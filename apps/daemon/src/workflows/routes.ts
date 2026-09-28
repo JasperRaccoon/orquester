@@ -108,6 +108,11 @@ export interface WorkflowRouteDeps {
    * failed) — the delete cascade must not drop the only record naming a directory it left behind.
    */
   projects?: Pick<ProjectOps, "deleteProject">;
+  /**
+   * Brings the agent catalogue validation reads (`service.catalog()`) up to date — bounded, never
+   * rejects — before a write or a validate is judged against it.
+   */
+  agentCatalogReady?: () => Promise<void>;
 }
 
 /** Definitions may be 2 MiB (`maxDefinitionBytes`); a JSON body carrying one needs room around it. */
@@ -299,6 +304,10 @@ type WorkflowRequest = FastifyRequest<{
 
 export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRouteDeps): void {
   const { service, secrets, runStore } = deps;
+  /** Up-to-date agent catalogue before a definition is judged (a no-op without one). */
+  const catalogReady = async (): Promise<void> => {
+    await deps.agentCatalogReady?.().catch(() => undefined);
+  };
 
   const guarded =
     (handler: (request: WorkflowRequest, reply: FastifyReply) => Promise<unknown>) =>
@@ -360,6 +369,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
     workflowRoutes.create,
     writeRoute,
     guarded(async (request, reply) => {
+      await catalogReady();
       const response: WorkflowWriteResponse = await service.create(request.body as CreateWorkflowRequest);
       return reply.code(201).send(response);
     })
@@ -372,11 +382,14 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
       if (!isRecord(request.body) || !("workflow" in request.body)) throw invalidRequest("The body must be {workflow}.");
       const candidate = request.body.workflow;
       const id = isRecord(candidate) && typeof candidate.id === "string" ? candidate.id : undefined;
+      await catalogReady();
+      const catalog = service.catalog();
       const { problems } = validateWorkflow(candidate, {
         secretNames: secrets.names(id),
         savedPromptIds: deps.savedPromptIds(),
         knownWorkflowIds: service.list().map((workflow) => workflow.id),
-        strictScheduleIntervals: true
+        strictScheduleIntervals: true,
+        ...(catalog ? { catalog } : {})
       });
       return { problems };
     })
@@ -423,6 +436,7 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
     "/api/workflows/:id",
     guarded(async (request): Promise<GetWorkflowResponse> => {
       const workflow = service.require(request.params.id);
+      await catalogReady();
       return { workflow, problems: service.problems(workflow) };
     })
   );
@@ -431,7 +445,10 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
     "/api/workflows/:id",
     writeRoute,
     guarded(
-      async (request): Promise<WorkflowWriteResponse> => service.replace(request.params.id, request.body as ReplaceWorkflowRequest)
+      async (request): Promise<WorkflowWriteResponse> => {
+        await catalogReady();
+        return service.replace(request.params.id, request.body as ReplaceWorkflowRequest);
+      }
     )
   );
 
@@ -451,13 +468,19 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
     "/api/workflows/:id/patch",
     writeRoute,
     guarded(
-      async (request): Promise<WorkflowWriteResponse> => service.patch(request.params.id, request.body as PatchWorkflowRequest)
+      async (request): Promise<WorkflowWriteResponse> => {
+        await catalogReady();
+        return service.patch(request.params.id, request.body as PatchWorkflowRequest);
+      }
     )
   );
 
   app.post(
     "/api/workflows/:id/duplicate",
-    guarded(async (request, reply) => reply.code(201).send(await service.duplicate(request.params.id)))
+    guarded(async (request, reply) => {
+      await catalogReady();
+      return reply.code(201).send(await service.duplicate(request.params.id));
+    })
   );
 
   // ---- Runs -------------------------------------------------------------------------------------
@@ -654,8 +677,9 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
 
   app.get(
     workflowRoutes.secrets,
+    // A workflow that does not exist (never did, or was deleted) is a 404, never the global list.
     guarded(async (request): Promise<ListWorkflowSecretsResponse> => ({
-      secrets: secrets.list(optionalString(request.query.workflowId))
+      secrets: secrets.list(secretScope(optionalString(request.query.workflowId)))
     }))
   );
 

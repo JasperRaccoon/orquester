@@ -58,6 +58,8 @@ export const WORKFLOW_PROBLEM_CODES = [
   "unknown_saved_prompt",
   "continue_invalid",
   "chain_too_long",
+  "unknown_agent",
+  "unknown_model",
   "timeout_too_long",
   "memory_out_of_range",
   "code_too_large",
@@ -80,7 +82,32 @@ export const WORKFLOW_PROBLEM_CODES = [
 ] as const;
 export type WorkflowProblemCode = (typeof WORKFLOW_PROBLEM_CODES)[number];
 
+/**
+ * The host's agent catalogue, for the agent blocks' chains: every chat agent the registry knows and
+ * the model slugs its provider lists. Given only by the daemon (the editor and the MCP read the
+ * daemon's verdict), and only when the registry could be read.
+ */
+export interface WorkflowAgentCatalog {
+  agents: ReadonlyArray<{
+    /** Registry refId (claude, claudex, codex, …). */
+    id: string;
+    /** False when the agent is known but not usable on this host (not installed, proxy down). */
+    enabled?: boolean;
+    /**
+     * The model slugs the provider lists — null (or empty) when that catalogue is not loaded yet (a
+     * provider still being probed, the proxy's list unread): a model is then only warned about.
+     */
+    models: readonly string[] | null;
+  }>;
+}
+
 export interface ValidateWorkflowOptions {
+  /**
+   * The host's agent catalogue: a chain entry naming an agent it does not know is an error
+   * (`unknown_agent`); a model its loaded catalogue does not list an error (`unknown_model`), a
+   * warning while that catalogue is empty or unknown. Without it nothing is checked.
+   */
+  catalog?: WorkflowAgentCatalog;
   /** Secret names visible to this workflow (global + its own); unknown `secrets.X` warns only when given. */
   secretNames?: readonly string[];
   /** Saved prompt ids; an unknown one warns only when given. */
@@ -562,6 +589,52 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
             message: `${node.name}: at most ${WORKFLOW_LIMITS.maxAgentChain} agents in a fallback chain`,
             nodeId: node.id,
             field: "config.chain"
+          });
+        }
+        if (opts.catalog) {
+          const known = new Map(opts.catalog.agents.map((agent) => [agent.id, agent]));
+          config.chain.forEach((entry, index) => {
+            const where = `config.chain.${index}`;
+            const agent = known.get(entry.agent);
+            if (agent === undefined) {
+              const valid = opts.catalog!.agents.map((a) => a.id);
+              push({
+                severity: "error",
+                code: "unknown_agent",
+                message: `${node.name}: "${entry.agent.slice(0, 60)}" is not a chat agent on this host${valid.length ? ` (known: ${valid.slice(0, 20).join(", ")})` : ""}`,
+                nodeId: node.id,
+                field: `${where}.agent`
+              });
+              return;
+            }
+            if (agent.enabled === false) {
+              push({
+                severity: "warning",
+                code: "unknown_agent",
+                message: `${node.name}: ${entry.agent} is not available on this host right now — the chain passes over it`,
+                nodeId: node.id,
+                field: `${where}.agent`
+              });
+            }
+            const models = agent.models ?? [];
+            if (models.includes(entry.model)) return;
+            if (models.length === 0) {
+              push({
+                severity: "warning",
+                code: "unknown_model",
+                message: `${node.name}: ${entry.agent}'s models are not known yet — "${entry.model.slice(0, 80)}" could not be checked`,
+                nodeId: node.id,
+                field: `${where}.model`
+              });
+              return;
+            }
+            push({
+              severity: "error",
+              code: "unknown_model",
+              message: `${node.name}: ${entry.agent} has no model "${entry.model.slice(0, 80)}" (it has ${models.slice(0, 20).join(", ")}${models.length > 20 ? ", …" : ""})`,
+              nodeId: node.id,
+              field: `${where}.model`
+            });
           });
         }
         if (config.prompt.kind === "text" && config.prompt.text.trim().length === 0) {

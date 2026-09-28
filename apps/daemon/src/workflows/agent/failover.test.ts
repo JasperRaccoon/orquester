@@ -12,7 +12,7 @@ import { createUsesAccount } from "./families.ts";
 import { FakeClock } from "./testing/fake-clock.ts";
 import { MemoryCooldowns, staticAccounts, staticUsage } from "./testing/fake-context.ts";
 import { FakeChatHost } from "./testing/fake-chat-host.ts";
-import { AUTONOMY_NOTE, CONTINUE_AFTER_SWITCH, handoffNotice } from "./prompt.ts";
+import { AUTONOMY_NOTE, CONTINUE_AFTER_AUTH_SWITCH, CONTINUE_AFTER_SWITCH, handoffNotice } from "./prompt.ts";
 import { byAccount, type ProviderStep } from "./testing/fake-chat-host.ts";
 import { account, agentNode, testWorkflow } from "./testing/fake-context.ts";
 import { Scenario } from "./testing/scenario.ts";
@@ -145,13 +145,40 @@ test("cross-family handoff: a new session with the handoff prompt (original prom
   assert.deepEqual(out.hops.map((h) => [h.agent, h.accountId, h.via]), [["claude", "a1", "initial"], ["codex", "c1", "handoff"]]);
   const handoff = sc.host.turnLog.find((t) => t.refId === "codex")!.input;
   assert.ok(handoff.startsWith("Fix issue #7.\n\n"), "the original prompt first");
-  assert.ok(handoff.includes(handoffNotice("claude")));
+  assert.ok(handoff.includes(handoffNotice("claude", "usage_limit")));
   assert.ok(handoff.includes("I changed src/app.ts\n\nNext: tests"), "the previous agent's messages");
   assert.ok(handoff.includes(" M src/app.ts\n?? src/new.ts"), "git status --short");
   assert.ok(handoff.endsWith(AUTONOMY_NOTE));
   const create = sc.host.calls.filter((c) => c.method === "POST" && c.path === "/api/sessions")[1]!.body as Record<string, unknown>;
   assert.deepEqual(create.owner, { kind: "workflow", workflowId: "wf-1", runId: "run-1", nodeId: "n1" }, "the same owner");
   assert.equal(create.accountId, "c1");
+});
+
+test("an auth handoff says the login failed and never passes the provider's error text as the agent's messages", async () => {
+  const sc = new Scenario({
+    accounts: [account("claude", "a1", "alpha"), ...CODEX],
+    behaviour: byAccount({
+      a1: [{ kind: "say", text: "I changed src/app.ts" }, { kind: "say", text: "Invalid API key · Please run /login" }, { kind: "auth" }],
+      c1: ok("codex finished")
+    })
+  });
+  const wf = testWorkflow([agentNode("n1", { chain: chain(["claude", "opus"], ["codex", "gpt-5"]), prompt: { kind: "text", text: "Fix issue #7." } })]);
+  const out = outputOf((await sc.run(wf, "n1")).result);
+  assert.equal(out.agent, "codex");
+  const handoff = sc.host.turnLog.find((t) => t.refId === "codex")!.input;
+  assert.ok(handoff.includes(handoffNotice("claude", "auth")));
+  assert.match(handoff, /was stopped because its account's login failed/);
+  assert.doesNotMatch(handoff, /usage limit/);
+  assert.ok(handoff.includes("I changed src/app.ts"), "the real assistant message is kept");
+  assert.doesNotMatch(handoff, /Invalid API key/, "the provider's auth error is not a message of the agent");
+});
+
+test("a same-family switch after a refused login says so, not 'usage limit'", async () => {
+  const sc = new Scenario({ accounts: CLAUDE, behaviour: byAccount({ a1: [{ kind: "auth" }], a2: ok() }) });
+  outputOf((await sc.run(testWorkflow([agentNode("n1")]), "n1")).result);
+  const last = sc.host.turnLog.at(-1)!.input;
+  assert.ok(last.startsWith(CONTINUE_AFTER_AUTH_SWITCH));
+  assert.doesNotMatch(last, /usage limit/);
 });
 
 test("the handoff caps the previous messages at 32 KiB (newest kept) and git status at 8 KiB", async () => {

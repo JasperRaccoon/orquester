@@ -171,6 +171,58 @@ describe("e2e: agent blocks through the engine", () => {
     }
   });
 
+  test("the host catalogue: unknown agents and models are validation problems, and the preview passes over them", async () => {
+    const clock = new FakeClock("2026-09-28T12:00:00.000Z");
+    const host = new FakeChatHost({ clock, accounts: ACCOUNTS, behaviour: byAccount({}) });
+    const { h, projectPath } = await setup(host, clock);
+    try {
+      const chain = [
+        { agent: "nope", model: "x", accounts: { ...FIXED } },
+        { agent: "claude", model: "gpt-404", accounts: { ...FIXED, accounts: ["a1"] } },
+        { agent: "claude", model: "opus", accounts: { ...FIXED, accounts: ["a2"] } }
+      ];
+      const workflow = {
+        name: "Catalogued",
+        enabled: false,
+        project: { kind: "existing", projectPath },
+        nodes: [
+          { id: "start", type: "trigger.manual", name: "Start" },
+          { id: "fix", type: "agent", name: "Fix", config: agentConfig(chain, "Fix it.") }
+        ],
+        edges: [{ source: "Start", target: "Fix" }]
+      };
+      const created = await json<WorkflowWriteResponse>(h, "POST", "/api/workflows", workflow);
+      assert.equal(created.status, 201, JSON.stringify(created.body));
+      const problems = created.body.problems.filter((p) => p.code === "unknown_agent" || p.code === "unknown_model");
+      assert.deepEqual(
+        problems.map((p) => [p.code, p.severity, p.field]),
+        [
+          ["unknown_agent", "error", "config.chain.0.agent"],
+          ["unknown_model", "error", "config.chain.1.model"]
+        ]
+      );
+      // Enabling it is refused while the chain names what this host cannot run.
+      const enable = await h.inject({
+        method: "PUT",
+        url: `/api/workflows/${created.body.workflow.id}`,
+        payload: { revision: created.body.workflow.revision, workflow: { ...created.body.workflow, enabled: true } }
+      });
+      assert.equal(enable.statusCode, 400);
+      assert.equal(JSON.parse(enable.body).error.code, "INVALID_WORKFLOW");
+
+      // The preview makes the run's own catalogue check: both bad entries are passed over.
+      const preview = await json<AccountPreviewResponse>(h, "POST", "/api/workflows/account-preview", { chain });
+      assert.equal(preview.body.decision.chosen?.chainIndex, 2, JSON.stringify(preview.body.decision));
+      assert.equal(preview.body.decision.chosen?.accountId, "a2");
+      const catalogSkips = preview.body.decision.skipped.filter((skip) => skip.why === "catalog");
+      assert.deepEqual(catalogSkips.map((skip) => skip.agent), ["nope", "claude"]);
+      const onlyBad = await json<AccountPreviewResponse>(h, "POST", "/api/workflows/account-preview", { chain: chain.slice(0, 2) });
+      assert.equal(onlyBad.body.decision.chosen, null, "no entry the host can run: nobody would run");
+    } finally {
+      await h.close();
+    }
+  });
+
   test("a restart while the agent works resumes the watcher and never sends the turn twice", async () => {
     const clock = new FakeClock("2026-09-28T12:00:00.000Z");
     const host = new FakeChatHost({

@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentAccount, UsageResponse } from "@orquester/api";
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem, ThreadSnapshotPayload, Turn } from "@orquester/api/agent-chat";
-import { failureAfterBaseline, isNewTurn, itemsAfterBaseline, takeBaseline, type AgentBaseline } from "./classify.ts";
+import { activityLine, failureAfterBaseline, isNewTurn, itemsAfterBaseline, takeBaseline, type AgentBaseline } from "./classify.ts";
 import { buildCreateBody, sessionTitle } from "./create.ts";
 import { finalText, parentAssistantText } from "./executor.ts";
 import { excludedKeys, resetWaitUntil, emptyMemory } from "./failover.ts";
@@ -191,4 +191,15 @@ test("the account preview decides as the block does (the owner's example), coold
   await cooldowns.set("claude", "a-jasper", { until: at(3600_000), reason: "usage_limit", setAt: at(0) });
   const second = await preview(chain);
   assert.equal(second.chosen?.accountLabel, "arakuma");
+});
+
+test("the activity line reads tool calls and assistant text, never a provider's stderr or warnings", () => {
+  const stderr = act("w1", "runtime.warning", { message: "Linux sandbox uses bubblewrap…" }, { summary: "Linux sandbox uses bubblewrap…", tone: "info" });
+  const error = act("e1", "runtime.error", { message: "boom" }, { summary: "stderr: boom" });
+  const output = act("o1", "tool.output", { delta: "raw bytes" }, { summary: "raw bytes", tone: "tool" });
+  const tool = act("c1", "tool.started", {}, { summary: "Run npm test", tone: "tool" });
+  assert.equal(activityLine(snap([msg("m1", "Looking at the tests\nmore"), tool, output, stderr, error], [turn("t1", "running")])), "Run npm test");
+  assert.equal(activityLine(snap([msg("m1", "Looking at the tests\nmore"), stderr], [turn("t1", "running")])), "Looking at the tests");
+  assert.equal(activityLine(snap([stderr, error], [turn("t1", "running")])), "Working", "only noise: the turn's state");
+  assert.equal(activityLine(snap([stderr], [turn("t1", "completed")])), undefined);
 });

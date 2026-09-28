@@ -121,6 +121,7 @@ import { WorkflowSecretsService } from "./workflows/secrets.ts";
 import { FileRunStore } from "./workflows/run-store.ts";
 import { WorkflowStateStore } from "./workflows/state-store.ts";
 import { registerWorkflowRoutes } from "./workflows/routes.ts";
+import type { ValidationCatalog } from "./workflows/agent/validation-catalog.ts";
 import { consoleWorkflowLogger, createWorkflowDaemon } from "./workflows/daemon-wiring.ts";
 import { createInternalDaemonApi } from "./chat-client/index.ts";
 import { AgentAccountsService } from "./agent-accounts.ts";
@@ -590,11 +591,15 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // routes serve definitions, secrets and run history from these stores alone.
   const workflowSecrets = new WorkflowSecretsService({ file: resolved.workflowSecretsFile, logger: console });
   await workflowSecrets.load();
+  // The agent catalogue validation checks chains against lives in the workflow daemon (built
+  // below, fed the daemon's own client at start): late-bound, nothing is checked before it.
+  let workflowValidationCatalog: ValidationCatalog | null = null;
   const workflows = new WorkflowService({
     file: resolved.workflowsFile,
     logger: console,
     secretNames: (workflowId) => workflowSecrets.names(workflowId),
-    savedPromptIds: () => savedPrompts.allIds()
+    savedPromptIds: () => savedPrompts.allIds(),
+    agentCatalog: () => workflowValidationCatalog?.current()
   });
   await workflows.load();
   const workflowRuns = new FileRunStore({ dir: resolved.workflowRunsDir, logger: console });
@@ -913,6 +918,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     push,
     logger: consoleWorkflowLogger
   });
+  workflowValidationCatalog = workflowDaemon.validationCatalog;
   publishWorkflowEvents({
     service: workflows,
     secrets: workflowSecrets,
@@ -1036,7 +1042,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const services: Services = {
     registry, sessions, validateModel, cliproxy, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
-    workflowProjects: workflowDaemon.runtime.projects
+    workflowProjects: workflowDaemon.runtime.projects,
+    workflowCatalogReady: () => workflowDaemon.validationCatalog.ready()
   };
 
   // Boot the managed proxy AFTER reattach (adoption must see the final session
@@ -1924,6 +1931,8 @@ interface Services {
   workflowEngine: WorkflowEngine | null;
   /** Temporary-project deletes for the workflow delete cascade when the engine cannot do them. */
   workflowProjects?: Pick<ProjectOps, "deleteProject">;
+  /** Brings the workflow validation's agent catalogue up to date (bounded) before a write. */
+  workflowCatalogReady?: () => Promise<void>;
   /**
    * The daemon's in-process, unauthenticated client of its own REST API, bound to the unix app
    * (see its construction in `startDaemon`); null until that app exists. The engine's ChatClient.
@@ -4485,6 +4494,7 @@ export function createServer(
     runStore: services.workflowRuns,
     engine: () => services.workflowEngine,
     ...(services.workflowProjects ? { projects: services.workflowProjects } : {}),
+    ...(services.workflowCatalogReady ? { agentCatalogReady: services.workflowCatalogReady } : {}),
     savedPromptIds: () => services.savedPrompts.allIds(),
     // `?projectPath=` names `<workspacesDir>/<ws>/<project>`, read per request (PUT
     // /api/config/daemon can move the workspaces dir).

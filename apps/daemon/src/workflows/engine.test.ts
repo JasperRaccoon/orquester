@@ -773,6 +773,31 @@ describe("engine: test runs, pins and retries", () => {
     assert.deepEqual(result.finalOutput, { node: "B", input: null });
   });
 
+  test("testNode seeds only the tested block's upstream: downstream and side branches stay skipped", async () => {
+    const code = scripted("code");
+    const wf = workflow(
+      "w1",
+      [T(), node("A", "code"), node("B", "code"), node("C", "code"), node("S", "code")],
+      [edge("T", "A"), edge("A", "B"), edge("B", "C"), edge("T", "S")]
+    );
+    const h = createHarness({ workflows: [wf], executors: { code } });
+    const first = await runToEnd(h, "w1", { input: 1 });
+    assert.equal(first.run.blocks.C!.status, "succeeded");
+    code.seen.length = 0;
+    const response = await h.engine.testNode("w1", "B");
+    const result = await h.engine.waitForRun(response.runId!);
+    const run = (await h.engine.getRun(response.runId!))!;
+    assert.deepEqual(code.seen, ["B"]);
+    assert.equal(run.blocks.A!.status, "succeeded", "the upstream is seeded from the latest run");
+    assert.equal(run.blocks.C!.status, "skipped", "the downstream is not filled from the earlier run");
+    assert.equal(run.blocks.C!.output, undefined);
+    assert.equal(run.blocks.S!.status, "skipped", "an unrelated branch is not seeded");
+    assert.deepEqual(result.finalOutput, { node: "B", input: first.run.blocks.A!.output });
+    assert.ok(run.takenEdges.includes("A-success-B"));
+    assert.ok(!run.takenEdges.includes("B-success-C"), "the tested block's outgoing edge did not run");
+    assert.ok(!run.takenEdges.includes("T-success-S"));
+  });
+
   test("retryOf reuses the succeeded blocks and re-runs the failed ones", async () => {
     let fail = true;
     const code = scripted("code", {

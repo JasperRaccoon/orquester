@@ -39,6 +39,7 @@ import { createCooldownStore } from "./agent/cooldowns.ts";
 import { createAgentExecutor, type AgentTimings } from "./agent/executor.ts";
 import { createUsesAccount, routerProvidersFromDisk, type UsesAccount } from "./agent/families.ts";
 import { createAccountPreview } from "./agent/preview.ts";
+import { createValidationCatalog, type ValidationCatalog } from "./agent/validation-catalog.ts";
 import { createWorkflowRuntime, realClock, type WorkflowRuntime, type WorkflowRuntimeDeps } from "./factory.ts";
 import type { WorkflowPushSender } from "./notifier.ts";
 import type { EngineLimits } from "./run-context.ts";
@@ -130,6 +131,12 @@ export interface WorkflowDaemon {
   start(api: DaemonApi): Promise<void>;
   /** Republish rows whose trigger state moved (the watcher's step; tests call it directly). */
   checkTriggerState(): void;
+  /**
+   * The agent catalogue validation checks chains against (`unknown_agent` / `unknown_model`): the
+   * store's `agentCatalog` reads `current()`, the write routes await `ready()`. Reads through the
+   * client `start` is handed; nothing before.
+   */
+  validationCatalog: ValidationCatalog;
   /** Fast: triggers, the watcher, then the engine (which kills nothing). Stores are the caller's to flush. */
   stop(): Promise<void>;
 }
@@ -143,6 +150,8 @@ export function createWorkflowDaemon(deps: WorkflowDaemonDeps): WorkflowDaemon {
 
   let scheduler: Scheduler | null = null;
   let poller: GitPoller | null = null;
+  let attachedApi: DaemonApi | null = null;
+  const validationCatalog = createValidationCatalog({ api: () => attachedApi, logger });
 
   const triggerState = (workflowId: string, nodeId: string): TriggerState | undefined => {
     const schedule = scheduler?.triggerState(workflowId, nodeId) ?? null;
@@ -266,9 +275,11 @@ export function createWorkflowDaemon(deps: WorkflowDaemonDeps): WorkflowDaemon {
     summarize,
     triggerState,
     checkTriggerState,
+    validationCatalog,
     async start(api: DaemonApi): Promise<void> {
       if (started || stopped) return;
       started = true;
+      attachedApi = api;
       runtime.attachApi(api);
       await runtime.start();
       // Seed what clients already hold (the list route's rows) so the watcher only speaks on a change.

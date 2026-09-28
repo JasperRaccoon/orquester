@@ -36,6 +36,7 @@ import {
   type ReplaceWorkflowRequest,
   type ValidateWorkflowOptions,
   type Workflow,
+  type WorkflowAgentCatalog,
   type WorkflowDeletedPayload,
   type WorkflowProblem,
   type WorkflowSecretsChangedPayload,
@@ -59,6 +60,8 @@ export interface WorkflowServiceOptions {
   secretNames?: (workflowId: string | undefined) => readonly string[];
   /** Saved prompt ids — validation context. */
   savedPromptIds?: () => readonly string[];
+  /** The host's agent catalogue (agent/validation-catalog.ts), when read — validation context. */
+  agentCatalog?: () => WorkflowAgentCatalog | undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -96,6 +99,7 @@ export class WorkflowService implements WorkflowStore {
   private readonly mintId: () => string;
   private readonly secretNames: (workflowId: string | undefined) => readonly string[];
   private readonly savedPromptIds: () => readonly string[];
+  private readonly agentCatalog: () => WorkflowAgentCatalog | undefined;
 
   constructor(options: WorkflowServiceOptions) {
     this.file = options.file;
@@ -104,6 +108,7 @@ export class WorkflowService implements WorkflowStore {
     this.mintId = options.mintId ?? randomUUID;
     this.secretNames = options.secretNames ?? (() => []);
     this.savedPromptIds = options.savedPromptIds ?? (() => []);
+    this.agentCatalog = options.agentCatalog ?? (() => undefined);
     this.lifecycle.setMaxListeners(50);
   }
 
@@ -173,13 +178,27 @@ export class WorkflowService implements WorkflowStore {
     return workflow;
   }
 
-  /** The validation context for a workflow (its visible secret names, saved prompts, workflow ids). */
+  /**
+   * The validation context for a workflow (its visible secret names, saved prompts, workflow ids,
+   * and the host's agent catalogue when one has been read).
+   */
   validationOptions(workflowId?: string): ValidateWorkflowOptions {
+    const catalog = this.catalog();
     return {
       secretNames: [...this.secretNames(workflowId)],
       savedPromptIds: [...this.savedPromptIds()],
-      knownWorkflowIds: [...this.workflows.keys()]
+      knownWorkflowIds: [...this.workflows.keys()],
+      ...(catalog ? { catalog } : {})
     };
+  }
+
+  /** The host's agent catalogue as validation last read it, or undefined. */
+  catalog(): WorkflowAgentCatalog | undefined {
+    try {
+      return this.agentCatalog();
+    } catch {
+      return undefined;
+    }
   }
 
   problems(workflow: Workflow): WorkflowProblem[] {

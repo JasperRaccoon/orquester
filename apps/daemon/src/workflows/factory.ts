@@ -123,6 +123,8 @@ export interface AccountPreviewFactoryDeps {
   cooldowns: CooldownStore;
   usesAccount?: (refId: string, model: string) => boolean;
   clock: Pick<Clock, "now">;
+  /** The daemon's own client once attached (the catalogue check reads through it), else null. */
+  api: () => DaemonApi | null;
 }
 
 export interface WorkflowRuntime {
@@ -172,7 +174,7 @@ export function createWorkflowRuntime(deps: WorkflowRuntimeDeps): WorkflowRuntim
     mintId,
     logger: deps.logger
   });
-  const accountPreview = deps.createAccountPreview?.({ usage: deps.usage, accounts: deps.accounts, cooldowns: deps.cooldowns, ...usesAccount, clock });
+  const accountPreview = deps.createAccountPreview?.({ usage: deps.usage, accounts: deps.accounts, cooldowns: deps.cooldowns, ...usesAccount, clock, api: () => api });
   const executors = createNodeExecutors(agent ? { agent } : {});
 
   const engine = createWorkflowEngine({

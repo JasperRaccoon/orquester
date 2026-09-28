@@ -29,6 +29,7 @@ import {
   renderTemplate,
   renderTemplateValue,
   topologicalOrder,
+  upstreamOf,
   validateWorkflow,
   type AccountSelectionDecision,
   type AgentChainEntry,
@@ -965,6 +966,21 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     }
   };
 
+  /**
+   * A single-block test's edges: only what ran. An edge is taken when its source finished on its
+   * handle AND its target ran (a seeded upstream block or the tested block itself) — the tested
+   * block's outgoing edges lead to blocks that did not run, so none of them is taken.
+   */
+  const testNodeEdgeStates = (a: ActiveRun): Record<string, "live" | "dead" | "pending"> => {
+    const states: Record<string, "live" | "dead" | "pending"> = { ...computeReadiness(a.def, readinessState(a)).edgeStates };
+    for (const edge of a.def.edges) {
+      if (states[edge.id] !== "live") continue;
+      const target = a.run.blocks[edge.target];
+      if (!target || (target.status !== "succeeded" && target.status !== "failed")) states[edge.id] = "dead";
+    }
+    return states;
+  };
+
   const step = (a: ActiveRun): void => {
     if (!alive(a)) return;
     if (a.ending !== null) {
@@ -974,7 +990,10 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     if (a.phase !== "walking") return;
     for (const id of a.forced) if (isPending(a, id)) startBlock(a, id);
     if (a.run.testNodeOnly) {
-      if (a.inFlight.size === 0) void finalize(a);
+      if (a.inFlight.size === 0) {
+        applyEdges(a, testNodeEdgeStates(a));
+        void finalize(a);
+      }
       return;
     }
     const readiness = computeReadiness(a.def, readinessState(a));
@@ -1273,7 +1292,11 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
 
     // The final output: the Stop's value, else the last succeeded block's in topological order.
     let finalNodeId = a.ending?.finalOutputNodeId;
-    if (finalNodeId === undefined && status === "succeeded") {
+    // A single-block test's result is the tested block's, never a seeded upstream block's.
+    if (finalNodeId === undefined && status === "succeeded" && a.run.testNodeOnly && a.run.fromNodeId !== undefined) {
+      if (a.run.blocks[a.run.fromNodeId]?.status === "succeeded") finalNodeId = a.run.fromNodeId;
+    }
+    if (finalNodeId === undefined && status === "succeeded" && !a.run.testNodeOnly) {
       for (let index = a.order.length - 1; index >= 0; index -= 1) {
         const id = a.order[index]!;
         if (a.run.blocks[id]?.status === "succeeded" && a.run.blocks[id]?.output !== undefined) {
@@ -1557,7 +1580,11 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     if (spec.fromNodeId !== undefined) {
       const executed = new Set<string>([spec.fromNodeId]);
       if (!spec.testNodeOnly) for (const id of downstreamOf(workflow, spec.fromNodeId)) executed.add(id);
-      const wanted = order.filter((id) => !executed.has(id));
+      // A single-block test seeds only what the tested block reads: its upstream. Its downstream
+      // (and every unrelated branch) stays skipped — a stale earlier result there would read as
+      // this test's.
+      const upstream = spec.testNodeOnly ? upstreamOf(workflow, spec.fromNodeId) : null;
+      const wanted = order.filter((id) => !executed.has(id) && (upstream === null || upstream.has(id)));
       // "Run from here" of a given run: the upstream outputs are that run's, as they were.
       const pinned = spec.retryOf !== undefined ? {} : (workflow.pinned ?? {});
       const fromRuns: string[] = [];

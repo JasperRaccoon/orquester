@@ -129,7 +129,29 @@ export function agentErrorMessage(snap: ThreadSnapshotPayload | null, baseline: 
   return "The agent's turn failed.";
 }
 
-/** A one-line description of what the parent is doing now, for the run view (`activity`). */
+/**
+ * The activity rows that say what the agent DOES: its tool calls, the subagents it launches, the
+ * cards it raises, a compaction, a proposed plan. Never `runtime.warning` / `runtime.error` (a
+ * provider's stderr — Codex's "Linux sandbox uses bubblewrap…" — or its own notices), a tool's raw
+ * `tool.output` chunk, or any other bookkeeping row.
+ */
+const ACTIVITY_LINE_KINDS: ReadonlySet<string> = new Set([
+  "tool.started",
+  "tool.updated",
+  "tool.completed",
+  "tool.denied",
+  "task.started",
+  "task.completed",
+  "approval.requested",
+  "user-input.requested",
+  "context-compaction",
+  "turn.proposed.completed"
+]);
+
+/**
+ * A one-line description of what the parent is doing now, for the run view (`activity`): its
+ * newest assistant text or meaningful activity row (`ACTIVITY_LINE_KINDS`), else its turn's state.
+ */
 export function activityLine(snap: ThreadSnapshotPayload): string | undefined {
   for (let i = snap.items.length - 1; i >= 0; i -= 1) {
     const item = snap.items[i]!;
@@ -139,9 +161,12 @@ export function activityLine(snap: ThreadSnapshotPayload): string | undefined {
       if (line) return clipLine(line);
       continue;
     }
-    if ((item as ThreadActivityItem).agentId) continue;
-    if (item.summary && item.summary.trim()) return clipLine(item.summary.trim());
+    const activity = item as ThreadActivityItem;
+    if (activity.agentId || !ACTIVITY_LINE_KINDS.has(activity.activityKind)) continue;
+    if (activity.summary && activity.summary.trim()) return clipLine(activity.summary.trim());
   }
+  const turn = snap.turns.at(-1);
+  if (turn && (turn.state === "running" || turn.state === "pending")) return "Working";
   return undefined;
 }
 

@@ -22,6 +22,7 @@ import type { AccountsReader, Clock, SandboxRunner, UsageReader, WorkflowEngine 
 import type { AgentTimings } from "../agent/executor.ts";
 import { createWorkflowDaemon, type WorkflowDaemon } from "../daemon-wiring.ts";
 import { registerWorkflowRoutes } from "../routes.ts";
+import type { ValidationCatalog } from "../agent/validation-catalog.ts";
 import { FileRunStore } from "../run-store.ts";
 import { createSandboxRunner } from "../sandbox/sandbox.ts";
 import { WorkflowSecretsService } from "../secrets.ts";
@@ -117,13 +118,16 @@ export async function boot(root: string, opts: BootOptions = {}): Promise<Booted
     }
   });
 
+  let catalogRef: ValidationCatalog | null = null;
   const secrets = new WorkflowSecretsService({ file: workflowSecretsPath(root), logger: quietStoreLogger });
   await secrets.load();
   const service = new WorkflowService({
     file: workflowsPath(root),
     logger: quietStoreLogger,
     secretNames: (workflowId) => secrets.names(workflowId),
-    savedPromptIds: () => []
+    savedPromptIds: () => [],
+    // Late-bound as in startDaemon: the workflow daemon below owns the catalogue.
+    agentCatalog: () => catalogRef?.current()
   });
   await service.load();
   const runStore = new FileRunStore({ dir: workflowRunsDir(root), logger: quietStoreLogger });
@@ -133,7 +137,15 @@ export async function boot(root: string, opts: BootOptions = {}): Promise<Booted
 
   let engine: WorkflowEngine | null = null;
   const app = Fastify({ logger: false });
-  registerWorkflowRoutes(app, { service, secrets, runStore, engine: () => engine, savedPromptIds: () => [], logPollMs: 10 });
+  registerWorkflowRoutes(app, {
+    service,
+    secrets,
+    runStore,
+    engine: () => engine,
+    savedPromptIds: () => [],
+    logPollMs: 10,
+    agentCatalogReady: async () => catalogRef?.ready()
+  });
   await app.ready();
   const api = new InjectDaemonApi({ app, authorization: undefined, agentChat: null, broadcaster, fsRoot: () => workspacesDir, workspacesDir: () => workspacesDir });
 
@@ -170,6 +182,7 @@ export async function boot(root: string, opts: BootOptions = {}): Promise<Booted
     ...(opts.random ? { random: opts.random } : {}),
     ...(opts.triggerStateCheckMs !== undefined ? { triggerStateCheckMs: opts.triggerStateCheckMs } : {})
   });
+  catalogRef = wf.validationCatalog;
   publishWorkflowEvents({ service, secrets, broadcaster: wf.events, summarize: (workflow) => wf.summarize(workflow) });
   engine = wf.runtime.engine;
   await wf.start(opts.engineApi ? opts.engineApi(api) : api);

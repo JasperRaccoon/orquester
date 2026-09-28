@@ -6,7 +6,7 @@
 // `{variables}` themselves, daemon-side (`PromptRenderer`), in the workflow's time zone. A failed
 // variable read fails the block naming it — a prompt is never sent missing its variables.
 
-import { escapePromptVariables, renderTemplate, WORKFLOW_LIMITS, type AgentBlockConfig } from "@orquester/api";
+import { escapePromptVariables, renderTemplate, WORKFLOW_LIMITS, type AgentBlockConfig, type AgentFailureReason } from "@orquester/api";
 import type { NodeExecutionContext, PromptRenderer } from "../contracts.ts";
 
 /** §5.1 step 3 — appended to every prompt this block sends while `autonomyNote` is on. */
@@ -20,9 +20,18 @@ export const CONTINUE_AFTER_SWITCH =
 /** §5.5 — the custom answer to a question that allows one. */
 export const AUTONOMOUS_ANSWER = "No user is available. Choose the most reasonable option yourself and proceed autonomously.";
 
-/** §5.4 step 4 — the handoff paragraph (the agent is named). */
-export function handoffNotice(agent: string): string {
-  return `A previous agent (${agent}) was cut off by a usage limit. Its partial work may already be in the working tree — inspect it and continue from there.`;
+/**
+ * §5.4 step 4 — the handoff paragraph (the agent is named), saying why the previous agent stopped:
+ * a usage limit, a refused login, or (with no known reason) neither.
+ */
+export function handoffNotice(agent: string, reason?: AgentFailureReason): string {
+  const why =
+    reason === "usage_limit"
+      ? "was cut off by a usage limit"
+      : reason === "auth"
+        ? "was stopped because its account's login failed"
+        : "was stopped before it finished";
+  return `A previous agent (${agent}) ${why}. Its partial work may already be in the working tree — inspect it and continue from there.`;
 }
 
 /** The prompt plus the autonomy note, when the block wants it. */
@@ -56,11 +65,13 @@ export function clipUtf8Tail(text: string, maxBytes: number): { text: string; tr
 export function buildHandoffPrompt(input: {
   originalPrompt: string;
   previousAgent: string;
+  /** Why the previous agent stopped (its last hop's account failure), when known. */
+  previousReason?: AgentFailureReason | undefined;
   previousMessages: string;
   gitStatus: string | null;
   autonomyNote: boolean;
 }): string {
-  const parts = [input.originalPrompt, handoffNotice(input.previousAgent)];
+  const parts = [input.originalPrompt, handoffNotice(input.previousAgent, input.previousReason)];
   const messages = clipUtf8Tail(input.previousMessages.trim(), WORKFLOW_LIMITS.handoffMessagesBytes);
   if (messages.text) {
     parts.push(`The previous agent's last messages${messages.truncated ? " (the oldest part cut)" : ""}:\n\n${messages.text}`);
@@ -72,9 +83,16 @@ export function buildHandoffPrompt(input: {
   return withAutonomyNote(parts.join("\n\n"), input.autonomyNote);
 }
 
-/** The message sent after an account switch (or after waiting for a reset on the same session). */
-export function continueMessage(autonomyNote: boolean): string {
-  return withAutonomyNote(CONTINUE_AFTER_SWITCH, autonomyNote);
+/** §5.4 step 3 for an account whose login was refused (the account moved for a sign-in failure). */
+export const CONTINUE_AFTER_AUTH_SWITCH =
+  "Your previous account's login failed and you have been moved to another account. Continue the task from exactly where you stopped.";
+
+/**
+ * The message sent after an account switch (or after waiting for a reset on the same session),
+ * naming why the previous account stopped: a refused login reads as one, never as a usage limit.
+ */
+export function continueMessage(autonomyNote: boolean, reason?: AgentFailureReason): string {
+  return withAutonomyNote(reason === "auth" ? CONTINUE_AFTER_AUTH_SWITCH : CONTINUE_AFTER_SWITCH, autonomyNote);
 }
 
 export type PromptSourceResult = { ok: true; template: string } | { ok: false; message: string };

@@ -34,6 +34,7 @@ import {
 } from "@orquester/api";
 import {
   buildPlanImplementationPrompt,
+  failureReasonOfActivity,
   reEmittedAssistantCopies,
   repairsReEmittedAssistantCopies,
   SETTLED_TURN_STATES,
@@ -777,7 +778,16 @@ class AgentBlockRun {
     this.st.switchRetries = 0;
     this.st.afterReset = false;
     this.ctx.update({ hops: this.hopsCopy() });
-    return this.enterSending(continueMessage(this.config.autonomyNote));
+    return this.enterSending(continueMessage(this.config.autonomyNote, this.lastHopReason()));
+  }
+
+  /** Why the previous account's hop ended (its account failure), when it ended on one. */
+  private lastHopReason(): AgentHop["reason"] | undefined {
+    for (let i = this.st.hops.length - 1; i >= 0; i -= 1) {
+      const hop = this.st.hops[i]!;
+      if (hop.endedAt) return hop.reason;
+    }
+    return undefined;
   }
 
   private async handingOff(): Promise<NodeResult | null> {
@@ -800,6 +810,7 @@ class AgentBlockRun {
     this.st.pendingInput = this.protect(buildHandoffPrompt({
       originalPrompt: this.st.prompt ?? "",
       previousAgent: previous.agent,
+      previousReason: this.lastHopReason(),
       previousMessages,
       gitStatus,
       autonomyNote: this.config.autonomyNote
@@ -1061,10 +1072,41 @@ export function parentAssistantText(snap: ThreadSnapshotPayload, sessionStartTur
       startAt = last + 1;
     }
   }
+  // A provider phrases a refused login as an assistant message of its own (Claude's synthetic
+  // "Invalid API key · Please run /login"): that is not the agent's work and never reaches the next
+  // agent. It is the parent message of the failing turn right before an auth failure row
+  // (reasoning and a subagent's rows in between do not count) — a real answer is never followed by
+  // a refused login with nothing in between, as the request that was refused produced nothing — or
+  // a message that repeats any account failure's own words.
+  const dropped = new Set<number>();
+  const failureTexts = new Set<string>();
+  let lastParentMessage = -1;
+  for (let i = startAt; i < snap.items.length; i += 1) {
+    const item = snap.items[i]!;
+    if (item.kind === "message") {
+      if (item.agentId || item.role === "reasoning") continue;
+      lastParentMessage = item.role === "assistant" ? i : -1;
+      continue;
+    }
+    if (item.kind !== "activity" || item.agentId) continue;
+    const failure = failureReasonOfActivity(item);
+    if (!failure) {
+      lastParentMessage = -1;
+      continue;
+    }
+    if (failure.reason === "auth" && lastParentMessage !== -1) {
+      const message = snap.items[lastParentMessage]!;
+      if (!item.turnId || !message.turnId || message.turnId === item.turnId) dropped.add(lastParentMessage);
+    }
+    lastParentMessage = -1;
+    if (failure.message.trim()) failureTexts.add(failure.message.trim());
+  }
   const texts: string[] = [];
   for (let i = startAt; i < snap.items.length; i += 1) {
     const item = snap.items[i]!;
-    if (item.kind === "message" && item.role === "assistant" && !item.agentId && item.text.trim()) texts.push(item.text.trim());
+    if (item.kind !== "message" || item.role !== "assistant" || item.agentId || dropped.has(i)) continue;
+    const text = item.text.trim();
+    if (text && !failureTexts.has(text)) texts.push(text);
   }
   return texts.join("\n\n");
 }

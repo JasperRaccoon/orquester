@@ -366,6 +366,13 @@ test("delete cascades: active runs cancelled through the engine, runs and secret
   assert.equal(h.service.get(workflow.id), null);
   assert.deepEqual((await readdir(join(h.dir, "workflow-runs"))).filter((n) => n.startsWith("run-")), ["run-keep"]);
   assert.deepEqual(h.secrets.resolve(workflow.id), { GLOBAL: "value-2" });
+  // Listing the deleted workflow's secrets is a 404, never the global list.
+  const listed = await h.app.inject({ url: `${workflowRoutes.secrets}?workflowId=${workflow.id}` });
+  assert.equal(listed.statusCode, 404);
+  assert.equal(listed.json().error.code, "WORKFLOW_NOT_FOUND");
+  assert.ok(!listed.body.includes("GLOBAL"));
+  assert.equal((await h.app.inject({ url: `${workflowRoutes.secrets}?workflowId=never-was` })).json().error.code, "WORKFLOW_NOT_FOUND");
+  assert.equal((await h.app.inject({ url: workflowRoutes.secrets })).statusCode, 200, "no workflowId: the global list");
 });
 
 test("with the engine: runs, tests, cancels and summaries go through it", async () => {

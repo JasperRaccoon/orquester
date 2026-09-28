@@ -336,6 +336,32 @@ describe("blocks", () => {
     assert.equal(only(problemsOf(wf), "unknown_saved_prompt").length, 0);
   });
 
+  it("agent: the chain is checked against the host catalogue when one is given", () => {
+    const chain = [
+      { agent: "claude", model: "opus", accounts: {} },
+      { agent: "nope", model: "x", accounts: {} },
+      { agent: "codex", model: "gpt-404", accounts: {} },
+      { agent: "opencode", model: "anything", accounts: {} },
+      { agent: "grok", model: "grok-4", accounts: {} }
+    ];
+    const wf = testWorkflow([manual(), agent("A", "x", { chain })], [testEdge("t", "A")]);
+    const catalog = {
+      agents: [
+        { id: "claude", models: ["opus", "sonnet"] },
+        { id: "codex", models: ["gpt-5.5"] },
+        { id: "opencode", models: null },
+        { id: "grok", enabled: false, models: ["grok-4"] }
+      ]
+    };
+    const problems = problemsOf(wf, { catalog });
+    const agents = only(problems, "unknown_agent");
+    assert.deepEqual(agents.map((p) => [p.severity, p.field]), [["error", "config.chain.1.agent"], ["warning", "config.chain.4.agent"]]);
+    const models = only(problems, "unknown_model");
+    assert.deepEqual(models.map((p) => [p.severity, p.field]), [["error", "config.chain.2.model"], ["warning", "config.chain.3.model"]]);
+    assert.match(models[0]!.message, /codex has no model "gpt-404" \(it has gpt-5\.5\)/);
+    assert.equal(only(problemsOf(wf), "unknown_agent").length + only(problemsOf(wf), "unknown_model").length, 0, "no catalogue, no check");
+  });
+
   it("agent: continue must name an upstream agent", () => {
     const code = testNode("c", "code", {}, { name: "Code" });
     const build = (fromNode: string, edges: ReturnType<typeof testEdge>[]) =>
