@@ -757,6 +757,20 @@ export const sessionChatRecordSchema = z.object({
 });
 export type SessionChatRecord = z.infer<typeof sessionChatRecordSchema>;
 
+/**
+ * The automated workflow run that started a chat tab (workflows spec §5.10). Mirrors
+ * `WorkflowSessionOwner` in `@orquester/api`. The daemon validates a create request's `owner`
+ * against this same schema (400 `INVALID_OWNER`), so what reaches `sessions.json` always parses.
+ */
+const ownerIdSchema = z.string().max(200).regex(/\S/, "must not be blank");
+export const workflowSessionOwnerSchema = z.object({
+  kind: z.literal("workflow"),
+  workflowId: ownerIdSchema,
+  runId: ownerIdSchema,
+  nodeId: ownerIdSchema
+});
+export type WorkflowSessionOwnerRecord = z.infer<typeof workflowSessionOwnerSchema>;
+
 export const sessionRecordSchema = z.object({
   id: z.string().min(1),
   title: z.string(),
@@ -786,7 +800,12 @@ export const sessionRecordSchema = z.object({
   // Agent-chat tabs only (kind "agent-chat"). Absent for terminals. See
   // parseSessionsConfig: a bad chat block drops that ONE session, never the
   // index — an unparseable index disables orphan reaping for every terminal.
-  chat: sessionChatRecordSchema.optional()
+  chat: sessionChatRecordSchema.optional(),
+  // Set when an automated workflow run started this (chat) tab (workflows spec §5.10).
+  // Tolerant: a malformed owner — a newer shape, a hand edit — is DROPPED, never the record
+  // (`.catch`), so a bad owner can't cost the user a tab. An older daemon strips the key on
+  // rollback, which only loses the Workflow chip.
+  owner: workflowSessionOwnerSchema.optional().catch(undefined)
 });
 
 export const sessionsConfigSchema = z.object({

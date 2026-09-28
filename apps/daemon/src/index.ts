@@ -99,6 +99,7 @@ import { listAgentConversations } from "./agent-conversations.ts";
 import { claudeTimeoutEnv } from "./agent-timeout-env.ts";
 import { type ISessionManager, SessionError, createSessionManager, resumeLaunchArgs } from "./sessions";
 import { AgentChatService, ChatSessionError, type CreateAgentChatRequest } from "./agent-chat/service.ts";
+import { INVALID_OWNER, parseSessionOwner } from "./agent-chat/owner.ts";
 import { ChatAwareSessionManager } from "./agent-chat/session-router.ts";
 import { registerAgentChatRoutes } from "./agent-chat/proxy-routes.ts";
 import type { ActivityCause } from "./ansi-activity";
@@ -3779,6 +3780,17 @@ export function createServer(
 
   app.post("/api/sessions", async (request, reply): Promise<SessionSummary | void> => {
     const body = (request.body ?? {}) as CreateSessionRequest;
+    // workflows §5.10: only a chat tab can be a workflow's, and its owner must parse.
+    if (body.owner !== undefined) {
+      const owner = parseSessionOwner(body.owner);
+      if (!owner.ok || body.kind !== "agent-chat") {
+        return reply.code(400).send({
+          code: INVALID_OWNER,
+          message: owner.ok ? "owner is only accepted for agent-chat sessions." : owner.message
+        });
+      }
+      body.owner = owner.owner;
+    }
     // A chat tab takes the §6.1 path: the same account/model validation as a
     // terminal, then the tab record, then the host thread. It shares nothing
     // with the PTY branch below but that validation, which runs first.

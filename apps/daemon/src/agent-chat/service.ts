@@ -39,6 +39,7 @@ import type { SessionIndexContributor } from "../sessions.ts";
 import { ChatSessionManager, ChatSessionError } from "./chat-sessions.ts";
 import { AgentHostClient, HostUnavailableError } from "./host-client.ts";
 import { markClaudeProjectTrusted } from "./home-prep.ts";
+import { parseSessionOwner } from "./owner.ts";
 import type { FastifyReply } from "fastify";
 import type { AgentChatRouteDeps } from "./proxy-routes.ts";
 import { AgentChatSummaryService, type SummaryBroadcaster, type SummaryPush } from "./summary.ts";
@@ -538,6 +539,11 @@ export class AgentChatService {
       throw new ChatSessionError(`"${entry.name}" has no chat adapter.`);
     }
     const fields = chatFields(req);
+    // workflows §5.10 — the route already refused a bad owner; this keeps a direct caller honest.
+    const owner = parseSessionOwner(req.owner);
+    if (!owner.ok) {
+      throw new ChatSessionError(owner.message, owner.code);
+    }
     if (fields.resume && !isUsableConversationId(fields.resume.conversationId)) {
       throw new ChatSessionError(
         "That conversation cannot be resumed with this agent.",
@@ -591,7 +597,8 @@ export class AgentChatService {
       order,
       accountId,
       home,
-      model: req.model
+      model: req.model,
+      ...(owner.owner ? { owner: owner.owner } : {})
     });
 
     const body: CreateHostThreadRequest = {
