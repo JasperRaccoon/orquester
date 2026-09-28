@@ -1,0 +1,177 @@
+// Automated workflows — the hourly sweepers (spec §5.8, §5.10):
+//
+//   - run retention (`RunStore.sweep`: the newest 100 runs per workflow, nothing past 30 days, never
+//     an active run);
+//   - temporary projects a failed run kept, once past their `deleteAfter` → deleted, and the run's
+//     `tempProject.deleted` set;
+//   - workflow chat tabs (`owner.kind === "workflow"`) in EXISTING projects, `workflowTabRetentionDays`
+//     after their run ended — never a tab the user wrote in after that end (the thread's last user
+//     message is read), never a tab whose run is still going or whose run record is gone.
+//
+// Everything goes through the daemon's own routes (`DaemonApi`); a failure is logged and the next
+// sweep tries again. Driven by the injected clock (no sleeps).
+
+import { isRunActive, WORKFLOW_LIMITS, type SessionSummary } from "@orquester/api";
+
+import { readThread } from "../chat-client/index.ts";
+import type { DaemonApi } from "../mcp/daemon-api.ts";
+import type { Clock, ProjectOps, RunStore, WorkflowLogger, WorkflowStore } from "./contracts.ts";
+
+export interface WorkflowSweepersDeps {
+  clock: Clock;
+  runStore: RunStore;
+  store: WorkflowStore;
+  projects: ProjectOps;
+  /** The daemon's own client, bound late. Without it the tab sweep is skipped. */
+  api: () => DaemonApi | null;
+  /** Runs the engine holds right now (never swept). */
+  activeRunIds: () => string[];
+  logger?: WorkflowLogger;
+  /** Default 1 h. */
+  intervalMs?: number;
+  /** Default `WORKFLOW_LIMITS.workflowTabRetentionDays`. */
+  workflowTabRetentionDays?: number;
+}
+
+export interface SweepReport {
+  tempProjectsDeleted: string[];
+  tabsClosed: string[];
+  errors: string[];
+}
+
+export interface WorkflowSweepers {
+  start(): void;
+  stop(): void;
+  sweepNow(): Promise<SweepReport>;
+}
+
+const DAY_MS = 24 * 60 * 60_000;
+
+function message(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}
+
+export function createWorkflowSweepers(deps: WorkflowSweepersDeps): WorkflowSweepers {
+  const intervalMs = deps.intervalMs ?? 60 * 60_000;
+  const tabRetentionMs = (deps.workflowTabRetentionDays ?? WORKFLOW_LIMITS.workflowTabRetentionDays) * DAY_MS;
+  let timer: { cancel(): void } | null = null;
+  let running: Promise<SweepReport> | null = null;
+  let stopped = true;
+
+  const sweepTempProjects = async (report: SweepReport): Promise<void> => {
+    const now = deps.clock.now().getTime();
+    const active = new Set(deps.activeRunIds());
+    for (const workflow of deps.store.list()) {
+      let before: string | undefined;
+      for (let page = 0; page < 20; page += 1) {
+        const listing = await deps.runStore.listForWorkflow(workflow.id, before !== undefined ? { before, limit: 100 } : { limit: 100 });
+        for (const summary of listing.runs) {
+          const temp = summary.tempProject;
+          if (!temp || temp.deleted || temp.deleteAfter === undefined) continue;
+          if (active.has(summary.id) || isRunActive(summary.status)) continue;
+          if (Date.parse(temp.deleteAfter) > now) continue;
+          try {
+            await deps.projects.deleteProject(temp.path);
+            const run = await deps.runStore.load(summary.id);
+            if (run?.tempProject) {
+              run.tempProject = { path: run.tempProject.path, deleted: true };
+              await deps.runStore.save(run);
+            }
+            report.tempProjectsDeleted.push(temp.path);
+          } catch (error) {
+            report.errors.push(`temp project ${temp.path}: ${message(error)}`);
+          }
+        }
+        if (listing.before === null) break;
+        before = listing.before;
+      }
+    }
+  };
+
+  const sweepTabs = async (report: SweepReport): Promise<void> => {
+    const api = deps.api();
+    if (!api) return;
+    const response = await api.request("GET", "/api/sessions");
+    if (response.status >= 400 || !Array.isArray(response.body)) {
+      report.errors.push(`sessions: the daemon answered ${response.status}`);
+      return;
+    }
+    const now = deps.clock.now().getTime();
+    const active = new Set(deps.activeRunIds());
+    for (const session of response.body as SessionSummary[]) {
+      const owner = session.owner;
+      if (!owner || owner.kind !== "workflow" || active.has(owner.runId)) continue;
+      try {
+        const run = await deps.runStore.load(owner.runId);
+        if (!run || isRunActive(run.status) || run.endedAt === undefined) continue;
+        // A temp project's tabs go with the project.
+        if (run.tempProject && run.tempProject.path === session.projectPath) continue;
+        const endedAt = Date.parse(run.endedAt);
+        if (!Number.isFinite(endedAt) || now - endedAt < tabRetentionMs) continue;
+        if (session.kind === "agent-chat") {
+          const thread = await readThread(api, session.id);
+          const userWroteAfter = thread.items.some(
+            (item) => item.kind === "message" && item.role === "user" && !item.agentId && Date.parse(item.createdAt) > endedAt
+          );
+          if (userWroteAfter) continue;
+        }
+        const closed = await api.request("DELETE", `/api/sessions/${encodeURIComponent(session.id)}`);
+        if (closed.status >= 400 && closed.status !== 404) {
+          report.errors.push(`tab ${session.id}: the daemon answered ${closed.status}`);
+          continue;
+        }
+        report.tabsClosed.push(session.id);
+      } catch (error) {
+        report.errors.push(`tab ${session.id}: ${message(error)}`);
+      }
+    }
+  };
+
+  const sweepNow = (): Promise<SweepReport> => {
+    running ??= (async () => {
+      const report: SweepReport = { tempProjectsDeleted: [], tabsClosed: [], errors: [] };
+      try {
+        await deps.runStore.sweep();
+      } catch (error) {
+        report.errors.push(`run retention: ${message(error)}`);
+      }
+      try {
+        await sweepTempProjects(report);
+      } catch (error) {
+        report.errors.push(`temp projects: ${message(error)}`);
+      }
+      try {
+        await sweepTabs(report);
+      } catch (error) {
+        report.errors.push(`tabs: ${message(error)}`);
+      }
+      if (report.errors.length > 0) deps.logger?.warn("workflow sweep had errors", { errors: report.errors });
+      return report;
+    })().finally(() => {
+      running = null;
+    });
+    return running;
+  };
+
+  const arm = (): void => {
+    if (stopped) return;
+    timer = deps.clock.setTimeout(() => {
+      timer = null;
+      void sweepNow().finally(arm);
+    }, intervalMs);
+  };
+
+  return {
+    start(): void {
+      if (!stopped) return;
+      stopped = false;
+      arm();
+    },
+    stop(): void {
+      stopped = true;
+      timer?.cancel();
+      timer = null;
+    },
+    sweepNow
+  };
+}

@@ -133,6 +133,17 @@ export interface PersistedRun extends Omit<WorkflowRun, "blocks"> {
   seededOutputs?: Record<string, unknown>;
   /** The node a partial test run starts from. */
   fromNodeId?: string;
+  /** Test one block: only `fromNodeId` executes; its downstream is left skipped (engine). */
+  testNodeOnly?: boolean;
+  /**
+   * Why a `queued` run has not started: "overlap" = the one pending fire of an overlap:"queue"
+   * workflow, waiting for its active run to end; "capacity" = the global run cap (engine).
+   */
+  queuedFor?: "overlap" | "capacity";
+  /** The block whose output is `finalOutput` (its whole value may be in that block's output file). */
+  finalOutputNodeId?: string;
+  /** Test runs: a block with a pinned output (the frozen definition's `pinned`) uses it instead of running. */
+  usePinned?: boolean;
 }
 
 export interface RunStore {
@@ -262,6 +273,10 @@ export interface NodeExecutionContext<T extends WorkflowNodeType = WorkflowNodeT
   timeoutMs: number;
   /** Sub-workflow depth of this run. */
   depth: number;
+  /** When this attempt started (wall clock): deadlines derive from it, so a restart never extends them. */
+  startedAt: string;
+  /** The live inputs this block runs on (sources that finished on the handle an edge takes), by edge order. */
+  liveInputs(): { nodeId: string; name: string; output: unknown }[];
   services: EngineServices;
   log: WorkflowLogger;
 }
