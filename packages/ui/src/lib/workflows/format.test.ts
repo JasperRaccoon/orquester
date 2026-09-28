@@ -18,7 +18,7 @@ import {
   workflowInProject
 } from "./format.ts";
 import { initialNewWorkflowDraft, isValidSecretName, normalizeSecretName, resolveNewWorkflow } from "./new-workflow.ts";
-import { blankWorkflowRequest, createFromTemplate, WORKFLOW_TEMPLATES } from "./templates.ts";
+import { blankWorkflowRequest, browserTimeZone, createFromTemplate, WORKFLOW_TEMPLATES } from "./templates.ts";
 
 const NOW = new Date(2026, 8, 28, 14, 30, 0).getTime(); // local time, Mon 28 Sep 2026 14:30
 
@@ -160,15 +160,17 @@ describe("the list", () => {
 });
 
 describe("new workflows", () => {
-  it("a blank workflow is one manual trigger the daemon names and places", () => {
+  it("a blank workflow is one manual trigger the daemon names and places, in the browser's time zone", () => {
     const project = { kind: "existing", projectPath: "/w/acme/app" } as const;
-    assert.deepEqual(blankWorkflowRequest("  Deploy  ", project), {
+    assert.deepEqual(blankWorkflowRequest("  Deploy  ", project, "Europe/Madrid"), {
       name: "Deploy",
       project,
+      settings: { timezone: "Europe/Madrid" },
       nodes: [{ type: "trigger.manual", config: {} }],
       autoLayout: true
     });
     assert.equal(blankWorkflowRequest("   ", project).name, "Untitled workflow");
+    assert.equal(blankWorkflowRequest("x", project).settings?.timezone, browserTimeZone(), "defaults to this browser's zone");
   });
 
   it("a starter is named after its template (stubbed until buildTemplate lands)", () => {

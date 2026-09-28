@@ -30,6 +30,10 @@ export interface CanvasActions {
   setHoveredEdgeId: (edgeId: string | null) => void;
   /** Clear the hover, unless another edge took it meanwhile. */
   clearHoveredEdge: (edgeId: string) => void;
+  /** A touch screen: an output is tapped to start tap-to-connect, never dragged. */
+  touch: boolean;
+  /** Start tap-to-connect from an output (touch only). */
+  startTapConnect: ((from: { nodeId: string; handle: string }) => void) | null;
 }
 
 const NOOP_ACTIONS: CanvasActions = {
@@ -39,7 +43,9 @@ const NOOP_ACTIONS: CanvasActions = {
   updateNote: () => undefined,
   hoveredEdgeId: null,
   setHoveredEdgeId: () => undefined,
-  clearHoveredEdge: () => undefined
+  clearHoveredEdge: () => undefined,
+  touch: false,
+  startTapConnect: null
 };
 
 export const CanvasActionsContext = createContext<CanvasActions>(NOOP_ACTIONS);
@@ -63,6 +69,8 @@ export interface BlockNodeData extends Record<string, unknown> {
   pinned: boolean;
   /** The pulsing "+" of a brand-new workflow. */
   hint: boolean;
+  /** Tap-to-connect in progress: the block it starts from, a block it may feed, one it may not. */
+  connectRole?: "source" | "valid" | "invalid" | null;
 }
 
 export interface EdgeData extends Record<string, unknown> {

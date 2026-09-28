@@ -15,7 +15,8 @@ import { useWorkflowRun, useWorkflowRuns } from "../../../lib/workflows/hooks";
 import { blockInputOf, parsePinnedText } from "../../../lib/workflows/inspector-data";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
 import { Section, Segmented, SmallButton } from "../ui/controls";
-import { JsonTree } from "../ui/JsonTree";
+import { usePhoneLayout } from "../phone/phone-context";
+import { JsonTree } from "../runs/JsonTree";
 import { useInspector } from "./inspector-context";
 
 export const DataTab: React.FC<{ onOpenRun?: (runId: string) => void }> = ({ onOpenRun }) => {
@@ -63,6 +64,8 @@ export const DataTab: React.FC<{ onOpenRun?: (runId: string) => void }> = ({ onO
   };
 
   const trigger = isTriggerType(node.type);
+  const variant = usePhoneLayout() ? "sheet" : "docked";
+  const outputPath = `nodes.${node.name}.output`;
 
   return (
     <>
@@ -107,11 +110,17 @@ export const DataTab: React.FC<{ onOpenRun?: (runId: string) => void }> = ({ onO
               input.kind === "none" ? (
                 <p className="text-[12px] text-neutral-500">It received no input in that run.</p>
               ) : (
-                <JsonTree value={input.value} label={input.kind === "single" ? `From ${input.from}` : "Merged inputs"} />
+                <div className="space-y-1">
+                  <p className="text-[11px] text-neutral-500">
+                    {input.kind === "single" ? `From ${input.from}` : "Merged inputs, by block"}
+                  </p>
+                  <JsonTree value={input.value} rootLabel="input" rootPath="input" variant={variant} />
+                </div>
               )
             ) : block.output !== undefined ? (
               <>
-                <JsonTree value={block.output} label={block.pinned ? "Output (pinned)" : "Output"} />
+                {block.pinned ? <p className="text-[11px] text-neutral-500">The pinned output (a test run)</p> : null}
+                <JsonTree value={block.output} rootLabel="output" rootPath={outputPath} variant={variant} />
                 {block.outputTruncated ? (
                   <p className="text-[11px] text-neutral-500">Only a preview is shown; the run view loads the whole output.</p>
                 ) : null}
@@ -167,7 +176,7 @@ export const DataTab: React.FC<{ onOpenRun?: (runId: string) => void }> = ({ onO
             </div>
           ) : hasPin ? (
             <div className="space-y-2">
-              <JsonTree value={pinned} label="Pinned" />
+              <JsonTree value={pinned} rootLabel="output" rootPath={outputPath} variant={variant} />
               {!readOnly ? (
                 <div className="flex gap-2">
                   <SmallButton onClick={() => setEditing(JSON.stringify(pinned, null, 2))}>Edit</SmallButton>

@@ -12,6 +12,8 @@ import { upstreamOf, type AgentBlockConfig, type AgentChainEntry } from "@orques
 
 import { useSavedPrompts } from "../../../lib/saved-prompts/hooks";
 import { Modal, ModalCloseButton } from "../../ui/modal";
+import { FullScreenEditor } from "../phone/FullScreenEditor";
+import { usePhoneLayout } from "../phone/phone-context";
 import { Field, NumberInput, Section, Segmented, SelectInput, SmallButton, ToggleRow } from "../ui/controls";
 import { ChainEditor } from "./ChainEditor";
 import { FieldAnchor, problemsAt, useConfigSetter, useFieldMessages, useInspector } from "./inspector-context";
@@ -25,6 +27,27 @@ const PromptEditorModal: React.FC<{
   title: string;
 }> = ({ open, onClose, value, onChange, title }) => {
   const { promptScope } = useInspector();
+  const phone = usePhoneLayout();
+  if (phone) {
+    // Full screen, the key bar over the keyboard (`{{`, braces, …).
+    return (
+      <FullScreenEditor open={open} onClose={onClose} title={title} subtitle="{{ for data from earlier blocks · {branch} and other variables">
+        {(height) => (
+          <TemplateEditor
+            value={value}
+            onChange={onChange}
+            scope={promptScope}
+            multiline
+            minHeight={height}
+            maxHeight={height}
+            ariaLabel={title}
+            autoFocus
+            className="h-full"
+          />
+        )}
+      </FullScreenEditor>
+    );
+  }
   return (
     <Modal open={open} onClose={onClose} className="h-[80vh] max-w-4xl flex-col">
       <div className="flex h-12 shrink-0 items-center justify-between border-b border-neutral-800 px-4">
@@ -54,6 +77,7 @@ export const AgentSettings: React.FC = () => {
   const config = node.config as AgentBlockConfig;
   const saved = useSavedPrompts(projectPath);
   const [expanded, setExpanded] = useState(false);
+  const phoneLayout = usePhoneLayout();
   const promptMessages = useFieldMessages(config.prompt.kind === "text" ? "config.prompt.text" : "config.prompt");
   const sessionMessages = useFieldMessages("config.session");
 
@@ -108,8 +132,8 @@ export const AgentSettings: React.FC = () => {
                 </>
               }
               aside={
-                <SmallButton variant="ghost" icon={<Maximize2 size={12} />} onClick={() => setExpanded(true)} className="-mr-1 h-6 px-1.5">
-                  Expand
+                <SmallButton variant="ghost" icon={<Maximize2 size={12} />} onClick={() => setExpanded(true)} className="-mr-1 h-6 px-1.5 [.wf-touch_&]:h-9 [.wf-touch_&]:px-2.5">
+                  {phoneLayout ? "Full screen" : "Expand"}
                 </SmallButton>
               }
             >
@@ -118,8 +142,8 @@ export const AgentSettings: React.FC = () => {
                 onChange={(text) => setConfig({ prompt: { kind: "text", text } }, "prompt-text")}
                 scope={promptScope}
                 multiline
-                minHeight={140}
-                maxHeight={420}
+                minHeight={phoneLayout ? 120 : 140}
+                maxHeight={phoneLayout ? 232 : 420}
                 placeholder="Describe the task. The agent works alone — say what done looks like."
                 ariaLabel="Agent prompt"
                 invalid={promptMessages.error !== null}

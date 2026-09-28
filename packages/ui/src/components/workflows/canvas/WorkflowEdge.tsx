@@ -50,15 +50,22 @@ function WorkflowEdgeView({
 }: EdgeProps<WorkflowFlowEdge>): React.ReactElement {
   const actions = useCanvasActions();
   const leaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const fromX = sourceX - (sourcePosition === Position.Right ? INSET : 0);
+  const toX = targetX + (targetPosition === Position.Left ? INSET : 0);
+  // A failure edge to a block further right on another row turns right away,
+  // in the gap beside its own block, and runs along the target's row — never
+  // through the cards between (the success path it would otherwise cross).
+  const turnsEarly = data?.handle === "error" && toX - fromX > 120 && Math.abs(targetY - sourceY) > 30;
   const [path, labelX, labelY] = getSmoothStepPath({
-    sourceX: sourceX - (sourcePosition === Position.Right ? INSET : 0),
+    sourceX: fromX,
     sourceY,
     sourcePosition,
-    targetX: targetX + (targetPosition === Position.Left ? INSET : 0),
+    targetX: toX,
     targetY,
     targetPosition,
     borderRadius: 14,
-    offset: 22
+    offset: 22,
+    ...(turnsEarly ? { centerX: fromX + 26 } : {})
   });
   const hovered = actions.hoveredEdgeId === id;
   const showTools = !actions.readOnly && (hovered || selected);

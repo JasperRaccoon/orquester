@@ -47,3 +47,35 @@ export function workflowRunTargetOf(
 }
 
 const isId = (value: unknown): value is string => typeof value === "string" && value.trim() !== "";
+
+// ---------------------------------------------------------------------------
+// "Show this run" to an editor tab already open on its workflow
+// ---------------------------------------------------------------------------
+
+/** A run to show in the workflow's editor tab (its Runs mode). */
+export interface WorkflowTabRun {
+  workflowId: string;
+  runId: string;
+}
+
+type TabRunListener = (target: WorkflowTabRun) => void;
+
+const tabRunListeners = new Set<TabRunListener>();
+
+/**
+ * Tell the workflow's open editor tabs to show a run. `openWorkflowTab` only
+ * records the run on the tab — when it is the run the tab already names (the
+ * user moved to the editor since), nothing changes there, so the tab listens
+ * here as well.
+ */
+export function showRunInWorkflowTabs(target: WorkflowTabRun): void {
+  const copy = { workflowId: target.workflowId, runId: target.runId };
+  for (const listener of [...tabRunListeners]) listener(copy);
+}
+
+export function subscribeWorkflowTabRun(listener: TabRunListener): () => void {
+  tabRunListeners.add(listener);
+  return () => {
+    tabRunListeners.delete(listener);
+  };
+}

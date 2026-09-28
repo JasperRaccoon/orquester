@@ -314,7 +314,8 @@
     animation: none;
     stroke-dasharray: none;
   }
-  .wf-ring-running {
+  /* Specific enough to beat the card's own Tailwind shadow. */
+  .wf-block.wf-ring-running {
     animation: none;
     box-shadow: 0 0 0 2px rgb(var(--sem-info-400) / 0.9);
   }
@@ -346,4 +347,106 @@
   color: rgb(var(--sem-warn-400));
   background: rgb(var(--sem-warn-400) / 0.12);
   border-radius: 3px;
+}
+
+/* ===========================================================================
+ * 5. Phones (workflows spec §7.4)
+ * ======================================================================== */
+
+/* Tap-to-connect: the blocks a tapped output may feed (their ring is Tailwind's; this breathes). */
+.wf-connect-target {
+  animation: wf-connect-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes wf-connect-pulse {
+  50% {
+    filter: brightness(1.18);
+  }
+}
+
+/* A sheet slides up. */
+.wf-sheet {
+  animation: wf-sheet-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.wf-sheet-backdrop {
+  animation: wf-fade-in 180ms ease-out;
+}
+
+@keyframes wf-sheet-in {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+@keyframes wf-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Finger-sized forms: fields at least 40 px, 16 px text (no zoom on focus),
+   selects that open the phone's own picker, sliders with a big thumb. */
+.wf-touch input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+.wf-touch select {
+  min-height: 40px;
+  font-size: 16px;
+}
+
+.wf-touch textarea {
+  font-size: 16px;
+}
+
+.wf-touch .wf-cm .cm-editor {
+  font-size: 16px;
+}
+
+.wf-touch .wf-cm .cm-line {
+  line-height: 24px;
+}
+
+.wf-touch [role="radiogroup"] > [role="radio"] {
+  min-height: 36px;
+}
+
+.wf-touch input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+}
+
+.wf-touch input[type="range"] {
+  height: 36px;
+}
+
+.wf-touch input[type="range"]::-webkit-slider-thumb {
+  width: 26px;
+  height: 26px;
+}
+
+.wf-touch input[type="range"]::-moz-range-thumb {
+  width: 26px;
+  height: 26px;
+}
+
+/* The full-screen editor fills its box. */
+.wf-fullscreen-editor .wf-cm,
+.wf-fullscreen-editor .cm-theme,
+.wf-fullscreen-editor .cm-editor {
+  height: 100%;
+}
+
+.wf-fullscreen-editor .wf-cm {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wf-connect-target {
+    animation: none;
+  }
+  .wf-sheet,
+  .wf-sheet-backdrop {
+    animation: none;
+  }
 }

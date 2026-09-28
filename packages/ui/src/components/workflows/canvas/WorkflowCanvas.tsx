@@ -36,6 +36,7 @@ import { Map as MapIcon } from "lucide-react";
 import { outputHandles, workflowHandleLabel, type Workflow, type WorkflowNodeType, type WorkflowProblem } from "@orquester/api";
 
 import { cn } from "../../../lib/cn";
+import { canvasFitOptions, phoneOpeningViewport } from "../../../lib/workflows/canvas-fit";
 import { blockAccent, nodeSummary, type NodeSummaryContext } from "../../../lib/workflows/catalog-ui";
 import type { ChangeOptions, EditorSelection } from "../../../lib/workflows/editor-store";
 import type { RunOverlay } from "../../../lib/workflows/overlay";
@@ -50,6 +51,8 @@ import {
 import { connectBlocks, connectionRefusal } from "./connection";
 import { NoteNode, noteSize, type NoteFlowNode } from "./NoteNode";
 import { GRID, moveNodes, removeElements, updateNode } from "./ops";
+import { useLongPress } from "../phone/use-long-press";
+import type { TapConnectEvent, TapConnectState } from "./tap-connect";
 import { WorkflowConnectionLine, WorkflowEdgeComponent, type WorkflowFlowEdge } from "./WorkflowEdge";
 
 /** The drag type the palette puts on a block it drags onto the canvas. */
@@ -86,6 +89,17 @@ export interface WorkflowCanvasProps {
   hint?: boolean;
   /** The last pointer position over the canvas (Tab opens the add menu there). */
   onPointerMove?: (client: { x: number; y: number }) => void;
+  /** Laid out for a phone: it opens on the first blocks at a readable zoom. */
+  phone?: boolean;
+  /** A plain tap / click on a block (a phone opens its settings). */
+  onNodeTap?: (nodeId: string) => void;
+  /** A long press (or right click) on a block: its menu. */
+  onLongPressNode?: (nodeId: string, client: { x: number; y: number }) => void;
+  /** A long press (or right click) on empty canvas: the add menu there. */
+  onLongPressPane?: (request: AddMenuRequest) => void;
+  /** Tap-to-connect's state, and where its taps go (the parent reduces them). */
+  tapConnect?: TapConnectState;
+  onTapConnect?: (event: TapConnectEvent) => void;
   className?: string;
 }
 
@@ -134,6 +148,12 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
     onToggleMinimap,
     hint = false,
     onPointerMove,
+    phone = false,
+    onNodeTap,
+    onLongPressNode,
+    onLongPressPane,
+    tapConnect,
+    onTapConnect,
     className
   },
   ref
@@ -179,6 +199,16 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
   const selectedEdges = useMemo(() => new Set(selection.edgeIds), [selection.edgeIds]);
   const runView = overlay !== null;
   const lonelyTrigger = hint && !readOnly && workflow.nodes.filter((node) => node.type !== "note").length === 1;
+  const picking = tapConnect?.mode === "picking" ? tapConnect.from : null;
+  const connectRoles = useMemo(() => {
+    if (!picking) return null;
+    const roles = new Map<string, "source" | "valid" | "invalid">();
+    for (const node of workflow.nodes) {
+      if (node.id === picking.nodeId) roles.set(node.id, "source");
+      else roles.set(node.id, connectionRefusal(workflow, { source: picking.nodeId, sourceHandle: picking.handle, target: node.id }) === null ? "valid" : "invalid");
+    }
+    return roles;
+  }, [picking?.nodeId, picking?.handle, workflow]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const nodes = useMemo(() => {
     const next: (BlockFlowNode | NoteFlowNode)[] = [];
@@ -196,7 +226,9 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
       const connectedKey = handlesConnected.join("|");
       const selected = selectedNodes.has(node.id);
       const pinned = workflow.pinned !== undefined && node.id in workflow.pinned;
+      const connectRole = connectRoles?.get(node.id) ?? null;
       const inputs = [
+        connectRole,
         node,
         nodeProblems,
         nodeOverlay,
@@ -224,7 +256,8 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
         runView,
         connected: handlesConnected,
         pinned,
-        hint: lonelyTrigger
+        hint: lonelyTrigger,
+        connectRole
       };
       const common = {
         id: node.id,
@@ -251,7 +284,7 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
     }
     for (const id of cache.current.keys()) if (!seen.has(id)) cache.current.delete(id);
     return next;
-  }, [workflow.nodes, workflow.pinned, byNode, overlay, dragPositions, resizing, measured, connected, selectedNodes, runView, lonelyTrigger, summaryContext, editable]);
+  }, [workflow.nodes, workflow.pinned, byNode, overlay, dragPositions, resizing, measured, connected, selectedNodes, runView, lonelyTrigger, summaryContext, editable, connectRoles]);
 
   const edges = useMemo(() => {
     const byId = new Map(workflow.nodes.map((node) => [node.id, node]));
@@ -487,18 +520,68 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
       },
       hoveredEdgeId,
       setHoveredEdgeId,
-      clearHoveredEdge: (edgeId) => setHoveredEdgeId((current) => (current === edgeId ? null : current))
+      clearHoveredEdge: (edgeId) => setHoveredEdgeId((current) => (current === edgeId ? null : current)),
+      touch: coarse || phone,
+      startTapConnect: editable && onTapConnect ? (from) => onTapConnect({ type: "start", from }) : null
     }),
-    [editable, onOpenAddMenu, change, hoveredEdgeId]
+    [editable, onOpenAddMenu, change, hoveredEdgeId, coarse, phone, onTapConnect]
   );
 
   const leaveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const wrapperRef = useRef<HTMLDivElement | null>(null);
+  // Tap-to-connect on a phone: frame the block it starts from and every block it may feed.
+  const pickingKey = picking ? `${picking.nodeId}:${picking.handle}` : null;
+  useEffect(() => {
+    if (!phone || !pickingKey || !connectRoles) return;
+    // The source and the (up to three) nearest blocks it may feed, at a size a finger can hit.
+    const at = new Map(workflowRef.current.nodes.map((node) => [node.id, node.position]));
+    const from = at.get(picking!.nodeId) ?? { x: 0, y: 0 };
+    const near = [...connectRoles]
+      .filter(([, role]) => role === "valid")
+      .map(([id]) => ({ id, d: Math.hypot((at.get(id)?.x ?? 0) - from.x, (at.get(id)?.y ?? 0) - from.y) }))
+      .sort((a, b) => a.d - b.d)
+      .slice(0, 3)
+      .map(({ id }) => ({ id }));
+    const ids = [{ id: picking!.nodeId }, ...near];
+    const frame = requestAnimationFrame(() => void flow.fitView({ nodes: ids, padding: 0.25, maxZoom: 0.9, minZoom: 0.45, duration: 260 }));
+    return () => cancelAnimationFrame(frame);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [phone, pickingKey]);
+  const fitOptions = useMemo(
+    () => {
+      const options = canvasFitOptions(workflowRef.current, { phone, run: overlay !== null });
+      if (!overlay || phone) return options;
+      // A run opens on the part it reached, at a size its cards can be read at.
+      const reached = Object.entries(overlay.nodes)
+        .filter(([, state]) => state.status !== "skipped" && state.status !== "pending")
+        .map(([id]) => ({ id }));
+      return reached.length > 0 ? { ...options, minZoom: 0.45, nodes: reached } : options;
+    },
+    // The opening frame: fixed once per mount (and per layout).
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [phone]
+  );
+  const longPress = useLongPress((point, target) => {
+    const element = target as Element | null;
+    if (!element || typeof element.closest !== "function") return;
+    const nodeElement = element.closest(".react-flow__node");
+    const nodeId = nodeElement?.getAttribute("data-id");
+    if (nodeId) {
+      onLongPressNode?.(nodeId, point);
+      return;
+    }
+    if (element.closest(".react-flow__pane") && editable) {
+      onLongPressPane?.({ clientPoint: point, flowPoint: flow.screenToFlowPosition(point) });
+    }
+  });
 
   return (
     <CanvasActionsContext.Provider value={actions}>
       <div
-        className={cn("wf-canvas relative h-full w-full", className)}
+        ref={wrapperRef}
+        className={cn("wf-canvas relative h-full w-full", picking && "wf-connecting", className)}
         onMouseMove={(event) => onPointerMove?.({ x: event.clientX, y: event.clientY })}
+        {...(onLongPressNode || onLongPressPane ? longPress : {})}
         onDoubleClick={(event) => {
           if (!editable) return;
           const target = event.target as Element;
@@ -534,6 +617,13 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
           connectionLineType={ConnectionLineType.SmoothStep}
           connectionRadius={28}
           onNodeDoubleClick={(_event, node) => onNodeDoubleClick?.(node.id)}
+          onNodeClick={(_event, node) => {
+            if (picking) onTapConnect?.({ type: "tap-node", nodeId: node.id });
+            else onNodeTap?.(node.id);
+          }}
+          onPaneClick={() => {
+            if (picking) onTapConnect?.({ type: "cancel" });
+          }}
           onEdgeMouseEnter={(_event, edge) => {
             if (leaveTimer.current) clearTimeout(leaveTimer.current);
             setHoveredEdgeId(edge.id);
@@ -547,8 +637,15 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
           }}
           snapToGrid
           snapGrid={[GRID, GRID]}
-          fitView
-          fitViewOptions={{ padding: 0.12, maxZoom: 1 }}
+          fitView={!phone}
+          fitViewOptions={fitOptions}
+          onInit={(instance) => {
+            if (!phone) return;
+            const rect = wrapperRef.current?.getBoundingClientRect();
+            const opening = rect ? phoneOpeningViewport(workflowRef.current, { width: rect.width, height: rect.height }) : null;
+            if (opening) void instance.setViewport(opening);
+            else void instance.fitView(fitOptions);
+          }}
           minZoom={0.15}
           maxZoom={2}
           deleteKeyCode={null}
@@ -564,12 +661,18 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
           zoomOnPinch
           nodesDraggable={editable}
           nodesConnectable={editable}
-          elementsSelectable
+          elementsSelectable={!picking}
+          connectOnClick={!(coarse || phone)}
           elevateEdgesOnSelect
           attributionPosition="bottom-center"
         >
           <Background variant={BackgroundVariant.Dots} gap={GRID} size={1.4} />
-          <Controls showInteractive={false} position="bottom-left" fitViewOptions={{ padding: 0.12, maxZoom: 1 }}>
+          <Controls
+            showInteractive={false}
+            position="bottom-left"
+            fitViewOptions={fitOptions}
+            className={cn(phone && "!hidden")}
+          >
             {onToggleMinimap ? (
               <ControlButton
                 onClick={onToggleMinimap}

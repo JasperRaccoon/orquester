@@ -8,6 +8,7 @@
 import { isAgentLikeSession } from "../../../lib/session-kind";
 import { jumpToProject, resolveProjectRef } from "../../../lib/session-nav";
 import { markWorkflowRunViewed } from "../../../lib/workflows/notifications";
+import { showRunInWorkflowTabs } from "../../../lib/workflows/open-bridge";
 import { useAppStore } from "../../../store/app";
 
 export interface RunTarget {
@@ -40,6 +41,7 @@ export function openWorkflowRunInEditor(target: RunTarget): boolean {
     runId: target.runId,
     ...(title ? { title } : {})
   });
+  showRunInWorkflowTabs({ workflowId: target.workflowId, runId: target.runId });
   markWorkflowRunViewed(target.runId);
   return true;
 }

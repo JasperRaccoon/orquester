@@ -4,10 +4,12 @@ import { describe, it } from "node:test";
 import type { WorkflowNodeType } from "./types.ts";
 import {
   autoLayout,
+  failureSide,
   LAYOUT_GRID,
   LAYOUT_NODE_HEIGHT,
   LAYOUT_NODE_SEP,
   LAYOUT_NODE_WIDTH,
+  layoutNodeHeight,
   placeNewNodes,
   type LayoutPoint
 } from "./layout.ts";
@@ -69,6 +71,59 @@ describe("autoLayout", () => {
     assert.deepEqual(Object.keys(layout).sort(), ["a", "b"]);
     assert.equal(Math.min(layout.a!.x, layout.b!.x), 800);
     assert.equal(Math.min(layout.a!.y, layout.b!.y), 400);
+  });
+
+  it("failure branches go below the success path, which stays on one row (the Jira fixer)", () => {
+    const layout = autoLayout({
+      nodes: [node("t", "trigger.schedule"), node("fetch"), node("fix", "agent"), node("done"), node("failed", "stop")],
+      edges: [
+        edge("t", "fetch"),
+        edge("fetch", "fix"),
+        edge("fix", "done"),
+        edge("fetch", "failed", "error"),
+        edge("fix", "failed", "error"),
+        edge("done", "failed", "error")
+      ]
+    });
+    const row = [layout.t!, layout.fetch!, layout.fix!, layout.done!];
+    for (const point of row) assert.equal(point.y, layout.t!.y, "the success path is straight");
+    assert.ok(layout.t!.x < layout.fetch!.x && layout.fetch!.x < layout.fix!.x && layout.fix!.x < layout.done!.x);
+    assert.ok(layout.failed!.y >= layout.t!.y + LAYOUT_NODE_HEIGHT + LAYOUT_NODE_SEP, "the failure block sits below");
+    assert.ok(layout.failed!.x > layout.done!.x, "one column right of the last block that fails into it");
+    assertNoOverlap(Object.values(layout));
+  });
+
+  it("a failure branch keeps its own chain, below the block it leaves", () => {
+    const layout = autoLayout({
+      nodes: [node("t", "trigger.manual"), node("a", "agent"), node("b"), node("notify", "http"), node("stop", "stop")],
+      edges: [edge("t", "a"), edge("a", "b"), edge("a", "notify", "error"), edge("notify", "stop")]
+    });
+    assert.equal(failureSide(
+      [node("t", "trigger.manual"), node("a", "agent"), node("b"), node("notify", "http"), node("stop", "stop")],
+      [edge("t", "a"), edge("a", "b"), edge("a", "notify", "error"), edge("notify", "stop")]
+    ).size, 2);
+    assert.equal(layout.a!.y, layout.b!.y);
+    assert.ok(layout.notify!.y > layout.a!.y && layout.stop!.y === layout.notify!.y);
+    assert.ok(layout.stop!.x > layout.notify!.x);
+    assertNoOverlap(Object.values(layout));
+  });
+
+  it("a block a success edge also reaches stays on the success path", () => {
+    const nodes = [node("t", "trigger.manual"), node("a"), node("b"), node("m", "merge")];
+    const edges = [edge("t", "a"), edge("a", "b"), edge("a", "m", "error"), edge("b", "m")];
+    assert.equal(failureSide(nodes, edges).size, 0);
+    assertNoOverlap(Object.values(autoLayout({ nodes, edges })));
+  });
+
+  it("columns leave room for a branch label; a many-output switch is laid out taller", () => {
+    const layout = autoLayout({
+      nodes: [node("t", "trigger.manual"), node("s", "switch"), node("x")],
+      edges: [edge("t", "s"), edge("s", "x", "case:0")]
+    });
+    assert.ok(layout.x!.x - layout.s!.x >= LAYOUT_NODE_WIDTH + 96);
+    const cases = { cases: [{}, {}, {}, {}], fallback: true };
+    assert.ok(layoutNodeHeight({ type: "switch", config: cases }) > LAYOUT_NODE_HEIGHT);
+    assert.equal(layoutNodeHeight({ type: "code" }), LAYOUT_NODE_HEIGHT);
   });
 
   it("an empty or notes-only graph yields nothing", () => {

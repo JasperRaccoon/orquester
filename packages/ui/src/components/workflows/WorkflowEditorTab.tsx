@@ -36,6 +36,7 @@ import { KEYBOARD_SURFACE_PROPS } from "../../lib/keyboard-surfaces";
 import { useProviderSnapshots } from "../../lib/agent-chat/hooks";
 import { providerForRefId } from "../../lib/agent-chat/providers";
 import { useSavedPrompts } from "../../lib/saved-prompts/hooks";
+import { canvasFitOptions } from "../../lib/workflows/canvas-fit";
 import { defaultAgentLabel, defaultModelLabel, type NodeSummaryContext } from "../../lib/workflows/catalog-ui";
 import {
   duplicateWorkflowNodes,
@@ -53,6 +54,7 @@ import {
   saveEditorLayout,
   type WorkflowEditorLayout
 } from "../../lib/workflows/inspector-layout";
+import { subscribeWorkflowTabRun } from "../../lib/workflows/open-bridge";
 import { runWorkflowNow } from "../../lib/workflows/store";
 import { useAppStore } from "../../store/app";
 import { WorkflowSecretsDialog } from "../right-rail/workflows/WorkflowSecretsDialog";
@@ -61,10 +63,12 @@ import { AddBlockMenu } from "./AddBlockMenu";
 import { BlockPalette } from "./BlockPalette";
 import { CanvasHud } from "./CanvasHud";
 import type { AddMenuRequest } from "./canvas/canvas-context";
-import { addBlock, nudgeNodes, removeElements } from "./canvas/ops";
+import { addBlock, moveNodes, nudgeNodes, removeElements } from "./canvas/ops";
 import { WorkflowCanvas, type WorkflowCanvasHandle } from "./canvas/WorkflowCanvas";
 import { EditorToolbar, type EditorMode } from "./EditorToolbar";
 import { Inspector } from "./inspector/Inspector";
+import { PhoneEditor } from "./phone/PhoneEditor";
+import { PhoneLayoutContext, useIsPhoneLayout } from "./phone/phone-context";
 import { RunNowPopover, type RunNowResult } from "./RunNowPopover";
 import { RunsModeFallback } from "./RunsModeFallback";
 import { useWorkflowEditor } from "./use-workflow-editor";
@@ -169,6 +173,7 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
     });
   }, []);
 
+  const phone = useIsPhoneLayout();
   const [mode, setMode] = useState<EditorMode>(runId ? "runs" : "editor");
   const [selectedRunId, setSelectedRunId] = useState<string | null>(runId);
   useEffect(() => {
@@ -177,6 +182,24 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
       setSelectedRunId(runId);
     }
   }, [runId]);
+  // Asked to show a run the tab already names (a chip, a toast, a notification): show it again.
+  useEffect(
+    () =>
+      subscribeWorkflowTabRun((target) => {
+        if (target.workflowId !== workflowId) return;
+        setMode("runs");
+        setSelectedRunId(target.runId);
+      }),
+    [workflowId]
+  );
+  /** Pick a run: shown here, and remembered on the tab (it reopens on it). */
+  const selectRun = useCallback(
+    (id: string | null) => {
+      setSelectedRunId(id);
+      if (id && projectPath) useAppStore.getState().openWorkflowTab(projectPath, workflowId, { runId: id });
+    },
+    [projectPath, workflowId]
+  );
 
   const [addMenu, setAddMenu] = useState<AddMenuRequest | null>(null);
   const [runNowOpen, setRunNowOpen] = useState(false);
@@ -358,13 +381,29 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
     [editor, flow]
   );
 
+  const fit = useCallback(
+    (duration = 300) => {
+      const current = editor.state.draft;
+      if (!current) return;
+      // Fit shows the whole graph; on a phone that may go smaller than its opening frame.
+      const options = canvasFitOptions(current);
+      void flow.fitView({ padding: options.padding, maxZoom: options.maxZoom, minZoom: phone ? 0.2 : options.minZoom, duration });
+    },
+    [editor, flow, phone]
+  );
+
   const tidy = useCallback(() => {
     if (!editor.state.draft) return;
     const selected = editor.state.selection.nodeIds;
     const positions = autoLayout(editor.state.draft, selected.length > 1 ? { onlyNodeIds: selected } : {});
-    canvasRef.current?.animateTo(positions);
-    setTimeout(() => void flow.fitView({ padding: 0.12, duration: 320, maxZoom: 1 }), 360);
-  }, [editor, flow]);
+    if (canvasRef.current) {
+      canvasRef.current.animateTo(positions);
+      setTimeout(() => fit(320), 360);
+    } else {
+      // No canvas on screen (the phone's Steps view): lay it out at once.
+      editor.change((current) => moveNodes(current, positions));
+    }
+  }, [editor, fit]);
 
   // -------------------------------------------------------------------------
   // Keyboard and clipboard (only while this is the focused tab)
@@ -417,7 +456,7 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
       }
     } else if (key === "!" || (key === "1" && event.shiftKey)) {
       event.preventDefault();
-      void flow.fitView({ padding: 0.12, duration: 300, maxZoom: 1 });
+      fit();
     }
   };
 
@@ -459,11 +498,13 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
   // A tab first shown after it mounted hidden has never been fitted.
   const fitted = useRef(false);
   useEffect(() => {
-    if (!show || mode !== "editor" || !draft || fitted.current) return;
+    // A phone's canvas mounts (and frames itself) only when it is picked.
+    if (phone || !show || mode !== "editor" || !draft || fitted.current) return;
     fitted.current = true;
-    const frame = requestAnimationFrame(() => void flow.fitView({ padding: 0.12, maxZoom: 1 }));
+    const options = canvasFitOptions(draft);
+    const frame = requestAnimationFrame(() => void flow.fitView(options));
     return () => cancelAnimationFrame(frame);
-  }, [show, mode, draft, flow]);
+  }, [show, mode, draft, flow, phone]);
 
   // -------------------------------------------------------------------------
   // Run now / enable
@@ -484,12 +525,12 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
       if (!result.ok) return { ok: false, error: result.error };
       const answer = result.value;
       if (answer.runId) {
-        setSelectedRunId(answer.runId);
+        selectRun(answer.runId);
         setMode("runs");
       }
       return { ok: true, runId: answer.runId, ...(answer.skipped ? { skipped: answer.skipped } : {}) };
     },
-    [api, editor, workflowId]
+    [api, editor, workflowId, selectRun]
   );
 
   const toggleEnabled = useCallback(
@@ -504,16 +545,19 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
   // Render
   // -------------------------------------------------------------------------
 
-  const openRun = useCallback((id: string) => {
-    setSelectedRunId(id);
-    setMode("runs");
-  }, []);
+  const openRun = useCallback(
+    (id: string) => {
+      selectRun(id);
+      setMode("runs");
+    },
+    [selectRun]
+  );
 
   const runsContext: WorkflowRunsModeContext = {
     workflowId,
     workflow: draft,
     runId: selectedRunId,
-    selectRun: setSelectedRunId,
+    selectRun,
     openEditor: (nodeId) => {
       setMode("editor");
       if (nodeId) editor.select({ nodeIds: [nodeId], edgeIds: [] });
@@ -559,42 +603,10 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
     );
   }
 
-  return (
-    <div
-      ref={rootRef}
-      {...KEYBOARD_SURFACE_PROPS}
-      tabIndex={-1}
-      onKeyDown={onKeyDown}
-      className="flex h-full w-full min-w-0 flex-col bg-neutral-950 outline-none"
-    >
-      <EditorToolbar
-        name={draft.name}
-        onRename={(name) => editor.change((current) => ({ ...current, name }))}
-        enabled={draft.enabled}
-        onToggleEnabled={(enabled) => void toggleEnabled(enabled)}
-        enableRefusal={enableRefusal}
-        saveState={state.saveState}
-        saveError={state.saveError}
-        onRetrySave={() => void editor.flush()}
-        canUndo={state.canUndo}
-        canRedo={state.canRedo}
-        onUndo={() => editor.undo()}
-        onRedo={() => editor.redo()}
-        onTidy={tidy}
-        onZoomIn={() => void flow.zoomIn({ duration: 180 })}
-        onZoomOut={() => void flow.zoomOut({ duration: 180 })}
-        onFit={() => void flow.fitView({ padding: 0.12, duration: 300, maxZoom: 1 })}
-        mode={mode}
-        onMode={setMode}
-        liveRuns={liveRuns}
-        runButtonRef={runButton}
-        onRunNow={() => setRunNowOpen((open) => !open)}
-        onSettings={() => setSettingsOpen(true)}
-        readOnly={state.status !== "ready"}
-      />
-
+  const banners = (
+    <>
       {state.conflict ? (
-        <div role="alert" className="flex shrink-0 items-center gap-3 border-b border-warn/30 bg-warn-soft/25 px-4 py-2 text-[12.5px] text-warn">
+        <div role="alert" className="flex shrink-0 flex-wrap items-center gap-x-3 gap-y-1.5 border-b border-warn/30 bg-warn-soft/25 px-4 py-2 text-[12.5px] text-warn">
           <AlertTriangle size={14} className="shrink-0" />
           <span className="min-w-0 flex-1">
             Changed elsewhere (e.g. by an agent through MCP). Your edits are not saved.
@@ -628,13 +640,157 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
         </div>
       ) : null}
 
+    </>
+  );
+
+  const runsContent = runsRenderer ? (
+    runsRenderer(runsContext)
+  ) : (
+    <RunsModeFallback workflowId={workflowId} runId={selectedRunId} onSelectRun={selectRun} summaryContext={summaryContext} />
+  );
+
+  const overlays = (
+    <>
+      <AddBlockMenu
+        open={addMenu !== null}
+        point={addMenu?.clientPoint ?? { x: 0, y: 0 }}
+        allowTriggers={!addMenu?.from && !addMenu?.intoEdgeId}
+        context={addContext}
+        onClose={() => setAddMenu(null)}
+        onPick={(type) =>
+          addMenu &&
+          insertBlock(type, {
+            ...(addMenu.flowPoint && !addMenu.from && !addMenu.intoEdgeId
+              ? { flowPoint: { x: addMenu.flowPoint.x - 120, y: addMenu.flowPoint.y - 40 } }
+              : addMenu.flowPoint
+                ? { flowPoint: addMenu.flowPoint }
+                : {}),
+            ...(addMenu.from ? { from: addMenu.from } : {}),
+            ...(addMenu.intoEdgeId ? { intoEdgeId: addMenu.intoEdgeId } : {})
+          })
+        }
+      />
+      <RunNowPopover
+        open={runNowOpen}
+        anchor={runButton.current}
+        onClose={() => setRunNowOpen(false)}
+        example={manualExample}
+        blockingErrors={errorCount}
+        onRun={runNow}
+      />
+      <WorkflowSettingsModal
+        open={settingsOpen}
+        onClose={() => setSettingsOpen(false)}
+        editor={editor}
+        workflow={draft}
+        readOnly={readOnly}
+        onOpenSecrets={() => setSecretsOpen(true)}
+        defaultProjectPath={projectPath}
+      />
+      {secretsOpen ? (
+        <WorkflowSecretsDialog workflows={summary ? [summary] : []} initialWorkflowId={workflowId} onClose={() => setSecretsOpen(false)} />
+      ) : null}
+    </>
+  );
+
+  if (phone) {
+    const tab = useAppStore.getState().workflowTabsByProject[projectPath]?.find((candidate) => candidate.workflowId === workflowId);
+    return (
+      <PhoneLayoutContext.Provider value={true}>
+        <div ref={rootRef} {...KEYBOARD_SURFACE_PROPS} tabIndex={-1} className="wf-touch flex h-full w-full min-w-0 flex-col bg-neutral-950 outline-none">
+          <PhoneEditor
+            editor={editor}
+            state={state}
+            draft={draft}
+            readOnly={readOnly}
+            summaryContext={summaryContext}
+            workflowProject={workflowProject}
+            secretNames={secretNames}
+            mode={mode}
+            onMode={setMode}
+            liveRuns={liveRuns}
+            enableRefusal={enableRefusal}
+            onToggleEnabled={(enabled) => void toggleEnabled(enabled)}
+            banners={banners}
+            runs={runsContent}
+            renderCanvas={(hooks) => (
+              <div ref={zoneRef} data-wf-zone="canvas" tabIndex={-1} className="relative h-full w-full outline-none">
+                <WorkflowCanvas
+                  ref={canvasRef}
+                  workflow={draft}
+                  problems={state.problems}
+                  readOnly={readOnly}
+                  selection={selection}
+                  onSelectionChange={select}
+                  onChange={(recipe, options) => editor.change(recipe, options)}
+                  mintId={editor.mintId}
+                  summaryContext={summaryContext}
+                  onOpenAddMenu={hooks.onOpenAddMenu}
+                  minimap={false}
+                  hint={emptyHint}
+                  phone
+                  onNodeTap={hooks.onNodeTap}
+                  onLongPressNode={hooks.onLongPressNode}
+                  onLongPressPane={hooks.onLongPressPane}
+                  tapConnect={hooks.tapConnect}
+                  onTapConnect={hooks.onTapConnect}
+                />
+              </div>
+            )}
+            runButtonRef={runButton}
+            onRunNow={() => setRunNowOpen((open) => !open)}
+            onSettings={() => setSettingsOpen(true)}
+            onSecrets={() => setSecretsOpen(true)}
+            onOpenRun={openRun}
+            onTidy={tidy}
+            onFit={() => fit()}
+            onClose={tab ? () => void useAppStore.getState().closeTab(tab.id) : null}
+          />
+          {overlays}
+        </div>
+      </PhoneLayoutContext.Provider>
+    );
+  }
+
+  return (
+    <div
+      ref={rootRef}
+      {...KEYBOARD_SURFACE_PROPS}
+      tabIndex={-1}
+      onKeyDown={onKeyDown}
+      className="flex h-full w-full min-w-0 flex-col bg-neutral-950 outline-none"
+    >
+      <EditorToolbar
+        name={draft.name}
+        onRename={(name) => editor.change((current) => ({ ...current, name }))}
+        enabled={draft.enabled}
+        onToggleEnabled={(enabled) => void toggleEnabled(enabled)}
+        enableRefusal={enableRefusal}
+        saveState={state.saveState}
+        saveError={state.saveError}
+        onRetrySave={() => void editor.flush()}
+        canUndo={state.canUndo}
+        canRedo={state.canRedo}
+        onUndo={() => editor.undo()}
+        onRedo={() => editor.redo()}
+        onTidy={tidy}
+        onZoomIn={() => void flow.zoomIn({ duration: 180 })}
+        onZoomOut={() => void flow.zoomOut({ duration: 180 })}
+        onFit={() => fit()}
+        mode={mode}
+        onMode={setMode}
+        liveRuns={liveRuns}
+        runButtonRef={runButton}
+        onRunNow={() => setRunNowOpen((open) => !open)}
+        onSettings={() => setSettingsOpen(true)}
+        readOnly={state.status !== "ready"}
+      />
+
+      {banners}
+
       {mode === "runs" ? (
         <div className="flex min-h-0 flex-1">
-          {runsRenderer ? (
-            runsRenderer(runsContext)
-          ) : (
-            <RunsModeFallback workflowId={workflowId} runId={selectedRunId} onSelectRun={setSelectedRunId} summaryContext={summaryContext} />
-          )}
+          {runsContent}
         </div>
       ) : (
         <div className="flex min-h-0 flex-1">
@@ -717,45 +873,7 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
         </div>
       )}
 
-      <AddBlockMenu
-        open={addMenu !== null}
-        point={addMenu?.clientPoint ?? { x: 0, y: 0 }}
-        allowTriggers={!addMenu?.from && !addMenu?.intoEdgeId}
-        context={addContext}
-        onClose={() => setAddMenu(null)}
-        onPick={(type) =>
-          addMenu &&
-          insertBlock(type, {
-            ...(addMenu.flowPoint && !addMenu.from && !addMenu.intoEdgeId
-              ? { flowPoint: { x: addMenu.flowPoint.x - 120, y: addMenu.flowPoint.y - 40 } }
-              : addMenu.flowPoint
-                ? { flowPoint: addMenu.flowPoint }
-                : {}),
-            ...(addMenu.from ? { from: addMenu.from } : {}),
-            ...(addMenu.intoEdgeId ? { intoEdgeId: addMenu.intoEdgeId } : {})
-          })
-        }
-      />
-      <RunNowPopover
-        open={runNowOpen}
-        anchor={runButton.current}
-        onClose={() => setRunNowOpen(false)}
-        example={manualExample}
-        blockingErrors={errorCount}
-        onRun={runNow}
-      />
-      <WorkflowSettingsModal
-        open={settingsOpen}
-        onClose={() => setSettingsOpen(false)}
-        editor={editor}
-        workflow={draft}
-        readOnly={readOnly}
-        onOpenSecrets={() => setSecretsOpen(true)}
-        defaultProjectPath={projectPath}
-      />
-      {secretsOpen ? (
-        <WorkflowSecretsDialog workflows={summary ? [summary] : []} initialWorkflowId={workflowId} onClose={() => setSecretsOpen(false)} />
-      ) : null}
+      {overlays}
     </div>
   );
 };
