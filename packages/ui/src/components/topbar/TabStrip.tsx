@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Dot, FolderTree, GitBranch, Globe, ListTodo, Pencil, Trash2, X } from "lucide-react";
+import { Dot, FolderTree, GitBranch, Globe, ListTodo, Pencil, Trash2, Workflow, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { shortAccountLabel } from "../../lib/account-label";
 import { getRegistryIcon } from "../../icons";
@@ -186,6 +186,8 @@ export const TabStrip: React.FC = () => {
           <GitBranch size={13} />
         ) : tab.type === "todo" ? (
           <ListTodo size={13} />
+        ) : tab.type === "workflow" ? (
+          <Workflow size={13} />
         ) : tab.type === "browser" ? (
           <Globe size={13} />
         ) : (

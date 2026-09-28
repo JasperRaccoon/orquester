@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { ChevronDown, Circle, FolderTree, GitBranch, Globe, ListTodo, Pencil, Trash2, X } from "lucide-react";
+import { ChevronDown, Circle, FolderTree, GitBranch, Globe, ListTodo, Pencil, Trash2, Workflow, X } from "lucide-react";
 import { BottomSheet, ConfirmDialog, DropdownEmpty } from "../ui";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { cn } from "../../lib/cn";
@@ -29,6 +29,8 @@ const tabIcon = (tab: ProjectTab, size = 16) => {
     <GitBranch size={size} />
   ) : tab.type === "todo" ? (
     <ListTodo size={size} />
+  ) : tab.type === "workflow" ? (
+    <Workflow size={size} />
   ) : tab.type === "browser" ? (
     <Globe size={size} />
   ) : (

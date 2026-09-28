@@ -6,6 +6,7 @@ export {
   type SavedPromptEditorRequest
 } from "./saved-prompts/editor-bridge";
 export { PromptHistoryPanel } from "./history/PromptHistoryPanel";
+export { WorkflowsPanel } from "./workflows/WorkflowsPanel";
 export {
   insertIntoChat,
   NO_CHAT_TARGET_REASON,

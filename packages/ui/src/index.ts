@@ -13,7 +13,7 @@ export {
 } from "./context/orquester-context";
 
 // Connection layer
-export { ApiClient, ApiError, type ApiRequestOptions } from "./lib/api-client";
+export { ApiClient, ApiError, WorkflowApiError, type ApiRequestOptions } from "./lib/api-client";
 export {
   type Transporter,
   type TransportRequest,
@@ -54,8 +54,32 @@ export {
   useActiveTabId,
   type AppState,
   type FileTab,
-  type ProjectTab
+  type ProjectTab,
+  type WorkflowTab
 } from "./store/app";
+// Automated workflows (the rail's module store, its hooks, the editor tab)
+export {
+  applyWorkflowsEvent,
+  loadWorkflowRun,
+  loadWorkflowRuns,
+  loadWorkflows,
+  loadWorkflowSecrets,
+  markWorkflowsStale,
+  resetWorkflows,
+  workflowsStore,
+  type WorkflowRunEntry,
+  type WorkflowRunsList,
+  type WorkflowsApi,
+  type WorkflowsState
+} from "./lib/workflows/store";
+export {
+  useWorkflowRun,
+  useWorkflowRuns,
+  useWorkflows,
+  useWorkflowSecrets,
+  useWorkflowsState
+} from "./lib/workflows/hooks";
+export * from "./components/workflows";
 export * from "./hooks";
 export * from "./services";
 
