@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentAccount, AgentAccountsResponse, AgentUsage, UsageAccount, UsageResponse } from "@orquester/api";
-import type { AccountCooldown, AccountPolicy, AgentChainEntry, RouterProvider } from "@orquester/config";
-import { createUsesAccount } from "./families.ts";
+import type { AccountCooldown, AccountPolicy, AgentChainEntry } from "@orquester/config";
 import {
   burntWindowResetAt,
   rankChainEntry,
@@ -81,7 +80,6 @@ function input(overrides: Partial<SelectAccountInput> & Pick<SelectAccountInput,
   return {
     usage: { agents: [claudeUsage] },
     accounts: accountsOf(...claudeAccounts),
-    seededAccountIds: new Set(),
     cooldowns: {},
     now: NOW,
     ...overrides
@@ -332,40 +330,6 @@ test("opencode has no accounts: one system candidate, only its cooldown applies"
   assert.equal(tried.skipped[0]!.why, "unavailable");
 });
 
-test("claudex/claudemix: only seeded accounts; router and xAI models run without one", () => {
-  const usage: UsageResponse = {
-    agents: [claudeUsage, agentRow("codex", [row("c1", "c1", { weekly: [50, DAY] }), row("c2", "c2", { weekly: [5, DAY] })])]
-  };
-  const accounts = accountsOf(...claudeAccounts, account("codex", "c1"), account("codex", "c2"));
-  const seededAccountIds = new Set(["c1", "a-arakuma"]);
-  const claudex = selectAccount(input({ usage, accounts, seededAccountIds, chain: [entry("claudex", "gpt-5.5")] }));
-  assert.equal(claudex.chosen?.accountId, "c1");
-  assert.deepEqual(claudex.skipped.map((skip) => [skip.accountId, skip.why]), [["c2", "notSeeded"]]);
-
-  const claudemix = selectAccount(input({ usage, accounts, seededAccountIds, chain: [entry("claudemix", "claude-opus-5")] }));
-  assert.equal(claudemix.chosen?.accountLabel, "arakuma.panama");
-  assert.equal(claudemix.skipped.filter((s) => s.why === "notSeeded").length, 3);
-
-  // An xAI model is accountless even when every codex account is out.
-  const xai = selectAccount(
-    input({ usage, accounts, seededAccountIds, cooldowns: { "codex:c1": cooldown(HOUR) }, chain: [entry("claudex", "grok-4.5")] })
-  );
-  assert.equal(xai.chosen?.accountId, "system");
-  // A router model, through the injected predicate; its cooldown is keyed on its router provider.
-  const providers = [{ id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", preset: "openrouter", models: [{ name: "moonshotai/kimi-k3", alias: "kimi-k3" }], keyVerifiedAt: null, createdAt: at(-DAY) }] as RouterProvider[];
-  const usesAccount = createUsesAccount(() => providers);
-  const router = selectAccount(input({ usage, accounts, seededAccountIds, usesAccount, chain: [entry("claudex", "kimi-k3")] }));
-  assert.equal(router.chosen?.accountId, "system");
-  const routerCooled = selectAccount(
-    input({ usage, accounts, seededAccountIds, usesAccount, cooldowns: { "claudex:router:openrouter": cooldown(HOUR) }, chain: [entry("claudex", "kimi-k3")] })
-  );
-  assert.equal(routerCooled.chosen, null);
-
-  // includeSystem on a proxy launcher: the proxy's own pick, usage unknown → last.
-  const withSystem = rankChainEntry(input({ usage, accounts, seededAccountIds, chain: [entry("claudex", "gpt-5.5", { includeSystem: true })] }), 0).ranked;
-  assert.deepEqual(withSystem.map((c) => [c.accountId, c.usage]), [["c1", "known"], ["system", "unknown"]]);
-});
-
 test("system: the family's system row, or its head row when it has no managed accounts", () => {
   // Grok with no managed accounts: the head row is the system login's reading; no 5h window, so a
   // session threshold is vacuous rather than unknown.
@@ -426,28 +390,17 @@ test("burntWindowResetAt: the latest reset among burnt windows", () => {
 });
 
 test("accountless cooldowns are per provider: one provider's limit never cools another's entries", () => {
-  const providers = [
-    { id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", preset: "openrouter", models: [{ name: "moonshotai/kimi-k3", alias: "kimi-k3" }], keyVerifiedAt: null, createdAt: at(-DAY) },
-    { id: "tokenrouter", label: "TokenRouter", baseUrl: "https://tokenrouter.example/v1", preset: "tokenrouter", models: [{ name: "deepseek-v4" }], keyVerifiedAt: null, createdAt: at(-DAY) }
-  ] as RouterProvider[];
-  const usesAccount = createUsesAccount(() => providers);
   const chain = [
     entry("opencode", "anthropic/claude-sonnet"),
     entry("opencode", "openai/gpt-5"),
-    entry("claudex", "kimi-k3"),
-    entry("claudex", "deepseek-v4"),
-    entry("claudex", "grok-4.5"),
-    entry("claudex", "gpt-5.5", { includeSystem: true, accounts: ["system"] }),
+    entry("opencode", "bare-model"),
     entry("codex", "gpt-5.5", { includeSystem: true })
   ];
-  const cooldowns = { "opencode:provider:anthropic": cooldown(HOUR), "claudex:router:openrouter": cooldown(HOUR), "claudex:xai": cooldown(HOUR), "claudex:proxy": cooldown(HOUR) };
+  const cooldowns = { "opencode:provider:anthropic": cooldown(HOUR), "opencode:model:bare-model": cooldown(HOUR) };
   const chosenAt = (index: number): number | undefined =>
-    selectAccount(input({ usesAccount, cooldowns, chain, onlyChainIndex: index, accounts: accountsOf(), seededAccountIds: new Set() })).chosen?.chainIndex;
+    selectAccount(input({ cooldowns, chain, onlyChainIndex: index, accounts: accountsOf() })).chosen?.chainIndex;
   assert.equal(chosenAt(0), undefined, "anthropic is cooling");
   assert.equal(chosenAt(1), 1, "openai is another provider");
-  assert.equal(chosenAt(2), undefined, "openrouter is cooling");
-  assert.equal(chosenAt(3), 3, "tokenrouter is another provider");
-  assert.equal(chosenAt(4), undefined, "xai is cooling");
-  assert.equal(chosenAt(5), undefined, "the proxy's own pick is cooling");
-  assert.equal(chosenAt(6), 6, "the proxy's pick is not codex's system login");
+  assert.equal(chosenAt(2), undefined, "a prefix-less model is keyed by itself");
+  assert.equal(chosenAt(3), 3, "an accountless provider's limit is not codex's system login");
 });

@@ -24,10 +24,7 @@ import {
   type CreateHostThreadRequest,
   type SetThreadIdentityRequest
 } from "../agent-host/host-protocol.ts";
-import {
-  AgentChatService,
-  proxyAccountFamily
-} from "./service.ts";
+import { AgentChatService } from "./service.ts";
 import { ChatSessionError, ChatSessionManager } from "./chat-sessions.ts";
 import { HostUnavailableError } from "./host-client.ts";
 import { UploadTooLargeError } from "../upload-stream.ts";
@@ -65,15 +62,13 @@ interface Fixture {
   onUpload: ((req: IncomingMessage) => void) | null;
   appdir: string;
   /** Overridable per-account launch env, so a switch can be observed. */
-  launchFor: (ctx: { accountId?: string; model?: string }) => {
+  launchFor: (ctx: { accountId?: string }) => {
     env: Record<string, string>;
     unset?: string[];
     accountId?: string;
   } | null;
   /** What `listManagedAccounts` answers — the family gate reads it. */
   accounts: AgentAccount[];
-  /** What the injected seeded-account gate answers. */
-  seededRefusal: { code: string; message: string } | null;
   /** Adapter ids the daemon asked the host to re-probe, in order. */
   refreshes: string[];
   /** Merged into the fake host's `/health` answer (`makeFixture`'s `health` option). */
@@ -94,16 +89,16 @@ interface Fixture {
   cleanup(): Promise<void>;
 }
 
-const CLAUDEX: RegistryEntry = {
-  id: "claudex",
-  name: "Claude (proxy)",
+const CLAUDE: RegistryEntry = {
+  id: "claude",
+  name: "Claude Code",
   kind: "agent",
   bin: ["claude"],
   resolvedBin: "/usr/bin/claude",
   enabled: true,
   installState: "idle",
   // What RegistryService materialises: the static entry env merged with
-  // `<appdir>/daemon/env/claudex.env`.
+  // `<appdir>/daemon/env/claude.env`.
   env: { ANTHROPIC_BASE_URL: "http://127.0.0.1:8317", ORQ_FROM_ENV_FILE: "1" },
   chat: { adapter: "claude" }
 };
@@ -151,7 +146,6 @@ async function makeFixture(
     appdir,
     launchFor: () => launch,
     accounts: [],
-    seededRefusal: null,
     refreshes: [],
     health: options.health ?? {},
     holdRequests: [],
@@ -297,7 +291,6 @@ async function makeFixture(
     registryEntry: (refId) => (refId === entry.id ? entry : undefined),
     resolveLaunchEnv: async (_entry, ctx) => state.launchFor(ctx),
     listManagedAccounts: () => ({ accounts: state.accounts }),
-    seededAccountRefusal: () => state.seededRefusal,
     systemClaudeConfigFile: () => join(appdir, ".claude.json"),
     // The real confinement lives in `index.ts` (realpath + assertInsideFsRoot);
     // here the sandbox is `<appdir>/ws`, so a path outside it answers null.
@@ -316,36 +309,33 @@ async function makeFixture(
 }
 
 test("the launch env is the registry entry's env UNDER the resolveExtraEnv contributors", async () => {
-  const f = await makeFixture(CLAUDEX, {
-    // The cliproxy contributor, exactly as it runs for a terminal today.
+  const f = await makeFixture(CLAUDE, {
+    // The account + timeout contributors, exactly as they run for a terminal.
     env: {
-      CLAUDE_CONFIG_DIR: "/var/lib/orquester/daemon/cliproxy/claude-home-claudex",
-      ANTHROPIC_AUTH_TOKEN: "tok",
-      ANTHROPIC_MODEL: "claude-sonnet",
-      ANTHROPIC_BASE_URL: "http://127.0.0.1:9999",
-      CLAUDE_CODE_AUTO_COMPACT_WINDOW: "150000"
+      CLAUDE_CONFIG_DIR: "/var/lib/orquester/daemon/agent-accounts/claude/acc-1/home",
+      API_TIMEOUT_MS: "600000",
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:9999"
     },
-    unset: ["ANTHROPIC_API_KEY"]
+    unset: ["ANTHROPIC_API_KEY"],
+    accountId: "acc-1"
   });
   await f.service.createSession(
-    { kind: "agent-chat", refId: "claudex", projectPath: "/w/p", cwd: "/w/p" },
+    { kind: "agent-chat", refId: "claude", projectPath: "/w/p", cwd: "/w/p" },
     0
   );
   assert.equal(f.created.length, 1);
   const body = f.created[0];
   assert.equal(body.launchEnv?.ORQ_FROM_ENV_FILE, "1", "the per-launcher env file reaches the host");
-  assert.equal(body.launchEnv?.ANTHROPIC_AUTH_TOKEN, "tok");
-  assert.equal(body.launchEnv?.ANTHROPIC_MODEL, "claude-sonnet");
-  assert.equal(body.launchEnv?.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "150000");
+  assert.equal(body.launchEnv?.API_TIMEOUT_MS, "600000");
   assert.equal(
     body.launchEnv?.ANTHROPIC_BASE_URL,
     "http://127.0.0.1:9999",
     "the contributor wins a collision with the entry env, as the terminal wrapper does"
   );
   assert.deepEqual(body.unsetEnv, ["ANTHROPIC_API_KEY"]);
-  assert.equal(body.home, "cliproxy");
-  assert.equal(body.proxyRefId, "claudex");
-  assert.equal(body.homePath, "/var/lib/orquester/daemon/cliproxy/claude-home-claudex");
+  assert.equal(body.home, "account");
+  assert.equal(body.accountId, "acc-1");
+  assert.equal(body.homePath, "/var/lib/orquester/daemon/agent-accounts/claude/acc-1/home");
   await f.cleanup();
 });
 
@@ -364,28 +354,12 @@ test("an OpenCode thread carries its per-launcher env file and the PROJECT ROOT"
   await f.cleanup();
 });
 
-test("a managed account binds its home through the adapter's own variable", async () => {
-  const f = await makeFixture(
-    { ...CLAUDEX, id: "claude", name: "Claude Code" },
-    { env: { CLAUDE_CONFIG_DIR: "/appdir/agent-accounts/claude/acc-1/home" }, accountId: "acc-1" }
-  );
-  await f.service.createSession(
-    { kind: "agent-chat", refId: "claude", projectPath: "/w/p", cwd: "/w/p" },
-    0
-  );
-  const body = f.created[0];
-  assert.equal(body.home, "account");
-  assert.equal(body.accountId, "acc-1");
-  assert.equal(body.homePath, "/appdir/agent-accounts/claude/acc-1/home");
-  await f.cleanup();
-});
-
 test("the project is marked trusted for the home the thread will run under", async () => {
   // A never-seen directory starts untrusted and the project's settings, hooks
   // and skills are then silently ignored, with nothing on the wire to say so.
   const dir = await mkdtemp(join(tmpdir(), "orq-claude-home-"));
   const f = await makeFixture(
-    { ...CLAUDEX, id: "claude", name: "Claude Code" },
+    CLAUDE,
     { env: { CLAUDE_CONFIG_DIR: dir }, accountId: "acc-1" }
   );
   const projectPath = join(f.appdir, "ws", "proj");
@@ -410,7 +384,7 @@ test("trust is granted for the validated projectPath, NEVER the request's cwd", 
   // grant also applies to every future terminal `claude` tab on that path.
   const dir = await mkdtemp(join(tmpdir(), "orq-claude-home-"));
   const f = await makeFixture(
-    { ...CLAUDEX, id: "claude", name: "Claude Code" },
+    CLAUDE,
     { env: { CLAUDE_CONFIG_DIR: dir }, accountId: "acc-1" }
   );
   const projectPath = join(f.appdir, "ws", "proj");
@@ -429,7 +403,7 @@ test("trust is granted for the validated projectPath, NEVER the request's cwd", 
 test("a projectPath outside the sandbox grants NO trust, and the launch still works", async () => {
   const dir = await mkdtemp(join(tmpdir(), "orq-claude-home-"));
   const f = await makeFixture(
-    { ...CLAUDEX, id: "claude", name: "Claude Code" },
+    CLAUDE,
     { env: { CLAUDE_CONFIG_DIR: dir }, accountId: "acc-1" }
   );
   await f.service.createSession(
@@ -527,11 +501,14 @@ test("a resume id the adapter cannot use is refused at creation, never degraded"
 });
 
 test("§6.1's fields ride the nested `chat` block the client sends", async () => {
-  const f = await makeFixture(OPENCODE, null);
+  const f = await makeFixture(CLAUDE, {
+    env: { CLAUDE_CONFIG_DIR: "/homes/acc-1" },
+    accountId: "acc-1"
+  });
   await f.service.createSession(
     {
       kind: "agent-chat",
-      refId: "opencode",
+      refId: "claude",
       projectPath: "/w/p",
       cwd: "/w/p",
       chat: {
@@ -539,7 +516,7 @@ test("§6.1's fields ride the nested `chat` block the client sends", async () =>
         // had no catalog to pick from. It is never a refusal.
         modelSelection: { model: "" },
         runtimeMode: "auto-accept-edits",
-        resume: { home: "cliproxy", conversationId: "0199-abc.def/history" }
+        resume: { home: "account", conversationId: "0199-abc.def/history" }
       }
     },
     0
@@ -547,7 +524,7 @@ test("§6.1's fields ride the nested `chat` block the client sends", async () =>
   const body = f.created[0];
   assert.deepEqual(body.modelSelection, { model: "" });
   assert.equal(body.runtimeMode, "auto-accept-edits");
-  assert.deepEqual(body.resume, { home: "cliproxy", conversationId: "0199-abc.def/history" });
+  assert.deepEqual(body.resume, { home: "account", conversationId: "0199-abc.def/history" });
   await f.cleanup();
 });
 
@@ -639,8 +616,6 @@ test("the service refuses a malformed owner before the tab or the thread exists"
 
 // --- §3.4 switching an existing thread's account ---------------------------
 
-const CLAUDE: RegistryEntry = { ...CLAUDEX, id: "claude", name: "Claude Code" };
-
 /** A `claude` chat tab on `acc-1`, plus a second account it can move to. */
 async function switchableFixture(): Promise<Fixture & { sessionId: string }> {
   const f = await makeFixture(CLAUDE, {
@@ -714,18 +689,6 @@ test("an account of another family is refused rather than silently degraded to S
   await f.cleanup();
 });
 
-test("the seeded-account gate applies to a switch exactly as it does to a create", async () => {
-  const f = await switchableFixture();
-  f.seededRefusal = { code: "SESSION_UNAVAILABLE", message: "This account is not seeded." };
-  await assert.rejects(
-    () => f.service.switchAccount(f.sessionId, { commandId: "c1", accountId: "acc-2" }),
-    (error: unknown) =>
-      error instanceof ChatSessionError && error.code === "INVALID_COMMAND"
-  );
-  assert.equal(f.identities.length, 0);
-  await f.cleanup();
-});
-
 test("an OpenCode thread cannot switch accounts", async () => {
   const f = await makeFixture(OPENCODE, null);
   const summary = await f.service.createSession(
@@ -785,12 +748,6 @@ test("a switch on an unknown tab is THREAD_NOT_FOUND and a blank commandId is in
   await f.cleanup();
 });
 
-test("the proxy launchers draw their accounts from the mapped family", () => {
-  assert.equal(proxyAccountFamily("claudex"), "codex");
-  assert.equal(proxyAccountFamily("claudemix"), "claude");
-  assert.equal(proxyAccountFamily("claude"), null);
-});
-
 // §3.2 — the daemon is the one process that knows an install just happened.
 //
 // The incident: `claude` was updated from Settings → Agents (2.1.278 → 2.1.280,
@@ -799,21 +756,21 @@ test("the proxy launchers draw their accounts from the mapped family", () => {
 // one probed under the old binary and nothing told it the CLI had changed.
 
 test("an install/update asks the host to re-probe the provider that entry maps to", async (t) => {
-  const f = await makeFixture(CLAUDEX, null);
+  const f = await makeFixture(CLAUDE, null);
   t.after(() => f.cleanup());
   const changed = once(f.broadcasts, "agent.providers.changed");
-  f.service.onRegistryEntryChanged({ ...CLAUDEX, installState: "installing" });
-  f.service.onRegistryEntryChanged({ ...CLAUDEX, installState: "idle" });
+  f.service.onRegistryEntryChanged({ ...CLAUDE, installState: "installing" });
+  f.service.onRegistryEntryChanged({ ...CLAUDE, installState: "idle" });
   await changed;
   assert.deepEqual(f.refreshes, ["claude"]);
 });
 
 test("a CLI version change asks the host to refresh its provider catalog", async (t) => {
-  const f = await makeFixture(CLAUDEX, null);
+  const f = await makeFixture(CLAUDE, null);
   t.after(() => f.cleanup());
-  f.service.onRegistryEntryChanged({ ...CLAUDEX, version: "2.1.278" });
+  f.service.onRegistryEntryChanged({ ...CLAUDE, version: "2.1.278" });
   const changed = once(f.broadcasts, "agent.providers.changed");
-  f.service.onRegistryEntryChanged({ ...CLAUDEX, version: "2.1.280" });
+  f.service.onRegistryEntryChanged({ ...CLAUDE, version: "2.1.280" });
   await changed;
   assert.deepEqual(f.refreshes, ["claude"]);
 });
@@ -831,7 +788,7 @@ const STALE_BUSY_HOST = {
 };
 
 test("agent goals §5.7: a blocked deploy drain posts the goal hold, with authentication", async (t) => {
-  const f = await makeFixture(CLAUDEX, null, { health: STALE_BUSY_HOST });
+  const f = await makeFixture(CLAUDE, null, { health: STALE_BUSY_HOST });
   t.after(() => f.cleanup());
   if (f.holdRequests.length === 0) await once(f.requests, "/goals/hold");
   assert.equal(f.holdRequests[0]!.body, "{}");
@@ -841,7 +798,7 @@ test("agent goals §5.7: a blocked deploy drain posts the goal hold, with authen
 
 test("agent goals §5.7, a host from before the hold: the snapshot read, the session stop and the hand-over reach the host as sent", { timeout: 10_000 }, async (t) => {
   t.mock.timers.enable({ apis: ["setInterval"] });
-  const f = await makeFixture(CLAUDEX, null, {
+  const f = await makeFixture(CLAUDE, null, {
     health: STALE_BUSY_HOST,
     holdAnswer: { status: 404, body: { error: { code: "THREAD_NOT_FOUND" } } }
   });
@@ -922,7 +879,7 @@ async function watchingForCrashes<T>(
 const turnOfTheLoop = (): Promise<void> => new Promise((resolve) => setImmediate(resolve));
 
 test("a body that fails mid-upload fails the upload, never the daemon", async () => {
-  const f = await makeFixture(CLAUDEX, { env: {} });
+  const f = await makeFixture(CLAUDE, { env: {} });
   try {
     // What the MCP hands over for a `{path}` attachment is a file stream, and a
     // file read can fail partway: EIO, a file truncated or unlinked under it.
@@ -945,7 +902,7 @@ test("a body that fails mid-upload fails the upload, never the daemon", async ()
 
 test("an upload refused before it was sent leaves a failing body nothing to crash on", async () => {
   // No host adopted yet: the host client refuses without ever reading the body.
-  const f = await makeFixture(CLAUDEX, { env: {} }, { adopt: false });
+  const f = await makeFixture(CLAUDE, { env: {} }, { adopt: false });
   try {
     const source = new Readable({ read() {} });
     source.push(Buffer.from("bytes"));
@@ -1052,7 +1009,7 @@ const CHAT_UPLOAD = {
 } as const;
 
 test("a host that refuses an upload before reading it is relayed as is, and the connection closes", async () => {
-  const f = await makeFixture(CLAUDEX, { env: {} });
+  const f = await makeFixture(CLAUDE, { env: {} });
   const refusal = { error: { code: "INVALID_COMMAND", message: "`name` is required." } };
   f.refuseUpload = { status: 400, body: refusal };
   const app = chatUploadRoute(f.appdir, f.service);
@@ -1070,7 +1027,7 @@ test("a host that refuses an upload before reading it is relayed as is, and the 
 });
 
 test("an upload the host takes is relayed without closing the connection", async () => {
-  const f = await makeFixture(CLAUDEX, { env: {} });
+  const f = await makeFixture(CLAUDE, { env: {} });
   const app = chatUploadRoute(f.appdir, f.service);
   try {
     const res = await app.inject({ ...CHAT_UPLOAD, headers: { ...CHAT_UPLOAD.headers } });
@@ -1140,7 +1097,7 @@ test("a host refusal keeps the client connection open once all upload bytes are 
 // else ever closes it. So a teardown that never reaches the socket fails here
 // instead of hanging the suite.
 test("a host that refuses while the upload is still arriving has the daemon's request to it torn down", { timeout: 10_000 }, async (t) => {
-  const f = await makeFixture(CLAUDEX, { env: {} });
+  const f = await makeFixture(CLAUDE, { env: {} });
   t.after(() => f.cleanup());
   // The real host's answer to an upload with no `name`, before it reads a byte.
   const refusal = { error: { code: "INVALID_COMMAND", message: "`name` is required." } };
@@ -1173,7 +1130,7 @@ test("a fully consumed upload preserves the host answer and all body bytes", asy
     { status: 200, value: {} },
     { status: 500, value: refusal }
   ]) {
-    const f = await makeFixture(CLAUDEX, { env: {} });
+    const f = await makeFixture(CLAUDE, { env: {} });
     t.after(() => f.cleanup());
     if (expected.status >= 400) {
       f.refuseUploadAfterBody = { status: expected.status, body: expected.value };
@@ -1196,7 +1153,7 @@ test("a fully consumed upload preserves the host answer and all body bytes", asy
 });
 
 test("an over-cap chat upload answers 413 UPLOAD_TOO_LARGE through the MCP seam too, and ends its owned stream", async (t) => {
-  const f = await makeFixture(CLAUDEX, { env: {} });
+  const f = await makeFixture(CLAUDE, { env: {} });
   const app = Fastify();
   try {
     const seam = new InjectDaemonApi({

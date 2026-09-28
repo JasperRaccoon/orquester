@@ -103,7 +103,7 @@ export interface ThreadMetaUpdatedPayload {
    * would relaunch under anyway, since `launch.json` is what it actually reads.
    */
   accountId?: string;
-  /** The home KIND for that account. Never crosses the cliproxy boundary. */
+  /** The home KIND for that account. */
   home?: AccountHomeKind;
 }
 

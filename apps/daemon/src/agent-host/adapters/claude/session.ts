@@ -230,7 +230,6 @@ export interface ClaudeSessionOptions {
   onClosed: (session: ClaudeSession) => void;
   /** Marks the cached provider snapshot stale (§4.1). */
   onUsageLimitsStale?: () => void;
-  autoCompactWindow?: number;
   /** The fold's goal (goals §5.3); the session reports only what changes from it. */
   knownGoal?: AgentGoal | null;
 }
@@ -384,9 +383,6 @@ export class ClaudeSession {
       ...(this.resumeSessionAt !== undefined ? { resumeSessionAt: this.resumeSessionAt } : {}),
       ...(this.resumeSessionId === undefined
         ? { sessionId: this.options.context.ids.uuid() }
-        : {}),
-      ...(this.options.autoCompactWindow !== undefined
-        ? { autoCompactWindow: this.options.autoCompactWindow }
         : {})
     });
     this.basePermissionMode = built.basePermissionMode;

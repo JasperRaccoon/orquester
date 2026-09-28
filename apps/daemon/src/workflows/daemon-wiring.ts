@@ -37,7 +37,6 @@ import type { DaemonApi } from "../mcp/daemon-api.ts";
 import type { AccountsReader, UsageReader, WorkflowLogger } from "./contracts.ts";
 import { createCooldownStore } from "./agent/cooldowns.ts";
 import { createAgentExecutor } from "./agent/executor.ts";
-import { createUsesAccount, routerProvidersFromDisk } from "./agent/families.ts";
 import { createAccountPreview } from "./agent/preview.ts";
 import { createValidationCatalog, type ValidationCatalog } from "./agent/validation-catalog.ts";
 import { createWorkflowRuntime, realClock, type WorkflowRuntime, type WorkflowRuntimeDeps } from "./factory.ts";
@@ -79,7 +78,7 @@ export interface WorkflowDaemonDeps {
   broadcaster: Pick<Broadcaster, "publish">;
   /** Synchronous: the usage service's latest cached reading (no I/O). */
   usage: UsageReader;
-  /** Managed agent accounts + the ids seeded into the model proxy (the create route's gate reads the same file). */
+  /** Managed agent accounts (the agent-accounts store). */
   accounts: AccountsReader;
   /** The daemon's GitService. */
   git: WorkflowRuntimeDeps["git"] & { remoteUrl(cwd: string): Promise<string | null> };
@@ -91,8 +90,6 @@ export interface WorkflowDaemonDeps {
   /** Getters: `PUT /api/config/daemon` moves both in place. */
   workspacesDir: () => string;
   fsRoot: () => string;
-  /** `<appdir>/daemon` — where the proxy's router providers live (`usesAccount`). */
-  daemonDir: string;
   /** `<appdir>/tmp` — the sandbox attempts' TMPDIR. */
   appdirTmp?: string;
   push: WorkflowPushSender | null;
@@ -128,7 +125,6 @@ export function createWorkflowDaemon(deps: WorkflowDaemonDeps): WorkflowDaemon {
   const { service, runStore, state, logger } = deps;
   const clock = realClock;
   const triggerClock = systemTriggerClock;
-  const usesAccount = createUsesAccount(() => routerProvidersFromDisk(deps.daemonDir));
   const cooldowns = createCooldownStore(state, clock);
 
   let scheduler: Scheduler | null = null;
@@ -220,7 +216,6 @@ export function createWorkflowDaemon(deps: WorkflowDaemonDeps): WorkflowDaemon {
     push: deps.push,
     createAgentExecutor,
     createAccountPreview: (previewDeps) => createAccountPreview(previewDeps),
-    usesAccount,
     logger,
     clock
   });

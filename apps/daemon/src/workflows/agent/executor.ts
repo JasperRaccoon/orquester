@@ -78,7 +78,7 @@ import {
   type FailoverDeps,
   type FailoverMemory
 } from "./failover.ts";
-import { cooldownSubject, defaultUsesAccount, type UsesAccount } from "./families.ts";
+import { cooldownSubject } from "./families.ts";
 import {
   buildHandoffPrompt,
   clipUtf8,
@@ -155,8 +155,6 @@ export interface AgentExecutorDeps {
   usage: UsageReader;
   accounts: AccountsReader;
   cooldowns: CooldownStore;
-  /** claudex router / xAI models run without an account (`createUsesAccount`). */
-  usesAccount?: UsesAccount;
   prompts: PromptRenderer;
   clock: Clock;
   mintId: MintId;
@@ -298,7 +296,6 @@ const DEFAULT_POLICY: AccountPolicy = {
 class AgentBlockRun {
   private readonly api: DaemonApi;
   private readonly catalog: AgentCatalog;
-  private readonly usesAccount: UsesAccount;
   private readonly failoverDeps: FailoverDeps;
 
   constructor(
@@ -308,8 +305,7 @@ class AgentBlockRun {
   ) {
     this.api = ctx.services.chat.api;
     this.catalog = new AgentCatalog(this.api);
-    this.usesAccount = deps.usesAccount ?? defaultUsesAccount;
-    this.failoverDeps = { usage: deps.usage, accounts: deps.accounts, cooldowns: deps.cooldowns, usesAccount: this.usesAccount, clock: deps.clock };
+    this.failoverDeps = { usage: deps.usage, accounts: deps.accounts, cooldowns: deps.cooldowns, clock: deps.clock };
   }
 
   private get config() {
@@ -442,7 +438,7 @@ class AgentBlockRun {
       chainIndex = 0;
     }
     const label = this.deps.accounts.list().accounts.find((a) => a.id === accountId)?.label;
-    const subject = cooldownSubject(agent, model, accountId, this.usesAccount);
+    const subject = cooldownSubject(agent, model, accountId);
     const current: AgentCandidate = {
       chainIndex,
       agent,
@@ -718,7 +714,7 @@ class AgentBlockRun {
       this.ctx.update({ hops: this.hopsCopy() });
       return this.enterSending(continueMessage(this.config.autonomyNote));
     }
-    if (sameEntry && !this.st.switchRefused && isAccountful(c, this.usesAccount)) {
+    if (sameEntry && !this.st.switchRefused && isAccountful(c)) {
       this.st.next = c;
       this.st.command = "account";
       this.st.commandId = this.deps.mintId();

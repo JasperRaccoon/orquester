@@ -9,7 +9,7 @@ A guide for an AI agent (or whoever configures one) to connect an MCP client to 
 
 The Orquester MCP lets an external agent — a Claude Code session, Claude Desktop, a script — do
 through `POST /mcp` what a person does in the chat GUI: open, resume, configure and close chat
-sessions of Claude Code (including `claudex`/`claudemix`), Codex, OpenCode and Grok; pick the
+sessions of Claude Code, Codex, OpenCode and Grok; pick the
 model, effort, permission mode, plan mode and account; send messages with images or files and get
 the reply back in the same call; set, follow and pause an agent's own goal; answer the agent's
 questions and tool approvals; read status,
@@ -162,7 +162,7 @@ Every tool names things the same way:
   workspace and not a directory inside the project (`PROJECT_NOT_FOUND`; outside the sandbox,
   `PATH_NOT_ALLOWED`). Sessions report their project back as `{workspace, name, path}`;
   `workspace`/`name` are `null` for a path that is not `<workspaces>/<workspace>/<project>`.
-- **An agent** is a registry id — `claude`, `claudex`, `claudemix`, `codex`, `opencode`, `grok` —
+- **An agent** is a registry id — `claude`, `codex`, `opencode`, `grok` —
   as `list_agents` lists them for this host.
 - **A pending question or approval** is `requestId` (from `get_session`). It may be omitted when
   exactly one request of that kind is pending. An empty `requestId` is refused (`INVALID_ARGUMENT`),
@@ -190,12 +190,11 @@ Values several tools share:
   `variant` on OpenCode, `reasoningEffort` on Grok — `list_agents` reports it as
   `effortOptionId`), and the real id is accepted too. Effort comes only from here, the model
   selection. A model marked `optionsOmitted` does have options — `list_agents {agent, model}` shows
-  them. `claudex`'s models take the options of Claude's default model, as the composer offers them.
+  them.
 - **`planMode`** — `true` sends one message in plan mode (the composer's plan toggle). It is per
   message, not a session setting.
 - **`accountId`** — `"system"` (the daemon's own login) or a managed account id from
-  `list_agents` (`accounts[]`); for `claudex`/`claudemix`, only accounts seeded into the model
-  proxy.
+  `list_agents` (`accounts[]`).
 
 ---
 
@@ -325,7 +324,7 @@ plus:
 
 ```
 chat: { …SessionView.chat,
-        model, options: { [id]: string | boolean }, runtimeMode, home: "system" | "account" | "cliproxy",
+        model, options: { [id]: string | boolean }, runtimeMode, home: "system" | "account",
         accountLabel?, activeTurnId: string | null, turnCount, lastError?, continueAfterRestart: boolean,
         contextWindow?: { usedTokens, maxTokens?, percentUsed? /* ≤ 100 */, compactsAutomatically? },
         goal: { objective /* ≤ 4 000 characters */, status, continuing, phase? /* ≤ 200 */, rounds?,
@@ -384,9 +383,9 @@ A terminal tab's `get_session` is just its `SessionView`: there is no transcript
 `AgentView` — `list_agents`:
 
 ```
-{ id: <agent id>, name, adapter, enabled, disabledReason?, installed, version, status: "ready" | "degraded" | "error" | "unknown", message?,
+{ id: <agent id>, name, adapter, enabled, installed, version, status: "ready" | "degraded" | "error" | "unknown", message?,
   auth: { status: "authenticated" | "unauthenticated" | "unknown", label?, email? },
-  models: [{ slug, name, shortName?, isDefault, isLegacy?, providerLabel?,
+  models: [{ slug, name, shortName?, isDefault, isLegacy?,
              options: [{ id, label, type: "select" | "boolean", description?,
                          values?: [{ id, label, description?, isDefault? }] }] }],
              /* shed to fit the result: optionsOmitted: true in place of options */
@@ -400,13 +399,7 @@ A terminal tab's `get_session` is just its `SessionView`: there is no transcript
 ```
 
 `enabled` means the agent can be opened on this host (`create_session` needs it): its CLI was
-found, and for `claudex`/`claudemix` the model proxy can serve it. A disabled agent says why in
-`disabledReason` when the daemon knows (e.g. `"proxy down"`) — the registry sets none for an agent
-whose CLI was not found. For `claudex`, `models` is the model proxy's launch catalogue, as the `+`
-menu offers it; each of its models carries the options of the Claude catalogue's default model —
-the chips the composer shows for a proxy model; `claudemix` runs the Claude main loop through the
-proxy, so its `models` are Claude's. For both, `accounts` are the accounts seeded into the proxy.
-`models: []` means the catalogue is still being probed — retry shortly. `auth.status: "unknown"` is
+found. `models: []` means the catalogue is still being probed — retry shortly. `auth.status: "unknown"` is
 not a sign-in problem; only `"unauthenticated"` is. `supports.goals` is how the agent's own goals
 work: `command: "host"` (Codex) — Orquester runs `/goal` itself (§6 Messages) — or `"provider"`
 (Claude, Grok) — `/goal` is the CLI's own; `actions` are what the GUI's goal chip offers;
@@ -431,8 +424,8 @@ and its default model (the flagged one, else the first) are never shed.
   workspace whose projects cannot be read is left out and named there rather than failing the
   whole list, and naming an archived workspace without `includeArchived` says why the list is
   empty.
-- **`list_agents`** — every agent that opens as a chat tab, enabled or not (`enabled`,
-  `disabledReason`). Call it before `create_session` and `update_session`: it has every valid model,
+- **`list_agents`** — every agent that opens as a chat tab, enabled or not (`enabled`).
+  Call it before `create_session` and `update_session`: it has every valid model,
   option value, permission mode and account. `list_agents {agent, model}` gives one model with its
   full options — a legacy one too, without `includeLegacyModels`, though a legacy model serves only
   an existing session: `create_session` refuses it and `update_session` takes it — which is how to
@@ -476,23 +469,19 @@ and its default model (the flagged one, else the first) are never shed.
   that keeps its head (`filesTruncated: true`, with `omittedFiles` counting the rest), and the diff
   gets the rest of the result.
 - **`create_session`** — every check runs before anything is created, and each refusal names the
-  valid values. The project must resolve; the agent must be a chat agent that is `enabled` here (a
-  disabled agent's refusal carries the registry's reason, e.g.
-  `claudex is not available on this host: proxy down.`); `model` must be in its catalogue
-  (default: the catalogue's default model — for `claudex` a model the proxy serves, for
-  `claudemix` the Claude catalogue); every `options` id and value must be one the model offers;
-  `accountId` must be `"system"` or an account of the agent's family (for `claudex`/`claudemix`,
-  one seeded into the proxy) — checked here because the daemon would silently fall back to its own
+  valid values. The project must resolve; the agent must be a chat agent that is `enabled` here;
+  `model` must be in its catalogue (default: the catalogue's default model); every `options` id
+  and value must be one the model offers; `accountId` must be `"system"` or an account of the
+  agent's family — checked here because the daemon would silently fall back to its own
   login; `cwd` (absolute, or relative to the project; default: the project) must be an existing
   directory inside the sandbox; and the project must have fewer than **24** running sessions
   (`SESSION_BUSY` otherwise — the GUI has no such cap). An omitted `accountId` means the family's
-  default account; `claudex` and `claudemix` always launch with an explicit one (the seeded
-  default, else `system`). With `resume`, the conversation must be one `list_conversations` lists
+  default account. With `resume`, the conversation must be one `list_conversations` lists
   for the project (never an OpenCode one: OpenCode history is not listed, so an OpenCode
   conversation cannot be resumed): its row decides the agent (`agent` may be omitted, and must
   match if given) and the default title, and a conversation stored under a managed account
-  resumes under that account. A row with `resumable: false` is refused (`INVALID_ARGUMENT`), for
-  instance a proxy-home conversation that names no launcher. `RESUME_UNAVAILABLE` and
+  resumes under that account. A row with `resumable: false` is refused (`INVALID_ARGUMENT`): its
+  agent is not a chat agent enabled on this host. `RESUME_UNAVAILABLE` and
   `SESSION_UNAVAILABLE` pass through with the daemon's message (a conversation already open in
   another tab arrives as `SESSION_UNAVAILABLE`).
   If the tab was created but could not be read back, the error's `detail` carries `sessionId` and
@@ -541,7 +530,7 @@ and its default model (the flagged one, else the first) are never shed.
   — what earlier launches of the chat left included, whether or not a session is live.
 - **`close_session`** — closes a chat or a terminal tab. A chat tab's Orquester thread (its event
   log) is deleted; the provider's own transcript survives and stays resumable through
-  `list_conversations` for Claude, Codex and Grok (and claudex/claudemix from their proxy homes).
+  `list_conversations` for Claude, Codex and Grok.
   OpenCode history is not listed, so for OpenCode closing a tab is final. A terminal tab's command
   is killed with it, and a Grok chat's background processes are stopped as `stop_session` stops
   them.

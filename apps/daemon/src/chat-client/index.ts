@@ -4,9 +4,8 @@
  *
  * The workflow engine and the MCP share ONE set of helpers, all over `DaemonApi`: every call runs a
  * daemon route in-process (`app.inject`), so every gate the GUI has — the family gate, the
- * seeded-account gate, the claudex model gate, the tab-then-thread order, `HOST_UNAVAILABLE` —
- * applies by construction, and nothing here touches a service directly (the MCP invariant, kept for
- * the engine as well).
+ * tab-then-thread order, `HOST_UNAVAILABLE` — applies by construction, and nothing here touches a
+ * service directly (the MCP invariant, kept for the engine as well).
  *
  * The helpers still live beside the MCP tools that grew them (`mcp/reads.ts`, `mcp/wait.ts`,
  * `mcp/views.ts`, `mcp/agents.ts`); this module RE-EXPORTS the very same functions — never
@@ -50,7 +49,6 @@ export { assistantTextForTurn } from "../mcp/views.ts";
 export {
   findAgent,
   findModel,
-  launchesProxyModel,
   loadAgents,
   resolveModelSelection,
   validateAccountId

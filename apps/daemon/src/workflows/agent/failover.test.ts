@@ -4,11 +4,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentChainEntry, AgentHop, UsageResponse } from "@orquester/api";
-import type { RouterProvider } from "@orquester/config";
 import type { NodeResult } from "../contracts.ts";
 import type { AgentBlockOutput } from "./executor.ts";
 import { candidateFromChoice, candidateKey, coolDown, countedHops, emptyMemory, type FailoverDeps } from "./failover.ts";
-import { createUsesAccount } from "./families.ts";
 import { FakeClock } from "./testing/fake-clock.ts";
 import { MemoryCooldowns, staticAccounts, staticUsage } from "./testing/fake-context.ts";
 import { FakeChatHost } from "./testing/fake-chat-host.ts";
@@ -319,33 +317,21 @@ test("coolDown keys accountless launches by provider and never reads another quo
       }
     ]
   };
-  const providers = [{ id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", preset: "openrouter", models: [{ name: "kimi-k3" }], keyVerifiedAt: null, createdAt: inDays(-1) }] as RouterProvider[];
-  const usesAccount = createUsesAccount(() => providers);
   const cooldowns = new MemoryCooldowns(clock);
-  const deps: FailoverDeps = { usage: staticUsage(usage), accounts: staticAccounts(new FakeChatHost({ clock })), cooldowns, usesAccount, clock };
+  const deps: FailoverDeps = { usage: staticUsage(usage), accounts: staticAccounts(new FakeChatHost({ clock })), cooldowns, clock };
   const memory = emptyMemory();
-  const choice = (agent: string, model: string, accountId: string) => candidateFromChoice({ agent, model, accountId, chainIndex: 0 }, usesAccount);
+  const choice = (agent: string, model: string, accountId: string) => candidateFromChoice({ agent, model, accountId, chainIndex: 0 });
 
-  const router = choice("claudex", "kimi-k3", "system");
-  assert.equal(candidateKey(router), "claudex:router:openrouter");
-  await coolDown(deps, memory, router, { reason: "usage_limit" });
-  assert.equal(cooldowns.entries["claudex:router:openrouter"]!.until, new Date(now + HOUR).toISOString(), "not the codex system row's 5-day reset");
-  assert.equal(cooldowns.entries["codex:system"], undefined, "the codex system login is untouched");
-
-  const proxyPick = choice("claudex", "gpt-5", "system");
-  assert.equal(candidateKey(proxyPick), "claudex:proxy");
-  await coolDown(deps, memory, proxyPick, { reason: "usage_limit" });
-  assert.equal(cooldowns.entries["claudex:proxy"]!.until, new Date(now + HOUR).toISOString());
-  assert.equal(cooldowns.entries["codex:system"], undefined);
-
-  const seeded = choice("claudex", "gpt-5", "c1");
-  assert.equal(candidateKey(seeded), "codex:c1");
-  await coolDown(deps, memory, seeded, { reason: "usage_limit" });
+  const managed = choice("codex", "gpt-5", "c1");
+  assert.equal(candidateKey(managed), "codex:c1");
+  await coolDown(deps, memory, managed, { reason: "usage_limit" });
   assert.equal(cooldowns.entries["codex:c1"]!.until, inDays(3), "a managed account's burnt window still counts");
 
   const oc = choice("opencode", "anthropic/claude-sonnet", "system");
+  assert.equal(candidateKey(oc), "opencode:provider:anthropic");
   await coolDown(deps, memory, oc, { reason: "usage_limit" });
-  assert.ok(cooldowns.entries["opencode:provider:anthropic"]);
+  assert.equal(cooldowns.entries["opencode:provider:anthropic"]!.until, new Date(now + HOUR).toISOString(), "not the codex system row's 5-day reset");
+  assert.equal(cooldowns.entries["codex:system"], undefined, "the codex system login is untouched");
   // A repeat with no known reset escalates.
   await coolDown(deps, memory, oc, { reason: "usage_limit" });
   assert.equal(cooldowns.entries["opencode:provider:anthropic"]!.until, new Date(now + 2 * HOUR).toISOString());

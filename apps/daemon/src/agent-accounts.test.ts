@@ -1,7 +1,7 @@
 import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
-import { mkdtemp, readFile, stat, mkdir, writeFile, lstat } from "node:fs/promises";
+import { mkdtemp, readFile, stat, mkdir, writeFile, lstat, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { AgentAccountsService } from "./agent-accounts.ts";
 
@@ -170,25 +170,32 @@ test("ensureFreshForUsage skips a token that is not near expiry", async (t) => {
   assert.equal(called, 0);
 });
 
-test("a proxy-owned account is never refreshed by the account service (single-refresher rule)", async (t) => {
+test("an account the retired model proxy owned is refreshed by the account service again", async (t) => {
   const now = 1_000_000;
-  let called = 0;
-  const svc = await makeServiceWithFetch(t, now, async () => {
-    called++;
-    return new Response(JSON.stringify({ access_token: "NEW", refresh_token: "NEWR", id_token: jwt({ email: "c@x.com" }) }), { status: 200 });
-  });
-  // Token is near expiry, so an unowned account would normally refresh.
-  const acct = await svc.importAccount({ content: codexBlob(Math.floor((now + 60_000) / 1000)) });
-  await svc.markProxyOwned(acct.id, true);
+  t.mock.method(globalThis, "fetch", async () => new Response(JSON.stringify({
+    access_token: "NEW", refresh_token: "NEWR", id_token: jwt({ email: "c@x.com" })
+  }), { status: 200 }));
+  const base = await mkdtemp(join(tmpdir(), "orq-fresh-legacy-"));
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const opts = {
+    indexFile: join(base, "agent-accounts.json"),
+    accountsDir: join(base, "agent-accounts"),
+    userhome: base,
+    now: () => now
+  };
+  const first = new AgentAccountsService(opts);
+  await first.init();
+  const acct = await first.importAccount({ content: codexBlob(Math.floor((now + 60_000) / 1000)) });
+  const index = JSON.parse(await readFile(opts.indexFile, "utf8"));
+  index.accounts[0].proxyOwned = true;
+  await writeFile(opts.indexFile, JSON.stringify(index));
+  const svc = new AgentAccountsService(opts);
+  await svc.init();
   await svc.ensureFreshForUsage("codex", acct.id, new Set());
-  assert.equal(called, 0, "proxy-owned → no refresh (the proxy is the sole refresher)");
-  // The flag is persisted on the record.
-  assert.equal(svc.getRecord(acct.id)?.proxyOwned, true);
-  // Ownership released → the account service resumes refreshing.
-  await svc.markProxyOwned(acct.id, false);
-  await svc.ensureFreshForUsage("codex", acct.id, new Set());
-  assert.equal(called, 1, "ownership released → refresh resumes");
-  assert.equal(svc.getRecord(acct.id)?.proxyOwned, false);
+  const auth = JSON.parse(await readFile(join(svc.homePath("codex", acct.id), "auth.json"), "utf8"));
+  assert.equal(auth.tokens.access_token, "NEW");
+  assert.equal(auth.tokens.refresh_token, "NEWR");
+  assert.equal(auth.tokens.account_id, "acc1");
 });
 
 test("resolveLaunchEnv unsets OPENAI_API_KEY for a managed Codex session", async () => {

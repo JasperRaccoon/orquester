@@ -1,7 +1,7 @@
 import { z } from "zod";
 import type { AgentConversationsResponse, ProjectSummary, RecentProjectSummary, RegistryResponse, WorkspaceSummary } from "@orquester/api";
 import { resolveProject } from "../addressing.ts";
-import { conversationLaunch, findAgent, findModel, fitAgentViews, loadAgents, nameList } from "../agents.ts";
+import { findAgent, findModel, fitAgentViews, loadAgents, nameList } from "../agents.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { listSessions } from "../reads.ts";
@@ -67,7 +67,7 @@ const listProjects = defineTool({
 const listAgents = defineTool({
   name: "list_agents",
   title: "List launchable agents",
-  description: "Every chat agent (claude, claudex, claudemix, codex, opencode, grok): valid models, model options (effort…), permission modes, capabilities, accounts. Only enabled ones open (disabledReason, when known, says why not). Call it before create_session or update_session. A catalogue too big for one result is cut (optionsOmitted, modelsTruncated): list_agents {agent, model} gives a model's full options.",
+  description: "Every chat agent (claude, codex, opencode, grok): valid models, model options (effort…), permission modes, capabilities, accounts. Only enabled ones open (a disabled one's CLI was not found on this host). Call it before create_session or update_session. A catalogue too big for one result is cut (optionsOmitted, modelsTruncated): list_agents {agent, model} gives a model's full options.",
   input: {
     agent: z.string().min(1).optional().describe("Only this agent id."),
     model: z.string().min(1).optional().describe("Needs agent: just this model (by slug), with its full options — how to read the options a cut catalogue omits (optionsOmitted). A legacy model (isLegacy) is found too, but serves only an existing session: create_session refuses it, update_session takes it."),
@@ -121,8 +121,8 @@ const listConversations = defineTool({
     const launchable = new Set(agents.filter((e) => e.chat?.adapter && e.enabled).map((e) => e.id));
     const res = expectOk<AgentConversationsResponse>(conversations, "conversations");
     const rows = res.conversations.map((c) => {
-      const { agent, reachable } = conversationLaunch(c);
-      const resumable = reachable && launchable.has(agent);
+      const agent = c.agentRefId;
+      const resumable = launchable.has(agent);
       return { id: c.id, agent, title: c.title, ...(c.preview ? { preview: c.preview } : {}), updatedAt: c.updatedAt, home: c.home ?? "system", ...(c.accountId ? { accountId: c.accountId } : {}), resumable };
     });
     // Unknown = neither a registry agent nor one a row of this project names; a known agent without rows is an honest [].

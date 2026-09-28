@@ -2,9 +2,8 @@
  * Supervision of the agent host process (spec §3.1 "Spawn and adoption",
  * "Readiness is a gate", "No-tmux hosts", "Kill guard"; §8).
  *
- * The shape follows `cliproxy.ts` deliberately: the host is a tmux *service*
- * session (`orqsvc-agent-host`) so `KillMode=process` leaves it running across
- * a deploy, boot adoption is an **authenticated probe first** (so "the socket
+ * The host is a tmux *service* session (`orqsvc-agent-host`) so
+ * `KillMode=process` leaves it running across a deploy, boot adoption is an **authenticated probe first** (so "the socket
  * answers" and "the host can take work" are the same fact — the host answers
  * `/health` only after its command gate opens), a foreign listener is a hard
  * error and is never killed, and a 15 s unref'd health interval with bounded
@@ -47,8 +46,8 @@ const MAX_RESPAWNS = 5;
  * whose event loop is busy with a large cold fold or a big `readThread` answers
  * nothing. Restarting on that takes down every live turn (§8: "Restarting the
  * host interrupts live work"), which is precisely what the drain rule exists to
- * avoid. cliproxy restarts on the first miss, but it has no in-flight user work
- * to lose.
+ * avoid. A supervised helper with no in-flight user work could restart on the
+ * first miss; the host cannot.
  */
 const UNREACHABLE_PROBES_BEFORE_RESTART = 2;
 
@@ -268,7 +267,7 @@ interface GoalHoldState {
 
 /**
  * Owns the lifetime of the agent host. One instance per daemon; created in
- * `startDaemon` after `sessions.reattach()`, exactly where cliproxy is.
+ * `startDaemon` after `sessions.reattach()`.
  */
 export class AgentHostSupervisor {
   private state: AgentHostState = "stopped";
@@ -1181,8 +1180,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 /**
  * The explicit launch environment of §8: the host inherits `TMPDIR`,
  * `NPM_CONFIG_PREFIX`, `PATH` and `HOME` **by explicit copy**, never by
- * spreading `process.env` — the daemon's own environment holds the cliproxy
- * and push secrets.
+ * spreading `process.env` — the daemon's own environment holds push and
+ * daemon secrets.
  *
  * `PATH` is the SESSION path (wider than the daemon's own under systemd): the
  * host resolves provider binaries the user installed into `~/.local/bin`,

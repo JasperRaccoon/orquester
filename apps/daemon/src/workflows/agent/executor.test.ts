@@ -45,7 +45,7 @@ test("happy path: creates the session like the MCP, sends the prompt with the au
   assert.equal(body.accountId, "a1");
   assert.equal(body.projectPath, "/w/ws/app");
   assert.equal(body.cwd, "/w/ws/app");
-  assert.equal("model" in body, false, "a top-level model is claudex's only");
+  assert.equal("model" in body, false, "the model rides the chat selection only");
   assert.deepEqual(body.chat, { accountId: "a1", modelSelection: { model: "opus", options: [] }, runtimeMode: "full-access" });
   assert.deepEqual(body.owner, { kind: "workflow", workflowId: "wf-1", runId: "run-1", nodeId: "n1" });
 
@@ -293,19 +293,30 @@ test("a continue block never implements a plan an earlier block left behind", as
   assert.equal(sc.host.session(first.sessionId).turns.length, upstreamTurns + 1, "one follow-up turn, no implementation turn");
 });
 
-test("an account the daemon would not launch (not seeded for claudemix) is passed over by the catalogue check, never sent", async () => {
+test("an account the daemon would not launch (gone from its catalogue) is passed over by the catalogue check, never sent", async () => {
   const accounts = [account("claude", "a1"), account("claude", "a2")];
   const sc = new Scenario({
-    accounts,
-    seeded: ["a2"],
-    // Selection's reader believes a1 is seeded too (a stale proxy status): the daemon's own catalogue decides.
-    accountsReader: { list: () => ({ accounts, defaults: { claude: null, codex: null, grok: null } }), seededAccountIds: () => new Set(["a1", "a2"]) }
+    accounts: [accounts[1]!],
+    // Selection's reader still lists a1 (a stale read): the daemon's own catalogue decides.
+    accountsReader: { list: () => ({ accounts, defaults: { claude: null, codex: null, grok: null } }) }
   });
-  const wf = testWorkflow([agentNode("n1", { chain: [{ agent: "claudemix", model: "opus", accounts: { strategy: "fixed", includeSystem: false, soonestResetWindow: "weekly", leastUsedMetric: "max", unknownUsage: "last" } }] })]);
+  const wf = testWorkflow([agentNode("n1", { chain: [{ agent: "claude", model: "opus", accounts: { strategy: "fixed", includeSystem: false, soonestResetWindow: "weekly", leastUsedMetric: "max", unknownUsage: "last" } }] })]);
   const { result, fc } = await sc.run(wf, "n1");
   const out = outputOf(result);
   assert.equal(out.accountId, "a2");
   const creates = sc.host.calls.filter((c) => c.method === "POST" && c.path === "/api/sessions");
   assert.deepEqual(creates.map((c) => (c.body as { accountId: string }).accountId), ["a2"]);
   assert.ok(fc.live().selection!.skipped.some((s) => s.accountId === "a1" && s.why === "unavailable"));
+});
+
+test("a stored chain naming an agent this host does not offer (a removed launcher) passes it over and runs the next entry", async () => {
+  const sc = new Scenario({ accounts: [account("claude", "a1")] });
+  const policy = { strategy: "least-used" as const, includeSystem: false, soonestResetWindow: "weekly" as const, leastUsedMetric: "max" as const, unknownUsage: "last" as const };
+  const wf = testWorkflow([agentNode("n1", { chain: [{ agent: "claudex", model: "gpt-5.5", accounts: policy }, { agent: "claude", model: "opus", accounts: policy }] })]);
+  const { result, fc } = await sc.run(wf, "n1");
+  const out = outputOf(result);
+  assert.equal(out.accountId, "a1");
+  const creates = sc.host.calls.filter((c) => c.method === "POST" && c.path === "/api/sessions");
+  assert.deepEqual(creates.map((c) => (c.body as { refId: string }).refId), ["claude"]);
+  assert.ok(fc.live().selection!.skipped.some((s) => s.agent === "claudex" && s.why === "catalog"));
 });

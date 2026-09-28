@@ -92,8 +92,6 @@ export interface WorkflowRuntimeDeps {
   createAgentExecutor?: (deps: AgentExecutorFactoryDeps) => NodeExecutor<"agent">;
   /** "Who would run now?" — `createAccountPreview` from agent/preview.ts. */
   createAccountPreview?: (deps: AccountPreviewFactoryDeps) => (chain: AgentChainEntry[], projectPath?: string) => Promise<AccountSelectionDecision>;
-  /** Which (agent, model) pairs run on an account (claudex router / xAI models do not): agent/families.ts `createUsesAccount`. */
-  usesAccount?: (refId: string, model: string) => boolean;
   logger: WorkflowLogger;
   clock?: Clock;
   mintId?: MintId;
@@ -107,7 +105,6 @@ export interface AgentExecutorFactoryDeps {
   usage: UsageReader;
   accounts: AccountsReader;
   cooldowns: CooldownStore;
-  usesAccount?: (refId: string, model: string) => boolean;
   prompts: PromptRenderer;
   clock: Clock;
   mintId: MintId;
@@ -119,7 +116,6 @@ export interface AccountPreviewFactoryDeps {
   usage: UsageReader;
   accounts: AccountsReader;
   cooldowns: CooldownStore;
-  usesAccount?: (refId: string, model: string) => boolean;
   clock: Pick<Clock, "now">;
   /** The daemon's own client once attached (the catalogue check reads through it), else null. */
   api: () => DaemonApi | null;
@@ -161,18 +157,16 @@ export function createWorkflowRuntime(deps: WorkflowRuntimeDeps): WorkflowRuntim
     deps.sandbox ?? createSandboxRunner({ clock, logger: deps.logger, ...(deps.appdirTmp !== undefined ? { appdirTmp: deps.appdirTmp } : {}) });
   const notifier = createWorkflowNotifier({ push: deps.push, clock, logger: deps.logger });
   const mintId = deps.mintId ?? randomUUID;
-  const usesAccount = deps.usesAccount !== undefined ? { usesAccount: deps.usesAccount } : {};
   const agent = deps.createAgentExecutor?.({
     usage: deps.usage,
     accounts: deps.accounts,
     cooldowns: deps.cooldowns,
-    ...usesAccount,
     prompts,
     clock,
     mintId,
     logger: deps.logger
   });
-  const accountPreview = deps.createAccountPreview?.({ usage: deps.usage, accounts: deps.accounts, cooldowns: deps.cooldowns, ...usesAccount, clock, api: () => api });
+  const accountPreview = deps.createAccountPreview?.({ usage: deps.usage, accounts: deps.accounts, cooldowns: deps.cooldowns, clock, api: () => api });
   const executors = createNodeExecutors(agent ? { agent } : {});
 
   const engine = createWorkflowEngine({

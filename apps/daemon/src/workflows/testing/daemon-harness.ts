@@ -95,7 +95,6 @@ export interface Booted {
 
 export async function boot(root: string, opts: BootOptions = {}): Promise<Booted> {
   const workspacesDir = join(root, "workspaces");
-  const daemonDir = join(root, "daemon");
   const broadcaster = new Broadcaster();
   const events: EventMessage[] = [];
   const waiters = new Set<{ match: (event: EventMessage) => boolean; resolve: (event: EventMessage) => void }>();
@@ -144,8 +143,7 @@ export async function boot(root: string, opts: BootOptions = {}): Promise<Booted
 
   const usage: UsageReader = opts.usage ?? { snapshot: (): UsageResponse => ({ agents: [] }) };
   const accounts: AccountsReader = opts.accounts ?? {
-    list: (): AgentAccountsResponse => ({ accounts: [], defaults: { claude: null, codex: null, grok: null } }) as AgentAccountsResponse,
-    seededAccountIds: () => new Set<string>()
+    list: (): AgentAccountsResponse => ({ accounts: [], defaults: { claude: null, codex: null, grok: null } }) as AgentAccountsResponse
   };
   const wf = createWorkflowDaemon({
     service,
@@ -164,7 +162,6 @@ export async function boot(root: string, opts: BootOptions = {}): Promise<Booted
     savedPrompts: { get: () => undefined },
     workspacesDir: () => workspacesDir,
     fsRoot: () => workspacesDir,
-    daemonDir,
     appdirTmp: join(root, "tmp"),
     push: null,
     logger: silentLogger()

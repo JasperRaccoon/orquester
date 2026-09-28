@@ -6,12 +6,12 @@ import { findAgent,loadAgents,resolveModelSelection,validateAccountId,type Agent
 
 const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [
   { id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", version: "2.1.280", chat: { adapter: "claude" } },
-  { id: "claudex", kind: "agent", name: "Claude Code × GPT/Kimi/Grok", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } },
+  { id: "codex", kind: "agent", name: "Codex", bin: ["codex"], enabled: true, installState: "idle", chat: { adapter: "codex" } },
   { id: "grok", kind: "agent", name: "Grok Build", bin: ["grok"], enabled: false, installState: "idle", chat: { adapter: "grok" } },
   { id: "deepseek", kind: "agent", name: "DeepSeek", bin: ["deepseek"], enabled: false, installState: "idle" }
 ] };
 const providers = { hostInstanceId: "h1", providers: [
-  { id: "claude", refIds: ["claude", "claudex", "claudemix"], installed: true, version: "2.1.280", status: "ready", auth: { status: "authenticated", label: "system" }, checkedAt: stamp(0), slashCommands: [], skills: [],
+  { id: "claude", refIds: ["claude"], installed: true, version: "2.1.280", status: "ready", auth: { status: "authenticated", label: "system" }, checkedAt: stamp(0), slashCommands: [], skills: [],
     capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "slash-command", command: "/compact" }, supportsBackgroundTasks: true },
     models: [
       { slug: "default", name: "Default · Opus", isDefault: true, capabilities: { optionDescriptors: [{ id: "effort", label: "Effort", type: "select", options: [{ id: "medium", label: "Medium", isDefault: true }, { id: "high", label: "High" }] }, { id: "thinking", label: "Thinking", type: "boolean" }] } },
@@ -25,18 +25,17 @@ const providers = { hostInstanceId: "h1", providers: [
 const accounts = { accounts: [
   { id: "acc-1", agent: "claude", label: "jasperclaude", email: null, plan: "max", needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) },
   { id: "acc-2", agent: "codex", label: "eduard@x.io", email: "eduard@x.io", plan: null, needsReauth: true, createdAt: stamp(0), importedAt: stamp(0) },
-  { id: "acc-3", agent: "codex", label: "unseeded@x.io", email: "unseeded@x.io", plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) }
+  { id: "acc-3", agent: "codex", label: "other@x.io", email: "other@x.io", plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) }
 ], defaults: { claude: "acc-1", codex: "acc-2", grok: null } };
-const cliproxy = { state: "healthy", reasons: [], detail: null, version: null, defaultModel: "gpt-5.6-sol", backgroundModel: "", modelOverrides: {}, providers: [], routerProviders: [], accounts: [{ id: "acc-2", provider: "codex", label: "eduard@x.io" }], activeSessionCount: 0, testedClaudeCliVersion: null, xai: { state: "none", email: null, expiredAt: null, lastQuotaError: null, lastLinkError: null, link: null } };
 
 function api() {
   return new FakeDaemonApi().on("GET", "/api/registry", { status: 200, body: registry }).on("GET", "/api/agent/providers", { status: 200, body: providers })
-    .on("GET", "/api/agent-accounts", { status: 200, body: accounts }).on("GET", "/api/cliproxy", { status: 200, body: cliproxy }).on("GET", "/api/cliproxy/models", { status: 200, body: { models: [], asOf: null } });
+    .on("GET", "/api/agent-accounts", { status: 200, body: accounts });
 }
 
 test("loadAgents lists only chat-capable entries with models, options, accounts and defaults", async () => {
   const agents = await loadAgents(api());
-  assert.deepEqual(agents.map((a) => a.id), ["claude", "claudex", "grok"]);
+  assert.deepEqual(agents.map((a) => a.id), ["claude", "codex", "grok"]);
   const claude = agents[0];
   assert.equal(claude.adapter, "claude"); assert.equal(claude.enabled, true); assert.equal(claude.version, "2.1.280"); assert.equal(claude.auth.status, "authenticated");
   assert.deepEqual(claude.models.map((m) => m.slug), ["default", "haiku"]);
@@ -51,30 +50,6 @@ test("loadAgents lists only chat-capable entries with models, options, accounts 
   assert.equal(grok.enabled, false); assert.equal(grok.installed, false); assert.equal(grok.effortOptionId, "reasoningEffort"); assert.equal(grok.defaultAccountId, "system");
   assert.deepEqual(grok.accounts, [{ id: "system", label: "System", email: null, plan: null, needsReauth: false, isDefault: true }]);
   assert.equal((await loadAgents(api(), { includeLegacyModels: true }))[0].models.length, 3);
-});
-
-test("a proxy launcher lists the proxy catalogue and only SEEDED accounts of its backing family", async () => {
-  const claudex = (await loadAgents(api()))[1];
-  assert.ok(claudex.models.some((m) => m.slug === "gpt-5.6-sol" && m.isDefault));
-  assert.deepEqual(claudex.accounts.map((a) => a.id), ["system", "acc-2"]);
-  assert.equal(claudex.defaultAccountId, "acc-2");
-});
-
-test("claudemix is the Claude main loop through the proxy: the Claude catalogue like claude, and only SEEDED Claude accounts", async () => {
-  const withClaudemix = api()
-    .on("GET", "/api/registry", { status: 200, body: { ...registry, agents: [...registry.agents, { id: "claudemix", kind: "agent", name: "Claude Code × Mixed", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } }] } })
-    .on("GET", "/api/agent-accounts", { status: 200, body: { ...accounts, accounts: [...accounts.accounts, { id: "acc-4", agent: "claude", label: "unseeded@claude", email: null, plan: null, needsReauth: false, createdAt: stamp(0), importedAt: stamp(0) }] } })
-    .on("GET", "/api/cliproxy", { status: 200, body: { ...cliproxy, accounts: [...cliproxy.accounts, { id: "acc-1", provider: "claude", label: "jasperclaude" }] } });
-  const agents = await loadAgents(withClaudemix);
-  const claude = findAgent(agents, "claude");
-  const claudemix = findAgent(agents, "claudemix");
-  assert.deepEqual(claudemix.models, claude.models, "the Claude adapter's catalogue, options included — never claudex's proxy list");
-  assert.deepEqual(claudemix.models.map((m) => m.slug), ["default", "haiku"]);
-  assert.deepEqual(findAgent(await loadAgents(withClaudemix, { includeLegacyModels: true }), "claudemix").models.map((m) => m.slug), ["default", "haiku", "old"], "legacy models follow the same flag");
-  assert.deepEqual(claudemix.accounts.map((a) => a.id), ["system", "acc-1"], "only the seeded Claude accounts");
-  assert.deepEqual(claude.accounts.map((a) => a.id), ["system", "acc-1", "acc-4"]);
-  assert.equal(claudemix.defaultAccountId, "acc-1");
-  assert.ok(findAgent(agents, "claudex").models.some((m) => m.slug === "gpt-5.6-sol" && m.isDefault), "claudex keeps the proxy catalogue");
 });
 
 test("resolveModelSelection: defaults, validation, effort alias, merge with current, drop foreign options", async () => {
@@ -108,23 +83,14 @@ test("a model without option descriptors takes no options, as the GUI shows it n
   assert.throws(() => resolveModelSelection(empty, {}), (e: { message: string }) => /Still loading/.test(e.message));
 });
 
-test("a disabled agent says why: the registry's disabledReason rides its view, and nothing is made up when there is none", async () => {
-  const down = api().on("GET", "/api/registry", { status: 200, body: { ...registry, agents: registry.agents.map((a) => (a.id === "claudex" ? { ...a, enabled: false, disabledReason: "proxy down" } : a)) } });
-  const agents = await loadAgents(down);
-  const claudex = findAgent(agents, "claudex");
-  assert.equal(claudex.enabled, false);
-  assert.equal(claudex.disabledReason, "proxy down");
-  assert.ok(!("disabledReason" in findAgent(agents, "claude")), "an enabled agent has none");
-  assert.ok(!("disabledReason" in findAgent(agents, "grok")), "grok is disabled without a runtime reason (its CLI was not found)");
-});
-
 test("validateAccountId accepts system and family accounts, refuses the rest with the valid list", async () => {
   const agents = await loadAgents(api());
   assert.equal(validateAccountId(agents[0], undefined), undefined);
   assert.equal(validateAccountId(agents[0], "system"), "system");
   assert.equal(validateAccountId(agents[0], "acc-1"), "acc-1");
   assert.throws(() => validateAccountId(agents[0], "acc-2"), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /acc-1/.test(e.message));
-  assert.throws(() => validateAccountId(agents[1], "acc-3"), (e: { message: string }) => /seeded/.test(e.message));
+  assert.equal(validateAccountId(agents[1], "acc-3"), "acc-3", "every account of the family, none held back");
+  assert.throws(() => validateAccountId(agents[1], "acc-1"), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
 });
 
 test("supports.rollback is offered only on an explicit true: an absent flag reads false", async () => {
@@ -139,7 +105,6 @@ test("supports.goals is the provider's goal surface read through parseGoalSuppor
   const codexCaps = { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" }, promptlessTurnContinuation: true };
   const codexRow = (capabilities?: unknown) => ({ id: "codex", refIds: ["codex"], installed: true, version: "0.130.0", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [], models: [], ...(capabilities === undefined ? {} : { capabilities }) });
   const withCodex = (row: unknown) => api()
-    .on("GET", "/api/registry", { status: 200, body: { ...registry, agents: [...registry.agents, { id: "codex", kind: "agent", name: "Codex", bin: ["codex"], enabled: true, installState: "idle", chat: { adapter: "codex" } }] } })
     .on("GET", "/api/agent/providers", { status: 200, body: { ...providers, providers: [...providers.providers, row] } });
   const codexOf = async (row: unknown) => findAgent(await loadAgents(withCodex(row)), "codex");
   assert.deepEqual((await codexOf(codexRow({ ...codexCaps, goals: codexGoals }))).supports, { planMode: true, rollback: true, compaction: true, backgroundTasks: false, goals: codexGoals, contextWindow: true });
@@ -176,7 +141,7 @@ test("a degraded provider row (an older host's) is normalised field by field, ne
     null,
     "junk",
     // No models, no auth, no capabilities at all.
-    { id: "claude", refIds: ["claude", "claudex"], installed: true, version: "2.0.0", status: "ready" },
+    { id: "claude", refIds: ["claude"], installed: true, version: "2.0.0", status: "ready" },
     { id: "grok", refIds: ["grok"], installed: "yes", version: 7, status: 3, auth: { status: 42, label: 9 }, message: { x: 1 },
       capabilities: { showPlanModeToggle: "yes", supportsConversationRollback: 1, compaction: null, reportsContextWindow: "true", supportsBackgroundTasks: {} }, models: [
       null,
@@ -206,25 +171,4 @@ test("a degraded provider row (an older host's) is normalised field by field, ne
     const broken = api().on("GET", "/api/agent/providers", { status: 200, body });
     assert.deepEqual(findAgent(await loadAgents(broken), "claude").auth, { status: "unknown" }, JSON.stringify(body));
   }
-});
-
-test("claudex's proxy models take the options of the Claude catalogue's default model, as the composer offers them: listed, accepted, checked", async () => {
-  const [claude, claudex] = await loadAgents(api());
-  // A proxy slug is no Claude model: the composer falls back to the Claude default model and shows its chips.
-  const claudeDefault = claude.models.find((m) => m.isDefault)!;
-  assert.equal(claudeDefault.slug, "default");
-  assert.ok(claudex.models.length > 1, "several proxy models");
-  for (const m of claudex.models) assert.deepEqual(m.options, claudeDefault.options, `${m.slug} lists the Claude default's options`);
-  assert.deepEqual(resolveModelSelection(claudex, { model: "gpt-5.6-sol", options: { effort: "high" } }), { model: "gpt-5.6-sol", options: [{ id: "effort", value: "high" }] });
-  assert.deepEqual(resolveModelSelection(claudex, { model: "gpt-5.6-sol", options: { effort: "High", thinking: true } }).options, [{ id: "effort", value: "high" }, { id: "thinking", value: true }]);
-  assert.throws(() => resolveModelSelection(claudex, { model: "gpt-5.6-sol", options: { effort: "ultra" } }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "Option \"effort\" must be one of: medium, high.");
-  assert.throws(() => resolveModelSelection(claudex, { model: "gpt-5.6-sol", options: { turbo: true } }), (e: { message: string }) => e.message === "Unknown option \"turbo\" for model gpt-5.6-sol. Valid options: effort, thinking.");
-  // The same options on every proxy model, so a model switch keeps them — as the composer keeps them.
-  const other = claudex.models.find((m) => m.slug !== "gpt-5.6-sol")!.slug;
-  assert.deepEqual(resolveModelSelection(claudex, { model: other, current: { model: "gpt-5.6-sol", options: [{ id: "effort", value: "high" }] } }), { model: other, options: [{ id: "effort", value: "high" }] });
-  // With no flagged default, the composer falls back to the catalogue's first model; with no catalogue, there is nothing to offer.
-  const unflagged = await loadAgents(api().on("GET", "/api/agent/providers", { status: 200, body: { ...providers, providers: [{ ...providers.providers[0], models: providers.providers[0].models.map(({ isDefault: _d, ...m }) => m) }, providers.providers[1]] } }));
-  assert.deepEqual(unflagged[1]!.models[0]!.options, unflagged[0]!.models[0]!.options);
-  const blind = await loadAgents(api().on("GET", "/api/agent/providers", { status: 503, body: null }));
-  assert.ok(blind[1]!.models.every((m) => m.options.length === 0), "no Claude catalogue, no options to offer");
 });

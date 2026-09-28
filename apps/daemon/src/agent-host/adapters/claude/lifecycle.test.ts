@@ -1853,7 +1853,7 @@ describe("claude adapter — snapshot", () => {
     const harness = await makeHarness();
     const snapshot = await harness.adapter.refreshSnapshot({ cwd: "/work/project" });
     assert.equal(snapshot.id, "claude");
-    assert.deepEqual(snapshot.refIds, ["claude", "claudex", "claudemix"]);
+    assert.deepEqual(snapshot.refIds, ["claude"]);
     assert.equal(snapshot.installed, true);
     assert.equal(snapshot.version, "2.1.210");
     assert.equal(snapshot.status, "ready");

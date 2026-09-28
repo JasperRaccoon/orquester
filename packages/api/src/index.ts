@@ -22,7 +22,6 @@ export type RuntimeMode = "desktop-local" | "desktop-remote" | "web-remote";
  * everything else.
  */
 export * from "./agent-chat/index.ts";
-export * from "./cliproxy-launch-models.ts";
 export * from "./saved-prompts.ts";
 export * from "./prompt-variables.ts";
 export * from "./workflows/index.ts";
@@ -881,15 +880,8 @@ export interface RegistryEntry {
   launchViaShell?: boolean;
   /** Extra environment variables set on the session process when launched. */
   env?: Record<string, string>;
-  /** True only when a candidate bin resolved AND the entry is not disabled. */
+  /** True only when a candidate bin resolved. */
   enabled: boolean;
-  /**
-   * Human-readable reason the entry is currently disabled at runtime (e.g. the
-   * managed proxy is down or an upstream credential expired). Surfaced only when
-   * effective `enabled` is false and the daemon set a runtime reason; absent
-   * otherwise. Lets the UI explain a greyed-out launcher instead of hiding it.
-   */
-  disabledReason?: string;
   /** Absolute path of the resolved bin, when found. */
   resolvedBin?: string;
   /** Flag to print a version (agents only), e.g. "--version". */
@@ -906,8 +898,7 @@ export interface RegistryEntry {
   installError?: string;
   /**
    * Agent-chat adapter this entry opens a chat tab with (chat design spec
-   * §5.3), mirrored from the static catalog. `claudex`/`claudemix` map to
-   * `claude` with their launcher env. **An agent row without `chat` cannot
+   * §5.3), mirrored from the static catalog. **An agent row without `chat` cannot
    * open a chat tab** — that is the whole gate the launch flow reads.
    */
   chat?: { adapter: AgentAdapterId };
@@ -987,19 +978,16 @@ export interface AgentConversationSummary {
   updatedAt: string;
   /**
    * Which home dir the transcript was read out of. "system" is the daemon's own
-   * HOME, "account" a managed agent-account home, "cliproxy" one of the
-   * claudex/claudemix proxy homes. Resuming a row under a DIFFERENT home just
+   * HOME, "account" a managed agent-account home. Resuming a row under a DIFFERENT home just
    * gives the agent an id it has never seen, so this is what a client needs to
    * relaunch under the home that owns the conversation.
    */
   home?: AgentConversationHome;
   /** Managed agent-account id — set only when `home` is "account". */
   accountId?: string;
-  /** Launcher registry id owning the proxy home (claudex/claudemix) — only when `home` is "cliproxy". */
-  proxyRefId?: string;
 }
 
-export type AgentConversationHome = "system" | "account" | "cliproxy";
+export type AgentConversationHome = "system" | "account";
 
 export interface AgentConversationsResponse {
   /** Newest first, across every agent. */
@@ -1099,138 +1087,31 @@ export interface SetAgentAccountDefaultsRequest {
   grok?: string | null;
 }
 
-export type AgentAccountsEventType = "agent-accounts.changed";
-
-// CliProxy — the managed CLIProxyAPI process backing the claudex/claudemix
-// launchers. Status is read-only over both transports; mutations are HTTP-only.
+export type AgentAccountsEventType = "agent-accounts.changed" | "grok-link.changed";
 
 /**
- * OAuth identity providers the managed proxy brokers via seeded managed-account
- * credentials. Key-based OpenAI-compatible routers are NOT here — they live in
- * their own user-defined {@link CliProxyRouterProviderStatus} list.
+ * The in-flight RFC 8628 device-code prompt of a Grok account link.
+ * `url`/`userCode` are user-facing by design (the user must visit and type
+ * them) — not secrets. In-memory on the daemon: it dies with a restart.
  */
-export type CliProxyProviderId = "codex" | "claude" | "grok";
-
-/**
- * A restart-gated cliproxy mutation (config/router-provider/router-key/disable)
- * refused because dependent sessions are live — the parsed 409 body. Callers
- * re-attempt with `force` after confirming with the user.
- */
-export type CliProxyMutationRefusal = { ok: false; affectedSessions: number };
-
-export interface CliProxyProviderStatus {
-  provider: CliProxyProviderId;
-  state: "ok" | "missing" | "expired";
-  lastVerifiedAt: string | null;
-}
-
-/** One model a router provider serves (wire mirror of config's `RouterModel`). */
-export interface CliProxyRouterModel {
-  name: string;
-  alias?: string;
-  contextWindow?: number;
-  compactWindow?: number;
-  compactPct?: number;
-}
-
-/**
- * A user-defined OpenAI-compatible router provider as reported by the daemon.
- * `keyState` is the only key signal that crosses the wire — the key itself never
- * does. "set" = a key is stored but unverified (inconclusive network check),
- * "verified" = the provider accepted it at `keyVerifiedAt`.
- */
-export interface CliProxyRouterProviderStatus {
-  id: string;
-  label: string;
-  preset: "openrouter" | "tokenrouter" | null;
-  baseUrl: string;
-  models: CliProxyRouterModel[];
-  keyState: "none" | "set" | "verified";
-  keyVerifiedAt: string | null;
-}
-
-/**
- * Body for `PUT /api/cliproxy/providers/:id` — the router-provider upsert. The id
- * travels in the path (it is the record's identity), never in the body. `preset`
- * is provenance of the create-form prefill only; behavior always comes from
- * `baseUrl`/`models`. The provider's API key is set separately (`…/key`) so a
- * plain edit never has to re-send it.
- */
-export interface CliProxyRouterProviderRequest {
-  label: string;
-  baseUrl: string;
-  preset?: "openrouter" | "tokenrouter" | null;
-  models: CliProxyRouterModel[];
-}
-
-/**
- * The in-flight RFC 8628 device-code prompt of an xAI link. `url`/`userCode` are
- * user-facing by design (the user must visit and type them) — not secrets. The
- * whole thing is in-memory on the daemon: it dies with a restart, and the
- * proxy-side session expires after 30 min anyway.
- */
-export interface CliProxyXaiLink {
+export interface GrokDeviceLink {
   url: string;
   userCode: string;
   expiresAt: string;
 }
 
 /**
- * The linked xAI (Grok) OAuth account, derived from CLIProxyAPI's `auth/xai-*`
- * files rather than persisted by Orquester — the proxy owns the tokens and their
- * refresh, so nothing here is stored at rest and no token ever crosses the wire.
- * `expired` = every auth file's expiry is in the past (the refresh token is dead;
- * relinking is the recovery). `lastQuotaError` is best-effort: upstream exposes
- * no quota readout, it only 429s and cools the account for 24 h.
- * `lastLinkError` is the verdict of the most recent failed/expired device flow;
- * cleared when a new link starts or one succeeds (the proxy-health `detail`
- * field must not carry it — every health-state change wipes that within ~15 s).
+ * The Grok device-code link as the daemon reports it (`GET
+ * /api/agent-accounts/grok/link`, and the `grok-link.changed` event on the
+ * agent-accounts channel). `lastError` is the verdict of the most recent
+ * failed or expired attempt, cleared when a new one starts or one succeeds.
+ * A granted link becomes a managed grok account (`agent-accounts.changed`).
  */
-export interface CliProxyXaiStatus {
-  state: "none" | "linking" | "linked" | "expired";
-  email: string | null;
-  expiredAt: string | null;
-  lastQuotaError: string | null;
-  lastLinkError: string | null;
-  link: CliProxyXaiLink | null;
+export interface GrokDeviceLinkStatus {
+  state: "idle" | "linking";
+  link: GrokDeviceLink | null;
+  lastError: string | null;
 }
-
-export interface CliProxyStatus {
-  state: "off" | "downloading" | "building" | "starting" | "healthy" | "degraded" | "error";
-  reasons: string[];
-  detail: string | null;
-  version: string | null;
-  defaultModel: string;
-  backgroundModel: string;
-  /** Per-model compact-window overrides (empty record when none set). */
-  modelOverrides: Record<string, { contextWindow?: number; compactWindow?: number; compactPct?: number }>;
-  providers: CliProxyProviderStatus[];
-  /** User-defined OpenAI-compatible routers (spec 2026-08-04 §1). */
-  routerProviders: CliProxyRouterProviderStatus[];
-  /** The linked xAI OAuth (Grok) account, if any (spec 2026-08-05 §B.1). */
-  xai: CliProxyXaiStatus;
-  accounts: { id: string; provider: CliProxyProviderId; label: string; email?: string }[];
-  activeSessionCount: number;
-  testedClaudeCliVersion: string | null;
-}
-
-/**
- * Body for `POST /api/cliproxy/accounts/seed` — the credential path. The daemon
- * reads that managed account's credential, converts it into CLIProxyAPI's
- * auth-file schema, stamps the deterministic routing prefix, and writes it into
- * `auth/` (spec §4). No secret material crosses this request.
- */
-export interface CliProxySeedRequest {
-  provider: CliProxyProviderId;
-  accountId: string;
-}
-
-/**
- * Body for `POST /api/cliproxy/accounts/unseed` — the reverse of a seed. Removes
- * the seeded credential from the proxy's `auth/` dir and restores Orquester's
- * ownership of the managed account's token (spec §4). Same shape as a seed.
- */
-export type CliProxyUnseedRequest = CliProxySeedRequest;
 
 /**
  * Sentinel `accountId` on a create-session request meaning "explicit System /
@@ -1258,20 +1139,6 @@ export interface SessionSummary {
   /** Per-project tab sort key (ascending); assigned by the daemon. */
   order: number;
   createdAt: string;
-  /**
-   * Effective model this session was launched with, for the claudex/claudemix
-   * launchers only (the per-launch model pick, resolved to the concrete catalog
-   * string). Absent for every other launcher and for pre-field records.
-   */
-  model?: string;
-  /**
-   * Launch-time model pre-flight (spec §8.4): referenced/configured models that
-   * the live catalog did NOT offer when this claudex/claudemix session launched.
-   * Advisory only — a missing model warns, it never blocks the launch — and it is
-   * a one-time launch snapshot: absent for other launchers, when nothing was
-   * missing, and on re-listed/persisted records.
-   */
-  missingModels?: string[];
   /** Live activity snapshot; absent in persisted indexes and for exited sessions. */
   activity?: SessionActivity;
   /**
@@ -1327,12 +1194,6 @@ export interface CreateSessionRequest {
   rows?: number;
   title?: string;
   accountId?: string;
-  /**
-   * Per-launch model pick — valid only for the claudex/claudemix launchers,
-   * rejected with 400 for any other refId. Omitted → the manager's configured
-   * default model. Validated against the proxy's live catalog before launch.
-   */
-  model?: string;
   /**
    * Resume this past conversation (an id from GET /api/agents/conversations)
    * instead of starting a fresh one. Ignored when the agent has no known
@@ -1775,110 +1636,20 @@ export class HttpOrquesterApiClient implements OrquesterApi {
     return this.get(`/api/usage${force ? "?refresh=1" : ""}`);
   }
 
-  // CliProxy — the managed CLIProxyAPI backing the claudex/claudemix launchers.
-  // Status/models read over either transport; mutations are HTTP-only (403 over
-  // the Unix socket) and never carry secret material.
+  // The Grok account's device-code link (Settings → Accounts). Start returns the
+  // prompt to show the user; the daemon polls auth.x.ai itself and broadcasts
+  // `grok-link.changed` on the agent-accounts channel as the state moves.
 
-  getCliProxyStatus(): Promise<CliProxyStatus> {
-    return this.get("/api/cliproxy");
+  getGrokDeviceLink(): Promise<GrokDeviceLinkStatus> {
+    return this.get("/api/agent-accounts/grok/link");
   }
 
-  getCliProxyModels(): Promise<{ models: string[]; asOf: string | null }> {
-    return this.get("/api/cliproxy/models");
+  startGrokDeviceLink(): Promise<GrokDeviceLink> {
+    return this.post("/api/agent-accounts/grok/link");
   }
 
-  enableCliProxy(): Promise<CliProxyStatus> {
-    return this.post("/api/cliproxy/enable");
-  }
-
-  disableCliProxy(force?: boolean): Promise<{ ok: boolean; affectedSessions?: number }> {
-    return this.mutateAllowingRefusal("POST", "/api/cliproxy/disable", { force: Boolean(force) });
-  }
-
-  setCliProxyConfig(
-    cfg: { defaultModel?: string; backgroundModel?: string; claudeDefaultModel?: string },
-    force?: boolean
-  ): Promise<CliProxyStatus | CliProxyMutationRefusal> {
-    return this.mutateAllowingRefusal("PUT", "/api/cliproxy/config", { ...cfg, force: Boolean(force) });
-  }
-
-  seedCliProxyAccount(req: CliProxySeedRequest): Promise<CliProxyProviderStatus> {
-    return this.post("/api/cliproxy/accounts/seed", req);
-  }
-
-  unseedCliProxyAccount(req: CliProxyUnseedRequest): Promise<CliProxyProviderStatus> {
-    return this.post("/api/cliproxy/accounts/unseed", req);
-  }
-
-  // Router providers (OpenRouter/TokenRouter/custom OpenAI-compatible gateways).
-  // Every mutation is restart-gated the same way as setCliProxyConfig: a 409
-  // refusal comes back as { ok:false, affectedSessions } for a force re-attempt.
-  // API keys only ever travel INTO the daemon; nothing here returns key material.
-
-  putCliProxyRouterProvider(
-    id: string,
-    cfg: CliProxyRouterProviderRequest,
-    force?: boolean
-  ): Promise<CliProxyStatus | CliProxyMutationRefusal> {
-    return this.mutateAllowingRefusal("PUT", `/api/cliproxy/providers/${encodeURIComponent(id)}`, {
-      ...cfg,
-      force: Boolean(force)
-    });
-  }
-
-  deleteCliProxyRouterProvider(
-    id: string,
-    force?: boolean
-  ): Promise<CliProxyStatus | CliProxyMutationRefusal> {
-    // DELETE carries no body — `force` rides the query string.
-    return this.mutateAllowingRefusal(
-      "DELETE",
-      `/api/cliproxy/providers/${encodeURIComponent(id)}${force ? "?force=true" : ""}`
-    );
-  }
-
-  setCliProxyRouterKey(
-    id: string,
-    key: string,
-    force?: boolean
-  ): Promise<{ ok: boolean; affectedSessions?: number }> {
-    return this.mutateAllowingRefusal(
-      "POST",
-      `/api/cliproxy/providers/${encodeURIComponent(id)}/key`,
-      { key, force: Boolean(force) }
-    );
-  }
-
-  clearCliProxyRouterKey(
-    id: string,
-    force?: boolean
-  ): Promise<{ ok: boolean; affectedSessions?: number }> {
-    return this.mutateAllowingRefusal(
-      "DELETE",
-      `/api/cliproxy/providers/${encodeURIComponent(id)}/key${force ? "?force=true" : ""}`
-    );
-  }
-
-  /** Browse the models a keyed router provider advertises upstream (read-only). */
-  getCliProxyRouterCatalog(id: string): Promise<{ models: string[] }> {
-    return this.get(`/api/cliproxy/providers/${encodeURIComponent(id)}/catalog`);
-  }
-
-  // xAI OAuth (Grok) account. Link starts the device-code flow and returns the
-  // prompt to show the user; the daemon polls the proxy and broadcasts
-  // cliproxy.changed as the state advances. Unlink (or cancelling an in-flight
-  // link) rides the same 409 force-gate as every other cliproxy mutation.
-
-  linkCliProxyXai(): Promise<CliProxyXaiLink> {
-    return this.post("/api/cliproxy/xai/link");
-  }
-
-  unlinkCliProxyXai(force?: boolean): Promise<CliProxyStatus | CliProxyMutationRefusal> {
-    // DELETE carries no body — `force` rides the query string.
-    return this.mutateAllowingRefusal(
-      "DELETE",
-      `/api/cliproxy/xai/link${force ? "?force=true" : ""}`
-    );
+  cancelGrokDeviceLink(): Promise<GrokDeviceLinkStatus> {
+    return this.delete("/api/agent-accounts/grok/link");
   }
 
   deleteFsEntry(path: string): Promise<{ ok: true }> {
@@ -1979,42 +1750,6 @@ export class HttpOrquesterApiClient implements OrquesterApi {
       },
       body: body === undefined ? undefined : JSON.stringify(body)
     });
-
-    if (!response.ok) {
-      throw new Error(`Orquester API request failed: ${response.status} ${response.statusText}`);
-    }
-
-    if (response.status === 204) {
-      return undefined as T;
-    }
-
-    return response.json() as Promise<T>;
-  }
-
-  // POST/PUT/DELETE for the restart-gated cliproxy mutations: a 409 refusal is a
-  // first-class value ({ ok:false, affectedSessions }), not an exception, so the
-  // caller can offer a force-confirm flow; every other non-2xx still throws.
-  // (DELETE carries no body — those routes take `force` as a query param.)
-  private async mutateAllowingRefusal<T>(
-    method: "POST" | "PUT" | "DELETE",
-    path: string,
-    body?: unknown
-  ): Promise<T> {
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      method,
-      headers: {
-        ...this.authHeaders(),
-        ...(body === undefined ? {} : { "Content-Type": "application/json" })
-      },
-      body: body === undefined ? undefined : JSON.stringify(body)
-    });
-
-    if (response.status === 409) {
-      const parsed = (await response.json().catch(() => null)) as
-        | { affectedSessions?: number }
-        | null;
-      return { ok: false, affectedSessions: parsed?.affectedSessions ?? 0 } as T;
-    }
 
     if (!response.ok) {
       throw new Error(`Orquester API request failed: ${response.status} ${response.statusText}`);

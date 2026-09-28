@@ -133,7 +133,7 @@ describe("Q2-12 — refresh appends a provider the catalog has not seen", () => 
 });
 
 describe("rate limits", () => {
-  it("fans a snapshot's windows out per registry id, merged by window id", async () => {
+  it("reports a snapshot's windows under each registry id it serves", async () => {
     const seen: Array<{ refId: string; ids: string[] }> = [];
     setProviderSideEffects({
       onRateLimits: (refId, update) =>
@@ -142,7 +142,7 @@ describe("rate limits", () => {
     await loadProviders(
       transportServing([
         provider({
-          refIds: ["claude", "claudex"],
+          refIds: ["claude"],
           usageLimits: {
             checkedAt: "2026-01-01T00:00:00.000Z",
             windows: [{ id: "w1", kind: "weekly", label: "Weekly", usedPercent: 10 }]
@@ -151,10 +151,7 @@ describe("rate limits", () => {
       ]),
       { force: true }
     );
-    assert.deepEqual(seen, [
-      { refId: "claude", ids: ["w1"] },
-      { refId: "claudex", ids: ["w1"] }
-    ]);
+    assert.deepEqual(seen, [{ refId: "claude", ids: ["w1"] }]);
   });
 });
 

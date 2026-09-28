@@ -34,13 +34,13 @@ import {
  */
 export interface WorkflowAgentCatalog {
   agents: ReadonlyArray<{
-    /** Registry refId (claude, claudex, codex, …). */
+    /** Registry refId (claude, codex, grok, opencode). */
     id: string;
-    /** False when the agent is known but not usable on this host (not installed, proxy down). */
+    /** False when the agent is known but not usable on this host (not installed). */
     enabled?: boolean;
     /**
      * The model slugs the provider lists — null (or empty) when that catalogue is not loaded yet (a
-     * provider still being probed, the proxy's list unread): a model is then only warned about.
+     * provider still being probed): a model is then only warned about.
      */
     models: readonly string[] | null;
   }>;

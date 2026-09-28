@@ -2,19 +2,19 @@
  * Agent host — the per-thread launch configuration (spec §3.1 "Launch
  * environment for provider children", §6.1).
  *
- * `CreateHostThreadRequest` carries `launchEnv` / `unsetEnv` / `homePath` /
- * `proxyRefId`: **exactly** what a terminal launch of the same registry entry
- * gets today, composed by the daemon because only the daemon has the sources
- * (the entry's own env, `<appdir>/daemon/env/<id>.env`, and every
- * `resolveExtraEnv` contributor — including the cliproxy launcher env for
- * `claudex`/`claudemix`).
+ * `CreateHostThreadRequest` carries `launchEnv` / `unsetEnv` / `homePath`:
+ * **exactly** what a terminal launch of the same registry entry gets today,
+ * composed by the daemon because only the daemon has the sources (the entry's
+ * own env, `<appdir>/daemon/env/<id>.env`, and every `resolveExtraEnv`
+ * contributor).
  *
  * It has to be **persisted**, and that is the whole reason this module exists.
  * The daemon sends it once, at create. A session is started long afterwards —
  * by lazy recovery (§4.1) or by the §3.3 reconcile, both of which can run in a
  * host that started after the daemon did. A host that kept this in memory would
- * relaunch `claudex` with no `ANTHROPIC_BASE_URL` and no proxy token and talk
- * to the wrong endpoint without saying so.
+ * relaunch a thread without its launcher env (an `opencode.env` proxy, the
+ * account home) and talk to the wrong endpoint, or as the wrong identity,
+ * without saying so.
  *
  * It is **not** thread-head state: `agentThreadHeadSchema` is a shared contract
  * and strips what it does not know, so this lives in its own file beside
@@ -32,8 +32,6 @@ export interface ThreadLaunchConfig {
   unsetEnv?: string[];
   /** The daemon's resolved absolute home dir. Never on a client wire. */
   homePath?: string;
-  /** The proxy launcher owning the home when `home` is `"cliproxy"`. */
-  proxyRefId?: string;
 }
 
 export interface LaunchConfigStore {
@@ -78,24 +76,20 @@ export function parseThreadLaunchConfig(value: unknown): ThreadLaunchConfig | nu
   if (typeof value.homePath === "string" && value.homePath.length > 0) {
     config.homePath = value.homePath;
   }
-  if (typeof value.proxyRefId === "string" && value.proxyRefId.length > 0) {
-    config.proxyRefId = value.proxyRefId;
-  }
+  // Any other field — an older build's `proxyRefId` among them — is ignored.
   return config;
 }
 
-/** Pick the four launch fields off a create request, dropping empty ones. */
+/** Pick the three launch fields off a create request, dropping empty ones. */
 export function launchConfigFromRequest(request: {
   launchEnv?: Record<string, string>;
   unsetEnv?: string[];
   homePath?: string;
-  proxyRefId?: string;
 }): ThreadLaunchConfig {
   return parseThreadLaunchConfig({
     launchEnv: request.launchEnv,
     unsetEnv: request.unsetEnv,
-    homePath: request.homePath,
-    proxyRefId: request.proxyRefId
+    homePath: request.homePath
   }) ?? {};
 }
 
@@ -103,7 +97,7 @@ const LAUNCH_CONFIG_FILE = "launch.json";
 
 /**
  * `<rootDir>/threads/<threadId>/launch.json`, written atomically (tmp +
- * rename) and 0600 — it carries the cliproxy auth token.
+ * rename) and 0600 — a launcher env can carry a credential.
  */
 export function createFileLaunchConfigStore(options: { rootDir: string }): LaunchConfigStore {
   const pathFor = (threadId: string): string =>

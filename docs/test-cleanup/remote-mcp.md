@@ -1,6 +1,6 @@
 # Incoming MCP audit: model-proxy retirement
 
-Status: pre-edit decisions recorded before merging `origin/main` at `8dcbdc61`. Scope is `git diff 008f84e6..origin/main -- apps/daemon/src/mcp`. Remote adds no new test file and no wholly new scenario; four existing scenarios are renamed for direct agents, thirteen test bodies otherwise change, and retired-feature cases disappear. Prior cleanup decisions in [mcp.md](mcp.md) and [mcp-history-sessions.md](mcp-history-sessions.md) continue to cover unchanged cases and shared fixture-only edits.
+Status: completed MCP merge cleanup. These decisions were recorded before merging `origin/main` at `8dcbdc61`. Scope is `git diff 008f84e6..origin/main -- apps/daemon/src/mcp`. Remote adds no new test file and no wholly new scenario; four existing scenarios are renamed for direct agents, thirteen test bodies otherwise change, and retired-feature cases disappear. Prior cleanup decisions in [mcp.md](mcp.md) and [mcp-history-sessions.md](mcp-history-sessions.md) continue to cover unchanged cases and shared fixture-only edits.
 
 Read production owners: incoming `agents.ts`, `tools/catalog.ts`, `tools/sessions.ts`, unchanged `errors.ts`, `tools/messages.ts`, `tools/requests.ts`. Independent source: incoming `docs/orquester-mcp.md`, especially AgentView/accounts (§6), discovery/resumability, create/update session and account-home rules (§7), and the error envelope (§4.5); remote retirement removes proxy-home launch support and its registry/account types.
 
@@ -47,3 +47,12 @@ No production changes beyond the incoming retirement and retention of already-au
 | DELETE | `apps/daemon/src/mcp/tools/sessions.test.ts`:343 — update_session on a claudemix thread: the Claude catalogue applies, and an options-only change keeps the head's Claude model | Keep remote deletion: its proxy catalogue/seeded account/proxy-home/disabledReason behavior was retired with its production owner. No current behavior becomes unprotected; direct-agent account and resume cases below remain. |
 
 Shared-fixture-only incoming changes in `tools/messages.test.ts` and `tools/requests.test.ts` remove the unused proxy registry entry, provider aliases, status blob and `/api/cliproxy*` routes; every unchanged named case keeps the disposition and six-bar explanation in `mcp.md`. The same fixture removals in `agents`, `catalog` and `sessions` affect setup only beyond the enumerated body changes. No copied declaration/error inventory is accepted from the remote version.
+
+
+## Implemented merge result
+
+Resolved all three MCP test conflicts (`agents.test.ts`, `tools/catalog.test.ts`, `tools/sessions.test.ts`) while keeping retirement changes and prior pruning. Eight tests that had legitimately survived the pre-retirement audit now disappear with the retired feature; already-deleted private lookup/description/predicate tests remain deleted. Existing catalogue budget rewrites remain independent of the implementation. Removed dead proxy fixture objects/routes and aliases. No additional production edits were required beyond Git's merged retirement and prior cleanup changes.
+
+The negative resume scenario now requests supported, enabled Claude against an account-home Codex conversation. If the mismatch gate is removed, the arranged Claude path can complete its POST; another unsupported-agent gate cannot make the test pass accidentally. The test checks INVALID_ARGUMENT and absence of a new POST.
+
+Validation: `cd apps/daemon && node --import tsx --import ../../scripts/test/assert-ok.mjs --import ./test/quiet-mock-timers.mjs --test src/mcp/agents.test.ts src/mcp/errors.test.ts src/mcp/tools/catalog.test.ts src/mcp/tools/messages.test.ts src/mcp/tools/requests.test.ts src/mcp/tools/sessions.test.ts` — **133 passed, 0 failed** (`/tmp/orquester-test-cleanup/remote-mcp-final.log`). Reviewed merged production owners and all changed tests; no MCP conflict markers remain and `git diff --check` passes. Root owns staging, repository-wide gates, merge commit and push.

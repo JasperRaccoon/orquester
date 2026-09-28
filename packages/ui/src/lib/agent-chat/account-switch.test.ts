@@ -70,40 +70,6 @@ describe("the option list", () => {
     assert.equal(options[2]!.needsReauth, true, "a stale account is offered, flagged");
   });
 
-  it("a proxy launcher draws from the MAPPED family and only what is seeded", () => {
-
-    // claudex → codex accounts, and only the seeded ones: an unseeded pin
-    // emits an `acc<hex>/` prefix no auth file serves.
-    assert.deepEqual(
-      buildChatAccountOptions({
-        refId: "claudex",
-        accounts: ACCOUNTS,
-        seededAccountIds: ["cod-1"],
-        shortLabel
-      }).map((option) => option.id),
-      ["system", "cod-1"]
-    );
-    assert.deepEqual(
-      buildChatAccountOptions({
-        refId: "claudex",
-        accounts: ACCOUNTS,
-        seededAccountIds: [],
-        shortLabel
-      }).map((option) => option.id),
-      ["system"],
-      "nothing seeded means System only"
-    );
-    assert.deepEqual(
-      buildChatAccountOptions({
-        refId: "claudemix",
-        accounts: ACCOUNTS,
-        seededAccountIds: ["cla-1", "cod-1"],
-        shortLabel
-      }).map((option) => option.id),
-      ["system", "cla-1"]
-    );
-  });
-
   it("OpenCode has no per-thread account, decided without waiting for a snapshot", () => {
     assert.equal(chatAccountSwitchSupported({ refId: "opencode" }), false);
     assert.equal(
@@ -113,7 +79,7 @@ describe("the option list", () => {
     );
     assert.equal(chatAccountSwitchSupported({ refId: "claude", adapterId: "opencode" }), false);
     assert.equal(chatAccountSwitchSupported({ refId: "claude", adapterId: "claude" }), true);
-    assert.equal(chatAccountSwitchSupported({ refId: "claudex" }), true);
+    assert.equal(chatAccountSwitchSupported({ refId: "codex" }), true);
   });
 
   it("an empty accounts list is still a usable menu", () => {

@@ -314,8 +314,6 @@ export interface UsageReader {
 
 export interface AccountsReader {
   list(): AgentAccountsResponse;
-  /** claudex/claudemix: the account ids seeded to the proxy. */
-  seededAccountIds(): Set<string>;
 }
 
 export interface CooldownStore {

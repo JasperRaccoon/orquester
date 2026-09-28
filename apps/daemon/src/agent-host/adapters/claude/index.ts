@@ -252,9 +252,8 @@ export async function createClaudeAdapterWith(
     }
 
     const executablePath = await ensureVersionGate();
-    // `home.proxyRefId` names the claudex/claudemix launcher whose extra env
-    // (ANTHROPIC_BASE_URL, ANTHROPIC_AUTH_TOKEN, ANTHROPIC_MODEL, …) the host
-    // attaches; the adapter passes it through untouched (§4.5).
+    // The host attaches the launcher's extra env (the daemon-composed
+    // `launchEnv`); the adapter passes it through untouched (§4.5).
     const env = context.buildEnv({ threadId: input.threadId, home: input.home });
     const cursor = readClaudeResumeCursor(input.resumeCursor, input.threadId);
 

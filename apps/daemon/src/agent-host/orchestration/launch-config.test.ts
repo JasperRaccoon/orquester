@@ -16,14 +16,14 @@ describe("thread launch config (§3.1, §6.1)", () => {
         launchEnv: { ANTHROPIC_AUTH_TOKEN: "tok", BAD: 7, "": "x" },
         unsetEnv: ["ANTHROPIC_API_KEY", 42],
         homePath: "/home/acc",
+        // An older build's field: read without complaint, then dropped.
         proxyRefId: "claudex",
         extra: "ignored"
       }),
       {
         launchEnv: { ANTHROPIC_AUTH_TOKEN: "tok" },
         unsetEnv: ["ANTHROPIC_API_KEY"],
-        homePath: "/home/acc",
-        proxyRefId: "claudex"
+        homePath: "/home/acc"
       }
     );
     assert.deepEqual(parseThreadLaunchConfig({ launchEnv: {}, unsetEnv: [] }), {});
@@ -40,19 +40,17 @@ describe("thread launch config (§3.1, §6.1)", () => {
       await store.save("t1", {
         launchEnv: { ANTHROPIC_AUTH_TOKEN: "tok" },
         unsetEnv: ["ANTHROPIC_API_KEY"],
-        homePath: "/home/proxy",
-        proxyRefId: "claudex"
+        homePath: "/home/proxy"
       });
       const path = join(dir, "threads", "t1", "launch.json");
-      // It carries the proxy token, so it is as sensitive as the appdir.
+      // A launcher env can carry a credential, so it is as sensitive as the appdir.
       assert.equal((await stat(path)).mode & 0o777, 0o600);
 
       const reread = createFileLaunchConfigStore({ rootDir: dir });
       assert.deepEqual(await reread.load("t1"), {
         launchEnv: { ANTHROPIC_AUTH_TOKEN: "tok" },
         unsetEnv: ["ANTHROPIC_API_KEY"],
-        homePath: "/home/proxy",
-        proxyRefId: "claudex"
+        homePath: "/home/proxy"
       });
     } finally {
       await rm(dir, { recursive: true, force: true });

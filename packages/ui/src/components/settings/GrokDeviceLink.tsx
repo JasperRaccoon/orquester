@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import { Download, ExternalLink, Link2 } from "lucide-react";
 import { Button } from "../ui";
 import { useAppStore } from "../../store/app";
+import { ApiError } from "../../lib/api-client";
 
 const formatStamp = (iso: string | null): string => {
   if (!iso) return "unknown";
@@ -12,25 +13,24 @@ const formatStamp = (iso: string | null): string => {
 /**
  * The grok-specific account acquisition path: unlike Claude/Codex there is a
  * device-code login as an alternative to importing `~/.grok/auth.json`. The
- * daemon drives the RFC 8628 flow directly against auth.x.ai (no model proxy
- * involved); on approval the tokens become a managed grok account (it appears
- * in the list above via `agent-accounts.changed`) — seeding it to the proxy
- * stays an explicit step in Settings → Model proxy, like Claude/Codex. Nothing
- * shown here is a secret — the verification URL and user code are meant to be
- * read out loud.
+ * daemon drives the RFC 8628 flow directly against auth.x.ai; on approval the
+ * tokens become a managed grok account (it appears in the list above via
+ * `agent-accounts.changed`). Nothing shown here is a secret — the verification
+ * URL and user code are meant to be read out loud.
  */
 export const GrokDeviceLink: React.FC = () => {
   const api = useAppStore((s) => s.api);
-  const status = useAppStore((s) => s.cliproxy);
-  const loadCliProxy = useAppStore((s) => s.loadCliProxy);
+  const status = useAppStore((s) => s.grokDeviceLink);
+  const loadGrokDeviceLink = useAppStore((s) => s.loadGrokDeviceLink);
   const loadAgentAccounts = useAppStore((s) => s.loadAgentAccounts);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  // The Accounts section can open before the Model proxy panel ever loaded a status.
+  // A link started elsewhere (another client, before a reload) is still
+  // pending on the daemon; `grok-link.changed` keeps it current from here.
   useEffect(() => {
-    void loadCliProxy();
-  }, [loadCliProxy]);
+    void loadGrokDeviceLink();
+  }, [loadGrokDeviceLink]);
 
   const run = useCallback(
     async (fn: () => Promise<unknown>) => {
@@ -38,19 +38,22 @@ export const GrokDeviceLink: React.FC = () => {
       setError(null);
       try {
         await fn();
-        await loadCliProxy();
       } catch (e) {
-        setError(e instanceof Error ? e.message : String(e));
+        // A 409 (a link already pending) or 502 (auth.x.ai failed) carries
+        // the daemon's own reason.
+        const message =
+          e instanceof ApiError ? (e.serverMessage ?? e.message) : e instanceof Error ? e.message : String(e);
+        setError(message);
       } finally {
         setBusy(false);
+        await loadGrokDeviceLink();
       }
     },
-    [loadCliProxy]
+    [loadGrokDeviceLink]
   );
 
-  const xai = status?.xai;
-  const linking = xai?.state === "linking";
-  const link = xai?.link ?? null;
+  const linking = status?.state === "linking";
+  const link = status?.link ?? null;
 
   return (
     <div className="space-y-2">
@@ -60,11 +63,11 @@ export const GrokDeviceLink: React.FC = () => {
             size="sm"
             variant="outline"
             disabled={busy}
-            title="Sign in on accounts.x.ai with a one-time code — works without the model proxy"
+            title="Sign in on accounts.x.ai with a one-time code"
             onClick={() => {
               void run(async () => {
                 if (!api) throw new Error("not connected");
-                await api.linkCliProxyXai();
+                await api.startGrokDeviceLink();
               });
             }}
           >
@@ -114,7 +117,7 @@ export const GrokDeviceLink: React.FC = () => {
             onClick={() => {
               void run(async () => {
                 if (!api) throw new Error("not connected");
-                await api.unlinkCliProxyXai();
+                await api.cancelGrokDeviceLink();
               });
             }}
           >
@@ -124,13 +127,9 @@ export const GrokDeviceLink: React.FC = () => {
       )}
 
       {error && <p className="text-[11px] text-danger-muted/80">{error}</p>}
-      {!linking && xai?.lastLinkError && (
-        <p className="text-[11px] text-danger-muted/80">Last link attempt failed: {xai.lastLinkError}</p>
+      {!linking && status?.lastError && (
+        <p className="text-[11px] text-danger-muted/80">Last link attempt failed: {status.lastError}</p>
       )}
-      <p className="text-[11px] text-neutral-600">
-        Grok runs through a reverse-engineered first-party-client contract: it can break or be
-        rate-limited without notice, and no quota readout is possible.
-      </p>
     </div>
   );
 };

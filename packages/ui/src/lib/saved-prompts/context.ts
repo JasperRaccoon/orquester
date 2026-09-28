@@ -51,10 +51,9 @@ export function savedPromptLabels(projectPath: string, sessionId: string | null)
     labels.agentLabel = agentLabelFor(refId, [...app.registry.agents, ...catalogue]);
   }
   // The thread head's selection is the chat's current model (the composer's
-  // chip reads the same); a claudex/claudemix launch model stands in before
-  // the head has loaded.
+  // chip reads the same).
   const selection = peekThreadStore(sessionId)?.getState().slice.head?.modelSelection ?? null;
-  const slug = selection?.model ?? session?.model ?? null;
+  const slug = selection?.model ?? null;
   const provider = refId !== null ? providerForRefId(providersStore.getState().providers, refId) : null;
   labels.modelLabel = modelLabelFor(provider?.models, slug);
   return labels;

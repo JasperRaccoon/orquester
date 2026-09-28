@@ -43,9 +43,7 @@ export const LAUNCH_MODEL_SEARCH_LIMIT = 40;
  * the one case this function answers `null` for.
  *
  * A remembered pick the catalogue no longer lists is **not** honoured: the
- * launch would fail at the provider rather than at the chip. That differs from
- * the proxy-launcher chips, which deliberately keep a stale pick visible (spec
- * §2) — there the daemon resolves it, here the provider would reject it.
+ * launch would fail at the provider rather than at the chip.
  *
  * Ties on `isDefault` resolve to catalogue order, deterministically: OpenCode
  * really does flag two models default, and "the default" must not depend on

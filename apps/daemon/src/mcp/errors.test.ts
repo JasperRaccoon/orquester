@@ -10,8 +10,8 @@ test("daemonError reads the chat envelope, the flat shape and a bare string", ()
   assert.equal(a.code, "COMMAND_REJECTED"); assert.equal(a.message, "busy"); assert.deepEqual(a.detail, { x: 1 });
   const b = daemonError({ status: 400, body: { code: "RESUME_UNAVAILABLE", message: "bad id" } });
   assert.equal(b.code, "RESUME_UNAVAILABLE"); assert.equal(b.message, "bad id");
-  const c = daemonError({ status: 400, body: { error: "model is only valid for claudex/claudemix", entryId: "codex" } });
-  assert.equal(c.code, "INVALID_ARGUMENT"); assert.equal(c.message, "model is only valid for claudex/claudemix");
+  const c = daemonError({ status: 400, body: { error: "model is not valid for this agent", entryId: "codex" } });
+  assert.equal(c.code, "INVALID_ARGUMENT"); assert.equal(c.message, "model is not valid for this agent");
   const d = daemonError({ status: 404, body: "not json" });
   assert.equal(d.code, "NOT_FOUND"); assert.match(d.message, /404/);
   const e = daemonError({ status: 503, body: null });

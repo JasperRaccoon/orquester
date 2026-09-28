@@ -1,11 +1,11 @@
 import { stat } from "node:fs/promises";
 import { resolve } from "node:path";
 import { z } from "zod";
-import { SYSTEM_ACCOUNT_ID, type AgentConversationsResponse, type CreateSessionRequest, type RegistryResponse, type SessionSummary } from "@orquester/api";
+import { SYSTEM_ACCOUNT_ID, type AgentConversationsResponse, type CreateSessionRequest, type SessionSummary } from "@orquester/api";
 import { agentChatRoutes, isSettledConversationCompaction, parseThreadGoal, RUNTIME_MODES, startedTurns, type AccountHomeKind, type CreateAgentChatSessionFields, type ModelSelection, type RuntimeMode, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload, type TurnDiffResponse } from "@orquester/api/agent-chat";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
 import { resolveProject } from "../addressing.ts";
-import { conversationLaunch, findAgent, isProxyAgent, launchesProxyModel, loadAgents, resolveModelSelection, validateAccountId, type ResolvedSelection } from "../agents.ts";
+import { findAgent, loadAgents, resolveModelSelection, validateAccountId, type ResolvedSelection } from "../agents.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { findSession, listSessions, readThread, requireChatSession, sendCommand } from "../reads.ts";
@@ -185,32 +185,13 @@ async function resolveCwd(api: DaemonApi, projectPath: string, input: string): P
 
 interface ResumeRow { id: string; agent: string; title: string; home: AccountHomeKind; accountId?: string }
 
-/**
- * Why the registry disabled an agent (`RegistryEntry.disabledReason` — "proxy down", …), when it says; read only to
- * refuse. It is a second registry read, so any failure of it — a throw, an error status, a body of another shape — only
- * leaves the reason out: the refusal stays INVALID_ARGUMENT, never an INTERNAL. When `AgentView` carries the reason
- * itself (F2), the view `findAgent` returned can answer instead and this read can go.
- */
-async function disabledReason(api: DaemonApi, refId: string): Promise<string | undefined> {
-  try {
-    const res = await api.request("GET", "/api/registry");
-    const agents = res.status < 400 ? (res.body as Partial<RegistryResponse> | null)?.agents : undefined;
-    const entry: unknown = Array.isArray(agents) ? agents.find((e: unknown) => (e as { id?: unknown } | null)?.id === refId) : undefined;
-    const reason = (entry as { disabledReason?: unknown } | undefined)?.disabledReason;
-    const text = typeof reason === "string" ? reason.trim().replace(/\.+$/, "") : "";
-    return text || undefined;
-  } catch {
-    return undefined;
-  }
-}
-
 const createSession = defineTool({
   name: "create_session",
   title: "Open a chat session",
   description: "Open a new chat tab for an agent in a project — the GUI's '+' menu — with model, options (effort…), permission mode and account; or resume a past conversation from list_conversations. Returns the session detail. Send the first message with send_message.",
   input: {
     project: z.string().describe("Absolute project path or \"<workspace>/<project>\"."),
-    agent: z.string().min(1).optional().describe("Agent id from list_agents (claude, claudex, claudemix, codex, opencode, grok). Required unless `resume` is given."),
+    agent: z.string().min(1).optional().describe("Agent id from list_agents (claude, codex, opencode, grok). Required unless `resume` is given."),
     // min(1): an empty model would read as none, so the default model would launch in its place (agents.ts).
     model: z.string().min(1).optional().describe("Model slug from list_agents; default: the agent's default."),
     options: optionsSchema.optional(),
@@ -229,20 +210,13 @@ const createSession = defineTool({
       const res = expectOk<AgentConversationsResponse>(await api.request("GET", "/api/agents/conversations", { query: { path: project.path } }), "conversations");
       const row = res.conversations.find((c) => c.id === args.resume!.conversationId);
       if (!row) throw new ToolError("INVALID_ARGUMENT", `No conversation "${args.resume.conversationId}" in this project; pick one from list_conversations.`);
-      // A proxy-home transcript belongs to the launcher that owns that home; with none named, plain `claude` would open an
-      // empty session in its own HOME — list_conversations reports that row resumable:false, and it is refused here.
-      const launch = conversationLaunch(row);
-      if (!launch.reachable) throw new ToolError("INVALID_ARGUMENT", `Conversation "${row.id}" is not resumable: it lives in a proxy home with no launcher. Pick a row with resumable: true from list_conversations.`);
-      resumeRow = { id: row.id, agent: launch.agent, title: row.title, home: row.home ?? "system", ...(row.accountId ? { accountId: row.accountId } : {}) };
+      resumeRow = { id: row.id, agent: row.agentRefId, title: row.title, home: row.home ?? "system", ...(row.accountId ? { accountId: row.accountId } : {}) };
     }
     const refId = args.agent ?? resumeRow?.agent;
     if (!refId) throw new ToolError("INVALID_ARGUMENT", "agent is required (see list_agents).");
     if (resumeRow && args.agent && resumeRow.agent !== args.agent) throw new ToolError("INVALID_ARGUMENT", `Conversation "${resumeRow.id}" belongs to ${resumeRow.agent}, not ${args.agent}.`);
     const agent = findAgent(await loadAgents(api), refId);
-    if (!agent.enabled) {
-      const reason = await disabledReason(api, refId);
-      throw new ToolError("INVALID_ARGUMENT", reason ? `${refId} is not available on this host: ${reason}.` : `${refId} is not available on this host (not installed or disabled).`);
-    }
+    if (!agent.enabled) throw new ToolError("INVALID_ARGUMENT", `${refId} is not available on this host (not installed or disabled).`);
     const selection = resolveModelSelection(agent, { model: args.model, options: args.options });
     let accountId = validateAccountId(agent, args.accountId);
     // The GUI's `resumeAccountId`: a transcript in a managed account's home is visible only from there, so that
@@ -250,17 +224,12 @@ const createSession = defineTool({
     // back), so the caller's pick stands and an omitted one stays omitted — the family default, as the GUI's chip
     // pre-selects; forcing System there broke resume whenever the system login was stale.
     if (resumeRow?.home === "account" && resumeRow.accountId) accountId = resumeRow.accountId;
-    // The daemon falls back to the family default for claude/codex/grok only; a proxy launcher left without an account
-    // runs unpinned. Pin what the "+" menu pre-selects: the seeded family default, else System.
-    if (accountId === undefined && isProxyAgent(refId)) accountId = agent.defaultAccountId;
     const cwd = args.cwd === undefined ? project.path : await resolveCwd(api, project.path, args.cwd);
     const running = (await listSessions(api, project.path)).filter((s) => s.status === "running").length;
     if (running >= MAX_RUNNING_SESSIONS_PER_PROJECT) throw new ToolError("SESSION_BUSY", `${running} sessions are open in this project (limit ${MAX_RUNNING_SESSIONS_PER_PROJECT}); close some first.`);
     const chat: CreateAgentChatSessionFields = { ...(accountId ? { accountId } : {}), modelSelection: { model: selection.model, options: selection.options }, runtimeMode: args.runtimeMode };
     if (resumeRow) chat.resume = { home: resumeRow.home, conversationId: resumeRow.id };
-    // A top-level model becomes the launch's ANTHROPIC_MODEL: claudex's proxy model, and only that. claudemix never
-    // names one — the daemon resolves its own Claude default, as the "+" menu leaves it — so its selection rides `chat`.
-    const body: CreateSessionRequest = { kind: "agent-chat", refId, projectPath: project.path, cwd, title: args.title ?? (resumeRow?.title || agent.name), ...(accountId ? { accountId } : {}), ...(launchesProxyModel(refId) ? { model: selection.model } : {}), chat };
+    const body: CreateSessionRequest = { kind: "agent-chat", refId, projectPath: project.path, cwd, title: args.title ?? (resumeRow?.title || agent.name), ...(accountId ? { accountId } : {}), chat };
     const summary = expectOk<SessionSummary>(await api.request("POST", "/api/sessions", { body }), "create");
     try {
       return { session: await chatDetail(api, summary.id) };
@@ -388,7 +357,7 @@ const stopSession = defineTool({
 const closeSession = defineTool({
   name: "close_session",
   title: "Close a session",
-  description: "Close a tab (chat or terminal). A chat's thread is deleted; the provider's own transcript stays resumable via list_conversations for Claude, Codex and Grok (and claudex/claudemix from their proxy homes); OpenCode history is not listed. A Grok chat's background processes are stopped as stop_session stops them.",
+  description: "Close a tab (chat or terminal). A chat's thread is deleted; the provider's own transcript stays resumable via list_conversations for Claude, Codex and Grok; OpenCode history is not listed. A Grok chat's background processes are stopped as stop_session stops them.",
   input: { sessionId: sessionIdField },
   annotations: DESTRUCTIVE,
   async run(args, { api }) {

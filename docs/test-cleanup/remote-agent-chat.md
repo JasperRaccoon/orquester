@@ -51,4 +51,8 @@ Risk: incorrectly restoring a proxy-only seam or losing a genuine account/owner/
 
 ## Status
 
-Pre-audit complete; source edits and focused verification wait for the root coordinator's merge-ready signal.
+Completed cleanup and conflict resolution. Remote proxy retirement and prior test-seam removals are both preserved. The additional managed-home duplicate was removed as recorded before editing. Root owns staging, commits, repository gates and push.
+
+All **216 agent-chat tests passed** across the initial successful files and the final two-file rerun: 178 passed in `cd apps/daemon && node --import tsx --import ../../scripts/test/assert-ok.mjs --import ./test/quiet-mock-timers.mjs --test src/agent-chat/*.test.ts`; after adjacent merge conflicts were resolved, `node --import tsx --import ../../scripts/test/assert-ok.mjs --import ./test/quiet-mock-timers.mjs --test src/agent-chat/service.test.ts src/agent-chat/owner.test.ts` passed **38/38**, with no failures or skips (7.4 seconds). The earlier file-load failures were caused by then-unresolved workflow/usage merge markers and are superseded by this successful rerun. Service/supervisor retain **79 tests**. Scoped `git diff --check` passes. Pre-merge daemon typecheck passed; root owns the final integrated typecheck and repository gates.
+
+Before the final nested-field fixture adjustment: OpenCode only supports its system server identity, so the remote account-resume fixture would describe an unsupported OpenCode launch. Use a managed Claude launch for this existing field-forwarding contract, preserving account resume and the independent path-shaped conversationId expectation. This prevents the fake host from accepting an impossible provider/home setup.

@@ -1211,7 +1211,7 @@ test("the launch environment is built explicitly, never from process.env", (t) =
   assert.equal(env.HOME, "/var/lib/orquester");
   assert.equal(env.NPM_CONFIG_PREFIX, "/var/lib/orquester/.npm-global");
   assert.equal(env.ORQUESTER_APPDIR, "/var/lib/orquester");
-  // Nothing else: the daemon's own environment holds the cliproxy and push
+  // Nothing else: the daemon's own environment holds push and daemon
   // secrets, and the host must never inherit them.
   assert.equal(env.ORQUESTER_HTTP_PASSWORD, undefined);
   const optional = buildAgentHostEnv({

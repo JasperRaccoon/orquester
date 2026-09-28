@@ -10,18 +10,14 @@
 
 import type { AgentAccount, AgentUsage, UsageAccount, UsageResponse, UsageWindow } from "@orquester/api";
 
-/** Launchers whose accounts are another family's (seeded into the model proxy). */
-const PROXY_FAMILY: Record<string, string> = { claudex: "codex", claudemix: "claude" };
-
-/** Agents with no per-thread account at all. */
-const ACCOUNTLESS: ReadonlySet<string> = new Set(["opencode"]);
+/** The managed-account families (the agent-accounts store); every other agent (OpenCode) has none. */
+const ACCOUNT_FAMILIES: ReadonlySet<string> = new Set(["claude", "codex", "grok"]);
 
 export const SYSTEM_ACCOUNT_ID = "system";
 
 /** The managed-account family a registry agent draws from; null when it has no accounts. */
 export function accountFamily(agent: string): string | null {
-  if (ACCOUNTLESS.has(agent)) return null;
-  return PROXY_FAMILY[agent] ?? agent;
+  return ACCOUNT_FAMILIES.has(agent) ? agent : null;
 }
 
 export interface UsageBar {

@@ -81,10 +81,11 @@ export interface SystemStatusOptions {
   listSessionIds: () => Set<string>;
   /**
    * Extra pids `kill` must refuse, alongside the daemon and the tmux server —
-   * infrastructure that happens to sit in the daemon's own tree. Read at kill
-   * time (not construction): the set changes as things respawn.
+   * infrastructure that happens to sit in the daemon's own tree (today the agent
+   * host), each with the label a refusal names. Read at kill time (not
+   * construction): the set changes as things respawn.
    */
-  protectedPids?: () => Iterable<number | { pid: number; label: string }>;
+  protectedPids?: () => Iterable<{ pid: number; label: string }>;
   /**
    * Extra tree ROOTS to descend from, beyond this process and the `orq-*` tmux
    * panes — today the agent host (chat design spec §3.1 "Kill guard"). It runs
@@ -657,11 +658,7 @@ export class SystemStatusService {
     const out = new Map<number, string>();
     try {
       for (const entry of this.options.protectedPids?.() ?? []) {
-        if (typeof entry === "number") {
-          out.set(entry, "the model proxy that backs claudex/claudemix sessions");
-        } else {
-          out.set(entry.pid, entry.label);
-        }
+        out.set(entry.pid, entry.label);
       }
     } catch {
       return new Map();
@@ -703,13 +700,10 @@ export class SystemStatusService {
         error: "Cannot stop the tmux server that keeps sessions alive."
       };
     }
-    // Daemon-owned infrastructure that is a plain child on this host — today the
-    // model proxy when tmux is absent. Under tmux it isn't in our tree at all,
-    // so the guard is a no-op there.
+    // Daemon-owned infrastructure the host names — today the agent host, which is
+    // a plain daemon child when tmux is absent and an extra tree root under tmux.
+    // Name what was refused by its label.
     const protectedPids = this.protectedPids();
-    // Name what was refused: the set now holds more than the model proxy (the
-    // agent host joined it), and "cannot stop the model proxy" was a lie for
-    // every other member.
     const protectedLabel = protectedPids.get(pid);
     if (protectedLabel !== undefined) {
       return {
@@ -743,8 +737,8 @@ export class SystemStatusService {
     const targets: Array<{ pid: number; starttime: number }> = [];
     for (const target of collectDescendants(procs, pid).reverse()) {
       // Same exclusions as the direct-target guards above: killing a subtree
-      // must not sweep up the daemon, the tmux server or the model proxy that
-      // happens to hang below the pid the user picked.
+      // must not sweep up the daemon, the tmux server or the protected
+      // infrastructure that happens to hang below the pid the user picked.
       if (target === process.pid || target === serverPid || protectedPids.has(target)) {
         continue;
       }
@@ -870,9 +864,9 @@ export class SystemStatusService {
    * PTYs and, on the no-tmux backend, the session PTYs themselves) plus every
    * tmux session pane. With the tmux backend a session's command lives in the
    * tmux server's process tree, NOT the daemon's, so without the pane pids the
-   * scan would miss every terminal. Service sessions (`orqsvc-`, e.g. the
-   * managed model proxy) are deliberately excluded — they are not user sessions
-   * and must not become kill targets.
+   * scan would miss every terminal. Service sessions (`orqsvc-`, e.g. the agent
+   * host) are deliberately excluded — they are not user sessions and must not
+   * become kill targets (the host re-enters as an `extraRootPids` root).
    */
   private async rootPids(known: Set<string>): Promise<Map<number, string | undefined>> {
     const roots = new Map<number, string | undefined>([[process.pid, undefined]]);

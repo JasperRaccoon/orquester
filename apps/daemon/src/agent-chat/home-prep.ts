@@ -77,8 +77,8 @@ export interface HomePrepLogger {
  * and force onboarding complete. Returns true when a write happened.
  *
  * `claudeConfigFile` is `<CLAUDE_CONFIG_DIR>/.claude.json` for the thread — a
- * managed account home, a cliproxy launcher home, or the system config file —
- * the same rule `agent-accounts.ts` and `cliproxy-files.ts` already follow.
+ * managed account home or the system config file — the same rule
+ * `agent-accounts.ts` already follows.
  *
  * `projectDir` MUST be a path the caller has confined to `fsRoot`; this
  * function is the writer, not the gatekeeper.

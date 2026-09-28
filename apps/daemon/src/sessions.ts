@@ -132,7 +132,7 @@ export interface SessionIndexContributor {
  */
 export type ResolveSessionExtraEnv = (
   entry: RegistryEntry,
-  ctx: { accountId?: string; model?: string }
+  ctx: { accountId?: string }
 ) =>
   | Promise<{ env: Record<string, string>; unset?: string[]; accountId?: string } | null>
   | { env: Record<string, string>; unset?: string[]; accountId?: string } | null;
@@ -334,10 +334,7 @@ export class SessionManager implements ISessionManager {
     // single-use refresh token.
     let accountId: string | undefined;
     try {
-      const resolved = await this.options.resolveExtraEnv?.(entry, {
-        accountId: req.accountId,
-        model: req.model
-      });
+      const resolved = await this.options.resolveExtraEnv?.(entry, { accountId: req.accountId });
       if (resolved) {
         extraEnv = resolved.env;
         unsetEnv = resolved.unset ?? [];
@@ -364,9 +361,6 @@ export class SessionManager implements ISessionManager {
       kind: entry.kind,
       refId: entry.id,
       accountId,
-      // Effective per-launch model (claudex/claudemix only); the route resolves it
-      // to a concrete catalog string before calling create — undefined otherwise.
-      model: req.model,
       title: req.title || entry.name,
       projectPath,
       cwd,
@@ -807,9 +801,6 @@ export class SessionManager implements ISessionManager {
         // account-pinned session (the refresher's zero-live-session gate depends
         // on it) and the client keeps the tab's account badge.
         accountId: record.accountId,
-        // Restore the per-launch model pin so the reattached claudex/claudemix tab
-        // keeps the model it was launched with across a daemon restart.
-        model: record.model,
         title: record.title,
         projectPath: record.projectPath,
         cwd: record.cwd,
@@ -861,9 +852,8 @@ export class SessionManager implements ISessionManager {
 
   /** Map a live session to its persisted record shape. */
   private recordOf(session: Session): SessionRecord {
-    const { id, title, order, projectPath, refId, kind, cwd, createdAt, cols, rows, accountId, model } =
-      session.summary;
-    return { id, title, order, projectPath, refId, kind, cwd, createdAt, cols, rows, accountId, model };
+    const { id, title, order, projectPath, refId, kind, cwd, createdAt, cols, rows, accountId } = session.summary;
+    return { id, title, order, projectPath, refId, kind, cwd, createdAt, cols, rows, accountId };
   }
 
   /**
@@ -1018,10 +1008,7 @@ export class LocalSessionManager implements ISessionManager {
     // see SessionManager.create for why we record this over the raw request value.
     let accountId: string | undefined;
     try {
-      const resolved = await this.options.resolveExtraEnv?.(entry, {
-        accountId: req.accountId,
-        model: req.model
-      });
+      const resolved = await this.options.resolveExtraEnv?.(entry, { accountId: req.accountId });
       if (resolved) {
         extraEnv = resolved.env;
         unsetEnv = resolved.unset ?? [];
@@ -1086,8 +1073,6 @@ export class LocalSessionManager implements ISessionManager {
       kind: entry.kind,
       refId: entry.id,
       accountId,
-      // Effective per-launch model (claudex/claudemix only); see SessionManager.create.
-      model: req.model,
       title: req.title || entry.name,
       projectPath,
       cwd,

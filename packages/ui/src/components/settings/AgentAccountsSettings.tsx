@@ -4,7 +4,7 @@ import type { AgentAccount, AgentAccountAgent } from "@orquester/api";
 import { Button, Input } from "../ui";
 import { useApi } from "../../context/orquester-context";
 import { useAppStore } from "../../store/app";
-import { GrokDeviceLink } from "./XaiAccountCard";
+import { GrokDeviceLink } from "./GrokDeviceLink";
 
 export function AgentAccountsSettings() {
   const api = useApi();
@@ -89,8 +89,8 @@ export function AgentAccountsSettings() {
               ))
             )}
           </div>
-          {/* Grok's second acquisition path: a device-code login through the
-              model proxy (no equivalent exists for Claude/Codex). */}
+          {/* Grok's second acquisition path: a device-code login (no
+              equivalent exists for Claude/Codex). */}
           {agent === "grok" ? <GrokDeviceLink /> : null}
         </section>
       ))}

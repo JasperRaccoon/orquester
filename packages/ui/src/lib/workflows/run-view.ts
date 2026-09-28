@@ -369,7 +369,6 @@ export function hopViaText(via: AgentHop["via"]): string {
 
 const SKIP_WHY: Record<AccountSkipReason, string> = {
   needsReauth: "needs signing in again",
-  notSeeded: "not linked to the model proxy",
   threshold: "over its usage threshold",
   cooldown: "cooling down",
   unknownUsage: "usage unknown",
@@ -380,7 +379,9 @@ const SKIP_WHY: Record<AccountSkipReason, string> = {
 /** Why an account was passed over: "therealeduard465 — over its usage threshold (weekly 90% ≥ 85%)". */
 export function skipText(skip: AccountSkip): string {
   const who = accountText(skip.agent, skip.accountId, skip.label);
-  const why = SKIP_WHY[skip.why] ?? skip.why;
+  // A reason this build does not name (a record an older build wrote) reads as "unavailable"; its
+  // detail still says what happened.
+  const why = Object.prototype.hasOwnProperty.call(SKIP_WHY, skip.why) ? SKIP_WHY[skip.why] : SKIP_WHY.unavailable;
   const detail = skip.detail.trim();
   return detail ? `${who} — ${why} (${detail})` : `${who} — ${why}`;
 }

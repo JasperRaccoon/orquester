@@ -269,7 +269,7 @@ export interface OrchestratorOptions {
   adapters: ReadonlyMap<AgentAdapterId, AgentAdapter>;
   logger: AdapterLogger;
   hostInstanceId: string;
-  /** Registry id (`claude`, `claudex`, `codex`, …) → adapter id, from the catalog. */
+  /** Registry id (`claude`, `codex`, …) → adapter id, from the catalog. */
   adapterForRefId(refId: string): AgentAdapterId | null;
   /** Absolute home dir for a thread's account (§3.1). Host-side only. */
   resolveHome(input: {
@@ -278,7 +278,7 @@ export interface OrchestratorOptions {
     adapter: AgentAdapterId;
     refId: string;
     accountId: string;
-    home: "system" | "account" | "cliproxy";
+    home: "system" | "account";
   }): Promise<AccountHome>;
   /**
    * §3.3: continuation is opt-in per project over a host-wide default that is
@@ -289,7 +289,7 @@ export interface OrchestratorOptions {
   /** A tab the user closed: settled on the next boot, never continued (§3.3). */
   isThreadClosed?(threadId: string): boolean | Promise<boolean>;
   /**
-   * Where the §6.1 `launchEnv`/`unsetEnv`/`homePath`/`proxyRefId` are kept. The
+   * Where the §6.1 `launchEnv`/`unsetEnv`/`homePath` are kept. The
    * daemon sends them once, at create; a session may be started much later by
    * lazy recovery or by the reconcile, so they must survive a host restart.
    */
@@ -3533,8 +3533,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           ? DEFAULT_RUNTIME_MODE
           : parseRuntimeMode(request.runtimeMode);
       const home = request.home;
-      if (home !== "system" && home !== "account" && home !== "cliproxy") {
-        throw invalidCommand("home must be system, account or cliproxy.");
+      if (home !== "system" && home !== "account") {
+        throw invalidCommand("home must be system or account.");
       }
 
       let resumeCursor: unknown;
@@ -3709,8 +3709,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       throw invalidCommand("accountId is required.");
     }
     const home = request.home;
-    if (home !== "system" && home !== "account" && home !== "cliproxy") {
-      throw invalidCommand("home must be system, account or cliproxy.");
+    if (home !== "system" && home !== "account") {
+      throw invalidCommand("home must be system or account.");
     }
     if (home === "account" && accountId.length === 0) {
       throw invalidCommand("An account home needs an account id.");
@@ -3721,15 +3721,6 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     if (head.adapter === "opencode") {
       throw invalidCommand("OpenCode threads always run under the server's own identity.");
     }
-    // A thread's home KIND is a function of its registry entry, which never
-    // changes; crossing this boundary would also cross the resume cursor's
-    // home, and a cliproxy home does not share `projects/` with the rest.
-    if ((head.home === "cliproxy") !== (home === "cliproxy")) {
-      throw invalidCommand(
-        "This agent's launcher cannot move between the model proxy and a direct account."
-      );
-    }
-
     if (accountId === head.accountId && home === head.home) {
       // Unchanged: still a receipt and still a `{seq}`, so a retry of the same
       // `commandId` is free — but no event, no activity and no restart.
@@ -6698,7 +6689,7 @@ export interface HostThreadSummary extends AgentChatSessionSummaryFields {
 /** Mirrors `AgentHostThreadUsageLimits` (`server/extra-routes.ts`). */
 export interface HostThreadUsageLimits {
   observedAt: string;
-  home: "system" | "account" | "cliproxy";
+  home: "system" | "account";
   accountId: string;
   windows: ProviderUsageWindow[];
 }

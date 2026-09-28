@@ -100,7 +100,7 @@ interface AgentChatSummaryOptions {
 /** A thread's live account-usage reading, with the tab's registry entry. */
 export interface ThreadUsageReading {
   threadId: string;
-  /** The tab's registry entry (`claude`, `claudex`, …). */
+  /** The tab's registry entry (`claude`, `codex`, …). */
   refId: string;
   limits: AgentHostThreadUsageLimits;
 }
@@ -523,7 +523,7 @@ function sanitizeUsageLimits(value: unknown): AgentHostThreadUsageLimits | null 
   if (!raw || typeof raw !== "object") return null;
   const row = raw as Record<string, unknown>;
   if (typeof row.observedAt !== "string" || !Number.isFinite(Date.parse(row.observedAt))) return null;
-  if (row.home !== "system" && row.home !== "account" && row.home !== "cliproxy") return null;
+  if (row.home !== "system" && row.home !== "account") return null;
   if (typeof row.accountId !== "string" || !Array.isArray(row.windows)) return null;
   const windows = row.windows.filter(
     (window): window is AgentHostThreadUsageLimits["windows"][number] =>

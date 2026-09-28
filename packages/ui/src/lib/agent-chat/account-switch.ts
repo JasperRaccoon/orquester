@@ -18,25 +18,6 @@ import type {
 } from "@orquester/api/agent-chat";
 
 /**
- * Which managed-account family a launcher draws its accounts from.
- *
- * The proxy launchers route by model name, so `claudex` pins a seeded **Codex**
- * account (its GPT/Kimi escape hatch) and `claudemix` a seeded **Claude** one
- * (the Fable main loop); their own ids never match an `AgentAccount.agent`.
- * Mirrors `proxyAccountFamily` on the daemon (`agent-chat/service.ts`), which
- * enforces the same rule at the wire.
- */
-export const PROXY_ACCOUNT_FAMILY: Record<string, "claude" | "codex"> = {
-  claudemix: "claude",
-  claudex: "codex"
-};
-
-/** True for a launcher whose accounts are seeded into the model proxy. */
-export function isProxyLauncher(refId: string): boolean {
-  return refId in PROXY_ACCOUNT_FAMILY;
-}
-
-/**
  * Whether this thread can switch accounts at all.
  *
  * OpenCode runs **one server per project** under the daemon's own identity and
@@ -62,27 +43,16 @@ export interface ChatAccountOption {
 
 /**
  * The accounts a chat thread of this launcher may switch to: "System" first,
- * then every managed account of the launcher's family.
- *
- * A proxy launcher's list is additionally filtered to the accounts **seeded**
- * into the model proxy: an unseeded pin emits an `acc<hex>/` routing prefix no
- * auth file serves and every later turn 502s. Same rule, same reason, as the
- * "+" menu's launch chips.
+ * then every managed account of the launcher's family — the "+" menu's launch
+ * chips offer the same list.
  */
 export function buildChatAccountOptions(input: {
   refId: string;
   accounts: readonly AgentAccount[] | undefined;
-  /** Accounts seeded into the model proxy; only read for a proxy launcher. */
-  seededAccountIds?: readonly string[] | undefined;
   /** How a label is shortened for a chip (`shortAccountLabel`). */
   shortLabel: (label: string | undefined) => string | undefined;
 }): ChatAccountOption[] {
-  const family = PROXY_ACCOUNT_FAMILY[input.refId];
-  const accountKey = family ?? input.refId;
-  const seeded = new Set(input.seededAccountIds ?? []);
-  const managed = (input.accounts ?? [])
-    .filter((account) => account.agent === accountKey)
-    .filter((account) => !family || seeded.has(account.id));
+  const managed = (input.accounts ?? []).filter((account) => account.agent === input.refId);
   return [
     { id: SYSTEM_ACCOUNT_ID, label: "System", needsReauth: false },
     ...managed.map((account) => ({

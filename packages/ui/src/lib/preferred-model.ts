@@ -1,6 +1,6 @@
-/** Client-local memory of the last backing model chosen per agent in the new-tab
- *  launcher (claudex/claudemix), so opening several tabs for the same launcher
- *  reuses the pick instead of falling back to the proxy default each time. */
+/** Client-local memory of the last model chosen per agent in the new-tab
+ *  launcher, so opening several tabs for the same agent reuses the pick instead
+ *  of falling back to the catalogue's default each time. */
 const STORAGE_KEY = "orquester:preferred-model-by-agent";
 
 /** Load the persisted per-agent model map (empty/safe on any failure). */

@@ -1,7 +1,7 @@
 // Automated workflows — which agent and account an agent block runs on (spec §5.2).
 //
 // Pure: everything it reads is handed in (the in-memory usage snapshot, the managed accounts, the
-// proxy's seeded ids, the active cooldowns, the clock), so the editor's "Who would run now?"
+// active cooldowns, the clock), so the editor's "Who would run now?"
 // (`POST /api/workflows/account-preview`), the first selection of a block and every failover hop
 // (§5.4) decide by the same function.
 //
@@ -12,12 +12,12 @@
 // exactly that long.
 //
 // Rules, per chain entry in order (the first entry with an eligible candidate wins):
-//   1. Family = `accountFamilyOf(refId)`. No family (opencode), or a claudex model served without
-//      an account (router / xAI) → ONE candidate, "system", subject only to its cooldown.
+//   1. Family = `accountFamilyOf(refId)`. No family (opencode) → ONE candidate, "system", subject
+//      only to its cooldown.
 //   2. Candidates = the family's managed accounts (+ "system" when `includeSystem`, or when the
-//      allow-list names it); claudex/claudemix: only accounts seeded into the proxy. An allow-list
-//      (`accounts`) filters and, for `fixed`, orders them; it matches an account id, else a label.
-//   3. Dropped: not seeded, needs re-auth, cooling down, already tried in this block (`exclude`),
+//      allow-list names it). An allow-list (`accounts`) filters and, for `fixed`, orders them; it
+//      matches an account id, else a label.
+//   3. Dropped: needs re-auth, cooling down, already tried in this block (`exclude`),
 //      over a threshold. Usage is joined BY ACCOUNT ID (`agents[family].accounts[]`; "system" →
 //      `.system`, or the family's head row when it has no managed accounts), every window through
 //      `currentWindow` (an expired window is the quota refilled, never a reading). `percent ≥ 100`
@@ -42,7 +42,7 @@ import {
 } from "@orquester/api";
 import type { AccountCooldown, AccountPolicy, AgentChainEntry } from "@orquester/config";
 import { currentWindow } from "../../usage-parse.ts";
-import { accountFamilyOf, cooldownKey, cooldownSubject, defaultUsesAccount, isProxyLauncher, type UsesAccount } from "./families.ts";
+import { accountFamilyOf, cooldownKey, cooldownSubject } from "./families.ts";
 
 /** A usage reading older than this is unknown (the usage service polls every 5 minutes). */
 const DEFAULT_USAGE_STALE_AFTER_MS = 20 * 60_000;
@@ -51,8 +51,6 @@ export interface SelectAccountInput {
   chain: AgentChainEntry[];
   usage: UsageResponse;
   accounts: AgentAccountsResponse;
-  /** claudex/claudemix: the managed account ids seeded into the model proxy. */
-  seededAccountIds: Set<string>;
   /** Active cooldowns keyed by `cooldownSubject` (`CooldownStore.list()`); expired ones are ignored anyway. */
   cooldowns: Record<string, AccountCooldown>;
   now: Date;
@@ -62,8 +60,6 @@ export interface SelectAccountInput {
   fromChainIndex?: number;
   /** Consider only this chain entry (the in-session account switch). */
   onlyChainIndex?: number;
-  /** Does this launch carry a managed account? Default: `defaultUsesAccount` (xAI models only are accountless). */
-  usesAccount?: UsesAccount;
 }
 
 type ResolvedPolicy = Required<Pick<AccountPolicy, "strategy" | "includeSystem" | "soonestResetWindow" | "leastUsedMetric" | "unknownUsage">> &
@@ -237,7 +233,7 @@ function freedAt(blockers: Blocker[]): number | undefined {
 export interface RankedCandidate {
   accountId: string;
   label?: string;
-  /** The key family (`cooldownSubject(...).family`): the account family, or the refId when accountless / the proxy's pick. */
+  /** The key family (`cooldownSubject(...).family`): the account family, or the refId when accountless. */
   family: string;
   /** "none" = an accountless launch (no usage applies). */
   usage: "known" | "unknown" | "none";
@@ -270,12 +266,10 @@ export function rankChainEntry(input: SelectAccountInput, chainIndex: number): C
   const policy = resolvePolicy(entry.accounts);
   const now = input.now;
   const nowMs = now.getTime();
-  const usesAccount = input.usesAccount ?? defaultUsesAccount;
   const accountFamily = accountFamilyOf(entry.agent);
-  const accountless = accountFamily === null || !usesAccount(entry.agent, entry.model);
-  const family = accountless ? entry.agent : accountFamily;
+  const family = accountFamily ?? entry.agent;
   const keyOf = (accountId: string): string => {
-    const subject = cooldownSubject(entry.agent, entry.model, accountId, usesAccount);
+    const subject = cooldownSubject(entry.agent, entry.model, accountId);
     return cooldownKey(subject.family, subject.account);
   };
   const skipped: AccountSkip[] = [];
@@ -305,12 +299,11 @@ export function rankChainEntry(input: SelectAccountInput, chainIndex: number): C
     return false;
   };
 
-  if (accountless) {
+  if (accountFamily === null) {
     const system: Candidate = { accountId: SYSTEM_ACCOUNT_ID, label: "System", order: 0 };
     const ranked: RankedCandidate[] = [];
     if (!cooledOrTried(system)) {
-      const what = accountFamily === null ? "has no managed accounts" : `serves ${entry.model} without an account`;
-      ranked.push({ accountId: SYSTEM_ACCOUNT_ID, label: "System", family, usage: "none", reason: `${entry.agent}: ${what} — runs on the system login` });
+      ranked.push({ accountId: SYSTEM_ACCOUNT_ID, label: "System", family, usage: "none", reason: `${entry.agent}: has no managed accounts — runs on the system login` });
     }
     return { chainIndex, entry, family, ranked, skipped, ...(earliestFreeAt !== undefined ? { earliestFreeAt } : {}) };
   }
@@ -347,24 +340,15 @@ export function rankChainEntry(input: SelectAccountInput, chainIndex: number): C
   const known: Eligible[] = [];
   const unknown: Eligible[] = [];
   for (const candidate of candidates) {
-    if (candidate.account && isProxyLauncher(entry.agent) && !input.seededAccountIds.has(candidate.accountId)) {
-      skip(candidate, "notSeeded", "not seeded into the model proxy");
-      continue;
-    }
     if (candidate.account?.needsReauth) {
       skip(candidate, "needsReauth", "needs signing in again");
       continue;
     }
     if (cooledOrTried(candidate)) continue;
-    // The proxy's own pick ("system" on a proxy launcher) is whichever seeded account the proxy
-    // routes to — no single usage row describes it.
-    const reading: UsageReading =
-      candidate.accountId === SYSTEM_ACCOUNT_ID && isProxyLauncher(entry.agent)
-        ? { known: false, unknownWhy: "the model proxy picks the account", session: null, weekly: null, scoped: [] }
-        : readUsage(input.usage, accountFamily, candidate.accountId, {
-            now,
-            hasManagedAccounts: managed.length > 0
-          });
+    const reading = readUsage(input.usage, accountFamily, candidate.accountId, {
+      now,
+      hasManagedAccounts: managed.length > 0
+    });
     if (!reading.known) {
       if (policy.unknownUsage === "exclude") skip(candidate, "unknownUsage", `usage unknown (${reading.unknownWhy})`);
       else unknown.push({ ...candidate, reading });

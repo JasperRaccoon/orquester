@@ -55,22 +55,18 @@ test("ambient vendor credentials are stripped from extraEnv", () => {
   });
   assert.equal(env.XAI_API_KEY, undefined);
   assert.equal(env.GROK_OAUTH2_REFERRER, "https://x.ai");
-});
-
-test("the cliproxy launcher may keep the one credential that IS the identity", () => {
-  const env = buildProviderEnv({
+  const claude = buildProviderEnv({
     adapter: "claude",
     ...base,
     extraEnv: {
-      ANTHROPIC_BASE_URL: "http://127.0.0.1:8317",
-      ANTHROPIC_AUTH_TOKEN: "proxy-token",
-      ANTHROPIC_API_KEY: "ambient-user-key"
-    },
-    allowCredentialVars: ["ANTHROPIC_AUTH_TOKEN"]
+      ANTHROPIC_BASE_URL: "http://127.0.0.1:9",
+      ANTHROPIC_AUTH_TOKEN: "retired-proxy-token",
+      ANTHROPIC_API_KEY: "someone-elses-key"
+    }
   });
-  assert.equal(env.ANTHROPIC_AUTH_TOKEN, "proxy-token");
-  assert.equal(env.ANTHROPIC_BASE_URL, "http://127.0.0.1:8317");
-  assert.equal(env.ANTHROPIC_API_KEY, undefined, "an unlisted ambient key still goes");
+  assert.equal(claude.ANTHROPIC_BASE_URL, "http://127.0.0.1:9");
+  assert.equal(claude.ANTHROPIC_AUTH_TOKEN, undefined);
+  assert.equal(claude.ANTHROPIC_API_KEY, undefined);
 });
 
 test("extraEnv can never move a child off the session PATH, TMPDIR or HOME", () => {

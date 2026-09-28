@@ -20,8 +20,7 @@ import type { ThreadItem, ThreadMessageItem } from "./thread.ts";
 
 /**
  * Whether a thread of this adapter gets the {@link reEmittedAssistantCopies}
- * repair: exactly a Claude thread (`claudex`/`claudemix` run on the `claude`
- * adapter too). Only a Claude log can hold a re-emitted copy; Codex narration
+ * repair: exactly a Claude thread. Only a Claude log can hold a re-emitted copy; Codex narration
  * may legitimately repeat itself, and nothing ever re-emitted a Codex,
  * OpenCode or Grok message. The one place that decision lives.
  */

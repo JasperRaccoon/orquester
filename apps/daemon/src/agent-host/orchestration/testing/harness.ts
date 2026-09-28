@@ -87,13 +87,12 @@ export interface TestHost<S extends HostThreadStore = FakeThreadStore> {
     refId?: string;
     cwd?: string;
     accountId?: string;
-    home?: "system" | "account" | "cliproxy";
+    home?: "system" | "account";
     /** §6.1 create-time resume, for the E5/E6 paths. */
-    resume?: { home: "system" | "account" | "cliproxy"; conversationId: string };
+    resume?: { home: "system" | "account"; conversationId: string };
     launchEnv?: Record<string, string>;
     unsetEnv?: string[];
     homePath?: string;
-    proxyRefId?: string;
   }): Promise<string>;
   settle(): Promise<void>;
   stop(): Promise<void>;
@@ -161,17 +160,14 @@ export function createTestHost<S extends HostThreadStore = FakeThreadStore>(
     adapters,
     logger,
     hostInstanceId: "host-test",
-    adapterForRefId: (refId) => {
-      if (refId === "claudex" || refId === "claudemix") return "claude";
-      return adapters.has(refId as AgentAdapterId) ? (refId as AgentAdapterId) : null;
-    },
+    adapterForRefId: (refId) =>
+      adapters.has(refId as AgentAdapterId) ? (refId as AgentAdapterId) : null,
     // Mirrors `main.ts`: the daemon's resolved `homePath` is the authority.
-    resolveHome: async ({ home, accountId, refId, threadId }) => {
+    resolveHome: async ({ home, accountId, threadId }) => {
       const launch = orchestrator.launchConfig(threadId);
       return {
         kind: home,
         ...(home === "account" ? { accountId } : {}),
-        ...(home === "cliproxy" ? { proxyRefId: launch?.proxyRefId ?? refId } : {}),
         path: launch?.homePath ?? `/tmp/home/${accountId}`
       };
     },
@@ -216,8 +212,7 @@ export function createTestHost<S extends HostThreadStore = FakeThreadStore>(
         ...(input.resume ? { resume: input.resume } : {}),
         ...(input.launchEnv ? { launchEnv: input.launchEnv } : {}),
         ...(input.unsetEnv ? { unsetEnv: input.unsetEnv } : {}),
-        ...(input.homePath ? { homePath: input.homePath } : {}),
-        ...(input.proxyRefId ? { proxyRefId: input.proxyRefId } : {})
+        ...(input.homePath ? { homePath: input.homePath } : {})
       });
       await orchestrator.subscribe(threadId, {
         onEvents: (events) => {

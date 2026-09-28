@@ -68,11 +68,8 @@ function useChatAgents(): AgentChoice[] {
   );
 }
 
-/** The models an entry can pick: the proxy's list for claudex/claudemix, else the provider's catalogue. */
-function modelsFor(agent: string, providers: readonly ProviderSnapshot[], proxyModels: readonly string[] | null): ProviderModel[] {
-  if ((agent === "claudex" || agent === "claudemix") && proxyModels && proxyModels.length > 0) {
-    return proxyModels.map((slug) => ({ slug, name: slug, capabilities: null }));
-  }
+/** The models an entry can pick: the provider's catalogue. */
+function modelsFor(agent: string, providers: readonly ProviderSnapshot[]): ProviderModel[] {
   return providerForRefId(providers, agent)?.models ?? [];
 }
 
@@ -82,7 +79,6 @@ const ChainRow: React.FC<{
   count: number;
   agents: AgentChoice[];
   providers: readonly ProviderSnapshot[];
-  proxyModels: readonly string[] | null;
   error: string | null;
   onChange: (entry: AgentChainEntry) => void;
   onMove: (delta: number) => void;
@@ -90,9 +86,9 @@ const ChainRow: React.FC<{
   dragProps: React.HTMLAttributes<HTMLDivElement>;
   onGripDragStart: (event: React.DragEvent) => void;
   dropTarget: boolean;
-}> = ({ entry, index, count, agents, providers, proxyModels, error, onChange, onMove, onRemove, dragProps, onGripDragStart, dropTarget }) => {
+}> = ({ entry, index, count, agents, providers, error, onChange, onMove, onRemove, dragProps, onGripDragStart, dropTarget }) => {
   const [accountsOpen, setAccountsOpen] = useState(index === 0);
-  const models = modelsFor(entry.agent, providers, proxyModels);
+  const models = modelsFor(entry.agent, providers);
   const selected = resolveSelectedModel(models, { model: entry.model });
   const exact = models.some((model) => model.slug === entry.model);
   const descriptors = optionDescriptors(exact ? selected : null).filter(
@@ -150,7 +146,7 @@ const ChainRow: React.FC<{
               value={entry.agent}
               aria-label="Agent"
               onValue={(agent) => {
-                const nextModels = modelsFor(agent, providers, proxyModels);
+                const nextModels = modelsFor(agent, providers);
                 const model = resolveSelectedModel(nextModels, null)?.slug ?? entry.model;
                 const policy = entry.accounts ?? DEFAULT_POLICY;
                 // Another family's account ids mean nothing here: the allow-list starts over.
@@ -313,7 +309,6 @@ export const ChainEditor: React.FC<{
   const api = useApi();
   const agents = useChatAgents();
   const providers = useProviderSnapshots();
-  const proxyModels = useAppStore((state) => state.cliproxyModels?.models ?? null);
   const [dragIndex, setDragIndex] = useState<number | null>(null);
   const [overIndex, setOverIndex] = useState<number | null>(null);
   const [preview, setPreview] = useState<
@@ -332,7 +327,7 @@ export const ChainEditor: React.FC<{
     const used = new Set(chain.map((entry) => entry.agent));
     const agent = agents.find((candidate) => !used.has(candidate.id) && candidate.installed) ?? agents[0];
     const id = agent?.id ?? "codex";
-    const model = resolveSelectedModel(modelsFor(id, providers, proxyModels), null)?.slug ?? "default";
+    const model = resolveSelectedModel(modelsFor(id, providers), null)?.slug ?? "default";
     onChange([...chain, { agent: id, model, accounts: { ...DEFAULT_POLICY } }]);
   };
 
@@ -356,7 +351,6 @@ export const ChainEditor: React.FC<{
           count={chain.length}
           agents={agents}
           providers={providers}
-          proxyModels={proxyModels}
           error={errorAt(index)}
           onChange={(next) => onChange(chain.map((current, i) => (i === index ? next : current)))}
           onMove={(delta) => move(index, index + delta)}

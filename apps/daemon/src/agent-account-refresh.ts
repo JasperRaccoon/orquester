@@ -10,8 +10,8 @@ const CLAUDE_CLIENT_ID = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 // refresh token, so a wrong/rotated constant fails closed (usage renders stale).
 const CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-// The grok CLI's public OIDC client (the same one CLIProxyAPI impersonates for
-// Grok-via-proxy). A standard-OAuth2 token endpoint: form-encoded refresh grant.
+// The grok CLI's public OIDC client (the one the device-code link signs in with).
+// A standard-OAuth2 token endpoint: form-encoded refresh grant.
 export const GROK_OIDC_ISSUER = "https://auth.x.ai";
 export const GROK_OIDC_CLIENT_ID = "b1a00492-073a-47ea-816f-4c329264a828";
 const GROK_TOKEN_URL = `${GROK_OIDC_ISSUER}/oauth2/token`;

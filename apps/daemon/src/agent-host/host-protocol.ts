@@ -24,15 +24,14 @@ export { agentHostSocketPath, agentHostTokenPath };
  * 1. probe the socket with the token;
  * 2. healthy and the same version — adopt;
  * 3. healthy but a version mismatch (after a deploy) — adopt, then restart the
- *    host as soon as no thread has an active turn (the drain rule cliproxy
- *    uses for re-parenting);
+ *    host as soon as no thread has an active turn (the drain rule);
  * 4. the socket answers but rejects the token — a foreign process. Log an
  *    error, **never kill or adopt**;
  * 5. nothing answers — spawn, poll readiness, then adopt.
  */
 export const AGENT_HOST_PROTOCOL_VERSION = 1;
 
-/** The tmux service session the host runs in, like cliproxy's (§3.1). */
+/** The tmux service session the host runs in, like the other `orqsvc-*` service sessions (§3.1). */
 export const AGENT_HOST_SERVICE_SESSION = "orqsvc-agent-host";
 
 /** Bearer token header. The token file is 0600 and regenerated only when no host is alive. */
@@ -45,7 +44,7 @@ export function agentHostAuthValue(token: string): string {
 /** The `Host:` value used on unix-socket requests (the authority is meaningless). */
 export const AGENT_HOST_HTTP_HOST = "agent-host.localhost";
 
-/** 15 s unref'd health interval with bounded backoff, as for cliproxy (§3.1). */
+/** 15 s unref'd health interval with bounded backoff (§3.1). */
 export const AGENT_HOST_HEALTH_INTERVAL_MS = 15_000;
 
 /**
@@ -259,11 +258,11 @@ export interface CreateHostThreadRequest {
   /** Registry id; the host maps it to an adapter via the catalog's `chat`. */
   refId: string;
   accountId: string;
-  home: "system" | "account" | "cliproxy";
+  home: "system" | "account";
   modelSelection: unknown;
   runtimeMode: unknown;
   /** §6.1: refused with `RESUME_UNAVAILABLE` when the adapter cannot use it. */
-  resume?: { home: "system" | "account" | "cliproxy"; conversationId: string };
+  resume?: { home: "system" | "account"; conversationId: string };
   /**
    * The launcher-specific environment §3.1 requires a chat thread to get —
    * **exactly** what a terminal launch of the same registry entry gets today.
@@ -271,10 +270,8 @@ export interface CreateHostThreadRequest {
    * The daemon composes it, because only the daemon has the sources: the
    * registry entry's own `env` plus its per-launcher env file
    * (`<appdir>/daemon/env/<id>.env`, e.g. `opencode.env`), and the
-   * `resolveExtraEnv` contributors — the managed account home, the cliproxy
-   * launcher env for `claudex`/`claudemix` (`ANTHROPIC_BASE_URL`,
-   * `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`, the compaction window and the
-   * Claude timeout), and the resolved per-launch model pin.
+   * `resolveExtraEnv` contributors — the managed account home and the Claude
+   * timeout.
    *
    * The host layers it **over** what `buildProviderEnv()` produces and keeps
    * `unsetEnv` as the ambient-credential denylist, so a thread can never
@@ -286,15 +283,13 @@ export interface CreateHostThreadRequest {
   unsetEnv?: string[];
   /** Absolute home dir for `home`, resolved daemon-side. Never on a client wire. */
   homePath?: string;
-  /** The proxy launcher owning the home when `home` is `"cliproxy"`. */
-  proxyRefId?: string;
 }
 
 /**
  * Body of `POST /threads/:id/identity` — §3.4's account switch, applied on the
  * thread's next message.
  *
- * The four launch fields are the SAME shapes {@link CreateHostThreadRequest}
+ * The three launch fields are the SAME shapes {@link CreateHostThreadRequest}
  * carries, because they replace exactly what create wrote: the host rewrites
  * `launch.json` from them **before** it records the new identity on the head,
  * so a host that dies in between relaunches under the environment the head
@@ -307,15 +302,11 @@ export interface SetThreadIdentityRequest {
   commandId: string;
   /** The managed account id, or `""` for the system identity. */
   accountId: string;
-  /**
-   * The home kind. It may never cross the cliproxy boundary: a thread's home
-   * KIND is a function of its registry entry, which never changes.
-   */
-  home: "system" | "account" | "cliproxy";
+  /** The home kind: `"account"` for a managed account, else `"system"`. */
+  home: "system" | "account";
   launchEnv?: Record<string, string>;
   unsetEnv?: string[];
   homePath?: string;
-  proxyRefId?: string;
 }
 
 /**

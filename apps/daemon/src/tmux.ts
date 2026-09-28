@@ -7,8 +7,8 @@ import { basename, delimiter, isAbsolute, join } from "node:path";
 export const TMUX_SESSION_PREFIX = "orq-";
 
 /**
- * Prefix for daemon-owned *service* sessions (e.g. the managed CLIProxyAPI
- * process). It must NOT start with `TMUX_SESSION_PREFIX` — the reaper scans
+ * Prefix for daemon-owned *service* sessions (e.g. `orqsvc-agent-host`, the
+ * agent host). It must NOT start with `TMUX_SESSION_PREFIX` — the reaper scans
  * `list-sessions` for `orq-` names, and reattach() reaps orphans there; a service
  * session named `orq-…` would be mistaken for a user session and reaped. Because
  * `"orqsvc-".startsWith("orq-") === false` (char 3 is `s`, not `-`), service

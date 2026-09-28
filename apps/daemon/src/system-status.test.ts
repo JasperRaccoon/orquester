@@ -473,60 +473,38 @@ test("a marked process whose parent still runs outside every root is no orphan: 
 });
 
 test("kill() refuses a protectedPids entry, directly and inside a subtree", async () => {
-  if (!SYSTEM_STATUS_SUPPORTED) {
-    return;
-  }
-  // Stands in for the tmux-less model-proxy child: a real child of this
-  // process, so it passes the "managed by this daemon" gate and would be
-  // killable if the guard were missing.
-  const proxy = spawn("sleep", ["30"], { stdio: "ignore" });
-  const parent = spawn("sh", ["-c", "sleep 30"], { stdio: "ignore" });
+  if (!SYSTEM_STATUS_SUPPORTED) return;
+  const guarded = spawn("sleep", ["30"], { stdio: "ignore" });
+  const started = once(guarded, "spawn");
+  const guardedGone = once(guarded, "exit").then(() => undefined);
+  const parent = spawn("sh", ["-c", "sleep 30 & child=$!; printf '%s\\n' \"$child\"; wait \"$child\""], { stdio: ["ignore", "pipe", "ignore"] });
+  const parentGone = once(parent, "exit").then(() => undefined);
+  const childAnnounced = once(parent.stdout, "data");
+  let spared: number | undefined;
   try {
-    await setTimeoutPromise(300);
-    assert.ok(proxy.pid && parent.pid);
-    const status = service({ protectedPids: () => [proxy.pid as number] });
-
-    const refused = await status.kill(proxy.pid);
+    const [, [line]] = await Promise.all([started, childAnnounced]);
+    spared = Number(String(line).trim());
+    assert.ok(guarded.pid && parent.pid);
+    assert.ok(Number.isInteger(spared) && spared > 1);
+    const status = service({ protectedPids: () => [{ pid: guarded.pid!, label: "the agent host" }] });
+    const refused = await status.kill(guarded.pid);
     assert.equal(refused.ok, false);
     assert.equal(refused.ok === false && refused.code, "PROCESS_PROTECTED");
-    const { stdout: alive } = await exec("sh", [
-      "-c",
-      `kill -0 ${proxy.pid} 2>/dev/null && echo alive || echo gone`
-    ]);
-    assert.equal(alive.trim(), "alive", "a refused kill must not have signalled anything");
+    assert.doesNotThrow(() => process.kill(guarded.pid!, 0));
 
-    // Protected INSIDE a requested subtree: killing the shell must spare it.
-    const { stdout: kids } = await exec("pgrep", ["-P", String(parent.pid)]);
-    const spared = Number(kids.trim().split("\n")[0]);
-    assert.ok(Number.isInteger(spared) && spared > 1);
-    const sub = service({ protectedPids: () => [spared] });
+    const sub = service({ protectedPids: () => [{ pid: spared!, label: "the agent host" }] });
     assert.equal((await sub.kill(parent.pid)).ok, true);
-    await setTimeoutPromise(200);
-    const { stdout: after } = await exec("sh", [
-      "-c",
-      `kill -0 ${spared} 2>/dev/null && echo alive || echo gone`
-    ]);
-    assert.equal(after.trim(), "alive", "a protected descendant must survive a subtree kill");
+    await allGone(parentGone, "the selected parent exiting");
+    assert.doesNotThrow(() => process.kill(spared!, 0), "a protected descendant must survive a subtree kill");
 
-    // The spared sleep is now reparented (its shell died), so it is no longer
-    // ours — clean it up by hand rather than through the service.
-    try {
-      process.kill(spared, "SIGKILL");
-    } catch {
-      // Already gone.
-    }
-
-    // A supplier that throws must not turn a legitimate kill into a 500 — nor
-    // fail closed and refuse everything.
-    const throwing = service({
-      protectedPids: () => {
-        throw new Error("boom");
-      }
-    });
-    assert.equal((await throwing.kill(proxy.pid)).ok, true);
+    const throwing = service({ protectedPids: () => { throw new Error("boom"); } });
+    assert.equal((await throwing.kill(guarded.pid)).ok, true);
+    await allGone(guardedGone, "the unprotected child exiting");
   } finally {
-    for (const child of [proxy, parent]) {
-      child.kill("SIGKILL");
+    for (const pid of [guarded.pid, parent.pid, spared]) {
+      if (!pid) continue;
+      try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ }
     }
+    await allGone(Promise.all([parentGone, guardedGone]).then(() => undefined), "owned children exiting");
   }
 });

@@ -687,4 +687,3 @@ node --import tsx --import ../../scripts/test/assert-ok.mjs --import ./test/svg-
 - Standalone retained checks: **4 passed** (`app-config.check.ts`, `system/session-owner.check.ts`, `system/system-format.check.ts`, `topbar/usage-format.check.ts`), each executed with the same four Node import hooks.
 - `pnpm --filter @orquester/ui typecheck`: reached unrelated concurrent agent-chat changes (removed status/title helpers still imported by tests, removed historyRowCap/rest test seams). No errors in this scope. Root handles the integrated rerun.
 - Final scoped `git diff --check`: passed. Reviewed production default-equivalence and deleted support references. No daemon/browser was started. Root owns repository check/test/build and commit/merge/push.
-

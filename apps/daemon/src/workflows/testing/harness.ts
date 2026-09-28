@@ -111,7 +111,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     services: {
       chat: { api: nullDaemonApi },
       usage: { snapshot: () => ({}) as UsageResponse },
-      accounts: { list: () => ({ accounts: [] }) as never, seededAccountIds: () => new Set() },
+      accounts: { list: () => ({ accounts: [] }) as never },
       cooldowns: { get: () => null, set: async () => undefined, list: () => ({}) },
       sandbox,
       projects,

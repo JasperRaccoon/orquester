@@ -10,7 +10,7 @@ import {
 test("createDefaultAgentAccounts is empty with null defaults", () => {
   const d = createDefaultAgentAccounts();
   assert.deepEqual(d.accounts, []);
-  // Grok is the third managed account family (AGENTS.md, the model proxy's Grok bullet).
+  // Grok is the third managed account family (AGENTS.md, the Grok managed-accounts bullet).
   assert.deepEqual(d.defaults, { claude: null, codex: null, grok: null });
 });
 

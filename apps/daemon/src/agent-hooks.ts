@@ -8,16 +8,12 @@ interface Logger {
 
 /**
  * Canonical agent family for a registry entry id. Hook installation, config
- * targeting, and the installer dispatch all key on the FAMILY, never the raw id
- * — the claudex/claudemix launchers run the real `claude` binary against the
- * managed CLIProxyAPI, so they must receive claude-shaped hooks + config, not
- * fall through to the opencode installer. Unknown ids get no managed hooks.
+ * targeting, and the installer dispatch all key on the FAMILY, never the raw id.
+ * Unknown ids get no managed hooks.
  */
 export function agentFamily(entryId: string): "claude" | "codex" | "opencode" | "grok" | null {
   switch (entryId) {
     case "claude":
-    case "claudex":
-    case "claudemix":
       return "claude";
     case "codex":
       return "codex";

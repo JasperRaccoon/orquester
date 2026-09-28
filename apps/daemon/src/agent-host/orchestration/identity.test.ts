@@ -295,37 +295,18 @@ describe("switching a thread's account (§3.4)", () => {
     await host.stop();
   });
 
-  it("refuses to cross the cliproxy boundary in either direction", async () => {
+  it("refuses a home kind it does not know — an older build's `cliproxy` included", async () => {
     const { host, threadId } = await idleThreadWithACursor();
     await assert.rejects(
       () =>
         host.orchestrator.setIdentity(threadId, {
           commandId: cmd(),
           accountId: "acc2",
-          home: "cliproxy",
-          proxyRefId: "claudex"
-        }),
-      (error: { code?: string }) => error.code === "INVALID_COMMAND"
-    );
-
-    const proxyHost = createTestHost();
-    const proxyThread = await proxyHost.createThread({
-      threadId: "thread-proxy",
-      refId: "claudex",
-      home: "cliproxy",
-      proxyRefId: "claudex"
-    });
-    await assert.rejects(
-      () =>
-        proxyHost.orchestrator.setIdentity(proxyThread, {
-          commandId: cmd(),
-          accountId: "acc2",
-          home: "account"
+          home: "cliproxy" as never
         }),
       (error: { code?: string }) => error.code === "INVALID_COMMAND"
     );
     await host.stop();
-    await proxyHost.stop();
   });
 });
 

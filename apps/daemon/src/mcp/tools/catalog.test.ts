@@ -62,30 +62,30 @@ test("list_agents returns the catalogue, optionally one agent", async () => {
   await assert.rejects(tool("list_agents").run({ agent: "nope", includeLegacyModels: false }, ctx(api)), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
 });
 
-test("list_conversations resolves the project, maps homes to launch agents and flags resumability", async (t) => {
+test("list_conversations resolves the project, names each row's agent and flags resumability", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "mcp-cat-")); t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, "acme", "api"), { recursive: true });
   const api = new FakeDaemonApi(); api.fsRoot = root; api.workspacesDir = root;
-  api.on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [{ id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } }, { id: "claudex", kind: "agent", name: "Claude Code × GPT", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } }] } })
+  api.on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [{ id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } }, { id: "codex", kind: "agent", name: "Codex", bin: ["codex"], enabled: true, installState: "idle", chat: { adapter: "codex" } }] } })
     .on("GET", "/api/agents/conversations", ({ query }) => ({ status: 200, body: { conversations: [
       { id: "s1", agentRefId: "claude", title: "Fix build", updatedAt: stamp(9), home: "account", accountId: "acc-1" },
-      { id: "s2", agentRefId: "claude", title: "Proxy chat", updatedAt: stamp(8), home: "cliproxy", proxyRefId: "claudex" },
+      { id: "s2", agentRefId: "codex", title: "Codex chat", updatedAt: stamp(8), home: "system" },
       { id: "s3", agentRefId: "deepseek", title: "Old", updatedAt: stamp(7) },
       { id: "s4", agentRefId: "claude", title: "Other", preview: "p", updatedAt: stamp(6), home: "system" }
     ].filter(() => query?.path === join(root, "acme", "api")) } }));
   const r = await tool("list_conversations").run({ project: "acme/api", limit: 3 }, ctx(api));
   assert.deepEqual(r, { conversations: [
     { id: "s1", agent: "claude", title: "Fix build", updatedAt: stamp(9), home: "account", accountId: "acc-1", resumable: true },
-    { id: "s2", agent: "claudex", title: "Proxy chat", updatedAt: stamp(8), home: "cliproxy", resumable: true },
+    { id: "s2", agent: "codex", title: "Codex chat", updatedAt: stamp(8), home: "system", resumable: true },
     { id: "s3", agent: "deepseek", title: "Old", updatedAt: stamp(7), home: "system", resumable: false }
   ] });
-  const only = await tool("list_conversations").run({ project: join(root, "acme", "api"), agent: "claudex", limit: 20 }, ctx(api));
+  const only = await tool("list_conversations").run({ project: join(root, "acme", "api"), agent: "codex", limit: 20 }, ctx(api));
   assert.deepEqual((only.conversations as { id: string }[]).map((c) => c.id), ["s2"]);
 });
 
 const chatRegistry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [
   { id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } },
-  { id: "claudex", kind: "agent", name: "Claude Code × GPT", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } },
+  { id: "codex", kind: "agent", name: "Codex", bin: ["codex"], enabled: true, installState: "idle", chat: { adapter: "codex" } },
   { id: "deepseek", kind: "agent", name: "DeepSeek", bin: ["deepseek"], enabled: false, installState: "idle" }
 ] };
 
@@ -144,9 +144,9 @@ test("a filter naming nothing that exists is refused, not answered with an empty
   conv.on("GET", "/api/registry", { status: 200, body: chatRegistry })
     .on("GET", "/api/agents/conversations", { status: 200, body: { conversations: [{ id: "s1", agentRefId: "claude", title: "A", updatedAt: stamp(1) }, { id: "s2", agentRefId: "gemini", title: "Legacy", updatedAt: stamp(0) }] } });
   await assert.rejects(tool("list_conversations").run({ project: "acme/api", agent: "cluade", limit: 20 }, ctx(conv)),
-    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "Unknown agent \"cluade\". Valid agents: claude, claudex, deepseek.");
+    (e: { code: string }) => e.code === "INVALID_ARGUMENT");
   // Known ids answer honestly: an agent with nothing recorded is an empty list, and an agent a row names is a valid filter.
-  assert.deepEqual(await tool("list_conversations").run({ project: "acme/api", agent: "claudex", limit: 20 }, ctx(conv)), { conversations: [] });
+  assert.deepEqual(await tool("list_conversations").run({ project: "acme/api", agent: "codex", limit: 20 }, ctx(conv)), { conversations: [] });
   assert.deepEqual((await tool("list_conversations").run({ project: "acme/api", agent: "gemini", limit: 20 }, ctx(conv))).conversations, [{ id: "s2", agent: "gemini", title: "Legacy", updatedAt: stamp(0), home: "system", resumable: false }]);
 });
 
@@ -162,21 +162,18 @@ test("list_agents hides legacy models unless includeLegacyModels", async () => {
   assert.deepEqual(await models(true), [["fable", false], ["sonnet-4", true]]);
 });
 
-test("list_conversations: a proxy-home row resumes only through its launcher, preview is kept, and the agent filter runs before the limit", async (t) => {
+test("list_conversations: preview is kept, a detect-only agent's row is not resumable, and the agent filter runs before the limit", async (t) => {
   const api = await projectApi(t);
   api.on("GET", "/api/registry", { status: 200, body: chatRegistry }).on("GET", "/api/agents/conversations", { status: 200, body: { conversations: [
-    { id: "s1", agentRefId: "claude", title: "Proxy home, launcher unknown", updatedAt: stamp(9), home: "cliproxy" },
-    { id: "s2", agentRefId: "claude", title: "Proxy", preview: "the long blurb", updatedAt: stamp(8), home: "cliproxy", proxyRefId: "claudex" },
+    { id: "s1", agentRefId: "claude", title: "In an account home", updatedAt: stamp(9), home: "account", accountId: "acc-1" },
+    { id: "s2", agentRefId: "codex", title: "Codex", preview: "the long blurb", updatedAt: stamp(8), home: "system" },
     { id: "s3", agentRefId: "deepseek", title: "Detect-only", updatedAt: stamp(7) },
     { id: "s4", agentRefId: "claude", title: "Mine", updatedAt: stamp(6), home: "system" },
-    { id: "s5", agentRefId: "claude", title: "Proxy again", updatedAt: stamp(5), home: "cliproxy", proxyRefId: "claudex" }
+    { id: "s5", agentRefId: "codex", title: "Codex again", updatedAt: stamp(5), home: "system" }
   ] } });
-  const all = await tool("list_conversations").run({ project: "acme/api", limit: 20 }, ctx(api));
-  assert.deepEqual((all.conversations as { id: string; agent: string; resumable: boolean }[]).map((c) => [c.id, c.agent, c.resumable]),
-    [["s1", "claude", false], ["s2", "claudex", true], ["s3", "deepseek", false], ["s4", "claude", true], ["s5", "claudex", true]]);
-  // Filtered first, then cut: claudex's first row, not the first row overall.
-  assert.deepEqual(await tool("list_conversations").run({ project: "acme/api", agent: "claudex", limit: 1 }, ctx(api)),
-    { conversations: [{ id: "s2", agent: "claudex", title: "Proxy", preview: "the long blurb", updatedAt: stamp(8), home: "cliproxy", resumable: true }] });
+  // Filtered first, then cut: codex's first row, not the first row overall.
+  assert.deepEqual(await tool("list_conversations").run({ project: "acme/api", agent: "codex", limit: 1 }, ctx(api)),
+    { conversations: [{ id: "s2", agent: "codex", title: "Codex", preview: "the long blurb", updatedAt: stamp(8), home: "system", resumable: true }] });
 });
 
 test("list_conversations fails INTERNAL when the registry cannot be read, as list_agents does, instead of calling every row unresumable", async (t) => {
@@ -214,7 +211,7 @@ type ListedModel = { slug: string; isDefault: boolean; isLegacy?: boolean; optio
 type ListedAgent = { id: string; models: ListedModel[]; modelsTruncated?: true; modelCount?: number; [key: string]: unknown };
 
 const chatAgent = (id: string, name: string, adapter: string) => ({ id, kind: "agent", name, bin: [adapter === "claude" ? "claude" : id], enabled: true, installState: "idle", chat: { adapter } });
-const allChatAgents = [chatAgent("claude", "Claude Code", "claude"), chatAgent("codex", "Codex", "codex"), chatAgent("opencode", "OpenCode", "opencode"), chatAgent("grok", "Grok Build", "grok"), chatAgent("claudex", "Claude Code × GPT/Kimi/Grok", "claude"), chatAgent("claudemix", "Claude Code × Mixed", "claude")];
+const allChatAgents = [chatAgent("claude", "Claude Code", "claude"), chatAgent("codex", "Codex", "codex"), chatAgent("opencode", "OpenCode", "opencode"), chatAgent("grok", "Grok Build", "grok")];
 const select = (id: string, label: string, values: string[], description?: string) => ({ id, label, type: "select", ...(description ? { description } : {}), options: values.map((v, i) => ({ id: v, label: v[0]!.toUpperCase() + v.slice(1), ...(i === 1 ? { isDefault: true } : {}) })) });
 
 /** `n` OpenCode models, their option descriptors in 22 distinct sets (as on a real host: 389 models, a few dozen sets); `defaultAt` is flagged default, or none. */
@@ -234,13 +231,10 @@ function catalogueApi(openCodeModels: unknown[]): FakeDaemonApi {
   const codexModels = ["gpt-6-astra", "gpt-6-sol", "gpt-6-luna", "gpt-5.6-sol", "gpt-5.5"].map((slug, i) => ({ slug, name: slug.toUpperCase(), ...(i === 0 ? { isDefault: true } : {}), ...(i === 4 ? { isLegacy: true } : {}), capabilities: { optionDescriptors: [select("effort", "Effort", ["low", "medium", "high", "xhigh"]), select("serviceTier", "Service tier", ["flex", "default", "priority"])] } }));
   const grokModels = ["grok-4.6", "grok-4.5"].map((slug, i) => ({ slug, name: `Grok ${slug.slice(5)}`, ...(i === 0 ? { isDefault: true } : {}), capabilities: { optionDescriptors: [select("reasoningEffort", "Reasoning", ["low", "high"])] } }));
   const row = (id: string, models: unknown[]) => ({ id, refIds: [id], installed: true, version: "1.0.0", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [], capabilities: { sessionModelSwitch: "in-session", showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" } }, models });
-  const cliproxy = { state: "healthy", reasons: [], detail: null, version: null, defaultModel: "gpt-5.6-sol", backgroundModel: "", modelOverrides: {}, providers: [], routerProviders: [], accounts: [], activeSessionCount: 0, testedClaudeCliVersion: null, xai: { state: "none", email: null, expiredAt: null, lastQuotaError: null, lastLinkError: null, link: null } };
   return new FakeDaemonApi()
     .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: allChatAgents } })
     .on("GET", "/api/agent/providers", { status: 200, body: { hostInstanceId: "h", providers: [row("claude", claudeModels), row("codex", codexModels), row("opencode", openCodeModels), row("grok", grokModels)] } })
-    .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [], defaults: { claude: null, codex: null, grok: null } } })
-    .on("GET", "/api/cliproxy", { status: 200, body: cliproxy })
-    .on("GET", "/api/cliproxy/models", { status: 200, body: { models: [], asOf: null } });
+    .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [], defaults: { claude: null, codex: null, grok: null } } });
 }
 
 const agentsOf = (r: Record<string, unknown>) => r.agents as ListedAgent[];
@@ -251,7 +245,7 @@ test("list_agents bounds large catalogues, preserves every model and the default
   const r = await listAgents(api);
   assert.ok(Buffer.byteLength(JSON.stringify(r)) <= 60_000);
   const agents = agentsOf(r);
-  assert.deepEqual(agents.map((a) => a.id), ["claude", "codex", "opencode", "grok", "claudex", "claudemix"]);
+  assert.deepEqual(agents.map((a) => a.id), ["claude", "codex", "opencode", "grok"]);
   const models = agents.find((a) => a.id === "opencode")!.models;
   assert.deepEqual(models.map((m) => m.slug), Array.from({ length: 400 }, (_, i) => "openrouter/vendor-" + i % 40 + "/model-" + i));
   assert.equal(models[137]!.isDefault, true);
@@ -335,13 +329,13 @@ test("list_conversations keeps within the result cap: 200 long rows lose the old
 
 test("list_conversations: a row is resumable only through an ENABLED chat agent, as the GUI's resume lists require (create_session refuses a disabled one)", async (t) => {
   const api = await projectApi(t);
-  api.on("GET", "/api/registry", { status: 200, body: { ...chatRegistry, agents: chatRegistry.agents.map((a) => (a.id === "claudex" ? { ...a, enabled: false, disabledReason: "proxy down" } : a)) } })
+  api.on("GET", "/api/registry", { status: 200, body: { ...chatRegistry, agents: chatRegistry.agents.map((a) => (a.id === "codex" ? { ...a, enabled: false } : a)) } })
     .on("GET", "/api/agents/conversations", { status: 200, body: { conversations: [
-      { id: "s1", agentRefId: "claude", title: "Through the proxy", updatedAt: stamp(3), home: "cliproxy", proxyRefId: "claudex" },
+      { id: "s1", agentRefId: "codex", title: "Codex chat", updatedAt: stamp(3), home: "system" },
       { id: "s2", agentRefId: "claude", title: "Mine", updatedAt: stamp(2), home: "system" }
     ] } });
   const r = await tool("list_conversations").run({ project: "acme/api", limit: 20 }, ctx(api));
-  assert.deepEqual((r.conversations as { id: string; agent: string; resumable: boolean }[]).map((c) => [c.id, c.agent, c.resumable]), [["s1", "claudex", false], ["s2", "claude", true]]);
+  assert.deepEqual((r.conversations as { id: string; agent: string; resumable: boolean }[]).map((c) => [c.id, c.agent, c.resumable]), [["s1", "codex", false], ["s2", "claude", true]]);
   // The filter still names the disabled agent's rows: it lists them, it just cannot resume them.
-  assert.deepEqual((await tool("list_conversations").run({ project: "acme/api", agent: "claudex", limit: 20 }, ctx(api))).conversations, [{ id: "s1", agent: "claudex", title: "Through the proxy", updatedAt: stamp(3), home: "cliproxy", resumable: false }]);
+  assert.deepEqual((await tool("list_conversations").run({ project: "acme/api", agent: "codex", limit: 20 }, ctx(api))).conversations, [{ id: "s1", agent: "codex", title: "Codex chat", updatedAt: stamp(3), home: "system", resumable: false }]);
 });

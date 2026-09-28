@@ -3,7 +3,7 @@
  * (spec §3.1 "Launch environment for provider children").
  *
  * Built **explicitly, never by spreading `process.env`**: the daemon's own
- * environment holds cliproxy and push secrets, and a provider child has no
+ * environment holds push and daemon secrets, and a provider child has no
  * business seeing them. That is the one place this differs from T3, which
  * layers per-instance vars over a spread of `process.env`
  * (`apps/server/src/provider/ProviderInstanceEnvironment.ts:5-22`).
@@ -69,10 +69,9 @@ export interface BuildProviderEnvInput {
    */
   accountHomeDir?: string;
   /**
-   * The registry entry's own env plus, for claudex/claudemix, the cliproxy
-   * launcher env exactly as `resolveExtraEnv` produces it today
-   * (`ANTHROPIC_BASE_URL`, `ANTHROPIC_AUTH_TOKEN`, `ANTHROPIC_MODEL`,
-   * compaction and timeout vars).
+   * The registry entry's own env plus the launcher env exactly as
+   * `resolveExtraEnv` produces it for a terminal launch (the timeout vars, a
+   * per-launcher env file).
    */
   extraEnv?: Readonly<Record<string, string | undefined>>;
   /** The chat session id. Stamped so a child can name its own tab. */
@@ -87,12 +86,6 @@ export interface BuildProviderEnvInput {
    * is a marker and nothing more.
    */
   launchId: string;
-  /**
-   * Keep an ambient credential that this adapter would normally strip. The
-   * ONLY legitimate caller is the cliproxy launcher path, where
-   * `ANTHROPIC_AUTH_TOKEN` *is* the selected identity.
-   */
-  allowCredentialVars?: readonly string[];
 }
 
 /**
@@ -111,8 +104,7 @@ export function buildProviderEnv(input: BuildProviderEnvInput): Record<string, s
     accountHomeDir,
     extraEnv,
     sessionId,
-    launchId,
-    allowCredentialVars
+    launchId
   } = input;
 
   const env: Record<string, string> = {
@@ -122,10 +114,7 @@ export function buildProviderEnv(input: BuildProviderEnvInput): Record<string, s
     ORQUESTER_SESSION_ID: sessionId
   };
 
-  const allowed = new Set(allowCredentialVars ?? []);
-  const denied = new Set(
-    AMBIENT_CREDENTIAL_ENV_VARS[adapter].filter((name) => !allowed.has(name))
-  );
+  const denied = new Set(AMBIENT_CREDENTIAL_ENV_VARS[adapter]);
 
   for (const [key, value] of Object.entries(extraEnv ?? {})) {
     if (value === undefined || key.length === 0) {

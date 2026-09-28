@@ -100,16 +100,17 @@ test("the handoff reads the parent's words since the block began in the session"
   assert.equal(parentAssistantText(snap(items, []), null), "before\n\nmine\n\nmore");
 });
 
-test("the create body: explicit account, full access, owner; a top-level model for claudex only", () => {
+test("the create body: explicit account, full access, owner; the model only in the chat selection", () => {
   const owner = { kind: "workflow" as const, workflowId: "w", runId: "r", nodeId: "n" };
-  const claudex = buildCreateBody({ candidate: { chainIndex: 0, agent: "claudex", model: "gpt-5-codex", options: [], accountId: "system", family: "codex" }, projectPath: "/w/ws/app", title: "T", owner });
-  assert.equal(claudex.model, "gpt-5-codex");
-  assert.equal(claudex.accountId, "system", "system is explicit, never omitted");
-  assert.equal(claudex.chat?.accountId, "system");
-  assert.equal(claudex.chat?.runtimeMode, "full-access");
-  const claudemix = buildCreateBody({ candidate: { chainIndex: 0, agent: "claudemix", model: "opus", options: [{ id: "effort", value: "high" }], accountId: "a1", family: "claude" }, projectPath: "/p", title: "T", owner });
-  assert.equal("model" in claudemix, false);
-  assert.deepEqual(claudemix.chat?.modelSelection, { model: "opus", options: [{ id: "effort", value: "high" }] });
+  const codex = buildCreateBody({ candidate: { chainIndex: 0, agent: "codex", model: "gpt-5-codex", options: [], accountId: "system", family: "codex" }, projectPath: "/w/ws/app", title: "T", owner });
+  assert.equal(codex.refId, "codex");
+  assert.equal(codex.accountId, "system", "system is explicit, never omitted");
+  assert.equal(codex.chat?.accountId, "system");
+  assert.equal(codex.chat?.runtimeMode, "full-access");
+  assert.deepEqual(codex.owner, owner);
+  const claude = buildCreateBody({ candidate: { chainIndex: 0, agent: "claude", model: "opus", options: [{ id: "effort", value: "high" }], accountId: "a1", family: "claude" }, projectPath: "/p", title: "T", owner });
+  assert.equal("model" in claude, false);
+  assert.deepEqual(claude.chat?.modelSelection, { model: "opus", options: [{ id: "effort", value: "high" }] });
 });
 
 test("exclusions: tried accounts only while their cooldown runs; unusable ones for good", () => {

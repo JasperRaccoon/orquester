@@ -7,7 +7,7 @@ small HTTP-over-unix-socket API at `<appdir>/daemon/agent-host.sock`.
 Why separate: `deploy/orquester.service` uses `KillMode=process`, so on restart only the node
 process is signalled and anything parented to the tmux server survives. Keeping adapters in the
 daemon would kill every in-flight turn on each deploy. The host runs in a tmux service session
-(`orqsvc-agent-host`) exactly as cliproxy does.
+(`orqsvc-agent-host`), so it survives a daemon restart.
 
 Spec: `docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md`. Every section reference below
 (`§n`) is to that file. The lazy boot, the fold snapshot and the thread index have their own
@@ -160,8 +160,8 @@ hands it over (`POST /goals/resume-sessions` → `resumeGoalSessionsAfterHandove
 - **An identity change writes `launch.json` before the head, and starts nothing** (§3.4).
   `buildEnv`/`resolveHome` in `main.ts` read the live launch config, so the order is what makes the
   next session start pick the new account up; the restart itself is the ordinary ensure step on the
-  next `/turn`. `orchestrator.setIdentity` refuses unless the thread is idle, refuses OpenCode, and
-  refuses any move across the cliproxy boundary.
+  next `/turn`. `orchestrator.setIdentity` refuses unless the thread is idle, and refuses
+  OpenCode.
 - **`state.json`, `index.sqlite` and the store's tool-output cache are caches of `events.ndjson`,
   never authorities** (invariant 1). Any doubt — another version, a seq or byte offset that does not
   line up, a file that does not parse — discards the cache and re-derives from the log, never the

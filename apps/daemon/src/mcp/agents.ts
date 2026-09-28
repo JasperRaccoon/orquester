@@ -1,43 +1,18 @@
-import { proxyLaunchModels, type AgentAccountsResponse, type AgentConversationSummary, type CliProxyStatus, type RegistryEntry, type RegistryResponse } from "@orquester/api";
+import type { AgentAccountsResponse, RegistryEntry, RegistryResponse } from "@orquester/api";
 import { agentChatRoutes, DEFAULT_RUNTIME_MODE, parseGoalSupport, RUNTIME_MODES, type AdapterCapabilities, type AdapterGoalSupport, type AgentAdapterId, type ModelSelection, type ProviderModel, type RuntimeMode } from "@orquester/api/agent-chat";
-import { proxyAccountFamily } from "../agent-chat/service.ts";
 import type { DaemonApi } from "./daemon-api.ts";
 import { ToolError } from "./errors.ts";
 import { clipText, MAX_ECHO_CHARS, resultBytes } from "./result.ts";
 
 const EFFORT_OPTION_IDS: Record<AgentAdapterId, string> = { claude: "effort", codex: "effort", opencode: "variant", grok: "reasoningEffort" };
 export interface AgentModelOptionView { id: string; label: string; type: "select" | "boolean"; description?: string; values?: { id: string; label: string; description?: string; isDefault?: boolean }[] }
-export interface AgentModelView { slug: string; name: string; shortName?: string; isDefault: boolean; isLegacy?: boolean; providerLabel?: string; options: AgentModelOptionView[] }
+export interface AgentModelView { slug: string; name: string; shortName?: string; isDefault: boolean; isLegacy?: boolean; options: AgentModelOptionView[] }
 export interface AgentAccountView { id: string; label: string; email: string | null; plan: string | null; needsReauth: boolean; isDefault: boolean }
 /** What an agent supports, as list_agents and get_session both report it (`supportsFrom`). */
 export interface AgentSupports { planMode: boolean; rollback: boolean; compaction: boolean; backgroundTasks: boolean; goals: AdapterGoalSupport | null }
-/** `disabledReason` is the registry's own (e.g. "proxy down"), present only on a disabled agent the daemon knows the reason for. */
-export interface AgentView { id: string; name: string; adapter: AgentAdapterId; enabled: boolean; disabledReason?: string; installed: boolean; version: string | null; status: string; message?: string; auth: { status: string; label?: string; email?: string };
+/** `enabled` is the registry's: false when the agent's CLI was not found on this host. */
+export interface AgentView { id: string; name: string; adapter: AgentAdapterId; enabled: boolean; installed: boolean; version: string | null; status: string; message?: string; auth: { status: string; label?: string; email?: string };
   models: AgentModelView[]; effortOptionId: string; runtimeModes: readonly RuntimeMode[]; defaultRuntimeMode: RuntimeMode; supports: AgentSupports & { contextWindow: boolean }; accounts: AgentAccountView[]; defaultAccountId: string }
-
-export function isProxyAgent(refId: string): boolean {
-  return proxyAccountFamily(refId) !== null;
-}
-
-/**
- * The one proxy launcher whose launch names a model the proxy serves: claudex (the "+" menu's model chips). claudemix
- * is the Claude main loop through the proxy — it offers the Claude catalogue and a launch never names a proxy model
- * for it (`cliproxy.ts` `validateModel`: "the UI never sends a model for claudemix").
- */
-export function launchesProxyModel(refId: string): boolean {
-  return refId === "claudex";
-}
-
-/**
- * The agent a past conversation resumes with — the GUI's `chatLaunchRefId`: a proxy home's transcript belongs to the
- * launcher that owns that home (`proxyRefId`), any other row to the CLI that wrote it. `reachable` is false for a proxy
- * home that names no launcher: no agent can resume it, since plain `claude` reads another HOME. The one predicate
- * behind list_conversations' `resumable` and create_session's resume refusal.
- */
-export function conversationLaunch(row: Pick<AgentConversationSummary, "agentRefId" | "home" | "proxyRefId">): { agent: string; reachable: boolean } {
-  if (row.home !== "cliproxy") return { agent: row.agentRefId, reachable: true };
-  return row.proxyRefId ? { agent: row.proxyRefId, reachable: true } : { agent: row.agentRefId, reachable: false };
-}
 
 /**
  * The capability flags list_agents and get_session both report. No snapshot, or an absent flag, reads false — and so
@@ -113,41 +88,17 @@ export async function loadAgents(api: DaemonApi, opts?: { includeLegacyModels?: 
   const providers = providersRes.status < 400 ? providerRows(providersRes.body) : new Map<string, ProviderRow>();
   const accountsRes = await api.request("GET", "/api/agent-accounts");
   const accounts = accountsRes.status < 400 ? (accountsRes.body as AgentAccountsResponse) : { accounts: [], defaults: { claude: null, codex: null, grok: null } };
-  // Every proxy launcher needs the proxy's seeded accounts; only one that launches a proxy model (claudex) needs its catalogue.
-  let proxy: CliProxyStatus | null = null;
-  let catalog: string[] = [];
-  if (entries.some((e) => isProxyAgent(e.id))) {
-    const statusRes = await api.request("GET", "/api/cliproxy");
-    if (statusRes.status < 400) proxy = statusRes.body as CliProxyStatus;
-  }
-  if (entries.some((e) => launchesProxyModel(e.id))) {
-    const catalogRes = await api.request("GET", "/api/cliproxy/models");
-    if (catalogRes.status < 400) catalog = ((catalogRes.body as { models?: string[] }).models ?? []);
-  }
-  const seeded = new Set((proxy?.accounts ?? []).map((a) => a.id));
   return entries.map((entry) => {
     const adapter = entry.chat.adapter;
     const snapshot = providers.get(adapter);
-    const family = (proxyAccountFamily(entry.id) ?? entry.id) as keyof AgentAccountsResponse["defaults"];
-    const familyAccounts = accounts.accounts.filter((a) => a.agent === family).filter((a) => !isProxyAgent(entry.id) || seeded.has(a.id));
+    // An entry draws its managed accounts from its own id's family (claude, codex, grok); OpenCode has none.
+    const family = entry.id as keyof AgentAccountsResponse["defaults"];
+    const familyAccounts = accounts.accounts.filter((a) => a.agent === family);
     const defaultAccountId = familyAccounts.some((a) => a.id === accounts.defaults[family]) ? (accounts.defaults[family] as string) : "system";
-    let models: AgentModelView[];
-    if (launchesProxyModel(entry.id)) {
-      // A proxy slug is no Claude model. The composer falls back to the Claude catalogue's default model — the flagged
-      // one, else the first (`resolveSelectedModel`, composer-model.ts) — and offers its option chips, and the host
-      // passes those options on for a model it has no entry for (`resolveEffortLevel`, adapters/claude/models.ts). So
-      // every proxy model takes that model's options; with no Claude catalogue there are none to offer.
-      const fallback = snapshot?.models.find((m) => m.isDefault === true) ?? snapshot?.models[0];
-      const options = fallback ? modelView(fallback).options : [];
-      models = proxyLaunchModels(proxy, catalog).map((m) => ({ slug: m.id, name: m.id, isDefault: m.id === proxy?.defaultModel, options, ...(m.providerLabel ? { providerLabel: m.providerLabel } : {}) }));
-      if (models.length && !models.some((m) => m.isDefault)) models[0]!.isDefault = true;
-    } else {
-      // The adapter's own catalogue — claudemix's too: its model is the Claude main loop's, only its account is the proxy's.
-      models = (snapshot?.models ?? []).filter((m) => opts?.includeLegacyModels || m.isLegacy !== true).map(modelView);
-    }
+    const models = (snapshot?.models ?? []).filter((m) => opts?.includeLegacyModels || m.isLegacy !== true).map(modelView);
     const caps = snapshot?.capabilities;
     const view: AgentView = {
-      id: entry.id, name: entry.name, adapter, enabled: entry.enabled, ...(!entry.enabled && nonEmpty(entry.disabledReason) ? { disabledReason: entry.disabledReason } : {}),
+      id: entry.id, name: entry.name, adapter, enabled: entry.enabled,
       installed: snapshot?.installed ?? false, version: entry.version ?? snapshot?.version ?? null,
       status: snapshot?.status ?? "unknown", auth: snapshot?.auth ?? { status: "unknown" },
       models, effortOptionId: EFFORT_OPTION_IDS[adapter], runtimeModes: RUNTIME_MODES, defaultRuntimeMode: DEFAULT_RUNTIME_MODE,
@@ -258,9 +209,8 @@ export function resolveModelSelection(agent: AgentView, input: { model?: string;
   const modelView = agent.models.find((m) => m.slug === model);
   if (agent.models.length && !modelView) throw unknownModel(agent, model);
   const descriptors = modelView?.options ?? [];
-  // A listed model without option descriptors takes none: the GUI offers it no chips (Claude's haiku). claudex's proxy
-  // models are not such models: they carry the Claude default model's descriptors (loadAgents), the chips the composer
-  // shows for them. Only a catalogue still being probed passes options through unchecked, for the host to judge.
+  // A listed model without option descriptors takes none: the GUI offers it no chips (Claude's haiku). Only a catalogue
+  // still being probed passes options through unchecked, for the host to judge.
   if (modelView && !descriptors.length && Object.keys(input.options ?? {}).length) throw new ToolError("INVALID_ARGUMENT", `${model} takes no options.`);
   const known = new Set(descriptors.map((d) => d.id));
   const merged = new Map<string, string | boolean>();
@@ -293,6 +243,5 @@ export function validateAccountId(agent: AgentView, accountId: string | undefine
   if (accountId === "system") return "system";
   if (agent.accounts.some((a) => a.id === accountId)) return accountId;
   const valid = agent.accounts.map((a) => a.id).join(", ");
-  const hint = isProxyAgent(agent.id) ? ` (${agent.id} accepts only accounts seeded into the model proxy)` : "";
-  throw new ToolError("INVALID_ARGUMENT", `Account "${accountId}" is not usable with ${agent.id}${hint}. Valid: ${valid}.`);
+  throw new ToolError("INVALID_ARGUMENT", `Account "${accountId}" is not usable with ${agent.id}. Valid: ${valid}.`);
 }

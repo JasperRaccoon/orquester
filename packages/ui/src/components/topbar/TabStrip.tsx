@@ -19,19 +19,6 @@ import {
 } from "../../store/app";
 
 /**
- * Short chip label for a proxy session's backing model, e.g. `gpt-5.6-sol` →
- * `sol`, `kimi-k3` → `kimi`. Mirrors the launcher-menu chip so a tab reads the
- * same as the "+" pick it came from. Rendered from `SessionSummary.model` (the
- * daemon-resolved record), so it survives refresh/reattach — never client state.
- */
-const shortModelLabel = (model: string): string => {
-  const lower = model.toLowerCase();
-  if (lower.includes("kimi")) return "kimi";
-  const parts = model.split(/[/-]/).filter(Boolean);
-  return parts[parts.length - 1] ?? model;
-};
-
-/**
  * The unread mark: this client has not looked at the tab since its latest turn
  * finished (§7.7). Deliberately separate from the status dot — needs-attention
  * is the daemon's ladder and is spent on three colours; unread is a private
@@ -167,9 +154,6 @@ export const TabStrip: React.FC = () => {
         const accountLabel = accountId
           ? shortAccountLabel(agentAccounts?.accounts.find((a) => a.id === accountId)?.label)
           : undefined;
-        // `model` is set by the daemon only for the claudex/claudemix proxy
-        // launchers, so its presence gates the backing-model badge.
-        const modelLabel = session?.model ? shortModelLabel(session.model) : undefined;
         // A pre-chat agent terminal still reattaches until its tab is closed
         // (§5.2 migration), so it says so rather than being mistaken for a chat
         // tab that failed to render. Nothing creates one any more.
@@ -261,14 +245,6 @@ export const TabStrip: React.FC = () => {
               </span>
             ) : null}
             <WorkflowChip session={session} className="ml-1" />
-            {modelLabel ? (
-              <span
-                className="ml-1 rounded bg-warn-500/15 px-1 text-[10px] text-warn-300"
-                title={session?.model}
-              >
-                {modelLabel}
-              </span>
-            ) : null}
             {accountLabel ? (
               <span className="ml-1 rounded bg-neutral-800 px-1 text-[10px] text-neutral-400">
                 {accountLabel}

@@ -43,3 +43,5 @@ no live daemon or deployment was changed.
 
 The final post-build smoke rerun also passed both scenarios; current artifacts are in
 `/var/lib/orquester/tmp/orquester-smoke-b6IU6M` (`results.json` and two screenshots).
+
+The merged web bundle (including incoming retirement commit `8dcbdc61`) was checked again with the same isolated static/unauthenticated transport surface. Both retained scenarios passed with no console/page failures. Final artifacts: `/var/lib/orquester/tmp/orquester-smoke-oEvA33/results.json`, `clean-storage.png`, and `legacy-usage-prefs-pre-agents-record.png` in that directory. Log: `/tmp/orquester-test-cleanup/merged-smoke.log`. The temporary server was stopped after the check.
