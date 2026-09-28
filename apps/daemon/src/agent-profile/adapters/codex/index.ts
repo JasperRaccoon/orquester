@@ -1403,16 +1403,24 @@ export class CodexProfileAdapter implements ProfileAdapter {
     }
     await copyTree(ref.dir, dest, { refuseSymlinks: false });
     await writeSkill(this.skillsRoot, document, options);
-    await removeProfilePath(ref.dir, options);
-    const notes: string[] = [];
     if (!item.enabled) {
-      // The off switch is keyed by path: carry it over, and drop the old entry.
+      // The off switch is keyed by path: carry it over, and drop the old entry while its path still resolves.
       await this.rpc("skills/config/write", { path: join(dest, SKILL_FILE), enabled: false });
-      await this.rpc("skills/config/write", { path: ref.configPath, enabled: true }).catch((error: unknown) => {
-        this.warn("clearing the old skill switch failed", error);
-      });
+      await this.clearSkillSwitch(ref.configPath);
     }
-    return { itemIds: [itemId("skill", document.name)], notes };
+    await removeProfilePath(ref.dir, options);
+    return { itemIds: [itemId("skill", document.name)], notes: [] };
+  }
+
+  /**
+   * Drops a skill's `[[skills.config]]` off entry (enabling does that) before
+   * the skill goes away: Codex canonicalizes the path, so it must still exist.
+   * Best effort — a leftover entry for a missing path is harmless.
+   */
+  private async clearSkillSwitch(configPath: string): Promise<void> {
+    await this.rpc("skills/config/write", { path: configPath, enabled: true }).catch((error: unknown) => {
+      this.warn("clearing a skill's off switch failed", error);
+    });
   }
 
   async setEnabled(id: string, revision: string, enabled: boolean): Promise<AdapterMutationResult> {
@@ -1467,13 +1475,10 @@ export class CodexProfileAdapter implements ProfileAdapter {
       }
       case "skill": {
         if (ref.dir === undefined) throw profileErrors.notDeletable(item.name);
-        await removeProfilePath(ref.dir, options);
         if (!item.enabled) {
-          // Enabling drops the `[[skills.config]]` entry of a skill that no longer exists.
-          await this.rpc("skills/config/write", { path: ref.configPath, enabled: true }).catch((error: unknown) => {
-            this.warn("clearing the removed skill's switch failed", error);
-          });
+          await this.clearSkillSwitch(ref.configPath);
         }
+        await removeProfilePath(ref.dir, options);
         break;
       }
       case "command":

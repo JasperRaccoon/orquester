@@ -257,6 +257,8 @@ export interface CodexAppServerClientOptions extends CodexConfigClientOptions {
   /** The idle timer and every call's deadline run on these (tests expire them by hand). */
   timers?: DeadlineTimers;
   killGraceMs?: number;
+  /** Added to the child's env (a test's fake reads its knobs from it). */
+  extraEnv?: Readonly<Record<string, string>>;
 }
 
 const realTimers: DeadlineTimers = {
@@ -343,7 +345,7 @@ export class CodexAppServerClient implements CodexConfigClient {
       return this.running;
     }
     const env = buildAgentCliEnv(
-      { bin: this.options.bin, extra: { CODEX_HOME: this.options.codexHome } },
+      { bin: this.options.bin, extra: { ...this.options.extraEnv, CODEX_HOME: this.options.codexHome } },
       { ...process.env, HOME: this.options.home }
     );
     const child = spawnProviderChild({
