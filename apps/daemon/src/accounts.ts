@@ -33,16 +33,108 @@ import {
 } from "./providers/bitbucket-server";
 import {
   buildCredentialFileLine,
+  type ConditionalListOptions,
+  type ConditionalPage,
   type CreateRepoOpts,
+  GitRemoteError,
+  type GitProvider,
+  type ParsedRepo,
   type ProviderCreds,
-  type ProviderIdentity
+  type ProviderIdentity,
+  type PullRequestInfo,
+  type ReleaseInfo
 } from "./providers/types";
+import {
+  checkoutArgs,
+  cloneArgs,
+  cloneRefProblem,
+  DEFAULT_CLONE_TIMEOUT_MS,
+  fetchCommitArgs,
+  isFullSha,
+  isMissingRemoteRef,
+  type LsRemoteResult,
+  mayBeAbbreviatedSha,
+  parseLsRemote,
+  parseRemoteUrl,
+  remoteUrlProblem
+} from "./workflows/git-remote";
 
 // Re-exported so existing importers (`index.ts`) keep working after the class
 // moved to its own module (breaking a provider↔accounts import cycle).
 export { AccountError };
 
 const run = promisify(execFile);
+
+/**
+ * The process runner AccountsService shells out through for clone and ls-remote (injectable so
+ * tests assert the argv/env without running git). Same contract as promisified `execFile`: a
+ * non-zero exit rejects with an error carrying `stdout`/`stderr`/`code` (and `killed` on a
+ * timeout).
+ */
+export type AccountsExec = (
+  file: string,
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv; timeout?: number; maxBuffer?: number }
+) => Promise<{ stdout: string; stderr: string }>;
+
+/** Options for `cloneRepo` / `cloneFromInput`. */
+export interface CloneOptions {
+  /**
+   * Branch, tag or commit to check out. A full sha is cloned then checked out detached (fetched
+   * by id when the clone did not bring it); a name is cloned with `--branch` (a tag leaves a
+   * detached HEAD); an abbreviated hex that names no branch/tag is retried as a commit.
+   */
+  ref?: string;
+  /** Ceiling on the whole clone, every step included (default 10 min). */
+  timeoutMs?: number;
+}
+
+/** Options for `lsRemote`. */
+export interface LsRemoteOptions {
+  /** Default 30 s. */
+  timeoutMs?: number;
+  /**
+   * Also resolve the remote's HEAD → `defaultBranch` (default true). git cannot narrow the
+   * advertisement to HEAD + heads + tags, so asking for HEAD reads the remote's WHOLE ref list
+   * (a GitHub remote's `refs/pull/*` included); `false` reads only `refs/heads/` and
+   * `refs/tags/`. A poller can resolve the default branch less often than it polls.
+   */
+  defaultBranch?: boolean;
+}
+
+/** Default ceiling on one `git ls-remote`. */
+export const LS_REMOTE_TIMEOUT_MS = 30_000;
+
+/** Replace any `//user:secret@` userinfo in git's output before it reaches an error message. */
+function redactUserinfo(text: string): string {
+  return text.replace(/\/\/[^/@\s:]*:[^/@\s]*@/g, "//***@");
+}
+
+/** True when a rejected exec was killed by its `timeout`. */
+function timedOut(error: unknown): boolean {
+  if (!error || typeof error !== "object") return false;
+  const { killed, code } = error as { killed?: unknown; code?: unknown };
+  return killed === true && code !== "ERR_CHILD_PROCESS_STDIO_MAXBUFFER";
+}
+
+/** Classify a failed remote git command (ls-remote, clone) by its stderr. */
+function remoteGitError(what: string, error: unknown, timeoutMs: number): GitRemoteError {
+  if (timedOut(error)) {
+    return new GitRemoteError(504, `${what} timed out after ${Math.round(timeoutMs / 1000)} s.`, "timeout");
+  }
+  const detail = redactUserinfo(errText(error));
+  if (
+    /Authentication failed|Permission denied|could not read (Username|Password)|terminal prompts disabled|HTTP (401|403)|Invalid username or password/i.test(
+      detail
+    )
+  ) {
+    return new GitRemoteError(400, `${what}: authentication was rejected. ${detail}`, "auth");
+  }
+  if (/Repository not found|not found|does not appear to be a git repository|HTTP 404/i.test(detail)) {
+    return new GitRemoteError(404, `${what}: the repository was not found. ${detail}`, "not_found");
+  }
+  return new GitRemoteError(502, `${what}: ${detail}`, "upstream");
+}
 
 /** Every provider id, for the "that URL belongs to another provider" hint. */
 const PROVIDER_IDS: readonly GitProviderId[] = ["github", "bitbucket-cloud", "bitbucket-server"];
@@ -146,12 +238,21 @@ export class AccountsService {
   /** Pinned HOME — the one `~` the daemon (and its terminals) use. */
   private readonly home = process.env.HOME ?? homedir();
 
+  /** Runs git for clone and ls-remote (a fake in tests). */
+  private readonly exec: AccountsExec;
+  /** False keeps `ensureKnownHosts` off the network (tests). */
+  private readonly refreshKnownHosts: boolean;
+
   constructor(
     /** Absolute path to accounts.json (resolved by the daemon via accountsConfigPath). */
     private readonly configPath: string,
     /** Absolute path to <appdir>/daemon/keys (created 0700 in prepareDirs). */
-    private readonly keysDirPath: string
-  ) {}
+    private readonly keysDirPath: string,
+    options: { exec?: AccountsExec; refreshKnownHosts?: boolean } = {}
+  ) {
+    this.exec = options.exec ?? (run as AccountsExec);
+    this.refreshKnownHosts = options.refreshKnownHosts ?? true;
+  }
 
   // --- Persistence ---------------------------------------------------------
 
@@ -311,7 +412,7 @@ export class AccountsService {
     if (account.provider === "github") {
       return null;
     }
-    return ensureKnownHosts(this.keysDirPath).catch(() => null);
+    return ensureKnownHosts(this.keysDirPath, { refresh: this.refreshKnownHosts }).catch(() => null);
   }
 
   // --- CRUD ----------------------------------------------------------------
@@ -664,7 +765,8 @@ export class AccountsService {
     accountId: string,
     input: string,
     destName: string | undefined,
-    cwd: string
+    cwd: string,
+    opts: CloneOptions = {}
   ): Promise<{ name: string }> {
     const account = await this.ensureSshHost(await this.requireAccount(accountId));
     const provider = providerFor(account.provider);
@@ -699,7 +801,7 @@ export class AccountsService {
     if (existsSync(join(cwd, name))) {
       throw new AccountError(409, "A project with this name already exists.");
     }
-    await this.cloneRepo(accountId, cloneUrl, name, cwd);
+    await this.cloneRepo(accountId, cloneUrl, name, cwd, opts);
     return { name };
   }
 
@@ -724,36 +826,227 @@ export class AccountsService {
   }
 
   /**
-   * Clone a repo into a project dir. SSH URLs pin the account's key through
-   * `GIT_SSH_COMMAND` (no token in the URL/argv) rather than relying on
-   * `includeIf` timing; HTTPS URLs point git at the account's 0600 credential
-   * store (plus its CA bundle on DC). `cwd` is the workspace dir, `destName` the
-   * new project subdir. Errors surface stderr so the route can map them to 4xx.
+   * The `-c` config and env a remote git command runs with — exactly what a clone uses. SSH URLs
+   * pin the account's key through `GIT_SSH_COMMAND` (no token in the URL/argv) rather than relying
+   * on `includeIf` timing; HTTPS URLs point git at the account's 0600 credential store (plus its
+   * CA bundle on DC). With no account (`null`, a public repo) every configured credential helper
+   * is reset, so nothing ambient answers for it. `GIT_TERMINAL_PROMPT=0` always: a daemon-side
+   * git must fail, never wait on a prompt.
    */
-  async cloneRepo(id: string, url: string, destName: string, cwd: string): Promise<void> {
-    const account = await this.requireAccount(id);
+  private async remoteTransport(
+    account: Account | null,
+    url: string,
+    opts: { batchSsh?: boolean } = {}
+  ): Promise<{ configArgs: string[]; env: NodeJS.ProcessEnv }> {
     const configArgs: string[] = [];
-    const env: NodeJS.ProcessEnv = { ...process.env, HOME: this.home };
+    const env: NodeJS.ProcessEnv = { ...process.env, HOME: this.home, GIT_TERMINAL_PROMPT: "0" };
+    const batch = opts.batchSsh ? " -o BatchMode=yes" : "";
     if (/^https?:\/\//i.test(url)) {
-      configArgs.push("-c", `credential.helper=store --file=${this.credentialsPath(account)}`);
-      if (account.caCertPath) {
-        configArgs.push("-c", `http.sslCAInfo=${account.caCertPath}`);
+      if (account) {
+        configArgs.push("-c", `credential.helper=store --file=${this.credentialsPath(account)}`);
+        if (account.caCertPath) {
+          configArgs.push("-c", `http.sslCAInfo=${account.caCertPath}`);
+        }
+      } else {
+        configArgs.push("-c", "credential.helper=");
       }
-    } else {
-      env.GIT_SSH_COMMAND = sshCommandFor(account, await this.knownHosts(account));
+    } else if (account) {
+      env.GIT_SSH_COMMAND = `${sshCommandFor(account, await this.knownHosts(account))}${batch}`;
+    } else if (opts.batchSsh) {
+      env.GIT_SSH_COMMAND = "ssh -o StrictHostKeyChecking=accept-new -o BatchMode=yes";
     }
-    try {
-      await run("git", [...configArgs, "clone", url, destName], { cwd, env });
-    } catch (error) {
-      const detail = errText(error);
+    return { configArgs, env };
+  }
+
+  /**
+   * Clone a repo into a project dir, optionally at a ref (see `CloneOptions`), over the account's
+   * transport (`remoteTransport`). `cwd` is the workspace dir, `destName` the new project subdir.
+   * The whole clone is bounded by `timeoutMs` (default 10 min). A clone whose checkout fails is
+   * removed again, so a failed ref never leaves a half-made project behind. Errors surface stderr
+   * so the route can map them to 4xx.
+   */
+  async cloneRepo(
+    id: string,
+    url: string,
+    destName: string,
+    cwd: string,
+    opts: CloneOptions = {}
+  ): Promise<void> {
+    const account = await this.requireAccount(id);
+    const ref = opts.ref;
+    if (ref !== undefined) {
+      const problem = cloneRefProblem(ref);
+      if (problem) {
+        throw new AccountError(400, problem);
+      }
+    }
+    const timeoutMs = opts.timeoutMs ?? DEFAULT_CLONE_TIMEOUT_MS;
+    const deadline = Date.now() + timeoutMs;
+    const remaining = () => Math.max(1_000, deadline - Date.now());
+    const { configArgs, env } = await this.remoteTransport(account, url);
+    const dest = join(cwd, destName);
+    const git = (args: string[], at: string) =>
+      this.exec("git", [...configArgs, ...args], { cwd: at, env, timeout: remaining() });
+
+    const cloneFailure = (error: unknown): AccountError => {
+      if (timedOut(error)) {
+        return new GitRemoteError(
+          504,
+          `Could not clone the repository: timed out after ${Math.round(timeoutMs / 1000)} s.`,
+          "timeout"
+        );
+      }
+      const detail = redactUserinfo(errText(error));
       if (/HTTP 410/.test(detail)) {
-        throw new AccountError(
+        return new AccountError(
           400,
           "Bitbucket rejected the stored credential (410) — app passwords were removed July 2026; reconnect with a scoped API token."
         );
       }
-      throw new AccountError(502, `Could not clone the repository: ${detail}`);
+      return new AccountError(502, `Could not clone the repository: ${detail}`);
+    };
+
+    // A commit is checked out after a plain clone; a name rides `--branch`, and an abbreviated
+    // hex that names no branch or tag is retried as a commit.
+    let commit = ref !== undefined && isFullSha(ref) ? ref : undefined;
+    try {
+      await git(cloneArgs(url, destName, commit === undefined ? ref : undefined), cwd);
+    } catch (error) {
+      if (ref === undefined || !mayBeAbbreviatedSha(ref) || timedOut(error) || !isMissingRemoteRef(errText(error))) {
+        throw cloneFailure(error);
+      }
+      commit = ref;
+      try {
+        await git(cloneArgs(url, destName), cwd);
+      } catch (retryError) {
+        throw cloneFailure(retryError);
+      }
     }
+    if (commit === undefined) {
+      return;
+    }
+    try {
+      try {
+        await git(checkoutArgs(commit), dest);
+      } catch (error) {
+        if (timedOut(error)) throw error;
+        // Not among the cloned refs (a fork's PR head, a sha no branch holds any more): fetch it
+        // by id — GitHub and Bitbucket serve reachable commits — then check that out.
+        await git(fetchCommitArgs(commit), dest);
+        await git(checkoutArgs("FETCH_HEAD"), dest);
+      }
+    } catch (error) {
+      await rm(dest, { recursive: true, force: true }).catch(() => undefined);
+      if (timedOut(error)) {
+        throw cloneFailure(error);
+      }
+      throw new AccountError(
+        400,
+        `Cloned, but could not check out ${commit}: ${redactUserinfo(errText(error))}`
+      );
+    }
+  }
+
+  /**
+   * `git ls-remote` over the account's clone transport (`remoteTransport`, plus SSH BatchMode);
+   * `accountId: null` reads a public repo anonymously. Returns the remote's branches, its tags
+   * (an annotated tag's `commit` is its peeled `^{}` sha) and, unless `defaultBranch: false`, the
+   * branch its HEAD names. No shell; bounded by `timeoutMs` (default 30 s). Failures are
+   * `GitRemoteError`s (`auth`, `not_found`, `timeout`, `upstream`) whose message never carries a
+   * credential.
+   */
+  async lsRemote(
+    accountId: string | null,
+    url: string,
+    opts: LsRemoteOptions = {}
+  ): Promise<LsRemoteResult> {
+    const trimmed = url.trim();
+    const problem = remoteUrlProblem(trimmed);
+    if (problem) {
+      throw new GitRemoteError(400, problem, "unsupported");
+    }
+    const account = accountId === null ? null : await this.requireAccount(accountId);
+    const { configArgs, env } = await this.remoteTransport(account, trimmed, { batchSsh: true });
+    const timeoutMs = opts.timeoutMs ?? LS_REMOTE_TIMEOUT_MS;
+    const args =
+      opts.defaultBranch === false
+        ? [...configArgs, "ls-remote", "--heads", "--tags", "--", trimmed]
+        : [...configArgs, "ls-remote", "--symref", "--", trimmed];
+    try {
+      const { stdout } = await this.exec("git", args, {
+        cwd: this.home,
+        env,
+        timeout: timeoutMs,
+        // A remote advertising every PR ref runs to megabytes; never truncate the list.
+        maxBuffer: 64 * 1024 * 1024
+      });
+      return parseLsRemote(stdout);
+    } catch (error) {
+      throw remoteGitError("git ls-remote", error, timeoutMs);
+    }
+  }
+
+  /**
+   * Resolve the provider, the repo and the credentials a REST listing of `url` runs with. With an
+   * account, its provider's grammar (anchored to its instance on DC) must parse the URL; its token
+   * authenticates, and an account with no token reads anonymously. With none, the URL's host picks
+   * the provider (github.com, bitbucket.org) and the read is anonymous; any other host has no
+   * anonymous REST (`unsupported`).
+   */
+  private async restTarget(
+    accountId: string | null,
+    url: string
+  ): Promise<{ provider: GitProvider; repo: ParsedRepo; creds: ProviderCreds | null }> {
+    const trimmed = url.trim();
+    if (accountId !== null) {
+      const account = await this.requireAccount(accountId);
+      const provider = providerFor(account.provider);
+      const repo = provider.parseRepoUrl(trimmed, this.urlCtx(account));
+      if (!repo) {
+        throw new GitRemoteError(
+          400,
+          `That repository URL does not belong to this ${account.provider} account.`,
+          "unsupported"
+        );
+      }
+      return { provider, repo, creds: account.token ? this.credsOf(account) : null };
+    }
+    const host = parseRemoteUrl(trimmed)?.host;
+    const providerId: GitProviderId | null =
+      host === "github.com" ? "github" : host === "bitbucket.org" ? "bitbucket-cloud" : null;
+    const provider = providerId ? providerFor(providerId) : null;
+    const repo = provider?.parseRepoUrl(trimmed, {}) ?? null;
+    if (!provider || !repo) {
+      throw new GitRemoteError(
+        400,
+        "Pull requests and releases can be read without an account only on github.com and bitbucket.org.",
+        "unsupported"
+      );
+    }
+    return { provider, repo, creds: null };
+  }
+
+  /**
+   * One page (≤ 50) of the repo's pull requests, most recently updated first, with ETag support
+   * (`{notModified: true}` when `opts.etag` still matches). Never returns a token.
+   */
+  async listPullRequests(
+    accountId: string | null,
+    url: string,
+    opts: ConditionalListOptions = {}
+  ): Promise<ConditionalPage<PullRequestInfo>> {
+    const { provider, repo, creds } = await this.restTarget(accountId, url);
+    return provider.listPullRequests(creds, repo, opts);
+  }
+
+  /** One page of the repo's releases, newest first (GitHub only; others `{items: [], unsupported: true}`). */
+  async listReleases(
+    accountId: string | null,
+    url: string,
+    opts: ConditionalListOptions = {}
+  ): Promise<ConditionalPage<ReleaseInfo>> {
+    const { provider, repo, creds } = await this.restTarget(accountId, url);
+    return provider.listReleases(creds, repo, opts);
   }
 
   /**
