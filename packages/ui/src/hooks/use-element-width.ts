@@ -1,30 +1,41 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 
 /**
- * An element's own width in CSS px, following it through every resize
- * (`ResizeObserver`) — for a layout keyed on a PANEL's width rather than the
- * viewport's (the right-rail dock spans 260–560 px on any desktop screen).
+ * What an element's own width (CSS px, its border box) comes to, following it
+ * through every resize (`ResizeObserver`) — for a layout keyed on a PANEL's
+ * width rather than the viewport's (the right-rail dock spans 260–560 px on
+ * any desktop screen).
  *
- * Returns a callback ref to put on the element and its width: `null` until it
- * has been measured (the first render, a static render, an engine without
- * `ResizeObserver`), so a caller picks its own default for that.
+ * `select` maps the width to what the caller lays out by (a breakpoint's
+ * name, say): the component re-renders only when THAT changes, never on every
+ * pixel of a resize drag. Without it the width itself is returned.
+ *
+ * Returns a callback ref to put on the element and the selected value: `null`
+ * until it has been measured (the first render, a static render, an engine
+ * without `ResizeObserver`), so a caller picks its own default for that.
+ * `select` should be a stable function (a module-level one).
  */
-export function useElementWidth<T extends HTMLElement>(): [(node: T | null) => void, number | null] {
-  const [width, setWidth] = useState<number | null>(null);
+export function useElementWidth<T extends HTMLElement, V = number>(
+  select?: (width: number) => V
+): [(node: T | null) => void, V | null] {
+  const [value, setValue] = useState<V | null>(null);
   const observer = useRef<ResizeObserver | null>(null);
+  const selectRef = useRef(select);
+  selectRef.current = select;
 
   const ref = useCallback((node: T | null) => {
     observer.current?.disconnect();
     observer.current = null;
     if (node === null) return;
-    const measure = (value: number) => {
-      const rounded = Math.round(value);
-      setWidth((current) => (current === rounded ? current : rounded));
+    const measure = () => {
+      const width = Math.round(node.getBoundingClientRect().width);
+      const next = (selectRef.current ? selectRef.current(width) : width) as V;
+      // An unchanged value is the same state: React skips the re-render.
+      setValue(() => next);
     };
-    measure(node.getBoundingClientRect().width);
+    measure();
     if (typeof ResizeObserver === "undefined") return;
-    // The border box, like the first measure: padding counts as width here.
-    observer.current = new ResizeObserver(() => measure(node.getBoundingClientRect().width));
+    observer.current = new ResizeObserver(measure);
     observer.current.observe(node);
   }, []);
 
@@ -36,5 +47,5 @@ export function useElementWidth<T extends HTMLElement>(): [(node: T | null) => v
     []
   );
 
-  return [ref, width];
+  return [ref, value];
 }

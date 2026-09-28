@@ -104,8 +104,11 @@ export interface AgentProfilePanelViewProps {
 
 export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (props) => {
   const sheet = props.variant === "sheet";
-  const [rootRef, measured] = useElementWidth<HTMLDivElement>();
-  const width = props.width !== undefined ? props.width : measured;
+  // Only the picker's layout is kept, so a dock drag re-renders the panel
+  // when it crosses the breakpoint, never on every pixel.
+  const [rootRef, measuredLayout] = useElementWidth<HTMLDivElement, "segmented" | "dropdown">(agentPickerLayout);
+  const pickerLayout =
+    props.width !== undefined ? agentPickerLayout(props.width) : (measuredLayout ?? agentPickerLayout(null));
   const label = AGENT_PROFILE_AGENT_LABELS[props.agent];
   const { snapshot, empty } = props;
   const notInstalled = empty?.kind === "not-installed";
@@ -120,7 +123,7 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
           agents={props.agents}
           value={props.agent}
           onChange={props.onAgentChange}
-          layout={agentPickerLayout(width ?? null)}
+          layout={pickerLayout}
           sheet={sheet}
         />
         {hasSnapshot ? (
