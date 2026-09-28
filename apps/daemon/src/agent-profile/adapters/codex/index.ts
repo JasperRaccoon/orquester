@@ -786,7 +786,8 @@ export class CodexProfileAdapter implements ProfileAdapter {
           code: "hook-unsupported",
           message: `Codex does not run "${String(entry.handler.type)}" hooks.`
         });
-      } else if (!entry.managed) {
+      } else if (!entry.managed && (meta !== undefined || userConfig !== null)) {
+        // Without hooks/list or the config (Codex missing, config unreadable) trust is unknown: no warning.
         const hash = codexHookHash(entry.eventSnake, entry.handler, entry.matcher);
         const trust =
           meta?.trustStatus ??
@@ -908,6 +909,9 @@ export class CodexProfileAdapter implements ProfileAdapter {
   }
 
   private requireConfig(loaded: Loaded): UserConfig {
+    if (this.ctx.bin === null) {
+      throw profileErrors.notInstalled(LABEL);
+    }
     if (loaded.userConfig === null) {
       throw profileErrors.unreadable(this.configPath, loaded.configError ?? "Codex could not read it");
     }

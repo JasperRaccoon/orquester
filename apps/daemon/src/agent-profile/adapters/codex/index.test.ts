@@ -42,7 +42,9 @@ async function writeSkillFile(dir: string, name: string, description: string, bo
 }
 
 /** A temp tree shaped like this host's real ~/.codex (secrets replaced) and two managed account homes. */
-async function makeFixture(options: { wrap?: (client: CodexConfigClient) => CodexConfigClient } = {}): Promise<Fixture> {
+async function makeFixture(
+  options: { wrap?: (client: CodexConfigClient) => CodexConfigClient; bin?: string | null } = {}
+): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "codex-profile-"));
   const home = join(root, "home");
   const codexHome = join(home, ".codex");
@@ -172,7 +174,7 @@ async function makeFixture(options: { wrap?: (client: CodexConfigClient) => Code
       agentsSkillsDir: join(home, ".agents", "skills")
     },
     appdir,
-    bin: "/usr/local/bin/codex",
+    bin: options.bin === undefined ? "/usr/local/bin/codex" : options.bin,
     accountHomes: async () => accounts,
     logger: { info: () => undefined, warn: () => undefined },
     now: () => new Date()
@@ -321,6 +323,26 @@ describe("CodexProfileAdapter", () => {
         f.adapter.create({ kind: "hook", hook: { event: "Stop", command: "x" } }, { onConflict: "fail" }),
         assertProfileError("CONFIG_UNREADABLE")
       );
+    });
+
+    it("lists what is on disk when Codex is not installed, and refuses config writes", async () => {
+      const bare = await makeFixture({ bin: null });
+      try {
+        const snapshot = await bare.adapter.snapshot();
+        assert.deepEqual(snapshot.fileErrors, []);
+        const ids = snapshot.items.map((item) => item.id);
+        assert.ok(ids.includes("skill:handoff") && ids.includes("command:old"));
+        const userHook = snapshot.items.find((item) => item.name === "notify-send done")!;
+        assert.deepEqual(userHook.warnings, [], "no trust guess without Codex");
+        await assert.rejects(
+          bare.adapter.create({ kind: "mcp", mcp: { name: "x", transport: "stdio", command: "x" } }, { onConflict: "fail" }),
+          assertProfileError("AGENT_NOT_INSTALLED", 404)
+        );
+        assert.equal(await bare.requests().then((r) => r.length), 0, "no app-server was started");
+      } finally {
+        await bare.adapter.close();
+        await rm(bare.root, { recursive: true, force: true });
+      }
     });
 
     it("watches the files and directories Codex reads", () => {
