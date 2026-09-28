@@ -880,7 +880,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
     build: (existing: Record<string, unknown> | undefined) => Record<string, unknown>,
     onConflict: ProfileConflictPolicy
   ): Promise<AdapterMutationResult> {
-    assertMcpServerName(name);
+    assertMcpServerName(typeof name === "string" ? name : "");
     const state = await this.load();
     this.requireClaudeJson(state);
     const created = await updateClaudeJsonMcpServers(
@@ -1047,7 +1047,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
     if (!isRecord(draft)) throw profileErrors.invalid("The MCP server draft is missing.");
     this.requireClaudeJson(state);
     const nextName = draft.name;
-    assertMcpServerName(nextName);
+    assertMcpServerName(typeof nextName === "string" ? nextName : "");
     const enabled = !isMcpDenied(state.settings, name);
     await updateClaudeJsonMcpServers(
       this.ctx.homes.claudeJson,
