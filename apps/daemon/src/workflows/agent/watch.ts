@@ -15,7 +15,15 @@
 //      background work, no continuing goal, nothing pending) — or `monitoring` (only watch loops,
 //      e.g. a dev server) after a 60 s grace when `whenOnlyWatchLoopsRemain: "finish"` — held for a
 //      5 s quiet window, because a background agent finishing can wake the parent into a
-//      provider-started turn;
+//      provider-started turn. After background work ENDED with no turn settling since
+//      (`backgroundEndedAt`), the window is 90 s (`wakeQuietMs`): the woken reply may take longer
+//      than 5 s to become a turn — the Claude CLI streams its first block (a long thinking block:
+//      many seconds) before the frame that opens the turn, and a host from before the adapter's
+//      wake signal (`session.state.changed {running}` at the held `message_start`) showed the
+//      thread idle and finished all that time, so the block ended with the launch message as its
+//      output. The adapter's signal is the fix at the source; this is the guard for a host without
+//      it and for any provider whose wake lags. Done without the long window once a turn settled
+//      after the background work ended — that turn IS the wake;
 // and `maxMinutes` / the run's cancel end the watch from outside.
 //
 // The watcher itself performs NO side effect: it returns what to do, and the executor persists its
@@ -39,6 +47,8 @@ import { AUTONOMOUS_ANSWER } from "./prompt.ts";
 export interface WatchTimings {
   /** How long "done" must hold before the output is read. */
   quietMs: number;
+  /** How long "done" must hold when background work ended after the latest settled turn (a wake may still come). */
+  wakeQuietMs: number;
   /** How long only watch loops must remain before `whenOnlyWatchLoopsRemain: "finish"` finishes. */
   monitorGraceMs: number;
   /** The safety re-read, whatever the bus says. */
@@ -49,6 +59,7 @@ export interface WatchTimings {
 
 export const DEFAULT_WATCH_TIMINGS: WatchTimings = {
   quietMs: 5_000,
+  wakeQuietMs: 90_000,
   monitorGraceMs: 60_000,
   rereadMs: 10_000,
   activityThrottleMs: 2_000
@@ -230,6 +241,9 @@ export async function watchAgent(input: WatchInput): Promise<WatchOutcome> {
   let doneSince: number | null = null;
   let doneKey: string | null = null;
   let monitorSince: number | null = null;
+  // Background work this watch saw running, and when it was first seen gone (`backgroundEndedAt`).
+  let sawBackground = false;
+  let backgroundGoneAt: number | null = null;
   let lastActivity: string | undefined;
   let lastActivityAt = Number.NEGATIVE_INFINITY;
   try {
@@ -253,6 +267,13 @@ export async function watchAgent(input: WatchInput): Promise<WatchOutcome> {
         if (question) return { kind: "question", request: question };
         const approval = snap.pending.approvals.find((r) => !input.handled.has(r.requestId));
         if (approval) return { kind: "approval", request: approval };
+
+        if (s.backgroundLiveness) {
+          sawBackground = true;
+          backgroundGoneAt = null;
+        } else if (sawBackground && backgroundGoneAt === null) {
+          backgroundGoneAt = at;
+        }
 
         const rung = resolveChatActivity(s).rung;
         const latest = s.latestTurn ?? null;
@@ -289,8 +310,12 @@ export async function watchAgent(input: WatchInput): Promise<WatchOutcome> {
             doneKey = key;
             doneSince = at;
           }
-          if (at - doneSince >= timings.quietMs) return { kind: "done", snapshot: snap, summary: s };
-          nextWake = Math.min(nextWake, doneSince + timings.quietMs);
+          const endedAt = backgroundEndedAt(snap, baseline, backgroundGoneAt);
+          const completedAt = latest!.completedAt ? Date.parse(latest!.completedAt) : Number.NaN;
+          const wakeMayCome = endedAt !== null && !(Number.isFinite(completedAt) && completedAt >= endedAt);
+          const quiet = wakeMayCome ? Math.max(timings.quietMs, timings.wakeQuietMs) : timings.quietMs;
+          if (at - doneSince >= quiet) return { kind: "done", snapshot: snap, summary: s };
+          nextWake = Math.min(nextWake, doneSince + quiet);
         } else if (completed && rung === "monitoring" && input.whenOnlyWatchLoopsRemain === "finish") {
           doneSince = null;
           doneKey = null;
@@ -316,6 +341,22 @@ export async function watchAgent(input: WatchInput): Promise<WatchOutcome> {
   } finally {
     waker.dispose();
   }
+}
+
+/**
+ * When background work last ended, as far as this block can tell: the newest `task.completed` row
+ * after the baseline (a subagent's or a background shell's end — the thread says so, across a
+ * daemon restart too), or the moment this watch first saw the session's background liveness gone.
+ * Null when neither says background work ended.
+ */
+export function backgroundEndedAt(snap: ThreadSnapshotPayload, baseline: AgentBaseline, watchedGoneAt: number | null): number | null {
+  let latest = watchedGoneAt;
+  for (const item of itemsAfterBaseline(snap.items, baseline)) {
+    if (item.kind !== "activity" || item.activityKind !== "task.completed") continue;
+    const t = Date.parse(item.createdAt);
+    if (Number.isFinite(t) && (latest === null || t > latest)) latest = t;
+  }
+  return latest;
 }
 
 /** The session already read `error` when the baseline was taken (a failed start the block is recovering from). */

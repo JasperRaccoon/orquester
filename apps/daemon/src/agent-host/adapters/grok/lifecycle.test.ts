@@ -2302,6 +2302,40 @@ test("a rate_limit stop is a usage limit, named by its reason — with no reset 
   await r.dispose();
 });
 
+for (const noPromptComplete of [false, true]) {
+  test(`an authentication_failed stop is a refused login, named by its reason${noPromptComplete ? " (no prompt_complete)" : ""}`, async () => {
+    const r = await rig({ scenario: "stop-failure", env: { GROK_MOCK_STOP_REASON: "authentication_failed", ...(noPromptComplete ? { GROK_MOCK_NO_PROMPT_COMPLETE: "1" } : {}) } });
+    await start(r);
+    void r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+    await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+    await r.drain();
+    const errors = runtimeErrors(r.events);
+    assert.equal(errors.length, 1, "reported once");
+    assert.equal(errors[0]!.payload.reason, "auth");
+    await r.dispose();
+  });
+}
+
+for (const [message, reason] of [
+  ["You are not authenticated.", "auth"],
+  ["Authentication failed: invalid_grant", "auth"],
+  ["upstream error 401 Unauthorized", "auth"],
+  ["xai: 429 grok-usage-exhausted", "usage_limit"],
+  ["model returned an empty response", undefined]
+] as const) {
+  test(`a prompt the CLI answers with "${message}" (-32603) names ${reason ?? "no account failure"}`, async () => {
+    const r = await rig({ scenario: "prompt-error", env: { GROK_MOCK_PROMPT_ERROR_CODE: "-32603", GROK_MOCK_PROMPT_ERROR_MESSAGE: message } });
+    await start(r);
+    void r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+    await r.waitFor((event) => event.type === "runtime.error", "runtime.error");
+    await r.drain();
+    const errors = runtimeErrors(r.events);
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0]!.payload.reason, reason);
+    await r.dispose();
+  });
+}
+
 for (const [code, reason] of [
   [-32000, "auth"],
   [-32003, "usage_limit"],

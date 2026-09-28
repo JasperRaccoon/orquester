@@ -109,7 +109,8 @@ export type ProviderStep =
   /** Background work that outlives the turn: liveness set while `steps` run, cleared after. */
   | { kind: "background"; liveness?: "working" | "monitoring"; steps: ProviderStep[]; forever?: boolean }
   /** Inside background work: the provider wakes the parent into a turn of its own. */
-  | { kind: "wake"; steps: ProviderStep[] }
+  /** Background work ends and wakes the parent — after `delayMs` with the thread idle meanwhile (a Claude wake still held), else at once. */
+  | { kind: "wake"; steps: ProviderStep[]; delayMs?: number }
   /** Never finishes on its own. */
   | { kind: "hang" };
 
@@ -641,6 +642,8 @@ export class FakeChatHost implements DaemonApi {
   private endBackground(s: FakeSessionState): void {
     s.backgroundCount = Math.max(0, s.backgroundCount - 1);
     if (s.backgroundCount === 0) s.backgroundLiveness = null;
+    // The roster's end row, as a real host writes one for a subagent or a background shell.
+    this.pushActivity(s, "task.completed", "Task completed", { taskId: "bg-agent", status: "completed" }, null, "info", "bg-agent");
     this.publish(s);
   }
 
@@ -661,6 +664,10 @@ export class FakeChatHost implements DaemonApi {
         return "stopped";
       } else if (step.kind === "wake") {
         this.endBackground(s);
+        if (step.delayMs) {
+          await this.clock.sleep(step.delayMs);
+          if (s.epoch !== epoch || s.closed) return "stopped";
+        }
         this.startTurn(s, "", true, step.steps);
         this.publish(s);
         return "woke";

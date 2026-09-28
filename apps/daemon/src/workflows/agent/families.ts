@@ -12,7 +12,7 @@
 // (`cliproxy/state.json`) and the selection itself stays pure.
 
 import { readFileSync } from "node:fs";
-import type { AgentAccountAgent } from "@orquester/api";
+import { SYSTEM_ACCOUNT_ID, type AgentAccountAgent } from "@orquester/api";
 import {
   cliproxyStateFile,
   parseCliProxyState,
@@ -45,8 +45,12 @@ export function isProxyLauncher(refId: string): boolean {
 /**
  * Does a launch of `refId` with `model` run under a managed account? False for an agent with no
  * family, and for a claudex model the proxy serves without one (a router provider's or xAI's).
+ * `routerProviderOf`, when present, names the router provider serving a claudex model — the
+ * cooldown key of an accountless router launch (`cooldownSubject`).
  */
-export type UsesAccount = (refId: string, model: string) => boolean;
+export type UsesAccount = ((refId: string, model: string) => boolean) & {
+  routerProviderOf?: (model: string) => string | null;
+};
 
 /**
  * The predicate over a live list of router providers (re-read on every call, so a provider added
@@ -54,12 +58,15 @@ export type UsesAccount = (refId: string, model: string) => boolean;
  * main loop's, never a proxy model (`launchesProxyModel`, mcp/agents.ts).
  */
 export function createUsesAccount(routerProviders: () => readonly RouterProvider[]): UsesAccount {
-  return (refId, model) => {
+  const uses = (refId: string, model: string): boolean => {
     if (accountFamilyOf(refId) === null) return false;
     if (refId !== "claudex") return true;
     if (resolveXaiModel(model)) return false;
     return resolveRouterModel(routerProviders(), model) === null;
   };
+  return Object.assign(uses, {
+    routerProviderOf: (model: string): string | null => resolveRouterModel(routerProviders(), model)?.providerId ?? null
+  });
 }
 
 /** Without the proxy state: only the curated xAI list is known, every other claudex model uses an account. */
@@ -75,14 +82,43 @@ export function routerProvidersFromDisk(daemonDir: string): RouterProvider[] {
 }
 
 /**
- * The family a chain entry's cooldowns and exclusions are keyed under (`<family>:<accountId>`).
- * An account-bearing launch uses its account family ("codex:acc1"); an accountless one — opencode,
- * a claudex router/xAI model — has the single candidate "system" under its own refId
- * ("opencode:system", "claudex:system"), so its limit never cools the family's system login.
+ * What a candidate's cooldowns and exclusions are keyed under: `<family>:<account>`
+ * (`cooldownKey`). Cooldowns live in `workflow-state.json` and are shared by every workflow, so a
+ * key must name exactly the quota that ran out — never a wider one:
+ *   - an account-bearing launch: its account family and account ("claude:acc1", "codex:system");
+ *   - the proxy launchers' own pick ("system" on claudex / claudemix — whichever seeded account the
+ *     proxy routes to): "claudex:proxy" / "claudemix:proxy", never the family's system login;
+ *   - an accountless launch, keyed by the PROVIDER that answered: OpenCode by the model's
+ *     `providerID/` prefix ("opencode:provider:anthropic"), a claudex router model by its router
+ *     provider ("claudex:router:openrouter"), an xAI model as "claudex:xai" — so one provider's 429
+ *     never cools another provider's entries. A model whose provider cannot be named (a router model
+ *     with no provider list at hand, an OpenCode model with no prefix) is keyed by the model itself.
  */
-export function cooldownFamilyOf(refId: string, model: string, usesAccount: UsesAccount = defaultUsesAccount): string {
+export function cooldownSubject(
+  refId: string,
+  model: string,
+  accountId: string,
+  usesAccount: UsesAccount = defaultUsesAccount
+): { family: string; account: string } {
   const family = accountFamilyOf(refId);
-  return family !== null && usesAccount(refId, model) ? family : refId;
+  if (family !== null && usesAccount(refId, model)) {
+    if (isProxyLauncher(refId) && accountId === SYSTEM_ACCOUNT_ID) return { family: refId, account: "proxy" };
+    return { family, account: accountId };
+  }
+  return { family: refId, account: accountlessProvider(refId, model, usesAccount) };
+}
+
+function accountlessProvider(refId: string, model: string, usesAccount: UsesAccount): string {
+  const bare = model.replace(/^acc[0-9a-fA-F]+\//, "");
+  if (isProxyLauncher(refId)) {
+    if (resolveXaiModel(model)) return "xai";
+    const router = usesAccount.routerProviderOf?.(model);
+    if (router) return `router:${router}`;
+    return `model:${bare}`;
+  }
+  const slash = bare.indexOf("/");
+  if (slash > 0) return `provider:${bare.slice(0, slash)}`;
+  return `model:${bare}`;
 }
 
 export function cooldownKey(family: string, accountId: string): string {
