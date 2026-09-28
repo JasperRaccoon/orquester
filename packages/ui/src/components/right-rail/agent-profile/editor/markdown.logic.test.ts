@@ -8,6 +8,7 @@ import {
   markdownEditorModel,
   markdownFormFromDocument,
   markdownNameError,
+  markdownNameHint,
   validateMarkdownForm
 } from "./markdown.logic";
 
@@ -88,6 +89,19 @@ test("names: skills are hyphenated lowercase words, commands may have one folder
   assert.equal(markdownNameError("command", "git/pr"), undefined);
   assert.ok(markdownNameError("command", "a/b/c"));
   assert.ok(markdownNameError("skill", "git/pr"));
+});
+
+test("names: Grok's commands are flat files — a folder is refused before the daemon does", () => {
+  const grok = markdownEditorModel("grok", "command");
+  assert.equal(grok.flatCommands, true);
+  assert.equal(markdownEditorModel("claude", "command").flatCommands, false);
+  assert.match(markdownNameError("command", "git/pr", { flatCommands: true }) ?? "", /No folder/);
+  assert.equal(markdownNameError("command", "git-pr", { flatCommands: true }), undefined);
+  const form = initialMarkdownForm(grok, "git/pr", "Body");
+  assert.match(validateMarkdownForm("command", grok, form).errors.name ?? "", /No folder/);
+  assert.equal(validateMarkdownForm("command", markdownEditorModel("opencode", "command"), form).errors.name, undefined);
+  assert.match(markdownNameHint("command", grok), /no folder/);
+  assert.match(markdownNameHint("command", markdownEditorModel("claude", "command")), /git\/pr/);
 });
 
 test("validation: a skill needs its description and a body; a command's description is optional", () => {

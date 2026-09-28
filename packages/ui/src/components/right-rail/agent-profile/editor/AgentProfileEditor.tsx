@@ -40,14 +40,20 @@ export const AgentProfileEditor: React.FC<{ request: AgentProfileEditorRequest; 
   const [kind, setKind] = useState<ProfileItemKind | null>(request.mode === "create" ? request.kind : null);
   const [confirming, setConfirming] = useState(false);
   const dirty = useRef(false);
+  const saving = useRef(false);
   const closeRef = useRef(onClose);
   closeRef.current = onClose;
 
   const setDirty = useCallback((value: boolean) => {
     dirty.current = value;
   }, []);
+  const setSaving = useCallback((value: boolean) => {
+    saving.current = value;
+  }, []);
+  // A save in flight is not "unsaved changes": it closes, and its outcome
+  // lands in the panel's notice (`useProfileSubmit`).
   const requestClose = useCallback(() => {
-    if (dirty.current) setConfirming(true);
+    if (dirty.current && !saving.current) setConfirming(true);
     else closeRef.current();
   }, []);
   const finish = useCallback(
@@ -64,8 +70,8 @@ export const AgentProfileEditor: React.FC<{ request: AgentProfileEditorRequest; 
   }, []);
 
   const env = useMemo<EditorEnv>(
-    () => ({ agent: request.agent, api, variant, connected, requestClose, finish, setDirty, switchKind }),
-    [request.agent, api, variant, connected, requestClose, finish, setDirty, switchKind]
+    () => ({ agent: request.agent, api, variant, connected, requestClose, finish, setDirty, setSaving, switchKind }),
+    [request.agent, api, variant, connected, requestClose, finish, setDirty, setSaving, switchKind]
   );
 
   return (

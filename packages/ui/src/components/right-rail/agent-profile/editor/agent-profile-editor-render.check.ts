@@ -16,6 +16,9 @@
  */
 
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { createElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -35,7 +38,7 @@ import {
 import type { ApiClient } from "../../../../lib/api-client";
 import { AgentProfileEditorHost } from "../AgentProfileEditorHost";
 import { CreateEditor, DetailEditor, EditLoader, ReadOnlyDetail } from "./AgentProfileEditor";
-import { DiscardConfirm } from "./EditorFrame";
+import { DiscardConfirm, focusOpener, needsInitialFocus } from "./EditorFrame";
 import { EditorShell } from "./EditorShell";
 import { EditorEnvContext, type EditorEnv } from "./env";
 import { HookFormView } from "./HookEditor";
@@ -49,7 +52,7 @@ import { initialMarketplaceForm, validateMarketplaceForm } from "./marketplace.l
 import { McpFormView } from "./McpEditor";
 import { initialMcpForm, newSecretRow, validateMcpForm, type McpForm } from "./mcp.logic";
 import { MarketplaceInstall, SpecInstall } from "./PluginEditor";
-import { SubmitStatus } from "./use-submit";
+import { closedSaveFailure, SubmitStatus } from "./use-submit";
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -68,6 +71,7 @@ function env(agent: AgentProfileAgentId, variant: EditorVariant, overrides: Part
     requestClose: noop,
     finish: noop,
     setDirty: noop,
+    setSaving: noop,
     switchKind: noop,
     ...overrides
   };
@@ -344,6 +348,22 @@ for (const variant of VARIANTS) {
     variant
   );
   assert.ok(general.includes('role="alert"') && general.includes("grok mcp add exited 1"), "anything else: the banner");
+
+  // An edit's ITEM_EXISTS (a rename onto a taken name): `PUT` takes no
+  // onConflict, so Replace / Keep both would only resend the same request.
+  const renamedOntoTaken = render(
+    inShell(
+      "body",
+      createElement(SubmitStatus, {
+        state: { error: { code: "ITEM_EXISTS", status: 409, message: '"jira" already exists.' }, placement: "exists" },
+        onDismiss: noop
+      })
+    ),
+    "claude",
+    variant
+  );
+  assert.ok(renamedOntoTaken.includes("&quot;jira&quot; already exists.") && renamedOntoTaken.includes('role="alert"'), "an edit's ITEM_EXISTS: the refusal");
+  assert.ok(!renamedOntoTaken.includes(">Replace<") && !renamedOntoTaken.includes(">Keep both<"), "without a Replace that cannot work");
 
   const nameOnly = renderToStaticMarkup(
     createElement(SubmitStatus, { state: { error: { code: "INVALID_NAME", status: 400, message: "Bad" }, placement: "name" } })
@@ -678,6 +698,51 @@ for (const variant of VARIANTS) {
   const conflict = render(inShell("body", createElement(InstructionsConflict, { message: "The file changed.", onReload: noop, onOverwrite: noop })), "codex", variant);
   assertEditorRules(conflict, `instructions conflict · ${variant}`, variant);
   assert.ok(buttonWith(conflict, "Reload") && buttonWith(conflict, "Overwrite").includes("text-danger"), "Reload or Overwrite");
+}
+
+// ---------------------------------------------------------------------------
+// Wiring the static render cannot reach (effects, a save's outcome)
+// ---------------------------------------------------------------------------
+
+{
+  const here = dirname(fileURLToPath(import.meta.url));
+  const source = (file: string): string =>
+    readFileSync(join(here, file), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
+
+  // Edits offer no Replace / Keep both; creates do.
+  for (const file of ["McpEditor.tsx", "HookEditor.tsx", "MarkdownEditor.tsx"]) {
+    assert.match(source(file), /onResolveConflict=\{detail \? undefined : submit\.resolveConflict\}/, `${file}: conflict answers for a create only`);
+  }
+
+  // The frame reads its opener while rendering — before a field inside autofocuses in the commit.
+  const frame = source("EditorFrame.tsx");
+  const read = frame.indexOf("opener.current = focusOpener(document)");
+  assert.ok(read > 0 && read < frame.indexOf("useLayoutEffect("), "the opener is read before any effect");
+  assert.match(frame, /needsInitialFocus\(dialogRef\.current, document\.activeElement\)/, "and the dialog takes focus when nothing inside did");
+  assert.equal((frame.match(/tabIndex=\{-1\}/g) ?? []).length, 2, "both dialogs can take focus");
+
+  // A save in flight closes without "Discard?", and one refused after closing tells the panel.
+  assert.match(source("AgentProfileEditor.tsx"), /if \(dirty\.current && !saving\.current\) setConfirming\(true\)/);
+  const submit = source("use-submit.tsx");
+  assert.match(submit, /env\.setSaving\(true\)/);
+  assert.match(submit, /if \(!alive\.current\) \{\s*setAgentProfileNotice\(\{ tone: "error", text: closedSaveFailure\(info\) \}\)/);
+  assert.equal(
+    closedSaveFailure({ code: "AGENT_CLI_FAILED", status: 502, message: "claude plugin install failed" }),
+    "Your change was not saved: claude plugin install failed"
+  );
+
+  // The focus rules themselves.
+  const body = { focus: noop } as unknown as HTMLElement;
+  const button = { focus: noop } as unknown as HTMLElement;
+  assert.equal(focusOpener({ activeElement: body, body }), null, "never <body>");
+  assert.equal(focusOpener({ activeElement: null, body }), null);
+  assert.equal(focusOpener({ activeElement: button, body }), button, "the trigger that opened it");
+  const inside = {} as Element;
+  const dialog = { contains: (node: Node | null) => node === inside };
+  assert.equal(needsInitialFocus(dialog, inside), false, "a field inside autofocused: leave it");
+  assert.equal(needsInitialFocus(dialog, button), true, "focus still behind the dialog: take it");
+  assert.equal(needsInitialFocus(dialog, null), true);
+  assert.equal(needsInitialFocus(null, button), false);
 }
 
 console.log("agent-profile editor render checks: ok");

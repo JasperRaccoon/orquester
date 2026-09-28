@@ -86,7 +86,7 @@ export const McpEditor: React.FC<{ detail?: McpDetail; onReload?: () => void }> 
     <EditorShell
       title={kindTitle(detail ? "edit" : "create", "mcp")}
       status={
-        <SubmitStatus state={submit} onResolveConflict={submit.resolveConflict} onDismiss={submit.clear} onReload={onReload} />
+        <SubmitStatus state={submit} onResolveConflict={detail ? undefined : submit.resolveConflict} onDismiss={submit.clear} onReload={onReload} />
       }
       primary={{ label: detail ? "Save" : "Add server", busy: submit.busy, onClick: save }}
     >

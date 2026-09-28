@@ -4,13 +4,15 @@
  * request again with that `onConflict`, `PROFILE_CONFLICT` says "Changed on
  * disk" and offers Reload, anything else is the banner above the Save bar.
  * A save that lands closes the editor and tells the panel — even if the
- * editor was closed while it was in flight.
+ * editor was closed while it was in flight; one refused after the editor
+ * closed says so in the panel's notice rather than nowhere.
  */
 
 import React, { useCallback, useEffect, useRef, useState } from "react";
 
 import type { ProfileConflictPolicy, ProfileMutationResponse } from "@orquester/api";
 
+import { setAgentProfileNotice } from "../../../../lib/agent-profile/store";
 import { useEditorEnv } from "./env";
 import { profileError, profileErrorPlacement, type ProfileErrorInfo, type ProfileErrorPlacement } from "./errors";
 import { Banner, SmallButton } from "./fields";
@@ -51,14 +53,21 @@ export function useProfileSubmit(): ProfileSubmit {
       inFlight.current = true;
       lastSend.current = send;
       setState({ busy: true, error: null, placement: null });
+      env.setSaving(true);
       try {
         const response = await send(onConflict);
         inFlight.current = false;
+        env.setSaving(false);
         env.finish(response);
       } catch (error) {
         inFlight.current = false;
-        if (!alive.current) return;
+        env.setSaving(false);
         const info = profileError(error);
+        if (!alive.current) {
+          // Closed while it was in flight: the editor that would show why is gone.
+          setAgentProfileNotice({ tone: "error", text: closedSaveFailure(info) });
+          return;
+        }
         setState({ busy: false, error: info, placement: profileErrorPlacement(info) });
       }
     },
@@ -86,9 +95,18 @@ export function useProfileSubmit(): ProfileSubmit {
   };
 }
 
+/** The panel's notice for a save refused after its editor closed. */
+export function closedSaveFailure(info: ProfileErrorInfo): string {
+  return `Your change was not saved: ${info.message}`;
+}
+
 /**
  * The refusal above the Save bar. `name` refusals are the name field's (not
  * repeated here); `onReload` is what "Changed on disk" offers.
+ * `onResolveConflict` is for a CREATE only: an edit's `ITEM_EXISTS` (a rename
+ * onto a name that is taken) is a plain refusal, since `PUT …/items/:id` takes
+ * no `onConflict` — offering Replace / Keep both there would only send the
+ * same request again.
  */
 export const SubmitStatus: React.FC<{
   state: Pick<SubmitState, "error" | "placement">;

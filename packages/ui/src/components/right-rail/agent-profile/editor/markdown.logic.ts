@@ -40,7 +40,15 @@ export interface MarkdownEditorModel {
   keptKeys: string[];
   /** The frontmatter as it is on disk (`{}` for a new item). */
   original: Record<string, unknown>;
+  /**
+   * Commands are flat files (Grok loads only the top of `~/.grok/commands`):
+   * a command name takes no folder.
+   */
+  flatCommands: boolean;
 }
+
+/** The agents whose commands cannot live in a folder (the daemon refuses one with `INVALID_NAME`). */
+const FLAT_COMMAND_AGENTS: readonly AgentProfileAgentId[] = ["grok"];
 
 /**
  * What a switch means when the frontmatter does not set it: `user-invocable`
@@ -103,7 +111,7 @@ export function markdownEditorModel(
     if (kind === "skill" && key === "name") return false;
     return !shown.has(key) || unfit.has(key);
   });
-  return { fields, keptKeys, original };
+  return { fields, keptKeys, original, flatCommands: FLAT_COMMAND_AGENTS.includes(agent) };
 }
 
 export function initialMarkdownForm(
@@ -171,7 +179,11 @@ export function markdownDraftFromForm(
   return { name: form.name.trim(), frontmatter: frontmatterDraft(kind, model, form), body: form.body };
 }
 
-export function markdownNameError(kind: MarkdownKind, name: string): string | undefined {
+export function markdownNameError(
+  kind: MarkdownKind,
+  name: string,
+  options: { flatCommands?: boolean } = {}
+): string | undefined {
   const trimmed = name.trim();
   if (trimmed === "") return kind === "skill" ? "Name the skill" : "Name the command";
   if (kind === "skill") {
@@ -179,10 +191,23 @@ export function markdownNameError(kind: MarkdownKind, name: string): string | un
     if (!isValidSkillName(trimmed)) return "Lowercase letters and digits, words joined by single hyphens (my-skill)";
     return undefined;
   }
+  if (options.flatCommands === true) {
+    if (trimmed.includes("/")) return "No folder: this agent loads commands only from the top of its commands folder";
+    if (!isValidSkillName(trimmed)) return "Lowercase words joined by hyphens (review or git-pr)";
+    return undefined;
+  }
   if (!isValidCommandName(trimmed)) {
     return "Lowercase words joined by hyphens, with at most one folder (review or git/pr)";
   }
   return undefined;
+}
+
+/** The name field's hint: what the name becomes. */
+export function markdownNameHint(kind: MarkdownKind, model: Pick<MarkdownEditorModel, "flatCommands">): string {
+  if (kind === "skill") return "Also the skill's folder name: lowercase words joined by hyphens.";
+  return model.flatCommands
+    ? "Invoked as /name: lowercase words joined by hyphens, no folder."
+    : "Invoked as /name. One folder level is allowed (git/pr → /git:pr).";
 }
 
 export interface MarkdownValidation {
@@ -192,7 +217,7 @@ export interface MarkdownValidation {
 
 export function validateMarkdownForm(kind: MarkdownKind, model: MarkdownEditorModel, form: MarkdownForm): MarkdownValidation {
   const errors: MarkdownValidation["errors"] = { fields: {} };
-  errors.name = markdownNameError(kind, form.name);
+  errors.name = markdownNameError(kind, form.name, { flatCommands: model.flatCommands });
   for (const spec of model.fields) {
     const value = form.values[spec.key];
     if (spec.type === "boolean") continue;

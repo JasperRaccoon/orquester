@@ -19,8 +19,10 @@ import {
   manageInAgent,
   matchesProfileQuery,
   profileKindChips,
+  profileItemMetaParts,
   switchDisabledReason,
-  switchLabel
+  switchLabel,
+  switchTitle
 } from "./list.logic.ts";
 
 function item(overrides: Partial<ProfileItem> & { id: string }): ProfileItem {
@@ -175,7 +177,67 @@ describe("what the list shows", () => {
   });
 });
 
+describe("a row's meta line", () => {
+  // The `meta` each adapter really sets (apps/daemon/src/agent-profile/adapters/*/index.ts).
+  const OFF_NOTE =
+    'Turning it off adds it to deniedMcpServers in settings.json, which also blocks a project MCP server named "jira".';
+
+  it("words the facts, and never shows Claude's off-switch caveat as a fact", () => {
+    const claudeMcp = item({ id: "mcp:jira", meta: { transport: "stdio", target: "npx -y jira-mcp", offNote: OFF_NOTE } });
+    assert.deepEqual(profileItemMetaParts(claudeMcp), ["stdio", "npx -y jira-mcp"]);
+    assert.ok(!matchesProfileQuery(claudeMcp, "deniedMcpServers"), "nor searches it");
+  });
+
+  it("drops what the description already says, and bare flags", () => {
+    const claudeHook = item({
+      id: "hook:PreToolUse:1",
+      kind: "hook",
+      description: "PreToolUse · Bash",
+      meta: { event: "PreToolUse", type: "command", matcher: "Bash" }
+    });
+    assert.deepEqual(profileItemMetaParts(claudeHook), [], "Claude's hook description is its event and matcher");
+    const codexHook = item({ id: "hook:Stop:2", kind: "hook", meta: { event: "Stop", timeout: "30s" } });
+    assert.deepEqual(profileItemMetaParts(codexHook), ["Stop", "timeout 30s"]);
+    const promptHook = item({ id: "hook:Stop:3", kind: "hook", description: "Stop", meta: { event: "Stop", type: "prompt" } });
+    assert.deepEqual(profileItemMetaParts(promptHook), ["prompt hook"]);
+    const symlinked = item({ id: "skill:x", kind: "skill", meta: { symlink: "true", override: "name-only" } });
+    assert.deepEqual(profileItemMetaParts(symlinked), ["skillOverrides: name-only", "symlink"]);
+  });
+
+  it("plugins and marketplaces: a version, where from, how many installed", () => {
+    const claudePlugin = item({
+      id: "plugin:superpowers@official",
+      kind: "plugin",
+      name: "superpowers@official",
+      meta: { version: "5.0.7", marketplace: "official" }
+    });
+    assert.deepEqual(profileItemMetaParts(claudePlugin), ["v5.0.7"], "the id already names the marketplace");
+    const opencodePlugin = item({ id: "plugin:x", kind: "plugin", meta: { source: "npm", version: "1.2.0", options: "yes" } });
+    assert.deepEqual(profileItemMetaParts(opencodePlugin), ["v1.2.0", "npm package", "with options"]);
+    const market = item({ id: "marketplace:m", kind: "marketplace", meta: { source: "github:a/b", installedPlugins: "3" } });
+    assert.deepEqual(profileItemMetaParts(market), ["github:a/b", "3 installed"]);
+    const none = item({ id: "marketplace:n", kind: "marketplace", meta: { source: "/srv/m", installedPlugins: "0", branch: "main" } });
+    assert.deepEqual(profileItemMetaParts(none), ["/srv/m", "branch main"]);
+    const configCommand = item({ id: "command:c", kind: "command", meta: { in: "config" } });
+    assert.deepEqual(profileItemMetaParts(configCommand), ["in the config file"]);
+  });
+
+  it("an unknown key from another daemon version still shows, after the known ones", () => {
+    assert.deepEqual(profileItemMetaParts(item({ id: "mcp:a", meta: { scope: "user", transport: "http" } })), ["http", "user"]);
+  });
+});
+
 describe("a row's switch and menu", () => {
+  it("its tooltip carries the adapter's off-switch caveat while on", () => {
+    const offNote = "Turning it off also blocks a project MCP server named \"jira\".";
+    assert.equal(
+      switchTitle(item({ id: "mcp:jira", meta: { offNote } })),
+      `On — loaded by new sessions. ${offNote}`
+    );
+    assert.equal(switchTitle(item({ id: "mcp:jira", enabled: false, meta: { offNote } })), "Off — not loaded");
+    assert.equal(switchTitle(item({ id: "mcp:jira" })), "On — loaded by new sessions");
+  });
+
   it("says what pressing it does", () => {
     assert.equal(switchLabel({ name: "jira", enabled: true }), "Turn off jira");
     assert.equal(switchLabel({ name: "jira", enabled: false }), "Turn on jira");

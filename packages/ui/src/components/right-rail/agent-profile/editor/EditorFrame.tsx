@@ -12,6 +12,14 @@
  *
  * The discard confirmation is drawn inside the dialog rather than as a second
  * modal, so there is only ever one layer and one Escape listener to agree.
+ *
+ * Focus: the dialog takes it when nothing inside did (an edit, a phone —
+ * fields autofocus only on a desktop create), so Tab and the screen reader
+ * start in the editor rather than behind it; and it goes back to what opened
+ * the editor when it closes. The opener is read while RENDERING, before the
+ * editor mounts — a field inside autofocuses during the commit, before any
+ * effect of this frame runs, and would otherwise pass for the opener (then
+ * nothing gets focus back, and the next bare Escape reaches the chat).
  */
 
 import React, { useEffect, useLayoutEffect, useRef, useState } from "react";
@@ -97,10 +105,10 @@ const FrameBody: React.FC<EditorFrameProps> = ({
   }, [phone, backArm]);
 
   // Focus goes back to what opened the editor (the row's menu, "+ Add").
-  const opener = useRef<HTMLElement | null>(null);
+  const opener = useRef<HTMLElement | null | undefined>(undefined);
+  if (opener.current === undefined) opener.current = focusOpener(document);
   useLayoutEffect(() => {
-    const active = document.activeElement;
-    opener.current = active instanceof HTMLElement && active !== document.body ? active : null;
+    if (needsInitialFocus(dialogRef.current, document.activeElement)) dialogRef.current?.focus({ preventScroll: true });
     return () => {
       const target = opener.current;
       setTimeout(() => {
@@ -122,8 +130,9 @@ const FrameBody: React.FC<EditorFrameProps> = ({
         role="dialog"
         aria-modal="true"
         aria-label={label}
+        tabIndex={-1}
         {...KEYBOARD_SURFACE_PROPS}
-        className="app-no-drag fixed inset-x-0 z-[120] flex flex-col overflow-hidden bg-neutral-950 text-neutral-100"
+        className="app-no-drag fixed inset-x-0 z-[120] flex flex-col overflow-hidden bg-neutral-950 text-neutral-100 focus:outline-none"
         style={{
           top: box.top,
           height: box.height || "100%",
@@ -151,11 +160,12 @@ const FrameBody: React.FC<EditorFrameProps> = ({
         role="dialog"
         aria-modal="true"
         aria-label={label}
+        tabIndex={-1}
         {...KEYBOARD_SURFACE_PROPS}
         // A row, like `ui/modal.tsx`: the editor inside stretches to the height
         // this box settles on (its content's, or the fill height it asks for),
         // capped by max-height, and its body scrolls.
-        className="relative flex max-h-[min(90vh,880px)] w-full max-w-[720px] overflow-hidden rounded-lg border border-neutral-800 bg-neutral-900 text-neutral-100 shadow-2xl"
+        className="relative flex max-h-[min(90vh,880px)] w-full max-w-[720px] overflow-hidden rounded-lg border border-neutral-800 bg-neutral-900 text-neutral-100 shadow-2xl focus:outline-none"
       >
         {children}
         {confirm}
@@ -163,6 +173,22 @@ const FrameBody: React.FC<EditorFrameProps> = ({
     </div>
   );
 };
+
+/** What had focus before the editor opened, to give it back: an element, never `<body>`. */
+export function focusOpener(doc: Pick<Document, "activeElement" | "body">): HTMLElement | null {
+  const active = doc.activeElement;
+  return active !== null && active !== doc.body && typeof (active as HTMLElement).focus === "function"
+    ? (active as HTMLElement)
+    : null;
+}
+
+/** The dialog takes focus when nothing inside it has it (no field autofocused). */
+export function needsInitialFocus(
+  dialog: Pick<HTMLElement, "contains"> | null,
+  active: Element | null
+): boolean {
+  return dialog !== null && (active === null || !dialog.contains(active));
+}
 
 export const DiscardConfirm: React.FC<{ onKeepEditing: () => void; onDiscard: () => void; touch: boolean }> = ({
   onKeepEditing,
