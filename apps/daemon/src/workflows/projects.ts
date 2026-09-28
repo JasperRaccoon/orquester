@@ -16,9 +16,12 @@ export interface ProjectOpsDeps {
   /** The daemon's own client (bound late: the unix app is built after the services). */
   api: DaemonApi | (() => DaemonApi | null);
   git: { status(cwd: string): Promise<GitStatusResponse>; currentBranch(cwd: string): Promise<string | null> };
-  workspacesDir: string;
-  fsRoot: string;
+  /** Getters in the daemon: `PUT /api/config/daemon` moves both in place. */
+  workspacesDir: string | (() => string);
+  fsRoot: string | (() => string);
 }
+
+const read = (value: string | (() => string)): string => (typeof value === "function" ? value() : value);
 
 const STATUS_LETTER: Record<GitFileChange["status"], string> = {
   modified: "M",
@@ -47,7 +50,15 @@ export function createProjectOps(deps: ProjectOpsDeps): ProjectOps {
     if (!resolved) throw new Error("The daemon API is not attached yet.");
     return resolved;
   };
-  const addressing = { fsRoot: deps.fsRoot, workspacesDir: deps.workspacesDir };
+  // Read at every use: the addressing rules follow a daemon config change.
+  const addressing = {
+    get fsRoot(): string {
+      return read(deps.fsRoot);
+    },
+    get workspacesDir(): string {
+      return read(deps.workspacesDir);
+    }
+  };
 
   return {
     async resolveExisting(projectPath: string): Promise<ProjectContext | null> {
@@ -76,7 +87,7 @@ export function createProjectOps(deps: ProjectOpsDeps): ProjectOps {
     },
 
     async deleteProject(path: string): Promise<void> {
-      const names = projectNamesFor(path, deps.workspacesDir);
+      const names = projectNamesFor(path, read(deps.workspacesDir));
       if (!names.workspace || !names.name) throw new Error(`"${path}" is not a project.`);
       const response = await api().request(
         "DELETE",

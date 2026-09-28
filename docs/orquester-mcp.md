@@ -1537,7 +1537,7 @@ routes, like every other tool; everything a tool changes shows up live in the ed
 | `get_workflow` | `workflowId`, `node?` | `{workflowId, name, revision, enabled, project, problems, errorCount, warningCount, connections, workflow}` — or, with `node`, that one block and its connections |
 | `create_workflow` | `name`, `description?`, `project`, `settings?`, `nodes`, `edges? = []`, `enabled? = false` | `{created: true, workflowId, revision, problems, …, connections, workflow, next?}` |
 | `update_workflow` | `workflowId`, `revision`, `ops` (1–500) | `{updated: true, workflowId, revision, problems, …, connections, workflow}` |
-| `validate_workflow` | `workflow` | `{valid, problems, errorCount, warningCount}` |
+| `validate_workflow` | `workflow` | `{valid, problems, errorCount, warningCount}` — a missing id, revision, timestamp, block position, edge id or edge `sourceHandle` is filled in |
 | `delete_workflow` | `workflowId`, `confirm: true` | `{deleted: true, workflowId}` |
 | `run_workflow` | `workflowId`, `input?`, `wait? = false`, `timeoutSeconds? = 300` (≤ 600), `force? = false` | `{runId, status: "started"}`; with `wait`, `{runId, finished, timedOut?, run, blocks, outputNote?}`; skipped: `{runId: null, skipped: "overlap", message}` |
 | `list_workflow_runs` | `workflowId`, `before?`, `limit? = 20` (≤ 50) | `{runs: [RunSummary], before}` — `before: null` = no more |
@@ -1660,8 +1660,9 @@ Errors keep the daemon's codes, with a hint: `WORKFLOW_NOT_FOUND` (`list_workflo
 `RUN_NOT_FOUND` (`list_workflow_runs`), `NODE_NOT_FOUND` (it lists the blocks),
 `REVISION_CONFLICT` (**re-read with `get_workflow`**, then send the ops again),
 `INVALID_WORKFLOW` (its problems are in the message — up to eight — and all of them in
-`detail.problems`), `INVALID_REQUEST` (an op or entry the daemon refused, named by index —
-`create_workflow` names `nodes[i]` or `edges[i]`), `RUN_NOT_ACTIVE` (cancelling a run that
+`detail.problems`; also an op or entry the daemon refused, named by the index its body carries
+(`opIndex`) — `update_workflow` names `ops[i]`, `create_workflow` names `nodes[i]` or `edges[i]`),
+`INVALID_REQUEST` (a malformed request body or query), `RUN_NOT_ACTIVE` (cancelling a run that
 already ended), `SECRET_INVALID`, `LIMIT_EXCEEDED`, `WORKFLOWS_UNAVAILABLE` (the daemon cannot
 write its workflows file right now).
 

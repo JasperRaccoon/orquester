@@ -712,13 +712,18 @@ const createWorkflow = defineTool({
   }
 });
 
+/** The daemon's own "Operation N: " / "Item N: " prefix, dropped where the tool names the entry itself. */
+function withoutEntryPrefix(message: string): string {
+  return message.replace(/^(?:Operation|Item) \d+: /, "");
+}
+
 /** A create refusal naming a failing entry: the daemon's opIndex counts the nodes, then the edges. */
 function indexedCreateError(error: ToolError, nodeCount: number): ToolError {
   const detail = isRecord(error.detail) ? error.detail : null;
   const index = detail && typeof detail.opIndex === "number" ? detail.opIndex : undefined;
   if (index === undefined) return error;
   const where = index < nodeCount ? `nodes[${index}]` : `edges[${index - nodeCount}]`;
-  return new ToolError(error.code, `${where}: ${error.message}`, { ...detail, entry: where });
+  return new ToolError(error.code, `${where}: ${withoutEntryPrefix(error.message)}`, { ...detail, entry: where });
 }
 
 /**
@@ -743,8 +748,9 @@ async function indexedPatchError(api: DaemonApi, workflowId: string, revision: n
     }
   }
   if (index === undefined || index < 0 || index >= ops.length) return error;
-  const already = new RegExp(`\\bops?\\s*\\[?#?${index}\\b`, "i").test(error.message);
-  const message = already ? error.message : `ops[${index}] (${ops[index]!.op}) failed: ${error.message}`;
+  const base = withoutEntryPrefix(error.message);
+  const already = new RegExp(`\\bops?\\s*\\[?#?${index}\\b`, "i").test(base);
+  const message = already ? base : `ops[${index}] (${ops[index]!.op}) failed: ${base}`;
   return new ToolError(error.code, `${message} Nothing was saved.`, { ...detail, opIndex: index, op: ops[index]!.op });
 }
 
@@ -776,12 +782,24 @@ const updateWorkflow = defineTool({
 const validateWorkflowTool = defineTool({
   name: "validate_workflow",
   title: "Validate a workflow definition",
-  description: "Check a whole definition without saving it (get_workflow's `workflow`, edited): its problems — errors block enabling, warnings do not. create_workflow and update_workflow return problems too; this is for drafts. A missing id, revision or timestamp is filled in.",
-  input: { workflow: z.record(z.unknown()).describe("The definition: {name, project:{kind:\"existing\", projectPath}|…, settings?, nodes:[{id, type, name, position, config}], edges:[{id, source, sourceHandle, target}]} — ids, not names, in edges.") },
+  description: "Check a whole definition without saving it (get_workflow's `workflow`, edited): its problems — errors block enabling, warnings do not. create_workflow and update_workflow return problems too; this is for drafts. A missing id, revision, timestamp, block position, edge id or edge sourceHandle is filled in.",
+  input: { workflow: z.record(z.unknown()).describe("The definition: {name, project:{kind:\"existing\", projectPath}|…, settings?, nodes:[{id, type, name, config}], edges:[{source, sourceHandle?, target}]} — ids, not names, in edges.") },
   annotations: READ_ONLY,
   async run(args, { api, now }) {
     const stamp = new Date(now()).toISOString();
-    const workflow = { id: "draft", revision: 0, enabled: false, createdAt: stamp, updatedAt: stamp, ...args.workflow };
+    const workflow: Record<string, unknown> = { id: "draft", revision: 0, enabled: false, createdAt: stamp, updatedAt: stamp, ...args.workflow };
+    // Positions and edge ids are the canvas's business, not a draft's: the real route's schema
+    // requires them, so a draft that leaves them out gets placeholders rather than a schema error.
+    if (Array.isArray(workflow.nodes)) {
+      workflow.nodes = workflow.nodes.map((node: unknown, index: number) =>
+        isRecord(node) && node.position === undefined ? { ...node, position: { x: 320 * index, y: 0 } } : node
+      );
+    }
+    if (Array.isArray(workflow.edges)) {
+      workflow.edges = workflow.edges.map((edge: unknown, index: number) =>
+        isRecord(edge) ? { ...edge, id: edge.id ?? `draft-edge-${index + 1}`, sourceHandle: edge.sourceHandle ?? "success" } : edge
+      );
+    }
     const body = expectWorkflowOk<ValidateWorkflowResponse>(await api.request("POST", workflowRoutes.validate, { body: { workflow } }));
     const view = problemsView(sanitizeProblems(body.problems));
     return { valid: view.errorCount === 0, ...view };

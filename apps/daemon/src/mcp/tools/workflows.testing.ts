@@ -111,7 +111,8 @@ export class FakeWorkflowDaemon extends FakeDaemonApi {
         this.workflows.set(created.id, created);
         return { status: 200, body: { workflow: created, problems } };
       } catch (e) {
-        if (e instanceof WorkflowPatchError) return err(400, "INVALID_REQUEST", e.message, { opIndex: e.opIndex });
+        // As the real service answers (service.ts `patchError`): the entry named, and its index.
+        if (e instanceof WorkflowPatchError) return err(400, "INVALID_WORKFLOW", `Item ${e.opIndex}: ${e.message}`, { opIndex: e.opIndex });
         throw e;
       }
     }
@@ -140,8 +141,8 @@ export class FakeWorkflowDaemon extends FakeDaemonApi {
       try {
         next = applyWorkflowPatch(w, req.ops, { mintId: this.mintId, now: this.now });
       } catch (e) {
-        // No opIndex in the body: the tool must find the op itself.
-        if (e instanceof WorkflowPatchError) return err(400, "INVALID_REQUEST", e.message);
+        // As a daemon from before `opIndex` answered: no index in the body, the tool must find the op itself.
+        if (e instanceof WorkflowPatchError) return err(400, "INVALID_WORKFLOW", `Operation ${e.opIndex}: ${e.message}`);
         throw e;
       }
       const { problems } = validateWorkflow(next);

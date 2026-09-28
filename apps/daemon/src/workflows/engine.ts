@@ -1213,11 +1213,13 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     delete a.run.queuedFor;
     a.summaryDirty = true;
 
-    // Temporary project: gone on success; kept `keepFailedTempDays` otherwise (§5.10).
+    // Temporary project: gone on success; kept `keepFailedTempDays` otherwise (§5.10). A run of a
+    // workflow that was deleted keeps nothing: its run record goes with it, and with the record
+    // the only thing that would ever sweep the project.
     const temp = a.run.tempProject;
     if (temp && !temp.deleted) {
       const keepDays = a.def.settings.keepFailedTempDays ?? 3;
-      if (status === "succeeded" || status === "stopped" || keepDays <= 0) {
+      if (status === "succeeded" || status === "stopped" || keepDays <= 0 || a.noPersist) {
         try {
           await opts.services.projects.deleteProject(temp.path);
           temp.deleted = true;

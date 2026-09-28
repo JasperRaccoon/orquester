@@ -188,6 +188,8 @@ export interface WorkflowEngine {
   /** Test one block (upstream from pins, else the last run). */
   testNode(workflowId: string, nodeId: string): Promise<RunWorkflowResponse>;
   cancel(runId: string): Promise<boolean>;
+  /** Resolves when the run has ended (optional: the delete cascade waits, bounded, for cancelled runs). */
+  waitForRun?(runId: string): Promise<unknown>;
   getRun(runId: string): Promise<WorkflowRun | null>;
   listRuns(workflowId: string, opts: { before?: string; limit: number }): Promise<ListWorkflowRunsResponse>;
   nodeOutput(runId: string, nodeId: string): Promise<{ found: boolean; output?: unknown }>;

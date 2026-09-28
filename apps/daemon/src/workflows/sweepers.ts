@@ -6,7 +6,12 @@
 //     `tempProject.deleted` set;
 //   - workflow chat tabs (`owner.kind === "workflow"`) in EXISTING projects, `workflowTabRetentionDays`
 //     after their run ended — never a tab the user wrote in after that end (the thread's last user
-//     message is read), never a tab whose run is still going or whose run record is gone.
+//     message is read), never a tab whose run is still going. A tab whose run record is gone (swept
+//     by retention, or its workflow deleted) is judged by its own clock instead: closed once the
+//     retention window has passed since the later of its creation and the user's last message in it.
+//
+// Temporary projects are swept BEFORE run retention: the record is what names a kept project, and
+// retention itself skips a run whose project is still there (run-store.ts), so neither can leak it.
 //
 // Everything goes through the daemon's own routes (`DaemonApi`); a failure is logged and the next
 // sweep tries again. Driven by the injected clock (no sleeps).
@@ -103,7 +108,29 @@ export function createWorkflowSweepers(deps: WorkflowSweepersDeps): WorkflowSwee
       if (!owner || owner.kind !== "workflow" || active.has(owner.runId)) continue;
       try {
         const run = await deps.runStore.load(owner.runId);
-        if (!run || isRunActive(run.status) || run.endedAt === undefined) continue;
+        if (!run) {
+          // The record is gone: the tab's own clock decides (its creation, the user's last word).
+          let since = Date.parse(session.createdAt);
+          if (!Number.isFinite(since)) continue;
+          if (now - since < tabRetentionMs) continue;
+          if (session.kind === "agent-chat") {
+            const thread = await readThread(api, session.id);
+            for (const item of thread.items) {
+              if (item.kind !== "message" || item.role !== "user" || item.agentId) continue;
+              const at = Date.parse(item.createdAt);
+              if (Number.isFinite(at) && at > since) since = at;
+            }
+            if (now - since < tabRetentionMs) continue;
+          }
+          const closed = await api.request("DELETE", `/api/sessions/${encodeURIComponent(session.id)}`);
+          if (closed.status >= 400 && closed.status !== 404) {
+            report.errors.push(`tab ${session.id}: the daemon answered ${closed.status}`);
+            continue;
+          }
+          report.tabsClosed.push(session.id);
+          continue;
+        }
+        if (isRunActive(run.status) || run.endedAt === undefined) continue;
         // A temp project's tabs go with the project.
         if (run.tempProject && run.tempProject.path === session.projectPath) continue;
         const endedAt = Date.parse(run.endedAt);
@@ -131,14 +158,14 @@ export function createWorkflowSweepers(deps: WorkflowSweepersDeps): WorkflowSwee
     running ??= (async () => {
       const report: SweepReport = { tempProjectsDeleted: [], tabsClosed: [], errors: [] };
       try {
-        await deps.runStore.sweep();
-      } catch (error) {
-        report.errors.push(`run retention: ${message(error)}`);
-      }
-      try {
         await sweepTempProjects(report);
       } catch (error) {
         report.errors.push(`temp projects: ${message(error)}`);
+      }
+      try {
+        await deps.runStore.sweep();
+      } catch (error) {
+        report.errors.push(`run retention: ${message(error)}`);
       }
       try {
         await sweepTabs(report);

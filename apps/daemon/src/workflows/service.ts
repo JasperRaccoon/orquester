@@ -77,7 +77,7 @@ function jsonBytes(value: unknown): number {
 function patchError(error: unknown, what: "op" | "item"): WorkflowError {
   if (error instanceof WorkflowPatchError) {
     const where = what === "op" ? `Operation ${error.opIndex}` : `Item ${error.opIndex}`;
-    return new WorkflowError(400, "INVALID_WORKFLOW", `${where}: ${error.message}`);
+    return new WorkflowError(400, "INVALID_WORKFLOW", `${where}: ${error.message}`, undefined, error.opIndex);
   }
   return new WorkflowError(400, "INVALID_WORKFLOW", error instanceof Error ? error.message : "The workflow is invalid.");
 }

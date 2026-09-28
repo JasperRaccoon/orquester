@@ -545,7 +545,11 @@ export type WorkflowErrorCode =
 
 /** Error body: `{ error: { code, message, problems? } }`. */
 export interface WorkflowErrorBody {
-  error: { code: WorkflowErrorCode; message: string; problems?: WorkflowProblem[] };
+  /**
+   * `opIndex`: the 0-based op a refused patch failed on (`POST …/patch`), or the entry a refused
+   * create failed on (its nodes first, then its edges).
+   */
+  error: { code: WorkflowErrorCode; message: string; problems?: WorkflowProblem[]; opIndex?: number };
 }
 
 /** GET /api/workflows?projectPath= */

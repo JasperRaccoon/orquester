@@ -15,7 +15,9 @@ export class WorkflowError extends Error {
     readonly status: WorkflowErrorStatus,
     readonly code: WorkflowErrorCode,
     message: string,
-    readonly problems?: WorkflowProblem[]
+    readonly problems?: WorkflowProblem[],
+    /** The op (patch) or entry (create: nodes, then edges) a refusal names. */
+    readonly opIndex?: number
   ) {
     super(message);
     this.name = "WorkflowError";
@@ -26,7 +28,8 @@ export class WorkflowError extends Error {
       error: {
         code: this.code,
         message: this.message,
-        ...(this.problems !== undefined ? { problems: this.problems } : {})
+        ...(this.problems !== undefined ? { problems: this.problems } : {}),
+        ...(this.opIndex !== undefined ? { opIndex: this.opIndex } : {})
       }
     };
   }

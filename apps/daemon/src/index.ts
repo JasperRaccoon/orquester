@@ -120,7 +120,8 @@ import { WorkflowService, publishWorkflowEvents } from "./workflows/service.ts";
 import { WorkflowSecretsService } from "./workflows/secrets.ts";
 import { FileRunStore } from "./workflows/run-store.ts";
 import { WorkflowStateStore } from "./workflows/state-store.ts";
-import { registerWorkflowRoutes, summarizeWorkflow } from "./workflows/routes.ts";
+import { registerWorkflowRoutes } from "./workflows/routes.ts";
+import { consoleWorkflowLogger, createWorkflowDaemon } from "./workflows/daemon-wiring.ts";
 import { createInternalDaemonApi } from "./chat-client/index.ts";
 import { AgentAccountsService } from "./agent-accounts.ts";
 import { AgentAccountError } from "./agent-account-paths.ts";
@@ -871,17 +872,55 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // Workflows → event bus (channel "workflows"): `workflow.upserted` (the rail summary — the
   // engine's, with live trigger state, once attached), `workflow.deleted`, `workflowSecrets.changed`
   // (no names, no values). Run events are published by the engine itself.
+  //
+  // The workflow runtime (workflows/daemon-wiring.ts): the engine with every block executor, the
+  // agent block and its account preview, the scheduler and the git poller, and the ONE summary
+  // builder. Built here, started after `agentChat.init()` (below, once the unix app exists).
+  // Usage is read synchronously by account selection: the service's latest reading, kept current.
+  let workflowUsage: UsageResponse = { agents: [] };
+  let workflowUsageSeen = false;
+  usage.events.on("changed", (reading: UsageResponse) => {
+    workflowUsageSeen = true;
+    workflowUsage = reading;
+  });
+  // The service started above: take what it already holds (no recompute), unless a change beat us.
+  const cachedUsage = await usage.snapshot();
+  if (!workflowUsageSeen) workflowUsage = cachedUsage;
+  const workflowTmp = join(paths.baseDir, "tmp");
+  await mkdir(workflowTmp, { recursive: true }).catch(() => undefined);
+  const workflowDaemon = createWorkflowDaemon({
+    service: workflows,
+    secrets: workflowSecrets,
+    runStore: workflowRuns,
+    state: workflowState,
+    broadcaster,
+    usage: { snapshot: () => workflowUsage },
+    accounts: {
+      list: () => agentAccounts.list(),
+      // The same file the create route's seeded-account gate reads (`seededAccountRefusal`).
+      seededAccountIds: () => new Set(readCliProxyState(resolved.daemonDir)?.seededAccounts.map((a) => a.accountId) ?? [])
+    },
+    git,
+    gitRemote: accounts,
+    readWorkspaceMeta: async (workspace) =>
+      (await readWorkspacesMeta(resolved.workspacesMetaFile)).workspaces.find((w) => w.name === workspace) ?? null,
+    savedPrompts,
+    // Getters: PUT /api/config/daemon reassigns both in place.
+    workspacesDir: () => resolved.workspacesDir,
+    fsRoot: () => resolved.fsRoot,
+    daemonDir: resolved.daemonDir,
+    appdirTmp: workflowTmp,
+    push,
+    logger: consoleWorkflowLogger
+  });
   publishWorkflowEvents({
     service: workflows,
     secrets: workflowSecrets,
-    broadcaster,
-    // `services` is assigned below, before any transport serves — and every event follows a
-    // request — so it is always set when this runs.
-    summarize: (workflow) =>
-      summarizeWorkflow(
-        { service: workflows, runStore: workflowRuns, engine: () => services.workflowEngine },
-        workflow
-      )
+    // The runtime's view of the bus: its trigger-state watcher notes every row that goes out.
+    broadcaster: workflowDaemon.events,
+    // The builder itself — never `summarizeWorkflow`, which delegates to the engine, which calls
+    // this builder (the recursion the engine refuses).
+    summarize: (workflow) => workflowDaemon.summarize(workflow)
   });
 
   // Server-side browser tabs (Design Mode). Chromium resolves through the
@@ -1044,22 +1083,24 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     app: unixServer,
     broadcaster,
     agentChat,
-    fsRoot: resolved.fsRoot,
-    workspacesDir: resolved.workspacesDir
+    // Getters: the client lives as long as the daemon, and PUT /api/config/daemon moves both.
+    fsRoot: () => resolved.fsRoot,
+    workspacesDir: () => resolved.workspacesDir
   });
 
   /**
-   * INTEGRATION POINT — attach the workflow engine (engine.ts) once it is built. Call it after
-   * `agentChat.init()` (above) and after `services.internalApi` exists (the engine's ChatClient
-   * rides it), then `await engine.resume()` and `engine.start()`. From then on the workflow routes
-   * run, test and cancel through it, and `workflow.upserted` carries its live trigger state; before
-   * it, those routes answer 503 ENGINE_UNAVAILABLE and history is read from the run store alone.
-   * `stop()` below stops an attached engine before flushing the workflow stores.
+   * Attach the workflow engine: after `agentChat.init()` (above — a resumed agent block re-enters
+   * its watcher against the adopted host) and after `services.internalApi` exists (the engine's
+   * ChatClient rides it). From then on the workflow routes run, test and cancel through it; before
+   * it they answer 503 ENGINE_UNAVAILABLE and history is read from the run store alone. `start`
+   * resumes every unfinished run, starts the queue and the sweepers, then arms the scheduler and the
+   * git poller. `stop()` below stops it before flushing the workflow stores.
    */
   const attachWorkflowEngine = (engine: WorkflowEngine): void => {
     services.workflowEngine = engine;
   };
-  void attachWorkflowEngine;
+  attachWorkflowEngine(workflowDaemon.runtime.engine);
+  await workflowDaemon.start(services.internalApi).catch((error) => console.error("Workflow engine start failed", error));
 
   // The external HTTP transport is opt-in and hot-reloadable: changing its
   // config (password / host / port / enabled) restarts THIS transport only —
@@ -1109,7 +1150,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Workflows first: the engine stops its timers, triggers and sweepers (never a sandbox child —
     // those are detached and survive, §5.8), then every workflow store's write chain is flushed.
     // Both are fast; the 3 s backstop in cli.ts bounds them regardless.
-    await services.workflowEngine?.stop().catch((error) => console.error("Workflow engine stop failed", error));
+    await workflowDaemon.stop().catch((error) => console.error("Workflow engine stop failed", error));
     await Promise.all([workflows.flush(), workflowSecrets.flush(), workflowRuns.flush(), workflowState.flush()]);
     clearInterval(cliproxyHealthTimer);
     agentAccounts.stopRefresher();

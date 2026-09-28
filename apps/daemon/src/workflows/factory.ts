@@ -78,8 +78,9 @@ export interface WorkflowRuntimeDeps {
   };
   /** The saved-prompts service (`get(id)`). */
   savedPrompts: { get(id: string): { body: string; title: string } | undefined | null };
-  workspacesDir: string;
-  fsRoot: string;
+  /** Getters in the daemon (`PUT /api/config/daemon` moves both in place); a string in tests. */
+  workspacesDir: string | (() => string);
+  fsRoot: string | (() => string);
   /** `<appdir>/tmp` — the sandbox attempts' TMPDIR. */
   appdirTmp?: string;
   /** The daemon's PushService (`notifyWorkflowRun`); null disables pushes. */
