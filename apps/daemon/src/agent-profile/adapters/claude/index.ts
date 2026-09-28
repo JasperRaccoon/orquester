@@ -168,6 +168,12 @@ interface LoadedState {
   plugins: InstalledPlugin[];
   marketplaces: KnownMarketplace[];
   entries: Map<string, Entry>;
+  /**
+   * Stashed items whose id a live item took meanwhile (the same hook re-added,
+   * a new file at the command's path): not listed, but a toggle carrying their
+   * revision answers `STASH_CONFLICT` rather than a bare conflict.
+   */
+  shadowed: Map<string, Entry>;
   fileErrors: ProfileFileError[];
 }
 
@@ -238,11 +244,27 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
 
   async snapshot(): Promise<AdapterSnapshot> {
     const state = await this.load();
+    const instructions = await this.tolerant(
+      state,
+      this.instructionsPath,
+      { path: this.instructionsPath, exists: false, bytes: 0, lines: 0, revision: "", warnings: [] },
+      async () => (await this.readInstructions()).info
+    );
     return {
-      instructions: (await this.readInstructions()).info,
+      instructions,
       items: [...state.entries.values()].map((entry) => entry.item),
       fileErrors: state.fileErrors
     };
+  }
+
+  /** Runs one part of a read; a failure (EACCES, EIO, …) becomes a `fileErrors` entry and `fallback`. */
+  private async tolerant<T>(state: LoadedState, path: string, fallback: T, run: () => Promise<T>): Promise<T> {
+    try {
+      return await run();
+    } catch (error) {
+      state.fileErrors.push({ path, message: message(error) });
+      return fallback;
+    }
   }
 
   /** Reads a JSON file tolerantly: missing → `null`; unreadable → `null` plus a `fileErrors` entry. */
@@ -282,6 +304,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
       plugins: plugins.value ?? [],
       marketplaces: marketplaces.value ?? [],
       entries: new Map(),
+      shadowed: new Map(),
       fileErrors
     };
     const pluginEntries = await this.loadPlugins(state);
@@ -289,7 +312,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
     await this.loadSkills(state, pluginEntries.skills);
     for (const entry of pluginEntries.plugins) this.add(state, entry);
     this.loadMarketplaces(state);
-    const stashed = await this.stash.list(AGENT);
+    const stashed = await this.tolerant(state, join(this.stash.dir, AGENT), [], () => this.stash.list(AGENT));
     this.loadHooks(state, stashed);
     await this.loadCommands(state, pluginEntries.commands, stashed);
     return state;
@@ -362,7 +385,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
   }
 
   private async loadSkills(state: LoadedState, pluginSkills: Entry[]): Promise<void> {
-    for (const skill of await scanSkills(this.skillsRoot)) {
+    for (const skill of await this.tolerant(state, this.skillsRoot, [], () => scanSkills(this.skillsRoot))) {
       if (skill.name === SYNCED_DIR) continue;
       const override = skillOverride(state.settings, skill.name);
       const enabled = override !== "off";
@@ -405,20 +428,23 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
   private async loadPlugins(state: LoadedState): Promise<{ plugins: Entry[]; skills: Entry[]; commands: Entry[]; mcp: Entry[] }> {
     const out = { plugins: [] as Entry[], skills: [] as Entry[], commands: [] as Entry[], mcp: [] as Entry[] };
     for (const plugin of state.plugins) {
-      const present = await pluginCachePresent(plugin.installPath);
-      const manifest = present ? await readPluginManifest(plugin.installPath) : null;
+      const read = await this.tolerant(state, plugin.installPath, null, async () => {
+        if (!(await pluginCachePresent(plugin.installPath))) return null;
+        const manifest = await readPluginManifest(plugin.installPath);
+        const skills = await scanSkills(join(plugin.installPath, "skills"));
+        const commands = await scanCommands(join(plugin.installPath, "commands"), { nested: true });
+        const mcp = await readPluginMcpServers(plugin.installPath, manifest);
+        const provides = await pluginProvides(plugin.installPath, {
+          skills: skills.length,
+          commands: commands.length,
+          mcpServers: Object.keys(mcp).length
+        });
+        return { manifest, skills, commands, mcp, provides };
+      });
+      const present = read !== null;
+      const { manifest, skills, commands, mcp, provides } = read ?? { manifest: null, skills: [], commands: [], mcp: {}, provides: {} };
       const enabled = isPluginEnabled(state.settings, plugin.id, manifest?.defaultEnabled);
       const source = pluginSource(plugin);
-      const skills = present ? await scanSkills(join(plugin.installPath, "skills")) : [];
-      const commands = present ? await scanCommands(join(plugin.installPath, "commands"), { nested: true }) : [];
-      const mcp = present ? await readPluginMcpServers(plugin.installPath, manifest) : {};
-      const provides = present
-        ? await pluginProvides(plugin.installPath, {
-            skills: skills.length,
-            commands: commands.length,
-            mcpServers: Object.keys(mcp).length
-          })
-        : {};
       const readOnly = { toggleable: false, editable: false, deletable: false, source, enabled };
       for (const skill of skills) {
         const name = `${plugin.name}:${skill.name}`;
@@ -607,12 +633,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
         this.ctx.logger.warn(`agent-profile claude: stashed hook ${entry.dir} has no usable fragment`);
         continue;
       }
-      const live = state.entries.get(entry.id);
-      if (live !== undefined) {
-        live.item.warnings.push({ code: "stashed-copy", message: "A turned-off copy of this hook is also stashed." });
-        continue;
-      }
-      this.add(state, {
+      const stashedEntry: Entry = {
         kind: "hook",
         origin: "stash",
         fragment,
@@ -623,12 +644,20 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
           stashed: true,
           path: entry.dir
         })
-      });
+      };
+      const live = state.entries.get(entry.id);
+      if (live !== undefined) {
+        live.item.warnings.push({ code: "stashed-copy", message: "A turned-off copy of this hook is also stashed." });
+        state.shadowed.set(entry.id, stashedEntry);
+        continue;
+      }
+      this.add(state, stashedEntry);
     }
   }
 
   private async loadCommands(state: LoadedState, pluginCommands: Entry[], stashed: StashEntry[]): Promise<void> {
-    for (const command of await scanCommands(this.commandsRoot, { nested: true })) {
+    const commands = await this.tolerant(state, this.commandsRoot, [], () => scanCommands(this.commandsRoot, { nested: true }));
+    for (const command of commands) {
       const warnings: ProfileItem["warnings"] = [];
       if (command.error !== undefined) {
         warnings.push({ code: "unreadable", message: command.error, action: "open-file" });
@@ -659,13 +688,6 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
     }
     for (const entry of stashed) {
       if (entry.kind !== "command" || entry.payloadPath === null) continue;
-      if (state.entries.has(entry.id)) {
-        state.entries.get(entry.id)!.item.warnings.push({
-          code: "stashed-copy",
-          message: "A turned-off copy with the same name is stashed; delete one of them."
-        });
-        continue;
-      }
       const text = await readTextIfExists(entry.payloadPath).catch(() => null);
       let description: string | undefined;
       try {
@@ -674,7 +696,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
       } catch {
         description = undefined;
       }
-      this.add(state, {
+      const stashedEntry: Entry = {
         kind: "command",
         origin: "stash",
         name: entry.name,
@@ -695,7 +717,17 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
           },
           { text, error: null }
         )
-      });
+      };
+      const live = state.entries.get(entry.id);
+      if (live !== undefined) {
+        live.item.warnings.push({
+          code: "stashed-copy",
+          message: "A turned-off copy with the same name is stashed; delete this one to get it back."
+        });
+        state.shadowed.set(entry.id, stashedEntry);
+        continue;
+      }
+      this.add(state, stashedEntry);
     }
     for (const entry of pluginCommands) this.add(state, entry);
   }
@@ -792,7 +824,13 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
     if (need === "edit" && !item.editable) throw profileErrors.notEditable(item.name);
     if (need === "toggle" && !item.toggleable) throw profileErrors.notToggleable(item.name);
     if (need === "delete" && !item.deletable) throw profileErrors.notDeletable(item.name);
-    if (item.revision !== revision) throw profileErrors.conflict();
+    if (item.revision !== revision) {
+      const shadow = state.shadowed.get(id);
+      if (need === "toggle" && shadow !== undefined && shadow.item.revision === revision) {
+        throw profileErrors.stashConflict(item.path ?? id);
+      }
+      throw profileErrors.conflict();
+    }
     return { state, entry };
   }
 
