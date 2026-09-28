@@ -35,7 +35,14 @@ import { menuFocusIndex } from "../saved-prompts/SavedPromptItem";
 import { RailSwitch, railCardClass } from "../primitives";
 import { agentIcon } from "./AgentPicker";
 import { WarningChip } from "./InstructionsCard";
-import { manageInAgent, profileItemMetaParts, switchDisabledReason, switchLabel, switchTitle } from "./list.logic";
+import {
+  manageInAgent,
+  profileItemDisplayName,
+  profileItemSecondLine,
+  switchDisabledReason,
+  switchLabel,
+  switchTitle
+} from "./list.logic";
 
 const FOCUS_RING = "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500";
 const DANGER_ACTION = "text-danger hover:bg-danger-500/10 hover:text-danger";
@@ -82,7 +89,7 @@ export const ProfileItemRow: React.FC<ProfileItemRowProps> = (props) => {
   const owner = manageInAgent(item);
   const hasMenu =
     item.editable || owner !== null || props.copyTargets.length > 0 || item.path !== undefined || item.deletable;
-  const secondLine = [...profileItemMetaParts(item), ...(item.description ? [item.description] : [])].join(" · ");
+  const secondLine = profileItemSecondLine(item);
   const menuButton = cn(
     "inline-flex shrink-0 items-center justify-center rounded-md text-neutral-400 transition-colors hover:bg-neutral-800 hover:text-neutral-100",
     sheet ? "h-10 w-10" : "h-7 w-7"
@@ -100,7 +107,8 @@ export const ProfileItemRow: React.FC<ProfileItemRowProps> = (props) => {
     >
       <div className={cn("flex items-center gap-1 pl-3 pr-1", sheet ? "min-h-14 py-1" : "min-h-12 py-1.5")}>
         <div className={cn("min-w-0 flex-1 transition-opacity", !item.enabled && "opacity-55")}>
-          <div className="flex min-w-0 items-center gap-1.5">
+          {/* Clips, so a dock squeezed below its minimum never draws the badge over the switch. */}
+          <div className="flex min-w-0 items-center gap-1.5 overflow-hidden">
             {item.locked ? (
               <span className="inline-flex shrink-0 text-neutral-500" title={disabledReason ?? "Locked"}>
                 <Lock size={11} aria-hidden />
@@ -108,7 +116,7 @@ export const ProfileItemRow: React.FC<ProfileItemRowProps> = (props) => {
               </span>
             ) : null}
             <span title={item.name} className="min-w-0 truncate text-[13px] font-medium text-neutral-100">
-              {item.name}
+              {profileItemDisplayName(item)}
             </span>
             {!item.enabled ? <span className="sr-only">(off)</span> : null}
             {item.source.type !== "user" ? (
@@ -146,7 +154,7 @@ export const ProfileItemRow: React.FC<ProfileItemRowProps> = (props) => {
           <AdaptiveMenu
             align="right"
             width="w-56"
-            title={item.name}
+            title={profileItemDisplayName(item)}
             focusOnOpen
             triggerClassName={cn("shrink-0 rounded-md", FOCUS_RING)}
             trigger={
@@ -218,9 +226,11 @@ export const ProfileItemRow: React.FC<ProfileItemRowProps> = (props) => {
       </div>
 
       {showFooter ? (
-        <div className="-mt-0.5 flex flex-wrap items-center gap-1.5 px-3 pb-2">
+        // On a phone the 40 px targets' own padding is the gap above them.
+        <div className={cn("flex flex-wrap items-center gap-1.5 px-3", sheet ? "-mt-2 pb-1" : "-mt-0.5 pb-2")}>
           {item.warnings.map((warning, index) => (
-            <span key={`${index}:${warning.code}`} className="inline-flex min-w-0 max-w-full items-center gap-1.5">
+            // Wraps: in a narrow panel the action goes under its message rather than squeezing it.
+            <span key={`${index}:${warning.code}`} className="inline-flex min-w-0 max-w-full flex-wrap items-center gap-1.5">
               <WarningChip message={warning.message} />
               {warning.action === "trust" ? (
                 <Button

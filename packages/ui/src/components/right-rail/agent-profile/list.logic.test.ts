@@ -19,7 +19,9 @@ import {
   manageInAgent,
   matchesProfileQuery,
   profileKindChips,
+  profileItemDisplayName,
   profileItemMetaParts,
+  profileItemSecondLine,
   switchDisabledReason,
   switchLabel,
   switchTitle
@@ -204,6 +206,46 @@ describe("a row's meta line", () => {
     assert.deepEqual(profileItemMetaParts(symlinked), ["skillOverrides: name-only", "symlink"]);
   });
 
+  it("a hook's second line reads alike for every agent: event, matcher, then the rest", () => {
+    // As the three adapters send them.
+    const claude = item({
+      id: "hook:PreToolUse:1",
+      kind: "hook",
+      description: "PreToolUse · *",
+      meta: { event: "PreToolUse", type: "command", matcher: "*" }
+    });
+    const codex = item({
+      id: "hook:PreToolUse:2",
+      kind: "hook",
+      description: "Matcher: *",
+      meta: { event: "PreToolUse", matcher: "*", timeout: "10s" }
+    });
+    const grok = item({
+      id: "hook:Stop:3",
+      kind: "hook",
+      description: "Stop",
+      meta: { event: "Stop", file: "orquester.json", timeout: "10 s" }
+    });
+    assert.equal(profileItemSecondLine(claude), "PreToolUse · *");
+    assert.equal(profileItemSecondLine(codex), "PreToolUse · * · timeout 10s");
+    assert.equal(profileItemSecondLine(grok), "Stop · timeout 10 s · orquester.json");
+    // Anything else: the meta, then the description.
+    const mcp = item({ id: "mcp:x", description: "Jira issues", meta: { transport: "stdio" } });
+    assert.equal(profileItemSecondLine(mcp), "stdio · Jira issues");
+    const eventless = item({ id: "hook:x", kind: "hook", description: "From the plugin" });
+    assert.equal(profileItemSecondLine(eventless), "From the plugin");
+  });
+
+  it("a hook's name shows the ends of its absolute paths", () => {
+    const hook = (name: string) => profileItemDisplayName({ kind: "hook", name });
+    assert.equal(hook("'/var/lib/orquester/daemon/hooks/agent-hook.sh' claude Stop"), "'…/agent-hook.sh' claude Stop");
+    assert.equal(hook("/usr/bin/node /opt/x/lint.js --fix"), "…/node …/lint.js --fix");
+    assert.equal(hook("python3 $HOME/.claude/hooks/reinject.py"), "python3 $HOME/.claude/hooks/reinject.py", "not absolute");
+    assert.equal(hook("~/.claude/hooks/check.sh"), "~/.claude/hooks/check.sh");
+    assert.equal(hook("/bin/true"), "…/true");
+    assert.equal(profileItemDisplayName({ kind: "mcp", name: "/odd/but/kept" }), "/odd/but/kept", "only hooks");
+  });
+
   it("plugins and marketplaces: a version, where from, how many installed", () => {
     const claudePlugin = item({
       id: "plugin:superpowers@official",
@@ -333,8 +375,10 @@ describe("agents and layout", () => {
   });
 
   it("collapses the picker to a dropdown below the segmented control's width", () => {
-    assert.equal(agentPickerLayout(null), "segmented", "unmeasured: the default dock width fits");
+    assert.equal(agentPickerLayout(null), "segmented", "unmeasured: a phone's section fits");
     assert.equal(agentPickerLayout(260), "dropdown", "the dock's minimum");
+    assert.equal(agentPickerLayout(319), "dropdown", "the dock's default 320 px, inside its border");
+    assert.equal(agentPickerLayout(330), "dropdown", "too narrow for the four names in a wide font");
     assert.equal(agentPickerLayout(AGENT_PICKER_SEGMENTED_MIN_WIDTH - 1), "dropdown");
     assert.equal(agentPickerLayout(AGENT_PICKER_SEGMENTED_MIN_WIDTH), "segmented");
     assert.equal(agentPickerLayout(352), "segmented", "a 360 px phone's section");

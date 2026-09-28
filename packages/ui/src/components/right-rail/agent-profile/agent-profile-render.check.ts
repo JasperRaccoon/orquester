@@ -556,4 +556,66 @@ const switchOf = (row: string): string => row.match(/<button[^>]*role="switch"[^
   assert.ok(!noActions.includes("More actions"), "nothing to offer, no menu");
 }
 
+// ---------------------------------------------------------------------------
+// Nothing clipped in the narrowest dock or on a phone (the screenshot pass)
+// ---------------------------------------------------------------------------
+
+{
+  const grokMd = {
+    code: "dead-grok-md",
+    message: "~/.grok/GROK.md is never read by Grok. Move its text into AGENTS.md."
+  };
+  const orquesterHook = item({
+    id: "hook:Stop:3333333333333333",
+    kind: "hook",
+    name: "'/var/lib/orquester/daemon/hooks/agent-hook.sh' grok Stop",
+    description: "Stop",
+    toggleable: false,
+    editable: false,
+    deletable: false,
+    locked: true,
+    source: { type: "orquester", label: "Orquester" },
+    meta: { event: "Stop", file: "orquester.json", timeout: "10 s" }
+  });
+  const inherited = { ...INHERITED, warnings: [{ code: "long", message: "A warning long enough to need a second line on a phone" }] };
+  const snap = snapshot("opencode", {
+    items: [orquesterHook, inherited],
+    instructions: { ...snapshot("opencode").instructions, warnings: [grokMd] }
+  });
+  const narrow = view(viewProps({ agent: "opencode", snap, width: 260 }));
+
+  assert.ok(narrow.includes('placeholder="Search profile…"'), "a search placeholder the 260 px dock holds");
+  assert.ok(narrow.includes('aria-label="Search OpenCode&#x27;s profile"'), "its name still says whose");
+
+  const hint = narrow.match(/<p class="[^"]*">Applies to new sessions · OpenCode servers restart when idle<\/p>/)?.[0] ?? "";
+  assert.ok(hint.length > 0 && !/\btruncate\b/.test(hint) && /text-balance/.test(hint), "OpenCode's hint wraps, never clips");
+
+  const card = narrow.match(/<button[^>]*data-profile-instructions=""[\s\S]*?<\/button>/)?.[0] ?? "";
+  assert.ok(!card.includes("h-8 w-8 shrink-0 items-center justify-center rounded-lg"), "a narrow panel's card drops the file icon");
+  assert.ok(/\bw-6\b/.test(card), "and narrows its chevron");
+  const wide = view(viewProps({ agent: "opencode", snap, width: 400 }));
+  const wideCard = wide.match(/<button[^>]*data-profile-instructions=""[\s\S]*?<\/button>/)?.[0] ?? "";
+  assert.ok(wideCard.includes("h-8 w-8 shrink-0 items-center justify-center rounded-lg"), "a wide one keeps it");
+
+  // Warning chips wrap: a phone has no tooltip to read the rest in.
+  for (const html of [card, rowOf(narrow, inherited.id)]) {
+    const chip = html.match(/<span class="inline-flex min-w-0 max-w-full items-start[^"]*text-warn">[\s\S]*?<\/span><\/span>/)?.[0] ?? "";
+    assert.ok(chip.length > 0 && /break-words/.test(chip) && !/\btruncate\b/.test(chip), "a warning chip wraps");
+  }
+
+  // A hook named by its command: the end of the path, the whole in the tooltip,
+  // and its line reads event first, like every agent's.
+  const hook = rowOf(narrow, orquesterHook.id);
+  assert.ok(hook.includes(`title="${orquesterHook.name.replace(/'/g, "&#x27;")}"`), "the whole command in the tooltip");
+  assert.ok(hook.includes(">&#x27;…/agent-hook.sh&#x27; grok Stop</span>"), "the part that tells hooks apart");
+  assert.ok(hook.includes(">Stop · timeout 10 s · orquester.json</p>"), "event first");
+  // A dock squeezed below its minimum (a 768 px tablet with the sidebar open)
+  // clips the name line, so the badge's floor never overlaps the switch.
+  assert.ok(/<div class="flex min-w-0 items-center gap-1\.5 overflow-hidden">/.test(hook), "the name line clips its badge");
+
+  // The sheet: the Manage-in footer tucks under the 40 px targets above it.
+  const sheet = view(viewProps({ agent: "opencode", snap, variant: "sheet", width: 352 }));
+  assert.ok(/<div class="flex flex-wrap items-center gap-1\.5 px-3 -mt-2 pb-1">/.test(rowOf(sheet, inherited.id)), "no gap under the row");
+}
+
 console.log("agent-profile render checks passed");
