@@ -1126,9 +1126,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Both are fast; the 3 s backstop in cli.ts bounds them regardless.
     await workflowDaemon.stop().catch((error) => console.error("Workflow engine stop failed", error));
     await Promise.all([workflows.flush(), workflowSecrets.flush(), workflowRuns.flush(), workflowState.flush()]);
-    // Agent profile: its watchers and debounce timers, then each adapter's long-lived helpers.
-    await agentProfile.stop().catch((error) => console.error("Agent profile stop failed", error));
-    await agentProfileImports.stop().catch((error) => console.error("Agent profile imports stop failed", error));
+    // Agent profile: its watchers and debounce timers, each adapter's long-lived helpers (a codex
+    // app-server may take its whole kill grace to exit) and the import trees. Started here, awaited
+    // last: it must not hold up the session and agent-host shutdown below within cli.ts's 3 s backstop.
+    const agentProfileStopped = Promise.all([
+      agentProfile.stop().catch((error) => console.error("Agent profile stop failed", error)),
+      agentProfileImports.stop().catch((error) => console.error("Agent profile imports stop failed", error))
+    ]);
     agentAccounts.stopRefresher();
     gitWatcher.stop();
     // Detach (don't kill) sessions: the tmux backend leaves its server running so
@@ -1143,6 +1147,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     const unixClosed = unixServer.close();
     unixServer.server.closeAllConnections?.();
     await unixClosed.catch(() => undefined);
+    await agentProfileStopped;
   };
 
   console.log(`Orquester daemon ${daemonId} on unix:${paths.socketPath} (workspaces: ${resolved.workspacesDir})`);
@@ -1265,6 +1270,10 @@ export function createServer(
     // makes the per-IP login throttle key on the actual client (see clientIp).
     // The unix-socket transport has no proxy, so leave it off there.
     trustProxy: options.mode === "remote" ? "127.0.0.1" : false,
+    // find-my-way's default (100) is shorter than an agent profile item id in its URL
+    // (`command%3A<64>%2F<64>`, `plugin%3A<name>%40<marketplace>`): such a route would 404.
+    // Every handler bounds and validates its own parameters.
+    maxParamLength: 2048,
     logger: {
       level: "info",
       stream: logStream,
@@ -1284,17 +1293,26 @@ export function createServer(
   app.addHook("onRequest", async (request, reply) => {
     // The multiplexed session WebSocket authenticates itself via a query token
     // (browsers can't set WS headers) and must skip the bearer logic below.
-    if (request.url.split("?")[0] === "/ws") {
+    const rawPath = request.url.split("?")[0] ?? "";
+    // The router matches the percent-DECODED path (`/%61pi/sessions` is routed to
+    // `/api/sessions`), so the gate is decided on the raw path, its decoded form AND the
+    // matched route's own pattern — never on the raw request line alone.
+    const routePath: string | undefined = request.routeOptions.url;
+    if (rawPath === "/ws" || routePath === "/ws") {
       return;
     }
 
     // Only the API + event stream are token-gated; the static web client, its
     // assets and the public auth-info endpoint load freely (the web app then
     // authenticates its API calls with the credential bearer).
-    const url = request.url.split("?")[0];
-    const needsAuth =
-      (url.startsWith("/api") || url.startsWith("/events") || url.startsWith("/mcp")) &&
-      url !== "/api/auth/info";
+    const decodedPath = safeDecodePath(rawPath);
+    const url = routePath ?? decodedPath ?? rawPath;
+    const gated = (path: string | undefined): boolean =>
+      path !== undefined &&
+      (path.startsWith("/api") || path.startsWith("/events") || path.startsWith("/mcp")) &&
+      path !== "/api/auth/info";
+    // A path that does not even decode is refused unless authenticated.
+    const needsAuth = decodedPath === undefined || gated(rawPath) || gated(decodedPath) || gated(routePath);
     if (!options.authRequired || !needsAuth) {
       return;
     }
@@ -4744,6 +4762,15 @@ function safeEqual(a: string, b: string): boolean {
   const ba = Buffer.from(a);
   const bb = Buffer.from(b);
   return ba.length === bb.length && timingSafeEqual(ba, bb);
+}
+
+/** A request path percent-decoded as the router sees it; `undefined` when it is not valid percent-encoding. */
+function safeDecodePath(path: string): string | undefined {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return undefined;
+  }
 }
 
 /**

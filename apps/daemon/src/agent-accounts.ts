@@ -14,7 +14,9 @@ import {
   readdir,
   rename,
   copyFile,
-  cp
+  cp,
+  link,
+  unlink
 } from "node:fs/promises";
 import { basename, dirname, extname, join, isAbsolute } from "node:path";
 import { SYSTEM_ACCOUNT_ID, type AgentAccount, type AgentAccountsResponse } from "@orquester/api";
@@ -76,6 +78,9 @@ export class AgentAccountsService {
   /** Account ids with an in-flight refresh, so the hourly loop and the usage
    *  path never double-spend one account's single-use refresh token. */
   private refreshing = new Set<string>();
+  /** Per agent: the tail of its account-home syncs. Two launches (of one account or of two)
+   *  merge into the same shared dirs, so their syncs never interleave. Never rejects. */
+  private syncChains = new Map<ManagedAgent, Promise<void>>();
 
   constructor(private readonly opts: AgentAccountsOptions) {}
 
@@ -217,9 +222,7 @@ export class AgentAccountsService {
     // onboarding flags, MCP servers, skills/plugins and settings relative to
     // CLAUDE_CONFIG_DIR/CODEX_HOME. Seed the shared, non-credential config from the
     // system home so managed sessions keep them. Best-effort — never block a launch.
-    await this.syncAccountHome(agent, id, home).catch((e) =>
-      this.opts.logger?.warn?.(`account home sync failed for ${agent}/${id}: ${String(e)}`)
-    );
+    await this.serializedSync(agent, id, home);
     if (agent === "claude") {
       return { env: { CLAUDE_CONFIG_DIR: home }, unset: [...CLAUDE_AUTH_ENV_UNSET], accountId: id };
     }
@@ -243,6 +246,23 @@ export class AgentAccountsService {
   }
   private systemGrokHome(): string {
     return process.env.GROK_HOME || join(this.opts.userhome, ".grok");
+  }
+
+  /**
+   * `syncAccountHome`, one at a time per agent: a merge that lists an account's
+   * real `commands/` while another sync of the same account turns it into the
+   * shared link would read the shared entries through that link and drop them
+   * as "duplicates" of themselves, and two accounts moving the same name into
+   * the shared dir at once would overwrite each other.
+   */
+  private serializedSync(agent: ManagedAgent, accountId: string, home: string): Promise<void> {
+    const run = (this.syncChains.get(agent) ?? Promise.resolve()).then(() =>
+      this.syncAccountHome(agent, accountId, home).catch((e) =>
+        this.opts.logger?.warn?.(`account home sync failed for ${agent}/${accountId}: ${String(e)}`)
+      )
+    );
+    this.syncChains.set(agent, run);
+    return run;
   }
 
   private async syncAccountHome(agent: ManagedAgent, accountId: string, home: string): Promise<void> {
@@ -352,9 +372,12 @@ export class AgentAccountsService {
     const st = await lstat(linkPath).catch(() => null);
     if (st) {
       if (st.isSymbolicLink()) {
-        if ((await readlink(linkPath).catch(() => null)) === target) return; // already shared
+        const current = await readlink(linkPath).catch(() => null);
+        if (current === target) return; // already shared
+        this.opts.logger?.warn?.(`replacing the link ${linkPath} -> ${current ?? "?"} with the shared ${target}`);
         await rm(linkPath, { force: true }).catch(() => undefined);
       } else if (st.isDirectory()) {
+        if (await samePath(linkPath, target)) return; // the "shared" dir IS this account's (a system home set to it)
         await this.mergeKeepingBoth(linkPath, target, accountId, options.bundledDir);
         if ((await readdir(linkPath).catch(() => ["x"])).length > 0) {
           this.opts.logger?.warn?.(`could not merge all of ${linkPath} into ${target}; left in place`);
@@ -388,9 +411,13 @@ export class AgentAccountsService {
       return;
     }
     for (const e of entries) {
+      // `src` must still be the account's own real dir: through a link to `dst` every entry would
+      // compare equal to itself and be removed as a duplicate.
+      if (!(await lstat(src).catch(() => null))?.isDirectory()) return;
       const s = join(src, e.name);
       const d = join(dst, e.name);
       const existing = await lstat(d).catch(() => null);
+      if (existing && (await samePath(s, d))) continue;
       if (!existing) {
         await moveEntry(s, d).catch((err) => this.opts.logger?.warn?.(`moving ${s} to ${d} failed: ${String(err)}`));
         continue;
@@ -430,18 +457,26 @@ export class AgentAccountsService {
     const st = await lstat(linkPath).catch(() => null);
     if (st) {
       if (st.isSymbolicLink()) {
-        if ((await readlink(linkPath).catch(() => null)) === target) return; // already shared
+        const current = await readlink(linkPath).catch(() => null);
+        if (current === target) return; // already shared
+        this.opts.logger?.warn?.(`replacing the link ${linkPath} -> ${current ?? "?"} with the shared ${target}`);
         await rm(linkPath, { force: true }).catch(() => undefined);
       } else if (st.isFile()) {
-        const shared = await lstat(target).catch(() => null);
+        if (await samePath(linkPath, target)) return; // the "shared" file IS this account's
+        // Followed: a shared file that is itself a link (a dotfiles repo) counts as the file it names.
+        const shared = await stat(target).catch(() => null);
         try {
           if (!shared) {
+            // Never onto a dangling link at `target`: moveEntry refuses an existing name.
             await moveEntry(linkPath, target);
-          } else if (await sameTree(linkPath, target)) {
+          } else if (await sameFileContent(linkPath, target)) {
             await rm(linkPath, { force: true });
           } else {
             const backup = await freeName(dirname(target), `${basename(target)}.account-${accountPrefix(accountId)}.bak`, true);
             await moveEntry(linkPath, join(dirname(target), backup));
+            this.opts.logger?.warn?.(
+              `${linkPath} differed from the shared ${target}; the account's copy was kept as ${join(dirname(target), backup)}`
+            );
           }
         } catch (e) {
           this.opts.logger?.warn?.(`could not merge ${linkPath} into ${target}; left in place: ${String(e)}`);
@@ -764,14 +799,41 @@ async function freeName(dir: string, name: string, isFile: boolean): Promise<str
   }
 }
 
-/** Rename, or copy-then-remove across filesystems. Never overwrites `dst`. */
+/**
+ * Rename, or copy-then-remove across filesystems. Never overwrites `dst`
+ * (EEXIST): `rename(2)` silently replaces a file, so a non-directory is
+ * hard-linked into place first (a link never replaces), then unlinked. A
+ * directory rename cannot replace anything but an empty directory.
+ */
 async function moveEntry(src: string, dst: string): Promise<void> {
+  const st = await lstat(src);
   try {
-    await rename(src, dst);
+    if (st.isDirectory()) {
+      await rename(src, dst);
+    } else {
+      await link(src, dst);
+      await unlink(src);
+    }
   } catch (e) {
-    if ((e as NodeJS.ErrnoException).code !== "EXDEV") throw e;
+    const code = (e as NodeJS.ErrnoException).code;
+    if (code !== "EXDEV" && !(code === "EPERM" && !st.isDirectory())) throw e;
     await cp(src, dst, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
     await rm(src, { recursive: true, force: true });
+  }
+}
+
+/** Both paths name the same file or directory (same device and inode, links followed). */
+async function samePath(a: string, b: string): Promise<boolean> {
+  const [sa, sb] = await Promise.all([stat(a).catch(() => null), stat(b).catch(() => null)]);
+  return sa !== null && sb !== null && sa.dev === sb.dev && sa.ino === sb.ino;
+}
+
+/** Two files' bytes, links followed. */
+async function sameFileContent(a: string, b: string): Promise<boolean> {
+  try {
+    return (await readFile(a)).equals(await readFile(b));
+  } catch {
+    return false;
   }
 }
 

@@ -552,3 +552,66 @@ test("nothing is linked into an agent home the daemon user does not have", async
   await assert.rejects(lstat(join(home, "commands")), { code: "ENOENT" });
   await assert.rejects(lstat(join(base, ".grok")), { code: "ENOENT" }, "the agent home itself is never created");
 });
+
+test("Claude: two accounts launched at once both keep their own command and CLAUDE.md (no move overwrites another)", async () => {
+  const f = await linkingFixture("claude");
+  const other = await f.svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "u" } }), label: "M" });
+  const homes: Array<[string, string]> = [
+    [f.acct.id, f.home],
+    [other.id, f.svc.homePath("claude", other.id)]
+  ];
+  for (const [id, home] of homes) {
+    await mkdir(join(home, "commands"), { recursive: true });
+    await writeFile(join(home, "commands", "review.md"), `review from ${id}`);
+    await writeFile(join(home, "CLAUDE.md"), `notes from ${id}`);
+  }
+  await Promise.all(homes.map(([id]) => f.svc.resolveLaunchEnv("claude", id)));
+  const commands = join(f.system, "commands");
+  const reviews = await Promise.all((await readdir(commands)).map((name) => readFile(join(commands, name), "utf8")));
+  const notes = await Promise.all(
+    (await readdir(f.system)).filter((name) => name.startsWith("CLAUDE.md")).map((name) => readFile(join(f.system, name), "utf8"))
+  );
+  for (const [id, home] of homes) {
+    assert.ok(reviews.includes(`review from ${id}`), `${id}'s command survived: ${JSON.stringify(reviews)}`);
+    assert.ok(notes.includes(`notes from ${id}`), `${id}'s CLAUDE.md survived: ${JSON.stringify(notes)}`);
+    assert.equal(await readlink(join(home, "commands")), commands);
+    assert.equal(await readlink(join(home, "CLAUDE.md")), join(f.system, "CLAUDE.md"));
+  }
+});
+
+test("Claude: overlapping launches of one account never drop the owner's shared commands", async () => {
+  for (let lag = 0; lag < 40; lag += 1) {
+    const f = await linkingFixture("claude");
+    await mkdir(join(f.system, "commands"), { recursive: true });
+    await writeFile(join(f.system, "commands", "owner.md"), "owner");
+    await mkdir(join(f.home, "commands"), { recursive: true });
+    await writeFile(join(f.home, "commands", "owner.md"), "owner");
+    await writeFile(join(f.home, "commands", "mine.md"), "mine");
+    const first = f.launch();
+    // Start the second launch a few event-loop turns into the first (no timers involved).
+    for (let i = 0; i < lag; i += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+    await Promise.all([first, f.launch()]);
+    assert.deepEqual((await readdir(join(f.system, "commands"))).sort(), ["mine.md", "owner.md"], `lag ${lag}`);
+    assert.equal(await readFile(join(f.system, "commands", "owner.md"), "utf8"), "owner");
+  }
+});
+
+test("Claude: a shared CLAUDE.md that is itself a link (dotfiles) is compared by what it names", async () => {
+  const f = await linkingFixture("claude");
+  await writeFile(join(f.base, "dotfiles-CLAUDE.md"), "same");
+  await symlink(join(f.base, "dotfiles-CLAUDE.md"), join(f.system, "CLAUDE.md"));
+  await writeFile(join(f.home, "CLAUDE.md"), "same");
+  await f.launch();
+  assert.equal(await readlink(join(f.home, "CLAUDE.md")), join(f.system, "CLAUDE.md"));
+  assert.deepEqual((await readdir(f.system)).filter((name) => name.includes(".bak")), [], "an identical copy is not a conflict");
+  assert.equal(await readlink(join(f.system, "CLAUDE.md")), join(f.base, "dotfiles-CLAUDE.md"), "the owner's link is kept");
+});
+
+test("Claude: an account copy never replaces a dangling shared CLAUDE.md link", async () => {
+  const f = await linkingFixture("claude");
+  await symlink(join(f.base, "not-yet.md"), join(f.system, "CLAUDE.md"));
+  await writeFile(join(f.home, "CLAUDE.md"), "account");
+  await f.launch();
+  assert.equal(await readlink(join(f.system, "CLAUDE.md")), join(f.base, "not-yet.md"), "the owner's link is kept");
+  assert.equal(await readFile(join(f.home, "CLAUDE.md"), "utf8"), "account", "the account's copy is left in place");
+});

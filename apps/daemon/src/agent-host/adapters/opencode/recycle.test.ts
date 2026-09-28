@@ -34,6 +34,10 @@ interface RecordedRequest {
 
 class FakeOpenCode {
   readonly requests: RecordedRequest[] = [];
+  /** While set, `GET /session/:id/message` answers only once it resolves (a history read in flight). */
+  messagesGate: Promise<void> | undefined;
+  /** Resolved by the first gated `GET /session/:id/message`. */
+  readonly messagesRequested = deferred<void>();
   private readonly sessions = new Map<string, { id: string; directory: string }>();
   private controller: ReadableStreamDefaultController<Uint8Array> | undefined;
   private nextSession = 0;
@@ -69,6 +73,10 @@ class FakeOpenCode {
       if (tail === "" && method === "PATCH") return json(true);
       if (tail === "/prompt_async") return new Response(null, { status: 204 });
       if (tail === "/abort") return json(true);
+      if (tail === "/message" && method === "GET" && this.messagesGate !== undefined) {
+        this.messagesRequested.resolve();
+        await this.messagesGate;
+      }
       if (tail === "/message" || tail === "/children") return json([]);
     }
     return json({}, 404);
@@ -358,6 +366,59 @@ test("nothing running means nothing recycled; a user's session stop after a recy
     );
     assert.equal(h.servers.length, 1, "a stopped thread is not brought back by the backstop");
   } finally {
+    await h.dispose();
+  }
+});
+
+test("history reads and rewind on a recycled idle thread bring its session back (the host calls them without ensureSession)", async () => {
+  const h = makeHarness();
+  try {
+    await h.adapter.startSession(START);
+    await h.waitFor("session.state.changed");
+    const sessionId = sessionIdOf(h);
+    assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 1, deferred: 0 });
+    assert.equal(h.adapter.hasSession(HOST_THREAD_ID), false);
+
+    const snapshot = await h.adapter.readThread(HOST_THREAD_ID);
+    assert.deepEqual(snapshot.turns, []);
+    assert.equal(h.adapter.hasSession(HOST_THREAD_ID), true, "the read brought the session back");
+    assert.equal(h.servers.length, 2, "on a fresh server");
+    assert.ok(
+      h.fake.requests.some((request) => request.url.origin === h.servers[1]!.url && request.url.pathname === `/session/${sessionId}/message`),
+      "the same upstream session is read"
+    );
+
+    assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 1, deferred: 0 });
+    await assert.rejects(
+      h.adapter.rollbackThread(HOST_THREAD_ID, 1, { firstRemovedTurnId: "msg_unknown", droppedTurnIds: ["msg_unknown"], retainedTurnIds: [] }),
+      (error: Error) => !/no live session/.test(error.message),
+      "a rewind reaches the session instead of failing for a missing one"
+    );
+    assert.equal(h.servers.length, 3);
+  } finally {
+    await h.dispose();
+  }
+});
+
+test("a recycle never stops the server under a history read; it goes once the read ends", async () => {
+  const h = makeHarness();
+  try {
+    await h.adapter.startSession(START);
+    await h.waitFor("session.state.changed");
+    const gate = deferred<void>();
+    h.fake.messagesGate = gate.promise;
+    const reading = h.adapter.readThread(HOST_THREAD_ID);
+    await h.fake.messagesRequested.promise;
+
+    assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 0, deferred: 1 });
+    assert.equal(h.servers[0]!.killed, false, "the read's server stays up");
+    gate.resolve();
+    await reading;
+    await h.adapter.recycleSettled();
+    assert.equal(h.servers[0]!.killed, true, "recycled once the read ended");
+    assert.equal(h.events.some((event) => event.type === "session.exited"), false);
+  } finally {
+    h.fake.messagesGate = undefined;
     await h.dispose();
   }
 });
