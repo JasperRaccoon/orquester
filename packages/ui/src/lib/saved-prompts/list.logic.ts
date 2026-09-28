@@ -21,7 +21,7 @@ export function normalizeProjectPath(path: string): string {
 }
 
 /** True when `prompt` is the project's own — never a global prompt, never with no project open. */
-export function belongsToProject(
+function belongsToProject(
   prompt: Pick<SavedPrompt, "projectPath">,
   projectPath: string
 ): boolean {
@@ -43,7 +43,7 @@ export function promptsForProject(
 }
 
 /** `all` = global + this project's; `project` = this project's only. */
-export function promptsInScope(
+function promptsInScope(
   prompts: readonly SavedPrompt[],
   scope: SavedPromptScopeFilter,
   projectPath: string
@@ -71,7 +71,7 @@ export function promptScopeLabel(prompt: Pick<SavedPrompt, "projectPath">): "Glo
 const FOLDED_LETTERS: Readonly<Record<string, string>> = { ł: "l", ø: "o", ß: "ss" };
 
 /** Case- and accent-insensitive form of `text`: "Révision" and "revision" match, and so do "Łódź" and "lodz". */
-export function foldSearchText(text: string): string {
+function foldSearchText(text: string): string {
   return text
     .normalize("NFD")
     .replace(/\p{M}+/gu, "")
@@ -80,7 +80,7 @@ export function foldSearchText(text: string): string {
 }
 
 /** The query's words, folded; none for a blank query. */
-export function searchWords(query: string): string[] {
+function searchWords(query: string): string[] {
   return foldSearchText(query)
     .split(/\s+/)
     .filter((word) => word.length > 0);
@@ -103,7 +103,7 @@ function haystackOf(prompt: SavedPrompt): string {
 }
 
 /** Every word appears somewhere in the title, the description, a tag or the body. */
-export function matchesSearch(prompt: SavedPrompt, words: readonly string[]): boolean {
+function matchesSearch(prompt: SavedPrompt, words: readonly string[]): boolean {
   if (words.length === 0) return true;
   const haystack = haystackOf(prompt);
   return words.every((word) => haystack.includes(word));
@@ -130,12 +130,12 @@ function byId(a: SavedPrompt, b: SavedPrompt): number {
 }
 
 /** Pinned prompts: alphabetical, so a favourite stays where the user last saw it. */
-export function compareByTitle(a: SavedPrompt, b: SavedPrompt): number {
+function compareByTitle(a: SavedPrompt, b: SavedPrompt): number {
   return titleCollator.compare(a.title, b.title) || byId(a, b);
 }
 
 /** The rest: last used first (never used last), then last edited, then by title. */
-export function compareByRecency(a: SavedPrompt, b: SavedPrompt): number {
+function compareByRecency(a: SavedPrompt, b: SavedPrompt): number {
   return (
     descending(timeOf(a.lastUsedAt), timeOf(b.lastUsedAt)) ||
     descending(timeOf(a.updatedAt), timeOf(b.updatedAt)) ||

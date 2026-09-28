@@ -44,6 +44,7 @@ import type {
 } from "../../services.ts";
 import type { AdapterLogger } from "../../adapter.ts";
 import { mergeSessionBinding } from "../../store/binding.ts";
+import type { LaunchConfigStore, ThreadLaunchConfig } from "../launch-config.ts";
 
 // ---------------------------------------------------------------------------
 // ThreadStore
@@ -400,8 +401,6 @@ export interface FakeIngestion extends Ingestion {
   readonly ingested: RuntimeEvent[];
   readonly flushedTurns: Array<{ threadId: string; turnId: string | undefined }>;
   readonly flushedThreads: string[];
-  /** Threads released through `Ingestion.forget` (Q1 #9). */
-  readonly forgottenThreads: string[];
   /** What to append for a given runtime event, if anything. */
   translate?: (event: RuntimeEvent) => AppendableDomainEvent[];
 }
@@ -412,12 +411,10 @@ export function createFakeIngestion(input: {
   const ingested: RuntimeEvent[] = [];
   const flushedTurns: Array<{ threadId: string; turnId: string | undefined }> = [];
   const flushedThreads: string[] = [];
-  const forgottenThreads: string[] = [];
   const fake: FakeIngestion = {
     ingested,
     flushedTurns,
     flushedThreads,
-    forgottenThreads,
     async ingest(event: RuntimeEvent): Promise<void> {
       ingested.push(event);
       const events = fake.translate?.(event) ?? [];
@@ -432,9 +429,7 @@ export function createFakeIngestion(input: {
     async flushThread(threadId: string): Promise<void> {
       flushedThreads.push(threadId);
     },
-    async forget(threadId: string): Promise<void> {
-      forgottenThreads.push(threadId);
-    },
+    async forget(): Promise<void> {},
     async drain(): Promise<void> {}
   };
   return fake;
@@ -641,39 +636,18 @@ export function createTestIdGen(): {
   };
 }
 
-/** A manual timer wheel: nothing in a test ever waits on real elapsed time. */
-export interface TestTimers {
-  setTimer(fn: () => void, ms: number): unknown;
-  clearTimer(handle: unknown): void;
-  /** Run every timer whose deadline is at or below `nowMs`. */
-  runDue(nowMs: number): void;
-  readonly pending: number;
-}
-
-export function createTestTimers(): TestTimers {
-  let nextId = 0;
-  const timers = new Map<number, { at: number; fn: () => void }>();
-  let elapsed = 0;
+/** The in-memory double every host test uses. */
+export function createMemoryLaunchConfigStore(): LaunchConfigStore & {
+  readonly entries: Map<string, ThreadLaunchConfig>;
+} {
+  const entries = new Map<string, ThreadLaunchConfig>();
   return {
-    setTimer(fn: () => void, ms: number): unknown {
-      nextId += 1;
-      timers.set(nextId, { at: elapsed + ms, fn });
-      return nextId;
+    entries,
+    async load(threadId: string): Promise<ThreadLaunchConfig | null> {
+      return entries.get(threadId) ?? null;
     },
-    clearTimer(handle: unknown): void {
-      if (typeof handle === "number") timers.delete(handle);
-    },
-    runDue(nowMs: number): void {
-      elapsed = nowMs;
-      for (const [id, timer] of [...timers]) {
-        if (timer.at <= nowMs) {
-          timers.delete(id);
-          timer.fn();
-        }
-      }
-    },
-    get pending() {
-      return timers.size;
+    async save(threadId: string, config: ThreadLaunchConfig): Promise<void> {
+      entries.set(threadId, config);
     }
   };
 }

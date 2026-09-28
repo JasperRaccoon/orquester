@@ -27,7 +27,7 @@ const FAMILY_OF: Readonly<Record<string, AccountFamily>> = {
   claude: "claude",
   codex: "codex",
   grok: "grok",
-  // The proxy launchers: `proxyAccountFamily` in agent-chat/service.ts (a test pins them equal).
+  // The proxy launchers: `proxyAccountFamily` in agent-chat/service.ts.
   claudemix: "claude",
   claudex: "codex"
 };

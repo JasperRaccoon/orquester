@@ -18,7 +18,6 @@ export type { RightRailPanelId, RightRailPanelProps } from "./types";
 export { RightRail, type RightRailProps } from "./RightRail";
 export { RightRailDock, type RightRailDockProps } from "./RightRailDock";
 export {
-  openProjectPathOf,
   RightRailEditorHost,
   RightRailFrame,
   RightRailRow,
@@ -26,12 +25,10 @@ export {
   type RightRailRowProps
 } from "./RightRailFrame";
 export {
-  MOBILE_SECTION_BAR_MAX,
   MobileSectionBar,
   MobileSectionNav,
   MobileSectionOverlay,
   MobileSectionView,
-  splitSectionItems,
   type MobileSectionBarProps,
   type MobileSectionViewProps
 } from "./MobileSections";

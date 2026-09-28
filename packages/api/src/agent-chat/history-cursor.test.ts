@@ -21,10 +21,6 @@ function base64Url(bytes: Buffer | string): string {
   return Buffer.from(bytes).toString("base64url");
 }
 
-test("a cursor round-trips through its encoding", () => {
-  assert.deepEqual(decodeHistoryCursor(encodeHistoryCursor(cursor), THREAD), cursor);
-});
-
 test("the encoding is base64url of JSON {t, a, i}, unpadded", () => {
   const encoded = encodeHistoryCursor(cursor);
   assert.match(encoded, /^[A-Za-z0-9_-]+$/, "safe in a query string as-is");

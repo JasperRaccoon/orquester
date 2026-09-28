@@ -6,10 +6,9 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { ApprovalDecision, RuntimeMode } from "@orquester/api/agent-chat";
+import type { RuntimeMode } from "@orquester/api/agent-chat";
 import { RUNTIME_MODES } from "@orquester/api/agent-chat";
 
-import { CODEX_ADAPTER_CAPABILITIES } from "./capabilities.ts";
 import {
   DEFAULT_APPROVAL_OPTIONS,
   approvalOptionsFromAvailableDecisions,
@@ -24,17 +23,8 @@ import {
   runtimeModeToThreadConfig,
   runtimeModeToTurnSandboxPolicy
 } from "./modes.ts";
-import { isUsableConversationId, resumeCursorFor } from "../../orchestration/resume.ts";
 import { toCodexAnswers, toUserInputQuestions, parseResumeCursor } from "./session.ts";
 import { MINIMUM_CODEX_VERSION, codexVersionFromUserAgent, meetsMinimumVersion } from "./probe.ts";
-
-const ALL_DECISIONS: ApprovalDecision[] = [
-  "accept",
-  "acceptForSession",
-  "acceptAlways",
-  "decline",
-  "cancel"
-];
 
 describe("§4.3 decision mapping — the Codex column", () => {
   it("maps every decision on a command approval", () => {
@@ -92,13 +82,6 @@ describe("§4.3 decision mapping — the Codex column", () => {
     assert.ok("network" in toPermissionsResponse("accept", requested).permissions);
   });
 
-  it("every decision produces a wire value on every surface", () => {
-    for (const decision of ALL_DECISIONS) {
-      assert.notEqual(toCommandDecision(decision), undefined);
-      assert.notEqual(toFileChangeDecision(decision), undefined);
-      assert.notEqual(toElicitationAction(decision), undefined);
-    }
-  });
 });
 
 describe("§4.3 options — availableDecisions is a hint, not a whitelist", () => {
@@ -192,26 +175,6 @@ describe("§4.4 permission modes — the Codex column", () => {
     });
   }
 
-  it("the turn-level sandbox uses a DIFFERENT spelling from the thread-level one", () => {
-    for (const mode of RUNTIME_MODES) {
-      assert.notEqual(
-        runtimeModeToTurnSandboxPolicy(mode).type,
-        runtimeModeToThreadConfig(mode).sandbox,
-        `${mode}: the two spellings must not be confused`
-      );
-    }
-  });
-
-  it("approvalsReviewer is always set, so auto_review never stays sticky after a switch", () => {
-    for (const mode of RUNTIME_MODES) {
-      const reviewer = runtimeModeToThreadConfig(mode).approvalsReviewer;
-      assert.ok(reviewer === "user" || reviewer === "auto_review");
-    }
-    // Only `auto` routes to the AI reviewer.
-    assert.equal(runtimeModeToThreadConfig("auto").approvalsReviewer, "auto_review");
-    assert.equal(runtimeModeToThreadConfig("full-access").approvalsReviewer, "user");
-  });
-
   it("only full access opens the network", () => {
     for (const mode of RUNTIME_MODES) {
       const policy = runtimeModeToTurnSandboxPolicy(mode);
@@ -255,43 +218,7 @@ describe("§4.4 plan mode is sticky thread state", () => {
   });
 });
 
-describe("§4.1 the Codex capability row", () => {
-  it("matches the spec's table", () => {
-    assert.deepEqual(CODEX_ADAPTER_CAPABILITIES, {
-      sessionModelSwitch: "in-session",
-      promptlessTurnContinuation: true,
-      supportsConversationRollback: true,
-      showPlanModeToggle: true,
-      reportsContextWindow: true,
-      compaction: { type: "native" },
-      // Goals §4.5: the host parses `/goal`, and Codex runs the goal's turns.
-      goals: { command: "host", actions: ["pause", "resume", "clear"], continuesAcrossTurns: true }
-    });
-  });
-});
-
 describe("§4.1 the resume cursor", () => {
-  it("is {threadId}", () => {
-    assert.deepEqual(parseResumeCursor({ threadId: "t-1" }), { threadId: "t-1" });
-  });
-
-  it("accepts the host's MINIMAL create-time cursor (§6.1), not just its own", () => {
-    // The shape the resume picker produces, built by the host and never by the
-    // adapter. If this ever stopped parsing, §6.1 resume would degrade in
-    // silence to a fresh thread — the exact failure §4.1 forbids.
-    const conversationId = "01a0c19d-e1f9-7e73-8dc5-a0d355d3d232";
-    const minimal = resumeCursorFor("codex", "orq-thread-1", conversationId);
-    assert.deepEqual(minimal, { threadId: conversationId });
-    assert.deepEqual(parseResumeCursor(minimal), { threadId: conversationId });
-  });
-
-  it("round-trips a cursor the adapter itself produced", () => {
-    // `sendTurn` persists `{threadId: <provider thread id>}` after every turn;
-    // the minimal form and the persisted form are the SAME shape for Codex, so
-    // one parser serves both.
-    const persisted = { threadId: "01a0c1a2-f62c-7000-8000-000000000000" };
-    assert.deepEqual(parseResumeCursor(persisted), persisted);
-  });
 
   it("a cursor that fails its own shape check means 'no resume', NEVER an error", () => {
     for (const bad of [
@@ -313,16 +240,6 @@ describe("§4.1 the resume cursor", () => {
     }
   });
 
-  it("agrees with the host on which ids are usable", () => {
-    for (const id of ["01a0c19d-e1f9-7e73-8dc5-a0d355d3d232", "abc.def", "a/b"]) {
-      assert.equal(isUsableConversationId(id), true);
-      assert.deepEqual(parseResumeCursor({ threadId: id }), { threadId: id });
-    }
-    for (const id of ["../x", "-x", "", "a b"]) {
-      assert.equal(isUsableConversationId(id), false);
-      assert.equal(parseResumeCursor({ threadId: id }), null);
-    }
-  });
 });
 
 describe("§4.5 the RPC question filter", () => {

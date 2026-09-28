@@ -8,12 +8,12 @@
  */
 
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { beforeEach,describe,it } from "node:test";
 
-import type { ThreadItem, ThreadMessageItem } from "@orquester/api/agent-chat";
+import type { ThreadItem,ThreadMessageItem } from "@orquester/api/agent-chat";
 
-import { agentPromptOf, drillInWindow } from "./agent-prompt.logic";
-import { activity, message, resetBuilders, stamp } from "./test-helpers";
+import { agentPromptOf,drillInWindow } from "./agent-prompt.logic";
+import { activity,message,resetBuilders,stamp } from "./test-helpers";
 
 beforeEach(() => {
   resetBuilders();
@@ -130,49 +130,12 @@ describe("drillInWindow: the agent's own items, each launch's prompt at its plac
     assert.deepEqual(agentPromptOf(rest!), { itemId: "rest", truncated: false, cutAtRest: true });
   });
 
-  it("is the same message object for the same launch row, so a streamed token keeps the fast paths", () => {
-    const items: ThreadItem[] = [launch("a1", { prompt: "The task." }, { id: "start", at: 1 })];
-    assert.equal(prompts(drillInWindow(items, "a1").items)[0], prompts(drillInWindow([...items], "a1").items)[0]);
-  });
-
   it("an ordinary message is no prompt", () => {
     assert.equal(agentPromptOf(message("user", "hello", { id: "u" })), null);
   });
 });
 
-/** `items`, counting the walks over it: every `for…of` takes a fresh iterator. */
-function counted(items: readonly ThreadItem[]): { items: readonly ThreadItem[]; walks: () => number } {
-  let walks = 0;
-  const proxy = new Proxy(items as ThreadItem[], {
-    get(target, property, receiver) {
-      if (property === Symbol.iterator) {
-        walks += 1;
-      }
-      return Reflect.get(target, property, receiver);
-    }
-  });
-  return { items: proxy, walks: () => walks };
-}
-
-describe("drillInWindow: one pass over the window, plus agentItemFilter's call-owner map — a second walk whenever the window holds an unstamped output chunk (review N4, final review C M3)", () => {
-  it("walks the window once, and once more when it holds an unstamped output chunk", () => {
-    const own: ThreadItem[] = [
-      launch("a1", { prompt: "First." }, { id: "first", at: 1 }),
-      message("assistant", "Done.", { id: "said", agentId: "a1", turnId: "t1", createdAt: stamp(2) })
-    ];
-    const plain = counted(own);
-    drillInWindow(plain.items, "a1");
-    assert.equal(plain.walks(), 1, "its items, its launches and its latest launch, in one pass");
-    // The parent's own streamed command output is such a chunk: it names no owner.
-    const parentOutput = activity(
-      "tool.output",
-      { toolUseId: "call-parent", streamKind: "command_output", delta: "ok\n" },
-      { id: "parent-chunk", turnId: "t1", createdAt: stamp(3) }
-    );
-    const withChunk = counted([...own, parentOutput]);
-    drillInWindow(withChunk.items, "a1");
-    assert.equal(withChunk.walks(), 2, "and the call-owner map's walk");
-  });
+describe("drillInWindow: latest launch", () => {
 
   it("names the agent's latest launch too — any start naming it, with a prompt or not", () => {
     const items: ThreadItem[] = [

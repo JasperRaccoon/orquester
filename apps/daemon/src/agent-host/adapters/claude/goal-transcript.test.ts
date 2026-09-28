@@ -145,8 +145,7 @@ describe("claude goal transcript — reading goal_status rows", () => {
   });
 
   async function fixture(
-    content: string,
-    options: { maxReadBytes?: number } = {}
+    content: string
   ): Promise<{ transcript: ClaudeGoalTranscript; file: string }> {
     seq += 1;
     const configDir = nodePath.join(root, `c${seq}`);
@@ -155,7 +154,7 @@ describe("claude goal transcript — reading goal_status rows", () => {
     const file = nodePath.join(dir, `${SESSION}.jsonl`);
     await writeFile(file, content);
     return {
-      transcript: new ClaudeGoalTranscript({ configDir, cwd: "/work/project", ...options }),
+      transcript: new ClaudeGoalTranscript({ configDir, cwd: "/work/project" }),
       file
     };
   }
@@ -212,13 +211,11 @@ describe("claude goal transcript — reading goal_status rows", () => {
   it("walks the file in bounded reads, rows split across reads included", async () => {
     let content = "";
     for (let index = 0; index < 20; index += 1) {
-      content += userRow(`turn ${index} ${"x".repeat(index * 7)}`);
-      content += goalRow({ met: false, condition: "a", reason: `check ${index}` });
+      content += userRow(`turn ${index} ${"x".repeat(100_000 + index * 7)}`);
+      content += userRow("x".repeat(180_000)) + goalRow({ met: false, condition: "a", reason: `check ${index}` });
     }
-    // Longer than any one line here (the longest is ~260 bytes), shorter than
-    // two: nearly every read ends inside a row, which the next read re-reads
-    // from its start.
-    const { transcript } = await fixture(content, { maxReadBytes: 300 });
+    // Real 1 MiB reads split the literal transcript across several chunks.
+    const { transcript } = await fixture(content);
     const rows = await readAll(transcript, SESSION);
     assert.deepEqual(
       rows?.map((row) => row.reason),
@@ -227,10 +224,9 @@ describe("claude goal transcript — reading goal_status rows", () => {
   });
 
   it("skips a line longer than one whole read — a goal row never is", async () => {
-    const huge = userRow(`"goal_status" ${"y".repeat(5_000)}`);
+    const huge = userRow(`"goal_status" ${"y".repeat(2 * 1024 * 1024)}`);
     const { transcript } = await fixture(
-      huge + goalRow({ met: true, condition: "a" }) + huge + goalRow({ met: false, condition: "a" }),
-      { maxReadBytes: 1_024 }
+      huge + goalRow({ met: true, condition: "a" }) + huge + goalRow({ met: false, condition: "a" })
     );
     assert.deepEqual(
       (await readAll(transcript, SESSION))?.map((row) => row.met),
@@ -347,18 +343,14 @@ describe("claude goal transcript — reading goal_status rows", () => {
   it("commits every chunk: a delta bigger than one read is walked in pieces, each one kept", async () => {
     let content = "";
     for (let index = 0; index < 12; index += 1) {
-      content += goalRow({ met: false, condition: "a", reason: `check ${index}` });
+      content += userRow("x".repeat(180_000)) + goalRow({ met: false, condition: "a", reason: `check ${index}` });
     }
-    const { transcript } = await fixture(content, { maxReadBytes: 400 });
+    const { transcript } = await fixture(content);
     const first = await transcript.readNew(SESSION);
     assert.ok(first !== undefined && first.more, "one read's worth, and more to come");
-    assert.ok(first.rows.length >= 1 && first.rows.length < 12, `a partial chunk: ${first.rows.length}`);
+    assert.deepEqual(first.rows.map((row) => row.reason), ["check 0", "check 1", "check 2", "check 3", "check 4"]);
     const second = await transcript.readNew(SESSION);
-    assert.equal(
-      second?.rows[0]?.reason,
-      `check ${first.rows.length}`,
-      "the next call starts where the last one committed, never at the start again"
-    );
+    assert.deepEqual(second?.rows.map((row) => row.reason), ["check 5", "check 6", "check 7", "check 8", "check 9"]);
     const rest = await readAll(transcript, SESSION);
     assert.deepEqual(
       [...first.rows, ...(second?.rows ?? []), ...(rest ?? [])].map((row) => row.reason),
@@ -369,22 +361,22 @@ describe("claude goal transcript — reading goal_status rows", () => {
 
   it("a chunk that is abandoned loses nothing an earlier chunk committed", async () => {
     let content = "";
-    for (let index = 0; index < 6; index += 1) {
-      content += goalRow({ met: false, condition: "a", reason: `check ${index}` });
+    for (let index = 0; index < 14; index += 1) {
+      content += userRow("x".repeat(180_000)) + goalRow({ met: false, condition: "a", reason: `check ${index}` });
     }
-    const { transcript } = await fixture(content, { maxReadBytes: 400 });
+    const { transcript } = await fixture(content);
     const first = await transcript.readNew(SESSION);
     assert.ok(first !== undefined && first.more, "a first chunk, committed");
     const stuck = transcript.readNew(SESSION);
     transcript.abandonPending();
-    const abandoned = await stuck;
+    await stuck;
     const again = await transcript.readNew(SESSION);
     assert.deepEqual(
       again?.rows.map((row) => row.reason),
-      abandoned?.rows.map((row) => row.reason),
+      ["check 5", "check 6", "check 7", "check 8", "check 9"],
       "the abandoned chunk is read again, from where the first one ended"
     );
-    assert.notEqual(again?.rows[0]?.reason, first.rows[0]?.reason);
+    assert.deepEqual(first.rows.map((row) => row.reason), ["check 0", "check 1", "check 2", "check 3", "check 4"]);
   });
 
   it("says there is no more once only a line still being written is left", async () => {

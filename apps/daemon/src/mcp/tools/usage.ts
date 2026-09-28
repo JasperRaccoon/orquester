@@ -9,7 +9,7 @@ import { usageView } from "../usage-view.ts";
  * cap: an oversized cost table is shed here, whole days oldest first, so it never reaches ok()'s last-resort cut,
  * which would keep only the head of the text. The head itself (≤ 90 byDay rows, a few KB) is never shed.
  */
-export const MAX_COST_RESULT_BYTES = 50_000;
+const MAX_COST_RESULT_BYTES = 50_000;
 
 const jsonByteSize = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
 

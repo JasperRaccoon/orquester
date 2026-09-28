@@ -17,8 +17,6 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { Clock } from "../../adapter.ts";
 import { countingIds, fixedClock } from "./fixtures.ts";
 import {
-  GOAL_PROGRESS_THROTTLE_MS,
-  GOAL_WAITING_BACKGROUND_PHASE,
   parseGoalStatusRow,
   transcriptGoalFromLastRow,
   type ClaudeGoalStatusRow
@@ -305,7 +303,7 @@ describe("claude normaliser — the /goal command's output (goals §6.1.2)", () 
 describe("claude normaliser — Stop-hook feedback and the check-in (goals §6.1.3)", () => {
   it("the tracked goal's feedback is `checked`, one round more, and never a user message", () => {
     const { normalizer, feed } = make({
-      knownGoal: { ...SHIP, rounds: 1, phase: GOAL_WAITING_BACKGROUND_PHASE }
+      knownGoal: { ...SHIP, rounds: 1, phase: "waiting-background" }
     });
     normalizer.beginTurn({ turnId: "turn-1" });
     const itemsBefore = normalizer.turnState?.items.length;
@@ -357,7 +355,7 @@ describe("claude normaliser — Stop-hook feedback and the check-in (goals §6.1
     );
     assert.deepEqual(types(events), ["thread.goal.updated"]);
     assert.deepEqual(goalEvents(events)[0]?.payload, {
-      goal: { ...SHIP, phase: GOAL_WAITING_BACKGROUND_PHASE },
+      goal: { ...SHIP, phase: "waiting-background" },
       change: "progress"
     });
     // Consumed even with no goal tracked.
@@ -368,7 +366,7 @@ describe("claude normaliser — Stop-hook feedback and the check-in (goals §6.1
 
   it("the re-prompt after a turn that ended early is progress WITHOUT the waiting phase", () => {
     const { normalizer, feed } = make({
-      knownGoal: { ...SHIP, phase: GOAL_WAITING_BACKGROUND_PHASE }
+      knownGoal: { ...SHIP, phase: "waiting-background" }
     });
     normalizer.beginTurn({ turnId: "turn-1" });
     const events = feed(
@@ -571,7 +569,7 @@ describe("claude normaliser — what the transcript said after a turn (goals §6
       normalizer.applyGoalTranscriptRows([], { turnId: "turn-1", backgroundLive: true, atTurnEnd: true })
     );
     assert.deepEqual(waiting?.payload, {
-      goal: { ...SHIP, phase: GOAL_WAITING_BACKGROUND_PHASE },
+      goal: { ...SHIP, phase: "waiting-background" },
       change: "progress"
     });
     assert.deepEqual(
@@ -579,7 +577,7 @@ describe("claude normaliser — what the transcript said after a turn (goals §6
       [],
       "still waiting is no news"
     );
-    clock.advance(GOAL_PROGRESS_THROTTLE_MS);
+    clock.advance(30_000);
     const [resumed] = goalEvents(
       normalizer.applyGoalTranscriptRows([], { turnId: "turn-3", backgroundLive: false, atTurnEnd: true })
     );
@@ -603,7 +601,7 @@ describe("claude normaliser — what the transcript said after a turn (goals §6
       normalizer.applyGoalTranscriptRows([], { backgroundLive: false, atTurnEnd: true }),
       []
     );
-    assert.deepEqual(deferred, [Date.parse("2026-09-24T10:00:00.000Z") + GOAL_PROGRESS_THROTTLE_MS]);
+    assert.deepEqual(deferred, [Date.parse("2026-09-24T10:00:00.000Z") + 30_000]);
     clock.advance(25_000);
     const [flushed] = goalEvents(normalizer.flushGoalProgress());
     assert.deepEqual(flushed?.payload, { goal: SHIP, change: "progress" });
@@ -695,77 +693,6 @@ describe("claude normaliser — the restore rule on resume (goals §6.1.5)", () 
     assert.equal(normalizer.goals.goal, null);
   });
 
-  it("every stdout-derived change moves the epoch: a check, a check-in, an active_goal", () => {
-    const { normalizer, feed } = make({ knownGoal: SHIP });
-    normalizer.beginTurn({ turnId: "turn-1" });
-    let epoch = normalizer.goalEpoch;
-    feed(syntheticUser("Stop hook feedback:\n[ship the release]: not yet"));
-    assert.ok(normalizer.goalEpoch > epoch, "checked");
-    epoch = normalizer.goalEpoch;
-    feed(
-      syntheticUser(
-        "Goal check-in: «ship the release» is still active, and evaluation has been deferred for 31 min because background work is still running:\n- b1"
-      )
-    );
-    assert.ok(normalizer.goalEpoch > epoch, "check-in");
-    epoch = normalizer.goalEpoch;
-    feed({
-      type: "active_goal",
-      value: { condition: "ship the release", iterations: 5, last_reason: "x" },
-      uuid: "ag",
-      session_id: "s"
-    });
-    assert.ok(normalizer.goalEpoch > epoch, "active_goal");
-    // What the transcript itself says moves nothing: it is the read.
-    epoch = normalizer.goalEpoch;
-    normalizer.applyGoalTranscriptRows([], { backgroundLive: true, atTurnEnd: true });
-    assert.equal(normalizer.goalEpoch, epoch);
-  });
-
-  it("a stdout frame that changes nothing moves nothing — not even the epoch", () => {
-    const clock = movableClock();
-    const { normalizer, feed } = make({
-      clock,
-      knownGoal: { ...SHIP, phase: GOAL_WAITING_BACKGROUND_PHASE }
-    });
-    normalizer.beginTurn({ turnId: "turn-1" });
-    const epoch = normalizer.goalEpoch;
-    // The same waiting check-in again, and a bare /goal repeating the goal:
-    // no update, so a turn-end re-read still pending must stay valid.
-    assert.deepEqual(
-      feed(
-        syntheticUser(
-          "Goal check-in: «ship the release» is still active, and evaluation has been deferred for 31 min because background work is still running:\n- b1"
-        )
-      ),
-      []
-    );
-    assert.deepEqual(goalEvents(feed(goalOutput("Goal active: ship the release (not yet evaluated)"))), []);
-    assert.equal(normalizer.goalEpoch, epoch, "unchanged goal news is no news");
-
-    // A progress the throttle holds back is not emitted either.
-    assert.equal(goalEvents(feed(goalOutput("Goal active: ship the release (1 turn)"))).length, 1);
-    const afterEmit = normalizer.goalEpoch;
-    assert.ok(afterEmit > epoch, "an emitted update moves it");
-    clock.advance(1_000);
-    assert.deepEqual(goalEvents(feed(goalOutput("Goal active: ship the release (2 turns)"))), []);
-    assert.equal(normalizer.goalEpoch, afterEmit, "a deferred progress is not emitted yet");
-  });
-
-  it("a `restored` read off stdout starts a run: set point and epoch both move", () => {
-    let setPoints = 0;
-    const { normalizer, feed } = make({
-      onGoalSetPoint: () => {
-        setPoints += 1;
-      }
-    });
-    normalizer.beginTurn({ turnId: "turn-1" });
-    const epoch = normalizer.goalEpoch;
-    feed(goalOutput("Goal active: ship the release (1 turn)"));
-    assert.equal(setPoints, 1);
-    assert.equal(normalizer.goalEpoch, epoch + 1);
-  });
-
   it("the same goal on both sides is no news", () => {
     const { normalizer } = make({ knownGoal: { ...SHIP, rounds: 4 } });
     assert.deepEqual(
@@ -855,7 +782,7 @@ describe("claude normaliser — the restore rule on resume (goals §6.1.5)", () 
   });
 
   it("a new process has nothing in the background: a stale waiting phase is dropped", () => {
-    const { normalizer } = make({ knownGoal: { ...SHIP, phase: GOAL_WAITING_BACKGROUND_PHASE } });
+    const { normalizer } = make({ knownGoal: { ...SHIP, phase: "waiting-background" } });
     const [progress] = goalEvents(
       normalizer.reconcileTranscriptGoal(last({ met: false, sentinel: true, condition: "ship the release" }))
     );

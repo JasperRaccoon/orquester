@@ -2,7 +2,6 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
   CURATED_PROXY_MODEL_IDS,
-  ROUTER_PRESETS,
   type RouterProvider,
   compactEnvForModel,
   createDefaultCliProxyState,
@@ -72,7 +71,7 @@ test("compactEnvForModel resolves router models by name or alias, overrides win"
   const byAlias = compactEnvForModel("kimi-k3", undefined, [openrouter]);
   assert.deepEqual(byAlias, { maxContextTokens: 1_048_576, autoCompactWindow: 450_000 });
   const byName = compactEnvForModel("moonshotai/kimi-k3", undefined, [openrouter]);
-  assert.deepEqual(byName, byAlias);
+  assert.deepEqual(byName, { maxContextTokens: 1_048_576, autoCompactWindow: 450_000 });
   const overridden = compactEnvForModel("kimi-k3", { "kimi-k3": { compactWindow: 100_000 } }, [
     openrouter
   ]);
@@ -99,11 +98,6 @@ test("migrateLegacyOpenRouter seeds the openrouter provider and mirrors the key"
   assert.equal(p?.keyVerifiedAt, "2026-07-01T00:00:00.000Z");
   // idempotent
   assert.equal(migrateLegacyOpenRouter(out.state, out.secrets, NOW).changed, false);
-});
-
-test("ROUTER_PRESETS ship openrouter and tokenrouter with prefilled models", () => {
-  const ids = ROUTER_PRESETS.map((p) => p.preset);
-  assert.deepEqual([...ids].sort(), ["openrouter", "tokenrouter"]);
 });
 
 test("validateRouterProviders refuses a router model that shadows a curated model id", () => {

@@ -2,13 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import type { PendingApproval, ThreadItem } from "@orquester/api/agent-chat";
 
-import {
-  APPROVAL_DETAIL_UNAVAILABLE,
-  diffLineTone,
-  findApprovalItem,
-  looksLikeDiff,
-  resolveApprovalDetail
-} from "./approval-detail.ts";
+import { resolveApprovalDetail } from "./approval-detail.ts";
 
 /**
  * Fixture-shaped: the activity is exactly what `derivePendingRequests` and the
@@ -42,8 +36,9 @@ function approval(overrides: Partial<PendingApproval> = {}): PendingApproval {
 const DIFF = "--- a/ui-hello.txt\n+++ b/ui-hello.txt\n@@ -0,0 +1 @@\n+hello from the agent";
 
 test("E7: the request's own detail wins and is marked as such", () => {
-  const resolved = resolveApprovalDetail(approval({ detail: DIFF }), []);
-  assert.equal(resolved.source, "request");
+  const resolved = resolveApprovalDetail(approval({ detail: DIFF, toolUseId: "call-1" }), [
+    activity({ toolUseId: "call-1", changedFiles: ["stale.txt"], detail: "stale detail" })
+  ]);
   assert.equal(resolved.text, DIFF);
   assert.equal(resolved.isDiff, true);
 });
@@ -59,7 +54,6 @@ test("E7: with no detail, the card joins the gated tool call by toolUseId", () =
     })
   ];
   const resolved = resolveApprovalDetail(approval({ toolUseId: "call-1" }), entries);
-  assert.equal(resolved.source, "item");
   assert.match(resolved.text ?? "", /src\/ui-hello\.txt/, "the path must be shown");
   assert.match(resolved.text ?? "", /\+hello from the agent/, "the diff must be shown");
   assert.equal(resolved.isDiff, true);
@@ -69,7 +63,6 @@ test("E7: the path list alone is enough when the item carries no diff", () => {
   const entries = [activity({ toolUseId: "call-1", changedFiles: ["a.txt", "b.txt"] })];
   const resolved = resolveApprovalDetail(approval({ toolUseId: "call-1" }), entries);
   assert.equal(resolved.text, "a.txt\nb.txt");
-  assert.equal(resolved.source, "item");
   assert.equal(resolved.isDiff, false);
 });
 
@@ -77,8 +70,6 @@ test("E7: the body is NEVER the card's own title", () => {
   // The bug: "File change approval" rendered as its own detail block.
   const resolved = resolveApprovalDetail(approval(), []);
   assert.equal(resolved.text, null);
-  assert.equal(resolved.source, "none");
-  assert.match(APPROVAL_DETAIL_UNAVAILABLE, /Decline it unless you know/);
 });
 
 test("E7: the join is by id only — a second write in flight is never guessed at", () => {
@@ -87,8 +78,7 @@ test("E7: the join is by id only — a second write in flight is never guessed a
     activity({ toolUseId: "call-a", changedFiles: ["a.txt"] }, { id: "a" }),
     activity({ toolUseId: "call-b", changedFiles: ["b.txt"] }, { id: "b" })
   ];
-  assert.equal(resolveApprovalDetail(approval(), entries).source, "none");
-  assert.equal(findApprovalItem({ toolUseId: undefined }, entries), null);
+  assert.equal(resolveApprovalDetail(approval(), entries).text, null);
 });
 
 test("E7: the newest activity wins when a tool id is reused across updates", () => {
@@ -96,7 +86,7 @@ test("E7: the newest activity wins when a tool id is reused across updates", () 
     activity({ toolUseId: "call-1", changedFiles: ["old.txt"] }, { id: "old" }),
     activity({ toolUseId: "call-1", changedFiles: ["new.txt"] }, { id: "new" })
   ];
-  assert.equal(findApprovalItem({ toolUseId: "call-1" }, entries)?.id, "new");
+  assert.equal(resolveApprovalDetail(approval({ toolUseId: "call-1" }), entries).text, "new.txt");
 });
 
 test("E7: a command payload is used when there are no changed files", () => {
@@ -110,22 +100,7 @@ test("E7: a command payload is used when there are no changed files", () => {
 test("E7: a missing or malformed payload never throws", () => {
   for (const payload of [null, "text", 42, undefined]) {
     const entries = [activity({}, { payload } as Partial<ThreadItem>)];
-    assert.doesNotThrow(() => resolveApprovalDetail(approval({ toolUseId: "call-1" }), entries));
+    assert.equal(resolveApprovalDetail(approval({ toolUseId: "call-1" }), entries).text, null);
   }
-  assert.equal(resolveApprovalDetail(approval({ toolUseId: "call-1" })).source, "none");
-});
-
-test("a file header alone is not a diff, but a hunk or a +/- pair is", () => {
-  assert.equal(looksLikeDiff("--- a/x\n+++ b/x"), false);
-  assert.equal(looksLikeDiff("@@ -1 +1 @@"), true);
-  assert.equal(looksLikeDiff("+added"), true);
-  assert.equal(looksLikeDiff("just some prose"), false);
-});
-
-test("diff lines get their tone from the leading marker", () => {
-  assert.equal(diffLineTone("+new"), "added");
-  assert.equal(diffLineTone("-gone"), "removed");
-  assert.equal(diffLineTone("@@ -1 +1 @@"), "meta");
-  assert.equal(diffLineTone("+++ b/x"), "meta");
-  assert.equal(diffLineTone(" unchanged"), "context");
+  assert.equal(resolveApprovalDetail(approval({ toolUseId: "call-1" })).text, null);
 });

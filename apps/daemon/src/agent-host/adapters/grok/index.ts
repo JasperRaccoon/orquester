@@ -65,7 +65,7 @@ import {
   probeGrok,
   probeSkills
 } from "./probe.ts";
-import { GrokSession, parseGrokResumeCursor } from "./session.ts";
+import { GrokSession } from "./session.ts";
 import { recordLeftoverWork, sweepLeftoverWork } from "../../support/leftover-work.ts";
 
 /** The registry ids this adapter serves. */
@@ -96,7 +96,7 @@ const ADAPTER_ID: AgentAdapterId = "grok";
  * goal run, which Grok then reports paused (read off 1.0.3, not captured) —
  * so the chip offers only resume and clear, and nothing while a turn runs.
  */
-export const GROK_CAPABILITIES: AdapterCapabilities = {
+const GROK_CAPABILITIES: AdapterCapabilities = {
   sessionModelSwitch: "in-session",
   supportsConversationRollback: false,
   showPlanModeToggle: false,
@@ -734,7 +734,7 @@ export const GROK_BLOCKED_COMMAND_MESSAGE =
  * A refusal shaped so the host answers `400 INVALID_COMMAND` rather than
  * letting it surface as a failed-turn activity.
  */
-export function grokBlockedCommandError(): Error & { code: string; status: number } {
+function grokBlockedCommandError(): Error & { code: string; status: number } {
   return Object.assign(new Error(GROK_BLOCKED_COMMAND_MESSAGE), {
     code: "INVALID_COMMAND",
     status: 400
@@ -748,5 +748,3 @@ export const createGrokAdapter: AdapterFactory = async (
   // factory may do real work — but must not start a provider session.
   return await Promise.resolve(new GrokAdapter(context));
 };
-
-export { GrokSession, parseGrokResumeCursor };

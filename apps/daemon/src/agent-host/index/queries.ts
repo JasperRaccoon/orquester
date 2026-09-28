@@ -544,7 +544,7 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
 // ---------------------------------------------------------------------------
 
 /** A parent `user` message as the index holds it, before the recall rule judges it. */
-export interface PromptCandidate {
+interface PromptCandidate {
   messageId: string;
   /** The seq of its first line: where it sits in the conversation. */
   seq: number;
@@ -556,10 +556,9 @@ export interface PromptCandidate {
 }
 
 /**
- * What {@link readPromptsPage} reads through: the SQL above, or the
- * orchestration tests' in-memory index, which pages by the same rule.
+ * The SQL reads used by {@link readPromptsPage}.
  */
-export interface PromptSource {
+interface PromptSource {
   /**
    * Up to `count` of the thread's parent `user` rows whose `seq` is below
    * `beforeSeq`, newest first: `candidates` are the ones that could be
@@ -579,10 +578,10 @@ export interface PromptSource {
  * transcript can hold thousands of `<task-notification>` rows between two
  * prompts, and every row walked is one FTS row read.
  */
-export const PROMPTS_SCAN_BUDGET = 2_000;
+const PROMPTS_SCAN_BUDGET = 2_000;
 
 /** Rows one read takes at the least, whatever the page's `limit`. */
-export const PROMPTS_MIN_BATCH = 256;
+const PROMPTS_MIN_BATCH = 256;
 
 /**
  * One page of the thread's own prompts, newest first: `limit` of the
@@ -604,7 +603,7 @@ export const PROMPTS_MIN_BATCH = 256;
  * Its `turnId` is then the turn the message itself names: the one a steer
  * steered, null for a prompt still waiting for its turn.
  */
-export function readPromptsPage(
+function readPromptsPage(
   threadId: string,
   input: { before?: string | null; limit: number },
   source: PromptSource
@@ -688,7 +687,7 @@ function promptEntry(
 }
 
 /** `limit` clamped to `[1, THREAD_PROMPTS_MAX_LIMIT]`; anything not a finite number is the default. */
-export function clampPromptsLimit(limit: number): number {
+function clampPromptsLimit(limit: number): number {
   const requested = Math.floor(limit);
   return Number.isFinite(requested)
     ? Math.min(Math.max(requested, 1), THREAD_PROMPTS_MAX_LIMIT)
@@ -716,7 +715,7 @@ function headOf(text: string, max: number): string {
  * the cursor survives an index rebuild and a revert, as the history cursor
  * does.
  */
-export function encodePromptsCursor(threadId: string, beforeSeq: number): string {
+function encodePromptsCursor(threadId: string, beforeSeq: number): string {
   return Buffer.from(JSON.stringify({ t: threadId, s: beforeSeq }), "utf8").toString("base64url");
 }
 
@@ -728,7 +727,7 @@ const BASE64URL_ALPHABET = /^[A-Za-z0-9_-]*$/;
  * is a query parameter. Fields beyond `{t, s}` are ignored, so a later build
  * can add one.
  */
-export function decodePromptsCursor(encoded: string, threadId: string): number | null {
+function decodePromptsCursor(encoded: string, threadId: string): number | null {
   // `Buffer` skips characters outside the alphabet rather than refusing them,
   // and a length of `4n + 1` is never a whole byte count.
   if (typeof encoded !== "string" || !BASE64URL_ALPHABET.test(encoded) || encoded.length % 4 === 1) {
@@ -778,7 +777,7 @@ function toPromptCandidate(value: unknown): PromptCandidate | null {
  * an implicit AND. So `NEAR`, `OR`, `*`, `-` and `:` are matched as text,
  * never parsed. Null when nothing searchable is left.
  */
-export function toFtsQuery(q: string): string | null {
+function toFtsQuery(q: string): string | null {
   const clamped = Array.from(q).slice(0, THREAD_SEARCH_MAX_QUERY_CHARS).join("");
   const tokens = clamped.split(/\s+/u).filter((token) => token.length > 0);
   if (tokens.length === 0) {

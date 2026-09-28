@@ -1,78 +1,36 @@
-/**
- * Pins scripts/test/assert-ok.mjs, which every package's test script preloads (AGENTS.md, "Tests and
- * fixtures"): a failing `assert.ok(value)` or `assert(value)` without a message fails at once and
- * names its own call. Without the preload, Node 20 looks the call up in the `.ts` file at the
- * position of tsx's one-line output — the wrong code, or a lookup that never ends.
- *
- * Every assert here that is meant to pass carries a message, and the failing ones run only once the
- * preload is known to be there.
- */
-
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
-import { isProxy } from "node:util/types";
+import { execFile } from "node:child_process";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
-const preloaded = isProxy(assert);
-
-interface Row {
-  payload?: unknown;
-}
-
-const rows: Row[] = [{ payload: {} }];
-const flagged = (row: Row | undefined): boolean =>
-  (row?.payload as Record<string, unknown> | undefined)?.["heldForUpdate"] === true;
-
-function thrown(fn: () => void): Error & { generatedMessage?: boolean; actual?: unknown } {
-  try {
-    fn();
-  } catch (error) {
-    return error as Error;
-  }
-  throw new Error("expected the call to throw");
-}
-
-const falsy = (code: string): string => `The expression evaluated to a falsy value:\n\n  ${code}\n`;
-
-it("the test script preloads scripts/test/assert-ok.mjs", () => {
-  assert.equal(preloaded, true, "node:assert/strict is not the one scripts/test/assert-ok-hooks.mjs serves");
-});
-
-describe("a failing assert without a message", { skip: !preloaded }, () => {
-  it("names its own call, TypeScript and all", () => {
-    const error = thrown(() => assert.ok(flagged(rows[0])));
-    assert.equal(error.message, falsy("assert.ok(flagged(rows[0]))"), "message");
-    assert.equal(error instanceof assert.AssertionError, true, "an AssertionError");
-    assert.equal(error.generatedMessage, true, "generatedMessage");
-    assert.equal(error.actual, false, "actual");
-    const frame = error.stack?.split("\n").find((line) => line.startsWith("    at "));
-    assert.match(frame ?? "", /assert-ok\.test\.ts:\d+:\d+\)?$/, "the stack starts at the call");
-  });
-
-  it("quotes a call over several lines as Node does", () => {
-    const error = thrown(() =>
-      assert.ok(
-        rows.some((row) => (row.payload as { x?: number } | undefined)?.x === 1)
-      )
-    );
-    assert.equal(
-      error.message,
-      falsy("assert.ok(\n    rows.some((row) => (row.payload as { x?: number } | undefined)?.x === 1)\n  )"),
-      "message"
-    );
-  });
-
-  it("covers a direct call of the default export", () => {
-    assert.equal(thrown(() => assert(rows.length === 2)).message, falsy("assert(rows.length === 2)"), "message");
-  });
-
-  it("leaves a given message, an Error and a missing value to Node's rules", () => {
-    assert.equal(thrown(() => assert.ok(0, "the words given")).message, "the words given", "message kept");
-    const error = new TypeError("thrown as is");
-    assert.equal(thrown(() => assert.ok(null, error)), error, "an Error message is thrown");
-    assert.equal(
-      thrown(() => (assert.ok as () => void)()).message,
-      "No value argument passed to `assert.ok()`",
-      "no value"
-    );
-  });
+test("message-less assertions in a long tsx module fail promptly", async (t) => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-assert-regression-"));
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const fixture = join(dir, "failure.ts");
+  // Node 20's generated-message lookup applies esbuild's positions to the raw
+  // TypeScript. A large source with type syntax reproduced a minutes-long hang.
+  await writeFile(fixture, [
+    'import assert from "node:assert/strict";',
+    'type Row = { payload?: { ready?: boolean } };',
+    'const rows: Row[] = [{ payload: {} }];',
+    '// TypeScript source padding\n'.repeat(1500),
+    'let failures = 0;',
+    'for (const check of [() => assert.ok(rows[0].payload?.ready === true), () => assert(rows[0].payload?.ready === true)]) {',
+    '  try { check(); } catch (error) {',
+    '    if (!(error instanceof assert.AssertionError) || error.actual !== false) throw error;',
+    '    failures++;',
+    '  }',
+    '}',
+    'process.stdout.write(String(failures));'
+  ].join("\n"));
+  const { stdout } = await promisify(execFile)(process.execPath, [
+    "--import", import.meta.resolve("tsx"),
+    "--import", fileURLToPath(new URL("../../../scripts/test/assert-ok.mjs", import.meta.url)),
+    fixture
+  ], { timeout: 10_000 });
+  assert.equal(stdout, "2", "both failing entrypoints completed with AssertionError");
 });

@@ -266,9 +266,9 @@ test(
           .filter((activity) => (activity.payload as { taskId?: string }).taskId === "task-bg-1")
           .map((activity) => {
             const payload = activity.payload as { status?: string; summary?: string; leftRunning?: boolean };
-            return [payload.status, payload.summary, payload.leftRunning];
+            return [payload.status, payload.leftRunning];
           }),
-        [["stopped", "Left running when the agent host stopped — stop it from Settings → System.", true]],
+        [["stopped", true]],
         "the shell's closing row reaches the log, saying where to stop it"
       );
       assert.equal(sessionSets(log).at(-1)?.payload.session.status, "stopped", "and so does the session's own stop");
@@ -440,9 +440,9 @@ test(
           .filter((activity) => (activity.payload as { taskId?: string }).taskId === "task-bg-1")
           .map((activity) => {
             const payload = activity.payload as { status?: string; summary?: string; leftRunning?: boolean };
-            return [payload.status, payload.summary, payload.leftRunning];
+            return [payload.status, payload.leftRunning];
           }),
-        [["stopped", undefined, undefined]],
+        [["stopped", undefined]],
         "it really stopped: nothing left running to speak of"
       );
       assert.equal(

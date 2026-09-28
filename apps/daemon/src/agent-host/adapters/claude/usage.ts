@@ -773,7 +773,7 @@ export function describeUsageLimit(input: {
   }limit resets${wait ? ` in ${wait}` : ""}.`;
 }
 
-export function formatUsageLimitWait(waitMs: number): string {
+function formatUsageLimitWait(waitMs: number): string {
   const totalMinutes = Math.ceil(waitMs / 60_000);
   const hours = Math.floor(totalMinutes / 60);
   const minutes = totalMinutes % 60;

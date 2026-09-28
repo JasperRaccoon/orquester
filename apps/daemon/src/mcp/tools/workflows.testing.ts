@@ -24,7 +24,6 @@ import {
   type WorkflowRun,
   type WorkflowRunStatus,
   type WorkflowRunSummary,
-  type WorkflowSecretName,
   type WorkflowSummary
 } from "@orquester/api";
 import type { WorkflowNode, WorkflowNodeType } from "@orquester/config";
@@ -39,7 +38,6 @@ export class FakeWorkflowDaemon extends FakeDaemonApi {
   runs = new Map<string, WorkflowRun>();
   /** Whole block outputs (the run detail carries previews). */
   outputs = new Map<string, unknown>();
-  secrets: (WorkflowSecretName & { value: string })[] = [];
   /** Called with every run started, so a test can finish it (or not). */
   onRunStarted: ((run: WorkflowRun) => void) | null = null;
   private ids = 0;
@@ -124,9 +122,6 @@ export class FakeWorkflowDaemon extends FakeDaemonApi {
       });
       return { status: 200, body: { types, expressionGuide: WORKFLOW_EXPRESSION_GUIDE } };
     }
-    if (rest[0] === "validate" && method === "POST") {
-      return { status: 200, body: { problems: validateWorkflow((body as { workflow: unknown }).workflow).problems } };
-    }
     const w = this.workflows.get(rest[0] ?? "");
     if (!w) return err(404, "WORKFLOW_NOT_FOUND", `No workflow "${rest[0]}"`);
     if (rest.length === 1 && method === "GET") return { status: 200, body: { workflow: w, problems: validateWorkflow(w).problems } };
@@ -167,13 +162,6 @@ export class FakeWorkflowDaemon extends FakeDaemonApi {
       this.onRunStarted?.(run);
       return { status: 200, body: { runId: id } };
     }
-    if (rest[1] === "runs" && method === "GET") {
-      const all = [...this.runs.values()].filter((r) => r.workflowId === w.id).reverse();
-      const start = query.before ? all.findIndex((r) => r.id === query.before) + 1 : 0;
-      const limit = Number(query.limit ?? 20);
-      const page = all.slice(start, start + limit);
-      return { status: 200, body: { runs: page.map((r) => this.summaryOfRun(r)), before: start + limit < all.length ? page.at(-1)!.id : null } };
-    }
     return { status: 404, body: { code: "NOT_FOUND", message: "not a route" } };
   }
 
@@ -181,11 +169,6 @@ export class FakeWorkflowDaemon extends FakeDaemonApi {
     const run = this.runs.get(rest[0] ?? "");
     if (!run) return err(404, "RUN_NOT_FOUND", `No run "${rest[0]}"`);
     if (rest.length === 1 && method === "GET") return { status: 200, body: { run } };
-    if (rest[1] === "cancel" && method === "POST") {
-      if (!isRunActive(run.status)) return err(409, "RUN_NOT_ACTIVE", "The run is not active");
-      this.finishRun(run.id, "cancelled");
-      return { status: 200, body: { ok: true } };
-    }
     if (rest[1] === "nodes" && rest[3] === "output" && method === "GET") {
       const key = `${run.id}/${rest[2]}`;
       if (!run.blocks[rest[2] ?? ""]) return err(404, "NODE_NOT_FOUND", `No block "${rest[2]}"`);
@@ -194,18 +177,8 @@ export class FakeWorkflowDaemon extends FakeDaemonApi {
     return { status: 404, body: { code: "NOT_FOUND", message: "not a route" } };
   }
 
-  private secretRoute(method: DaemonMethod, rest: string[], query: Record<string, string>, body: unknown): DaemonResponse {
-    if (rest.length === 0 && method === "GET") {
-      const visible = this.secrets.filter((s) => s.scope === "global" || s.workflowId === query.workflowId);
-      return { status: 200, body: { secrets: visible.map(({ value: _v, ...name }) => name) } };
-    }
-    if (rest.length === 1 && method === "PUT") {
-      const value = (body as { value: string }).value;
-      const scope = query.workflowId ? "workflow" : "global";
-      this.secrets = this.secrets.filter((s) => !(s.name === rest[0] && s.workflowId === query.workflowId));
-      this.secrets.push({ name: rest[0]!, scope, ...(query.workflowId ? { workflowId: query.workflowId } : {}), updatedAt: this.now().toISOString(), short: value.length < 4, value });
-      return { status: 200, body: { ok: true } };
-    }
+  private secretRoute(method: DaemonMethod, rest: string[], _query: Record<string, string>, _body: unknown): DaemonResponse {
+    if (rest.length === 1 && method === "PUT") return { status: 200, body: { ok: true } };
     return { status: 404, body: { code: "NOT_FOUND", message: "not a route" } };
   }
 }

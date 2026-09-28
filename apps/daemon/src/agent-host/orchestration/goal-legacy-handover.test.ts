@@ -17,7 +17,7 @@ import { describe, it } from "node:test";
 
 import type { AdapterGoalSupport } from "@orquester/api/agent-chat";
 
-import { LEGACY_GOAL_CONTINUATION_GAP_MS, legacyGoalTurnOf } from "../../agent-chat/supervisor.ts";
+import { legacyGoalTurnOf } from "../../agent-chat/supervisor.ts";
 import type { GoalCommandResult } from "../adapter.ts";
 import { createScriptedAdapter, createTestHost, type TestHost } from "./testing/index.ts";
 
@@ -168,7 +168,7 @@ describe("goals §5.7 — the daemon's reading of a legacy host's snapshot, agai
     // `/compact` typed after a goal turn — is not one.
     host.clock.advance(60_000);
     await sessionSet(host, threadId, null);
-    host.clock.advance(LEGACY_GOAL_CONTINUATION_GAP_MS + 1_000);
+    host.clock.advance(4_000);
     await sessionSet(host, threadId, "later-4");
     assert.equal(legacyGoalTurnOf(await host.orchestrator.readThread(threadId))?.goalLoop, false);
     await host.stop();

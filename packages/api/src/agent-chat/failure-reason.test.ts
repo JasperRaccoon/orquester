@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  LEGACY_FAILURE_PREFIXES,
   failureReasonOfActivity,
   latestFailureReason
 } from "./failure-reason.ts";
@@ -75,25 +74,6 @@ test("an unknown reason is no failure this reader knows — and never read by it
     ),
     null
   );
-});
-
-test("legacy: each documented prefix is recognised when the row carries no reason", () => {
-  const expected: Record<string, string> = {
-    "Claude usage limit reached.": "usage_limit",
-    "Grok usage limit reached.": "usage_limit",
-    "Claude is not logged in": "auth"
-  };
-  assert.deepEqual(
-    Object.fromEntries(LEGACY_FAILURE_PREFIXES.map((entry) => [entry.prefix, entry.reason])),
-    expected
-  );
-  for (const [prefix, reason] of Object.entries(expected)) {
-    const failure = failureReasonOfActivity(
-      activity("runtime.error", { message: `${prefix} and more`, class: "provider_error" })
-    );
-    assert.equal(failure?.reason, reason, prefix);
-    assert.equal(failure?.legacy, true);
-  }
 });
 
 test("legacy: the adapters' real sentences", () => {

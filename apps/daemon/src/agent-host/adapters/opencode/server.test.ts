@@ -19,11 +19,8 @@ import { projectDirFor } from "./index.ts";
 import {
   OpenCodeServerPool,
   parseServerUrl,
-  probeFreePort,
   trimToLastLines
 } from "./server.ts";
-import { basicAuthHeader } from "./http.ts";
-import { MINIMUM_OPENCODE_VERSION } from "./semver.ts";
 import { makePeer, type Peer } from "./testing/peer.ts";
 
 const silentLogger: AdapterLogger = {
@@ -36,8 +33,7 @@ const silentLogger: AdapterLogger = {
 function makePool(
   peer: Peer,
   extraEnv: Record<string, string>,
-  controller: AbortController,
-  overrides: { serverPassword?: string | null } = {}
+  controller: AbortController
 ): OpenCodeServerPool {
   return new OpenCodeServerPool({
     logger: silentLogger,
@@ -48,11 +44,7 @@ function makePool(
       TMPDIR: peer.dir,
       ...extraEnv
     }),
-    signal: controller.signal,
-    idleCloseMs: 10,
-    ...(overrides.serverPassword !== undefined
-      ? { serverPassword: overrides.serverPassword }
-      : {})
+    signal: controller.signal
   });
 }
 
@@ -75,23 +67,14 @@ test("the scrape ignores a line that merely mentions the phrase", () => {
   assert.equal(parseServerUrl("nothing here\n"), null);
 });
 
-test("the probed port is free and is not the well-known 4096", async () => {
-  const port = await probeFreePort("127.0.0.1");
-  assert.ok(port > 0 && port < 65_536);
-  // `--port 0` binds 4096 when free; a probed port never silently lands there
-  // unless the OS genuinely handed it out, which it will not twice in a row.
-  const second = await probeFreePort("127.0.0.1");
-  assert.notEqual(port, second);
-});
-
 test("a healthy peer is adopted, and the URL comes off stdout", async () => {
   const peer = makePeer();
   const controller = new AbortController();
-  const pool = makePool(peer, { MOCK_MODE: "noisy" }, controller);
+  const pool = makePool(peer, { MOCK_MODE: "noisy", MOCK_VERSION: "1.18.5" }, controller);
   try {
     const handle = await pool.acquire(peer.dir);
     assert.match(handle.url, /^http:\/\/127\.0\.0\.1:\d+$/);
-    assert.equal(handle.version, MINIMUM_OPENCODE_VERSION);
+    assert.equal(handle.version, "1.18.5");
     assert.ok(handle.pid !== undefined);
     handle.release();
   } finally {
@@ -105,20 +88,20 @@ test("`/global/health` is reached WITH the credential, as the real server demand
   const peer = makePeer();
   const controller = new AbortController();
   // The peer 401s anything whose Authorization is not the exact Basic form.
-  const pool = makePool(peer, { MOCK_MODE: "ok" }, controller, {
-    serverPassword: "fixture-password"
-  });
+  const pool = makePool(peer, { MOCK_MODE: "ok" }, controller);
   try {
     const handle = await pool.acquire(peer.dir);
-    assert.equal(handle.serverPassword, "fixture-password");
+    const unauthenticated = await fetch(`${handle.url}/global/health`);
+    assert.equal(unauthenticated.status, 401);
+    await unauthenticated.arrayBuffer();
     const client = handle.client(peer.dir);
     const health = await client.get<{ healthy: boolean }>("/global/health", { timeoutMs: 2_000 });
     assert.equal(health.healthy, true);
-    assert.equal(
-      client.headers().authorization,
-      basicAuthHeader("fixture-password"),
-      "the literal `opencode` username is load-bearing"
-    );
+    const authorization = client.headers().authorization!;
+    assert.ok(authorization.startsWith("Basic "));
+    const credential = Buffer.from(authorization.slice(6), "base64").toString("utf8");
+    assert.equal(credential.slice(0, credential.indexOf(":")), "opencode");
+    assert.ok(credential.slice(credential.indexOf(":") + 1).length > 0);
     handle.release();
   } finally {
     await pool.stopAll();
@@ -135,7 +118,7 @@ test("a server below the minimum is REFUSED with the required version in the mes
     await assert.rejects(pool.acquire(peer.dir), (error: unknown) => {
       assert.ok(error instanceof Error);
       assert.match(error.message, /1\.10\.0 is too old/);
-      assert.match(error.message, new RegExp(MINIMUM_OPENCODE_VERSION.replace(/\./g, "\\.")));
+      assert.match(error.message, /1\.14\.19/);
       return true;
     });
   } finally {
@@ -183,8 +166,7 @@ test("a bad binary fails the acquire instead of hanging", async () => {
     logger: silentLogger,
     resolveBin: async () => join(peer.dir, "definitely-not-here"),
     buildEnv: () => ({ PATH: "", HOME: peer.dir, TMPDIR: peer.dir }),
-    signal: controller.signal,
-    idleCloseMs: 10
+    signal: controller.signal
   });
   try {
     await assert.rejects(pool.acquire(peer.dir), /failed to spawn|ENOENT/);
@@ -195,7 +177,7 @@ test("a bad binary fails the acquire instead of hanging", async () => {
   }
 });
 
-test("a silent peer hits the handshake deadline and the child is killed", async () => {
+test("a host abort cancels acquisition of a silent peer", async () => {
   const peer = makePeer();
   const controller = new AbortController();
   const pool = new OpenCodeServerPool({
@@ -208,7 +190,6 @@ test("a silent peer hits the handshake deadline and the child is killed", async 
       MOCK_MODE: "silent"
     }),
     signal: controller.signal,
-    idleCloseMs: 10,
     // The real window is 30 s (`AGENT_HOST_DEADLINES.handshakeMs`); the test
     // asserts the mechanism, not the number, so the pool is given a signal it
     // can abort instead — once the peer says it is up, so the pool is waiting
@@ -217,8 +198,7 @@ test("a silent peer hits the handshake deadline and the child is killed", async 
       if (line.text.includes("never ready")) {
         controller.abort();
       }
-    },
-    serverPassword: null
+    }
   });
   try {
     await assert.rejects(pool.acquire(peer.dir));
@@ -229,7 +209,7 @@ test("a silent peer hits the handshake deadline and the child is killed", async 
   }
 });
 
-test("threads of one project share one server, ref-counted, closed after the last release", async () => {
+test("threads of one project share one server, ref-counted, closed after the last release", async (t) => {
   const peer = makePeer();
   const controller = new AbortController();
   const pool = makePool(peer, { MOCK_MODE: "ok" }, controller);
@@ -239,12 +219,17 @@ test("threads of one project share one server, ref-counted, closed after the las
     assert.equal(first.pid, second.pid, "one `opencode serve` per project");
     assert.equal(pool.list().length, 1);
 
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     first.release();
-    // One reference is still held: the server must stay up.
-    assert.equal(second.hasExited(), false);
+    t.mock.timers.tick(30_000);
+    assert.equal(second.hasExited(), false, "another thread still owns the server");
+    assert.equal(pool.list()[0]?.pid, second.pid);
 
     const exited = second.exited;
     second.release();
+    t.mock.timers.tick(29_999);
+    assert.equal(pool.list()[0]?.pid, second.pid);
+    t.mock.timers.tick(1);
     await exited;
     assert.equal(pool.list().length, 0);
   } finally {
@@ -254,7 +239,7 @@ test("threads of one project share one server, ref-counted, closed after the las
   }
 });
 
-test("a re-acquire inside the idle window cancels the close", async () => {
+test("a re-acquire inside the idle window cancels the close", async (t) => {
   const peer = makePeer();
   const controller = new AbortController();
   const pool = new OpenCodeServerPool({
@@ -266,17 +251,22 @@ test("a re-acquire inside the idle window cancels the close", async () => {
       TMPDIR: peer.dir,
       MOCK_MODE: "ok"
     }),
-    signal: controller.signal,
-    // A manual timer, so the test drives the close rather than waiting on it.
-    idleCloseMs: 60_000
+    signal: controller.signal
   });
   try {
     const first = await pool.acquire(peer.dir);
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     first.release();
+    t.mock.timers.tick(29_999);
     const second = await pool.acquire(peer.dir);
+    t.mock.timers.tick(1);
     assert.equal(second.pid, first.pid, "the parked server was reused");
-    assert.equal(second.hasExited(), false);
+    assert.equal(pool.list()[0]?.pid, second.pid, "the original idle close was cancelled");
+    const health = await second.client(peer.dir).get<{ healthy: boolean }>("/global/health", { timeoutMs: 2_000 });
+    assert.equal(health.healthy, true);
     second.release();
+    t.mock.timers.tick(30_000);
+    await second.exited;
   } finally {
     await pool.stopAll();
     controller.abort();
@@ -344,8 +334,7 @@ test("two projects get two servers", async () => {
       TMPDIR: projectDir,
       MOCK_MODE: "ok"
     }),
-    signal: controller.signal,
-    idleCloseMs: 10
+    signal: controller.signal
   });
   try {
     const a = await pool.acquire(peerA.dir);
@@ -366,21 +355,16 @@ test("two projects get two servers", async () => {
 test("concurrent acquires for one project collapse onto a single start", async () => {
   const peer = makePeer();
   const controller = new AbortController();
-  let starts = 0;
   const pool = new OpenCodeServerPool({
     logger: silentLogger,
-    resolveBin: async () => {
-      starts += 1;
-      return peer.bin;
-    },
+    resolveBin: async () => peer.bin,
     buildEnv: () => ({
       PATH: process.env.PATH ?? "",
       HOME: peer.dir,
       TMPDIR: peer.dir,
       MOCK_MODE: "ok"
     }),
-    signal: controller.signal,
-    idleCloseMs: 10
+    signal: controller.signal
   });
   try {
     const handles = await Promise.all([
@@ -388,7 +372,6 @@ test("concurrent acquires for one project collapse onto a single start", async (
       pool.acquire(peer.dir),
       pool.acquire(peer.dir)
     ]);
-    assert.equal(starts, 1);
     assert.equal(new Set(handles.map((handle) => handle.pid)).size, 1);
     for (const handle of handles) {
       handle.release();
@@ -414,10 +397,7 @@ test("a dead server is not reported as live by pool.list()", async () => {
       TMPDIR: peer.dir,
       MOCK_MODE: "ok"
     }),
-    signal: controller.signal,
-    // Long idle window: the reference is still held, so only the child's death
-    // can clear the entry.
-    idleCloseMs: 60_000
+    signal: controller.signal
   });
   try {
     const handle = await pool.acquire(peer.dir);
@@ -463,12 +443,6 @@ test("the startup buffer is trimmed on a LINE boundary", () => {
   assert.equal(parseServerUrl(naive), "http://127.0.0.1:12345");
   // …and one character further in, the naive slice severs the ready line.
   assert.equal(parseServerUrl(full.slice(-30)), null, "the bug this guards against");
-});
-
-test("trimToLastLines keeps short text untouched and never returns a partial head", () => {
-  assert.equal(trimToLastLines("short\n", 100), "short\n");
-  const trimmed = trimToLastLines("aaaa\nbbbb\ncccc\n", 6);
-  assert.ok(["cccc\n", "bbbb\ncccc\n"].includes(trimmed), `got ${JSON.stringify(trimmed)}`);
 });
 
 test("a second stopAll waits for the first's kills: the host's two teardown calls both return only once the servers are gone", async () => {

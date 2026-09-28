@@ -66,6 +66,7 @@ import {
   MAX_TURN_IMAGE_BYTES,
   SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES,
   applyDomainEvent,
+  applyFullHistoryEvent,
   createEmptyThreadState,
   deserializeFoldState,
   parseFoldSnapshotFile,
@@ -108,15 +109,10 @@ import {
 import { applyEventToHead } from "./head.ts";
 import { RawFrameLog, pruneRawLogDirectory } from "./raw-log.ts";
 import { joinToolOutput, type ItemWrite } from "./tool-output.ts";
-import {
-  TOOL_OUTPUT_CACHE_IDLE_MS,
-  TOOL_OUTPUT_CACHE_MAX_BYTES,
-  TOOL_OUTPUT_CACHE_MAX_ENTRIES,
-  createToolOutputCache
-} from "./tool-output-cache.ts";
+import { createToolOutputCache } from "./tool-output-cache.ts";
 
 /** `meta.json` is rewritten after this many appended events (§5.1). */
-export const HEAD_CHECKPOINT_EVENTS = 50;
+const HEAD_CHECKPOINT_EVENTS = 50;
 
 /**
  * A fold the store runs itself (the attachment sweep's) yields to the event
@@ -177,7 +173,7 @@ const IMAGE_FILE_EXTENSIONS: ReadonlySet<string> = new Set([
  */
 const SAFE_THREAD_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 
-export function isSafeThreadId(threadId: string): boolean {
+function isSafeThreadId(threadId: string): boolean {
   return SAFE_THREAD_ID.test(threadId) && !threadId.includes("..");
 }
 
@@ -196,7 +192,7 @@ function isCursorCount(value: number): boolean {
  * An unreferenced attachment younger than this is never swept: it is a file
  * uploaded for a turn that has not dispatched yet (§6.3).
  */
-export const UNREFERENCED_ATTACHMENT_GRACE_MS = PENDING_ATTACHMENT_MAX_AGE_MS;
+const UNREFERENCED_ATTACHMENT_GRACE_MS = PENDING_ATTACHMENT_MAX_AGE_MS;
 
 export interface ThreadStoreOptions {
   /** `<appdir>/daemon/agent` — the directory that holds `threads/` and `receipts.json`. */
@@ -213,43 +209,15 @@ export interface ThreadStoreOptions {
    */
   deleteThreadRefs?: (input: { threadId: string; cwd: string }) => Promise<void>;
   /**
-   * How often the store sweeps host-wide (§3.1's raw-log ceiling, §5.1's
-   * pending/`.part` attachment TTLs). `0` disables it.
-   *
-   * The store schedules this ITSELF rather than waiting for a caller: every
-   * bound it enforces is a background one, and the only other `pruneAttachments`
-   * caller in the host passes a `threadId` (the revert path), which skips the
-   * host-wide branch entirely — so without this the ceiling was correct code
-   * that nothing ever ran.
-   */
-  sweepIntervalMs?: number;
-  /** Test seams so the sweep can be driven without sleeping (§9). */
-  setTimer?: (fn: () => void, ms: number) => unknown;
-  clearTimer?: (handle: unknown) => void;
-  /**
    * Where the store says what it could not make right: today only an append
    * whose rollback failed too. Silent by default (tests); the host wires its
    * own logger.
    */
   logger?: { warn(message: string, detail?: unknown): void };
-  /**
-   * The bounds of the tool-output cache (`tool-output-cache.ts`): join
-   * buffers in bytes, entries (item cursors, and as many joins), and how long
-   * an unread entry lives. The defaults are its `TOOL_OUTPUT_CACHE_*`.
-   */
-  toolOutputCacheBytes?: number;
-  toolOutputCacheEntries?: number;
-  toolOutputCacheIdleMs?: number;
-  /**
-   * Test seam: every read of a thread's `events.ndjson` the tool-output cache
-   * makes (`[fromByte, toByte)`) and every whole-log read (`readLog`), so a
-   * test can see that a warm page read only the log's tail.
-   */
-  onLogRead?: (threadId: string, fromByte: number, toByte: number) => void;
 }
 
 /** Default cadence for the background sweep. */
-export const DEFAULT_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
+const DEFAULT_SWEEP_INTERVAL_MS = 6 * 60 * 60 * 1000;
 
 const defaultClock: Clock = {
   now: () => new Date(),
@@ -367,17 +335,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
   const threads = new Map<string, ThreadRuntime>();
   const pendingDir = path.join(rootDir, "pending-attachments");
 
-  const sweepIntervalMs = options.sweepIntervalMs ?? DEFAULT_SWEEP_INTERVAL_MS;
-  const setTimer =
-    options.setTimer ??
-    ((fn: () => void, ms: number) => {
-      const handle = setInterval(fn, ms);
-      handle.unref?.();
-      return handle;
-    });
-  const clearTimer =
-    options.clearTimer ?? ((handle: unknown) => clearInterval(handle as NodeJS.Timeout));
-  let sweepTimer: unknown = null;
+  let sweepTimer: NodeJS.Timeout | null = null;
 
   // --- receipts ------------------------------------------------------------
 
@@ -658,7 +616,6 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     if (contents === null) {
       return { events: [], seq: 0, truncated: false };
     }
-    options.onLogRead?.(threadId, 0, Buffer.byteLength(contents, "utf8"));
     const events: DomainEvent[] = [];
     const torn = contents.length > 0 && !contents.endsWith("\n");
     let truncated = torn;
@@ -738,12 +695,8 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     committedLength: async (threadId) => (await ensureLoaded(threadId)).logBytes,
     decodeLine,
     now: () => clock.now().getTime(),
-    maxJoinBytes: options.toolOutputCacheBytes ?? TOOL_OUTPUT_CACHE_MAX_BYTES,
-    maxEntries: options.toolOutputCacheEntries ?? TOOL_OUTPUT_CACHE_MAX_ENTRIES,
-    idleMs: options.toolOutputCacheIdleMs ?? TOOL_OUTPUT_CACHE_IDLE_MS,
     decodeSliceMs: DECODE_SLICE_MS,
-    yieldToLoop,
-    ...(options.onLogRead !== undefined ? { onLogRead: options.onLogRead } : {})
+    yieldToLoop
   });
 
   /**
@@ -757,7 +710,6 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     write: Extract<ItemWrite, { kind: "activity" }>
   ): Promise<ThreadActivityItem | null> {
     const end = write.byteOffset + write.byteLength;
-    options.onLogRead?.(threadId, write.byteOffset, end);
     const line = await readFileWindow(threadEventsPath(rootDir, threadId), write.byteOffset, end);
     if (line === null || line.bytes.length !== write.byteLength || line.bytes[write.byteLength - 1] !== 0x0a) {
       return null;
@@ -785,10 +737,11 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         continue;
       }
       // A message id is written once per delta, so the newest row alone is
-      // a fragment: rebuild the accumulated body the same way the fold does
+      // a fragment: rebuild its body without the resident window discarding
+      // earlier deltas. Rewinds still apply through the shared reducer
       // — yielding, like every other whole-log fold in this store, so a
       // long thread's "load full output" cannot starve the health probe.
-      const state = await foldForward(createEmptyThreadState(), tail.events);
+      const state = await foldForward(createEmptyThreadState(), tail.events, applyFullHistoryEvent);
       return state.items.find((item) => item.id === itemId) ?? null;
     }
     return null;
@@ -891,11 +844,12 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
   /** `applyDomainEvent` over `events`, yielding to the loop every {@link FOLD_YIELD_EVENTS}. */
   async function foldForward(
     state: ThreadFoldState,
-    events: readonly DomainEvent[]
+    events: readonly DomainEvent[],
+    applyEvent = applyDomainEvent
   ): Promise<ThreadFoldState> {
     let folded = state;
     for (let index = 0; index < events.length; index += 1) {
-      folded = applyDomainEvent(folded, events[index]!);
+      folded = applyEvent(folded, events[index]!);
       if ((index + 1) % FOLD_YIELD_EVENTS === 0) {
         await yieldToLoop();
       }
@@ -1612,7 +1566,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
 
     close(): void {
       if (sweepTimer !== null) {
-        clearTimer(sweepTimer);
+        clearInterval(sweepTimer);
         sweepTimer = null;
       }
       for (const entry of threads.values()) {
@@ -1658,13 +1612,12 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     }
   };
 
-  if (sweepIntervalMs > 0) {
-    sweepTimer = setTimer(() => {
-      // Best effort and never awaited by anything: a sweep that fails costs
-      // disk, never a turn.
-      void store.pruneAttachments().catch(() => undefined);
-    }, sweepIntervalMs);
-  }
+  sweepTimer = setInterval(() => {
+    // Best effort and never awaited by anything: a sweep that fails costs
+    // disk, never a turn.
+    void store.pruneAttachments().catch(() => undefined);
+  }, DEFAULT_SWEEP_INTERVAL_MS);
+  sweepTimer.unref?.();
 
   return store;
 }

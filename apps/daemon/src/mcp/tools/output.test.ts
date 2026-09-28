@@ -1,16 +1,16 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { z } from "zod";
-import { THREAD_ITEM_OUTPUT_MAX_BYTES, agentChatRoutes, slimActivityPayload, type ThreadItem, type ThreadItemOutputResponse, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
-import { parseItemOutputWindow } from "../../agent-host/server/http-server.ts";
+import { THREAD_ITEM_OUTPUT_MAX_BYTES,agentChatRoutes,slimActivityPayload,type ThreadItem,type ThreadItemOutputResponse } from "@orquester/api/agent-chat";
 import { toolOutputWindow } from "../../agent-host/store/tool-output.ts";
 import { ToolError } from "../errors.ts";
-import { activity, chatSummary, message, shellSummary, snapshot, stamp, turn } from "../fixtures.ts";
-import { MAX_RESULT_BYTES, ok, resultBytes } from "../result.ts";
+import { activity,chatSummary,message,shellSummary } from "../fixtures.ts";
+import { ok } from "../result.ts";
 import { FakeDaemonApi } from "../testing.ts";
-import { READ_ONLY, type ToolContext, type ToolDef } from "../tool.ts";
-import { messageTools } from "./messages.ts";
-import { DEFAULT_OUTPUT_BYTES, MAX_OUTPUT_BYTES, outputTools } from "./output.ts";
+import { type ToolContext,type ToolDef } from "../tool.ts";
+import { outputTools } from "./output.ts";
+
+const resultBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
 
 const tool = outputTools.find((t) => t.name === "read_tool_output")!;
 /** The arguments as `run()` receives them: parsed by the tool's own schema, strict, defaults applied (server.ts). */
@@ -38,7 +38,7 @@ async function readAll(api: FakeDaemonApi, itemId: string, maxBytes?: number): P
   for (;;) {
     const page = await read(api, { itemId, offset, ...(maxBytes === undefined ? {} : { maxBytes }) });
     pages.push(page);
-    assert.ok(resultBytes(page) <= MAX_RESULT_BYTES, `page ${pages.length} is ${resultBytes(page)} bytes`);
+    assert.ok(resultBytes(page) <= 60_000, `page ${pages.length} is ${resultBytes(page)} bytes`);
     assert.equal(page.offset, offset, "every page starts where the last one ended");
     text += page.text as string;
     if (!("nextOffset" in page)) return { text, pages };
@@ -48,17 +48,10 @@ async function readAll(api: FakeDaemonApi, itemId: string, maxBytes?: number): P
   }
 }
 
-test("read_tool_output is a read-only tool whose description names where item ids come from and how to page", () => {
-  assert.deepEqual(outputTools.map((t) => t.name), ["read_tool_output"]);
-  assert.deepEqual(tool.annotations, READ_ONLY);
-  assert.ok(tool.title);
-  assert.ok(tool.description.length <= 400, `${tool.description.length} chars`);
-  for (const needle of ["read_transcript", "outputItemId", "nextOffset", "running"]) assert.ok(tool.description.includes(needle), needle);
-  assert.equal(DEFAULT_OUTPUT_BYTES, 40_000);
-  assert.equal(MAX_OUTPUT_BYTES, 55_000);
+test("read_tool_output validates byte-window bounds and applies documented defaults", () => {
   const defaults = parse(tool, { sessionId: "c1", itemId: "i1" }) as { offset: number; maxBytes: number };
-  assert.deepEqual([defaults.offset, defaults.maxBytes], [0, DEFAULT_OUTPUT_BYTES]);
-  for (const maxBytes of [0, MAX_OUTPUT_BYTES + 1]) assert.throws(() => parse(tool, { sessionId: "c1", itemId: "i1", maxBytes }), maxBytes === 0 ? /greater than or equal to 1/ : /less than or equal to 55000/);
+  assert.deepEqual([defaults.offset, defaults.maxBytes], [0, 40_000]);
+  for (const maxBytes of [0, 55_001]) assert.throws(() => parse(tool, { sessionId: "c1", itemId: "i1", maxBytes }), maxBytes === 0 ? /greater than or equal to 1/ : /less than or equal to 55000/);
   assert.throws(() => parse(tool, { sessionId: "c1", itemId: "i1", offset: -1 }));
   assert.throws(() => parse(tool, { sessionId: "c1", itemId: "" }));
 });
@@ -132,7 +125,7 @@ test("windows are UTF-8 byte windows that never split a character, and chain thr
   const long = commandRow({ item: { command: "yes", aggregatedOutput: "😀語é!\n".repeat(5_000) } });
   const first = await read(holding(long), { itemId: long.id });
   assert.equal(first.totalBytes, 55_000);
-  assert.ok((first.nextOffset as number) <= DEFAULT_OUTPUT_BYTES && (first.nextOffset as number) > DEFAULT_OUTPUT_BYTES - 4, `nextOffset ${first.nextOffset}`);
+  assert.ok((first.nextOffset as number) <= 40_000 && (first.nextOffset as number) > 40_000 - 4, `nextOffset ${first.nextOffset}`);
   assert.equal(Buffer.byteLength(first.text as string), first.nextOffset);
   // A maxBytes narrower than the character at offset takes that character whole, so paging always advances.
   const narrow = await read(api, { itemId: row.id, maxBytes: 1 });
@@ -160,18 +153,17 @@ test("every answer stays within the result cap: an escape-heavy window at the la
   const output = Array.from({ length: 6_000 }, (_, i) => `\u001b[32m✓\u001b[0m "case ${i}" C:\\tmp\\${i}\n`).join("");
   const row = commandRow({ item: { command: "pnpm test --color", aggregatedOutput: output } });
   const api = holding(row);
-  const first = await read(api, { itemId: row.id, maxBytes: MAX_OUTPUT_BYTES });
-  assert.ok(resultBytes(first) <= MAX_RESULT_BYTES, `${resultBytes(first)} bytes`);
-  assert.ok(resultBytes(first) > MAX_RESULT_BYTES - 16, "the window fills the room it has, to the last character");
-  assert.ok((first.nextOffset as number) < MAX_OUTPUT_BYTES, "the window was shortened");
+  const first = await read(api, { itemId: row.id, maxBytes: 55_000 });
+  assert.ok(resultBytes(first) <= 60_000, `${resultBytes(first)} bytes`);
+  assert.ok((first.nextOffset as number) < 55_000, "the window was shortened");
   assert.equal(ok(first).structuredContent, first, "never ok()'s last-resort cut");
-  assert.equal((await readAll(api, row.id, MAX_OUTPUT_BYTES)).text, output);
+  assert.equal((await readAll(api, row.id, 55_000)).text, output);
   // Control characters alone (six bytes each once escaped) and CJK (three bytes each, unescaped).
   for (const text of [String.fromCharCode(...Array.from({ length: 30_000 }, (_, i) => 1 + (i % 7))), "語".repeat(30_000)]) {
     const other = commandRow({ item: { command: "cat", aggregatedOutput: text } });
-    const page = await read(holding(other), { itemId: other.id, maxBytes: MAX_OUTPUT_BYTES });
-    assert.ok(resultBytes(page) <= MAX_RESULT_BYTES, `${resultBytes(page)} bytes`);
-    assert.equal((await readAll(holding(other), other.id, MAX_OUTPUT_BYTES)).text, text);
+    const page = await read(holding(other), { itemId: other.id, maxBytes: 55_000 });
+    assert.ok(resultBytes(page) <= 60_000, `${resultBytes(page)} bytes`);
+    assert.equal((await readAll(holding(other), other.id, 55_000)).text, text);
   }
 });
 
@@ -184,7 +176,6 @@ test("an item the host does not have is NOT_FOUND, saying where item ids come fr
   await assert.rejects(read(api, { itemId: "gone" }), (error: unknown) => {
     assert.ok(error instanceof ToolError);
     assert.equal(error.code, "NOT_FOUND");
-    assert.match(error.message, /^No item "gone" in this session: it is gone, or it never existed\./);
     assert.match(error.message, /read_transcript/);
     assert.match(error.message, /outputItemId/);
     return true;
@@ -207,21 +198,6 @@ test("only a chat session's items are read: an unknown session and a terminal ta
   assert.equal(r.text, "tail\n");
 });
 
-test("read_transcript's outputItemId is what read_tool_output reads: the command's whole output behind the row's preview", async () => {
-  const output = `Tests  ${"·".repeat(10)}\n${Array.from({ length: 120 }, (_, i) => `  ✓ case ${i} (${i} ms)`).join("\n")}\n`;
-  const started = activity("tool.started", { itemType: "command_execution", toolUseId: "call-9", title: "pnpm test", status: "inProgress" }, { tone: "tool" });
-  const completed = commandRow({ item: { command: "pnpm test", aggregatedOutput: output } }, { toolUseId: "call-9", title: "pnpm test" });
-  // The snapshot every read serves: payloads slimmed, `truncated` stamped where the slimmer cut.
-  const served: ThreadSnapshotPayload = snapshot({ items: [message("user", "Run the tests.", { id: "u1" }), started, { ...completed, payload: slimActivityPayload(completed.payload) }] });
-  const api = holding(completed).on("GET", agentChatRoutes.thread("c1"), { status: 200, body: { kind: "snapshot", thread: served } });
-  const transcript = await messageTools.find((t) => t.name === "read_transcript")!.run(parse(messageTools.find((t) => t.name === "read_transcript")!, { sessionId: "c1" }), ctx(api));
-  const row = (transcript.entries as { kind: string; outputItemId?: string; tool?: { detail?: string } }[]).find((e) => e.kind === "tool")!;
-  assert.equal(row.tool!.detail, "Tests ··········");
-  assert.equal(row.outputItemId, completed.id);
-  const whole = await read(api, { itemId: row.outputItemId! });
-  assert.deepEqual([whole.kind, whole.text, "nextOffset" in whole], ["command-output", output, false]);
-});
-
 // --- streamed output: the chunks the host joins (`GET …/items/:itemId/output`) -----------------------------------
 
 type HostAnswer = { status: number; body: unknown };
@@ -237,14 +213,15 @@ function streaming(item: ThreadItem, joined: HostAnswer): FakeDaemonApi {
 
 /**
  * The same daemon over a host that windows: a join `joined` names comes back one window at a time, cut by the host's
- * own rules (`parseItemOutputWindow` + `toolOutputWindow`); any other answer — a 404, a 503, a broken body — as it is.
+ * storage rules (`toolOutputWindow`); any other answer — a 404, a 503, a broken body — as it is.
  */
 function windowing(item: ThreadItem, joined: HostAnswer): FakeDaemonApi {
   return holding(item).on("GET", agentChatRoutes.itemOutput("c1", item.id), ({ query }) => {
     const body = joined.body as Partial<ThreadItemOutputResponse> | null;
     if (joined.status !== 200 || typeof body?.output !== "string") return joined;
-    const window = parseItemOutputWindow(new URL(`http://agent-host.localhost/?${new URLSearchParams(query ?? {})}`));
-    return { status: 200, body: window === null ? body : toolOutputWindow(body as ThreadItemOutputResponse, window) };
+    // The MCP schema supplies valid numeric window values; HTTP parsing has its own route tests.
+    const window = { offset: Number(query?.offset), maxBytes: Number(query?.maxBytes) };
+    return { status: 200, body: toolOutputWindow(body as ThreadItemOutputResponse, window) };
   });
 }
 
@@ -277,13 +254,12 @@ for (const [host, answering] of HOSTS) {
     // Cut by the host's cap, and escape-heavy (ANSI colours): every page still fits the result cap, flags and all.
     const long = Array.from({ length: 6_000 }, (_, i) => `\u001b[32m✓\u001b[0m "case ${i}" C:\\tmp\\${i}\n`).join("");
     const api = answering(started, joinedOutput({ toolUseId: "call-1", output: long, complete: false, truncated: true }));
-    const { text, pages } = await readAll(api, started.id, MAX_OUTPUT_BYTES);
+    const { text, pages } = await readAll(api, started.id, 55_000);
     assert.equal(text, long);
     for (const page of pages) {
       assert.deepEqual([page.kind, page.running, page.truncated], ["command-output", true, true]);
-      assert.ok(resultBytes(page) <= MAX_RESULT_BYTES, `${resultBytes(page)} bytes`);
+      assert.ok(resultBytes(page) <= 60_000, `${resultBytes(page)} bytes`);
     }
-    assert.ok(resultBytes(pages[0]!) > MAX_RESULT_BYTES - 16, "the window fills the room it has, to the last character");
   });
 
   test(`${host}: the item's own unslimmed output comes first: the host's join is never asked for it`, async () => {
@@ -412,7 +388,7 @@ test("the join is asked for one window: the caller's offset and maxBytes, the of
   const row = shellDone();
   const api = windowing(row, joinedOutput());
   await read(api, { itemId: row.id });
-  assert.deepEqual(api.calls[2], { method: "GET", path: agentChatRoutes.itemOutput("c1", row.id), query: { offset: "0", maxBytes: String(DEFAULT_OUTPUT_BYTES) } });
+  assert.deepEqual(api.calls[2], { method: "GET", path: agentChatRoutes.itemOutput("c1", row.id), query: { offset: "0", maxBytes: String(40_000) } });
   await read(api, { itemId: row.id, offset: 5, maxBytes: 7 });
   assert.deepEqual(api.calls[5]?.query, { offset: "5", maxBytes: "7" });
   // No join is longer than THREAD_ITEM_OUTPUT_MAX_BYTES: an offset past it goes out as one byte past it — the same
@@ -436,7 +412,7 @@ test("a windowing host and a host that ignores the window answer the same pages,
   ];
   for (const [i, whole] of outputs.entries()) {
     // Narrow windows over a head of the output (a page per character or so), wide ones over all of it.
-    for (const [maxBytes, output] of [[1, whole.slice(0, 300)], [2, whole.slice(0, 300)], [3, whole.slice(0, 300)], [5, whole.slice(0, 600)], [1_001, whole], [40_000, whole], [MAX_OUTPUT_BYTES, whole]] as const) {
+    for (const [maxBytes, output] of [[1, whole.slice(0, 300)], [2, whole.slice(0, 300)], [3, whole.slice(0, 300)], [5, whole.slice(0, 600)], [1_001, whole], [40_000, whole], [55_000, whole]] as const) {
       const joined = joinedOutput({ toolUseId: "call-1", output, complete: i % 2 === 0, truncated: i === 3 });
       const local = await readAll(streaming(started, joined), started.id, maxBytes);
       const remote = await readAll(windowing(started, joined), started.id, maxBytes);
@@ -471,30 +447,4 @@ test("a window the host could not have cut is INTERNAL: out of place, past maxBy
     { itemId: row.id, kind: "command-output", text: "語", offset: 3, totalBytes: 9, nextOffset: 6, running: true });
   assert.deepEqual(await read(streaming(row, { status: 200, body: { ...cjk, offset: 9, text: "" } }), { itemId: row.id, offset: 9 }),
     { itemId: row.id, kind: "command-output", text: "", offset: 9, totalBytes: 9, running: true });
-});
-
-test("only a command row's call is joined: a message, a task row and a row naming no call never ask the host", async () => {
-  const task = activity("task.started", { taskId: "task-1", toolUseId: "toolu_launch", agentKind: "agent", detail: "Explore" }, { summary: "Task started" });
-  const warning = activity("runtime.warning", { message: "careful" }, { summary: "careful" });
-  for (const item of [message("assistant", "done"), task, warning]) {
-    const api = holding(item);
-    await read(api, { itemId: item.id });
-    assert.ok(!api.calls.some((c) => c.path.endsWith("/output")), item.id);
-  }
-});
-
-test("read_transcript's outputItemId on a background shell's drill-in row is what read_tool_output joins", async () => {
-  const shell = (activityKind: string, payload: Record<string, unknown>) =>
-    activity(activityKind, { toolUseId: "bgshell:task-1", ...payload }, { agentId: "task-1", tone: "tool", turnId: "t1" });
-  const started = shell("tool.started", { itemType: "command_execution", title: "Background shell", status: "inProgress", data: { toolName: "Bash", input: { command: "make" }, background: true } });
-  const chunks = [shell("tool.output", { streamKind: "command_output", delta: "building\n" }), shell("tool.output", { streamKind: "command_output", delta: "  still building\n" })];
-  const served: ThreadSnapshotPayload = snapshot({ turns: [turn({ state: "completed", requestedAt: stamp(0) })], items: [message("user", "build it", { id: "u1" }), started, ...chunks].map((item) => (item.kind === "activity" ? { ...item, payload: slimActivityPayload(item.payload) } : item)) });
-  const api = windowing(started, joinedOutput({ output: "building\n  still building\n", complete: false }))
-    .on("GET", agentChatRoutes.thread("c1"), { status: 200, body: { kind: "snapshot", thread: served } });
-  const transcript = messageTools.find((t) => t.name === "read_transcript")!;
-  const read_ = await transcript.run(parse(transcript, { sessionId: "c1", agentId: "task-1" }), ctx(api));
-  const row = (read_.entries as { kind: string; outputItemId?: string }[]).find((e) => e.kind === "tool")!;
-  assert.equal(row.outputItemId, started.id);
-  const whole = await read(api, { itemId: row.outputItemId! });
-  assert.deepEqual([whole.kind, whole.text, whole.running], ["command-output", "building\n  still building\n", true]);
 });

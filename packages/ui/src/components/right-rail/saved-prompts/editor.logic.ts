@@ -34,7 +34,7 @@ export interface SavedPromptDraft {
 }
 
 /** Tags as saved: split on commas, trimmed, inner whitespace collapsed, empties dropped, unique (case-insensitive, first spelling wins). */
-export function parseTagsText(text: string): string[] {
+function parseTagsText(text: string): string[] {
   const seen = new Set<string>();
   const tags: string[] = [];
   for (const raw of text.split(",")) {
@@ -48,7 +48,7 @@ export function parseTagsText(text: string): string[] {
   return tags;
 }
 
-export function formatTagsText(tags: readonly string[]): string {
+function formatTagsText(tags: readonly string[]): string {
   return tags.join(", ");
 }
 
@@ -175,7 +175,7 @@ const COPY_SUFFIX = " (copy)";
  * (UTF-16 units, as the daemon counts) — cut between code points, never
  * through the middle of an emoji's surrogate pair.
  */
-export function duplicateTitle(title: string): string {
+function duplicateTitle(title: string): string {
   const base = title.trim();
   const room = SAVED_PROMPT_TITLE_MAX - COPY_SUFFIX.length;
   if (base.length <= room) return `${base}${COPY_SUFFIX}`;

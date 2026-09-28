@@ -36,11 +36,11 @@ import { DropdownItem } from "../ui/dropdown";
 import { BottomSheet } from "../ui/sheet";
 import { useActiveChatTarget } from "./chat-target";
 import { setMobileSection, useMobileSection } from "./mobile-section";
-import { RIGHT_RAIL_PANEL_ORDER, RIGHT_RAIL_PANEL_REGISTRY, type RightRailPanelRegistry } from "./panels";
+import { RIGHT_RAIL_PANEL_ORDER, RIGHT_RAIL_PANEL_REGISTRY } from "./panels";
 import type { RightRailPanelId } from "./types";
 
 /** The most items the bar shows side by side, "More" included. */
-export const MOBILE_SECTION_BAR_MAX = 5;
+const MOBILE_SECTION_BAR_MAX = 5;
 
 /* ── A section, full screen ─────────────────────────────────────────────── */
 
@@ -49,15 +49,12 @@ export interface MobileSectionViewProps {
   projectPath: string;
   /** Back to the tab content. */
   onLeave: () => void;
-  /** The panels by id (the real ones unless a check passes fakes). */
-  panels?: RightRailPanelRegistry;
 }
 
 export const MobileSectionView: React.FC<MobileSectionViewProps> = ({
   section,
   projectPath,
-  onLeave,
-  panels = RIGHT_RAIL_PANEL_REGISTRY
+  onLeave
 }) => {
   const sessionId = useActiveChatTarget();
   const rootRef = React.useRef<HTMLDivElement | null>(null);
@@ -79,7 +76,7 @@ export const MobileSectionView: React.FC<MobileSectionViewProps> = ({
     return () => document.removeEventListener("keydown", onKey);
   }, [onLeave]);
 
-  const { Component, title } = panels[section];
+  const { Component, title } = RIGHT_RAIL_PANEL_REGISTRY[section];
   return (
     <div
       ref={rootRef}
@@ -131,20 +128,18 @@ export interface MobileSectionBarProps {
   onSelect: (section: RightRailPanelId | null) => void;
   /** The visible tab is a chat: the first item says "Chat" rather than "Tab". */
   chatTab: boolean;
-  panels?: RightRailPanelRegistry;
-  order?: readonly RightRailPanelId[];
 }
 
 /**
  * The items of the bar, in order: the tab content, then the panels. When they
- * do not all fit, the first `max - 1` and the rest behind "More".
+ * do not all fit, the first four and the rest behind "More".
  */
-export function splitSectionItems<T>(items: readonly T[], max = MOBILE_SECTION_BAR_MAX): {
+function splitSectionItems<T>(items: readonly T[]): {
   shown: T[];
   more: T[];
 } {
-  if (items.length <= max) return { shown: [...items], more: [] };
-  return { shown: items.slice(0, max - 1), more: items.slice(max - 1) };
+  if (items.length <= MOBILE_SECTION_BAR_MAX) return { shown: [...items], more: [] };
+  return { shown: items.slice(0, MOBILE_SECTION_BAR_MAX - 1), more: items.slice(MOBILE_SECTION_BAR_MAX - 1) };
 }
 
 const ITEM =
@@ -182,9 +177,7 @@ const BarButton: React.FC<{
 export const MobileSectionBar: React.FC<MobileSectionBarProps> = ({
   active,
   onSelect,
-  chatTab,
-  panels = RIGHT_RAIL_PANEL_REGISTRY,
-  order = RIGHT_RAIL_PANEL_ORDER
+  chatTab
 }) => {
   const [moreOpen, setMoreOpen] = React.useState(false);
   const closeMore = React.useCallback(() => setMoreOpen(false), []);
@@ -195,11 +188,11 @@ export const MobileSectionBar: React.FC<MobileSectionBarProps> = ({
       title: chatTab ? "Back to the chat" : "Back to the tab",
       Icon: chatTab ? MessageSquare : AppWindow
     },
-    ...order.map((id) => ({
+    ...RIGHT_RAIL_PANEL_ORDER.map((id) => ({
       id,
-      label: panels[id].shortTitle,
-      title: panels[id].title,
-      Icon: panels[id].Icon
+      label: RIGHT_RAIL_PANEL_REGISTRY[id].shortTitle,
+      title: RIGHT_RAIL_PANEL_REGISTRY[id].title,
+      Icon: RIGHT_RAIL_PANEL_REGISTRY[id].Icon
     }))
   ];
   const { shown, more } = splitSectionItems(items);

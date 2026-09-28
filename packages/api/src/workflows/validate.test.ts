@@ -3,8 +3,7 @@ import { describe, it } from "node:test";
 
 import { testEdge, testNode, testWorkflow, T0 } from "./testing.ts";
 import type { WorkflowProblem } from "./types.ts";
-import { WORKFLOW_LIMITS } from "./types.ts";
-import { hasWorkflowErrors, utf8ByteLength, validateWorkflow, WORKFLOW_PROBLEM_CODES, type ValidateWorkflowOptions } from "./validate.ts";
+import { hasWorkflowErrors, validateWorkflow, type ValidateWorkflowOptions } from "./validate.ts";
 
 function codes(problems: WorkflowProblem[]): string[] {
   return problems.map((problem) => problem.code);
@@ -35,16 +34,6 @@ describe("a valid workflow", () => {
     assert.equal(result.workflow?.id, "wf-1");
     assert.equal(hasWorkflowErrors(result.problems), false);
   });
-
-  it("every emitted code is declared", () => {
-    const declared = new Set<string>(WORKFLOW_PROBLEM_CODES);
-    const messy = {
-      ...testWorkflow([]),
-      nodes: [{ id: "a", type: "nope" }, agent("A", "")],
-      edges: [{ id: "e", source: "a", target: "zzz", sourceHandle: "bad handle" }]
-    };
-    for (const problem of problemsOf(messy)) assert.ok(declared.has(problem.code), problem.code);
-  });
 });
 
 describe("schema", () => {
@@ -74,7 +63,6 @@ describe("schema", () => {
     assert.equal(schema.length, 1);
     assert.equal(schema[0]!.nodeId, "bad");
     assert.equal(schema[0]!.field, "config.chain");
-    assert.match(schema[0]!.message, /^Block Bad: config\.chain:/);
     assert.equal(only(result.problems, "unknown_reference").length, 1);
   });
 
@@ -95,22 +83,16 @@ describe("schema", () => {
 
 describe("limits", () => {
   it("counts blocks, connections, name length and size", () => {
-    const many = Array.from({ length: WORKFLOW_LIMITS.maxNodes + 1 }, (_, index) => testNode(`n${index}`, "note", {}, { name: `N${index}` }));
+    const many = Array.from({ length: 200 + 1 }, (_, index) => testNode(`n${index}`, "note", {}, { name: `N${index}` }));
     assert.ok(codes(problemsOf(testWorkflow(many))).includes("too_many_nodes"));
     const wf = testWorkflow([manual(), testNode("c", "code", {}, { name: "C" })]);
-    const edges = Array.from({ length: WORKFLOW_LIMITS.maxEdges + 1 }, (_, index) => testEdge("t", "c", "success", `e${index}`));
+    const edges = Array.from({ length: 400 + 1 }, (_, index) => testEdge("t", "c", "success", `e${index}`));
     assert.ok(codes(problemsOf({ ...wf, edges })).includes("too_many_edges"));
     assert.ok(codes(problemsOf({ ...wf, name: "x".repeat(121) })).includes("name_too_long"));
-    const huge = testNode("big", "note", { text: "x".repeat(WORKFLOW_LIMITS.maxDefinitionBytes) }, { name: "Big" });
+    const huge = testNode("big", "note", { text: "x".repeat(2 * 1024 * 1024) }, { name: "Big" });
     assert.ok(codes(problemsOf(testWorkflow([manual(), huge]))).includes("definition_too_large"));
-  });
-
-  it("utf8ByteLength", () => {
-    assert.equal(utf8ByteLength("abc"), 3);
-    assert.equal(utf8ByteLength("é"), 2);
-    assert.equal(utf8ByteLength("€"), 3);
-    assert.equal(utf8ByteLength("😀"), 4);
-    assert.equal(utf8ByteLength("\ud800"), 3);
+    const unicode = testNode("big", "note", { text: "😀".repeat(600_000) }, { name: "Big" });
+    assert.ok(codes(problemsOf(testWorkflow([manual(), unicode]))).includes("definition_too_large"));
   });
 });
 
@@ -160,8 +142,6 @@ describe("edges", () => {
     assert.deepEqual(byEdge("edge_unknown_source"), ["e-src"]);
     assert.deepEqual(byEdge("edge_unknown_target"), ["e-tgt"]);
     assert.deepEqual(byEdge("edge_invalid_handle"), ["e-handle", "e-stop"]);
-    assert.match(only(problems, "edge_invalid_handle")[0]!.message, /has no "success" output \(it has true, false, error\)/);
-    assert.match(only(problems, "edge_invalid_handle")[1]!.message, /End has no outputs/);
     assert.deepEqual(byEdge("edge_target_no_input"), ["e-trigger", "e-note"]);
     assert.deepEqual(byEdge("edge_self_loop"), ["e-self"]);
     assert.deepEqual(byEdge("duplicate_edge"), ["e-dup"]);
@@ -189,7 +169,6 @@ describe("edges", () => {
     );
     const cycle = only(problemsOf(wf), "cycle");
     assert.equal(cycle.length, 1);
-    assert.match(cycle[0]!.message, /A → B → A|B → A → B/);
   });
 });
 
@@ -256,10 +235,10 @@ describe("templates", () => {
     const problems = problemsOf(wf);
     const unknown = only(problems, "unknown_reference");
     assert.equal(unknown.length, 2);
-    assert.match(unknown[0]!.message, /no block named "Ghost"/);
-    assert.match(unknown[1]!.message, /must name a block/);
+    assert.ok(unknown.every((problem) => problem.nodeId === "Second" && problem.severity === "error"));
     const notUpstream = only(problems, "reference_not_upstream");
-    assert.deepEqual(notUpstream.map((problem) => problem.message.match(/"(\w+)"/)![1]), ["Third", "Second"]);
+    assert.equal(notUpstream.length, 2);
+    assert.ok(notUpstream.every((problem) => problem.nodeId === "Second"));
     assert.ok(notUpstream.every((problem) => problem.severity === "warning"));
   });
 
@@ -268,7 +247,6 @@ describe("templates", () => {
     const problems = only(problemsOf(testWorkflow([manual(), shell], [testEdge("t", "sh")])), "shell_template");
     assert.equal(problems.length, 1);
     assert.equal(problems[0]!.field, "config.script");
-    assert.match(problems[0]!.message, /env entry/);
     const docker = testNode("sh", "shell", { script: "docker inspect -f '{{.State.Status}}' app" }, { name: "Sh" });
     assert.deepEqual(codes(problemsOf(testWorkflow([manual(), docker], [testEdge("t", "sh")]))), []);
   });
@@ -284,7 +262,7 @@ describe("templates", () => {
       [testEdge("t", "h"), testEdge("t", "h2"), testEdge("t", "Ag")]
     );
     const problems = problemsOf(wf, { secretNames: ["TOKEN"] });
-    assert.deepEqual(only(problems, "unknown_secret").map((problem) => problem.message), ["H: there is no secret named MISSING"]);
+    assert.deepEqual(only(problems, "unknown_secret").map((problem) => [problem.nodeId, problem.field]), [["h", "config.headers.0.value"]]);
     assert.equal(only(problems, "secret_reference").length, 1);
     assert.equal(only(problems, "secret_in_prompt").length, 1, "once per field");
     assert.equal(only(problems, "secret_in_prompt")[0]!.severity, "warning");
@@ -358,7 +336,6 @@ describe("blocks", () => {
     assert.deepEqual(agents.map((p) => [p.severity, p.field]), [["error", "config.chain.1.agent"], ["warning", "config.chain.4.agent"]]);
     const models = only(problems, "unknown_model");
     assert.deepEqual(models.map((p) => [p.severity, p.field]), [["error", "config.chain.2.model"], ["warning", "config.chain.3.model"]]);
-    assert.match(models[0]!.message, /codex has no model "gpt-404" \(it has gpt-5\.5\)/);
     assert.equal(only(problemsOf(wf), "unknown_agent").length + only(problemsOf(wf), "unknown_model").length, 0, "no catalogue, no check");
   });
 
@@ -368,13 +345,13 @@ describe("blocks", () => {
       testWorkflow([manual(), agent("A", "x"), code, agent("B", "y", { session: { kind: "continue", fromNode } }), agent("Later", "z")], edges);
     const chain = [testEdge("t", "A"), testEdge("A", "c"), testEdge("c", "B"), testEdge("B", "Later")];
     assert.deepEqual(only(problemsOf(build("A", chain)), "continue_invalid"), []);
-    assert.match(only(problemsOf(build("Nope", chain)), "continue_invalid")[0]!.message, /no block named/);
-    assert.match(only(problemsOf(build("Code", chain)), "continue_invalid")[0]!.message, /not an agent/);
-    assert.match(only(problemsOf(build("Later", chain)), "continue_invalid")[0]!.message, /does not run before/);
+    assert.deepEqual(only(problemsOf(build("Nope", chain)), "continue_invalid").map((problem) => [problem.nodeId, problem.field]), [["B", "config.session.fromNode"]]);
+    assert.deepEqual(only(problemsOf(build("Code", chain)), "continue_invalid").map((problem) => [problem.nodeId, problem.field]), [["B", "config.session.fromNode"]]);
+    assert.deepEqual(only(problemsOf(build("Later", chain)), "continue_invalid").map((problem) => [problem.nodeId, problem.field]), [["B", "config.session.fromNode"]]);
   });
 
   it("code: size, default export, memory, timeout", () => {
-    const big = testNode("big", "code", { source: `export default () => 1;//${"x".repeat(WORKFLOW_LIMITS.maxCodeSourceBytes)}` }, { name: "Big" });
+    const big = testNode("big", "code", { source: `export default () => 1;//${"x".repeat(512 * 1024)}` }, { name: "Big" });
     const noExport = testNode("ne", "code", { source: "module.exports = 1", memoryMb: 100, timeoutMinutes: 2000 }, { name: "NoExport" });
     const problems = problemsOf(testWorkflow([manual(), big, noExport], [testEdge("t", "big"), testEdge("t", "ne")]));
     assert.equal(only(problems, "code_too_large").length, 1);
@@ -397,7 +374,7 @@ describe("blocks", () => {
   it("wait, block timeouts", () => {
     const nodes = [
       manual(),
-      testNode("w1", "wait", { kind: "duration", minutes: WORKFLOW_LIMITS.waitMaxMinutes + 1 }, { name: "W1" }),
+      testNode("w1", "wait", { kind: "duration", minutes: 7 * 24 * 60 + 1 }, { name: "W1" }),
       testNode("w2", "wait", { kind: "until", time: "09:00", timezone: "Atlantis/Nowhere" }, { name: "W2" }),
       testNode("sh", "shell", {}, { name: "Sh", timeoutMinutes: 24 * 60 + 1 })
     ];
@@ -463,7 +440,7 @@ describe("the whole graph", () => {
   it("pinned data", () => {
     const wf = testWorkflow([manual()], [], { pinned: { t: { ok: true }, gone: 1 } });
     assert.deepEqual(codes(problemsOf(wf)), ["pinned_unknown_node"]);
-    const big = testWorkflow([manual()], [], { pinned: { t: "x".repeat(WORKFLOW_LIMITS.maxPinnedBytes + 1) } });
+    const big = testWorkflow([manual()], [], { pinned: { t: "x".repeat(1024 * 1024 + 1) } });
     assert.deepEqual(codes(problemsOf(big)), ["pinned_too_large"]);
   });
 

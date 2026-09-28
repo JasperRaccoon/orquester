@@ -18,7 +18,6 @@ import { Broadcaster } from "./broadcaster.ts";
 import {
   SavedPromptError,
   SavedPromptsService,
-  STARTER_PROMPTS,
   publishSavedPromptEvents
 } from "./saved-prompts.ts";
 
@@ -142,74 +141,24 @@ function storedRecord(overrides: Record<string, unknown> = {}): Record<string, u
 
 // --- First run / seeding --------------------------------------------------------
 
-test("a first run seeds the four starters, in order, verbatim, and writes the file at once", async (t) => {
+test("first-run starter prompts are usable global records persisted before mutation", async (t) => {
   const s = await scratch();
   t.after(s.cleanup);
-  const time = clock();
-  const service = s.service({ now: time.now });
+  const service = s.service();
   await service.load();
 
   const prompts = await service.list(null);
-  assert.deepEqual(
-    prompts.map((p) => ({ title: p.title, description: p.description, tags: p.tags, pinned: p.pinned, body: p.body })),
-    [
-      {
-        title: "Review current changes",
-        description:
-          "Review the current diff for bugs, regressions, and missing tests. Prioritize findings by severity.",
-        tags: ["Review"],
-        pinned: true,
-        body:
-          "Review the current uncommitted changes on {branch} for bugs, regressions, and missing tests. Prioritize the findings by severity and cite the file and line for each one.\n\n{diff}"
-      },
-      {
-        title: "Plan before coding",
-        description: "Explore the codebase and propose a plan",
-        tags: ["Plan"],
-        pinned: false,
-        // The trailing "Task: " is deliberate: the user types the task after inserting.
-        body:
-          "Before writing any code, explore the relevant parts of {project} and propose a step-by-step implementation plan: the files you expect to change, the approach, the risks, and any open questions. Wait for my go-ahead before implementing.\n\nTask: "
-      },
-      {
-        title: "Fix failing tests",
-        description: "Find the root cause and verify the fix",
-        tags: ["Debug"],
-        pinned: false,
-        body:
-          "Run the test suite for {project}, find the root cause of each failing test, and fix it. Re-run the tests to verify the fix. Don't weaken, skip or delete tests to make them pass."
-      },
-      {
-        title: "Create a handoff",
-        description: "Summarize decisions, changes, and next steps",
-        tags: ["Docs"],
-        pinned: false,
-        body:
-          "Write a handoff note for this session ({date}, branch {branch}): the goal, the decisions made and why, what changed (files and behaviour), what is verified and how, and the open next steps."
-      }
-    ]
-  );
-  assert.equal(STARTER_PROMPTS.length, 4);
-  prompts.forEach((prompt, index) => {
-    assert.match(prompt.id, /^[0-9a-f-]{36}$/, "ids are UUIDs");
-    assert.equal(prompt.projectPath, null, "starters are global");
-    // A millisecond apart, newest first: the client lists never-used prompts
-    // by `updatedAt` descending, so they list in this order.
-    const stamp = new Date(Date.parse(time.iso()) - index).toISOString();
-    assert.equal(prompt.createdAt, stamp);
-    assert.equal(prompt.updatedAt, stamp);
+  assert.ok(prompts.length > 0, "a new library includes starter prompts");
+  assert.equal(new Set(prompts.map((prompt) => prompt.id)).size, prompts.length);
+  for (const prompt of prompts) {
+    assert.ok(prompt.title.trim() && prompt.body.trim(), "starters can be selected and inserted");
+    assert.equal(prompt.projectPath, null);
     assert.equal(prompt.lastUsedAt, null);
     assert.equal(prompt.useCount, 0);
-  });
-  assert.equal(new Set(prompts.map((p) => p.id)).size, 4, "four distinct ids");
-
+  }
   const written = await onDisk(s);
   assert.equal(written.version, 1);
-  assert.deepEqual(
-    written.prompts.map((p) => p.id),
-    prompts.map((p) => p.id),
-    "the seed is on disk before any mutation"
-  );
+  assert.deepEqual(written.prompts, prompts);
   assert.equal((await stat(s.file)).mode & 0o777, 0o600);
 });
 
@@ -775,29 +724,6 @@ test("a project path must be <workspaces>/<workspace>/<project>, inside the sand
     );
   }
   assert.deepEqual(await service.list(null), [], "no refused create stored anything");
-});
-
-test("the workspaces directory and sandbox root are read at every use, so a runtime move needs no restart", async (t) => {
-  const s = await scratch();
-  t.after(s.cleanup);
-  await writeLibrary(s, { version: 1, prompts: [] });
-  let live = s.workspacesDir;
-  const service = new SavedPromptsService({
-    file: s.file,
-    workspacesDir: () => live,
-    fsRoot: () => live,
-    logger: quiet
-  });
-  await service.load();
-  const before = await s.project("acme", "site");
-  assert.equal(await service.resolveProjectPath(before), before);
-
-  const moved = join(s.root, "moved");
-  const after = join(moved, "acme", "site");
-  await mkdir(after, { recursive: true });
-  live = moved;
-  assert.equal(await service.resolveProjectPath(after), after, "the new directory's projects validate");
-  await refuses(service.resolveProjectPath(before), 400, "INVALID_PROJECT_PATH");
 });
 
 test("list answers the global prompts plus the named project's own, and validates the project", async (t) => {

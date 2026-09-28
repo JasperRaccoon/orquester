@@ -196,7 +196,7 @@ export function acpFailureReason(error: unknown): "usage_limit" | "auth" | undef
  * `authentication_failed` stop reason (observation 50), and the xAI OAuth server answers a revoked
  * or expired refresh with `invalid_grant`.
  */
-export function grokAuthFailureText(text: string): boolean {
+function grokAuthFailureText(text: string): boolean {
   return (
     /\bnot (?:authenticated|logged[ -]?in|signed[ -]?in)\b/i.test(text) ||
     /\bauthentication[ _-]?(?:failed|required|error)\b/i.test(text) ||
@@ -211,7 +211,7 @@ export function grokAuthFailureText(text: string): boolean {
  * The words of an exhausted quota on an RPC error: xAI's `…-usage-exhausted` 429 (the model
  * proxy's accepted risk, AGENTS.md), a bare 429 / "too many requests", or a rate / usage limit.
  */
-export function grokUsageLimitText(text: string): boolean {
+function grokUsageLimitText(text: string): boolean {
   return (
     /usage[-_ ]exhausted/i.test(text) ||
     /\b429\b/.test(text) ||

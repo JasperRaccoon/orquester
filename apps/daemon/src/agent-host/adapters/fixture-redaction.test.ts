@@ -137,25 +137,38 @@ function scanText(where: string, text: string, findings: Finding[]): void {
  * Walks one parsed value: every credential-named field holding a real value, and every byte
  * array — scanned decoded, since a text rule never sees the path its bytes spell.
  */
-function scanValue(where: string, value: unknown, findings: Finding[]): void {
+function scanValue(where: string, value: unknown, findings: Finding[], redactMcpEnvironment = false): void {
   if (Array.isArray(value)) {
     if (value.length > 0 && value.every((n) => Number.isInteger(n) && n >= 0 && n <= 255)) {
       const decoded = Buffer.from(value as number[]).toString("utf8");
       scanText(`${where} (a byte array, decoded)`, decoded, findings);
       return;
     }
-    for (const entry of value) scanValue(where, entry, findings);
+    for (const entry of value) scanValue(where, entry, findings, redactMcpEnvironment);
     return;
   }
   if (value === null || typeof value !== "object") return;
   const record = value as Record<string, unknown>;
+  // Grok's fixture README requires EVERY MCP environment value to be redacted,
+  // including host/settings values with neither credential names nor token shapes.
+  if (redactMcpEnvironment && Array.isArray(record.mcpServers)) {
+    for (const server of record.mcpServers) {
+      const env = asRecord(server)?.env;
+      if (!Array.isArray(env)) continue;
+      for (const entry of env) {
+        if (asRecord(entry)?.value !== "<redacted>") {
+          findings.push({ where, rule: "an unredacted MCP environment value", match: "mcpServers[].env[].value" });
+        }
+      }
+    }
+  }
   // An env entry as Grok's MCP definitions spell one: `{name, value}`.
   if (typeof record.name === "string" && typeof record.value === "string") {
     judgeField(where, record.name, record.value, findings);
   }
   for (const [key, entry] of Object.entries(record)) {
     if (typeof entry === "string") judgeField(where, key, entry, findings);
-    else scanValue(where, entry, findings);
+    else scanValue(where, entry, findings, redactMcpEnvironment);
   }
 }
 
@@ -433,15 +446,15 @@ function scanSet(set: FixtureSet): Finding[] {
     const content = readFileSync(nodePath.join(dir, name), "utf8");
     content.split("\n").forEach((row, at) => scanText(`${file}:${at + 1}`, row, findings));
     if (name.endsWith(".json")) {
-      scanValue(file, parseJson(file, content), findings);
+      scanValue(file, parseJson(file, content), findings, set === "grok");
     }
     if (!name.endsWith(".ndjson")) continue;
     const lines = readCaptureLines(file, content);
-    for (const { line, value } of lines) scanValue(`${file}:${line}`, value, findings);
+    for (const { line, value } of lines) scanValue(`${file}:${line}`, value, findings, set === "grok");
     for (const stream of JOINERS[set](file, lines)) {
       scanText(stream.where, stream.text, findings);
       const value = tryParseJson(stream.text);
-      if (value !== undefined) scanValue(stream.where, value, findings);
+      if (value !== undefined) scanValue(stream.where, value, findings, set === "grok");
     }
   }
   scans.set(set, findings);

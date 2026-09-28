@@ -27,61 +27,6 @@ import {
   type WorkflowProblem
 } from "./types.ts";
 
-/** Every code `validateWorkflow` emits. */
-export const WORKFLOW_PROBLEM_CODES = [
-  "schema",
-  "not_json",
-  "too_many_nodes",
-  "too_many_edges",
-  "definition_too_large",
-  "name_too_long",
-  "duplicate_node_id",
-  "duplicate_node_name",
-  "invalid_node_name",
-  "duplicate_edge_id",
-  "duplicate_edge",
-  "edge_unknown_source",
-  "edge_unknown_target",
-  "edge_invalid_handle",
-  "edge_target_no_input",
-  "edge_self_loop",
-  "cycle",
-  "template_syntax",
-  "unknown_reference",
-  "reference_not_upstream",
-  "secret_reference",
-  "unknown_secret",
-  "secret_in_prompt",
-  "untrusted_prompt_input",
-  "shell_template",
-  "empty_prompt",
-  "unknown_saved_prompt",
-  "continue_invalid",
-  "chain_too_long",
-  "unknown_agent",
-  "unknown_model",
-  "timeout_too_long",
-  "memory_out_of_range",
-  "code_too_large",
-  "code_no_default_export",
-  "http_url_missing",
-  "http_url_invalid",
-  "wait_too_long",
-  "invalid_timezone",
-  "invalid_cron",
-  "schedule_preset_mismatch",
-  "schedule_uneven_interval",
-  "release_github_only",
-  "subworkflow_unset",
-  "subworkflow_self",
-  "unknown_workflow",
-  "pinned_unknown_node",
-  "pinned_too_large",
-  "unreachable",
-  "no_trigger"
-] as const;
-export type WorkflowProblemCode = (typeof WORKFLOW_PROBLEM_CODES)[number];
-
 /**
  * The host's agent catalogue, for the agent blocks' chains: every chat agent the registry knows and
  * the model slugs its provider lists. Given only by the daemon (the editor and the MCP read the
@@ -134,7 +79,7 @@ export function hasWorkflowErrors(problems: readonly WorkflowProblem[]): boolean
 }
 
 /** UTF-8 byte length without allocating. */
-export function utf8ByteLength(text: string): number {
+function utf8ByteLength(text: string): number {
   let bytes = 0;
   for (let i = 0; i < text.length; i += 1) {
     const code = text.charCodeAt(i);

@@ -14,7 +14,7 @@
  */
 
 /** The bounded tail an exit error carries an excerpt from (§3.1). */
-export const STDERR_TAIL_BYTES = 4096;
+const STDERR_TAIL_BYTES = 4096;
 
 /** What one classified stderr line becomes. */
 export type StderrLineClass = "drop" | "warning" | "error";
@@ -38,7 +38,7 @@ const ANSI_RE =
   /\u001B\][^\u0007\u001B]*(?:\u0007|\u001B\\)|[\u001B\u009B][[\]()#;?]*(?:\d{1,4}(?:;\d{0,4})*)?[0-9A-PR-TZcf-nqry=><]/g;
 
 /** Strip ANSI escape sequences (colour, cursor moves, OSC titles). */
-export function stripAnsi(value: string): string {
+function stripAnsi(value: string): string {
   return value.replace(ANSI_RE, "");
 }
 
@@ -178,7 +178,7 @@ export function redactStderr(value: string, options: RedactOptions = {}): string
  * dropped outright — surfacing it would train the user to ignore the warning
  * row. Snippets are matched case-insensitively against the stripped line.
  */
-export const DEFAULT_BENIGN_SNIPPETS: readonly string[] = [
+const DEFAULT_BENIGN_SNIPPETS: readonly string[] = [
   "state db missing rollout path for thread",
   "record_discrepancy",
   "falling_back",
@@ -191,7 +191,7 @@ export const DEFAULT_BENIGN_SNIPPETS: readonly string[] = [
  * A line matching one of these is a `runtime.error {class: "provider_error"}`:
  * the child is not going to recover on its own and the user must act.
  */
-export const DEFAULT_FATAL_SNIPPETS: readonly string[] = [
+const DEFAULT_FATAL_SNIPPETS: readonly string[] = [
   "command not found",
   "no such file or directory",
   "permission denied",
@@ -264,12 +264,9 @@ export class StderrCapture {
   private remainder = "";
   private tail = "";
   private readonly options: ClassifyOptions;
-  private readonly tailBytes: number;
 
-  constructor(options: ClassifyOptions & { tailBytes?: number } = {}) {
-    const { tailBytes, ...classify } = options;
-    this.options = classify;
-    this.tailBytes = tailBytes ?? STDERR_TAIL_BYTES;
+  constructor(options: ClassifyOptions = {}) {
+    this.options = { ...options };
   }
 
   /** Feed a chunk; returns the classified lines it completed. */
@@ -316,7 +313,7 @@ export class StderrCapture {
   private take(raw: string): ClassifiedStderrLine {
     const line = classifyStderrLine(raw, this.options);
     if (line.text.length > 0) {
-      this.tail = appendBounded(this.tail, `${line.text}\n`, this.tailBytes);
+      this.tail = appendBounded(this.tail, `${line.text}\n`, STDERR_TAIL_BYTES);
     }
     return line;
   }

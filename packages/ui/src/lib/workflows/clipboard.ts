@@ -84,7 +84,7 @@ export function parseWorkflowClipboard(text: string | null | undefined): Workflo
 }
 
 /** A free name for `wanted` among `taken`: itself when free, else renumbered ("Review2"). */
-export function freeNodeName(wanted: string, type: WorkflowNode["type"], taken: ReadonlySet<string>): string {
+function freeNodeName(wanted: string, type: WorkflowNode["type"], taken: ReadonlySet<string>): string {
   if (WORKFLOW_NODE_NAME_PATTERN.test(wanted) && !taken.has(wanted)) return wanted;
   const base = wanted.replace(/\d+$/, "").slice(0, 36);
   if (!WORKFLOW_NODE_NAME_PATTERN.test(base)) return defaultNodeName(type, taken);

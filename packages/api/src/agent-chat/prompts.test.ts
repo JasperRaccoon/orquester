@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { buildPlanImplementationPrompt } from "./plan.ts";
-import { isProviderInternalUserText, recallablePromptText } from "./prompts.ts";
+import { recallablePromptText } from "./prompts.ts";
 
 describe("recallablePromptText", () => {
   it("keeps what the user typed, trimmed", () => {
@@ -17,14 +16,13 @@ describe("recallablePromptText", () => {
       "<system-reminder>x</system-reminder>",
       "<local-command-caveat>y</local-command-caveat>"
     ]) {
-      assert.equal(isProviderInternalUserText(text), true, text);
       assert.equal(recallablePromptText(text), null, text);
     }
   });
 
   it("drops the verbatim /compact and the plan's Implement prompt", () => {
     assert.equal(recallablePromptText(" /COMPACT "), null);
-    assert.equal(recallablePromptText(buildPlanImplementationPrompt("# Plan\n- a")), null);
+    assert.equal(recallablePromptText("PLEASE IMPLEMENT THIS PLAN:\n# Plan\n- a"), null);
   });
 
   it("removes image placeholders with the space before them", () => {

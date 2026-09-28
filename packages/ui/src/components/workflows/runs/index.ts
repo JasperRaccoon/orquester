@@ -4,15 +4,10 @@ export { RunsList, type RunsListProps } from "./RunsList";
 export { RunHeader, type RunHeaderProps } from "./RunHeader";
 export { RunTimeline, type RunTimelineProps } from "./RunTimeline";
 export { BlockRunDetails, defaultBlockTab, type BlockDetailsTab, type BlockRunDetailsProps } from "./BlockRunDetails";
-export { LogViewer, LogViewerView, type LogStream, type LogViewerProps, type LogViewerViewProps } from "./LogViewer";
+export { LogViewer, type LogStream, type LogViewerProps } from "./LogViewer";
 export { JsonTree, CopyAction, type JsonTreeProps } from "./JsonTree";
-export { WorkflowRunToast, WorkflowRunToastCard, type WorkflowRunToastCardProps } from "./WorkflowRunToast";
-export {
-  WorkflowAttention,
-  WorkflowAttentionRows,
-  useWorkflowAttention,
-  type WorkflowAttentionRowsProps
-} from "./WorkflowAttention";
+export { WorkflowRunToast } from "./WorkflowRunToast";
+export { WorkflowAttention, useWorkflowAttention } from "./WorkflowAttention";
 export { useRunHistory, RUN_HISTORY_PAGE, type RunHistory } from "./use-run-history";
 export { useRunActions, type RunActionKind, type RunActionsState } from "./use-run-actions";
 export {

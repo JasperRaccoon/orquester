@@ -167,7 +167,7 @@ function redactPrefix(text: string, end: number, found: readonly SecretMatch[]):
  * `text` is safe to emit and its `carry` must be handed to the next step. With `final`, everything
  * is emitted (end of stream).
  */
-export function redactChunk(
+function redactChunk(
   redactor: SecretRedactor,
   carry: string,
   chunk: string,

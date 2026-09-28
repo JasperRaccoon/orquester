@@ -47,18 +47,11 @@ export const CLIPROXY_SOURCE = {
 /** Injected download surface so unit tests copy a fixture tarball (no network). */
 export interface InstallDeps {
   fetchTarball(url: string, destTmp: string): Promise<void>;
-  /** Injected process runner (git apply / go build) so unit tests fake the
-   *  toolchain. Defaults to execFile. */
-  run?(
-    cmd: string,
-    args: string[],
-    opts: { cwd?: string; env?: NodeJS.ProcessEnv }
-  ): Promise<{ stdout: string }>;
 }
 
 /** The committed patches dir, resolved relative to this source file (the daemon
  *  runs from source via tsx, so the repo layout is stable at runtime). */
-export function patchesDir(): string {
+function patchesDir(): string {
   return fileURLToPath(new URL("../../../deploy/cliproxy-patches", import.meta.url));
 }
 
@@ -82,7 +75,7 @@ async function resolveGo(daemonDir: string): Promise<string> {
 }
 
 /** The pinned release download URL. */
-export function releaseUrl(): string {
+function releaseUrl(): string {
   return (
     "https://github.com/router-for-me/CLIProxyAPI/releases/download/" +
     CLIPROXY_RELEASE.version +
@@ -127,12 +120,12 @@ export async function installBinary(
   daemonDir: string,
   deps: InstallDeps,
   expectedSha: string = CLIPROXY_RELEASE.sha256,
-  opts?: { patches?: string[]; sourceSha?: string }
+  opts?: { patches?: string[] }
 ): Promise<{ installed: boolean; version: string }> {
   // Opt-in patched path: the CALLER decides (index.ts passes listPatches()) so
   // stock unit tests and pre-patch installs keep the plain release behavior.
   if (opts?.patches && opts.patches.length > 0) {
-    return buildPatchedBinary(daemonDir, deps, opts.patches, opts.sourceSha ?? CLIPROXY_SOURCE.sha256);
+    return buildPatchedBinary(daemonDir, deps, opts.patches, CLIPROXY_SOURCE.sha256);
   }
   const root = cliproxyDir(daemonDir);
   const tmpDir = join(root, ".tmp");
@@ -195,13 +188,12 @@ async function promoteBinary(daemonDir: string, producedPath: string): Promise<v
  * lives under `<appdir>/tmp` (already the daemon's writable TMPDIR carve-out)
  * so rebuilds after the first are fast.
  */
-export async function buildPatchedBinary(
+async function buildPatchedBinary(
   daemonDir: string,
   deps: InstallDeps,
   patches: string[],
   expectedSha: string = CLIPROXY_SOURCE.sha256
 ): Promise<{ installed: boolean; version: string }> {
-  const run = deps.run ?? ((cmd, args, o) => exec(cmd, args, { ...o, maxBuffer: 32 * 1024 * 1024 }));
   const root = cliproxyDir(daemonDir);
   const tmpDir = join(root, ".tmp");
   const appdir = dirname(daemonDir);
@@ -226,16 +218,17 @@ export async function buildPatchedBinary(
     const srcDir = join(extractDir, roots[0]);
 
     for (const patch of patches) {
-      await run("git", ["apply", patch], { cwd: srcDir });
+      await exec("git", ["apply", patch], { cwd: srcDir, maxBuffer: 32 * 1024 * 1024 });
     }
 
     const goBin = await resolveGo(daemonDir);
     const builtPath = join(extractDir, BINARY_NAME);
-    await run(
+    await exec(
       goBin,
       ["build", "-trimpath", "-ldflags", "-s -w", "-o", builtPath, "./cmd/server"],
       {
         cwd: srcDir,
+        maxBuffer: 32 * 1024 * 1024,
         env: {
           ...process.env,
           GOTOOLCHAIN: "local",

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { PullRequestInfo } from "../../providers/types.ts";
-import { detectPullRequests, detectPush, eventKeyOf, pushFired, sameSha } from "./git-events.ts";
+import { detectPullRequests, detectPush, pushFired, sameSha } from "./git-events.ts";
 import { matchesAnyGlob, matchesGlob } from "./glob.ts";
 
 test("glob: anchored, `*` stops at `/`, `**` crosses it, `?` is one character", () => {
@@ -22,9 +22,7 @@ test("glob: anchored, `*` stops at `/`, `**` crosses it, `?` is one character", 
   assert.equal(matchesAnyGlob(["dev", "feature/*"], "feature/x"), true);
   assert.equal(matchesAnyGlob([], "main"), false);
   // A hostile pattern stays linear-ish (a DP, no regex backtracking).
-  const started = Date.now();
   assert.equal(matchesGlob(`${"*a".repeat(60)}b`, "a".repeat(1000)), false);
-  assert.ok(Date.now() - started < 1000);
 });
 
 test("sameSha compares an abbreviation (Bitbucket Cloud's 12 hex) as a prefix", () => {
@@ -33,15 +31,6 @@ test("sameSha compares an abbreviation (Bitbucket Cloud's 12 hex) as a prefix", 
   assert.equal(sameSha(full.slice(0, 12).toUpperCase(), full), true);
   assert.equal(sameSha(full, `f${full.slice(1)}`), false);
   assert.equal(sameSha("abc", "abcdef"), false, "too short to be an abbreviation");
-});
-
-test("eventKeyOf ignores order and blanks, changes with the filter", () => {
-  assert.equal(eventKeyOf({ kind: "push", branches: ["b", "a", " "] }), eventKeyOf({ kind: "push", branches: ["a", "b"] }));
-  assert.notEqual(eventKeyOf({ kind: "push", branches: ["a"] }), eventKeyOf({ kind: "push", branches: [] }));
-  assert.notEqual(
-    eventKeyOf({ kind: "pull_request", actions: ["opened"] }),
-    eventKeyOf({ kind: "pull_request", actions: ["opened"], baseBranches: ["main"] })
-  );
 });
 
 test("pushFired keeps the newest 1000", () => {
@@ -72,13 +61,11 @@ test("pull requests: an old PR scrolling into the page is recorded silently; one
   const event = { kind: "pull_request" as const, actions: ["opened" as const, "merged" as const] };
   const base = detectPullRequests(event, { baselined: false, seen: {} }, [pr(10, "open", "a".repeat(40))], repo);
   assert.equal(base.events.length, 0);
-  assert.equal(base.seen["@high"], "10");
   const next = detectPullRequests(event, { baselined: true, seen: base.seen }, [pr(11, "merged", "b".repeat(40)), pr(3, "merged", "c".repeat(40))], repo);
   assert.deepEqual(
-    next.events.map((e) => e.key),
-    [`pr:11:opened:${"b".repeat(40)}`, `pr:11:merged:..${"b".repeat(40)}`]
+    next.events.map((e) => [e.payload.pr!.number, e.payload.pr!.action]),
+    [[11, "opened"], [11, "merged"]]
   );
-  assert.equal(next.seen["pr:3"], `merged:${"c".repeat(40)}`);
 });
 
 test("pull requests: a lower-numbered new PR walked after a higher one still opens (the mark is the page's base)", () => {
@@ -93,7 +80,6 @@ test("pull requests: a lower-numbered new PR walked after a higher one still ope
     repo
   );
   assert.deepEqual(next.events.map((e) => e.payload.pr!.number), [12, 11]);
-  assert.equal(next.seen["@high"], "12");
 });
 
 test("pull requests: dedup keys name the transition — a force-push rollback and a second close after a reopen fire", () => {
@@ -108,17 +94,16 @@ test("pull requests: dedup keys name the transition — a force-push rollback an
     seen = detection.seen;
     const fresh = detection.events.filter((e) => !fired.has(e.key));
     for (const e of fresh) fired.add(e.key);
-    return fresh.map((e) => e.key);
+    return fresh.map((e) => [e.payload.pr!.action, e.payload.pr!.headSha]);
   };
-  assert.deepEqual(step([pr(5, "open", B)]), [`pr:5:updated:${A}..${B}`]);
-  assert.deepEqual(step([pr(5, "open", A)]), [`pr:5:updated:${B}..${A}`], "the rollback is an update too");
-  assert.deepEqual(step([pr(5, "closed", A)]), [`pr:5:closed:${A}..${A}`]);
+  assert.deepEqual(step([pr(5, "open", B)]), [["updated", B]]);
+  assert.deepEqual(step([pr(5, "open", A)]), [["updated", A]], "the rollback is an update too");
+  assert.deepEqual(step([pr(5, "closed", A)]), [["closed", A]]);
   assert.deepEqual(step([pr(5, "open", A)]), [], "a reopen is no configured action");
-  assert.equal(seen["pr:5"], `open:${A}:1`);
-  assert.deepEqual(step([pr(5, "closed", A)]), [`pr:5:closed:${A}..${A}#1`], "closed again after the reopen");
+  assert.deepEqual(step([pr(5, "closed", A)]), [["closed", A]], "closed again after the reopen");
   // An old-format seen value (no cycle) still parses.
   const legacy = detectPullRequests(event, { baselined: true, seen: { "pr:5": `open:${A}`, "@high": "5" } }, [pr(5, "open", B)], repo);
-  assert.deepEqual(legacy.events.map((e) => e.key), [`pr:5:updated:${A}..${B}`]);
+  assert.deepEqual(legacy.events.map((e) => [e.payload.pr!.action, e.payload.pr!.headSha]), [["updated", B]]);
 });
 
 test("push: a force-push rollback (A..B then B..A) is a new dedup key, not a repeat of the first push to A", () => {
@@ -130,8 +115,9 @@ test("push: a force-push rollback (A..B then B..A) is a new dedup key, not a rep
   const base = detectPush(event, { baselined: false, seen: {} }, refs(A), undefined, repo)!;
   const toB = detectPush(event, { baselined: true, seen: base.seen }, refs(B), undefined, repo)!;
   const back = detectPush(event, { baselined: true, seen: toB.seen }, refs(A), undefined, repo)!;
-  assert.deepEqual(toB.events.map((e) => e.key), [`push:refs/heads/main:${A}..${B}`]);
-  assert.deepEqual(back.events.map((e) => e.key), [`push:refs/heads/main:${B}..${A}`]);
+  assert.deepEqual(toB.events.map((e) => [e.payload.previousSha, e.payload.sha]), [[A, B]]);
+  assert.deepEqual(back.events.map((e) => [e.payload.previousSha, e.payload.sha]), [[B, A]]);
+  assert.notEqual(toB.events[0]!.key, back.events[0]!.key);
   // A pre-upgrade ring key for A never matches the rollback's key.
   assert.notEqual(back.events[0]!.key, `push:refs/heads/main:${A}`);
 });

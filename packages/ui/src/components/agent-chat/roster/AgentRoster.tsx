@@ -25,7 +25,6 @@ import { cn } from "../../../lib/cn";
 import type { AgentRosterMainRow, AgentRosterProps } from "../contracts";
 import { formatSubagentTokenCount, formatSubagentModelLabel } from "./format";
 import {
-  ROSTER_COLLAPSED_ROWS,
   selectRosterRows,
   type FinishedRowsPhase
 } from "./roster-rows";
@@ -312,5 +311,4 @@ export function AgentRoster({
   );
 }
 
-export { ROSTER_COLLAPSED_ROWS };
 export default AgentRoster;

@@ -23,9 +23,9 @@ import type {
 import { GitRemoteError, POLL_PAGE_SIZE } from "./types";
 
 /** The git trigger's DC listing reads at most this many OPEN pull requests per poll. */
-export const DC_OPEN_PULLS_CAP = 200;
+const DC_OPEN_PULLS_CAP = 200;
 /** …and looks up at most this many PRs it last saw open that the listings no longer hold. */
-export const DC_KNOWN_OPEN_LOOKUPS = 25;
+const DC_KNOWN_OPEN_LOOKUPS = 25;
 
 /**
  * Bitbucket Server / Data Center ("Bitbucket Enterprise").
@@ -163,7 +163,7 @@ function errorCode(error: unknown): string | undefined {
  * setup) would otherwise read as a bare "fetch failed" with no pointer to the
  * per-account CA field that fixes it.
  */
-export function describeFetchFailure(error: unknown): string {
+function describeFetchFailure(error: unknown): string {
   const code = errorCode(error);
   if (code && TLS_ERROR_CODES.has(code)) {
     return `TLS verification failed (${code}) — if the instance uses a self-signed or internal-CA certificate, add its CA certificate (PEM) to this account.`;
@@ -334,7 +334,7 @@ function readCloneUrls(clone: Array<{ name: string; href: string }>): CloneUrls 
  * `readCloneUrls` for callers that need a usable transport (the clone path).
  * Throws only when the repo exposes neither HTTPS nor SSH.
  */
-export function pickCloneUrls(clone: Array<{ name: string; href: string }>): CloneUrls {
+function pickCloneUrls(clone: Array<{ name: string; href: string }>): CloneUrls {
   const urls = readCloneUrls(clone);
   if (!urls.https && !urls.ssh) {
     throw new AccountError(502, "The repository exposes no clone URL (neither HTTP(S) nor SSH).");
@@ -370,7 +370,7 @@ function baseUrlPattern(baseUrl: string): string {
  * embeds; it is ignored (git gets credentials from the credential store), and it
  * cannot smuggle in a foreign host because the instance host still has to match.
  */
-export function parseServerRepoUrl(input: string, ctx: UrlContext): ParsedRepo | null {
+function parseServerRepoUrl(input: string, ctx: UrlContext): ParsedRepo | null {
   const trimmed = input.trim();
   const part = "[A-Za-z0-9._-]+";
   const shortRe = new RegExp(`^(~?${part})/(${part})$`);
@@ -432,7 +432,7 @@ function sshCandidateHosts(ctx: UrlContext): string[] {
  * exposes no clone transport at all. Deliberately non-throwing: one odd repo
  * must not fail the whole listing (and with it the repo picker).
  */
-export function toServerRepoSummary(repo: any): RepoSummary | null {
+function toServerRepoSummary(repo: any): RepoSummary | null {
   const projectKey: string = repo?.project?.key ?? "";
   const slug: string = repo?.slug ?? "";
   const { https, ssh } = readCloneUrls(repo?.links?.clone ?? []);
@@ -461,7 +461,7 @@ export function toServerRepoSummary(repo: any): RepoSummary | null {
  * instance served the request anonymously (public instance + bad token).
  * Falls back to the typed username when the header is absent.
  */
-export function resolveDcLogin(headerValue: string | null | undefined, typedUsername: string): string {
+function resolveDcLogin(headerValue: string | null | undefined, typedUsername: string): string {
   if (!headerValue) {
     return typedUsername;
   }
@@ -719,7 +719,7 @@ export const bitbucketServerProvider: GitProvider = {
 };
 
 /** Map one DC pull request JSON object to `PullRequestInfo`. */
-export function toServerPullRequest(pr: any): PullRequestInfo {
+function toServerPullRequest(pr: any): PullRequestInfo {
   const text = (value: unknown): string => (typeof value === "string" ? value : "");
   const user = pr?.author?.user ?? {};
   const selfLinks: unknown = pr?.links?.self;

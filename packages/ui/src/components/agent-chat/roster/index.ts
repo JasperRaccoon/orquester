@@ -3,8 +3,7 @@
  * workflow groups, and the subagent drill-in.
  *
  * The pure parts — which rows render and how their text is built — are
- * exported too, because they are what the tests and any other surface (a
- * palette entry, a tooltip) should reuse rather than re-derive.
+ * shared by the dock, workflow groups and drill-in.
  */
 
 export { AgentRoster, useFinishedRowsPhase, ROSTER_FADE_MS } from "./AgentRoster";
@@ -12,7 +11,6 @@ export { AgentDrillIn } from "./AgentDrillIn";
 export { AgentRosterRow, BackgroundShellRow, RosterMainRow } from "./AgentRosterRow";
 export {
   collapsedRosterLabel,
-  expandedRosterLabel,
   partitionRosterRows,
   rosterKindCounts,
   shellSectionLabel,
@@ -22,11 +20,9 @@ export type { AgentRosterRowProps, RosterMainRowProps } from "./AgentRosterRow";
 export { WorkflowGroup, type WorkflowGroupProps } from "./WorkflowGroup";
 
 export {
-  ROSTER_COLLAPSED_ROWS,
   isActiveStatus,
   isFinishedRow,
   isLiveBackgroundRow,
-  rosterDisplayOrder,
   rosterRowTicks,
   rosterStatusVisual,
   selectRosterRows,
@@ -48,7 +44,6 @@ export {
   agentActivityText,
   formatSubagentModelLabel,
   formatSubagentTokenCount,
-  isLiveStatus,
   rosterRoleChip,
   rosterRowMetrics
 } from "./format";

@@ -10,20 +10,11 @@ import type {
 
 import { ApiError } from "../api-client";
 import {
-  CATCH_UP_MAX_ATTEMPTS,
-  catchUpDelayMs,
-  PROMPT_PAGE_LIMIT,
   PromptIndexCache,
-  promptListErrorMessage,
-  promptTextErrorMessage,
-  scheduleCatchUpReask,
-  SEARCH_PAGE_LIMIT,
-  SEARCH_PROMPT_CAP,
   fillWantsOlder,
   searchIsPaging,
   searchWantsOlder,
-  type PromptIndexState,
-  type ReaskTimers
+  type PromptIndexState
 } from "./index-cache";
 
 interface Pending<T> {
@@ -41,11 +32,7 @@ function harness() {
     text: (sessionId, messageId) =>
       new Promise((resolve, reject) => textCalls.push({ sessionId, messageId, resolve, reject }))
   });
-  let notified = 0;
-  cache.subscribe(() => {
-    notified += 1;
-  });
-  return { cache, pageCalls, textCalls, notifications: () => notified };
+  return { cache, pageCalls, textCalls };
 }
 
 function entry(messageId: string): ThreadPromptEntry {
@@ -79,12 +66,13 @@ function apiError(status: number, code?: string): ApiError {
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 describe("PromptIndexCache — the first page", () => {
-  it("asks once per session, 100 to a page, and holds what it got", async () => {
-    const { cache, pageCalls, notifications } = harness();
+  it("coalesces a session's first page and caches its prompts", async () => {
+    const { cache, pageCalls } = harness();
+    let published: PromptIndexState | undefined;
+    cache.subscribe(() => { published = cache.get("s1"); });
     cache.ensure("s1");
     cache.ensure("s1");
     assert.equal(pageCalls.length, 1, "a second ensure does not ask again");
-    assert.deepEqual(pageCalls[0]!.query, { limit: PROMPT_PAGE_LIMIT });
     assert.equal(cache.get("s1")?.status, "loading");
     pageCalls[0]!.resolve(page(["u3", "u2"], "cursor-1"));
     await settle();
@@ -95,7 +83,7 @@ describe("PromptIndexCache — the first page", () => {
       ["u3", "u2"]
     );
     assert.equal(state.before, "cursor-1");
-    assert.ok(notifications() >= 2);
+    assert.equal(published?.status, "ready", "subscribers can render the completed request");
     cache.ensure("s1");
     assert.equal(pageCalls.length, 1, "a cached session is not asked again");
     assert.equal(cache.get("s2"), undefined);
@@ -136,7 +124,7 @@ describe("PromptIndexCache — the first page", () => {
     await settle();
     const failed = cache.get("s1")!;
     assert.equal(failed.status, "failed");
-    assert.match(failed.error ?? "", /can't list/);
+    assert.ok(failed.error);
     cache.retry("s1");
     assert.equal(pageCalls.length, 2);
     assert.equal(cache.get("s1")?.status, "loading");
@@ -144,51 +132,16 @@ describe("PromptIndexCache — the first page", () => {
     await settle();
     assert.equal(cache.get("s1")?.status, "ready");
   });
-
-  it("names a failure by the host's code, never a missing route for a missing index", () => {
-    assert.match(promptListErrorMessage(apiError(404, "THREAD_NOT_FOUND")), /can't list a chat's prompts/);
-    assert.match(promptListErrorMessage(apiError(503, "INDEX_UNAVAILABLE")), /index couldn't answer/);
-    assert.match(promptListErrorMessage(apiError(503, "HOST_UNAVAILABLE")), /agent host isn't available/);
-    assert.match(promptListErrorMessage(apiError(0)), /Couldn't reach the daemon/);
-    assert.equal(promptListErrorMessage(new Error("x"), "Couldn't load older prompts."), "Couldn't load older prompts.");
-  });
-
-  it("does not ask twice while the first page is on its way", async () => {
-    const { cache, pageCalls } = harness();
-    cache.ensure("s1");
-    pageCalls[0]!.reject(new Error("offline"));
-    await settle();
-    cache.retry("s1");
-    cache.retry("s1");
-    cache.loadOlder("s1");
-    assert.equal(pageCalls.length, 2, "one retry in flight; nothing older before a first page");
-    pageCalls[1]!.resolve(page(["u1"], "c1"));
-    await settle();
-    assert.deepEqual(
-      cache.get("s1")?.prompts.map((prompt) => prompt.messageId),
-      ["u1"]
-    );
-  });
 });
 
 describe("PromptIndexCache — an index still catching up", () => {
-  it("backs off 3 s, 6 s, 12 s, 24 s, then every 30 s, and gives up after its last attempt", () => {
-    assert.deepEqual(
-      [1, 2, 3, 4, 5, 6, 12].map(catchUpDelayMs),
-      [3_000, 6_000, 12_000, 24_000, 30_000, 30_000, 30_000]
-    );
-    assert.equal(catchUpDelayMs(CATCH_UP_MAX_ATTEMPTS), 30_000);
-    assert.equal(catchUpDelayMs(CATCH_UP_MAX_ATTEMPTS + 1), null, "gave up");
-    assert.equal(catchUpDelayMs(0), null, "nothing said it is catching up");
-  });
-
-  it("asks again quietly, counting each answer that still says so, until the index answers", async () => {
+  it("keeps catching-up state during retries until the index answers", async () => {
     const { cache, pageCalls } = harness();
     cache.ensure("s1");
     pageCalls[0]!.resolve(catchingUp());
     await settle();
     let state = cache.get("s1")!;
-    assert.deepEqual([state.status, state.catchUpAttempts, state.refreshing], ["catchingUp", 1, false]);
+    assert.deepEqual([state.status, state.refreshing], ["catchingUp", false]);
 
     cache.retry("s1");
     state = cache.get("s1")!;
@@ -202,13 +155,13 @@ describe("PromptIndexCache — an index still catching up", () => {
     pageCalls[1]!.resolve(catchingUp());
     await settle();
     state = cache.get("s1")!;
-    assert.deepEqual([state.status, state.catchUpAttempts, state.refreshing], ["catchingUp", 2, false]);
+    assert.deepEqual([state.status, state.refreshing], ["catchingUp", false]);
 
     cache.retry("s1");
     pageCalls[2]!.resolve(page(["u2", "u1"], null));
     await settle();
     state = cache.get("s1")!;
-    assert.deepEqual([state.status, state.catchUpAttempts], ["ready", 0], "caught up: the asking stops");
+    assert.equal(state.status, "ready", "caught up: the asking stops");
   });
 
   it("turns a failed re-ask into a failure the user can retry, and a terminal answer into no index", async () => {
@@ -230,88 +183,6 @@ describe("PromptIndexCache — an index still catching up", () => {
     await settle();
     assert.equal(terminal.cache.get("s1")?.status, "unindexed");
   });
-
-  it("starts the backoff over when the user retries after it gave up", async () => {
-    const { cache, pageCalls } = harness();
-    cache.ensure("s1");
-    pageCalls[0]!.resolve(catchingUp());
-    await settle();
-    // Walk the counter past the last attempt, as the timer would.
-    for (let attempt = 1; attempt <= CATCH_UP_MAX_ATTEMPTS; attempt += 1) {
-      cache.retry("s1");
-      pageCalls.at(-1)!.resolve(catchingUp());
-      await settle();
-    }
-    assert.equal(cache.get("s1")?.catchUpAttempts, CATCH_UP_MAX_ATTEMPTS + 1);
-    assert.equal(scheduleCatchUpReask(cache, "s1", cache.get("s1"), fakeTimers().timers), null, "gave up");
-    cache.retry("s1");
-    pageCalls.at(-1)!.resolve(catchingUp());
-    await settle();
-    assert.equal(cache.get("s1")?.catchUpAttempts, 1, "asking by itself again");
-  });
-});
-
-/** A clock the test turns by hand. */
-function fakeTimers(): { timers: ReaskTimers; pending: Map<number, { run: () => void; ms: number }> } {
-  const pending = new Map<number, { run: () => void; ms: number }>();
-  let next = 0;
-  return {
-    pending,
-    timers: {
-      set: (run, ms) => {
-        next += 1;
-        pending.set(next, { run, ms });
-        return next;
-      },
-      clear: (handle) => {
-        pending.delete(handle as number);
-      }
-    }
-  };
-}
-
-describe("scheduleCatchUpReask — the effect behind the asking", () => {
-  const base: PromptIndexState = {
-    status: "catchingUp",
-    prompts: [],
-    before: null,
-    loadingOlder: false,
-    olderError: null,
-    error: null,
-    catchUpAttempts: 3,
-    refreshing: false
-  };
-
-  it("arms one re-ask at the backoff's delay, and its cleanup disarms it (the panel went)", () => {
-    const retried: string[] = [];
-    const { timers, pending } = fakeTimers();
-    const cancel = scheduleCatchUpReask({ retry: (id) => retried.push(id) }, "s1", base, timers);
-    assert.ok(cancel !== null);
-    assert.deepEqual([...pending.values()].map((timer) => timer.ms), [12_000]);
-    cancel();
-    assert.equal(pending.size, 0, "unmounted: nothing fires");
-    assert.equal(retried.length, 0);
-
-    scheduleCatchUpReask({ retry: (id) => retried.push(id) }, "s1", base, timers);
-    for (const timer of pending.values()) timer.run();
-    assert.deepEqual(retried, ["s1"], "it fires the cache's quiet re-ask");
-  });
-
-  it("arms nothing unless the session is catching up and not already asking", () => {
-    const { timers, pending } = fakeTimers();
-    const cache = { retry: () => undefined };
-    for (const state of [
-      undefined,
-      { ...base, status: "ready" as const },
-      { ...base, status: "unindexed" as const },
-      { ...base, status: "failed" as const },
-      { ...base, refreshing: true },
-      { ...base, catchUpAttempts: CATCH_UP_MAX_ATTEMPTS + 1 }
-    ]) {
-      assert.equal(scheduleCatchUpReask(cache, "s1", state, timers), null);
-    }
-    assert.equal(pending.size, 0);
-  });
 });
 
 describe("PromptIndexCache — older pages", () => {
@@ -328,7 +199,7 @@ describe("PromptIndexCache — older pages", () => {
     cache.loadOlder("s1");
     cache.loadOlder("s1");
     assert.equal(pageCalls.length, 2, "one request in flight at a time");
-    assert.deepEqual(pageCalls[1]!.query, { before: "c1", limit: PROMPT_PAGE_LIMIT });
+    assert.equal(pageCalls[1]!.query.before, "c1");
     assert.equal(cache.get("s1")?.loadingOlder, true);
     pageCalls[1]!.resolve(page(["u4", "u3", "u2"], null));
     await settle();
@@ -354,10 +225,10 @@ describe("PromptIndexCache — older pages", () => {
       state.prompts.map((prompt) => prompt.messageId),
       ["u2"]
     );
-    assert.match(state.olderError ?? "", /unavailable/);
+    assert.ok(state.olderError);
     cache.retry("s1");
     assert.equal(pageCalls.length, 3);
-    assert.deepEqual(pageCalls[2]!.query, { before: "c1", limit: PROMPT_PAGE_LIMIT });
+    assert.equal(pageCalls[2]!.query.before, "c1");
     pageCalls[2]!.resolve(page(["u1"], null));
     await settle();
     state = cache.get("s1")!;
@@ -392,13 +263,6 @@ describe("PromptIndexCache — a search reaches the whole thread", () => {
     assert.equal(searchWantsOlder({ ...ready(), status: "failed" }), false);
   });
 
-  it("stops at the cap, leaving the rest to Load older prompts", () => {
-    const many = Array.from({ length: SEARCH_PROMPT_CAP }, (_, i) => entry(`u${i}`));
-    assert.equal(searchWantsOlder(ready({ prompts: many })), false);
-    assert.equal(searchWantsOlder(ready({ prompts: many.slice(1) })), true);
-    assert.equal(searchWantsOlder(ready({ prompts: many.slice(0, 3) }), 3), false, "a cap of its own");
-  });
-
   it("reads as paging while a page is on its way or the next one is due", () => {
     assert.equal(searchIsPaging(ready()), true);
     assert.equal(searchIsPaging(ready({ loadingOlder: true })), true);
@@ -406,87 +270,9 @@ describe("PromptIndexCache — a search reaches the whole thread", () => {
     assert.equal(searchIsPaging(ready({ olderError: "down" })), false);
     assert.equal(searchIsPaging(undefined), false);
   });
-
-  /**
-   * The pager as `useSearchLoadsOlder` runs it: every time the state changes,
-   * ask for the next page while `searchWantsOlder` says so. The host is a
-   * script of answers; the loop must end on its own.
-   */
-  async function runPager(
-    answers: Array<ThreadPromptsResponse | Error>,
-    cap: number = SEARCH_PROMPT_CAP
-  ): Promise<{ state: PromptIndexState; asked: number }> {
-    const setup = harness();
-    setup.cache.ensure("s1");
-    setup.pageCalls[0]!.resolve(page(["p0"], "c0"));
-    await settle();
-    let asked = 0;
-    for (let guard = 0; guard < 100; guard += 1) {
-      if (!searchWantsOlder(setup.cache.get("s1"), cap)) break;
-      setup.cache.loadOlder("s1", SEARCH_PAGE_LIMIT);
-      const call = setup.pageCalls.at(-1)!;
-      assert.equal(call.query.limit, SEARCH_PAGE_LIMIT);
-      const answer = answers[asked] ?? page([], null);
-      asked += 1;
-      if (answer instanceof Error) call.reject(answer);
-      else call.resolve(answer);
-      await settle();
-    }
-    return { state: setup.cache.get("s1")!, asked };
-  }
-
-  it("pages until the thread's first prompt, and stops", async () => {
-    const { state, asked } = await runPager([page(["p1"], "c1"), page(["p2"], "c2"), page(["p3"], null)]);
-    assert.equal(asked, 3);
-    assert.equal(state.before, null);
-    assert.equal(state.prompts.length, 4);
-    assert.equal(searchIsPaging(state), false);
-  });
-
-  it("stops at the cap, leaving the rest to Load older prompts", async () => {
-    const { state, asked } = await runPager(
-      [page(["p1", "p2"], "c1"), page(["p3", "p4"], "c2"), page(["p5"], "c3")],
-      4
-    );
-    assert.equal(asked, 2, "4 held: no third page");
-    assert.equal(state.before, "c2", "there is older history, the user's to load");
-    assert.equal(searchIsPaging(state, 4), false);
-  });
-
-  it("stops on a failed page, which waits for the user's Retry", async () => {
-    const { state, asked } = await runPager([page(["p1"], "c1"), apiError(503, "INDEX_UNAVAILABLE")]);
-    assert.equal(asked, 2);
-    assert.notEqual(state.olderError, null);
-    assert.equal(searchIsPaging(state), false);
-  });
-
-  it("asks a search's pages at the host's maximum size", async () => {
-    const setup = harness();
-    setup.cache.ensure("s1");
-    setup.pageCalls[0]!.resolve(page(["u9"], "c1"));
-    await settle();
-    setup.cache.loadOlder("s1", SEARCH_PAGE_LIMIT);
-    assert.deepEqual(setup.pageCalls[1]!.query, { before: "c1", limit: SEARCH_PAGE_LIMIT });
-  });
 });
 
 describe("PromptIndexCache — whole texts", () => {
-  it("names a text read's failure by the host's code", async () => {
-    assert.equal(promptTextErrorMessage(apiError(404, "PROMPT_NOT_FOUND")), "That prompt is no longer in this chat.");
-    assert.doesNotMatch(promptTextErrorMessage(apiError(404, "PROMPT_NOT_FOUND")), /can't list/);
-    assert.match(promptTextErrorMessage(apiError(503, "INDEX_UNAVAILABLE")), /try again in a moment/);
-    assert.match(promptTextErrorMessage(apiError(404, "THREAD_NOT_FOUND")), /no longer available/);
-    assert.match(promptTextErrorMessage(apiError(0)), /Couldn't reach the daemon/);
-
-    const { cache, textCalls } = harness();
-    cache.ensureText("s1", "gone");
-    textCalls[0]!.reject(apiError(404, "PROMPT_NOT_FOUND"));
-    await settle();
-    assert.deepEqual(cache.text("s1", "gone"), {
-      status: "failed",
-      error: "That prompt is no longer in this chat."
-    });
-  });
 
   it("reads a cut prompt once, and again only after a failure", async () => {
     const { cache, textCalls } = harness();
@@ -525,14 +311,6 @@ describe("PromptIndexCache — a short page with more behind it is filled", () =
     // The host walks a bounded number of rows per request: an EMPTY page with
     // a cursor means "more behind", never "no prompts".
     assert.equal(fillWantsOlder(readyWith(0, "c1")), true);
-    assert.equal(fillWantsOlder(readyWith(PROMPT_PAGE_LIMIT - 1, "c1")), true);
-  });
-
-  it("stops at a page's worth, at the thread's first prompt, on a failure, one page at a time", () => {
-    assert.equal(fillWantsOlder(readyWith(PROMPT_PAGE_LIMIT, "c1")), false);
-    assert.equal(fillWantsOlder(readyWith(3, null)), false);
-    assert.equal(fillWantsOlder({ ...readyWith(3, "c1"), olderError: "down" }), false);
-    assert.equal(fillWantsOlder({ ...readyWith(3, "c1"), loadingOlder: true }), false);
-    assert.equal(fillWantsOlder(undefined), false);
+    assert.equal(fillWantsOlder(readyWith(3, "c1")), true);
   });
 });

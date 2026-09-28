@@ -56,7 +56,6 @@ import type {
 import {
   XAI_EXTENSION_NOTIFICATIONS,
   XAI_EXTENSION_REQUESTS,
-  xaiMethodSpellings,
   type XaiAskUserQuestionParams,
   type XaiExitPlanModeParams,
   type XaiPromptCompleteParams
@@ -89,40 +88,6 @@ import { answersToXaiResponse } from "./questions.ts";
 import { parsePromptResultUsage, parseXaiUsage } from "./usage.ts";
 import { agentVersionOf, contextWindowFromModelState, modelStateOf, promptIdOf } from "./xai-meta.ts";
 
-/**
- * Every method this adapter registers a handler for, in the spelling it
- * registers. Exported so `acp/_generated/catalog.test.ts` can assert that each
- * one exists in the generated catalog: a typo would otherwise register a
- * handler that can never fire, silently (R4 #19).
- *
- * Extension names are listed in their BARE spelling —
- * `AcpPeer.registerExtension*` registers both.
- */
-export const GROK_REGISTERED_METHODS: readonly string[] = [
-  "session/update",
-  "session/request_permission",
-  XAI_EXTENSION_NOTIFICATIONS.session_notification,
-  XAI_EXTENSION_NOTIFICATIONS.session_update,
-  XAI_EXTENSION_NOTIFICATIONS.task_backgrounded,
-  XAI_EXTENSION_NOTIFICATIONS.task_completed,
-  XAI_EXTENSION_NOTIFICATIONS.monitor_event,
-  XAI_EXTENSION_NOTIFICATIONS.scheduled_task_created,
-  XAI_EXTENSION_NOTIFICATIONS.scheduled_task_fired,
-  XAI_EXTENSION_NOTIFICATIONS.scheduled_task_deleted,
-  XAI_EXTENSION_NOTIFICATIONS.prompt_complete,
-  XAI_EXTENSION_NOTIFICATIONS.queue_changed,
-  XAI_EXTENSION_NOTIFICATIONS.settings_update,
-  XAI_EXTENSION_NOTIFICATIONS.announcements_update,
-  XAI_EXTENSION_NOTIFICATIONS.sessions_changed,
-  XAI_EXTENSION_NOTIFICATIONS.mcp_init_progress,
-  XAI_EXTENSION_NOTIFICATIONS.mcp_initialized,
-  XAI_EXTENSION_NOTIFICATIONS.mcp_servers_updated,
-  XAI_EXTENSION_NOTIFICATIONS.models_update,
-  XAI_EXTENSION_NOTIFICATIONS.mcp_server_status,
-  XAI_EXTENSION_REQUESTS.ask_user_question,
-  XAI_EXTENSION_REQUESTS.exit_plan_mode
-];
-
 /** How many settled turns `readThread` remembers. */
 const MAX_RECORDED_TURNS = 200;
 
@@ -138,15 +103,15 @@ const MAX_RECORDED_TURNS = 200;
 const CLI_OWN_REPLY_IDS: ReadonlySet<string> = new Set(["skills-reload", "workflows-reload"]);
 
 /** `{schemaVersion: 1, sessionId}` — the only thing persisted for resume (§4.1). */
-export const GROK_RESUME_SCHEMA_VERSION = 1;
+const GROK_RESUME_SCHEMA_VERSION = 1;
 
-export interface GrokResumeCursor {
+interface GrokResumeCursor {
   schemaVersion: number;
   sessionId: string;
 }
 
 /** A cursor that fails its shape check means "no resume", **never** an error. */
-export function parseGrokResumeCursor(value: unknown): GrokResumeCursor | null {
+function parseGrokResumeCursor(value: unknown): GrokResumeCursor | null {
   if (value === null || typeof value !== "object" || Array.isArray(value)) {
     return null;
   }
@@ -212,7 +177,7 @@ export type GrokSessionEndCause = "restart" | "host";
  * bare "Stopped" read as the user's doing. (A `/goal` is no row: it is the
  * thread's goal, `goal.ts`.)
  */
-export function endedNote(cause: GrokSessionEndCause | "exit"): string {
+function endedNote(cause: GrokSessionEndCause | "exit"): string {
   const when =
     cause === "restart"
       ? "the session restarted"
@@ -233,13 +198,13 @@ export function endedNote(cause: GrokSessionEndCause | "exit"): string {
  * SIGTERM itself spends its own 2 s grace first, and the backstop can then
  * cut the helpers' SIGKILL — see {@link GrokSession.stopLeftovers}.
  */
-export const HOST_TEARDOWN_SWEEP_GRACE_MS = 1_000;
+const HOST_TEARDOWN_SWEEP_GRACE_MS = 1_000;
 
 /**
  * The line a shell's or a monitor's closing row says when its process
  * outlives the end — never a bare "stopped" for work that runs on.
  */
-export function leftRunningNote(
+function leftRunningNote(
   cause: GrokSessionEndCause | "exit",
   platform: NodeJS.Platform = process.platform
 ): string {
@@ -316,7 +281,7 @@ interface ActiveTurn {
  * observation 50) — never captured, since a refused login cannot be recorded without logging the
  * account out.
  */
-export function grokStopFailure(stopReason: unknown): { reason: "usage_limit" | "auth"; message: string } | null {
+function grokStopFailure(stopReason: unknown): { reason: "usage_limit" | "auth"; message: string } | null {
   if (stopReason === "rate_limit") return { reason: "usage_limit", message: "Grok usage limit reached. Try again later." };
   if (stopReason === "authentication_failed") {
     return { reason: "auth", message: "Grok is not logged in: the account's sign-in was refused. Sign it in again." };
@@ -2163,5 +2128,3 @@ function currentEffortOf(modelState: unknown, modelId: string | undefined): stri
   }
   return undefined;
 }
-
-export { xaiMethodSpellings };

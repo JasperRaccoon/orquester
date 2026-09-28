@@ -7,7 +7,7 @@ import { join } from "node:path";
 import type { RegistryEntry } from "@orquester/api";
 import type { RegistryService } from "./registry.ts";
 import { Tmux, tmuxAvailable, tmuxVersionOk } from "./tmux.ts";
-import { LocalSessionManager, SessionManager, type ResolveSessionExtraEnv } from "./sessions.ts";
+import { LocalSessionManager, SessionManager } from "./sessions.ts";
 
 const claudex: RegistryEntry = {
   id: "claudex",
@@ -26,13 +26,8 @@ const registry = {
   }
 } as Pick<RegistryService, "get"> as RegistryService;
 
-test("resolver receives ctx with model; summary carries it", async () => {
-  const seen: Array<{ accountId?: string; model?: string }> = [];
-  const resolveExtraEnv: ResolveSessionExtraEnv = (_entry, ctx) => {
-    seen.push(ctx);
-    return null;
-  };
-  const mgr = new LocalSessionManager(registry, { resolveExtraEnv });
+test("local session summary carries the requested model", async () => {
+  const mgr = new LocalSessionManager(registry);
   try {
     const s = await mgr.create({
       kind: "agent",
@@ -43,31 +38,7 @@ test("resolver receives ctx with model; summary carries it", async () => {
       rows: 24,
       model: "kimi-k3"
     });
-    assert.equal(seen[0].model, "kimi-k3");
     assert.equal(s.model, "kimi-k3");
-  } finally {
-    mgr.closeAll();
-  }
-});
-
-test("model omitted → ctx.model undefined (route-level default resolution is upstream)", async () => {
-  const seen: Array<{ accountId?: string; model?: string }> = [];
-  const resolveExtraEnv: ResolveSessionExtraEnv = (_entry, ctx) => {
-    seen.push(ctx);
-    return null;
-  };
-  const mgr = new LocalSessionManager(registry, { resolveExtraEnv });
-  try {
-    const s = await mgr.create({
-      kind: "agent",
-      refId: "claudex",
-      projectPath: "/p",
-      cwd: "/tmp",
-      cols: 80,
-      rows: 24
-    });
-    assert.equal(seen[0].model, undefined);
-    assert.equal(s.model, undefined);
   } finally {
     mgr.closeAll();
   }

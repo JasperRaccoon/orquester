@@ -19,7 +19,7 @@
  * the layout classes in `ChatComposer`: the prompt clamps from its 70px
  * minimum to a single 32px row and the control footer leaves flow.
  */
-export const COMPOSER_RESTING_EXPANSION_MIN_PX = 94;
+const COMPOSER_RESTING_EXPANSION_MIN_PX = 94;
 
 export function resolveComposerTimelineInset(input: {
   currentInset: number;

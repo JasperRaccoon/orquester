@@ -9,14 +9,14 @@
  */
 
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { beforeEach,describe,it } from "node:test";
 
 import { NOTHING_STREAMS } from "@orquester/api/agent-chat";
 
 import type { AgentChatTimelineRow } from "./contracts";
-import { EMPTY_AGENT_DRILL_IN, projectAgentDrillIn } from "./drill-in.logic";
+import { EMPTY_AGENT_DRILL_IN,projectAgentDrillIn } from "./drill-in.logic";
 import { deriveWorkLogEntries } from "./entries.logic";
-import { activity, resetBuilders } from "./test-helpers";
+import { activity,resetBuilders } from "./test-helpers";
 
 beforeEach(() => {
   resetBuilders();
@@ -159,9 +159,4 @@ describe("the Grok agent's own drill-in (R8)", () => {
       assert.ok(!rows.some((row) => row.id === "a2"), "and no bot row labelled with its result");
     });
   }
-
-  it("keeps the parent's spawn row whole: only the agent's OWN view drops it", () => {
-    const entries = deriveWorkLogEntries(launchRows("completed"));
-    assert.deepEqual(entries[0]?.agentSpawn?.agentTaskIds, [CALL]);
-  });
 });

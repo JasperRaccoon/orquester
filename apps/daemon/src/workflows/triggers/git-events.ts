@@ -25,9 +25,9 @@ import { matchesAnyGlob, matchesGlob } from "./glob.ts";
 /** At most this many runs per trigger per poll; the rest are recorded as skipped (never a burst). */
 export const MAX_FIRES_PER_POLL = 10;
 /** The fired-key dedup ring, per trigger. */
-export const FIRED_RING_SIZE = 1000;
+const FIRED_RING_SIZE = 1000;
 /** PR states remembered per trigger (most recently changed kept). */
-export const MAX_SEEN_PULL_REQUESTS = 2000;
+const MAX_SEEN_PULL_REQUESTS = 2000;
 
 export interface DetectedEvent {
   /** The dedup key (`push:<ref>:<prev>..<sha>`, `tag:<name>:<sha>`, `release:<id>`, `pr:<n>:<action>:<prev>..<headSha>`). */

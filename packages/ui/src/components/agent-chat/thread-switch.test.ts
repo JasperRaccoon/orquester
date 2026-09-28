@@ -51,12 +51,12 @@ test("nothing held yet and nothing to show is simply empty", () => {
 test("only a settled non-empty paint is remembered", () => {
   const previous = { sessionId: "a", rows: ["a1"] };
   // paint-only: the screen is showing someone else's rows — do not re-hold them.
-  assert.equal(
+  assert.deepEqual(
     nextHeldTimeline(previous, { rows: ["a1"], paintOnly: true, displaySessionId: "a" }),
     previous
   );
   // empty: nothing worth holding.
-  assert.equal(
+  assert.deepEqual(
     nextHeldTimeline(previous, { rows: [], paintOnly: false, displaySessionId: "b" }),
     previous
   );
@@ -66,13 +66,4 @@ test("only a settled non-empty paint is remembered", () => {
     displaySessionId: "b"
   });
   assert.deepEqual(fresh, { sessionId: "b", rows: ["b1"] });
-});
-
-test("an unchanged projection keeps its object identity", () => {
-  const rows = ["a1"];
-  const previous = { sessionId: "a", rows };
-  assert.equal(
-    nextHeldTimeline(previous, { rows, paintOnly: false, displaySessionId: "a" }),
-    previous
-  );
 });

@@ -30,7 +30,7 @@ export function useWorkflowNotifications(): WorkflowNotificationsState {
   );
 }
 
-export interface WorkflowRunToastCardProps {
+interface WorkflowRunToastCardProps {
   notice: WorkflowRunNotice;
   /** Toasts behind this one. */
   more: number;
@@ -39,7 +39,7 @@ export interface WorkflowRunToastCardProps {
 }
 
 /** The card as a picture of its props (the render checks draw it without a store). */
-export const WorkflowRunToastCard: React.FC<WorkflowRunToastCardProps> = ({ notice, more, onOpen, onDismiss }) => {
+const WorkflowRunToastCard: React.FC<WorkflowRunToastCardProps> = ({ notice, more, onOpen, onDismiss }) => {
   const failed = notice.tone === "danger";
   const Icon = failed ? CircleX : CircleCheck;
   return (

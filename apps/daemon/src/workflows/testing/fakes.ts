@@ -258,8 +258,6 @@ export class InMemoryRunStore implements RunStore {
   readonly runs = new Map<string, PersistedRun>();
   readonly events = new Map<string, Record<string, unknown>[]>();
   readonly files = new Map<string, unknown>();
-  saves = 0;
-  sweeps = 0;
   /** Makes `save` fail (to exercise the engine's logging path). */
   failSaves = false;
 
@@ -273,7 +271,6 @@ export class InMemoryRunStore implements RunStore {
 
   async save(run: PersistedRun): Promise<void> {
     if (this.failSaves) throw new Error("disk full");
-    this.saves += 1;
     this.runs.set(run.id, structuredClone(run));
   }
 
@@ -343,7 +340,6 @@ export class InMemoryRunStore implements RunStore {
   }
 
   async sweep(): Promise<void> {
-    this.sweeps += 1;
   }
 }
 

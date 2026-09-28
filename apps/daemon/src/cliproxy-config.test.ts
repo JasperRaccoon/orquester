@@ -9,7 +9,7 @@ import { registerCliProxyRoutes } from "./index";
 import {
   parseCliProxyState, createDefaultCliProxyState,
   parseCliProxySecrets, cliproxyDir, cliproxyHomeDir, MODEL_NAME_RE,
-  CLAUDE_ARMING_COMPACT_WINDOW, CURATED_PROXY_MODEL_IDS, compactEnvForModel
+  compactEnvForModel
 } from "@orquester/config";
 
 test("state: defaults on garbage, valid passes through", () => {
@@ -53,13 +53,13 @@ test("compactEnvForModel: acc-prefixed model resolves like its bare id", () => {
 
 test("compactEnvForModel: bare claude ids get the arming value only (native window detection)", () => {
   assert.deepEqual(compactEnvForModel("claude-fable-5"), {
-    autoCompactWindow: CLAUDE_ARMING_COMPACT_WINDOW
+    autoCompactWindow: 1_048_576
   });
 });
 
 test("compactEnvForModel: claude ids NEVER get maxContextTokens (refused when family-classified)", () => {
   assert.deepEqual(compactEnvForModel("acc14137047/claude-opus-5"), {
-    autoCompactWindow: CLAUDE_ARMING_COMPACT_WINDOW
+    autoCompactWindow: 1_048_576
   });
 });
 
@@ -105,10 +105,6 @@ test("cliProxyState: modelOverrides roundtrip and absent-field default", () => {
     modelOverrides: { "kimi-k3": { compactWindow: 500000 } }
   });
   assert.deepEqual(parsed.modelOverrides, { "kimi-k3": { compactWindow: 500000 } });
-});
-
-test("CURATED_PROXY_MODEL_IDS is the OAuth picker order sol, terra, luna (no router models)", () => {
-  assert.deepEqual(CURATED_PROXY_MODEL_IDS, ["gpt-5.6-sol", "gpt-5.6-terra", "gpt-5.6-luna"]);
 });
 
 // --- Router-provider HTTP routes (spec 2026-08-04 §2) -------------------------

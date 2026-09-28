@@ -38,19 +38,19 @@ import {
 } from "./git-events.ts";
 import type { ResolveRepo, ResolvedRepo } from "./repo-resolve.ts";
 
-export const REFS_POLL_MS = 60_000;
-export const REST_POLL_MS = 120_000;
-export const BITBUCKET_CLOUD_REST_POLL_MS = 180_000;
-export const POLL_JITTER = 0.1;
-export const MAX_BACKOFF_MS = 15 * 60_000;
+const REFS_POLL_MS = 60_000;
+const REST_POLL_MS = 120_000;
+const BITBUCKET_CLOUD_REST_POLL_MS = 180_000;
+const POLL_JITTER = 0.1;
+const MAX_BACKOFF_MS = 15 * 60_000;
 /** A provider's Retry-After is honoured up to this. */
-export const MAX_RETRY_AFTER_MS = 60 * 60_000;
+const MAX_RETRY_AFTER_MS = 60 * 60_000;
 /** The default branch is re-read every Nth refs poll. */
-export const DEFAULT_BRANCH_EVERY = 10;
+const DEFAULT_BRANCH_EVERY = 10;
 /** First polls after a (re)arm are spread over this window. */
-export const INITIAL_SPREAD_MS = 10_000;
+const INITIAL_SPREAD_MS = 10_000;
 /** Definitions are re-resolved this often too (a project's `origin` can change without an edit). */
-export const RESOLVE_INTERVAL_MS = 5 * 60_000;
+const RESOLVE_INTERVAL_MS = 5 * 60_000;
 
 export interface GitRemoteReader {
   lsRemote(accountId: string | null, url: string, opts?: { defaultBranch?: boolean }): Promise<LsRemoteResult>;
@@ -65,10 +65,6 @@ export interface GitPollerDeps {
   resolveRepo: ResolveRepo;
   clock: Clock;
   logger: WorkflowLogger;
-  /** [0, 1); injectable for tests (jitter, initial spread). */
-  random?: () => number;
-  /** How often definitions are re-resolved without an edit (default `RESOLVE_INTERVAL_MS`; 0 = never). */
-  resolveIntervalMs?: number;
 }
 
 export interface GitTriggerState {
@@ -123,7 +119,7 @@ interface RepoPoller {
   removed: boolean;
 }
 
-export function gitCursorKey(workflowId: string, nodeId: string): string {
+function gitCursorKey(workflowId: string, nodeId: string): string {
   return `${workflowId}:${nodeId}`;
 }
 
@@ -149,7 +145,7 @@ function etagKey(channel: "pulls" | "releases", pollerKey: string): string {
 }
 
 /** A short, credential-free reason for a trigger card: "auth rejected", "missing scope read:pullrequest", … */
-export function describePollError(error: unknown): string {
+function describePollError(error: unknown): string {
   const kind = (error as { kind?: unknown } | null)?.kind;
   const message = error instanceof Error ? error.message : String(error);
   switch (kind) {
@@ -188,8 +184,7 @@ function freshCursor(pollerKey: string, eventKey: string, previous?: GitTriggerC
 
 export function createGitPoller(deps: GitPollerDeps): GitPoller {
   const { host, state, remote, resolveRepo, clock, logger } = deps;
-  const random = deps.random ?? Math.random;
-  const resolveIntervalMs = deps.resolveIntervalMs ?? RESOLVE_INTERVAL_MS;
+  const random = Math.random;
   const pollers = new Map<string, RepoPoller>();
   /** Trigger key → why its repository could not be resolved. */
   const unresolved = new Map<string, string>();
@@ -610,11 +605,11 @@ export function createGitPoller(deps: GitPollerDeps): GitPoller {
   function armResolveTimer(): void {
     resolveTimer?.cancel();
     resolveTimer = null;
-    if (stopped || resolveIntervalMs <= 0) return;
+    if (stopped) return;
     resolveTimer = clock.setTimeout(() => {
       resolveTimer = null;
       void rearm();
-    }, resolveIntervalMs);
+    }, RESOLVE_INTERVAL_MS);
   }
 
   function rearm(): Promise<void> {

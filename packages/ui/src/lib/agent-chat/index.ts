@@ -37,7 +37,6 @@ export {
 
 export {
   applyFrame,
-  applyFrames,
   createReducerState,
   emptySlice,
   foldStateFromSnapshot,
@@ -46,26 +45,19 @@ export {
   patchSlice,
   projectSlice,
   withConnection,
-  type AgentChatReducerState,
-  type FoldOps
+  type AgentChatReducerState
 } from "./reducer.logic";
 
 export {
-  cachedThreadState,
   createThreadStore,
   ensureThreadStore,
   peekThreadStore,
   releaseThreadStore,
-  resetDismissedErrorBanners,
-  resetThreadRetention,
-  resetThreadStores,
-  retainedThreadCount,
   retainThreadStore,
   THREAD_SNAPSHOT_IDLE_TTL_MS,
   THREAD_STORE_DISPOSE_GRACE_MS,
   updateThreadDraft,
   type AgentChatThreadState,
-  type RetainedThreadState,
   type ThreadStore,
   type ThreadStoreDeps
 } from "./store";
@@ -73,19 +65,16 @@ export {
 export {
   ThreadRetentionCache,
   THREAD_SNAPSHOT_CACHE_MAX,
-  type RetainedThread,
-  type ThreadRetentionOptions
+  type RetainedThread
 } from "./retention";
 
 export {
-  authErrorMessage,
   authErrorNotice,
   loadProviders,
   notifyProvidersChanged,
   providerForRefId,
   providersStore,
   refreshProvider,
-  resetProvidersStore,
   setProviderSideEffects,
   type ProvidersState,
   type ProvidersStore,

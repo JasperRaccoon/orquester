@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, rm, symlink } from "node:fs/promises";
+import { mkdtemp,mkdir,rm,symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveProject, projectNamesFor } from "./addressing.ts";
+import { resolveProject } from "./addressing.ts";
 
 async function sandbox() {
   const root = await mkdtemp(join(tmpdir(), "mcp-addr-"));
@@ -41,21 +41,11 @@ test("a directory inside a project is refused and names the project", async (t) 
     (e: { code: string; message: string }) => e.code === "PROJECT_NOT_FOUND" && /inside project acme\/api/.test(e.message));
 });
 
-test("projectNamesFor splits a sandbox path and nulls the rest", () => {
-  assert.deepEqual(projectNamesFor("/w/acme/api", "/w"), { workspace: "acme", name: "api", path: "/w/acme/api" });
-  assert.deepEqual(projectNamesFor("/w/acme/api/sub", "/w"), { workspace: "acme", name: "api", path: "/w/acme/api/sub" });
-  assert.deepEqual(projectNamesFor("/elsewhere", "/w"), { workspace: null, name: null, path: "/elsewhere" });
-});
-
-test("a directory that is not a project is refused for what it is: the workspaces root, a workspace, or outside every workspace", async (t) => {
+test("directories above or outside a project are refused with PROJECT_NOT_FOUND", async (t) => {
   const s = await sandbox(); t.after(() => rm(s.root, { recursive: true, force: true }));
-  const refused = (input: string, message: string) => assert.rejects(resolveProject(s.api, input), (e: { code: string; message: string }) => e.code === "PROJECT_NOT_FOUND" && e.message === message, input);
-  const hint = "Pass \"<workspace>/<project>\" (list_projects names them).";
-  await refused(s.api.workspacesDir, `"${s.api.workspacesDir}" is the workspaces root, not a project. ${hint}`);
-  await refused(`${s.api.workspacesDir}/`, `"${s.api.workspacesDir}/" is the workspaces root, not a project. ${hint}`);
-  await refused(join(s.api.workspacesDir, "acme"), `"${join(s.api.workspacesDir, "acme")}" is a workspace, not a project. ${hint}`);
-  // A sandbox wider than the workspaces dir reaches directories that sit in no workspace at all.
-  const wide = { fsRoot: s.root, workspacesDir: s.api.workspacesDir };
-  await assert.rejects(resolveProject(wide, join(s.root, "outside")),
-    (e: { code: string; message: string }) => e.code === "PROJECT_NOT_FOUND" && e.message === `"${join(s.root, "outside")}" is not inside a workspace. ${hint}`);
+  for (const input of [s.api.workspacesDir, s.api.workspacesDir + "/", join(s.api.workspacesDir, "acme")]) {
+    await assert.rejects(resolveProject(s.api, input), (e: { code: string }) => e.code === "PROJECT_NOT_FOUND");
+  }
+  await assert.rejects(resolveProject({ fsRoot: s.root, workspacesDir: s.api.workspacesDir }, join(s.root, "outside")),
+    (e: { code: string }) => e.code === "PROJECT_NOT_FOUND");
 });

@@ -34,7 +34,7 @@ import type { RuntimeEventDraft } from "./normalise.ts";
  * history from live traffic without knowing which provider produced it.
  * `method` still names the call the rows were read back from.
  */
-export const CODEX_RAW_HISTORY: RuntimeEventRaw["source"] = HISTORICAL_RAW_SOURCE;
+const CODEX_RAW_HISTORY: RuntimeEventRaw["source"] = HISTORICAL_RAW_SOURCE;
 
 /**
  * A history turn claims no usage. The provider reports per-turn usage only on

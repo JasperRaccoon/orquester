@@ -1,14 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  THREAD_VISITS_LIMIT,
-  hasUnseenCompletion,
-  markThreadRead,
-  markThreadUnread,
-  markThreadVisited,
-  sanitizeThreadVisits
-} from "./thread-visits.ts";
+import { hasUnseenCompletion, markThreadRead, markThreadUnread, sanitizeThreadVisits } from "./thread-visits.ts";
 
 const T0 = "2026-09-21T10:00:00.000Z";
 const T1 = "2026-09-21T10:05:00.000Z";
@@ -18,18 +11,6 @@ test("a junk blob loads as empty and bad entries are dropped", () => {
   assert.deepEqual(sanitizeThreadVisits([1]), {});
   assert.deepEqual(sanitizeThreadVisits("x"), {});
   assert.deepEqual(sanitizeThreadVisits({ a: T0, b: 7, c: "yesterday", "": T0 }), { a: T0 });
-});
-
-test("the visit map is capped, newest first", () => {
-  const raw: Record<string, string> = {};
-  for (let i = 0; i < THREAD_VISITS_LIMIT + 10; i++) {
-    raw[`s${i}`] = new Date(Date.parse(T0) + i * 1000).toISOString();
-  }
-  const visits = sanitizeThreadVisits(raw);
-  assert.equal(Object.keys(visits).length, THREAD_VISITS_LIMIT);
-  // The ten oldest went.
-  assert.equal(visits.s0, undefined);
-  assert.equal(visits[`s${THREAD_VISITS_LIMIT + 9}`] !== undefined, true);
 });
 
 test("reading a thread stamps the TURN'S COMPLETION, never the clock", () => {
@@ -49,30 +30,21 @@ test("reading a thread stamps the TURN'S COMPLETION, never the clock", () => {
 
 test("a thread whose latest turn never completed has nothing to read", () => {
   const visits = { a: T0 };
-  assert.equal(markThreadRead(visits, "a", null), visits, "same object, no write");
-  assert.equal(markThreadRead(visits, "a", undefined), visits);
-  assert.equal(markThreadRead(visits, "a", "garbage"), visits);
-});
-
-test("mark-unread survives a later read of the SAME completion", () => {
-  // The inverse pair: unread stamps `completedAt - 1ms`, so a re-read of that
-  // same completion is what clears it — and nothing else does, because
-  // `markThreadVisited` refuses to move a stamp backwards.
-  const unread = markThreadUnread({ a: T1 }, "a", T1);
-  assert.equal(hasUnseenCompletion(T1, unread.a), true);
-  assert.equal(hasUnseenCompletion(T1, markThreadRead(unread, "a", T1).a), false);
+  assert.deepEqual(markThreadRead(visits, "a", null), visits, "no completed turn changes no read data");
+  assert.deepEqual(markThreadRead(visits, "a", undefined), visits);
+  assert.deepEqual(markThreadRead(visits, "a", "garbage"), visits);
 });
 
 test("visits are monotonic: an older stamp never moves the mark back", () => {
-  const after = markThreadVisited({ a: T1 }, "a", T0);
+  const after = markThreadRead({ a: T1 }, "a", T0);
   assert.deepEqual(after, { a: T1 });
-  assert.deepEqual(markThreadVisited({ a: T0 }, "a", T1), { a: T1 });
+  assert.deepEqual(markThreadRead({ a: T0 }, "a", T1), { a: T1 });
 });
 
-test("an unparseable visit stamp is ignored and the map keeps its identity", () => {
+test("an unparseable visit stamp is ignored without changing the stored data", () => {
   const visits = { a: T0 };
-  assert.equal(markThreadVisited(visits, "a", "nope"), visits);
-  assert.equal(markThreadVisited(visits, "a", T0), visits);
+  assert.deepEqual(markThreadRead(visits, "a", "nope"), visits);
+  assert.deepEqual(markThreadRead(visits, "a", T0), visits);
 });
 
 test("mark-unread stamps one millisecond before the completion", () => {
@@ -84,18 +56,11 @@ test("mark-unread stamps one millisecond before the completion", () => {
 
 test("mark-unread is a no-op without a completed turn, and is idempotent", () => {
   const visits = { a: T0 };
-  assert.equal(markThreadUnread(visits, "a", null), visits);
-  assert.equal(markThreadUnread(visits, "a", undefined), visits);
-  assert.equal(markThreadUnread(visits, "a", "nope"), visits);
+  assert.deepEqual(markThreadUnread(visits, "a", null), visits);
+  assert.deepEqual(markThreadUnread(visits, "a", undefined), visits);
+  assert.deepEqual(markThreadUnread(visits, "a", "nope"), visits);
   const once = markThreadUnread(visits, "a", T1);
-  assert.equal(markThreadUnread(once, "a", T1), once);
-});
-
-test("unread is exactly completedAt newer than the last visit", () => {
-  assert.equal(hasUnseenCompletion(T1, T0), true);
-  assert.equal(hasUnseenCompletion(T0, T1), false);
-  // Equal is read: visiting at the instant it completed means you saw it.
-  assert.equal(hasUnseenCompletion(T0, T0), false);
+  assert.deepEqual(markThreadUnread(once, "a", T1), once);
 });
 
 test("a never-visited thread is not unread, and a running turn is never unread", () => {

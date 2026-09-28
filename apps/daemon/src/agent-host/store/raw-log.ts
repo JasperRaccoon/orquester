@@ -27,22 +27,22 @@ import * as path from "node:path";
 import { redactStderr } from "../support/stderr.ts";
 
 /** 10 MiB per file (§3.1). */
-export const RAW_LOG_MAX_FILE_BYTES = 10 * 1024 * 1024;
+const RAW_LOG_MAX_FILE_BYTES = 10 * 1024 * 1024;
 /** 10 files kept. */
-export const RAW_LOG_MAX_FILES = 10;
+const RAW_LOG_MAX_FILES = 10;
 /** 14 days. */
-export const RAW_LOG_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
+const RAW_LOG_MAX_AGE_MS = 14 * 24 * 60 * 60 * 1000;
 /** The ceiling across every raw log in the directory, on top of rotation. */
-export const RAW_LOG_TOTAL_BYTES_CEILING = 512 * 1024 * 1024;
+const RAW_LOG_TOTAL_BYTES_CEILING = 512 * 1024 * 1024;
 /** Batch window: a flush happens at most this often. */
-export const RAW_LOG_BATCH_MS = 1_000;
+const RAW_LOG_BATCH_MS = 1_000;
 /** …or earlier, on either of these. */
-export const RAW_LOG_FLUSH_BYTES = 1024 * 1024;
-export const RAW_LOG_FLUSH_RECORDS = 512;
+const RAW_LOG_FLUSH_BYTES = 1024 * 1024;
+const RAW_LOG_FLUSH_RECORDS = 512;
 /** Per-record caps (§3.1). */
-export const RAW_LOG_MAX_STRING_CHARS = 64 * 1024;
-export const RAW_LOG_MAX_FIELDS = 1024;
-export const RAW_LOG_MAX_DEPTH = 16;
+const RAW_LOG_MAX_STRING_CHARS = 64 * 1024;
+const RAW_LOG_MAX_FIELDS = 1024;
+const RAW_LOG_MAX_DEPTH = 16;
 
 /**
  * High-rate delta frames are DROPPED rather than written: the decoded frame
@@ -51,7 +51,7 @@ export const RAW_LOG_MAX_DEPTH = 16;
  * spellings the fixtures observed are listed, because an adapter logs the
  * provider's frame, not ours.
  */
-export const RAW_LOG_DROPPED_FRAME_TYPES: ReadonlySet<string> = new Set([
+const RAW_LOG_DROPPED_FRAME_TYPES: ReadonlySet<string> = new Set([
   // Canonical (§4.2 `TRANSIENT_RUNTIME_EVENT_TYPES`).
   "content.delta",
   "item.updated",
@@ -174,11 +174,8 @@ export interface RawLogOptions {
   filePath: string;
   /** Home dirs collapsed to `~` in the textual redaction pass. */
   homeDirs?: readonly string[];
-  /** Test seam: the clock the rotation and the age sweep read. */
+  /** The host clock used by rotation and the age sweep. */
   now?: () => number;
-  /** Test seam: schedule the batch flush. */
-  setTimer?: (fn: () => void, ms: number) => unknown;
-  clearTimer?: (handle: unknown) => void;
 }
 
 /**
@@ -188,27 +185,14 @@ export interface RawLogOptions {
 export class RawFrameLog {
   private pending: string[] = [];
   private pendingBytes = 0;
-  private timer: unknown = null;
+  private timer: NodeJS.Timeout | null = null;
   private disabled = false;
   private closed = false;
 
-  /** Frames dropped because they are transient (§3.1), for a counter. */
-  droppedTransient = 0;
-
   private readonly now: () => number;
-  private readonly setTimer: (fn: () => void, ms: number) => unknown;
-  private readonly clearTimer: (handle: unknown) => void;
 
   constructor(private readonly options: RawLogOptions) {
     this.now = options.now ?? (() => Date.now());
-    this.setTimer =
-      options.setTimer ??
-      ((fn, ms) => {
-        const handle = setTimeout(fn, ms);
-        handle.unref?.();
-        return handle;
-      });
-    this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
   }
 
   /** Append one frame. Never throws, never blocks, never awaits. */
@@ -217,7 +201,6 @@ export class RawFrameLog {
       return;
     }
     if (frameTypes(frame).some((name) => RAW_LOG_DROPPED_FRAME_TYPES.has(name))) {
-      this.droppedTransient += 1;
       return;
     }
 
@@ -241,17 +224,18 @@ export class RawFrameLog {
       return;
     }
     if (this.timer === null) {
-      this.timer = this.setTimer(() => {
+      this.timer = setTimeout(() => {
         this.timer = null;
         this.flush();
       }, RAW_LOG_BATCH_MS);
+      this.timer.unref?.();
     }
   }
 
   /** Write everything buffered. Synchronous by design — it runs off a timer. */
   flush(): void {
     if (this.timer !== null) {
-      this.clearTimer(this.timer);
+      clearTimeout(this.timer);
       this.timer = null;
     }
     if (this.pending.length === 0 || this.disabled) {
@@ -275,11 +259,6 @@ export class RawFrameLog {
   close(): void {
     this.flush();
     this.closed = true;
-  }
-
-  /** True once a write or rotation failed and the log stopped recording. */
-  get isDisabled(): boolean {
-    return this.disabled;
   }
 
   private rotateIfNeeded(incomingBytes: number): void {
@@ -366,10 +345,9 @@ export function pruneRawLogDirectory(input: {
   readonly threadsRoot: string;
   /** Threads with an open writer: their LIVE file is never unlinked. */
   readonly liveThreadIds?: ReadonlySet<string>;
-  readonly ceilingBytes?: number;
   readonly now?: () => number;
 }): { readonly deleted: number; readonly totalBytes: number } {
-  const ceiling = input.ceilingBytes ?? RAW_LOG_TOTAL_BYTES_CEILING;
+  const ceiling = RAW_LOG_TOTAL_BYTES_CEILING;
   const nowMs = input.now?.() ?? Date.now();
   const cutoff = nowMs - RAW_LOG_MAX_AGE_MS;
 

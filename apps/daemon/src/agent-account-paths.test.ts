@@ -14,7 +14,7 @@ test("passes for a well-formed owned home", async () => {
   const home = join(root, "claude", "id1", "home");
   await mkdir(home, { recursive: true });
   await writeFile(join(home, ACCOUNT_MARKER), "id1");
-  await assertOwnedAccountHome(root, "claude", "id1", home);
+  await assert.doesNotReject(assertOwnedAccountHome(root, "claude", "id1", home));
 });
 
 test("rejects a missing marker", async () => {

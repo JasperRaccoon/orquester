@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { FakeDaemonApi } from "./testing.ts";
 import { stamp } from "./fixtures.ts";
-import { conversationLaunch, EFFORT_OPTION_IDS, findAgent, isProxyAgent, launchesProxyModel, loadAgents, nameList, resolveModelSelection, supportsFrom, validateAccountId, type AgentView } from "./agents.ts";
+import { findAgent,loadAgents,resolveModelSelection,validateAccountId,type AgentView } from "./agents.ts";
 
 const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [
   { id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", version: "2.1.280", chat: { adapter: "claude" } },
@@ -58,7 +58,6 @@ test("a proxy launcher lists the proxy catalogue and only SEEDED accounts of its
   assert.ok(claudex.models.some((m) => m.slug === "gpt-5.6-sol" && m.isDefault));
   assert.deepEqual(claudex.accounts.map((a) => a.id), ["system", "acc-2"]);
   assert.equal(claudex.defaultAccountId, "acc-2");
-  assert.equal(isProxyAgent("claudex"), true); assert.equal(isProxyAgent("claude"), false);
 });
 
 test("claudemix is the Claude main loop through the proxy: the Claude catalogue like claude, and only SEEDED Claude accounts", async () => {
@@ -76,14 +75,6 @@ test("claudemix is the Claude main loop through the proxy: the Claude catalogue 
   assert.deepEqual(claude.accounts.map((a) => a.id), ["system", "acc-1", "acc-4"]);
   assert.equal(claudemix.defaultAccountId, "acc-1");
   assert.ok(findAgent(agents, "claudex").models.some((m) => m.slug === "gpt-5.6-sol" && m.isDefault), "claudex keeps the proxy catalogue");
-  assert.equal(isProxyAgent("claudemix"), true);
-  assert.deepEqual(["claude", "claudex", "claudemix"].map((id) => launchesProxyModel(id)), [false, true, false]);
-});
-
-test("findAgent names the valid ids on a miss", async () => {
-  const agents = await loadAgents(api());
-  assert.equal(findAgent(agents, "grok").id, "grok");
-  assert.throws(() => findAgent(agents, "gemini"), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /claude, claudex, grok/.test(e.message));
 });
 
 test("resolveModelSelection: defaults, validation, effort alias, merge with current, drop foreign options", async () => {
@@ -101,7 +92,6 @@ test("resolveModelSelection: defaults, validation, effort alias, merge with curr
   assert.deepEqual(switched, { model: "haiku", options: [] });
   const grok = (await loadAgents(api()))[2];
   assert.deepEqual(resolveModelSelection(grok, { options: { effort: "low" } }), { model: "grok-4.6", options: [{ id: "reasoningEffort", value: "low" }] });
-  assert.equal(EFFORT_OPTION_IDS.opencode, "variant");
 });
 
 test("a model without option descriptors takes no options, as the GUI shows it no chips: any is refused; an empty catalogue refuses", async () => {
@@ -160,7 +150,6 @@ test("supports.goals is the provider's goal surface read through parseGoalSuppor
   assert.equal((await codexOf(codexRow(codexCaps))).supports.goals, null, "no goals block: an older host's row, or OpenCode's");
   assert.equal((await codexOf(codexRow())).supports.goals, null, "a row without capabilities");
   assert.equal((await codexOf(codexRow("all"))).supports.goals, null, "capabilities that are no object");
-  assert.deepEqual(supportsFrom(undefined), { planMode: false, rollback: false, compaction: false, backgroundTasks: false, goals: null }, "no provider snapshot at all");
 });
 
 test("an empty model never wins: an empty current or input model resolves like an omitted one, and its options are validated", async () => {
@@ -180,20 +169,6 @@ test("a model switch carries an option only when the new model advertises it and
   ] };
   assert.deepEqual(resolveModelSelection(agent, { model: "sonnet", current: { model: "opus", options: [{ id: "effort", value: "max" }, { id: "thinking", value: true }] } }), { model: "sonnet", options: [{ id: "thinking", value: true }] });
   assert.deepEqual(resolveModelSelection(agent, { model: "sonnet", current: { model: "opus", options: [{ id: "effort", value: "high" }, { id: "thinking", value: "on" }] } }), { model: "sonnet", options: [{ id: "effort", value: "high" }] });
-});
-
-test("the proxy catalogue is read only when an agent launches a proxy model: claudemix alone needs the seeded accounts, not the catalogue", async () => {
-  const claudemix = { id: "claudemix", kind: "agent", name: "Claude Code × Mixed", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } };
-  const withAgents = (agents: unknown[]) => api().on("GET", "/api/registry", { status: 200, body: { ...registry, agents } });
-  const mixOnly = withAgents([registry.agents[0], claudemix]);
-  await loadAgents(mixOnly);
-  assert.deepEqual(mixOnly.calls.filter((c) => c.path.startsWith("/api/cliproxy")).map((c) => c.path), ["/api/cliproxy"], "the seeded accounts only");
-  const withClaudex = withAgents([registry.agents[0], registry.agents[1], claudemix]);
-  await loadAgents(withClaudex);
-  assert.deepEqual(withClaudex.calls.filter((c) => c.path.startsWith("/api/cliproxy")).map((c) => c.path), ["/api/cliproxy", "/api/cliproxy/models"]);
-  const noProxy = withAgents([registry.agents[0], registry.agents[2]]);
-  await loadAgents(noProxy);
-  assert.ok(!noProxy.calls.some((c) => c.path.startsWith("/api/cliproxy")), "no proxy launcher, no proxy read");
 });
 
 test("a degraded provider row (an older host's) is normalised field by field, never thrown on", async () => {
@@ -231,25 +206,6 @@ test("a degraded provider row (an older host's) is normalised field by field, ne
     const broken = api().on("GET", "/api/agent/providers", { status: 200, body });
     assert.deepEqual(findAgent(await loadAgents(broken), "claude").auth, { status: "unknown" }, JSON.stringify(body));
   }
-});
-
-test("conversationLaunch: a proxy home resumes under the launcher that owns it; one that names none is reachable by nothing", () => {
-  assert.deepEqual(conversationLaunch({ agentRefId: "claude", home: "cliproxy", proxyRefId: "claudex" }), { agent: "claudex", reachable: true });
-  assert.deepEqual(conversationLaunch({ agentRefId: "claude", home: "cliproxy" }), { agent: "claude", reachable: false }, "plain claude reads another HOME");
-  assert.deepEqual(conversationLaunch({ agentRefId: "claude", home: "account" }), { agent: "claude", reachable: true });
-  assert.deepEqual(conversationLaunch({ agentRefId: "codex", home: "system", proxyRefId: "claudex" }), { agent: "codex", reachable: true }, "proxyRefId counts only for a proxy home");
-  assert.deepEqual(conversationLaunch({ agentRefId: "grok" }), { agent: "grok", reachable: true }, "no home is the system home");
-});
-
-test("nameList: every error that lists valid values lists them one way — up to 40, then an ellipsis; none at all says so", async () => {
-  assert.equal(nameList([]), "none");
-  assert.equal(nameList(["a", "b"]), "a, b");
-  const many = Array.from({ length: 41 }, (_, i) => `m${i}`);
-  assert.equal(nameList(many), `${many.slice(0, 40).join(", ")}, …`);
-  const claude = (await loadAgents(api()))[0];
-  const big: AgentView = { ...claude, models: many.map((slug) => ({ slug, name: slug, isDefault: false, options: [] })) };
-  assert.throws(() => resolveModelSelection(big, { model: "nope" }), (e: { message: string }) => e.message === `Unknown model "nope" for claude. Valid models: ${nameList(many.slice())}.`);
-  assert.throws(() => findAgent([], "claude"), (e: { message: string }) => e.message === "Unknown agent \"claude\". Valid agents: none.");
 });
 
 test("claudex's proxy models take the options of the Claude catalogue's default model, as the composer offers them: listed, accepted, checked", async () => {

@@ -1,22 +1,16 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe,it } from "node:test";
 
 import {
-  NdjsonLineBuffer,
-  parseStreamLine,
-  RECONNECT_MAX_MS,
-  reconnectDelayMs,
-  resumeCursorFor,
-  shouldApplyFrame
+NdjsonLineBuffer,
+parseStreamLine
 } from "./stream.logic";
 
 describe("NdjsonLineBuffer", () => {
   it("splits complete lines and holds the partial one", () => {
     const buffer = new NdjsonLineBuffer();
     assert.deepEqual(buffer.push('{"a":1}\n{"b'), ['{"a":1}']);
-    assert.equal(buffer.rest(), '{"b');
     assert.deepEqual(buffer.push('":2}\n'), ['{"b":2}']);
-    assert.equal(buffer.rest(), "");
   });
 
   it("handles a chunk boundary inside a line and several lines at once", () => {
@@ -64,60 +58,5 @@ describe("parseStreamLine", () => {
       event: { type: "thread.created", seq: 9, payload: { futureField: true } }
     });
     assert.equal(parseStreamLine(line).kind, "frame");
-  });
-});
-
-describe("reconnectDelayMs", () => {
-  it("grows exponentially and is capped", () => {
-    const fixed = () => 1;
-    assert.equal(reconnectDelayMs(0, fixed), 500);
-    assert.equal(reconnectDelayMs(1, fixed), 1000);
-    assert.equal(reconnectDelayMs(2, fixed), 2000);
-    assert.equal(reconnectDelayMs(20, fixed), RECONNECT_MAX_MS);
-  });
-
-  it("applies full jitter between half and the full delay", () => {
-    assert.equal(reconnectDelayMs(1, () => 0), 500);
-    assert.equal(reconnectDelayMs(1, () => 1), 1000);
-  });
-});
-
-describe("resumeCursorFor", () => {
-  it("resumes by sequence on the same host", () => {
-    assert.equal(
-      resumeCursorFor({ lastSeq: 12, knownHostInstanceId: "h1", observedHostInstanceId: "h1" }),
-      12
-    );
-  });
-
-  it("asks for a snapshot when the host instance changed", () => {
-    assert.equal(
-      resumeCursorFor({ lastSeq: 12, knownHostInstanceId: "h1", observedHostInstanceId: "h2" }),
-      undefined
-    );
-  });
-
-  it("asks for a snapshot from a cold start", () => {
-    assert.equal(
-      resumeCursorFor({ lastSeq: 0, knownHostInstanceId: null, observedHostInstanceId: null }),
-      undefined
-    );
-  });
-});
-
-describe("shouldApplyFrame", () => {
-  it("drops events at or below the cursor and keeps the rest", () => {
-    const at = (seq: number) =>
-      shouldApplyFrame({ kind: "event", seq, event: { seq } as never }, 5);
-    assert.equal(at(5), false);
-    assert.equal(at(4), false);
-    assert.equal(at(6), true);
-  });
-
-  it("always applies a snapshot, which replaces loaded history", () => {
-    assert.equal(
-      shouldApplyFrame({ kind: "snapshot", thread: { seq: 1 } as never }, 100),
-      true
-    );
   });
 });

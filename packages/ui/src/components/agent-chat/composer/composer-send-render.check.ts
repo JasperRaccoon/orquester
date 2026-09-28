@@ -17,12 +17,11 @@ import { createElement, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { ApiClient } from "../../../lib/api-client";
-import { resetThreadStores } from "../../../lib/agent-chat/store";
+import { releaseThreadStore } from "../../../lib/agent-chat/store";
 import type { RewindTarget } from "../../../lib/agent-chat/rewind.logic";
 import { OrquesterProvider } from "../../../context/orquester-context";
 import { ChatComposer } from "./ChatComposer";
-import { beginComposerSend, resetComposerSends } from "./composer-sends";
-import { RewindControl } from "./RewindControl";
+import { beginComposerSend } from "./composer-sends";
 
 /**
  * What React's server renderer prints for every `useLayoutEffect` it cannot
@@ -80,7 +79,7 @@ function composer(sessionId: string): string {
         hasPendingRequest: false,
         queue: [],
         activePlan: null,
-        actionableProposedPlan: null,
+        actionableProposedPlan: { id: "plan-1", planMarkdown: "# Implement the fix" },
         reverting: false,
         rewindTargets: [TARGET],
         onRewind: () => undefined,
@@ -92,8 +91,11 @@ function composer(sessionId: string): string {
   );
 }
 
-const button = (html: string, token: string): string =>
-  html.match(new RegExp(`<button[^>]*data-composer-shortcut="${token}"[^>]*>`))?.[0] ?? "";
+const button = (html: string, token: string): string => {
+  const match = html.match(new RegExp(`<button[^>]*data-composer-shortcut="${token}"[^>]*>`));
+  assert.ok(match, `missing ${token} control`);
+  return match[0];
+};
 // The HTML attribute, not the `disabled:` Tailwind variants in the class list.
 const DISABLED_ATTR = /\sdisabled=""/;
 
@@ -105,39 +107,18 @@ const DISABLED_ATTR = /\sdisabled=""/;
 const settle = beginComposerSend("A");
 try {
   const a = composer("A");
-  assert.ok(button(a, "send").includes('aria-label="Sending"'), "the new composer for A shows the send in flight");
   assert.ok(DISABLED_ATTR.test(button(a, "send")), "and refuses a second click");
-  assert.ok(a.includes("ac-spin"), "with the spinner, not an idle Send");
   assert.ok(DISABLED_ATTR.test(button(a, "rewind")), "a rewind would race the turn being sent");
 
   const b = composer("B");
-  assert.ok(button(b, "send").includes('aria-label="Send message"'), "B has nothing in flight");
-  assert.ok(!b.includes("ac-spin"));
+  assert.ok(!DISABLED_ATTR.test(button(b, "send")), "B can implement its plan");
   assert.ok(!DISABLED_ATTR.test(button(b, "rewind")), "B's picker opens");
 } finally {
   settle();
 }
-assert.ok(button(composer("A"), "send").includes('aria-label="Send message"'), "settled: A may send again");
+assert.ok(!DISABLED_ATTR.test(button(composer("A"), "send")), "settled: A can implement its plan");
+assert.ok(!DISABLED_ATTR.test(button(composer("A"), "rewind")), "settled: A may rewind again");
 
-// ---------------------------------------------------------------------------
-// The rewind picker's own gate
-// ---------------------------------------------------------------------------
-
-const rewind = (isSending: boolean): string =>
-  render(
-    createElement(RewindControl, {
-      targets: [TARGET],
-      isTurnActive: false,
-      reverting: false,
-      hasPendingRequest: false,
-      isSending,
-      onRewind: () => undefined
-    })
-  );
-assert.ok(!DISABLED_ATTR.test(button(rewind(false), "rewind")), "idle ⇒ the picker opens");
-assert.ok(DISABLED_ATTR.test(button(rewind(true), "rewind")), "a send in flight ⇒ it waits, as for a turn");
-assert.ok(rewind(true).includes("Available when the agent is idle"), "and says why");
-
-resetComposerSends();
-resetThreadStores();
+releaseThreadStore("A");
+releaseThreadStore("B");
 console.log("composer send render checks passed");

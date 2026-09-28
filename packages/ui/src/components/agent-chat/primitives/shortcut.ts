@@ -66,7 +66,8 @@ const OTHER_GLYPHS: Record<string, string> = {
  * through upper-cased; empty segments are dropped, so a stray `"a++b"` or a
  * trailing `+` cannot produce a blank key cap.
  */
-export function shortcutKeys(combo: string, apple = isAppleLike()): string[] {
+export function shortcutKeys(combo: string): string[] {
+  const apple = isAppleLike();
   const glyphs = apple ? APPLE_GLYPHS : OTHER_GLYPHS;
   const order = apple ? ["ctrl", "alt", "shift", "mod"] : ["mod", "ctrl", "alt", "shift"];
   const tokens = combo

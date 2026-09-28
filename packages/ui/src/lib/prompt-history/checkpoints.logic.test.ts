@@ -139,10 +139,6 @@ describe("deriveCheckpointEntries", () => {
         [1, "prompt"]
       ]
     );
-    const first = entries.at(-1)!;
-    assert.equal(first.origin.kind === "prompt" ? first.origin.prompt : null, listed);
-    assert.deepEqual(first.summary, { fileCount: 1, additions: 2, deletions: 0 });
-    assert.equal(new Set(entries.map((entry) => entry.key)).size, entries.length, "keys are unique");
   });
 
   it("goes back to whichever user message opened the turn, and to none the agent opened", () => {

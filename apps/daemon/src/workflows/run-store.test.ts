@@ -1,12 +1,11 @@
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative, sep } from "node:path";
 import { after, test } from "node:test";
 import { workflowRecordSchema } from "@orquester/config";
-import type { WorkflowRunStatus } from "@orquester/api";
 import type { PersistedRun } from "./contracts.ts";
-import { FileRunStore, pathSegment, persistedRunToWire, previewOutput, runSummaryOf } from "./run-store.ts";
+import { FileRunStore, persistedRunToWire, runSummaryOf } from "./run-store.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -111,8 +110,6 @@ test("init rebuilds the index from the run directories; an unreadable run.json i
 
   // The rewritten cache is reused on the next boot (same answer).
   await second.flush();
-  const cache = JSON.parse(await readFile(join(dir, "index.json"), "utf8")) as { runs: Record<string, unknown> };
-  assert.deepEqual(Object.keys(cache.runs).sort(), ["run-new", "run-old", "run-other"]);
   const third = new FileRunStore({ dir, logger: quiet().logger });
   await third.init();
   assert.deepEqual((await third.listForWorkflow("wf-1", { limit: 10 })).runs.map((r) => r.id), ["run-new", "run-old"]);
@@ -135,39 +132,38 @@ test("paging: `before` is a run id cursor, newest first; an unknown cursor is a 
   assert.deepEqual(await store.listForWorkflow("nobody", { limit: 2 }), { runs: [], before: null });
 });
 
-test("sweep keeps the newest N and nothing older than the retention, and never an active run", async () => {
+test("sweep keeps the newest 100 and nothing older than 30 days, preserving active runs", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-09-28T12:00:00.000Z") });
   const dir = await scratch();
-  const now = new Date("2026-09-28T12:00:00.000Z");
-  const store = new FileRunStore({ dir, logger: quiet().logger, now: () => now, runsPerWorkflow: 3, runRetentionDays: 1 });
+  const store = new FileRunStore({ dir, logger: quiet().logger });
   await store.init();
-  const statuses: WorkflowRunStatus[] = ["succeeded", "failed", "succeeded", "running", "succeeded", "cancelled"];
-  // run-0 newest … run-5 oldest; run-3 is active.
-  for (let i = 0; i < statuses.length; i += 1) {
-    await store.create(run(`run-${i}`, { queuedAt: at(i * 10), status: statuses[i]!, ...(statuses[i] === "running" ? {} : { endedAt: at(i * 10) }) }));
+  for (let i = 0; i < 102; i += 1) {
+    await store.create(run(`run-${i}`, { queuedAt: at(i * 10), endedAt: at(i * 10) }));
   }
-  // An old one past retention, but among the newest of another workflow.
-  await store.create(run("run-ancient", { workflowId: "wf-2", queuedAt: at(3 * 24 * 60), endedAt: at(3 * 24 * 60) }));
-  await store.create(run("run-ancient-active", { workflowId: "wf-2", queuedAt: at(4 * 24 * 60), status: "queued" }));
+  await store.create(run("run-active", { queuedAt: at(1100), status: "running" }));
+  await store.create(run("run-ancient", { workflowId: "wf-2", queuedAt: at(31 * 24 * 60), endedAt: at(31 * 24 * 60) }));
+  await store.create(run("run-ancient-active", { workflowId: "wf-2", queuedAt: at(32 * 24 * 60), status: "queued" }));
   await store.sweep();
-  assert.deepEqual((await store.listForWorkflow("wf-1", { limit: 10 })).runs.map((r) => r.id), ["run-0", "run-1", "run-2", "run-3"]);
+  assert.deepEqual((await store.listForWorkflow("wf-1", { limit: 200 })).runs.map((r) => r.id), [...Array.from({ length: 100 }, (_, i) => `run-${i}`), "run-active"]);
   assert.deepEqual((await store.listForWorkflow("wf-2", { limit: 10 })).runs.map((r) => r.id), ["run-ancient-active"]);
-  const left = (await readdir(dir)).filter((name) => name.startsWith("run-")).sort();
-  assert.deepEqual(left, ["run-0", "run-1", "run-2", "run-3", "run-ancient-active"]);
-  // A late save of a swept run never recreates it.
-  await store.save(run("run-5"));
-  await store.appendEvent("run-5", { type: "late" });
-  assert.ok(!(await readdir(dir)).includes("run-5"));
+  assert.equal(await store.load("run-100"), null);
+  assert.equal(await store.load("run-101"), null);
+  assert.equal(await store.load("run-ancient"), null);
+  await store.save(run("run-101"));
+  await store.appendEvent("run-101", { type: "late" });
+  assert.ok(!(await readdir(dir)).includes("run-101"));
+  await store.flush();
 });
 
-test("sweep keeps a run whose temporary project is still there, until the project is deleted", async () => {
+test("sweep keeps a run whose temporary project is still there, until the project is deleted", async (t) => {
+  t.mock.timers.enable({ apis: ["Date"], now: new Date("2026-09-28T12:00:00.000Z") });
   const dir = await scratch();
-  const now = new Date("2026-09-28T12:00:00.000Z");
-  const store = new FileRunStore({ dir, logger: quiet().logger, now: () => now, runsPerWorkflow: 1, runRetentionDays: 1 });
+  const store = new FileRunStore({ dir, logger: quiet().logger });
   await store.init();
   const kept = { path: "/w/ws/wf-kept", deleted: false, deleteAfter: at(-60) };
   await store.create(run("run-new", { queuedAt: at(0), endedAt: at(0), status: "succeeded" }));
-  await store.create(run("run-kept", { queuedAt: at(10), endedAt: at(10), status: "failed", tempProject: kept }));
-  await store.create(run("run-plain", { queuedAt: at(20), endedAt: at(20), status: "failed" }));
+  await store.create(run("run-kept", { queuedAt: at(31 * 24 * 60), endedAt: at(31 * 24 * 60), status: "failed", tempProject: kept }));
+  await store.create(run("run-plain", { queuedAt: at(32 * 24 * 60), endedAt: at(32 * 24 * 60), status: "failed" }));
   await store.sweep();
   assert.deepEqual((await store.listForWorkflow("wf-1", { limit: 10 })).runs.map((r) => r.id), ["run-new", "run-kept"]);
   // The sweeper deleted the project: the next retention sweep takes the run.
@@ -190,15 +186,19 @@ test("events append as NDJSON; attempt dirs and output files live under the run"
   const attempt = await store.attemptDir("run-x", "node-1", 2);
   assert.equal(attempt, join(dir, "run-x", "nodes", "node-1", "2"));
   assert.ok((await stat(attempt)).isDirectory());
-  assert.equal(store.attemptPath("run-x", "../../evil", 1), join(dir, "run-x", "nodes", pathSegment("../../evil"), "1"));
-  assert.match(pathSegment("../../evil"), /^x-[0-9a-f]{40}$/);
+  const escaped = await store.attemptDir("run-x", "../../evil", 1);
+  const underRun = relative(join(dir, "run-x", "nodes"), escaped);
+  assert.ok(!isAbsolute(underRun) && underRun !== ".." && !underRun.startsWith(`..${sep}`));
+  assert.ok((await stat(escaped)).isDirectory());
 
   const big = { text: "y".repeat(100_000) };
   const path = await store.writeOutputFile("run-x", "node-1", 2, big);
   assert.equal(path, join(attempt, "output.json"));
   assert.equal((await stat(path)).mode & 0o777, 0o600);
   assert.deepEqual(await store.readOutputFile(path), big);
-  await assert.rejects(store.readOutputFile("/etc/passwd"));
+  const outside = join(await scratch(), "outside.json");
+  await writeFile(outside, '{"secret":"host-only"}');
+  await assert.rejects(store.readOutputFile(outside));
 });
 
 test("deleteForWorkflow removes every run of that workflow only", async () => {
@@ -215,7 +215,7 @@ test("deleteForWorkflow removes every run of that workflow only", async () => {
 });
 
 test("runSummaryOf / persistedRunToWire: bookkeeping stripped, outputs cut to the preview", () => {
-  const big = { text: "z".repeat(70 * 1024) };
+  const big = "é".repeat(40_000);
   const persisted = run("run-w", {
     status: "failed",
     error: "boom",
@@ -235,15 +235,16 @@ test("runSummaryOf / persistedRunToWire: bookkeeping stripped, outputs cut to th
     }
   });
   const summary = runSummaryOf(persisted);
-  assert.deepEqual(Object.keys(summary).sort(), ["error", "id", "queuedAt", "retryOf", "status", "test", "trigger", "workflowId", "workflowName"]);
+  assert.equal(summary.status, "failed");
+  assert.equal(summary.error, "boom");
+  assert.equal(summary.retryOf, "run-v");
+  assert.ok(!("definition" in summary) && !("triggerPayload" in summary) && !("blocks" in summary));
   const wire = persistedRunToWire(persisted);
   assert.ok(!("version" in wire) && !("depth" in wire) && !("seededOutputs" in wire));
   assert.deepEqual(wire.blocks.a!.output, { small: true });
   assert.equal(wire.blocks.a!.outputTruncated, undefined);
   assert.equal(wire.blocks.b!.outputTruncated, true);
-  assert.equal(typeof wire.blocks.b!.output, "string");
+  assert.equal(wire.blocks.b!.output, '"' + "é".repeat(32_767));
   assert.ok(!("outputFile" in wire.blocks.b!));
   assert.ok(!("waitingOn" in wire.blocks.c!));
-  // The preview is the head of the JSON text, cut at a character boundary.
-  assert.equal(previewOutput("é".repeat(10), 5).output, '"éé');
 });

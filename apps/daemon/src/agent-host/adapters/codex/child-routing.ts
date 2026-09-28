@@ -42,7 +42,7 @@ export type CodexChildNotificationRoute = "agent-event" | "parent" | "drop";
  * never showed a command's output, and passed to the parent, a child's MCP
  * progress named the child's raw item id and no owner, and wrote nothing.
  */
-export const CHILD_AGENT_EVENT_METHODS: ReadonlySet<string> = new Set([
+const CHILD_AGENT_EVENT_METHODS: ReadonlySet<string> = new Set([
   "turn/started",
   "turn/completed",
   "thread/status/changed",
@@ -72,7 +72,7 @@ export const CHILD_AGENT_EVENT_METHODS: ReadonlySet<string> = new Set([
  * it sets is announced on its own thread id, and the parent maps every goal
  * notification onto the thread's one goal (goals §6.2).
  */
-export const CHILD_CHATTER_METHODS: ReadonlySet<string> = new Set([
+const CHILD_CHATTER_METHODS: ReadonlySet<string> = new Set([
   "item/agentMessage/delta",
   "item/reasoning/textDelta",
   "item/reasoning/summaryTextDelta",

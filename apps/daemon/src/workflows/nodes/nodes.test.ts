@@ -69,27 +69,27 @@ describe("shell output caps", () => {
       workflows: [
         workflow(
           "w1",
-          [T(), node("S", "shell", { script: "for i in $(seq 1 2000); do echo line-$i; done; echo err-tail >&2" })],
+          [T(), node("S", "shell", { script: "echo head; head -c 16777216 /dev/zero | tr '\\0' 'a'; echo tail; echo err-tail >&2" })],
           [edge("T", "S")],
           { project: { kind: "existing", projectPath } }
         )
       ],
-      executors: { shell: createShellExecutor({ maxOutputBytes: 8 * 1024 }) },
+      executors: { shell: createShellExecutor() },
       runStore: new InMemoryRunStore(join(root, "runs")),
       projects,
       clock: realClock as never,
-      sandbox: createSandboxRunner({ pollMs: 20, killGraceMs: 300, appdirTmp: root }) as never
+      sandbox: createSandboxRunner({ appdirTmp: root }) as never
     });
     const { runId } = await h.engine.run("w1", {});
     const result = await h.engine.waitForRun(runId!);
     const run = (await h.engine.getRun(runId!))!;
     assert.equal(result.status, "succeeded");
-    const output = run.blocks.S!.output as { stdout: string; stderr: string; exitCode: number };
-    assert.ok(Buffer.byteLength(JSON.stringify(output)) <= 8 * 1024);
-    assert.ok(output.stdout.endsWith("line-2000\n"), "the tail is kept");
-    assert.ok(!output.stdout.includes("line-1\n"), "the head is cut");
+    const output = (await h.engine.nodeOutput(runId!, "S")).output as { stdout: string; stderr: string; exitCode: number };
+    assert.ok(Buffer.byteLength(JSON.stringify(output)) <= 16 * 1024 * 1024);
+    assert.ok(output.stdout.endsWith("tail\n"), "the tail is kept");
+    assert.ok(!output.stdout.includes("head\n"), "the head is cut");
     assert.equal(output.stderr, "err-tail\n");
-    assert.ok(run.blocks.S!.warnings?.some((warning) => warning.startsWith("stdout was cut")));
-    assert.ok((run.blocks.S!.logs?.stdoutBytes ?? 0) > 8 * 1024, "the log itself is whole");
+    assert.ok(run.blocks.S!.warnings?.some((warning) => warning.length > 0), "truncation is reported");
+    assert.ok((run.blocks.S!.logs?.stdoutBytes ?? 0) > 16 * 1024 * 1024, "the log itself is whole");
   });
 });

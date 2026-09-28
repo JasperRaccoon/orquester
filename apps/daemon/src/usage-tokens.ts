@@ -273,8 +273,6 @@ export class UsageTokensScanner {
        *  GPT/Kimi transcripts routed through a Claude harness are attributed to the
        *  launcher and excluded from the Claude-account aggregate. */
       accountHomes?: () => { agent: "claude" | "codex"; home: string; launcherId?: string }[];
-      /** Watcher-triggered recomputes run at most once per this window (default 30 s). */
-      minRecomputeIntervalMs?: number;
     }
   ) {}
 
@@ -295,7 +293,7 @@ export class UsageTokensScanner {
    *  trailing run per cooldown window). With dozens of live agent sessions the
    *  watcher fires continuously; unthrottled recomputes pegged a full core. */
   requestRecompute(): void {
-    const interval = this.opts.minRecomputeIntervalMs ?? 30_000;
+    const interval = 30_000;
     const due = this.lastRunMs + interval - this.opts.now();
     if (due <= 0) {
       this.lastRunMs = this.opts.now();

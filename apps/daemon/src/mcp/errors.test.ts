@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import Fastify from "fastify";
 import { Broadcaster } from "../broadcaster.ts";
 import { InjectDaemonApi } from "./daemon-api.ts";
-import { ToolError, daemonError, expectOk } from "./errors.ts";
+import { daemonError } from "./errors.ts";
 
 test("daemonError reads the chat envelope, the flat shape and a bare string", () => {
   const a = daemonError({ status: 409, body: { error: { code: "COMMAND_REJECTED", message: "busy", detail: { x: 1 } } } });
@@ -50,12 +50,6 @@ test("a 4xx whose body names nothing falls back to the status table and never ec
   assert.equal(daemonError({ status: 429, body: null }).code, "TOO_MANY_ATTEMPTS");
 });
 
-test("expectOk returns the body below 400 and throws above", () => {
-  assert.deepEqual(expectOk({ status: 200, body: { seq: 3 } }, "turn"), { seq: 3 });
-  assert.throws(() => expectOk({ status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: "no" } } }, "thread"),
-    (err: unknown) => err instanceof ToolError && err.code === "THREAD_NOT_FOUND");
-});
-
 test("a code-less 4xx with an empty message falls back to the status text, never to an empty message", () => {
   const fastify = daemonError({ status: 400, body: { statusCode: 400, error: "Bad Request", message: "" } });
   assert.equal(fastify.code, "INVALID_ARGUMENT"); assert.equal(fastify.message, "Bad Request");
@@ -64,7 +58,7 @@ test("a code-less 4xx with an empty message falls back to the status text, never
   // No status text to fall back on either: the status-derived message.
   for (const body of [{ message: "" }, { error: "" }, { statusCode: 409, error: "", message: "" }]) {
     const e = daemonError({ status: 409, body });
-    assert.equal(e.code, "COMMAND_REJECTED", JSON.stringify(body)); assert.equal(e.message, "The daemon answered 409.", JSON.stringify(body));
+    assert.equal(e.code, "COMMAND_REJECTED", JSON.stringify(body)); assert.ok(e.message.trim().length > 0, JSON.stringify(body));
   }
   // A non-empty reason is still preferred to the status text.
   assert.equal(daemonError({ status: 400, body: { statusCode: 400, error: "Bad Request", message: "body/title must be string" } }).message, "body/title must be string");

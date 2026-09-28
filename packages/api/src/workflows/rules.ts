@@ -19,8 +19,8 @@ import {
   type ExpressionContext
 } from "./expressions.ts";
 
-export const RULE_MATCH_MAX_INPUT = 100 * 1024;
-export const RULE_MATCH_MAX_PATTERN = 1000;
+const RULE_MATCH_MAX_INPUT = 100 * 1024;
+const RULE_MATCH_MAX_PATTERN = 1000;
 
 export interface RuleEvaluation {
   result: boolean;
@@ -37,7 +37,7 @@ function ruleText(value: unknown): string {
 }
 
 /** A finite number from a number or a numeric text; null otherwise. */
-export function ruleNumber(value: unknown): number | null {
+function ruleNumber(value: unknown): number | null {
   if (typeof value === "number") return Number.isFinite(value) ? value : null;
   if (typeof value !== "string") return null;
   const trimmed = value.trim();
@@ -89,7 +89,7 @@ function safeRepeatedAlternation(body: string): boolean {
  * backtracking: a repeated group that itself contains a repeat (`(a+)+`, `(.*)*`), a repeated
  * alternation whose branches may overlap (`(a|aa)*`), and backreferences.
  */
-export function unsafeRegexReason(pattern: string): string | null {
+function unsafeRegexReason(pattern: string): string | null {
   if (pattern.length > RULE_MATCH_MAX_PATTERN) return `the pattern is longer than ${RULE_MATCH_MAX_PATTERN} characters`;
   const groups: { start: number; quantified: boolean; alternation: boolean }[] = [];
   let inClass = false;
@@ -139,7 +139,7 @@ export function unsafeRegexReason(pattern: string): string | null {
 }
 
 /** `/pattern/flags` or a bare pattern → a RegExp, or the reason it is refused. */
-export function compileRulePattern(source: string): { regex: RegExp } | { error: string } {
+function compileRulePattern(source: string): { regex: RegExp } | { error: string } {
   let pattern = source;
   let flags = "";
   const literal = /^\/([\s\S]*)\/([A-Za-z]*)$/.exec(source);

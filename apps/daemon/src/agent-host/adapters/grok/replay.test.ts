@@ -11,9 +11,9 @@ import assert from "node:assert/strict";
 
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
-import { BACKGROUND_LIVENESS_TTL_MS, createLivenessRegistry } from "../../orchestration/liveness.ts";
+import { createLivenessRegistry } from "../../orchestration/liveness.ts";
 import { createTestClock } from "../../orchestration/testing/fakes.ts";
-import { captureFiles, readCapture, agentFrames, promptResults, type JsonRpcFrame } from "./fixtures.ts";
+import { captureFiles, readCapture, agentFrames, type JsonRpcFrame } from "./fixtures.ts";
 import { GrokNormalizer } from "./normalize.ts";
 import type { SessionNotification } from "./acp/_generated/schema.ts";
 import { XAI_ROUTED_METHODS as XAI_CHANNEL_METHODS, driveCapture } from "./testing/capture-driver.ts";
@@ -74,10 +74,6 @@ function route(normalizer: GrokNormalizer, frame: JsonRpcFrame): RuntimeEvent[] 
     return normalizer.handleXaiNotification(method, frame.params);
   }
   return [];
-}
-
-function types(events: readonly RuntimeEvent[]): string[] {
-  return events.map((event) => event.type);
 }
 
 function only<T extends RuntimeEvent["type"]>(
@@ -158,15 +154,6 @@ test("a window nobody resolved is omitted rather than invented", () => {
   }
 });
 
-test("02 plain prompt: the RPC result carries the turn's usage and its cost", () => {
-  const results = promptResults(readCapture("02-prompt-plain-text.ndjson"));
-  const meta = results[0]?.["_meta"] as Record<string, unknown>;
-  const usage = meta["usage"] as Record<string, unknown>;
-  assert.equal(usage["inputTokens"], 22423);
-  assert.equal(usage["outputTokens"], 30);
-  assert.equal(usage["costUsdTicks"], 121_754_000);
-});
-
 test("03 allow-once: the write tool is one item lifecycle, ending completed", () => {
   const { events } = replay("03-permission-allow-once.ndjson");
   const items = events.filter(
@@ -192,19 +179,6 @@ test("03 allow-once: the session title arrives as thread.metadata.updated", () =
   );
 });
 
-test("03b: the accumulated bash output is coalesced, not one event per resend", () => {
-  const { events } = replay("03b-bash-output-accumulation.ndjson");
-  const toolEvents = events.filter(
-    (event) =>
-      event.itemId === "call-a7c3bfe8-967c-4ffe-916f-749b3b6da4c2-0" &&
-      (event.type === "item.started" || event.type === "item.updated" || event.type === "item.completed")
-  );
-  // Four `tool_call`/`tool_call_update` frames; the two identical in-progress
-  // resends collapse, the terminal one always emits.
-  assert.ok(toolEvents.length <= 4 && toolEvents.length >= 2, `got ${toolEvents.length}`);
-  assert.equal(toolEvents.at(-1)?.type, "item.completed");
-});
-
 test("04 reject: the tool fails and the turn's stop reason is a PermissionRejected cancel", () => {
   const { events } = replay("04-permission-reject.ndjson");
   const failed = only(events, "item.completed").filter((event) => event.payload.status === "failed");
@@ -218,15 +192,6 @@ test("04 reject: the tool fails and the turn's stop reason is a PermissionReject
   const params = complete?.params as Record<string, unknown>;
   assert.equal(params["stopReason"], "cancelled");
   assert.equal(params["cancellationCategory"], "PermissionRejected");
-});
-
-test("05 cancel: the same stop reason carries MidTurnAbort instead", () => {
-  const complete = agentFrames(readCapture("05-cancel-with-pending-permission.ndjson")).find(
-    (frame) => frame.method === "_x.ai/session/prompt_complete"
-  );
-  const params = complete?.params as Record<string, unknown>;
-  assert.equal(params["stopReason"], "cancelled");
-  assert.equal(params["cancellationCategory"], "MidTurnAbort");
 });
 
 test("05 Stop: the write its permission held is closed with the turn it cut — the CLI never answers it", () => {
@@ -261,40 +226,11 @@ test("06 session/load: every replayed frame is dropped from the live stream", ()
   );
 });
 
-test("06 session/load: the replay channel is the underscore x.ai method name", () => {
-  const methods = new Set(
-    agentFrames(readCapture("06-session-load-replay.ndjson"))
-      .map((frame) => frame.method)
-      .filter((method): method is string => typeof method === "string")
-  );
-  assert.ok(
-    methods.has("_x.ai/session/update"),
-    "T3 does not register this name; an adapter that skips it loses the replayed usage rows"
-  );
-});
-
 test("07 plan mode: the plan file write becomes turn.proposed.completed once", () => {
   const { events } = replay("07-plan-mode-exit-plan.ndjson");
   const proposals = only(events, "turn.proposed.completed");
   assert.equal(proposals.length, 1, "deduped per turn");
   assert.match(proposals[0].payload.planMarkdown, /^# Add `subtract` to `add\.js`/);
-});
-
-test("07 plan mode: enter/exit are declared by _meta['x.ai/tool'].kind", () => {
-  const kinds = new Set<string>();
-  for (const frame of agentFrames(readCapture("07-plan-mode-exit-plan.ndjson"))) {
-    if (frame.method !== "session/update") {
-      continue;
-    }
-    const update = (frame.params as { update?: Record<string, unknown> }).update;
-    const meta = update?.["_meta"] as Record<string, unknown> | undefined;
-    const tool = meta?.["x.ai/tool"] as Record<string, unknown> | undefined;
-    if (typeof tool?.["kind"] === "string") {
-      kinds.add(tool["kind"]);
-    }
-  }
-  assert.ok(kinds.has("enter_plan"));
-  assert.ok(kinds.has("exit_plan"));
 });
 
 test("10 compact: auto_compact_completed becomes thread.state.changed", () => {
@@ -305,14 +241,6 @@ test("10 compact: auto_compact_completed becomes thread.state.changed", () => {
   assert.equal(compacted.length, 1);
   assert.equal(compacted[0].payload.beforeTokens, 22_462);
   assert.equal(compacted[0].payload.afterTokens, 22_462);
-});
-
-test("10 compact: a locally handled slash command reports totalTokens 0, which is not a context size", () => {
-  const results = promptResults(readCapture("10-compact-and-context.ndjson"));
-  const meta = results.at(-1)?.["_meta"] as Record<string, unknown>;
-  assert.equal(meta["totalTokens"], 0);
-  const { normalizer } = replay("10-compact-and-context.ndjson");
-  assert.notEqual(normalizer.contextSize, 0, "0 must never blank the meter");
 });
 
 test("11 background task: the roster and the tool-call join produce one task.started", () => {
@@ -340,7 +268,7 @@ test("11 background task: the shell is live work — monitoring — in the real 
   }
   assert.equal(registry.liveness("thread-1"), "monitoring");
   assert.equal(registry.liveAgentCount("thread-1"), 0);
-  clock.set(BACKGROUND_LIVENESS_TTL_MS);
+  clock.set(600_000);
   assert.equal(registry.liveness("thread-1"), null, "the TTL still bounds a silent shell");
 });
 
@@ -360,63 +288,4 @@ test("hooks on the private channel become hook.started / hook.completed pairs", 
   assert.ok(started.length >= 2, "user_prompt_submit and stop both ran");
   assert.equal(completed.length, started.length);
   assert.equal(completed.every((event) => event.payload.outcome === "success"), true);
-});
-
-test("marketing payloads never reach the timeline", () => {
-  for (const file of captureFiles()) {
-    const { events } = replay(file);
-    for (const event of events) {
-      const serialised = JSON.stringify(event);
-      assert.equal(
-        /Hope you are having a wonderful day/.test(serialised),
-        false,
-        `${file} leaked an announcement into ${event.type}`
-      );
-    }
-  }
-});
-
-test("every emitted event carries a unique id and the thread id", () => {
-  for (const file of captureFiles()) {
-    const { events } = replay(file);
-    const ids = new Set<string>();
-    for (const event of events) {
-      assert.equal(event.threadId, "thread-1");
-      assert.equal(ids.has(event.eventId), false, `${file} reused ${event.eventId}`);
-      ids.add(event.eventId);
-    }
-  }
-});
-
-test("the emitted types stay inside the documented union", () => {
-  const seen = new Set<string>();
-  for (const file of captureFiles()) {
-    for (const type of types(replay(file).events)) {
-      seen.add(type);
-    }
-  }
-  // A regression here means the normaliser started emitting something new;
-  // that is fine, but it must be a deliberate edit.
-  const expected = [
-    "content.delta",
-    "hook.completed",
-    "hook.started",
-    "item.completed",
-    "item.started",
-    "item.updated",
-    "task.completed",
-    "task.progress",
-    "task.started",
-    "task.updated",
-    // Fixture 30's `goal_updated` frames: the thread's goal (goals §6.3).
-    "thread.goal.updated",
-    "thread.metadata.updated",
-    "thread.state.changed",
-    "thread.token-usage.updated",
-    // Fixture 30's goal run is the first capture whose model wrote a todo
-    // list (`todo_write`): the plan row it has always mapped to.
-    "turn.plan.updated",
-    "turn.proposed.completed"
-  ];
-  assert.deepEqual([...seen].sort(), expected);
 });

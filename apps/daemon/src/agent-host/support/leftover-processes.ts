@@ -72,16 +72,6 @@ export interface ProcStat {
   readonly sid: number;
 }
 
-/** Where the sweep reads processes from — the real `/proc` unless a test says otherwise. */
-export interface ProcSource {
-  pids(): Promise<number[]>;
-  /** `/proc/<pid>/environ` (NUL-separated), or null when unreadable or gone. */
-  environ(pid: number): Promise<string | null>;
-  stat(pid: number): Promise<ProcStat | null>;
-  /** `pid`'s direct children, or null when the kernel does not say (no `task/*\/children`). */
-  children(pid: number): Promise<number[] | null>;
-}
-
 /**
  * A session a provider CLI's child took part in, recorded while the CLI
  * lived: its id — the pid of its leader — and that leader's starttime, which
@@ -131,7 +121,7 @@ async function readText(path: string, encoding: BufferEncoding): Promise<string 
 }
 
 /** The real `/proc`. Unreadable entries — another user's environment, a pid gone mid-read — are null. */
-export const PROC: ProcSource = {
+const PROC = {
   async pids(): Promise<number[]> {
     let entries: string[];
     try {
@@ -143,12 +133,12 @@ export const PROC: ProcSource = {
   },
   // latin1: an environment is bytes, and the marker is ASCII — a non-UTF-8
   // value elsewhere in it must not be able to hide it.
-  environ: async (pid) => await readText(`/proc/${pid}/environ`, "latin1"),
-  async stat(pid) {
+  environ: async (pid: number) => await readText(`/proc/${pid}/environ`, "latin1"),
+  async stat(pid: number): Promise<ProcStat | null> {
     const content = await readText(`/proc/${pid}/stat`, "latin1");
     return content === null ? null : parseStat(content);
   },
-  async children(pid) {
+  async children(pid: number): Promise<number[] | null> {
     // Every thread's own list (`CONFIG_PROC_CHILDREN`): a child is listed
     // under the thread that forked it.
     let tasks: string[];
@@ -196,13 +186,12 @@ async function eachLimited<T>(items: readonly T[], work: (item: T) => Promise<vo
  * none. Linux-only; elsewhere, nothing.
  */
 export async function recordChildSessions(
-  parentPid: number,
-  options: { proc?: ProcSource; platform?: NodeJS.Platform } = {}
+  parentPid: number
 ): Promise<RecordedSession[]> {
-  if ((options.platform ?? process.platform) !== "linux") {
+  if (process.platform !== "linux") {
     return [];
   }
-  const proc = options.proc ?? PROC;
+  const proc = PROC;
   const parent = await proc.stat(parentPid);
   if (!running(parent)) {
     return [];
@@ -247,12 +236,12 @@ export async function recordChildSessions(
  */
 export async function findLeftoverProcesses(
   launchId: string,
-  options: { sessions: readonly RecordedSession[]; proc?: ProcSource }
+  options: { sessions: readonly RecordedSession[] }
 ): Promise<LeftoverProcess[]> {
   if (launchId.length === 0 || options.sessions.length === 0) {
     return [];
   }
-  const proc = options.proc ?? PROC;
+  const proc = PROC;
   const bySid = new Map(options.sessions.map((session) => [session.sid, session]));
   const marker = `${AGENT_LAUNCH_ENV_VAR}=${launchId}`;
   const found: LeftoverProcess[] = [];
@@ -290,12 +279,6 @@ export interface StopLeftoversOptions {
   sessions: readonly RecordedSession[];
   /** SIGTERM, then SIGKILL this long after. Defaults to `spawn.ts`'s grace. */
   graceMs?: number;
-  pollMs?: number;
-  proc?: ProcSource;
-  kill?: (pid: number, signal: NodeJS.Signals) => void;
-  now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
-  platform?: NodeJS.Platform;
 }
 
 export interface LeftoverSweepResult {
@@ -322,18 +305,13 @@ const sleepFor = async (ms: number): Promise<void> =>
  * or not ours to signal is not an error here.
  */
 export async function stopLeftoverProcesses(options: StopLeftoversOptions): Promise<LeftoverSweepResult> {
-  const platform = options.platform ?? process.platform;
-  if (platform !== "linux" || options.sessions.length === 0) {
+  if (process.platform !== "linux" || options.sessions.length === 0) {
     return { found: 0, terminated: 0, killed: 0 };
   }
-  const proc = options.proc ?? PROC;
-  const kill = options.kill ?? ((pid: number, signal: NodeJS.Signals) => process.kill(pid, signal));
-  const now = options.now ?? Date.now;
-  const sleep = options.sleep ?? sleepFor;
+  const proc = PROC;
   const graceMs = options.graceMs ?? DEFAULT_KILL_GRACE_MS;
-  const pollMs = options.pollMs ?? POLL_MS;
   const find = async (): Promise<LeftoverProcess[]> =>
-    await findLeftoverProcesses(options.launchId, { proc, sessions: options.sessions });
+    await findLeftoverProcesses(options.launchId, { sessions: options.sessions });
 
   /** Signal each target still the process the scan saw; the count of signals sent. */
   const signalAll = async (targets: readonly LeftoverProcess[], signal: NodeJS.Signals): Promise<number> => {
@@ -344,7 +322,7 @@ export async function stopLeftoverProcesses(options: StopLeftoversOptions): Prom
         continue;
       }
       try {
-        kill(target.pid, signal);
+        process.kill(target.pid, signal);
         sent += 1;
       } catch {
         // Gone already (ESRCH), or not ours (EPERM): nothing to do either way.
@@ -355,7 +333,7 @@ export async function stopLeftoverProcesses(options: StopLeftoversOptions): Prom
 
   /** Wait until none of `targets` runs any more, or `windowMs` has passed. */
   const waitGone = async (targets: readonly LeftoverProcess[], windowMs: number): Promise<void> => {
-    const deadline = now() + windowMs;
+    const deadline = Date.now() + windowMs;
     let alive = [...targets];
     for (;;) {
       const still: LeftoverProcess[] = [];
@@ -366,10 +344,10 @@ export async function stopLeftoverProcesses(options: StopLeftoversOptions): Prom
         }
       }
       alive = still;
-      if (alive.length === 0 || now() >= deadline) {
+      if (alive.length === 0 || Date.now() >= deadline) {
         return;
       }
-      await sleep(Math.min(pollMs, Math.max(0, deadline - now())));
+      await sleepFor(Math.min(POLL_MS, Math.max(0, deadline - Date.now())));
     }
   };
 

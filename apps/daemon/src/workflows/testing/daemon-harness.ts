@@ -5,7 +5,9 @@
 // `boot()` twice over the same root is a daemon restart: a new set of stores reads what the last one
 // flushed, and a new runtime resumes the runs it left.
 
-import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
+import { watch } from "node:fs";
+import { dirname } from "node:path";
+import { mkdir, mkdtemp, realpath, rm, readdir, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -18,13 +20,11 @@ import { GitService } from "../../git.ts";
 import { InjectDaemonApi, type DaemonApi } from "../../mcp/daemon-api.ts";
 import type { LsRemoteResult } from "../git-remote/index.ts";
 import type { ConditionalListOptions, ConditionalPage, PullRequestInfo, ReleaseInfo } from "../../providers/types.ts";
-import type { AccountsReader, Clock, SandboxRunner, UsageReader, WorkflowEngine } from "../contracts.ts";
-import type { AgentTimings } from "../agent/executor.ts";
+import type { AccountsReader, UsageReader, WorkflowEngine } from "../contracts.ts";
 import { createWorkflowDaemon, type WorkflowDaemon } from "../daemon-wiring.ts";
 import { registerWorkflowRoutes } from "../routes.ts";
 import type { ValidationCatalog } from "../agent/validation-catalog.ts";
 import { FileRunStore } from "../run-store.ts";
-import { createSandboxRunner } from "../sandbox/sandbox.ts";
 import { WorkflowSecretsService } from "../secrets.ts";
 import { WorkflowService, publishWorkflowEvents } from "../service.ts";
 import { WorkflowStateStore } from "../state-store.ts";
@@ -66,16 +66,10 @@ export class FakeGitRemote implements GitRemoteReader {
 export interface BootOptions {
   /** The engine's client (default: the daemon's own `InjectDaemonApi` over this app). */
   engineApi?: (inject: InjectDaemonApi) => DaemonApi;
-  clock?: Clock;
-  triggerClock?: Clock;
-  sandbox?: SandboxRunner;
   gitRemote?: GitRemoteReader;
   usage?: UsageReader;
   accounts?: AccountsReader;
-  agentTimings?: Partial<AgentTimings>;
   workspaceAccounts?: Record<string, string>;
-  random?: () => number;
-  triggerStateCheckMs?: number;
 }
 
 export interface Booted {
@@ -143,7 +137,6 @@ export async function boot(root: string, opts: BootOptions = {}): Promise<Booted
     runStore,
     engine: () => engine,
     savedPromptIds: () => [],
-    logPollMs: 10,
     agentCatalogReady: async () => catalogRef?.ready()
   });
   await app.ready();
@@ -174,13 +167,7 @@ export async function boot(root: string, opts: BootOptions = {}): Promise<Booted
     daemonDir,
     appdirTmp: join(root, "tmp"),
     push: null,
-    logger: silentLogger(),
-    sandbox: opts.sandbox ?? createSandboxRunner({ pollMs: 20, killGraceMs: 300, appdirTmp: join(root, "tmp") }),
-    ...(opts.clock ? { clock: opts.clock } : {}),
-    ...(opts.triggerClock ? { triggerClock: opts.triggerClock } : {}),
-    ...(opts.agentTimings ? { agentTimings: opts.agentTimings } : {}),
-    ...(opts.random ? { random: opts.random } : {}),
-    ...(opts.triggerStateCheckMs !== undefined ? { triggerStateCheckMs: opts.triggerStateCheckMs } : {})
+    logger: silentLogger()
   });
   catalogRef = wf.validationCatalog;
   publishWorkflowEvents({ service, secrets, broadcaster: wf.events, summarize: (workflow) => wf.summarize(workflow) });
@@ -227,6 +214,15 @@ export async function boot(root: string, opts: BootOptions = {}): Promise<Booted
       await wf.stop();
       await Promise.all([service.flush(), secrets.flush(), runStore.flush(), state.flush()]);
       await app.close();
+      const evidence = await mkdtemp(join(tmpdir(), "orq-workflow-evidence-"));
+      const runs: unknown[] = [];
+      for (const entry of await readdir(workflowRunsDir(root), { withFileTypes: true })) {
+        if (!entry.isDirectory()) continue;
+        const record = await readFile(join(workflowRunsDir(root), entry.name, "run.json"), "utf8").catch(() => null);
+        if (record) runs.push(JSON.parse(record));
+      }
+      await writeFile(join(evidence, "results.json"), JSON.stringify({ runs, events }, null, 2));
+      console.info(`Workflow evidence: ${join(evidence, "results.json")}`);
     }
   };
 }
@@ -236,3 +232,27 @@ export const runFinished =
   (runId: string) =>
   (event: EventMessage): boolean =>
     event.channel === "workflows" && event.type === "workflowRun.finished" && (event.payload as { run?: { id?: string } })?.run?.id === runId;
+
+/** Await a persisted-state change without sleeps; subscribe before the first read to avoid races. */
+export async function waitForFileState<T>(file: string, read: () => Promise<T>, ready: (value: T) => boolean): Promise<T> {
+  let wake: (() => void) | undefined;
+  let changed = false;
+  const watcher = watch(dirname(file), () => { changed = true; wake?.(); });
+  const deadline = AbortSignal.timeout(20_000);
+  const abort = () => wake?.();
+  deadline.addEventListener("abort", abort);
+  try {
+    for (;;) {
+      changed = false;
+      const value = await read();
+      if (ready(value)) return value;
+      deadline.throwIfAborted();
+      if (!changed) await new Promise<void>((resolve) => { wake = resolve; });
+      wake = undefined;
+      deadline.throwIfAborted();
+    }
+  } finally {
+    watcher.close();
+    deadline.removeEventListener("abort", abort);
+  }
+}

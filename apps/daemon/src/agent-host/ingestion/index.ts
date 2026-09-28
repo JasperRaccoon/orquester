@@ -8,8 +8,8 @@
  * is also the write-side batcher of §5.6: assistant, reasoning and plan deltas
  * buffer per message and flush every 250 ms or 8 KB, whichever first.
  *
- * Everything that makes it testable is injected: the clock, the id generator
- * and the timers. No test in this package sleeps.
+ * Batching uses the host timer clock; timestamps and event ids are provided
+ * by the orchestration boundary.
  *
  * Invariants:
  * - **it never throws on a provider event.** A malformed frame produces a
@@ -36,7 +36,7 @@ import {
 import type { Clock, IdGen } from "../adapter.ts";
 import type { AppendableDomainEvent, Ingestion, LivenessRegistry } from "../services.ts";
 import { runtimeEventToActivities } from "./activities.ts";
-import { DeltaBufferSet, type BufferFlush, type TimerHandle } from "./buffer.ts";
+import { DeltaBufferSet, type BufferFlush } from "./buffer.ts";
 import { COALESCE_WINDOW_MS, MAX_PENDING_UPDATES, coalesceToolUpdates } from "./coalesce.ts";
 import {
   ownedBaseKey,
@@ -59,22 +59,7 @@ import {
 } from "./session-status.ts";
 import { hasRenderableText, truncateDetail } from "./text-boundary.ts";
 
-export { runtimeEventToActivities, requestKindFromCanonicalRequestType } from "./activities.ts";
-export { BATCH_INTERVAL_MS, BATCH_MAX_CHARS } from "./buffer.ts";
-export {
-  COALESCE_WINDOW_MS,
-  MAX_PENDING_UPDATES,
-  coalesceToolUpdates,
-  dropStaleContextWindowActivities,
-  dropSupersededToolUpdatedActivities,
-  projectSnapshotActivities,
-  slimActivity,
-  slimActivityEvent,
-  stableToolCallId,
-  toolLifecycleIdentity
-} from "./coalesce.ts";
-export { splitBufferedText } from "./text-boundary.ts";
-export { nextSessionState, threadStatusFromRuntimeState } from "./session-status.ts";
+export { projectSnapshotActivities, slimActivityEvent } from "./coalesce.ts";
 
 /**
  * What the host knows about a thread that ingestion cannot derive from the
@@ -109,9 +94,6 @@ export interface IngestionOptions {
   liveness: LivenessRegistry;
   clock?: Clock;
   idGen?: IdGen;
-  /** Injectable timers so batching is testable without sleeping (§9). */
-  setTimer?: (fn: () => void, ms: number) => unknown;
-  clearTimer?: (handle: unknown) => void;
   /** The head's view of a thread (§5.1 title rule, §3.3 restart, §5.1 metadata). */
   threadContext?: (threadId: string) => IngestionThreadContext | null | undefined;
   /**
@@ -136,8 +118,6 @@ export interface IngestionOptions {
   onAccountEvent?: (
     event: Extract<RuntimeEvent, { type: "auth.status" | "account.rate-limits.updated" }>
   ) => void;
-  /** §5.6 slimming. Defaults to W2's `slimActivityPayload`. */
-  slim?: (payload: unknown) => unknown;
   logger?: IngestionLogger;
 }
 
@@ -234,7 +214,7 @@ interface ThreadState {
   >;
   outbox: AppendableDomainEvent[];
   pendingUpdates: AppendableDomainEvent[];
-  coalesceTimer: TimerHandle | null;
+  coalesceTimer: ReturnType<typeof setTimeout> | null;
   chain: Promise<void>;
 }
 
@@ -293,11 +273,6 @@ function ownerOf(event: { agentId?: string }): string | undefined {
 export function createIngestion(options: IngestionOptions): Ingestion {
   const clock = options.clock ?? defaultClock;
   const ids = options.idGen ?? defaultIdGen();
-  const setTimer =
-    options.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms) as unknown);
-  const clearTimer =
-    options.clearTimer ?? ((handle: unknown) => clearTimeout(handle as NodeJS.Timeout));
-  const slim = options.slim ?? slimActivityPayload;
   const logger = options.logger;
 
   const threads = new Map<string, ThreadState>();
@@ -336,10 +311,8 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       coalesceTimer: null,
       chain: Promise.resolve()
     };
-    const timers = { setTimer, clearTimer };
     const now = () => clock.now().getTime();
     state.messages = new DeltaBufferSet({
-      timers,
       now,
       onTimerFlush: (flush) => {
         emitMessageDelta(threadId, state, flush);
@@ -347,7 +320,6 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       }
     });
     state.toolOutput = new DeltaBufferSet({
-      timers,
       now,
       onTimerFlush: (flush) => {
         emitToolOutput(threadId, state, flush);
@@ -355,7 +327,6 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       }
     });
     state.planPacer = new DeltaBufferSet({
-      timers,
       now,
       onTimerFlush: (flush) => {
         emitBufferedPlan(threadId, state, flush.key, null);
@@ -623,7 +594,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
           cancelCoalesceWindow(state);
           ship.push(...takePendingUpdates(state));
         } else if (state.coalesceTimer === null) {
-          state.coalesceTimer = setTimer(() => {
+          state.coalesceTimer = setTimeout(() => {
             state.coalesceTimer = null;
             const flushed = takePendingUpdates(state);
             if (flushed.length > 0) {
@@ -684,7 +655,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
 
   function cancelCoalesceWindow(state: ThreadState): void {
     if (state.coalesceTimer !== null) {
-      clearTimer(state.coalesceTimer);
+      clearTimeout(state.coalesceTimer);
       state.coalesceTimer = null;
     }
   }
@@ -1554,7 +1525,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       return activity;
     }
     try {
-      const slimmed = slim(activity.payload);
+      const slimmed = slimActivityPayload(activity.payload);
       return slimmed === activity.payload ? activity : { ...activity, payload: slimmed };
     } catch (error) {
       // W2 owns `slimActivityPayload`. A failure there must not cost the row.

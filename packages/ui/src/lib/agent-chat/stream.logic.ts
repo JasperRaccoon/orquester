@@ -12,8 +12,7 @@
 
 import {
   AGENT_CHAT_HEARTBEAT_MS,
-  type AgentChatStreamFrame,
-  type DomainEvent
+  type AgentChatStreamFrame
 } from "@orquester/api/agent-chat";
 
 /**
@@ -38,11 +37,6 @@ export class NdjsonLineBuffer {
       newline = this.buffer.indexOf("\n");
     }
     return lines;
-  }
-
-  /** Whatever is left unterminated. Dropped on close: a partial line is not a frame. */
-  rest(): string {
-    return this.buffer;
   }
 
   reset(): void {
@@ -115,11 +109,6 @@ export function parseStreamLine(line: string): StreamLine {
   }
 }
 
-/** The domain event carried by an `event` frame, for callers that narrowed already. */
-export function frameEvent(frame: AgentChatStreamFrame): DomainEvent | null {
-  return frame.kind === "event" ? frame.event : null;
-}
-
 // ---------------------------------------------------------------------------
 // Reconnect schedule
 // ---------------------------------------------------------------------------
@@ -129,12 +118,11 @@ export const RECONNECT_BASE_MS = 500;
 export const RECONNECT_MAX_MS = 15_000;
 
 /**
- * Exponential backoff with full jitter. `random` is injected so the test can
- * pin it; production passes `Math.random`.
+ * Exponential backoff with full jitter.
  */
-export function reconnectDelayMs(attempt: number, random: () => number = Math.random): number {
+export function reconnectDelayMs(attempt: number): number {
   const capped = Math.min(RECONNECT_MAX_MS, RECONNECT_BASE_MS * 2 ** Math.max(0, attempt));
-  return Math.round(capped * (0.5 + random() * 0.5));
+  return Math.round(capped * (0.5 + Math.random() * 0.5));
 }
 
 /**

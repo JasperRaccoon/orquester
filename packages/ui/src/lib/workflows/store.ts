@@ -248,7 +248,7 @@ function bindConnection(api: WorkflowsApi): void {
 // ---------------------------------------------------------------------------
 
 /** A run that ended never reads as running again: `incoming` replaces `current` unless it would. */
-export function mergeRunSummary(
+function mergeRunSummary(
   current: WorkflowRunSummary | undefined,
   incoming: WorkflowRunSummary
 ): WorkflowRunSummary {
@@ -272,7 +272,7 @@ const BLOCK_RANK: Record<WorkflowBlockStatus, number> = {
  * `incoming` replaces `current` unless it is behind it: an earlier attempt, or
  * the same attempt at an earlier stage (a loaded run that predates a delta).
  */
-export function mergeBlock(current: WorkflowBlockRun | undefined, incoming: WorkflowBlockRun): WorkflowBlockRun {
+function mergeBlock(current: WorkflowBlockRun | undefined, incoming: WorkflowBlockRun): WorkflowBlockRun {
   if (current === undefined) return incoming;
   if (incoming.attempt !== current.attempt) return incoming.attempt > current.attempt ? incoming : current;
   return BLOCK_RANK[incoming.status] >= BLOCK_RANK[current.status] ? incoming : current;

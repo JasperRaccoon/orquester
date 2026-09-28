@@ -16,7 +16,7 @@ import { NO_CHAT_TARGET_REASON, type ChatDelivery } from "../chat-target";
 export type SavedPromptDeliveryAction = "insert" | "send";
 
 /** Why a prompt rendered for one chat is not delivered to another. */
-export const CHAT_CHANGED_REASON = "The chat changed while the prompt was being prepared — try again.";
+const CHAT_CHANGED_REASON = "The chat changed while the prompt was being prepared — try again.";
 
 export type SavedPromptDeliveryOutcome =
   /** A newer click took over, or the panel went away: nothing to show. */

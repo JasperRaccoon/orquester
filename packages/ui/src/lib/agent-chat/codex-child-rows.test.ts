@@ -13,13 +13,13 @@
  * parent's.
  */
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { beforeEach,describe,it } from "node:test";
 
-import type { ThreadActivityItem, ThreadItem } from "@orquester/api/agent-chat";
+import type { ThreadActivityItem,ThreadItem } from "@orquester/api/agent-chat";
 
 import { joinLifecycleDetails } from "../../components/agent-chat/timeline/row-chrome";
-import { deriveWorkLogEntries, itemsForAgent } from "./entries.logic";
-import { activity, resetBuilders } from "./test-helpers";
+import { deriveWorkLogEntries,itemsForAgent } from "./entries.logic";
+import { activity,resetBuilders } from "./test-helpers";
 
 const CHILD = "child-thread";
 const CHILD_CALL = `codex-child:${CHILD}:call_1`;

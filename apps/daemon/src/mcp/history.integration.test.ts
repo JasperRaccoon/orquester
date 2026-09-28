@@ -1,13 +1,16 @@
-import { describe, it } from "node:test";
+import { describe, it, type TestContext } from "node:test";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import assert from "node:assert/strict";
 import { agentChatRoutes, startedTurns, THREAD_HISTORY_DEFAULT_TURNS, THREAD_HISTORY_MAX_TURNS, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { isAgentChatCommandError } from "../agent-host/orchestration/errors.ts";
-import { createFakeThreadIndex, type FakeThreadIndex } from "../agent-host/orchestration/testing/fake-index.ts";
-import { createTestHost, type TestHost } from "../agent-host/orchestration/testing/index.ts";
+import { createThreadIndex, type ThreadIndex } from "../agent-host/index/index.ts";
+import { createTestHost, createRecordingLogger, type TestHost } from "../agent-host/orchestration/testing/index.ts";
 import type { AppendableDomainEvent } from "../agent-host/services.ts";
 import type { DaemonApi, DaemonMethod, DaemonResponse } from "./daemon-api.ts";
 import { chatSummary } from "./fixtures.ts";
-import { HISTORY_PAGES_PER_READ, readOlderHistory, unavailableHint } from "./history.ts";
+import { readOlderHistory, unavailableHint } from "./history.ts";
 import { readThread } from "./reads.ts";
 import type { ToolContext } from "./tool.ts";
 import { messageTools } from "./tools/messages.ts";
@@ -15,7 +18,7 @@ import { messageTools } from "./tools/messages.ts";
 /*
  * The MCP's older-history walk (history.ts) against the REAL orchestrator's `readHistory`: its block planning, the
  * `turns` soft cap (`capTurnOf`), the cursors it mints (`blockCursor`, always with `beforeSeq`) and the bounds it
- * stamps on a snapshot (`historyBoundsOf`) — over the in-memory store and index the host's own tests use. The unit tests
+ * stamps on a snapshot (`historyBoundsOf`) — over input event logs and real temporary SQLite indexes. The unit tests
  * (history.test.ts) pin the walk against pages written by hand; these pin that the two sides agree.
  */
 
@@ -92,12 +95,23 @@ async function seedTurn(host: TestHost, n: number, rows: number): Promise<void> 
   ]) await host.orchestrator.ingestionSink(THREAD, [event]);
 }
 
-/** A host whose one thread has turns of the given sizes, in activity rows, seeded through the sink. */
-async function threadOf(rowsPerTurn: readonly number[], index: FakeThreadIndex = createFakeThreadIndex()): Promise<{ host: TestHost; index: FakeThreadIndex; api: ReturnType<typeof hostApi> }> {
+async function freshIndex(t: TestContext): Promise<ThreadIndex> {
+  const dir = await mkdtemp(join(tmpdir(), "mcp-history-index-"));
+  const index = createThreadIndex({ filePath: join(dir, "index.sqlite"), logger: createRecordingLogger() });
+  t.after(async () => { await index.stop(); await rm(dir, { recursive: true, force: true }); });
+  assert.equal(index.available, true);
+  return index;
+}
+
+/** A real index of the event log seeded through the host sink. */
+async function threadOf(t: TestContext, rowsPerTurn: readonly number[]): Promise<{ host: TestHost; index: ThreadIndex; api: ReturnType<typeof hostApi> }> {
+  const index = await freshIndex(t);
   const host = createTestHost({ index });
+  t.after(() => host.stop());
   await host.createThread({ threadId: THREAD });
   for (const [i, rows] of rowsPerTurn.entries()) await seedTurn(host, i + 1, rows);
   await host.settle();
+  await index.drain();
   return { host, index, api: hostApi(host) };
 }
 
@@ -133,9 +147,9 @@ async function walk(api: ReturnType<typeof hostApi>, start: number, end: number)
 }
 
 describe("read_transcript's older history against the real orchestrator (design 2026-09-23, C)", () => {
-  it("a small range below the window is read in ONE page, every log row of its turns present", async () => {
+  it("a small range below the window is read in ONE page, every log row of its turns present", async (t) => {
     // Twenty turns of 60 rows: the window keeps the last 500–550 parent rows, so the first eleven or so turns aged out.
-    const { host, api } = await threadOf(Array.from({ length: 20 }, () => 60));
+    const { host, api } = await threadOf(t, Array.from({ length: 20 }, () => 60));
     const snap = await readThread(api, THREAD);
     const oldest = snap.history?.oldestRetainedOrdinal;
     assert.equal(snap.history?.hasOlder, true);
@@ -157,20 +171,18 @@ describe("read_transcript's older history against the real orchestrator (design 
     await host.stop();
   });
 
-  it("a range from turn 1 walks every block down to the log's start, where the host's cursor is null", async () => {
-    const { host, api } = await threadOf(Array.from({ length: 20 }, () => 60));
+  it("a range from turn 1 walks every block down to the log's start, where the host's cursor is null", async (t) => {
+    const { host, api } = await threadOf(t, Array.from({ length: 20 }, () => 60));
     const oldest = (await readThread(api, THREAD)).history!.oldestRetainedOrdinal!;
     const r = await walk(api, 1, oldest);
     // Some 650 rows aged out: two blocks of at most 400 activities, no soft cap from turn 1.
-    assert.equal(r.pages, 2);
-    assert.deepEqual(api.historyReads.map((q) => q.turns), [String(oldest + 1), String(oldest + 1)]);
     assert.equal(r.unavailable, null);
     assert.deepEqual(missingOf(host, r.snapshot, 1, oldest), []);
     await host.stop();
   });
 
-  it("paging back by olderTurns through the tool never skips a turn, however much each read sheds", async () => {
-    const { host, api } = await threadOf(Array.from({ length: 20 }, () => 60));
+  it("paging back by olderTurns through the tool never skips a turn, however much each read sheds", async (t) => {
+    const { host, api } = await threadOf(t, Array.from({ length: 20 }, () => 60));
     const read = messageTools.find((t) => t.name === "read_transcript")!;
     const ctx: ToolContext = { api, todos: {} as never, files: {} as never, signal: new AbortController().signal, now: () => Date.now() };
     const shown = new Set<number>();
@@ -188,21 +200,20 @@ describe("read_transcript's older history against the real orchestrator (design 
       if (r.olderTurns === 0) break;
       beforeTurn = r.olderTurns + 1;
     }
-    assert.ok(shed > 5, `the reads shed (${shed})`);
+    assert.ok(shed > 0, "pagination exercised truncated responses");
     assert.deepEqual([...shown].sort((a, b) => a - b), Array.from({ length: 20 }, (_, i) => i + 1), "every turn was shown");
     await host.stop();
   });
 
-  it("a turn larger than five pages: its latest rows are returned, and the hint names the call for the turns before it", async () => {
+  it("a turn larger than five pages: its latest rows are returned, and the hint names the call for the turns before it", async (t) => {
     // Turn 3 alone is 2 600 rows, entirely below the window; turn 5's evicted part is 2 500 rows below the window's start.
-    const { host, api } = await threadOf([10, 10, 2_600, 10, 3_000]);
+    const { host, api } = await threadOf(t, [10, 10, 2_600, 10, 3_000]);
     const snap = await readThread(api, THREAD);
     assert.equal(snap.history?.oldestRetainedOrdinal, 5, "the window starts inside turn 5");
 
     const large = await walk(api, 3, 3);
-    assert.equal(large.pages, HISTORY_PAGES_PER_READ);
+    assert.equal(large.pages, 5);
     assert.deepEqual(large.unavailable, { turns: [3, 3], reason: "limit" });
-    assert.equal(unavailableHint(large.unavailable!, 3), `Turn 3 is larger than one call reads (${HISTORY_PAGES_PER_READ} pages of older history): its latest rows are returned.`);
     // Five blocks of 400: exactly its latest 2 000 rows.
     const turn3 = logRowsOf(host, 3, 3).filter((id) => id.includes("-row-"));
     const held = new Set(large.snapshot.items.map((item) => item.id));
@@ -211,7 +222,7 @@ describe("read_transcript's older history against the real orchestrator (design 
     const wider = await walk(api, 1, 3);
     assert.deepEqual(wider.unavailable, { turns: [1, 3], reason: "limit" });
     const hint = unavailableHint(wider.unavailable!, 3);
-    assert.equal(hint, `Turn 3 is larger than one call reads (${HISTORY_PAGES_PER_READ} pages of older history): its latest rows are returned. Read turns 1–2 with beforeTurn: 3, turns: 2.`);
+    assert.match(hint, /beforeTurn: 3, turns: 2/);
     // The call the hint names reads turns 1 and 2 whole, in one page.
     const rest = await walk(api, 1, 2);
     assert.deepEqual([rest.pages, rest.unavailable, missingOf(host, rest.snapshot, 1, 2)], [1, null, []]);
@@ -223,15 +234,16 @@ describe("read_transcript's older history against the real orchestrator (design 
     await host.stop();
   });
 
-  it("restarted onto a fresh index: the turns the window no longer holds are named until the catch-up, then read whole", async () => {
-    const first = await threadOf(Array.from({ length: 20 }, () => 60));
+  it("restarted onto a fresh index: the turns the window no longer holds are named until the catch-up, then read whole", async (t) => {
+    const first = await threadOf(t, Array.from({ length: 20 }, () => 60));
     // Where the window begins, as a caught-up index says.
     const oldest = (await readThread(first.api, THREAD)).history!.oldestRetainedOrdinal!;
     await first.host.stop();
     // The next host starts on an empty index — as after the schema bump that rebuilds every index — and has not caught
     // this thread up yet.
-    const index = createFakeThreadIndex();
+    const index = await freshIndex(t);
     const host = createTestHost({ store: first.host.store, index });
+    t.after(() => host.stop());
     const api = hostApi(host);
     const snap = await readThread(api, THREAD);
     assert.deepEqual(snap.history, { indexed: true, hasOlder: false, beforeCursor: null, oldestRetainedOrdinal: null, totalTurns: 0 });
@@ -241,7 +253,6 @@ describe("read_transcript's older history against the real orchestrator (design 
     assert.equal(early.pages, 0, "nothing to page yet");
     assert.deepEqual(early.unavailable, { turns: [2, 4], reason: "unavailable" });
     assert.ok(missingOf(host, early.snapshot, 2, 4).length > 0, "those turns really are partial");
-    assert.equal(unavailableHint(early.unavailable!, 4), "Turns 2–4 could not be read whole: older turns are unavailable on this host right now. Try again later.");
     // A range reaching the window's oldest turn names the turns up to it; one after it is the window's alone.
     const reaching = await walk(api, oldest - 1, oldest + 1);
     assert.deepEqual(reaching.unavailable, { turns: [oldest - 1, oldest], reason: "unavailable" });

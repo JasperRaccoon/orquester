@@ -107,22 +107,6 @@ export function parseNdjsonLine(line: string): unknown {
   return JSON.parse(trimmed) as unknown;
 }
 
-/**
- * A backpressure-aware NDJSON writer.
- *
- * `write()` never returns a promise the caller has to await — diagnostics must
- * never block a turn (§3.1) — but it does honour `drain`: once the sink says
- * it is full, later records queue in memory instead of piling into the socket.
- * Past {@link NdjsonWriterOptions.maxQueuedBytes} records are **dropped** and
- * counted, because an unbounded queue is how a slow consumer turns into a
- * host OOM (§6.3 makes the same trade for a slow stream).
- */
-export interface NdjsonWriterOptions {
-  /** Drop records once this many bytes are queued behind a non-draining sink. */
-  maxQueuedBytes?: number;
-  /** Called once per dropped record, for a counter or a log line. */
-  onDrop?: (bytes: number) => void;
-}
 
 /**
  * The minimum a sink must offer. A Node `Writable` satisfies it structurally;
@@ -134,24 +118,23 @@ export interface NdjsonSink {
   once(event: "drain", listener: () => void): unknown;
 }
 
+/**
+ * A backpressure-aware NDJSON writer.
+ *
+ * `write()` never returns a promise the caller has to await — diagnostics must
+ * never block a turn (§3.1) — but it does honour `drain`: once the sink says
+ * it is full, later records queue in memory instead of piling into the socket.
+ * Past the 4 MiB queued-byte budget, records are **dropped**: an unbounded
+ * queue lets a slow consumer exhaust host memory (§6.3 makes the same trade
+ * for a slow stream).
+ */
 export class NdjsonWriter {
   private queue: string[] = [];
   private queuedBytes = 0;
   private draining = false;
   private closed = false;
-  private readonly maxQueuedBytes: number;
-  private readonly onDrop: ((bytes: number) => void) | undefined;
 
-  /** Records dropped because the queue was full. */
-  droppedCount = 0;
-
-  constructor(
-    private readonly sink: NdjsonSink,
-    options: NdjsonWriterOptions = {}
-  ) {
-    this.maxQueuedBytes = options.maxQueuedBytes ?? 4 * 1024 * 1024;
-    this.onDrop = options.onDrop;
-  }
+  constructor(private readonly sink: NdjsonSink) {}
 
   /** Serialise and enqueue one record. Returns false when it was dropped. */
   write(record: unknown): boolean {
@@ -177,9 +160,7 @@ export class NdjsonWriter {
     const bytes = Buffer.byteLength(payload);
 
     if (this.draining) {
-      if (this.queuedBytes + bytes > this.maxQueuedBytes) {
-        this.droppedCount += 1;
-        this.onDrop?.(bytes);
+      if (this.queuedBytes + bytes > 4 * 1024 * 1024) {
         return false;
       }
       this.queue.push(payload);
@@ -192,15 +173,6 @@ export class NdjsonWriter {
       this.sink.once("drain", () => this.onDrain());
     }
     return true;
-  }
-
-  /** True while the sink has asked us to stop writing. */
-  get isBackpressured(): boolean {
-    return this.draining;
-  }
-
-  get pendingBytes(): number {
-    return this.queuedBytes;
   }
 
   /** Stop accepting records and forget the queue. */

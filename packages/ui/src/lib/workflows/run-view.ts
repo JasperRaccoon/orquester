@@ -356,13 +356,6 @@ export function hopsText(
   return parts.join(" → ");
 }
 
-/** "2 hops", or "" for a block that never moved accounts. */
-export function hopCountText(hops: readonly AgentHop[] | null | undefined): string {
-  const moves = Math.max(0, (hops?.length ?? 0) - 1);
-  if (moves === 0) return "";
-  return moves === 1 ? "1 hop" : `${moves} hops`;
-}
-
 const HOP_VIA: Record<AgentHop["via"], string> = {
   initial: "started",
   switched: "switched account",

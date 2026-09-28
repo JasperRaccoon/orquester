@@ -80,7 +80,7 @@ import type {
 
 import type { AdapterLogger } from "../adapter.ts";
 import type { ProviderSnapshotRegistry } from "../services.ts";
-import { AGENT_HOST_DEADLINES, type DeadlineTimers, withDeadline } from "../support/deadline.ts";
+import { AGENT_HOST_DEADLINES, withDeadline } from "../support/deadline.ts";
 import { ADAPTER_IDS, ADAPTER_PENDING_SNAPSHOTS, isAgentAdapterId } from "../adapters/index.ts";
 import { isPendingSnapshot } from "../adapters/pending.ts";
 import { AGENT_HOST_PROTOCOL_VERSION } from "../host-protocol.ts";
@@ -88,7 +88,7 @@ import type { Clock } from "./runtime-seams.ts";
 import { systemClock } from "./runtime-seams.ts";
 
 /** T3's default is five minutes and user-configurable; Orquester pins it. */
-export const PROVIDER_SNAPSHOT_REFRESH_INTERVAL_MS = 5 * 60_000;
+const PROVIDER_SNAPSHOT_REFRESH_INTERVAL_MS = 5 * 60_000;
 
 /**
  * How often, at most, a READ may stat an adapter's bin to notice that the CLI
@@ -100,10 +100,10 @@ export const PROVIDER_SNAPSHOT_REFRESH_INTERVAL_MS = 5 * 60_000;
  * still rate-limited per adapter: a client polling provider status must not be
  * able to turn every poll into filesystem traffic.
  */
-export const PROVIDER_BIN_CHECK_INTERVAL_MS = 5_000;
+const PROVIDER_BIN_CHECK_INTERVAL_MS = 5_000;
 
 /** At most this many per-cwd overlays are retained per provider (§4.6.4). */
-export const MAX_WORKSPACE_SNAPSHOTS = 16;
+const MAX_WORKSPACE_SNAPSHOTS = 16;
 
 export interface ProviderProbe {
   id: AgentAdapterId;
@@ -238,7 +238,7 @@ interface PersistedIdentity extends ProviderCacheIdentity {
 }
 
 /** The current on-disk cache format. v1 carried no identity and is discarded. */
-export const PROVIDER_SNAPSHOT_CACHE_VERSION = 2;
+const PROVIDER_SNAPSHOT_CACHE_VERSION = 2;
 
 export interface ProviderSnapshotRegistryOptions {
   probes: ProviderProbe[];
@@ -246,10 +246,6 @@ export interface ProviderSnapshotRegistryOptions {
   stateDir: string;
   logger: AdapterLogger;
   clock?: Clock;
-  intervalMs?: number;
-  /** Injectable so the background cadence is testable without elapsed time (§9). */
-  setTimer?: (fn: () => void, ms: number) => unknown;
-  clearTimer?: (handle: unknown) => void;
 }
 
 export interface ManagedProviderSnapshotRegistry extends ProviderSnapshotRegistry {
@@ -440,9 +436,6 @@ export function createProviderSnapshotRegistry(
   options: ProviderSnapshotRegistryOptions
 ): ManagedProviderSnapshotRegistry {
   const clock = options.clock ?? systemClock;
-  const intervalMs = options.intervalMs ?? PROVIDER_SNAPSHOT_REFRESH_INTERVAL_MS;
-  const setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms).unref());
-  const clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as NodeJS.Timeout));
   const cachePath = join(options.stateDir, "provider-snapshots.json");
 
   const probes = new Map<AgentAdapterId, ProviderProbe>(
@@ -600,22 +593,13 @@ export function createProviderSnapshotRegistry(
     return result;
   };
 
-  // A probe's ceiling rides the injected timer when there is one, so a test
-  // sees which ceiling is armed and expires it without elapsed time (§9); the
-  // host's own runs on `withDeadline`'s, which is never unref'd.
-  const probeTimers: DeadlineTimers | undefined =
-    options.setTimer !== undefined
-      ? { set: options.setTimer, clear: options.clearTimer ?? (() => undefined) }
-      : undefined;
-
   const probeOnce = async (
     probe: ProviderProbe,
     input?: { cwd?: string }
   ): Promise<ProviderSnapshot> =>
     withDeadline(() => probe.refresh(input), {
       timeoutMs: probe.timeoutMs ?? AGENT_HOST_DEADLINES.authProbeMs,
-      label: `provider-snapshot:${probe.id}`,
-      ...(probeTimers !== undefined ? { timers: probeTimers } : {})
+      label: `provider-snapshot:${probe.id}`
     });
 
   const refreshOne = async (
@@ -708,12 +692,12 @@ export function createProviderSnapshotRegistry(
     if (stopped || watchers === 0 || timerHandle !== null) {
       return;
     }
-    timerHandle = setTimer(() => {
+    timerHandle = setTimeout(() => {
       timerHandle = null;
       void refreshAllNow().finally(() => {
         scheduleNext();
       });
-    }, intervalMs);
+    }, PROVIDER_SNAPSHOT_REFRESH_INTERVAL_MS).unref();
   };
 
   const refreshAllNow = async (): Promise<void> => {
@@ -945,7 +929,7 @@ export function createProviderSnapshotRegistry(
         released = true;
         watchers = Math.max(0, watchers - 1);
         if (watchers === 0 && timerHandle !== null) {
-          clearTimer(timerHandle);
+          clearTimeout(timerHandle as NodeJS.Timeout);
           timerHandle = null;
         }
       };
@@ -1051,7 +1035,7 @@ export function createProviderSnapshotRegistry(
     stop(): void {
       stopped = true;
       if (timerHandle !== null) {
-        clearTimer(timerHandle);
+        clearTimeout(timerHandle as NodeJS.Timeout);
         timerHandle = null;
       }
       listeners.clear();

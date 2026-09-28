@@ -50,40 +50,6 @@ export type ComposerControlCommand =
   | "send"
   | "stop";
 
-/**
- * Every token that a mounted composer actually carries.
- *
- * A token belongs here only once a control advertises it: `account` and
- * `compact` were once in this union with **no DOM target**, so
- * `openControl("account")` was a silent no-op that read like a bug (fix-wave
- * R7-12). `account` is back because the chip became a picker (§3.4's account
- * switch) and carries `data-composer-shortcut="account"` — but it gets **no
- * chord**: §7.4's *Built:* note spends that argument already (it is changed
- * rarely, and every chord spent is one the terminal surfaces cannot have), so
- * the token exists only so the control is addressable, never bound.
- * `compact` is still reached through the context meter, not a control.
- *
- * `rewind` is the same case from the other side. The composer's rewind picker
- * (§5.5, the CLI's "jump to a previous message") carries the token so the
- * double Escape can reach it through `openControl("rewind")` — but a double
- * press is a SEQUENCE, not a chord, so no arm of the table below produces it.
- * The two Escape handlers that own the sequence (the composer's textarea and
- * the shell's `resolveChatEscape`) open the control themselves; the table
- * keeps resolving Escape to `interrupt`, and `chatShortcutLabel` stays `null`
- * because there is no chord to print.
- */
-export const COMPOSER_CONTROL_COMMANDS: readonly ComposerControlCommand[] = [
-  "model",
-  "effort",
-  "mode",
-  "account",
-  "plan",
-  "attach",
-  "rewind",
-  "send",
-  "stop"
-];
-
 /** Actions the composer performs directly rather than by clicking a control. */
 export type ChatShortcutCommand =
   | { kind: "control"; command: ComposerControlCommand }

@@ -53,7 +53,8 @@ export const DELIVERY_FEEDBACK_MS = 2_000;
  * checkpoint's one line and a rewind's quote render: the whole text only ever
  * reaches the DOM on an open card.
  */
-export function previewText(text: string, max: number = PROMPT_PREVIEW_CHARS): string {
+export function previewText(text: string): string {
+  const max = PROMPT_PREVIEW_CHARS;
   if (text.length <= max) return text;
   let end = max;
   const last = text.charCodeAt(end - 1);

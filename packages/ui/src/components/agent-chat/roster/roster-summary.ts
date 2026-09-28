@@ -87,14 +87,6 @@ export function collapsedRosterLabel(counts: RosterKindCounts): string {
   return parts.length > 0 ? parts.join(" · ") : "Agents";
 }
 
-/** A kind-only title for callers that need one instead of the count line. */
-export function expandedRosterLabel(counts: RosterKindCounts): string {
-  if (counts.agents === 0 && counts.loops === 0 && counts.goals === 0 && counts.shells > 0) {
-    return counts.shells === 1 ? "Shell" : "Shells";
-  }
-  return "Agents";
-}
-
 /** The caption above the shell rows, and how many of them still run. */
 export function shellSectionLabel(counts: RosterKindCounts): { title: string; detail: string | null } {
   return {

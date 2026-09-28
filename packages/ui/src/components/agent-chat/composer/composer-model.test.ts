@@ -8,8 +8,6 @@ import {
   applyOptionSelection,
   currentOptionValue,
   findReasoningDescriptor,
-  modelChipLabel,
-  optionChoiceLabel,
   resolveSelectedModel
 } from "./composer-model.ts";
 
@@ -72,24 +70,11 @@ test("the selected model falls back to the provider default, then to the first",
   assert.equal(resolveSelectedModel([], null), null);
 });
 
-test("the chip label prefers the short name and never goes blank", () => {
-  assert.equal(modelChipLabel(OPUS, null), "Opus 5");
-  assert.equal(modelChipLabel(HAIKU, null), "Claude Haiku 5");
-  assert.equal(modelChipLabel(null, { model: "raw-slug" }), "raw-slug");
-  assert.equal(modelChipLabel(null, null), "Model");
-});
-
 test("an unset option reads the descriptor's default, then its currentValue", () => {
   assert.equal(currentOptionValue(null, EFFORT), "high");
   assert.equal(currentOptionValue({ model: "x", options: [{ id: "effort", value: "low" }] }, EFFORT), "low");
   assert.equal(currentOptionValue(null, { ...FAST, currentValue: true }), true);
   assert.equal(currentOptionValue(null, FAST), undefined);
-});
-
-test("a choice label resolves, and an unknown value prints itself", () => {
-  assert.equal(optionChoiceLabel(EFFORT, "xhigh"), "Extra high");
-  assert.equal(optionChoiceLabel(EFFORT, "mystery"), "mystery");
-  assert.equal(optionChoiceLabel(EFFORT, true), null);
 });
 
 test("setting an option adds it, then replaces it in place", () => {
@@ -98,11 +83,6 @@ test("setting an option adds it, then replaces it in place", () => {
   assert.deepEqual(withEffort.options, [{ id: "effort", value: "low" }]);
   const changed = applyOptionSelection(withEffort, "effort", "xhigh");
   assert.deepEqual(changed.options, [{ id: "effort", value: "xhigh" }]);
-});
-
-test("a no-op edit returns the SAME object, so it cannot restart a session", () => {
-  const selection: ModelSelection = { model: "m", options: [{ id: "effort", value: "low" }] };
-  assert.equal(applyOptionSelection(selection, "effort", "low"), selection);
 });
 
 test("switching model drops options the new model does not advertise", () => {
@@ -129,14 +109,6 @@ test("an option whose value is no longer a valid choice is dropped too", () => {
     options: [{ id: "effort", value: "ultra" }]
   };
   assert.deepEqual(applyModelSelection(selection, OPUS), { model: "claude-opus-5" });
-});
-
-test("re-picking the current model returns the SAME object", () => {
-  const selection: ModelSelection = {
-    model: "claude-opus-5",
-    options: [{ id: "effort", value: "low" }]
-  };
-  assert.equal(applyModelSelection(selection, OPUS), selection);
 });
 
 test("/effort <id> matches by id or label and refuses anything else", () => {

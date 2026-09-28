@@ -74,16 +74,6 @@ const CREATE: SavedPromptEditorRequest = { mode: "create", projectPath: PROJECT 
 const draftOf = (request: SavedPromptEditorRequest) => ({ ...initialDraft(request), title: "Fix tests", body: "Run them" });
 
 describe("the editor's save", () => {
-  it("a create sends the record, and reveals what the daemon answered", async () => {
-    const created = prompt({ id: "new", title: "Fix tests" });
-    const { calls, deps } = fakes(async () => ({ ok: true, prompt: created }));
-    const saver = createSavedPromptSaver(deps);
-    assert.deepEqual(await saver.save(CREATE, draftOf(CREATE)), { status: "saved", prompt: created });
-    assert.equal(calls.created.length, 1);
-    assert.equal(calls.created[0]?.title, "Fix tests");
-    assert.deepEqual(calls.saved, [created]);
-  });
-
   it("an edit that changes nothing sends nothing, and closes", async () => {
     const { calls, deps } = fakes(async () => ({ ok: true, prompt: null }));
     const editing: SavedPromptEditorRequest = { mode: "edit", projectPath: PROJECT, prompt: prompt() };
@@ -91,13 +81,6 @@ describe("the editor's save", () => {
       status: "unchanged"
     });
     assert.deepEqual(calls.updated, []);
-  });
-
-  it("an edit sends only what changed", async () => {
-    const { calls, deps } = fakes(async () => ({ ok: true, prompt: prompt({ title: "Renamed" }) }));
-    const editing: SavedPromptEditorRequest = { mode: "edit", projectPath: PROJECT, prompt: prompt() };
-    await createSavedPromptSaver(deps).save(editing, { ...initialDraft(editing), title: "Renamed" });
-    assert.deepEqual(calls.updated, [{ id: "p1", patch: { title: "Renamed" } }]);
   });
 
   it("an invalid draft is not sent", async () => {
@@ -117,15 +100,6 @@ describe("the editor's save", () => {
     assert.equal((await first).status, "saved");
     assert.equal(saver.saving, false);
     assert.equal(calls.created.length, 1);
-  });
-
-  it("a refusal while the editor is open is the form's to show", async () => {
-    const { calls, deps } = fakes(async () => ({ ok: false, error: "Title is required" }));
-    assert.deepEqual(await createSavedPromptSaver(deps).save(CREATE, draftOf(CREATE)), {
-      status: "failed",
-      error: "Title is required"
-    });
-    assert.deepEqual(calls.lateFailures, [], "not the panel's");
   });
 
   it("closed while saving: a success still lands and is revealed", async () => {

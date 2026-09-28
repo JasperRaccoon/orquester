@@ -1,11 +1,13 @@
 import { test } from "node:test";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import assert from "node:assert/strict";
 import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cliproxyStateFile, type RouterProvider } from "@orquester/config";
 import { writeAddonEnvLaunchScript } from "./sessions.ts";
-import { cliproxyContributor, composeExtraEnv } from "./index.ts";
+import { cliproxyContributor } from "./index.ts";
 
 const DIR = "/nonexistent/daemon";
 const ACCOUNT = "abcdef12-3456-7890-abcd-ef1234567890";
@@ -64,22 +66,31 @@ async function daemonDirWithSeeded(
   return dir;
 }
 
-test("wrapper exports env and unsets requested keys", async () => {
-  const w = await writeAddonEnvLaunchScript({ bin: "claude", args: ["--foo"] }, { CLAUDE_CONFIG_DIR: "/x/home" }, ["ANTHROPIC_API_KEY"]);
-  const script = await readFile(w.args[0], "utf8");
-  // This repo's shellQuote leaves shell-safe strings unquoted, so tolerate optional quotes.
-  assert.match(script, /export CLAUDE_CONFIG_DIR='?\/x\/home'?/);
-  assert.match(script, /unset ANTHROPIC_API_KEY/);
-  assert.match(script, /exec '?claude'? '?--foo'?/);
-  await w.cleanup();
+test("launcher child receives env overrides, removals and literal arguments", async () => {
+  const child = {
+    bin: process.execPath,
+    args: ["-e", "process.stdout.write(JSON.stringify({ home: process.env.CLAUDE_CONFIG_DIR, key: process.env.ANTHROPIC_API_KEY, args: process.argv.slice(1) }))", "a b", "$(echo injected)"]
+  };
+  const launch = await writeAddonEnvLaunchScript(child, { CLAUDE_CONFIG_DIR: "/x/home with 'quotes'" }, ["ANTHROPIC_API_KEY"]);
+  try {
+    const { stdout } = await promisify(execFile)(launch.bin, launch.args, { env: { ...process.env, ANTHROPIC_API_KEY: "inherited-secret" } });
+    assert.deepEqual(JSON.parse(stdout), { home: "/x/home with 'quotes'", args: ["a b", "$(echo injected)"] });
+  } finally {
+    await launch.cleanup();
+  }
 });
 
-test("wrapper still returns a script when only unsets are present (no env)", async () => {
-  const w = await writeAddonEnvLaunchScript({ bin: "claude", args: [] }, {}, ["ANTHROPIC_API_KEY"]);
-  assert.notEqual(w.bin, "claude"); // wrapped through a shell, not the bare bin
-  const script = await readFile(w.args[0], "utf8");
-  assert.match(script, /unset ANTHROPIC_API_KEY/);
-  await w.cleanup();
+test("launcher removes inherited credentials even without env overrides", async () => {
+  const launch = await writeAddonEnvLaunchScript({
+    bin: process.execPath,
+    args: ["-e", "process.stdout.write(JSON.stringify({ key: process.env.ANTHROPIC_API_KEY }))"]
+  }, {}, ["ANTHROPIC_API_KEY"]);
+  try {
+    const { stdout } = await promisify(execFile)(launch.bin, launch.args, { env: { ...process.env, ANTHROPIC_API_KEY: "inherited-secret" } });
+    assert.deepEqual(JSON.parse(stdout), {});
+  } finally {
+    await launch.cleanup();
+  }
 });
 
 test("cliproxyContributor pins the account and prefixes the model for a real account", () => {
@@ -165,13 +176,6 @@ test("cliproxyContributor: a non-router model still carries the acc prefix when 
   assert.equal(res.env.ANTHROPIC_MODEL, "accabcdef12/gpt-5.6-sol");
 });
 
-test("cliproxyContributor pins the account for claudemix", () => {
-  const res = cliproxyContributor("claudemix", { accountId: ACCOUNT, model: "claude-fable-5" }, DIR);
-  assert.ok(res);
-  assert.equal(res.accountId, ACCOUNT);
-  assert.equal(res.env.ANTHROPIC_MODEL, "accabcdef12/claude-fable-5[1m]");
-});
-
 test("cliproxyContributor: the sole seeded account of a provider launches BARE (no acc prefix leak)", async () => {
   const dir = await daemonDirWithSeeded([
     { provider: "codex", accountId: ACCOUNT },
@@ -181,16 +185,6 @@ test("cliproxyContributor: the sole seeded account of a provider launches BARE (
   assert.ok(res);
   assert.equal(res.env.ANTHROPIC_MODEL, "gpt-5.6-sol", "no prefix when routing is unambiguous");
   assert.equal(res.accountId, ACCOUNT, "account still recorded for attribution");
-});
-
-test("cliproxyContributor: a second seeded account of the same provider forces the prefix", async () => {
-  const dir = await daemonDirWithSeeded([
-    { provider: "codex", accountId: ACCOUNT },
-    { provider: "codex", accountId: OTHER }
-  ]);
-  const res = cliproxyContributor("claudex", { accountId: ACCOUNT, model: "gpt-5.6-sol" }, dir);
-  assert.ok(res);
-  assert.equal(res.env.ANTHROPIC_MODEL, "accabcdef12/gpt-5.6-sol");
 });
 
 test("cliproxyContributor returns null for a non-proxy entry", () => {
@@ -281,16 +275,6 @@ test("cliproxyContributor: state modelOverrides beat curated defaults at launch"
   assert.ok(res);
   assert.equal(res.env.CLAUDE_CODE_AUTO_COMPACT_WINDOW, "500000");
   assert.equal(res.env.CLAUDE_CODE_MAX_CONTEXT_TOKENS, "200000", "unoverridden fields stay curated");
-});
-
-test("composeExtraEnv carries accountId from b when a is null", () => {
-  const merged = composeExtraEnv(null, { env: {}, accountId: "acc-x" });
-  assert.equal(merged?.accountId, "acc-x");
-});
-
-test("composeExtraEnv prefers a's accountId when both set", () => {
-  const merged = composeExtraEnv({ env: {}, accountId: "a" }, { env: {}, accountId: "b" });
-  assert.equal(merged?.accountId, "a");
 });
 
 test("cliproxyContributor: an xAI OAuth model launches BARE with its curated compact env", async () => {

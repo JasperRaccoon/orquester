@@ -55,10 +55,10 @@ import { AgentHostClient } from "./host-client.ts";
  * and a "needs your input" push feel immediate, slow enough to be free: each
  * tick is one small JSON read per OPEN chat tab over a local unix socket.
  */
-export const SUMMARY_POLL_INTERVAL_MS = 1_500;
+const SUMMARY_POLL_INTERVAL_MS = 1_500;
 
 /** A read that hangs must never stall the next tick. */
-export const SUMMARY_READ_TIMEOUT_MS = 5_000;
+const SUMMARY_READ_TIMEOUT_MS = 5_000;
 
 export interface SummaryBroadcaster {
   publish(channel: string, type: string, payload: unknown): void;
@@ -68,14 +68,13 @@ export interface SummaryPush {
   notifyStructural(session: SessionSummary, type: ChatPushType): Promise<void>;
 }
 
-export interface AgentChatSummaryOptions {
+interface AgentChatSummaryOptions {
   client: AgentHostClient;
   chat: ChatSessionManager;
   broadcaster: SummaryBroadcaster;
   push: SummaryPush;
   /** False while the host is restarting or foreign — the poll then idles. */
   isHostHealthy?: () => boolean;
-  now?: () => number;
   logger?: { warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
   /**
    * A turn reached a settled state. The supervisor's version drain-restart
@@ -96,9 +95,6 @@ export interface AgentChatSummaryOptions {
    * account named, so usage follows every model response.
    */
   onUsageLimits?: (reading: ThreadUsageReading) => void;
-  /** Test seam: replaces the interval so a test never waits on a clock. */
-  setInterval?: (fn: () => void, ms: number) => { unref?: () => void };
-  clearInterval?: (handle: unknown) => void;
 }
 
 /** A thread's live account-usage reading, with the tab's registry entry. */
@@ -130,30 +126,25 @@ export class AgentChatSummaryService {
   private readonly threads = new Map<string, ThreadState>();
   /** The `observedAt` of each thread's last usage reading handed on. */
   private readonly usageObservedAt = new Map<string, string>();
-  private timer: unknown = null;
+  private timer: ReturnType<typeof setInterval> | null = null;
   private polling = false;
   /** True once one poll round has completed — before that the view is unknown. */
   private polledOnce = false;
-  private readonly now: () => number;
 
-  constructor(private readonly opts: AgentChatSummaryOptions) {
-    this.now = opts.now ?? Date.now;
-  }
+  constructor(private readonly opts: AgentChatSummaryOptions) {}
 
   /** Start the poll. Idempotent. */
   start(): void {
     if (this.timer !== null) return;
-    const set = this.opts.setInterval ?? ((fn, ms) => setInterval(fn, ms));
-    const handle = set(() => void this.refreshAll(), SUMMARY_POLL_INTERVAL_MS);
+    const handle = setInterval(() => void this.refreshAll(), SUMMARY_POLL_INTERVAL_MS);
     // Unref'd: a poll must never hold the process open on shutdown.
     handle.unref?.();
     this.timer = handle;
   }
 
-  stop(): void {
+  private stop(): void {
     if (this.timer === null) return;
-    const clear = this.opts.clearInterval ?? ((handle: unknown) => clearInterval(handle as never));
-    clear(this.timer);
+    clearInterval(this.timer);
     this.timer = null;
   }
 
@@ -174,11 +165,6 @@ export class AgentChatSummaryService {
   forget(threadId: string): void {
     this.threads.delete(threadId);
     this.usageObservedAt.delete(threadId);
-  }
-
-  /** The current activity for a chat tab, for `SessionSummary.activity`. */
-  activity(threadId: string): SessionActivity | undefined {
-    return this.threads.get(threadId)?.activity;
   }
 
   /**
@@ -235,7 +221,7 @@ export class AgentChatSummaryService {
    * known state alone rather than blanking the tab: a host restarting mid-poll
    * must not make every tab flicker to "unknown".
    */
-  async refreshThread(threadId: string): Promise<void> {
+  private async refreshThread(threadId: string): Promise<void> {
     let raw: unknown;
     try {
       const response = await this.opts.client.json<unknown>(
@@ -267,7 +253,7 @@ export class AgentChatSummaryService {
   }
 
   /** Hand a thread's usage reading on once per new `observedAt`. Never throws. */
-  applyUsageLimits(threadId: string, limits: AgentHostThreadUsageLimits | null): void {
+  private applyUsageLimits(threadId: string, limits: AgentHostThreadUsageLimits | null): void {
     const tab = this.opts.chat.get(threadId);
     if (!limits || !tab) {
       if (!tab) this.usageObservedAt.delete(threadId);
@@ -285,10 +271,8 @@ export class AgentChatSummaryService {
   /**
    * Merge the seven fields onto the tab, resolve the ladder, broadcast what
    * changed, and push.
-   *
-   * Exposed so tests drive the fold directly, without a host.
    */
-  applyFields(
+  private applyFields(
     threadId: string,
     fields: AgentChatSessionSummaryFields,
     pendingRequests: readonly AgentHostPendingRequest[] = []
@@ -300,7 +284,7 @@ export class AgentChatSummaryService {
     }
     const previous = this.threads.get(threadId);
     const resolution = resolveChatActivity(fields);
-    const nowMs = this.now();
+    const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
     const attentionChanged = (previous?.activity.attention ?? null) !== resolution.attention;
     const previousPending = previous?.pending ?? new Map<string, AgentHostPendingRequest>();
@@ -508,7 +492,7 @@ function settledSince(turn: LatestTurnSummary | null, since: number): boolean {
  * `requestId` a client will post an approval against, so a row without a usable
  * one is worse than no row.
  */
-export function sanitizePendingRequests(value: unknown): AgentHostPendingRequest[] {
+function sanitizePendingRequests(value: unknown): AgentHostPendingRequest[] {
   if (!value || typeof value !== "object") return [];
   const rows = (value as Record<string, unknown>).pendingRequests;
   if (!Array.isArray(rows)) return [];
@@ -533,7 +517,7 @@ function hasBackgroundLiveness(fields: AgentChatSessionSummaryFields): boolean {
 }
 
 /** The summary's `usageLimits`, or null when absent or malformed. */
-export function sanitizeUsageLimits(value: unknown): AgentHostThreadUsageLimits | null {
+function sanitizeUsageLimits(value: unknown): AgentHostThreadUsageLimits | null {
   if (!value || typeof value !== "object") return null;
   const raw = (value as { usageLimits?: unknown }).usageLimits;
   if (!raw || typeof raw !== "object") return null;
@@ -553,7 +537,7 @@ export function sanitizeUsageLimits(value: unknown): AgentHostThreadUsageLimits 
   return { observedAt: row.observedAt, home: row.home, accountId: row.accountId, windows };
 }
 
-export function sanitizeFields(value: unknown): AgentChatSessionSummaryFields {
+function sanitizeFields(value: unknown): AgentChatSessionSummaryFields {
   const fields: AgentChatSessionSummaryFields = {};
   if (!value || typeof value !== "object") {
     return fields;

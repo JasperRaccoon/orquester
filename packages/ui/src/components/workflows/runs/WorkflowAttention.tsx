@@ -35,7 +35,7 @@ export function useWorkflowAttention(): readonly WorkflowAttentionEntry[] {
   );
 }
 
-export interface WorkflowAttentionRowsProps {
+interface WorkflowAttentionRowsProps {
   entries: readonly WorkflowAttentionEntry[];
   now: number;
   onOpen: (entry: WorkflowAttentionEntry) => void;
@@ -45,7 +45,7 @@ export interface WorkflowAttentionRowsProps {
 }
 
 /** The group as a picture of its props. */
-export const WorkflowAttentionRows: React.FC<WorkflowAttentionRowsProps> = ({
+const WorkflowAttentionRows: React.FC<WorkflowAttentionRowsProps> = ({
   entries,
   now,
   onOpen,

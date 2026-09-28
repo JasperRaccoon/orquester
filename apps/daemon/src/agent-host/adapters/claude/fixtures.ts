@@ -22,7 +22,7 @@ import type { Clock, IdGen } from "../../adapter.ts";
 import { classifyRequestType, summarizeToolRequest, trimmedString } from "./classify.ts";
 import { claudeCanUseToolRoute, claudeRequestKey } from "./decisions.ts";
 import { ClaudeNormalizer, extractExitPlanModePlan } from "./normalize.ts";
-import { questionsFromAskUserQuestionInput } from "./questions.ts";
+import { parseAskUserQuestionInput } from "./questions.ts";
 
 export const CLAUDE_FIXTURES_DIR = nodePath.resolve(
   nodePath.dirname(fileURLToPath(import.meta.url)),
@@ -74,7 +74,7 @@ export interface ReplayResult {
   normalizer: ClaudeNormalizer;
 }
 
-export function sdkMessageTag(message: unknown): string {
+function sdkMessageTag(message: unknown): string {
   if (message === null || typeof message !== "object") {
     return "<non-object>";
   }
@@ -136,7 +136,7 @@ export function replayClaudeFixture(name: string): ReplayResult {
         const toolUseId = trimmedString(data.options?.toolUseID);
         const route = claudeCanUseToolRoute(toolName);
         if (route === "user-input") {
-          const questions: UserInputQuestion[] = questionsFromAskUserQuestionInput(toolInput);
+          const questions: UserInputQuestion[] = parseAskUserQuestionInput(toolInput).questions;
           events.push(
             normalizer.userInputRequested({
               requestId,

@@ -59,12 +59,6 @@ function perThreadTokens(onChange: (sessionId: string) => void) {
     },
     has(sessionId: string): boolean {
       return (open.get(sessionId)?.size ?? 0) > 0;
-    },
-    /** Forget every token; answers the threads that had one. */
-    clear(): string[] {
-      const threads = [...open.keys()];
-      open.clear();
-      return threads;
     }
   };
 }
@@ -139,13 +133,4 @@ export function subscribeQueuedSends(listener: QueuedListener): () => void {
   return () => {
     queuedListeners.delete(listener);
   };
-}
-
-/** Test seam: forget every send in flight, composer and queued. */
-export function resetComposerSends(): void {
-  composerSends.clear();
-  for (const listener of [...listeners]) listener();
-  for (const sessionId of queuedSends.clear()) {
-    for (const listener of [...queuedListeners]) listener(sessionId);
-  }
 }

@@ -27,10 +27,8 @@ import {
   type GoalAction
 } from "@orquester/api/agent-chat";
 
-import { dismissWhenChatTabLeaves } from "../../../lib/agent-chat-active-tab";
 import { clipGoalText, GOAL_HELD_FOR_UPDATE_TEXT } from "../../../lib/agent-chat/goal.logic";
 import { formatWorkDuration } from "../../../lib/agent-chat/rows.logic";
-import type { DropdownRole } from "../../ui/dropdown-logic";
 import { formatRowTimestamp, formatRowTimestampTooltip } from "../timeline/timestamp-format";
 import { formatContextTokens } from "./context-meter";
 
@@ -116,7 +114,7 @@ const WAITING_BACKGROUND_SHORT = "waiting";
  * other (Grok's `planning`/`executing`/`idle`) with its
  * separators turned into spaces. `null` for none.
  */
-export function formatGoalPhase(phase: string | null | undefined): string | null {
+function formatGoalPhase(phase: string | null | undefined): string | null {
   const trimmed = phase?.trim() ?? "";
   if (trimmed.length === 0) return null;
   return KNOWN_PHASES[trimmed] ?? trimmed.replace(/[-_]+/g, " ");
@@ -249,18 +247,16 @@ function formatGoalTokens(goal: AgentGoal): string | null {
 }
 
 /**
- * The popover's readout. `now` is injectable so the set time is testable. A
- * goal held for an Orquester update ({@link GoalHoldOptions}) says so in its
+ * The popover's readout. A goal held for an Orquester update ({@link GoalHoldOptions}) says so in its
  * status; every other fact is the paused goal's own, and its actions are a
  * paused goal's ({@link goalActions}).
  */
 export function deriveGoalPanel(
   goal: AgentGoal,
-  now: Date = new Date(),
   options: GoalHoldOptions = {}
 ): GoalPanelModel {
   const lastCheck = goal.lastCheck?.trim() ?? "";
-  const setAt = goal.setAt ? formatRowTimestamp(goal.setAt, now) : "";
+  const setAt = goal.setAt ? formatRowTimestamp(goal.setAt) : "";
   const held = options.heldForUpdate === true && goal.status === "paused";
   return {
     objective: goal.objective,
@@ -314,30 +310,6 @@ export interface GoalActionModel {
    * after opening clears nothing (fix round 2).
    */
   destructive: boolean;
-}
-
-/**
- * The props the goal chip hands its `Dropdown` (goals §8.2, fix rounds 1–2,
- * final wave, micro-fix): a labelled dialog — a readout with plain buttons is
- * not a menu — that takes focus when it opens, gives it back to the chip when
- * it closes, and closes by itself when its thread's tab is LEFT, so its
- * Pause/Clear never strand over another tab. Never when its own tab is
- * activated: in the grid view the click that opens it also activates its
- * cell (`dismissWhenChatTabLeaves`). Exported so the wiring is testable
- * without a DOM.
- */
-export function goalPopoverProps(sessionId: string | null): {
-  role: DropdownRole;
-  ariaLabel: string;
-  focusOnOpen: true;
-  dismissOn: (dismiss: () => void) => () => void;
-} {
-  return {
-    role: "dialog",
-    ariaLabel: "Goal",
-    focusOnOpen: true,
-    dismissOn: dismissWhenChatTabLeaves(sessionId)
-  };
 }
 
 export interface GoalActionsInput {
@@ -403,7 +375,7 @@ export function goalActions(input: GoalActionsInput): GoalActionModel[] {
 }
 
 /** Why a provider-command adapter's popover has no buttons while its turn runs. */
-export const GOAL_ACTIONS_WAIT_NOTE = "Goal actions wait until the agent is idle.";
+const GOAL_ACTIONS_WAIT_NOTE = "Goal actions wait until the agent is idle.";
 
 /**
  * The popover's one-line explanation when the matrix withholds every action

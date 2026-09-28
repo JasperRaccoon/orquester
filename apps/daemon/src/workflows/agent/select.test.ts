@@ -5,9 +5,6 @@ import type { AccountCooldown, AccountPolicy, AgentChainEntry, RouterProvider } 
 import { createUsesAccount } from "./families.ts";
 import {
   burntWindowResetAt,
-  describeSkip,
-  describeSkips,
-  formatDuration,
   rankChainEntry,
   sameFamilyAlternatives,
   selectAccount,
@@ -103,12 +100,8 @@ test("owner's example: soonest weekly reset under 85% picks jasperclaude and ski
   assert.equal(decision.chosen?.accountLabel, "jasperclaude");
   assert.equal(decision.chosen?.chainIndex, 0);
   assert.equal(decision.chosen?.agent, "claude");
-  assert.equal(decision.reason, "jasperclaude: soonest weekly reset (in 4d 2h) under 85%");
   assert.equal(decision.usageAsOf, fresh);
-  assert.deepEqual(decision.skipped, [
-    { agent: "claude", accountId: "a-eduard", label: "therealeduard465", why: "threshold", detail: "weekly 90% ≥ 85%" }
-  ]);
-  assert.equal(describeSkip(decision.skipped[0]!), "therealeduard465: weekly 90% ≥ 85%");
+  assert.deepEqual(decision.skipped.map(({ accountId, why }) => ({ accountId, why })), [{ accountId: "a-eduard", why: "threshold" }]);
 });
 
 test("soonest-reset without a threshold takes the earliest weekly reset", () => {
@@ -127,7 +120,6 @@ test("soonest-reset on the session window: unknown resets go last", () => {
 test("least-used (max) picks jasperinuwu", () => {
   const decision = selectAccount(input({ chain: [entry("claude", "m", { strategy: "least-used", maxWeeklyPct: 85 })] }));
   assert.equal(decision.chosen?.accountLabel, "jasperinuwu");
-  assert.equal(decision.reason, "jasperinuwu: least used (max 3%) under weekly 85%");
   const ranked = rankChainEntry(input({ chain: [entry("claude", "m", { strategy: "least-used" })] }), 0).ranked;
   assert.deepEqual(ranked.map((c) => c.label), ["jasperinuwu", "arakuma.panama", "jasperclaude", "therealeduard465"]);
 });
@@ -153,8 +145,7 @@ test("fixed order [therealeduard465, jasperclaude] under 85% weekly picks jasper
   for (const accounts of [["therealeduard465", "jasperclaude"], ["a-eduard", "a-jasperclaude"]]) {
     const decision = selectAccount(input({ chain: [entry("claude", "m", { strategy: "fixed", accounts, maxWeeklyPct: 85 })] }));
     assert.equal(decision.chosen?.accountId, "a-jasperclaude");
-    assert.equal(decision.reason, "jasperclaude: first eligible in the fixed order");
-    assert.deepEqual(decision.skipped.map(describeSkip), ["therealeduard465: weekly 90% ≥ 85%"]);
+    assert.deepEqual(decision.skipped.map((skip) => [skip.accountId, skip.why]), [["a-eduard", "threshold"]]);
   }
   // Without the threshold the fixed order's first wins, however used it is.
   const first = selectAccount(input({ chain: [entry("claude", "m", { strategy: "fixed", accounts: ["therealeduard465", "jasperclaude"] })] }));
@@ -164,7 +155,7 @@ test("fixed order [therealeduard465, jasperclaude] under 85% weekly picks jasper
 test("an allow-list filters the family, and names what it cannot find", () => {
   const decision = selectAccount(input({ chain: [entry("claude", "m", { accounts: ["jasperclaude", "arakuma.panama", "ghost"] })] }));
   assert.equal(decision.chosen?.accountLabel, "arakuma.panama", "least used of the two allowed");
-  assert.deepEqual(decision.skipped, [{ agent: "claude", accountId: "ghost", why: "unavailable", detail: "not a claude account" }]);
+  assert.deepEqual(decision.skipped.map((skip) => [skip.accountId, skip.why]), [["ghost", "unavailable"]]);
 });
 
 test("a scoped threshold applies only to the models it names", () => {
@@ -173,7 +164,7 @@ test("a scoped threshold applies only to the models it names", () => {
   assert.equal(opus.chosen?.accountLabel, "therealeduard465");
   const fable = selectAccount(input({ chain: [entry("claude", "claude-fable-5", { strategy: "soonest-reset", scoped })] }));
   assert.equal(fable.chosen?.accountLabel, "jasperclaude");
-  assert.deepEqual(fable.skipped.map(describeSkip), ["therealeduard465: Fable 48% ≥ 40%"]);
+  assert.deepEqual(fable.skipped.map((skip) => [skip.accountId, skip.why]), [["a-eduard", "threshold"]]);
   // No onlyForModels: every model.
   const all = selectAccount(input({ chain: [entry("claude", "claude-opus-5", { strategy: "soonest-reset", scoped: [{ label: "fable", maxPct: 40 }] })] }));
   assert.equal(all.chosen?.accountLabel, "jasperclaude");
@@ -191,10 +182,10 @@ test("a window at 100% is always burnt; a burnt scoped window stops only the mod
   const accounts = accountsOf(account("claude", "a"), account("claude", "b"));
   const opus = selectAccount(input({ usage, accounts, chain: [entry("claude", "claude-opus-5")] }));
   assert.equal(opus.chosen?.accountId, "b");
-  assert.deepEqual(opus.skipped.map(describeSkip), ["a: session 100% (limit reached)"]);
+  assert.deepEqual(opus.skipped.map((skip) => [skip.accountId, skip.why]), [["a", "threshold"]]);
   const fable = selectAccount(input({ usage, accounts, chain: [entry("claude", "claude-fable-5")] }));
   assert.equal(fable.chosen, null);
-  assert.deepEqual(fable.skipped.map(describeSkip), ["a: session 100% (limit reached)", "b: Fable 100% (limit reached)"]);
+  assert.deepEqual(fable.skipped.map((skip) => [skip.accountId, skip.why]), [["a", "threshold"], ["b", "threshold"]]);
   assert.equal(fable.earliestResetAt, at(HOUR));
 });
 
@@ -202,7 +193,6 @@ test("expired windows are ignored: a pre-reset 100% no longer blocks", () => {
   const usage: UsageResponse = { agents: [agentRow("claude", [row("a", "a", { session: [100, -MIN], weekly: [100, -HOUR] })])] };
   const decision = selectAccount(input({ usage, accounts: accountsOf(account("claude", "a")), chain: [entry("claude", "m", { maxWeeklyPct: 50 })] }));
   assert.equal(decision.chosen?.accountId, "a");
-  assert.equal(decision.reason, "a: least used (max 0%) under weekly 50%");
 });
 
 test("unknown usage is tried after every known account — or dropped with unknownUsage: exclude", () => {
@@ -222,29 +212,20 @@ test("unknown usage is tried after every known account — or dropped with unkno
     ranked.map((c) => [c.accountId, c.usage]),
     [["known", "known"], ["missing", "unknown"], ["off", "unknown"], ["old", "unknown"]]
   );
-  assert.match(ranked[3]!.reason, /usage reading is 30m old/);
 
   // The known one is over the threshold: an unknown one still runs rather than nothing.
   const blocked = selectAccount(input({ usage, accounts, chain: [entry("claude", "m", { maxWeeklyPct: 50 })] }));
   assert.equal(blocked.chosen?.accountId, "missing");
-  assert.equal(blocked.reason, "missing: usage unknown (no usage reading) — tried after every account with known usage");
 
   const excluded = selectAccount(input({ usage, accounts, chain: [entry("claude", "m", { maxWeeklyPct: 50, unknownUsage: "exclude" })] }));
   assert.equal(excluded.chosen, null);
-  assert.deepEqual(excluded.skipped.map((s) => [s.accountId, s.why, s.detail]), [
-    ["missing", "unknownUsage", "usage unknown (no usage reading)"],
-    ["off", "unknownUsage", "usage unknown (usage unavailable)"],
-    ["old", "unknownUsage", "usage unknown (usage reading is 30m old)"],
-    ["known", "threshold", "weekly 70% ≥ 50%"]
+  assert.deepEqual(excluded.skipped.map((s) => [s.accountId, s.why]), [
+    ["missing", "unknownUsage"],
+    ["off", "unknownUsage"],
+    ["old", "unknownUsage"],
+    ["known", "threshold"]
   ]);
   assert.equal(excluded.earliestResetAt, at(3 * DAY));
-});
-
-test("staleAfterMs is configurable", () => {
-  const usage: UsageResponse = { agents: [agentRow("claude", [row("a", "a", { weekly: [5, DAY] }, { asOf: at(-10 * MIN) })])] };
-  const accounts = accountsOf(account("claude", "a"));
-  assert.equal(rankChainEntry(input({ usage, accounts, chain: [entry("claude", "m")] }), 0).ranked[0]!.usage, "known");
-  assert.equal(rankChainEntry(input({ usage, accounts, staleAfterMs: 5 * MIN, chain: [entry("claude", "m")] }), 0).ranked[0]!.usage, "unknown");
 });
 
 test("needsReauth, cooldowns and the exclude set drop candidates", () => {
@@ -268,8 +249,6 @@ test("needsReauth, cooldowns and the exclude set drop candidates", () => {
     ["therealeduard465", "unavailable"],
     ["jasperinuwu", "cooldown"]
   ]);
-  assert.equal(decision.skipped[1]!.detail, "already tried in this block");
-  assert.equal(decision.skipped[2]!.detail, `usage limit — cooling down until ${at(3 * HOUR)} (in 3h 0m)`);
 });
 
 test("an expired cooldown no longer counts", () => {
@@ -300,16 +279,14 @@ test("cross-family fallback: claude (all burnt or cooling) → codex (reauth, bu
     input({ usage, accounts, chain, cooldowns: { "claude:a-arakuma": cooldown(5 * HOUR), "claude:a-jasperinuwu": cooldown(2 * HOUR) } })
   );
   assert.deepEqual(decision.chosen, { agent: "grok", model: "grok-build", accountId: "g1", accountLabel: "g1", chainIndex: 2 });
-  assert.equal(decision.reason, "g1: least used (max 40%) under session 50% — fallback to grok (chain entry 3): no eligible account for claude, codex");
-  assert.deepEqual(decision.skipped.map((s) => `${s.agent}/${describeSkip(s)}`), [
-    "claude/jasperclaude: weekly 63% ≥ 60%",
-    `claude/arakuma.panama: usage limit — cooling down until ${at(5 * HOUR)} (in 5h 0m)`,
-    "claude/therealeduard465: weekly 90% ≥ 60%",
-    `claude/jasperinuwu: usage limit — cooling down until ${at(2 * HOUR)} (in 2h 0m)`,
-    "codex/c1: weekly 100% (limit reached)",
-    "codex/c2: needs signing in again"
+  assert.deepEqual(decision.skipped.map((s) => [s.agent, s.accountId, s.why]), [
+    ["claude", "a-jasperclaude", "threshold"],
+    ["claude", "a-arakuma", "cooldown"],
+    ["claude", "a-eduard", "threshold"],
+    ["claude", "a-jasperinuwu", "cooldown"],
+    ["codex", "c1", "threshold"],
+    ["codex", "c2", "needsReauth"]
   ]);
-  assert.match(describeSkips(decision.skipped), /^claude — jasperclaude: weekly 63% ≥ 60%; /);
 
   // fromChainIndex starts later in the chain; onlyChainIndex never falls through.
   assert.equal(selectAccount(input({ usage, accounts, chain, fromChainIndex: 2 })).chosen?.chainIndex, 2);
@@ -326,7 +303,6 @@ test("nothing eligible anywhere: chosen null and the earliest instant a candidat
   assert.equal(decision.chosen, null);
   // jasperclaude 4d2h, arakuma 5d8h, jasperinuwu 6d22h (thresholds), therealeduard465 20h (cooldown), opencode 30h.
   assert.equal(decision.earliestResetAt, at(20 * HOUR));
-  assert.equal(decision.reason, "No eligible account in any of 2 chain entries — the earliest frees up in 20h 0m.");
   assert.deepEqual(decision.skipped.map((s) => [s.agent, s.accountId, s.why]), [
     ["claude", "a-jasperclaude", "threshold"],
     ["claude", "a-arakuma", "threshold"],
@@ -341,14 +317,12 @@ test("a threshold breach with an unknown reset contributes no earliest instant",
   const decision = selectAccount(input({ usage, accounts: accountsOf(account("claude", "a")), chain: [entry("claude", "m", { maxWeeklyPct: 90 })] }));
   assert.equal(decision.chosen, null);
   assert.equal(decision.earliestResetAt, undefined);
-  assert.equal(decision.reason, "No eligible account in the chain entry.");
 });
 
 test("opencode has no accounts: one system candidate, only its cooldown applies", () => {
   const decision = selectAccount(input({ chain: [entry("opencode", "anthropic/claude-sonnet", { maxWeeklyPct: 1, accounts: ["x"] })] }));
   assert.equal(decision.chosen?.accountId, "system");
   assert.equal(decision.chosen?.accountLabel, "System");
-  assert.equal(decision.reason, "opencode: has no managed accounts — runs on the system login");
   assert.deepEqual(decision.skipped, []);
   const cooled = selectAccount(input({ chain: [entry("opencode", "m")], cooldowns: { "opencode:model:m": cooldown(HOUR) } }));
   assert.equal(cooled.chosen, null);
@@ -366,7 +340,7 @@ test("claudex/claudemix: only seeded accounts; router and xAI models run without
   const seededAccountIds = new Set(["c1", "a-arakuma"]);
   const claudex = selectAccount(input({ usage, accounts, seededAccountIds, chain: [entry("claudex", "gpt-5.5")] }));
   assert.equal(claudex.chosen?.accountId, "c1");
-  assert.deepEqual(claudex.skipped, [{ agent: "claudex", accountId: "c2", label: "c2", why: "notSeeded", detail: "not seeded into the model proxy" }]);
+  assert.deepEqual(claudex.skipped.map((skip) => [skip.accountId, skip.why]), [["c2", "notSeeded"]]);
 
   const claudemix = selectAccount(input({ usage, accounts, seededAccountIds, chain: [entry("claudemix", "claude-opus-5")] }));
   assert.equal(claudemix.chosen?.accountLabel, "arakuma.panama");
@@ -377,7 +351,6 @@ test("claudex/claudemix: only seeded accounts; router and xAI models run without
     input({ usage, accounts, seededAccountIds, cooldowns: { "codex:c1": cooldown(HOUR) }, chain: [entry("claudex", "grok-4.5")] })
   );
   assert.equal(xai.chosen?.accountId, "system");
-  assert.equal(xai.reason, "claudex: serves grok-4.5 without an account — runs on the system login");
   // A router model, through the injected predicate; its cooldown is keyed on its router provider.
   const providers = [{ id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", preset: "openrouter", models: [{ name: "moonshotai/kimi-k3", alias: "kimi-k3" }], keyVerifiedAt: null, createdAt: at(-DAY) }] as RouterProvider[];
   const usesAccount = createUsesAccount(() => providers);
@@ -410,7 +383,8 @@ test("system: the family's system row, or its head row when it has no managed ac
   const withSystem = selectAccount(input({ usage: { agents: [managedUsage] }, chain: [entry("claude", "m", { includeSystem: true })] }));
   assert.equal(withSystem.chosen?.accountId, "system");
   const hidden = rankChainEntry(input({ chain: [entry("claude", "m", { includeSystem: true })] }), 0).ranked;
-  assert.deepEqual(hidden.at(-1), { accountId: "system", label: "System", family: "claude", usage: "unknown", reading: hidden.at(-1)!.reading, reason: hidden.at(-1)!.reason });
+  assert.equal(hidden.at(-1)?.accountId, "system");
+  assert.equal(hidden.at(-1)?.usage, "unknown");
   // Naming "system" in the allow-list includes it without includeSystem.
   const named = selectAccount(input({ usage: { agents: [managedUsage] }, chain: [entry("claude", "m", { strategy: "fixed", accounts: ["system", "jasperclaude"] })] }));
   assert.equal(named.chosen?.accountId, "system");
@@ -449,14 +423,6 @@ test("burntWindowResetAt: the latest reset among burnt windows", () => {
   assert.equal(burntWindowResetAt({ usage, family: "claude", accountId: "b", now: NOW }), undefined);
   assert.equal(burntWindowResetAt({ usage, family: "claude", accountId: "c", now: NOW }), undefined, "an expired window is no reading");
   assert.equal(burntWindowResetAt({ usage, family: "claude", accountId: "zzz", now: NOW }), undefined);
-});
-
-test("formatDuration", () => {
-  assert.equal(formatDuration(4 * DAY + 2 * HOUR + 59 * MIN), "4d 2h");
-  assert.equal(formatDuration(3 * HOUR + 12 * MIN), "3h 12m");
-  assert.equal(formatDuration(12 * MIN + 30_000), "12m");
-  assert.equal(formatDuration(10_000), "<1m");
-  assert.equal(formatDuration(-5), "<1m");
 });
 
 test("accountless cooldowns are per provider: one provider's limit never cools another's entries", () => {

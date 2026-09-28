@@ -81,7 +81,7 @@ export const EMPTY_LOADED_PROMPTS: LoadedPrompts = { prompts: [], unlisted: new 
 // Turn claims
 // ---------------------------------------------------------------------------
 
-export interface PromptTurnClaim {
+interface PromptTurnClaim {
   turnId: string;
   /** 1-based, among the started turns. */
   ordinal: number;
@@ -94,7 +94,7 @@ export interface PromptTurnClaim {
  * that turn. First turn wins, as in the timeline's rewind numbering
  * (`rows.logic.ts` `buildRevertTurnCountByUserMessageId`).
  */
-export function promptTurnClaims(turns: readonly Turn[]): ReadonlyMap<string, PromptTurnClaim> {
+function promptTurnClaims(turns: readonly Turn[]): ReadonlyMap<string, PromptTurnClaim> {
   const claims = new Map<string, PromptTurnClaim>();
   startedTurns(turns).forEach((turn, index) => {
     if (turn.userMessageId !== undefined && !claims.has(turn.userMessageId)) {
@@ -125,7 +125,7 @@ export function turnOrdinalsOf(turns: readonly Turn[]): ReadonlyMap<string, numb
 // ---------------------------------------------------------------------------
 
 /** A user message of the PARENT conversation — never a subagent's (§7.2). */
-export function isParentUserMessage(item: ThreadItem): item is ThreadMessageItem {
+function isParentUserMessage(item: ThreadItem): item is ThreadMessageItem {
   return (
     item.kind === "message" &&
     item.role === "user" &&
@@ -151,7 +151,7 @@ function unlistedKindOf(message: ThreadMessageItem): UnlistedPromptKind {
 }
 
 /** The parent user messages of one list, in its order. */
-export function parentUserMessagesOf(items: readonly ThreadItem[]): ThreadMessageItem[] {
+function parentUserMessagesOf(items: readonly ThreadItem[]): ThreadMessageItem[] {
   const messages: ThreadMessageItem[] = [];
   for (const item of items) {
     if (isParentUserMessage(item)) messages.push(item);
@@ -160,7 +160,7 @@ export function parentUserMessagesOf(items: readonly ThreadItem[]): ThreadMessag
 }
 
 /** The loaded history's parent user messages — every page (oldest first), then the bridge — once each. */
-export interface HistoryUserMessages {
+interface HistoryUserMessages {
   messages: readonly ThreadMessageItem[];
   /** Message id → its place in {@link messages}. */
   at: ReadonlyMap<string, number>;
@@ -174,7 +174,7 @@ const EMPTY_HISTORY_MESSAGES: HistoryUserMessages = { messages: [], at: new Map(
  * with the newest copy — the timeline's own rule for rows a page shares with
  * the window.
  */
-export function historyUserMessages(
+function historyUserMessages(
   pages: readonly ThreadHistoryPage[],
   bridge: readonly ThreadItem[]
 ): HistoryUserMessages {
@@ -201,7 +201,7 @@ export function historyUserMessages(
  * message both hold stays at the history's (older) place with the window's
  * (newer) copy, and the rest follow in the window's order.
  */
-export function joinLoadedUserMessages(
+function joinLoadedUserMessages(
   history: HistoryUserMessages,
   windowMessages: readonly ThreadMessageItem[]
 ): ThreadMessageItem[] {
@@ -219,25 +219,8 @@ export function joinLoadedUserMessages(
   return [...(replaced ?? history.messages), ...after];
 }
 
-/**
- * The parent user messages the chat holds, oldest first, once each: the loaded
- * history pages (oldest first), then the bridge, then the window. A message
- * several of them hold is listed at its OLDEST place, with the newest copy —
- * the timeline's own rule for rows a page shares with the window.
- */
-export function loadedUserMessages(input: {
-  pages: readonly ThreadHistoryPage[];
-  bridge: readonly ThreadItem[];
-  entries: readonly ThreadItem[];
-}): ThreadMessageItem[] {
-  return joinLoadedUserMessages(
-    historyUserMessages(input.pages, input.bridge),
-    parentUserMessagesOf(input.entries)
-  );
-}
-
 /** One loaded message as a listed prompt, or null when it is not one the user can reuse. */
-export function loadedPrompt(
+function loadedPrompt(
   message: ThreadMessageItem,
   claims: ReadonlyMap<string, PromptTurnClaim>
 ): HistoryPrompt | null {
@@ -386,7 +369,7 @@ function sameList<T>(left: readonly T[], right: readonly T[]): boolean {
 const indexPromptCache = new WeakMap<ThreadPromptEntry, HistoryPrompt>();
 
 /** One index entry as a listed prompt. */
-export function indexPrompt(entry: ThreadPromptEntry): HistoryPrompt {
+function indexPrompt(entry: ThreadPromptEntry): HistoryPrompt {
   const cached = indexPromptCache.get(entry);
   if (cached !== undefined) return cached;
   const prompt: HistoryPrompt = {

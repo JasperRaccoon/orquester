@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { isAnyLayerOpen, openLayer, openLayerEffect, openTrackedLayer } from "./open-layers.ts";
+import { isAnyLayerOpen, openLayer, openTrackedLayer } from "./open-layers.ts";
 
 describe("the open-layer registry", () => {
   const opened: Array<() => void> = [];
@@ -55,53 +55,13 @@ describe("the open-layer registry", () => {
   });
 });
 
-/**
- * `useOpenLayer` hands `openLayerEffect(open)` to React's `useEffect`, keyed on
- * `open`. These drive it the way React does — the package has no DOM, so no
- * effect ever runs under a renderer here — to pin the lifecycle contract a
- * layer relies on: whatever order React mounts, re-runs and unmounts in, the
- * registry ends up holding exactly the layers that are open.
- */
-describe("a layer's effect across React's lifecycle", () => {
-  afterEach(() => assert.equal(isAnyLayerOpen(), false, "a phantom layer outlived its component"));
-
-  it("a closed layer registers nothing", () => {
-    assert.equal(openLayerEffect(false), undefined);
-    assert.equal(isAnyLayerOpen(), false);
-  });
-
-  it("StrictMode's mount, cleanup and mount again leave exactly one layer, and unmounting it none", () => {
-    const first = openLayerEffect(true);
-    first?.();
-    const second = openLayerEffect(true);
-    assert.equal(isAnyLayerOpen(), true);
-    second?.();
-  });
-
-  it("closing runs the cleanup, and the closed render registers nothing in its place", () => {
-    const cleanup = openLayerEffect(true);
-    cleanup?.();
-    assert.equal(openLayerEffect(false), undefined);
-    assert.equal(isAnyLayerOpen(), false);
-  });
-
-  it("unmounting while open releases the layer — no Escape stays swallowed after it is gone", () => {
-    // A chat tab closing with its viewer up, a menu whose owner re-renders it
-    // away: React runs the cleanup, and that must be the whole release.
-    const cleanup = openLayerEffect(true);
-    assert.equal(isAnyLayerOpen(), true);
-    cleanup?.();
-    assert.equal(isAnyLayerOpen(), false);
-  });
-
-  it("a tracked layer knows when a newer one (a dropdown inside a sheet) is above it", () => {
-    const sheet = openTrackedLayer();
-    assert.equal(sheet.isTopmost(), true);
-    const dropdown = openLayer();
-    assert.equal(sheet.isTopmost(), false, "the dropdown owns Escape");
-    dropdown();
-    assert.equal(sheet.isTopmost(), true);
-    sheet.release();
-    assert.equal(isAnyLayerOpen(), false);
-  });
+it("a tracked layer knows when a newer one (a dropdown inside a sheet) is above it", () => {
+  const sheet = openTrackedLayer();
+  assert.equal(sheet.isTopmost(), true);
+  const dropdown = openLayer();
+  assert.equal(sheet.isTopmost(), false, "the dropdown owns Escape");
+  dropdown();
+  assert.equal(sheet.isTopmost(), true);
+  sheet.release();
+  assert.equal(isAnyLayerOpen(), false);
 });

@@ -21,7 +21,7 @@
  * once disabled, and the editor says so.
  *
  * No React import; `useWorkflowEditor` (components) reads it through
- * `useSyncExternalStore`. Timers and the clock are injected for tests.
+ * `useSyncExternalStore`.
  */
 
 import { createStore, type StoreApi } from "zustand/vanilla";
@@ -44,38 +44,15 @@ import { isRecord, sanitizeWorkflowRecord } from "./sanitize";
 import { workflowsStore } from "./store";
 
 /** Autosave fires this long after the last change. */
-export const AUTOSAVE_DELAY_MS = 600;
+const AUTOSAVE_DELAY_MS = 600;
 /** Validation runs this long after the last change. */
-export const VALIDATE_DELAY_MS = 200;
+const VALIDATE_DELAY_MS = 200;
 
 export interface WorkflowEditorApi {
   getWorkflow(id: string, signal?: AbortSignal): Promise<GetWorkflowResponse>;
   replaceWorkflow(id: string, req: ReplaceWorkflowRequest): Promise<WorkflowWriteResponse>;
   patchWorkflow(id: string, req: PatchWorkflowRequest): Promise<WorkflowWriteResponse>;
 }
-
-export interface EditorTimers {
-  set(fn: () => void, ms: number): unknown;
-  clear(handle: unknown): void;
-  now(): number;
-}
-
-const REAL_TIMERS: EditorTimers = {
-  set: (fn, ms) => setTimeout(fn, ms),
-  clear: (handle) => clearTimeout(handle as ReturnType<typeof setTimeout>),
-  now: () => Date.now()
-};
-
-/** Where remote revisions come from — the workflows store by default. */
-export interface RemoteRevisions {
-  revisionOf(workflowId: string): number | undefined;
-  subscribe(listener: () => void): () => void;
-}
-
-const STORE_REVISIONS: RemoteRevisions = {
-  revisionOf: (id) => workflowsStore.getState().summaries.get(id)?.revision,
-  subscribe: (listener) => workflowsStore.subscribe(listener)
-};
 
 export type EditorSaveState = "saved" | "pending" | "saving" | "error" | "conflict";
 
@@ -147,7 +124,7 @@ function errorText(error: unknown, fallback: string): string {
 const isConflict = (error: unknown): boolean => errorCode(error) === "REVISION_CONFLICT" || errorStatus(error) === 409;
 
 /** The body of a `PUT`: the definition without the daemon's own fields. */
-export function replaceBody(workflow: Workflow): ReplaceWorkflowRequest["workflow"] {
+function replaceBody(workflow: Workflow): ReplaceWorkflowRequest["workflow"] {
   const { id: _id, revision: _revision, createdAt: _created, updatedAt: _updated, ...rest } = workflow;
   return rest;
 }
@@ -162,19 +139,12 @@ const defaultMintId = (): string =>
     ? crypto.randomUUID()
     : `id-${Date.now().toString(36)}-${(idCounter += 1)}`;
 
-export interface WorkflowEditorOptions {
-  timers?: EditorTimers;
-  remote?: RemoteRevisions | null;
-  mintId?: () => string;
-}
-
 export class WorkflowEditor {
   readonly store: StoreApi<WorkflowEditorState>;
-  readonly mintId: () => string;
-  private readonly timers: EditorTimers;
+  readonly mintId = defaultMintId;
   private readonly history = new SnapshotHistory<Workflow>();
-  private saveTimer: unknown = null;
-  private validateTimer: unknown = null;
+  private saveTimer: ReturnType<typeof setTimeout> | null = null;
+  private validateTimer: ReturnType<typeof setTimeout> | null = null;
   private saving: Promise<void> | null = null;
   private saveAgain = false;
   private validation: ValidationContext = {};
@@ -185,15 +155,11 @@ export class WorkflowEditor {
   private editSeq = 0;
   /** An enable/disable patch in flight: its answer decides the revision, like a save's. */
   private enabling: Promise<unknown> | null = null;
-  private readonly remote: RemoteRevisions | null;
 
   constructor(
     private api: WorkflowEditorApi,
-    readonly workflowId: string,
-    options: WorkflowEditorOptions = {}
+    readonly workflowId: string
   ) {
-    this.timers = options.timers ?? REAL_TIMERS;
-    this.mintId = options.mintId ?? defaultMintId;
     this.store = createStore<WorkflowEditorState>(() => ({
       workflowId,
       status: "loading",
@@ -210,14 +176,10 @@ export class WorkflowEditor {
       canUndo: false,
       canRedo: false
     }));
-    const remote = options.remote === undefined ? STORE_REVISIONS : options.remote;
-    this.remote = remote;
-    if (remote !== null) {
-      this.unsubscribeRemote = remote.subscribe(() => {
-        const revision = remote.revisionOf(workflowId);
-        if (revision !== undefined) this.onRemoteRevision(revision);
-      });
-    }
+    this.unsubscribeRemote = workflowsStore.subscribe(() => {
+      const revision = this.remoteRevision();
+      if (revision !== undefined) this.onRemoteRevision(revision);
+    });
   }
 
   get state(): WorkflowEditorState {
@@ -350,7 +312,7 @@ export class WorkflowEditor {
       if (options.select) this.select(options.select);
       return false;
     }
-    this.history.record(draft, options.coalesce ?? null, this.timers.now());
+    this.history.record(draft, options.coalesce ?? null, Date.now());
     this.editSeq += 1;
     this.set({
       draft: next,
@@ -371,7 +333,7 @@ export class WorkflowEditor {
     let refusal: string | null = null;
     this.change((draft) => {
       try {
-        const next = applyWorkflowPatch(draft, ops, { mintId: this.mintId, now: () => new Date(this.timers.now()) });
+        const next = applyWorkflowPatch(draft, ops, { mintId: this.mintId, now: () => new Date() });
         // The daemon stamps updatedAt; keep ours so an undo is a pure swap.
         return { ...next, updatedAt: draft.updatedAt };
       } catch (error) {
@@ -448,8 +410,8 @@ export class WorkflowEditor {
   }
 
   private scheduleValidate(): void {
-    if (this.validateTimer !== null) this.timers.clear(this.validateTimer);
-    this.validateTimer = this.timers.set(() => {
+    if (this.validateTimer !== null) clearTimeout(this.validateTimer);
+    this.validateTimer = setTimeout(() => {
       this.validateTimer = null;
       this.validateNow();
     }, VALIDATE_DELAY_MS);
@@ -474,7 +436,7 @@ export class WorkflowEditor {
     this.scheduleValidate();
     if (this.state.conflict !== null) return;
     this.cancelSave();
-    this.saveTimer = this.timers.set(() => {
+    this.saveTimer = setTimeout(() => {
       this.saveTimer = null;
       void this.flush();
     }, AUTOSAVE_DELAY_MS);
@@ -482,7 +444,7 @@ export class WorkflowEditor {
 
   private cancelSave(): void {
     if (this.saveTimer !== null) {
-      this.timers.clear(this.saveTimer);
+      clearTimeout(this.saveTimer);
       this.saveTimer = null;
     }
   }
@@ -511,7 +473,7 @@ export class WorkflowEditor {
   }
 
   private remoteRevision(): number | undefined {
-    return this.remote?.revisionOf(this.workflowId);
+    return workflowsStore.getState().summaries.get(this.workflowId)?.revision;
   }
 
   private async saveOnce(): Promise<void> {
@@ -638,7 +600,7 @@ export class WorkflowEditor {
     if (this.disposed) return;
     const pending = this.state.dirty && this.state.conflict === null;
     if (pending) void this.flush();
-    if (this.validateTimer !== null) this.timers.clear(this.validateTimer);
+    if (this.validateTimer !== null) clearTimeout(this.validateTimer);
     this.unsubscribeRemote?.();
     this.unsubscribeRemote = null;
     // Let an in-flight or just-started save finish; nothing else writes after this.
@@ -655,7 +617,7 @@ export class WorkflowEditor {
 // ---------------------------------------------------------------------------
 
 /** A released editor lingers this long, so a remount (StrictMode, a tab moving cells) keeps its draft. */
-export const EDITOR_RELEASE_GRACE_MS = 1_000;
+const EDITOR_RELEASE_GRACE_MS = 1_000;
 
 interface EditorEntry {
   editor: WorkflowEditor;
@@ -671,7 +633,7 @@ const editors = new Map<string, EditorEntry>();
  * The editor for `workflowId`, created (and loaded) on first use. Safe to call
  * while rendering; hold it with `retainWorkflowEditor` from an effect.
  */
-export function workflowEditorFor(api: WorkflowEditorApi, workflowId: string, options?: WorkflowEditorOptions): WorkflowEditor {
+export function workflowEditorFor(api: WorkflowEditorApi, workflowId: string): WorkflowEditor {
   installLifecycleFlush();
   const connectionKey = connectionKeyOf(api);
   let entry = editors.get(workflowId);
@@ -687,7 +649,7 @@ export function workflowEditorFor(api: WorkflowEditorApi, workflowId: string, op
     entry.editor.setApi(api);
     return entry.editor;
   }
-  const editor = new WorkflowEditor(api, workflowId, options);
+  const editor = new WorkflowEditor(api, workflowId);
   entry = { editor, connectionKey, refs: 0, disposeTimer: null };
   editors.set(workflowId, entry);
   void editor.load();
@@ -695,7 +657,7 @@ export function workflowEditorFor(api: WorkflowEditorApi, workflowId: string, op
 }
 
 /** A client's connection id when it has one (the app's `ApiClient`), else the client itself. */
-export function connectionKeyOf(api: WorkflowEditorApi): unknown {
+function connectionKeyOf(api: WorkflowEditorApi): unknown {
   const connection = (api as { connection?: unknown }).connection;
   if (isRecord(connection) && typeof connection.id === "string") return `connection:${connection.id}`;
   return api;
@@ -740,13 +702,4 @@ export function retainWorkflowEditor(editor: WorkflowEditor): () => void {
       entry.editor.dispose();
     }, EDITOR_RELEASE_GRACE_MS);
   };
-}
-
-/** Test seam. */
-export function resetWorkflowEditors(): void {
-  for (const entry of editors.values()) {
-    if (entry.disposeTimer) clearTimeout(entry.disposeTimer);
-    entry.editor.dispose();
-  }
-  editors.clear();
 }

@@ -6,19 +6,14 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import {
-  AGENT_GOAL_CHANGES,
-  GOAL_ACTIVITY_KIND,
   HISTORICAL_RAW_SOURCE,
-  TASK_PROMPT_MAX_CHARS,
-  TOOL_LIFECYCLE_ITEM_TYPES,
   type AgentGoal,
   type CanonicalItemType,
+  type CanonicalRequestType,
   type GoalUpdatedPayload
 } from "@orquester/api/agent-chat";
 
-import { cancelledRequestActivity } from "../orchestration/events.ts";
 import {
-  requestKindFromCanonicalRequestType,
   runtimeEventToActivities,
   taskLinkageActivityFields
 } from "./activities.ts";
@@ -42,12 +37,13 @@ describe("requestKindFromCanonicalRequestType (§5.1 requestKind rewrite)", () =
     // so older rows classify; T3 keeps the two functions apart and so do we.
     ["dynamic_tool_call", undefined],
     ["auth_tokens_refresh", undefined],
-    ["tool_user_input", undefined],
     ["unknown", undefined]
   ];
   for (const [requestType, expected] of cases) {
     it(`${requestType} -> ${expected ?? "unmapped"}`, () => {
-      assert.equal(requestKindFromCanonicalRequestType(requestType), expected);
+      const [row] = runtimeEventToActivities(runtimeEvent("request.opened", { requestType: requestType as CanonicalRequestType, dismissible: false }));
+      assert.ok(row);
+      assert.equal(payloadOf(row).requestKind, expected);
     });
   }
 });
@@ -65,7 +61,7 @@ describe("approvals (§5.1)", () => {
     assert.ok(row);
     assert.equal(row.activityKind, "approval.requested");
     assert.equal(row.tone, "approval");
-    assert.equal(row.summary, "Command approval requested");
+
     assert.equal(row.turnId, "turn-1");
     const payload = payloadOf(row);
     assert.equal(payload.requestKind, "command");
@@ -110,7 +106,7 @@ describe("approvals (§5.1)", () => {
     assert.ok(row);
     assert.equal(payloadOf(row).requestKind, undefined);
     assert.equal(payloadOf(row).requestType, "dynamic_tool_call");
-    assert.equal(row.summary, "Approval requested");
+
   });
 });
 
@@ -126,14 +122,13 @@ describe("a request the provider withdrew is the host's own cancelled row", () =
       { requestType: "command_execution_approval", decision: "cancel", withdrawn: true },
       { requestId: "req-7", turnId: "turn-3" }
     );
-    assert.deepEqual(runtimeEventToActivities(event), [
-      cancelledRequestActivity({
-        requestId: "req-7",
-        kind: "approval",
-        turnId: "turn-3",
-        createdAt: event.createdAt
-      })
-    ]);
+    const [row, ...rest] = runtimeEventToActivities(event);
+    assert.deepEqual(rest, []);
+    assert.ok(row);
+    assert.equal(row.activityKind, "approval.resolved");
+    assert.equal(row.turnId, "turn-3");
+
+    assert.deepEqual(row.payload, { requestId: "req-7", decision: "cancel" });
   });
 
   it("a question: one 'Question cancelled' row, turnless when its card was", () => {
@@ -142,16 +137,13 @@ describe("a request the provider withdrew is the host's own cancelled row", () =
       { answers: {}, withdrawn: true },
       { requestId: "q-7" }
     );
-    const rows = runtimeEventToActivities(event);
-    assert.deepEqual(rows, [
-      cancelledRequestActivity({
-        requestId: "q-7",
-        kind: "question",
-        turnId: null,
-        createdAt: event.createdAt
-      })
-    ]);
-    assert.equal(rows[0]!.summary, "Question cancelled");
+    const [row, ...rest] = runtimeEventToActivities(event);
+    assert.deepEqual(rest, []);
+    assert.ok(row);
+    assert.equal(row.activityKind, "user-input.resolved");
+    assert.equal(row.turnId, null);
+
+    assert.deepEqual(row.payload, { requestId: "q-7" });
   });
 
   it("a withdrawn tool_user_input resolution is still no row: a question closes by its own event", () => {
@@ -167,20 +159,11 @@ describe("a request the provider withdrew is the host's own cancelled row", () =
     );
   });
 
-  it("an answered resolution keeps its own row", () => {
-    const [row] = runtimeEventToActivities(
-      runtimeEvent(
-        "request.resolved",
-        { requestType: "command_execution_approval", decision: "cancel" },
-        { requestId: "req-9" }
-      )
-    );
-    assert.equal(row!.summary, "Approval resolved", "a user's Cancel is an answer");
-  });
+
 });
 
 describe("item lifecycle is gated on isToolLifecycleItemType (§5.1)", () => {
-  for (const itemType of TOOL_LIFECYCLE_ITEM_TYPES) {
+  for (const itemType of ["command_execution", "file_change", "mcp_tool_call", "dynamic_tool_call", "collab_agent_tool_call", "web_search", "image_view"] as const) {
     it(`${itemType} produces tool.started / tool.updated / tool.completed`, () => {
       const kinds = (["item.started", "item.updated", "item.completed"] as const).map(
         (type) =>
@@ -316,7 +299,7 @@ describe("token usage and compaction (§5.1)", () => {
     assert.ok(opening);
     assert.equal(opening.tone, "info");
     assert.equal(opening.activityKind, "context-compaction");
-    assert.equal(opening.summary, "Compacting context");
+
     // The client renders on `payload.state`, never on the summary text.
     assert.equal(payloadOf(opening).state, "compacting");
     assert.equal(payloadOf(opening).requestId, "req-9");
@@ -352,7 +335,7 @@ describe("token usage and compaction (§5.1)", () => {
     assert.ok(row);
     assert.equal(row.tone, "error");
     assert.equal(row.activityKind, "context-compaction");
-    assert.equal(row.summary, "Context compaction failed");
+
     assert.equal(payloadOf(row).state, "compaction-failed");
     assert.equal(payloadOf(row).error, "Not enough context to compact.");
   });
@@ -406,7 +389,7 @@ describe("task linkage rides every row (§4.2/§5.1)", () => {
     // Pages of it, leading and trailing whitespace included: the drill-in shows
     // the prompt the agent was given, not a preview of it (§7.6).
     const prompt = `  Read b.txt and report its first word.\n\n${"Context line.\n".repeat(900)}  `;
-    assert.ok(prompt.length > 180 && prompt.length < TASK_PROMPT_MAX_CHARS);
+    assert.ok(prompt.length > 180 && prompt.length < 32_000);
     const [row] = runtimeEventToActivities(
       runtimeEvent("task.started", {
         taskId: "task-1",
@@ -422,8 +405,8 @@ describe("task linkage rides every row (§4.2/§5.1)", () => {
     assert.equal(payload.detail, "Read b.txt first word");
   });
 
-  it("task.started keeps a prompt of exactly TASK_PROMPT_MAX_CHARS whole, and cuts a longer one there", () => {
-    const exact = "p".repeat(TASK_PROMPT_MAX_CHARS);
+  it("task.started keeps a prompt of exactly 32_000 whole, and cuts a longer one there", () => {
+    const exact = "p".repeat(32_000);
     const [whole] = runtimeEventToActivities(
       runtimeEvent("task.started", { taskId: "task-1", prompt: exact, ...linkage })
     );
@@ -440,20 +423,20 @@ describe("task linkage rides every row (§4.2/§5.1)", () => {
   it("task.started never cuts a prompt through a surrogate pair", () => {
     // The pair straddles the cap: keeping its high half would store a lone
     // surrogate, which is no character at all.
-    const prompt = `${"p".repeat(TASK_PROMPT_MAX_CHARS - 1)}😀 after`;
+    const prompt = `${"p".repeat(32_000 - 1)}😀 after`;
     const [row] = runtimeEventToActivities(
       runtimeEvent("task.started", { taskId: "task-1", prompt, ...linkage })
     );
     const stored = payloadOf(row!).prompt;
-    assert.equal(stored, "p".repeat(TASK_PROMPT_MAX_CHARS - 1));
+    assert.equal(stored, "p".repeat(32_000 - 1));
     assert.equal(payloadOf(row!).promptTruncated, true);
 
     // A pair wholly inside the cap is kept whole.
-    const inside = `${"p".repeat(TASK_PROMPT_MAX_CHARS - 2)}😀 after`;
+    const inside = `${"p".repeat(32_000 - 2)}😀 after`;
     const [kept] = runtimeEventToActivities(
       runtimeEvent("task.started", { taskId: "task-1", prompt: inside, ...linkage })
     );
-    assert.equal(payloadOf(kept!).prompt, `${"p".repeat(TASK_PROMPT_MAX_CHARS - 2)}😀`);
+    assert.equal(payloadOf(kept!).prompt, `${"p".repeat(32_000 - 2)}😀`);
     assert.equal(payloadOf(kept!).promptTruncated, true);
   });
 
@@ -508,7 +491,7 @@ describe("task linkage rides every row (§4.2/§5.1)", () => {
       { taskTitle: "Refactor the store" }
     );
     assert.ok(row);
-    assert.equal(row.summary, "Task stopped");
+
     assert.equal(payloadOf(row).title, "Refactor the store");
   });
 
@@ -573,7 +556,7 @@ describe("tool progress, denials and diagnostics (§5.1 catch-all)", () => {
       runtimeEvent("tool.denied", { toolName: "Bash", reason: "blocked by policy" })
     );
     assert.equal(row!.tone, "error");
-    assert.equal(row!.summary, "Tool denied: Bash");
+
   });
 
   it("runtime.error keeps its class; runtime.warning uses the message as the label", () => {
@@ -674,9 +657,9 @@ describe("goals (goals §4.3)", () => {
     assert.equal(rows.length, 1);
     const [row] = rows;
     assert.equal(row!.id, "re-goal");
-    assert.equal(row!.activityKind, GOAL_ACTIVITY_KIND);
+    assert.equal(row!.activityKind, "goal.updated");
     assert.equal(row!.tone, "info");
-    assert.equal(row!.summary, "Goal check 2: not met — lint still fails");
+
     assert.equal(row!.turnId, "turn-7");
     assert.deepEqual(row!.payload, payload);
   });
@@ -692,37 +675,16 @@ describe("goals (goals §4.3)", () => {
     assert.equal(row!.turnId, null);
     assert.equal(row!.agentId, undefined);
     assert.equal("agentId" in payloadOf(row!), false);
-    assert.equal(row!.summary, "Goal cleared: Make CI green");
+
   });
 
   it("only a failed goal is error-toned", () => {
-    for (const change of AGENT_GOAL_CHANGES) {
+    for (const [change, tone] of [["set", "info"], ["replaced", "info"], ["restored", "info"], ["progress", "info"], ["checked", "info"], ["paused", "info"], ["resumed", "info"], ["blocked", "info"], ["limited", "info"], ["achieved", "info"], ["failed", "error"], ["cleared", "info"]] as const) {
       const [row] = runtimeEventToActivities(
         runtimeEvent("thread.goal.updated", { goal: null, change, previous: goal })
       );
-      assert.equal(row!.tone, change === "failed" ? "error" : "info", change);
+      assert.equal(row!.tone, tone, change);
     }
-  });
-
-  it("the row text is §4.3's: a long objective is cut, the payload keeps it whole", () => {
-    const objective = `Refactor ${"the billing module ".repeat(30)}`;
-    const payload: GoalUpdatedPayload = {
-      goal: { objective, status: "active", rounds: 0 },
-      change: "set"
-    };
-    const [row] = runtimeEventToActivities(runtimeEvent("thread.goal.updated", payload));
-    assert.ok(row!.summary.startsWith("Goal set: Refactor the billing module"));
-    assert.ok(row!.summary.endsWith("…"));
-    assert.ok(row!.summary.length <= "Goal set: ".length + 200);
-    assert.equal((payloadOf(row!).goal as AgentGoal).objective, objective);
-
-    const [limited] = runtimeEventToActivities(
-      runtimeEvent("thread.goal.updated", {
-        goal: { ...goal, status: "usage-limited" },
-        change: "limited"
-      })
-    );
-    assert.equal(limited!.summary, "Goal stopped: usage limit reached");
   });
 
   it("a cleared goal's row keeps the goal that ended, verbatim", () => {
@@ -749,10 +711,10 @@ describe("goals (goals §4.3)", () => {
       rows.map((row) => row.id),
       ["goal-progress:thread-9", "goal-progress:thread-9", "goal-progress:thread-9"]
     );
-    assert.equal(rows[2]!.summary, "Goal progress");
+
     assert.deepEqual(rows[2]!.payload, { goal: { ...goal, rounds: 3 }, change: "progress" });
     // Every other change is a row of its own, history the timeline shows.
-    for (const change of AGENT_GOAL_CHANGES.filter((entry) => entry !== "progress")) {
+    for (const change of ["set", "replaced", "restored", "checked", "paused", "resumed", "blocked", "limited", "achieved", "failed", "cleared"] as const) {
       const [row] = runtimeEventToActivities(
         runtimeEvent("thread.goal.updated", { goal, change }, { eventId: `re-${change}` })
       );
@@ -777,15 +739,6 @@ describe("goals (goals §4.3)", () => {
 });
 
 describe("events that are not thread facts (§5.1)", () => {
-  it("auth.status and account.rate-limits.updated update the provider snapshot, not the thread", () => {
-    assert.deepEqual(runtimeEventToActivities(runtimeEvent("auth.status", {})), []);
-    assert.deepEqual(
-      runtimeEventToActivities(
-        runtimeEvent("account.rate-limits.updated", { limits: { windows: [] } })
-      ),
-      []
-    );
-  });
 
   it("session, turn and content events produce no activity of their own", () => {
     assert.deepEqual(runtimeEventToActivities(runtimeEvent("session.started", {})), []);

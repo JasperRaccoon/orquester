@@ -48,7 +48,7 @@ export interface SavedPromptListActions {
   cancelRemove: () => void;
 }
 
-export interface SavedPromptsPanelViewProps {
+interface SavedPromptsPanelViewProps {
   variant: "docked" | "sheet";
   query: string;
   onQueryChange: (query: string) => void;

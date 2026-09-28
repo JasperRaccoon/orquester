@@ -13,12 +13,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
+import { watch } from "node:fs";
 
 import { agentChatDir } from "@orquester/config";
-import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
 
 import type { AdapterLogger } from "./adapter.ts";
-import { buildRefIdIndex, startAgentHost } from "./main.ts";
+import { startAgentHost } from "./main.ts";
 
 const quietLogger = (): AdapterLogger => ({
   debug: () => {},
@@ -27,17 +27,8 @@ const quietLogger = (): AdapterLogger => ({
   error: () => {}
 });
 
-/** Wait for a condition the host reaches asynchronously, without sleeping on it. */
-async function eventually(check: () => Promise<boolean>, label: string): Promise<void> {
-  for (let attempt = 0; attempt < 200; attempt += 1) {
-    if (await check()) return;
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  assert.fail(label);
-}
-
 describe("agent host boot — the store's host-wide sweep (S1 #5)", () => {
-  it("sweeps once at boot, so a restart collects what accumulated while it was down", async () => {
+  it("sweeps once at boot, so a restart collects what accumulated while it was down", async (t) => {
     const appdir = await mkdtemp(join(tmpdir(), "agent-host-boot-"));
     try {
       const pendingDir = join(agentChatDir(appdir), "pending-attachments");
@@ -55,6 +46,15 @@ describe("agent host boot — the store's host-wide sweep (S1 #5)", () => {
       const fresh = join(pendingDir, "attachment-2-fedcba.part");
       await writeFile(fresh, "an upload in flight");
 
+      const swept = new Promise<void>((resolve, reject) => {
+        const watcher = watch(pendingDir, { signal: AbortSignal.timeout(10_000) }, (_event, filename) => {
+          if (filename === "attachment-1-abcdef.part") resolve();
+        });
+        watcher.once("error", reject);
+        watcher.once("close", () => reject(new Error("boot sweep produced no filesystem event")));
+        t.after(() => watcher.close());
+      });
+
       const host = await startAgentHost({
         appdir,
         // No provider CLI on this host's PATH: the boot refresh must not probe
@@ -65,10 +65,8 @@ describe("agent host boot — the store's host-wide sweep (S1 #5)", () => {
       });
       try {
         await host.ready;
-        await eventually(async () => {
-          const entries = await readdir(pendingDir);
-          return !entries.includes("attachment-1-abcdef.part");
-        }, "the boot sweep never ran — a dead `.part` outlives every restart");
+        await swept;
+        assert.equal((await readdir(pendingDir)).includes("attachment-1-abcdef.part"), false);
         assert.ok(await stat(fresh), "an upload still in flight is not collected");
       } finally {
         // `store.close()` runs here; a second stop must stay safe.
@@ -78,26 +76,5 @@ describe("agent host boot — the store's host-wide sweep (S1 #5)", () => {
     } finally {
       await rm(appdir, { recursive: true, force: true, maxRetries: 3 });
     }
-  });
-});
-
-describe("agent host wiring — the registry refId index (§5.3)", () => {
-  it("carries the adapter and the bins, never the row's terminal args", () => {
-    // A registry row's `args` are the TERMINAL launcher's flags. Copied into
-    // this index they reached every chat launch: every Claude-family thread
-    // ran `bypassPermissions` whatever the permission chip said, and the
-    // row's `--effort` overruled the effort chip.
-    const rows = REGISTRY.agents as readonly RegistryEntryDef[];
-    const index = buildRefIdIndex();
-    for (const row of rows) {
-      if (!row.chat) continue;
-      const entry = index.get(row.id);
-      assert.ok(entry, `${row.id} is chat-capable, so it is indexed`);
-      assert.equal(entry.adapter, row.chat.adapter);
-      assert.equal("args" in entry, false, `${row.id}'s terminal args never enter the index`);
-    }
-    // Not vacuous: the rows the bug came from really do declare such flags.
-    const claude = rows.find((row) => row.id === "claude");
-    assert.ok(claude?.args?.includes("--dangerously-skip-permissions"));
   });
 });

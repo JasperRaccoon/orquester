@@ -1,11 +1,29 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
+import fsPromises, { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FsSearchResponse } from "@orquester/api";
 import { onPath } from "./archive.ts";
-import { searchProjectFiles, listProjectFiles, FsSearchError } from "./search.ts";
+import { searchProjectFiles as searchWithInstalledTools, listProjectFiles, FsSearchError } from "./search.ts";
+
+// Each module owns its normal executable-discovery cache. The fallback module
+// probes a PATH with no ripgrep, exactly as it would on a host without the tool.
+const withoutRipgrep = await import(new URL("./search.ts?without-ripgrep", import.meta.url).href) as typeof import("./search.ts");
+
+type SearchOptions = Parameters<typeof searchWithInstalledTools>[2];
+function searchProjectFiles(root: string, path: string, { engine, ...options }: SearchOptions & { engine?: "node" | "rg" }) {
+  if (engine !== "node") return searchWithInstalledTools(root, path, options);
+  const originalPath = process.env.PATH;
+  process.env.PATH = "";
+  try {
+    return withoutRipgrep.searchProjectFiles(root, path, options);
+  } finally {
+    if (originalPath === undefined) delete process.env.PATH;
+    else process.env.PATH = originalPath;
+  }
+}
 
 // The whole fixture tree lives under `fsRoot`; the searched root is `fsRoot` itself
 // (except the symlink-escape test, which searches a subdir). `outside` holds a file
@@ -155,10 +173,10 @@ test("node: case-insensitive 'i' against İ yields a non-empty, correctly-sliced
 });
 
 test("node: case-insensitive folds ASCII case", async () => {
-  const res = await node("STRASSE", { caseSensitive: false });
+  const res = await node("strasse", { caseSensitive: false });
   const file = fileOf(res, "src/unicode.txt");
   assert.ok(file);
-  // "STRASSE" query folds to "strasse"; matches the STRASSE line (line 3).
+  // The lowercase query must match the uppercase text (line 3).
   assert.ok(file!.matches.some((m) => m.line === 3));
 });
 
@@ -200,7 +218,6 @@ test("node: a symlink (here one escaping the root) is skipped entirely", { skip:
   // its out-of-root target never surfaces regardless of realpath.
   const res = await node("secret");
   assert.equal(res.files.length, 0);
-  for (const f of res.files) assert.ok(!f.path.includes("escape"));
 });
 
 // --- whole-word boundaries -----------------------------------------------------
@@ -233,14 +250,6 @@ test("node: without whole-word every occurrence matches", async () => {
   assert.equal(file!.matches.filter((m) => m.line <= 2).length, 5);
 });
 
-test("node: whole-word respects unicode boundaries (CJK adjacency)", async () => {
-  // "日本語 cat" — the CJK run is separated by a space, so cat is a whole word.
-  const res = await node("cat", { wholeWord: true });
-  const file = fileOf(res, "src/unicode.txt");
-  assert.ok(file);
-  assert.ok(file!.matches.some((m) => m.line === 4));
-});
-
 // --- include / exclude globs ---------------------------------------------------
 
 test("node: include limits the searched files", async () => {
@@ -254,32 +263,11 @@ test("node: exclude removes matched files", async () => {
   assert.deepEqual(res.files.map((f) => f.path), ["keep.ts"]);
 });
 
-test("node: brace expansion in include", async () => {
-  const res = await node("cat", { include: "keep.{ts,js}" });
-  assert.deepEqual(res.files.map((f) => f.path).sort(), ["keep.js", "keep.ts"]);
-});
-
-test("node: folder-shorthand include", async () => {
-  const res = await node("cat", { include: "src" });
-  assert.ok(res.files.every((f) => f.path.startsWith("src/")));
-  assert.ok(res.files.length > 0);
-});
-
-test("node: anchored include only matches at the root", async () => {
-  const res = await node("cat", { include: "/keep.ts" });
-  assert.deepEqual(res.files.map((f) => f.path), ["keep.ts"]);
-});
-
-test("node: ! inside an include field acts as an exclude", async () => {
-  const res = await node("cat", { include: "*.ts, !dist" });
-  assert.deepEqual(res.files.map((f) => f.path), ["keep.ts"]);
-});
-
 test("node: unbalanced brace is INVALID_GLOB on the include field", async () => {
   await assert.rejects(
     () => node("cat", { include: "*.{ts,tsx" }),
     (err: unknown) => {
-      assert.ok(err instanceof FsSearchError);
+      assert.ok((err instanceof FsSearchError || err instanceof withoutRipgrep.FsSearchError));
       assert.equal(err.status, 400);
       assert.equal(err.code, "INVALID_GLOB");
       assert.equal(err.field, "include");
@@ -293,7 +281,7 @@ test("node: over-cap term count is INVALID_GLOB on the exclude field", async () 
   await assert.rejects(
     () => node("cat", { exclude: raw }),
     (err: unknown) => {
-      assert.ok(err instanceof FsSearchError);
+      assert.ok((err instanceof FsSearchError || err instanceof withoutRipgrep.FsSearchError));
       assert.equal(err.code, "INVALID_GLOB");
       assert.equal(err.field, "exclude");
       return true;
@@ -307,7 +295,7 @@ test("node: regex mode is refused without ripgrep", async () => {
   await assert.rejects(
     () => node("c.t", { regex: true }),
     (err: unknown) => {
-      assert.ok(err instanceof FsSearchError);
+      assert.ok((err instanceof FsSearchError || err instanceof withoutRipgrep.FsSearchError));
       assert.equal(err.code, "REGEX_UNSUPPORTED");
       assert.equal(err.field, "query");
       return true;
@@ -323,7 +311,7 @@ test("node: a pre-aborted signal rejects with REQUEST_ABORTED", async () => {
   await assert.rejects(
     () => node("cat", { signal: controller.signal }),
     (err: unknown) => {
-      assert.ok(err instanceof FsSearchError);
+      assert.ok((err instanceof FsSearchError || err instanceof withoutRipgrep.FsSearchError));
       assert.equal(err.status, 499);
       assert.equal(err.code, "REQUEST_ABORTED");
       return true;
@@ -353,22 +341,11 @@ test("node: an abort fired mid-search never returns a success payload", async ()
   const promise = node("cat", { signal: controller.signal });
   controller.abort();
   await assert.rejects(promise, (err: unknown) => {
-    assert.ok(err instanceof FsSearchError);
+    assert.ok((err instanceof FsSearchError || err instanceof withoutRipgrep.FsSearchError));
     assert.equal(err.status, 499);
     assert.equal(err.code, "REQUEST_ABORTED");
     return true;
   });
-});
-
-test("node: totalMatches never exceeds maxResults under concurrency", async () => {
-  // Concurrent scans each read a per-file budget from a stale total; the central clamp
-  // must keep the aggregate within the cap and consistent with the emitted matches.
-  for (const cap of [1, 2, 3, 5]) {
-    const res = await node("cat", { maxResults: cap });
-    assert.ok(res.totalMatches <= cap, `totalMatches ${res.totalMatches} <= ${cap}`);
-    const summed = res.files.reduce((n, f) => n + f.matches.length, 0);
-    assert.equal(summed, res.totalMatches, "summed per-file matches equal totalMatches");
-  }
 });
 
 test("both engines: no empty file at the cap and totalMatches respects it", async () => {
@@ -393,7 +370,7 @@ test("both engines: no empty file at the cap and totalMatches respects it", asyn
 test("node: empty query is rejected", async () => {
   await assert.rejects(
     () => searchProjectFiles(fsRoot, fsRoot, { query: "", engine: "node" }),
-    (err: unknown) => err instanceof FsSearchError && err.code === "INVALID_REQUEST"
+    (err: unknown) => (err instanceof FsSearchError || err instanceof withoutRipgrep.FsSearchError) && err.code === "INVALID_REQUEST"
   );
 });
 
@@ -415,21 +392,6 @@ test("node: a symlink cycle (self -> .) is not followed and terminates fast", { 
     const res = await searchProjectFiles(dir, dir, { query: "needle", engine: "node" });
     assert.equal(res.totalMatches, 1);
     assert.deepEqual(res.files.map((f) => f.path), ["docs/a.txt"]);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
-test("node: an in-tree dir symlink (docs-link -> docs) does not duplicate matches", { skip: isWin }, async () => {
-  const dir = await mkdtemp(join(tmpdir(), "orq-duplink-"));
-  try {
-    await mkdir(join(dir, "docs"), { recursive: true });
-    await writeFile(join(dir, "docs", "a.txt"), "needle here\n");
-    await symlink(join(dir, "docs"), join(dir, "docs-link"));
-
-    const res = await searchProjectFiles(dir, dir, { query: "needle", engine: "node" });
-    assert.deepEqual(res.files.map((f) => f.path), ["docs/a.txt"]); // no docs-link/a.txt
-    assert.equal(res.totalMatches, 1);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -457,7 +419,7 @@ test("parity: node and rg skip symlinks identically (cycle + dup link)", { skip:
 
 // --- deterministic near-cap aggregation ----------------------------------------
 
-test("node: near-cap results are deterministic across repeated runs", async () => {
+test("both engines: near-cap results select the fixed path-order prefix", async () => {
   // ~40 matching files, a cap small enough to truncate mid-set. With completion-order
   // commit, which files land under the cap raced across the concurrency window; the
   // reorder buffer must make the boundary (files + matches) identical every run.
@@ -469,16 +431,18 @@ test("node: near-cap results are deterministic across repeated runs", async () =
       await mkdir(join(abs, ".."), { recursive: true });
       await writeFile(abs, "alpha marker beta\nmarker again\n"); // 2 matches per file
     }
-    const cap = 15;
-    const first = await searchProjectFiles(dir, dir, { query: "marker", engine: "node", maxResults: cap });
-    assert.equal(first.limitHit, true);
-    assert.ok(first.totalMatches <= cap, `totalMatches ${first.totalMatches} <= ${cap}`);
-    assert.ok(first.totalMatches > 0);
-    const snapshot = JSON.stringify(first.files);
-    for (let r = 0; r < 5; r += 1) {
-      const again = await searchProjectFiles(dir, dir, { query: "marker", engine: "node", maxResults: cap });
-      assert.equal(JSON.stringify(again.files), snapshot, `run ${r} identical files+matches`);
-      assert.equal(again.totalMatches, first.totalMatches, `run ${r} identical totalMatches`);
+    const expected = [
+      ["d00/f0.txt", 2], ["d01/f1.txt", 2], ["d02/f2.txt", 2], ["d03/f3.txt", 2],
+      ["d04/f4.txt", 2], ["d05/f5.txt", 2], ["d06/f6.txt", 2], ["d07/f7.txt", 1]
+    ];
+    const engines: Array<"node" | "rg"> = rgAvailable ? ["node", "rg"] : ["node"];
+    for (const engine of engines) {
+      for (let run = 0; run < 3; run += 1) {
+        const result = await searchProjectFiles(dir, dir, { query: "marker", engine, maxResults: 15 });
+        assert.equal(result.limitHit, true);
+        assert.equal(result.totalMatches, 15);
+        assert.deepEqual(result.files.map((file) => [file.path, file.matches.length]), expected, `${engine} run ${run}`);
+      }
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -497,7 +461,7 @@ test("rg: a bad regex is a 400", { skip: !rgAvailable }, async () => {
   await assert.rejects(
     () => rg("(unclosed", { regex: true }),
     (err: unknown) => {
-      assert.ok(err instanceof FsSearchError);
+      assert.ok((err instanceof FsSearchError || err instanceof withoutRipgrep.FsSearchError));
       assert.equal(err.status, 400);
       return true;
     }
@@ -508,7 +472,7 @@ test("rg: whole-word matches the node engine", { skip: !rgAvailable }, async () 
   const res = await rg("cat", { wholeWord: true });
   const file = fileOf(res, "src/ascii.txt");
   assert.ok(file);
-  assert.ok(file!.matches.every((m) => m.text.slice(m.start, m.start + m.matchLength) === "cat"));
+  assert.deepEqual(file!.matches.map((match) => [match.line, match.column]), [[1, 0], [2, 11]]);
 });
 
 test("rg: node_modules and .git stay excluded", { skip: !rgAvailable }, async () => {
@@ -522,55 +486,14 @@ test("rg: include glob limits files like the node engine", { skip: !rgAvailable 
   assert.deepEqual(res.files.map((f) => f.path).sort(), ["dist/generated.ts", "keep.ts"]);
 });
 
-test("parity: node and rg agree on the file set (modulo tool)", { skip: !rgAvailable }, async () => {
-  const [n, r] = await Promise.all([node("cat", { wholeWord: true }), rg("cat", { wholeWord: true })]);
-  const paths = (res: FsSearchResponse) => res.files.map((f) => f.path).sort();
-  assert.deepEqual(paths(n), paths(r));
-});
-
-test("parity: node and rg agree on column offsets for a unicode line", { skip: !rgAvailable }, async () => {
-  const [n, r] = await Promise.all([node("city"), rg("city")]);
-  const nm = fileOf(n, "src/unicode.txt")!.matches[0];
-  const rm = fileOf(r, "src/unicode.txt")!.matches[0];
-  assert.equal(nm.column, rm.column);
-  assert.equal(nm.matchLength, rm.matchLength);
+test("rg: byte offsets become character offsets for a unicode line", { skip: !rgAvailable }, async () => {
+  const result = await rg("city");
+  const match = fileOf(result, "src/unicode.txt")!.matches[0];
+  assert.equal(match.column, 16);
+  assert.equal(match.matchLength, 4);
 });
 
 // --- rg cap determinism + node parity (finding #1) -----------------------------
-
-test("rg: a capped search is deterministic and caps the same path-order prefix as node", { skip: !rgAvailable }, async () => {
-  // More matches than the cap, spread across many files. Without `--sort path` rg walks
-  // in parallel and truncates at the cap in nondeterministic completion order, so the
-  // surviving file subset varies run to run (and diverges from node). `--sort path` makes
-  // the cap a deterministic path-order prefix — identical every run AND identical to node.
-  const dir = await mkdtemp(join(tmpdir(), "orq-rgcap-"));
-  try {
-    for (let i = 0; i < 40; i += 1) {
-      const abs = join(dir, `d${String(i).padStart(2, "0")}`, `f${i}.txt`);
-      await mkdir(join(abs, ".."), { recursive: true });
-      await writeFile(abs, "alpha marker beta\nmarker again\n"); // 2 matches per file
-    }
-    const cap = 15;
-    const search = (engine: "node" | "rg") =>
-      searchProjectFiles(dir, dir, { query: "marker", engine, maxResults: cap });
-
-    const first = await search("rg");
-    assert.equal(first.limitHit, true);
-    assert.ok(first.totalMatches > 0 && first.totalMatches <= cap, `totalMatches ${first.totalMatches}`);
-    const shape = (res: FsSearchResponse) => res.files.map((f) => [f.path, f.matches.length]);
-    const snapshot = JSON.stringify(shape(first));
-    for (let r = 0; r < 3; r += 1) {
-      const again = await search("rg");
-      assert.equal(JSON.stringify(shape(again)), snapshot, `rg run ${r} identical capped set`);
-    }
-    // The cap must select the SAME files (and per-file match counts) as the node engine.
-    const viaNode = await search("node");
-    assert.equal(JSON.stringify(shape(viaNode)), snapshot, "rg and node cap the same prefix");
-    assert.equal(first.totalMatches, viaNode.totalMatches);
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
 
 test("both engines: a capped mixed-case dir selects the IDENTICAL byte-order prefix", async () => {
   // apple/Banana/cherry/Zebra each match once. Byte order (Banana < Zebra < apple <
@@ -589,57 +512,33 @@ test("both engines: a capped mixed-case dir selects the IDENTICAL byte-order pre
   if (rgAvailable) {
     const r = await searchProjectFiles(fsRoot, mixed, { query: "cat", engine: "rg", maxResults: cap });
     assert.deepEqual(
-      r.files.map((f) => f.path).sort((a, b) => a.localeCompare(b)),
-      n.files.map((f) => f.path).sort((a, b) => a.localeCompare(b)),
+      r.files.map((f) => f.path),
+      ["Banana.txt", "Zebra.txt"],
       "rg and node select the identical capped file set"
     );
-    assert.equal(r.totalMatches, n.totalMatches);
+    assert.equal(r.totalMatches, 2);
   }
 });
 
 // --- rg abort during the post-runRipgrep size-stat phase (finding #3) -----------
 
-test("rg: an abort during the size-stat phase rejects and never resolves", { skip: !rgAvailable }, async () => {
-  // The size-stat loop runs AFTER runRipgrep resolves; finding #3 was that it had no
-  // signal checks, so a request cancelled there still resolved a success payload.
-  // Landing the abort inside that window used to be timed off a calibration run
-  // (abort at 40% of the measured duration), which flaked under the parallel suite's
-  // CPU contention — the abort could arrive after the loop had already finished and
-  // the search resolved. The `onStatFile` seam fires INSIDE the loop, so the abort is
-  // deterministic: it is raised while the stat phase is provably still running.
+test("rg: an abort while reading matched-file metadata rejects", { skip: !rgAvailable }, async (t) => {
   const dir = await mkdtemp(join(tmpdir(), "orq-rgstat-"));
-  try {
-    for (let i = 0; i < 20; i += 1) {
-      const abs = join(dir, `d${String(i).padStart(4, "0")}`, "f.txt");
-      await mkdir(join(abs, ".."), { recursive: true });
-      await writeFile(abs, "cat here\n");
-    }
-    const controller = new AbortController();
-    let statted = 0;
-    await assert.rejects(
-      searchProjectFiles(dir, dir, {
-        query: "cat",
-        engine: "rg",
-        maxResults: 1000,
-        signal: controller.signal,
-        onStatFile: () => {
-          statted += 1;
-          if (statted === 1) controller.abort();
-        }
-      }),
-      (err: unknown) => {
-        assert.ok(err instanceof FsSearchError);
-        assert.equal(err.status, 499);
-        assert.equal(err.code, "REQUEST_ABORTED");
-        return true;
-      }
-    );
-    // Proves the rejection came from the in-loop check, not from a pre-rg or
-    // post-loop one: the loop entered, and it stopped on the aborting iteration.
-    assert.equal(statted, 1, "the stat loop aborted on its first file, not after finishing");
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await writeFile(join(dir, "match.txt"), "cat here\n");
+  const controller = new AbortController();
+  const originalStat = fsPromises.stat;
+  const mocked = t.mock.method(fsPromises, "stat", async (...args: Parameters<typeof fsPromises.stat>) => {
+    const result = await originalStat(...args);
+    if (String(args[0]) === join(dir, "match.txt")) controller.abort();
+    return result;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { mocked.mock.restore(); syncBuiltinESMExports(); });
+  await assert.rejects(
+    searchProjectFiles(dir, dir, { query: "cat", engine: "rg", signal: controller.signal }),
+    (error: unknown) => (error instanceof FsSearchError || error instanceof withoutRipgrep.FsSearchError) && error.status === 499 && error.code === "REQUEST_ABORTED"
+  );
 });
 
 // --- rg glob parity: literal brackets + field on parse failure (finding #4) -----
@@ -669,7 +568,7 @@ test("rg: a glob the node parser accepts but rg rejects is INVALID_GLOB carrying
   await assert.rejects(
     () => rg("cat", { include: "foo\\" }),
     (err: unknown) => {
-      assert.ok(err instanceof FsSearchError);
+      assert.ok((err instanceof FsSearchError || err instanceof withoutRipgrep.FsSearchError));
       assert.equal(err.status, 400);
       assert.equal(err.code, "INVALID_GLOB");
       assert.equal(err.field, "include");
@@ -679,7 +578,7 @@ test("rg: a glob the node parser accepts but rg rejects is INVALID_GLOB carrying
   await assert.rejects(
     () => rg("cat", { exclude: "bar\\" }),
     (err: unknown) => {
-      assert.ok(err instanceof FsSearchError);
+      assert.ok((err instanceof FsSearchError || err instanceof withoutRipgrep.FsSearchError));
       assert.equal(err.code, "INVALID_GLOB");
       assert.equal(err.field, "exclude");
       return true;

@@ -78,7 +78,7 @@ export function subscribeActiveChatTab(
  * own subscription in the same commit, so closing on any change opened it and
  * shut it at once. An owner nobody knows (`null`) closes on any change.
  */
-export function chatTabSwitchDismisses(
+function chatTabSwitchDismisses(
   ownSessionId: string | null,
   activeSessionId: string | null
 ): boolean {

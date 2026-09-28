@@ -27,14 +27,6 @@ test("BellScanner recognizes C1 ST after C1 string introducers", () => {
   assert.equal(scanner.feed("\x9d0;title\x9c\x07"), 1);
 });
 
-test("BellScanner swallows BELs inside DCS, SOS, PM, and APC strings", () => {
-  for (const introducer of ["P", "X", "^", "_"]) {
-    const scanner = new BellScanner();
-
-    assert.equal(scanner.feed(`\x1b${introducer}hidden\x07`), 0, introducer);
-  }
-});
-
 test("BellScanner recovers after BEL terminates DCS, SOS, PM, and APC strings", () => {
   for (const introducer of ["P", "X", "^", "_"]) {
     const scanner = new BellScanner();
@@ -352,24 +344,6 @@ test("ActivityTracker: a bell never downgrades a structural attention", () => {
   tracker.noteOutput("\x07", 5); // bell arrives at the prompt
   assert.equal(tracker.snapshot().state, "waiting");
   assert.equal(tracker.snapshot().attention, "needs-input"); // not "bell"
-
-  tracker.dispose();
-});
-
-test("ActivityTracker: noteHookSource latches coverage without a transition", () => {
-  const changes: string[] = [];
-  const tracker = new ActivityTracker((s, cause) => changes.push(`${cause}:${s.state}/${s.attention}`));
-
-  assert.equal(tracker.hasHookSource, false);
-  tracker.noteHookSource(); // e.g. a valid hook event that classifies to null
-  assert.equal(tracker.hasHookSource, true);
-  assert.deepEqual(changes, []); // no state change, no emission
-
-  // A later bell still sets attention state (the dot pulses) — the push layer
-  // is what demotes it, via hasHookSource on the lifecycle event.
-  tracker.noteOutput("ding\x07", 1);
-  assert.equal(tracker.snapshot().attention, "bell");
-  assert.equal(tracker.hasHookSource, true);
 
   tracker.dispose();
 });

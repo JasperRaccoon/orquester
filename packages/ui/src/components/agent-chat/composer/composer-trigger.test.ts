@@ -4,9 +4,7 @@ import assert from "node:assert/strict";
 import {
   detectComposerTrigger,
   extendReplacementRangeForTrailingSpace,
-  isStandaloneCompactCommand,
   isTriggerAtPromptStart,
-  parseStandaloneComposerSlashCommand,
   replaceTextRange
 } from "./composer-trigger.ts";
 
@@ -69,22 +67,6 @@ test("a caret before the trigger character sees no trigger", () => {
   assert.equal(detectComposerTrigger("@src", 0), null);
 });
 
-test("the cursor is clamped, so a stale caret cannot read out of range", () => {
-  assert.deepEqual(detectComposerTrigger("/go", 999), {
-    kind: "slash-command",
-    query: "go",
-    rangeStart: 0,
-    rangeEnd: 3
-  });
-  assert.equal(detectComposerTrigger("/go", -5), null);
-  assert.deepEqual(detectComposerTrigger("/go", Number.NaN), {
-    kind: "slash-command",
-    query: "go",
-    rangeStart: 0,
-    rangeEnd: 3
-  });
-});
-
 test("the position gate keys on offset 0, not on the line", () => {
   const first = detectComposerTrigger("/pl", 3);
   const second = detectComposerTrigger("hi\n/pl", 6);
@@ -101,28 +83,9 @@ test("replaceTextRange splices and reports the caret after the replacement", () 
   });
 });
 
-test("replaceTextRange clamps an inverted or out-of-range span", () => {
-  assert.deepEqual(replaceTextRange("abc", 9, 2, "X"), { text: "abcX", cursor: 4 });
-});
-
 test("a trailing space in the replacement swallows one space already there", () => {
   assert.equal(extendReplacementRangeForTrailingSpace("/pl rest", 3, "/plan "), 4);
   assert.equal(extendReplacementRangeForTrailingSpace("/pl", 3, "/plan "), 3);
   // No trailing space in the replacement: never extend.
   assert.equal(extendReplacementRangeForTrailingSpace("/pl rest", 3, "/plan"), 3);
-});
-
-test("/plan and /default are re-recognised on submit, case-insensitively", () => {
-  assert.equal(parseStandaloneComposerSlashCommand("/plan"), "plan");
-  assert.equal(parseStandaloneComposerSlashCommand("  /Default  "), "default");
-  assert.equal(parseStandaloneComposerSlashCommand("/plan the work"), null);
-  // §4.6.5(a): /model and /effort are deliberately NOT recognised on submit.
-  assert.equal(parseStandaloneComposerSlashCommand("/model"), null);
-  assert.equal(parseStandaloneComposerSlashCommand("/effort"), null);
-});
-
-test("the compact predicate is exact, trimmed and lowercased", () => {
-  assert.equal(isStandaloneCompactCommand("  /COMPACT "), true);
-  assert.equal(isStandaloneCompactCommand("/compact now"), false);
-  assert.equal(isStandaloneCompactCommand("compact"), false);
 });

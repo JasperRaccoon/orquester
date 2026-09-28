@@ -126,24 +126,12 @@ export function isHostGoalCommandText(text: string, hostParsesGoal: boolean): bo
 // Length
 // ---------------------------------------------------------------------------
 
-/**
- * Prompt-length validation measures the **larger of the literal draft and its
- * wire-expanded form**, so a short reference that expands on the wire cannot
- * smuggle the thread past §4.1's bound.
- *
- * Orquester's composer inserts canonical paths literally, so today `expand` is
- * the identity and the two lengths agree. The seam stays because the rule is
- * about the bound, not about today's tokeniser: anything that later expands on
- * the wire must be measured here rather than at the send site.
- *
- * *T3: `composerSubmission.ts:12-23`.*
- */
+/** The trimmed prompt must fit the shared provider-turn input bound (§4.1). */
 export function composerPromptLengthValidationMessage(
-  prompt: string,
-  expand: (text: string) => string = (text) => text
+  prompt: string
 ): string | null {
   const normalized = prompt.trim();
-  const inputLength = Math.max(normalized.length, expand(normalized).length);
+  const inputLength = normalized.length;
   const excess = inputLength - MAX_TURN_INPUT_CHARS;
   if (excess <= 0) return null;
   const noun = excess === 1 ? "character" : "characters";
@@ -161,10 +149,9 @@ export function composerPromptLengthValidationMessage(
 export function composerSubmissionValidationMessage(input: {
   prompt: string;
   submissionTarget: "provider-turn" | "pending-user-input";
-  expand?: (text: string) => string;
 }): string | null {
   return input.submissionTarget === "provider-turn"
-    ? composerPromptLengthValidationMessage(input.prompt, input.expand)
+    ? composerPromptLengthValidationMessage(input.prompt)
     : null;
 }
 

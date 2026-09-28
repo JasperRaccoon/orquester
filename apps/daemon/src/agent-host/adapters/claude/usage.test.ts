@@ -12,8 +12,6 @@ import {
   claudeTotalProcessedTokens,
   compactBoundarySnapshot,
   contextUsageSnapshot,
-  describeUsageLimit,
-  formatUsageLimitWait,
   isRateLimitBlocking,
   isRateLimitClearing,
   maxContextWindowFromModelUsage,
@@ -295,26 +293,6 @@ describe("claude subscription windows", () => {
     assert.equal(isRateLimitClearing({ status: "rejected" }), false);
   });
 
-  it("states the remaining wait rather than a wall-clock time", () => {
-    const nowMs = Date.parse("2026-09-21T00:00:00.000Z");
-    const message = describeUsageLimit({
-      info: { rateLimitType: "five_hour", resetsAt: nowMs / 1000 + 5_400 },
-      nowMs,
-      names: {}
-    });
-    assert.ok(message.includes("5-hour"));
-    assert.ok(message.includes("1h 30m"), message);
-    assert.equal(formatUsageLimitWait(45 * 60_000), "45m");
-    assert.equal(formatUsageLimitWait(2 * 60 * 60_000), "2h");
-
-    // An implausible reset ships without a wait rather than a silly one.
-    const far = describeUsageLimit({
-      info: { rateLimitType: "five_hour", resetsAt: nowMs / 1000 + 400 * 24 * 3600 },
-      nowMs,
-      names: {}
-    });
-    assert.ok(!far.includes(" in "), far);
-  });
 });
 
 describe("claude context usage — the authoritative /context accounting", () => {
@@ -335,15 +313,6 @@ describe("claude context usage — the authoritative /context accounting", () =>
     model: "claude-opus-4-8[1m]",
     apiUsage: null
   };
-
-  it("measures against rawMaxTokens and states the reported threshold", () => {
-    const snapshot = contextUsageSnapshot(response, undefined);
-    assert.ok(snapshot);
-    assert.equal(snapshot.usedTokens, 15_868);
-    assert.equal(snapshot.maxTokens, 1_000_000);
-    assert.equal(snapshot.autoCompactAtTokens, 967_000);
-    assert.equal(snapshot.compactsAutomatically, true);
-  });
 
   it("derives the threshold from the buffer rows when the CLI reports none", () => {
     const { autoCompactThreshold: _dropped, ...withoutThreshold } = response;

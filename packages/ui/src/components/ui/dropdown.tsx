@@ -3,10 +3,8 @@ import { createPortal } from "react-dom";
 import { useOpenLayer } from "../../hooks/use-open-layer";
 import { cn } from "../../lib/cn";
 import {
-  dropdownDismissSubscription,
   dropdownFocusTarget,
   dropdownHorizontalPosition,
-  dropdownPanelAttributes,
   dropdownPanelMaxWidth,
   type DropdownRole
 } from "./dropdown-logic";
@@ -141,7 +139,7 @@ export const Dropdown: React.FC<DropdownProps> = ({
   // trigger belongs to whatever just went off screen.
   const dismissQuietly = useCallback(() => setOpen(false), []);
   useEffect(
-    () => dropdownDismissSubscription(open, dismissOn, dismissQuietly),
+    () => open && dismissOn !== undefined ? dismissOn(dismissQuietly) : undefined,
     [open, dismissOn, dismissQuietly]
   );
 
@@ -301,7 +299,9 @@ export const Dropdown: React.FC<DropdownProps> = ({
         createPortal(
           <div
             ref={attachPanel}
-            {...dropdownPanelAttributes({ role, ariaLabel, focusOnOpen })}
+            role={role ?? "menu"}
+            aria-label={ariaLabel}
+            tabIndex={focusOnOpen ? -1 : undefined}
             {...hoverProps}
             style={{
               position: "fixed",

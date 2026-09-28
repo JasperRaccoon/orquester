@@ -37,11 +37,6 @@ import type { Clock } from "./runtime-seams.ts";
 export interface TurnWatchdogOptions {
   threadId: string;
   clock: Clock;
-  setTimer: (fn: () => void, ms: number) => unknown;
-  clearTimer: (handle: unknown) => void;
-  idleMs?: number;
-  activeToolMs?: number;
-  goalMs?: number;
   /**
    * Whether the thread's goal is active right now (goals §5.2). While it is,
    * the window is `max(goalMs, the normal window)`: a goal run's verifier
@@ -67,21 +62,18 @@ export interface TurnWatchdogOptions {
 export interface TurnWatchdog {
   /** Feed every runtime event for this thread, in order. */
   observe(event: RuntimeEvent): void;
-  /** The turn the watchdog is currently arming for, if any. */
-  readonly turnId: string | null;
-  readonly paused: boolean;
   stop(): void;
 }
 
 export function createTurnWatchdog(options: TurnWatchdogOptions): TurnWatchdog {
-  const idleMs = options.idleMs ?? TURN_LIVENESS_WINDOWS.idleMs;
-  const activeToolMs = options.activeToolMs ?? TURN_LIVENESS_WINDOWS.activeToolMs;
-  const goalMs = options.goalMs ?? TURN_LIVENESS_WINDOWS.goalMs;
+  const idleMs = TURN_LIVENESS_WINDOWS.idleMs;
+  const activeToolMs = TURN_LIVENESS_WINDOWS.activeToolMs;
+  const goalMs = TURN_LIVENESS_WINDOWS.goalMs;
 
   let turnId: string | null = null;
   let observedProgress = false;
   let lastActivityAt = 0;
-  let handle: unknown = null;
+  let handle: NodeJS.Timeout | null = null;
   const openTools = new Set<string>();
   const openRequests = new Set<string>();
 
@@ -95,7 +87,7 @@ export function createTurnWatchdog(options: TurnWatchdogOptions): TurnWatchdog {
 
   const disarm = (): void => {
     if (handle !== null) {
-      options.clearTimer(handle);
+      clearTimeout(handle);
       handle = null;
     }
   };
@@ -111,7 +103,7 @@ export function createTurnWatchdog(options: TurnWatchdogOptions): TurnWatchdog {
     // observes an event before ingestion folds it — so a goal that just ended
     // still reads active here. Every wake re-reads the window; a goal that is
     // still active simply re-arms.
-    handle = options.setTimer(expire, Math.min(Math.max(0, windowMs() - elapsed), normalWindowMs()));
+    handle = setTimeout(expire, Math.min(Math.max(0, windowMs() - elapsed), normalWindowMs())).unref();
   };
 
   const expire = (): void => {
@@ -135,7 +127,7 @@ export function createTurnWatchdog(options: TurnWatchdogOptions): TurnWatchdog {
       // A card the user still holds — an earlier turn's, which this turn's own
       // pause no longer knows — is never a stall: look again a normal window
       // later (no timer sleeps past one on the goal's word).
-      handle = options.setTimer(expire, normalWindowMs());
+      handle = setTimeout(expire, normalWindowMs()).unref();
       return;
     }
     const stalledTurnId = turnId;
@@ -215,14 +207,6 @@ export function createTurnWatchdog(options: TurnWatchdogOptions): TurnWatchdog {
         default:
           touch();
       }
-    },
-
-    get turnId(): string | null {
-      return turnId;
-    },
-
-    get paused(): boolean {
-      return paused();
     },
 
     stop(): void {

@@ -24,12 +24,7 @@ export interface WorkflowStateStoreOptions {
   /** `workflowStatePath(baseDir)` from @orquester/config. */
   path: string;
   logger?: WorkflowStateStoreLogger;
-  now?: () => Date;
-  /** Injectable for tests; the daemon's atomic writer by default. */
-  write?: (path: string, content: string) => Promise<void>;
 }
-
-const defaultWrite = (path: string, content: string): Promise<void> => writeFileAtomic(path, content, 0o600, false);
 
 export class WorkflowStateStore {
   private state: WorkflowStateFile = createDefaultWorkflowStateFile();
@@ -39,14 +34,10 @@ export class WorkflowStateStore {
   private queued: Promise<void> | null = null;
   private readonly path: string;
   private readonly logger: WorkflowStateStoreLogger;
-  private readonly now: () => Date;
-  private readonly write: (path: string, content: string) => Promise<void>;
 
   constructor(options: WorkflowStateStoreOptions) {
     this.path = options.path;
     this.logger = options.logger ?? console;
-    this.now = options.now ?? (() => new Date());
-    this.write = options.write ?? defaultWrite;
   }
 
   /** Reads the file. Never throws: missing → empty; unreadable or corrupt → empty, logged. */
@@ -66,7 +57,7 @@ export class WorkflowStateStore {
       this.state = parseWorkflowStateFile(JSON.parse(text));
     } catch (error) {
       this.state = createDefaultWorkflowStateFile();
-      const aside = `${this.path}.corrupt-${this.now().toISOString().replace(/[:.]/g, "-")}`;
+      const aside = `${this.path}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
       try {
         await rename(this.path, aside);
         this.logger.warn(`workflow-state.json is corrupt (${(error as Error).message}); moved it to ${aside} and started with an empty workflow state.`);
@@ -110,7 +101,7 @@ export class WorkflowStateStore {
         this.queued = null;
         const content = `${JSON.stringify(this.state, null, 2)}\n`;
         try {
-          await this.write(this.path, content);
+          await writeFileAtomic(this.path, content, 0o600, false);
         } catch (error) {
           this.logger.error(`workflow-state.json could not be written: ${(error as Error).message}`);
           throw error;

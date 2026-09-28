@@ -10,7 +10,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { AGENT_CHAT_COMMAND_NAMES, agentChatRoutes } from "./wire.ts";
+import { agentChatRoutes } from "./wire.ts";
 import { foldThread } from "./fold.ts";
 import type { DomainEvent } from "./domain-events.ts";
 import { created, ev, resetActivityIds, resetSeq } from "./test-helpers.ts";
@@ -23,7 +23,6 @@ function reset(): void {
 test("the account route is daemon-owned: a path, never a proxied command name", () => {
   assert.equal(agentChatRoutes.account("s1"), "/api/sessions/s1/account");
   assert.equal(agentChatRoutes.account("a/b"), "/api/sessions/a%2Fb/account");
-  assert.ok(!(AGENT_CHAT_COMMAND_NAMES as readonly string[]).includes("account"));
 });
 
 test("thread.meta-updated carries the new identity onto the head", () => {

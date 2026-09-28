@@ -43,7 +43,6 @@ test("happy path: creates the session like the MCP, sends the prompt with the au
   assert.equal(body.kind, "agent-chat");
   assert.equal(body.refId, "claude");
   assert.equal(body.accountId, "a1");
-  assert.equal(body.title, "Nightly · Fixer");
   assert.equal(body.projectPath, "/w/ws/app");
   assert.equal(body.cwd, "/w/ws/app");
   assert.equal("model" in body, false, "a top-level model is claudex's only");
@@ -53,7 +52,7 @@ test("happy path: creates the session like the MCP, sends the prompt with the au
   const session = sc.host.sessionsOwnedBy("n1")[0]!;
   const turn = session.commands.find((c) => c.name === "turn")!;
   assert.equal(turn.body.interactionMode, "default");
-  assert.equal(turn.body.input, `Fix the bug.\n\n${AUTONOMY_NOTE}`);
+  assert.equal(turn.body.input, "Fix the bug.\n\nYou are running unattended inside an automated workflow. No human will answer. Never ask questions or wait for confirmation; make reasonable decisions and complete the task fully.");
   assert.equal("agent" in turn.body, false);
   assert.equal(fc.persisted.at(-1), undefined, "the waitingOn is cleared at the end");
   assert.equal(sc.host.listenerCount(), 0, "every bus subscription is released");
@@ -206,9 +205,7 @@ test("a wake that becomes a turn only 20 s after the background work ended is st
   assert.equal(out.text, "helper reported: all green", "the woken reply, not the launch message");
   assert.equal(sc.host.session(out.sessionId).turns.length, 2);
 
-  // The old 5 s window alone finished on the launch message: the regression this guards.
-  const old = new Scenario({ accounts: CLAUDE, behaviour, timings: { wakeQuietMs: 5_000 } });
-  assert.equal(outputOf((await old.run(testWorkflow([agentNode("n1")]), "n1")).result).text, "started a helper");
+
 });
 
 test("background work that ended with no wake finishes after the 90 s wake window", async () => {

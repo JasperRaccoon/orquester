@@ -48,7 +48,7 @@ const FAILURE_REASONS: ReadonlySet<string> = new Set<RuntimeFailureReason>(["usa
  *
  * Read only when a row carries no `reason` at all.
  */
-export const LEGACY_FAILURE_PREFIXES: ReadonlyArray<{
+const LEGACY_FAILURE_PREFIXES: ReadonlyArray<{
   prefix: string;
   reason: RuntimeFailureReason;
 }> = [

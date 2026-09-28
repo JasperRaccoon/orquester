@@ -49,11 +49,10 @@ export function removeImagePlaceholder(text: string, n: number): string {
  * on unmount — a URL that outlives its chip pins the whole file in memory.
  */
 export function revokeImagePreviews(
-  attachments: readonly { previewUrl?: string }[],
-  revoke: (url: string) => void = (url) => URL.revokeObjectURL(url)
+  attachments: readonly { previewUrl?: string }[]
 ): void {
   for (const attachment of attachments) {
-    if (attachment.previewUrl) revoke(attachment.previewUrl);
+    if (attachment.previewUrl) URL.revokeObjectURL(attachment.previewUrl);
   }
 }
 

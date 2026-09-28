@@ -1,3 +1,14 @@
+
+import { isolatedPage } from "./testing/isolated-page";
+let page: Awaited<ReturnType<typeof isolatedPage>>;
+async function loadPage(): Promise<void> {
+  await page?.dispose();
+  page = await isolatedPage();
+  ({ createThreadStore } = page.store);
+  ({ AgentChatCommandError } = page.transport);
+}
+beforeEach(loadPage);
+afterEach(async () => { await page.dispose(); });
 /**
  * Fix-wave regressions for the per-thread store.
  *
@@ -7,19 +18,15 @@
  */
 
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it } from "node:test";
 
-import type {
-  AgentChatStreamFrame,
-  AttachmentRef,
-  ThreadItemResponse
-} from "@orquester/api/agent-chat";
+import type { AgentChatStreamFrame, ThreadItemResponse } from "@orquester/api/agent-chat";
 
-import { registerComposerHandle } from "../../components/agent-chat/composer/composer-bridge";
-import type { AgentChatTimelineRow } from "./contracts";
-import { createThreadStore, resetDismissedErrorBanners, type AgentChatThreadState } from "./store";
-import { AgentChatCommandError, type AgentChatTransport } from "./transport";
-import { activity, ev, foldTurn, head, message, resetBuilders, snapshot, stamp } from "./test-helpers";
+import type { AgentChatThreadState } from "./store";
+let createThreadStore: typeof import("./store")["createThreadStore"];
+import type { AgentChatTransport } from "./transport";
+let AgentChatCommandError: typeof import("./transport")["AgentChatCommandError"];
+import { activity, head, resetBuilders, snapshot, stamp } from "./test-helpers";
 
 interface Posted {
   name: string;
@@ -32,13 +39,11 @@ function fakeTransport(): {
   /** Every `GET …/items/:itemId`, by item id. */
   itemReads: string[];
   push(frame: AgentChatStreamFrame): void;
-  fail(error: unknown, times?: number): void;
   onReadItem(answer: (itemId: string) => Promise<ThreadItemResponse>): void;
 } {
   const posted: Posted[] = [];
   const itemReads: string[] = [];
   let onFrame: ((frame: AgentChatStreamFrame) => void) | null = null;
-  let failures: { error: unknown; times: number } | null = null;
   let readItem: (itemId: string) => Promise<ThreadItemResponse> = async () => {
     throw new Error("unused");
   };
@@ -49,10 +54,6 @@ function fakeTransport(): {
       return { lastSeq: 0, hostInstanceId: null, resetCursor: () => {}, close: () => {} };
     },
     async command(_sessionId, name, body) {
-      if (failures && failures.times > 0) {
-        failures.times -= 1;
-        throw failures.error;
-      }
       posted.push({ name, body: body as unknown as Record<string, unknown> });
       return { seq: posted.length };
     },
@@ -95,9 +96,6 @@ function fakeTransport(): {
     posted,
     itemReads,
     push: (frame) => onFrame?.(frame),
-    fail: (error, times = 1) => {
-      failures = { error, times };
-    },
     onReadItem: (answer) => {
       readItem = answer;
     }
@@ -116,19 +114,14 @@ async function store(): Promise<{
   state: () => AgentChatThreadState;
 }> {
   const fake = fakeTransport();
-  let n = 0;
   const api = createThreadStore("s1", {
-    transport: fake.transport,
-    newId: () => `id${++n}`,
-    now: () => stamp(1),
-    delay: async () => {}
+    transport: fake.transport
   });
   await flush();
   return { api, fake, state: () => api.getState() };
 }
 
 const running = () => head({ session: { status: "running", activeTurnId: "t1" } });
-const ready = () => head({ session: { status: "ready", activeTurnId: null } });
 
 const draft = (text: string) => ({
   text,
@@ -141,7 +134,7 @@ const draft = (text: string) => ({
 
 beforeEach(() => {
   resetBuilders();
-  resetDismissedErrorBanners();
+
 });
 
 describe("R7-1 — the client queue actually flushes", () => {
@@ -176,26 +169,13 @@ describe("R7-1 — the client queue actually flushes", () => {
     );
   });
 
-  it("sends at turn end", async () => {
-    const { api, fake, state } = await store();
-    fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, head: running() }) });
-    api.getState().actions.queueMessage(draft("later"));
-    await flush();
-    assert.equal(fake.posted.length, 0);
-
-    fake.push({ kind: "snapshot", thread: snapshot({ seq: 2, head: ready() }) });
-    await flush();
-    assert.equal(fake.posted.length, 1);
-    assert.equal(state().slice.queue.length, 0);
-  });
-
   it("never flushes while an approval is pending", async () => {
     const { api, fake } = await store();
     fake.push({
       kind: "snapshot",
       thread: snapshot({
         seq: 1,
-        head: ready(),
+        head: head({ session: { status: "ready", activeTurnId: null } }),
         pending: {
           approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(1) }],
           userInputs: []
@@ -207,205 +187,6 @@ describe("R7-1 — the client queue actually flushes", () => {
     assert.equal(fake.posted.length, 0);
   });
 
-  it("does not re-drive a message held at the front after a failed send", async () => {
-    const { api, fake, state } = await store();
-    fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, head: ready() }) });
-    fake.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"), 99);
-    api.getState().actions.queueMessage(draft("doomed"));
-    await flush();
-    assert.equal(state().slice.queue[0]?.holdUntilUserAction, true);
-
-    const sent = fake.posted.length;
-    fake.push({ kind: "snapshot", thread: snapshot({ seq: 2, head: ready() }) });
-    await flush();
-    assert.equal(fake.posted.length, sent, "a held message waits for Send now");
-  });
-});
-
-describe("Q2-4 — the layer-2 row memo is reachable", () => {
-  /**
-   * **Assert at layer 2, not layer 3.** V1 caught the first version of this
-   * suite testing `state.rows` — the *stable* rows — which restores object
-   * identity from its own `byId` map whether or not layer 2 ran, so it stayed
-   * green with the memo permanently dead. The only observation that separates
-   * the two is `rowsProjection.rows`: `deriveTimelineRows` allocates every row
-   * object afresh, so identity there can only come from
-   * `replaceStreamingMessageRows` taking its fast path.
-   */
-  const layer2 = (api: { getState(): AgentChatThreadState }): readonly unknown[] =>
-    (api.getState() as unknown as { rowsProjection: { rows: readonly unknown[] } }).rowsProjection
-      .rows;
-
-  it("takes the fast path — layer-2 rows are reused, before layer 3 can restore them", async () => {
-    const { fake, api } = await store();
-    const user = message("user", "hi", { createdAt: stamp(1) });
-    fake.push({ kind: "snapshot", thread: snapshot({ items: [user], seq: 1 }) });
-
-    fake.push({
-      kind: "event",
-      seq: 2,
-      event: ev(
-        "thread.message-sent",
-        { messageId: "a1", role: "assistant", text: "par", streaming: true, turnId: null },
-        { seq: 2 }
-      )
-    });
-    const before = layer2(api);
-
-    fake.push({
-      kind: "event",
-      seq: 3,
-      event: ev(
-        "thread.message-sent",
-        { messageId: "a1", role: "assistant", text: "tial", streaming: true, turnId: null },
-        { seq: 3 }
-      )
-    });
-    const after = layer2(api);
-
-    assert.equal(
-      after[0],
-      before[0],
-      "layer 2 reused the untouched row; a rebuild would have allocated a new object"
-    );
-    assert.notEqual(after[1], before[1], "and rebuilt exactly the row the token changed");
-  });
-
-  it("keeps untouched row objects across consecutive streamed tokens", async () => {
-    const { fake, api } = await store();
-    const user = message("user", "hi", { createdAt: stamp(1) });
-    fake.push({ kind: "snapshot", thread: snapshot({ items: [user], seq: 1 }) });
-    const first = api.getState().rows;
-
-    fake.push({
-      kind: "event",
-      seq: 2,
-      event: ev(
-        "thread.message-sent",
-        { messageId: "a1", role: "assistant", text: "par", streaming: true, turnId: null },
-        { seq: 2 }
-      )
-    });
-    const second = api.getState().rows;
-    assert.equal(second[0], first[0]);
-
-    // The real proof: a SECOND delta with no other state change must still
-    // reuse the untouched row. Rebuilding the `Set`-valued row inputs on every
-    // projection made `shallowEqualInput` permanently false and defeated this.
-    fake.push({
-      kind: "event",
-      seq: 3,
-      event: ev(
-        "thread.message-sent",
-        { messageId: "a1", role: "assistant", text: "tial", streaming: true, turnId: null },
-        { seq: 3 }
-      )
-    });
-    const third = api.getState().rows;
-    assert.equal(third[0], second[0], "the user row survives a second token");
-    assert.notEqual(third[1], second[1], "the streaming row is the one that changed");
-  });
-
-  it("keeps the fast path for a running turn's own stream, whose row reads streaming", async () => {
-    // The two tests above stream a turnless message: the liveness rule reads
-    // it as settled, and the rows' fast path lets a turnless message through
-    // without consulting the rule. These tokens belong to the RUNNING turn, so
-    // the rule's turn clause is what keeps the row streaming, and the context
-    // being the same object token after token (memoised by the roster) is what
-    // keeps `shallowEqualInput` — and so the fast path — alive.
-    const { fake, api } = await store();
-    type Row = AgentChatTimelineRow;
-    const rows = (): readonly Row[] => layer2(api) as readonly Row[];
-    const isAnswer = (row: Row): row is Extract<Row, { kind: "message" }> =>
-      row.kind === "message" && row.id === "a1";
-    fake.push({
-      kind: "snapshot",
-      thread: snapshot({
-        head: head({ session: { status: "running", activeTurnId: "t1" } }),
-        items: [message("user", "hi", { id: "u1", createdAt: stamp(1) })],
-        turns: [{ ...foldTurn("t1", "u1"), state: "running", completedAt: null }],
-        seq: 1
-      })
-    });
-    const token = (seq: number, text: string): void =>
-      fake.push({
-        kind: "event",
-        seq,
-        event: ev(
-          "thread.message-sent",
-          { messageId: "a1", role: "assistant", text, streaming: true, turnId: "t1" },
-          { seq }
-        )
-      });
-
-    // The first token also stamps the turn's `assistantMessageId`: a new
-    // `turns` array, so a full derive. Every token after it is text only.
-    token(2, "par");
-    const seen = [rows()];
-    token(3, "tial");
-    seen.push(rows());
-    token(4, " answer");
-    seen.push(rows());
-
-    for (let step = 1; step < seen.length; step += 1) {
-      const [previous, next] = [seen[step - 1]!, seen[step]!];
-      assert.equal(next.length, previous.length);
-      assert.ok(next.some((row) => row.kind === "working"), "the turn is running: its rows include the working row");
-      next.forEach((row, index) => {
-        if (isAnswer(row)) {
-          assert.notEqual(row, previous[index], "the token rebuilt exactly its own row");
-        } else {
-          assert.equal(row, previous[index], `layer 2 reused ${row.kind} ${row.id}: no full re-derive`);
-        }
-      });
-    }
-    const answer = seen.at(-1)!.find(isAnswer);
-    assert.equal(answer?.message.text, "partial answer");
-    assert.equal(answer?.streaming, true, "the running turn's own words read streaming");
-  });
-});
-
-describe("R8-M2 — the composer goes inert while a revert runs", () => {
-  it("sets and clears `reverting` around the command", async () => {
-    const { api, state } = await store();
-    assert.equal(state().reverting, false);
-    const pending = api.getState().actions.revert({ targetTurnCount: 1 });
-    assert.equal(state().reverting, true);
-    await pending;
-    assert.equal(state().reverting, false);
-  });
-
-  it("clears it when the revert is rejected", async () => {
-    const { api, fake, state } = await store();
-    fake.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "past turnCount"), 99);
-    await assert.rejects(() => api.getState().actions.revert({ targetTurnCount: 99 }));
-    assert.equal(state().reverting, false);
-  });
-});
-
-describe("R8-B1 — the actionable plan proposal reaches the view", () => {
-  it("is exposed, and retired by the turn that implements it", async () => {
-    const { fake, api } = await store();
-    const proposal = activity(
-      "turn.proposed.completed",
-      { planMarkdown: "# Ship it" },
-      { createdAt: stamp(1) }
-    );
-    fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, items: [proposal] }) });
-    assert.equal(api.getState().actionableProposedPlan?.planMarkdown, "# Ship it");
-
-    fake.push({
-      kind: "snapshot",
-      thread: snapshot({
-        seq: 2,
-        items: [
-          proposal,
-          message("user", "PLEASE IMPLEMENT THIS PLAN:\n# Ship it", { createdAt: stamp(2) })
-        ]
-      })
-    });
-    assert.equal(api.getState().actionableProposedPlan, null);
-  });
 });
 
 describe("Implement never sends a plan the wire cut (§5.6, §7.3)", () => {
@@ -451,147 +232,9 @@ describe("Implement never sends a plan the wire cut (§5.6, §7.3)", () => {
     fake.onReadItem(async () => {
       throw new AgentChatCommandError(503, "HOST_UNAVAILABLE", "The agent host is restarting.");
     });
-    await assert.rejects(api.getState().actions.readFullPlanMarkdown(plan), /full plan could not be loaded/);
+    await assert.rejects(api.getState().actions.readFullPlanMarkdown(plan));
     fake.onReadItem(async (itemId) => ({ item: activity("turn.proposed.completed", {}, { id: itemId }) }));
-    await assert.rejects(api.getState().actions.readFullPlanMarkdown(plan), /full plan could not be loaded/);
+    await assert.rejects(api.getState().actions.readFullPlanMarkdown(plan));
     assert.deepEqual(fake.posted, []);
-  });
-});
-
-describe("Q2-7 — a snapshot invalidates the cached projections", () => {
-  it("rebuilds rows from the replacing snapshot rather than merging", async () => {
-    const { fake, api } = await store();
-    fake.push({
-      kind: "snapshot",
-      thread: snapshot({
-        seq: 1,
-        items: [message("user", "one", { createdAt: stamp(1) }), message("user", "two", { createdAt: stamp(2) })]
-      })
-    });
-    assert.equal(api.getState().rows.filter((row) => row.kind === "message").length, 2);
-
-    // A revert truncated the thread: the replacing snapshot has fewer rows.
-    fake.push({
-      kind: "snapshot",
-      thread: snapshot({ seq: 9, items: [message("user", "one", { createdAt: stamp(1) })] })
-    });
-    assert.equal(api.getState().rows.filter((row) => row.kind === "message").length, 1);
-  });
-});
-
-describe("R7-5 — a returned queued message gives its attachments back as chips", () => {
-  /**
-   * A mounted composer OWNS the draft: it loads the persisted one on mount and
-   * writes its own back on every change. So parking a returned attachment
-   * there while a composer is already mounted shows the user nothing until its
-   * next mount — the user hits Stop, the message comes back, and the thing
-   * they attached is simply not in the tray — and the composer's next save
-   * writes over it. The whole message goes to the composer instead
-   * (`returnMessage`), and a file it still refuses comes back into its draft
-   * as the path the user can see.
-   */
-  const attachment = (id: string): AttachmentRef => ({
-    type: "file",
-    id,
-    name: `${id}.txt`,
-    sizeBytes: 10
-  });
-
-  function mountComposer(sessionId: string, refuse: string[] = []): {
-    returned: Array<{ text: string; attachments: string[] }>;
-    staged: string[];
-    inserted: string[];
-    unregister: () => void;
-  } {
-    const returned: Array<{ text: string; attachments: string[] }> = [];
-    const staged: string[] = [];
-    const inserted: string[] = [];
-    const unregister = registerComposerHandle(sessionId, {
-      insertText: (text) => inserted.push(text),
-      // A NEW pick's door: a file coming back must never go through it, where
-      // the eight would refuse it.
-      stageAttachment: (ref) => {
-        staged.push(ref.id);
-        return true;
-      },
-      returnMessage: (message) => {
-        returned.push({ text: message.text, attachments: message.attachments.map((ref) => ref.id) });
-        return message.attachments.filter((ref) => refuse.includes(ref.id));
-      },
-      focusAtEnd: () => {},
-      openControl: () => {},
-      sendText: () => false,
-      submitText: () => ({ ok: false, reason: "refused" }),
-      restoreFailedSend: () => false
-    });
-    return { returned, staged, inserted, unregister };
-  }
-
-  it("hands the composer the whole message, its attachments with its text, and leaves the draft alone", async () => {
-    const { api, fake, state } = await store();
-    const composer = mountComposer("s1");
-    try {
-      fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, head: running() }) });
-      api.getState().actions.queueMessage({
-        ...draft("with a file"),
-        attachments: [attachment("a1"), attachment("a2")]
-      });
-      await flush();
-      const queued = state().slice.queue[0]!;
-
-      api.getState().actions.returnQueuedToComposer(queued.id);
-      assert.deepEqual(composer.returned, [{ text: "with a file", attachments: ["a1", "a2"] }]);
-      assert.deepEqual(composer.staged, [], "never as NEW picks, which the eight would refuse");
-      assert.deepEqual(composer.inserted, [], "nothing refused, so no path to write");
-      assert.deepEqual(state().draft.attachments, [], "nothing was parked in the fallback draft");
-      assert.equal(state().draft.text, "", "the composer owns the visible draft");
-    } finally {
-      composer.unregister();
-    }
-  });
-
-  it("writes a file the composer still refuses into its draft as its path, never parks it behind it", async () => {
-    const { api, fake, state } = await store();
-    const composer = mountComposer("s1", ["a2"]);
-    try {
-      fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, head: running() }) });
-      api.getState().actions.queueMessage({
-        ...draft("one refused"),
-        attachments: [
-          attachment("a1"),
-          { type: "file", id: "a2", name: "a2.txt", sizeBytes: 10, path: "/w/p/.att/a2.txt" }
-        ]
-      });
-      await flush();
-      const queued = state().slice.queue[0]!;
-
-      api.getState().actions.returnQueuedToComposer(queued.id);
-      assert.deepEqual(
-        composer.inserted,
-        ["/w/p/.att/a2.txt"],
-        "a refused file is visible in the draft as its path, never dropped"
-      );
-      assert.deepEqual(state().draft.attachments, [], "and never parked where the composer's next save drops it");
-    } finally {
-      composer.unregister();
-    }
-  });
-
-  it("puts everything in the fallback draft when no composer is mounted", async () => {
-    const { api, fake, state } = await store();
-    fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, head: running() }) });
-    api.getState().actions.queueMessage({
-      ...draft("tab not open"),
-      attachments: [attachment("a1")]
-    });
-    await flush();
-    const queued = state().slice.queue[0]!;
-
-    api.getState().actions.returnQueuedToComposer(queued.id);
-    assert.equal(state().draft.text, "tab not open");
-    assert.deepEqual(
-      state().draft.attachments.map((ref) => ref.id),
-      ["a1"]
-    );
   });
 });

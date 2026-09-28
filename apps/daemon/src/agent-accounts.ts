@@ -30,13 +30,13 @@ import {
   refreshGrokToken
 } from "./agent-account-refresh.ts";
 
-export const CLAUDE_AUTH_ENV_UNSET = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
+const CLAUDE_AUTH_ENV_UNSET = ["ANTHROPIC_API_KEY", "ANTHROPIC_AUTH_TOKEN", "CLAUDE_CODE_OAUTH_TOKEN"];
 // A stray host OPENAI_API_KEY makes codex bill the API instead of the managed
 // ChatGPT account; strip it so file-based (auth.json) sign-in wins.
-export const CODEX_AUTH_ENV_UNSET = ["OPENAI_API_KEY"];
+const CODEX_AUTH_ENV_UNSET = ["OPENAI_API_KEY"];
 // Same rule for grok: XAI_API_KEY switches the CLI to API billing, beating the
 // OAuth login in GROK_HOME/auth.json.
-export const GROK_AUTH_ENV_UNSET = ["XAI_API_KEY"];
+const GROK_AUTH_ENV_UNSET = ["XAI_API_KEY"];
 
 /** The agent families with managed (per-account HOME) credentials. */
 export type ManagedAgent = "claude" | "codex" | "grok";
@@ -50,8 +50,6 @@ export interface AgentAccountsOptions {
   userhome: string;
   now: () => number;
   logger?: Pick<Console, "warn">;
-  /** Injectable for tests; defaults to the global fetch inside the refresh calls. */
-  fetchImpl?: typeof fetch;
 }
 
 export class AgentAccountsService {
@@ -497,7 +495,7 @@ export class AgentAccountsService {
       if (agent === "claude") {
         const refreshToken = creds?.claudeAiOauth?.refreshToken;
         if (typeof refreshToken !== "string") return;
-        const out = await refreshClaudeToken(refreshToken, this.opts.fetchImpl);
+        const out = await refreshClaudeToken(refreshToken);
         if (out.ok) {
           await writeFile(credsPath, JSON.stringify(mergeClaudeRefreshedCreds(creds, out, this.opts.now())), { mode: 0o600 });
           if (record.needsReauth) await this.markNeedsReauth(id, false);
@@ -507,7 +505,7 @@ export class AgentAccountsService {
       } else if (agent === "grok") {
         const refreshToken = grokAuthEntry(creds)?.refresh_token;
         if (typeof refreshToken !== "string" || !refreshToken) return;
-        const out = await refreshGrokToken(refreshToken, this.opts.fetchImpl);
+        const out = await refreshGrokToken(refreshToken);
         if (out.ok) {
           await writeFile(credsPath, JSON.stringify(mergeGrokRefreshedAuth(creds, out, this.opts.now())), { mode: 0o600 });
           if (record.needsReauth) await this.markNeedsReauth(id, false);
@@ -517,7 +515,7 @@ export class AgentAccountsService {
       } else {
         const refreshToken = creds?.tokens?.refresh_token;
         if (typeof refreshToken !== "string") return;
-        const out = await refreshCodexToken(refreshToken, this.opts.fetchImpl);
+        const out = await refreshCodexToken(refreshToken);
         if (out.ok) {
           await writeFile(credsPath, JSON.stringify(mergeCodexRefreshedTokens(creds, out)), { mode: 0o600 });
           if (record.needsReauth) await this.markNeedsReauth(id, false);

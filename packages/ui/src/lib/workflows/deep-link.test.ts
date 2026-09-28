@@ -9,8 +9,7 @@ import {
   requestWorkflowDeepLink,
   stripWorkflowDeepLink,
   subscribeWorkflowDeepLink,
-  takeWorkflowDeepLink,
-  WORKFLOW_RUN_MESSAGE
+  takeWorkflowDeepLink
 } from "./deep-link.ts";
 
 describe("workflow deep links", () => {
@@ -29,9 +28,9 @@ describe("workflow deep links", () => {
   });
 
   it("parses the service worker's message; anything else is null", () => {
-    assert.deepEqual(parseWorkflowRunMessage({ type: WORKFLOW_RUN_MESSAGE, workflowId: "w", runId: "r" }), { workflowId: "w", runId: "r" });
+    assert.deepEqual(parseWorkflowRunMessage({ type: "orquester:open-workflow-run", workflowId: "w", runId: "r" }), { workflowId: "w", runId: "r" });
     assert.equal(parseWorkflowRunMessage({ type: "other", workflowId: "w" }), null);
-    assert.equal(parseWorkflowRunMessage({ type: WORKFLOW_RUN_MESSAGE, workflowId: 3 }), null);
+    assert.equal(parseWorkflowRunMessage({ type: "orquester:open-workflow-run", workflowId: 3 }), null);
     assert.equal(parseWorkflowRunMessage("orquester:open-workflow-run"), null);
     assert.equal(parseWorkflowRunMessage(null), null);
   });

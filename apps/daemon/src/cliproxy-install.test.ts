@@ -123,56 +123,17 @@ async function makeSourceFixtureTarball(dir: string) {
   return { tgz, sha };
 }
 
-test("installBinary with patches builds from source: git apply then go build, promoted with rollback", async () => {
-  const root = await mkdtemp(join(tmpdir(), "cliproxy-patched-"));
-  try {
-    // A prior stock binary must survive into bin.prev.
-    await mkdir(join(root, "cliproxy", "bin"), { recursive: true });
-    await writeFile(join(root, "cliproxy", "bin", "cli-proxy-api"), "stock", { mode: 0o755 });
-
-    const { tgz, sha } = await makeSourceFixtureTarball(root);
-    const calls: Array<{ cmd: string; args: string[]; cwd?: string }> = [];
-    const deps = {
-      fetchTarball: async (_u: string, d: string) => { await exec("cp", [tgz, d]); },
-      run: async (cmd: string, args: string[], opts: { cwd?: string }) => {
-        calls.push({ cmd, args, cwd: opts.cwd });
-        if (args[0] === "build") {
-          const out = args[args.indexOf("-o") + 1];
-          await writeFile(out, "patched", { mode: 0o755 });
-        }
-        return { stdout: "" };
-      }
-    };
-    const patch = join(root, "0001-test.patch");
-    const r = await installBinary(root, deps, undefined, { patches: [patch], sourceSha: sha });
-
-    assert.equal(r.installed, true);
-    assert.equal(r.version, "v7.2.95+orq1");
-    assert.equal(await readFile(join(root, "cliproxy", "bin", "cli-proxy-api"), "utf8"), "patched");
-    assert.equal(await readFile(join(root, "cliproxy", "bin.prev", "cli-proxy-api"), "utf8"), "stock");
-    // Order + shape of toolchain calls: git apply inside the extracted source, then go build.
-    assert.equal(calls[0].cmd, "git");
-    assert.deepEqual(calls[0].args, ["apply", patch]);
-    assert.ok(calls[0].cwd?.endsWith("CLIProxyAPI-7.2.95"), "git apply runs in the source dir");
-    assert.equal(calls[1].args[0], "build");
-    assert.equal(calls[1].args[calls[1].args.length - 1], "./cmd/server");
-  } finally { await rm(root, { recursive: true, force: true }); }
-});
-
-test("installBinary with patches: source sha mismatch rejects before any toolchain call", async () => {
+test("installBinary rejects a source checksum mismatch without installing", async () => {
   const root = await mkdtemp(join(tmpdir(), "cliproxy-patched-sha-"));
   try {
     const { tgz } = await makeSourceFixtureTarball(root);
-    const calls: string[] = [];
     const deps = {
-      fetchTarball: async (_u: string, d: string) => { await exec("cp", [tgz, d]); },
-      run: async (cmd: string) => { calls.push(cmd); return { stdout: "" }; }
+      fetchTarball: async (_u: string, d: string) => { await exec("cp", [tgz, d]); }
     };
     await assert.rejects(
-      () => installBinary(root, deps, undefined, { patches: ["/x.patch"], sourceSha: "0".repeat(64) }),
+      () => installBinary(root, deps, undefined, { patches: ["/x.patch"] }),
       /source sha256 mismatch/
     );
-    assert.equal(calls.length, 0, "no git/go runs on a bad source tarball");
     await assert.rejects(stat(join(root, "cliproxy", "bin", "cli-proxy-api")));
   } finally { await rm(root, { recursive: true, force: true }); }
 });

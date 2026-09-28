@@ -70,7 +70,7 @@ export async function loadLanguageParser(info: string | undefined): Promise<Pars
 }
 
 /** The parser if it is already resolved, without starting a load. */
-export function resolvedLanguageParser(info: string | undefined): Parser | null {
+function resolvedLanguageParser(info: string | undefined): Parser | null {
   const entry = resolveLanguageEntry(info, ENTRIES);
   if (entry === null) return null;
   return parsers.get(entry.name) ?? null;

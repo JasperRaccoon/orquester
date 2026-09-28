@@ -143,7 +143,7 @@ const isRecord = (value: unknown): value is Record<string, unknown> =>
  * a project). A daemon of another version may send another shape, and raw
  * JSON must never reach typed code (AGENTS.md, "Adapter/localStorage loads").
  */
-export function sanitizeSavedPrompt(value: unknown): SavedPrompt | null {
+function sanitizeSavedPrompt(value: unknown): SavedPrompt | null {
   if (!isRecord(value)) return null;
   const { id, title, body, projectPath } = value;
   if (typeof id !== "string" || id.length === 0) return null;

@@ -41,7 +41,7 @@ export const MAX_ECHO_CHARS = 100;
  * caller's, JSON-escaped — up to 602 characters, as a control character or a lone surrogate escapes to six — and lists
  * at most 40 items of ≤ 70, 3 701 in all at worst for a 3 000-item list (todo-tools.test.ts builds that case).
  */
-export const MAX_ERROR_MESSAGE_CHARS = 4_000;
+const MAX_ERROR_MESSAGE_CHARS = 4_000;
 
 /** A value's size as a result, as ok() measures it: its JSON text, in UTF-8 bytes. */
 export const resultBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");

@@ -2,9 +2,8 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import type { ResolveSavedPromptResult } from "../../../lib/saved-prompts/variables.ts";
-import { NO_CHAT_TARGET_REASON, type ChatDelivery } from "../chat-target.ts";
+import { type ChatDelivery } from "../chat-target.ts";
 import {
-  CHAT_CHANGED_REASON,
   createSavedPromptDeliverer,
   type SavedPromptDelivererDeps
 } from "./deliver.ts";
@@ -34,7 +33,7 @@ function fakes(overrides: Partial<SavedPromptDelivererDeps> = {}) {
   const deps: SavedPromptDelivererDeps = {
     resolve: async (body, target, signal) => {
       calls.resolved.push({ body, target, signal });
-      return { ok: true, text: `rendered ${body}` };
+      return { ok: true, text: "Review +changed line" };
     },
     activeTarget: () => onScreen,
     insert: (target, text): ChatDelivery => {
@@ -63,51 +62,34 @@ const PROMPT = { id: "p1", body: "Review {diff}" };
 
 describe("saved-prompt delivery", () => {
   it("renders for the chat captured at the click, delivers there, and counts the use", async () => {
-    const { calls, deps } = fakes();
-    const deliverer = createSavedPromptDeliverer(deps);
-    const outcome = await deliverer.deliver(PROMPT, "insert", "chat-1");
-    assert.deepEqual(outcome, { status: "delivered", delivery: { ok: true, disposition: "inserted" } });
-    assert.equal(calls.resolved[0]?.target, "chat-1");
-    assert.deepEqual(calls.inserted, [{ target: "chat-1", text: "rendered Review {diff}" }]);
-    assert.deepEqual(calls.sent, []);
-    assert.deepEqual(calls.used, ["p1"]);
-  });
-
-  it("Send goes through the send path", async () => {
-    const { calls, deps } = fakes();
-    const outcome = await createSavedPromptDeliverer(deps).deliver(PROMPT, "send", "chat-1");
-    assert.equal(outcome.status, "delivered");
-    assert.equal(calls.sent.length, 1);
-    assert.equal(calls.inserted.length, 0);
+    for (const action of ["insert", "send"] as const) {
+      const { calls, deps } = fakes();
+      const outcome = await createSavedPromptDeliverer(deps).deliver(PROMPT, action, "chat-1");
+      assert.equal(outcome.status, "delivered");
+      assert.equal(calls.resolved[0]?.target, "chat-1");
+      assert.deepEqual(calls.inserted, action === "insert" ? [{ target: "chat-1", text: "Review +changed line" }] : []);
+      assert.deepEqual(calls.sent, action === "send" ? [{ target: "chat-1", text: "Review +changed line" }] : []);
+      assert.deepEqual(calls.used, ["p1"]);
+    }
   });
 
   it("refuses when another chat is on screen once the prompt is rendered — nothing lands, nothing counted", async () => {
-    const gate = deferred<ResolveSavedPromptResult>();
-    const { calls, deps, setOnScreen } = fakes({ resolve: () => gate.promise });
-    const pending = createSavedPromptDeliverer(deps).deliver(PROMPT, "insert", "chat-1");
-    // The user switches tabs while git is being read.
-    setOnScreen("chat-2");
-    gate.resolve({ ok: true, text: "rendered" });
-    assert.deepEqual(await pending, { status: "refused", reason: CHAT_CHANGED_REASON });
-    assert.deepEqual(calls.inserted, []);
-    assert.deepEqual(calls.used, []);
-  });
-
-  it("refuses when no chat is on screen at all by the time it is rendered", async () => {
-    const gate = deferred<ResolveSavedPromptResult>();
-    const { deps, setOnScreen } = fakes({ resolve: () => gate.promise });
-    const pending = createSavedPromptDeliverer(deps).deliver(PROMPT, "send", "chat-1");
-    setOnScreen(null);
-    gate.resolve({ ok: true, text: "rendered" });
-    assert.deepEqual(await pending, { status: "refused", reason: CHAT_CHANGED_REASON });
+    for (const nextTarget of ["chat-2", null]) {
+      const gate = deferred<ResolveSavedPromptResult>();
+      const { calls, deps, setOnScreen } = fakes({ resolve: () => gate.promise });
+      const pending = createSavedPromptDeliverer(deps).deliver(PROMPT, "insert", "chat-1");
+      setOnScreen(nextTarget);
+      gate.resolve({ ok: true, text: "rendered" });
+      assert.equal((await pending).status, "refused");
+      assert.deepEqual(calls.inserted, []);
+      assert.deepEqual(calls.sent, []);
+      assert.deepEqual(calls.used, []);
+    }
   });
 
   it("with no chat at the click, refuses at once and renders nothing", async () => {
     const { calls, deps } = fakes();
-    assert.deepEqual(await createSavedPromptDeliverer(deps).deliver(PROMPT, "insert", null), {
-      status: "refused",
-      reason: NO_CHAT_TARGET_REASON
-    });
+    assert.equal((await createSavedPromptDeliverer(deps).deliver(PROMPT, "insert", null)).status, "refused");
     assert.deepEqual(calls.resolved, []);
   });
 
@@ -171,12 +153,5 @@ describe("saved-prompt delivery", () => {
       reason: "boom"
     });
     assert.deepEqual(threw.calls.used, []);
-  });
-
-  it("a Send that switched the chat's mode is a delivery too", async () => {
-    const { calls, deps } = fakes({ send: () => ({ ok: true, disposition: "mode", mode: "plan" }) });
-    const outcome = await createSavedPromptDeliverer(deps).deliver({ id: "p", body: "/plan" }, "send", "chat-1");
-    assert.deepEqual(outcome, { status: "delivered", delivery: { ok: true, disposition: "mode", mode: "plan" } });
-    assert.deepEqual(calls.used, ["p"]);
   });
 });

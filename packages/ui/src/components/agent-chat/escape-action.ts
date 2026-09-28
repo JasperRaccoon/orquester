@@ -129,7 +129,7 @@ const NON_TEXT_INPUT_TYPES: ReadonlySet<string> = new Set([
  * text, a `<textarea>` (a terminal's helper textarea included), a `<select>`,
  * or anything in an editing host — a CodeMirror editor's content is one.
  */
-export function isEditableTarget(target: EscapeTargetLike | null | undefined): boolean {
+function isEditableTarget(target: EscapeTargetLike | null | undefined): boolean {
   if (!target) return false;
   if (target.isContentEditable === true) return true;
   const tag = typeof target.tagName === "string" ? target.tagName.toUpperCase() : "";
@@ -181,7 +181,7 @@ export function chatEscapeTargetGate(
  * chat's, no drill-in to leave and no turn to stop. Exactly these are the
  * Escapes the double press counts — the ones that did nothing else.
  */
-export function isIdleChatEscape(input: ChatEscapeGate): boolean {
+function isIdleChatEscape(input: ChatEscapeGate): boolean {
   return (
     input.key === "Escape" &&
     !input.repeat &&

@@ -88,35 +88,6 @@ export function composerOwnsEscape(input: {
   return input.insideComposerShell;
 }
 
-/**
- * The shell's half, stated here so the disjointness is testable in one place.
- * `AgentChatView` implements exactly this; if it ever drifts, the test that
- * asserts the two never both return true is what catches it.
- *
- * `rewindPress` is the shell's third arm (`resolveChatEscape`'s `"rewind"`):
- * the second of two idle Escapes, with a rewind picker to open. It lives
- * outside the composer shell like the other two — the double press INSIDE the
- * composer is the textarea's own, counted on its own sequence — so the scopes
- * stay disjoint by the same rule.
- */
-export function shellOwnsEscape(input: {
-  defaultPrevented: boolean;
-  insideComposerShell: boolean;
-  isTurnActive: boolean;
-  drillInOpen: boolean;
-  rewindPress?: boolean;
-  /** `resolveChatEscape`'s `blockingLayerOpen`: the same gate, the same set. */
-  layerOpen: boolean;
-  /** Typed into a field that is not this chat's (`chatEscapeTargetGate`): the field's. */
-  editableOutsideChat: boolean;
-}): boolean {
-  if (input.defaultPrevented) return false;
-  if (input.layerOpen) return false;
-  if (input.editableOutsideChat) return false;
-  if (input.insideComposerShell) return false;
-  return input.drillInOpen || input.isTurnActive || input.rewindPress === true;
-}
-
 // ---------------------------------------------------------------------------
 // The textarea's own Escape (§7.4)
 // ---------------------------------------------------------------------------

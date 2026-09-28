@@ -256,11 +256,6 @@ export function authErrorNotice(provider: ProviderSnapshot): ProviderAuthNotice 
   return null;
 }
 
-/** The notice's copy, or null when the provider is fine. */
-export function authErrorMessage(provider: ProviderSnapshot): string | null {
-  return authErrorNotice(provider)?.message ?? null;
-}
-
 /** Fan a fresh snapshot out to the ambient surfaces of §7.7. Never throws. */
 function publishAmbientFacts(providers: readonly ProviderSnapshot[]): void {
   for (const provider of providers) {
@@ -382,12 +377,4 @@ export function providerForRefId(
   refId: string
 ): ProviderSnapshot | null {
   return providers.find((provider) => provider.refIds.includes(refId)) ?? null;
-}
-
-/** Test seam. */
-export function resetProvidersStore(): void {
-  providersStore.setState(INITIAL, true);
-  inFlight = null;
-  boundTransport = null;
-  sideEffects = {};
 }

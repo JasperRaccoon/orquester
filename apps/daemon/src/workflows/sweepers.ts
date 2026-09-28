@@ -32,10 +32,6 @@ export interface WorkflowSweepersDeps {
   /** Runs the engine holds right now (never swept). */
   activeRunIds: () => string[];
   logger?: WorkflowLogger;
-  /** Default 1 h. */
-  intervalMs?: number;
-  /** Default `WORKFLOW_LIMITS.workflowTabRetentionDays`. */
-  workflowTabRetentionDays?: number;
 }
 
 export interface SweepReport {
@@ -57,8 +53,8 @@ function message(error: unknown): string {
 }
 
 export function createWorkflowSweepers(deps: WorkflowSweepersDeps): WorkflowSweepers {
-  const intervalMs = deps.intervalMs ?? 60 * 60_000;
-  const tabRetentionMs = (deps.workflowTabRetentionDays ?? WORKFLOW_LIMITS.workflowTabRetentionDays) * DAY_MS;
+  const intervalMs = 60 * 60_000;
+  const tabRetentionMs = WORKFLOW_LIMITS.workflowTabRetentionDays * DAY_MS;
   let timer: { cancel(): void } | null = null;
   let running: Promise<SweepReport> | null = null;
   let stopped = true;

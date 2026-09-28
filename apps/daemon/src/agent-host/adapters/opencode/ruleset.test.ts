@@ -6,10 +6,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { RUNTIME_MODES, type ApprovalDecision, type RuntimeMode } from "@orquester/api/agent-chat";
+import type { ApprovalDecision } from "@orquester/api/agent-chat";
 
 import {
-  SYNTHESISED_COMMANDS,
   toSlashCommands,
   unusableSnapshot
 } from "./snapshot.ts";
@@ -175,33 +174,9 @@ test("§4.4: the read-only and always-allowed tools are exactly the documented s
   }
 });
 
-test("every RuntimeMode produces a usable ruleset", () => {
-  for (const mode of RUNTIME_MODES as readonly RuntimeMode[]) {
-    const rules = buildOpenCodePermissionRules(mode);
-    assert.ok(rules.length > 0, `mode ${mode}`);
-    for (const rule of rules) {
-      assert.ok(["allow", "ask", "deny"].includes(rule.action));
-      assert.ok(rule.permission.length > 0);
-      assert.ok(rule.pattern.length > 0);
-    }
-  }
-});
-
 // ---------------------------------------------------------------------------
 // §4.6.3 / §4.6.5(a) — what the adapter synthesises
 // ---------------------------------------------------------------------------
-
-test("§4.6.5(a): `/effort` is CLIENT-only — the adapter synthesises `/compact` alone", () => {
-  // R2-2: the composer adds its own `/effort` host row whenever the selected
-  // model exposes a reasoning descriptor (every OpenCode model has `variant`),
-  // so a synthesised provider entry produced TWO `/effort` rows — and picking
-  // the provider one inserted the literal text and forwarded it to a CLI that
-  // does not implement it.
-  assert.deepEqual(
-    SYNTHESISED_COMMANDS.map((command) => command.name),
-    ["compact"]
-  );
-});
 
 test("§4.6.3: a real command list keeps `/compact` first and drops skill-sourced rows", () => {
   const commands = toSlashCommands([

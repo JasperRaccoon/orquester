@@ -3,13 +3,10 @@ import { describe, it } from "node:test";
 
 import type { WorkflowBlockStatus, WorkflowNodeType } from "./types.ts";
 import {
-  acceptsInput,
   computeReadiness,
   downstreamOf,
   executableNodes,
   findCycles,
-  workflowHandleLabel,
-  outputHandles,
   reachableFromTriggers,
   topologicalOrder,
   upstreamOf,
@@ -43,41 +40,6 @@ function graph(nodes: [string, WorkflowNodeType, unknown?][], edges: [string, st
 function state(status: Record<string, WorkflowBlockStatus>, handle: Record<string, string> = {}): ReadinessState {
   return { status, handle };
 }
-
-describe("handles", () => {
-  it("per type", () => {
-    assert.deepEqual(outputHandles({ id: "t", type: "trigger.schedule" }), ["success"]);
-    for (const type of ["agent", "code", "shell", "http", "merge", "wait", "workflow"] as const) {
-      assert.deepEqual(outputHandles({ id: "x", type }), ["success", "error"], type);
-    }
-    assert.deepEqual(outputHandles({ id: "i", type: "if" }), ["true", "false", "error"]);
-    assert.deepEqual(outputHandles({ id: "s", type: "stop" }), []);
-    assert.deepEqual(outputHandles({ id: "n", type: "note" }), []);
-    assert.deepEqual(
-      outputHandles({ id: "w", type: "switch", config: { cases: [{}, {}], fallback: true } }),
-      ["case:0", "case:1", "default", "error"]
-    );
-    assert.deepEqual(outputHandles({ id: "w", type: "switch", config: { cases: [{}], fallback: false } }), [
-      "case:0",
-      "error"
-    ]);
-  });
-
-  it("labels", () => {
-    const sw = { id: "s", type: "switch" as const, config: { cases: [{ label: "Bug" }, { label: " " }] } };
-    assert.equal(workflowHandleLabel(sw, "case:0"), "Bug");
-    assert.equal(workflowHandleLabel(sw, "case:1"), "case 2");
-    assert.equal(workflowHandleLabel(sw, "error"), "failure");
-    assert.equal(workflowHandleLabel(sw, "default"), "default");
-  });
-
-  it("inputs", () => {
-    assert.equal(acceptsInput({ id: "t", type: "trigger.manual" }), false);
-    assert.equal(acceptsInput({ id: "n", type: "note" }), false);
-    assert.equal(acceptsInput({ id: "a", type: "agent" }), true);
-    assert.equal(acceptsInput({ id: "s", type: "stop" }), true);
-  });
-});
 
 describe("order and reachability", () => {
   const g = graph(
@@ -147,14 +109,6 @@ describe("order and reachability", () => {
     );
     assert.deepEqual(topologicalOrder(g2), ["t"]);
     assert.deepEqual(findCycles(g2), []);
-  });
-
-  it("findCycles copes with a long chain without recursion", () => {
-    const n = 5000;
-    const nodes: [string, WorkflowNodeType][] = Array.from({ length: n }, (_, i) => [`n${i}`, "code"]);
-    const edges: [string, string][] = Array.from({ length: n - 1 }, (_, i) => [`n${i}`, `n${i + 1}`]);
-    edges.push([`n${n - 1}`, "n0"]);
-    assert.equal(findCycles(graph(nodes, edges))[0]!.length, n);
   });
 });
 

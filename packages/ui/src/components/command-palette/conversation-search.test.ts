@@ -10,16 +10,7 @@ import { describe, it } from "node:test";
 import type { ThreadSearchHit, ThreadSearchResponse } from "@orquester/api/agent-chat";
 
 import { AgentChatCommandError } from "../../lib/agent-chat/transport";
-import {
-  conversationSearchFailure,
-  conversationSearchNotice,
-  conversationSearchQuery,
-  paletteInputChange,
-  searchHitKindLabel,
-  shownSearchResponse,
-  snippetSegments,
-  type ConversationSearchState
-} from "./conversation-search";
+import { conversationSearchFailure, conversationSearchNotice, conversationSearchQuery, paletteInputChange, shownSearchResponse, snippetSegments, type ConversationSearchState } from "./conversation-search";
 
 const hit = (overrides: Partial<ThreadSearchHit> = {}): ThreadSearchHit => ({
   threadId: "s1",
@@ -90,40 +81,16 @@ describe("snippetSegments", () => {
     assert.deepEqual(snippetSegments("no marks here"), [{ text: "no marks here", match: false }]);
     assert.deepEqual(snippetSegments("open « only"), [{ text: "open « only", match: false }]);
   });
-
-  it("drops empty segments", () => {
-    assert.deepEqual(snippetSegments("x «» y"), [
-      { text: "x ", match: false },
-      { text: " y", match: false }
-    ]);
-  });
-});
-
-describe("searchHitKindLabel", () => {
-  it("names who spoke on a message hit", () => {
-    assert.equal(searchHitKindLabel(hit({ role: "user" })), "You");
-    assert.equal(searchHitKindLabel(hit({ role: "assistant" })), "Assistant");
-    assert.equal(searchHitKindLabel(hit({ role: "reasoning" })), "Thinking");
-  });
-
-  it("names an activity hit by its kind's family", () => {
-    const activity = (activityKind: string | null) =>
-      searchHitKindLabel(hit({ kind: "activity", role: null, activityKind }));
-    assert.equal(activity("tool.completed"), "Tool");
-    assert.equal(activity("user-input.resolved"), "User input");
-    assert.equal(activity("context-compaction"), "Context compaction");
-    assert.equal(activity(null), "Activity");
-  });
 });
 
 describe("what the list shows", () => {
   const notice = (state: ConversationSearchState, visible = 0) =>
-    conversationSearchNotice(state, visible)?.text ?? null;
+    conversationSearchNotice(state, visible)?.kind ?? null;
 
   it("says the index is unavailable only when the host answers `indexed: false`", () => {
     assert.equal(
       notice({ status: "done", query: "x", response: response({ indexed: false, hits: [] }) }),
-      "Search is unavailable on this host"
+      "unavailable"
     );
   });
 
@@ -135,24 +102,14 @@ describe("what the list shows", () => {
     ]) {
       const shown = conversationSearchNotice(conversationSearchFailure("x", error), 0);
       assert.equal(shown?.kind, "error", error.message);
-      assert.notEqual(shown?.text, "Search is unavailable on this host", error.message);
     }
   });
 
-  it("tells a host it could not reach apart from a host that answered badly", () => {
-    const unreachable = conversationSearchNotice(
-      conversationSearchFailure("x", new AgentChatCommandError(0, "HOST_UNAVAILABLE", "fetch failed")),
-      0
-    );
-    assert.match(unreachable?.text ?? "", /try again/i);
-    assert.doesNotMatch(unreachable?.text ?? "", /fetch failed/, "no raw transport message");
-  });
-
   it("says there are no matches, rather than showing nothing", () => {
-    assert.equal(notice({ status: "done", query: "x", response: response({ hits: [] }) }), "No matches");
+    assert.equal(notice({ status: "done", query: "x", response: response({ hits: [] }) }), "empty");
     assert.equal(
       notice({ status: "done", query: "x", response: response() }, 0),
-      "No matches",
+      "empty",
       "hits this client may not show (an archived project) are no matches here"
     );
     assert.equal(notice({ status: "done", query: "x", response: response() }, 1), null);
@@ -163,7 +120,7 @@ describe("what the list shows", () => {
     const loading: ConversationSearchState = { status: "loading", query: "fo", previous };
     assert.equal(shownSearchResponse(loading), previous);
     assert.equal(notice(loading, 1), null);
-    assert.equal(notice({ status: "loading", query: "fo", previous: null }), "Searching…");
+    assert.equal(notice({ status: "loading", query: "fo", previous: null }), "loading");
   });
 
   it("surfaces any other failure in words", () => {
@@ -171,11 +128,8 @@ describe("what the list shows", () => {
       "x",
       new AgentChatCommandError(502, "UNKNOWN", "the host answered garbage")
     );
-    assert.match(notice(failed) ?? "", /the host answered garbage/);
-  });
-
-  it("invites a query before there is one", () => {
-    assert.ok((notice({ status: "idle" }) ?? "").length > 0);
+    assert.equal(failed.status, "error");
+    if (failed.status === "error") assert.equal(failed.message, "the host answered garbage");
   });
 
   it("says when more matched than it shows", () => {

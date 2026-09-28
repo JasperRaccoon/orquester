@@ -33,10 +33,6 @@ export interface RunStoreOptions {
   /** `workflowRunsDir(baseDir)`. */
   dir: string;
   logger?: Pick<Console, "warn" | "error">;
-  now?: () => Date;
-  /** Retention overrides (tests); WORKFLOW_LIMITS by default. */
-  runsPerWorkflow?: number;
-  runRetentionDays?: number;
 }
 
 /** The summary fields of a run — the one derivation every list, index and event uses. */
@@ -85,7 +81,8 @@ function jsonBytes(value: unknown): number {
 }
 
 /** A block output cut to the inline preview: whole when it fits, else the head of its JSON text. */
-export function previewOutput(output: unknown, maxBytes: number = WORKFLOW_LIMITS.inlineOutputPreviewBytes): { output: unknown; truncated: boolean } {
+function previewOutput(output: unknown): { output: unknown; truncated: boolean } {
+  const maxBytes = WORKFLOW_LIMITS.inlineOutputPreviewBytes;
   if (jsonBytes(output) <= maxBytes) return { output, truncated: false };
   let text: string;
   try {
@@ -122,7 +119,7 @@ export function persistedRunToWire(run: PersistedRun): WorkflowRun {
 const SAFE_SEGMENT = /^[A-Za-z0-9_-]{1,128}$/;
 
 /** A path segment for an id: the id itself when it is plainly safe, else a stable hash of it. */
-export function pathSegment(id: string): string {
+function pathSegment(id: string): string {
   return SAFE_SEGMENT.test(id) ? id : `x-${createHash("sha256").update(id).digest("hex").slice(0, 40)}`;
 }
 
@@ -146,9 +143,6 @@ interface RunWriter {
 export class FileRunStore implements RunStore {
   private readonly dir: string;
   private readonly logger: Pick<Console, "warn" | "error">;
-  private readonly now: () => Date;
-  private readonly runsPerWorkflow: number;
-  private readonly runRetentionDays: number;
   /** runId -> entry. */
   private readonly entries = new Map<string, IndexEntry>();
   /** workflowId -> runIds, newest first. */
@@ -162,9 +156,6 @@ export class FileRunStore implements RunStore {
   constructor(options: RunStoreOptions) {
     this.dir = resolve(options.dir);
     this.logger = options.logger ?? console;
-    this.now = options.now ?? (() => new Date());
-    this.runsPerWorkflow = options.runsPerWorkflow ?? WORKFLOW_LIMITS.runsPerWorkflow;
-    this.runRetentionDays = options.runRetentionDays ?? WORKFLOW_LIMITS.runRetentionDays;
   }
 
   get runsDir(): string {
@@ -330,7 +321,7 @@ export class FileRunStore implements RunStore {
   }
 
   async sweep(): Promise<void> {
-    const cutoff = this.now().getTime() - this.runRetentionDays * 86_400_000;
+    const cutoff = new Date().getTime() - WORKFLOW_LIMITS.runRetentionDays * 86_400_000;
     const doomed: string[] = [];
     for (const list of this.byWorkflow.values()) {
       list.forEach((summary, position) => {
@@ -341,7 +332,7 @@ export class FileRunStore implements RunStore {
         if (summary.tempProject && !summary.tempProject.deleted) return;
         const at = Date.parse(summary.endedAt ?? summary.queuedAt);
         const tooOld = Number.isFinite(at) && at < cutoff;
-        if (position >= this.runsPerWorkflow || tooOld) doomed.push(summary.id);
+        if (position >= WORKFLOW_LIMITS.runsPerWorkflow || tooOld) doomed.push(summary.id);
       });
     }
     await Promise.all(doomed.map((runId) => this.deleteRun(runId)));

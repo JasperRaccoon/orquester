@@ -72,21 +72,22 @@ describe("deriveRunOverlay", () => {
     assert.equal(overlay.edges["a-err-s"], "idle");
   });
 
-  it("the run's own lists win, and a failed block's error edge is the one taken", () => {
-    const overlay = deriveRunOverlay(
-      {
-        status: "failed",
-        blocks: {
-          a: block("a", "failed", { error: { kind: "agent_error", message: "Boom" } }),
-          s: block("s", "succeeded")
-        },
-        takenEdges: [],
-        deadEdges: ["a-success-s"]
+  it("a failed block takes its error edge unless the run records another path", () => {
+    const failed = {
+      status: "failed" as const,
+      blocks: {
+        a: block("a", "failed", { error: { kind: "agent_error", message: "Boom" } }),
+        s: block("s", "succeeded")
       },
-      def
-    );
+      takenEdges: [],
+      deadEdges: ["a-success-s"]
+    };
+    const overlay = deriveRunOverlay(failed, def);
     assert.equal(overlay.edges["a-success-s"], "dead");
     assert.equal(overlay.edges["a-err-s"], "taken");
     assert.equal(overlay.nodes.a?.errorMessage, "Boom");
+    const recorded = deriveRunOverlay({ ...failed, takenEdges: ["a-success-s"], deadEdges: ["a-err-s"] }, def);
+    assert.equal(recorded.edges["a-success-s"], "taken");
+    assert.equal(recorded.edges["a-err-s"], "dead");
   });
 });

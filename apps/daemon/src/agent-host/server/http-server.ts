@@ -230,7 +230,7 @@ const THREAD_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/;
 /** `POST /goals/resume-sessions`: more threads than any host serves at once. */
 const MAX_RESUME_GOAL_SESSIONS = 1_000;
 
-export function isSafeThreadId(value: string): boolean {
+function isSafeThreadId(value: string): boolean {
   return THREAD_ID_PATTERN.test(value) && !value.split(/[/\\]/).includes("..");
 }
 
@@ -283,7 +283,7 @@ function parseAfter(url: URL): number | undefined {
  * repeated one takes its first value, as every page size here does. The
  * daemon forwards both verbatim, so these rules are the only ones.
  */
-export function parseItemOutputWindow(url: URL): ThreadItemOutputWindowQuery | null {
+function parseItemOutputWindow(url: URL): ThreadItemOutputWindowQuery | null {
   const offsets = url.searchParams.getAll("offset");
   if (offsets.length === 0 && !url.searchParams.has("maxBytes")) return null;
   if (offsets.length > 1) {

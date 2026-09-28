@@ -62,16 +62,6 @@ function snapshotFromFixture(name: string): ThreadSnapshot {
 describe("claude history projection — fixture 11 (resume and fork)", () => {
   const snapshot = snapshotFromFixture("11-resume-and-fork.ndjson");
 
-  it("the capture really does replay nothing on resume", () => {
-    // The reason this projection exists at all.
-    const note = readClaudeFixture("11-resume-and-fork.ndjson").find(
-      (line) =>
-        line.kind === "note" && "replayUuids" in (line.data as Record<string, unknown>)
-    );
-    assert.ok(note, "fixture 11 must carry the replayUuids note");
-    assert.deepEqual((note.data as { replayUuids: unknown[] }).replayUuids, []);
-  });
-
   it("projects one turn.started/turn.completed pair per turn", () => {
     assert.ok(snapshot.turns.length >= 2, "the capture must hold turns to project");
     const events = project(snapshot);

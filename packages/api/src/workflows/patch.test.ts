@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { applyWorkflowPatch, createWorkflowFromRequest, findWorkflowNode, WorkflowPatchError, type PatchEnvironment } from "./patch.ts";
-import { sequentialIds, testEdge, testNode, testWorkflow, T0 } from "./testing.ts";
+import { sequentialIds, testEdge, testNode, testWorkflow } from "./testing.ts";
 import type { Workflow, WorkflowPatchOp } from "./types.ts";
 import { validateWorkflow } from "./validate.ts";
 
@@ -59,7 +59,7 @@ describe("applyWorkflowPatch", () => {
     assert.equal(result.revision, original.revision, "the revision is the daemon's");
   });
 
-  it("add_node mints id and name, fills defaults, merges config, places it", () => {
+  it("add_node mints unique ids and names, fills defaults and merges config", () => {
     const result = patch([
       { op: "add_node", node: { type: "agent" } },
       { op: "add_node", node: { type: "agent", config: { maxMinutes: 30 } } },
@@ -71,8 +71,6 @@ describe("applyWorkflowPatch", () => {
     assert.equal(second.id, "id-2");
     assert.equal(second.type === "agent" && second.config.maxMinutes, 30);
     assert.equal(second.type === "agent" && second.config.chain[0]!.agent, "claude");
-    assert.ok(first.position.x > 1280, "placed right of its input");
-    assert.notDeepEqual(first.position, second.position);
     assert.equal(result.edges.at(-1)!.id, "id-3");
     assert.equal(result.edges.at(-1)!.sourceHandle, "success");
   });
@@ -209,7 +207,7 @@ describe("applyWorkflowPatch", () => {
 });
 
 describe("createWorkflowFromRequest", () => {
-  it("mints ids and names, applies defaults, lays out and resolves edge refs by name", () => {
+  it("mints ids and names, applies defaults and resolves edge refs by name", () => {
     const workflow = createWorkflowFromRequest(
       {
         name: "Nightly",
@@ -237,12 +235,10 @@ describe("createWorkflowFromRequest", () => {
     assert.deepEqual(workflow.nodes.map((node) => node.name), ["Nightly", "Work", "Stop", "Note"]);
     assert.equal(workflow.edges[1]!.id, "fail-edge");
     assert.equal(workflow.edges[0]!.source, workflow.nodes[0]!.id);
-    const [trigger, work] = workflow.nodes;
-    assert.ok(work!.position.x > trigger!.position.x);
     assert.deepEqual(validateWorkflow(workflow).problems, []);
   });
 
-  it("autoLayout lays out every node; otherwise given positions stay", () => {
+  it("create preserves caller-provided positions", () => {
     const request = {
       name: "L",
       project: { kind: "existing" as const, projectPath: "/w/ws/app" },
@@ -254,9 +250,6 @@ describe("createWorkflowFromRequest", () => {
     };
     const kept = createWorkflowFromRequest(request, env());
     assert.deepEqual(findWorkflowNode(kept, "a")!.position, { x: 999, y: 999 });
-    assert.ok(findWorkflowNode(kept, "b")!.position.x > 999);
-    const laid = createWorkflowFromRequest({ ...request, autoLayout: true }, env());
-    assert.deepEqual(findWorkflowNode(laid, "a")!.position, { x: 0, y: 0 });
   });
 
   it("names the failing node or edge", () => {
@@ -281,13 +274,5 @@ describe("createWorkflowFromRequest", () => {
     assert.throws(() => createWorkflowFromRequest(badEdge, env()), (error: unknown) => error instanceof WorkflowPatchError && error.opIndex === 1);
     assert.throws(() => createWorkflowFromRequest({ ...request, name: " " }, env()), WorkflowPatchError);
     assert.throws(() => createWorkflowFromRequest({ ...request, nodes: [], project: { kind: "nope" } as never }, env()), WorkflowPatchError);
-  });
-
-  it("uses a fixed Date as the clock too", () => {
-    const workflow = createWorkflowFromRequest(
-      { name: "D", project: { kind: "existing", projectPath: "/w/ws/app" } },
-      { mintId: sequentialIds(), now: new Date(T0) }
-    );
-    assert.equal(workflow.updatedAt, T0);
   });
 });

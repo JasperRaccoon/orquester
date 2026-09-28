@@ -103,7 +103,7 @@ describe("the store's binding file (§8 rollback boundary)", () => {
     run: (input: { store: ReturnType<typeof createThreadStore>; rootDir: string }) => Promise<void>
   ): Promise<void> => {
     const rootDir = await fsp.mkdtemp(path.join(os.tmpdir(), "orq-binding-"));
-    const store = createThreadStore({ rootDir, sweepIntervalMs: 0 });
+    const store = createThreadStore({ rootDir });
     try {
       await run({ store, rootDir });
     } finally {
@@ -120,7 +120,7 @@ describe("the store's binding file (§8 rollback boundary)", () => {
         patch: { adapterKey: "claudex", status: "running", resumeCursor: { resume: "sess-1" } }
       });
       // A second store reads what the first wrote — no in-memory shortcut.
-      const reader = createThreadStore({ rootDir, sweepIntervalMs: 0 });
+      const reader = createThreadStore({ rootDir });
       try {
         const loaded = await reader.loadBinding("t1");
         assert.deepEqual(loaded?.resumeCursor, { resume: "sess-1" });
@@ -131,7 +131,7 @@ describe("the store's binding file (§8 rollback boundary)", () => {
           adapter: "claude",
           patch: { status: "stopped" }
         });
-        const after = await createThreadStore({ rootDir, sweepIntervalMs: 0 }).loadBinding("t1");
+        const after = await createThreadStore({ rootDir }).loadBinding("t1");
         assert.deepEqual(after?.resumeCursor, { resume: "sess-1" });
         assert.equal(after?.status, "stopped");
       } finally {
@@ -148,7 +148,7 @@ describe("the store's binding file (§8 rollback boundary)", () => {
         patch: { resumeCursor: { resume: "sess-1" } }
       });
       await fsp.writeFile(path.join(rootDir, "threads", "t1", BINDING_FILE_NAME), "{ not json");
-      const reader = createThreadStore({ rootDir, sweepIntervalMs: 0 });
+      const reader = createThreadStore({ rootDir });
       try {
         assert.equal(await reader.loadBinding("t1"), null);
         assert.equal(reader.threadError("t1"), null, "an unreadable binding never errors the thread");

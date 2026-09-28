@@ -55,7 +55,7 @@ function validationKey(workflow: Workflow, options: ValidateWorkflowOptions): st
   ].join("\u0001");
 }
 
-export function errorCountOf(workflow: Workflow, options: ValidateWorkflowOptions): number {
+function errorCountOf(workflow: Workflow, options: ValidateWorkflowOptions): number {
   const key = validationKey(workflow, options);
   const cached = errorCounts.get(workflow);
   if (cached && cached.key === key) return cached.count;
@@ -66,7 +66,7 @@ export function errorCountOf(workflow: Workflow, options: ValidateWorkflowOption
 }
 
 /** The project a workflow's triggers name: an existing project's directory name, a temp clone's repo. */
-export function workflowProjectName(workflow: Workflow): string | undefined {
+function workflowProjectName(workflow: Workflow): string | undefined {
   const project = workflow.project;
   if (project.kind === "existing") return basename(project.projectPath) || undefined;
   if (project.source.kind === "clone") return repoDisplayName(project.source.url);

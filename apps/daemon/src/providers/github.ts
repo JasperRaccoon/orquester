@@ -159,7 +159,7 @@ function loginOf(value: unknown): string {
 }
 
 /** Map one GitHub pull JSON object (`GET /repos/:o/:r/pulls`) to `PullRequestInfo`. */
-export function toGithubPullRequest(pull: Record<string, unknown>): PullRequestInfo {
+function toGithubPullRequest(pull: Record<string, unknown>): PullRequestInfo {
   const head = (pull.head ?? {}) as { ref?: unknown; sha?: unknown };
   const base = (pull.base ?? {}) as { ref?: unknown };
   const merged = typeof pull.merged_at === "string" && pull.merged_at.length > 0;
@@ -178,7 +178,7 @@ export function toGithubPullRequest(pull: Record<string, unknown>): PullRequestI
 }
 
 /** Map one GitHub release JSON object (`GET /repos/:o/:r/releases`) to `ReleaseInfo`. */
-export function toGithubRelease(release: Record<string, unknown>): ReleaseInfo {
+function toGithubRelease(release: Record<string, unknown>): ReleaseInfo {
   const tag = text(release.tag_name);
   const id = release.id;
   return {

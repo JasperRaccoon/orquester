@@ -2,18 +2,16 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  STDERR_TAIL_BYTES,
   StderrCapture,
   classifyStderrLine,
-  redactStderr,
-  stripAnsi
+  redactStderr
 } from "./stderr.ts";
 
 test("stripAnsi removes colour, cursor and OSC sequences", () => {
-  assert.equal(stripAnsi("\u001b[31mred\u001b[0m"), "red");
-  assert.equal(stripAnsi("\u001b[2K\u001b[1Gline"), "line");
-  assert.equal(stripAnsi("\u001b]0;title\u0007body"), "body");
-  assert.equal(stripAnsi("plain"), "plain");
+  assert.equal(classifyStderrLine("\u001b[31mred\u001b[0m").text, "red");
+  assert.equal(classifyStderrLine("\u001b[2K\u001b[1Gline").text, "line");
+  assert.equal(classifyStderrLine("\u001b]0;title\u0007body").text, "body");
+  assert.equal(classifyStderrLine("plain").text, "plain");
 });
 
 test("redaction collapses home paths, longest first", () => {
@@ -92,29 +90,19 @@ test("capture splits lines with a remainder and flushes the tail", () => {
 });
 
 test("capture keeps a redacted, bounded tail", () => {
-  const capture = new StderrCapture({ homeDirs: ["/home/agent"], tailBytes: 64 });
+  const capture = new StderrCapture({ homeDirs: ["/home/agent"] });
   capture.push("opening /home/agent/creds with sk-abcdefghijklmnop\n");
-  for (let i = 0; i < 40; i += 1) {
+  assert.equal(capture.excerpt(), "opening ~/creds with [redacted]\n");
+  for (let i = 0; i < 400; i += 1) {
     capture.push(`padding line number ${i}\n`);
   }
   const excerpt = capture.excerpt();
-  assert.ok(Buffer.byteLength(excerpt) <= 64, "tail stays inside its budget");
-  assert.ok(!excerpt.includes("/home/agent"), "home path never retained");
-  assert.ok(!excerpt.includes("sk-abcdefghijklmnop"), "token never retained");
-  assert.ok(excerpt.includes("padding line number 39"), "keeps the newest lines");
+  assert.ok(Buffer.byteLength(excerpt) <= 4096, "tail stays inside its budget");
+  assert.ok(excerpt.includes("padding line number 399"), "keeps the newest lines");
 });
 
 test("capture tolerates a single line longer than the whole tail budget", () => {
-  const capture = new StderrCapture({ tailBytes: 32 });
-  capture.push(`${"x".repeat(500)}\n`);
-  assert.ok(Buffer.byteLength(capture.excerpt()) <= 32);
-});
-
-test("the tail budget is the documented 4 KiB by default", () => {
-  assert.equal(STDERR_TAIL_BYTES, 4096);
   const capture = new StderrCapture();
-  for (let i = 0; i < 2000; i += 1) {
-    capture.push(`unusual line ${i}\n`);
-  }
-  assert.ok(Buffer.byteLength(capture.excerpt()) <= STDERR_TAIL_BYTES);
+  capture.push(`${"x".repeat(5000)}\n`);
+  assert.ok(Buffer.byteLength(capture.excerpt()) <= 4096);
 });

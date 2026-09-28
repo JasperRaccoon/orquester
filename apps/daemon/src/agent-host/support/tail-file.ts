@@ -38,15 +38,11 @@ export interface FileTailRead {
 
 export interface FileTailOptions {
   path: string;
-  maxReadBytes?: number;
-  maxTotalBytes?: number;
 }
 
 export class FileTail {
   readonly path: string;
 
-  private readonly maxReadBytes: number;
-  private readonly maxTotalBytes: number;
   private decoder = new StringDecoder("utf8");
   private offset = 0;
   private consumed = 0;
@@ -54,8 +50,6 @@ export class FileTail {
 
   constructor(options: FileTailOptions) {
     this.path = options.path;
-    this.maxReadBytes = options.maxReadBytes ?? TAIL_MAX_READ_BYTES;
-    this.maxTotalBytes = options.maxTotalBytes ?? TAIL_MAX_TOTAL_BYTES;
   }
 
   get finished(): boolean {
@@ -82,18 +76,18 @@ export class FileTail {
         this.offset = 0;
         this.decoder = new StringDecoder("utf8");
       }
-      const budget = this.maxTotalBytes - this.consumed;
+      const budget = TAIL_MAX_TOTAL_BYTES - this.consumed;
       const available = stat.size - this.offset;
       if (available <= 0) {
         return { text: "", done: false };
       }
-      const length = Math.min(available, this.maxReadBytes, budget);
+      const length = Math.min(available, TAIL_MAX_READ_BYTES, budget);
       const buffer = Buffer.allocUnsafe(length);
       const { bytesRead } = await handle.read(buffer, 0, length, this.offset);
       this.offset += bytesRead;
       this.consumed += bytesRead;
       let text = this.decoder.write(buffer.subarray(0, bytesRead));
-      if (this.consumed >= this.maxTotalBytes) {
+      if (this.consumed >= TAIL_MAX_TOTAL_BYTES) {
         this.done = true;
         text += `${text.endsWith("\n") || text.length === 0 ? "" : "\n"}${this.capNotice()}`;
       }
@@ -109,7 +103,7 @@ export class FileTail {
   }
 
   private capNotice(): string {
-    const mib = Math.round(this.maxTotalBytes / (1024 * 1024));
+    const mib = Math.round(TAIL_MAX_TOTAL_BYTES / (1024 * 1024));
     return `[orquester] this shell has written more than ${mib} MiB; the live tail stops here — the full output is at ${this.path}`;
   }
 

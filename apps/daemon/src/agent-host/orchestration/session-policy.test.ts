@@ -5,7 +5,6 @@ import type { AdapterCapabilities, ProviderSession } from "@orquester/api/agent-
 
 import {
   decideSessionRestart,
-  modelSelectionEquals,
   type BoundSessionShape,
   type DesiredSessionShape
 } from "./session-policy.ts";
@@ -103,18 +102,5 @@ describe("session restart policy (§3.4)", () => {
     });
     const decision = decideSessionRestart({ desired, bound: bound(), capabilities });
     assert.equal(decision.restart, false);
-  });
-
-  it("modelSelectionEquals is deep and order-sensitive", () => {
-    assert.equal(modelSelectionEquals({ model: "a" }, { model: "a" }), true);
-    assert.equal(modelSelectionEquals({ model: "a" }, { model: "b" }), false);
-    assert.equal(
-      modelSelectionEquals(
-        { model: "a", options: [{ id: "x", value: 1 as unknown as string }] },
-        { model: "a", options: [{ id: "x", value: "1" }] }
-      ),
-      false
-    );
-    assert.equal(modelSelectionEquals(undefined, { model: "a" }), false);
   });
 });

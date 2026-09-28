@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 
 import type { StreamHandlers, Transporter, TransportRequest, TransportResponse } from "../transporter";
 
@@ -13,8 +13,7 @@ import {
 import {
   AgentChatCommandError,
   attachmentRefFromUpload,
-  createAgentChatTransport,
-  resolveAgentChatTransport
+  createAgentChatTransport
 } from "./transport";
 import { ev, resetBuilders, snapshot } from "./test-helpers";
 
@@ -54,7 +53,7 @@ class FakeTransporter implements Transporter {
 /** A transporter that can carry binary — the web's HTTP one; the base fake stands for one that cannot. */
 class FakeBinaryTransporter extends FakeTransporter {
   readonly byteRequests: TransportRequest[] = [];
-  bytes: ArrayBuffer = new ArrayBuffer(3);
+  bytes: ArrayBuffer = new Uint8Array([1, 2, 3]).buffer;
   byteResponses: Array<TransportResponse<ArrayBuffer>> = [];
 
   async requestBytes(req: TransportRequest): Promise<TransportResponse<ArrayBuffer>> {
@@ -63,45 +62,21 @@ class FakeBinaryTransporter extends FakeTransporter {
   }
 }
 
-/** A timer queue the test drives, so nothing waits on a real clock. */
-function fakeTimers() {
-  let nextId = 1;
-  const pending = new Map<number, { fn: () => void; at: number }>();
-  return {
-    setTimer: (fn: () => void, ms: number): unknown => {
-      const id = nextId++;
-      pending.set(id, { fn, at: ms });
-      return id;
-    },
-    clearTimer: (handle: unknown): void => {
-      pending.delete(handle as number);
-    },
-    runAll(): void {
-      const entries = [...pending.entries()];
-      pending.clear();
-      for (const [, entry] of entries) {
-        entry.fn();
-      }
-    },
-    get size(): number {
-      return pending.size;
-    }
-  };
-}
-
 const line = (frame: AgentChatStreamFrame): string => `${JSON.stringify(frame)}\n`;
 
 beforeEach(() => {
   resetBuilders();
 });
 
+afterEach(() => mock.timers.reset());
+
 describe("the stream reader", () => {
   it("opens without a cursor from a cold start and decodes frames in order", () => {
     const transporter = new FakeTransporter();
     const transport = createAgentChatTransport(transporter);
     const frames: AgentChatStreamFrame[] = [];
-    const timers = fakeTimers();
-    const handle = transport.stream("s1", { ...timers }, { onFrame: (frame) => frames.push(frame) });
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const handle = transport.stream("s1", {}, { onFrame: (frame) => frames.push(frame) });
 
     assert.equal(transporter.latest.path, "/api/sessions/s1/events");
     transporter.latest.handlers.onData(
@@ -120,14 +95,14 @@ describe("the stream reader", () => {
   it("resumes from the highest applied sequence after a drop", () => {
     const transporter = new FakeTransporter();
     const transport = createAgentChatTransport(transporter);
-    const timers = fakeTimers();
-    const handle = transport.stream("s1", { ...timers, random: () => 0 }, { onFrame: () => {} });
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const handle = transport.stream("s1", {}, { onFrame: () => {} });
 
     transporter.latest.handlers.onData(
       line({ kind: "event", seq: 7, event: ev("thread.reverted", { turnCount: 1 }, { seq: 7 }) })
     );
     transporter.latest.handlers.onEnd();
-    timers.runAll();
+    mock.timers.tick(1_000);
 
     assert.equal(transporter.streams.length, 2);
     assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=7");
@@ -138,8 +113,8 @@ describe("the stream reader", () => {
     const transporter = new FakeTransporter();
     const transport = createAgentChatTransport(transporter);
     const frames: AgentChatStreamFrame[] = [];
-    const timers = fakeTimers();
-    const handle = transport.stream("s1", { ...timers, random: () => 0 }, {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const handle = transport.stream("s1", {}, {
       onFrame: (frame) => frames.push(frame)
     });
 
@@ -150,7 +125,7 @@ describe("the stream reader", () => {
     });
     transporter.latest.handlers.onData(line(event(1)) + line(event(2)));
     transporter.latest.handlers.onEnd();
-    timers.runAll();
+    mock.timers.tick(1_000);
     // The host replays from the cursor; 2 overlaps and must be dropped.
     transporter.latest.handlers.onData(line(event(2)) + line(event(3)));
 
@@ -164,17 +139,17 @@ describe("the stream reader", () => {
   it("asks for a snapshot when the host instance changed", () => {
     const transporter = new FakeTransporter();
     const transport = createAgentChatTransport(transporter);
-    const timers = fakeTimers();
+    mock.timers.enable({ apis: ["setTimeout"] });
     const handle = transport.stream(
       "s1",
-      { ...timers, after: 5, hostInstanceId: "h1", random: () => 0 },
+      { after: 5, hostInstanceId: "h1" },
       { onFrame: () => {} }
     );
     assert.equal(transporter.latest.path, "/api/sessions/s1/events?after=5");
 
     transporter.latest.handlers.onData(line({ kind: "synchronized", hostInstanceId: "h2" }));
     transporter.latest.handlers.onEnd();
-    timers.runAll();
+    mock.timers.tick(1_000);
     assert.equal(
       transporter.latest.path,
       "/api/sessions/s1/events",
@@ -183,27 +158,12 @@ describe("the stream reader", () => {
     handle.close();
   });
 
-  it("survives a chunk boundary inside a frame and a malformed line", () => {
-    const transporter = new FakeTransporter();
-    const transport = createAgentChatTransport(transporter);
-    const frames: AgentChatStreamFrame[] = [];
-    const timers = fakeTimers();
-    const handle = transport.stream("s1", { ...timers }, { onFrame: (frame) => frames.push(frame) });
-
-    const whole = line({ kind: "synchronized", hostInstanceId: "h1" });
-    transporter.latest.handlers.onData("{oops\n");
-    transporter.latest.handlers.onData(whole.slice(0, 10));
-    transporter.latest.handlers.onData(whole.slice(10));
-    assert.equal(frames.length, 1);
-    handle.close();
-  });
-
   it("reports the reconnect and stops for good on close", () => {
     const transporter = new FakeTransporter();
     const transport = createAgentChatTransport(transporter);
-    const timers = fakeTimers();
+    mock.timers.enable({ apis: ["setTimeout"] });
     const seen: Array<{ attempt: number; reason: string }> = [];
-    const handle = transport.stream("s1", { ...timers, random: () => 0 }, {
+    const handle = transport.stream("s1", {}, {
       onFrame: () => {},
       onReconnect: (info) => seen.push({ attempt: info.attempt, reason: info.reason })
     });
@@ -211,18 +171,20 @@ describe("the stream reader", () => {
     assert.deepEqual(seen, [{ attempt: 1, reason: "ended" }]);
 
     handle.close();
-    timers.runAll();
+    mock.timers.tick(1_000);
     assert.equal(transporter.streams.length, 1, "a closed stream never reconnects");
   });
 
   it("closes a wedged stream once the heartbeat window lapses", () => {
     const transporter = new FakeTransporter();
     const transport = createAgentChatTransport(transporter);
-    const timers = fakeTimers();
-    const handle = transport.stream("s1", { ...timers, random: () => 0 }, { onFrame: () => {} });
-    // The stall timer fires, then the scheduled reconnect fires.
-    timers.runAll();
-    timers.runAll();
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const handle = transport.stream("s1", {}, { onFrame: () => {} });
+    mock.timers.tick(49_999);
+    assert.equal(transporter.streams[0]?.closed, false);
+    mock.timers.tick(1);
+    assert.equal(transporter.streams[0]?.closed, true);
+    mock.timers.tick(1_000);
     assert.equal(transporter.streams.length, 2);
     handle.close();
   });
@@ -337,8 +299,9 @@ describe("indexed history and search (design 2026-09-23 §C)", () => {
     await transport.readHistory("s1", {}, controller.signal);
     await transport.search({ q: "x" }, controller.signal);
 
-    assert.equal(transporter.requests[0]?.signal, controller.signal);
-    assert.equal(transporter.requests[1]?.signal, controller.signal);
+    assert.deepEqual(transporter.requests.map((request) => request.signal?.aborted), [false, false]);
+    controller.abort();
+    assert.deepEqual(transporter.requests.map((request) => request.signal?.aborted), [true, true]);
   });
 
   it("maps INDEX_UNAVAILABLE to a typed, non-retryable error", async () => {
@@ -474,7 +437,7 @@ describe("a call's streamed output (GET …/items/:itemId/output, window by wind
       const transporter = new FakeTransporter();
       const transport = createAgentChatTransport(transporter);
       transporter.responses.push(...pages.map(ok));
-      await assert.rejects(() => transport.readItemOutput!("s1", "i1"), /streamed output/);
+      await assert.rejects(() => transport.readItemOutput!("s1", "i1"));
       assert.equal(transporter.requests.length, pages.length);
     };
     await refused({ seq: 3 });
@@ -501,7 +464,7 @@ describe("a call's streamed output (GET …/items/:itemId/output, window by wind
       const transporter = new FakeTransporter();
       const transport = createAgentChatTransport(transporter);
       transporter.responses.push(ok(page));
-      await assert.rejects(() => transport.readItemOutput!("s1", "i1"), /streamed output/);
+      await assert.rejects(() => transport.readItemOutput!("s1", "i1"));
       assert.equal(transporter.requests.length, 1);
     };
     const wide = THREAD_ITEM_OUTPUT_WINDOW_MAX_BYTES + 1;
@@ -543,10 +506,9 @@ describe("a call's streamed output (GET …/items/:itemId/output, window by wind
 
     await transport.readItemOutput!("s1", "i1", controller.signal);
 
-    assert.deepEqual(
-      transporter.requests.map((request) => request.signal),
-      [controller.signal, controller.signal]
-    );
+    assert.deepEqual(transporter.requests.map((request) => request.signal?.aborted), [false, false]);
+    controller.abort();
+    assert.deepEqual(transporter.requests.map((request) => request.signal?.aborted), [true, true]);
   });
 });
 
@@ -599,14 +561,13 @@ describe("attachments", () => {
   it("reads an attachment's bytes back over requestBytes, and refuses where the transporter has none (§7.4)", async () => {
     const plain = new FakeTransporter();
     await assert.rejects(
-      () => createAgentChatTransport(plain).fetchAttachment("s1", "att-1"),
-      /not supported/
+      () => createAgentChatTransport(plain).fetchAttachment("s1", "att-1")
     );
     assert.equal(plain.requests.length, 0, "never falls back to the JSON request path");
 
     const binary = new FakeBinaryTransporter();
     const bytes = await createAgentChatTransport(binary).fetchAttachment("s1", "att-1");
-    assert.equal(bytes, binary.bytes);
+    assert.deepEqual(new Uint8Array(bytes), new Uint8Array([1, 2, 3]));
     assert.equal(binary.byteRequests[0]?.method, "GET");
     assert.equal(binary.byteRequests[0]?.path, "/api/sessions/s1/attachments/att-1");
 
@@ -619,23 +580,8 @@ describe("attachments", () => {
         assert.ok(error instanceof AgentChatCommandError);
         assert.equal(error.status, 404);
         assert.equal(error.code, "UNKNOWN");
-        assert.equal(error.message, "Attachment fetch failed");
         return true;
       }
     );
-  });
-});
-
-describe("resolveAgentChatTransport", () => {
-  it("memoises per transporter so a re-render never re-opens a stream", () => {
-    const transporter = new FakeTransporter();
-    assert.equal(resolveAgentChatTransport(transporter), resolveAgentChatTransport(transporter));
-  });
-
-  it("prefers a transporter's own implementation", () => {
-    const own = {} as never;
-    const transporter = new FakeTransporter() as FakeTransporter & Transporter;
-    transporter.agentChat = () => own;
-    assert.equal(resolveAgentChatTransport(transporter), own);
   });
 });

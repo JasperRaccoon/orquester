@@ -340,7 +340,6 @@ function makeHarness(): Harness {
   const server: OpenCodeServerHandle = {
     url: "http://127.0.0.1:1",
     version: "1.18.5",
-    serverPassword: undefined,
     projectDir: "/repo",
     pid: 1234,
     client: (directory: string) =>

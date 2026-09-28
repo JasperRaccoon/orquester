@@ -71,7 +71,7 @@ import { truncateDetail } from "./text-boundary.ts";
  * *T3: `ProviderRuntimeIngestion.ts:400-419` vs
  * `packages/client-runtime/src/pendingRequests.ts:48-65`.*
  */
-export function requestKindFromCanonicalRequestType(
+function requestKindFromCanonicalRequestType(
   requestType: string | undefined
 ): ProviderRequestKind | undefined {
   switch (requestType) {

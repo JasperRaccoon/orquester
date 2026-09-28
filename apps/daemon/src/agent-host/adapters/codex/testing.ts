@@ -11,7 +11,7 @@
  * with the rest of the package.
  */
 
-import { chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -93,7 +93,7 @@ export type MockParentAskEnd = ("turn-interrupted" | "turn-failed" | "resolved" 
 export type MockTurnScript =
   | { kind: "text"; text: string }
   | { kind: "command-approval"; command: string; availableDecisions?: unknown[]; afterAsking?: MockParentAskEnd }
-  | { kind: "file-change-approval"; path: string; diff: string; /** Stay SILENT this long after the answer, so no notification shields the watchdog. */ holdAfterApprovalMs?: number }
+  | { kind: "file-change-approval"; path: string; diff: string; /** Stay silent after the answer, until a wire notification or interrupt. */ holdAfterApproval?: boolean }
   | { kind: "user-input"; questionId: string; header: string; question: string; options: { label: string; description: string }[]; isOther?: boolean; isBlocking?: boolean; /** Append a question the filter must drop, to exercise the partial-refusal rule. */ withUnrenderable?: boolean; afterAsking?: MockParentAskEnd }
   | {
       kind: "elicitation";
@@ -175,6 +175,7 @@ export interface MockGoal {
 
 export interface MockConfig {
   userAgent?: string;
+  stderr?: string;
   /** Never answer `initialize`, to exercise the handshake deadline. */
   hangOnInitialize?: boolean;
   /** Exit this many ms after start without answering anything. */
@@ -263,12 +264,15 @@ export function writeMockCodexServer(config: Omit<MockConfig, "logPath">): {
   bin: string;
   dir: string;
   logPath: string;
+  notify(method: string, params: unknown): void;
   received(): MockReceived[];
 } {
   const dir = mkdtempSync(join(tmpdir(), "codex-mock-"));
   const logPath = join(dir, "received.ndjson");
   const configPath = join(dir, "config.json");
-  writeFileSync(configPath, JSON.stringify({ ...config, logPath }), "utf8");
+  const notificationPath = join(dir, "notifications.ndjson");
+  writeFileSync(notificationPath, "", "utf8");
+  writeFileSync(configPath, JSON.stringify({ ...config, logPath, notificationPath }), "utf8");
 
   const bin = join(dir, "codex-mock.mjs");
   writeFileSync(bin, MOCK_SERVER_SOURCE.replace("__CONFIG_PATH__", configPath), "utf8");
@@ -278,6 +282,7 @@ export function writeMockCodexServer(config: Omit<MockConfig, "logPath">): {
     bin,
     dir,
     logPath,
+    notify: (method, params) => appendFileSync(notificationPath, `${JSON.stringify({ method, params })}\n`, "utf8"),
     received: () => readReceived(logPath)
   };
 }
@@ -394,6 +399,8 @@ const log = (record) => {
 };
 
 const send = (frame) => { process.stdout.write(JSON.stringify(frame) + "\\n"); };
+let notificationOffset = 0;
+if (config.stderr) process.stderr.write(config.stderr);
 let serverRequestId = 0;
 const pendingServerRequests = new Map();
 
@@ -509,9 +516,7 @@ async function runTurn(turnId, script) {
     case "file-change-approval": {
       send({ method: "item/started", params: { item: { type: "fileChange", id: itemId, changes: [{ path: script.path, kind: { type: "add" }, diff: script.diff }], status: "inProgress" }, threadId, turnId, startedAtMs: 0 } });
       const reply = await askServerRequest("item/fileChange/requestApproval", { threadId, turnId, itemId, startedAtMs: 0, reason: null, grantRoot: null });
-      if (script.holdAfterApprovalMs) {
-        await new Promise((r) => setTimeout(r, script.holdAfterApprovalMs));
-      }
+      if (script.holdAfterApproval) return;
       const accepted = reply && reply.result && reply.result.decision !== "decline" && reply.result.decision !== "cancel";
       send({ method: "item/completed", params: { item: { type: "fileChange", id: itemId, changes: [{ path: script.path, kind: { type: "add" }, diff: script.diff }], status: accepted ? "completed" : "declined" }, threadId, turnId, completedAtMs: 1 } });
       break;
@@ -813,6 +818,11 @@ function handle(frame) {
       return;
     }
     case "thread/turns/list": {
+      const queued = readFileSync(config.notificationPath, "utf8");
+      for (const line of queued.slice(notificationOffset).split("\\n")) {
+        if (line.trim()) send(JSON.parse(line));
+      }
+      notificationOffset = queued.length;
       const all = historyTurnIds.map((tid) => ({ ...turnObject(tid, "completed"), items: [{ type: "agentMessage", id: "i-" + tid, text: tid, phase: "final_answer", memoryCitation: null, delivery: null, questions: null }], itemsView: "full" }));
       if (typeof config.turnsPageSize !== "number") {
         send({ id, result: { data: all, nextCursor: null, backwardsCursor: null } });

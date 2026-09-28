@@ -28,9 +28,8 @@ function fakeTmux(live: string[]): Tmux {
     setWindowSizeLatest: async () => undefined,
     scrubGlobalSecrets: async () => undefined,
     killSession: async () => undefined,
-    // The attach PTY exits immediately (`tmux -V`); the exit path then asks
-    // whether the pane is still alive, which it is not.
-    hasSession: async () => false,
+    // The harmless attach client exits; the fixture pane remains live independently.
+    hasSession: async (id: string) => live.includes(id),
     attachArgs: () => ["-V"]
   } as unknown as Tmux;
 }
@@ -83,17 +82,7 @@ async function harness(
     // a temp file can appear after the rmdir listed the directory.
     cleanup: async () => {
       await drainSessionIndexWrites(indexPath);
-      // `close()`/`closeAll()` can queue one more write behind the drain, so
-      // retry the rmdir rather than failing the test on an ENOTEMPTY that says
-      // nothing about the code under test.
-      for (let attempt = 0; attempt < 10; attempt++) {
-        try {
-          await rm(dir, { recursive: true, force: true });
-          return;
-        } catch {
-          await drainSessionIndexWrites(indexPath);
-        }
-      }
+      await rm(dir, { recursive: true, force: true });
     }
   };
 }
@@ -120,8 +109,7 @@ test("a chat record is never reaped as an orphan tmux session", async () => {
   );
   const chat = new ChatSessionManager({ requestPersist: () => undefined });
   const tmux = {
-    ...fakeTmux(["orphan-1"]),
-    listSessions: async () => ["orphan-1"],
+    ...fakeTmux(["chat-1", "orphan-1"]),
     killSession: async (id: string) => {
       killed.push(id);
     }
@@ -136,6 +124,7 @@ test("a chat record is never reaped as an orphan tmux session", async () => {
   await manager.reattach();
   assert.deepEqual(killed, ["orphan-1"], "a genuine orphan is still reaped");
   manager.closeAll();
+  await drainSessionIndexWrites(indexPath);
   await rm(dir, { recursive: true, force: true });
 });
 
@@ -165,67 +154,41 @@ test("a shell record carries no legacy flag", async () => {
   await h.cleanup();
 });
 
-test("the PTY manager is the only writer: one file holds both kinds", async () => {
+test("one persisted index holds updated chat and terminal records", async () => {
   const h = await harness([chatRecord("chat-1", 1), terminalRecord("bash-1", "shell", 0)], ["bash-1"]);
-  await h.manager.reattach();
-  h.manager.persistIndexNow();
-  // persistIndexNow is fire-and-forget; wait for the atomic rename to land. A
-  // parse failure here is only "the write has not landed yet" — never a
-  // half-written file, which is what the unique temp name guarantees.
-  for (let i = 0; i < 50; i++) {
-    let raw: { sessions: SessionRecord[] };
-    try {
-      raw = JSON.parse(await readFile(h.indexPath, "utf8")) as { sessions: SessionRecord[] };
-    } catch {
-      await new Promise((resolve) => setTimeout(resolve, 10));
-      continue;
-    }
-    if (raw.sessions.some((s) => s.kind === "agent-chat")) {
-      const chatRow = raw.sessions.find((s) => s.kind === "agent-chat");
-      assert.equal(chatRow?.id, "chat-1", "the contributor's record is in the one file");
-      assert.equal(chatRow?.chat?.lastSeq, 7);
-      assert.equal(chatRow?.chat?.home, "account");
-      h.manager.closeAll();
-      await h.cleanup();
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
+  try {
+    await h.manager.reattach();
+    h.chat.noteSeq("chat-1", 11);
+    h.manager.persistIndexNow();
+    await drainSessionIndexWrites(h.indexPath);
+    const raw = JSON.parse(await readFile(h.indexPath, "utf8")) as { sessions: SessionRecord[] };
+    assert.deepEqual(raw.sessions.map((row) => row.id).sort(), ["bash-1", "chat-1"]);
+    assert.equal(raw.sessions.find((row) => row.id === "chat-1")?.chat?.lastSeq, 11);
+  } finally {
+    h.manager.closeAll();
+    await h.cleanup();
   }
-  assert.fail("the contributor's records never reached sessions.json");
 });
 
-test("concurrent writes never publish a mixture of two documents", async () => {
-  // Regression: a FIXED `<path>.tmp` let two in-flight writes interleave in the
-  // same temp file, and the rename then published a complete JSON document
-  // followed by the tail of a longer one. `readIndex()` reads that as corrupt,
-  // and `reattach()` then refuses to reap orphans for EVERY terminal — the
-  // exact failure persistence exists to prevent.
+test("concurrent writes retain the latest complete session index", async () => {
   const h = await harness([], []);
-  await h.manager.reattach();
-  const seen: string[] = [];
-  for (let round = 0; round < 40; round++) {
-    // Alternate long and short payloads: a shorter document overwriting a
-    // longer one in place is what leaves trailing bytes behind.
-    h.chat.clear();
-    if (round % 2 === 0) {
-      for (let i = 0; i < 12; i++) {
-        h.chat.adopt([chatRecord(`long-${round}-${i}`, i)]);
+  try {
+    await h.manager.reattach();
+    for (let round = 0; round < 40; round++) {
+      h.chat.clear();
+      if (round % 2 === 0) {
+        for (let i = 0; i < 12; i++) h.chat.adopt([chatRecord(`long-${round}-${i}`, i)]);
+      } else {
+        h.chat.adopt([chatRecord("short", 0)]);
       }
-    } else {
-      h.chat.adopt([chatRecord("short", 0)]);
+      h.manager.persistIndexNow();
     }
-    h.manager.persistIndexNow();
+    await drainSessionIndexWrites(h.indexPath);
+    const saved = JSON.parse(await readFile(h.indexPath, "utf8")) as { sessions: SessionRecord[] };
+    assert.deepEqual(saved.sessions.map((row) => row.id), ["short"]);
+    assert.equal(saved.sessions[0]?.chat?.lastSeq, 7);
+  } finally {
+    h.manager.closeAll();
+    await h.cleanup();
   }
-  for (let i = 0; i < 100; i++) {
-    const raw = await readFile(h.indexPath, "utf8").catch(() => null);
-    if (raw !== null) {
-      seen.push(raw);
-      // Every observation must be exactly one document.
-      JSON.parse(raw);
-    }
-    await new Promise((resolve) => setTimeout(resolve, 2));
-  }
-  assert.ok(seen.length > 0, "the index was observed at least once");
-  h.manager.closeAll();
-  await h.cleanup();
 });

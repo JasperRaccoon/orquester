@@ -30,7 +30,7 @@
 import { redactStderr } from "../../../support/stderr.ts";
 
 /** Sentinel written in place of a redacted value. Matches the fixtures. */
-export const REDACTED = "<redacted>";
+const REDACTED = "<redacted>";
 
 /** Depth past which a frame is replaced by a marker rather than walked. */
 const MAX_DEPTH = 24;

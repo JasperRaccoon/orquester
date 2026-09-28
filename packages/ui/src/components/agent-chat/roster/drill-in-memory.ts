@@ -47,7 +47,7 @@ export type DrillInMemory = ReadonlyMap<string, DrillInMemoryEntry>;
 export const EMPTY_DRILL_IN_MEMORY: DrillInMemory = new Map();
 
 /** How many agents one thread's memory keeps. */
-export const DRILL_IN_MEMORY_LIMIT = 50;
+const DRILL_IN_MEMORY_LIMIT = 50;
 
 const NO_DISCLOSURES: DisclosureState = {
   expandedTurnIds: [],
@@ -63,14 +63,13 @@ const NO_IDS: readonly string[] = [];
 export function rememberDrillIn(
   memory: DrillInMemory,
   agentId: string,
-  entry: DrillInMemoryEntry,
-  limit = DRILL_IN_MEMORY_LIMIT
+  entry: DrillInMemoryEntry
 ): DrillInMemory {
   const next = new Map(memory);
   next.delete(agentId);
   next.set(agentId, entry);
   for (const oldest of next.keys()) {
-    if (next.size <= limit) {
+    if (next.size <= DRILL_IN_MEMORY_LIMIT) {
       break;
     }
     next.delete(oldest);
@@ -96,7 +95,7 @@ export interface DrillInOpening {
 }
 
 /**
- * How `agentId`'s drill-in opens: its remembered disclosures, and the reader's
+ * How an agent's drill-in opens: its remembered disclosures, and the reader's
  * position when they left it mid-list — with follow OFF, or the first re-pin
  * would carry the list to its end over the restore. An agent never opened, or
  * left at its end, opens at its end, following: the content grew since.
@@ -109,11 +108,6 @@ export interface DrillInOpening {
  * armed again, and restoring that position reopened the agent where the
  * reader had been before they caught up.
  */
-export function openDrillIn(memory: DrillInMemory, agentId: string): DrillInOpening {
-  return drillInOpening(recallDrillIn(memory, agentId));
-}
-
-/** {@link openDrillIn} for an entry already recalled (or none). */
 export function drillInOpening(entry: DrillInMemoryEntry | null): DrillInOpening {
   const position =
     entry !== null && !entry.follow && entry.position !== null && !entry.position.atEnd ? entry.position : null;

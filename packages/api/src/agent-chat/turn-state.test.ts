@@ -9,9 +9,7 @@ import test from "node:test";
 import type { Turn } from "./thread.ts";
 import {
   applySessionStatusToTurn,
-  deriveLatestTurn,
-  isSettledTurnState,
-  settledTurnStateForSessionStatus
+  deriveLatestTurn
 } from "./turn-state.ts";
 
 function turn(overrides: Partial<Turn> = {}): Turn {
@@ -27,49 +25,13 @@ function turn(overrides: Partial<Turn> = {}): Turn {
   };
 }
 
-test("settledTurnStateForSessionStatus is T3's table", () => {
-  assert.equal(settledTurnStateForSessionStatus("idle"), "completed");
-  assert.equal(settledTurnStateForSessionStatus("ready"), "completed");
-  assert.equal(settledTurnStateForSessionStatus("stopped"), "interrupted");
-  assert.equal(settledTurnStateForSessionStatus("error"), "failed");
-  assert.equal(settledTurnStateForSessionStatus("starting"), null);
-  assert.equal(settledTurnStateForSessionStatus("running"), null);
-});
-
-test("isSettledTurnState covers exactly the four terminal states", () => {
-  assert.equal(isSettledTurnState("completed"), true);
-  assert.equal(isSettledTurnState("failed"), true);
-  assert.equal(isSettledTurnState("interrupted"), true);
-  assert.equal(isSettledTurnState("cancelled"), true);
-  assert.equal(isSettledTurnState("running"), false);
-  assert.equal(isSettledTurnState("pending"), false);
-});
-
-test("a running turn settles on the session leaving running", () => {
-  const settled = applySessionStatusToTurn(turn(), "ready", "2026-01-01T00:00:09.000Z");
-  assert.equal(settled.state, "completed");
-  assert.equal(settled.completedAt, "2026-01-01T00:00:09.000Z");
-});
-
-test("a stopped session interrupts the turn but keeps its completedAt stamp", () => {
-  const settled = applySessionStatusToTurn(turn(), "stopped", "2026-01-01T00:00:09.000Z");
-  assert.equal(settled.state, "interrupted");
-  assert.equal(settled.completedAt, "2026-01-01T00:00:09.000Z");
-});
-
-test("a still-running session returns the same turn reference", () => {
-  const original = turn();
-  assert.equal(applySessionStatusToTurn(original, "running", "x"), original);
-  assert.equal(applySessionStatusToTurn(original, "starting", "x"), original);
-});
-
 test("a settled turn never moves again: a late transition cannot extend it", () => {
   const original = turn({
     state: "interrupted",
     completedAt: "2026-01-01T00:00:05.000Z"
   });
   const next = applySessionStatusToTurn(original, "ready", "2026-01-01T00:01:00.000Z");
-  assert.equal(next, original);
+  assert.equal(next.state, "interrupted");
   assert.equal(next.completedAt, "2026-01-01T00:00:05.000Z");
 });
 

@@ -20,7 +20,7 @@ const OPEN = "";
 const CLOSE = "";
 const MARKER = /([^]+)/g;
 
-export function secretMarker(name: string): string {
+function secretMarker(name: string): string {
   return `${OPEN}${name}${CLOSE}`;
 }
 

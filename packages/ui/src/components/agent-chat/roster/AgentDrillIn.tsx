@@ -83,8 +83,6 @@ const noop = (): void => {};
 export function AgentDrillIn({
   sessionId,
   agentId,
-  agent: agentOverride,
-  rows: rowsOverride,
   onBack,
   bottomInset,
   roster,
@@ -128,7 +126,6 @@ export function AgentDrillIn({
   const lastKnownAgent = React.useRef<RuntimeSubagent | null>(opening.agent);
   const live = useAgentChatDrillIn(sessionId, agentId, {
     disclosures: projectionDisclosures,
-    agent: agentOverride,
     lastKnownAgent: lastKnownAgent.current
   });
   if (live.agent !== null) {
@@ -153,16 +150,14 @@ export function AgentDrillIn({
   const shellTitle = agent?.title;
   const shellProjection = React.useRef<BackgroundShellProjection | null>(null);
   const shellRows = React.useMemo(() => {
-    if (live.rows !== null || rowsOverride !== undefined) {
+    if (live.rows !== null) {
       return null;
     }
     shellProjection.current = projectBackgroundShell(shellProjection.current, live.items, agentId, shellTitle);
     return shellProjection.current.rows;
-  }, [live.rows, live.items, rowsOverride, agentId, shellTitle]);
-  // The hook is the source, and the ONLY projection: the timeline renders
-  // these rows as they are. The prop overrides it for a host that already
-  // holds the rows (and for tests, which have no store).
-  const rows = rowsOverride ?? live.rows ?? shellRows ?? EMPTY_ROWS;
+  }, [live.rows, live.items, agentId, shellTitle]);
+  // The timeline renders the agent or shell projection directly.
+  const rows = live.rows ?? shellRows ?? EMPTY_ROWS;
 
   // A shell's rows open THEMSELVES: the output is the whole reason the row was
   // clicked, and one more click to reach it is the bug this fixes. Seeded by

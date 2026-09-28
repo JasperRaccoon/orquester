@@ -12,11 +12,7 @@ export {
   type AgentHostServerOptions
 } from "./http-server.ts";
 export {
-  coalesceToolUpdates,
   createThreadStream,
-  serializedSize,
-  COALESCE_WINDOW_MS,
-  MAX_PENDING_UPDATES,
   type ThreadStream,
   type ThreadStreamOptions
 } from "./stream.ts";

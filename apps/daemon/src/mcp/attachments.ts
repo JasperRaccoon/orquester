@@ -23,7 +23,7 @@ export type AttachmentInput = z.infer<typeof attachmentInputSchema>;
 const MIME_BY_EXT: Record<string, string> = { gif: "image/gif", jpg: "image/jpeg", jpeg: "image/jpeg", png: "image/png", webp: "image/webp", pdf: "application/pdf", txt: "text/plain", md: "text/markdown", csv: "text/csv", json: "application/json", html: "text/html", xml: "application/xml", js: "text/javascript", ts: "text/typescript", py: "text/x-python", log: "text/plain" };
 const IMAGE_EXTS = new Set(["gif", "jpg", "jpeg", "png", "webp"]);
 
-export function guessMime(name: string): string | undefined {
+function guessMime(name: string): string | undefined {
   const ext = extname(name).slice(1).toLowerCase();
   return Object.hasOwn(MIME_BY_EXT, ext) ? MIME_BY_EXT[ext] : undefined; // own keys only: "x.constructor" is no MIME type
 }

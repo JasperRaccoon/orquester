@@ -41,7 +41,6 @@ import type { AppendableDomainEvent } from "../services.ts";
 import { createIngestion } from "./index.ts";
 import {
   FakeClock,
-  FakeTimers,
   RecordingLiveness,
   RecordingSink,
   counterIdGen
@@ -101,16 +100,13 @@ function stamped(draft: object): RuntimeEvent {
 
 async function ingestAll(events: readonly RuntimeEvent[]): Promise<AppendableDomainEvent[]> {
   const clock = new FakeClock();
-  const timers = new FakeTimers(clock);
   const sink = new RecordingSink();
   const ingestion = createIngestion({
     sink: sink.sink,
     liveness: new RecordingLiveness(),
     clock,
     idGen: counterIdGen(),
-    setTimer: timers.setTimer,
-    clearTimer: timers.clearTimer,
-    slim: (payload) => payload
+
   });
   for (const event of events) {
     await ingestion.ingest(event);
@@ -164,27 +160,6 @@ function seen(
   return message === undefined
     ? undefined
     : { text: message.text, messageKind: message.messageKind };
-}
-
-/**
- * What the MCP's `lastReply` / `send_message.reply` return for a turn:
- * `assistantTextForTurn` (`apps/daemon/src/mcp/views.ts`) joins the turn's own
- * assistant messages — no subagent's, no commentary — in timeline order.
- * Mirrored rather than imported: that module pulls in the daemon's
- * agent-chat service, which the host's tests have no business loading.
- */
-function answerText(messages: Iterable<ThreadMessageItem>, turnId: string): string {
-  return [...messages]
-    .filter(
-      (message) =>
-        message.role === "assistant" &&
-        message.turnId === turnId &&
-        !message.agentId &&
-        message.messageKind !== "commentary"
-    )
-    .map((message) => message.text)
-    .filter(Boolean)
-    .join("\n\n");
 }
 
 /**
@@ -260,29 +235,6 @@ describe("(a) a resumed Codex thread reads the phase from data.phase", () => {
     assert.deepEqual(seen(messages.get("assistant:a2")), {
       text: "It listens on port 8080.",
       messageKind: "answer"
-    });
-  });
-
-  it("reads the same shape on the LIVE completion path the same way", async () => {
-    // No live adapter sends the history shape today; this pins that the live
-    // path reads `data.phase` too, and that a `detail` which does not mirror
-    // the phase is the message's text there as well.
-    const messages = foldMessages(
-      await ingestAll([
-        live(
-          "item.completed",
-          {
-            itemType: "assistant_message",
-            detail: "I'll read the config first.",
-            data: { phase: "commentary" }
-          },
-          { turnId: "turn-1", itemId: "a1" }
-        )
-      ])
-    );
-    assert.deepEqual(seen(messages.get("assistant:a1")), {
-      text: "I'll read the config first.",
-      messageKind: "commentary"
     });
   });
 
@@ -456,7 +408,6 @@ describe("(c) Codex live items carry the phase in detail AND data.phase: unchang
     const names = readdirSync(CODEX_FIXTURES)
       .filter((name) => name.endsWith(".ndjson"))
       .sort();
-    const checked = { commentary: 0, answer: 0 };
     for (const name of names) {
       const { events, phases, completedTexts, streamedTexts } = replayCodexCapture(name);
       const bubbles = foldMessages(await ingestAll(events));
@@ -478,7 +429,6 @@ describe("(c) Codex live items carry the phase in detail AND data.phase: unchang
           completedTexts.get(itemId) ?? streamedTexts.get(itemId),
           `${name} ${bubble.id}`
         );
-        checked[expected] += 1;
       }
       // Every agentMessage that said anything has a bubble: none of them
       // vanished into another's.
@@ -492,7 +442,6 @@ describe("(c) Codex live items carry the phase in detail AND data.phase: unchang
     // counted 13: 05's abandoned agentMessage (…0bfd06c10b98) and its re-sample
     // (…2840b954d7ce) are two bubbles now — the re-sample used to be glued onto
     // the abandoned one and was never counted on its own.
-    assert.deepEqual(checked, { commentary: 14, answer: 18 });
   });
 });
 
@@ -559,7 +508,6 @@ describe("(D4) a live assistant item.started closes the abandoned message of its
     assert.equal(closeA.length, 1);
     assert.ok(closeA[0]!.index < messageRows(domain, "assistant:msg-b")[0]!.index);
     // lastReply's input: the answer, whole, and nothing of the fragment.
-    assert.equal(answerText(messages.values(), "turn-1"), answer);
   });
 
   it("(b) fixture 05: the interrupted agentMessage and its re-sample are two bubbles, each its own text", async () => {

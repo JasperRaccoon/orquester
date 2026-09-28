@@ -5,13 +5,9 @@ import type { RuleOperator, WorkflowRule } from "@orquester/config";
 
 import type { ExpressionContext } from "./expressions.ts";
 import {
-  compileRulePattern,
   evaluateRule,
   evaluateRules,
   evaluateSwitch,
-  RULE_MATCH_MAX_INPUT,
-  ruleNumber,
-  unsafeRegexReason
 } from "./rules.ts";
 
 const ctx: ExpressionContext = {
@@ -65,11 +61,11 @@ describe("evaluateRule", () => {
     const bad = evaluateRule(rule("{{ input.s }}", "gt", "1"), ctx);
     assert.equal(bad.result, false);
     assert.match(bad.warnings[0]!, /not a number/);
-    assert.equal(ruleNumber(" 42 "), 42);
-    assert.equal(ruleNumber("0x10"), null);
-    assert.equal(ruleNumber(""), null);
-    assert.equal(ruleNumber("Infinity"), null);
-    assert.equal(ruleNumber(Number.NaN), null);
+    for (const invalid of ["0x10", "", "Infinity"]) {
+      const result = evaluateRule(rule(invalid, "gt", "-1"), ctx);
+      assert.equal(result.result, false);
+      assert.equal(result.warnings.length, 1);
+    }
   });
 
   it("presence operators treat a missing value as an answer, without a warning", () => {
@@ -110,20 +106,18 @@ describe("evaluateRule", () => {
 
   it("matches refuses catastrophic patterns", () => {
     for (const pattern of ["(a+)+$", "(.*)*", "(\\w+\\s?)*$", "((ab)+)*", "(a|aa)*b", "(x+){2,}", "(a)\\1", "(?<x>a)\\k<x>"]) {
-      assert.notEqual(unsafeRegexReason(pattern), null, pattern);
       const evaluated = evaluateRule(rule("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa!", "matches", pattern), ctx);
       assert.equal(evaluated.result, false, pattern);
       assert.equal(evaluated.warnings.length, 1, pattern);
     }
     for (const pattern of ["^v\\d+\\.\\d+", "(foo|bar)+", "(?:ab)+c", "[(+)]+", "a{2,3}", "(ab)?c*", "\\(a+\\)+", "x(a+)y"]) {
-      assert.equal(unsafeRegexReason(pattern), null, pattern);
+      assert.deepEqual(evaluateRule(rule("anything", "matches", pattern), ctx).warnings, [], pattern);
     }
-    assert.notEqual(unsafeRegexReason("a".repeat(1001)), null);
-    assert.ok("regex" in compileRulePattern("(foo|bar)+"));
+    assert.equal(evaluateRule(rule("x", "matches", "a".repeat(1001)), ctx).warnings.length, 1);
   });
 
   it("matches only searches the first 100 KB", () => {
-    const big: ExpressionContext = { ...ctx, input: { text: "x".repeat(RULE_MATCH_MAX_INPUT) + "NEEDLE" } };
+    const big: ExpressionContext = { ...ctx, input: { text: "x".repeat(100 * 1024) + "NEEDLE" } };
     const evaluated = evaluateRule(rule("{{ input.text }}", "matches", "NEEDLE"), big);
     assert.equal(evaluated.result, false);
     assert.match(evaluated.warnings[0]!, /first 100 KB/);

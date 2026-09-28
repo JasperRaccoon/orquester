@@ -10,9 +10,7 @@ import test from "node:test";
 
 import {
   deriveAgentPanelModel,
-  emptyAgentPanelModel,
-  foldSubagentActivities,
-  isBackgroundTaskActivity
+  foldSubagentActivities
 } from "./roster.ts";
 import { ROSTER_LIMIT } from "./thread.ts";
 import { activity, agentTask, resetActivityIds } from "./test-helpers.ts";
@@ -23,12 +21,6 @@ function byId(agents: readonly RuntimeSubagent[], id: string): RuntimeSubagent {
   assert.ok(agent, `no roster row for ${id}`);
   return agent;
 }
-
-test("isBackgroundTaskActivity reads the host stamp only", () => {
-  assert.equal(isBackgroundTaskActivity({ agentKind: "agent" }), false);
-  assert.equal(isBackgroundTaskActivity({ agentKind: "background" }), true);
-  assert.equal(isBackgroundTaskActivity({}), true, "an unstamped row is background");
-});
 
 test("builds an agent from start → progress → completion", () => {
   resetActivityIds();
@@ -222,21 +214,6 @@ test("metadata is never downgraded to null by a later partial event", () => {
   assert.equal(agent.title, "Reviewer");
   assert.equal(agent.model, "opus");
   assert.equal(agent.role, "review");
-});
-
-test("recent activity is a deduped ring of six bounded entries", () => {
-  resetActivityIds();
-  const rows = [activity("task.started", agentTask("t1"))];
-  for (let i = 0; i < 10; i += 1) {
-    rows.push(activity("task.progress", agentTask("t1", { summary: `step ${i}` })));
-  }
-  rows.push(activity("task.progress", agentTask("t1", { summary: "step 9" })));
-  rows.push(activity("task.progress", agentTask("t1", { summary: "x".repeat(400) })));
-  const agent = byId(foldSubagentActivities(rows), "t1");
-  assert.equal(agent.recentActivity.length, 6);
-  const last = agent.recentActivity[5]!;
-  assert.equal(last.summary.length, 180);
-  assert.ok(last.summary.endsWith("…"));
 });
 
 test("tool.progress is the agent-owned heartbeat and never creates a row", () => {
@@ -478,7 +455,7 @@ test("a member with an unknown phase index lands in unphasedMembers, never vanis
   assert.deepEqual(group.unphasedMembers.map((member) => member.id), ["m3"]);
 });
 
-test("a phase with only pending members never reads as running", () => {
+test("a pending workflow member counts as active work in its phase", () => {
   resetActivityIds();
   const agents = foldSubagentActivities([
     activity("task.started", agentTask("wf", { taskType: "local_workflow" })),
@@ -543,11 +520,6 @@ test("counts split waiting and idle out of running and settled", () => {
   );
 });
 
-test("emptyAgentPanelModel is what an agent-less thread reads", () => {
-  assert.deepEqual(deriveAgentPanelModel({ agents: [] }), emptyAgentPanelModel());
-  assert.equal(emptyAgentPanelModel().hasAgents, false);
-});
-
 test("the roster caps at ROSTER_LIMIT, evicting live rows last", () => {
   resetActivityIds();
   const rows = [];
@@ -583,9 +555,9 @@ test("the cap evicts by rank but returns survivors in first-seen order", () => {
   const agents = foldSubagentActivities(rows);
   assert.equal(agents.length, ROSTER_LIMIT);
 
-  const firstSeen = agents.map((agent) => agent.firstSeenAt);
-  const sorted = [...firstSeen].sort();
-  assert.deepEqual(firstSeen, sorted, "survivors keep their original insertion order");
+  assert.deepEqual(agents.map((agent) => agent.id),
+    Array.from({ length: 100 }, (_, index) => `t${String(index + 20).padStart(3, "0")}`),
+    "survivors keep their original insertion order");
 });
 
 test("a resume reopens even when the NEW run's in-place progress row precedes the OLD run's terminal row", () => {

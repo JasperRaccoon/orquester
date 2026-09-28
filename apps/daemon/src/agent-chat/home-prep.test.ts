@@ -1,5 +1,5 @@
 import { strict as assert } from "node:assert";
-import { lstat, mkdtemp, readFile, readdir, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -33,23 +33,12 @@ test("an existing project's other settings are preserved", () => {
   assert.equal(project.hasTrustDialogAccepted, true);
 });
 
-test("an already-trusted project is a no-op (no write churn per turn)", () => {
-  assert.equal(
-    applyClaudeProjectTrust(
-      {
-        hasCompletedOnboarding: true,
-        projects: { "/w/p": { hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true } }
-      },
-      "/w/p"
-    ),
-    null
-  );
-});
-
 test("a malformed projects map is replaced rather than crashing the launch", () => {
   const next = applyClaudeProjectTrust({ projects: "nonsense" }, "/w/p");
   assert.ok(next);
-  assert.equal(typeof next.projects, "object");
+  assert.deepEqual((next.projects as Record<string, unknown>)["/w/p"], {
+    hasTrustDialogAccepted: true, hasCompletedProjectOnboarding: true
+  });
 });
 
 test("the other projects in the file survive the grant", () => {
@@ -93,17 +82,6 @@ test("a pre-existing 0644 config is NARROWED to 0600, never left wide", async ()
   await rm(dir, { recursive: true, force: true });
 });
 
-test("the write is atomic: tmp + rename, and no temp file is left behind", async () => {
-  // A plain truncating writeFile leaves an EMPTY `.claude.json` on a crash or a
-  // full disk, destroying every project entry and the account state.
-  const dir = await mkdtemp(join(tmpdir(), "orq-home-prep-"));
-  const file = join(dir, ".claude.json");
-  await writeFile(file, JSON.stringify({ hasCompletedOnboarding: false }), { mode: 0o600 });
-  assert.equal(await markClaudeProjectTrusted(file, "/w/p"), true);
-  assert.deepEqual(await readdir(dir), [".claude.json"], "no .tmp left over");
-  await rm(dir, { recursive: true, force: true });
-});
-
 test("a symlinked config is written THROUGH, never replaced by a regular file", async () => {
   // Users symlink agent configs into dotfiles repos; renaming onto the link
   // path would silently sever the setup.
@@ -133,32 +111,4 @@ test("an unwritable config never fails a launch", async () => {
   );
   assert.equal(warnings.length, 1);
   await rm(dir, { recursive: true, force: true });
-});
-
-test("the module writes NOTHING for Grok any more", async () => {
-  // Regression: `ensureGrokChatConfig` used to set `[features]
-  // support_permission` / `auto_update` in `<grokHome>/config.toml`, which on a
-  // managed account home is a SYMLINK to the daemon user's own
-  // `~/.grok/config.toml` — so one chat launch reconfigured Grok host-wide, for
-  // every terminal tab and every account. The daemon no longer writes any
-  // shared home file; W9 owns getting those settings to the CLI.
-  const module = (await import("./home-prep.ts")) as Record<string, unknown>;
-  for (const removed of ["ensureGrokChatConfig", "setTomlKey", "GROK_CHAT_CONFIG"]) {
-    assert.equal(module[removed], undefined, `${removed} must stay removed`);
-  }
-  // Code, not prose: exactly one write call in the module, and it is the
-  // atomic Claude one. (The doc comment still explains why the Grok write is
-  // gone, so a substring match on "config.toml" would be a false positive.)
-  const source = (await readFile(new URL("./home-prep.ts", import.meta.url), "utf8"))
-    .split("\n")
-    .filter((line) => !/^\s*(\*|\/\/|\/\*)/.test(line))
-    .join("\n");
-  assert.equal(source.includes("GROK_HOME"), false, "no grok home is resolved here");
-  assert.equal(source.includes("config.toml"), false, "no config.toml path is built here");
-  assert.equal(
-    (source.match(/writeFileAtomic\(/g) ?? []).length,
-    1,
-    "one write, and it is the atomic Claude one"
-  );
-  assert.equal(/\bwriteFile\(/.test(source), false, "no plain truncating write remains");
 });

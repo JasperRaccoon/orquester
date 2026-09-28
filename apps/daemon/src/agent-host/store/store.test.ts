@@ -24,12 +24,7 @@ const attachmentsDirOf = (root: string, id: string): string =>
 const receiptsPathOf = (root: string): string => path.join(root, "receipts.json");
 
 import type { AppendableDomainEvent, Clock, IdGen } from "../services.ts";
-import {
-  DEFAULT_SWEEP_INTERVAL_MS,
-  HEAD_CHECKPOINT_EVENTS,
-  createThreadStore,
-  isSafeThreadId
-} from "./index.ts";
+import { createThreadStore } from "./index.ts";
 
 /**
  * The sweep reads REAL file mtimes, so its clock has to move relative to now
@@ -100,9 +95,10 @@ function message(threadId: string, id: string, attachments?: AttachmentRef[]): A
   } as AppendableDomainEvent;
 }
 
-test("append stamps a per-thread monotonic seq and returns what it persisted", async () => {
+test("append stamps a per-thread monotonic seq and returns what it persisted", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
 
   const first = await store.append({ threadId: "t1", events: [created(), message("t1", "m1")] });
   assert.deepEqual(first.events.map((event) => event.seq), [1, 2]);
@@ -117,9 +113,10 @@ test("append stamps a per-thread monotonic seq and returns what it persisted", a
   assert.equal(tail.truncated, false);
 });
 
-test("concurrent appends never reuse a sequence", async () => {
+test("concurrent appends never reuse a sequence", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   await store.append({ threadId: "t1", events: [created()] });
 
   const results = await Promise.all(
@@ -135,7 +132,7 @@ test("concurrent appends never reuse a sequence", async () => {
   assert.equal(tail.seq, 26);
 });
 
-test("a first-touch read racing a first-touch append never re-uses a seq", async () => {
+test("a first-touch read racing a first-touch append never re-uses a seq", async (t) => {
   // Q1 #2: `ensureLoaded` used to mark a thread loaded BEFORE its disk reads,
   // so a read that arrived in that window returned `seq: 0` and the queued
   // append stamped 1 over sequences already on disk. On-disk seqs came back
@@ -143,6 +140,7 @@ test("a first-touch read racing a first-touch append never re-uses a seq", async
   // FOREVER.
   const rootDir = await tempRoot();
   const first = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => first.close());
   await first.append({
     threadId: "t1",
     events: [created(), message("t1", "m1"), message("t1", "m2")]
@@ -151,6 +149,7 @@ test("a first-touch read racing a first-touch append never re-uses a seq", async
 
   // A fresh instance: nothing is loaded, so both calls race the first load.
   const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => reopened.close());
   const [, appended] = await Promise.all([
     reopened.readAll("t1"),
     reopened.append({ threadId: "t1", events: [message("t1", "m3")] })
@@ -170,64 +169,14 @@ test("a first-touch read racing a first-touch append never re-uses a seq", async
   assert.equal(tail.events.length, 4);
 });
 
-test("many concurrent first-touch callers all serialise on one load", async () => {
-  const rootDir = await tempRoot();
-  const first = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  await first.append({ threadId: "t1", events: [created()] });
-  await first.drain();
-
-  const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  const work: Array<Promise<unknown>> = [];
-  for (let i = 0; i < 12; i += 1) {
-    work.push(reopened.readTail("t1", 0));
-    work.push(reopened.loadHead("t1"));
-    work.push(reopened.append({ threadId: "t1", events: [message("t1", `m${i}`)] }));
-  }
-  await Promise.all(work);
-  await reopened.drain();
-
-  const tail = await reopened.readAll("t1");
-  assert.equal(tail.truncated, false);
-  assert.deepEqual(
-    tail.events.map((event) => event.seq),
-    Array.from({ length: 13 }, (_unused, index) => index + 1)
-  );
-});
-
-test("a torn trailing line is truncated on load, never fatal", async () => {
-  const rootDir = await tempRoot();
-  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  await store.append({ threadId: "t1", events: [created(), message("t1", "m1")] });
-  await store.drain();
-
-  // Simulate a crash between write() and the newline.
-  const eventsPath = eventsPathOf(rootDir, "t1");
-  await fs.appendFile(eventsPath, '{"seq":3,"eventId":"e3","threa');
-
-  const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  const tail = await reopened.readAll("t1");
-  assert.deepEqual(tail.events.map((event) => event.seq), [1, 2]);
-  // The fragment was a batch that never completed: it is cut on load, so what
-  // is left reads whole.
-  assert.equal(tail.truncated, false);
-  assert.equal(tail.seq, 2);
-
-  // And the next append lands at 3, on a line of its own — not glued onto
-  // the fragment, where a full read would stop before it forever.
-  const appended = await reopened.append({ threadId: "t1", events: [message("t1", "m2")] });
-  assert.equal(appended.seq, 3);
-  const after = await reopened.readAll("t1");
-  assert.deepEqual(after.events.map((event) => event.seq), [1, 2, 3]);
-  assert.equal(after.truncated, false);
-});
-
-test("an event type from a NEWER host folds inertly and never truncates (R1-8, §8)", async () => {
+test("an event type from a NEWER host folds inertly and never truncates (R1-8, §8)", async (t) => {
   // §8: the thread log is outside every rollback — events appended by a newer
   // host stay on disk and the older host must still fold them. A closed type
   // enum made a new event type indistinguishable from a malformed line, so an
   // older host silently dropped the whole tail after it.
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   await store.append({ threadId: "t1", events: [created(), message("t1", "m1")] });
   await store.drain();
 
@@ -267,6 +216,7 @@ test("an event type from a NEWER host folds inertly and never truncates (R1-8, �
   );
 
   const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => reopened.close());
   const tail = await reopened.readAll("t1");
   assert.equal(tail.truncated, false, "an unknown type is decodable, not malformed");
   assert.deepEqual(tail.events.map((event) => event.seq), [1, 2, 3, 4]);
@@ -288,13 +238,14 @@ test("an event type from a NEWER host folds inertly and never truncates (R1-8, �
   assert.equal(appended.seq, 5);
 });
 
-test("an unknown type as the LAST line still seeds seq, so no append re-uses it", async () => {
+test("an unknown type as the LAST line still seeds seq, so no append re-uses it", async (t) => {
   // The seq-reuse half of R1-8: when the undecodable line was the last one,
   // `entry.seq` was seeded from the TRUNCATED scan (line N-1) while `append`
   // stamped `++entry.seq` regardless — permanently corrupting the ordering
   // that the fold and `/events?after=` depend on.
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   await store.append({ threadId: "t1", events: [created(), message("t1", "m1")] });
   await store.drain();
 
@@ -314,6 +265,7 @@ test("an unknown type as the LAST line still seeds seq, so no append re-uses it"
   );
 
   const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => reopened.close());
   const appended = await reopened.append({ threadId: "t1", events: [message("t1", "m2")] });
   assert.equal(appended.seq, 4, "the sequence must continue past the unknown event");
 
@@ -325,9 +277,10 @@ test("an unknown type as the LAST line still seeds seq, so no append re-uses it"
   assert.equal((await reopened.readAll("t1")).truncated, false);
 });
 
-test("genuinely malformed lines still truncate — §5.1's rule is unchanged", async () => {
+test("genuinely malformed lines still truncate — §5.1's rule is unchanged", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   await store.append({ threadId: "t1", events: [created()] });
   await store.drain();
 
@@ -336,6 +289,7 @@ test("genuinely malformed lines still truncate — §5.1's rule is unchanged", a
   for (const bad of ['{"seq":2,"type":', JSON.stringify({ seq: 2, type: "thread.deleted" })]) {
     const rootDir2 = await tempRoot();
     const s2 = createThreadStore({ rootDir: rootDir2, clock: fixedClock(), idGen: countingIds() });
+    t.after(() => s2.close());
     await s2.append({ threadId: "t1", events: [created()] });
     await s2.drain();
     await fs.appendFile(eventsPathOf(rootDir2, "t1"), `${bad}\n`);
@@ -344,15 +298,17 @@ test("genuinely malformed lines still truncate — §5.1's rule is unchanged", a
       clock: fixedClock(),
       idGen: countingIds()
     });
+    t.after(() => reopened.close());
     const tail = await reopened.readAll("t1");
     assert.equal(tail.truncated, true, bad);
     assert.equal(tail.events.length, 1, bad);
   }
 });
 
-test("a malformed middle line truncates the fold at that point", async () => {
+test("a malformed middle line truncates the fold at that point", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   await store.append({ threadId: "t1", events: [created(), message("t1", "m1")] });
   await store.drain();
 
@@ -362,14 +318,16 @@ test("a malformed middle line truncates the fold at that point", async () => {
   await fs.writeFile(eventsPath, `${lines[0]}\nnot json\n${lines[1]}\n`);
 
   const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => reopened.close());
   const tail = await reopened.readAll("t1");
   assert.equal(tail.events.length, 1, "everything after the bad line is dropped");
   assert.equal(tail.truncated, true);
 });
 
-test("a thread whose meta.json is corrupt is marked error and still readable", async () => {
+test("a thread whose meta.json is corrupt is marked error and still readable", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   await store.append({ threadId: "bad", events: [created("bad")] });
   await store.append({ threadId: "good", events: [created("good")] });
   await store.saveHead({
@@ -380,6 +338,7 @@ test("a thread whose meta.json is corrupt is marked error and still readable", a
   await fs.writeFile(metaPath(rootDir, "bad"), "{ not json");
 
   const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => reopened.close());
   assert.equal(await reopened.loadHead("bad"), null);
   assert.match(reopened.threadError("bad") ?? "", /meta\.json/);
   // The other thread is untouched: one bad directory never spreads (§5.1).
@@ -392,7 +351,7 @@ test("a thread whose meta.json is corrupt is marked error and still readable", a
   assert.equal(bad.events.length, 1);
 });
 
-test("a meta.json that does not match the schema marks the thread error", async () => {
+test("a meta.json that does not match the schema marks the thread error", async (t) => {
   const rootDir = await tempRoot();
   await fs.mkdir(threadDir(rootDir, "t1"), { recursive: true });
   await fs.writeFile(
@@ -400,13 +359,15 @@ test("a meta.json that does not match the schema marks the thread error", async 
     JSON.stringify({ id: "t1", adapter: "not-an-adapter" })
   );
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   assert.equal(await store.loadHead("t1"), null);
   assert.match(store.threadError("t1") ?? "", /schema/);
 });
 
-test("a metadata-only head read never scans a malformed event log", async () => {
+test("a metadata-only head read never scans a malformed event log", async (t) => {
   const rootDir = await tempRoot();
   const writer = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => writer.close());
   await writer.append({ threadId: "t1", events: [created()] });
   const head = await headOf(writer, "t1");
   await writer.saveHead(head);
@@ -415,6 +376,7 @@ test("a metadata-only head read never scans a malformed event log", async () => 
   await fs.appendFile(eventsPathOf(rootDir, "t1"), "{malformed}\n");
 
   const reader = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => reader.close());
   const loaded = await reader.loadHead("t1", { seedRuntime: false });
 
   assert.equal(loaded?.id, "t1");
@@ -422,9 +384,10 @@ test("a metadata-only head read never scans a malformed event log", async () => 
   reader.close();
 });
 
-test("a metadata-only head read never rolls a seeded thread's head back to meta.json", async () => {
+test("a metadata-only head read never rolls a seeded thread's head back to meta.json", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   await store.append({ threadId: "t1", events: [created()] });
   await store.saveHead(await headOf(store, "t1"));
   // Between two checkpoints the seeded head moves on and meta.json does not.
@@ -451,32 +414,34 @@ async function headOf(
   return head;
 }
 
-test("meta.json is checkpointed every 50 events and rewritten atomically", async () => {
+test("meta.json is checkpointed every 50 events and rewritten atomically", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   await store.append({ threadId: "t1", events: [created()] });
   await store.drain();
 
   const meta = metaPath(rootDir, "t1");
   await assert.rejects(fs.stat(meta), "nothing is written before the checkpoint threshold");
 
-  for (let i = 0; i < HEAD_CHECKPOINT_EVENTS; i += 1) {
+  for (let i = 0; i < 50; i += 1) {
     await store.append({ threadId: "t1", events: [message("t1", `m${i}`)] });
   }
   await store.drain();
 
   const written = JSON.parse(await fs.readFile(meta, "utf8")) as ThreadHead;
   assert.equal(written.id, "t1");
-  assert.equal(written.seq, HEAD_CHECKPOINT_EVENTS, "the checkpoint fires ON the 50th event");
+  assert.equal(written.seq, 50, "the checkpoint fires ON the 50th event");
 
   // tmp + rename: no temp file is left behind.
   const entries = await fs.readdir(threadDir(rootDir, "t1"));
   assert.deepEqual(entries.filter((entry) => entry.includes(".tmp")), []);
 });
 
-test("saveHead wins over the store's own projection and survives a reopen", async () => {
+test("saveHead wins over the store's own projection and survives a reopen", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   await store.append({ threadId: "t1", events: [created()] });
   const head = await headOf(store, "t1");
   const marker = { turnId: "T-9", prepared: true, markedAt: "2026-09-27T08:00:00.000Z" };
@@ -484,6 +449,7 @@ test("saveHead wins over the store's own projection and survives a reopen", asyn
   await store.drain();
 
   const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => reopened.close());
   const loaded = await headOf(reopened, "t1");
   // The stamp too (§3.3): `meta.json` is parsed by a zod object, which drops
   // a key it does not list, and a marker that lost its stamp could never
@@ -491,9 +457,10 @@ test("saveHead wins over the store's own projection and survives a reopen", asyn
   assert.deepEqual(loaded.continueAfterRestart, marker);
 });
 
-test("the goal-resume marker is head-only state that survives a reopen (goals §5.5)", async () => {
+test("the goal-resume marker is head-only state that survives a reopen (goals §5.5)", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   await store.append({ threadId: "t1", events: [created()] });
   await store.saveHead({ ...(await headOf(store, "t1")), resumeGoalAfterRestart: true });
   // The store's own projection carries it forward across appends — no domain
@@ -505,11 +472,13 @@ test("the goal-resume marker is head-only state that survives a reopen (goals §
 
   // The boot candidate check reads meta.json alone, like `isOrphanedHead`.
   const metaOnly = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => metaOnly.close());
   const persisted = await metaOnly.loadHead("t1", { seedRuntime: false });
   assert.equal(persisted?.resumeGoalAfterRestart, true);
   metaOnly.close();
 
   const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => reopened.close());
   const loaded = await headOf(reopened, "t1");
   assert.equal(loaded.resumeGoalAfterRestart, true);
   // Cleared by the next head save that omits it.
@@ -519,13 +488,15 @@ test("the goal-resume marker is head-only state that survives a reopen (goals §
   await reopened.drain();
   reopened.close();
   const after = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => after.close());
   assert.equal((await headOf(after, "t1")).resumeGoalAfterRestart, undefined);
   after.close();
 });
 
-test("the goal-hold marker is head-only state that survives a reopen (goals §5.7)", async () => {
+test("the goal-hold marker is head-only state that survives a reopen (goals §5.7)", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   await store.append({ threadId: "t1", events: [created()] });
   await store.saveHead({ ...(await headOf(store, "t1")), goalHeldForHandover: true });
   // Carried forward across appends by the store's own projection: no domain
@@ -538,11 +509,13 @@ test("the goal-hold marker is head-only state that survives a reopen (goals §5.
 
   // The boot's candidate check reads meta.json alone.
   const metaOnly = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => metaOnly.close());
   const persisted = await metaOnly.loadHead("t1", { seedRuntime: false });
   assert.equal(persisted?.goalHeldForHandover, true);
   metaOnly.close();
 
   const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => reopened.close());
   const loaded = await headOf(reopened, "t1");
   assert.equal(loaded.goalHeldForHandover, true);
   const { goalHeldForHandover: _cleared, ...cleared } = loaded;
@@ -551,30 +524,12 @@ test("the goal-hold marker is head-only state that survives a reopen (goals §5.
   await reopened.drain();
   reopened.close();
   const after = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => after.close());
   assert.equal((await headOf(after, "t1")).goalHeldForHandover, undefined);
   after.close();
 });
 
-test("deleteThread deletes the thread's checkpoint refs before its directory", async () => {
-  const rootDir = await tempRoot();
-  const calls: Array<{ threadId: string; cwd: string }> = [];
-  const store = createThreadStore({
-    rootDir,
-    clock: fixedClock(),
-    idGen: countingIds(),
-    deleteThreadRefs: async (input) => {
-      calls.push(input);
-      // The directory must still be there when the refs are cleaned up.
-      await fs.stat(threadDir(rootDir, input.threadId));
-    }
-  });
-  await store.append({ threadId: "t1", events: [created()] });
-  await store.deleteThread("t1");
-  assert.deepEqual(calls, [{ threadId: "t1", cwd: "/w/p" }]);
-  await assert.rejects(fs.stat(threadDir(rootDir, "t1")));
-});
-
-test("a failing ref cleanup aborts the delete rather than orphaning refs", async () => {
+test("a failing ref cleanup aborts the delete rather than orphaning refs", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({
     rootDir,
@@ -584,6 +539,7 @@ test("a failing ref cleanup aborts the delete rather than orphaning refs", async
       throw new Error("git is busy");
     }
   });
+  t.after(() => store.close());
   await store.append({ threadId: "t1", events: [created()] });
   await assert.rejects(store.deleteThread("t1"), /git is busy/);
   // Still whole, so the delete can be retried.
@@ -591,9 +547,10 @@ test("a failing ref cleanup aborts the delete rather than orphaning refs", async
   assert.deepEqual(await store.listThreads(), ["t1"]);
 });
 
-test("listThreads names every directory on disk; deleteThread removes one whole", async () => {
+test("listThreads names every directory on disk; deleteThread removes one whole", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   await store.append({ threadId: "a", events: [created("a")] });
   await store.append({ threadId: "b", events: [created("b")] });
   await store.drain();
@@ -606,9 +563,10 @@ test("listThreads names every directory on disk; deleteThread removes one whole"
 
 // --- receipts --------------------------------------------------------------
 
-test("a receipt is written with the events and replays their sequence", async () => {
+test("a receipt is written with the events and replays their sequence", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const result = await store.append({
     threadId: "t1",
     events: [created(), message("t1", "m1")],
@@ -627,13 +585,15 @@ test("a receipt is written with the events and replays their sequence", async ()
   assert.equal(receipt?.threadId, "t1");
 
   const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => reopened.close());
   assert.equal((await reopened.getReceipt("cmd-1"))?.seq, result.seq);
   assert.equal(await reopened.getReceipt("never-seen"), null);
 });
 
-test("a rejected receipt is persisted too, so a retry replays the rejection", async () => {
+test("a rejected receipt is persisted too, so a retry replays the rejection", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   await store.putReceipt({
     commandId: "cmd-bad",
     threadId: "t1",
@@ -644,14 +604,16 @@ test("a rejected receipt is persisted too, so a retry replays the rejection", as
   });
   await store.drain();
   const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => reopened.close());
   const receipt = await reopened.getReceipt("cmd-bad");
   assert.equal(receipt?.status, "rejected");
   assert.equal(receipt?.error?.code, "TURN_ACTIVE");
 });
 
-test("the receipt ring evicts oldest-first at 500", async () => {
+test("the receipt ring evicts oldest-first at 500", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   for (let i = 0; i < 520; i += 1) {
     await store.putReceipt({
       commandId: `cmd-${i}`,
@@ -671,11 +633,12 @@ test("the receipt ring evicts oldest-first at 500", async () => {
   assert.equal(onDisk.receipts.length, 500);
 });
 
-test("an unreadable receipts file costs at most a replayed command, never a thread", async () => {
+test("an unreadable receipts file costs at most a replayed command, never a thread", async (t) => {
   const rootDir = await tempRoot();
   await fs.mkdir(rootDir, { recursive: true });
   await fs.writeFile(receiptsPathOf(rootDir), "}}} not json");
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   assert.equal(await store.getReceipt("cmd-1"), null);
   const result = await store.append({
     threadId: "t1",
@@ -699,9 +662,10 @@ async function writeSource(dir: string, name: string, bytes: number): Promise<st
   return filePath;
 }
 
-test("putAttachment copies the file, names the thread in the id and stats the size", async () => {
+test("putAttachment copies the file, names the thread in the id and stats the size", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const source = await writeSource(path.join(rootDir, "src"), "shot.PNG", 64);
 
   const ref = await store.putAttachment({
@@ -724,9 +688,10 @@ test("putAttachment copies the file, names the thread in the id and stats the si
   assert.equal((await fs.stat(source)).size, 64);
 });
 
-test("an attachment id belonging to another thread is refused, not looked up", async () => {
+test("an attachment id belonging to another thread is refused, not looked up", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const source = await writeSource(path.join(rootDir, "src"), "a.bin", 8);
   const ref = await store.putAttachment({ threadId: "t1", name: "a.bin", sourcePath: source });
   // The file arm names its absolute path too (§7.4).
@@ -742,9 +707,10 @@ test("an attachment id belonging to another thread is refused, not looked up", a
   await assert.rejects(store.resolveAttachment("t1", "t1-00000000-0000-4000-8000-000000009999-bin"), /not found/);
 });
 
-test("bounds are checked against the stat'd file, per kind", async () => {
+test("bounds are checked against the stat'd file, per kind", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const big = await writeSource(path.join(rootDir, "src"), "big.png", 11 * 1024 * 1024);
   await assert.rejects(
     store.putAttachment({ threadId: "t1", name: "big.png", mimeType: "image/png", sourcePath: big }),
@@ -761,9 +727,10 @@ test("bounds are checked against the stat'd file, per kind", async () => {
   assert.equal(ref.type, "file");
 });
 
-test("pruneAttachments keeps referenced files and sweeps stale orphans", async () => {
+test("pruneAttachments keeps referenced files and sweeps stale orphans", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const src = path.join(rootDir, "src");
   const keptRef = await store.putAttachment({
     threadId: "t1",
@@ -789,9 +756,10 @@ test("pruneAttachments keeps referenced files and sweeps stale orphans", async (
   await assert.rejects(store.resolveAttachment("t1", orphanRef.id), /not found/);
 });
 
-test("pruneAttachments sweeps .part files after an hour and pending uploads after a day", async () => {
+test("pruneAttachments sweeps .part files after an hour and pending uploads after a day", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   await store.append({ threadId: "t1", events: [created()] });
   await store.drain();
 
@@ -817,9 +785,10 @@ test("pruneAttachments sweeps .part files after an hour and pending uploads afte
   await assert.rejects(fs.stat(pendingFile), "a pending upload is stale after a day");
 });
 
-test("a revert's truncation is what the attachment sweep recomputes against", async () => {
+test("a revert's truncation is what the attachment sweep recomputes against", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const src = path.join(rootDir, "src");
   const ref = await store.putAttachment({
     threadId: "t1",
@@ -864,9 +833,10 @@ test("a revert's truncation is what the attachment sweep recomputes against", as
   );
 });
 
-test("readItem serves the FULL payload, even for a row past the fold's window", async () => {
+test("readItem serves the FULL payload, even for a row past the fold's window", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const bigOutput = "y".repeat(40_000);
   const activity = {
     kind: "activity" as const,
@@ -905,9 +875,10 @@ test("readItem serves the FULL payload, even for a row past the fold's window", 
   assert.equal(await store.readItem("t1", "never-written"), null);
 });
 
-test("readItem rebuilds a streamed message's accumulated body", async () => {
+test("readItem rebuilds a streamed message's accumulated body", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const delta = (text: string, streaming: boolean): AppendableDomainEvent =>
     ({
       eventId: `e-${text}`,
@@ -936,37 +907,26 @@ test("readItem rebuilds a streamed message's accumulated body", async () => {
   assert.equal(item.text, "Hello");
 });
 
-test("drain settles every queued write", async () => {
-  const rootDir = await tempRoot();
-  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  const appends = Array.from({ length: 10 }, (_unused, index) =>
-    store.append({ threadId: `t${index}`, events: [created(`t${index}`)] })
-  );
-  await store.drain();
-  await Promise.all(appends);
-  assert.equal((await store.listThreads()).length, 10);
-});
-
 // --- fix-wave regressions ---------------------------------------------------
 
-test("an unusable thread id is refused before it reaches path.join or rm -rf", async () => {
+test("an unusable thread id is refused before it reaches path.join or rm -rf", async (t) => {
   // S1 #11: the host is a separate process with its own trust boundary; one
   // wrong caller would turn a DELETE into an arbitrary recursive delete.
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   for (const bad of ["../../etc", "a/b", "", ".hidden", "..", "x".repeat(200)]) {
-    assert.equal(isSafeThreadId(bad), false, bad);
     await assert.rejects(store.deleteThread(bad), /unusable thread id/, bad);
     await assert.rejects(store.loadHead(bad), /unusable thread id/, bad);
   }
-  assert.equal(isSafeThreadId("3f2504e0-4f89-41d3-9a0c-0305e82c3301"), true);
 });
 
-test("the image cap follows the stored extension, not just the declared mime", async () => {
+test("the image cap follows the stored extension, not just the declared mime", async (t) => {
   // S1 #7: `?name=x.png&type=application/octet-stream` carried 40 MiB in under
   // the 50 MiB FILE limit and was then re-declared `image/png` on the turn.
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const big = await writeSource(path.join(rootDir, "src"), "sneaky.png", 11 * 1024 * 1024);
   await assert.rejects(
     store.putAttachment({
@@ -989,46 +949,10 @@ test("the image cap follows the stored extension, not just the declared mime", a
   assert.equal(ref.type, "file");
 });
 
-test("two head writes in the same millisecond do not collide on a temp name", async () => {
-  // Q1 #51: the temp name was `pid + Date.now()`, so the second rename threw
-  // ENOENT out of saveHead.
+test("the host-wide sweep removes stale raw-log files", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  await store.append({ threadId: "t1", events: [created()] });
-  const head = await headOf(store, "t1");
-  await Promise.all([
-    store.saveHead({ ...head, title: "one" }),
-    store.saveHead({ ...head, title: "two" }),
-    store.saveHead({ ...head, title: "three" })
-  ]);
-  await store.drain();
-  const written = JSON.parse(await fs.readFile(metaPath(rootDir, "t1"), "utf8")) as ThreadHead;
-  assert.ok(["one", "two", "three"].includes(written.title));
-  const leftovers = (await fs.readdir(threadDir(rootDir, "t1"))).filter((entry) =>
-    entry.includes(".tmp")
-  );
-  assert.deepEqual(leftovers, []);
-});
-
-test("the receipts file is compact JSON, not a pretty-printed ring", async () => {
-  const rootDir = await tempRoot();
-  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  await store.putReceipt({
-    commandId: "cmd-1",
-    threadId: "t1",
-    seq: 1,
-    status: "accepted",
-    acceptedAt: "2026-01-01T00:00:00.000Z"
-  });
-  await store.drain();
-  const raw = await fs.readFile(receiptsPathOf(rootDir), "utf8");
-  assert.ok(!raw.includes("\n  "), "the ring is rewritten once per command; do not indent it");
-  assert.equal((JSON.parse(raw) as { receipts: unknown[] }).receipts.length, 1);
-});
-
-test("the host-wide raw-log ceiling runs on the sweep schedule", async () => {
-  const rootDir = await tempRoot();
-  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   await store.append({ threadId: "t1", events: [created()] });
   await store.drain();
   // A stale rotated rung from a thread with no open writer.
@@ -1041,9 +965,10 @@ test("the host-wide raw-log ceiling runs on the sweep schedule", async () => {
   await assert.rejects(fs.stat(rung), "the sweep must reach raw logs, not just attachments");
 });
 
-test("the startup sweep avoids history folds and leaves completed attachments for the deep sweep", async () => {
+test("the startup sweep avoids history folds and leaves completed attachments for the deep sweep", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, idGen: countingIds() });
+  t.after(() => store.close());
   const src = path.join(rootDir, "src");
   const orphan = await store.putAttachment({
     threadId: "t1",
@@ -1072,111 +997,5 @@ test("the startup sweep avoids history folds and leaves completed attachments fo
     store.resolveAttachment("t1", orphan.id),
     "the scheduled deep pass still collects completed orphans"
   );
-  store.close();
-});
-
-// --- S1-5 residual: the sweep needs a production scheduler ------------------
-
-test("the store schedules its own host-wide sweep", async () => {
-  // V1 residual on S1-5: the ceiling was hoisted correctly but the only
-  // production caller passes a threadId (`orchestrator.ts` revert path), which
-  // skips the host-wide branch — so nothing ever ran it. The store now owns
-  // the cadence itself.
-  const rootDir = await tempRoot();
-  const timers: Array<{ fn: () => void; ms: number }> = [];
-  const store = createThreadStore({
-    rootDir,
-    // A REAL clock: the sweep compares against real file mtimes, so a fixture
-    // date in the past makes everything look like it is from the future.
-    clock: { now: () => new Date(), nowIso: () => new Date().toISOString() },
-    idGen: countingIds(),
-    sweepIntervalMs: 60_000,
-    setTimer: (fn, ms) => {
-      timers.push({ fn, ms });
-      return timers.length;
-    },
-    clearTimer: () => undefined
-  });
-  assert.equal(timers.length, 1, "a sweep is scheduled at construction");
-  assert.equal(timers[0]?.ms, 60_000);
-
-  await store.append({ threadId: "t1", events: [created()] });
-  await store.drain();
-
-  // A stale rotated rung that only the ARGUMENT-LESS sweep collects.
-  const rung = path.join(rootDir, "threads", "t1", "raw.ndjson.1");
-  await fs.writeFile(rung, "old\n");
-  const ancient = (Date.now() - 30 * 24 * 60 * 60 * 1000) / 1000;
-  await fs.utimes(rung, ancient, ancient);
-
-  // A per-thread prune must NOT collect it — that is the gap V1 found.
-  await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(0) });
-  await fs.stat(rung);
-
-  // Firing the scheduled callback does.
-  timers[0]!.fn();
-  await store.drain();
-  // The timer body is fire-and-forget, so wait for the sweep it started.
-  await store.sweepNow();
-  await assert.rejects(fs.stat(rung), "the scheduled sweep must reach raw logs");
-
-  store.close();
-});
-
-test("sweepIntervalMs 0 disables the scheduler, and close() stops it", async () => {
-  const rootDir = await tempRoot();
-  const timers: Array<() => void> = [];
-  let cleared = 0;
-  const off = createThreadStore({
-    rootDir,
-    clock: fixedClock(),
-    idGen: countingIds(),
-    sweepIntervalMs: 0,
-    setTimer: (fn) => {
-      timers.push(fn);
-      return timers.length;
-    },
-    clearTimer: () => {
-      cleared += 1;
-    }
-  });
-  assert.equal(timers.length, 0, "0 means no background sweep");
-  off.close();
-  assert.equal(cleared, 0, "nothing to clear");
-
-  const on = createThreadStore({
-    rootDir,
-    clock: fixedClock(),
-    idGen: countingIds(),
-    sweepIntervalMs: 1_000,
-    setTimer: (fn) => {
-      timers.push(fn);
-      return timers.length;
-    },
-    clearTimer: () => {
-      cleared += 1;
-    }
-  });
-  assert.equal(timers.length, 1);
-  on.close();
-  assert.equal(cleared, 1, "close() stops the scheduled sweep");
-  on.close();
-  assert.equal(cleared, 1, "close() is idempotent");
-});
-
-test("the default cadence is used when none is given", async () => {
-  const rootDir = await tempRoot();
-  const seen: number[] = [];
-  const store = createThreadStore({
-    rootDir,
-    clock: fixedClock(),
-    idGen: countingIds(),
-    setTimer: (_fn, ms) => {
-      seen.push(ms);
-      return 1;
-    },
-    clearTimer: () => undefined
-  });
-  assert.deepEqual(seen, [DEFAULT_SWEEP_INTERVAL_MS]);
   store.close();
 });

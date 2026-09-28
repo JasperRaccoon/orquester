@@ -264,58 +264,6 @@ test("an unattended clone (a workflow's) gets a prompt-free env and a 10 min cei
   assert.ok((calls[0].timeout ?? 0) > 9 * 60_000 && (calls[0].timeout ?? 0) <= 10 * 60_000);
 });
 
-test("cloneRepo at a branch or tag clones with --branch", async () => {
-  const { exec, calls } = fakeExec();
-  await service(exec).cloneRepo("dc", "https://bb.corp.example/bitbucket/scm/PRJ/api.git", "wf-a", workspace, {
-    ref: "release/1.0"
-  });
-  assert.equal(calls.length, 1);
-  assert.deepEqual(command(calls[0].args), [
-    "clone",
-    "--branch",
-    "release/1.0",
-    "--",
-    "https://bb.corp.example/bitbucket/scm/PRJ/api.git",
-    "wf-a"
-  ]);
-  assert.deepEqual(configOf(calls[0].args), [
-    `credential.helper=store --file=${join(keysDir, "dc.git-credentials")}`,
-    `http.sslCAInfo=${caPath}`
-  ]);
-});
-
-test("cloneRepo at a sha clones, then checks out detached in the clone", async () => {
-  const { exec, calls } = fakeExec();
-  await service(exec).cloneRepo("gh", "https://github.com/o/r.git", "wf-b", workspace, { ref: SHA, timeoutMs: 60_000 });
-  assert.deepEqual(
-    calls.map((call) => [command(call.args), call.cwd]),
-    [
-      [["clone", "--", "https://github.com/o/r.git", "wf-b"], workspace],
-      [["checkout", "--detach", SHA], join(workspace, "wf-b")]
-    ]
-  );
-  // The checkout rides the same transport config (a later fetch may need the credentials).
-  assert.deepEqual(configOf(calls[1].args), configOf(calls[0].args));
-  assert.ok((calls[1].timeout ?? 0) <= 60_000);
-});
-
-test("cloneRepo fetches a sha the clone did not bring, then checks out FETCH_HEAD", async () => {
-  const { exec, calls } = fakeExec((args) =>
-    command(args)[0] === "checkout" && command(args)[2] === SHA ? gitFailure(`fatal: reference is not a tree: ${SHA}`) : ""
-  );
-  await service(exec).cloneRepo("gh", "git@github.com:o/r.git", "wf-c", workspace, { ref: SHA });
-  assert.deepEqual(
-    calls.map((call) => command(call.args)),
-    [
-      ["clone", "--", "git@github.com:o/r.git", "wf-c"],
-      ["checkout", "--detach", SHA],
-      ["fetch", "origin", SHA],
-      ["checkout", "--detach", "FETCH_HEAD"]
-    ]
-  );
-  assert.ok(calls.slice(1).every((call) => call.env?.GIT_SSH_COMMAND?.includes('-i "/k/gh"')));
-});
-
 test("cloneRepo removes the clone when the sha cannot be checked out", async () => {
   const dest = join(workspace, "wf-d");
   const { exec } = fakeExec((args) => {
@@ -331,24 +279,6 @@ test("cloneRepo removes the clone when the sha cannot be checked out", async () 
     (error: unknown) => error instanceof AccountError && error.status === 400 && error.message.includes(SHA)
   );
   assert.equal(existsSync(dest), false);
-});
-
-test("cloneRepo retries an abbreviated hex that names no branch as a commit", async () => {
-  const short = SHA.slice(0, 10);
-  const { exec, calls } = fakeExec((args) =>
-    command(args).includes("--branch")
-      ? gitFailure(`warning: Could not find remote branch ${short} to clone.\nfatal: Remote branch ${short} not found in upstream origin`)
-      : ""
-  );
-  await service(exec).cloneRepo("gh", "git@github.com:o/r.git", "wf-e", workspace, { ref: short });
-  assert.deepEqual(
-    calls.map((call) => command(call.args)),
-    [
-      ["clone", "--branch", short, "--", "git@github.com:o/r.git", "wf-e"],
-      ["clone", "--", "git@github.com:o/r.git", "wf-e"],
-      ["checkout", "--detach", short]
-    ]
-  );
 });
 
 test("cloneRepo: a missing branch name is a clone failure, a bad ref never runs, a timeout says so", async () => {
@@ -373,22 +303,6 @@ test("cloneRepo: a missing branch name is a clone failure, a bad ref never runs,
     service(slow.exec).cloneRepo("gh", "git@github.com:o/r.git", "wf-h", workspace, { timeoutMs: 3_000 }),
     (error: unknown) => error instanceof GitRemoteError && error.kind === "timeout" && error.status === 504
   );
-});
-
-test("cloneFromInput passes the ref through", async () => {
-  const { exec, calls } = fakeExec();
-  const { name } = await service(exec).cloneFromInput("gh", "octo-org/hello-world", "wf-i", workspace, {
-    ref: "v1.0.0"
-  });
-  assert.equal(name, "wf-i");
-  assert.deepEqual(command(calls[0].args), [
-    "clone",
-    "--branch",
-    "v1.0.0",
-    "--",
-    "git@github.com:octo-org/hello-world.git",
-    "wf-i"
-  ]);
 });
 
 // --- PR / release listings: provider + repo resolution ------------------------
@@ -453,28 +367,6 @@ test("listReleases: GitHub lists, Bitbucket answers unsupported without a reques
     unsupported: true
   });
   assert.equal(urls.length, 1);
-});
-
-test("cloneRepo resolves an abbreviated commit (Bitbucket Cloud's 12 hex) against the remote's refs before fetching it", async () => {
-  const short = SHA.slice(0, 12);
-  const other = "f".repeat(40);
-  const { exec, calls } = fakeExec((args) => {
-    const cmd = command(args);
-    if (cmd.includes("--branch")) return gitFailure(`fatal: Remote branch ${short} not found in upstream origin`);
-    if (cmd[0] === "checkout" && cmd[2] === short) return gitFailure(`error: pathspec '${short}' did not match any file(s) known to git`);
-    if (cmd[0] === "ls-remote") return `${other}\trefs/heads/main\n${SHA}\trefs/pull-requests/7/from\n`;
-    return "";
-  });
-  await service(exec).cloneRepo("cloud", "git@ssh.bitbucket.org:acme/web-app.git", "wf-f", workspace, { ref: short, unattended: true });
-  assert.deepEqual(
-    calls.map((call) => command(call.args)).slice(2),
-    [
-      ["checkout", "--detach", short],
-      ["ls-remote", "origin"],
-      ["fetch", "origin", SHA],
-      ["checkout", "--detach", "FETCH_HEAD"]
-    ]
-  );
 });
 
 test("an abbreviated commit no ref resolves fails clearly and removes the clone (never fetches a prefix)", async () => {

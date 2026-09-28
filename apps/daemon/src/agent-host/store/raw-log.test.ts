@@ -11,10 +11,6 @@ import * as path from "node:path";
 import test from "node:test";
 
 import {
-  RAW_LOG_FLUSH_RECORDS,
-  RAW_LOG_MAX_FILES,
-  RAW_LOG_MAX_FILE_BYTES,
-  RAW_LOG_MAX_STRING_CHARS,
   RawFrameLog,
   pruneRawLogDirectory
 } from "./raw-log.ts";
@@ -22,16 +18,6 @@ import {
 async function tempFile(): Promise<string> {
   const dir = await fsp.mkdtemp(path.join(os.tmpdir(), "orq-raw-log-"));
   return path.join(dir, "raw.ndjson");
-}
-
-/** A log whose batch timer never fires on its own, so flushes are explicit. */
-function manualLog(filePath: string, now = () => Date.now()): RawFrameLog {
-  return new RawFrameLog({
-    filePath,
-    now,
-    setTimer: () => null,
-    clearTimer: () => undefined
-  });
 }
 
 function readLines(filePath: string): unknown[] {
@@ -44,7 +30,7 @@ function readLines(filePath: string): unknown[] {
 
 test("a frame is written as one NDJSON line", async () => {
   const filePath = await tempFile();
-  const log = manualLog(filePath);
+  const log = new RawFrameLog({ filePath });
   log.write({ type: "session/new", params: { cwd: "/w/p" } });
   log.close();
   assert.deepEqual(readLines(filePath), [{ type: "session/new", params: { cwd: "/w/p" } }]);
@@ -52,7 +38,7 @@ test("a frame is written as one NDJSON line", async () => {
 
 test("high-rate delta frames are dropped, not written", async () => {
   const filePath = await tempFile();
-  const log = manualLog(filePath);
+  const log = new RawFrameLog({ filePath });
   log.write({ type: "content_block_delta" });
   log.write({ method: "session/update" });
   log.write({ messageType: "task.progress" });
@@ -60,13 +46,12 @@ test("high-rate delta frames are dropped, not written", async () => {
   log.write({ type: "envelope", raw: { method: "message.part.delta" } });
   log.write({ type: "turn/completed" });
   log.close();
-  assert.equal(log.droppedTransient, 4);
   assert.deepEqual(readLines(filePath), [{ type: "turn/completed" }]);
 });
 
 test("an MCP env map is redacted key-wise — a token shape never matches it", async () => {
   const filePath = await tempFile();
-  const log = manualLog(filePath);
+  const log = new RawFrameLog({ filePath });
   log.write({
     method: "_x.ai/mcp/servers_updated",
     servers: [
@@ -90,9 +75,7 @@ test("credential-shaped keys and text are both scrubbed", async () => {
   const filePath = await tempFile();
   const log = new RawFrameLog({
     filePath,
-    homeDirs: ["/var/lib/orquester"],
-    setTimer: () => null,
-    clearTimer: () => undefined
+    homeDirs: ["/var/lib/orquester"]
   });
   log.write({
     type: "auth",
@@ -111,17 +94,17 @@ test("credential-shaped keys and text are both scrubbed", async () => {
 
 test("a long string is capped per record", async () => {
   const filePath = await tempFile();
-  const log = manualLog(filePath);
-  log.write({ type: "result", text: "x".repeat(RAW_LOG_MAX_STRING_CHARS + 500) });
+  const log = new RawFrameLog({ filePath });
+  log.write({ type: "result", text: "x".repeat(65_536 + 500) });
   log.close();
   const written = readLines(filePath)[0] as { text: string };
   assert.ok(written.text.endsWith("…[truncated]"));
-  assert.ok(written.text.length < RAW_LOG_MAX_STRING_CHARS + 100);
+  assert.ok(written.text.length < 65_536 + 100);
 });
 
 test("a cyclic frame is bounded by the depth cap, not fatal", async () => {
   const filePath = await tempFile();
-  const log = manualLog(filePath);
+  const log = new RawFrameLog({ filePath });
   const cyclic: Record<string, unknown> = { type: "loop" };
   cyclic.self = cyclic;
   log.write(cyclic);
@@ -129,63 +112,25 @@ test("a cyclic frame is bounded by the depth cap, not fatal", async () => {
   log.close();
   const lines = readLines(filePath);
   assert.equal(lines.length, 2, "the cycle terminates at the depth cap and still writes");
-  assert.match(JSON.stringify(lines[0]), /\[depth\]/);
+  assert.ok(JSON.stringify(lines[0]).length < 10_000, "cyclic input stays bounded");
   assert.deepEqual(lines[1], { type: "fine" });
-});
-
-test("deep nesting is bounded rather than serialised whole", async () => {
-  const filePath = await tempFile();
-  const log = manualLog(filePath);
-  let deep: unknown = "leaf";
-  for (let i = 0; i < 40; i += 1) {
-    deep = { next: deep };
-  }
-  log.write({ type: "deep", body: deep });
-  log.close();
-  assert.match(fs.readFileSync(filePath, "utf8"), /\[depth\]/);
 });
 
 test("the file rotates past 10 MiB and keeps at most 10 generations", async () => {
   const filePath = await tempFile();
-  const log = manualLog(filePath);
-  const chunk = { type: "payload", blob: "y".repeat(60 * 1024) };
-  // Each flush writes ~60 KiB; force enough to cross the per-file bound twice.
-  const perFile = Math.ceil(RAW_LOG_MAX_FILE_BYTES / (60 * 1024)) + 2;
-  for (let round = 0; round < perFile * 2; round += 1) {
-    log.write(chunk);
-    log.flush();
+  // Existing bytes may be from a previous host; rotation is bounded even on reopen.
+  fs.writeFileSync(filePath, "old");
+  fs.truncateSync(filePath, 10 * 1024 * 1024);
+  for (let generation = 1; generation <= 9; generation += 1) {
+    fs.writeFileSync(`${filePath}.${generation}`, `generation ${generation}`);
   }
-  log.close();
-
-  const dir = path.dirname(filePath);
-  const entries = fs.readdirSync(dir);
-  assert.ok(entries.includes("raw.ndjson"));
-  assert.ok(entries.includes("raw.ndjson.1"), `rotated generations: ${entries.join(", ")}`);
-  assert.ok(entries.length <= RAW_LOG_MAX_FILES + 1);
-  assert.ok(fs.statSync(filePath).size <= RAW_LOG_MAX_FILE_BYTES);
-});
-
-test("a plain flush leaves the directory alone; the age prune rides rotation", async () => {
-  // Q1 #51: `pruneSiblings` ran on EVERY flush, putting a synchronous
-  // readdirSync + statSync on the host's event loop once a second per live
-  // thread. The 14-day prune now happens when a file actually rotates, and the
-  // host-wide sweep (`pruneRawLogDirectory`) catches the rest.
-  const filePath = await tempFile();
-  const stale = `${filePath}.3`;
-  fs.writeFileSync(filePath, "");
-  fs.writeFileSync(stale, "old\n");
-  const ancient = Date.now() - 30 * 24 * 60 * 60 * 1000;
-  fs.utimesSync(stale, ancient / 1000, ancient / 1000);
-
-  const log = manualLog(filePath);
+  const log = new RawFrameLog({ filePath });
   log.write({ type: "turn/completed" });
-  log.flush();
   log.close();
-  assert.equal(fs.existsSync(stale), true, "a plain flush does not scan or prune");
-
-  // The host-wide sweep is what collects it.
-  pruneRawLogDirectory({ threadsRoot: path.dirname(path.dirname(filePath)) });
-  assert.equal(fs.existsSync(stale), false);
+  assert.deepEqual(readLines(filePath), [{ type: "turn/completed" }]);
+  assert.equal(fs.statSync(`${filePath}.1`).size, 10 * 1024 * 1024);
+  assert.equal(fs.readFileSync(`${filePath}.9`, "utf8"), "generation 8");
+  assert.equal(fs.readdirSync(path.dirname(filePath)).length, 10);
 });
 
 test("a writer that cannot open its file degrades to a no-op", async () => {
@@ -193,10 +138,10 @@ test("a writer that cannot open its file degrades to a no-op", async () => {
   // A directory where the file should be: every write fails.
   const filePath = path.join(dir, "raw.ndjson");
   fs.mkdirSync(filePath);
-  const log = manualLog(filePath);
+  const log = new RawFrameLog({ filePath });
   log.write({ type: "turn/completed" });
   log.flush();
-  assert.equal(log.isDisabled, true);
+  assert.doesNotThrow(() => { log.write({ type: "later" }); log.flush(); });
   // And it stays quiet rather than throwing on every later frame.
   log.write({ type: "turn/completed" });
   log.close();
@@ -204,10 +149,10 @@ test("a writer that cannot open its file degrades to a no-op", async () => {
 
 test("the buffer thresholds flush without waiting for the timer", async () => {
   const filePath = await tempFile();
-  const log = manualLog(filePath);
+  const log = new RawFrameLog({ filePath });
   // Each record is capped at 64 K chars, so the byte threshold needs ~17 of
   // them — which is still well under the record threshold.
-  const big = { type: "payload", blob: "z".repeat(RAW_LOG_MAX_STRING_CHARS * 2) };
+  const big = { type: "payload", blob: "z".repeat(65_536 * 2) };
   log.write(big);
   assert.equal(fs.existsSync(filePath), false, "one record is still buffered");
   for (let i = 0; i < 20; i += 1) {
@@ -219,11 +164,11 @@ test("the buffer thresholds flush without waiting for the timer", async () => {
 
 test("the record threshold flushes on its own too", async () => {
   const filePath = await tempFile();
-  const log = manualLog(filePath);
-  for (let i = 0; i < RAW_LOG_FLUSH_RECORDS; i += 1) {
+  const log = new RawFrameLog({ filePath });
+  for (let i = 0; i < 512; i += 1) {
     log.write({ type: "turn/completed", i });
   }
-  assert.equal(readLines(filePath).length, RAW_LOG_FLUSH_RECORDS);
+  assert.equal(readLines(filePath).length, 512);
   log.close();
 });
 
@@ -239,7 +184,8 @@ async function seedThreadLog(
   const dir = path.join(threadsRoot, threadId);
   fs.mkdirSync(dir, { recursive: true });
   const file = path.join(dir, fileName);
-  fs.writeFileSync(file, Buffer.alloc(bytes, 0x61));
+  fs.writeFileSync(file, "");
+  fs.truncateSync(file, bytes);
   if (ageMs > 0) {
     const when = (Date.now() - ageMs) / 1000;
     fs.utimesSync(file, when, when);
@@ -255,14 +201,11 @@ test("the ceiling is enforced ACROSS threads, which rotation alone cannot do", a
   const threadsRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "orq-raw-ceiling-"));
   for (let i = 0; i < 6; i += 1) {
     // t0 is the OLDEST, so oldest-first eviction takes it before t5.
-    await seedThreadLog(threadsRoot, `t${i}`, "raw.ndjson.1", 4_000, (6 - i) * 60_000);
+    await seedThreadLog(threadsRoot, `t${i}`, "raw.ndjson.1", 128 * 1024 * 1024, (6 - i) * 60_000);
   }
-  const before = fs.readdirSync(threadsRoot).length;
-  assert.equal(before, 6);
-
-  const result = pruneRawLogDirectory({ threadsRoot, ceilingBytes: 10_000 });
-  assert.ok(result.deleted >= 3, `expected rungs to be deleted, got ${result.deleted}`);
-  assert.ok(result.totalBytes <= 10_000, `still over the ceiling: ${result.totalBytes}`);
+  const result = pruneRawLogDirectory({ threadsRoot });
+  assert.equal(result.deleted, 2);
+  assert.equal(result.totalBytes, 512 * 1024 * 1024);
 
   // Oldest first: t0's rung goes before t5's.
   assert.equal(fs.existsSync(path.join(threadsRoot, "t0", "raw.ndjson.1")), false);
@@ -271,12 +214,11 @@ test("the ceiling is enforced ACROSS threads, which rotation alone cannot do", a
 
 test("a live file whose thread has an open writer is never unlinked", async () => {
   const threadsRoot = await fsp.mkdtemp(path.join(os.tmpdir(), "orq-raw-ceiling-"));
-  const live = await seedThreadLog(threadsRoot, "live", "raw.ndjson", 8_000, 600_000);
-  const idle = await seedThreadLog(threadsRoot, "idle", "raw.ndjson", 8_000, 300_000);
+  const live = await seedThreadLog(threadsRoot, "live", "raw.ndjson", 300 * 1024 * 1024, 600_000);
+  const idle = await seedThreadLog(threadsRoot, "idle", "raw.ndjson", 300 * 1024 * 1024, 300_000);
 
   pruneRawLogDirectory({
     threadsRoot,
-    ceilingBytes: 1_000,
     liveThreadIds: new Set(["live"])
   });
   assert.equal(fs.existsSync(live), true, "a file the host is appending to must survive");

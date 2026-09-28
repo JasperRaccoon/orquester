@@ -26,16 +26,12 @@
 
 import type { RuntimeSubagent, RuntimeSubagentStatus } from "@orquester/api/agent-chat";
 import {
-  ROSTER_VISIBLE_ROWS,
   deriveRosterDockView,
   isActiveSubagentStatus,
   isBackgroundShellRow,
   isTerminalSubagentStatus
 } from "../../../lib/agent-chat/roster.logic";
 import type { ChatTone } from "../primitives/tone";
-
-/** How many non-exempt rows render before the rest collapse behind "N more". */
-export const ROSTER_COLLAPSED_ROWS = ROSTER_VISIBLE_ROWS;
 
 /**
  * Where a finished row is in its exit.
@@ -48,8 +44,6 @@ export type FinishedRowsPhase = "visible" | "fading" | "removed";
 
 export interface RosterVisibleRow {
   agent: RuntimeSubagent;
-  /** A live background row: never collapsed, never faded, never counted. */
-  exempt: boolean;
   /** Rendered, but on its way out — the component applies the fade. */
   fading: boolean;
 }
@@ -58,12 +52,6 @@ export interface RosterSelection {
   rows: RosterVisibleRow[];
   /** The "N more" count: non-exempt rows the collapse is holding back. */
   hiddenCount: number;
-  /** Every row the fold gave us, exempt ones included. */
-  totalCount: number;
-  /** Rows in one of the three in-flight statuses. */
-  liveCount: number;
-  /** Rows in a terminal status. */
-  finishedCount: number;
 }
 
 /** The three in-flight statuses — one steady "working" look (§7.6). */
@@ -102,7 +90,7 @@ export function isLiveBackgroundRow(
  * means. An unparseable stamp sorts by its incoming position rather than
  * jumping to one end.
  */
-export function rosterDisplayOrder(
+function rosterDisplayOrder(
   agents: readonly RuntimeSubagent[]
 ): RuntimeSubagent[] {
   return agents
@@ -122,7 +110,7 @@ export function rosterDisplayOrder(
 
 export interface SelectRosterRowsInput {
   agents: readonly RuntimeSubagent[];
-  /** `false` collapses everything past {@link ROSTER_COLLAPSED_ROWS}. */
+  /** `false` collapses rows beyond the dock selector's visible limit. */
   expanded: boolean;
   /** Where finished rows are in their exit; `visible` while a turn runs. */
   finished: FinishedRowsPhase;
@@ -146,13 +134,6 @@ export interface SelectRosterRowsInput {
 export function selectRosterRows(input: SelectRosterRowsInput): RosterSelection {
   const ordered = rosterDisplayOrder(input.agents);
 
-  let liveCount = 0;
-  let finishedCount = 0;
-  for (const agent of ordered) {
-    if (isActiveStatus(agent.status)) liveCount += 1;
-    if (isFinishedRow(agent)) finishedCount += 1;
-  }
-
   const view = deriveRosterDockView({
     roster: ordered,
     expanded: input.expanded,
@@ -168,17 +149,13 @@ export function selectRosterRows(input: SelectRosterRowsInput): RosterSelection 
     const exempt = isLiveBackgroundRow(agent);
     rows.push({
       agent,
-      exempt,
       fading: !exempt && isFinishedRow(agent) && input.finished === "fading"
     });
   }
 
   return {
     rows,
-    hiddenCount: view.hiddenCount,
-    totalCount: ordered.length,
-    liveCount,
-    finishedCount
+    hiddenCount: view.hiddenCount
   };
 }
 

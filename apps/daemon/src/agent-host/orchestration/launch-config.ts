@@ -99,7 +99,7 @@ export function launchConfigFromRequest(request: {
   }) ?? {};
 }
 
-export const LAUNCH_CONFIG_FILE = "launch.json";
+const LAUNCH_CONFIG_FILE = "launch.json";
 
 /**
  * `<rootDir>/threads/<threadId>/launch.json`, written atomically (tmp +
@@ -130,22 +130,6 @@ export function createFileLaunchConfigStore(options: { rootDir: string }): Launc
         mode: 0o600
       });
       await rename(tmp, path);
-    }
-  };
-}
-
-/** The in-memory double every host test uses. */
-export function createMemoryLaunchConfigStore(): LaunchConfigStore & {
-  readonly entries: Map<string, ThreadLaunchConfig>;
-} {
-  const entries = new Map<string, ThreadLaunchConfig>();
-  return {
-    entries,
-    async load(threadId: string): Promise<ThreadLaunchConfig | null> {
-      return entries.get(threadId) ?? null;
-    },
-    async save(threadId: string, config: ThreadLaunchConfig): Promise<void> {
-      entries.set(threadId, config);
     }
   };
 }

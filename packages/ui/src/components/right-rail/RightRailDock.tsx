@@ -34,7 +34,7 @@ import { composerHandle, focusComposer } from "../agent-chat/composer/composer-b
 import { ResizeHandle } from "../ui/resize-handle";
 import { useActiveChatTarget } from "./chat-target";
 import { dockKeyAction, useDockKeyboardLayer, useFocusInside } from "./dock-keyboard";
-import { RIGHT_RAIL_DOCK_ID, RIGHT_RAIL_PANEL_REGISTRY, type RightRailPanelRegistry } from "./panels";
+import { RIGHT_RAIL_DOCK_ID, RIGHT_RAIL_PANEL_REGISTRY } from "./panels";
 import {
   RIGHT_RAIL_CSS_MAX_WIDTH,
   RIGHT_RAIL_CSS_MIN_WIDTH,
@@ -55,8 +55,6 @@ export interface RightRailDockProps {
   width: number;
   /** The row the dock shares with the tab content and the rail: its width caps the dock's. */
   rowRef?: { readonly current: HTMLElement | null };
-  /** The panels by id (the real ones unless a check passes fakes). */
-  panels?: RightRailPanelRegistry;
 }
 
 /**
@@ -98,10 +96,9 @@ export const RightRailDock: React.FC<RightRailDockProps> = ({
   panel,
   projectPath,
   width,
-  rowRef,
-  panels = RIGHT_RAIL_PANEL_REGISTRY
+  rowRef
 }) => {
-  const { title, Icon, Component } = panels[panel];
+  const { title, Icon, Component } = RIGHT_RAIL_PANEL_REGISTRY[panel];
   const [node, setNode] = React.useState<HTMLElement | null>(null);
   // An open layer while focus is inside: the chat's Escape arms and
   // Ctrl+Shift+A stand down while the user works in the panel.

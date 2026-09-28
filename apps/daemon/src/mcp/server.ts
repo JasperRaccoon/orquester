@@ -29,19 +29,18 @@ export interface McpDeps {
   createApi: (authorization: string | undefined) => DaemonApi;
   todos: TodoTools;
   files: FsTools;
-  now?: () => number;
 }
 
-export const SERVER_VERSION = "2.0.0";
+const SERVER_VERSION = "2.0.0";
 
 /**
  * ≤ 2 KB: Claude Code truncates server instructions around there (and surfaces them only with tool
  * search on), so every load-bearing rule is also in the description of the tool it governs.
  */
-export const SERVER_INSTRUCTIONS = `Orquester MCP drives Orquester's agent chat sessions (Claude Code, Codex, OpenCode, Grok) exactly like the chat GUI. A session is a tab: a chat with an agent, or a terminal (listed and closable only). Addressing: sessions by sessionId (list_sessions); projects by absolute path or "workspace/project" (list_projects). Call list_agents for the valid models, options (effort…), permission modes and accounts before create_session or update_session. create_session opens a chat tab, or resumes a conversation from list_conversations; send_message talks to it — wait:true (default) returns the reply or the question/approval it stopped on; while a turn runs, a message steers it. get_session shows status (status/attention/reason), pending questions and approvals with their ids and options, the proposed plan, subagents and the context meter; read_transcript shows what was said and done (agentId drills into a subagent), read_tool_output a tool row's whole output (its outputItemId); search_sessions finds words across every chat. answer_question / resolve_approval / dismiss_question act on pending requests; implement_plan is the GUI's Implement button. update_session changes model, effort/options, permission mode, account or title. wait_for_session blocks until a session needs you — pass its cursor back as \`after\`; never poll in a loop. Attachments are inline ({path} in the sandbox or {name, base64}). get_usage percentages are % USED. Automated workflows: list_workflow_block_types first, then create_workflow; edit with update_workflow ops (revision from get_workflow); run_workflow, get_workflow_run. Errors carry a code (SESSION_BUSY, PENDING_REQUEST, INVALID_ARGUMENT…) and a message naming the fix.`;
+const SERVER_INSTRUCTIONS = `Orquester MCP drives Orquester's agent chat sessions (Claude Code, Codex, OpenCode, Grok) exactly like the chat GUI. A session is a tab: a chat with an agent, or a terminal (listed and closable only). Addressing: sessions by sessionId (list_sessions); projects by absolute path or "workspace/project" (list_projects). Call list_agents for the valid models, options (effort…), permission modes and accounts before create_session or update_session. create_session opens a chat tab, or resumes a conversation from list_conversations; send_message talks to it — wait:true (default) returns the reply or the question/approval it stopped on; while a turn runs, a message steers it. get_session shows status (status/attention/reason), pending questions and approvals with their ids and options, the proposed plan, subagents and the context meter; read_transcript shows what was said and done (agentId drills into a subagent), read_tool_output a tool row's whole output (its outputItemId); search_sessions finds words across every chat. answer_question / resolve_approval / dismiss_question act on pending requests; implement_plan is the GUI's Implement button. update_session changes model, effort/options, permission mode, account or title. wait_for_session blocks until a session needs you — pass its cursor back as \`after\`; never poll in a loop. Attachments are inline ({path} in the sandbox or {name, base64}). get_usage percentages are % USED. Automated workflows: list_workflow_block_types first, then create_workflow; edit with update_workflow ops (revision from get_workflow); run_workflow, get_workflow_run. Errors carry a code (SESSION_BUSY, PENDING_REQUEST, INVALID_ARGUMENT…) and a message naming the fix.`;
 
 /** Every tool, in tools/list order (spec §7.10: 31, plus the 13 automated-workflow tools of the workflows spec §8.3). */
-export function allTools(): ToolDef[] {
+function allTools(): ToolDef[] {
   return [...catalogTools, ...sessionTools, ...searchTools, ...messageTools, ...outputTools, ...requestTools, ...watchTools, ...usageTools, ...fileTools, ...todoTools, ...workflowTools];
 }
 
@@ -56,7 +55,7 @@ const MAX_ISSUE_CHARS = 200;
 const MAX_ISSUE_PATH_CHARS = 100;
 
 /** The one line an argument the schema refuses answers with: each bad field and why, as zod words it, each capped. */
-export function argumentProblems(toolName: string, error: z.ZodError): string {
+function argumentProblems(toolName: string, error: z.ZodError): string {
   const oneLine = (text: string) => text.replace(/\s+/g, " ");
   const named = error.issues.slice(0, MAX_NAMED_ISSUES).map((issue) => {
     const path = issue.path.length ? clipText(oneLine(issue.path.join(".")), MAX_ISSUE_PATH_CHARS) : "arguments";
@@ -73,7 +72,7 @@ export function argumentProblems(toolName: string, error: z.ZodError): string {
  * converter advertises `additionalProperties: false` on every tool. Only the top level changes — a nested object keeps
  * its own mode (an attachment is strict already).
  */
-export function argumentsSchema(tool: ToolDef): z.ZodTypeAny {
+function argumentsSchema(tool: ToolDef): z.ZodTypeAny {
   return z.object(tool.input).strict();
 }
 
@@ -88,9 +87,9 @@ export function argumentsSchema(tool: ToolDef): z.ZodTypeAny {
  * on purpose: a tool's `enabled` flag (no tool is ever disabled), task support and output schemas (no tool declares
  * either).
  */
-export function buildServer(deps: McpDeps, authorization: string | undefined, signal: AbortSignal): McpServer {
+function buildServer(deps: McpDeps, authorization: string | undefined, signal: AbortSignal): McpServer {
   const server = new McpServer({ name: "orquester", version: SERVER_VERSION }, { instructions: SERVER_INSTRUCTIONS });
-  const ctx: ToolContext = { api: deps.createApi(authorization), todos: deps.todos, files: deps.files, signal, now: deps.now ?? (() => Date.now()) };
+  const ctx: ToolContext = { api: deps.createApi(authorization), todos: deps.todos, files: deps.files, signal, now: () => Date.now() };
   const call = async (tool: ToolDef, args: unknown) => {
     try {
       return ok(await tool.run(args as never, ctx));

@@ -149,13 +149,3 @@ export function parseStandaloneComposerSlashCommand(text: string): "plan" | "def
   if (!match) return null;
   return match[1]?.toLowerCase() === "plan" ? "plan" : "default";
 }
-
-/**
- * §4.6.5(b): the host-native compaction predicate, exact and deliberately
- * narrow — the trimmed, lowercased draft is exactly `/compact`. The composer
- * may send either this or the `/compact` command; they land on the same host
- * path.
- */
-export function isStandaloneCompactCommand(text: string): boolean {
-  return text.trim().toLowerCase() === "/compact";
-}

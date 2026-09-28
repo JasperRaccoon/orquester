@@ -11,7 +11,7 @@ import { Worker } from "node:worker_threads";
 
 import type { RuleMatcher, RuleMatchJob } from "@orquester/api";
 
-export const RULE_MATCH_TIMEOUT_MS = 250;
+const RULE_MATCH_TIMEOUT_MS = 250;
 
 // Plain JavaScript evaluated as the worker's body: no loader, no imports of ours.
 const WORKER_SOURCE = `
@@ -39,8 +39,8 @@ export interface RegexMatcher {
   close(): Promise<void>;
 }
 
-export function createRegexMatcher(options: { timeoutMs?: number } = {}): RegexMatcher {
-  const timeoutMs = options.timeoutMs ?? RULE_MATCH_TIMEOUT_MS;
+export function createRegexMatcher(): RegexMatcher {
+  const timeoutMs = RULE_MATCH_TIMEOUT_MS;
   let worker: Worker | null = null;
   /** Resolves once the current worker runs: its boot never counts against a search's deadline. */
   let online: Promise<void> = Promise.resolve();

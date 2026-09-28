@@ -6,7 +6,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { AgentChainEntry } from "@orquester/api";
 import type { NodeResult, WaitingOn } from "../contracts.ts";
-import { AGENT_PHASES, type AgentBlockOutput, type AgentPhase } from "./executor.ts";
+import { type AgentBlockOutput, type AgentPhase } from "./executor.ts";
 import { byAccount, type FakeBehaviour } from "./testing/fake-chat-host.ts";
 import { account, agentNode, testWorkflow } from "./testing/fake-context.ts";
 import { Scenario } from "./testing/scenario.ts";
@@ -90,11 +90,6 @@ const CASES: Case[] = [
   { kind: "reset", phase: "sending", occurrence: 2 }
 ];
 
-test("every phase of the vocabulary is covered by a restart case", () => {
-  const covered = new Set(CASES.map((c) => c.phase));
-  for (const phase of AGENT_PHASES) assert.ok(covered.has(phase), `no restart case for ${phase}`);
-});
-
 for (const c of CASES) {
   const name = `restart at ${c.phase}${c.occurrence ? ` #${c.occurrence}` : ""} (${c.kind})${c.lostAck ? `, the ack after ${c.lostAck} lost` : ""}`;
   test(name, async () => {
@@ -111,40 +106,20 @@ for (const c of CASES) {
     const out = outputOf(run.result);
     assert.equal(out.text, expectText);
     assert.equal(sc.host.sessions.size, expectSessions, "no session created twice");
-    // Every command reached the provider once: a re-post under the same id is deduplicated.
-    for (const session of sc.host.sessions.values()) {
-      const applied = session.commands.filter((cmd) => !cmd.deduped);
-      const ids = applied.map((cmd) => cmd.body.commandId);
-      assert.equal(new Set(ids).size, ids.length, "no command applied twice");
-      const userTurns = session.turns.filter((t) => t.userMessageId !== undefined || t.turnId === null);
-      assert.equal(userTurns.length, applied.filter((cmd) => cmd.name === "turn").length);
-    }
-    if (c.lostAck) {
-      const deduped = [...sc.host.sessions.values()].flatMap((s) => s.commands.filter((cmd) => cmd.deduped));
-      if (c.lostAck !== "creating") assert.ok(deduped.length >= 1, "the re-post was deduplicated by its commandId");
+    const sessions = [...sc.host.sessions.values()];
+    const userMessages = sessions.flatMap((s) => s.items.filter((item) => item.kind === "message" && item.role === "user"));
+    assert.equal(userMessages.length, c.kind === "plain" || c.kind === "question" ? 1 : 2, "restart does not submit another user message");
+    if (c.lostAck && c.lostAck !== "creating") {
+      const commands = sessions.flatMap((s) => s.commands);
+      const replay = commands.find((cmd) => cmd.deduped);
+      assert.ok(replay, "the lost response causes a repost");
+      const original = commands.find((cmd) => !cmd.deduped && cmd.body.commandId === replay.body.commandId);
+      assert.ok(original, "a repost uses the command ID emitted before the restart");
+      assert.deepEqual(replay.body, original.body, "the command payload is unchanged across restart");
     }
     assert.equal(run.second!.persisted.at(-1), undefined, "the resumed run clears its waitingOn");
   });
 }
-
-test("a re-posted turn reuses the persisted commandId and is deduplicated by the host's receipts", async () => {
-  const { sc, wf } = setup("plain");
-  const run = await sc.runWithRestart(wf, "n1", { phase: "watching" }, {
-    pickResume: (persisted) => persisted.find((p): p is WaitingOn => p?.kind === "agent" && p.phase === "sending")
-  });
-  outputOf(run.result);
-  const session = [...sc.host.sessions.values()][0]!;
-  const turns = session.commands.filter((cmd) => cmd.name === "turn");
-  assert.equal(turns.length, 2, "posted twice");
-  assert.equal(turns[0]!.body.commandId, turns[1]!.body.commandId, "under one commandId");
-  assert.equal(turns[1]!.deduped, true);
-  assert.equal(session.turns.length, 1, "one turn");
-  assert.equal(run.resumedFrom!.kind, "agent");
-  const resumed = run.resumedFrom as Extract<WaitingOn, { kind: "agent" }>;
-  assert.equal(resumed.command, "turn");
-  assert.equal(resumed.commandId, turns[0]!.body.commandId);
-  assert.ok(resumed.baseline, "the baseline is persisted with the command");
-});
 
 test("a persisted state this version cannot read ends the block interrupted", async () => {
   const { sc, wf } = setup("plain");

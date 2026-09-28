@@ -16,29 +16,17 @@
  * its port and *then* holds the readiness line — exactly the window the budget
  * used to be spent in — until the test signals it.
  *
- * Nothing here waits on a clock: the ceiling arithmetic is checked as
- * arithmetic, the registry's ceiling on the registry's own timer, injected and
- * fired by the test, and the behaviour against a peer whose start ends when
- * the test says so. (A degraded probe's time is bounded from above — it must
- * not spend the budget — but nothing waits for that bound.)
+ * Peer startup ends when the test signals readiness. The registry's custom
+ * timeout contract is owned by orchestration/provider-snapshots.test.ts.
  */
 
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { ProviderSnapshot } from "@orquester/api/agent-chat";
-
 import type { AdapterContext } from "../../adapter.ts";
-import {
-  createProviderSnapshotRegistry,
-  type ProviderProbe
-} from "../../orchestration/provider-snapshots.ts";
 import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
-import { SNAPSHOT_TIMEOUTS_MS } from "../index.ts";
-import { OPENCODE_SNAPSHOT_TIMEOUT_MS, createOpenCodeAdapter } from "./index.ts";
+import { createOpenCodeAdapter } from "./index.ts";
 import { makePeer, type Peer } from "./testing/peer.ts";
 
 function peerCtx(
@@ -70,73 +58,6 @@ function peerCtx(
     signal: new AbortController().signal
   } as AdapterContext;
 }
-
-// ---------------------------------------------------------------------------
-// The ceiling itself
-// ---------------------------------------------------------------------------
-
-test("E9: the cold ceiling covers BOTH phases, not just the catalogue read", () => {
-  // Readiness (`handshakeMs` + the `/global/health` gate) happens before the
-  // first catalogue byte. A ceiling that only covers the read is the bug.
-  const phases =
-    AGENT_HOST_DEADLINES.handshakeMs +
-    AGENT_HOST_DEADLINES.healthMs +
-    AGENT_HOST_DEADLINES.authProbeMs;
-  assert.ok(
-    OPENCODE_SNAPSHOT_TIMEOUT_MS >= phases,
-    `cold ceiling ${OPENCODE_SNAPSHOT_TIMEOUT_MS}ms must cover ${phases}ms of phases`
-  );
-  // And it is genuinely more than the window that failed in production.
-  assert.ok(OPENCODE_SNAPSHOT_TIMEOUT_MS > AGENT_HOST_DEADLINES.authProbeMs);
-});
-
-test("E9: only OpenCode gets the longer leash", () => {
-  // One slow provider must not buy the others a longer window — a stuck Codex
-  // or Claude probe should still be cut at the tight auth deadline.
-  assert.equal(SNAPSHOT_TIMEOUTS_MS.opencode, OPENCODE_SNAPSHOT_TIMEOUT_MS);
-  assert.deepEqual(Object.keys(SNAPSHOT_TIMEOUTS_MS), ["opencode"]);
-});
-
-test("E9: the registry honours a probe's own ceiling", async () => {
-  // The seam the ceiling rides on. A probe that declares 60 ms is cut at 60 ms
-  // rather than at the 10 s default, which is the same mechanism that lets
-  // OpenCode declare 45 s. The registry's own timer, injected, is the clock:
-  // the test sees which ceiling is armed, and fires it.
-  const stateDir = mkdtempSync(join(tmpdir(), "orq-snapshot-budget-"));
-  const probe: ProviderProbe = {
-    id: "opencode",
-    timeoutMs: 60,
-    // A probe that never answers: only the ceiling can end the refresh.
-    refresh: (): Promise<ProviderSnapshot> => new Promise<ProviderSnapshot>(() => undefined)
-  };
-  const armed: { ms: number; fire: () => void }[] = [];
-  const registry = createProviderSnapshotRegistry({
-    probes: [probe],
-    stateDir,
-    logger: {
-      debug: () => undefined,
-      info: () => undefined,
-      warn: () => undefined,
-      error: () => undefined
-    },
-    setTimer: (fire, ms) => armed.push({ ms, fire }) - 1,
-    clearTimer: () => undefined
-  });
-  try {
-    const refreshing = registry.refresh("opencode");
-    await nextTurn();
-    assert.deepEqual(
-      armed.map((timer) => timer.ms),
-      [60],
-      "the probe's own ceiling, not the default"
-    );
-    armed[0]!.fire();
-    await assert.rejects(refreshing, /timed out after 60ms/);
-  } finally {
-    registry.stop?.();
-    rmSync(stateDir, { recursive: true, force: true });
-  }
-});
 
 // ---------------------------------------------------------------------------
 // The behaviour, against a slow-starting peer

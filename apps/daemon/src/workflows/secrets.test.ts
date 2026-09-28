@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
-import { WORKFLOW_SECRET_MAX_VALUE_BYTES } from "@orquester/config";
 import { WorkflowError } from "./errors.ts";
 import { WorkflowSecretsService } from "./secrets.ts";
 
@@ -21,8 +20,7 @@ async function scratch(): Promise<string> {
 function makeSecrets(file: string) {
   const lines: string[] = [];
   const logger = { warn: (...a: unknown[]) => void lines.push(a.join(" ")), error: (...a: unknown[]) => void lines.push(a.join(" ")) };
-  let tick = 0;
-  const secrets = new WorkflowSecretsService({ file, logger, now: () => new Date(Date.UTC(2026, 8, 28, 10, 0, tick++)) });
+  const secrets = new WorkflowSecretsService({ file, logger });
   return { secrets, lines };
 }
 
@@ -43,7 +41,7 @@ test("values are stored 0600 (also after an existing file was looser) and never 
 
   const list = secrets.list();
   assert.deepEqual(
-    list.map((s) => ({ name: s.name, scope: s.scope, short: s.short })),
+    list.map((s) => ({ name: s.name, scope: s.scope, short: s.short })).sort((a, b) => a.name.localeCompare(b.name)),
     [
       { name: "API_TOKEN", scope: "global", short: false },
       { name: "OTHER", scope: "global", short: true }
@@ -67,10 +65,10 @@ test("a workflow's own secret shadows a global one; list shows both scopes; dele
   assert.deepEqual(secrets.resolve("wf-1"), { TOKEN: "own-value", BASE: "https://example.test" });
   assert.deepEqual(secrets.resolve("wf-2"), { TOKEN: "global-value", BASE: "https://example.test" });
   assert.deepEqual(
-    secrets.list("wf-1").map((s) => `${s.name}:${s.scope}`),
+    secrets.list("wf-1").map((s) => `${s.name}:${s.scope}`).sort(),
     ["BASE:global", "TOKEN:global", "TOKEN:workflow"]
   );
-  assert.deepEqual(secrets.names("wf-1"), ["BASE", "TOKEN"]);
+  assert.deepEqual(secrets.names("wf-1").sort(), ["BASE", "TOKEN"]);
 
   assert.equal(await secrets.delete("TOKEN", "wf-2"), false);
   await secrets.deleteForWorkflow("wf-1");
@@ -90,9 +88,9 @@ test("names and values are validated: 400 SECRET_INVALID", async () => {
   for (const name of ["lower", "1ABC", "A-B", "", `A${"B".repeat(64)}`]) {
     await rejectsWith(secrets.set(name, "value"), 400, "SECRET_INVALID");
   }
-  await rejectsWith(secrets.set("BIG", "x".repeat(WORKFLOW_SECRET_MAX_VALUE_BYTES + 1)), 400, "SECRET_INVALID");
+  await rejectsWith(secrets.set("BIG", "x".repeat(64 * 1024 + 1)), 400, "SECRET_INVALID");
   await rejectsWith(secrets.set("NOT_TEXT", 42 as never), 400, "SECRET_INVALID");
-  await secrets.set("EXACT", "x".repeat(WORKFLOW_SECRET_MAX_VALUE_BYTES));
+  await secrets.set("EXACT", "x".repeat(64 * 1024));
   assert.deepEqual(secrets.names(), ["EXACT"]);
 });
 
@@ -110,19 +108,14 @@ test("a foreign-version file is moved aside, without quoting a value", async () 
   assert.ok(!lines.join("\n").includes("leak-me-not"));
 });
 
-test("an unreadable file makes the store read-only (503) and is never written over", async (t) => {
-  if (process.getuid?.() === 0) {
-    t.skip("root reads a 0000 file");
-    return;
-  }
-  const dir = await scratch();
-  const file = join(dir, "workflow-secrets.json");
-  await writeFile(file, "{}");
-  await chmod(file, 0o000);
+test("an unreadable path makes the store read-only (503) and preserves existing content", async () => {
+  const file = join(await scratch(), "workflow-secrets.json");
+  await mkdir(file);
+  const sentinel = join(file, "keep");
+  await writeFile(sentinel, "original");
   const { secrets } = makeSecrets(file);
   await secrets.load();
   await rejectsWith(secrets.set("A_B", "value"), 503, "WORKFLOWS_UNAVAILABLE");
-  await secrets.deleteForWorkflow("wf-1"); // a cascade never throws
-  await chmod(file, 0o600);
-  assert.equal(await readFile(file, "utf8"), "{}");
+  await secrets.deleteForWorkflow("wf-1");
+  assert.equal(await readFile(sentinel, "utf8"), "original");
 });

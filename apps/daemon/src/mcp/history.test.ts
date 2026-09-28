@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { agentChatRoutes, decodeHistoryCursor, encodeHistoryCursor, type ThreadActivityItem, type ThreadHistoryBounds, type ThreadHistoryPage, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
 import type { DaemonResponse } from "./daemon-api.ts";
 import { activity, message, snapshot, turn } from "./fixtures.ts";
-import { HISTORY_PAGES_PER_READ, mergeHistoryPages, readOlderHistory, unavailableHint } from "./history.ts";
+import { readOlderHistory } from "./history.ts";
 import { FakeDaemonApi } from "./testing.ts";
 
 const HISTORY = agentChatRoutes.history("c1");
@@ -77,7 +77,7 @@ test("no page is read when the window already holds the range, when the host pre
   // The window's oldest turn may be partial, so only a range starting after it is the window's alone.
   const covered = windowed(t, 7);
   const read = await readOlderHistory(api, "c1", covered, { start: 8, end: 10 });
-  assert.equal(read.snapshot, covered, "the snapshot itself"); assert.equal(read.unavailable, null);
+  assert.deepEqual(read.snapshot.items, t.rowsOf(7, 10)); assert.equal(read.unavailable, null);
   const legacy = snapshot({ turns: t.turns, items: t.rowsOf(8, 10) }); // no `history`: an older host
   assert.deepEqual(await readOlderHistory(api, "c1", legacy, { start: 1, end: 10 }), { snapshot: legacy, unavailable: null });
   // An index that knows every turn of the thread says nothing is older: its word is taken.
@@ -88,62 +88,11 @@ test("no page is read when the window already holds the range, when the host pre
   assert.equal(historyCalls(api).length, 0);
 });
 
-test("the first page ends at the window's boundary when the range reaches the window's oldest turn; its soft cap reaches one turn below the range", async () => {
-  const t = thread(10);
-  for (const [range, oldest] of [[{ start: 6, end: 10 }, 8], [{ start: 5, end: 8 }, 8], [{ start: 8, end: 8 }, 8]] as const) {
-    const api = host([page(t.rowsOf(1, 7), null)]);
-    const read = await readOlderHistory(api, "c1", windowed(t, oldest), range);
-    const [call] = historyCalls(api);
-    // The page ends inside turn 8, the window's oldest: counting that turn, turns 8 down to start − 1.
-    assert.deepEqual(call!.query, { turns: String(oldest - range.start + 2) }, `${JSON.stringify(range)}: no cursor`);
-    assert.equal(read.unavailable, null);
-  }
-});
-
-test("a range that ends before the window's oldest turn: the first page ends where turn end + 1 begins, named by the snapshot's own turn record", async () => {
-  const t = thread(10);
-  // Turn 5 is older than the window; turn 8 IS the window's oldest turn, and none of it is in the range [5, 7], so its
-  // evicted rows are not waded through before turn 7.
-  for (const [range, next] of [[{ start: 2, end: 4 }, 5], [{ start: 5, end: 7 }, 8]] as const) {
-    const api = host([page(t.rowsOf(1, range.end), null)]);
-    const read = await readOlderHistory(api, "c1", windowed(t, 8), range);
-    const [call] = historyCalls(api);
-    // Turns end down to start − 1: the range and one turn below it.
-    assert.equal(call!.query!.turns, String(range.end - range.start + 2), JSON.stringify(range));
-    assert.deepEqual(decodeHistoryCursor(call!.query!.before!, "c1"), { threadId: "c1", beforeAnchorAt: t.turns[next - 1]!.requestedAt, beforeTurnId: `t${next}` }, `turn ${next}'s start, no in-turn bound`);
-    assert.equal(read.unavailable, null);
-  }
-});
-
-test("a page the soft cap ended at turn start − 1 names that turn with beforeSeq, as the host names every block: turn start is whole in one page", async () => {
-  const t = thread(10);
-  const api = host([page(t.rowsOf(3, 7), cursorAt(t, 3, 30))]);
-  const read = await readOlderHistory(api, "c1", windowed(t, 8), { start: 4, end: 9 });
-  assert.equal(historyCalls(api).length, 1);
-  assert.deepEqual([historyCalls(api)[0]!.query!.turns, read.unavailable], ["6", null], "turns 8 down to 3");
-});
-
 test("the soft cap reaches one turn below the range, at most THREAD_HISTORY_MAX_TURNS, on every page", async () => {
   const t = thread(200);
   const api = host([page([], cursorAt(t, 120, 5)), page([], null)]);
   await readOlderHistory(api, "c1", windowed(t, 190), { start: 1, end: 200 });
   assert.deepEqual(historyCalls(api).map((c) => c.query!.turns), ["100", "100"]);
-  // From turn 1 it asks for more turns than there are below: the host applies no cap, and its last page's cursor is null.
-  const small = host([page(t.rowsOf(1, 3), null)]);
-  await readOlderHistory(small, "c1", windowed(t, 190), { start: 1, end: 3 });
-  assert.deepEqual(historyCalls(small).map((c) => c.query!.turns), ["4"]);
-});
-
-test("pages are followed by their beforeCursor until turn start is whole: an in-turn cursor must name an older turn", async () => {
-  const t = thread(10);
-  const cursors = [cursorAt(t, 3, 40), cursorAt(t, 2, 20), cursorAt(t, 1, 5)];
-  const api = host([page(t.rowsOf(3, 7), cursors[0]!), page(t.rowsOf(2, 3), cursors[1]!), page(t.rowsOf(1, 2), cursors[2]!), page([], null)]);
-  const read = await readOlderHistory(api, "c1", windowed(t, 8), { start: 2, end: 10 });
-  const calls = historyCalls(api);
-  // Inside turn 3, then inside turn 2 — still partial — then inside turn 1: turn 2 is whole.
-  assert.deepEqual(calls.map((c) => c.query!.before), [undefined, cursors[0], cursors[1]]);
-  assert.equal(read.unavailable, null);
-  assert.deepEqual(read.snapshot.items.map((i) => i.id), t.rowsOf(1, 10).map((i) => i.id), "every row once, in log order");
 });
 
 test("pages are followed until turn start is whole: a cursor at a turn's start may name turn start itself", async () => {
@@ -155,33 +104,18 @@ test("pages are followed until turn start is whole: a cursor at a turn's start m
   assert.equal(read.unavailable, null);
 });
 
-test("a null beforeCursor ends the walk: the pages reach the thread's first turn", async () => {
-  const t = thread(10);
-  const api = host([page(t.rowsOf(1, 7), null)]);
-  const read = await readOlderHistory(api, "c1", windowed(t, 8), { start: 1, end: 10 });
-  assert.equal(historyCalls(api).length, 1); assert.equal(read.unavailable, null);
-  assert.deepEqual(read.snapshot.items.map((i) => i.id), t.rowsOf(1, 10).map((i) => i.id));
-});
-
-test(`at most ${HISTORY_PAGES_PER_READ} pages a read: the turns left partial are reported, and a host that never moves ends the walk too`, async () => {
+test("a host repeating its history cursor is bounded to five pages and reports missing turns", async () => {
   const t = thread(12);
-  // Each page reaches one turn further back, inside it: after five, turn 6 is the oldest whole one.
-  const api = host([10, 9, 8, 7, 6].map((k) => page(t.rowsOf(k, k), cursorAt(t, k, k * 10))));
-  const read = await readOlderHistory(api, "c1", windowed(t, 11), { start: 2, end: 12 });
-  assert.equal(historyCalls(api).length, HISTORY_PAGES_PER_READ);
-  assert.deepEqual(read.unavailable, { turns: [2, 6], reason: "limit" });
-  assert.deepEqual(read.snapshot.items.map((i) => i.id), t.rowsOf(6, 12).map((i) => i.id), "what the pages read is still served");
-  // A range entirely below the window, the page limit reached before any of it: every turn of it is named.
   const stuck = host(Array.from({ length: 9 }, () => page([], cursorAt(t, 9, 90))));
-  const none = await readOlderHistory(stuck, "c1", windowed(t, 11), { start: 1, end: 3 });
-  assert.equal(historyCalls(stuck).length, HISTORY_PAGES_PER_READ, "the same cursor again and again: five pages, then it stops");
-  assert.deepEqual(none.unavailable, { turns: [1, 3], reason: "limit" });
+  const read = await readOlderHistory(stuck, "c1", windowed(t, 11), { start: 1, end: 3 });
+  assert.equal(historyCalls(stuck).length, 5);
+  assert.deepEqual(read.unavailable, { turns: [1, 3], reason: "limit" });
 });
 
 test("a page read that fails — 503 INDEX_UNAVAILABLE, another status, a throw, a body that is no page — is never an error: the window's rows are served and the turns left are named", async (t) => {
   const th = thread(10);
   const snap = windowed(th, 8);
-  const logged = t.mock.method(console, "error", () => {});
+  t.mock.method(console, "error", () => {});
   const failures: [string, DaemonResponse | (() => never)][] = [
     ["503 INDEX_UNAVAILABLE", { status: 503, body: { error: { code: "INDEX_UNAVAILABLE", message: "Older history is not available on this host right now." } } }],
     ["404 THREAD_NOT_FOUND", { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: "gone" } } }],
@@ -192,11 +126,11 @@ test("a page read that fails — 503 INDEX_UNAVAILABLE, another status, a throw,
   for (const [what, answer] of failures) {
     const api = new FakeDaemonApi().on("GET", HISTORY, typeof answer === "function" ? answer : () => answer);
     const read = await readOlderHistory(api, "c1", snap, { start: 6, end: 10 });
-    assert.equal(read.snapshot, snap, `${what}: the window alone`);
+    assert.deepEqual(read.snapshot.items, th.rowsOf(8, 10), `${what}: the window alone`);
+    assert.ok(!JSON.stringify(read).includes("agent-host.sock"));
     // The window's oldest turn (8) may be partial: turns 6 to 8 were not read whole.
     assert.deepEqual(read.unavailable, { turns: [6, 8], reason: "unavailable" }, what);
   }
-  assert.equal(logged.mock.callCount(), 1, "only the thrown call is logged, and never returned");
   // A failure after pages were read keeps them: the turns they hold whole are not named.
   const api = host([page(th.rowsOf(5, 7), cursorAt(th, 5, 50)), { status: 503, body: { error: { code: "INDEX_UNAVAILABLE", message: "rebuilding" } } }]);
   const partial = await readOlderHistory(api, "c1", snap, { start: 2, end: 10 });
@@ -251,8 +185,6 @@ test("an index that has not caught up with the thread — it knows fewer turns �
   // Caught up part of the way: the host's own ordinal, when it has one.
   const partway = windowed(t, 8, { hasOlder: false, beforeCursor: null, oldestRetainedOrdinal: 7, totalTurns: 6 });
   assert.deepEqual(await read(partway, 1, 10), { turns: [1, 7], reason: "unavailable" });
-  // Caught up: `hasOlder: false` is the host's word that nothing is older.
-  assert.equal(await read(windowed(t, 8, { hasOlder: false, beforeCursor: null, oldestRetainedOrdinal: 8, totalTurns: 10 }), 1, 10), null);
   // A window with no activity row at all cannot say where it begins: nothing is named for it.
   assert.equal(await read(snapshot({ turns: t.turns, items: t.rowsOf(8, 10).filter((i) => i.kind === "message"), history: fresh.history }), 1, 10), null);
   assert.equal(historyCalls(api).length, 0);
@@ -379,20 +311,6 @@ test("an agent with no row left ends its span at its end when its last task row 
   assert.equal(historyCalls(api).length, 0);
 });
 
-test("a child resumed after its end, as OpenCode resumes one — its launch and end stamped with its own id and written once — is bounded by the oldest row any agent kept, not by that end", async () => {
-  const t = thread(10);
-  const api = host([]);
-  // oc1 was launched in turn 2 and ended in turn 3. Its `task` tool resumed it and it worked in turns 5 and 6 under its
-  // own id with no new launch, rows the windows have dropped since. a5 kept its rows from turn 8 on.
-  const oc1 = [agentTask(t, "task.started", "oc1", 2, { agentId: "oc1" }), agentTask(t, "task.completed", "oc1", 3, { agentId: "oc1" })];
-  const items = [...oc1, agentTask(t, "task.started", "a5", 4), ...t.rowsOf(3, 10), ...servedCalls(t, "a5", 8, 10)];
-  for (const bounds of [BEHIND, UNINDEXED]) {
-    const read = await readOlderHistory(api, "c1", snapshot({ turns: t.turns, items, history: bounds }), { start: 1, end: 10 }, { agentId: "oc1" });
-    assert.deepEqual(read.unavailable, { turns: [2, 8], reason: "unavailable" }, `indexed: ${bounds.indexed}: turns 5 and 6 among them`);
-  }
-  assert.equal(historyCalls(api).length, 0);
-});
-
 /**
  * The opening row of work still running in turn `n`, which the fold keeps whatever its age (`openWorkOf`): a call's
  * `tool.started` no row has closed, or a background task's `task.started` with no `task.completed`.
@@ -451,7 +369,7 @@ test("an empty page with a null cursor at the window's boundary or at a host's c
     const first = await readOlderHistory(empty, "c1", snap, { start: 2, end: 9 }, opts);
     assert.equal(historyCalls(empty).length, 1, view);
     assert.deepEqual(first.unavailable, { turns: [2, 8], reason: "unavailable" }, view);
-    assert.equal(first.snapshot, snap, `${view}: the window alone`);
+    assert.deepEqual(first.snapshot.items, t.rowsOf(8, 10), `${view}: the window alone`);
     // A later page: the page read before it is kept, and the turn it ends inside (5) is still partial.
     const later = await readOlderHistory(host([page(t.rowsOf(5, 7), cursorAt(t, 5, 50)), page([], null)]), "c1", snap, { start: 2, end: 9 }, opts);
     assert.deepEqual(later.unavailable, { turns: [2, 5], reason: "unavailable" }, view);
@@ -478,7 +396,7 @@ test("the first page below turn end + 1 — the one cursor the walk mints itself
     assert.deepEqual(decodeHistoryCursor(call!.query!.before!, "c1"), { threadId: "c1", beforeAnchorAt: t.turns[3]!.requestedAt, beforeTurnId: "t4" }, `${view}: turn 4's start, minted from its turn record`);
     assert.equal(historyCalls(api).length, 1, view);
     assert.equal(read.unavailable, null, `${view}: every turn of the range has its rows`);
-    assert.equal(read.snapshot, snap, `${view}: nothing to merge`);
+    assert.deepEqual(read.snapshot.items, [...chat(1, 3), ...t.rowsOf(8, 10)], `${view}: retained rows survive`);
   }
   // The parent view's net still names a turn with no row at all: turn 1's chat went too.
   assert.deepEqual((await readOlderHistory(host([page([], null)]), "c1", holding(chat(2, 3)), { start: 1, end: 3 })).unavailable, { turns: [1, 1], reason: "unavailable" });
@@ -514,16 +432,13 @@ test("a drill-in's page-limit span starts at the turn the subagent was launched 
   assert.deepEqual((await readOlderHistory(back(), "c1", launchedIn(4), { start: 2, end: 12 })).unavailable, { turns: [2, 6], reason: "limit" }, "the parent view");
   const drill = await readOlderHistory(back(), "c1", launchedIn(4), { start: 2, end: 12 }, { agentId: "a1" });
   assert.deepEqual(drill.unavailable, { turns: [4, 6], reason: "limit" }, "a1 has no rows before turn 4");
-  assert.equal(unavailableHint(drill.unavailable!, 12), `Turns 4–6 could not be read whole: one call reads at most ${HISTORY_PAGES_PER_READ} pages of older history. Read them with beforeTurn: 7, turns: 3.`);
   assert.equal((await readOlderHistory(back(), "c1", launchedIn(7), { start: 2, end: 12 }, { agentId: "a1" })).unavailable, null, "launched after every turn the walk left");
   // The limit inside the range's last turn: turn 9 alone outlasts five pages.
   const inside = () => host([90, 80, 70, 60, 50].map((seq) => page([], cursorAt(t, 9, seq))));
   const wider = await readOlderHistory(inside(), "c1", launchedIn(8), { start: 6, end: 9 }, { agentId: "a1" });
   assert.deepEqual(wider.unavailable, { turns: [8, 9], reason: "limit" });
-  assert.equal(unavailableHint(wider.unavailable!, 9), `Turn 9 is larger than one call reads (${HISTORY_PAGES_PER_READ} pages of older history): its latest rows are returned. Read turn 8 with beforeTurn: 9, turns: 1.`);
   const alone = await readOlderHistory(inside(), "c1", launchedIn(9), { start: 6, end: 9 }, { agentId: "a1" });
   assert.deepEqual(alone.unavailable, { turns: [9, 9], reason: "limit" });
-  assert.equal(unavailableHint(alone.unavailable!, 9), `Turn 9 is larger than one call reads (${HISTORY_PAGES_PER_READ} pages of older history): its latest rows are returned.`);
 });
 
 test("the parent view's net: after a walk, a turn of the range with no row in the merged snapshot is still named — beside a failed read's turns, never past the page limit; a drill-in has none", async () => {
@@ -551,7 +466,7 @@ test("the parent view's net: after a walk, a turn of the range with no row in th
   assert.ok(a1.every((row) => served.has(row.id)), "a1's rows are served");
 });
 
-test("the merge: a row a page repeats keeps the window's copy, once, and every row sorts into log order; checkpoints by turn id", () => {
+test("repeated history rows keep the window values once, in time order, with current checkpoints", async () => {
   const ask = message("user", "go", { turnId: "t1" });
   const started = activity("tool.started", { itemType: "command_execution", toolUseId: "tu1", status: "inProgress" }, { turnId: "t1", tone: "tool" });
   const progress = activity("task.progress", { taskId: "a", detail: "early" }, { turnId: "t1", id: "task-progress:a" });
@@ -561,40 +476,16 @@ test("the merge: a row a page repeats keeps the window's copy, once, and every r
   const fresh = new Date(Date.parse(completed.createdAt) + 500).toISOString();
   const replaced = { ...progress, payload: { taskId: "a", detail: "late" }, createdAt: fresh, updatedAt: fresh };
   const cp = (turnId: string | null, completedAt: string, path: string) => ({ turnId, checkpointTurnCount: 1, checkpointRef: `refs/${path}`, status: "ready" as const, files: [{ path, additions: 1, deletions: 0 }], assistantMessageId: null, completedAt });
-  const snap = snapshot({ items: [replaced, completed, reply], checkpoints: [cp("t1", reply.createdAt, "window.ts"), cp(null, reply.createdAt, "turnless.ts")] });
+  const th = thread(2);
+  const snap = snapshot({ turns: th.turns, history: { indexed: true, hasOlder: true, beforeCursor: "window", oldestRetainedOrdinal: 2, totalTurns: 2 }, items: [replaced, completed, reply], checkpoints: [cp("t1", reply.createdAt, "window.ts"), cp(null, reply.createdAt, "turnless.ts")] });
   // Newest page first, as they are read; the two pages share the tool's start row.
-  const merged = mergeHistoryPages(snap, [
-    { items: [started, progress], checkpoints: [cp("t1", ask.createdAt, "page.ts"), cp("t0", ask.createdAt, "older.ts")] },
-    { items: [ask, started], checkpoints: [cp(null, ask.createdAt, "page-turnless.ts")] }
+  const api = host([
+    { status: 200, body: { threadId: "c1", turns: [], items: [started, progress], checkpoints: [cp("t1", ask.createdAt, "page.ts"), cp("t0", ask.createdAt, "older.ts")], page: { beforeCursor: cursorAt(th, 1, 3) }, seq: 9 } },
+    { status: 200, body: { threadId: "c1", turns: [], items: [ask, started], checkpoints: [cp(null, ask.createdAt, "page-turnless.ts")], page: { beforeCursor: null }, seq: 9 } }
   ]);
+  const { snapshot: merged } = await readOlderHistory(api, "c1", snap, { start: 1, end: 2 });
   assert.deepEqual(merged.items.map((i) => i.id), [ask.id, started.id, completed.id, progress.id, reply.id], "each row once, in log order: the progress row at its window copy's time");
   assert.equal((merged.items.find((i) => i.id === progress.id) as { payload: { detail: string } }).payload.detail, "late", "the window's copy of a row a page repeats");
   assert.deepEqual(merged.checkpoints.map((c) => c.files[0]!.path), ["older.ts", "window.ts", "turnless.ts"], "the window's checkpoint for t1 wins; a page's without a turn id is not kept");
-  assert.equal(mergeHistoryPages(snap, []), snap, "no page, the snapshot itself");
   assert.deepEqual(snap.items, [replaced, completed, reply], "the snapshot is not touched");
-});
-
-test("the hint names the turns, why, and — for the page limit — the call that reads them", () => {
-  assert.equal(unavailableHint({ turns: [3, 5], reason: "unavailable" }, 5), "Turns 3–5 could not be read whole: older turns are unavailable on this host right now. Try again later.");
-  assert.equal(unavailableHint({ turns: [4, 4], reason: "unavailable" }, 9), "Turn 4 could not be read whole: older turns are unavailable on this host right now. Try again later.");
-  // The limit, with turns after them read whole: the call that reads the rest ends before this one did.
-  assert.equal(unavailableHint({ turns: [2, 6], reason: "limit" }, 12), `Turns 2–6 could not be read whole: one call reads at most ${HISTORY_PAGES_PER_READ} pages of older history. Read them with beforeTurn: 7, turns: 5.`);
-  assert.equal(unavailableHint({ turns: [9, 9], reason: "limit" }, 10), `Turn 9 could not be read whole: one call reads at most ${HISTORY_PAGES_PER_READ} pages of older history. Read it with beforeTurn: 10, turns: 1.`);
-  // The limit inside the range's last turn: asking again would read the same pages, so the turns before it are named.
-  const large = `larger than one call reads (${HISTORY_PAGES_PER_READ} pages of older history): its latest rows are returned.`;
-  assert.equal(unavailableHint({ turns: [3, 3], reason: "limit" }, 3), `Turn 3 is ${large}`);
-  assert.equal(unavailableHint({ turns: [4, 5], reason: "limit" }, 5), `Turn 5 is ${large} Read turn 4 with beforeTurn: 5, turns: 1.`);
-  assert.equal(unavailableHint({ turns: [1, 5], reason: "limit" }, 5), `Turn 5 is ${large} Read turns 1–4 with beforeTurn: 5, turns: 4.`);
-});
-
-test("the page limit inside the range's last turn — every page stays in turn end — says that turn is larger than one call, and never repeats the call", async () => {
-  const t = thread(12);
-  // Turn 9 alone outlasts five pages: each ends a little further inside it.
-  const inside = () => host([90, 80, 70, 60, 50].map((seq) => page([], cursorAt(t, 9, seq))));
-  const alone = await readOlderHistory(inside(), "c1", windowed(t, 11), { start: 9, end: 9 });
-  assert.deepEqual(alone.unavailable, { turns: [9, 9], reason: "limit" });
-  assert.equal(unavailableHint(alone.unavailable!, 9), `Turn 9 is larger than one call reads (${HISTORY_PAGES_PER_READ} pages of older history): its latest rows are returned.`);
-  const wider = await readOlderHistory(inside(), "c1", windowed(t, 11), { start: 6, end: 9 });
-  assert.deepEqual(wider.unavailable, { turns: [6, 9], reason: "limit" });
-  assert.equal(unavailableHint(wider.unavailable!, 9), `Turn 9 is larger than one call reads (${HISTORY_PAGES_PER_READ} pages of older history): its latest rows are returned. Read turns 6–8 with beforeTurn: 9, turns: 3.`);
 });

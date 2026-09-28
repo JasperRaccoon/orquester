@@ -11,13 +11,6 @@ export interface UsageServiceDeps {
   readGrok?: () => Promise<AgentUsage | null>;
   getPrefs: () => Promise<UsagePrefs>;
   now: () => number;
-  /**
-   * Poll cadence (default 5m fresh / 5m stale). The Anthropic /api/oauth/usage
-   * endpoint rate-limits per account (Retry-After 300s), so polling faster than
-   * ~5m just 429s; the 5h/weekly windows move slowly, so 5m is plenty.
-   */
-  activeMs?: number;
-  idleMs?: number;
 }
 
 const DEFAULT_PREFS: UsagePrefs = {
@@ -94,9 +87,7 @@ export class UsageService {
     await this.recompute().catch(() => undefined);
     this.firstReadingDone();
     if (this.stopped) return;
-    const claude = this.cache.agents.find((a) => a.id === "claude");
-    const delay = claude?.stale ? this.deps.idleMs ?? 300_000 : this.deps.activeMs ?? 300_000;
-    this.timer = setTimeout(() => void this.tick(), delay);
+    this.timer = setTimeout(() => void this.tick(), 300_000);
   }
 
   stop(): void {

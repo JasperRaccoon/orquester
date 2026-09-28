@@ -41,13 +41,12 @@ export {
 export { CopyButton, COPY_FEEDBACK_MS, type CopyButtonProps } from "./CopyButton";
 export { ScrollToBottomButton, type ScrollToBottomButtonProps } from "./ScrollToBottomButton";
 
-export { formatElapsed, elapsedBetween, type ElapsedStamp } from "./elapsed";
+export { elapsedBetween, type ElapsedStamp } from "./elapsed";
 export {
   clampMeterPercent,
   isMeterOverloaded,
   meterDashOffset,
-  formatMeterPercent,
-  METER_OVERLOAD_PERCENT
+  formatMeterPercent
 } from "./meter";
 export { shortcutKeys, isAppleLike } from "./shortcut";
 export { useVisibleAnimation, observeVisibleAnimation } from "./visible-animation";

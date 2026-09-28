@@ -105,7 +105,6 @@ export function ApprovalCard({
               disabled={isResponding}
               aria-description={option.warning}
               title={option.warning}
-              data-approval-decision={option.decision}
               onClick={() => onRespond(option.decision)}
               className={cn(
                 PRIMARY_BUTTON,
@@ -170,7 +169,6 @@ export function ApprovalCard({
     >
       <div
         aria-label={approvalDetailAriaLabel(approval.requestKind)}
-        data-approval-detail={detail.text === null ? "unavailable" : detail.source}
         tabIndex={0}
         className={cn(
           // A file change can be long: the 80px cap and the thin scrollbar are

@@ -41,7 +41,7 @@ import type { CodexProtocol } from "./_generated/index.ts";
 // ---------------------------------------------------------------------------
 
 /** At most one counters-only `progress` row per thread in this window (goals §6). */
-export const CODEX_GOAL_PROGRESS_INTERVAL_MS = 30_000;
+const CODEX_GOAL_PROGRESS_INTERVAL_MS = 30_000;
 
 /**
  * ONE deadline for a whole `/goal` command (goals §6.2.3) — its settle wait
@@ -93,7 +93,7 @@ export const NO_GOAL_TO_EDIT_SUMMARY = "No goal is set. Use /goal <objective> to
 // ---------------------------------------------------------------------------
 
 /** A Codex `ThreadGoalStatus` in the normalised spelling, or `null` for one this build does not know. */
-export function agentGoalStatusFromCodex(status: unknown): AgentGoalStatus | null {
+function agentGoalStatusFromCodex(status: unknown): AgentGoalStatus | null {
   if (typeof status !== "string") {
     return null;
   }
@@ -239,7 +239,7 @@ function sameGoalSnapshot(a: AgentGoal, b: AgentGoal): boolean {
 // The tracker (goals §6, §6.2)
 // ---------------------------------------------------------------------------
 
-export interface CodexGoalTrackerOptions {
+interface CodexGoalTrackerOptions {
   /**
    * The goal the host's fold holds (goals §4.6 `knownGoal`): what the thread
    * already shows, so only a real change becomes a row. `undefined` reads as
@@ -254,7 +254,6 @@ export interface CodexGoalTrackerOptions {
   carry?: boolean;
   /** Milliseconds, for the throttle. */
   now?: () => number;
-  progressIntervalMs?: number;
 }
 
 /**
@@ -277,7 +276,6 @@ export class CodexGoalTracker {
   private carrying = false;
   private readonly carry: boolean;
   private readonly now: () => number;
-  private readonly progressIntervalMs: number;
 
   constructor(options: CodexGoalTrackerOptions = {}) {
     // Field-wise, like everything else the tracker holds: the fold's
@@ -289,7 +287,6 @@ export class CodexGoalTracker {
     this.told = known;
     this.carry = options.carry === true;
     this.now = options.now ?? Date.now;
-    this.progressIntervalMs = options.progressIntervalMs ?? CODEX_GOAL_PROGRESS_INTERVAL_MS;
   }
 
   /** The goal as the provider last described it — before anything did, the fold's. */
@@ -446,7 +443,7 @@ export class CodexGoalTracker {
     if (this.told !== null && sameGoalSnapshot(this.told, next)) {
       return null;
     }
-    if (this.lastRowAt !== null && this.now() - this.lastRowAt < this.progressIntervalMs) {
+    if (this.lastRowAt !== null && this.now() - this.lastRowAt < CODEX_GOAL_PROGRESS_INTERVAL_MS) {
       return null;
     }
     return this.row({ goal: next, change: "progress" });
@@ -514,7 +511,7 @@ export function codexGoalStatusSummary(goal: AgentGoal | null): string {
  * Codex's own compact duration (`format_goal_elapsed_seconds` in the TUI's
  * `goal_display.rs`): `59s`, `30m`, `1h 30m`, `2h`, `2d 23h 42m`.
  */
-export function formatGoalElapsed(ms: number): string {
+function formatGoalElapsed(ms: number): string {
   const seconds = Math.max(0, Math.floor(ms / 1_000));
   if (seconds < 60) {
     return `${seconds}s`;

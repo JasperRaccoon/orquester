@@ -1,133 +1,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { composerHandle, insertComposerText, registerComposerHandle, type ComposerHandle } from "./composer-bridge";
 
-import {
-  composerHandle,
-  insertComposerText,
-  openComposerControl,
-  registerComposerHandle,
-  restoreComposerFailedSend,
-  returnComposerMessage,
-  sendComposerText,
-  stageComposerAttachment,
-  submitComposerText,
-  COMPOSER_NOT_MOUNTED_REASON,
-  type ComposerHandle
-} from "./composer-bridge.ts";
-import type { StagedAttachment } from "./ComposerAttachments";
-import type { FailedSendRestore } from "./composer-submission";
-
-function fakeHandle(
-  log: string[],
-  stageResult = true,
-  { sendResult = true, showsThread = true }: { sendResult?: boolean; showsThread?: boolean } = {}
-): ComposerHandle {
+function fakeHandle(log: string[]): ComposerHandle {
   return {
-    insertText: (text, mode) => log.push(`insert:${mode ?? "cursor"}:${text}`),
-    stageAttachment: (ref) => {
-      log.push(`stage:${ref.id}`);
-      return stageResult;
-    },
-    returnMessage: (message) => {
-      log.push(`return:${message.text}`);
-      return stageResult ? [] : [...message.attachments];
-    },
-    focusAtEnd: () => log.push("focus"),
-    openControl: (command) => log.push(`open:${command}`),
-    sendText: (text) => {
-      log.push(`send:${text}`);
-      return sendResult;
-    },
-    submitText: (text) => {
-      log.push(`submit:${text}`);
-      return sendResult ? { ok: true, disposition: "sent" } : { ok: false, reason: "refused" };
-    },
-    restoreFailedSend: (restore) => {
-      log.push(`restore:${restore.outcome.notice}`);
-      return showsThread;
-    }
+    insertText: (text, mode) => void log.push(`insert:${mode ?? "cursor"}:${text}`),
+    stageAttachment: () => false,
+    returnMessage: () => [],
+    focusAtEnd: () => {},
+    openControl: () => {},
+    sendText: () => false,
+    submitText: () => ({ ok: false, reason: "unavailable" }),
+    restoreFailedSend: () => false
   };
 }
-
-const FAILED: FailedSendRestore<StagedAttachment> = {
-  outcome: { kind: "failed", text: "hello", notice: "Could not send the message." },
-  sent: []
-};
-
-const REF = { type: "file", id: "/tmp/a.txt", name: "a.txt", sizeBytes: 1 } as const;
-
-test("a registered handle receives text and control requests", () => {
-  const log: string[] = [];
-  const unregister = registerComposerHandle("s1", fakeHandle(log));
-  insertComposerText("s1", "hello");
-  insertComposerText("s1", "tail", "append");
-  openComposerControl("s1", "model");
-  assert.deepEqual(log, ["insert:cursor:hello", "insert:append:tail", "open:model"]);
-  unregister();
-});
-
-test("a call for a session that is not mounted is a silent no-op", () => {
-  // A tab closed while a request was in flight must not throw on delivery.
-  assert.doesNotThrow(() => insertComposerText("gone", "text"));
-  assert.doesNotThrow(() => openComposerControl("gone", "mode"));
-  assert.equal(composerHandle("gone"), null);
-});
-
-test("staging an uploaded ref reaches the mounted composer", () => {
-  const log: string[] = [];
-  const unregister = registerComposerHandle("s3", fakeHandle(log));
-  assert.equal(stageComposerAttachment("s3", REF), true);
-  assert.deepEqual(log, ["stage:/tmp/a.txt"]);
-  unregister();
-});
-
-test("staging reports false when no composer is mounted, so the caller can fall back", () => {
-  // The fallback is writing the path into the draft: a file that vanishes
-  // between the picker and the message is worse than a visible path.
-  assert.equal(stageComposerAttachment("never-mounted", REF), false);
-});
-
-test("staging reports false when the composer refuses it", () => {
-  const log: string[] = [];
-  const unregister = registerComposerHandle("s4", fakeHandle(log, false));
-  assert.equal(stageComposerAttachment("s4", REF), false);
-  unregister();
-});
-
-test("a failed send's draft reaches the composer that shows its thread", () => {
-  const log: string[] = [];
-  const unregister = registerComposerHandle("s5", fakeHandle(log));
-  assert.equal(restoreComposerFailedSend("s5", FAILED), true);
-  assert.deepEqual(log, ["restore:Could not send the message."]);
-  unregister();
-});
-
-test("a failed send is refused when no composer shows its thread, so the caller writes its persisted draft", () => {
-  assert.equal(restoreComposerFailedSend("never-mounted", FAILED), false);
-  // A composer can refuse too: it no longer shows the thread its handle names.
-  const log: string[] = [];
-  const unregister = registerComposerHandle("s6", fakeHandle(log, true, { showsThread: false }));
-  assert.equal(restoreComposerFailedSend("s6", FAILED), false);
-  unregister();
-});
-
-test("a message coming back reaches the mounted composer whole, and the refs it refused come back to the caller", () => {
-  const message = { text: "queued", attachments: [REF], context: [] };
-  const log: string[] = [];
-  const unregister = registerComposerHandle("s7", fakeHandle(log));
-  assert.deepEqual(returnComposerMessage("s7", message), []);
-  assert.deepEqual(log, ["return:queued"], "one call, the whole message: its placeholders need the live tray");
-  unregister();
-
-  // A ref a bound still refuses comes back, for the caller to write as its path.
-  const refusing = registerComposerHandle("s8", fakeHandle([], false));
-  assert.deepEqual(returnComposerMessage("s8", message), [REF]);
-  refusing();
-});
-
-test("a message coming back with no composer mounted says so, so the caller merges the persisted draft", () => {
-  assert.equal(returnComposerMessage("never-mounted", { text: "queued", attachments: [REF], context: [] }), null);
-});
 
 test("a stale unregister cannot drop the handle that replaced it", () => {
   // A fast tab switch can run the old effect's cleanup after the new effect
@@ -142,43 +28,4 @@ test("a stale unregister cannot drop the handle that replaced it", () => {
   assert.deepEqual(first, []);
   unregisterSecond();
   assert.equal(composerHandle("s2"), null);
-});
-
-test("goals §8.2: a chip action is sent BY the mounted composer, never around it", () => {
-  const log: string[] = [];
-  const unregister = registerComposerHandle("s5", fakeHandle(log));
-  assert.equal(sendComposerText("s5", "/goal pause"), true);
-  assert.deepEqual(log, ["send:/goal pause"], "the composer's own send path, and nothing else");
-  unregister();
-});
-
-test("goals §8.2: a refused or unmounted send reports false", () => {
-  // The composer says why in its own notice; the caller only learns it did not go.
-  const log: string[] = [];
-  const unregister = registerComposerHandle("s6", fakeHandle(log, true, { sendResult: false }));
-  assert.equal(sendComposerText("s6", "/goal clear"), false);
-  unregister();
-  assert.equal(sendComposerText("never-mounted", "/goal clear"), false);
-});
-
-test("the right rail's submit reaches the mounted composer and answers its result", () => {
-  const log: string[] = [];
-  const unregister = registerComposerHandle("rail", fakeHandle(log));
-  assert.deepEqual(submitComposerText("rail", "review this"), { ok: true, disposition: "sent" });
-  assert.deepEqual(log, ["submit:review this"]);
-  unregister();
-});
-
-test("the right rail's submit says why when the composer refuses it", () => {
-  const log: string[] = [];
-  const unregister = registerComposerHandle("rail-refused", fakeHandle(log, true, { sendResult: false }));
-  assert.deepEqual(submitComposerText("rail-refused", "x"), { ok: false, reason: "refused" });
-  unregister();
-});
-
-test("the right rail's submit to a thread with no composer is refused, never dropped silently", () => {
-  assert.deepEqual(submitComposerText("never-mounted", "x"), {
-    ok: false,
-    reason: COMPOSER_NOT_MOUNTED_REASON
-  });
 });

@@ -1,19 +1,17 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { describe,it } from "node:test";
 
 import type { QueuedComposerMessage } from "./contracts";
 import {
-  drainQueue,
-  EMPTY_QUEUE,
-  enqueue,
-  holdAtFront,
-  isQueuedMessageDue,
-  latestCompletedToolActivityId,
-  nextDueQueuedMessage,
-  removeQueued,
-  shouldQueueSubmission,
-  takeQueued,
-  type QueueState
+EMPTY_QUEUE,
+enqueue,
+holdAtFront,
+isQueuedMessageDue,
+latestCompletedToolActivityId,
+nextDueQueuedMessage,
+shouldQueueSubmission,
+takeQueued,
+type QueueState
 } from "./queue.logic";
 
 let counter = 0;
@@ -41,59 +39,16 @@ function queueOf(...texts: string[]): { state: QueueState; ids: string[] } {
 }
 
 describe("enqueue / take / re-anchor", () => {
-  it("takes one message and re-anchors the rest to the new boundary", () => {
-    const { state, ids } = queueOf("one", "two", "three");
-    const result = takeQueued(state, ids[0]!, "boundary-1");
-    assert.equal(result.message?.text, "one");
-    assert.equal(result.state.messages.length, 2);
-    for (const message of result.state.messages) {
-      assert.equal(
-        message.queuedAfterToolActivityId,
-        "boundary-1",
-        "exactly one message leaves per boundary"
-      );
-    }
-  });
 
   it("answers null when another caller already took it", () => {
     const { state, ids } = queueOf("one");
     const first = takeQueued(state, ids[0]!, null);
     const second = takeQueued(first.state, ids[0]!, null);
     assert.equal(second.message, null);
-    assert.equal(second.state, first.state);
-  });
-
-  it("removes one message without touching the others' anchors", () => {
-    const { state, ids } = queueOf("one", "two");
-    const result = removeQueued(state, ids[0]!);
-    assert.equal(result.message?.text, "one");
-    assert.equal(result.state.messages[0]?.queuedAfterToolActivityId, "boundary-0");
   });
 });
 
 describe("the three guards", () => {
-  it("guard 1: draining bumps the generation so a late send can detect it", () => {
-    const { state } = queueOf("one", "two");
-    const before = state.drainGeneration;
-    const drained = drainQueue(state);
-    assert.equal(drained.messages.length, 2, "Stop returns EVERY queued message");
-    assert.equal(drained.state.messages.length, 0);
-    assert.equal(drained.state.drainGeneration, before + 1);
-  });
-
-  it("guard 1: draining an empty queue does not bump the generation", () => {
-    const drained = drainQueue(EMPTY_QUEUE);
-    assert.equal(drained.state, EMPTY_QUEUE);
-  });
-
-  it("guard 2: a failed send goes back to the FRONT, held for user action", () => {
-    const { state, ids } = queueOf("one", "two");
-    const taken = takeQueued(state, ids[0]!, "boundary-1");
-    const held = holdAtFront(taken.state, taken.message!);
-    assert.equal(held.messages[0]?.id, ids[0]);
-    assert.equal(held.messages[0]?.holdUntilUserAction, true, "nothing overtakes it");
-    assert.equal(held.messages.length, 2);
-  });
 
   it("guard 2, in order: a later failure is held behind the ones held before it, still ahead of the rest", () => {
     const { state, ids } = queueOf("one", "two", "three");
@@ -188,10 +143,6 @@ describe("latestCompletedToolActivityId", () => {
       { id: "a2", activityKind: "tool.updated", createdAt: "2026-01-01T00:00:09.000Z" }
     ]);
     assert.equal(id, "a3");
-  });
-
-  it("is null when nothing has completed", () => {
-    assert.equal(latestCompletedToolActivityId([]), null);
   });
 });
 

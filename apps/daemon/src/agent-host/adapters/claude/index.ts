@@ -117,16 +117,6 @@ export async function createClaudeAdapterWith(
     events.pushAll(batch);
   };
 
-  /** The one writer of a thread's start record (see `deps.onStartRecord`). */
-  const recordStart = (
-    threadId: string,
-    record: StartRecord,
-    writer: "start" | "started" | "send" | "closed" | "rollback"
-  ): void => {
-    starts.set(threadId, record);
-    deps.onStartRecord?.(threadId, writer);
-  };
-
   /**
    * The probe's environment. With no `home` it runs under the **host's** own
    * identity — it never authenticates and never opens a session (§4.1) — but
@@ -305,13 +295,12 @@ export async function createClaudeAdapterWith(
         const start = starts.get(closed.threadId);
         const latest = closed.currentCursor();
         if (start !== undefined) {
-          recordStart(
+          starts.set(
             closed.threadId,
             {
               input: { ...start.input, knownGoal: closed.trackedGoal },
               cursor: latest ?? start.cursor
-            },
-            "closed"
+            }
           );
         }
         sessions.delete(closed.threadId);
@@ -321,11 +310,11 @@ export async function createClaudeAdapterWith(
       }
     });
     sessions.set(input.threadId, session);
-    recordStart(input.threadId, { input, cursor }, "start");
+    starts.set(input.threadId, { input, cursor });
 
     try {
       const record = await session.start();
-      recordStart(input.threadId, { input, cursor: session.currentCursor() ?? cursor }, "started");
+      starts.set(input.threadId, { input, cursor: session.currentCursor() ?? cursor });
       // The per-cwd skills overlay is refreshed off the session start, forked
       // so it never delays the turn (§4.6.4), under the thread's own home so
       // the user-scope skills are that account's.
@@ -412,7 +401,7 @@ export async function createClaudeAdapterWith(
     });
     const start = starts.get(input.threadId);
     if (start !== undefined && result.resumeCursor !== undefined) {
-      recordStart(input.threadId, { ...start, cursor: result.resumeCursor }, "send");
+      starts.set(input.threadId, { ...start, cursor: result.resumeCursor });
     }
     return {
       turnId: result.turnId,
@@ -513,7 +502,7 @@ export async function createClaudeAdapterWith(
         throw new Error("The Claude session could not be restarted after the rewind.");
       }
       next.seedTurns(plan.retainedTurns);
-      recordStart(threadId, { input, cursor: plan.cursor }, "rollback");
+      starts.set(threadId, { input, cursor: plan.cursor });
       return next.readThread();
     },
 

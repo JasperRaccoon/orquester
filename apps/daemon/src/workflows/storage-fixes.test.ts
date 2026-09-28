@@ -1,8 +1,9 @@
 // Regression tests for the storage review fixes: forward-compatible definitions and secrets
-// files, block/edge ids that can never key Object.prototype, and the run index's stamp.
+// files and block/edge ids that can never key Object.prototype.
 
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import fs, { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { syncBuiltinESMExports } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
@@ -10,9 +11,9 @@ import { after, test } from "node:test";
 import { validateWorkflow } from "@orquester/api";
 import { parseWorkflowsFile, workflowRecordSchema } from "@orquester/config";
 
+import { WorkflowSecretsService } from "./secrets.ts";
 import type { PersistedRun } from "./contracts.ts";
 import { FileRunStore } from "./run-store.ts";
-import { WorkflowSecretsService } from "./secrets.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -53,10 +54,15 @@ test("a newer build's nested fields survive this build's parse (a save never era
       { id: "b", type: "trigger.git", name: "Git", position: { x: 0, y: 0 }, config: { repo: { kind: "project", futureRepoKey: true }, event: { kind: "push", futureEventKey: 1 } } }
     ])
   );
-  const json = JSON.stringify(parsed);
-  for (const key of ["futureProjectKey", "futureNotifyKey", "futureZ", "futureBackoff", "futureTls", "futureEncoding", "futureRepoKey", "futureEventKey"]) {
-    assert.ok(json.includes(key), `${key} kept`);
-  }
+  const value = JSON.parse(JSON.stringify(parsed));
+  assert.equal(value.project.futureProjectKey, 1);
+  assert.equal(value.settings.notify.futureNotifyKey, "slack");
+  assert.equal(value.nodes[0].position.futureZ, 3);
+  assert.equal(value.nodes[0].retry.futureBackoff, "exp");
+  assert.deepEqual(value.nodes[0].config.futureTls, { pin: "abc" });
+  assert.equal(value.nodes[0].config.body.futureEncoding, "gzip");
+  assert.equal(value.nodes[1].config.repo.futureRepoKey, true);
+  assert.equal(value.nodes[1].config.event.futureEventKey, 1);
 });
 
 test("block and connection ids that could key Object.prototype are refused, by the schema and by validation", () => {
@@ -120,31 +126,50 @@ test("the secrets store never indexes past its own maps", async () => {
   assert.equal(await secrets.delete("TOKEN", "wf-1"), true);
 });
 
-test("a new summary drops the index's file stamp until its write lands", async () => {
-  const dir = await scratch();
-  const store = new FileRunStore({ dir: join(dir, "runs"), logger: quiet });
+
+test("an unfinished run remains recoverable when the index lands before its pending save", async (t) => {
+  const dir = join(await scratch(), "runs");
+  const store = new FileRunStore({ dir, logger: quiet });
   await store.init();
   const run: PersistedRun = {
-    version: 1,
-    id: "r1",
-    workflowId: "wf-1",
-    workflowName: "W",
-    status: "running",
-    trigger: { kind: "manual" },
-    test: false,
-    queuedAt: "2026-09-28T10:00:00.000Z",
-    definition: record([]) as never,
-    triggerPayload: null,
-    blocks: {},
-    takenEdges: [],
-    deadEdges: [],
-    depth: 0
+    version: 1, id: "r1", workflowId: "wf-1", workflowName: "W", status: "running",
+    trigger: { kind: "manual" }, test: false, queuedAt: "2026-09-28T10:00:00.000Z",
+    definition: workflowRecordSchema.parse(record([])), triggerPayload: null,
+    blocks: {}, takenEdges: [], deadEdges: [], depth: 0
   };
   await store.create(run);
-  const entries = (store as unknown as { entries: Map<string, { size: number; mtimeMs: number }> }).entries;
-  assert.ok(entries.get("r1")!.size > 0, "stamped once written");
+  await store.flush();
+
+  let releaseWrite!: () => void;
+  const pendingWrite = new Promise<void>((resolve) => { releaseWrite = resolve; });
+  let writeStarted!: () => void;
+  const writing = new Promise<void>((resolve) => { writeStarted = resolve; });
+  let indexWritten!: () => void;
+  const indexed = new Promise<void>((resolve) => { indexWritten = resolve; });
+  const rename = fs.rename;
+  const intercepted = t.mock.method(fs, "rename", async (source: Parameters<typeof rename>[0], target: Parameters<typeof rename>[1]) => {
+    if (target === join(dir, "r1", "run.json")) {
+      writeStarted();
+      await pendingWrite;
+    }
+    await rename(source, target);
+    if (target === join(dir, "index.json")) indexWritten();
+  });
+  syncBuiltinESMExports();
+  t.after(async () => {
+    releaseWrite();
+    await store.flush();
+    intercepted.mock.restore();
+    syncBuiltinESMExports();
+  });
   const saving = store.save({ ...run, status: "succeeded" });
-  assert.equal(entries.get("r1")!.size, -1, "the old stamp never pairs with the new summary");
+  await writing;
+  await store.create({ ...run, id: "r2", status: "succeeded" });
+  await indexed;
+
+  const reopened = new FileRunStore({ dir, logger: quiet });
+  await reopened.init();
+  assert.deepEqual((await reopened.listUnfinished()).map((entry) => ({ id: entry.id, status: entry.status })), [{ id: "r1", status: "running" }]);
+  releaseWrite();
   await saving;
-  assert.ok(entries.get("r1")!.size > 0, "stamped again when the write landed");
 });

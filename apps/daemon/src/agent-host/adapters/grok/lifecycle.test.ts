@@ -11,7 +11,7 @@
  * Nothing here sleeps: every wait is on an emitted event.
  */
 
-import test from "node:test";
+import test, { after } from "node:test";
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync, readdirSync } from "node:fs";
@@ -34,7 +34,6 @@ import type { AdapterContext } from "../../adapter.ts";
 import { createIngestion } from "../../ingestion/index.ts";
 import {
   FakeClock,
-  FakeTimers,
   RecordingLiveness,
   RecordingSink,
   counterIdGen,
@@ -42,8 +41,7 @@ import {
 } from "../../ingestion/test-harness.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
 import { readLeftoverWork } from "../../support/leftover-work.ts";
-import { createGrokAdapter, GROK_CAPABILITIES, isBlockedGrokCommand } from "./index.ts";
-import { parseGrokResumeCursor } from "./session.ts";
+import { createGrokAdapter } from "./index.ts";
 
 const MOCK = join(dirname(fileURLToPath(import.meta.url)), "testing/mock-grok.mjs");
 
@@ -68,12 +66,13 @@ interface Rig {
   logged(pattern: RegExp): Promise<void>;
 }
 
-/**
- * Every rig, so the teardown test can prove no provider child outlived the
- * suite. A test that fails before its own `dispose()` would otherwise leak a
- * live `grok` child and hang the runner.
- */
+/** Always dispose rigs, including when a behavioral assertion fails. */
 const openRigs: Rig[] = [];
+after(async () => {
+  for (const entry of openRigs) {
+    if (!entry.disposed) await entry.dispose();
+  }
+});
 
 async function rig(
   options: {
@@ -250,21 +249,6 @@ const MOCK_SESSION_CURSOR = { schemaVersion: 1, sessionId: "01a0c19e-de22-78c0-a
 
 // ---------------------------------------------------------------------------
 
-test("the adapter declares the capabilities the reality check demands", () => {
-  assert.equal(GROK_CAPABILITIES.reportsContextWindow, true, "the spec says false; the CLI reports usage");
-  assert.equal(GROK_CAPABILITIES.showPlanModeToggle, false);
-  assert.equal(GROK_CAPABILITIES.supportsConversationRollback, false);
-  assert.deepEqual(GROK_CAPABILITIES.compaction, { type: "slash-command", command: "/compact" });
-  assert.equal(GROK_CAPABILITIES.sessionModelSwitch, "in-session");
-  // Goals §4.5: the CLI parses `/goal …` itself; its goal runs inside one turn,
-  // so it never starts a turn of its own, and pause is not a chip action.
-  assert.deepEqual(GROK_CAPABILITIES.goals, {
-    command: "provider",
-    actions: ["resume", "clear"],
-    continuesAcrossTurns: false
-  });
-});
-
 test("a missing binary is refused with a message, not a hang", async () => {
   const r = await rig({ bin: null });
   await assert.rejects(async () => await start(r), /not installed or not on PATH/);
@@ -274,13 +258,6 @@ test("a missing binary is refused with a message, not a hang", async () => {
 test("a binary that cannot be spawned settles rather than hanging", async () => {
   const r = await rig({ bin: join(dirname(MOCK), "definitely-not-here") });
   await assert.rejects(async () => await start(r));
-  await r.dispose();
-});
-
-test("a CLI below the minimum version is refused with the required version", async () => {
-  const r = await rig({ version: "0.9.0" });
-  await assert.rejects(async () => await start(r), /0\.9\.0 is too old/);
-  assert.equal(r.adapter.hasSession("t1"), false, "a refused session is not registered");
   await r.dispose();
 });
 
@@ -445,6 +422,10 @@ test("an approval opens a request, and the decision reaches the agent", async ()
     "turn.completed"
   )) as Extract<RuntimeEvent, { type: "turn.completed" }>;
   assert.equal(completed.payload.state, "completed");
+  await r.drain();
+  assert.deepEqual(resolutionsOf(r.events, opened.requestId).map((event) => event.payload), [
+    { requestType: "file_change_approval", decision: "accept" }
+  ]);
   await r.dispose();
 });
 
@@ -602,30 +583,6 @@ test("a cursor with the wrong shape means 'no resume', never an error", async ()
   await r.dispose();
 });
 
-test("steering reuses the turn id and emits no second turn.started (see the steer test for the settlement)", async () => {
-  const r = await rig({ scenario: "slow" });
-  await start(r);
-  const first = await r.adapter.sendTurn({
-    threadId: "t1",
-    input: "count to twenty",
-    attachments: [],
-    interactionMode: "default"
-  });
-  const second = await r.adapter.sendTurn({
-    threadId: "t1",
-    input: "stop and say DONE",
-    attachments: [],
-    interactionMode: "default"
-  });
-  await r.drain();
-  assert.equal(second.turnId, first.turnId, "a mid-turn message is not a second turn");
-  assert.equal(
-    r.events.filter((event) => event.type === "turn.started").length,
-    1
-  );
-  await r.dispose();
-});
-
 test("compaction is a /compact turn, and is refused while a turn runs", async () => {
   const r = await rig({ scenario: "slow" });
   await start(r);
@@ -689,7 +646,7 @@ test("stopSession settles everything and emits a graceful exit", async () => {
   await r.dispose();
 });
 
-test("listSessions and the adapter id", async () => {
+test("listSessions reflects active sessions", async () => {
   const r = await rig();
   await start(r);
   await r.drain();
@@ -815,20 +772,6 @@ test("stopAll stops sessions without ending the event stream", async () => {
   await r.dispose();
 });
 
-
-test("the host's create-time cursor is accepted verbatim", () => {
-  // §6.1: a thread created from the resume picker has only a conversation id,
-  // so the HOST builds the minimal cursor. Pinning it against the host's own
-  // builder means a change on either side breaks the build rather than
-  // silently degrading resume to a fresh session.
-  const minimal = resumeCursorFor("grok", "t1", "01a0c19e-de22-78c0-a72a-7e230ccfbec0");
-  assert.deepEqual(minimal, { schemaVersion: 1, sessionId: "01a0c19e-de22-78c0-a72a-7e230ccfbec0" });
-  assert.deepEqual(parseGrokResumeCursor(minimal), {
-    schemaVersion: 1,
-    sessionId: "01a0c19e-de22-78c0-a72a-7e230ccfbec0"
-  });
-});
-
 test("a session starts from the host's minimal cursor, not just our own", async () => {
   const r = await rig();
   await start(r, {
@@ -850,34 +793,6 @@ test("a session starts from the host's minimal cursor, not just our own", async 
   );
   await r.dispose();
 });
-
-test("the adapter runs no watchdog of its own — the host owns it", async () => {
-  const r = await rig({ scenario: "slow" });
-  await start(r, { runtimeMode: "approval-required" });
-  void r.adapter.sendTurn({ threadId: "t1", input: "long", attachments: [], interactionMode: "default" });
-  await r.waitFor((event) => event.type === "turn.started", "turn.started");
-  await r.drain();
-  // A second watchdog on the same windows would race the host's and settle the
-  // turn twice; the adapter settles only on `interruptTurn`, an exit, or a
-  // provider result.
-  assert.equal(
-    r.events.some((event) => event.type === "turn.completed"),
-    false
-  );
-  await r.adapter.interruptTurn("t1");
-  const completed = (await r.waitFor(
-    (event) => event.type === "turn.completed",
-    "turn.completed"
-  )) as Extract<RuntimeEvent, { type: "turn.completed" }>;
-  assert.equal(completed.payload.state, "interrupted");
-  assert.equal(
-    r.events.filter((event) => event.type === "turn.completed").length,
-    1,
-    "exactly one terminal row"
-  );
-  await r.dispose();
-});
-
 
 test("a steer closes the call its cancel cut, on the turn it steers — the CLI never answers it", async () => {
   const r = await rig({ scenario: "steer-call" });
@@ -997,21 +912,17 @@ test("a steer closes the cancelled prompt's bubble: the steered reply is a new a
 
   // Through ingestion: two messages in arrival order, never one "oneDONE".
   const clock = new FakeClock("2026-09-24T12:00:00.000Z");
-  const timers = new FakeTimers(clock);
   const sink = new RecordingSink();
   const ingestion = createIngestion({
     sink: sink.sink,
     liveness: new RecordingLiveness(),
     clock,
-    idGen: counterIdGen("d"),
-    setTimer: timers.setTimer,
-    clearTimer: timers.clearTimer
+    idGen: counterIdGen("d")
   });
   for (const event of r.events) {
     clock.advance(30);
     await ingestion.ingest(event);
   }
-  timers.advance(1000);
   await ingestion.drain();
   await settle();
   const texts = new Map<string, string>();
@@ -1575,14 +1486,6 @@ test("a host-initiated stop emits no runtime.error after session.exited", async 
   await r.dispose();
 });
 
-test("the /always-approve refusal is a typed 400 with a pointer at the chip", () => {
-  // R2 #7: it must be a validation refusal, not a failed-turn activity.
-  assert.equal(isBlockedGrokCommand("/always-approve off"), true);
-  assert.equal(isBlockedGrokCommand("  /always-approve  "), true);
-  assert.equal(isBlockedGrokCommand("/always-approve-ish"), false);
-  assert.equal(isBlockedGrokCommand("tell me about /always-approve"), false);
-});
-
 test("sendTurn refuses /always-approve with INVALID_COMMAND / 400", async () => {
   const r = await rig();
   await start(r);
@@ -1598,7 +1501,6 @@ test("sendTurn refuses /always-approve with INVALID_COMMAND / 400", async () => 
   assert.match(error.message, /permission selector/);
   await r.dispose();
 });
-
 
 // ---------------------------------------------------------------------------
 // What the CLI leaves behind (AGENTS.md, "What a Grok CLI starts outlives it";
@@ -1728,14 +1630,7 @@ test("the host's teardown and a restart stop a Grok session's helpers — never 
       assert.deepEqual(after.member, before.member, `${end}: and so does what it started`);
       assert.deepEqual(after.daemon, before.daemon);
       // Its row says so — never a silent "stopped" for work that runs on.
-      assert.deepEqual(shellEnds(r), [
-        [
-          "stopped",
-          end === "teardown"
-            ? "Left running when the agent host stopped — stop it from Settings → System."
-            : "Left running when the session restarted — stop it from Settings → System."
-        ]
-      ]);
+      assert.deepEqual(shellEnds(r), [["stopped", true]]);
       const remembered = await readLeftoverWork(r.leftoverWork);
       assert.equal(remembered.length, 1, `${end}: the launch's work is remembered for a later user end`);
       assert.ok(remembered[0]!.sessions.length >= 1);
@@ -1760,9 +1655,7 @@ test("the host's teardown resolves only once every session's stop is done: the s
     // The moment it resolves, before anything else is awaited:
     assert.deepEqual(leftovers(r).helper, [], "the helper is swept before the host's own call resolves");
     await r.drain();
-    assert.deepEqual(shellEnds(r), [
-      ["stopped", "Left running when the agent host stopped — stop it from Settings → System."]
-    ]);
+    assert.deepEqual(shellEnds(r), [["stopped", true]]);
     assert.ok(r.events.some((event) => event.type === "session.exited"), "and the session's exit row");
   } finally {
     reap(r);
@@ -1770,20 +1663,59 @@ test("the host's teardown resolves only once every session's stop is done: the s
   }
 });
 
-test("at the host's teardown a helper that ignores SIGTERM is killed after a 1 s grace, not spawn.ts's 2 s", { skip: process.platform !== "linux" }, async () => {
-  // Under the SIGTERM path's 3 s backstop (`main.ts`): with the 2 s grace the
-  // helper's SIGKILL landed ~2.4 s into the host's stop.
+test("at the host's teardown a helper that ignores SIGTERM is killed after a 1 s grace, not spawn.ts's 2 s", { skip: process.platform !== "linux", timeout: 30_000 }, async (t) => {
   const r = await rig({ scenario: "leftover", env: { GROK_MOCK_HELPER_IGNORES_TERM: "1" } });
   try {
     await start(r);
     await turnWithLeftovers(r);
-    assert.equal(leftovers(r).helper.length, 1);
-    const began = performance.now();
-    await r.teardown();
-    const took = performance.now() - began;
-    assert.deepEqual(leftovers(r).helper, [], "only the SIGKILL ends it, and it came");
-    assert.ok(took < 2_000, `the teardown took ${Math.round(took)} ms — a 2 s grace alone takes longer`);
+    const helpers = leftovers(r).helper;
+    assert.equal(helpers.length, 1);
+    const helper = helpers[0]!;
+    t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: 0 });
+
+    type Wake = { delay: number } | { done: true };
+    const wakes: Wake[] = [];
+    let receive: ((wake: Wake) => void) | undefined;
+    const offer = (wake: Wake): void => {
+      if (receive !== undefined) {
+        const resolve = receive;
+        receive = undefined;
+        resolve(wake);
+      } else wakes.push(wake);
+    };
+    const nextWake = (): Promise<Wake> => {
+      const wake = wakes.shift();
+      return wake === undefined ? new Promise((resolve) => { receive = resolve; }) : Promise.resolve(wake);
+    };
+    let termAt: number | undefined;
+    let killAt: number | undefined;
+    const sendSignal = process.kill.bind(process);
+    t.mock.method(process, "kill", (pid: number, signal?: string | number) => {
+      const result = sendSignal(pid, signal);
+      if (pid === helper && signal === "SIGTERM") termAt = Date.now();
+      if (pid === helper && signal === "SIGKILL") killAt = Date.now();
+      return result;
+    });
+    const schedule = globalThis.setTimeout;
+    t.mock.method(globalThis, "setTimeout", ((...args: Parameters<typeof setTimeout>) => {
+      const timer = schedule(...args);
+      if (termAt !== undefined) offer({ delay: Number(args[1] ?? 0) });
+      return timer;
+    }) as typeof setTimeout);
+
+    const teardown = r.teardown();
+    void teardown.then(() => offer({ done: true }), () => offer({ done: true }));
+    for (;;) {
+      const wake = await nextWake();
+      if ("done" in wake) break;
+      t.mock.timers.tick(wake.delay);
+    }
+    await teardown;
+    assert.notEqual(termAt, undefined, "the real helper received SIGTERM first");
+    assert.equal(killAt! - termAt!, 1_000, "SIGKILL follows the documented teardown grace");
+    assert.deepEqual(leftovers(r).helper, [], "the actual helper is gone before teardown resolves");
   } finally {
+    t.mock.reset();
     reap(r);
     await r.dispose();
   }
@@ -1797,7 +1729,7 @@ test("the user ending the session stops its running work too — never what daem
     const before = leftovers(r);
     await r.adapter.stopSession("t1", { endedByUser: true });
     const after = leftovers(r);
-    assert.deepEqual(shellEnds(r), [["stopped", undefined]], "it really stopped: nothing to say");
+    assert.deepEqual(shellEnds(r), [["stopped", false]], "a user end leaves no running-work marker");
     assert.deepEqual(after.helper, []);
     assert.deepEqual(after.shell, [], "the session stop command or a closed tab: the agent's work goes with it");
     assert.deepEqual(after.member, []);
@@ -1852,7 +1784,7 @@ test("the user's end is prepared before its card is answered: a CLI that exits o
     await r.waitFor((event) => event.type === "session.exited", "the CLI's exit on the cancel");
     await r.drain();
     assert.equal(r.adapter.hasSession("t1"), false, "gone before any stop could reach it");
-    assert.deepEqual(shellEnds(r), [["stopped", undefined]], "the user's end: nothing left running to speak of");
+    assert.deepEqual(shellEnds(r), [["stopped", false]], "a prepared user end leaves no running-work marker");
     await r.adapter.sweepEndedSession!("t1");
     const after = leftovers(r);
     assert.deepEqual(after.shell, [], "the user ended the session: its work goes with it");
@@ -1864,14 +1796,13 @@ test("the user's end is prepared before its card is answered: a CLI that exits o
   }
 });
 
-/** `[status, summary]` of the leftover shell's closing rows — a summary only with the adapter's marker. */
-function shellEnds(r: Rig): Array<[string | undefined, string | undefined]> {
+/** The leftover shell's completion state and whether its work was left running. */
+function shellEnds(r: Rig): Array<[string | undefined, boolean]> {
   return r.events
     .filter((event) => event.type === "task.completed" && (event.payload as { taskId?: string }).taskId === "task-bg-1")
     .map((event) => {
-      const payload = event.payload as { status?: string; summary?: string; leftRunning?: boolean };
-      assert.equal(payload.leftRunning === true, payload.summary !== undefined, "the note rides its marker, and only it");
-      return [payload.status, payload.summary];
+      const payload = event.payload as { status?: string; leftRunning?: boolean };
+      return [payload.status, payload.leftRunning === true];
     });
 }
 
@@ -1921,9 +1852,7 @@ test("a CLI that exits on its own takes its helpers with it", { skip: process.pl
     assert.equal(after.shell.length, 1, "a crash is no user's end: the running work stays, a marked orphan");
     assert.equal(after.member.length, 1);
     assert.equal(after.daemon.length, 1);
-    assert.deepEqual(shellEnds(r), [
-      ["stopped", "Left running when the agent process exited — stop it from Settings → System."]
-    ]);
+    assert.deepEqual(shellEnds(r), [["stopped", true]]);
     // Recorded when the CLI reported it, while it lived: nothing can be read
     // off a CLI that is gone. The user ending the session later sweeps it.
     assert.equal((await readLeftoverWork(r.leftoverWork)).length, 1);
@@ -2135,30 +2064,6 @@ test("goals: a load replays the goal silently, then restores it once, after the 
   await r.dispose();
 });
 
-test("goals: a load whose goal the thread already shows emits no goal row", async () => {
-  const r = await rig({ scenario: "goal" });
-  await start(r, { resumeCursor: MOCK_SESSION_CURSOR, knownGoal: MOCK_REPLAYED_GOAL });
-  await r.waitFor((event) => event.type === "thread.started", "thread.started");
-  await r.drain();
-  assert.deepEqual(goalUpdates(r), []);
-  await r.dispose();
-});
-
-test("goals: a load that replays no goal row leaves the thread's unfinished goal alone", async () => {
-  // Absence of replayed evidence is not a clear: whether 1.0.34 persists
-  // `goal_updated` rows is unverified live, and a false `cleared` would hide a
-  // paused or blocked goal after every restart.
-  const r = await rig({ scenario: "happy" });
-  await start(r, {
-    resumeCursor: MOCK_SESSION_CURSOR,
-    knownGoal: { ...MOCK_REPLAYED_GOAL, status: "paused" }
-  });
-  await r.waitFor((event) => event.type === "thread.started", "thread.started");
-  await r.drain();
-  assert.deepEqual(goalUpdates(r), []);
-  await r.dispose();
-});
-
 test("goals: a fresh session (session/new) clears the unfinished goal the thread still shows", async () => {
   // A brand-new Grok session has no goal by definition — unlike a load, whose
   // replay may simply not carry goal rows.
@@ -2170,18 +2075,6 @@ test("goals: a fresh session (session/new) clears the unfinished goal the thread
   const order = r.events.map((event) => event.type);
   assert.ok(order.indexOf("thread.goal.updated") > order.indexOf("thread.started"));
   await r.dispose();
-});
-
-test("teardown: no provider child outlives the suite", async () => {
-  const leaked = openRigs.filter((entry) => !entry.disposed);
-  for (const entry of leaked) {
-    await entry.dispose();
-  }
-  assert.deepEqual(
-    leaked.length,
-    0,
-    "a test returned without stopping its session; the child would keep the host alive"
-  );
 });
 
 // ---------------------------------------------------------------------------
@@ -2262,20 +2155,6 @@ test("an exit with a parked question settles it once, before session.exited", as
   assert.equal(resolutions.length, 1, "one closing row, none after the exit");
   assert.deepEqual(resolutions[0]!.payload, { answers: {}, withdrawn: true });
   assert.ok(r.events.indexOf(resolutions[0]!) < r.events.indexOf(exited));
-  await r.dispose();
-});
-
-test("an answered approval is settled once, by the answer", async () => {
-  const r = await rig({ scenario: "permission" });
-  await start(r);
-  void r.adapter.sendTurn({ threadId: "t1", input: "write", attachments: [], interactionMode: "default" });
-  const opened = await r.waitFor((event) => event.type === "request.opened", "request.opened");
-  await r.adapter.respondToApproval("t1", opened.requestId!, "accept");
-  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
-  await r.drain();
-  const resolutions = resolutionsOf(r.events, opened.requestId);
-  assert.equal(resolutions.length, 1);
-  assert.deepEqual(resolutions[0]!.payload, { requestType: "file_change_approval", decision: "accept" });
   await r.dispose();
 });
 

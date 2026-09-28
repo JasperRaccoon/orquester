@@ -105,11 +105,10 @@ export function ContextMeter({
 
 
 /**
- * The popover's contents, exported so the readout can be rendered — and
- * asserted — without driving the popover open. Everything here is a function
+ * The popover's contents. Everything here is a function
  * of the model; the trigger owns the interaction.
  */
-export function ContextMeterPanel({
+function ContextMeterPanel({
   model,
   modelLabel = null,
   onCompact,

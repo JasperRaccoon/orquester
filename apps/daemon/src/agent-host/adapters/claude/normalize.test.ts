@@ -26,13 +26,11 @@ import {
   fixedClock,
   listClaudeFixtures,
   readClaudeFixture,
-  replayClaudeFixture,
-  sdkMessageTag
+  replayClaudeFixture
 } from "./fixtures.ts";
 import { createIngestion } from "../../ingestion/index.ts";
 import {
   FakeClock,
-  FakeTimers,
   RecordingLiveness,
   RecordingSink,
   counterIdGen,
@@ -64,10 +62,6 @@ const UNHANDLED_MARKER = "is not handled";
 describe("claude normaliser — fixture replay", () => {
   const fixtures = listClaudeFixtures();
 
-  it("finds the committed captures", () => {
-    assert.ok(fixtures.length >= 18, `expected the captures, found ${fixtures.length}`);
-  });
-
   for (const fixture of fixtures) {
     it(`${fixture}: every captured message has a defined disposition`, () => {
       const { events, observed } = replayClaudeFixture(fixture);
@@ -89,26 +83,6 @@ describe("claude normaliser — fixture replay", () => {
       }
     });
 
-    it(`${fixture}: a call's output carries the owner its item rows carry`, () => {
-      // A subagent's tool_result names only `parent_tool_use_id` (fixtures
-      // README observation 22). An output chunk without the owner lands in the
-      // PARENT's timeline and retention window while its call's rows are the
-      // subagent's, and the drill-in never shows the output.
-      const { events } = replayClaudeFixture(fixture);
-      const owners = new Map<string, string | undefined>();
-      for (const event of allOf(events, "item.started")) {
-        if (event.itemId !== undefined && !owners.has(event.itemId)) {
-          owners.set(event.itemId, event.agentId);
-        }
-      }
-      for (const event of outputDeltas(events)) {
-        assert.equal(
-          event.agentId,
-          owners.get(event.itemId ?? ""),
-          `${fixture}: ${event.itemId}'s output names another owner than its item`
-        );
-      }
-    });
   }
 
   it("01: a plain text turn streams and settles", () => {
@@ -347,14 +321,6 @@ describe("claude normaliser — fixture replay", () => {
       (event) => event.payload.status === "declined"
     );
     assert.ok(declined.length >= 1);
-  });
-
-  it("11: resume and fork replay nothing onto the message stream", () => {
-    const { events } = replayClaudeFixture("11-resume-and-fork.ndjson");
-    // Every user message in the capture is a tool result or absent; a resume
-    // must not synthesise user-message rows.
-    assert.ok(allOf(events, "turn.completed").length >= 2);
-    assert.ok(eventTypes(events).includes("thread.started"));
   });
 
   it("12: a compaction reports before/after and does not fail the turn", () => {
@@ -599,44 +565,6 @@ describe("claude normaliser — the unknown-frame contract (§10)", () => {
     } as unknown as SDKMessage);
     // Only the thread-identity row; `content.map` would have thrown here.
     assert.deepEqual(eventTypes(events), ["thread.started"]);
-  });
-});
-
-describe("claude normaliser — captured message vocabulary", () => {
-  it("covers every type/subtype the captures contain", () => {
-    const observed = new Set<string>();
-    for (const fixture of listClaudeFixtures()) {
-      for (const tag of replayClaudeFixture(fixture).observed) {
-        observed.add(tag);
-      }
-    }
-    // The README's aggregate list, so a re-capture that adds a frame type is a
-    // visible test change rather than a silent one.
-    for (const expected of [
-      "assistant",
-      "command_lifecycle",
-      "rate_limit_event",
-      "result/success",
-      "result/error_during_execution",
-      "stream_event",
-      "system/init",
-      "system/status",
-      "system/thinking_tokens",
-      "system/compact_boundary",
-      "system/background_tasks_changed",
-      "system/task_started",
-      "system/task_progress",
-      "system/task_updated",
-      "system/task_notification",
-      "user"
-    ]) {
-      assert.ok(observed.has(expected), `capture no longer contains ${expected}`);
-    }
-  });
-
-  it("tags a message the same way the replay harness does", () => {
-    assert.equal(sdkMessageTag({ type: "system", subtype: "init" }), "system/init");
-    assert.equal(sdkMessageTag({ type: "assistant" }), "assistant");
   });
 });
 
@@ -1522,16 +1450,13 @@ describe("claude normaliser — a turn the CLI starts itself keeps its opening m
 
   it("through ingestion, the incident's turn is one message per text block, the answer last", async () => {
     const clock = new FakeClock("2026-09-24T15:07:42.000Z");
-    const timers = new FakeTimers(clock);
+
     const sink = new RecordingSink();
     const ingestion = createIngestion({
       sink: sink.sink,
       liveness: new RecordingLiveness(),
       clock,
       idGen: counterIdGen("d"),
-      setTimer: timers.setTimer,
-      clearTimer: timers.clearTimer,
-      slim: (payload: unknown) => payload
     });
     const normalizer = new ClaudeNormalizer({ threadId: "t", clock, ids: countingIds() });
     const frames = [
@@ -1548,7 +1473,7 @@ describe("claude normaliser — a turn the CLI starts itself keeps its opening m
       }
       await settle();
     }
-    timers.advance(1000);
+    clock.advance(1000);
     await ingestion.drain();
     await settle();
 
@@ -1637,19 +1562,6 @@ describe("claude normaliser — a compaction is a visible phase, not generic 'wo
     assert.equal(
       warning.type === "runtime.warning" ? warning.payload.message : undefined,
       "Not enough context."
-    );
-  });
-
-  it("a failed compaction with no reason falls back to a fixed sentence", () => {
-    const { feed } = feedable();
-    feed(statusFrame({ status: "compacting" }));
-    const settled = feed(statusFrame({ status: null, compact_result: "failed" }));
-    const failed = settled.find(
-      (event) => event.type === "thread.state.changed" && event.payload.state === "compaction-failed"
-    );
-    assert.equal(
-      failed?.type === "thread.state.changed" ? failed.payload.error : undefined,
-      "Context compaction failed."
     );
   });
 

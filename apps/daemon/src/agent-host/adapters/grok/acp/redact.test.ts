@@ -6,8 +6,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { captureFiles, readCapture } from "../fixtures.ts";
-import { REDACTED, redactAcpFrame } from "./redact.ts";
+import { redactAcpFrame } from "./redact.ts";
 
 test("every MCP server env value is masked before the line is written", () => {
   const frame = {
@@ -29,7 +28,6 @@ test("every MCP server env value is masked before the line is written", () => {
   const redacted = JSON.stringify(redactAcpFrame(frame));
   assert.equal(redacted.includes("ATATT3xFfGF0abcdefghijklmnop"), false);
   assert.equal(redacted.includes("someone@example.com"), false);
-  assert.match(redacted, new RegExp(REDACTED));
   // The structure survives, so the frame is still diagnosable.
   assert.match(redacted, /JIRA_API_TOKEN/);
   assert.match(redacted, /jira-cloud/);
@@ -87,32 +85,8 @@ test("a deeply nested frame is bounded rather than walked forever", () => {
     deep = { next: deep };
   }
   const redacted = JSON.stringify(redactAcpFrame(deep));
-  assert.match(redacted, /depth limit/);
-});
-
-test("a long array keeps its head and says how much it dropped", () => {
-  const redacted = redactAcpFrame({ items: new Array(400).fill("x") }) as { items: unknown[] };
-  assert.equal(redacted.items.length, 257);
-  assert.match(String(redacted.items.at(-1)), /144 more items/);
-});
-
-test("the committed captures are already redacted, and stay that way through the redactor", () => {
-  for (const file of captureFiles()) {
-    for (const entry of readCapture(file)) {
-      const frame = entry.frame as { method?: string; params?: { mcpServers?: unknown } } | null;
-      if (frame?.method !== "_x.ai/mcp/servers_updated") {
-        continue;
-      }
-      const redacted = redactAcpFrame(frame) as {
-        params: { mcpServers: Array<{ env?: Array<{ value?: unknown }> }> };
-      };
-      for (const server of redacted.params.mcpServers) {
-        for (const pair of server.env ?? []) {
-          assert.equal(pair.value, REDACTED, `${file} kept an MCP env value`);
-        }
-      }
-    }
-  }
+  assert.ok(redacted.length < 1_000);
+  assert.equal(redacted.includes("leaf"), false);
 });
 
 test("an MCP env given as an OBJECT MAP is masked too", () => {

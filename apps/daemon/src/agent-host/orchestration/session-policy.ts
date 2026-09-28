@@ -160,7 +160,7 @@ export interface IdentitySwitchState {
 }
 
 /** The refusal for a continuing goal — the composer mirror shows these very words. */
-export const GOAL_CONTINUING_SWITCH_REFUSAL = "Pause the goal before switching accounts.";
+const GOAL_CONTINUING_SWITCH_REFUSAL = "Pause the goal before switching accounts.";
 
 /**
  * The refusal for a goal held for an Orquester update (goals §5.7) — the
@@ -168,7 +168,7 @@ export const GOAL_CONTINUING_SWITCH_REFUSAL = "Pause the goal before switching a
  * (the goal going again, which refuses the switch too) and what takes the
  * goal back.
  */
-export const GOAL_HELD_SWITCH_REFUSAL =
+const GOAL_HELD_SWITCH_REFUSAL =
   "The goal is paused for an Orquester update and resumes by itself once the agent host has restarted. Send /goal pause to keep it paused, then switch accounts.";
 
 /**

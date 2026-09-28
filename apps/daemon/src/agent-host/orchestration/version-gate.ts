@@ -20,7 +20,7 @@ import type { AgentAdapterId } from "@orquester/api/agent-chat";
  * validated range in their own adapter (§10). A `null` here means "no host-side
  * floor".
  */
-export const MINIMUM_CLI_VERSIONS: Readonly<Record<AgentAdapterId, string | null>> = {
+const MINIMUM_CLI_VERSIONS: Readonly<Record<AgentAdapterId, string | null>> = {
   claude: null,
   codex: null,
   opencode: "1.14.19",
@@ -28,7 +28,7 @@ export const MINIMUM_CLI_VERSIONS: Readonly<Record<AgentAdapterId, string | null
 };
 
 /** Numeric-dotted comparison; a trailing pre-release tag is ignored. */
-export function compareVersions(left: string, right: string): number {
+function compareVersions(left: string, right: string): number {
   const parse = (value: string): number[] =>
     value
       .trim()
@@ -55,9 +55,8 @@ export interface VersionGateResult {
 export function checkMinimumVersion(input: {
   adapter: AgentAdapterId;
   version: string | null | undefined;
-  minimums?: Readonly<Record<AgentAdapterId, string | null>>;
 }): VersionGateResult {
-  const minimum = (input.minimums ?? MINIMUM_CLI_VERSIONS)[input.adapter];
+  const minimum = MINIMUM_CLI_VERSIONS[input.adapter];
   if (minimum === null || minimum === undefined) {
     return { ok: true };
   }

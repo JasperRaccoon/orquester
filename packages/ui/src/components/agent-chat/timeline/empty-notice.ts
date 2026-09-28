@@ -72,14 +72,14 @@ const NON_TOOL_ITEM_TYPE_RECORD = {
  * which is ever a row of the child's. Exactly the canonical item types that
  * are not `TOOL_LIFECYCLE_ITEM_TYPES`, by construction.
  */
-export const NON_TOOL_ITEM_TYPES: ReadonlySet<string> = new Set(Object.keys(NON_TOOL_ITEM_TYPE_RECORD));
+const NON_TOOL_ITEM_TYPES: ReadonlySet<string> = new Set(Object.keys(NON_TOOL_ITEM_TYPE_RECORD));
 
 /**
  * The roster row says the agent did real tool work — a tool's name as its last
  * tool (never a Codex word or thought tick), or a tool-use count above zero —
  * and a tool call is a row of the agent's own on every provider.
  */
-export function didToolWork(agent: Pick<RuntimeSubagent, "lastToolName" | "usage">): boolean {
+function didToolWork(agent: Pick<RuntimeSubagent, "lastToolName" | "usage">): boolean {
   const tool = agent.lastToolName?.trim();
   return (
     (tool !== undefined && tool.length > 0 && !NON_TOOL_ITEM_TYPES.has(tool)) ||
@@ -139,10 +139,10 @@ export function drillInEmptyNotice(input: {
 }
 
 /** The notice's key among the rows: no row id takes this shape. */
-export const TIMELINE_NOTICE_KEY = "timeline-empty-notice";
+const TIMELINE_NOTICE_KEY = "timeline-empty-notice";
 
 /** One child of the timeline's list: a row, or the empty notice. */
-export type TimelineSlot =
+type TimelineSlot =
   | { readonly key: string; readonly row: AgentChatTimelineRow }
   | { readonly key: typeof TIMELINE_NOTICE_KEY; readonly notice: EmptyNotice };
 
@@ -153,7 +153,7 @@ export type TimelineSlot =
  * lands and the notice goes — moved to another array and remounted, replaying
  * its rise; §7.3 wants the working row swapped in place, never remounted.
  */
-export function timelineSlots(rows: readonly AgentChatTimelineRow[], notice: EmptyNotice | null): TimelineSlot[] {
+function timelineSlots(rows: readonly AgentChatTimelineRow[], notice: EmptyNotice | null): TimelineSlot[] {
   const slots: TimelineSlot[] = [];
   rows.forEach((row, index) => {
     if (notice !== null && index === notice.at) {

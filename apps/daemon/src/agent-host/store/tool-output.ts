@@ -184,8 +184,7 @@ function joinStep(
  */
 export function joinToolOutput(
   events: readonly DomainEvent[],
-  itemId: string,
-  maxBytes: number = THREAD_ITEM_OUTPUT_MAX_BYTES
+  itemId: string
 ): ThreadItemOutputResponse | null {
   const toolUseId = callOf(events, itemId);
   if (toolUseId === undefined) {
@@ -194,7 +193,7 @@ export function joinToolOutput(
   const counters: JoinCounters = { bytes: 0, complete: false, truncated: false };
   const chunks: string[] = [];
   for (const event of events) {
-    const piece = joinStep(counters, event, toolUseId, maxBytes);
+    const piece = joinStep(counters, event, toolUseId, THREAD_ITEM_OUTPUT_MAX_BYTES);
     if (piece !== undefined) chunks.push(piece);
   }
   return { toolUseId, output: chunks.join(""), complete: counters.complete, truncated: counters.truncated };
@@ -209,7 +208,7 @@ export function joinToolOutput(
  * whole text by the same rule, so a page is the same bytes whichever side cut
  * it.
  */
-export function utf8Window(bytes: Uint8Array, offset: number, maxBytes: number): { start: number; end: number } {
+function utf8Window(bytes: Uint8Array, offset: number, maxBytes: number): { start: number; end: number } {
   const total = bytes.length;
   const at = Math.min(offset, total);
   let start = at;
@@ -293,13 +292,10 @@ export class ToolOutputJoin {
   private pendingHigh = "";
   private readonly counters: JoinCounters = { bytes: 0, complete: false, truncated: false };
 
-  constructor(
-    readonly toolUseId: string,
-    private readonly maxBytes: number = THREAD_ITEM_OUTPUT_MAX_BYTES
-  ) {}
+  constructor(readonly toolUseId: string) {}
 
   push(event: DomainEvent): void {
-    const piece = joinStep(this.counters, event, this.toolUseId, this.maxBytes);
+    const piece = joinStep(this.counters, event, this.toolUseId, THREAD_ITEM_OUTPUT_MAX_BYTES);
     if (piece !== undefined) this.append(piece);
   }
 
@@ -311,11 +307,6 @@ export class ToolOutputJoin {
     return this.counters.truncated;
   }
 
-  /** UTF-8 bytes of the join as it stands. */
-  get totalBytes(): number {
-    return this.length + (this.pendingHigh === "" ? 0 : 3);
-  }
-
   /** The bytes this join holds in memory — its buffer, grown ahead of its text — for the cache's budget. */
   get capacity(): number {
     return this.buffer.length;
@@ -325,7 +316,7 @@ export class ToolOutputJoin {
    * The join's bytes: exactly `Buffer.from(output, "utf8")`. A view of the
    * join's own buffer, valid until the next {@link push}.
    */
-  bytes(): Buffer {
+  private bytes(): Buffer {
     if (this.pendingHigh === "") return this.buffer.subarray(0, this.length);
     // U+FFFD in the spare room past the text: the next piece overwrites it.
     this.reserve(this.length + 3);
@@ -361,7 +352,7 @@ export class ToolOutputJoin {
   private reserve(needed: number): void {
     if (needed <= this.buffer.length) return;
     const doubled = Math.max(INITIAL_JOIN_CAPACITY, this.buffer.length * 2);
-    const grown = Buffer.alloc(Math.max(needed, Math.min(doubled, this.maxBytes + 3)));
+    const grown = Buffer.alloc(Math.max(needed, Math.min(doubled, THREAD_ITEM_OUTPUT_MAX_BYTES + 3)));
     this.buffer.copy(grown, 0, 0, this.length);
     this.buffer = grown;
   }

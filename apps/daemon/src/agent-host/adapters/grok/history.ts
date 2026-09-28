@@ -45,7 +45,7 @@ import { goalCommandFromReminder } from "./goal.ts";
  * which is the only way to tell a Grok projection from any other once the
  * source is shared.
  */
-export const GROK_HISTORY_RAW_METHOD = "_x.ai/session/update#replay";
+const GROK_HISTORY_RAW_METHOD = "_x.ai/session/update#replay";
 
 /**
  * One opaque item of a `ThreadSnapshot` turn (§4.1 calls these opaque; this is

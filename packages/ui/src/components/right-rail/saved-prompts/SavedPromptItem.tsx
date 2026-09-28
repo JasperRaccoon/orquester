@@ -46,7 +46,7 @@ export interface SavedPromptFeedback {
   text: string;
 }
 
-export interface SavedPromptItemProps {
+interface SavedPromptItemProps {
   prompt: SavedPrompt;
   expanded: boolean;
   variant: "docked" | "sheet";
@@ -105,7 +105,7 @@ const DANGER_ACTION = "text-danger hover:bg-danger-500/10 hover:text-danger";
  * Home / End jump — or `null` for a key the menu leaves alone. `at` is the
  * focused item's index, -1 when none is (focus on the panel itself).
  */
-export function menuFocusIndex(key: string, count: number, at: number): number | null {
+function menuFocusIndex(key: string, count: number, at: number): number | null {
   if (count === 0) return null;
   const last = count - 1;
   switch (key) {

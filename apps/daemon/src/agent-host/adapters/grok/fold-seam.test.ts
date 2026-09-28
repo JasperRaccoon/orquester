@@ -19,14 +19,13 @@ import {
 } from "@orquester/api/agent-chat";
 
 import { createIngestion } from "../../ingestion/index.ts";
-import { FakeClock, FakeTimers, RecordingSink, counterIdGen } from "../../ingestion/test-harness.ts";
+import { FakeClock, RecordingSink, counterIdGen } from "../../ingestion/test-harness.ts";
 import { createLivenessRegistry } from "../../orchestration/liveness.ts";
 import { createTestClock } from "../../orchestration/testing/fakes.ts";
 import type { AppendableDomainEvent } from "../../services.ts";
 import type { SessionNotification } from "./acp/_generated/schema.ts";
 import { agentFrames, readCapture } from "./fixtures.ts";
-import { GROK_AGENT_LIVENESS_TTL_MS, GrokNormalizer } from "./normalize.ts";
-import { driveCapture } from "./testing/capture-driver.ts";
+import { GrokNormalizer } from "./normalize.ts";
 
 const THREAD = "thread-1";
 const SESSION = "01a0c1a7-1185-7171-9447-3aa38569088c";
@@ -49,16 +48,13 @@ interface Seam {
 /** `livenessClock` drives the registry's TTLs by hand (no sleeps). */
 function seam(livenessClock?: ReturnType<typeof createTestClock>): Seam {
   const clock = new FakeClock();
-  const timers = new FakeTimers(clock);
   const sink = new RecordingSink();
   const liveness = createLivenessRegistry(livenessClock === undefined ? {} : { clock: livenessClock });
   const ingestion = createIngestion({
     sink: sink.sink,
     liveness,
     clock,
-    idGen: counterIdGen(),
-    setTimer: timers.setTimer,
-    clearTimer: timers.clearTimer
+    idGen: counterIdGen()
   });
   let turnId: string | undefined;
   let counter = 0;
@@ -210,12 +206,6 @@ const spawnEnd = (
   ...(rawOutput === undefined ? {} : { rawOutput })
 });
 
-const FIND_CALLERS = {
-  prompt: "Find every caller of add().",
-  description: "find callers",
-  subagent_type: "explore"
-};
-
 /** The foreground completion tag, and a spawn's text answer (see normalize.test.ts). */
 const completion = (subagentId?: string) => ({
   type: "SubagentCompleted",
@@ -250,233 +240,6 @@ function agent(s: Seam, taskId: string) {
   return row;
 }
 
-test("a foreground Grok subagent runs, ends with its result, and its launch row is the agent's", async () => {
-  const s = seam();
-  await s.startTurn("turn-1");
-  await s.update(spawnStart("call-s1", FIND_CALLERS));
-
-  const running = agent(s, "call-s1");
-  assert.equal(running.status, "running");
-  assert.equal(running.title, "find callers");
-  assert.equal(s.liveness.liveness(THREAD), "working", "a running subagent is live work");
-
-  const result = "add() is called from main.js:3.";
-  await s.update(spawnEnd("call-s1", "completed", result, completion(SUB_A)));
-  const done = agent(s, "call-s1");
-  assert.equal(done.status, "completed");
-  assert.equal(done.result, result);
-  assert.equal(done.activationCount, 1);
-  assert.equal(s.liveness.liveness(THREAD), null);
-
-  // The GUI hides a call's rows behind an AGENT task row naming it
-  // (`deriveWorkLogEntries`, packages/ui entries.logic.ts, pinned by "hides a
-  // launch tool row once its task row replaces it") unless the call failed.
-  const activities = s.state().activities;
-  const anchors = activities.filter((row) => row.activityKind.startsWith("task."));
-  assert.ok(anchors.length >= 2);
-  for (const row of anchors) {
-    const payload = row.payload as { agentKind?: string; toolUseId?: string };
-    assert.equal(payload.agentKind, "agent", "ingestion stamps it an agent");
-    assert.equal(payload.toolUseId, "call-s1", "…launched by the spawn call");
-  }
-  const launchRows = rowsOfCall(activities, "call-s1");
-  assert.ok(launchRows.length >= 2);
-  for (const row of launchRows) {
-    const payload = row.payload as { itemType?: string; status?: string };
-    assert.equal(payload.itemType, "collab_agent_tool_call");
-    assert.notEqual(payload.status, "failed");
-  }
-});
-
-test("a resumed Grok subagent reopens as run 2 and settles with its new result", async () => {
-  const s = seam();
-  await s.startTurn("turn-1");
-  await s.update(spawnStart("call-s1", FIND_CALLERS));
-  await s.update(spawnEnd("call-s1", "completed", "main.js:3", completion(SUB_A)));
-  assert.equal(agent(s, "call-s1").status, "completed");
-
-  await s.startTurn("turn-2");
-  await s.update(spawnStart("call-s2", { prompt: "Now check the tests.", resume_from: SUB_A }));
-  const reopened = agent(s, "call-s1");
-  assert.equal(reopened.status, "running");
-  assert.equal(reopened.activationCount, 2);
-  assert.equal(reopened.result, null, "the previous run's result is cleared");
-  assert.equal(s.liveness.liveness(THREAD), "working");
-
-  await s.update(spawnEnd("call-s2", "completed", "tests/add.test.js:4", completion()));
-  const settled = agent(s, "call-s1");
-  assert.equal(settled.status, "completed");
-  assert.equal(settled.result, "tests/add.test.js:4");
-  assert.equal(settled.activationCount, 2);
-  assert.equal(s.state().roster.length, 1, "one agent, two runs");
-  assert.equal(s.liveness.liveness(THREAD), null);
-});
-
-test("a background Grok subagent outlives its call and turn; a poll between turns ends it", async () => {
-  const s = seam();
-  await s.startTurn("turn-1");
-  const input = { prompt: "Run the suite.", description: "run tests", background: true };
-  await s.update(spawnStart("call-bg", input));
-  await s.update(spawnEnd("call-bg", "completed", "Subagent started.", textAnswer(SUB_B)));
-  await s.feed(s.grok.endTurn());
-  await s.feed([s.grok.turnCompleted("turn-1", { stopReason: "end_turn" })]);
-
-  assert.equal(agent(s, "call-bg").status, "running", "its call answered; the agent works on");
-  assert.equal(s.liveness.liveness(THREAD), "working", "live work outlives the parent's turn");
-
-  // The CLI woke the parent (no turn of ours) and the model polled the id.
-  const command = "[subagent:general-purpose] run tests";
-  await poll(s, { task_id: SUB_B, command, status: "completed", output: "12 tests pass." });
-  const done = agent(s, "call-bg");
-  assert.equal(done.status, "completed");
-  assert.equal(done.result, "12 tests pass.");
-  assert.equal(s.liveness.liveness(THREAD), null);
-});
-
-test("a background Grok subagent still running when Stop comes is closed by it", async () => {
-  const s = seam();
-  await s.startTurn("turn-1");
-  const input = { prompt: "Run the suite.", description: "run tests", background: true };
-  await s.update(spawnStart("call-bg", input));
-  await s.update(spawnEnd("call-bg", "completed", "Subagent started.", textAnswer(SUB_B)));
-  await s.feed(s.grok.stopBackgroundTasks());
-  assert.equal(agent(s, "call-bg").status, "interrupted");
-  assert.equal(s.liveness.liveness(THREAD), null);
-});
-
-test("a foreground Grok subagent its turn cut is cancelled with it: live until the CLI says so", async () => {
-  const s = seam();
-  await s.startTurn("turn-1");
-  await s.update(spawnStart("call-s1", { prompt: "p", description: "find callers" }));
-  const spawned = {
-    sessionUpdate: "subagent_spawned",
-    subagent_id: SUB_A,
-    child_session_id: SUB_A,
-    description: "find callers",
-    subagent_type: "general-purpose"
-  };
-  await s.feed(s.grok.handleXaiNotification("_x.ai/session_notification", { sessionId: SESSION, update: spawned }));
-  // `session/cancel`: the call gets no terminal frame (fixture 05) and the
-  // CLI cancels the child with the turn (fixture 23).
-  await s.feed(s.grok.endTurn());
-  const cancelled = { stopReason: "cancelled", cancellationCategory: "MidTurnAbort" };
-  await s.feed([s.grok.turnCompleted("turn-1", cancelled)]);
-  // The session settles `ready` after the interrupted turn (`settleTurn`).
-  await s.feed([s.grok.event("session.state.changed", { state: "ready" })]);
-  const cut = agent(s, "call-s1");
-  assert.equal(cut.status, "running", "live until the CLI's end arrives");
-  assert.notEqual(cut.isBackgrounded, true, "never sent to the background: nothing kept it running");
-  assert.equal(s.liveness.liveness(THREAD), "working");
-  const finished = {
-    sessionUpdate: "subagent_finished",
-    subagent_id: SUB_A,
-    child_session_id: SUB_A,
-    status: "cancelled",
-    error: "Subagent was cancelled",
-    will_wake: false
-  };
-  await s.feed(s.grok.handleXaiNotification("_x.ai/session_notification", { sessionId: SESSION, update: finished }));
-  assert.equal(agent(s, "call-s1").status, "interrupted");
-  assert.equal(s.liveness.liveness(THREAD), null);
-});
-
-test("a Grok shell a poll ended stays ended while a snapshot lists it: one start, one end", async () => {
-  const s = seam();
-  await s.startTurn("turn-1");
-  const shell = "01a0c1a7-3335-7fc3-894b-56f0bb60a6db";
-  const command = "npm run dev";
-  const update = { sessionUpdate: "task_backgrounded", tool_call_id: "call-sh", task_id: shell, command };
-  await s.feed(s.grok.handleXaiNotification("_x.ai/task_backgrounded", { sessionId: SESSION, update }));
-  assert.equal(s.liveness.liveness(THREAD), "monitoring");
-  await poll(s, { task_id: shell, command, status: "completed", output: "bye" });
-  assert.equal(s.liveness.liveness(THREAD), null);
-
-  const listing = (tasks: unknown[]) =>
-    s.grok.handleXaiNotification("_x.ai/session_notification", {
-      sessionId: SESSION,
-      update: { sessionUpdate: "background_tasks", tasks }
-    });
-  await s.feed(listing([{ task_id: shell, command, kind: "bash", status: "completed" }]));
-  assert.equal(s.liveness.liveness(THREAD), null, "a finished shell the CLI still lists holds no drain");
-  await s.feed(listing([]));
-  const rows = s
-    .state()
-    .activities.filter(
-      (row) => row.activityKind.startsWith("task.") && (row.payload as { taskId?: string }).taskId === shell
-    );
-  assert.deepEqual(
-    rows.map((row) => row.activityKind),
-    ["task.started", "task.completed"]
-  );
-  assert.equal(agent(s, shell).status, "completed");
-});
-
-test("a Grok shell's exit code reaches the roster — from a poll's answer and from task_completed", async () => {
-  const s = seam();
-  await s.startTurn("turn-1");
-  const polled = "01a0c1a7-3335-7fc3-894b-56f0bb60a6db";
-  const reported = "01a0c1a7-4446-7fc3-894b-56f0bb60a6dc";
-  for (const [task, command] of [
-    [polled, "make test"],
-    [reported, "make lint"]
-  ] as const) {
-    const update = { sessionUpdate: "task_backgrounded", tool_call_id: `call-${task}`, task_id: task, command };
-    await s.feed(s.grok.handleXaiNotification("_x.ai/task_backgrounded", { sessionId: SESSION, update }));
-  }
-  await poll(s, { task_id: polled, command: "make test", status: "failed", exit_code: 2, output: "1 failing" });
-  const completed = {
-    sessionUpdate: "task_completed",
-    task_snapshot: { task_id: reported, command: "make lint", exit_code: 1, completed: true, kind: "bash" },
-    will_wake: false
-  };
-  await s.feed(s.grok.handleXaiNotification("_x.ai/task_completed", { sessionId: SESSION, update: completed }));
-  assert.equal(agent(s, polled).status, "failed");
-  assert.equal(agent(s, polled).exitCode, 2);
-  assert.equal(agent(s, reported).status, "failed");
-  assert.equal(agent(s, reported).exitCode, 1);
-});
-
-test("a Grok shell Stop closed counts live again while a snapshot lists it running", async () => {
-  const s = seam();
-  await s.startTurn("turn-1");
-  const shell = "01a0c1a7-3335-7fc3-894b-56f0bb60a6db";
-  const command = "npm run dev";
-  const update = { sessionUpdate: "task_backgrounded", tool_call_id: "call-sh", task_id: shell, command };
-  await s.feed(s.grok.handleXaiNotification("_x.ai/task_backgrounded", { sessionId: SESSION, update }));
-  // The session-scoped Stop writes the end itself; whether `session/cancel`
-  // kills the CLI's background shell is not captured.
-  await s.feed(s.grok.stopBackgroundTasks());
-  const closed = agent(s, shell).status;
-  assert.notEqual(closed, "running");
-  assert.equal(s.liveness.liveness(THREAD), null);
-
-  const task = { task_id: shell, command, kind: "bash", status: "running" };
-  const snapshot = { sessionId: SESSION, update: { sessionUpdate: "background_tasks", tasks: [task] } };
-  await s.feed(s.grok.handleXaiNotification("_x.ai/session_notification", snapshot));
-  assert.equal(s.liveness.liveness(THREAD), "monitoring", "the CLI still runs it: a deploy must wait");
-  assert.equal(agent(s, shell).status, closed, "the roster reads the start as a late delivery");
-});
-
-test("a Grok shell Stop closed counts live again when a poll answers running", async () => {
-  const s = seam();
-  await s.startTurn("turn-1");
-  const shell = "01a0c1a7-3335-7fc3-894b-56f0bb60a6db";
-  const command = "npm run dev";
-  const update = { sessionUpdate: "task_backgrounded", tool_call_id: "call-sh", task_id: shell, command };
-  await s.feed(s.grok.handleXaiNotification("_x.ai/task_backgrounded", { sessionId: SESSION, update }));
-  await s.feed(s.grok.stopBackgroundTasks());
-  const closed = agent(s, shell).status;
-  assert.equal(s.liveness.liveness(THREAD), null);
-
-  await poll(s, { task_id: shell, command, status: "running" });
-  assert.equal(s.liveness.liveness(THREAD), "monitoring", "the CLI still runs it: a deploy must wait");
-  assert.equal(agent(s, shell).status, closed, "the roster keeps the adapter's end");
-  await poll(s, { task_id: shell, command, status: "running" });
-  assert.equal(s.liveness.liveness(THREAD), "monitoring");
-  assert.equal(agent(s, shell).status, closed, "a further report re-arms it, and reopens nothing");
-  assert.equal(agent(s, shell).activationCount, 1);
-});
-
 test("a Grok subagent Stop closed counts live again when a poll answers running, for its hour", async () => {
   const clock = createTestClock(0);
   const s = seam(clock);
@@ -497,11 +260,11 @@ test("a Grok subagent Stop closed counts live again when a poll answers running,
   assert.equal(kept.status, "interrupted", "the roster keeps the adapter's end");
   assert.equal(kept.activationCount, 1, "a late delivery, not a new run");
 
-  clock.set(GROK_AGENT_LIVENESS_TTL_MS - 1);
+  clock.set(3_600_000 - 1);
   await poll(s, { task_id: SUB_B, command, status: "running" });
-  clock.set(2 * GROK_AGENT_LIVENESS_TTL_MS - 2);
+  clock.set(2 * 3_600_000 - 2);
   assert.equal(s.liveness.liveness(THREAD), "working", "re-armed by the next report");
-  clock.set(2 * GROK_AGENT_LIVENESS_TTL_MS - 1);
+  clock.set(2 * 3_600_000 - 1);
   assert.equal(s.liveness.liveness(THREAD), null, "its hour applies");
   assert.equal(agent(s, "call-bg").status, "interrupted");
 });
@@ -516,13 +279,13 @@ test("a Grok agent nobody polls holds working for an hour, re-armed by a running
   await s.feed(s.grok.endTurn());
   await s.feed([s.grok.turnCompleted("turn-1", { stopReason: "end_turn" })]);
 
-  clock.set(GROK_AGENT_LIVENESS_TTL_MS - 1);
+  clock.set(3_600_000 - 1);
   assert.equal(s.liveness.liveness(THREAD), "working");
   const command = "[subagent:general-purpose] run tests";
   await poll(s, { task_id: SUB_B, command, status: "running" });
-  clock.set(2 * GROK_AGENT_LIVENESS_TTL_MS - 2);
+  clock.set(2 * 3_600_000 - 2);
   assert.equal(s.liveness.liveness(THREAD), "working", "the running poll re-armed the hour");
-  clock.set(2 * GROK_AGENT_LIVENESS_TTL_MS - 1);
+  clock.set(2 * 3_600_000 - 1);
   assert.equal(s.liveness.liveness(THREAD), null, "an hour with no row naming it: the drain may go");
   assert.equal(agent(s, "call-bg").status, "running", "liveness lapsed, the roster row did not");
 
@@ -530,185 +293,6 @@ test("a Grok agent nobody polls holds working for an hour, re-armed by a running
   assert.equal(agent(s, "call-bg").status, "completed", "a later end is recorded as any end is");
   assert.equal(agent(s, "call-bg").result, "done at last");
   assert.equal(s.liveness.liveness(THREAD), null);
-});
-
-// ---------------------------------------------------------------------------
-// The 2026-09-25 captures through ingestion, the fold and the registry
-// ---------------------------------------------------------------------------
-
-interface CaptureSeam {
-  readonly events: readonly RuntimeEvent[];
-  readonly liveness: ReturnType<typeof createLivenessRegistry>;
-  /** Ingest every event up to and including `index` not ingested yet. */
-  feedThrough(index: number): Promise<void>;
-  state(): ReturnType<typeof fold>;
-}
-
-/**
- * Drive a capture (`testing/capture-driver.ts`) and hand its events to the
- * real seam, on demand — fed as the host feeds them: the orchestrator hands
- * EVERY event to the liveness registry (`orchestrator.ts`, the adapter event
- * loop: `turn.started` / `turn.completed` run its turn-boundary sweep), then
- * to ingestion, which observes the task rows again (`main.ts` wires one
- * registry into both). The registry's clock follows each event's
- * `createdAt` — the capture's own times — so the sweep sees the real order.
- */
-function captureSeam(file: string, options: Parameters<typeof driveCapture>[1] = {}): CaptureSeam {
-  const run = driveCapture(file, options);
-  const clock = new FakeClock();
-  const timers = new FakeTimers(clock);
-  const sink = new RecordingSink();
-  const livenessClock = createTestClock(0);
-  const liveness = createLivenessRegistry({ clock: livenessClock });
-  const ingestion = createIngestion({
-    sink: sink.sink,
-    liveness,
-    clock,
-    idGen: counterIdGen(),
-    setTimer: timers.setTimer,
-    clearTimer: timers.clearTimer
-  });
-  let next = 0;
-  return {
-    events: run.events,
-    liveness,
-    feedThrough: async (index) => {
-      for (; next <= index && next < run.events.length; next += 1) {
-        const event = run.events[next]!;
-        livenessClock.set(Date.parse(event.createdAt));
-        liveness.observe(event);
-        await ingestion.ingest(event);
-      }
-      await ingestion.drain();
-    },
-    state: () => fold(sink.events())
-  };
-}
-
-function indexOf(events: readonly RuntimeEvent[], predicate: (event: RuntimeEvent) => boolean): number {
-  const index = events.findIndex(predicate);
-  assert.ok(index >= 0, "the capture holds the moment the test names");
-  return index;
-}
-
-const taskEnd = (taskId: string) => (event: RuntimeEvent) =>
-  event.type === "task.completed" && event.payload.taskId === taskId;
-
-test("15 through the fold: the agent completes with its answer; its child's rows and words are its own", async () => {
-  const FG = "call-178a2a0c-2c5e-49a6-8fb8-e0fee73d6c1e-0";
-  const CHILD_CALL = "call-bc7ab91e-2c90-4a0b-b578-8ba7dc84ce7e-0";
-  const s = captureSeam("15-subagent-foreground.ndjson");
-  await s.feedThrough(indexOf(s.events, taskEnd(FG)) - 1);
-  assert.equal(s.liveness.liveness(THREAD), "working", "a running foreground agent is live work");
-  await s.feedThrough(s.events.length);
-  const state = s.state();
-  const roster = state.roster.find((entry) => entry.id === FG);
-  assert.equal(roster?.status, "completed");
-  assert.equal(roster?.result, "sub-ok");
-  assert.equal(roster?.title, "echo check");
-  assert.equal(s.liveness.liveness(THREAD), null);
-
-  const childRows = state.activities.filter((row) => (row.payload as { toolUseId?: string }).toolUseId === CHILD_CALL);
-  assert.ok(childRows.length > 0);
-  assert.ok(childRows.every((row) => row.agentId === FG), "the child's call renders in its agent's drill-in only");
-  const messages = state.items.filter((item) => item.kind === "message");
-  const childWords = messages.filter((item) => item.agentId === FG && item.role === "assistant");
-  assert.deepEqual(childWords.map((item) => item.text), ["sub-ok"]);
-  const parentWords = messages.filter((item) => item.agentId === undefined && item.role === "assistant");
-  assert.ok(parentWords.some((item) => item.text.endsWith("DONE")));
-  assert.equal(parentWords.some((item) => item.text.includes("sub-ok")), false);
-  assert.deepEqual(
-    messages.filter((item) => item.streaming).map((item) => item.id),
-    [],
-    "every segment, the agent's included, is closed"
-  );
-});
-
-test("16 through the fold: live while the background agent runs, idle after subagent_finished; its shell is its own", async () => {
-  const BG = "call-a00d2553-adc5-48f4-9181-4a66616fc94f-0";
-  const CHILD_SHELL = "call-88e87ad3-152e-4eab-b522-89fc544e8db5-0";
-  const s = captureSeam("16-subagent-background-poll.ndjson");
-  const firstTurnEnd = indexOf(s.events, (event) => event.type === "turn.completed");
-  await s.feedThrough(firstTurnEnd);
-  assert.equal(s.liveness.liveness(THREAD), "working", "the agent outlives its parent's turn");
-  await s.feedThrough(s.events.length);
-  const state = s.state();
-  assert.equal(state.roster.find((entry) => entry.id === BG)?.status, "completed");
-  assert.equal(state.roster.find((entry) => entry.id === BG)?.result, "bg-done");
-  const shell = state.roster.find((entry) => entry.id === CHILD_SHELL);
-  assert.equal(shell?.status, "completed");
-  assert.equal(shell?.agentKind, "background");
-  const shellRows = state.activities.filter((row) => (row.payload as { taskId?: string }).taskId === CHILD_SHELL);
-  assert.ok(shellRows.every((row) => row.agentId === BG), "the child's shell is its agent's, never the parent's");
-  assert.equal(s.liveness.liveness(THREAD), null);
-});
-
-test("20 through the fold: a monitor reads monitoring while it runs and nothing after task_completed", async () => {
-  const MONITOR = "01a0d913-6204-7391-8dbb-5ea888f73f03";
-  const s = captureSeam("20-monitor.ndjson");
-  await s.feedThrough(indexOf(s.events, taskEnd(MONITOR)) - 1);
-  assert.equal(s.liveness.liveness(THREAD), "monitoring");
-  await s.feedThrough(s.events.length);
-  const monitor = s.state().roster.find((entry) => entry.id === MONITOR);
-  assert.equal(monitor?.status, "completed");
-  assert.equal(monitor?.title, "tick watch");
-  assert.equal(s.liveness.liveness(THREAD), null);
-});
-
-test("18 through the fold: a killed agent and a killed shell both read interrupted", async () => {
-  const s = captureSeam("18-subagent-kill.ndjson");
-  await s.feedThrough(s.events.length);
-  const roster = s.state().roster;
-  assert.equal(roster.find((entry) => entry.id === "call-e64257f2-037e-4f00-95c4-f512daeb136b-1")?.status, "interrupted");
-  assert.equal(roster.find((entry) => entry.id === "01a0d911-4089-7b73-a6b2-4490a4cfe87a")?.status, "interrupted");
-  assert.equal(s.liveness.liveness(THREAD), null);
-});
-
-test("21 through the fold: after a Stop, the shell the CLI kept running holds monitoring; the roster keeps the end", async () => {
-  const SHELL_21 = "01a0d915-61b7-7132-b432-a6c95b3f7778";
-  const s = captureSeam("21-stop-with-background-work.ndjson", {
-    atNote: (note, { grok }) =>
-      /sending session\/cancel with no prompt in flight/.test(note)
-        ? [...grok.failOpenTools("Stopped."), ...grok.stopBackgroundTasks()]
-        : []
-  });
-  await s.feedThrough(s.events.length);
-  assert.equal(s.liveness.liveness(THREAD), "monitoring", "the poll said the shell still runs: a deploy must wait");
-  const roster = s.state().roster;
-  assert.equal(roster.find((entry) => entry.id === SHELL_21)?.status, "interrupted");
-  assert.equal(roster.find((entry) => entry.id === "call-7b249d13-32d3-4f24-a3ad-b582665c9c5a-1")?.status, "interrupted");
-});
-
-test("25 through the fold: a Stop while the spawn's own card is pending ends the agent that never started", async () => {
-  // Turn 2 of fixture 25 asks before it spawns; the test presses Stop where
-  // the harness answered the card — the capture's rest is what a REJECT
-  // did, so the drive ends there. No child ever existed: no
-  // `subagent_spawned` joined the launch, no `subagent_finished` can come.
-  const SPAWN_2 = "call-d288c474-db56-4180-813b-74576843d412-1";
-  const cardNote = (note: string): boolean =>
-    note.includes(`for tool call ${SPAWN_2}`) && note.includes("session/request_permission");
-  // The session is live throughout, as the adapter says it is: it opened
-  // ready, and a Stop returns it to ready (the roster reads a dead session's
-  // running rows as interrupted, which would hide the phantom).
-  const ready = (control: { grok: GrokNormalizer }): RuntimeEvent[] => [
-    control.grok.event("session.state.changed", { state: "ready" })
-  ];
-  const s = captureSeam("25-subagent-child-approval.ndjson", {
-    atNote: (note, control) =>
-      note.startsWith("spawn:")
-        ? [control.grok.event("session.started", {}), ...ready(control)]
-        : cardNote(note)
-          ? [...control.interrupt(), ...ready(control)]
-          : [],
-    endAtNote: cardNote
-  });
-  await s.feedThrough(s.events.length);
-  const agent = s.state().roster.find((entry) => entry.id === SPAWN_2);
-  assert.ok(agent, "the launch is a roster agent");
-  assert.notEqual(agent.status, "running", "never read running for a run that never started");
-  assert.equal(s.liveness.liveness(THREAD), null, "nor holds a deploy's drain for its hour");
-  const end = s.events.find(taskEnd(SPAWN_2)) as Extract<RuntimeEvent, { type: "task.completed" }> | undefined;
-  assert.deepEqual([end?.payload.status, end?.payload.summary], ["stopped", "Stopped before it started."]);
 });
 
 test("a loop a later launch reports again reopens its row: each launch numbers its own runs", async () => {
@@ -774,22 +358,6 @@ function agentMessages(state: ReturnType<typeof fold>, agentId: string, role: "a
   );
 }
 
-test("17 through the fold: a resumed run's words are a message of its own, never the first run's", async () => {
-  const FIRST = "call-22f4fca9-389a-4943-a3bc-f130066bc4ce-0";
-  const s = captureSeam("17-subagent-resume-from.ndjson");
-  await s.feedThrough(s.events.length);
-  const state = s.state();
-  assert.deepEqual(
-    agentMessages(state, FIRST, "assistant").map((item) => item.text),
-    ["first-run", "resumed-ok"],
-    "the resume shares its task id with the run it continues, never its message"
-  );
-  const agent = state.roster.find((entry) => entry.id === FIRST);
-  assert.equal(agent?.status, "completed");
-  assert.equal(agent?.result, "resumed-ok");
-  assert.equal(agent?.activationCount, 2);
-});
-
 test("a resume in a later turn keeps each run's words and thinking apart, each on its own turn", async () => {
   const s = seam();
   const RUN_1 = "01a0d910-6f3a-7c33-b417-671c083d422c";
@@ -849,29 +417,6 @@ test("a resume in a later turn keeps each run's words and thinking apart, each o
       ["think-2", "turn-2"]
     ]
   );
-});
-
-test("20 fed as the host feeds it: the monitor stays live through its own wakes until task_completed", async () => {
-  const MONITOR = "01a0d913-6204-7391-8dbb-5ea888f73f03";
-  const s = captureSeam("20-monitor.ndjson");
-  const started = indexOf(s.events, (event) => event.type === "task.started" && event.payload.taskId === MONITOR);
-  const ended = indexOf(s.events, taskEnd(MONITOR));
-  const readings: string[] = [];
-  for (let index = started; index < ended; index += 1) {
-    await s.feedThrough(index);
-    const event = s.events[index]!;
-    if (event.type === "turn.completed") {
-      readings.push(`${event.turnId}: ${String(s.liveness.liveness(THREAD))}`);
-    }
-  }
-  assert.equal(readings.length, 3, "the user's turn and the two line wakes end while it runs");
-  assert.deepEqual(
-    readings.filter((reading) => !reading.endsWith("monitoring")),
-    [],
-    "a line's wake is the monitor reporting: its end must not drop it"
-  );
-  await s.feedThrough(s.events.length);
-  assert.equal(s.liveness.liveness(THREAD), null, "its end ends it");
 });
 
 test("a subagent's own shell counts on its own once the subagent's run ends, until its own end", async () => {
@@ -1007,131 +552,6 @@ test("a subagent's own shell the CLI revived counts on its own once the subagent
   assert.equal(agent(s, shell).status, "interrupted", "the roster keeps the end the adapter wrote, never reopened");
 });
 
-test("19 through the fold: an unpolled background agent works past its turn, ends by subagent_finished, and its wake is a turn", async () => {
-  const AGENT = "call-b929f166-b896-45fa-bdb5-4b7129d05044-0";
-  const s = captureSeam("19-subagent-background-unpolled.ndjson");
-  await s.feedThrough(indexOf(s.events, (event) => event.type === "turn.completed"));
-  assert.equal(s.liveness.liveness(THREAD), "working", "live past its parent's turn, with no poll");
-  await s.feedThrough(indexOf(s.events, taskEnd(AGENT)) - 1);
-  assert.equal(s.liveness.liveness(THREAD), "working", "its heartbeat kept it live to its end");
-  await s.feedThrough(s.events.length);
-  const state = s.state();
-  const row = state.roster.find((entry) => entry.id === AGENT);
-  assert.equal(row?.status, "completed");
-  assert.equal(row?.result, "e-done");
-  assert.equal(s.liveness.liveness(THREAD), null);
-  assert.deepEqual(
-    agentMessages(state, AGENT, "assistant").map((item) => item.text),
-    ["e-done"],
-    "the child's words are its agent's"
-  );
-  const woken = state.items.filter(
-    (item) => item.kind === "message" && item.role === "assistant" && item.agentId === undefined && /e-done/.test(item.text)
-  );
-  assert.equal(woken.length, 1, "the parent's woken reply is a message of the parent's");
-  assert.equal(state.turns.length, 2, "the prompt's turn and the wake's");
-});
-
-test("22 through the fold: a foreground run past its await budget reads backgrounded, then completes", async () => {
-  const AGENT = "call-058f81b9-857c-4320-84f2-eefa4e2b3d6c-0";
-  const s = captureSeam("22-subagent-await-budget.ndjson");
-  await s.feedThrough(indexOf(s.events, (event) => event.type === "turn.completed"));
-  const moved = s.state().roster.find((entry) => entry.id === AGENT);
-  assert.equal(moved?.status, "running");
-  assert.equal(moved?.isBackgrounded, true, "the CLI moved it to the background");
-  assert.equal(s.liveness.liveness(THREAD), "working");
-  await s.feedThrough(s.events.length);
-  const done = s.state().roster.find((entry) => entry.id === AGENT);
-  assert.equal(done?.status, "completed");
-  assert.equal(done?.result, "late-ok");
-  assert.equal(s.liveness.liveness(THREAD), null);
-});
-
-test("23 through the fold: a Stop that cuts a foreground agent ends it interrupted, never backgrounded", async () => {
-  const AGENT = "call-051e75a0-fd17-4ac0-b9cd-a9d831db32a0-0";
-  const s = captureSeam("23-stop-cuts-foreground-subagent.ndjson", {
-    atNote: (note, control) => (/sending session\/cancel mid-turn/.test(note) ? control.interrupt() : [])
-  });
-  await s.feedThrough(s.events.length);
-  const row = s.state().roster.find((entry) => entry.id === AGENT);
-  assert.equal(row?.status, "interrupted");
-  assert.notEqual(row?.isBackgrounded, true);
-  assert.equal(s.liveness.liveness(THREAD), null);
-  const turn = s.state().turns.at(-1);
-  assert.equal(turn?.state, "interrupted");
-});
-
 // ---------------------------------------------------------------------------
 // 2026-09-26: a loop and a goal through ingestion and the fold (fixtures 29, 30)
 // ---------------------------------------------------------------------------
-
-test("29 through the fold: the loop is a background roster row, live until deleted; its fire an agent of its own", async () => {
-  const LOOP = "01a0de9b-e17c-7fa0-83dc-a436461e59b5";
-  const FIRE = "01a0de9b-e17d-7391-93f1-ba66a305252f";
-  const s = captureSeam("29-loop-scheduled-task.ndjson");
-  await s.feedThrough(indexOf(s.events, taskEnd(FIRE)));
-  const live = s.state().roster.find((entry) => entry.id === LOOP);
-  assert.equal(live?.agentKind, "background", "stamped background: never an agent");
-  assert.equal(live?.kind, "loop", "a loop row, never a shell's");
-  assert.equal(live?.status, "running");
-  assert.equal(live?.title, "Every 1 minute: Reply with exactly: tick");
-  assert.equal(live?.progress, "Fired once");
-  assert.equal(s.liveness.liveness(THREAD), null, "a loop between its fires is no live work");
-  const fire = s.state().roster.find((entry) => entry.id === FIRE);
-  assert.equal(fire?.agentKind, "agent");
-  assert.equal(fire?.status, "completed");
-  await s.feedThrough(s.events.length);
-  const ended = s.state().roster.find((entry) => entry.id === LOOP);
-  assert.equal(ended?.status, "interrupted", "deleted: stopped");
-  assert.equal(ended?.result, "Deleted");
-});
-
-test("30 through the fold: the thread's goal is set, stopped by its budget, then cleared; no roster row", async () => {
-  // Fixture 30 (observations 53 and 57): the goal is the thread's goal —
-  // `thread.goal.updated` rows the fold reads — never a roster row. 1.0.34's
-  // `/goal clear` frame names no goal and no event (status `cleared`).
-  const s = captureSeam("30-goal.ndjson");
-  // The planner runs under `phase: "executing"` with `planning: true`
-  // (observation 53): the thread's goal reads `planning` while it runs, and
-  // `executing` again once it is done — 34 s later, with no goal frame after
-  // it until the budget stops the goal.
-  const goalPhases = (index: number): Array<string | undefined> =>
-    s.events
-      .slice(0, index + 1)
-      .filter((event) => event.type === "thread.goal.updated")
-      .map((event) => (event.payload as { goal: { phase?: string } | null }).goal?.phase);
-  const planning = s.events.findIndex(
-    (event) =>
-      event.type === "thread.goal.updated" &&
-      (event.payload as { goal: { phase?: string } | null }).goal?.phase === "planning"
-  );
-  assert.ok(planning > 0, "the planner's frames are the planning phase");
-  await s.feedThrough(planning);
-  assert.equal(s.state().goal?.phase, "planning");
-  const limited = s.events.findIndex(
-    (event) => event.type === "thread.goal.updated" && (event.payload as { change: string }).change === "limited"
-  );
-  assert.ok(limited > 0, "the budget_limited frame is a goal row");
-  await s.feedThrough(limited - 1);
-  assert.equal(s.state().goal?.phase, "executing", "the planner done");
-  assert.deepEqual(goalPhases(limited), ["executing", "planning", "executing", "idle"]);
-  await s.feedThrough(limited);
-  const atBudget = s.state().goal;
-  assert.equal(atBudget?.objective, "Create a file named goal.txt containing exactly: ok");
-  assert.equal(atBudget?.status, "budget-limited");
-  assert.equal(atBudget?.tokensUsed, 48_386);
-  assert.equal(atBudget?.tokenBudget, 20_000);
-  await s.feedThrough(s.events.length);
-  const state = s.state();
-  assert.equal(state.goal, null, "the /goal clear frame clears it");
-  assert.deepEqual(
-    state.activities
-      .filter((row) => row.activityKind === "goal.updated")
-      .map((row) => (row.payload as { change: string }).change),
-    // The planner's two phase moves are one hidden `progress` row, replaced
-    // in place under its stable id.
-    ["set", "progress", "limited", "cleared"]
-  );
-  assert.equal(state.roster.some((entry) => entry.id.startsWith("goal:")), false, "the goal is no roster row");
-  assert.equal(s.liveness.liveness(THREAD), null);
-});

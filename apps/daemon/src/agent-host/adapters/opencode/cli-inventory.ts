@@ -25,7 +25,7 @@
  */
 
 import type { AdapterLogger } from "../../adapter.ts";
-import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
+import { withDeadline } from "../../support/deadline.ts";
 import { spawnProviderChild } from "../../support/spawn.ts";
 import type {
   OpenCodeAgentRow,
@@ -47,14 +47,14 @@ const CLI_PROBE_TIMEOUT_MS = 30_000;
 /** The SQLite-lock retry pause. */
 const CLI_RETRY_DELAY_MS = 1_000;
 
-export interface CliCommandResult {
+interface CliCommandResult {
   stdout: string;
   code: number;
   /** Set when the command never produced an exit status we could read. */
   failure?: string;
 }
 
-export interface RunOpenCodeCliInput {
+interface RunOpenCodeCliInput {
   bin: string;
   args: readonly string[];
   cwd: string;
@@ -64,7 +64,7 @@ export interface RunOpenCodeCliInput {
 }
 
 /** Run one `opencode …`, bounded in time and in bytes. Never throws. */
-export async function runOpenCodeCli(input: RunOpenCodeCliInput): Promise<CliCommandResult> {
+async function runOpenCodeCli(input: RunOpenCodeCliInput): Promise<CliCommandResult> {
   let child;
   try {
     child = spawnProviderChild({
@@ -347,16 +347,13 @@ export function parseSkillsCliOutput(stdout: string): OpenCodeSkillRow[] {
 // The probe
 // ---------------------------------------------------------------------------
 
-export interface LoadInventoryFromCliInput {
+interface LoadInventoryFromCliInput {
   bin: string;
   /** Any directory; a machine-level probe uses one with no project config. */
   cwd: string;
   env: Record<string, string>;
   logger?: AdapterLogger;
   signal?: AbortSignal;
-  /** Test seam. */
-  run?: (input: RunOpenCodeCliInput) => Promise<CliCommandResult>;
-  sleep?: (ms: number) => Promise<void>;
 }
 
 /**
@@ -366,8 +363,6 @@ export interface LoadInventoryFromCliInput {
 export async function loadInventoryFromCli(
   input: LoadInventoryFromCliInput
 ): Promise<OpenCodeInventory> {
-  const run = input.run ?? runOpenCodeCli;
-  const sleep = input.sleep ?? ((ms: number) => delay(ms, input.signal));
   const base = {
     bin: input.bin,
     cwd: input.cwd,
@@ -376,11 +371,11 @@ export async function loadInventoryFromCli(
   };
 
   const runModels = (): Promise<CliCommandResult> =>
-    run({ ...base, args: ["models", "--verbose"], maxOutputBytes: MODELS_MAX_OUTPUT_BYTES });
+    runOpenCodeCli({ ...base, args: ["models", "--verbose"], maxOutputBytes: MODELS_MAX_OUTPUT_BYTES });
   const runAgents = (): Promise<CliCommandResult> =>
-    run({ ...base, args: ["agent", "list"], maxOutputBytes: AGENTS_MAX_OUTPUT_BYTES });
+    runOpenCodeCli({ ...base, args: ["agent", "list"], maxOutputBytes: AGENTS_MAX_OUTPUT_BYTES });
   const runSkills = (): Promise<CliCommandResult> =>
-    run({ ...base, args: ["debug", "skill"], maxOutputBytes: SKILLS_MAX_OUTPUT_BYTES });
+    runOpenCodeCli({ ...base, args: ["debug", "skill"], maxOutputBytes: SKILLS_MAX_OUTPUT_BYTES });
 
   // One at a time: concurrent runs hit the same SQLite file (§4.5).
   let models = await runModels();
@@ -390,7 +385,7 @@ export async function loadInventoryFromCli(
   const failed = (result: CliCommandResult): boolean => result.code !== 0;
   if (failed(models) || failed(agents) || failed(skills)) {
     // A `database is locked` is transient; one retry, still sequential.
-    await sleep(CLI_RETRY_DELAY_MS);
+    await delay(CLI_RETRY_DELAY_MS, input.signal);
     if (failed(models)) {
       models = await runModels();
     }

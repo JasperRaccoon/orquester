@@ -84,12 +84,12 @@ function capUtf8(value: string): string | null {
   return `${value.slice(0, end)}…`;
 }
 /** Tool text output is elided at this many characters. */
-export const SLIM_SUMMARY_ELIDE_CHARS = 84;
-export const SLIM_MAX_CHANGED_FILES = 12;
-export const SLIM_MAX_CHANGED_FILE_DEPTH = 4;
+const SLIM_SUMMARY_ELIDE_CHARS = 84;
+const SLIM_MAX_CHANGED_FILES = 12;
+const SLIM_MAX_CHANGED_FILE_DEPTH = 4;
 
 /** Fields an MCP tool call keeps. *T3: `ActivityPayloadProjection.ts:190-207`.* */
-export const MCP_ITEM_KEPT_FIELDS = [
+const MCP_ITEM_KEPT_FIELDS = [
   "type",
   "id",
   "tool",

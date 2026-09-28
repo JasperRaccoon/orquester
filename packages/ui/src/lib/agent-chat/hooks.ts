@@ -250,8 +250,6 @@ export interface AgentChatDrillInOptions {
    * and the ones the user closed stay closed (`collapsedTurnIds`).
    */
   disclosures?: AgentDrillInDisclosures | null;
-  /** The agent's roster row, where the host already holds it; the thread's own otherwise. */
-  agent?: RuntimeSubagent | null;
   /**
    * The row the drill-in last saw for this agent: read once the roster no
    * longer has one — it keeps 100 rows and evicts the oldest settled ones
@@ -262,7 +260,7 @@ export interface AgentChatDrillInOptions {
 
 /** One drill-in, as {@link useAgentChatDrillIn} projects it. */
 export interface AgentChatDrillInView {
-  /** The agent's row: the override, the roster's, else the one last seen (`drillInAgentRow`). */
+  /** The agent's row: the roster's, else the one last seen (`drillInAgentRow`). */
   agent: RuntimeSubagent | null;
   /**
    * `agent` is the row last seen, not the roster's: its title and kind hold,
@@ -311,7 +309,7 @@ export function useAgentChatDrillIn(
   agentId: string | null,
   options: AgentChatDrillInOptions = {}
 ): AgentChatDrillInView {
-  const { disclosures, agent: agentOverride, lastKnownAgent } = options;
+  const { disclosures, lastKnownAgent } = options;
   const store = useThreadStore(sessionId);
   const entries = useThreadState(store, (state) => state.slice.entries);
   const roster = useThreadState(store, (state) => state.slice.roster);
@@ -337,7 +335,6 @@ export function useAgentChatDrillIn(
     }
     const { row: agent, remembered: agentRemembered } = drillInAgentRow({
       agentId,
-      override: agentOverride,
       roster,
       lastKnown: lastKnownAgent
     });
@@ -365,7 +362,7 @@ export function useAgentChatDrillIn(
       openTurnIds: projection.current.openTurnIds,
       retentionDropped
     };
-  }, [agentId, agentOverride, lastKnownAgent, entries, roster, messageStreaming, disclosures, retentionDropped]);
+  }, [agentId, lastKnownAgent, entries, roster, messageStreaming, disclosures, retentionDropped]);
 }
 
 // ---------------------------------------------------------------------------

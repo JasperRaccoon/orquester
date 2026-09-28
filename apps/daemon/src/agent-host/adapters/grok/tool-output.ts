@@ -25,10 +25,10 @@
 import type { CanonicalRequestType, ToolLifecycleItemType } from "@orquester/api/agent-chat";
 
 /** Bounded output keeps the LAST this-many characters. */
-export const TOOL_CALL_CONTENT_MAX_CHARS = 8_000;
-export const TOOL_CALL_CONTENT_TRUNCATION_MARKER = "[Earlier output truncated]\n\n";
+const TOOL_CALL_CONTENT_MAX_CHARS = 8_000;
+const TOOL_CALL_CONTENT_TRUNCATION_MARKER = "[Earlier output truncated]\n\n";
 /** A byte array in `rawOutput` keeps its last this-many entries. */
-export const TOOL_CALL_RAW_BYTES_MAX = 4_096;
+const TOOL_CALL_RAW_BYTES_MAX = 4_096;
 
 /**
  * `rawOutput` fields holding accumulated TEXT. T3's four, plus the two Grok
@@ -36,7 +36,7 @@ export const TOOL_CALL_RAW_BYTES_MAX = 4_096;
  *
  * *T3: `AcpRuntimeModel.ts:300` — `["content","stdout","stderr","output"]`.*
  */
-export const RAW_OUTPUT_TEXT_FIELDS: readonly string[] = [
+const RAW_OUTPUT_TEXT_FIELDS: readonly string[] = [
   "content",
   "content_concise",
   "stdout",
@@ -49,7 +49,7 @@ export const RAW_OUTPUT_TEXT_FIELDS: readonly string[] = [
 ];
 
 /** Fields holding an accumulated byte array. */
-export const RAW_OUTPUT_BYTE_FIELDS: readonly string[] = ["output", "stdout", "stderr"];
+const RAW_OUTPUT_BYTE_FIELDS: readonly string[] = ["output", "stdout", "stderr"];
 
 /**
  * ≤ the cap passes through unchanged; otherwise keep the **tail** and prepend
@@ -57,7 +57,7 @@ export const RAW_OUTPUT_BYTE_FIELDS: readonly string[] = ["output", "stdout", "s
  * `kind`, so a redrawing progress bar is indistinguishable from real output
  * and the end is the useful part.
  */
-export function boundToolOutputText(text: string): string {
+function boundToolOutputText(text: string): string {
   if (text.length <= TOOL_CALL_CONTENT_MAX_CHARS) {
     return text;
   }
@@ -178,8 +178,8 @@ export function toolContentText(content: unknown): string | undefined {
 // otherwise only when progress grew ≥ 256 chars or 10 updates were skipped")
 // ---------------------------------------------------------------------------
 
-export const TOOL_UPDATE_MIN_GROWTH_CHARS = 256;
-export const TOOL_UPDATE_COALESCE_LIMIT = 10;
+const TOOL_UPDATE_MIN_GROWTH_CHARS = 256;
+const TOOL_UPDATE_COALESCE_LIMIT = 10;
 
 export interface ToolCallSnapshot {
   readonly title?: string;
@@ -198,7 +198,7 @@ export interface CoalesceDecision {
  * By reference, which works only because the bounding helpers preserve
  * identity when nothing changed.
  */
-export function toolOutputUnchanged(previous: ToolCallSnapshot, next: ToolCallSnapshot): boolean {
+function toolOutputUnchanged(previous: ToolCallSnapshot, next: ToolCallSnapshot): boolean {
   return previous.content === next.content && previous.rawOutput === next.rawOutput;
 }
 

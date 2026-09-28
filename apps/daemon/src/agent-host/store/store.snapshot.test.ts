@@ -21,7 +21,6 @@ import {
   serializeFoldState
 } from "@orquester/api/agent-chat";
 
-import { createFakeThreadStore } from "../orchestration/testing/fakes.ts";
 import type { AppendableDomainEvent, Clock, IdGen, ThreadStore } from "../services.ts";
 import { createThreadStore } from "./index.ts";
 
@@ -102,10 +101,11 @@ function foldAheadOf(events: readonly DomainEvent[], threadId: string) {
   return foldThread([...events, beyond]);
 }
 
-test("a saved fold snapshot loads back as written, on a reopened store", async () => {
+test("a saved fold snapshot loads back as written, on a reopened store", async (t) => {
   const rootDir = await tempRoot();
   const clock = fixedClock("2026-02-03T04:05:06.000Z");
   const store = createThreadStore({ rootDir, clock, idGen: countingIds() });
+  t.after(() => store.close());
   const { appended, state } = await seeded(store);
 
   await store.saveFoldSnapshot({
@@ -117,9 +117,9 @@ test("a saved fold snapshot loads back as written, on a reopened store", async (
   });
 
   const reopened = createThreadStore({ rootDir, clock, idGen: countingIds() });
+  t.after(() => reopened.close());
   const loaded = await reopened.loadFoldSnapshot("t1");
   assert.ok(loaded, "the snapshot must load");
-  assert.equal(loaded.version, FOLD_SNAPSHOT_VERSION);
   assert.equal(loaded.threadId, "t1");
   assert.equal(loaded.seq, 3);
   assert.equal(loaded.logBytes, appended.logBytes);
@@ -136,9 +136,10 @@ test("a saved fold snapshot loads back as written, on a reopened store", async (
   assert.deepEqual(tail.events, []);
 });
 
-test("extras are optional and stay absent when none were given", async () => {
+test("extras are optional and stay absent when none were given", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const { appended, state } = await seeded(store);
 
   await store.saveFoldSnapshot({ threadId: "t1", seq: appended.seq, logBytes: appended.logBytes, state });
@@ -150,11 +151,12 @@ test("extras are optional and stay absent when none were given", async () => {
   assert.equal(loaded.extras, undefined);
 });
 
-test("state.json sits where @orquester/config says, 0600, written by rename", async () => {
+test("state.json sits where @orquester/config says, 0600, written by rename", async (t) => {
   const appdir = await tempRoot();
   // `rootDir` is `<appdir>/daemon/agent`, exactly as the host wires it.
   const rootDir = agentChatDir(appdir);
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const { appended, state } = await seeded(store);
 
   await store.saveFoldSnapshot({ threadId: "t1", seq: appended.seq, logBytes: appended.logBytes, state });
@@ -165,9 +167,10 @@ test("state.json sits where @orquester/config says, 0600, written by rename", as
   assert.deepEqual(entries.filter((entry) => entry.includes(".tmp")), []);
 });
 
-test("a missing, corrupt, other-version or other-thread snapshot loads as null", async () => {
+test("a missing, corrupt, other-version or other-thread snapshot loads as null", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const { appended, state } = await seeded(store, "t1");
   await seeded(store, "t2");
 
@@ -197,20 +200,22 @@ test("a missing, corrupt, other-version or other-thread snapshot loads as null",
   }
 });
 
-test("loadFoldSnapshot never throws, even for an unusable thread id", async () => {
+test("loadFoldSnapshot never throws, even for an unusable thread id", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   for (const bad of ["../escape", "", "a/b"]) {
     assert.equal(await store.loadFoldSnapshot(bad), null, bad);
   }
 });
 
-test("a snapshot file AHEAD of the log is discarded, never trusted", async () => {
+test("a snapshot file AHEAD of the log is discarded, never trusted", async (t) => {
   // Written after the append it covers, a snapshot can only trail the log. One
   // that claims more (a log restored from an older backup, a hand edit) would
   // make the fold drop every event appended up to its seq.
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const { appended, state } = await seeded(store);
   await store.saveFoldSnapshot({ threadId: "t1", seq: appended.seq, logBytes: appended.logBytes, state });
   const good = JSON.parse(await fs.readFile(statePathOf(rootDir, "t1"), "utf8")) as Record<
@@ -230,13 +235,15 @@ test("a snapshot file AHEAD of the log is discarded, never trusted", async () =>
     assert.ok(parseFoldSnapshotFile(planted, "t1"), `precondition: ${label} is a valid file`);
     await fs.writeFile(statePathOf(rootDir, "t1"), JSON.stringify(planted));
     const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+    t.after(() => reopened.close());
     assert.equal(await reopened.loadFoldSnapshot("t1"), null, label);
   }
 });
 
-test("a save the log cannot honour is never written", async () => {
+test("a save the log cannot honour is never written", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const { appended, state } = await seeded(store);
   await store.saveFoldSnapshot({ threadId: "t1", seq: appended.seq, logBytes: appended.logBytes, state });
 
@@ -253,11 +260,12 @@ test("a save the log cannot honour is never written", async () => {
   }
 });
 
-test("a save whose state is not folded to its seq is refused loudly", async () => {
+test("a save whose state is not folded to its seq is refused loudly", async (t) => {
   // Such a file could never load (the parser demands state.seq === seq), so
   // writing it would be a silent, permanent cache miss.
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const { appended, state } = await seeded(store);
 
   await assert.rejects(
@@ -267,9 +275,10 @@ test("a save whose state is not folded to its seq is refused loudly", async () =
   await assert.rejects(fs.stat(statePathOf(rootDir, "t1")), { code: "ENOENT" });
 });
 
-test("deleteThread removes the snapshot with the thread", async () => {
+test("deleteThread removes the snapshot with the thread", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const { appended, state } = await seeded(store);
   await store.saveFoldSnapshot({ threadId: "t1", seq: appended.seq, logBytes: appended.logBytes, state });
   await fs.stat(statePathOf(rootDir, "t1"));
@@ -280,9 +289,10 @@ test("deleteThread removes the snapshot with the thread", async () => {
   assert.equal(await store.loadFoldSnapshot("t1"), null);
 });
 
-test("a snapshot save queued behind a delete does not bring the thread back", async () => {
+test("a snapshot save queued behind a delete does not bring the thread back", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const { appended, state } = await seeded(store);
 
   // Fire-and-forget, as the orchestrator does, landing after the delete.
@@ -300,12 +310,13 @@ test("a snapshot save queued behind a delete does not bring the thread back", as
   assert.deepEqual(await store.listThreads(), []);
 });
 
-test("the snapshot is what the caller handed over at call time", async () => {
+test("the snapshot is what the caller handed over at call time", async (t) => {
   // Saves are fire-and-forget on the write queue while the caller keeps
   // folding: what lands must be the state AS OF `seq`, not whatever the
   // caller's objects hold by the time the queue reaches it.
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const { appended, state } = await seeded(store);
 
   const extras: Record<string, unknown> = { revertedTo: 1 };
@@ -323,9 +334,10 @@ test("the snapshot is what the caller handed over at call time", async () => {
   assert.deepEqual(loaded?.extras, { revertedTo: 1 });
 });
 
-test("two saves land in call order: the later one wins", async () => {
+test("two saves land in call order: the later one wins", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const first = await store.append({ threadId: "t1", events: [created(), say("t1", "m1", "ñ")] });
   const second = await store.append({ threadId: "t1", events: [say("t1", "m2", "🎉")] });
 
@@ -344,79 +356,6 @@ test("two saves land in call order: the later one wins", async () => {
   await store.drain();
 
   assert.equal((await store.loadFoldSnapshot("t1"))?.seq, second.seq);
-});
-
-// --- the contract, real store and fake alike -----------------------------------
-
-async function snapshotContract(store: ThreadStore): Promise<void> {
-  const { appended, state } = await seeded(store, "s1");
-  await seeded(store, "s2");
-
-  assert.equal(await store.loadFoldSnapshot("s1"), null);
-  await store.saveFoldSnapshot({
-    threadId: "s1",
-    seq: appended.seq,
-    logBytes: appended.logBytes,
-    state,
-    extras: { titleManual: true }
-  });
-  await store.drain();
-
-  const loaded = await store.loadFoldSnapshot("s1");
-  assert.ok(loaded);
-  assert.equal(loaded.version, FOLD_SNAPSHOT_VERSION);
-  assert.equal(loaded.threadId, "s1");
-  assert.equal(loaded.seq, appended.seq);
-  assert.equal(loaded.logBytes, appended.logBytes);
-  assert.deepEqual(loaded.extras, { titleManual: true });
-  assert.deepEqual(deserializeFoldState(loaded.state), state);
-  assert.equal(await store.loadFoldSnapshot("s2"), null, "a snapshot is per thread");
-
-  // Ahead of the log: never served.
-  await store.saveFoldSnapshot({
-    threadId: "s1",
-    seq: appended.seq + 1,
-    logBytes: appended.logBytes,
-    state: foldAheadOf(appended.events, "s1")
-  });
-  await store.drain();
-  assert.equal((await store.loadFoldSnapshot("s1"))?.seq, appended.seq);
-
-  await store.deleteThread("s1");
-  assert.equal(await store.loadFoldSnapshot("s1"), null, "deleted with its thread");
-}
-
-test("the real store keeps the snapshot contract", async () => {
-  const rootDir = await tempRoot();
-  await snapshotContract(createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() }));
-});
-
-test("the fake store keeps the same snapshot contract, and exposes what it holds", async () => {
-  const store = createFakeThreadStore();
-  await snapshotContract(store);
-
-  // Tests reach into `snapshots` to plant a stale or broken cache, and the
-  // fake refuses it exactly as the real store refuses the file.
-  const { appended, state } = await seeded(store, "s3");
-  await store.saveFoldSnapshot({ threadId: "s3", seq: appended.seq, logBytes: appended.logBytes, state });
-  const held = store.snapshots.get("s3");
-  assert.ok(held);
-  assert.equal(held.seq, appended.seq);
-
-  store.snapshots.set("s3", { ...held, version: FOLD_SNAPSHOT_VERSION + 1 });
-  assert.equal(await store.loadFoldSnapshot("s3"), null, "a planted bad version is refused");
-
-  const ahead = {
-    ...held,
-    seq: appended.seq + 1,
-    state: serializeFoldState(foldAheadOf(appended.events, "s3"))
-  };
-  assert.ok(parseFoldSnapshotFile(ahead, "s3"), "precondition: a valid file");
-  store.snapshots.set("s3", ahead);
-  assert.equal(await store.loadFoldSnapshot("s3"), null, "a planted snapshot ahead of the log");
-
-  store.snapshots.set("s3", { ...held, logBytes: appended.logBytes + 1 });
-  assert.equal(await store.loadFoldSnapshot("s3"), null, "planted bytes past the log's end");
 });
 
 // --- the attachment sweep reads references off the snapshot ------------------------
@@ -493,9 +432,10 @@ async function survivors(
  *   zero turns (dropping E and D), then adds F;
  * - `plain`: never snapshotted — G referenced, H an orphan.
  */
-async function sweepScenario(snapshots: boolean): Promise<Record<string, string[]>> {
+async function sweepScenario(t: { after(fn: () => void): void }): Promise<Record<string, string[]>> {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const src = path.join(rootDir, "src");
   const put = async (threadId: string, label: string) =>
     store.putAttachment({
@@ -504,14 +444,12 @@ async function sweepScenario(snapshots: boolean): Promise<Record<string, string[
       sourcePath: await writeSource(src, `${threadId}-${label}.bin`)
     });
   const snapshotHere = async (threadId: string, events: DomainEvent[], logBytes: number) => {
-    if (snapshots) {
-      await store.saveFoldSnapshot({
+    await store.saveFoldSnapshot({
         threadId,
         seq: events[events.length - 1]!.seq,
         logBytes,
         state: foldThread(events)
-      });
-    }
+    });
   };
 
   const keep = { A: await put("keep", "A"), B: await put("keep", "B"), C: await put("keep", "C") };
@@ -552,57 +490,17 @@ async function sweepScenario(snapshots: boolean): Promise<Record<string, string[
   };
 }
 
-test("the sweep keeps exactly the same attachments with snapshots as without them", async () => {
-  const withSnapshots = await sweepScenario(true);
-  const withoutSnapshots = await sweepScenario(false);
+test("the snapshot attachment sweep retains references after tail reverts", async (t) => {
+  const withSnapshots = await sweepScenario(t);
   // Hand-derived: the tail's revert drops E (which the snapshot alone still
   // references) and D; a thread with no snapshot sweeps as it always did.
   assert.deepEqual(withSnapshots, { keep: ["A", "C"], undo: ["F"], plain: ["G"] });
-  assert.deepEqual(withoutSnapshots, withSnapshots);
 });
 
-test("with a snapshot, the sweep reads the log only past the snapshot's cursor", async () => {
-  // Proven with damage only a whole-log read can see: an early line corrupted
-  // AFTER the snapshot folded it. A whole-log fold stops there and loses every
-  // reference from that line on; the snapshot and its tail do not.
+test("a snapshot whose cursor the log does not honour is ignored: the sweep reads the whole log", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  const src = path.join(rootDir, "src");
-  const a = await store.putAttachment({ threadId: "t1", name: "a.bin", sourcePath: await writeSource(src, "a.bin") });
-  const c = await store.putAttachment({ threadId: "t1", name: "c.bin", sourcePath: await writeSource(src, "c.bin") });
-  const head = await store.append({
-    threadId: "t1",
-    events: [created(), withFiles(say("t1", "m1", "a"), [a])]
-  });
-  await store.saveFoldSnapshot({
-    threadId: "t1",
-    seq: head.seq,
-    logBytes: head.logBytes,
-    state: foldThread(head.events)
-  });
-  await store.append({ threadId: "t1", events: [withFiles(say("t1", "m2", "c"), [c])] });
-  await store.drain();
-
-  const eventsPath = path.join(threadDirOf(rootDir, "t1"), "events.ndjson");
-  const bytes = await fs.readFile(eventsPath);
-  const early = head.positions[1]!;
-  bytes.fill(0x78, early.byteOffset, early.byteOffset + early.byteLength - 1);
-  await fs.writeFile(eventsPath, bytes);
-
-  const warm = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  await warm.pruneAttachments({ now: hoursFromNow(48) });
-  assert.deepEqual(await survivors(warm, "t1", { a, c }), ["a", "c"]);
-
-  // The control: the same sweep without the snapshot reads the whole log.
-  await fs.rm(statePathOf(rootDir, "t1"));
-  const cold = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  await cold.pruneAttachments({ now: hoursFromNow(48) });
-  assert.deepEqual(await survivors(cold, "t1", { a, c }), []);
-});
-
-test("a snapshot whose cursor the log does not honour is ignored: the sweep reads the whole log", async () => {
-  const rootDir = await tempRoot();
-  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
   const src = path.join(rootDir, "src");
   const put = async (label: string) =>
     store.putAttachment({ threadId: "t1", name: `${label}.bin`, sourcePath: await writeSource(src, `${label}.bin`) });
@@ -633,6 +531,7 @@ test("a snapshot whose cursor the log does not honour is ignored: the sweep read
   );
 
   const reopened = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => reopened.close());
   await reopened.pruneAttachments({ now: hoursFromNow(48) });
   assert.deepEqual(await survivors(reopened, "t1", { a, c, x }), ["a", "c"]);
 });

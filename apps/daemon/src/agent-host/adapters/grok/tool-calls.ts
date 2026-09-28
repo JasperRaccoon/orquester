@@ -91,7 +91,7 @@ const TOOL_STATUS_TO_ITEM_STATUS: Record<ToolCallStatus, RuntimeItemStatus> = {
  * from a new call's first one. The bound is memory only: a resend arriving a
  * thousand calls later has never been seen.
  */
-export const FINISHED_CALLS_REMEMBERED = 1_024;
+const FINISHED_CALLS_REMEMBERED = 1_024;
 
 export function isTerminalToolStatus(status: ToolCallStatus | null | undefined): boolean {
   return status === "completed" || status === "failed";

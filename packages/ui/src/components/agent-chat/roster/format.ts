@@ -13,7 +13,6 @@
 import type { RuntimeSubagent } from "@orquester/api/agent-chat";
 import {
   agentActivityText as activityTextFor,
-  isActiveSubagentStatus,
   isLoopOrGoalRow
 } from "../../../lib/agent-chat/roster.logic";
 
@@ -74,9 +73,6 @@ export function formatSubagentTokenCount(totalTokens: number | null | undefined)
   }
   return `${(value / 1_000_000).toFixed(1)}M`;
 }
-
-/** The three in-flight statuses (§7.6: they all present as one "working" look). */
-export const isLiveStatus = isActiveSubagentStatus;
 
 /**
  * The activity line, whose **order flips with status**: a live row leads with

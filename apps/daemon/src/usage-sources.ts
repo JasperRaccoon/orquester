@@ -101,17 +101,14 @@ export function createClaudeSource(opts: {
   userhome: string;
   now: () => number;
   claudeHome?: string;
-  fetchImpl?: typeof fetch;
   logger?: Pick<Console, "warn">;
   /** Persisted state, under `key` (default: in memory only). */
   state?: { store: ClaudeUsageStateStore; key: string };
-  /** Minimum time between two endpoint requests (default {@link CLAUDE_USAGE_MIN_INTERVAL_MS}). */
-  minIntervalMs?: number;
 }): ClaudeUsageSource {
-  const doFetch = opts.fetchImpl ?? fetch;
+  const doFetch = fetch;
   const claudeHome = opts.claudeHome || process.env.CLAUDE_CONFIG_DIR || join(opts.userhome, ".claude");
   const credsFile = join(claudeHome, ".credentials.json");
-  const minIntervalMs = opts.minIntervalMs ?? CLAUDE_USAGE_MIN_INTERVAL_MS;
+  const minIntervalMs = CLAUDE_USAGE_MIN_INTERVAL_MS;
   let record: ClaudeUsageRecord = opts.state?.store.get(opts.state.key) ?? {
     lastGood: null,
     lastFetchAt: 0,
@@ -373,10 +370,9 @@ export function createGrokSource(opts: {
    *  Pass `() => []` when multi-account wiring polls managed homes separately. */
   managedGrokAuthFiles?: () => string[];
   now: () => number;
-  fetchImpl?: typeof fetch;
   logger?: Pick<Console, "warn">;
 }): () => Promise<AgentUsage | null> {
-  const doFetch = opts.fetchImpl ?? fetch;
+  const doFetch = fetch;
   let lastGood: AgentUsage | null = null;
   let backoffUntil = 0;
   // userId resolved from GET /user when the credential file lacks one; keyed by
@@ -599,10 +595,9 @@ export function createCodexSource(opts: {
   userhome: string;
   now: () => number;
   codexHome?: string;
-  fetchImpl?: typeof fetch;
   logger?: Pick<Console, "warn">;
 }): () => Promise<AgentUsage | null> {
-  const doFetch = opts.fetchImpl ?? fetch;
+  const doFetch = fetch;
   const codexHome = opts.codexHome || process.env.CODEX_HOME || join(opts.userhome, ".codex");
   const authFile = join(codexHome, "auth.json");
   let lastGood: AgentUsage | null = null;

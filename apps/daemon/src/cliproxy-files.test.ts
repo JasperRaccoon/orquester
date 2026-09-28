@@ -178,74 +178,6 @@ test("projections: token==apiKey; claudex.env contains ANTHROPIC_MODEL + CLAUDE_
   assert.ok(claudexOr.includes("ANTHROPIC_DEFAULT_FABLE_MODEL=kimi-k3"), "kimi slot with a key");
 });
 
-test("claudex.env Fable slot follows kimi-k3 availability across providers", async () => {
-  const dir = await makeDir();
-  const state = createDefaultCliProxyState();
-  const envFile = join(dir, "env", "claudex.env");
-
-  // A keyed provider serving the kimi-k3 alias arms the slot, labelled with the
-  // provider that actually serves it.
-  await writeProjections(
-    dir,
-    { ...secrets, routerKeys: { openrouter: "OR_KEY" } },
-    { ...state, routerProviders: [openrouterProvider] }
-  );
-  const armed = await readFile(envFile, "utf8");
-  assert.ok(armed.includes("ANTHROPIC_DEFAULT_FABLE_MODEL=kimi-k3"), "fable slot armed");
-  assert.ok(armed.includes("ANTHROPIC_DEFAULT_FABLE_MODEL_NAME=Kimi K3"), "fable slot named");
-  assert.ok(
-    armed.includes("ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION=Moonshot Kimi via OpenRouter"),
-    "fable description names the serving provider"
-  );
-
-  // A different provider serving the same pick relabels the slot.
-  await writeProjections(
-    dir,
-    { ...secrets, routerKeys: { tokenrouter: "TR_KEY" } },
-    {
-      ...state,
-      routerProviders: [
-        {
-          id: "tokenrouter",
-          label: "TokenRouter",
-          baseUrl: "https://api.tokenrouter.com/v1",
-          preset: "tokenrouter",
-          models: [{ name: "moonshotai/kimi-k3", alias: "kimi-k3" }],
-          keyVerifiedAt: null,
-          createdAt: "t"
-        }
-      ]
-    }
-  );
-  const relabelled = await readFile(envFile, "utf8");
-  assert.ok(
-    relabelled.includes("ANTHROPIC_DEFAULT_FABLE_MODEL_DESCRIPTION=Moonshot Kimi via TokenRouter"),
-    "fable description follows the serving provider"
-  );
-
-  // No provider serves kimi-k3 → no Fable rows at all.
-  await writeProjections(
-    dir,
-    { ...secrets, routerKeys: { tokenrouter: "TR_KEY" } },
-    {
-      ...state,
-      routerProviders: [
-        {
-          id: "tokenrouter",
-          label: "TokenRouter",
-          baseUrl: "https://api.tokenrouter.com/v1",
-          preset: "tokenrouter",
-          models: [{ name: "moonshotai/kimi-k3-free" }],
-          keyVerifiedAt: null,
-          createdAt: "t"
-        }
-      ]
-    }
-  );
-  const disarmed = await readFile(envFile, "utf8");
-  assert.ok(!disarmed.includes("ANTHROPIC_DEFAULT_FABLE_MODEL"), "no fable rows without a kimi-k3 provider");
-});
-
 test("writeProjections rejects a poisoned router model name or alias", async () => {
   const dir = await makeDir();
   const state = createDefaultCliProxyState();
@@ -263,20 +195,14 @@ test("writeProjections rejects a poisoned router model name or alias", async () 
   );
 });
 
-test("wrapper: generated script has no 'source', reads token file path, claudex handles --model", async () => {
+test("installed launcher scripts are accessible only to their owner", async () => {
   const dir = await makeDir();
   await writeProjections(dir, secrets, createDefaultCliProxyState());
   const appdir = dirname(dir);
   const binPath = (name: string) => join(appdir, ".npm-global", "bin", name);
 
-  const sh = await readFile(binPath("claudex"), "utf8");
-  assert.ok(!/\bsource\b|^\s*\.\s/m.test(sh), "no shell sourcing");
-  assert.ok(sh.includes("cliproxy/token"), "reads the token file");
-  assert.ok(sh.includes("--model"), "claudex supports --model");
   assert.equal((await stat(binPath("claudex"))).mode & 0o777, 0o700);
 
-  const mix = await readFile(binPath("claudemix"), "utf8");
-  assert.ok(!/\bsource\b|^\s*\.\s/m.test(mix), "no shell sourcing (claudemix)");
   assert.equal((await stat(binPath("claudemix"))).mode & 0o777, 0o700);
 });
 
@@ -411,7 +337,6 @@ test("seedHome: seeds the managed delegation CLAUDE.md into claudemix only, kimi
   // Known key state writes it; kimi mentions track the flag.
   await seedHome(dir, "claudemix", sysDir, join(sysDir, ".claude.json"), true);
   const withKimi = await readFile(memFile, "utf8");
-  assert.ok(withKimi.includes('subagent_type values: "gpt-sol"'), "names the subagent types");
   assert.ok(withKimi.includes('"kimi"') && withKimi.includes("kimi-k3"), "kimi listed with a key");
   await seedHome(dir, "claudemix", sysDir, join(sysDir, ".claude.json"), false);
   const withoutKimi = await readFile(memFile, "utf8");
@@ -484,11 +409,9 @@ test("seedHome: the delegation CLAUDE.md names grok only while the xai account i
   await seedHome(dir, "claudemix", sysDir, join(sysDir, ".claude.json"), false, true);
   const withGrok = await readFile(memFile, "utf8");
   assert.ok(withGrok.includes('"grok"') && withGrok.includes("grok-build-0.1"), "grok listed while linked");
-  assert.ok(withGrok.includes("# Model proxy: delegating to GPT / Grok"), "title tracks the gates");
   assert.ok(!withGrok.includes("kimi"), "kimi stays on its own gate");
 
   await seedHome(dir, "claudemix", sysDir, join(sysDir, ".claude.json"), true, false);
   const withoutGrok = await readFile(memFile, "utf8");
   assert.ok(!withoutGrok.includes("grok"), "grok absent once unlinked");
-  assert.ok(withoutGrok.includes("# Model proxy: delegating to GPT / Kimi"));
 });

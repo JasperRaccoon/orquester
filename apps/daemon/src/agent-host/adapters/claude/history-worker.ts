@@ -18,7 +18,15 @@
 
 import { forkSession, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 
-import { writeAllToStdout as writeAll } from "./stdout-write.ts";
+/** Await pipe flush before allowing the worker to exit. */
+function writeAll(text: string): Promise<void> {
+  return new Promise((resolve, reject) => {
+    process.stdout.write(text, (error) => {
+      if (error) reject(error);
+      else resolve();
+    });
+  });
+}
 
 async function main(): Promise<void> {
   const [method, sessionId, rawArgs] = process.argv.slice(2);

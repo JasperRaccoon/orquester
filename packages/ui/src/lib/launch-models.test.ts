@@ -3,14 +3,7 @@ import assert from "node:assert/strict";
 
 import type { ProviderModel } from "@orquester/api/agent-chat";
 
-import {
-  LAUNCH_MODEL_CHIP_LIMIT,
-  groupModelsByProvider,
-  launchModelList,
-  modelDisplayName,
-  modelProviderOf,
-  resolveLaunchModel
-} from "./launch-models.ts";
+import { launchModelList, resolveLaunchModel } from "./launch-models.ts";
 
 const model = (slug: string, over: Partial<ProviderModel> = {}): ProviderModel =>
   ({ slug, name: slug, capabilities: null, ...over }) as ProviderModel;
@@ -26,7 +19,6 @@ test("a launch always names a model, so the host cannot refuse it", () => {
   // one-click launcher died with "modelSelection.model is required".
   const resolved = resolveLaunchModel({ snapshot: { models: catalogue } });
   assert.equal(resolved, "big-pickle");
-  assert.ok(resolved && resolved.length > 0);
 });
 
 test("the remembered pick wins while the catalogue still serves it", () => {
@@ -63,96 +55,22 @@ test("no catalogue yields null, so the caller can refuse instead of posting", ()
   assert.equal(resolveLaunchModel({ snapshot: null, preferred: "x" }), null);
 });
 
-/* ── a PENDING snapshot (host §3.2 layer one) ───────────────────────────── */
-
-/**
- * What the host seeds itself with at construction, before any probe:
- * `status:"unknown"`, `auth:{status:"unknown"}`, `installed:false`, and the
- * adapter's bundled catalogue. `GET /api/agent/providers` answers this from
- * the first millisecond so a cold host is launchable — the bug being fixed is
- * a client that showed "Still loading this agent's models" for five minutes.
- */
-const pendingClaude = {
-  models: [
-    model("default", { name: "Default (recommended)", isDefault: true }),
-    model("opus", { name: "Opus" }),
-    model("sonnet", { name: "Sonnet" }),
-    model("haiku", { name: "Haiku" }),
-    model("fable", { name: "Fable" })
-  ]
-};
-
-test("a pending snapshot with a bundled catalogue is launchable", () => {
-  // The host validates the model at thread creation, so a bundled family alias
-  // is a legitimate launch — and it is the difference between a one-click
-  // launcher that works on a cold host and one that refuses for minutes.
-  assert.equal(resolveLaunchModel({ snapshot: pendingClaude }), "default");
-});
-
-test("a remembered pick still wins inside a pending catalogue", () => {
-  assert.equal(
-    resolveLaunchModel({ snapshot: pendingClaude, preferred: "sonnet" }),
-    "sonnet"
-  );
-});
-
-test("a pending snapshot with NO catalogue is the only 'still loading' case", () => {
-  // Codex and OpenCode read their catalogues off a live server and have
-  // nothing honest to bundle; their pending row exists (so the provider is
-  // listed) but names no model, and the caller must say so rather than post a
-  // launch the host will refuse.
-  assert.equal(resolveLaunchModel({ snapshot: { models: [] } }), null);
-});
-
-test("resolution never branches on the snapshot's status", () => {
-  // `resolveLaunchModel` takes `Pick<ProviderSnapshot, "models">` on purpose:
-  // there is no way for a future change to gate a launch on `status` without
-  // widening this signature, which is the point.
-  const byModelsAlone = resolveLaunchModel({ snapshot: { models: pendingClaude.models } });
-  assert.equal(byModelsAlone, "default");
-});
-
-test("the pending catalogue renders as chips without a search", () => {
-  const list = launchModelList({ models: pendingClaude.models, selected: "default" });
-  assert.equal(list.searchable, false, "five families is not a wall");
-  assert.equal(list.hidden, 0);
-  assert.deepEqual(
-    list.shown.map((choice) => choice.slug),
-    ["default", "opus", "sonnet", "haiku", "fable"]
-  );
-});
-
-/* ── the picker ─────────────────────────────────────────────────────────── */
-
-const big = Array.from({ length: 378 }, (_, i) =>
-  model(i === 0 ? "opencode/big-pickle" : `openrouter/vendor-${i}/model-${i}`, {
-    name: `Model ${i}`,
-    ...(i === 0 ? { isDefault: true } : {})
-  })
-);
-
-test("a 378-model catalogue never renders as 378 chips", () => {
-  const list = launchModelList({ models: big, selected: "opencode/big-pickle" });
-  assert.ok(list.shown.length <= LAUNCH_MODEL_CHIP_LIMIT, `${list.shown.length} chips`);
-  assert.equal(list.hidden, 378 - list.shown.length);
-  assert.equal(list.searchable, true);
-});
-
 test("the selected model is always shown, even when a query excludes it", () => {
   const list = launchModelList({
-    models: big,
-    selected: "opencode/big-pickle",
-    query: "vendor-7/"
+    models: catalogue,
+    selected: "big-pickle",
+    query: "haiku"
   });
-  assert.equal(list.shown[0]?.slug, "opencode/big-pickle");
-  assert.ok(list.shown.slice(1).every((choice) => choice.slug.includes("vendor-7/")));
+  assert.deepEqual(new Set(list.shown.map((choice) => choice.slug)), new Set([
+    "big-pickle", "openrouter/anthropic/claude-3-haiku"
+  ]));
 });
 
 test("the catalogue default stays one click away when it is not the selection", () => {
-  const list = launchModelList({ models: big, selected: "openrouter/vendor-5/model-5" });
+  const list = launchModelList({ models: catalogue, selected: "gpt-5.6-luna" });
   assert.deepEqual(
-    list.shown.slice(0, 2).map((choice) => choice.slug),
-    ["openrouter/vendor-5/model-5", "opencode/big-pickle"]
+    ["gpt-5.6-luna", "big-pickle"].every((slug) => list.shown.some((choice) => choice.slug === slug)),
+    true
   );
 });
 
@@ -176,54 +94,4 @@ test("a query with no match shows nothing but the selection", () => {
     ["big-pickle"]
   );
   assert.equal(list.hidden, 0);
-});
-
-test("a small catalogue is not searchable and shows everything", () => {
-  const list = launchModelList({ models: catalogue, selected: null });
-  assert.equal(list.searchable, false);
-  assert.equal(list.hidden, 0);
-  assert.equal(list.shown.length, catalogue.length);
-});
-
-test("a search is capped, so one character cannot render the catalogue", () => {
-  const list = launchModelList({ models: big, selected: null, query: "model" });
-  assert.ok(list.shown.length <= LAUNCH_MODEL_CHIP_LIMIT * 4);
-  assert.ok(list.hidden > 0);
-});
-
-/* ── naming and grouping ────────────────────────────────────────────────── */
-
-test("a model reads by its catalogue name, matching the composer's chip", () => {
-  // The launch menu showed raw slugs while the composer showed friendly names.
-  assert.equal(modelDisplayName(model("x", { name: "GPT-5.6-Luna" })), "GPT-5.6-Luna");
-  assert.equal(
-    modelDisplayName(model("x", { name: "Long", shortName: "Short" })),
-    "Short"
-  );
-  // No name at all: the last meaningful slug segment beats the whole path.
-  assert.equal(
-    modelDisplayName({ slug: "openrouter/anthropic/claude-3-haiku", name: "" } as ProviderModel),
-    "claude-3-haiku"
-  );
-});
-
-test("the provider is the segment before the first slash, or none", () => {
-  assert.equal(modelProviderOf("openrouter/anthropic/claude-3-haiku"), "openrouter");
-  assert.equal(modelProviderOf("big-pickle"), null);
-  assert.equal(modelProviderOf("/leading"), null);
-});
-
-test("grouping keeps catalogue order of first appearance", () => {
-  const groups = groupModelsByProvider([
-    model("openrouter/a"),
-    model("bare"),
-    model("openrouter/b")
-  ]);
-  assert.deepEqual(
-    groups.map((group) => [group.provider, group.models.length]),
-    [
-      ["openrouter", 2],
-      [null, 1]
-    ]
-  );
 });

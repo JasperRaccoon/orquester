@@ -59,7 +59,7 @@ type Row<K extends AgentChatTimelineRow["kind"]> = Extract<AgentChatTimelineRow,
  * reading as a list of *things* rather than a list of stripes.
  * *T3: `MessagesTimeline.tsx:3158-3226`.*
  */
-export function LiveActivityLine({
+function LiveActivityLine({
   label,
   iconName,
   live = false,
@@ -291,7 +291,7 @@ function IdentityNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactEleme
 // The tool row
 // ---------------------------------------------------------------------------
 
-export const ToolEntryRow = React.memo(function ToolEntryRow({
+const ToolEntryRow = React.memo(function ToolEntryRow({
   entry,
   insideExpandedGroup = false,
   displayLabel
@@ -767,7 +767,7 @@ const MEMBER_STATUS_LABEL: Record<RuntimeSubagent["status"], string> = {
  * render time**. Persisting a count here would go stale the moment a member
  * finished (§7.6).
  */
-export const AgentSpawnRow = React.memo(function AgentSpawnRow({
+const AgentSpawnRow = React.memo(function AgentSpawnRow({
   entry,
   active
 }: {

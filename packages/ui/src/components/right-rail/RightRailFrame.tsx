@@ -6,7 +6,6 @@ import { useCurrentContext, type TabContext } from "../../store/app";
 import { RightRail } from "./RightRail";
 import { RightRailDock } from "./RightRailDock";
 import { MobileSectionOverlay } from "./MobileSections";
-import type { RightRailPanelRegistry } from "./panels";
 import { toggleRightRailPanel, useRightRailState } from "./right-rail-state";
 import { SavedPromptEditorHost } from "./saved-prompts/SavedPromptEditorHost";
 import type { RightRailPanelId } from "./types";
@@ -15,7 +14,7 @@ import type { RightRailPanelId } from "./types";
  * The open project's directory, or `null`: the landing view (nothing open) and
  * a workspace's to-do context have no project.
  */
-export function openProjectPathOf(ctx: TabContext | null): string | null {
+function openProjectPathOf(ctx: TabContext | null): string | null {
   return ctx?.kind === "project" ? ctx.project.path : null;
 }
 
@@ -33,8 +32,6 @@ export interface RightRailRowProps {
   open: RightRailPanelId | null;
   /** The dock's stored width (px). */
   width: number;
-  /** The panels by id (the real ones unless a check passes fakes). */
-  panels?: RightRailPanelRegistry;
   /**
    * Drawn over the tab content (the row is its containing block): a phone's
    * section, full screen (`MobileSections.tsx`).
@@ -64,7 +61,6 @@ export const RightRailRow: React.FC<RightRailRowProps> = ({
   projectPath,
   open,
   width,
-  panels,
   overlay,
   isolateContent = false
 }) => {
@@ -85,11 +81,10 @@ export const RightRailRow: React.FC<RightRailRowProps> = ({
           projectPath={projectPath}
           width={width}
           rowRef={rowRef}
-          panels={panels}
         />
       ) : null}
       {projectPath !== null ? (
-        <RightRail open={open} onToggle={toggleRightRailPanel} panels={panels} />
+        <RightRail open={open} onToggle={toggleRightRailPanel} />
       ) : null}
     </div>
   );

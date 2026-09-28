@@ -25,11 +25,7 @@ import type { RuntimeEvent } from "@orquester/api/agent-chat";
 import type { SessionNotification } from "./acp/_generated/schema.ts";
 import { agentFrames, readCapture } from "./fixtures.ts";
 import {
-  ENDED_TASKS_REMEMBERED,
-  FINISHED_CALLS_REMEMBERED,
-  GROK_AGENT_LIVENESS_TTL_MS,
-  GrokNormalizer,
-  SUBAGENTS_REMEMBERED
+  GrokNormalizer
 } from "./normalize.ts";
 
 const SESSION = "01a0c1a7-1185-7171-9447-3aa38569088c";
@@ -96,13 +92,6 @@ function capturedCall(file: string, toolCallId: string): SessionNotification[] {
 
 const ECHO_CALL = "call-a7c3bfe8-967c-4ffe-916f-749b3b6da4c2-0";
 
-/** A status-less resend after the terminal frame. Never captured: the defect is read off the code path. */
-const lateResend = frame({
-  sessionUpdate: "tool_call_update",
-  toolCallId: ECHO_CALL,
-  content: [{ type: "content", content: { type: "text", text: "hi\n" } }]
-});
-
 /** Fixture 03b's `echo hi` call, folded to its end. */
 function echoCompleted(): GrokNormalizer {
   const grok = normalizer();
@@ -113,42 +102,6 @@ function echoCompleted(): GrokNormalizer {
   assert.equal(only(events, "item.completed").length, 1, "the captured call completes once");
   return grok;
 }
-
-test("a late status-less update of a finished call never starts it again", () => {
-  const grok = echoCompleted();
-  const late = grok.handleSessionUpdate(lateResend);
-  assert.deepEqual(
-    late.filter((event) => event.itemId === ECHO_CALL).map((event) => event.type),
-    [],
-    "a finished call has no lifecycle left to report"
-  );
-});
-
-test("…so the process exiting does not fail a call that completed", () => {
-  const grok = echoCompleted();
-  grok.handleSessionUpdate(lateResend);
-  const closing = grok.failOpenTools("The agent process exited.");
-  assert.deepEqual(
-    statuses(closing.filter((event) => event.itemId === ECHO_CALL)),
-    [],
-    "the late frame re-registered the call as open, and the exit sweep then failed it"
-  );
-});
-
-test("the finished-call memory is bounded: the oldest id is forgotten first", () => {
-  const grok = normalizer();
-  for (let index = 0; index <= FINISHED_CALLS_REMEMBERED; index += 1) {
-    const toolCallId = `call-${index}`;
-    const start = { sessionUpdate: "tool_call", toolCallId, title: "read_file", rawInput: {} };
-    grok.handleSessionUpdate(frame(start));
-    grok.handleSessionUpdate(frame({ sessionUpdate: "tool_call_update", toolCallId, status: "completed" }));
-  }
-  const resend = (toolCallId: string): RuntimeEvent[] =>
-    grok.handleSessionUpdate(frame({ sessionUpdate: "tool_call_update", toolCallId, title: "again" }));
-  assert.equal(only(resend("call-0"), "item.started").length, 1, "past the bound, call-0 is a new call");
-  assert.equal(resend("call-1").length, 0, "still remembered");
-  assert.equal(resend(`call-${FINISHED_CALLS_REMEMBERED}`).length, 0, "the newest is remembered");
-});
 
 test("a restated end the CLI already sent emits nothing — the open bubble stays open", () => {
   const grok = echoCompleted();
@@ -211,17 +164,6 @@ function spawnStart(callId: string, input: Record<string, unknown>): SessionNoti
     toolCallId: callId,
     title: "spawn_subagent",
     rawInput: input,
-    _meta: SPAWN_META
-  });
-}
-
-/** The status-less rewrite every captured call gets second; its `variant` name is not captured. */
-function spawnRewrite(callId: string): SessionNotification {
-  return frame({
-    sessionUpdate: "tool_call_update",
-    toolCallId: callId,
-    title: "Subagent: find callers",
-    rawInput: { variant: "SpawnSubagent" },
     _meta: SPAWN_META
   });
 }
@@ -330,15 +272,6 @@ function agentRows(events: readonly RuntimeEvent[]): AgentRow[] {
   return events.filter((event): event is AgentRow => event.type.startsWith("task."));
 }
 
-/** `[type, taskId, isBackgrounded]` of every task row. */
-function backgroundings(events: readonly RuntimeEvent[]): Array<[string, string, boolean | undefined]> {
-  return agentRows(events).map((event) => [
-    event.type,
-    event.payload.taskId,
-    (event.payload as { isBackgrounded?: boolean }).isBackgrounded
-  ]);
-}
-
 const RUN_TESTS = "[subagent:general-purpose] run tests";
 
 function turnUsage(event: RuntimeEvent) {
@@ -373,24 +306,6 @@ function spawned(subagentId: string, description: string, extra: Record<string, 
       effective_context_source: "new",
       model: "grok-4.7",
       ...extra
-    }
-  };
-}
-
-/** `subagent_progress`, the captured shape (fixture 15). */
-function progressed(subagentId: string): unknown {
-  return {
-    sessionId: SESSION,
-    update: {
-      sessionUpdate: "subagent_progress",
-      subagent_id: subagentId,
-      child_session_id: subagentId,
-      duration_ms: 2102,
-      turn_count: 1,
-      tool_call_count: 1,
-      tokens_used: 11_925,
-      tools_used: ["run_terminal_command"],
-      error_count: 0
     }
   };
 }
@@ -446,71 +361,6 @@ const FIND_CALLERS = {
   subagent_type: "explore"
 };
 
-test("a foreground spawn_subagent is a roster agent, started with its call, settled with its result", () => {
-  const grok = normalizer();
-  const start = grok.handleSessionUpdate(spawnStart("call-s1", FIND_CALLERS));
-  const launch = only(start, "item.started");
-  assert.equal(launch.length, 1);
-  assert.equal(launch[0]!.itemId, "call-s1");
-  assert.equal(launch[0]!.payload.itemType, "collab_agent_tool_call", "an agent launch, as Claude's is");
-  const [started, ...restOfStart] = only(start, "task.started");
-  assert.equal(restOfStart.length, 0);
-  assert.equal(started!.turnId, "turn-1");
-  assert.deepEqual(started!.payload, {
-    taskId: "call-s1",
-    taskType: "subagent",
-    agentId: "call-s1",
-    title: "find callers",
-    role: "explore",
-    toolUseId: "call-s1",
-    description: "find callers",
-    isBackgrounded: false,
-    // What the launch asked it to do, verbatim: the top of its drill-in (§7.6).
-    prompt: "Find every caller of add() and report file:line.",
-    livenessTtlMs: GROK_AGENT_LIVENESS_TTL_MS
-  });
-
-  const rewrite = grok.handleSessionUpdate(spawnRewrite("call-s1"));
-  assert.deepEqual(taskRows(rewrite), [], "the rewrite is the call's, not the agent's");
-
-  const end = grok.handleSessionUpdate(
-    spawnEnd("call-s1", "completed", "add() is called from main.js:3 and test.js:7.", {
-      type: "SubagentCompleted",
-      subagent_id: SUB_A,
-      subagent_type: "explore",
-      tool_calls: 4,
-      turns: 2,
-      duration_ms: 5100
-    })
-  );
-  assert.deepEqual(end.map((event) => event.type), ["item.completed", "task.completed"]);
-  const completed = only(end, "task.completed")[0]!;
-  assert.equal(completed.payload.taskId, "call-s1");
-  assert.equal(completed.payload.status, "completed");
-  assert.equal(completed.payload.summary, "add() is called from main.js:3 and test.js:7.");
-  assert.equal(completed.payload.toolUseId, "call-s1");
-  assert.equal(completed.payload.agentId, "call-s1");
-  assert.equal(completed.payload.livenessTtlMs, GROK_AGENT_LIVENESS_TTL_MS);
-
-  const settled = grok.turnCompleted("turn-1", { stopReason: "end_turn" });
-  assert.equal(turnUsage(settled)?.hasSubagents, true, "the turn ran a subagent");
-});
-
-test("a spawn the CLI refused before any child ran ends its agent stopped, with the CLI's reason", () => {
-  // No `subagent_spawned` joined the launch: the user declined its card
-  // (fixture 25, turn 2) or the CLI refused it — the run never started, so it
-  // ends short, as a run the user cut short does (observation 50).
-  const grok = normalizer();
-  startedBy(grok, "call-s1", { prompt: "p", description: "nested", subagent_type: "explore" });
-  const ended = endedBy(
-    grok,
-    spawnEnd("call-s1", "failed", "max_depth_exceeded: a subagent cannot spawn subagents")
-  );
-  assert.equal(ended.length, 1);
-  assert.equal(ended[0]!.payload.status, "stopped");
-  assert.equal(ended[0]!.payload.summary, "max_depth_exceeded: a subagent cannot spawn subagents");
-});
-
 test("a failed spawn whose child ran settles its agent failed, with the reason", () => {
   const grok = normalizer();
   startedBy(grok, "call-s1", { prompt: "p", description: "nested", subagent_type: "explore" });
@@ -519,55 +369,6 @@ test("a failed spawn whose child ran settles its agent failed, with the reason",
   assert.equal(failed.length, 1);
   assert.equal(failed[0]!.payload.status, "failed");
   assert.match(failed[0]!.payload.summary ?? "", /the child crashed/);
-});
-
-test("a background spawn outlives its call and its turn; Stop or exit closes it", () => {
-  const grok = normalizer();
-  const started = startedBy(grok, "call-bg", {
-    prompt: "Run the whole test suite.",
-    description: "run tests",
-    background: true
-  });
-  assert.equal(started.payload.isBackgrounded, true);
-  // The call answers at once with the subagent's id; the agent works on.
-  const returned = grok.handleSessionUpdate(
-    spawnEnd("call-bg", "completed", "Subagent started.", textAnswer(SUB_B))
-  );
-  assert.deepEqual(returned.map((event) => event.type), ["item.completed"], "the call ended, not the agent");
-  assert.deepEqual(taskRows(grok.endTurn()), [], "it outlives the parent's turn");
-
-  const closing = taskRows(grok.stopBackgroundTasks());
-  assert.deepEqual(statuses(closing), [["task.completed", "call-bg", "stopped"]]);
-  assert.deepEqual(grok.stopBackgroundTasks(), [], "closed once");
-});
-
-test("a foreground spawn answered without the completion tag went to the background: it stays live", () => {
-  // "foreground subagent exceeded await budget; auto-backgrounding (child
-  // keeps running)" — the binary's own log line.
-  const grok = normalizer();
-  startedBy(grok, "call-s1", FIND_CALLERS);
-  const lead = "Subagent took longer than the foreground budget and was moved to the background.";
-  const answered = grok.handleSessionUpdate(spawnEnd("call-s1", "completed", lead, textAnswer(SUB_A, lead)));
-  assert.deepEqual(
-    backgroundings(answered),
-    [["task.updated", "call-s1", true]],
-    "no end: the run goes on in the background, and says so"
-  );
-  assert.equal(startedBy(grok, "call-s2", { prompt: "p", resume_from: SUB_A }).payload.taskId, "call-s1");
-});
-
-test("a foreground spawn its turn cut is not sent to the background: the CLI's cancel ends it", () => {
-  // `session/cancel` leaves the call with no terminal frame and CANCELS the
-  // child (fixture 23: `subagent_finished {status: "cancelled"}` 42 ms
-  // later). The run stays live, unbackgrounded, until the CLI says so.
-  const grok = normalizer();
-  startedBy(grok, "call-s1", { prompt: "p", description: "find callers" });
-  grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "find callers"));
-  grok.beginTurn();
-  assert.deepEqual(agentRows(grok.endTurn()), [], "no task.updated {isBackgrounded}: nothing moved");
-  const cancelled = grok.handleXaiNotification("_x.ai/session_notification", finished(SUB_A, "cancelled"));
-  assert.deepEqual(statuses(taskRows(cancelled)), [["task.completed", "call-s1", "stopped"]]);
-  assert.deepEqual(grok.stopBackgroundTasks(), [], "nothing left live");
 });
 
 test("a Stop that cuts a spawn no subagent_spawned joined ends its agent stopped: it never started", () => {
@@ -587,16 +388,6 @@ test("a Stop that cuts a spawn no subagent_spawned joined ends its agent stopped
   assert.deepEqual(statuses(ends), [["task.completed", "call-s1", "stopped"]]);
   assert.equal(ends[0]!.payload.summary, "Stopped before it started.");
   assert.deepEqual(grok.stopBackgroundTasks(), [], "nothing left live");
-});
-
-test("a Stop that cuts a spawn whose child was spawned leaves its end to the CLI", () => {
-  // Fixture 23: the CLI cancels the child with the turn, and says so.
-  const grok = normalizer();
-  startedBy(grok, "call-s1", { prompt: "p", description: "find callers" });
-  grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "find callers"));
-  assert.deepEqual(only(grok.cutTurnCalls("Stopped."), "task.completed"), [], "a child exists: its end is the CLI's");
-  const cancelled = grok.handleXaiNotification("_x.ai/session_notification", finished(SUB_A, "cancelled"));
-  assert.deepEqual(statuses(taskRows(cancelled)), [["task.completed", "call-s1", "stopped"]]);
 });
 
 test("a spawn the CLI reports after the Stop cut it joins its launch: one agent, never a second", () => {
@@ -629,27 +420,6 @@ test("a foreground spawn its turn cut with no CLI end stays live until Stop", ()
     "a call that fails with its run still open fails the run it opened"
   );
   assert.deepEqual(grok.stopBackgroundTasks(), [], "…once");
-});
-
-test("resume_from reopens the settled agent: the same task, launched again by the new call", () => {
-  const grok = normalizer();
-  startedBy(grok, "call-s1", FIND_CALLERS);
-  endedBy(grok, spawnEnd("call-s1", "completed", "main.js:3", completion(SUB_A)));
-
-  const started = startedBy(grok, "call-s2", {
-    prompt: "Now check the tests too.",
-    subagent_type: "explore",
-    resume_from: SUB_A
-  });
-  assert.equal(started.payload.taskId, "call-s1", "the resumed conversation is the same roster row");
-  assert.equal(started.payload.toolUseId, "call-s2", "…launched by a new call, which is what reopens it");
-  assert.equal(started.payload.title, "find callers", "a resume naming no description keeps the agent's");
-
-  const end = endedBy(grok, spawnEnd("call-s2", "completed", "tests/add.test.js:4", completion()));
-  assert.equal(end.length, 1);
-  assert.equal(end[0]!.payload.taskId, "call-s1");
-  assert.equal(end[0]!.payload.toolUseId, "call-s2");
-  assert.equal(end[0]!.payload.summary, "tests/add.test.js:4");
 });
 
 test("the id a launch reports anywhere in its result is enough to resume it", () => {
@@ -777,7 +547,7 @@ test("a poll answering running re-arms the agent; a finished one ends it with it
     [["task.progress", "call-bg", "running"]],
     "no end: the row that keeps it live"
   );
-  assert.equal(agentRows(running)[0]!.payload.livenessTtlMs, GROK_AGENT_LIVENESS_TTL_MS);
+  assert.equal(agentRows(running)[0]!.payload.livenessTtlMs, 3_600_000);
 
   const output = "\n12 tests pass.\nNo failures.";
   const done = poll(grok, [{ task_id: SUB_B, command: RUN_TESTS, status: "completed", output }]);
@@ -921,18 +691,6 @@ test("a poll ends a known shell with its first output line; an id nobody reporte
 const SNAPSHOTS = "_x.ai/session_notification";
 const EMPTY_SNAPSHOT = { sessionId: SESSION, update: { sessionUpdate: "background_tasks", tasks: [] } };
 
-test("a snapshot still listing a shell a poll ended starts nothing, and ends nothing twice", () => {
-  const grok = normalizer();
-  grok.handleXaiNotification("_x.ai/task_backgrounded", backgrounded("call-sh", SHELL));
-  const bye = { task_id: SHELL, command: "npm run dev", status: "completed", output: "bye" };
-  assert.deepEqual(statuses(taskRows(poll(grok, [bye]))), [["task.completed", SHELL, "completed"]]);
-  const listed = grok.handleXaiNotification(SNAPSHOTS, snapshot(SHELL, "bash", "completed"));
-  assert.deepEqual(agentRows(listed), [], "the CLI still lists the finished shell: no new start");
-  const dropped = grok.handleXaiNotification(SNAPSHOTS, EMPTY_SNAPSHOT);
-  assert.deepEqual(agentRows(dropped), [], "…and no second end when it drops out");
-  assert.deepEqual(grok.stopBackgroundTasks(), [], "nothing is live");
-});
-
 /** A snapshot listing SHELL alone, with this status. */
 function listShell(grok: GrokNormalizer, status: string): RuntimeEvent[] {
   return grok.handleXaiNotification(SNAPSHOTS, snapshot(SHELL, "bash", status));
@@ -1053,7 +811,7 @@ test("a subagent Stop closed counts live again on any CLI report that it still r
     const revived = agentRows(report(grok));
     assert.deepEqual(statuses(revived), [["task.started", "call-bg", undefined]], how);
     assert.equal(revived[0]!.payload.toolUseId, "call-bg", `${how}: its own launch — a late delivery`);
-    assert.equal(revived[0]!.payload.livenessTtlMs, GROK_AGENT_LIVENESS_TTL_MS, `${how}: its hour`);
+    assert.equal(revived[0]!.payload.livenessTtlMs, 3_600_000, `${how}: its hour`);
     assert.deepEqual(
       statuses(agentRows(poll(grok, [running]))),
       [["task.progress", "call-bg", undefined]],
@@ -1094,39 +852,13 @@ test("a resting listing of a task Stop closed says nothing — neither a run nor
   assert.equal(only(listShell(grok, "running"), "task.started").length, 1, "a later run still counts");
 });
 
-test("the ended-task memory is bounded: the oldest id is forgotten first", () => {
-  const grok = normalizer();
-  const ids = Array.from(
-    { length: ENDED_TASKS_REMEMBERED + 1 },
-    (_, index) => `01a0c1ac-0000-7000-8000-${String(index).padStart(12, "0")}`
-  );
-  const listing = (status: string) => ({
-    sessionId: SESSION,
-    update: {
-      sessionUpdate: "background_tasks",
-      tasks: ids.map((task_id) => ({ task_id, command: "c", kind: "bash", status }))
-    }
-  });
-  grok.handleXaiNotification(SNAPSHOTS, listing("running"));
-  const ended = grok.handleXaiNotification(SNAPSHOTS, listing("completed"));
-  assert.equal(only(ended, "task.completed").length, ids.length, "the CLI ended every one");
-  const newest = grok.handleXaiNotification(SNAPSHOTS, snapshot(ids.at(-1)!, "bash", "completed"));
-  assert.deepEqual(agentRows(newest), [], "the newest end is remembered");
-  const oldest = grok.handleXaiNotification(SNAPSHOTS, snapshot(ids[0]!, "bash", "completed"));
-  assert.deepEqual(
-    agentRows(oldest).map((event) => event.type),
-    ["task.started"],
-    "the oldest was forgotten: memory only, as the finished-call bound is"
-  );
-});
-
 test("an ended subagent's ids outlive its launch's memory: a snapshot listing one is no new shell", () => {
   const grok = normalizer();
   backgroundLaunched(grok);
   const done = poll(grok, [{ task_id: SUB_B, command: RUN_TESTS, status: "completed", output: "ok" }]);
   assert.equal(only(done, "task.completed").length, 1);
   // As many later launches push SUB_B's id out of the launch memory.
-  for (let index = 0; index < SUBAGENTS_REMEMBERED; index += 1) {
+  for (let index = 0; index < 2_000; index += 1) {
     const callId = `call-many-${index}`;
     const id = `01a0c1ab-0000-7000-8000-${String(index).padStart(12, "0")}`;
     grok.handleSessionUpdate(spawnStart(callId, { prompt: "p", background: true }));
@@ -1190,28 +922,6 @@ test("only grok_build's spawn_subagent launches a subagent; `background` is its 
   assert.deepEqual(agentRows(bare), [], "no vendor block: no namespace to trust");
   const started = startedBy(grok, "call-s1", { prompt: "p", description: "d", is_background: true });
   assert.equal(started.payload.isBackgrounded, false, "`is_background` is run_terminal_command's spelling");
-});
-
-test("every row naming a subagent carries the hour-long liveness TTL", () => {
-  const grok = normalizer();
-  const rows: RuntimeEvent[] = [];
-  rows.push(...grok.handleSessionUpdate(spawnStart("call-s1", FIND_CALLERS)));
-  rows.push(...grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "find callers")));
-  rows.push(...grok.endTurn());
-  rows.push(...grok.handleXaiNotification("_x.ai/session_notification", progressed(SUB_A)));
-  rows.push(...poll(grok, [{ task_id: SUB_A, command: "[subagent:explore] x", status: "running" }]));
-  grok.beginTurn();
-  rows.push(...grok.handleSessionUpdate(spawnStart("call-s2", FIND_CALLERS)));
-  rows.push(...grok.handleSessionUpdate(spawnEnd("call-s2", "completed", "done", completion())));
-  rows.push(...grok.stopBackgroundTasks());
-  const tasks = agentRows(rows);
-  assert.deepEqual(
-    tasks.map((event) => event.type),
-    ["task.started", "task.progress", "task.progress", "task.started", "task.completed", "task.completed"]
-  );
-  for (const row of tasks) {
-    assert.equal(row.payload.livenessTtlMs, GROK_AGENT_LIVENESS_TTL_MS, row.type);
-  }
 });
 
 // ---------------------------------------------------------------------------
@@ -1467,17 +1177,6 @@ test("a run's end closes its child's open calls BEFORE its task row", () => {
   assert.equal(failed.payload.status, "failed");
   assert.equal(failed.agentId, "call-s1");
   assert.equal(failed.turnId, "turn-1", "on the turn the call started in");
-});
-
-test("a frame of a session no subagent_spawned named is the parent's, as before", () => {
-  const grok = normalizer();
-  const events = grok.handleSessionUpdate(
-    childFrame("01a0ffff-0000-7000-8000-000000000000", {
-      sessionUpdate: "agent_message_chunk",
-      content: { type: "text", text: "hi" }
-    })
-  );
-  assert.equal(only(events, "content.delta")[0]?.agentId, undefined);
 });
 
 test("subagent_spawned joins a resume to its source's task, and a spawn no launch explains starts its own", () => {

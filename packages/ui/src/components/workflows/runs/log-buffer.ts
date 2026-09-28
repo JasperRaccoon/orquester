@@ -33,7 +33,7 @@ const SHORT_ESC = /\u001b[ -/]*[0-~]/g;
 const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001a\u001c-\u001f\u007f]/g;
 
 /** Text without ANSI escape sequences or stray control characters (tabs, newlines and CRs stay). */
-export function stripAnsi(text: string): string {
+function stripAnsi(text: string): string {
   if (!/[\u001b\u009b\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(text)) return text;
   return text.replace(OSC, "").replace(DCS, "").replace(CSI, "").replace(SHORT_ESC, "").replace(CONTROL, "");
 }
@@ -43,7 +43,7 @@ export function stripAnsi(text: string): string {
  * chunk completes it. Returns `[complete, carry]`. A carry longer than 256
  * characters is not an escape we will ever complete: it is let through.
  */
-export function splitIncompleteEscape(text: string): [string, string] {
+function splitIncompleteEscape(text: string): [string, string] {
   const at = text.lastIndexOf("\u001b");
   if (at < 0 || text.length - at > 256) return [text, ""];
   const tail = text.slice(at);
@@ -56,7 +56,7 @@ export function splitIncompleteEscape(text: string): [string, string] {
 }
 
 /** A line as a terminal leaves it: what follows the last carriage return wins. */
-export function applyCarriageReturns(line: string): string {
+function applyCarriageReturns(line: string): string {
   const at = line.lastIndexOf("\r");
   if (at < 0) return line;
   if (at === line.length - 1) {
@@ -83,29 +83,15 @@ export interface LogBufferState {
   carry: string;
   /** Lines dropped off the top to stay within `maxLines`. */
   dropped: number;
-  /** UTF-8 bytes received so far (the offset to resume a stream from). */
-  bytes: number;
 }
 
-export const EMPTY_LOG: LogBufferState = { lines: [], partial: "", carry: "", dropped: 0, bytes: 0 };
-
-export interface LogLimits {
-  maxLines?: number;
-  maxLineChars?: number;
-}
-
-const encoder = typeof TextEncoder === "function" ? new TextEncoder() : null;
-
-/** UTF-8 length of a decoded chunk. */
-export function utf8Length(text: string): number {
-  return encoder ? encoder.encode(text).length : text.length;
-}
+export const EMPTY_LOG: LogBufferState = { lines: [], partial: "", carry: "", dropped: 0 };
 
 /** `state` with `chunk` appended. */
-export function appendLog(state: LogBufferState, chunk: string, limits: LogLimits = {}): LogBufferState {
+export function appendLog(state: LogBufferState, chunk: string): LogBufferState {
   if (chunk.length === 0) return state;
-  const maxLines = Math.max(1, limits.maxLines ?? LOG_MAX_LINES);
-  const maxChars = Math.max(16, limits.maxLineChars ?? LOG_MAX_LINE_CHARS);
+  const maxLines = LOG_MAX_LINES;
+  const maxChars = LOG_MAX_LINE_CHARS;
   const [complete, carry] = splitIncompleteEscape(state.carry + chunk);
   const clean = stripAnsi(complete).replace(/\r\n/g, "\n");
   const pieces = clean.split("\n");
@@ -125,13 +111,13 @@ export function appendLog(state: LogBufferState, chunk: string, limits: LogLimit
     lines.splice(0, cut);
     dropped += cut;
   }
-  return { lines, partial, carry, dropped, bytes: state.bytes + utf8Length(chunk) };
+  return { lines, partial, carry, dropped };
 }
 
 /** The lines to render: the complete ones and the line in progress. */
-export function visibleLogLines(state: LogBufferState, maxLineChars = LOG_MAX_LINE_CHARS): string[] {
+export function visibleLogLines(state: LogBufferState): string[] {
   if (state.partial.length === 0) return state.lines;
-  const partial = clipLine(applyCarriageReturns(state.partial), maxLineChars);
+  const partial = clipLine(applyCarriageReturns(state.partial), LOG_MAX_LINE_CHARS);
   return partial.length === 0 ? state.lines : [...state.lines, partial];
 }
 

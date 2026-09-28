@@ -13,40 +13,7 @@
  */
 
 export {
-  CHECKPOINT_DIFF_CACHE_LIMIT,
-  CHECKPOINT_DIFF_CACHE_MAX_BYTES,
-  CHECKPOINT_DIFF_MAX_OUTPUT_BYTES,
-  CHECKPOINT_REF_LIMIT,
-  CheckpointRefDeleteError,
   CheckpointRefUnavailableError,
-  CheckpointRollbackUnsupportedError,
   CheckpointTurnRangeError,
   createCheckpointService
 } from "./service.ts";
-export type {
-  CaptureBaselineInput,
-  CaptureTurnEndInput,
-  CheckpointServiceOptions
-} from "./service.ts";
-
-export {
-  CHECKPOINT_REFS_PREFIX,
-  checkpointRefForThreadTurn,
-  checkpointRefNamespace,
-  turnCountFromCheckpointRef
-} from "./refs.ts";
-export { parseTurnDiffFilesFromNumstat } from "./numstat.ts";
-export {
-  GIT_DEFAULT_CONCURRENCY,
-  GIT_DEFAULT_MAX_OUTPUT_BYTES,
-  GIT_DEFAULT_TIMEOUT_MS,
-  GitAbortedError,
-  GitError,
-  GitExitError,
-  GitOutputLimitError,
-  GitSpawnError,
-  GitTimeoutError,
-  createGitRunner
-} from "./git.ts";
-export type { GitRunInput, GitRunResult, GitRunner, GitRunnerOptions } from "./git.ts";
-export { CHECKPOINT_CAPTURE_OPERATION, captureCheckpoint, isInsideWorkTree } from "./capture.ts";

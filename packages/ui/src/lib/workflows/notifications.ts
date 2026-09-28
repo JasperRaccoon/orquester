@@ -141,9 +141,9 @@ export function attentionEntryFor(run: WorkflowRunSummary, context: NoticeContex
 // ---------------------------------------------------------------------------
 
 /** Toasts waiting to be read; the newest shows, with a count of the rest. */
-export const MAX_TOASTS = 5;
+const MAX_TOASTS = 5;
 /** Attention entries kept (newest first). */
-export const MAX_ATTENTION = 20;
+const MAX_ATTENTION = 20;
 /** Runs already notified — an event delivered twice (a reconnect's reload) notifies once. */
 const MAX_REMEMBERED = 500;
 
@@ -271,9 +271,6 @@ export function markWorkflowRunViewed(runId: string, options: { finished?: boole
 /** What each mounted run view shows right now (null: nothing, or hidden). */
 const onScreen = new Map<object, string>();
 
-let documentVisible: () => boolean = () =>
-  typeof document === "undefined" || document.visibilityState !== "hidden";
-
 /**
  * A run view reports the run it shows — only while its tab is in Runs mode
  * AND shown; `null` when not. Several views may report (grid cells).
@@ -285,14 +282,9 @@ export function setRunOnScreen(owner: object, runId: string | null): void {
 
 /** The user can see `runId` right now: a view shows it and the document is visible. */
 export function isRunOnScreen(runId: string): boolean {
-  if (!documentVisible()) return false;
+  if (typeof document !== "undefined" && document.visibilityState === "hidden") return false;
   for (const shown of onScreen.values()) if (shown === runId) return true;
   return false;
-}
-
-/** Test seam: the document's visibility. */
-export function setDocumentVisibilityProbe(probe: (() => boolean) | null): void {
-  documentVisible = probe ?? (() => typeof document === "undefined" || document.visibilityState !== "hidden");
 }
 
 /** A connection switch or a sign-out: nothing from the previous daemon stays. */

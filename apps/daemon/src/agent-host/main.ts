@@ -182,7 +182,7 @@ function consoleLogger(): AdapterLogger {
  * launch never sees them. Permissions come only from the thread's
  * `runtimeMode`, effort only from its model selection.
  */
-export function buildRefIdIndex(): Map<string, { adapter: AgentAdapterId; bins: string[] }> {
+function buildRefIdIndex(): Map<string, { adapter: AgentAdapterId; bins: string[] }> {
   const index = new Map<string, { adapter: AgentAdapterId; bins: string[] }>();
   for (const entry of REGISTRY.agents as readonly RegistryEntryDef[]) {
     if (!entry.chat) continue;

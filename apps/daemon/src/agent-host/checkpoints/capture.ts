@@ -13,6 +13,7 @@
  */
 
 import { isUtf8 } from "node:buffer";
+import { randomUUID } from "node:crypto";
 import { copyFile, rm, stat, utimes } from "node:fs/promises";
 import path from "node:path";
 
@@ -67,12 +68,10 @@ const NESTED_REPO_ENV: Record<string, string | undefined> = {
   GIT_ALTERNATE_OBJECT_DIRECTORIES: undefined
 };
 
-export interface CaptureInput {
+interface CaptureInput {
   cwd: string;
   /** The full ref name to publish, from `checkpointRefForThreadTurn`. */
   ref: string;
-  /** Names the temp index; a seam so a test can make it deterministic. */
-  uuid: string;
 }
 
 /** True when `cwd` sits inside a git work tree. A non-git project skips silently. */
@@ -94,7 +93,7 @@ export async function isInsideWorkTree(runner: GitRunner, cwd: string): Promise<
   }
 }
 
-export async function resolveGitCommonDir(runner: GitRunner, cwd: string): Promise<string> {
+async function resolveGitCommonDir(runner: GitRunner, cwd: string): Promise<string> {
   const result = await runner.run({
     operation: "checkpoints.resolveGitCommonDir",
     cwd,
@@ -105,7 +104,7 @@ export async function resolveGitCommonDir(runner: GitRunner, cwd: string): Promi
   return path.isAbsolute(gitCommonDir) ? gitCommonDir : path.resolve(cwd, gitCommonDir);
 }
 
-export async function hasHeadCommit(
+async function hasHeadCommit(
   runner: GitRunner,
   cwd: string,
   env?: Record<string, string | undefined>,
@@ -157,7 +156,7 @@ export async function captureCheckpoint(runner: GitRunner, input: CaptureInput):
   const { cwd, ref } = input;
 
   const gitCommonDir = await resolveGitCommonDir(runner, cwd);
-  const tempIndexPath = path.join(gitCommonDir, `orq-checkpoint-index-${input.uuid}`);
+  const tempIndexPath = path.join(gitCommonDir, `orq-checkpoint-index-${randomUUID()}`);
   const captureEnv: Record<string, string | undefined> = {
     ...IDENTITY_ENV,
     GIT_INDEX_FILE: tempIndexPath

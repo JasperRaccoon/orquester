@@ -10,11 +10,6 @@ import type { NodeExecutionContext, NodeExecutor, NodeResult } from "../contract
 import { createRedactor } from "../sandbox/redact.ts";
 import { describeDuration } from "./process.ts";
 
-export interface HttpExecutorOptions {
-  fetch?: typeof fetch;
-  maxHttpBodyBytes?: number;
-}
-
 const HEADER_NAME = /^[!#$%&'*+\-.^_`|~0-9A-Za-z]+$/;
 
 function isJsonContentType(value: string | null): boolean {
@@ -126,9 +121,8 @@ function buildRequest(ctx: NodeExecutionContext<"http">): BuiltRequest {
   return { ok: true, url: url.toString(), init };
 }
 
-export function createHttpExecutor(options: HttpExecutorOptions = {}): NodeExecutor<"http"> {
-  const doFetch = options.fetch ?? ((input: RequestInfo | URL, init?: RequestInit) => fetch(input, init));
-  const maxBody = options.maxHttpBodyBytes ?? WORKFLOW_LIMITS.maxHttpBodyBytes;
+export function createHttpExecutor(): NodeExecutor<"http"> {
+  const maxBody = WORKFLOW_LIMITS.maxHttpBodyBytes;
 
   return {
     type: "http",
@@ -157,7 +151,7 @@ export function createHttpExecutor(options: HttpExecutorOptions = {}): NodeExecu
         : null;
       try {
         await ctx.setWaitingOn({ kind: "http", method, startedAt: ctx.services.clock.now().toISOString() });
-        const response = await doFetch(built.url, { ...built.init, signal: controller.signal });
+        const response = await fetch(built.url, { ...built.init, signal: controller.signal });
         const headers: Record<string, string> = {};
         response.headers.forEach((value, name) => {
           headers[name] = value;

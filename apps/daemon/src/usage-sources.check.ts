@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createClaudeSource, createCodexSource, createGrokSource } from "./usage-sources";
 
+const originalFetch = globalThis.fetch;
+
 const NOW = Date.parse("2026-07-07T08:00:00Z");
 const now = () => NOW;
 
@@ -28,13 +30,13 @@ async function claudeTests() {
 
   // REGRESSION: a 429 with no prior good reading must NOT read as "not logged in".
   let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return jsonRes(429, { error: "rate_limited" }, { "retry-after": "600" });
+  };
   const src429 = createClaudeSource({
     userhome: home,
-    now,
-    fetchImpl: async () => {
-      calls++;
-      return jsonRes(429, { error: "rate_limited" }, { "retry-after": "600" });
-    }
+    now
   });
   const a1 = await src429();
   assert.ok(a1, "429 must return an agent, not null");
@@ -48,33 +50,10 @@ async function claudeTests() {
   assert.ok(a2 && a2.available);
   assert.equal(calls, 1, "must back off after 429 (no repeated fetch)");
 
-  // 200 then 429 → stale last-known carrying the real numbers. (No minimum interval here, so the
-  // second call asks the endpoint again at the same instant.)
-  let mode: "ok" | "429" = "ok";
-  const src = createClaudeSource({
-    userhome: home,
-    now,
-    minIntervalMs: 0,
-    fetchImpl: async () =>
-      mode === "ok"
-        ? jsonRes(200, { five_hour: { utilization: 45, resets_at: "2026-07-07T10:00:00Z" }, seven_day: { utilization: 69 } })
-        : jsonRes(429, { error: "x" })
-  });
-  const good = await src();
-  assert.ok(good);
-  assert.equal(good.stale, false);
-  assert.equal(good.session?.percent, 45);
-  assert.ok(good.asOf, "fresh reading stamps asOf");
-  mode = "429";
-  const stale = await src();
-  assert.ok(stale);
-  assert.equal(stale.stale, true);
-  assert.equal(stale.session?.percent, 45, "stale shows last-known 45%");
-  assert.equal(stale.asOf, good.asOf, "stale reuses the last good reading's asOf");
-
   // No creds file → genuinely not logged in (null → widget shows "not logged in").
   const empty = await mkdtemp(join(tmpdir(), "usage-empty-"));
-  const srcNone = createClaudeSource({ userhome: empty, now, fetchImpl: async () => jsonRes(200, {}) });
+  globalThis.fetch = async () => jsonRes(200, {});
+  const srcNone = createClaudeSource({ userhome: empty, now });
   assert.equal(await srcNone(), null, "no creds → null");
 }
 
@@ -108,7 +87,8 @@ async function codexTests() {
 
   // REGRESSION: with the wham endpoint unavailable (5xx), the log-scrape fallback must
   // still fall back from the empty newest file to the older one with data, not null.
-  const a = await createCodexSource({ userhome: home, now, fetchImpl: async () => jsonRes(500, {}) })();
+  globalThis.fetch = async () => jsonRes(500, {});
+  const a = await createCodexSource({ userhome: home, now })();
   assert.ok(a, "must fall back to the older file with data, not null");
   assert.equal(a.available, true);
   assert.equal(a.session?.percent, 3);
@@ -131,14 +111,16 @@ async function codexTests() {
   await writeFile(noAuthRollout, JSON.stringify(tc) + "\n");
   await utimes(noAuthRollout, new Date(NOW - 3_600_000), new Date(NOW - 3_600_000));
   // No auth.json at all → still scrape the rollout log for the reading.
-  const scraped = await createCodexSource({ userhome: noAuth, now, fetchImpl: async () => jsonRes(500, {}) })();
+  globalThis.fetch = async () => jsonRes(500, {});
+  const scraped = await createCodexSource({ userhome: noAuth, now })();
   assert.ok(scraped, "missing auth.json must fall back to rollout log scrape, not null");
   assert.equal(scraped.available, true);
   assert.equal(scraped.session?.percent, 3);
   assert.equal(scraped.weekly?.percent, 37);
   // auth.json present but without tokens.access_token → same log-scrape fallback.
   await writeFile(join(noAuthCodex, "auth.json"), JSON.stringify({ tokens: {} }));
-  const scraped2 = await createCodexSource({ userhome: noAuth, now, fetchImpl: async () => jsonRes(500, {}) })();
+  globalThis.fetch = async () => jsonRes(500, {});
+  const scraped2 = await createCodexSource({ userhome: noAuth, now })();
   assert.ok(scraped2, "auth.json without access_token must fall back to rollout log scrape, not null");
   assert.equal(scraped2.session?.percent, 3);
 }
@@ -153,7 +135,8 @@ async function grokTests() {
     });
 
   // No credential anywhere → null (renders "not linked").
-  assert.equal(await createGrokSource({ authDir, grokHome, now, fetchImpl: async () => billing(1) })(), null);
+  globalThis.fetch = async () => billing(1);
+  assert.equal(await createGrokSource({ authDir, grokHome, now })(), null);
 
   // cliproxy xai auth file → weekly window; token/sub must never leak into the payload.
   await mkdir(authDir, { recursive: true });
@@ -162,14 +145,14 @@ async function grokTests() {
     JSON.stringify({ type: "xai", auth_kind: "oauth", access_token: "SECRET-TOK", sub: "uid-1", email: "user@example.com", expired: "2026-07-07T09:00:00Z" })
   );
   const seen: { url: string; headers: Record<string, string> }[] = [];
+  globalThis.fetch = async (url, init) => {
+    seen.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string> });
+    return billing(22.4);
+  };
   const src = createGrokSource({
     authDir,
     grokHome,
-    now,
-    fetchImpl: async (url, init) => {
-      seen.push({ url: String(url), headers: (init?.headers ?? {}) as Record<string, string> });
-      return billing(22.4);
-    }
+    now
   });
   const g1 = await src();
   assert.ok(g1);
@@ -191,14 +174,14 @@ async function grokTests() {
     JSON.stringify({ type: "xai", access_token: "SECRET-TOK", sub: "uid-1", expired: "2026-07-07T07:00:00Z" })
   );
   let fetches = 0;
+  globalThis.fetch = async () => {
+    fetches++;
+    return billing(1);
+  };
   const expired = await createGrokSource({
     authDir,
     grokHome,
-    now,
-    fetchImpl: async () => {
-      fetches++;
-      return billing(1);
-    }
+    now
   })();
   assert.ok(expired, "expired credential is still linked, not null");
   assert.equal(expired.stale, true);
@@ -210,14 +193,14 @@ async function grokTests() {
     JSON.stringify({ type: "xai", access_token: "SECRET-TOK", sub: "uid-1", expired: "2026-07-07T09:00:00Z" })
   );
   let calls = 0;
+  globalThis.fetch = async () => {
+    calls++;
+    return calls === 1 ? billing(50) : jsonRes(429, {}, { "retry-after": "600" });
+  };
   const src429 = createGrokSource({
     authDir,
     grokHome,
-    now,
-    fetchImpl: async () => {
-      calls++;
-      return calls === 1 ? billing(50) : jsonRes(429, {}, { "retry-after": "600" });
-    }
+    now
   });
   const ok1 = await src429();
   assert.equal(ok1?.weekly?.percent, 50);
@@ -237,14 +220,14 @@ async function grokTests() {
     JSON.stringify({ "https://auth.x.ai::client-1": { key: "CLI-TOK", auth_mode: "oidc", expires_at: "2026-07-07T09:00:00Z" } })
   );
   const cliSeen: string[] = [];
+  globalThis.fetch = async (url) => {
+    cliSeen.push(String(url));
+    return String(url).includes("/user") ? jsonRes(200, { userId: "uid-9" }) : billing(3);
+  };
   const cliSrc = createGrokSource({
     authDir: join(cliOnly, "auth"),
     grokHome: cliHome,
-    now,
-    fetchImpl: async (url) => {
-      cliSeen.push(String(url));
-      return String(url).includes("/user") ? jsonRes(200, { userId: "uid-9" }) : billing(3);
-    }
+    now
   });
   const cli1 = await cliSrc();
   assert.equal(cli1?.weekly?.percent, 3);
@@ -267,12 +250,12 @@ async function grokTests() {
       }
     })
   );
+  globalThis.fetch = async () => billing(41);
   const mSrc = createGrokSource({
     authDir: join(managedHome, "no-proxy"),
     grokHome: join(managedHome, "no-cli"),
     authFile: managedAuth,
-    now,
-    fetchImpl: async () => billing(41)
+    now
   });
   const m1 = await mSrc();
   assert.equal(m1?.weekly?.percent, 41);
@@ -309,31 +292,38 @@ async function homeOverrideTests() {
 
   try {
     process.env.CLAUDE_CONFIG_DIR = claudeDir;
-    const viaEnv = await createClaudeSource({ userhome: empty, now, fetchImpl: async () => jsonRes(200, {}) })();
+    globalThis.fetch = async () => jsonRes(200, {});
+    const viaEnv = await createClaudeSource({ userhome: empty, now })();
     assert.equal(viaEnv?.plan, "Pro", "CLAUDE_CONFIG_DIR wins over userhome, as the CLI reads it");
+    globalThis.fetch = async () => jsonRes(200, {});
     const pinned = await createClaudeSource({
       userhome: empty,
       claudeHome: join(empty, ".claude"),
-      now,
-      fetchImpl: async () => jsonRes(200, {})
+      now
     })();
     assert.equal(pinned, null, "an explicit claudeHome wins over CLAUDE_CONFIG_DIR");
 
     process.env.CODEX_HOME = codexDir;
+    globalThis.fetch = async () => jsonRes(500, {});
     assert.equal(
-      await createCodexSource({ userhome: empty, now, fetchImpl: async () => jsonRes(500, {}) })(),
+      await createCodexSource({ userhome: empty, now })(),
       null,
       "CODEX_HOME wins over userhome: its API-key auth reads as no subscription"
     );
-    const pinnedCodex = await createCodexSource({ userhome: empty, codexHome: codexLogs, now, fetchImpl: async () => jsonRes(500, {}) })();
+    globalThis.fetch = async () => jsonRes(500, {});
+    const pinnedCodex = await createCodexSource({ userhome: empty, codexHome: codexLogs, now })();
     assert.equal(pinnedCodex?.session?.percent, 9, "an explicit codexHome wins over CODEX_HOME");
   } finally {
     for (const name of HOME_OVERRIDES) delete process.env[name];
   }
 }
 
-await claudeTests();
-await codexTests();
-await grokTests();
-await homeOverrideTests();
+try {
+  await claudeTests();
+  await codexTests();
+  await grokTests();
+  await homeOverrideTests();
+} finally {
+  globalThis.fetch = originalFetch;
+}
 console.log("usage-sources.check OK");

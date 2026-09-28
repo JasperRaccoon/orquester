@@ -3,14 +3,12 @@ import type { ServerResponse } from "node:http";
 import { describe, it } from "node:test";
 
 import {
-  AGENT_CHAT_HEARTBEAT_LINE,
   type AgentChatStreamFrame,
   type DomainEvent,
   type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
 
-import { createTestTimers } from "../orchestration/testing/fakes.ts";
-import { coalesceToolUpdates, createThreadStream, serializedSize } from "./stream.ts";
+import { createThreadStream } from "./stream.ts";
 
 interface FakeResponse {
   response: ServerResponse;
@@ -136,39 +134,10 @@ const snapshot = (seq: number): ThreadSnapshotPayload =>
     seq
   }) as unknown as ThreadSnapshotPayload;
 
-describe("thread stream — coalescing (§5.6, §6.3)", () => {
-  it("keeps only the latest update per stable tool id in a run", () => {
-    const events = [toolUpdate(1, "tool-a"), toolUpdate(2, "tool-a"), toolUpdate(3, "tool-b")];
-    const survivors = coalesceToolUpdates(events);
-    assert.deepEqual(
-      survivors.map((entry) => entry.seq),
-      [2, 3]
-    );
-  });
-
-  it("lets anonymous updates through — labels are not unique in parallel", () => {
-    const events = [toolUpdate(1, null), toolUpdate(2, null)];
-    assert.equal(coalesceToolUpdates(events).length, 2);
-  });
-
-  it("a non-update frame closes the run immediately", () => {
-    const events = [toolUpdate(1, "tool-a"), event(2), toolUpdate(3, "tool-a")];
-    assert.deepEqual(
-      coalesceToolUpdates(events).map((entry) => entry.seq),
-      [1, 2, 3]
-    );
-  });
-
-  it("does not collapse across turns", () => {
-    const events = [toolUpdate(1, "tool-a", "turn-1"), toolUpdate(2, "tool-a", "turn-2")];
-    assert.equal(coalesceToolUpdates(events).length, 2);
-  });
-});
-
 describe("thread stream — the live tail is attached before the read (§6.3)", () => {
-  it("loses no event published while the read is in flight, and duplicates none", async () => {
+  it("loses no event published while the read is in flight, and duplicates none", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const fake = fakeResponse();
-    const timers = createTestTimers();
     let attached = false;
     let emit: (events: DomainEvent[]) => void = () => undefined;
     const readGateHandles: Array<() => void> = [];
@@ -196,8 +165,6 @@ describe("thread stream — the live tail is attached before the read (§6.3)", 
         await readGate;
         return [{ kind: "snapshot", thread: snapshot(5) }];
       },
-      setTimer: (fn, ms) => timers.setTimer(fn, ms),
-      clearTimer: (handle) => timers.clearTimer(handle)
     });
 
     const started = stream.start();
@@ -223,9 +190,9 @@ describe("thread stream — the live tail is attached before the read (§6.3)", 
     stream.close();
   });
 
-  it("pushes `synchronized` after everything buffered, never straight to the socket", async () => {
+  it("pushes `synchronized` after everything buffered, never straight to the socket", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const fake = fakeResponse();
-    const timers = createTestTimers();
     let emit: (events: DomainEvent[]) => void = () => undefined;
     const stream = createThreadStream({
       response: fake.response,
@@ -238,8 +205,6 @@ describe("thread stream — the live tail is attached before the read (§6.3)", 
         emit([event(2), event(3)]);
         return [{ kind: "event", seq: 1, event: event(1) }];
       },
-      setTimer: (fn, ms) => timers.setTimer(fn, ms),
-      clearTimer: (handle) => timers.clearTimer(handle)
     });
     await stream.start();
     const frames = parse(fake.lines);
@@ -252,9 +217,9 @@ describe("thread stream — the live tail is attached before the read (§6.3)", 
 });
 
 describe("thread stream — live delivery", () => {
-  it("coalesces live tool updates on the 50 ms window and flushes on any other frame", async () => {
+  it("coalesces live tool updates on the 50 ms window and flushes on any other frame", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const fake = fakeResponse();
-    const timers = createTestTimers();
     let emit: ((events: DomainEvent[]) => void) = () => undefined;
     const stream = createThreadStream({
       response: fake.response,
@@ -264,8 +229,6 @@ describe("thread stream — live delivery", () => {
         return () => undefined;
       },
       read: async () => [],
-      setTimer: (fn, ms) => timers.setTimer(fn, ms),
-      clearTimer: (handle) => timers.clearTimer(handle)
     });
     await stream.start();
     fake.lines.length = 0;
@@ -273,7 +236,7 @@ describe("thread stream — live delivery", () => {
     emit([toolUpdate(10, "tool-a")]);
     emit([toolUpdate(11, "tool-a")]);
     assert.equal(fake.lines.length, 0, "updates wait on the window");
-    timers.runDue(50);
+    t.mock.timers.tick(50);
     assert.deepEqual(
       parse(fake.lines).map((frame) => (frame as { seq: number }).seq),
       [11]
@@ -287,33 +250,34 @@ describe("thread stream — live delivery", () => {
       [12, 13],
       "a non-update frame flushes the run immediately"
     );
+    fake.lines.length = 0;
+    emit([toolUpdate(14, null), toolUpdate(15, null), toolUpdate(16, "same", "turn-1"), toolUpdate(17, "same", "turn-2")]);
+    t.mock.timers.tick(50);
+    assert.deepEqual(parse(fake.lines).map((frame) => (frame as { seq: number }).seq), [14, 15, 16, 17]);
     stream.close();
   });
 
-  it("sends `:hb` on the heartbeat interval", async () => {
+  it("sends `:hb` on the heartbeat interval", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const fake = fakeResponse();
-    const timers = createTestTimers();
     const stream = createThreadStream({
       response: fake.response,
       hostInstanceId: "host-1",
       subscribe: async () => () => undefined,
       read: async () => [],
-      heartbeatMs: 15_000,
-      setTimer: (fn, ms) => timers.setTimer(fn, ms),
-      clearTimer: (handle) => timers.clearTimer(handle)
     });
     await stream.start();
-    assert.equal(fake.lines.includes(AGENT_CHAT_HEARTBEAT_LINE), false);
-    timers.runDue(15_000);
-    assert.equal(fake.lines.at(-1), AGENT_CHAT_HEARTBEAT_LINE);
-    timers.runDue(30_000);
-    assert.equal(fake.lines.filter((line) => line === AGENT_CHAT_HEARTBEAT_LINE).length, 2);
+    assert.equal(fake.lines.includes(":hb"), false);
+    t.mock.timers.tick(15_000);
+    assert.equal(fake.lines.at(-1), ":hb");
+    t.mock.timers.tick(15_000);
+    assert.equal(fake.lines.filter((line) => line === ":hb").length, 2);
     stream.close();
   });
 
-  it("closes the stream when the undrained write buffer passes its budget", async () => {
+  it("closes the stream when the undrained write buffer passes its budget", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const fake = fakeResponse();
-    const timers = createTestTimers();
     let emit: ((events: DomainEvent[]) => void) = () => undefined;
     const closed: string[] = [];
     const stream = createThreadStream({
@@ -324,9 +288,6 @@ describe("thread stream — live delivery", () => {
         return () => undefined;
       },
       read: async () => [],
-      bufferLimitBytes: 400,
-      setTimer: (fn, ms) => timers.setTimer(fn, ms),
-      clearTimer: (handle) => timers.clearTimer(handle),
       onClose: (reason) => closed.push(reason)
     });
     await stream.start();
@@ -334,17 +295,17 @@ describe("thread stream — live delivery", () => {
     // Every write stalls, so nothing is ever released from the charge.
     for (let index = 0; index < 20 && !stream.closed; index += 1) {
       fake.stall();
-      emit([event(100 + index)]);
+      emit([event(100 + index, { type: "thread.message-sent", payload: { messageId: "large", role: "assistant", text: "x".repeat(1024 * 1024), streaming: true, turnId: null } })]);
     }
     assert.equal(stream.closed, true);
     assert.deepEqual(closed, ["budget"]);
-    assert.match(fake.lines.at(-1) ?? "", /Resume from the last received sequence/);
+    assert.equal(JSON.parse(fake.lines.at(-1) ?? "{}").kind, "error");
     assert.equal(fake.ended, true);
   });
 
-  it("releases the charge once the socket drains", async () => {
+  it("releases the charge once the socket drains", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const fake = fakeResponse();
-    const timers = createTestTimers();
     let emit: ((events: DomainEvent[]) => void) = () => undefined;
     const stream = createThreadStream({
       response: fake.response,
@@ -354,23 +315,20 @@ describe("thread stream — live delivery", () => {
         return () => undefined;
       },
       read: async () => [],
-      bufferLimitBytes: 400,
-      setTimer: (fn, ms) => timers.setTimer(fn, ms),
-      clearTimer: (handle) => timers.clearTimer(handle)
     });
     await stream.start();
     for (let index = 0; index < 20; index += 1) {
       fake.stall();
-      emit([event(200 + index)]);
+      emit([event(200 + index, { type: "thread.message-sent", payload: { messageId: "large", role: "assistant", text: "x".repeat(1024 * 1024), streaming: true, turnId: null } })]);
       fake.drain();
     }
     assert.equal(stream.closed, false, "a client that keeps up is never cut");
     stream.close();
   });
 
-  it("stops writing once the client disconnects", async () => {
+  it("stops writing once the client disconnects", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     const fake = fakeResponse();
-    const timers = createTestTimers();
     let emit: ((events: DomainEvent[]) => void) = () => undefined;
     const closed: string[] = [];
     const stream = createThreadStream({
@@ -381,8 +339,6 @@ describe("thread stream — live delivery", () => {
         return () => undefined;
       },
       read: async () => [],
-      setTimer: (fn, ms) => timers.setTimer(fn, ms),
-      clearTimer: (handle) => timers.clearTimer(handle),
       onClose: (reason) => closed.push(reason)
     });
     await stream.start();
@@ -391,15 +347,7 @@ describe("thread stream — live delivery", () => {
     emit([event(42)]);
     assert.equal(fake.lines.length, before);
     assert.deepEqual(closed, ["client"]);
-    assert.equal(timers.pending, 0, "no heartbeat is left behind");
-  });
-});
-
-describe("thread stream — byte accounting", () => {
-  it("measures an event once and caches it by identity", () => {
-    const sample = event(1);
-    const first = serializedSize(sample);
-    assert.equal(serializedSize(sample), first);
-    assert.equal(first, Buffer.byteLength(JSON.stringify(sample)));
+    t.mock.timers.tick(30_000);
+    assert.equal(fake.lines.length, before, "heartbeats stop after disconnect");
   });
 });

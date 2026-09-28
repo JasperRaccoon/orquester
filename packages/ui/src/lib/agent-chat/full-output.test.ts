@@ -1,26 +1,23 @@
-import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
 import {
-  slimActivityPayload,
-  TASK_PROMPT_MAX_CHARS,
-  type ThreadActivityItem,
-  type ThreadItemOutputResponse,
-  type ThreadItemResponse
+slimActivityPayload,
+type ThreadActivityItem,
+type ThreadItemOutputResponse,
+type ThreadItemResponse
 } from "@orquester/api/agent-chat";
+import assert from "node:assert/strict";
+import { beforeEach,describe,it } from "node:test";
 
 import { joinLifecycleDetails } from "../../components/agent-chat/timeline/row-chrome";
 import type { WorkLogEntry } from "./contracts";
 import { deriveWorkLogEntries } from "./entries.logic";
 import {
-  createViewerReads,
-  fullOutputNotes,
-  fullOutputSourceOf,
-  fullOutputText,
-  fullOutputViewerCopy,
-  readFullOutput,
-  type FullOutputReads
+createViewerReads,
+fullOutputSourceOf,
+fullOutputText,
+readFullOutput,
+type FullOutputReads
 } from "./full-output";
-import { activity, message, resetBuilders } from "./test-helpers";
+import { activity,message,resetBuilders } from "./test-helpers";
 
 beforeEach(() => {
   resetBuilders();
@@ -123,23 +120,20 @@ describe("the full-output viewer's read", () => {
       "streamed"
     );
     assert.deepEqual(running, { kind: "streamed", text: "so far\n", running: true, cut: false });
-    assert.deepEqual(fullOutputNotes(running), ["Still running — this is its output so far."]);
 
     const cut = await readFullOutput(
       reads({ streamedOutput: async () => join("head\n", { truncated: true }) }),
       "a1",
       "streamed"
     );
-    // The log keeps every chunk: only this read stops at the host's cap.
-    assert.deepEqual(fullOutputNotes(cut), ["Only the first 8 MiB of this output can be shown here."]);
+    assert.deepEqual(cut, { kind: "streamed", text: "head\n", running: false, cut: true });
 
     const both = await readFullOutput(
       reads({ streamedOutput: async () => join("head\n", { complete: false, truncated: true }) }),
       "a1",
       "streamed"
     );
-    assert.equal(fullOutputNotes(both).length, 2);
-    assert.deepEqual(fullOutputNotes({ kind: "streamed", text: "all\n", running: false, cut: false }), []);
+    assert.deepEqual(both, { kind: "streamed", text: "head\n", running: true, cut: true });
   });
 
   it("reads the item where the host has no join (a 404) or the call streamed nothing: never an error", async () => {
@@ -165,7 +159,6 @@ describe("the full-output viewer's read", () => {
     assert.deepEqual(await readFullOutput(viewer, "e1", "item"), { kind: "item", item });
     assert.deepEqual(await readFullOutput(viewer, "e1"), { kind: "item", item });
     assert.deepEqual(viewer.asked, ["item e1", "item e1"]);
-    assert.deepEqual(fullOutputNotes({ kind: "item", item }), []);
   });
 
   it("a join read that fails is the viewer's error, not a quiet fallback", async () => {
@@ -235,7 +228,6 @@ describe("a Codex completion that kept only its output's head (stored cut past 6
       const viewer = reads({ item: async () => ({ item: stored }), streamedOutput: async () => answer });
       const output = await readFullOutput(viewer, stored.id, "item");
       assert.deepEqual(output, { kind: "kept", text: head });
-      assert.deepEqual(fullOutputNotes(output), ["Only part of this output was kept."]);
     }
   });
 
@@ -254,7 +246,6 @@ describe("a Codex completion that kept only its output's head (stored cut past 6
     const output = await readFullOutput(viewer, intact.id, "item");
     assert.deepEqual(output, { kind: "item", item: intact });
     assert.equal(fullOutputText(intact), head);
-    assert.deepEqual(fullOutputNotes(output), []);
     assert.deepEqual(viewer.asked, ["item done-7"]);
   });
 
@@ -318,7 +309,6 @@ describe("an OpenCode completion whose final output the tool cut (the END of it,
       const viewer = reads({ item: async () => ({ item: stored }), streamedOutput: async () => answer });
       const output = await readFullOutput(viewer, stored.id, "streamed");
       assert.deepEqual(output, { kind: "kept", text: kept });
-      assert.deepEqual(fullOutputNotes(output), ["Only part of this output was kept."]);
     }
   });
 });
@@ -431,19 +421,6 @@ describe("an agent's launch prompt in the viewer (§7.6: a wire-cut prompt's 'Sh
   it("shows the prompt itself, never its launch row as JSON", () => {
     const whole = "Find every caller of parse().\n".repeat(900);
     assert.equal(fullOutputText(start({ prompt: whole })), whole);
-    assert.deepEqual(fullOutputNotes({ kind: "item", item: start({ prompt: whole }) }), []);
-  });
-
-  it("says when only the prompt's start was ever kept, and names the cap it was cut at", () => {
-    const item = start({ prompt: "The start of it", promptTruncated: true });
-    const notes = fullOutputNotes({ kind: "item", item });
-    assert.equal(notes.length, 1);
-    assert.match(notes[0]!, /^Only the start of this prompt was kept/);
-    // `TASK_PROMPT_MAX_CHARS` counts UTF-16 units, cut on a code point: an upper bound in characters.
-    assert.ok(
-      notes[0]!.includes(`up to ${TASK_PROMPT_MAX_CHARS.toLocaleString("en-US")} characters`),
-      `the note names ingestion's cap at rest: ${notes[0]}`
-    );
   });
 
   it("a start with no prompt is its payload, as before", () => {
@@ -483,21 +460,6 @@ describe("a wire-cut launch prompt never makes its spawn row a 'Load full output
 });
 
 describe("the viewer's copy follows what it reads (review N1)", () => {
-  it("a launch prompt's viewer is titled for a prompt", () => {
-    assert.deepEqual(fullOutputViewerCopy("prompt"), {
-      title: "Prompt",
-      missing: "That prompt is no longer available."
-    });
-  });
-
-  it("an output's, as before", () => {
-    for (const source of [undefined, "item", "streamed"] as const) {
-      assert.deepEqual(fullOutputViewerCopy(source), {
-        title: "Full output",
-        missing: "That output is no longer available."
-      });
-    }
-  });
 
   it("a prompt is read as its item", async () => {
     const item = activity("task.started", { taskId: "a1", prompt: "The whole prompt." }, { turnId: "t1" });

@@ -12,12 +12,12 @@ import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
  * A hit's title, in code points: the longest title create_session and update_session accept, so a title set through
  * the MCP is never cut — only a longer one given in the GUI, which does not bound it.
  */
-export const SEARCH_TITLE_CHARS = 300;
+const SEARCH_TITLE_CHARS = 300;
 /**
  * A hit's snippet, in code points. The host's is FTS5's 12-token excerpt (`agent-host/index/queries.ts`), far shorter
  * in prose or code; only a giant token or a long run of separators — whitespace, rules, box drawing — reaches the cap.
  */
-export const SEARCH_SNIPPET_CHARS = 300;
+const SEARCH_SNIPPET_CHARS = 300;
 
 /** The palette's own count per search (`CONVERSATION_SEARCH_LIMIT`). */
 const DEFAULT_LIMIT = 20;

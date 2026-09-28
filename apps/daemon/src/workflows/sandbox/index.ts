@@ -2,9 +2,6 @@
 export {
   createSandboxRunner,
   readSandboxExit,
-  SANDBOX_DEADLINE_BACKSTOP_MS,
-  SANDBOX_KILL_GRACE_MS,
-  SANDBOX_RUNNER_PATH,
   type DetailedSandboxRunner,
   type SandboxExitDetail,
   type SandboxExitRecord,
@@ -21,7 +18,6 @@ export {
   createChunkRedactor,
   createRedactor,
   MIN_REDACTED_SECRET_LENGTH,
-  redactChunk,
   secretPlaceholder,
   type ChunkRedactor,
   type SecretMatch,

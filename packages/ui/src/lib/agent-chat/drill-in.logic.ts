@@ -154,7 +154,7 @@ export interface DrillInAgent {
 }
 
 /**
- * The drill-in's agent row: the host's override, else the roster's, else the
+ * The drill-in's agent row: the roster's, else the
  * row the drill-in last saw for this agent (`lastKnown`), which is then
  * `remembered`. The roster keeps 100 rows and evicts the oldest settled ones
  * first, so an open drill-in's row can leave it (final review C, M2); the
@@ -162,18 +162,14 @@ export interface DrillInAgent {
  * nothing reads its status as current (r1, m1): the header says the agent is
  * no longer in the thread's roster, and the timeline and its empty notice
  * read it as not live. The roster's own row wins over the remembered one: it
- * is the newer, and current; so is a host's override.
+ * is the newer, and current.
  */
 export function drillInAgentRow(input: {
   readonly agentId: string;
-  readonly override: RuntimeSubagent | null | undefined;
   readonly roster: readonly RuntimeSubagent[];
   readonly lastKnown: RuntimeSubagent | null | undefined;
 }): DrillInAgent {
-  const { agentId, override, roster, lastKnown } = input;
-  if (override !== undefined && override !== null) {
-    return { row: override, remembered: false };
-  }
+  const { agentId, roster, lastKnown } = input;
   const row = roster.find((candidate) => candidate.id === agentId);
   if (row !== undefined) {
     return { row, remembered: false };

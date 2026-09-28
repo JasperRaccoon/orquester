@@ -317,15 +317,6 @@ export class AcpPeer {
     this.pending.clear();
   }
 
-  get isClosed(): boolean {
-    return this.closedReason !== null;
-  }
-
-  /** How many calls are still awaiting a reply. Tests assert on this. */
-  get inFlightCount(): number {
-    return this.pending.size;
-  }
-
   // --------------------------------------------------------------- internals
 
   private dispatchNotification(method: string, params: unknown): void {
@@ -432,7 +423,7 @@ export class AcpPeer {
  * CLI — and only when the inner `method` really names this extension, so a
  * payload that happens to carry a `method` field of its own is left alone.
  */
-export function unwrapExtensionParams(params: unknown, bareMethod: string): unknown {
+function unwrapExtensionParams(params: unknown, bareMethod: string): unknown {
   if (params === null || typeof params !== "object" || Array.isArray(params)) {
     return params;
   }
@@ -461,7 +452,7 @@ function toErrorPayload(value: unknown): AcpErrorPayload {
  * warning about an unknown method must not copy a file's contents into the
  * host log.
  */
-export function summarisePayload(params: unknown): unknown {
+function summarisePayload(params: unknown): unknown {
   if (params === null || params === undefined) {
     return params;
   }

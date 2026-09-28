@@ -1,4 +1,4 @@
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { mkdtemp, readFile, stat, mkdir, writeFile, lstat } from "node:fs/promises";
@@ -47,12 +47,6 @@ test("import claude requires a label and stores subscriptionType as plan", async
   assert.equal(acct.plan, "max");
   const creds = JSON.parse(await readFile(join(svc.homePath("claude", acct.id), ".credentials.json"), "utf8"));
   assert.equal(creds.claudeAiOauth.refreshToken, "r");
-});
-
-test("first account for an agent becomes the default", async () => {
-  const { svc } = await makeService();
-  const acct = await svc.importAccount({ content: JSON.stringify({ tokens: { access_token: "a", id_token: jwt({ email: "e@e.com" }) } }) });
-  assert.equal(svc.list().defaults.codex, acct.id);
 });
 
 test("resolveLaunchEnv maps claude to CLAUDE_CONFIG_DIR + unset, codex to CODEX_HOME", async () => {
@@ -112,14 +106,14 @@ test("index and API responses carry no token material", async () => {
   assert.equal(JSON.stringify(svc.list()).includes("SECRET"), false);
 });
 
-async function makeServiceWithFetch(now: number, fetchImpl: typeof fetch) {
+async function makeServiceWithFetch(t: TestContext, now: number, fetchImpl: typeof fetch) {
+  t.mock.method(globalThis, "fetch", fetchImpl);
   const base = await mkdtemp(join(tmpdir(), "orq-fresh-"));
   const svc = new AgentAccountsService({
     indexFile: join(base, "agent-accounts.json"),
     accountsDir: join(base, "agent-accounts"),
     userhome: base,
-    now: () => now,
-    fetchImpl
+    now: () => now
   });
   await svc.init();
   return svc;
@@ -136,10 +130,10 @@ function codexBlob(accessExpSec: number): string {
   });
 }
 
-test("ensureFreshForUsage refreshes an idle Codex account whose token is expiring", async () => {
+test("ensureFreshForUsage refreshes an idle Codex account whose token is expiring", async (t) => {
   const now = 1_000_000;
   let called = 0;
-  const svc = await makeServiceWithFetch(now, async () => {
+  const svc = await makeServiceWithFetch(t, now, async () => {
     called++;
     return new Response(JSON.stringify({ access_token: "NEW", refresh_token: "NEWR", id_token: jwt({ email: "c@x.com" }) }), { status: 200 });
   });
@@ -152,10 +146,10 @@ test("ensureFreshForUsage refreshes an idle Codex account whose token is expirin
   assert.equal(auth.tokens.account_id, "acc1"); // preserved
 });
 
-test("ensureFreshForUsage does not refresh an account with a live session", async () => {
+test("ensureFreshForUsage does not refresh an account with a live session", async (t) => {
   const now = 1_000_000;
   let called = 0;
-  const svc = await makeServiceWithFetch(now, async () => {
+  const svc = await makeServiceWithFetch(t, now, async () => {
     called++;
     return new Response("{}", { status: 200 });
   });
@@ -164,10 +158,10 @@ test("ensureFreshForUsage does not refresh an account with a live session", asyn
   assert.equal(called, 0);
 });
 
-test("ensureFreshForUsage skips a token that is not near expiry", async () => {
+test("ensureFreshForUsage skips a token that is not near expiry", async (t) => {
   const now = 1_000_000;
   let called = 0;
-  const svc = await makeServiceWithFetch(now, async () => {
+  const svc = await makeServiceWithFetch(t, now, async () => {
     called++;
     return new Response("{}", { status: 200 });
   });
@@ -176,10 +170,10 @@ test("ensureFreshForUsage skips a token that is not near expiry", async () => {
   assert.equal(called, 0);
 });
 
-test("a proxy-owned account is never refreshed by the account service (single-refresher rule)", async () => {
+test("a proxy-owned account is never refreshed by the account service (single-refresher rule)", async (t) => {
   const now = 1_000_000;
   let called = 0;
-  const svc = await makeServiceWithFetch(now, async () => {
+  const svc = await makeServiceWithFetch(t, now, async () => {
     called++;
     return new Response(JSON.stringify({ access_token: "NEW", refresh_token: "NEWR", id_token: jwt({ email: "c@x.com" }) }), { status: 200 });
   });

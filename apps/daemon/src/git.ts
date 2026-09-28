@@ -855,7 +855,7 @@ const EMPTY_TREE_SHA1 = "4b825dc642cb6eb9a060e54bf8d69288fbee4904";
  * `diff.srcPrefix`/`diff.dstPrefix` — an older git ignores a key it does not
  * know), and repo-relative paths (`diff.relative`).
  */
-export const WORKING_DIFF_CONFIG: readonly string[] = [
+const WORKING_DIFF_CONFIG: readonly string[] = [
   "-c",
   "core.quotePath=false",
   "-c",
@@ -871,7 +871,7 @@ export const WORKING_DIFF_CONFIG: readonly string[] = [
 ];
 
 /** `workingDiff`'s `untracked` is capped here: a prompt wants a list, not an un-ignored build dir's inventory. */
-export const WORKING_DIFF_UNTRACKED_MAX = 1000;
+const WORKING_DIFF_UNTRACKED_MAX = 1000;
 
 /** The untracked listing's read cap: room for the capped count of PATH_MAX-long paths, and no more. */
 const UNTRACKED_LIST_READ_BYTES = WORKING_DIFF_UNTRACKED_MAX * 4097;
@@ -1232,8 +1232,7 @@ export class GitWatcher {
 
   constructor(
     private readonly git: GitService,
-    private readonly onChange: (path: string, status: GitStatusResponse) => void,
-    private readonly intervalMs = WATCH_INTERVAL_MS
+    private readonly onChange: (path: string, status: GitStatusResponse) => void
   ) {}
 
   /** Register interest in `path`, starting the poll loop on the first subscriber. */
@@ -1285,7 +1284,7 @@ export class GitWatcher {
       entry.previous = null;
     }
     if (entry.stopped || this.watched.get(path) !== entry) return;
-    entry.timer = setTimeout(() => void this.poll(path), this.intervalMs);
+    entry.timer = setTimeout(() => void this.poll(path), WATCH_INTERVAL_MS);
     entry.timer.unref?.();
   }
 }

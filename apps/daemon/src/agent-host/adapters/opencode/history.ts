@@ -49,7 +49,7 @@ import { isRecord, type OpenCodeMessageInfo, type OpenCodePart } from "./protoco
  * attention, fire a push or move a live turn, so a second spelling would
  * silently make every replayed row look live.
  */
-export const OPENCODE_HISTORY_SOURCE: RuntimeEventRawSource = HISTORICAL_RAW_SOURCE;
+const OPENCODE_HISTORY_SOURCE: RuntimeEventRawSource = HISTORICAL_RAW_SOURCE;
 
 /** Replayed turns produce no usable per-turn usage — see the module header. */
 const UNAVAILABLE_USAGE: TurnTokenUsage = {

@@ -162,7 +162,7 @@ function settle<T>(promise: Promise<T>): Promise<Settled<T>> {
  * The words a failed read is shown with: the server's own message when it sent one (an
  * `ApiError`'s `serverMessage` — git's stderr), else the error's message. Duck-typed.
  */
-export function promptVariableErrorText(error: unknown, fallback = "Something went wrong."): string {
+function promptVariableErrorText(error: unknown, fallback = "Something went wrong."): string {
   if (typeof error === "object" && error !== null) {
     const server = (error as { serverMessage?: unknown }).serverMessage;
     if (typeof server === "string" && server.trim().length > 0) return server.trim();
@@ -178,7 +178,7 @@ export function promptVariableErrorText(error: unknown, fallback = "Something we
 // ---------------------------------------------------------------------------
 
 /** A project path without trailing separators (a bare root stays itself). */
-export function normalizePromptProjectPath(path: string): string {
+function normalizePromptProjectPath(path: string): string {
   const stripped = path.replace(/[\\/]+$/, "");
   return stripped.length > 0 || path.length === 0 ? stripped : path.charAt(0);
 }

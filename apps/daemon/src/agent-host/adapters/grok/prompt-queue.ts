@@ -15,7 +15,7 @@ import type { RuntimeEvent } from "@orquester/api/agent-chat";
 import type { GrokNormalizer } from "./normalize.ts";
 
 /** How many prompt ids are remembered, oldest forgotten first; memory only. */
-export const PROMPT_IDS_REMEMBERED = 256;
+const PROMPT_IDS_REMEMBERED = 256;
 
 /**
  * How many frames wait for a waiting wake's turn ({@link GrokWakes.offer}).
@@ -24,7 +24,7 @@ export const PROMPT_IDS_REMEMBERED = 256;
  * (a steer, or a wake that starts during a `session/set_model` round trip):
  * past it the held frames join the open turn, in order. Nothing is dropped.
  */
-export const HELD_FRAMES_MAX = 256;
+const HELD_FRAMES_MAX = 256;
 
 /**
  * A prompt the CLI started itself: a background subagent's end
@@ -59,7 +59,7 @@ const MONITOR_EVENT_RE = /<monitor-event\b[^>]*\btask_id="([^"]+)"/g;
 const MONITOR_LINE_PROMPT_PREFIX = "notifications-";
 
 /** The monitors a CLI prompt's `runningText` carries lines of. */
-export function monitorTaskIdsIn(runningText: unknown): string[] {
+function monitorTaskIdsIn(runningText: unknown): string[] {
   if (typeof runningText !== "string") {
     return [];
   }
@@ -128,7 +128,7 @@ interface PendingWake {
  * 20's first monitor line, 15 ms before the user's prompt's RPC result — is
  * already the one running, and waits here for that turn to settle.
  */
-export class GrokPromptQueue {
+class GrokPromptQueue {
   private readonly listed = new Set<string>();
   private readonly cli = new Set<string>();
   private readonly pending: PendingWake[] = [];
@@ -227,7 +227,7 @@ export class GrokPromptQueue {
 }
 
 /** What a session (or the capture-replay driver) does for {@link GrokWakes}. */
-export interface WakeHost {
+interface WakeHost {
   /** A turn is open and unsettled: a CLI prompt announced now waits for it. */
   turnOpen(): boolean;
   /** Open the CLI prompt's own turn (`turn.started`); its re-arms and held frames follow. */
@@ -239,10 +239,9 @@ export interface WakeHost {
   debug(message: string, detail: Record<string, unknown>): void;
 }
 
-export interface WakeOptions {
+interface WakeOptions {
   /** The thread's own ACP session id; `""` until `session/new` answers. */
   parentSessionId(): string;
-  maxHeld?: number;
 }
 
 /**
@@ -275,24 +274,16 @@ export interface WakeOptions {
 export class GrokWakes {
   private readonly queue = new GrokPromptQueue();
   private held: Array<() => void> = [];
-  private readonly maxHeld: number;
 
   constructor(
     private readonly normalizer: Pick<GrokNormalizer, "rearmMonitors">,
     private readonly host: WakeHost,
     private readonly options: WakeOptions
-  ) {
-    this.maxHeld = options.maxHeld ?? HELD_FRAMES_MAX;
-  }
+  ) {}
 
   /** A prompt the CLI started itself — never a turn of ours to claim. */
   isCliPrompt(promptId: string): boolean {
     return this.queue.isCliPrompt(promptId);
-  }
-
-  /** How many frames wait for a turn. */
-  get heldFrames(): number {
-    return this.held.length;
   }
 
   /**
@@ -353,7 +344,7 @@ export class GrokWakes {
     }
     if (this.held.length > 0 || (waiting !== undefined && !waiting.merged)) {
       this.held.push(replay);
-      if (this.held.length > this.maxHeld) {
+      if (this.held.length > HELD_FRAMES_MAX) {
         this.merge("more frames than a hold keeps");
       }
       return true;

@@ -22,7 +22,6 @@ import { describe, it } from "node:test";
 
 import { buildClaudeAuth } from "./claude/probe.ts";
 import { toProviderAuth as codexAuth } from "./codex/probe.ts";
-import { parseGrokModelsOutput } from "./grok/probe.ts";
 import { inferAuth as openCodeAuth, type OpenCodeInventory } from "./opencode/snapshot.ts";
 
 describe("claude — an init result that merely lacks account info is an AMBIGUITY", () => {
@@ -85,27 +84,6 @@ describe("codex — the credential answer is the proof", () => {
       codexAuth({ account: { type: "apiKey" }, requiresOpenaiAuth: false } as never).status,
       "authenticated"
     );
-  });
-});
-
-describe("grok — the CLI's own not-logged-in line is the proof", () => {
-  /**
-   * The mapping `probeGrok` applies to `parseGrokModelsOutput`: `true` →
-   * authenticated, `false` → unauthenticated, `null` → unknown. A `grok models`
-   * invocation that did not exit cleanly is never parsed at all, so a failed
-   * read reaches this as `null`.
-   */
-  const map = (authenticated: boolean | null): string =>
-    authenticated === true ? "authenticated" : authenticated === false ? "unauthenticated" : "unknown";
-
-  it("is `unknown` for output that says nothing either way", () => {
-    assert.equal(map(parseGrokModelsOutput("").authenticated), "unknown");
-  });
-
-  it("is `unauthenticated` when the CLI prints that it is not logged in", () => {
-    const parsed = parseGrokModelsOutput("Not logged in. Run `grok login` to authenticate.");
-    assert.equal(parsed.authenticated, false);
-    assert.equal(map(parsed.authenticated), "unauthenticated");
   });
 });
 

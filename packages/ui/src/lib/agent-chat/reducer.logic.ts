@@ -13,13 +13,12 @@
  */
 
 import {
-  applyDomainEvent as defaultApplyDomainEvent,
+  applyDomainEvent,
   createEmptyThreadState,
   DEFAULT_INTERACTION_MODE,
   isSettledTurnState,
   parseThreadGoal,
   type AgentChatStreamFrame,
-  type DomainEvent,
   type PendingRequests,
   type ThreadActivityItem,
   type ThreadFoldState,
@@ -39,19 +38,6 @@ import {
   historyBoundsFromSnapshot,
   resetHistory
 } from "./history.logic";
-
-/**
- * The fold is W2's. It is injected rather than imported at the call site so a
- * test can drive the reducer with a hand-written fold, and so this package
- * stayed testable while W2 was still landing.
- */
-export interface FoldOps {
-  applyDomainEvent(state: ThreadFoldState, event: DomainEvent): ThreadFoldState;
-}
-
-export const DEFAULT_FOLD_OPS: FoldOps = {
-  applyDomainEvent: defaultApplyDomainEvent
-};
 
 /** The whole per-thread reducer state: the shared fold plus the client's view. */
 export interface AgentChatReducerState {
@@ -278,8 +264,7 @@ export function projectSlice(
  */
 export function applyFrame(
   state: AgentChatReducerState,
-  frame: AgentChatStreamFrame,
-  ops: FoldOps = DEFAULT_FOLD_OPS
+  frame: AgentChatStreamFrame
 ): AgentChatReducerState {
   switch (frame.kind) {
     case "snapshot": {
@@ -296,7 +281,7 @@ export function applyFrame(
       if (frame.seq <= state.fold.seq) {
         return state;
       }
-      const fold = ops.applyDomainEvent(state.fold, frame.event);
+      const fold = applyDomainEvent(state.fold, frame.event);
       if (fold === state.fold) {
         return state;
       }
@@ -333,15 +318,6 @@ export function needsResync(previousInstanceId: string | null, frame: AgentChatS
     previousInstanceId !== null &&
     previousInstanceId !== frame.hostInstanceId
   );
-}
-
-/** Apply a batch in wire order. Convenience for replays and tests. */
-export function applyFrames(
-  state: AgentChatReducerState,
-  frames: readonly AgentChatStreamFrame[],
-  ops: FoldOps = DEFAULT_FOLD_OPS
-): AgentChatReducerState {
-  return frames.reduce((acc, frame) => applyFrame(acc, frame, ops), state);
 }
 
 // ---------------------------------------------------------------------------

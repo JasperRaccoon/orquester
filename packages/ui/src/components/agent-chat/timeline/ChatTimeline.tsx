@@ -880,7 +880,7 @@ const NOOP_STRING = (): void => {};
  * as the context's own fallback does: an intact plan as is, and only a cut
  * one refused.
  */
-export function threadPlanReader(sessionId: string): AgentChatActions["readFullPlanMarkdown"] {
+function threadPlanReader(sessionId: string): AgentChatActions["readFullPlanMarkdown"] {
   return (plan) => {
     const store = peekThreadStore(sessionId);
     return store ? store.getState().actions.readFullPlanMarkdown(plan) : readPlanWithoutStore(plan);

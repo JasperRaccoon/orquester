@@ -33,7 +33,7 @@ import * as nodePath from "node:path";
 import { parseGoalStatusRow, type ClaudeGoalStatusRow } from "./goal.ts";
 
 /** At most this many bytes per `read()` (goals §6.1.4). */
-export const GOAL_TRANSCRIPT_READ_BYTES = 1024 * 1024;
+const GOAL_TRANSCRIPT_READ_BYTES = 1024 * 1024;
 
 /**
  * The SDK's `sanitizePath` keeps a project dir name whole up to this length;
@@ -123,8 +123,6 @@ interface ReadTarget {
 export interface ClaudeGoalTranscriptOptions {
   configDir: string;
   cwd: string;
-  /** Overridden in tests, so a row split across two reads is exercised. */
-  maxReadBytes?: number;
 }
 
 /**
@@ -135,7 +133,6 @@ export interface ClaudeGoalTranscriptOptions {
 export class ClaudeGoalTranscript {
   private readonly configDir: string;
   private readonly cwd: string;
-  private readonly maxReadBytes: number;
   private sessionId: string | undefined;
   private path: string | undefined;
   private position: ReadPosition = { offset: 0, skipping: false };
@@ -146,7 +143,6 @@ export class ClaudeGoalTranscript {
   constructor(options: ClaudeGoalTranscriptOptions) {
     this.configDir = options.configDir;
     this.cwd = options.cwd;
-    this.maxReadBytes = Math.max(1, options.maxReadBytes ?? GOAL_TRANSCRIPT_READ_BYTES);
   }
 
   /**
@@ -287,7 +283,7 @@ export class ClaudeGoalTranscript {
     onRow: (row: ClaudeGoalStatusRow) => void
   ): Promise<ScanResult | undefined> {
     try {
-      return await scanGoalStatusRows(target.path, from, this.maxReadBytes, maxReads, onRow);
+      return await scanGoalStatusRows(target.path, from, GOAL_TRANSCRIPT_READ_BYTES, maxReads, onRow);
     } catch (error) {
       if (isMissing(error)) {
         this.forgetPath(target);

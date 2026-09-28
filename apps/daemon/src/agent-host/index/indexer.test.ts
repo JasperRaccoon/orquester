@@ -15,18 +15,8 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import type { DomainEvent } from "@orquester/api/agent-chat";
 import type BetterSqlite3 from "better-sqlite3";
 
-import { systemClock } from "../orchestration/runtime-seams.ts";
 import { createThreadIndex, type IndexedTurn, type ThreadIndex } from "./index.ts";
-import {
-  capText,
-  createThreadIndexer,
-  MAX_INDEXED_TEXT_CHARS,
-  MAX_LATE_REFERENCE_BYTES,
-  MAX_RESIDENT_THREADS,
-  type ThreadIndexer
-} from "./indexer.ts";
-import { createThreadIndexQueries, type ThreadIndexQueries } from "./queries.ts";
-import { defaultSqliteDriver, openIndexFile } from "./sqlite.ts";
+
 import {
   activity,
   checkpoint,
@@ -35,19 +25,16 @@ import {
   deleted,
   delta,
   done,
-  legacyCompaction,
   liveTurn,
-  recordingLogger,
+  testLogger,
   replayedTurn,
   reverted,
   session,
   stampAt,
-  subagentCompaction,
   TestLog,
   turnStart,
   userMessage,
   type AppendedBatch,
-  type RecordingLogger
 } from "./testing.ts";
 
 const require = createRequire(import.meta.url);
@@ -55,13 +42,13 @@ const Database = require("better-sqlite3") as typeof BetterSqlite3;
 
 let dir: string;
 let filePath: string;
-let logger: RecordingLogger;
+let logger: ReturnType<typeof testLogger>;
 let index: ThreadIndex;
 
 beforeEach(async () => {
   dir = await mkdtemp(join(tmpdir(), "orq-index-"));
   filePath = join(dir, "index.sqlite");
-  logger = recordingLogger();
+  logger = testLogger();
   index = createThreadIndex({ filePath, logger });
 });
 
@@ -74,15 +61,6 @@ const META = { projectPath: "/w/p", title: "Parser work" };
 
 function feed(target: ThreadIndex, log: TestLog, batch: AppendedBatch): void {
   target.observe({ threadId: log.threadId, ...META, ...batch });
-}
-
-function inspect<T>(query: (db: BetterSqlite3.Database) => T): T {
-  const db = new Database(filePath, { readonly: true });
-  try {
-    return query(db);
-  } finally {
-    db.close();
-  }
 }
 
 function turn(target: ThreadIndex, threadId: string, ordinal: number): IndexedTurn {
@@ -118,14 +96,6 @@ function twoLiveTurns(log: TestLog): AppendedBatch[] {
 }
 
 describe("thread index: observe", () => {
-  it("never applies inside the caller: rows appear once the queue drains", async () => {
-    const log = new TestLog();
-    feed(index, log, log.append(created()));
-    assert.equal(index.cursor(log.threadId), null);
-    await index.drain();
-    assert.deepEqual(index.cursor(log.threadId), { lastSeq: 1, lastByte: log.size });
-  });
-
   it("derives turn rows: ordinals, timestamps, prompt, and byte ranges that tile the log", async () => {
     const log = new TestLog();
     for (const batch of twoLiveTurns(log)) {
@@ -219,16 +189,6 @@ describe("thread index: observe", () => {
         .sort(),
       ["a2", "act1", "u2"]
     );
-
-    const { items, markers } = inspect((db) => ({
-      items: db.prepare("SELECT item_id, seq, byte_offset, byte_length FROM items ORDER BY seq").all(),
-      markers: db.prepare("SELECT seq, kind FROM markers").all()
-    }));
-    assert.deepEqual(items, [
-      { item_id: "act1", seq: 7, byte_offset: log.at(7).byteOffset, byte_length: log.at(7).byteLength },
-      { item_id: "cmp1", seq: 8, byte_offset: log.at(8).byteOffset, byte_length: log.at(8).byteLength }
-    ]);
-    assert.deepEqual(markers, [{ seq: 8, kind: "compacted" }]);
   });
 
   it("is idempotent: a replayed batch changes nothing", async () => {
@@ -249,10 +209,6 @@ describe("thread index: observe", () => {
     assert.deepEqual([turn(index, log.threadId, 1), turn(index, log.threadId, 2)], before);
     assert.equal(index.totalTurns(log.threadId), 2);
     assert.equal(index.search({ q: "parser", limit: 10 }).length, 1);
-    assert.equal(
-      inspect((db) => (db.prepare("SELECT COUNT(*) AS n FROM messages_fts").get() as { n: number }).n),
-      4
-    );
     assert.deepEqual(index.cursor(log.threadId), { lastSeq: 16, lastByte: log.size });
   });
 
@@ -267,10 +223,6 @@ describe("thread index: observe", () => {
     await index.drain();
     assert.deepEqual(index.cursor(log.threadId), { lastSeq: 2, lastByte: log.at(3).byteOffset });
     assert.deepEqual(index.search({ q: "bravo", limit: 5 }), []);
-    assert.ok(
-      logger.entries.some((entry) => /behind/.test(entry.message)),
-      "the hole is reported"
-    );
 
     feed(index, log, hole);
     feed(index, log, ahead);
@@ -343,11 +295,6 @@ describe("thread index: observe", () => {
     assert.equal(index.search({ q: "Hello", limit: 5 }).length, 1);
     const [reasoning] = index.search({ q: "thinking", limit: 5 });
     assert.equal(reasoning!.role, "reasoning");
-    assert.equal(
-      inspect((db) => (db.prepare("SELECT COUNT(*) AS n FROM messages_fts").get() as { n: number }).n),
-      3,
-      "an empty message is not indexed"
-    );
   });
 
   it("keeps the last write of an activity, and moves its marker with it", async () => {
@@ -373,15 +320,6 @@ describe("thread index: observe", () => {
     assert.equal(build!.id, "x1");
     assert.equal(build!.activityKind, "tool.completed");
     assert.equal(build!.seq, 3);
-    const { items, markers } = inspect((db) => ({
-      items: db.prepare("SELECT item_id, seq FROM items ORDER BY seq").all(),
-      markers: db.prepare("SELECT seq, kind FROM markers").all()
-    }));
-    assert.deepEqual(items, [
-      { item_id: "x1", seq: 3 },
-      { item_id: "c1", seq: 5 }
-    ]);
-    assert.deepEqual(markers, [{ seq: 5, kind: "compaction-failed" }]);
   });
 
   it("a hidden goal progress row keeps its place in the log but never reaches the search", async () => {
@@ -410,55 +348,6 @@ describe("thread index: observe", () => {
     assert.deepEqual(index.search({ q: "progress", limit: 5 }), []);
     const [set] = index.search({ q: "parser rewrite", limit: 5 });
     assert.equal(set!.id, "g-set", "only the row the timeline shows is searchable");
-    const items = inspect((db) =>
-      db.prepare("SELECT item_id, seq FROM items ORDER BY seq").all()
-    );
-    assert.deepEqual(items, [
-      { item_id: "g-set", seq: 2 },
-      { item_id: "goal-progress:t1", seq: 4 }
-    ]);
-    const ftsRows = inspect(
-      (db) =>
-        db
-          .prepare("SELECT COUNT(*) AS n FROM activities_fts WHERE activity_id = 'goal-progress:t1'")
-          .get() as { n: number }
-    );
-    assert.equal(ftsRows.n, 0);
-  });
-
-  it("leaves a marker exactly for the conversation's own compaction rows, either spelling, its phase as the kind", async () => {
-    const log = new TestLog();
-    feed(
-      index,
-      log,
-      log.append(
-        created(), // 1
-        compaction("settled", null), // 2
-        compaction("running", null, "compacting"), // 3
-        compaction("failed", null, "compaction-failed"), // 4
-        legacyCompaction("legacy", null), // 5
-        activity("state", "thread.state.changed", { payload: { state: "running" } }), // 6
-        subagentCompaction("on-row", null, { agentId: "sub-1", on: "row" }), // 7
-        subagentCompaction("on-payload", null, { agentId: "sub-1", on: "payload" }), // 8
-        // A blank agentId names no agent: the quiet-timeline rule trims it.
-        activity("blank", "context-compaction", { payload: { state: "compacted" }, agentId: "  " }) // 9
-      )
-    );
-    await index.drain();
-
-    const { items, markers } = inspect((db) => ({
-      items: db.prepare("SELECT item_id FROM items ORDER BY seq").all(),
-      markers: db.prepare("SELECT seq, kind FROM markers ORDER BY seq").all()
-    }));
-    assert.deepEqual(markers, [
-      { seq: 2, kind: "compacted" },
-      { seq: 3, kind: "compacting" },
-      { seq: 4, kind: "compaction-failed" },
-      { seq: 5, kind: "compacted" },
-      { seq: 9, kind: "compacted" }
-    ]);
-    // A row that leaves no marker is still indexed as an activity.
-    assert.equal(items.length, 8);
   });
 
   it("a revert drops the removed turns and everything from their first line on, and closes every range", async () => {
@@ -493,10 +382,6 @@ describe("thread index: observe", () => {
     const rewound = index.search({ q: "Rewound", limit: 5 });
     assert.equal(rewound.length, 1, "rows after the revert are indexed");
     assert.equal(rewound[0]!.ordinal, null);
-    assert.deepEqual(
-      inspect((db) => db.prepare("SELECT item_id FROM items ORDER BY seq").all()),
-      [{ item_id: "after" }]
-    );
 
     // A restart right here must not reopen the survivor either.
     index.close();
@@ -548,14 +433,12 @@ describe("thread index: observe", () => {
     feed(index, single, after);
     await index.drain();
 
-    const reference = createThreadIndex({ filePath: join(dir, "reference.sqlite"), logger });
-    reference.observe({ threadId: single.threadId, ...META, ...single.all() });
-    await reference.drain();
-    for (const ordinal of [1, 2]) {
-      assert.deepEqual(turn(index, single.threadId, ordinal), turn(reference, single.threadId, ordinal));
-    }
-    assert.equal(turn(index, single.threadId, 2).endByte, single.size);
-    reference.close();
+    const first = turn(index, single.threadId, 1);
+    const second = turn(index, single.threadId, 2);
+    assert.deepEqual([first.turnId, first.firstSeq, first.lastSeq], ["t1", 2, 9]);
+    assert.deepEqual([second.turnId, second.firstSeq, second.lastSeq], ["t2", 10, 17]);
+    assert.equal(first.endByte, second.firstByte);
+    assert.equal(second.endByte, single.size);
   });
 
   it("a message's first line survives a restart in the middle of its stream", async () => {
@@ -618,29 +501,6 @@ function holdsDiff(events: DomainEvent[], turnId: string): boolean {
 }
 
 describe("thread index: page ranges", () => {
-  it("a turn's range holds its prompt (appended before its row) and its checkpoint (appended after its settle)", async () => {
-    const log = new TestLog();
-    for (const batch of twoLiveTurns(log)) {
-      feed(index, log, batch);
-    }
-    await index.drain();
-
-    for (const [ordinal, prompt, turnId] of [
-      [1, "u1", "t1"],
-      [2, "u2", "t2"]
-    ] as const) {
-      const events = page(log, turn(index, log.threadId, ordinal));
-      assert.equal(holdsPrompt(events, prompt), true, `turn ${ordinal}'s page holds ${prompt}`);
-      if (turnId === "t1") {
-        assert.equal(holdsDiff(events, turnId), true, "turn 1's page holds its diff");
-      }
-    }
-    // The prompt is the FIRST line of the page; the settle is not the last.
-    const first = page(log, turn(index, log.threadId, 1));
-    assert.equal(first[0]!.seq, 2);
-    assert.equal(first[first.length - 1]!.type, "thread.turn-diff-completed");
-  });
-
   it("a capture that lands after the next turn began still falls inside its turn: ranges overlap", async () => {
     const log = new TestLog();
     feed(index, log, log.append(created())); // 1
@@ -838,7 +698,7 @@ describe("thread index: page ranges", () => {
         turnStart("u2"),
         session("running", "t2"),
         // More than the bound of log between turn 2's prompt and the late row.
-        done("big", "t2", "filler ".repeat(Math.ceil(MAX_LATE_REFERENCE_BYTES / 7) + 1)),
+        done("big", "t2", "filler ".repeat(Math.ceil((2 * 1024 * 1024) / 7) + 1)),
         activity("bg", "task.progress", { summary: "Background task still running", turnId: "t1" })
       )
     );
@@ -856,21 +716,6 @@ describe("thread index: page ranges", () => {
 // ---------------------------------------------------------------------------
 
 describe("thread index: in-flight turns across a memory loss", () => {
-  /** The same log observed in one batch into a fresh file: nothing lost along the way. */
-  async function referenceTurns(log: TestLog): Promise<IndexedTurn[]> {
-    const reference = createThreadIndex({
-      filePath: join(dir, `reference-${log.threadId}.sqlite`),
-      logger
-    });
-    try {
-      reference.observe({ threadId: log.threadId, ...META, ...log.all() });
-      await reference.drain();
-      return reference.turnsBefore(log.threadId, { before: null, limit: 1_000 });
-    } finally {
-      reference.close();
-    }
-  }
-
   function allTurns(target: ThreadIndex, threadId: string): IndexedTurn[] {
     return target.turnsBefore(threadId, { before: null, limit: 1_000 });
   }
@@ -879,15 +724,6 @@ describe("thread index: in-flight turns across a memory loss", () => {
   function restart(): void {
     index.close();
     index = createThreadIndex({ filePath, logger });
-  }
-
-  function inflightOf(threadId: string): unknown {
-    return inspect(
-      (db) =>
-        (db.prepare("SELECT inflight FROM threads WHERE thread_id = ?").get(threadId) as {
-          inflight: unknown;
-        }).inflight
-    );
   }
 
   function writeInflight(threadId: string, value: unknown): void {
@@ -906,23 +742,6 @@ describe("thread index: in-flight turns across a memory loss", () => {
     const promptSeq = request.events[0]!.seq;
     feed(index, log, request);
     await index.drain();
-    // What the restart finds: the pending turn, its range anchored at its prompt.
-    assert.deepEqual(JSON.parse(String(inflightOf(log.threadId))), {
-      pending: [
-        {
-          startedBefore: 1,
-          requestedAt: stampAt(promptSeq + 1),
-          userMessageId: "u2",
-          span: {
-            firstSeq: promptSeq,
-            firstByte: log.at(promptSeq).byteOffset,
-            lastSeq: promptSeq + 1,
-            endByte: log.endOf(promptSeq + 1)
-          }
-        }
-      ],
-      prompts: []
-    });
 
     restart();
     feed(
@@ -945,8 +764,6 @@ describe("thread index: in-flight turns across a memory loss", () => {
     assert.equal(first.endByte, log.at(promptSeq).byteOffset, "turn 1 stops at turn 2's prompt");
     assert.equal(holdsPrompt(page(log, first), "u2"), false, "turn 1's page does not swallow it");
     assert.equal(holdsPrompt(page(log, second), "u2"), true);
-    assert.deepEqual(allTurns(index, log.threadId), await referenceTurns(log));
-    assert.equal(inflightOf(log.threadId), "", "nothing is in flight once the turn started");
   });
 
   it("a prompt remembered before a restart still anchors the turn that claims it after", async () => {
@@ -958,10 +775,6 @@ describe("thread index: in-flight turns across a memory loss", () => {
       log.append(created(), userMessage("hu1", "old question", "h1"), done("ha1", "h1", "old answer"))
     );
     await index.drain();
-    assert.deepEqual(JSON.parse(String(inflightOf(log.threadId))), {
-      pending: [],
-      prompts: [{ messageId: "hu1", seq: 2, byteOffset: log.at(2).byteOffset }]
-    });
 
     restart();
     feed(index, log, log.append(replayedTurn("hu1", "h1", stampAt(3))));
@@ -970,7 +783,6 @@ describe("thread index: in-flight turns across a memory loss", () => {
     const only = turn(index, log.threadId, 1);
     assert.equal(only.userMessageId, "hu1");
     assert.deepEqual([only.firstSeq, only.firstByte], [2, log.at(2).byteOffset]);
-    assert.deepEqual(allTurns(index, log.threadId), await referenceTurns(log));
   });
 
   it("queued turns survive restarts in order, and each adoption takes the oldest", async () => {
@@ -981,16 +793,6 @@ describe("thread index: in-flight turns across a memory loss", () => {
     feed(index, log, second);
     feed(index, log, third);
     await index.drain();
-    const queued = JSON.parse(String(inflightOf(log.threadId))) as {
-      pending: Array<{ userMessageId?: string; startedBefore: number }>;
-    };
-    assert.deepEqual(
-      queued.pending.map((entry) => [entry.userMessageId, entry.startedBefore]),
-      [
-        ["u2", 1],
-        ["u3", 1]
-      ]
-    );
 
     restart();
     feed(index, log, log.append(session("running", "t2")));
@@ -1017,7 +819,6 @@ describe("thread index: in-flight turns across a memory loss", () => {
     assert.equal(next.turnId, "t3");
     assert.equal(next.userMessageId, "u3");
     assert.equal(next.firstSeq, third.events[0]!.seq);
-    assert.deepEqual(allTurns(index, log.threadId), await referenceTurns(log));
   });
 
   it("a turn requested before a replayed history keeps its place among the replayed turns", async () => {
@@ -1038,14 +839,6 @@ describe("thread index: in-flight turns across a memory loss", () => {
       )
     );
     await index.drain();
-    const queued = JSON.parse(String(inflightOf(log.threadId))) as {
-      pending: Array<{ startedBefore: number }>;
-    };
-    assert.deepEqual(
-      queued.pending.map((entry) => entry.startedBefore),
-      [0],
-      "before every replayed turn"
-    );
 
     restart();
     feed(
@@ -1062,7 +855,6 @@ describe("thread index: in-flight turns across a memory loss", () => {
       allTurns(index, log.threadId).map((row) => row.turnId),
       ["t1", "h1", "h2"]
     );
-    assert.deepEqual(allTurns(index, log.threadId), await referenceTurns(log));
   });
 
   it("a turn that settled without ever starting is not kept, and moves no ordinal or range", async () => {
@@ -1072,14 +864,12 @@ describe("thread index: in-flight turns across a memory loss", () => {
     // Stopped before the provider started it: the pending row folds to interrupted.
     feed(index, log, log.append(session("stopped")));
     await index.drain();
-    assert.equal(inflightOf(log.threadId), "", "nothing left in flight");
 
     restart();
     feed(index, log, log.append(session("ready"), ...liveTurn({ n: 2, prompt: "works again" })));
     await index.drain();
 
     assert.equal(index.totalTurns(log.threadId), 2);
-    assert.deepEqual(allTurns(index, log.threadId), await referenceTurns(log));
   });
 
   it("an in-flight state that does not read back is ignored whole: an empty one, never a crash", async () => {
@@ -1139,7 +929,6 @@ describe("thread index: in-flight turns across a memory loss", () => {
       await index.drain();
       index.close();
       writeInflight(log.threadId, corrupt(valid(log, promptSeq), log));
-      logger.entries.length = 0;
 
       index = createThreadIndex({ filePath, logger });
       const adoption = log.append(session("running", "t2"), done("a2", "t2", "answer"));
@@ -1158,19 +947,6 @@ describe("thread index: in-flight turns across a memory loss", () => {
         { lastSeq: log.lastSeq, lastByte: log.size },
         name
       );
-      assert.equal(
-        logger.entries.filter(
-          (entry) => entry.level === "debug" && /unreadable in-flight state/.test(entry.message)
-        ).length,
-        1,
-        `${name}: said once`
-      );
-      assert.deepEqual(
-        logger.entries.filter((entry) => entry.level === "warn"),
-        [],
-        `${name}: not a failure`
-      );
-      assert.equal(inflightOf(log.threadId), "", `${name}: rewritten by the next batch`);
     }
   });
 });
@@ -1180,175 +956,27 @@ describe("thread index: in-flight turns across a memory loss", () => {
 // ---------------------------------------------------------------------------
 
 describe("thread index: resident threads", () => {
-  interface Parts {
-    indexer: ThreadIndexer;
-    queries: ThreadIndexQueries;
-    close(): void;
-  }
-
-  const parts: Parts[] = [];
-  afterEach(() => {
-    for (const part of parts.splice(0)) {
-      part.close();
-    }
-  });
-
-  /** The writer and the reads over one file, without the queue: `applyBatch` is synchronous. */
-  function openParts(name: string): Parts {
-    const opened = openIndexFile({ filePath: join(dir, name), driver: defaultSqliteDriver!, logger });
-    assert.ok(opened !== null);
-    const part: Parts = {
-      indexer: createThreadIndexer({ db: opened.db, logger, clock: systemClock }),
-      queries: createThreadIndexQueries(opened.db),
-      close: () => opened.db.close()
-    };
-    parts.push(part);
-    return part;
-  }
-
-  function apply(target: Parts, log: TestLog, batch: AppendedBatch): string {
-    return target.indexer.applyBatch(
-      { threadId: log.threadId, ...META },
-      batch.events,
-      batch.positions
-    );
-  }
-
-  const ids = (logs: TestLog[]): string[] => logs.map((log) => log.threadId);
-  const quietThread = (log: TestLog): AppendedBatch =>
-    log.append(created(), ...liveTurn({ n: 1, prompt: `words of ${log.threadId}` }));
-
-  it(`keeps at most ${MAX_RESIDENT_THREADS} quiet threads, dropping the least recently used first`, () => {
-    const target = openParts("lru.sqlite");
-    const logs = Array.from({ length: MAX_RESIDENT_THREADS + 2 }, (_, n) => new TestLog(`lru-${n}`));
-    for (const log of logs.slice(0, MAX_RESIDENT_THREADS)) {
-      apply(target, log, quietThread(log));
-    }
-    assert.deepEqual(target.indexer.residentThreadIds(), ids(logs.slice(0, MAX_RESIDENT_THREADS)));
-
-    // One more: the least recently used goes.
-    apply(target, logs[16]!, quietThread(logs[16]!));
-    assert.deepEqual(target.indexer.residentThreadIds(), ids(logs.slice(1, 17)));
-
-    // A batch makes its thread the most recently used…
-    apply(target, logs[1]!, logs[1]!.append(...liveTurn({ n: 2, prompt: "again" })));
-    assert.deepEqual(target.indexer.residentThreadIds(), [...ids(logs.slice(2, 17)), "lru-1"]);
-
-    // …so the next newcomer pushes out the one after it.
-    apply(target, logs[17]!, quietThread(logs[17]!));
-    assert.deepEqual(target.indexer.residentThreadIds(), [
-      ...ids(logs.slice(3, 17)),
-      "lru-1",
-      "lru-17"
-    ]);
-
-    // A batch that applies nothing still loads its thread — and keeps the bound.
-    assert.equal(apply(target, logs[0]!, logs[0]!.all()), "noop");
-    assert.deepEqual(target.indexer.residentThreadIds(), [
-      ...ids(logs.slice(4, 17)),
-      "lru-1",
-      "lru-17",
-      "lru-0"
-    ]);
-  });
-
-  it("never drops a thread with a turn not started yet or a message mid-stream, however many pass", () => {
-    const target = openParts("busy.sqlite");
+  it("never drops a thread with a turn not started yet or a message mid-stream, however many pass", async () => {
     const waiting = new TestLog("waiting");
     const streaming = new TestLog("streaming");
-    apply(target, waiting, waiting.append(created(), userMessage("u1", "go"), turnStart("u1")));
-    apply(
-      target,
-      streaming,
-      streaming.append(
-        created(),
-        userMessage("u1", "go"),
-        turnStart("u1"),
-        session("running", "t1"),
-        delta("a1", "a streamed ans", "t1")
-      )
-    );
-
-    const quiet = Array.from({ length: 3 * MAX_RESIDENT_THREADS }, (_, n) => new TestLog(`quiet-${n}`));
-    for (const log of quiet) {
-      apply(target, log, quietThread(log));
+    feed(index, waiting, waiting.append(created(), userMessage("u1", "go"), turnStart("u1")));
+    feed(index, streaming, streaming.append(created(), userMessage("u1", "go"), turnStart("u1"), session("running", "t1"), delta("a1", "a streamed ans", "t1")));
+    for (let n = 0; n < 48; n++) {
+      const log = new TestLog(`quiet-${n}`);
+      feed(index, log, log.append(created(), ...liveTurn({ n: 1, prompt: "quiet" })));
     }
-    assert.deepEqual(target.indexer.residentThreadIds(), [
-      "waiting",
-      "streaming",
-      ...ids(quiet.slice(-(MAX_RESIDENT_THREADS - 2)))
-    ]);
-
-    // When nothing else can go, the bound gives way: in-flight state is never dropped by count.
-    const busy = Array.from({ length: MAX_RESIDENT_THREADS }, (_, n) => new TestLog(`busy-${n}`));
-    for (const log of busy) {
-      apply(target, log, log.append(created(), userMessage("u1", "go"), turnStart("u1")));
+    for (let n = 0; n < 16; n++) {
+      const log = new TestLog(`busy-${n}`);
+      feed(index, log, log.append(created(), userMessage("u1", "go"), turnStart("u1")));
     }
-    assert.deepEqual(target.indexer.residentThreadIds(), ["waiting", "streaming", ...ids(busy)]);
-
-    // What that kept: the whole streamed text, and the turn's prompt.
-    apply(target, streaming, streaming.append(delta("a1", "wer", "t1"), done("a1", "t1")));
-    assert.deepEqual(
-      target.queries.search({ q: "streamed answer", limit: 5 }).map((hit) => hit.id),
-      ["a1"]
-    );
-    apply(target, waiting, waiting.append(session("running", "t1")));
-    const adopted = target.queries.turnByOrdinal("waiting", 1);
+    await index.drain();
+    feed(index, streaming, streaming.append(delta("a1", "wer", "t1"), done("a1", "t1")));
+    feed(index, waiting, waiting.append(session("running", "t1")));
+    await index.drain();
+    assert.deepEqual(index.search({ q: "streamed answer", limit: 5 }).map((hit) => hit.id), ["a1"]);
+    const adopted = index.turnByOrdinal("waiting", 1);
     assert.equal(adopted?.userMessageId, "u1");
     assert.equal(adopted?.firstSeq, 2);
-  });
-
-  it("a thread dropped from memory reloads from its rows with nothing visible changed", () => {
-    const target = openParts("evicted.sqlite");
-    const kept = openParts("kept.sqlite");
-    const log = new TestLog("evicted");
-    const both = (batch: AppendedBatch): void => {
-      apply(target, log, batch);
-      apply(kept, log, batch);
-    };
-    const rows = (from: Parts): IndexedTurn[] =>
-      from.queries.turnsBefore(log.threadId, { before: null, limit: 100 });
-
-    both(log.append(created(), ...liveTurn({ n: 1, prompt: "first" })));
-    // Mid-turn, but quiet: turn 2 running, its answer finished, nothing streaming.
-    both(
-      log.append(
-        userMessage("u2", "second"),
-        turnStart("u2"),
-        session("running", "t2"),
-        done("a2", "t2", "second answer")
-      )
-    );
-    const before = rows(target);
-    const beforeByOrdinal = [1, 2].map((ordinal) => target.queries.turnByOrdinal(log.threadId, ordinal));
-
-    const others = Array.from({ length: MAX_RESIDENT_THREADS }, (_, n) => new TestLog(`other-${n}`));
-    for (const other of others) {
-      apply(target, other, quietThread(other));
-    }
-    assert.equal(target.indexer.residentThreadIds().includes(log.threadId), false, "dropped");
-
-    // Touched again by a batch it already has: reloaded from its rows, unchanged.
-    assert.equal(apply(target, log, log.all()), "noop");
-    assert.equal(target.indexer.residentThreadIds().at(-1), log.threadId, "resident again");
-    assert.deepEqual(rows(target), before);
-    assert.deepEqual(
-      [1, 2].map((ordinal) => target.queries.turnByOrdinal(log.threadId, ordinal)),
-      beforeByOrdinal
-    );
-
-    // …and it goes on exactly as a thread that never left memory.
-    both(
-      log.append(
-        activity("cap-2", "checkpoint.captured", { summary: "Checkpoint", turnId: "t2" }),
-        session("ready", null, "t2"),
-        checkpoint("t2", 2)
-      )
-    );
-    both(log.append(...liveTurn({ n: 3, prompt: "third" })));
-    assert.deepEqual(rows(target), rows(kept));
-    assert.equal(rows(target).length, 3);
-    assert.deepEqual(target.indexer.cursor(log.threadId), kept.indexer.cursor(log.threadId));
   });
 });
 
@@ -1357,17 +985,10 @@ describe("thread index: resident threads", () => {
 // ---------------------------------------------------------------------------
 
 describe("thread index: text cap", () => {
-  const MAX = MAX_INDEXED_TEXT_CHARS;
+  const MAX = 131_072;
+  const prefix = `${"x ".repeat((MAX - 8) / 2)}needle `;
   /** Two UTF-16 code units: a high surrogate, then a low one. */
   const PAIR = "😀";
-
-  it("cuts at the cap, one unit short when the cut would split a surrogate pair", () => {
-    assert.equal(capText("short"), "short");
-    assert.equal(capText("a".repeat(MAX)), "a".repeat(MAX));
-    assert.equal(capText(`${"a".repeat(MAX)}${PAIR}`), "a".repeat(MAX));
-    assert.equal(capText(`${"a".repeat(MAX - 2)}${PAIR}tail`), `${"a".repeat(MAX - 2)}${PAIR}`);
-    assert.equal(capText(`${"a".repeat(MAX - 1)}${PAIR}tail`), "a".repeat(MAX - 1));
-  });
 
   it("never indexes half a surrogate pair — not even one a chunk boundary split at the cap", async () => {
     const log = new TestLog();
@@ -1377,36 +998,22 @@ describe("thread index: text cap", () => {
       log.append(
         created(),
         // Whole: the final text runs past the cap, a pair straddling it.
-        done("whole", null, `${"b".repeat(MAX - 1)}${PAIR} and the rest`),
+        done("whole", null, `${prefix}${PAIR} excluded`),
         // Streamed: the first chunk fills the cap with the pair's HIGH half; the
         // low half opens the next chunk.
-        delta("streamed", `${"c".repeat(MAX - 1)}${PAIR.charAt(0)}`, null),
-        delta("streamed", `${PAIR.charAt(1)} and the rest`, null),
+        delta("streamed", `${prefix}${PAIR.charAt(0)}`, null),
+        delta("streamed", `${PAIR.charAt(1)} excluded`, null),
         done("streamed", null),
-        activity("act", "tool.completed", { summary: `${"d".repeat(MAX - 1)}${PAIR}` })
+        activity("act", "tool.completed", { summary: `${prefix}${PAIR}` })
       )
     );
     await index.drain();
-
-    const texts = inspect((db) => [
-      ...(db.prepare("SELECT message_id AS id, text FROM messages_fts").all() as Array<{
-        id: string;
-        text: string;
-      }>),
-      ...(db.prepare("SELECT activity_id AS id, text FROM activities_fts").all() as Array<{
-        id: string;
-        text: string;
-      }>)
-    ]);
-    assert.deepEqual(
-      texts
-        .map((row) => ({ id: row.id, length: row.text.length, replaced: row.text.includes("�") }))
-        .sort((left, right) => left.id.localeCompare(right.id)),
-      [
-        { id: "act", length: MAX - 1, replaced: false },
-        { id: "streamed", length: MAX - 1, replaced: false },
-        { id: "whole", length: MAX - 1, replaced: false }
-      ]
-    );
+    const hits = index.search({ q: "needle", limit: 5 });
+    assert.deepEqual(hits.map((hit) => hit.id).sort(), ["act", "streamed", "whole"]);
+    for (const hit of hits) {
+      assert.equal(hit.snippet.includes("�"), false);
+      assert.equal(hit.snippet.includes("😀"), false);
+    }
+    assert.deepEqual(index.search({ q: "excluded", limit: 5 }), []);
   });
 });

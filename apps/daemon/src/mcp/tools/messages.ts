@@ -51,7 +51,7 @@ const SUBAGENTS_TRIMMED_HINT = "The subagent list was trimmed too; get_session m
  * under `maxChars` for this field, and the `unavailable` sentence's bytes more, so the answer, hint included, keeps
  * within `maxChars`.
  */
-export function transcriptHint(result: Pick<TranscriptResult, "truncated" | "subagentsTruncated">, unavailable?: string): string | undefined {
+function transcriptHint(result: Pick<TranscriptResult, "truncated" | "subagentsTruncated">, unavailable?: string): string | undefined {
   const shed = !result.truncated ? undefined : result.subagentsTruncated ? `${TRUNCATED_HINT} ${SUBAGENTS_TRIMMED_HINT}` : TRUNCATED_HINT;
   return unavailable && shed ? `${unavailable} ${shed}` : unavailable || shed;
 }

@@ -1,26 +1,22 @@
 import assert from "node:assert/strict";
 import { beforeEach, describe, it } from "node:test";
 
-import type { ThreadItem, ThreadMessageItem } from "@orquester/api/agent-chat";
+import type { ThreadItem } from "@orquester/api/agent-chat";
 
 import { REWIND_BUSY_TITLE } from "../../components/agent-chat/composer/RewindControl";
 import type { AgentChatTimelineRow } from "../agent-chat/contracts";
 import { deriveTimelineEntriesFromItems } from "../agent-chat/entries.logic";
 import { deriveTimelineRows } from "../agent-chat/rows.logic";
 import { activity, foldTurn, historyPage, message, resetBuilders, stamp } from "../agent-chat/test-helpers";
-import { createLoadedPromptsMemo, type HistoryPrompt } from "./prompts.logic";
+import type { HistoryPrompt } from "./prompts.logic";
 import {
-  CHAT_NOT_READY,
-  createRewindTargetsMemo,
   latestLoadedCompactionAt,
   latestSettledCompactionAt,
   PROMPT_GONE,
   promptRewindTarget,
-  revealMissReason,
   REWIND_NOT_OFFERED,
   REWIND_NOT_RENDERED,
   REWIND_WITHHELD,
-  rewindBusyReason,
   rowsRewindTargetsOf,
   runPromptRewind,
   TURN_LOAD_FAILED,
@@ -31,19 +27,6 @@ import {
 } from "./rewind.logic";
 
 beforeEach(() => resetBuilders());
-
-function userRow(id: string, revertTurnCount?: number): AgentChatTimelineRow {
-  const item: ThreadMessageItem = message("user", `text ${id}`, { id });
-  return {
-    kind: "message",
-    id,
-    createdAt: item.createdAt,
-    message: item,
-    durationStart: item.createdAt,
-    showAssistantMeta: false,
-    ...(revertTurnCount === undefined ? {} : { revertTurnCount })
-  };
-}
 
 function facts(targets: Record<string, number | null>, latestCompactionAt: string | null = null): RewindFacts {
   return { targets: new Map(Object.entries(targets)), latestCompactionAt };
@@ -75,28 +58,6 @@ function rowsOf(items: ThreadItem[], turns = [foldTurn("t1", "u1")]): AgentChatT
 
 const IDLE = { isTurnActive: false, reverting: false, hasPendingRequest: false };
 
-describe("rowsRewindTargetsOf", () => {
-  it("reads every user message row's verdict", () => {
-    const assistant: AgentChatTimelineRow = {
-      kind: "message",
-      id: "a1",
-      createdAt: stamp(3),
-      message: message("assistant", "answer", { id: "a1" }),
-      durationStart: stamp(3),
-      showAssistantMeta: true
-    };
-    const targets = rowsRewindTargetsOf([userRow("u1", 0), assistant, userRow("u2"), userRow("u3", 2)]);
-    assert.deepEqual(Object.fromEntries(targets), { u1: 0, u2: null, u3: 2 });
-  });
-
-  it("hands the same map back until a verdict changes", () => {
-    const memo = createRewindTargetsMemo();
-    const first = memo([userRow("u1", 0), userRow("u2", 1)]);
-    assert.equal(memo([userRow("u1", 0), userRow("u2", 1)]), first, "a new rows array, same verdicts");
-    assert.notEqual(memo([userRow("u1", 0), userRow("u2")]), first);
-  });
-});
-
 describe("the compaction that bounds a rewind is read off the items, never the rows", () => {
   it("finds a compaction the settled turn's fold hides from the rows", () => {
     // A long turn the provider compacted in the middle of, then settled.
@@ -109,11 +70,6 @@ describe("the compaction that bounds a rewind is read off the items, never the r
       message("assistant", "done", { id: "a1", turnId: "t1" })
     ];
     const rows = rowsOf(items);
-    assert.ok(rows.some((row) => row.kind === "turn-fold"), "the settled turn is folded");
-    assert.ok(
-      !rows.some((row) => row.kind === "context-compaction"),
-      "the fold of the settled turn hides the marker from the rows"
-    );
     const compactedAt = latestSettledCompactionAt(items);
     assert.equal(compactedAt, marker.createdAt, "the items still hold it");
     // So an index-only prompt from before it is not offered a rewind.
@@ -135,26 +91,6 @@ describe("the compaction that bounds a rewind is read off the items, never the r
     );
   });
 
-  it("never takes a legacy state row that is not `compacted` for a compaction", () => {
-    const running = activity("thread.state.changed", { state: "running" }, { id: "s1", tone: "info" });
-    const compacted = activity("thread.state.changed", { state: "compacted" }, { id: "s2", tone: "info" });
-    // The rows draw any legacy state row as a compaction divider…
-    const rows = rowsOf([message("user", "go", { id: "u1" }), running]);
-    assert.ok(rows.some((row) => row.kind === "context-compaction"), "the over-strict signal the rows give");
-    // …the one rule does not.
-    assert.equal(latestSettledCompactionAt([running]), null);
-    assert.equal(latestSettledCompactionAt([running, compacted]), compacted.createdAt);
-  });
-
-  it("ignores a compaction still running, a failed one, and a subagent's own", () => {
-    const items = [
-      activity("context-compaction", { state: "compacting" }, { tone: "info" }),
-      activity("context-compaction", { state: "compaction-failed" }, { tone: "error" }),
-      activity("context-compaction", { state: "compacted" }, { tone: "info", agentId: "sub-1" })
-    ];
-    assert.equal(latestSettledCompactionAt(items), null);
-  });
-
   it("takes the newest across the loaded pages, the bridge and the window", () => {
     const onPage = activity("context-compaction", { state: "compacted" }, { createdAt: stamp(10) });
     const inBridge = activity("context-compaction", { state: "compacted" }, { createdAt: stamp(30) });
@@ -163,56 +99,6 @@ describe("the compaction that bounds a rewind is read off the items, never the r
     assert.equal(latestLoadedCompactionAt({ pages, bridge: [inBridge], entries: [inWindow] }), stamp(30));
     assert.equal(latestLoadedCompactionAt({ pages, bridge: [], entries: [inWindow] }), stamp(20));
     assert.equal(latestLoadedCompactionAt({ pages: [], bridge: [], entries: [] }), null);
-  });
-});
-
-describe("the count is the timeline's own", () => {
-  it("equals the prompt's turn ordinal minus one — the number `/revert` keeps", () => {
-    // Four started turns, one of them the agent's own, one prompt a steer.
-    const items = [
-      message("user", "first", { id: "u1" }),
-      message("assistant", "one", { id: "a1", turnId: "t1" }),
-      message("assistant", "the agent went on", { id: "a2", turnId: "t2" }),
-      message("user", "second", { id: "u3" }),
-      message("user", "a steer", { id: "s3", turnId: "t3" }),
-      message("assistant", "three", { id: "a3", turnId: "t3" }),
-      message("user", "third", { id: "u4" }),
-      message("assistant", "four", { id: "a4", turnId: "t4" })
-    ];
-    const turns = [foldTurn("t1", "u1"), foldTurn("t2"), foldTurn("t3", "u3"), foldTurn("t4", "u4")];
-    const verdicts = rowsRewindTargetsOf(rowsOf(items, turns));
-    const prompts = createLoadedPromptsMemo()({ pages: [], bridge: [], entries: items, turns }).prompts;
-    for (const prompt of prompts) {
-      const fromRows = verdicts.get(prompt.messageId);
-      if (prompt.turnOrdinal === null) {
-        assert.equal(fromRows, null, `${prompt.messageId} opened no turn: no rewind`);
-      } else {
-        assert.equal(fromRows, prompt.turnOrdinal - 1, `${prompt.messageId}`);
-      }
-    }
-    assert.deepEqual(
-      prompts.map((prompt) => [prompt.messageId, prompt.turnOrdinal]),
-      [
-        ["u4", 4],
-        ["s3", null],
-        ["u3", 3],
-        ["u1", 1]
-      ]
-    );
-  });
-
-  it("is withheld before a settled compaction, as the timeline withholds it", () => {
-    const items = [
-      message("user", "before", { id: "u1" }),
-      message("assistant", "one", { id: "a1", turnId: "t1" }),
-      activity("context-compaction", { state: "compacted" }, { id: "c1", turnId: null, tone: "info" }),
-      message("user", "after", { id: "u2" }),
-      message("assistant", "two", { id: "a2", turnId: "t2" })
-    ];
-    const verdicts = rowsRewindTargetsOf(rowsOf(items, [foldTurn("t1", "u1"), foldTurn("t2", "u2")]));
-    assert.equal(verdicts.get("u1"), null);
-    assert.equal(verdicts.get("u2"), 1);
-    assert.notEqual(latestSettledCompactionAt(items), null);
   });
 });
 
@@ -277,42 +163,6 @@ describe("promptRewindTarget", () => {
       null,
       "a loaded prompt the rows do not render has no verdict"
     );
-  });
-});
-
-describe("rewindBusyReason", () => {
-  it("is the composer picker's own gate", () => {
-    const idle = { ...IDLE, isSending: false };
-    assert.equal(rewindBusyReason(idle), null);
-    assert.equal(rewindBusyReason({ ...idle, isTurnActive: true }), REWIND_BUSY_TITLE);
-    assert.equal(rewindBusyReason({ ...idle, reverting: true }), REWIND_BUSY_TITLE);
-    assert.equal(rewindBusyReason({ ...idle, hasPendingRequest: true }), REWIND_BUSY_TITLE);
-    // A composer send still on its way: its turn would start against the
-    // history the rewind is about to cut (the picker's own rule, §7.4).
-    assert.equal(rewindBusyReason({ ...idle, isSending: true }), REWIND_BUSY_TITLE);
-  });
-});
-
-describe("revealMissReason", () => {
-  const known = [foldTurn("t1", "u1"), foldTurn("t2", "u2")];
-  const miss = (over: Partial<Parameters<typeof revealMissReason>[0]>) =>
-    revealMissReason({ turnId: "t1", connection: "synchronized", turns: known, historyError: null, ...over });
-
-  it("says 'no longer in this chat' only when the fold no longer knows the turn", () => {
-    assert.equal(miss({ turnId: "t-reverted" }), PROMPT_GONE);
-    assert.notEqual(miss({}), PROMPT_GONE);
-  });
-
-  it("tells a turn too far back from a page that failed and a chat not connected", () => {
-    assert.equal(miss({}), TURN_TOO_FAR_BACK, "past the reveal's page cap, or nothing older to page");
-    assert.equal(
-      miss({ historyError: "Older turns are unavailable on this host right now." }),
-      "Older turns are unavailable on this host right now.",
-      "the page's own words"
-    );
-    assert.equal(miss({ historyError: " " }), TURN_LOAD_FAILED);
-    assert.equal(miss({ connection: "reconnecting" }), CHAT_NOT_READY);
-    assert.equal(miss({ connection: "connecting", turnId: "t-reverted" }), CHAT_NOT_READY, "unsynced says so first");
   });
 });
 

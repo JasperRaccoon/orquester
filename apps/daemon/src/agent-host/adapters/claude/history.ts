@@ -16,11 +16,11 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { forkSession, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 
-import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
+import { withDeadline } from "../../support/deadline.ts";
 import { spawnProviderChild } from "../../support/spawn.ts";
 import type { ClaudeHistoryMessage } from "./rollback.ts";
 
-export const HISTORY_WORKER_PATH = nodePath.resolve(
+const HISTORY_WORKER_PATH = nodePath.resolve(
   nodePath.dirname(fileURLToPath(import.meta.url)),
   "history-worker.ts"
 );
@@ -32,7 +32,7 @@ export const HISTORY_WORKER_PATH = nodePath.resolve(
  * `ERR_MODULE_NOT_FOUND: Cannot find package 'tsx'` and the worker never
  * started, so this is resolved from THIS module's own location instead.
  */
-export const TSX_IMPORT_SPECIFIER = ((): string => {
+const TSX_IMPORT_SPECIFIER = ((): string => {
   try {
     return pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
   } catch {
@@ -41,7 +41,7 @@ export const TSX_IMPORT_SPECIFIER = ((): string => {
 })();
 
 /** A bounded window for one history read or fork. */
-export const HISTORY_DEADLINE_MS = 30_000;
+const HISTORY_DEADLINE_MS = 30_000;
 
 export interface ClaudeHistoryReader {
   readMessages(input: {
@@ -65,8 +65,6 @@ export interface ClaudeHistoryReaderOptions {
   /** Overridden in tests. */
   spawn?: typeof spawnProviderChild;
   nodePath?: string;
-  /** Overridden in tests, so a real child can be driven through this path. */
-  workerPath?: string;
 }
 
 function collect(stream: NodeJS.ReadableStream): Promise<string> {
@@ -112,7 +110,7 @@ export function createClaudeHistoryReader(
       args: [
         "--import",
         TSX_IMPORT_SPECIFIER,
-        options.workerPath ?? HISTORY_WORKER_PATH,
+        HISTORY_WORKER_PATH,
         method,
         sessionId,
         JSON.stringify(args)
@@ -180,5 +178,3 @@ export function createClaudeHistoryReader(
     }
   };
 }
-
-export { AGENT_HOST_DEADLINES };

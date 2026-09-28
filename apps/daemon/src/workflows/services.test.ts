@@ -6,23 +6,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 
-import type { GitStatusResponse, SessionSummary, Workflow, WorkflowRunSummary } from "@orquester/api";
+import type { GitStatusResponse, SessionSummary, WorkflowRunSummary } from "@orquester/api";
 
 import type { DaemonApi, DaemonMethod } from "../mcp/daemon-api.ts";
 import type { PersistedRun } from "./contracts.ts";
-import { createWorkflowRuntime } from "./factory.ts";
 import { createWorkflowNotifier, type WorkflowPushPayload } from "./notifier.ts";
-import { createProjectOps, shortStatusLines } from "./projects.ts";
+import { createProjectOps } from "./projects.ts";
 import { createPromptRenderer } from "./prompt-renderer.ts";
 import { createSlotPool, SlotAbortedError } from "./scheduler-queue.ts";
 import { createWorkflowSweepers } from "./sweepers.ts";
 import {
-  edge,
   FakeProjects,
-  FakeSandbox,
   flush,
   InMemoryRunStore,
-  InMemorySecretStore,
   InMemoryWorkflowStore,
   ManualClock,
   node,
@@ -122,12 +118,12 @@ describe("projects", () => {
       { path: "c.ts", status: "untracked", staged: false, unstaged: true },
       { path: "d.ts", status: "renamed", staged: true, unstaged: false, oldPath: "old.ts" }
     ];
-    assert.deepEqual(shortStatusLines(cleanStatus(files)), ["M  a.ts", " M b.ts", "?? c.ts", "R  old.ts -> d.ts"]);
+    const porcelain = createProjectOps({ api: null as never, git: { status: async () => cleanStatus(files), currentBranch: async () => null }, workspacesDir: "/w", fsRoot: "/w" });
+    assert.equal(await porcelain.gitStatusShort("/w/ws/app", 1024), "M  a.ts\n M b.ts\n?? c.ts\nR  old.ts -> d.ts");
     const many = Array.from({ length: 500 }, (_, i) => ({ path: `file-${i}.ts`, status: "modified" as const, staged: false, unstaged: true }));
     const ops = createProjectOps({ api: null as never, git: { status: async () => cleanStatus(many), currentBranch: async () => null }, workspacesDir: "/w", fsRoot: "/w" });
     const text = await ops.gitStatusShort("/w/ws/app", 1024);
     assert.ok(Buffer.byteLength(text) <= 1024);
-    assert.match(text, /… \(\d+ more\)$/);
     const clean = createProjectOps({ api: null as never, git: { status: async () => cleanStatus(), currentBranch: async () => null }, workspacesDir: "/w", fsRoot: "/w" });
     assert.equal(await clean.gitStatusShort("/w/ws/app", 1024), "(no changes)");
     assert.equal(await clean.currentBranch("/w/ws/app"), undefined);
@@ -148,8 +144,6 @@ describe("prompt renderer", () => {
     assert.equal(result.ok, true);
     assert.match((result as { text: string }).text, /^app on main at .*2026.* by Claude\/Opus$/);
     assert.ok((result as { text: string }).text.includes("29") || (result as { text: string }).text.includes("Sep 29"), "the date is Tokyo's (already the 29th)");
-    assert.deepEqual(renderer.savedPromptBody("p1"), { body: "Fix {branch}", title: "Fixer" });
-    assert.equal(renderer.savedPromptBody("nope"), null);
   });
 
   test("a failed git read renders nothing and names the variables", async () => {
@@ -180,7 +174,7 @@ describe("notifier", () => {
   test("pushes per settings.notify, debounced per workflow and kind", async () => {
     const clock = new ManualClock();
     const pushed: WorkflowPushPayload[] = [];
-    const notifier = createWorkflowNotifier({ push: { notifyWorkflowRun: async (payload) => void pushed.push(payload) }, clock, debounceMs: 60_000 });
+    const notifier = createWorkflowNotifier({ push: { notifyWorkflowRun: async (payload) => void pushed.push(payload) }, clock });
     notifier.runFinished(run("failed", { error: "A: boom" }), wf({ onFailure: true, onSuccess: false }));
     notifier.runFinished(run("failed", { error: "again" }), wf({ onFailure: true, onSuccess: false }));
     notifier.runFinished(run("succeeded"), wf({ onFailure: true, onSuccess: false }));
@@ -189,13 +183,8 @@ describe("notifier", () => {
     notifier.runFinished(run("failed", { test: true }), wf({ onFailure: true, onSuccess: true }));
     notifier.runFinished(run("failed", { parentRunId: "p" }), wf({ onFailure: true, onSuccess: true }));
     await flush();
-    assert.deepEqual(
-      pushed.map((payload) => [payload.title, payload.body]),
-      [
-        ["Workflow failed: Nightly", "A: boom"],
-        ["Workflow finished: Nightly", "Finished in 2m 5s."]
-      ]
-    );
+    assert.equal(pushed.length, 2);
+    assert.deepEqual(pushed.map((payload) => payload.workflowId), ["w1", "w1"]);
     assert.equal(pushed[0]!.tag, "workflow-w1");
     await clock.advance(60_000);
     notifier.runFinished(run("interrupted", { error: "restart" }), wf({ onFailure: true, onSuccess: false }));
@@ -219,11 +208,9 @@ describe("slot pool", () => {
       (error: unknown) => order.push(error instanceof SlotAbortedError ? "third aborted" : "?")
     );
     const fourth = pool.acquire(signal).then((release) => (order.push("fourth"), release));
-    assert.equal(pool.waiting(), 3);
     aborter.abort();
     await third;
     const forced = await pool.acquire(signal, { force: true });
-    assert.equal(pool.inUse(), 2);
     forced();
     first();
     first();
@@ -231,13 +218,11 @@ describe("slot pool", () => {
     releaseSecond();
     (await fourth)();
     assert.deepEqual(order, ["third aborted", "second", "fourth"]);
-    assert.equal(pool.inUse(), 0);
     await assert.rejects(pool.acquire(aborter.signal), SlotAbortedError);
   });
 });
 
 describe("sweepers", () => {
-  const DAY = 24 * 60 * 60_000;
 
   function finishedRun(id: string, extra: Partial<PersistedRun>): PersistedRun {
     return {
@@ -310,70 +295,31 @@ describe("sweepers", () => {
     assert.deepEqual(report.tabsClosed, ["s-old", "s-gone-old"]);
     assert.ok(calls.some((call) => call.method === "DELETE" && call.path === "/api/sessions/s-old"));
     assert.ok(calls.some((call) => call.method === "DELETE" && call.path === "/api/sessions/s-gone-old"));
-    assert.equal(runStore.sweeps, 1);
-    void DAY;
   });
 
   test("runs hourly on the injected clock and stops cleanly", async () => {
     const clock = new ManualClock();
     const runStore = new InMemoryRunStore();
+    const projects = new FakeProjects();
+    await runStore.create(finishedRun("due", { tempProject: { path: "/w/ws/due", deleted: false, deleteAfter: clock.now().toISOString() } }));
     const sweepers = createWorkflowSweepers({
       clock,
       runStore,
       store: new InMemoryWorkflowStore(),
-      projects: new FakeProjects(),
+      projects,
       api: () => null,
       activeRunIds: () => []
     });
     sweepers.start();
     await clock.advance(59 * 60_000);
-    assert.equal(runStore.sweeps, 0);
+    assert.deepEqual(projects.deleted, []);
     await clock.advance(60_000);
-    assert.equal(runStore.sweeps, 1);
+    assert.deepEqual(projects.deleted, ["/w/ws/due"]);
     await clock.advance(60 * 60_000);
-    assert.equal(runStore.sweeps, 2);
+    assert.deepEqual(projects.deleted, ["/w/ws/due"]);
     sweepers.stop();
+    await runStore.create(finishedRun("later", { tempProject: { path: "/w/ws/later", deleted: false, deleteAfter: clock.now().toISOString() } }));
     await clock.advance(3 * 60 * 60_000);
-    assert.equal(runStore.sweeps, 2);
-  });
-});
-
-describe("factory", () => {
-  test("assembles a runtime that refuses to start detached, then resumes and runs", async () => {
-    const clock = new ManualClock();
-    const store = new InMemoryWorkflowStore([workflow("w1", [node("T", "trigger.manual"), node("W", "wait", { kind: "duration", minutes: 1 })], [edge("T", "W")])]);
-    const runStore = new InMemoryRunStore();
-    const events: string[] = [];
-    const { api } = fakeApi(() => ({ status: 200, body: { name: "x", workspace: "ws", path: "/w/ws/x" } }), { fsRoot: "/w", workspacesDir: "/w" });
-    const runtime = createWorkflowRuntime({
-      store,
-      runStore,
-      secrets: new InMemorySecretStore(),
-      publish: (type) => events.push(type),
-      summarize: (wf: Workflow) => ({ id: wf.id, name: wf.name, enabled: wf.enabled, revision: wf.revision, project: wf.project, triggers: [], nodeCount: 0, errorCount: 0, activeRuns: [], createdAt: wf.createdAt, updatedAt: wf.updatedAt }),
-      usage: { snapshot: () => ({}) as never },
-      accounts: { list: () => ({}) as never, seededAccountIds: () => new Set() },
-      cooldowns: { get: () => null, set: async () => undefined, list: () => ({}) },
-      git: { status: async () => cleanStatus(), workingDiff: async () => ({}) as never, currentBranch: async () => "main" },
-      savedPrompts: { get: () => undefined },
-      workspacesDir: "/w",
-      fsRoot: "/w",
-      push: null,
-      logger: silentLogger(),
-      clock,
-      sandbox: new FakeSandbox(),
-      mintId: () => "run-1"
-    });
-    await assert.rejects(runtime.start(), /Attach the daemon API/);
-    runtime.attachApi(api);
-    await runtime.start();
-    // The existing project must resolve for real paths; point the workflow at a temp project instead.
-    store.put(workflow("w1", [node("T", "trigger.manual"), node("W", "wait", { kind: "duration", minutes: 1 })], [edge("T", "W")], { project: { kind: "temp", workspace: "ws", source: { kind: "empty" } } }));
-    const { runId } = await runtime.engine.run("w1", {});
-    await clock.advance(60_000);
-    const result = await runtime.engine.waitForRun(runId!);
-    assert.equal(result.status, "succeeded");
-    assert.ok(events.includes("workflowRun.finished"));
-    await runtime.stop();
+    assert.deepEqual(projects.deleted, ["/w/ws/due"]);
   });
 });

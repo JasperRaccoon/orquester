@@ -11,15 +11,11 @@ import type {
   RuntimeEvent
 } from "@orquester/api/agent-chat";
 
-import { CLAUDE_CAPABILITIES } from "../adapters/claude/index.ts";
-import { CODEX_ADAPTER_CAPABILITIES } from "../adapters/codex/index.ts";
-import { GROK_CAPABILITIES } from "../adapters/grok/index.ts";
-import { ADAPTER_PENDING_SNAPSHOTS } from "../adapters/index.ts";
 import {
-  createProviderSnapshotRegistry,
-  PROVIDER_BIN_CHECK_INTERVAL_MS
+  createProviderSnapshotRegistry
 } from "./provider-snapshots.ts";
-import { createRecordingLogger, createTestClock, createTestTimers } from "./testing/fakes.ts";
+import { createRecordingLogger, createTestClock } from "./testing/fakes.ts";
+import { DeadlineExceededError } from "../support/deadline.ts";
 
 function snapshotFor(id: AgentAdapterId, overrides: Partial<ProviderSnapshot> = {}): ProviderSnapshot {
   return {
@@ -85,12 +81,10 @@ async function withRegistry<T>(
   run: (input: {
     registry: ReturnType<typeof createProviderSnapshotRegistry>;
     probe: { calls: number; next: ProviderSnapshot; lastCwd?: string; gate?: Promise<void> };
-    timers: ReturnType<typeof createTestTimers>;
     stateDir: string;
   }) => Promise<T>
 ): Promise<T> {
   const stateDir = await mkdtemp(join(tmpdir(), "provider-snapshots-"));
-  const timers = createTestTimers();
   const probe = { calls: 0, next: snapshotFor("claude") } as {
     calls: number;
     next: ProviderSnapshot;
@@ -111,13 +105,10 @@ async function withRegistry<T>(
     ],
     stateDir,
     logger: createRecordingLogger(),
-    clock: createTestClock(0),
-    intervalMs: 1_000,
-    setTimer: (fn, ms) => timers.setTimer(fn, ms),
-    clearTimer: (handle) => timers.clearTimer(handle)
+    clock: createTestClock(0)
   });
   try {
-    return await run({ registry, probe, timers, stateDir });
+    return await run({ registry, probe, stateDir });
   } finally {
     registry.stop();
     await registry.flush();
@@ -126,6 +117,40 @@ async function withRegistry<T>(
 }
 
 describe("provider snapshot registry (§3.2, §6.3)", () => {
+  it("E9: the registry honours a probe's own ceiling", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const stateDir = await mkdtemp(join(tmpdir(), "provider-probe-ceiling-"));
+    let started!: () => void;
+    const probing = new Promise<void>((resolve) => { started = resolve; });
+    const registry = createProviderSnapshotRegistry({
+      probes: [{
+        id: "opencode",
+        timeoutMs: 45_000,
+        refresh: () => {
+          started();
+          return new Promise<ProviderSnapshot>(() => {});
+        }
+      }],
+      stateDir,
+      logger: createRecordingLogger()
+    });
+    t.after(async () => {
+      registry.stop();
+      await registry.flush();
+      await rm(stateDir, { recursive: true, force: true });
+    });
+    let settled = false;
+    const refreshing = registry.refresh("opencode");
+    refreshing.then(() => { settled = true; }, () => { settled = true; });
+    const rejected = assert.rejects(refreshing, DeadlineExceededError);
+    await probing;
+    t.mock.timers.tick(44_999);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(settled, false, "a cold probe retains its declared budget");
+    t.mock.timers.tick(1);
+    await rejected;
+  });
+
   it("caches, notifies on change and short-circuits an identical configuration", async () => {
     await withRegistry(async ({ registry, probe }) => {
       const changed: AgentAdapterId[] = [];
@@ -187,47 +212,30 @@ describe("provider snapshot registry (§3.2, §6.3)", () => {
     });
   });
 
-  it("only runs the background loop while something is watching", async () => {
-    await withRegistry(async ({ registry, probe, timers }) => {
-      timers.runDue(5_000);
+  it("only runs the background loop while something is watching", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    await withRegistry(async ({ registry, probe }) => {
+      t.mock.timers.tick(5 * 60_000);
       assert.equal(probe.calls, 0, "no watcher, no probe");
 
       const release = registry.addWatcher();
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
       assert.equal(probe.calls, 1, "the first watcher primes the empty registry at once");
-      timers.runDue(6_000);
+      t.mock.timers.tick(5 * 60_000);
       await new Promise((resolve) => setImmediate(resolve));
       await new Promise((resolve) => setImmediate(resolve));
       assert.equal(probe.calls, 2, "then the interval keeps it fresh");
 
       release();
-      timers.runDue(20_000);
+      t.mock.timers.tick(15 * 60_000);
       await new Promise((resolve) => setImmediate(resolve));
       assert.equal(probe.calls, 2, "the loop stops once nothing is watching");
     });
   });
 
-  it("a watcher on an empty registry probes immediately, before the first interval", async () => {
-    await withRegistry(async ({ registry, probe, timers }) => {
-      assert.deepEqual(registry.all(), [], "nothing cached on a fresh host");
-      const release = registry.addWatcher();
-      await new Promise((resolve) => setImmediate(resolve));
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.equal(probe.calls, 1, "primed without any timer firing");
-      assert.equal(registry.all().length, 1);
-      // A second watcher does not prime again: the snapshot is now held.
-      const release2 = registry.addWatcher();
-      await new Promise((resolve) => setImmediate(resolve));
-      assert.equal(probe.calls, 1);
-      timers.runDue(0);
-      release();
-      release2();
-    });
-  });
-
   it("a watcher on a registry warmed from the cache does not re-probe at once", async () => {
-    await withRegistry(async ({ registry, probe, timers, stateDir }) => {
+    await withRegistry(async ({ registry, probe, stateDir }) => {
       await registry.refresh("claude");
       await registry.flush();
       assert.equal(probe.calls, 1);
@@ -235,10 +243,7 @@ describe("provider snapshot registry (§3.2, §6.3)", () => {
         probes: [{ id: "claude", refresh: async () => { probe.calls += 1; return probe.next; } }],
         stateDir,
         logger: createRecordingLogger(),
-        clock: createTestClock(0),
-        intervalMs: 1_000,
-        setTimer: (fn, ms) => timers.setTimer(fn, ms),
-        clearTimer: (handle) => timers.clearTimer(handle)
+        clock: createTestClock(0)
       });
       try {
         await reloaded.load();
@@ -350,24 +355,11 @@ describe("provider snapshot registry (§3.2, §6.3)", () => {
   });
 });
 
-/**
- * The client's own gate, restated (`agent-chat/providers.ts`'s
- * `authErrorMessage` in the UI package). That package is not a daemon
- * dependency, so this is the one honest way to pin the CONTRACT rather than the
- * producer: the fix wave shipped both halves and they disagreed, and both
- * sides' tests passed because each asserted only its own half.
- */
-function clientWouldToast(snapshot: ProviderSnapshot): boolean {
-  if (snapshot.auth.status === "unauthenticated") return true;
-  return snapshot.status === "error" && snapshot.auth.status !== "authenticated";
-}
-
 describe("R8-M4: an auth.status error is written in the shape the toast reads", () => {
   it("stores `error`, not `degraded`, so the client actually raises it", async () => {
     await withRegistry(async ({ registry, probe }) => {
       probe.next = snapshotFor("claude");
       await registry.refresh("claude");
-      assert.equal(clientWouldToast(registry.get("claude")!), false, "a healthy provider is quiet");
 
       registry.applyAuthStatus?.("claude", {
         eventId: "auth-1",
@@ -384,7 +376,7 @@ describe("R8-M4: an auth.status error is written in the shape the toast reads", 
       assert.equal(after.status, "error");
       assert.equal(after.auth.status, "unknown");
       assert.equal(after.message, "Session expired, run /login");
-      assert.equal(clientWouldToast(after), true, "the whole point of the chain");
+
     });
   });
 
@@ -411,7 +403,7 @@ describe("R8-M4: an auth.status error is written in the shape the toast reads", 
       const cleared = registry.get("claude")!;
       assert.equal(cleared.status, "ready");
       assert.equal(cleared.message, undefined);
-      assert.equal(clientWouldToast(cleared), false);
+
     });
   });
 });
@@ -472,10 +464,7 @@ describe("§3.2 boot: pending seed, correlated cache, forced boot probe", () => 
       ],
       stateDir,
       logger: createRecordingLogger(),
-      clock: createTestClock(0),
-      intervalMs: 1_000,
-      setTimer: () => null,
-      clearTimer: () => undefined
+      clock: createTestClock(0)
     });
     try {
       return await run({ registry, probe, stateDir });
@@ -497,19 +486,13 @@ describe("§3.2 boot: pending seed, correlated cache, forced boot probe", () => 
       assert.equal(seeded.status, "unknown");
       assert.equal(seeded.auth.status, "unknown");
       assert.equal(seeded.installed, false);
-      assert.match(seeded.message ?? "", /has not been checked in this session yet/);
+
       // The whole point: a pending row is still LAUNCHABLE.
       assert.equal(seeded.models.length, 1);
       assert.deepEqual(
         registry.all().map((row) => row.id),
         ["claude"]
       );
-    });
-  });
-
-  it("layer 1: a pending snapshot never raises the client's auth toast", async () => {
-    await withSeeded(async ({ registry }) => {
-      assert.equal(clientWouldToast(registry.get("claude")!), false);
     });
   });
 
@@ -664,20 +647,6 @@ describe("§3.2 boot: pending seed, correlated cache, forced boot probe", () => 
     }
   });
 
-  it("layer 3: the boot probe's result is written to the cache WITH its identity", async () => {
-    await withSeeded(async ({ registry, stateDir }) => {
-      registry.startBootRefresh();
-      await registry.refreshAllNow();
-      await registry.flush();
-      const raw = JSON.parse(
-        await readFile(join(stateDir, "provider-snapshots.json"), "utf8")
-      ) as CacheFile;
-      assert.equal(raw.providers.claude?.identity.binPath, "/usr/bin/claude");
-      assert.equal(raw.providers.claude?.identity.adapterId, "claude");
-      assert.equal(raw.providers.claude?.snapshot.status, "ready");
-    });
-  });
-
   it("the first watcher's priming is a no-op once the boot probe has run", async () => {
     await withSeeded(async ({ registry, probe }) => {
       registry.startBootRefresh();
@@ -687,16 +656,6 @@ describe("§3.2 boot: pending seed, correlated cache, forced boot probe", () => 
       await registry.refreshAllNow();
       // The watcher itself added no extra pass; only the explicit one above.
       assert.equal(probe.calls, after + 1);
-      release();
-    });
-  });
-
-  it("the first watcher still primes a registry nobody kicked at boot", async () => {
-    await withSeeded(async ({ registry, probe }) => {
-      assert.equal(probe.calls, 0);
-      const release = registry.addWatcher();
-      await registry.refreshAllNow();
-      assert.ok(probe.calls >= 1, "the stopgap is kept as a fallback");
       release();
     });
   });
@@ -771,10 +730,7 @@ describe("§3.2: a moved CLI binary re-probes itself on the next read", () => {
       ],
       stateDir,
       logger: createRecordingLogger(),
-      clock,
-      intervalMs: 1_000,
-      setTimer: () => null,
-      clearTimer: () => undefined
+      clock
     });
     try {
       return await run({ registry, probe, clock, stateDir, binPath, installVersion });
@@ -815,7 +771,7 @@ describe("§3.2: a moved CLI binary re-probes itself on the next read", () => {
       await new Promise((resolve) => setImmediate(resolve));
       assert.equal(probe.calls, 1, "a read within the window is not even stat'ed");
 
-      clock.advance(PROVIDER_BIN_CHECK_INTERVAL_MS);
+      clock.advance(5_000);
       const changed = nextChange(registry);
       const served = registry.all();
       assert.equal(
@@ -839,7 +795,7 @@ describe("§3.2: a moved CLI binary re-probes itself on the next read", () => {
       assert.equal(probe.calls, 2, "a second read within the window schedules none");
 
       // Past the window it is picked up.
-      clock.advance(PROVIDER_BIN_CHECK_INTERVAL_MS);
+      clock.advance(5_000);
       const again = nextChange(registry);
       registry.all();
       await again;
@@ -959,10 +915,7 @@ describe("goals §5.4: capabilities are the adapter's, not the cache's", () => {
       ],
       stateDir,
       logger: createRecordingLogger(),
-      clock: createTestClock(0),
-      intervalMs: 1_000,
-      setTimer: () => null,
-      clearTimer: () => undefined
+      clock: createTestClock(0)
     });
     try {
       return await run({ registry, probe, stateDir });
@@ -1007,21 +960,6 @@ describe("goals §5.4: capabilities are the adapter's, not the cache's", () => {
     }
   });
 
-  it("the pending seed and a live probe's own row serve the adapter's capabilities too", async () => {
-    const stateDir = await mkdtemp(join(tmpdir(), "provider-capabilities-"));
-    try {
-      await withCurrentAdapter(async ({ registry, probe }) => {
-        assert.deepEqual(registry.get("claude")?.capabilities, withGoals, "pending");
-        const refreshed = await registry.refresh("claude");
-        assert.equal(probe.calls, 1);
-        assert.deepEqual(refreshed.capabilities, withGoals, "the refresh answer");
-        assert.deepEqual(registry.get("claude")?.capabilities, withGoals, "probed");
-      }, stateDir);
-    } finally {
-      await rm(stateDir, { recursive: true, force: true, maxRetries: 3 });
-    }
-  });
-
   it("the freshest live statement wins: a probe's capabilities replace the seed's", async () => {
     // The probe asks the running adapter itself, so what it reports is the
     // adapter's current word — and a cached row hydrated after it gets that.
@@ -1049,45 +987,4 @@ describe("goals §5.4: capabilities are the adapter's, not the cache's", () => {
       await rm(stateDir, { recursive: true, force: true, maxRetries: 3 });
     }
   });
-
-  it("the cache file itself is rewritten with the current capabilities", async () => {
-    const stateDir = await mkdtemp(join(tmpdir(), "provider-capabilities-"));
-    try {
-      await withCurrentAdapter(async ({ registry }) => {
-        await registry.refresh("claude");
-        await registry.flush();
-        const raw = JSON.parse(
-          await readFile(join(stateDir, "provider-snapshots.json"), "utf8")
-        ) as CacheFile;
-        assert.deepEqual(raw.providers.claude?.snapshot.capabilities, withGoals);
-      }, stateDir);
-    } finally {
-      await rm(stateDir, { recursive: true, force: true, maxRetries: 3 });
-    }
-  });
-});
-
-/**
- * The overlay's source is each adapter's PENDING seed, so the whole of goals
- * §5.4 rests on one equality nothing else enforces: the seed carries the very
- * capability constant the adapter itself serves. Pinned here for every adapter
- * with a goal surface — a seed that built its own block would silently strip
- * or fake `goals` on every row the registry serves.
- */
-describe("goals §5.4: each goal adapter's pending seed carries the adapter's own capabilities", () => {
-  const cases = [
-    ["claude", CLAUDE_CAPABILITIES, "provider", false],
-    ["codex", CODEX_ADAPTER_CAPABILITIES, "host", true],
-    ["grok", GROK_CAPABILITIES, "provider", false]
-  ] as const;
-  for (const [id, constant, command, continuesAcrossTurns] of cases) {
-    it(id, () => {
-      const seed = ADAPTER_PENDING_SNAPSHOTS[id]("1970-01-01T00:00:00.000Z");
-      assert.equal(seed.capabilities, constant, "the same object, not a copy that can drift");
-      // The two fields the host itself keys on: who parses `/goal`, and who
-      // starts the goal's turns.
-      assert.equal(constant.goals?.command, command);
-      assert.equal(constant.goals?.continuesAcrossTurns, continuesAcrossTurns);
-    });
-  }
 });

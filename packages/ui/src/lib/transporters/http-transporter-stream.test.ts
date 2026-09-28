@@ -8,10 +8,6 @@ afterEach(() => {
   globalThis.fetch = realFetch;
 });
 
-async function settle(): Promise<void> {
-  for (let i = 0; i < 20; i += 1) await new Promise((resolve) => setImmediate(resolve));
-}
-
 describe("HttpTransporter.openStream", () => {
   it("a non-2xx answer is one error and one end — its JSON body is never stream data", async () => {
     globalThis.fetch = (async () =>
@@ -20,8 +16,13 @@ describe("HttpTransporter.openStream", () => {
     const data: string[] = [];
     let errors = 0;
     let ends = 0;
-    transporter.openStream("/x", { onData: (chunk) => data.push(chunk), onEnd: () => (ends += 1), onError: () => (errors += 1) });
-    await settle();
+    await new Promise<void>((resolve) => {
+      transporter.openStream("/x", {
+        onData: (chunk) => data.push(chunk),
+        onEnd: () => { ends += 1; resolve(); },
+        onError: () => { errors += 1; }
+      });
+    });
     assert.deepEqual(data, []);
     assert.equal(errors, 1);
     assert.equal(ends, 1);
@@ -32,8 +33,13 @@ describe("HttpTransporter.openStream", () => {
     const transporter = new HttpTransporter({ baseUrl: "http://daemon.test", httpClient: {} as never });
     const data: string[] = [];
     let ends = 0;
-    transporter.openStream("/x", { onData: (chunk) => data.push(chunk), onEnd: () => (ends += 1) });
-    await settle();
+    await new Promise<void>((resolve, reject) => {
+      transporter.openStream("/x", {
+        onData: (chunk) => data.push(chunk),
+        onEnd: () => { ends += 1; resolve(); },
+        onError: reject
+      });
+    });
     assert.equal(data.join(""), "hello");
     assert.equal(ends, 1);
   });

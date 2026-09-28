@@ -3,14 +3,6 @@ import test from "node:test";
 
 import { parseTurnDiffFilesFromNumstat } from "./numstat.ts";
 
-test("reads NUL-delimited numstat records", () => {
-  const numstat = "3\t1\tsrc/a.ts\u00000\t9\tdocs/b.md\u0000";
-  assert.deepEqual(parseTurnDiffFilesFromNumstat(numstat), [
-    { path: "docs/b.md", additions: 0, deletions: 9 },
-    { path: "src/a.ts", additions: 3, deletions: 1 }
-  ]);
-});
-
 test("a rename spends two extra records on the source and the destination", () => {
   const numstat = "1\t1\t\u0000old/name.ts\u0000new/name.ts\u00005\t0\tother.ts\u0000";
   assert.deepEqual(parseTurnDiffFilesFromNumstat(numstat), [

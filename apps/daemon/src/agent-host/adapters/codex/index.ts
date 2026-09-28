@@ -45,13 +45,12 @@ import { projectCodexHistory } from "./history.ts";
 import { CodexPeer } from "./protocol.ts";
 import {
   MINIMUM_CODEX_VERSION,
-  codexVersionFromUserAgent,
   meetsMinimumVersion,
   pendingCodexSnapshot,
   probeCodex,
   uninstalledCodexSnapshot
 } from "./probe.ts";
-import { CodexSession, type CodexResumeCursor } from "./session.ts";
+import { CodexSession } from "./session.ts";
 import type { RuntimeEventDraft } from "./normalise.ts";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
@@ -552,10 +551,7 @@ export function mergeSnapshot(
 }
 
 /** *T3: `apps/server/src/provider/Layers/ProviderRegistry.ts:80-100`.* */
-export const MAX_WORKSPACE_SNAPSHOTS = 16;
+const MAX_WORKSPACE_SNAPSHOTS = 16;
 
-export { CODEX_ADAPTER_CAPABILITIES } from "./capabilities.ts";
-export { MINIMUM_CODEX_VERSION, codexVersionFromUserAgent, meetsMinimumVersion } from "./probe.ts";
 /** §3.2 layer one — the pending seed the snapshot registry reads at construction. */
 export { pendingCodexSnapshot } from "./probe.ts";
-export type { CodexResumeCursor };

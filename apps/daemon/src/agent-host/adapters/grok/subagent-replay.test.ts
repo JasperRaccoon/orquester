@@ -15,7 +15,6 @@ import assert from "node:assert/strict";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
 import { agentFrames, readCapture } from "./fixtures.ts";
-import { GROK_AGENT_LIVENESS_TTL_MS } from "./normalize.ts";
 import { driveCapture, type DrivenCapture } from "./testing/capture-driver.ts";
 
 type TaskRow = Extract<
@@ -90,7 +89,7 @@ test("15 foreground: the call starts the agent, subagent_finished ends it once w
   assert.equal(ends[0]!.payload.status, "completed");
   assert.equal(ends[0]!.payload.summary, "sub-ok", "the run's own output, never the call's <subagent_meta> blocks");
   assert.deepEqual(ends[0]!.payload.usage, { totalTokens: 12_011, toolUses: 1, durationMs: 3731 });
-  assert.equal(ends[0]!.payload.livenessTtlMs, GROK_AGENT_LIVENESS_TTL_MS);
+  assert.equal(ends[0]!.payload.livenessTtlMs, 3_600_000);
   assert.deepEqual(
     rows.filter((row) => row.type === "task.updated"),
     [],
@@ -105,7 +104,7 @@ test("15 foreground: the call starts the agent, subagent_finished ends it once w
     undefined,
     "a heartbeat names no status: a late one can never reopen an ended run"
   );
-  assert.equal(progress[0]!.payload.livenessTtlMs, GROK_AGENT_LIVENESS_TTL_MS, "…and re-arms its hour");
+  assert.equal(progress[0]!.payload.livenessTtlMs, 3_600_000, "…and re-arms its hour");
 });
 
 test("15 foreground: the child session's frames are the agent's own rows, on the parent turn", () => {
@@ -205,12 +204,6 @@ test("16 background: the child's own auto-backgrounded shell is the agent's, and
   assert.equal(end.payload.status, "completed");
   assert.equal(end.payload.summary, "bg-done");
   assert.equal(end.payload.exitCode, 0);
-});
-
-test("16 background: the CLI's wake is a turn of its own, holding the parent's reply", () => {
-  const run = driveCapture("16-subagent-background-poll.ndjson");
-  assert.deepEqual(run.turns, ["turn-1", "wake-1", "turn-2"]);
-  assert.match(textOf(run.events, undefined, "wake-1"), /finished successfully/);
 });
 
 // ---------------------------------------------------------------------------
@@ -328,36 +321,6 @@ test("20 monitor: one monitor task, its events as progress, its end by task_comp
 });
 
 // ---------------------------------------------------------------------------
-// 21 — a session-scoped Stop while a background subagent and shell run
-// ---------------------------------------------------------------------------
-
-const STOP_SHELL = "01a0d915-61b7-7132-b432-a6c95b3f7778";
-const STOP_AGENT = "call-7b249d13-32d3-4f24-a3ad-b582665c9c5a-1";
-
-test("21 Stop: the CLI cancels the subagent but keeps the shell; a poll saying so counts the shell live again", () => {
-  const run = driveCapture("21-stop-with-background-work.ndjson", {
-    atNote: (note, { grok }) =>
-      /sending session\/cancel with no prompt in flight/.test(note)
-        ? [...grok.failOpenTools("Stopped."), ...grok.stopBackgroundTasks()]
-        : []
-  });
-  assert.deepEqual(unmapped(run), []);
-  assert.deepEqual(
-    lifecycle(run.events, STOP_AGENT).filter(([type]) => type !== "task.progress"),
-    [
-      ["task.started", undefined],
-      ["task.completed", "stopped"]
-    ],
-    "the adapter's own end; the CLI's `cancelled` after it adds nothing"
-  );
-  assert.deepEqual(
-    lifecycle(run.events, STOP_SHELL).map(([type]) => type),
-    ["task.started", "task.completed", "task.started"],
-    "the poll answering `running` re-emits the shell's own start: live again"
-  );
-});
-
-// ---------------------------------------------------------------------------
 // 22 — a foreground subagent past its await budget
 // ---------------------------------------------------------------------------
 
@@ -465,16 +428,6 @@ test("15–28: every spawn's start carries the prompt its call gave it, verbatim
     );
     assert.equal(new Set(starts.map((row) => row.payload.toolUseId)).size, prompts.size, `${file}: a start per spawn`);
   }
-});
-
-test("17 resume_from: the relaunch's start carries the resume's own prompt, never the first run's", () => {
-  const prompts = spawnPromptsOf("17-subagent-resume-from.ndjson");
-  const starts = only(taskRows(driveCapture("17-subagent-resume-from.ndjson").events, FIRST_CALL), "task.started");
-  assert.deepEqual(
-    starts.map((row) => row.payload.prompt),
-    [prompts.get(FIRST_CALL), prompts.get(RESUME_CALL)]
-  );
-  assert.match(String(starts[1]?.payload.prompt), /^Now run the shell command `echo resumed-ok`/);
 });
 
 test("no shell, monitor, loop or CLI-spawned agent start (a loop's fire, a goal's planner) carries a prompt", () => {

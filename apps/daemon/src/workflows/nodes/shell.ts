@@ -13,11 +13,6 @@ import { createRedactor } from "../sandbox/redact.ts";
 import { tailUtf8 } from "../run-context.ts";
 import { describeDuration, runSandboxAttempt } from "./process.ts";
 
-export interface ShellExecutorOptions {
-  /** The whole output's cap; each stream's tail gets half of it minus a margin. */
-  maxOutputBytes?: number;
-}
-
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 async function fileSize(path: string): Promise<number> {
@@ -38,8 +33,8 @@ async function readTail(path: string, maxBytes: number, secrets: Record<string, 
   return { text: window.text, cut: from > 0 };
 }
 
-export function createShellExecutor(options: ShellExecutorOptions = {}): NodeExecutor<"shell"> {
-  const maxOutputBytes = options.maxOutputBytes ?? WORKFLOW_LIMITS.maxOutputBytes;
+export function createShellExecutor(): NodeExecutor<"shell"> {
+  const maxOutputBytes = WORKFLOW_LIMITS.maxOutputBytes;
   // Half the cap per stream, less room for the JSON around them (spec §3.2).
   const tailBytes = Math.max(1024, Math.floor(maxOutputBytes / 2) - 4096);
 

@@ -34,15 +34,14 @@ import {
 
 import type { Broadcaster } from "../broadcaster.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
-import type { AccountsReader, Clock, MintId, SandboxRunner, UsageReader, WorkflowLogger } from "./contracts.ts";
+import type { AccountsReader, UsageReader, WorkflowLogger } from "./contracts.ts";
 import { createCooldownStore } from "./agent/cooldowns.ts";
-import { createAgentExecutor, type AgentTimings } from "./agent/executor.ts";
-import { createUsesAccount, routerProvidersFromDisk, type UsesAccount } from "./agent/families.ts";
+import { createAgentExecutor } from "./agent/executor.ts";
+import { createUsesAccount, routerProvidersFromDisk } from "./agent/families.ts";
 import { createAccountPreview } from "./agent/preview.ts";
 import { createValidationCatalog, type ValidationCatalog } from "./agent/validation-catalog.ts";
 import { createWorkflowRuntime, realClock, type WorkflowRuntime, type WorkflowRuntimeDeps } from "./factory.ts";
 import type { WorkflowPushSender } from "./notifier.ts";
-import type { EngineLimits } from "./run-context.ts";
 import type { FileRunStore } from "./run-store.ts";
 import type { WorkflowSecretsService } from "./secrets.ts";
 import type { WorkflowService } from "./service.ts";
@@ -70,7 +69,7 @@ function safeJson(value: unknown): string {
 }
 
 /** How often the trigger-state watcher looks for a moved `nextRunAt` / `lastError`. */
-export const TRIGGER_STATE_CHECK_MS = 15_000;
+const TRIGGER_STATE_CHECK_MS = 15_000;
 
 export interface WorkflowDaemonDeps {
   service: WorkflowService;
@@ -98,20 +97,6 @@ export interface WorkflowDaemonDeps {
   appdirTmp?: string;
   push: WorkflowPushSender | null;
   logger: WorkflowLogger;
-  // ---- test seams ----
-  /** The engine's clock (default: the wall clock, unref'd timers). */
-  clock?: Clock;
-  /** The triggers' clock (default: the wall clock, unref'd timers). */
-  triggerClock?: Clock;
-  mintId?: MintId;
-  sandbox?: SandboxRunner;
-  limits?: Partial<EngineLimits>;
-  agentTimings?: Partial<AgentTimings>;
-  usesAccount?: UsesAccount;
-  workflowTabRetentionDays?: number;
-  /** [0, 1) for the poller's jitter and spread. */
-  random?: () => number;
-  triggerStateCheckMs?: number;
 }
 
 export interface WorkflowDaemon {
@@ -129,8 +114,6 @@ export interface WorkflowDaemon {
   triggerState(workflowId: string, nodeId: string): TriggerState | undefined;
   /** After `agentChat.init()`, with the daemon's own client: resume, run, then arm the triggers. */
   start(api: DaemonApi): Promise<void>;
-  /** Republish rows whose trigger state moved (the watcher's step; tests call it directly). */
-  checkTriggerState(): void;
   /**
    * The agent catalogue validation checks chains against (`unknown_agent` / `unknown_model`): the
    * store's `agentCatalog` reads `current()`, the write routes await `ready()`. Reads through the
@@ -143,9 +126,9 @@ export interface WorkflowDaemon {
 
 export function createWorkflowDaemon(deps: WorkflowDaemonDeps): WorkflowDaemon {
   const { service, runStore, state, logger } = deps;
-  const clock = deps.clock ?? realClock;
-  const triggerClock = deps.triggerClock ?? systemTriggerClock;
-  const usesAccount = deps.usesAccount ?? createUsesAccount(() => routerProvidersFromDisk(deps.daemonDir));
+  const clock = realClock;
+  const triggerClock = systemTriggerClock;
+  const usesAccount = createUsesAccount(() => routerProvidersFromDisk(deps.daemonDir));
   const cooldowns = createCooldownStore(state, clock);
 
   let scheduler: Scheduler | null = null;
@@ -215,7 +198,7 @@ export function createWorkflowDaemon(deps: WorkflowDaemonDeps): WorkflowDaemon {
       watcherTimer = null;
       checkTriggerState();
       armWatcher();
-    }, deps.triggerStateCheckMs ?? TRIGGER_STATE_CHECK_MS);
+    }, TRIGGER_STATE_CHECK_MS);
   };
   let unsubscribeDefinitions: (() => void)[] = [];
 
@@ -235,16 +218,11 @@ export function createWorkflowDaemon(deps: WorkflowDaemonDeps): WorkflowDaemon {
     fsRoot: deps.fsRoot,
     ...(deps.appdirTmp !== undefined ? { appdirTmp: deps.appdirTmp } : {}),
     push: deps.push,
-    createAgentExecutor: (agentDeps) =>
-      createAgentExecutor({ ...agentDeps, ...(deps.agentTimings ? { timings: deps.agentTimings } : {}) }),
+    createAgentExecutor,
     createAccountPreview: (previewDeps) => createAccountPreview(previewDeps),
     usesAccount,
     logger,
-    clock,
-    ...(deps.mintId ? { mintId: deps.mintId } : {}),
-    ...(deps.sandbox ? { sandbox: deps.sandbox } : {}),
-    ...(deps.limits ? { limits: deps.limits } : {}),
-    ...(deps.workflowTabRetentionDays !== undefined ? { workflowTabRetentionDays: deps.workflowTabRetentionDays } : {})
+    clock
   });
 
   scheduler = createScheduler({ host: runtime.engine, state, clock: triggerClock, logger });
@@ -254,8 +232,7 @@ export function createWorkflowDaemon(deps: WorkflowDaemonDeps): WorkflowDaemon {
     remote: deps.gitRemote,
     resolveRepo: createRepoResolver({ git: deps.git, readWorkspaceMeta: deps.readWorkspaceMeta, workspacesDir: deps.workspacesDir }),
     clock: triggerClock,
-    logger,
-    ...(deps.random ? { random: deps.random } : {})
+    logger
   });
   const theScheduler = scheduler;
   const thePoller = poller;
@@ -274,7 +251,6 @@ export function createWorkflowDaemon(deps: WorkflowDaemonDeps): WorkflowDaemon {
     poller: thePoller,
     summarize,
     triggerState,
-    checkTriggerState,
     validationCatalog,
     async start(api: DaemonApi): Promise<void> {
       if (started || stopped) return;

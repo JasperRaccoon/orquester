@@ -70,7 +70,7 @@ const CONVERSATION_ID = /^[\w.][\w.\-/]*$/;
  * (`orchestration/provider-snapshots.ts`), so a dropped nudge costs latency,
  * never correctness.
  */
-export const PROVIDER_REFRESH_DEBOUNCE_MS = 10_000;
+const PROVIDER_REFRESH_DEBOUNCE_MS = 10_000;
 
 /**
  * Deadline on the refresh hop. Wider than the host's own 10 s auth probe so a
@@ -163,21 +163,6 @@ export interface AgentChatServiceOptions {
     warn?: (...a: unknown[]) => void;
     error?: (...a: unknown[]) => void;
   };
-  /** Test seam: overrides `process.execPath`. */
-  nodeBin?: string;
-  mainPath?: string;
-  /**
-   * Test seam for the no-tmux spawn. Production leaves it unset and gets the
-   * real child; a test that supplies it can never start a host process.
-   */
-  spawnDirect?: (bin: string, args: string[], env: Record<string, string>) => DirectHostHandle;
-  now?: () => number;
-  sleep?: (ms: number) => Promise<void>;
-  /**
-   * Test seam: the cap `uploadAttachment` counts a chat upload against.
-   * Production leaves it unset and gets the shared `MAX_UPLOAD_BYTES`.
-   */
-  uploadLimitBytes?: number;
 }
 
 /**
@@ -201,9 +186,9 @@ function chatFields(req: CreateAgentChatRequest): Partial<CreateAgentChatSession
 
 export class AgentChatService {
   readonly chat: ChatSessionManager;
-  readonly client: AgentHostClient;
-  readonly supervisor: AgentHostSupervisor;
-  readonly summary: AgentChatSummaryService;
+  private readonly client: AgentHostClient;
+  private readonly supervisor: AgentHostSupervisor;
+  private readonly summary: AgentChatSummaryService;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
   private directHandle: DirectHostHandle | null = null;
   private readonly socketPath: string;
@@ -227,8 +212,7 @@ export class AgentChatService {
         appdir: opts.baseDir,
         socketPath: this.socketPath
       }),
-      nodeBin: opts.nodeBin ?? process.execPath,
-      mainPath: opts.mainPath,
+      nodeBin: process.execPath,
       // The daemon's own commit, read at boot; a surviving host reporting a
       // different one is drained and replaced (see `support/code-stamp.ts`).
       codeStamp: readCodeStamp(opts.cwd),
@@ -248,10 +232,6 @@ export class AgentChatService {
         resumeGoalSessions: (threadIds) => this.requestHostResumeGoalSessions(threadIds),
         tmux: opts.tmux,
         spawnDirect: (bin, args, env) => {
-          if (opts.spawnDirect) {
-            this.directHandle = opts.spawnDirect(bin, args, env);
-            return this.directHandle;
-          }
           const child = spawn(bin, args, { cwd: opts.cwd, detached: false, stdio: "ignore", env });
           child.on("error", (error) => opts.logger?.error?.("agent host spawnDirect failed", error));
           let alive = true;
@@ -273,8 +253,8 @@ export class AgentChatService {
           this.directHandle = handle;
           return handle;
         },
-        now: opts.now ?? Date.now,
-        sleep: opts.sleep ?? ((ms) => new Promise((resolve) => setTimeout(resolve, ms))),
+        now: Date.now,
+        sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
         // The host's OWN refresh (§4.6.4) reaches the bus through here; the
         // explicit refresh route publishes separately.
         onProvidersRevision: () => this.summary.publishProvidersChanged(),
@@ -292,7 +272,6 @@ export class AgentChatService {
       chat: this.chat,
       broadcaster: opts.broadcaster,
       push: opts.push,
-      now: opts.now,
       logger: opts.logger,
       // The poll idles while the host is restarting or foreign: every chat
       // route answers 503 then anyway, and a read would only log noise.
@@ -389,7 +368,7 @@ export class AgentChatService {
   private readonly registryInstallStates = new Map<string, RegistryEntry["installState"]>();
   /** When each adapter was last nudged, on the injected clock. */
   private readonly providerRefreshAt = new Map<AgentAdapterId, number>();
-  /** In-flight nudges — the idempotence guard AND the §9 drain seam. */
+  /** In-flight nudges, used as the idempotence guard. */
   private readonly providerRefreshInFlight = new Map<AgentAdapterId, Promise<void>>();
 
   /**
@@ -454,7 +433,7 @@ export class AgentChatService {
    * also bumps `providersRevision`, which the supervisor's health poll turns
    * into the same event — this only makes it immediate.)
    */
-  refreshProvider(adapterId: AgentAdapterId, reason: string): void {
+  private refreshProvider(adapterId: AgentAdapterId, reason: string): void {
     if (this.providerRefreshInFlight.has(adapterId)) {
       return;
     }
@@ -463,7 +442,7 @@ export class AgentChatService {
       // every provider at boot anyway.
       return;
     }
-    const now = (this.opts.now ?? Date.now)();
+    const now = Date.now();
     const last = this.providerRefreshAt.get(adapterId);
     if (last !== undefined && now - last < PROVIDER_REFRESH_DEBOUNCE_MS) {
       return;
@@ -491,13 +470,6 @@ export class AgentChatService {
         this.providerRefreshInFlight.delete(adapterId);
       });
     this.providerRefreshInFlight.set(adapterId, task);
-  }
-
-  /** Await every in-flight provider nudge. The §9 drain seam a test waits on. */
-  async drainProviderRefreshes(): Promise<void> {
-    while (this.providerRefreshInFlight.size > 0) {
-      await Promise.all([...this.providerRefreshInFlight.values()]).catch(() => undefined);
-    }
   }
 
   routeDeps(): AgentChatRouteDeps {
@@ -871,7 +843,7 @@ export class AgentChatService {
     // refused a declared `Content-Length` above it, and this counts what
     // actually arrives — a chunked upload with no `Content-Length` would
     // otherwise stream unbounded straight through to the host.
-    const counted = countingLimit(body, this.opts.uploadLimitBytes ?? MAX_UPLOAD_BYTES);
+    const counted = countingLimit(body, MAX_UPLOAD_BYTES);
     const stream = await this.client
       .open("POST", path, {
         body: counted,
@@ -1101,7 +1073,7 @@ export class AgentChatService {
  * Which HOME the thread's provider child runs under — the §5.2 `home` field,
  * and the same three-way split the resume picker already uses.
  */
-export function resolveHomeKind(entryId: string, accountId: string): AgentChatHome {
+function resolveHomeKind(entryId: string, accountId: string): AgentChatHome {
   if (entryId === "claudex" || entryId === "claudemix") return "cliproxy";
   return accountId ? "account" : "system";
 }
@@ -1140,9 +1112,9 @@ export function proxyAccountFamily(entryId: string): "claude" | "codex" | null {
  * `refuseUpload`'s 413 and `Connection: close`, the MCP seam by destroying the
  * file stream it opened. (Not because a destroyed request would lose the 413:
  * on Node 20 `pipeline` detaches a server request's socket before destroying
- * it, and the reply still goes out.) Exported for its test.
+ * it, and the reply still goes out.)
  */
-export function countingLimit(source: Readable, limit: number): Readable {
+function countingLimit(source: Readable, limit: number): Readable {
   let seen = 0;
   const counted = new Transform({
     transform(chunk: Buffer, _encoding, callback) {
@@ -1159,7 +1131,7 @@ export function countingLimit(source: Readable, limit: number): Readable {
 }
 
 /** §6.1: an id the adapter cannot use is refused at creation, never degraded. */
-export function isUsableConversationId(value: unknown): boolean {
+function isUsableConversationId(value: unknown): boolean {
   const id = typeof value === "string" ? value.trim() : "";
   return Boolean(id) && CONVERSATION_ID.test(id) && !id.split("/").includes("..");
 }

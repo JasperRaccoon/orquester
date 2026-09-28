@@ -1,22 +1,19 @@
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { beforeEach,describe,it } from "node:test";
 
 import {
-  buildCollapsedProposedPlanPreviewMarkdown,
-  buildPlanImplementationPrompt,
-  buildProposedPlanMarkdownFilename,
-  deriveActivePlanState,
-  findLatestProposedPlan,
-  hasActionableProposedPlan,
-  planProgress,
-  PLAN_IMPLEMENTATION_PROMPT_PREFIX,
-  proposedPlanTitle,
-  resolvePlanFollowUpSubmission,
-  shouldShowPlanFollowUpPrompt,
-  stripDisplayedPlanMarkdown,
-  wholePlanMarkdown
+buildProposedPlanMarkdownFilename,
+deriveActivePlanState,
+findLatestProposedPlan,
+hasActionableProposedPlan,
+PLAN_IMPLEMENTATION_PROMPT_PREFIX,
+planProgress,
+proposedPlanTitle,
+resolvePlanFollowUpSubmission,
+shouldShowPlanFollowUpPrompt,
+wholePlanMarkdown
 } from "./plan.logic";
-import { activity, resetBuilders, stamp } from "./test-helpers";
+import { activity,resetBuilders,stamp } from "./test-helpers";
 
 beforeEach(() => {
   resetBuilders();
@@ -86,10 +83,6 @@ describe("the implement/refine split button", () => {
     const result = resolvePlanFollowUpSubmission({ draftText: " tweak it ", planMarkdown: "# Plan" });
     assert.deepEqual(result, { text: "tweak it", interactionMode: "plan" });
   });
-
-  it("builds the fixed prefix exactly", () => {
-    assert.equal(buildPlanImplementationPrompt("  # Plan  "), `${PLAN_IMPLEMENTATION_PROMPT_PREFIX}# Plan`);
-  });
 });
 
 describe("shouldShowPlanFollowUpPrompt", () => {
@@ -133,17 +126,6 @@ describe("proposal helpers", () => {
     assert.equal(proposedPlanTitle("no heading"), null);
     assert.equal(buildProposedPlanMarkdownFilename("# Ship it!"), "ship-it.md");
     assert.equal(buildProposedPlanMarkdownFilename("no heading"), "plan.md");
-  });
-
-  it("strips the displayed heading and a Summary heading", () => {
-    assert.equal(stripDisplayedPlanMarkdown(plan().planMarkdown), "Do the thing");
-  });
-
-  it("truncates a long preview and marks it", () => {
-    const long = `# T\n${Array.from({ length: 20 }, (_, i) => `line ${i}`).join("\n")}`;
-    const preview = buildCollapsedProposedPlanPreviewMarkdown(long, { maxLines: 3 });
-    assert.equal(preview.split("\n").length, 5);
-    assert.ok(preview.endsWith("..."));
   });
 
   it("picks the current turn's proposal, else the newest of any turn", () => {

@@ -199,19 +199,6 @@ export function resolveChatActivity(fields: AgentChatSessionSummaryFields): Chat
 }
 
 /**
- * The push type this rung produces, or null when it must not push (§6.4).
- *
- * **A "finished" push is never sent while background liveness is non-null** —
- * that is what rungs 7 and 8 exist for, and both answer null here, so the rule
- * is enforced by the ladder rather than by a second check that could drift.
- * The same holds for a continuing goal (goals §4.7): its rung answers null,
- * and while the host reports it continuing the `error` rung does not fire.
- */
-export function pushTypeForRung(rung: ChatActivityRung): ChatPushType | null {
-  return pushTypeForRungInternal(rung);
-}
-
-/**
  * The push kinds a chat thread produces. `plan-ready` is its own kind rather
  * than a `needs-input` with different copy: "needs your input" reads as a
  * blocked provider waiting on an answer, and a finished turn that left a plan

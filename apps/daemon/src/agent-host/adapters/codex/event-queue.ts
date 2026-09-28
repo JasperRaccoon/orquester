@@ -29,10 +29,6 @@ export class AsyncEventQueue<T> implements AsyncIterable<T> {
     this.onDrop = options.onDrop;
   }
 
-  get size(): number {
-    return this.buffer.length;
-  }
-
   push(value: T): void {
     if (this.closed) {
       return;

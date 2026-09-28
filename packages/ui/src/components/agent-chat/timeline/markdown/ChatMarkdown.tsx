@@ -64,7 +64,7 @@ const BLOCK_SPACING = "my-[0.65rem] first:mt-0 last:mb-0";
 const HEADING_BASE = "mb-2 mt-5 font-semibold leading-[1.3] text-neutral-100 first:mt-0";
 
 /** A link target that may resolve to an editor tab rather than a navigation. */
-export function looksLikeWorkspacePath(href: string): boolean {
+function looksLikeWorkspacePath(href: string): boolean {
   if (href.length === 0) return false;
   if (/^[a-z][a-z0-9+.-]*:/i.test(href)) return false;
   if (href.startsWith("#")) return false;
@@ -204,7 +204,7 @@ const STATIC_PLUGINS = [remarkGfm];
  * fence. Below that there is nothing expensive to skip, and the cache's
  * bail-out checks are not free. *T3: `ChatMarkdown.tsx:3318-3329`.*
  */
-export function shouldArmIncrementalParser(text: string, streaming: boolean): boolean {
+function shouldArmIncrementalParser(text: string, streaming: boolean): boolean {
   return streaming && (text.includes("```") || text.includes("~~~"));
 }
 

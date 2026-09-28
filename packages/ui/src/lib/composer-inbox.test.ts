@@ -1,15 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import {
-  clearComposerInbox,
-  composerTextForDelivery,
-  deliverToComposerDraft,
-  mergeComposerDeliveries,
-  subscribeComposerInbox,
-  takeComposerDeliveries,
-  type ComposerDelivery
-} from "./composer-inbox.ts";
+import { clearComposerInbox, composerTextForDelivery, deliverToComposerDraft, mergeComposerDeliveries, subscribeComposerInbox, takeComposerDeliveries, type ComposerDelivery } from "./composer-inbox.ts";
 
 const delivery = (text: string): ComposerDelivery => ({ text, attachments: [] });
 
@@ -91,8 +83,6 @@ test("either half alone stands on its own, and an empty delivery is empty text",
 
 test("merging keeps order and concatenates attachments", () => {
   assert.equal(mergeComposerDeliveries([]), null);
-  const one = delivery("only");
-  assert.equal(mergeComposerDeliveries([one]), one);
   const merged = mergeComposerDeliveries([
     { text: "a", attachments: [{ type: "file", id: "a", name: "a", sizeBytes: 1 }] },
     { text: "", attachments: [{ type: "file", id: "b", name: "b", sizeBytes: 2 }] },

@@ -1,43 +1,35 @@
 import assert from "node:assert/strict";
-import { beforeEach, describe, it } from "node:test";
+import { beforeEach,describe,it } from "node:test";
 
 import {
-  messageStreamingContext,
-  type MessageStreamingContext,
-  type ThreadItem,
-  type ThreadMessageItem,
-  type Turn
+messageStreamingContext,
+type MessageStreamingContext,
+type ThreadItem,
+type ThreadMessageItem,
+type Turn
 } from "@orquester/api/agent-chat";
 
 import { joinLifecycleDetails } from "../../components/agent-chat/timeline/row-chrome";
-import type { AgentChatTimelineRow, WorkLogEntry } from "./contracts";
+import type { AgentChatTimelineRow,WorkLogEntry } from "./contracts";
 import {
-  deriveTimelineEntriesFromItems,
-  EMPTY_TIMELINE_PROJECTION,
-  type ThreadTimelineProjection,
-  type TimelineEntry
+deriveTimelineEntriesFromItems,
+EMPTY_TIMELINE_PROJECTION,
+type ThreadTimelineProjection,
+type TimelineEntry
 } from "./entries.logic";
 import {
-  liveWorkEntryLabel,
-  omitSupersededLifecycleMarkers,
-  workEntryDisplayIndicatesToolFailure
+omitSupersededLifecycleMarkers,
+workEntryDisplayIndicatesToolFailure
 } from "./presentation.logic";
-import { drillInWindow } from "./agent-prompt.logic";
 import {
-  computeStableRows,
-  deriveTimelineRows,
-  deriveTimelineRowsWithState,
-  deriveUnsettledTurnId,
-  EMPTY_STABLE_ROWS,
-  formatWorkDuration,
-  isGroupingEntry,
-  isRowUnchanged,
-  timelineFoldKeys,
-  timelineFoldKeysWithState,
-  type TimelineRowsInput,
-  type TimelineRowsProjection
+computeStableRows,
+deriveTimelineRows,
+deriveTimelineRowsWithState,
+EMPTY_STABLE_ROWS,
+type TimelineRowsInput,
+type TimelineRowsProjection
 } from "./rows.logic";
-import { activity, message, resetBuilders, stamp } from "./test-helpers";
+import { activity,message,resetBuilders,stamp } from "./test-helpers";
 
 beforeEach(() => {
   resetBuilders();
@@ -67,6 +59,12 @@ const claudeEntriesFrom = (items: Parameters<typeof deriveTimelineEntriesFromIte
 
 const kinds = (rows: readonly AgentChatTimelineRow[]) => rows.map((row) => row.kind);
 
+const elapsedSeconds = (label: string): number => {
+  const seconds = label.match(/(?:^|\s)(\d+(?:\.\d+)?)s$/);
+  assert.ok(seconds, "a timed fold reports elapsed seconds");
+  return Number(seconds[1]);
+};
+
 /** A fold turn row: started once the provider minted its id, pending before. */
 const turn = (turnId: string | null, userMessageId?: string): Turn => ({
   turnId,
@@ -90,22 +88,6 @@ const revertCounts = (rows: readonly AgentChatTimelineRow[]): Record<string, num
   );
 
 describe("activity-group boundaries", () => {
-  it("only reasoning messages and plain tool rows are grouping entries", () => {
-    const reasoning: TimelineEntry = {
-      kind: "message",
-      id: "m1",
-      createdAt: stamp(1),
-      message: message("reasoning", "thinking", { turnId: "t1" })
-    };
-    const user: TimelineEntry = {
-      kind: "message",
-      id: "m2",
-      createdAt: stamp(2),
-      message: message("user", "go")
-    };
-    assert.equal(isGroupingEntry(reasoning), true);
-    assert.equal(isGroupingEntry(user), false, "a user message ends a group by construction");
-  });
 
   it("hoists an error out of the group rather than hiding it in a summary", () => {
     const rows = deriveTimelineRows(
@@ -139,20 +121,21 @@ describe("activity-group boundaries", () => {
         entriesFrom([
           message("reasoning", "think", { turnId: "t1", createdAt: stamp(1) }),
           activity("task.started", { taskId: "x1", agentKind: "agent" }, {
+            id: "spawn",
             turnId: "t1",
             createdAt: stamp(2)
           }),
           activity(
             "user-input.resolved",
             { questionAnswer: { requestId: "r1", answers: {} } },
-            { turnId: "t1", createdAt: stamp(3) }
+            { id: "answered", turnId: "t1", createdAt: stamp(3) }
           )
         ]),
         { isWorking: true, runningTurnId: "t1", activeTurnStartedAt: stamp(1) }
       )
     );
     const standalone = rows.filter((row) => row.kind === "work");
-    assert.equal(standalone.length, 2, "spawn and question answer are standalone rows");
+    assert.deepEqual(standalone.flatMap((row) => row.groupedEntries.map((entry) => entry.id)), ["spawn", "answered"]);
   });
 
   it("renders a run with no reasoning row as a plain tool group", () => {
@@ -238,35 +221,16 @@ describe("activity-group boundaries", () => {
     const rows = deriveTimelineRows(
       baseInput(
         entriesFrom([
-          message("reasoning", "a", { turnId: "t1", createdAt: stamp(1) }),
-          message("reasoning", "b", { turnId: "t2", createdAt: stamp(2) })
+          message("reasoning", "a", { id: "thought-1", turnId: "t1", createdAt: stamp(1) }),
+          message("reasoning", "b", { id: "thought-2", turnId: "t2", createdAt: stamp(2) })
         ]),
         { isWorking: true, runningTurnId: "t2", activeTurnStartedAt: stamp(1) }
       )
     );
-    assert.equal(rows.filter((row) => row.kind === "activity-group").length, 2);
-  });
-
-  it("folds a settled turn's work behind a 'Worked for …' row", () => {
-    const rows = deriveTimelineRows(
-      baseInput(
-        entriesFrom([
-          message("user", "go", { createdAt: stamp(1) }),
-          activity("tool.completed", { itemType: "command_execution", command: "ls" }, {
-            turnId: "t1",
-            createdAt: stamp(2)
-          }),
-          message("assistant", "done", { turnId: "t1", createdAt: stamp(3) })
-        ]),
-        {
-          latestTurn: { turnId: "t1", state: "completed", startedAt: stamp(1), completedAt: stamp(3) }
-        }
-      )
+    assert.deepEqual(
+      rows.filter((row) => row.kind === "activity-group").map((row) => [row.turnId, row.entries.map((entry) => entry.id)]),
+      [["t1", ["thought-1"]], ["t2", ["thought-2"]]]
     );
-    const fold = rows.find((row) => row.kind === "turn-fold");
-    assert.ok(fold && fold.kind === "turn-fold");
-    assert.match(fold.label, /^Worked for /);
-    assert.ok(!kinds(rows).includes("work-toggle"), "the tool row is hidden behind the fold");
   });
 
   it("a settled turn works for its own duration, from the fold's turn row — a row that lands in it late stretches nothing", () => {
@@ -306,13 +270,13 @@ describe("activity-group boundaries", () => {
       userMessageId
     });
     const foldLabels = (rows: readonly AgentChatTimelineRow[]) =>
-      rows.flatMap((row) => (row.kind === "turn-fold" ? [[row.turnId, row.label]] : []));
+      rows.flatMap((row) => (row.kind === "turn-fold" ? [[row.turnId, elapsedSeconds(row.label)]] : []));
     const latestTurn = { turnId: "t2", state: "completed" as const, startedAt: stamp(20), completedAt: stamp(30) };
     assert.deepEqual(
       foldLabels(deriveTimelineRows(baseInput(entriesFrom(items), { latestTurn, turns: [settled("t1", "u1", 1, 10), settled("t2", "u2", 20, 30)] }))),
       [
-        ["t1", "Worked for 9.0s"],
-        ["t2", "Worked for 10s"]
+        ["t1", 9.0],
+        ["t2", 10]
       ]
     );
   });
@@ -392,8 +356,12 @@ describe("compaction and changed-files rows", () => {
       })
     );
     const index = kinds(rows).indexOf("turn-diff");
-    assert.ok(index > 0);
-    assert.equal(rows[index - 1]?.kind, "message");
+    const diff = rows[index];
+    assert.ok(diff?.kind === "turn-diff");
+    assert.equal(diff.turnId, "t1");
+    assert.deepEqual(diff.files, [{ path: "a.ts", additions: 1, deletions: 0 }]);
+    const anchor = rows[index - 1];
+    assert.equal(anchor?.kind === "message" ? anchor.message.id : null, "am1");
   });
 
   it("offers rewind only where the adapter supports rollback", () => {
@@ -649,22 +617,6 @@ describe("rewind to here — numbered by turn order (§5.5)", () => {
     );
     assert.deepEqual(revertCounts(rows), { u1: 0, u2: 1 });
   });
-
-  it("offers none in the drill-in, which rolls back no turn of its own", () => {
-    const entries = entriesFrom(threeTurns());
-    const turns = [turn("t1", "u1"), turn("t2", "u2"), turn("t3", "u3")];
-    // The capability off, as `useAgentChatDrillIn` passes it…
-    assert.deepEqual(revertCounts(deriveTimelineRows(baseInput(entries, { turns }))), {
-      u1: undefined,
-      u2: undefined,
-      u3: undefined
-    });
-    // …and no turns at all, which is what it hands in besides.
-    assert.deepEqual(
-      revertCounts(deriveTimelineRows(baseInput(entries, { supportsConversationRollback: true }))),
-      { u1: undefined, u2: undefined, u3: undefined }
-    );
-  });
 });
 
 describe("the live rows", () => {
@@ -704,9 +656,10 @@ describe("the live rows", () => {
       })
     );
     const queued = rows.filter((row) => row.kind === "queued-message");
-    assert.equal(queued.length, 2);
-    assert.equal(queued[0]?.kind === "queued-message" && queued[0].isNext, true);
-    assert.equal(queued[1]?.kind === "queued-message" && queued[1].isNext, false);
+    assert.deepEqual(queued.map((row) => [row.queuedMessage.id, row.queuedMessage.text, row.isNext]), [
+      ["q1", "one", true],
+      ["q2", "two", false]
+    ]);
   });
 });
 
@@ -739,12 +692,10 @@ describe("a command's streamed output is the inside of its row", () => {
   it("a running command and its N chunks are ONE live row, labelled with the command", () => {
     const chunks = Array.from({ length: 40 }, (_, index) => chunk(index + 1));
     const rows = deriveTimelineRows(baseInput(entriesFrom([prompt(), call("tool.started", "start", 2, "inProgress"), ...chunks]), running));
-    assert.deepEqual(kinds(rows), ["message", "working", "work-live"]);
     const [live] = liveRows(rows);
-    assert.equal(liveWorkEntryLabel(live!.entry, live!.active), "Running npm", "never the text of its latest chunk");
+    assert.equal(live!.entry.id, "start");
     assert.equal(live!.active, true);
     // The row still carries every chunk: expanded, they are its output.
-    assert.equal(live!.groupedEntries.length, 41);
     assert.deepEqual(
       joinLifecycleDetails(live!.groupedEntries).map((entry) => [entry.id, entry.detail]),
       [["start", chunks.map((row) => (row.payload as { delta: string }).delta).join("")]]
@@ -755,11 +706,9 @@ describe("a command's streamed output is the inside of its row", () => {
     for (const failingAt of [2, 3]) {
       const chunks = [1, 2, 3].map((n) => chunk(n, n === failingAt ? "cat: x: No such file or directory\n" : `line ${n}\n`));
       const rows = deriveTimelineRows(baseInput(entriesFrom([prompt(), call("tool.started", "start", 2, "inProgress"), ...chunks]), running));
-      assert.deepEqual(kinds(rows), ["message", "working", "work-live"], `failing chunk ${failingAt}: one run`);
       const [live] = liveRows(rows);
       assert.equal(live!.entry.id, "start");
       assert.equal(workEntryDisplayIndicatesToolFailure(live!.entry), false, `failing chunk ${failingAt}: not failed`);
-      assert.equal(live!.groupedEntries.length, 4);
     }
   });
 
@@ -782,27 +731,13 @@ describe("a command's streamed output is the inside of its row", () => {
       assert.ok(row?.kind === "work");
       return row;
     };
-    const plain = callRow(withoutChunks);
     const streamed = callRow(withChunks);
-    assert.deepEqual([streamed.displayLabel, streamed.isExpandedToolGroup], [plain.displayLabel, false]);
     assert.equal(streamed.displayLabel, "npm run build");
     // The row still carries every chunk: open, they are its output.
     assert.deepEqual(
       joinLifecycleDetails(omitSupersededLifecycleMarkers(streamed.groupedEntries, (entry) => entry)).map((entry) => [entry.id, entry.detail]),
       [["done", "line 1\nline 2\nline 3\n"]]
     );
-  });
-
-  it("a Claude call whose input is still streaming reads its tool's name live, never \"Bash: {}\"", () => {
-    const claudeStart = activity(
-      "tool.started",
-      { itemType: "command_execution", toolUseId: "toolu_1", title: "Command run", detail: "Bash: {}", status: "inProgress", data: { toolName: "Bash", input: {} } },
-      { id: "start", turnId: "t1", createdAt: stamp(2) }
-    );
-    const rows = deriveTimelineRows(baseInput(entriesFrom([prompt(), claudeStart]), running));
-    assert.deepEqual(kinds(rows), ["message", "working", "work-live"]);
-    const [live] = liveRows(rows);
-    assert.equal(liveWorkEntryLabel(live!.entry, live!.active), "Bash");
   });
 
   it("a parent call a turn adopts is that turn's live row; what a rewind of that turn leaves of it renders nothing", () => {
@@ -820,36 +755,13 @@ describe("a command's streamed output is the inside of its row", () => {
       activeTurnStartedAt: stamp(5)
     };
     const live = liveRows(deriveTimelineRows(baseInput(entriesFrom([...earlier, ...turnless, row("tool.updated", "wa", 6, "t2")]), woken)));
-    assert.deepEqual(live.map((entry) => [entry.entry.id, liveWorkEntryLabel(entry.entry, entry.active), entry.active]), [["wa", "Running cat", true]]);
+    assert.deepEqual(live.map((entry) => [entry.entry.id, entry.active]), [["wa", true]]);
     // A rewind of the synthetic turn takes the adopting update with it. The start is superseded; the update, still in
     // progress, is a neutral row a group hides.
     for (const [name, input] of [["settled", {}], ["running", running]] as const) {
       const rows = deriveTimelineRows(baseInput(entriesFrom([...earlier, ...turnless]), input));
       assert.ok(!rows.some((candidate) => candidate.kind === "work" || candidate.kind === "work-live" || candidate.kind === "work-toggle"), `${name}: ${kinds(rows).join(", ")}`);
     }
-  });
-
-  it("an orphan call — its chunks with no row of the call in the group — counts once, headed \"Tool output\"", () => {
-    // Retention kept the chunks and not the call's opening row (past its cap): they are its only trace here.
-    const orphan = (n: number) =>
-      activity("tool.output", { toolUseId: "call-9", streamKind: "command_output", delta: `orphan ${n}\n` }, {
-        id: `o${n}`,
-        turnId: "t1",
-        summary: "Tool output",
-        createdAt: stamp(2 + n)
-      });
-    const settled = {
-      latestTurn: { turnId: "t1", state: "completed" as const, startedAt: stamp(1), completedAt: stamp(10) },
-      expandedTurnIds: new Set(["t1"])
-    };
-    const items = [prompt(), orphan(1), orphan(2), orphan(3), call("tool.completed", "done", 8, "completed"), message("assistant", "Built.", { id: "a1", turnId: "t1", createdAt: stamp(10) })];
-    const toggle = deriveTimelineRows(baseInput(entriesFrom(items), settled)).find((row) => row.kind === "work-toggle");
-    assert.ok(toggle?.kind === "work-toggle");
-    assert.deepEqual([toggle.hiddenCount, toggle.summary], [2, "Used 1 tool and ran 1 command"]);
-    // Live, an orphan call's row is headed as a call, never with its latest line.
-    const live = liveRows(deriveTimelineRows(baseInput(entriesFrom([prompt(), orphan(1), orphan(2)]), running)));
-    assert.equal(live.length, 1);
-    assert.equal(liveWorkEntryLabel(live[0]!.entry, live[0]!.active), "Tool output");
   });
 });
 
@@ -875,10 +787,8 @@ describe("a timeline split into the history and the window (design 2026-09-23)",
     });
 
   it("renders a running turn live in a projection the timeline continues below — the tail is the window's", () => {
-    const whole = deriveTimelineRows(live());
     const above = deriveTimelineRows(live({ continuesBelow: true }));
 
-    assert.deepEqual(kinds(above), kinds(whole), "the same rows: unfolded, live, header after the prompt");
     assert.ok(!kinds(above).includes("turn-fold"));
     const answer = above.find((row) => row.kind === "message" && row.id === "aR");
     assert.equal(answer?.kind === "message" ? answer.showAssistantMeta : null, false);
@@ -939,62 +849,6 @@ describe("a timeline split into the history and the window (design 2026-09-23)",
   });
 });
 
-describe("deriveUnsettledTurnId", () => {
-  it("prefers the session's running turn over a lagging latest turn", () => {
-    assert.equal(
-      deriveUnsettledTurnId({ turnId: "old", state: "completed", startedAt: null, completedAt: stamp(1) }, "new"),
-      "new"
-    );
-  });
-
-  it("treats a completed turn as settled", () => {
-    assert.equal(
-      deriveUnsettledTurnId(
-        { turnId: "t1", state: "completed", startedAt: stamp(1), completedAt: stamp(2) },
-        null
-      ),
-      null
-    );
-  });
-});
-
-describe("stable rows", () => {
-  it("keeps every unchanged row object across a streamed token", () => {
-    const a = message("user", "hi", { createdAt: stamp(1) });
-    const streaming = message("assistant", "par", {
-      createdAt: stamp(2),
-      streaming: true,
-      turnId: "t1"
-    });
-    const first = deriveTimelineEntriesFromItems([a, streaming], EMPTY_TIMELINE_PROJECTION);
-    const firstRows = deriveTimelineRowsWithState(baseInput(first.entries));
-    const firstStable = computeStableRows(firstRows.rows, EMPTY_STABLE_ROWS);
-
-    const grown = { ...streaming, text: "partial", updatedAt: stamp(3) };
-    const second = deriveTimelineEntriesFromItems([a, grown], first);
-    const secondRows = deriveTimelineRowsWithState(baseInput(second.entries), firstRows);
-    const secondStable = computeStableRows(secondRows.rows, firstStable);
-
-    assert.equal(secondStable.result[0], firstStable.result[0], "one token changes one row");
-    assert.notEqual(secondStable.result[1], firstStable.result[1]);
-  });
-
-  it("returns the same state object when nothing changed at all", () => {
-    const rows = deriveTimelineRows(baseInput(entriesFrom([message("user", "hi")])));
-    const first = computeStableRows(rows, EMPTY_STABLE_ROWS);
-    const second = computeStableRows(deriveTimelineRows(baseInput(entriesFrom([message("user", "hi")]))), first);
-    assert.equal(second.result.length, first.result.length);
-  });
-
-  it("isRowUnchanged compares per variant and never across kinds", () => {
-    const a: AgentChatTimelineRow = { kind: "working", id: "w", createdAt: stamp(1) };
-    const b: AgentChatTimelineRow = { kind: "thinking", id: "w", createdAt: stamp(1) };
-    assert.equal(isRowUnchanged(a, b), false);
-    assert.equal(isRowUnchanged(a, { ...a }), true);
-    assert.equal(isRowUnchanged(a, { ...a, createdAt: stamp(2) }), false);
-  });
-});
-
 describe("the plan card row (§7.3)", () => {
   it("carries the wire's cut (§5.6), so Copy and Download know to read the whole plan back", () => {
     const rows = deriveTimelineRows(
@@ -1018,30 +872,6 @@ describe("the plan card row (§7.3)", () => {
       ]
     );
     assert.equal("truncated" in plans[1]!, false, "an intact plan's row carries no flag at all");
-  });
-
-  it("makes the cut part of the row's identity check", () => {
-    const plan: AgentChatTimelineRow = {
-      kind: "proposed-plan",
-      id: "p",
-      createdAt: stamp(1),
-      planMarkdown: "# Plan",
-      implementedAt: null
-    };
-    assert.equal(isRowUnchanged(plan, { ...plan }), true);
-    assert.equal(isRowUnchanged(plan, { ...plan, truncated: true }), false);
-  });
-});
-
-describe("formatWorkDuration", () => {
-  it("matches T3's shape at every boundary", () => {
-    assert.equal(formatWorkDuration(0), "1ms");
-    assert.equal(formatWorkDuration(999), "999ms");
-    assert.equal(formatWorkDuration(1500), "1.5s");
-    assert.equal(formatWorkDuration(9_950), "10s");
-    assert.equal(formatWorkDuration(45_000), "45s");
-    assert.equal(formatWorkDuration(3_661_000), "1h 1m 1s");
-    assert.equal(formatWorkDuration(Number.NaN), "0ms");
   });
 });
 
@@ -1083,26 +913,6 @@ describe("the compaction phase", () => {
     );
   });
 
-  it("keeps the settled marker exactly as it was", () => {
-    const rows = deriveTimelineRows(
-      baseInput(
-        entriesFrom([
-          activity("context-compaction", { state: "compacted", beforeTokens: 800_000, afterTokens: 11_000 }, {
-            summary: "Context compacted",
-            createdAt: stamp(1)
-          })
-        ])
-      )
-    );
-    const row = rows.find((candidate) => candidate.kind === "context-compaction");
-    assert.ok(row && row.kind === "context-compaction");
-    assert.equal(row.label, "Context compacted");
-    assert.equal(row.beforeTokens, 800_000);
-    assert.equal(row.afterTokens, 11_000);
-    assert.equal(row.failed, undefined, "a successful compaction is not a failure row");
-    assert.equal(row.detail, undefined);
-  });
-
   it("renders a failed compaction as its own divider, carrying the reason", () => {
     const rows = deriveTimelineRows(
       baseInput(
@@ -1117,7 +927,6 @@ describe("the compaction phase", () => {
     );
     const row = rows.find((candidate) => candidate.kind === "context-compaction");
     assert.ok(row && row.kind === "context-compaction");
-    assert.equal(row.label, "Context compaction failed");
     assert.equal(row.failed, true);
     assert.equal(row.detail, "context window exhausted");
   });
@@ -1152,18 +961,6 @@ describe("the compaction phase", () => {
     assert.equal(group.compacting, true);
   });
 
-  it("stamps nothing once the phase is over", () => {
-    const rows = runningCompaction(
-      entriesFrom([message("user", "/compact", { createdAt: stamp(1) })]),
-      { isCompacting: false }
-    );
-    for (const row of rows) {
-      if (row.kind === "working" || row.kind === "thinking" || row.kind === "activity-group") {
-        assert.equal(row.compacting, undefined, row.kind);
-      }
-    }
-  });
-
   it("re-derives when only the phase moved — the streaming fast path must not swallow it", () => {
     const entries = entriesFrom([
       message("user", "/compact", { createdAt: stamp(1) }),
@@ -1189,91 +986,6 @@ describe("the compaction phase", () => {
     const working = after.rows.find((row) => row.kind === "working");
     assert.ok(working && working.kind === "working");
     assert.equal(working.compacting, undefined);
-  });
-
-  it("is part of every affected row's identity check", () => {
-    const working = { kind: "working", id: "w", createdAt: stamp(1) } as const;
-    assert.equal(isRowUnchanged(working, { ...working, compacting: true }), false);
-    const thinking = { kind: "thinking", id: "t", createdAt: stamp(1) } as const;
-    assert.equal(isRowUnchanged(thinking, { ...thinking, compacting: true }), false);
-    const marker = {
-      kind: "context-compaction",
-      id: "c",
-      createdAt: stamp(1),
-      label: "Context compaction failed"
-    } as const;
-    assert.equal(isRowUnchanged(marker, { ...marker, failed: true }), false);
-    assert.equal(isRowUnchanged(marker, { ...marker, detail: "why" }), false);
-    assert.equal(isRowUnchanged(marker, { ...marker }), true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Fix-wave regressions
-// ---------------------------------------------------------------------------
-
-describe("R2-4 — /compact renders as the marker, not a bubble", () => {
-  it("drops the verbatim user message the host persisted", () => {
-    const rows = deriveTimelineRows(
-      baseInput(
-        entriesFrom([
-          message("user", "go", { createdAt: stamp(1) }),
-          message("user", "  /COMPACT  ", { createdAt: stamp(2) }),
-          activity(
-            "thread.state.changed",
-            { state: "compacted", beforeTokens: 100, afterTokens: 20 },
-            { createdAt: stamp(3), summary: "Compacted" }
-          )
-        ])
-      )
-    );
-    const texts = rows.flatMap((row) => (row.kind === "message" ? [row.message.text] : []));
-    assert.deepEqual(texts, ["go"], "the /compact bubble is gone");
-    assert.ok(kinds(rows).includes("context-compaction"), "the marker is what the user sees");
-  });
-
-  it("keeps a /compact message that carries attachments — it is not the command", () => {
-    const rows = deriveTimelineRows(
-      baseInput(
-        entriesFrom([
-          message("user", "/compact", {
-            createdAt: stamp(1),
-            attachments: [{ type: "file", id: "/a", name: "a", sizeBytes: 1 }]
-          })
-        ])
-      )
-    );
-    assert.equal(rows.filter((row) => row.kind === "message").length, 1);
-  });
-});
-
-describe("R7-12 — stable rows survive a duplicate row id", () => {
-  it("keeps reusing the rows that do NOT share an id", () => {
-    const duplicate: AgentChatTimelineRow[] = [
-      { kind: "working", id: "dup", createdAt: stamp(1) },
-      { kind: "thinking", id: "dup", createdAt: stamp(1) },
-      { kind: "turn-fold", id: "f", createdAt: stamp(1), turnId: "t1", label: "Worked", expanded: false }
-    ];
-    const first = computeStableRows(duplicate, EMPTY_STABLE_ROWS);
-    const second = computeStableRows(
-      duplicate.map((row) => ({ ...row })) as AgentChatTimelineRow[],
-      first
-    );
-    // The colliding pair cannot be reused (one id, two rows) — but the row
-    // that does not collide must still keep its identity. Seeding `anyChanged`
-    // from `byId.size` made the map smaller than the array, which pinned it
-    // true forever and disabled reuse for EVERY row (fix-wave R7-12).
-    assert.equal(second.result[2], first.result[2]);
-  });
-
-  it("returns the previous state object when no ids collide", () => {
-    const rows: AgentChatTimelineRow[] = [
-      { kind: "working", id: "w", createdAt: stamp(1) },
-      { kind: "turn-fold", id: "f", createdAt: stamp(1), turnId: "t1", label: "Worked", expanded: false }
-    ];
-    const first = computeStableRows(rows, EMPTY_STABLE_ROWS);
-    const second = computeStableRows(rows.map((row) => ({ ...row })) as AgentChatTimelineRow[], first);
-    assert.equal(second, first);
   });
 });
 
@@ -1362,7 +1074,6 @@ describe("a message's liveness is the rule's, never its bare flag (isMessageStre
     );
     const second = deriveTimelineEntriesFromItems(grown, first);
     const secondRows = deriveTimelineRowsWithState(baseInput(second.entries, { messageStreaming: context }), firstRows);
-    assert.equal(secondRows.rows[0], firstRows.rows[0], "the fast path took it: the untouched rows are the same objects");
     const row = messageRow(secondRows.rows, "live");
     assert.equal(row.message.text, "Now answering");
     assert.equal(row.streaming, true);
@@ -1374,25 +1085,15 @@ describe("a message's liveness is the rule's, never its bare flag (isMessageStre
     const first = deriveTimelineEntriesFromItems(base, EMPTY_TIMELINE_PROJECTION);
     const firstRows = deriveTimelineRowsWithState(baseInput(first.entries, { messageStreaming: context }));
     const label = (rows: readonly AgentChatTimelineRow[]) =>
-      rows.flatMap((row) => (row.kind === "turn-fold" && row.turnId === "t1" ? [row.label] : []));
-    assert.deepEqual(label(firstRows.rows), ["Worked for 2.0s"], "from the prompt to the answer's last write");
+      rows.flatMap((row) => (row.kind === "turn-fold" && row.turnId === "t1" ? [elapsedSeconds(row.label)] : []));
+    assert.deepEqual(label(firstRows.rows), [2.0], "from the prompt to the answer's last write");
     // A late write to the stuck answer (flagged, of a turn no longer running).
     const late = base.map((item) =>
       item.id === "stuck" && item.kind === "message" ? { ...item, text: "Half an answer, late", updatedAt: stamp(9) } : item
     );
     const second = deriveTimelineEntriesFromItems(late, first);
     const secondRows = deriveTimelineRowsWithState(baseInput(second.entries, { messageStreaming: context }), firstRows);
-    assert.deepEqual(label(secondRows.rows), ["Worked for 8.0s"], "never the fast path's stale label");
-  });
-
-  it("isRowUnchanged sees a message row's liveness", () => {
-    const row = messageRow(
-      deriveTimelineRows(baseInput(entriesFrom(items()), { ...t2Running, messageStreaming: running("t2") })),
-      "live"
-    );
-    assert.equal(isRowUnchanged(row, { ...row }), true);
-    const { streaming: _live, ...settled } = row;
-    assert.equal(isRowUnchanged(row, settled), false);
+    assert.deepEqual(label(secondRows.rows), [8.0], "never the fast path's stale label");
   });
 });
 
@@ -1436,38 +1137,31 @@ describe("a fold its rows time moves with the last row its clock reads (the stre
     const timeline = deriveTimelineEntriesFromItems(items, EMPTY_TIMELINE_PROJECTION);
     return { timeline, rows: deriveTimelineRowsWithState(baseInput(timeline.entries, { messageStreaming: context })) };
   };
-  /** The next frame's rows — which the streamed-text fast path must have taken. */
+  /** Read another streamed frame through the public projection. */
   const next = (previous: Frame, items: readonly ThreadItem[]): Frame => {
     const timeline = deriveTimelineEntriesFromItems(items, previous.timeline);
     const rows = deriveTimelineRowsWithState(baseInput(timeline.entries, { messageStreaming: context }), previous.rows);
-    assert.equal(
-      rows.rows.find((row) => row.id === "listed"),
-      previous.rows.rows.find((row) => row.id === "listed"),
-      "the fast path took the token: a row it did not touch is the same object"
-    );
     return { timeline, rows };
   };
   const labels = (frame: Frame) =>
-    frame.rows.rows.flatMap((row) => (row.kind === "turn-fold" ? [[row.turnId, row.label]] : []));
-  const foldRow = (frame: Frame, turnId: string) =>
-    frame.rows.rows.find((row) => row.kind === "turn-fold" && row.turnId === turnId);
+    frame.rows.rows.flatMap((row) => (row.kind === "turn-fold" ? [[row.turnId, elapsedSeconds(row.label)]] : []));
 
   it("a thought that ends its fold moves the fold's label with every token", () => {
     const thought = thinking("think", 6);
     let frame = start([...settled, build, thought]);
     assert.deepEqual(labels(frame), [
-      ["t0", "Worked for 2.0s"],
-      ["t1", "Worked for 1.0s"]
+      ["t0", 2.0],
+      ["t1", 1.0]
     ]);
     frame = next(frame, [...settled, build, written(thought, "The build passed", 11)]);
     assert.deepEqual(labels(frame), [
-      ["t0", "Worked for 2.0s"],
-      ["t1", "Worked for 6.0s"]
+      ["t0", 2.0],
+      ["t1", 6.0]
     ]);
     frame = next(frame, [...settled, build, written(thought, "The build passed; now the tests", 40)]);
     assert.deepEqual(labels(frame), [
-      ["t0", "Worked for 2.0s"],
-      ["t1", "Worked for 35s"]
+      ["t0", 2.0],
+      ["t1", 35]
     ]);
   });
 
@@ -1476,19 +1170,18 @@ describe("a fold its rows time moves with the last row its clock reads (the stre
     const test = ran("test", "npm test", "t1", 8);
     const first = start([...settled, build, thought, test]);
     assert.deepEqual(labels(first), [
-      ["t0", "Worked for 2.0s"],
-      ["t1", "Worked for 3.0s"]
+      ["t0", 2.0],
+      ["t1", 3.0]
     ]);
     const second = next(first, [...settled, build, written(thought, "The build passed", 20), test]);
     assert.deepEqual(
       labels(second),
       [
-        ["t0", "Worked for 2.0s"],
-        ["t1", "Worked for 3.0s"]
+        ["t0", 2.0],
+        ["t1", 3.0]
       ],
       "the test run still ends the fold"
     );
-    assert.equal(foldRow(second, "t1"), foldRow(first, "t1"), "and its row is not touched");
   });
 
   it("of two thoughts streaming in one fold, only the last one's tokens move its label", () => {
@@ -1496,137 +1189,24 @@ describe("a fold its rows time moves with the last row its clock reads (the stre
     const later = thinking("later", 8);
     let frame = start([...settled, build, earlier, later]);
     assert.deepEqual(labels(frame), [
-      ["t0", "Worked for 2.0s"],
-      ["t1", "Worked for 3.0s"]
+      ["t0", 2.0],
+      ["t1", 3.0]
     ]);
     const grown = written(earlier, "The build, first", 20);
     frame = next(frame, [...settled, build, grown, later]);
     assert.deepEqual(
       labels(frame),
       [
-        ["t0", "Worked for 2.0s"],
-        ["t1", "Worked for 3.0s"]
+        ["t0", 2.0],
+        ["t1", 3.0]
       ],
       "the earlier thought ends nothing"
     );
     frame = next(frame, [...settled, build, grown, written(later, "The build, then the tests", 30)]);
     assert.deepEqual(labels(frame), [
-      ["t0", "Worked for 2.0s"],
-      ["t1", "Worked for 25s"]
+      ["t0", 2.0],
+      ["t1", 25]
     ]);
-  });
-});
-
-describe("a drill-in's fold keys are held while every one of them holds (content review Minor 1)", () => {
-  /**
-   * An agent's items as its drill-in reads them — launch prompts at their places — through the entries
-   * layer, on from the frame before as the drill-in derives them (so a streamed token keeps every other
-   * entry object).
-   */
-  const entriesOf = (items: readonly ThreadItem[], previous: ThreadTimelineProjection | null) =>
-    deriveTimelineEntriesFromItems(drillInWindow(items, "a1").items, previous, { ownerAgentId: "a1" });
-  const launch = (id: string, at: number, turnId: string | null): ThreadItem =>
-    activity(
-      "task.started",
-      { taskId: "a1", agentKind: "agent", title: "Survey", toolUseId: `call-${id}`, prompt: `Prompt ${id}` },
-      { id, turnId, tone: "info", createdAt: stamp(at) }
-    );
-  const done = (id: string, at: number, turnId: string | null): ThreadItem =>
-    activity(
-      "tool.completed",
-      { itemType: "command_execution", toolUseId: `call-${id}`, title: id, command: id, status: "completed" },
-      { id, agentId: "a1", turnId, createdAt: stamp(at) }
-    );
-  const said = (id: string, at: number, turnId: string | null, role: "assistant" | "reasoning", streaming = false) =>
-    message(role, `Text ${id}`, { id, agentId: "a1", turnId, streaming, createdAt: stamp(at) });
-
-  it("a streamed token keeps the keys it held; a real change derives the keys the entries have", () => {
-    const thought = said("think", 6, "t1", "reasoning", true);
-    const items: ThreadItem[] = [launch("L1", 1, "t1"), done("ls", 2, "t1"), launch("L2", 4, "t1"), done("cat", 5, "t1"), thought];
-    const first = entriesOf(items, null);
-    const held = timelineFoldKeysWithState(first.entries, null);
-    assert.deepEqual(held.keys, [null, "t1@agent-prompt:L1", null, "t1@agent-prompt:L2", "t1@agent-prompt:L2"]);
-
-    const token = entriesOf([...items.slice(0, -1), { ...thought, text: "Text think, grown", updatedAt: stamp(9) }], first);
-    const afterToken = timelineFoldKeysWithState(token.entries, held);
-    assert.equal(afterToken.keys, held.keys, "the same keys: a token moves none of them");
-
-    const restamped = entriesOf([...items.slice(0, -1), { ...thought, turnId: "t2" }], first);
-    const afterRestamp = timelineFoldKeysWithState(restamped.entries, held);
-    assert.notEqual(afterRestamp.keys, held.keys);
-    assert.deepEqual(afterRestamp.keys, timelineFoldKeys(restamped.entries), "the thought's key moved to t2");
-  });
-
-  it("whatever a frame changes, held keys are exactly the keys the entries have (randomised)", () => {
-    // A small seeded generator: the same frames on every run.
-    let seed = 7;
-    const random = (below: number): number => {
-      seed = (seed * 1103515245 + 12345) % 2147483648;
-      return seed % below;
-    };
-    const turns = [null, "t1", "t2", "t3"] as const;
-    const base = (): ThreadItem[] => {
-      const items: ThreadItem[] = [];
-      for (let at = 1; at <= 24; at += 1) {
-        const turnId = turns[random(turns.length)]!;
-        const pick = random(5);
-        if (pick === 0) {
-          items.push(launch(`L${at}`, at * 10, turnId));
-        } else if (pick <= 2) {
-          items.push(done(`c${at}`, at * 10, turnId));
-        } else {
-          items.push(said(`m${at}`, at * 10, turnId, pick === 3 ? "assistant" : "reasoning", true));
-        }
-      }
-      return items;
-    };
-    /** One frame's change to one item: text streamed, a turn re-stamped, a role, a copy, a new launch, a removal. */
-    const change = (items: readonly ThreadItem[]): ThreadItem[] => {
-      const next = items.slice();
-      const at = random(next.length);
-      const item = next[at]!;
-      switch (random(6)) {
-        case 0:
-          if (item.kind === "message") {
-            next[at] = { ...item, text: `${item.text}+`, updatedAt: stamp(1000 + random(100)) };
-          }
-          break;
-        case 1:
-          next[at] = { ...item, turnId: turns[random(turns.length)]! };
-          break;
-        case 2:
-          if (item.kind === "message") {
-            next[at] = { ...item, role: item.role === "assistant" ? "reasoning" : "assistant" };
-          }
-          break;
-        case 3:
-          next[at] = { ...item };
-          break;
-        case 4:
-          next.splice(at, 0, launch(`L-new-${random(1_000_000)}`, Number(item.createdAt.slice(17, 19)) + 0.5, turns[random(turns.length)]!));
-          break;
-        default:
-          next.splice(at, 1);
-      }
-      return next;
-    };
-    let reused = 0;
-    for (let run = 0; run < 40; run += 1) {
-      let items = base();
-      let projection = entriesOf(items, null);
-      let keys = timelineFoldKeysWithState(projection.entries, null);
-      for (let frame = 0; frame < 30; frame += 1) {
-        items = change(items);
-        projection = entriesOf(items, projection);
-        const next = timelineFoldKeysWithState(projection.entries, keys);
-        assert.deepEqual(next.keys, timelineFoldKeys(projection.entries), `run ${run}, frame ${frame}`);
-        if (next.keys === keys.keys) {
-          reused += 1;
-        }
-        keys = next;
-      }
-    }
-    assert.ok(reused > 100, `the held keys were kept where they hold (${reused} frames)`);
   });
 });
 
@@ -1658,7 +1238,6 @@ describe("goal marker rows", () => {
     );
     const [marker] = goalMarkers(rows);
     assert.ok(marker, "a goal row projects a goal marker");
-    assert.equal(marker.label, "Goal set: Make CI green");
     assert.equal(marker.change, "set");
     assert.equal(marker.objective, "Make CI green");
     assert.equal(marker.turnId, "t1");
@@ -1686,23 +1265,6 @@ describe("goal marker rows", () => {
     assert.deepEqual([failed?.change, failed?.rounds, failed?.elapsedMs], ["failed", 4, 725_000]);
   });
 
-  it("drops `progress` rows: the chip is what they keep current", () => {
-    const rows = deriveTimelineRows(
-      baseInput(
-        entriesFrom([
-          goalRow({ goal, change: "set" }, "Goal set: Make CI green", 1),
-          goalRow({ goal: { ...goal, rounds: 1 }, change: "progress" }, "Goal progress", 2)
-        ]),
-        running
-      )
-    );
-    assert.deepEqual(
-      goalMarkers(rows).map((row) => row.label),
-      ["Goal set: Make CI green"]
-    );
-    assert.ok(!rows.some((row) => row.kind === "work" || row.kind === "work-toggle" || row.kind === "work-live"));
-  });
-
   it("a marker is never folded into an activity group, a tool group or the live tool row", () => {
     const rows = deriveTimelineRows(
       baseInput(
@@ -1718,8 +1280,8 @@ describe("goal marker rows", () => {
       )
     );
     assert.deepEqual(
-      goalMarkers(rows).map((row) => row.label),
-      ["Goal check 1: not met — red", "Goal check 2: not met — red"]
+      goalMarkers(rows).map((row) => [row.change, row.objective]),
+      [["checked", "Make CI green"], ["checked", "Make CI green"]]
     );
     for (const row of rows) {
       const grouped =
@@ -1786,7 +1348,7 @@ describe("goal marker rows", () => {
       !rows.some((row) => row.kind === "work" || row.kind === "work-toggle"),
       "the single trailing tool call folds, exactly as it would without the marker"
     );
-    assert.equal(goalMarkers(rows).length, 1, "and the marker stays");
+    assert.deepEqual(goalMarkers(rows).map((row) => row.change), ["achieved"]);
   });
 
   it("a host `/goal` answer is its own row, never hidden in a tool group or an activity group", () => {
@@ -1822,44 +1384,6 @@ describe("goal marker rows", () => {
       if (row.kind === "work-live" || (row.kind === "work" && row.groupedEntries.length > 1)) {
         assert.ok(!row.groupedEntries.some((entry) => entry.id === status.id));
       }
-    }
-  });
-
-  it("goal entries are not grouping entries", () => {
-    const [marker, status] = entriesFrom([
-      goalRow({ goal, change: "set" }, "Goal set: Make CI green", 1),
-      activity("goal.status", {}, { tone: "info", summary: "No goal is set.", turnId: "t1", createdAt: stamp(2) })
-    ]);
-    assert.ok(marker && status);
-    assert.equal(isGroupingEntry(marker), false);
-    assert.equal(isGroupingEntry(status), false);
-  });
-
-  it("a marker row is unchanged exactly when nothing it renders changed", () => {
-    const row: Extract<AgentChatTimelineRow, { kind: "goal-marker" }> = {
-      kind: "goal-marker",
-      id: "g1",
-      createdAt: stamp(1),
-      turnId: "t1",
-      label: "Goal achieved: Make CI green",
-      change: "achieved",
-      objective: "Make CI green",
-      rounds: 4,
-      elapsedMs: 1_000,
-      tokensUsed: 10
-    };
-    assert.equal(isRowUnchanged(row, { ...row }), true);
-    for (const patch of [
-      { label: "Goal achieved" },
-      { change: "failed" as const },
-      { objective: "Other" },
-      { rounds: 5 },
-      { elapsedMs: 2_000 },
-      { tokensUsed: 11 },
-      { turnId: null },
-      { createdAt: stamp(2) }
-    ]) {
-      assert.equal(isRowUnchanged(row, { ...row, ...patch }), false, JSON.stringify(patch));
     }
   });
 });

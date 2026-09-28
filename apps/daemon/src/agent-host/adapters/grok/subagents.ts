@@ -277,7 +277,7 @@ function finishedStatus(status: unknown, error: unknown): "completed" | "failed"
  * `resume_from`, oldest forgotten first (a live agent never is). A resume of a
  * forgotten id starts a row of its own — the same as after a host restart.
  */
-export const SUBAGENTS_REMEMBERED = 512;
+const SUBAGENTS_REMEMBERED = 512;
 
 /**
  * How long a Grok agent counts as live work after the latest row naming it
@@ -288,7 +288,7 @@ export const SUBAGENTS_REMEMBERED = 512;
  * otherwise hold "working" — and every code-only deploy's drain — for as long
  * as its chat stays open. Liveness only: the roster keeps the row.
  */
-export const GROK_AGENT_LIVENESS_TTL_MS = 60 * 60_000;
+const GROK_AGENT_LIVENESS_TTL_MS = 60 * 60_000;
 
 /** At most this many ids are taken from one launch's result. */
 const IDS_PER_LAUNCH = 16;
@@ -525,7 +525,7 @@ function settleSubagentLaunch(
 }
 
 /** The summary of an agent a Stop ended before the CLI spawned it ({@link cutUnspawnedLaunch}). */
-export const SUBAGENT_NEVER_STARTED = "Stopped before it started.";
+const SUBAGENT_NEVER_STARTED = "Stopped before it started.";
 
 /**
  * A cut `spawn_subagent` call (`GrokNormalizer.cutTurnCalls`) whose launch no

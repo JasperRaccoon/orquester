@@ -36,7 +36,7 @@ import {
 } from "./editor.logic";
 import { useIsomorphicLayoutEffect } from "./layout-effect";
 
-export interface SavedPromptEditorFormProps {
+interface SavedPromptEditorFormProps {
   mode: "create" | "edit";
   draft: SavedPromptDraft;
   onChange: (patch: Partial<SavedPromptDraft>) => void;
