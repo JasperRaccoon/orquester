@@ -355,6 +355,7 @@ export const FIXTURE_API = {
   deleteWorkflowSecret: async () => undefined,
   getWorkflowNodeOutput: async () => ({ output: null }),
   openWorkflowNodeLog: () => ({ close: () => undefined }),
+  readWorkflowNodeLogWindow: async () => ({ text: "", nextOffset: 0, eof: true, size: 0, live: false }),
   cancelWorkflowRun: async () => undefined,
   deleteWorkflowRunTempProject: async () => undefined
 } as unknown as WorkflowRunsApi;

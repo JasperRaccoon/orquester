@@ -410,6 +410,9 @@ describe("actions", () => {
       { test: true, retryOf: "run-1", fromNodeId: "OnTag" }
     );
     assert.deepEqual(retryRunRequest(manual, null), {});
+    // Not loaded yet (undefined): never an empty request.
+    assert.deepEqual(retryRunRequest({ ...manual, trigger: { kind: "manual", nodeId: "t" } }, undefined), { retryOf: manual.id, fromNodeId: "t" });
+    assert.equal(retryRunRequest({ ...manual, trigger: { kind: "manual" } }, undefined), null);
     assert.deepEqual(retryFromFailedRequest(manual), { retryOf: "run-1" });
     assert.deepEqual(retryFromFailedRequest(git), { retryOf: "run-1", test: true });
   });

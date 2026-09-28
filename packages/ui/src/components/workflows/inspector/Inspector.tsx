@@ -348,7 +348,7 @@ export const Inspector: React.FC<InspectorProps> = ({
             <div className="pt-0.5">
               <BlockTile type={node.type} />
             </div>
-            <NameField editor={editor} node={node} workflow={workflow} readOnly={readOnly} />
+            <NameField key={node.id} editor={editor} node={node} workflow={workflow} readOnly={readOnly} />
             <IconButton label="Close the inspector" onClick={onClose}>
               <X size={15} />
             </IconButton>
@@ -370,9 +370,10 @@ export const Inspector: React.FC<InspectorProps> = ({
             />
           ) : null}
         </div>
+        {/* Keyed by the block: pin editor text, field drafts and CodeMirror undo stacks never carry over to another block. */}
         <div ref={bodyRef} className="min-h-0 flex-1 overflow-y-auto overscroll-contain" data-inspector-body="">
           {tab === "settings" || node.type === "note" ? (
-            <fieldset disabled={readOnly} className="min-w-0">
+            <fieldset key={node.id} disabled={readOnly} className="min-w-0">
               {errors.length > 0 ? (
                 <div className="border-b border-neutral-800/80 px-4 py-3">
                   <ProblemList problems={errors} onPick={(problem) => focusField(bodyRef.current, problem.field)} />
@@ -382,7 +383,7 @@ export const Inspector: React.FC<InspectorProps> = ({
               {node.type !== "note" ? <CommonSettings /> : null}
             </fieldset>
           ) : (
-            <DataTab onOpenRun={onOpenRun} />
+            <DataTab key={node.id} onOpenRun={onOpenRun} />
           )}
         </div>
       </div>

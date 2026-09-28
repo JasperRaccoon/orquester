@@ -34,12 +34,14 @@ import { StandaloneWorkflowCanvas } from "./canvas/WorkflowCanvas";
 import { usePhoneLayout } from "./phone/phone-context";
 import { WorkflowSheet } from "./phone/WorkflowSheet";
 import { BlockRunDetails } from "./runs/BlockRunDetails";
+import { focusWorkflowSession, isWorkflowSessionOpen, type OpenSessionResult } from "./runs/open-run";
 import { RunHeader } from "./runs/RunHeader";
 import { RunsList } from "./runs/RunsList";
 import { RunTimeline } from "./runs/RunTimeline";
 import { StatusGlyph, useNow, type WorkflowRunsApi } from "./runs/shared";
 import { useRunActions } from "./runs/use-run-actions";
 import { useRunHistory } from "./runs/use-run-history";
+import { useRunOnScreen } from "./runs/use-run-on-screen";
 import type { WorkflowRunsModeContext } from "./WorkflowEditorTab";
 
 export function renderWorkflowRunsMode(context: WorkflowRunsModeContext): React.ReactNode {
@@ -58,6 +60,7 @@ function useRunsView(context: WorkflowRunsModeContext) {
   const runId = pickRunId(context.runId, history.runs);
   const entry = useWorkflowRun(runId);
   const live = entry ? isRunActive(entry.summary.status) : history.runs.some((run) => isRunActive(run.status));
+  useRunOnScreen(entry ? runId : null, context.show, entry !== null && !isRunActive(entry.summary.status));
   const now = useNow(live);
   const [picked, setPicked] = useState<string | null>(null);
   useEffect(() => setPicked(null), [runId]);
@@ -227,9 +230,25 @@ const PhoneRuns: React.FC<WorkflowRunsModeContext> = (context) => {
     scroller.current?.scrollTo?.({ top: 0 });
   }, [runId]);
 
+  // A tab that is not shown holds no sheet open (a sheet is portaled over whatever is shown).
+  useEffect(() => {
+    if (!context.show) {
+      setDetailsFor(null);
+      setListOpen(false);
+    }
+  }, [context.show]);
+
   const openStep = (nodeId: string): void => {
     view.setPicked(nodeId);
     setDetailsFor(nodeId);
+  };
+
+  /** "Open session": the sheets close first, or the step sheet would cover the chat it opens. */
+  const openSession = (sessionId: string): OpenSessionResult => {
+    if (!isWorkflowSessionOpen(sessionId)) return "closed";
+    setDetailsFor(null);
+    setListOpen(false);
+    return focusWorkflowSession(sessionId);
   };
   const detailsName = detailsFor ? (entry?.blocks[detailsFor]?.name ?? definition?.nodes.find((node) => node.id === detailsFor)?.name ?? "Step") : "";
   const summary = entry?.summary ?? null;
@@ -363,6 +382,7 @@ const PhoneRuns: React.FC<WorkflowRunsModeContext> = (context) => {
             nodeId={detailsFor}
             now={now}
             variant="sheet"
+            onOpenSession={openSession}
             onOpenRun={(id) => {
               setDetailsFor(null);
               context.selectRun(id);

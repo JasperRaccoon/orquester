@@ -32,7 +32,11 @@ import type { StatusIcon } from "../../../lib/workflows/run-view";
 export type WorkflowRunsApi = WorkflowsApi &
   Pick<
     ApiClient,
-    "getWorkflowNodeOutput" | "openWorkflowNodeLog" | "cancelWorkflowRun" | "deleteWorkflowRunTempProject"
+    | "getWorkflowNodeOutput"
+    | "openWorkflowNodeLog"
+    | "readWorkflowNodeLogWindow"
+    | "cancelWorkflowRun"
+    | "deleteWorkflowRunTempProject"
   >;
 
 export type RunsVariant = "docked" | "sheet";

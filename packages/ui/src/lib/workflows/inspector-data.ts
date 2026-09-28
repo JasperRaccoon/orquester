@@ -48,3 +48,21 @@ export function parsePinnedText(text: string): { ok: true; value: unknown } | { 
     return { ok: false, error: `Not valid JSON: ${error instanceof Error ? error.message : String(error)}` };
   }
 }
+
+/**
+ * The output to pin from a run's block: its recorded output when it is whole;
+ * when the run kept only a preview (`outputTruncated`), the whole output read
+ * from the daemon — never the preview, which a test run would then use as if
+ * it were the block's real answer.
+ */
+export async function pinnableOutputOf(
+  block: Pick<WorkflowBlockRun, "output" | "outputTruncated">,
+  readWhole: () => Promise<{ output?: unknown } | unknown>
+): Promise<unknown> {
+  if (!block.outputTruncated) return block.output;
+  const answer = await readWhole();
+  if (answer === null || typeof answer !== "object" || !("output" in answer)) {
+    throw new Error("The daemon did not return the whole output.");
+  }
+  return (answer as { output: unknown }).output;
+}

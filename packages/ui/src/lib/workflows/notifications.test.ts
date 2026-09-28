@@ -16,6 +16,8 @@ import {
   observeWorkflowRunEvent,
   resetWorkflowNotifications,
   runOutcomeKind,
+  setDocumentVisibilityProbe,
+  setRunOnScreen,
   workflowNotificationsStore
 } from "./notifications.ts";
 import { resetWorkflows, workflowsStore } from "./store.ts";
@@ -127,8 +129,44 @@ describe("the notifications store", () => {
   });
 
   it("stays quiet for the run the user is looking at", () => {
-    observeWorkflowRunEvent({ type: "workflowRun.finished", payload: { run: run() } }, { viewingRunId: "run-1" });
+    const view = {};
+    setRunOnScreen(view, "run-1");
+    observeWorkflowRunEvent({ type: "workflowRun.finished", payload: { run: run() } });
+    setRunOnScreen(view, null);
     assert.deepEqual(state(), { toasts: [], attention: [] });
+  });
+
+  it("a run view that is not on screen (Editor mode, hidden tab, hidden document) does not swallow the failure", () => {
+    // Editor mode / hidden tab: the view reports nothing.
+    observeWorkflowRunEvent({ type: "workflowRun.finished", payload: { run: run() } });
+    assert.equal(state().attention.length, 1);
+    // Shown, but the document is hidden.
+    const view = {};
+    setRunOnScreen(view, "run-2");
+    setDocumentVisibilityProbe(() => false);
+    try {
+      observeWorkflowRunEvent({ type: "workflowRun.finished", payload: { run: run({ id: "run-2" }) } });
+    } finally {
+      setDocumentVisibilityProbe(null);
+      setRunOnScreen(view, null);
+    }
+    assert.equal(state().attention.length, 2);
+  });
+
+  it("viewing a LIVE run never silences its later failure", () => {
+    markWorkflowRunViewed("run-live");
+    notifyWorkflowRunFinished(run({ id: "run-live" }));
+    assert.equal(state().attention.some((entry) => entry.runId === "run-live"), true);
+  });
+
+  it("the workflow summary's notify settings decide (a success toast when asked, no failure when off)", () => {
+    workflowsStore.setState({
+      summaries: new Map([["wf", { id: "wf", notify: { onFailure: false, onSuccess: true } } as never]])
+    });
+    notifyWorkflowRunFinished(run({ id: "f" }));
+    assert.equal(state().toasts.length, 0);
+    notifyWorkflowRunFinished(run({ id: "s", status: "succeeded", error: undefined }));
+    assert.equal(state().toasts[0]?.runId, "s");
   });
 
   it("clears a run's toast and entry once it is viewed, and stays quiet about it after", () => {
@@ -143,7 +181,7 @@ describe("the notifications store", () => {
       state().attention.map((entry) => entry.runId),
       ["run-2"]
     );
-    markWorkflowRunViewed("run-3");
+    markWorkflowRunViewed("run-3", { finished: true });
     notifyWorkflowRunFinished(run({ id: "run-3" }));
     assert.equal(
       state().attention.some((entry) => entry.runId === "run-3"),

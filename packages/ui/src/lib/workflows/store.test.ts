@@ -439,6 +439,41 @@ describe("runs", () => {
     assert.equal(entry.blocks.n2?.status, "pending");
   });
 
+  it("a reconnect marks a held run stale; a forced reload clears it and takes the run's end", async () => {
+    const api = new FakeApi();
+    api.runDetail = {
+      run: { ...run({ id: "r3", workflowId: "a" }), definition: record({ id: "a" }), triggerPayload: null, blocks: {}, takenEdges: [], deadEdges: [] }
+    };
+    await loadWorkflowRun(api, "r3");
+    assert.equal(state().runs.r3?.summary.status, "running");
+    markWorkflowsStale();
+    assert.equal(state().runs.r3?.stale, true);
+    api.runDetail = {
+      run: {
+        ...run({ id: "r3", workflowId: "a", status: "failed", endedAt: T0 }),
+        definition: record({ id: "a" }),
+        triggerPayload: null,
+        blocks: {},
+        takenEdges: [],
+        deadEdges: []
+      }
+    };
+    await loadWorkflowRun(api, "r3", { force: true });
+    assert.equal(state().runs.r3?.stale, false);
+    assert.equal(state().runs.r3?.summary.status, "failed");
+  });
+
+  it("a list refresh updates the summary of a run held whole", async () => {
+    const api = new FakeApi();
+    api.runDetail = {
+      run: { ...run({ id: "r4", workflowId: "a" }), definition: record({ id: "a" }), triggerPayload: null, blocks: {}, takenEdges: [], deadEdges: [] }
+    };
+    await loadWorkflowRun(api, "r4");
+    api.runList = [run({ id: "r4", workflowId: "a", status: "succeeded", endedAt: T0 })];
+    await loadWorkflowRuns(api, "a", { force: true });
+    assert.equal(state().runs.r4?.summary.status, "succeeded");
+  });
+
   it("a run whose definition does not parse is an error, not a crash", async () => {
     const api = new FakeApi();
     api.runDetail = { run: { ...run({ id: "r2", workflowId: "a" }), definition: { nope: true } } };

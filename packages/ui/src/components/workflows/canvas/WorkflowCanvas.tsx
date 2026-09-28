@@ -100,6 +100,8 @@ export interface WorkflowCanvasProps {
   /** Tap-to-connect's state, and where its taps go (the parent reduces them). */
   tapConnect?: TapConnectState;
   onTapConnect?: (event: TapConnectEvent) => void;
+  /** Triggers whose last poll failed, by node id (`triggerErrorsOf`). */
+  triggerErrors?: ReadonlyMap<string, string>;
   className?: string;
 }
 
@@ -154,6 +156,7 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
     onLongPressPane,
     tapConnect,
     onTapConnect,
+    triggerErrors,
     className
   },
   ref
@@ -227,7 +230,9 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
       const selected = selectedNodes.has(node.id);
       const pinned = workflow.pinned !== undefined && node.id in workflow.pinned;
       const connectRole = connectRoles?.get(node.id) ?? null;
+      const triggerError = triggerErrors?.get(node.id) ?? null;
       const inputs = [
+        triggerError,
         connectRole,
         node,
         nodeProblems,
@@ -257,7 +262,8 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
         connected: handlesConnected,
         pinned,
         hint: lonelyTrigger,
-        connectRole
+        connectRole,
+        triggerError
       };
       const common = {
         id: node.id,
@@ -284,7 +290,7 @@ export const WorkflowCanvas = forwardRef<WorkflowCanvasHandle, WorkflowCanvasPro
     }
     for (const id of cache.current.keys()) if (!seen.has(id)) cache.current.delete(id);
     return next;
-  }, [workflow.nodes, workflow.pinned, byNode, overlay, dragPositions, resizing, measured, connected, selectedNodes, runView, lonelyTrigger, summaryContext, editable, connectRoles]);
+  }, [workflow.nodes, workflow.pinned, byNode, overlay, dragPositions, resizing, measured, connected, selectedNodes, runView, lonelyTrigger, summaryContext, editable, connectRoles, triggerErrors]);
 
   const edges = useMemo(() => {
     const byId = new Map(workflow.nodes.map((node) => [node.id, node]));

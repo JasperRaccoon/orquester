@@ -165,7 +165,7 @@ function OverlayLine({ overlay }: { overlay: OverlayNodeState }): React.ReactEle
 }
 
 function BlockNodeView({ id, data, selected }: NodeProps<BlockFlowNode>): React.ReactElement {
-  const { node, summary, problems, overlay, runView, connected, pinned, hint, connectRole = null } = data;
+  const { node, summary, problems, overlay, runView, connected, pinned, hint, connectRole = null, triggerError = null } = data;
   const Icon = BLOCK_ICONS[node.type];
   const trigger = isTriggerType(node.type);
   const handles = outputHandles(node);
@@ -229,6 +229,16 @@ function BlockNodeView({ id, data, selected }: NodeProps<BlockFlowNode>): React.
             {summary || " "}
           </div>
           {overlay ? <OverlayLine overlay={overlay} /> : null}
+          {triggerError && !overlay ? (
+            <div
+              className="mt-1 flex min-w-0 items-center gap-1 text-[11px] leading-4 text-warn"
+              title={`Last check failed: ${triggerError}`}
+              aria-label={`Last check failed: ${triggerError}`}
+            >
+              <AlertTriangle size={11} aria-hidden className="shrink-0" />
+              <span className="truncate">Last check failed</span>
+            </div>
+          ) : null}
         </div>
       </div>
 

@@ -1711,6 +1711,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         notice: null,
         protectArchived: false,
         protectArchivedLoaded: false,
+        // Workflow editor tabs name the previous daemon's workflows.
+        ...withoutWorkflowTabs(get()),
         authPrompt: { connectionId: api.connection.id }
       });
     }
@@ -1752,6 +1754,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       // next one. connect() reloads it from the newly selected daemon.
       protectArchived: false,
       protectArchivedLoaded: false,
+      // Workflow editor tabs name the previous daemon's workflows.
+      ...withoutWorkflowTabs(get()),
       sessions: [],
       browsers: [],
       accounts: []
@@ -3223,9 +3227,11 @@ export const useAppStore = create<AppState>((set, get) => ({
       // sanitised); this store mirrors only what its editor tabs show — a
       // renamed workflow's title, a deleted workflow's tab closing.
       const effect = applyWorkflowsEvent(event);
-      // A finished run raises its toast / Attention Center entry — unless the
-      // focused editor tab is showing that very run.
-      observeWorkflowRunEvent(event, { viewingRunId: viewedWorkflowRunId(get()) });
+      // A finished run raises its toast / Attention Center entry — unless a
+      // run view shows that very run right now (Runs mode, shown, the
+      // document visible: `setRunOnScreen`). A tab's remembered `runId` is
+      // not enough — it stays set while the tab is in Editor mode.
+      observeWorkflowRunEvent(event);
       if (effect?.kind === "upserted") {
         set((state) => renameWorkflowTabs(state, effect.workflow.id, effect.workflow.name));
       } else if (effect?.kind === "deleted") {
@@ -3445,13 +3451,18 @@ function removeLocalTab(state: AppState, id: string): Partial<AppState> {
   };
 }
 
-/** The run the focused editor tab shows, if the visible tab is a workflow tab on a run. */
-function viewedWorkflowRunId(state: AppState): string | null {
-  const path = state.currentProject?.path;
-  if (!path) return null;
-  const active = state.activeTabByProject[path];
-  const tab = active ? state.workflowTabsByProject[path]?.find((t) => t.id === active) : undefined;
-  return tab?.runId ?? null;
+/**
+ * Drop every workflow editor tab (a connection switch, a sign-out: they name
+ * the previous daemon's workflows), and any active-tab pointer at one.
+ */
+export function withoutWorkflowTabs(
+  state: Pick<AppState, "workflowTabsByProject" | "activeTabByProject">
+): Pick<AppState, "workflowTabsByProject" | "activeTabByProject"> {
+  const ids = new Set<string>();
+  for (const tabs of Object.values(state.workflowTabsByProject)) for (const tab of tabs) ids.add(tab.id);
+  const activeTabByProject: Record<string, string | null> = {};
+  for (const [path, id] of Object.entries(state.activeTabByProject)) activeTabByProject[path] = id !== null && ids.has(id) ? null : id;
+  return { workflowTabsByProject: {}, activeTabByProject };
 }
 
 /** Retitle every open editor tab of workflow `workflowId` (a `workflow.upserted` — a rename anywhere). */

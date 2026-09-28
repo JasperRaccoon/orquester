@@ -69,6 +69,8 @@ export interface BlockNodeData extends Record<string, unknown> {
   pinned: boolean;
   /** The pulsing "+" of a brand-new workflow. */
   hint: boolean;
+  /** A trigger whose last poll failed (§6.2): the daemon's words. */
+  triggerError?: string | null;
   /** Tap-to-connect in progress: the block it starts from, a block it may feed, one it may not. */
   connectRole?: "source" | "valid" | "invalid" | null;
 }

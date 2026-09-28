@@ -79,6 +79,8 @@ export function buildWorkflowSummary(workflow: Workflow, deps: WorkflowSummaryDe
     updatedAt: workflow.updatedAt
   };
   if (workflow.description !== undefined) summary.description = workflow.description;
+  const notify = workflow.settings?.notify;
+  if (notify) summary.notify = { onFailure: notify.onFailure !== false, onSuccess: notify.onSuccess === true };
   const lastRun = deps.runStore.latestForWorkflow(workflow.id);
   if (lastRun !== undefined) summary.lastRun = lastRun;
   return summary;

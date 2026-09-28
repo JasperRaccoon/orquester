@@ -91,7 +91,13 @@ export function useRunActions(
         if (!run) return;
         await api.cancelWorkflowRun(run.id);
       }),
-    retry: () => act("retry", () => start(run ? retryRunRequest(run, triggerPayload) : {})),
+    retry: () =>
+      act("retry", async () => {
+        if (!run) return;
+        const request = retryRunRequest(run, triggerPayload);
+        if (request === null) throw new Error("The run is still loading; retry it in a moment.");
+        await start(request);
+      }),
     retryFromFailed: () => act("retry-failed", () => start(run ? retryFromFailedRequest(run) : {})),
     deleteTempProject: () =>
       act("delete-temp", async () => {

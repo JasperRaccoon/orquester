@@ -42,6 +42,7 @@ export function openWorkflowRunInEditor(target: RunTarget): boolean {
     ...(title ? { title } : {})
   });
   showRunInWorkflowTabs({ workflowId: target.workflowId, runId: target.runId });
+  // Clears its toast/entry now; a live run is judged again when it finishes.
   markWorkflowRunViewed(target.runId);
   return true;
 }

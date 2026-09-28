@@ -762,9 +762,18 @@ export function runActions(
 export function retryRunRequest(
   run: Pick<WorkflowRunSummary, "id" | "trigger" | "test">,
   triggerPayload: WorkflowTriggerPayload | null | undefined
-): RunWorkflowRequest {
+): RunWorkflowRequest | null {
   const request: RunWorkflowRequest = {};
   if (run.test) request.test = true;
+  if (triggerPayload === undefined) {
+    // The run is not loaded yet, so its input is unknown: never retry with
+    // none. Re-running from its trigger replays the same event/input; with no
+    // trigger to name, the caller must wait for the run to load.
+    if (!run.trigger.nodeId) return null;
+    request.retryOf = run.id;
+    request.fromNodeId = run.trigger.nodeId;
+    return request;
+  }
   if (triggerPayload && (triggerPayload.kind === "manual" || triggerPayload.kind === "subworkflow")) {
     if (triggerPayload.input !== undefined) request.input = triggerPayload.input;
     return request;

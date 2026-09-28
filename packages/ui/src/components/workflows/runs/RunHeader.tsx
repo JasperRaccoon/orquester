@@ -5,11 +5,12 @@
  * Cancel run, Retry run, Retry from failed block, Open in canvas.
  *
  * Prop-driven: the actions arrive as a `RunActionsState` (`useRunActions`),
- * so a static render draws every state. Viewing a run reads its notification
- * (`markWorkflowRunViewed`): its toast and its Attention entry clear.
+ * so a static render draws every state. Whether the run counts as viewed is
+ * the Runs mode's call (`useRunOnScreen`), not this component's: only a
+ * finished run, shown, in a visible document.
  */
 
-import React, { useEffect, useState } from "react";
+import React, { useState } from "react";
 import {
   Ban,
   FlaskConical,
@@ -27,7 +28,6 @@ import type { WorkflowBlockRun, WorkflowRunSummary } from "@orquester/api";
 
 import { cn } from "../../../lib/cn";
 import { runElapsedMs, runTriggerText } from "../../../lib/workflows/format";
-import { markWorkflowRunViewed } from "../../../lib/workflows/notifications";
 import { formatClock, formatStepDuration, runActions, runStatusView } from "../../../lib/workflows/run-view";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
 import type { RunActionsState } from "./use-run-actions";
@@ -70,10 +70,6 @@ export const RunHeader: React.FC<RunHeaderProps> = ({
   const can = runActions(run, blocks);
   const elapsed = runElapsedMs(run, now);
   const [confirm, setConfirm] = useState<"cancel" | "delete-temp" | null>(null);
-
-  useEffect(() => {
-    markWorkflowRunViewed(run.id);
-  }, [run.id]);
 
   const started = run.startedAt ?? run.queuedAt;
   const buttonHeight = sheet ? "h-10" : "h-7";

@@ -226,3 +226,19 @@ export function runProgress(run: WorkflowRunSummary, now: number): RunProgressVi
 export function liveRunOf(summary: WorkflowSummary): WorkflowRunSummary | null {
   return summary.activeRuns.find((run) => run.status === "running") ?? summary.activeRuns[0] ?? null;
 }
+
+/**
+ * The poll errors of a workflow's triggers (§6.2: a git trigger's failing
+ * poll), by trigger node id — what the canvas's trigger card and the phone's
+ * Steps card show. Empty when the row reports none.
+ */
+export function triggerErrorsOf(
+  summary: { triggers: readonly { nodeId: string; lastError?: string | null }[] } | null | undefined
+): ReadonlyMap<string, string> {
+  const errors = new Map<string, string>();
+  for (const trigger of summary?.triggers ?? []) {
+    const error = trigger.lastError?.trim();
+    if (error) errors.set(trigger.nodeId, error);
+  }
+  return errors;
+}

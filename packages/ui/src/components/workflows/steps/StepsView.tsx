@@ -33,6 +33,8 @@ export interface StepsViewProps {
   /** The empty workflow's "Add a trigger" / "Add the first step". */
   onAddFirst: (kind: "trigger" | "step") => void;
   onStepMenu: (row: StepRow) => void;
+  /** Triggers whose last poll failed, by node id (`triggerErrorsOf`). */
+  triggerErrors?: ReadonlyMap<string, string>;
   className?: string;
 }
 
@@ -79,6 +81,7 @@ export const StepsView: React.FC<StepsViewProps> = ({
   onAddAfter,
   onAddFirst,
   onStepMenu,
+  triggerErrors,
   className
 }) => {
   const model = useMemo(
@@ -140,6 +143,7 @@ export const StepsView: React.FC<StepsViewProps> = ({
               onOpen={onOpenStep}
               onAddAfter={onAddAfter}
               onMenu={onStepMenu}
+              triggerError={triggerErrors?.get(row.nodeId) ?? null}
             />
           )}
         </React.Fragment>
@@ -201,7 +205,8 @@ const StepCard: React.FC<{
   onOpen: (nodeId: string) => void;
   onAddAfter: (from: OutputRef) => void;
   onMenu: (row: StepRow) => void;
-}> = ({ row, continues, selected, readOnly, onOpen, onAddAfter, onMenu }) => {
+  triggerError?: string | null;
+}> = ({ row, continues, selected, readOnly, onOpen, onAddAfter, onMenu, triggerError = null }) => {
   const press = useLongPress(() => onMenu(row));
   const onlyOne = row.outputs.length === 1;
   const chip = (output: StepRow["outputs"][number]): React.ReactNode => {
@@ -269,6 +274,12 @@ const StepCard: React.FC<{
               ) : null}
             </div>
             <div className="truncate text-[13px] leading-[18px] text-neutral-400">{row.summary || " "}</div>
+            {triggerError ? (
+              <div className="mt-0.5 flex min-w-0 items-start gap-1 text-[12px] leading-4 text-warn" title={triggerError}>
+                <AlertTriangle size={12} aria-hidden className="mt-0.5 shrink-0" />
+                <span className="line-clamp-2">Last check failed: {triggerError}</span>
+              </div>
+            ) : null}
             {row.firstProblem ? (
               <div className={cn("mt-0.5 line-clamp-2 text-[12px] leading-4", row.errors > 0 ? "text-danger" : "text-warn")}>
                 {row.firstProblem}
