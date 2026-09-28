@@ -1966,7 +1966,9 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `session/cancel` cancels a background subagent but leaves a background shell running. A task
   counts as live at all only because a row whose `agentId` is its own `taskId` is its own, not an
   agent's internal work (`orchestration/liveness.ts`). A subagent starts at its `spawn_subagent`
-  call's first frame, under the call's id; `subagent_spawned` names its run's id and child session,
+  call's first frame, under the call's id; `subagent_spawned` names its run's id and child session
+  (and no call: while two open launches of its description could be its, the child's rows wait for
+  its prompt echo or a call's answer to say which — 2026-09-28, `HeldSpawn`),
   `subagent_progress` is its heartbeat (a status-less progress row that re-arms its liveness hour),
   and `subagent_finished` is its end, every way it ends, with its clean `output` — the call's
   `SubagentCompleted` answer and the poll and kill answers end it only when that never came. A

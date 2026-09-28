@@ -19,7 +19,7 @@ import type { BackgroundTrack, ENDED_TASKS_REMEMBERED, EndedTask } from "./backg
 import type { LoopTrack, scheduledTask } from "./loops.ts";
 import type { GrokNormalizer } from "./normalize.ts";
 import type { PlanPathHost } from "./plan.ts";
-import type { ChildSession, subagentFromToolCall, SubagentLaunch, SubagentTrack } from "./subagents.ts";
+import type { ChildSession, HeldSpawn, subagentFromToolCall, SubagentLaunch, SubagentTrack } from "./subagents.ts";
 import type { FINISHED_CALLS_REMEMBERED, FinishedCall, ToolTrack } from "./tool-calls.ts";
 
 export const ACP_RAW_SOURCE: RuntimeEventRawSource = "acp.jsonrpc";
@@ -108,6 +108,13 @@ export interface GrokNormalizerState {
    */
   readonly children: Map<string, ChildSession>;
   /**
+   * Child sessions (lower-cased id) whose `subagent_spawned` more than one
+   * open launch could explain, held until evidence decides which
+   * (`HeldSpawn`, `subagents.ts`). Their frames are still a child's, never
+   * the parent's.
+   */
+  readonly heldSpawns: Map<string, HeldSpawn>;
+  /**
    * The turn the latest subagent launch ran in (`TurnTokenUsage.hasSubagents`).
    * A turn id, not a per-turn flag: a steer re-runs
    * {@link GrokNormalizer.beginTurn} inside the same turn.
@@ -146,6 +153,7 @@ export function createNormalizerState(deps: GrokNormalizerDeps, sessionId: strin
     subagentLaunches: new Map<string, SubagentLaunch>(),
     subagentIds: new Map<string, string>(),
     children: new Map<string, ChildSession>(),
+    heldSpawns: new Map<string, HeldSpawn>(),
     lastSubagentTurnId: undefined,
     planModeActive: false,
     lastProposedPlan: undefined,

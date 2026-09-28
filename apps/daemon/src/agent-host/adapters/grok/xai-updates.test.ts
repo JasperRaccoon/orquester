@@ -156,13 +156,13 @@ const SPAWN_TOOL_META = {
 };
 
 /** The model's `spawn_subagent` call: its first frame, then the update naming it. */
-function spawnCall(r: Rig, toolCallId: string, description: string): RuntimeEvent[] {
+function spawnCall(r: Rig, toolCallId: string, description: string, prompt = "Audit the handlers."): RuntimeEvent[] {
   return [
     ...r.acp({
       sessionUpdate: "tool_call",
       toolCallId,
       title: "spawn_subagent",
-      rawInput: { description, prompt: "Audit the handlers.", subagent_type: "explore", capability_mode: "read-only" },
+      rawInput: { description, prompt, subagent_type: "explore", capability_mode: "read-only" },
       _meta: SPAWN_TOOL_META
     }),
     ...r.acp({
@@ -172,7 +172,7 @@ function spawnCall(r: Rig, toolCallId: string, description: string): RuntimeEven
       title: description,
       rawInput: {
         variant: "Task",
-        prompt: "Audit the handlers.",
+        prompt,
         description,
         subagent_type: "explore",
         run_in_background: true,
@@ -343,8 +343,9 @@ test("an explore subagent is the spawn_subagent call that launched it: the call 
   // first frame starts the agent under the call's id — its launch — so the
   // timeline shows the agent row instead of both; `subagent_spawned` then
   // joins the child to it, by the id the call's answer reported, else the
-  // oldest open launch of the same description. The goal engine's own agents
-  // have no call: each starts under its own id.
+  // open launch of the same description — held while two could be its, until
+  // the child's prompt or a call's answer decides. The goal engine's own
+  // agents have no call: each starts under its own id.
   const r = rig();
   const launched = [
     ...spawnCall(r, "call-26", "Audit patients PHI IDOR"),
@@ -433,13 +434,41 @@ test("in the real order — the call's result first, the spawn after — a subag
   assert.equal(unpaired?.payload.toolUseId, SUB_D);
 });
 
+/** A frame of a subagent's child session, on the ACP channel. */
+function childAcp(r: Rig, child: string, update: Record<string, unknown>): RuntimeEvent[] {
+  return r.normalizer.handleSessionUpdate({ sessionId: child, update, _meta: {} } as unknown as SessionNotification);
+}
+
+/** The child's own `user_prompt_submit` hook — what precedes its prompt (fixtures 15–23, the 1.0.3 children). */
+function childHook(r: Rig, child: string): RuntimeEvent[] {
+  return r.normalizer.handleXaiNotification("_x.ai/session_notification", {
+    sessionId: child,
+    update: { sessionUpdate: "hook_execution", event_name: "user_prompt_submit", prompt_id: "p", runs: [] },
+    _meta: {}
+  });
+}
+
+/** The child's prompt, as its session echoes it: one `user_message_chunk` (fixtures 15–28). */
+function childPrompt(r: Rig, child: string, text: string): RuntimeEvent[] {
+  return childAcp(r, child, { sessionUpdate: "user_message_chunk", content: { type: "text", text } });
+}
+
+/** Who owns the child's words: the agent its session was joined to. */
+function ownerOf(r: Rig, child: string): string | undefined {
+  return childAcp(r, child, {
+    sessionUpdate: "agent_message_chunk",
+    content: { type: "text", text: "working" }
+  }).find((event) => event.type === "content.delta")?.agentId;
+}
+
 test("a call the description pairing already gave away is never given to a second subagent", () => {
   // Two open calls of one description; the subagent that really belongs to
-  // the NEWER call spawns first, so the description pairing gives it the
-  // older one. That call's answer then names the other subagent — taking it
-  // would make ONE agent of both children, the newer call's agent never
-  // started and its child's end dropped. Each child is one agent's, and each
-  // ends its own.
+  // the NEWER call spawns first. Nothing the spawn says tells the two calls
+  // apart, so its join waits; call-1's answer then names the OTHER subagent,
+  // which leaves call-2 as the only launch it can be. Joined to the oldest
+  // call at once (the rule before), the two children were swapped between
+  // their calls' rows for good — and taking the id call-1's answer names
+  // would have made ONE agent of both children.
   const SUB_X = "01a0d910-6f3a-7c33-b417-671c083d4201";
   const SUB_Y = "01a0d910-6f3a-7c33-b417-671c083d4202";
   const r = rig();
@@ -449,25 +478,131 @@ test("a call the description pairing already gave away is never given to a secon
   spawnCallDone(r, "call-1", SUB_Y, "Audit agenda IDOR");
   spawnCallDone(r, "call-2", SUB_X, "Audit agenda IDOR");
   r.live(explore(SUB_Y, "Audit agenda IDOR"));
-  const ownerOf = (child: string): string | undefined =>
-    r.normalizer
-      .handleSessionUpdate({
-        sessionId: child,
-        update: { sessionUpdate: "agent_message_chunk", content: { type: "text", text: "working" } },
-        _meta: {}
-      } as unknown as SessionNotification)
-      .find((event) => event.type === "content.delta")?.agentId;
-  assert.equal(ownerOf(SUB_X), "call-1", "the oldest open call, by description");
-  assert.equal(ownerOf(SUB_Y), "call-2", "call-1 is taken already: no call is shared");
+  assert.equal(ownerOf(r, SUB_X), "call-2", "the call whose answer named it");
+  assert.equal(ownerOf(r, SUB_Y), "call-1", "the call whose answer named it");
   assert.deepEqual(
     only([...r.live(finished(SUB_X, { output: "x" })), ...r.live(finished(SUB_Y, { output: "y" }))], "task.completed").map(
       (event) => [event.payload.taskId, event.payload.summary]
     ),
     [
-      ["call-1", "x"],
-      ["call-2", "y"]
+      ["call-2", "x"],
+      ["call-1", "y"]
     ]
   );
+});
+
+test("two launches of one description: each child joins the call whose prompt it received, whichever spawns first", () => {
+  // The real session spawned its children out of call order (rows 2101–2119:
+  // the fourth call's child first, the ninth and tenth swapped), and a
+  // child's first frames are its hooks, then its prompt — the call's
+  // `prompt` argument verbatim, in one `user_message_chunk` (fixtures 15–28;
+  // all 27 model launches of the 1.0.3 goal session). The prompt tells two
+  // launches of one description apart before any row of the child is routed.
+  const SUB_A = "01a0d910-6f3a-7c33-b417-671c083d42a5";
+  const SUB_B = "01a0d910-6f3a-7c33-b417-671c083d42b5";
+  const r = rig();
+  spawnCall(r, "call-1", "Audit agenda IDOR", "Audit the agenda handlers.");
+  spawnCall(r, "call-2", "Audit agenda IDOR", "Audit the doctors handlers.");
+  const held = [
+    ...r.live(explore(SUB_B, "Audit agenda IDOR")),
+    ...r.live(explore(SUB_A, "Audit agenda IDOR")),
+    ...childHook(r, SUB_B),
+    ...childHook(r, SUB_A),
+    ...childPrompt(r, SUB_B, "Audit the doctors handlers."),
+    ...childPrompt(r, SUB_A, "Audit the agenda handlers.")
+  ];
+  assert.deepEqual(held, [], "a join waiting for its evidence writes nothing");
+  assert.equal(ownerOf(r, SUB_B), "call-2");
+  assert.equal(ownerOf(r, SUB_A), "call-1");
+  const progress = only(r.live({ sessionUpdate: "subagent_progress", subagent_id: SUB_B, tokens_used: 10 }), "task.progress");
+  assert.deepEqual(
+    progress.map((event) => event.payload.taskId),
+    ["call-2"]
+  );
+  assert.deepEqual(
+    only([...r.live(finished(SUB_A, { output: "a" })), ...r.live(finished(SUB_B, { output: "b" }))], "task.completed").map(
+      (event) => [event.payload.taskId, event.payload.summary]
+    ),
+    [
+      ["call-1", "a"],
+      ["call-2", "b"]
+    ]
+  );
+});
+
+test("a prompt streamed in pieces still tells the launches apart", () => {
+  const SUB_A = "01a0d910-6f3a-7c33-b417-671c083d42a6";
+  const SUB_B = "01a0d910-6f3a-7c33-b417-671c083d42b6";
+  const r = rig();
+  spawnCall(r, "call-1", "Audit agenda IDOR", "Audit the handlers of the agenda.");
+  spawnCall(r, "call-2", "Audit agenda IDOR", "Audit the handlers of the doctors.");
+  r.live(explore(SUB_B, "Audit agenda IDOR"));
+  r.live(explore(SUB_A, "Audit agenda IDOR"));
+  childPrompt(r, SUB_B, "Audit the handlers");
+  childPrompt(r, SUB_B, " of the doctors.");
+  assert.equal(ownerOf(r, SUB_B), "call-2");
+  // The other child is decided by elimination: call-1 is the only launch left.
+  assert.equal(ownerOf(r, SUB_A), "call-1");
+});
+
+test("launches identical in every argument are told apart by nothing before an answer: the oldest, at the child's first row", () => {
+  // Two launches of one description, one prompt, one type: every row either
+  // agent shows reads the same, so the child takes the oldest open call when
+  // its first row must be routed — the rule before the wait — and an answer
+  // naming it before that decides it instead.
+  const SUB_X = "01a0d910-6f3a-7c33-b417-671c083d4207";
+  const SUB_Y = "01a0d910-6f3a-7c33-b417-671c083d4208";
+  const r = rig();
+  spawnCall(r, "call-1", "Audit agenda IDOR");
+  spawnCall(r, "call-2", "Audit agenda IDOR");
+  r.live(explore(SUB_Y, "Audit agenda IDOR"));
+  r.live(explore(SUB_X, "Audit agenda IDOR"));
+  childPrompt(r, SUB_Y, "Audit the handlers.");
+  assert.equal(ownerOf(r, SUB_Y), "call-1", "nothing told them apart: the oldest open call");
+  assert.equal(ownerOf(r, SUB_X), "call-2");
+});
+
+test("a launch the user declined is no candidate for a child of its description", () => {
+  // Supervised, the CLI asks before it spawns (observation 49): of two calls
+  // of one description, one approved and one declined, only the approved one
+  // has a child — even when its spawn arrives before the other's refusal.
+  const SUB_X = "01a0d910-6f3a-7c33-b417-671c083d4209";
+  const r = rig();
+  spawnCall(r, "call-1", "Audit agenda IDOR");
+  spawnCall(r, "call-2", "Audit agenda IDOR");
+  r.live(explore(SUB_X, "Audit agenda IDOR"));
+  const declined = r.acp({
+    sessionUpdate: "tool_call_update",
+    toolCallId: "call-1",
+    status: "failed",
+    content: [{ type: "content", content: { type: "text", text: "User rejected the execution for tool `spawn_subagent`" } }]
+  });
+  assert.deepEqual(
+    only(declined, "task.completed").map((event) => [event.payload.taskId, event.payload.status]),
+    [["call-1", "stopped"]],
+    "a spawn that never ran is stopped, never failed"
+  );
+  assert.equal(ownerOf(r, SUB_X), "call-2");
+  assert.deepEqual(
+    only(r.live(finished(SUB_X, { output: "x" })), "task.completed").map((event) => [event.payload.taskId, event.payload.status]),
+    [["call-2", "completed"]]
+  );
+});
+
+test("a Stop while a join waits decides it as before: no child is left without its agent", () => {
+  const SUB_X = "01a0d910-6f3a-7c33-b417-671c083d420a";
+  const r = rig();
+  spawnCall(r, "call-1", "Audit agenda IDOR", "Audit the agenda handlers.");
+  spawnCall(r, "call-2", "Audit agenda IDOR", "Audit the doctors handlers.");
+  r.live(explore(SUB_X, "Audit agenda IDOR"));
+  const cut = r.normalizer.cutTurnCalls("Stopped.");
+  assert.deepEqual(
+    only(cut, "task.completed").map((event) => [event.payload.taskId, event.payload.summary]),
+    [["call-2", "Stopped before it started."]],
+    "the child took the oldest call; only the other one never started"
+  );
+  assert.deepEqual(only(cut, "task.started"), []);
+  assert.equal(ownerOf(r, SUB_X), "call-1");
 });
 
 test("a call that answered with its child's id is never taken by another child of its description", () => {

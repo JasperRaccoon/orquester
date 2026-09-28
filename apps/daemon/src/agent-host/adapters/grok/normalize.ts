@@ -89,8 +89,12 @@ import {
   contentDelta
 } from "./segments.ts";
 import {
+  childPromptChunk,
   closeSubagent,
   cutUnspawnedLaunch,
+  heldSpawnNamed,
+  joinHeldSpawn,
+  joinHeldSpawns,
   subagentFinished,
   subagentProgress,
   subagentSpawned,
@@ -241,9 +245,42 @@ export class GrokNormalizer {
     }
   }
 
-  /** The child session a frame's `sessionId` names, if a `subagent_spawned` introduced it. */
-  private childSessionOf(sessionId: unknown): ChildSession | undefined {
-    return typeof sessionId === "string" ? this.state.children.get(sessionId.toLowerCase()) : undefined;
+  /**
+   * How a frame of a child session is handled, if a `subagent_spawned`
+   * introduced the session: `handle` gets the child the frame belongs to
+   * LAZILY. A child whose join still waits for its evidence
+   * ({@link heldSpawnNamed}) is decided only when a frame must be routed to
+   * its agent — a row — and then by the rule before the wait, the oldest
+   * open candidate; a frame that routes nothing (a hook, the child's own
+   * state) decides nothing, and its prompt is the evidence itself
+   * ({@link childPromptChunk}). What deciding it writes comes first.
+   */
+  private childRouteOf(
+    sessionId: unknown
+  ): ((handle: (child: () => ChildSession) => RuntimeEvent[]) => RuntimeEvent[]) | undefined {
+    if (typeof sessionId !== "string") {
+      return undefined;
+    }
+    const key = sessionId.toLowerCase();
+    const joined = this.state.children.get(key);
+    if (joined !== undefined) {
+      return (handle) => handle(() => joined);
+    }
+    if (heldSpawnNamed(this.state, key) === undefined) {
+      return undefined;
+    }
+    return (handle) => {
+      const decided: RuntimeEvent[] = [];
+      const events = handle(() => {
+        decided.push(...joinHeldSpawn(this.state, key));
+        const child = this.state.children.get(key);
+        if (child === undefined) {
+          throw new Error(`grok: held child session ${key} was not bound when decided`);
+        }
+        return child;
+      });
+      return [...decided, ...events];
+    };
   }
 
   get slashCommands(): ReadonlyArray<{ name: string; description?: string; input?: { hint: string } }> {
@@ -385,9 +422,9 @@ export class GrokNormalizer {
    * {@link handleXaiNotification}); nothing else is.
    */
   handleSessionUpdate(params: SessionNotification): RuntimeEvent[] {
-    const child = this.childSessionOf(params.sessionId);
-    if (child !== undefined) {
-      return isReplayFrame(params._meta) ? [] : this.childSessionUpdate(child, params);
+    const route = this.childRouteOf(params.sessionId);
+    if (route !== undefined) {
+      return isReplayFrame(params._meta) ? [] : route((child) => this.childSessionUpdate(child, params));
     }
     if (isReplayFrame(params._meta)) {
       this.history.observeAcpUpdate(params.update as Record<string, unknown>);
@@ -510,21 +547,27 @@ export class GrokNormalizer {
    * meter is per adapter and never a subagent's"), and its catalog, mode,
    * title and model are its session's, not the thread's.
    */
-  private childSessionUpdate(child: ChildSession, params: SessionNotification): RuntimeEvent[] {
+  private childSessionUpdate(child: () => ChildSession, params: SessionNotification): RuntimeEvent[] {
     const update = params.update;
     const raw: RuntimeEventRaw = { source: ACP_RAW_SOURCE, method: "session/update", payload: params };
     switch (update.sessionUpdate) {
       case "agent_message_chunk":
-        return childText(this.state, child, update.content, raw);
+        return childText(this.state, child(), update.content, raw);
       case "agent_thought_chunk":
-        return childReasoning(this.state, child, update.content, raw);
+        return childReasoning(this.state, child(), update.content, raw);
       case "tool_call":
-        return toolCall(this.state, update, params, "tool_call", child);
+        return toolCall(this.state, update, params, "tool_call", child());
       case "tool_call_update":
-        return toolCall(this.state, update, params, "tool_call_update", child);
+        return toolCall(this.state, update, params, "tool_call_update", child());
       case "user_message_chunk":
-        // The child's prompt, live (not a replay: fixture 15). The spawn
-        // call's `rawInput` already holds it.
+        // The child's prompt, live (not a replay: fixture 15) — the spawn
+        // call's `prompt` argument verbatim, which its `rawInput` already
+        // holds. For a child whose launch is not decided yet it is the
+        // evidence that decides it; it writes nothing either way.
+        if (update.content.type === "text") {
+          childPromptChunk(this.state, String(params.sessionId), update.content.text);
+        }
+        return [];
       case "available_commands_update":
       case "current_mode_update":
       case "config_option_update":
@@ -590,9 +633,11 @@ export class GrokNormalizer {
         })
       ];
     }
-    const child = this.childSessionOf(envelope?.sessionId);
-    if (child !== undefined) {
-      return isReplayFrame(envelope?._meta) ? [] : this.childXaiUpdate(child, method, update, params);
+    const route = this.childRouteOf(envelope?.sessionId);
+    if (route !== undefined) {
+      return isReplayFrame(envelope?._meta)
+        ? []
+        : route((child) => this.childXaiUpdate(child, method, update, params));
     }
     if (isReplayFrame(envelope?._meta)) {
       // Replay is history the HOST already holds for a thread it has seen;
@@ -793,25 +838,28 @@ export class GrokNormalizer {
    * (ingestion stamps none), so a child's would land in the parent timeline.
    */
   private childXaiUpdate(
-    child: ChildSession,
+    child: () => ChildSession,
     method: string,
     update: XaiSessionUpdate,
     params: unknown
   ): RuntimeEvent[] {
     const raw: RuntimeEventRaw = { source: XAI_RAW_SOURCE, method, payload: params };
-    const scope: TaskScope = { session: child.sessionId, owner: child.taskId };
+    const scope = (): TaskScope => {
+      const { sessionId, taskId } = child();
+      return { session: sessionId, owner: taskId };
+    };
     switch (update.sessionUpdate) {
       case "turn_completed":
-        return closeChildSegments(this.state, child);
+        return closeChildSegments(this.state, child());
       case "background_tasks":
         return foldBackgroundTasks(
           this.state,
           (update as { tasks?: ReadonlyArray<XaiBackgroundTask> }).tasks ?? [],
           raw,
-          scope
+          scope()
         );
       case "task_backgrounded":
-        return taskBackgrounded(this.state, update as unknown as Record<string, unknown>, raw, scope);
+        return taskBackgrounded(this.state, update as unknown as Record<string, unknown>, raw, scope());
       case "task_completed":
         return taskCompleted(this.state, update as unknown as Record<string, unknown>, raw);
       case "monitor_event":
@@ -904,7 +952,10 @@ export class GrokNormalizer {
    */
   stopBackgroundTasks(notes: { leftRunning?: string; ended?: string } = {}): RuntimeEvent[] {
     const { leftRunning, ended } = notes;
-    const events: RuntimeEvent[] = [];
+    // A child whose launch is not decided yet is decided first, by the rule
+    // before the wait: its run is ended with its agent, and a later frame of
+    // its finds the agent it joined — never a candidate this stop closed.
+    const events: RuntimeEvent[] = joinHeldSpawns(this.state);
     // Shells and monitors first: a subagent's own ones are closed with the
     // rest, so its end below leaves none to count on its own.
     for (const [taskId, track] of [...this.state.tasks.entries()]) {
@@ -958,7 +1009,7 @@ export class GrokNormalizer {
    * run before it.
    */
   failOpenTools(reason: string): RuntimeEvent[] {
-    const events: RuntimeEvent[] = [];
+    const events: RuntimeEvent[] = joinHeldSpawns(this.state);
     for (const [toolCallId, track] of [...this.state.tools.entries()]) {
       events.push(...failTool(this.state, toolCallId, track, reason));
     }
@@ -987,7 +1038,10 @@ export class GrokNormalizer {
    * ({@link cutUnspawnedLaunch}).
    */
   cutTurnCalls(reason: string): RuntimeEvent[] {
-    const events: RuntimeEvent[] = [];
+    // A spawn a child's `subagent_spawned` may explain has a child: decided
+    // first (the oldest open candidate, the rule before the wait), so only
+    // the calls no child took end "Stopped before it started.".
+    const events: RuntimeEvent[] = joinHeldSpawns(this.state);
     for (const [toolCallId, track] of [...this.state.tools.entries()]) {
       if (track.owned === undefined) {
         events.push(...failTool(this.state, toolCallId, track, reason));

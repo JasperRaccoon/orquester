@@ -1797,10 +1797,21 @@ tests `xai-updates.test.ts`, frames shaped on these rows.
   background.\nsubagent_id: <id>\n…`, in `rawOutput.text` and the content); the call starts its agent
   at its first frame, keyed by the call (observation 37). The two orders are mixed: for 14 of the 27
   the call's result landed BEFORE `subagent_spawned` (rows 2090–2098 before 2100–2118, 3320–3323
-  before 3325–3333, row 188 before 199), for 13 after it — and two launches of one description ran in
-  parallel. So a spawn joins its launch by the id the launch's answer named, else the oldest launch of
-  its description whose answer named no child yet; a launch a spawn already took learns no id from its
-  answer, so no call ever becomes two children's.
+  before 3325–3333, row 188 before 199), for 13 after it. The CLI spawns the children of one response
+  in an order of its own, not the calls' (rows 2101–2119: the fourth call's child first, the ninth's
+  and tenth's swapped), and `subagent_spawned` names no call — only `description`, `subagent_type`,
+  `capability_mode` (both as the call wrote them), `role`, `model` and ids of its own. Agents of one
+  description run in parallel (the engine's skeptics, three at a time); none of the 27 MODEL launches
+  shared a description there, but nothing stops a model from launching two. What tells two such
+  launches apart is the child's session: its first frames are its hooks, then its prompt as one
+  `user_message_chunk` — the call's `prompt` argument verbatim for all 27 (the children's own
+  `updates.jsonl`), as in every capture with a call (fixtures 15–28). So a spawn joins its launch by
+  the id the launch's answer named, else the one open launch of its description (narrowed by type and
+  capability mode) whose answer named no child yet; while two remain the child is HELD, writing
+  nothing, until its prompt echo, a call's answer naming it, or the other candidates dropping out
+  decides — the oldest candidate only when a row must be routed first (tests `xai-updates.test.ts`).
+  A launch a spawn already took learns no id from its answer, so no call ever becomes two
+  children's.
 - **`retry_state` → one `session.state.changed {running}` per retry episode, mid-turn only.** Every
   row is `type: "retrying"`, `max_retries: 15`, `attempt` 1–6; `attempt` counts one request's retries
   and can continue past partial output (`retrying:1`, thought chunks, `retrying:2`), so an episode

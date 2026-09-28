@@ -25,6 +25,7 @@ import {
 } from "./normalizer-state.ts";
 import {
   closeSubagent,
+  joinHeldSpawn,
   subagentAnswerText,
   subagentFromSnapshot,
   subagentLinkage,
@@ -391,6 +392,9 @@ export function foldBackgroundTasks(
     seen.add(task.task_id);
     const status = normalizeTaskStatus(task.status);
     const existing = state.tasks.get(task.task_id);
+    if (existing === undefined) {
+      events.push(...joinHeldSpawn(state, task.task_id));
+    }
     const subagentTask =
       existing === undefined ? state.subagentIds.get(task.task_id.toLowerCase()) : undefined;
     if (subagentTask !== undefined) {
@@ -864,6 +868,11 @@ function backgroundTaskRunning(state: GrokNormalizerState, id: string, raw: Runt
       )
     ];
   }
+  // A child whose join still waits is decided before its agent is read.
+  const decided = joinHeldSpawn(state, id);
+  if (decided.length > 0) {
+    return [...decided, ...backgroundTaskRunning(state, id, raw)];
+  }
   const track = subagentNamed(state, id);
   if (track === undefined) {
     return shellReport(state, id, "running", raw) ?? [];
@@ -925,6 +934,10 @@ function endBackgroundTask(
         raw
       )
     ];
+  }
+  const decided = joinHeldSpawn(state, id);
+  if (decided.length > 0) {
+    return [...decided, ...endBackgroundTask(state, id, status, output, raw, exitCode)];
   }
   const track = subagentNamed(state, id);
   if (track === undefined) {

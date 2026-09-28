@@ -867,7 +867,9 @@ next session's §6.3.4 comparison).
    existing concept (amended 2026-09-27: the subagent, shell and monitor part is the adapter's
    captured mapping — AGENTS.md "Grok: shells are live work", Grok fixtures README observations
    37–51: an agent starts at its `spawn_subagent` call's first frame under the call's id,
-   `subagent_spawned` joins it (never taking a launch whose answer named another child), a resumed
+   `subagent_spawned` joins it (never taking a launch whose answer named another child; amended
+   2026-09-28: while two launches of its description could be its, it waits for the child's prompt
+   echo or a call's answer to decide — the CLI spawns in an order of its own), a resumed
    agent relaunches its source's row — a resume the CLI runs itself, with no call, at its
    `subagent_spawned` — the goal engine's own agents are agents under their own ids,
    `task_completed` ends the shell or monitor it names); `retry_state` ⇒ one invisible

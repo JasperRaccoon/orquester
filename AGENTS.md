@@ -1510,10 +1510,21 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
   behind the agent's row like a Claude `Agent` call). `subagent_spawned` (parent session) names the
   run's `subagent_id`, which IS its child session's id, and joins it to its launch — an id the
   launch's answer already reported (a background launch answers before this frame), a resume's
-  `resumed_from`, else the oldest launch no spawn has named and whose answer named no child yet, a
-  matching `description` first; a launch a spawn already took learns no id from its answer, so two
-  launches of one description in parallel (real 1.0.3 goal sessions, fixtures README observation 58)
-  never become one agent. A spawn no launch explains is an agent of its own under its id, and a
+  `resumed_from`, else the launch no spawn has named and whose answer named no child yet, a
+  matching `description` first, narrowed by the `subagent_type`/`capability_mode` the spawn repeats.
+  `subagent_spawned` names no call, and the CLI spawns in an order of its own (the real 1.0.3 goal
+  session, rows 2101–2119), so when two launches remain — two of one description in parallel, which
+  that session's engine does with its own agents (fixtures README observation 58) — the child is HELD, writing nothing, until evidence decides
+  (`HeldSpawn`, `subagents.ts`): its session's prompt echo (its first `user_message_chunk`, after its
+  hooks, is the call's `prompt` argument verbatim — every capture, all 27 model launches of that
+  session; `childPromptChunk`), a call's answer naming its id, or every other candidate dropping out
+  (taken by another child, its answer naming another child, a declined spawn). Joined to "the oldest"
+  at once, as before, a child that belonged to the newer call was swapped with the other one between
+  their calls' rows for good. Only when one of its rows must be routed first (never seen: nothing
+  but hooks precedes the prompt), or a Stop, the session's stop or a report naming it comes, does the
+  oldest open candidate take it: in practice only for launches identical in every argument, whose
+  rows read the same on either agent. A launch a spawn already took learns no id from its answer, so
+  no call ever becomes two children's. A spawn no launch explains is an agent of its own under its id, and a
   `resumed_from` with no call behind it — a goal engine resuming its skeptic — relaunches the
   source's ended row under the resume's own id (`relaunchResumedSubagent`), so the resumed run's
   answer is the agent's result (`subagentSpawned`). `subagent_progress` is its
