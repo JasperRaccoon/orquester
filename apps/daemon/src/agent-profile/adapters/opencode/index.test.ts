@@ -921,3 +921,174 @@ test("export carries real MCP values and a skill copy; import honours the confli
     "INVALID_ITEM"
   );
 });
+
+// ---------------------------------------------------------------------------
+// Behaviour checked against the real OpenCode 1.18.32
+// ---------------------------------------------------------------------------
+
+test("frontmatter is written for OpenCode's YAML 1.1 reader: values it would retype are quoted, also on a body-only edit", async (t) => {
+  const env = await setup(t);
+  await env.adapter.create(
+    { kind: "command", document: { name: "c1", frontmatter: { description: "2024-01-01", agent: "1_000" }, body: "Do it" } },
+    { onConflict: "fail" }
+  );
+  assert.equal(await env.read(join(env.dir, "commands", "c1.md")), '---\ndescription: "2024-01-01"\nagent: "1_000"\n---\nDo it');
+
+  // A valid, quoted file keeps its quotes when only the body changes.
+  await put(join(env.dir, "commands", "rel.md"), '---\ndescription: "1:30"\n---\nOld\n');
+  const rel = await env.item("command:rel");
+  assert.deepEqual(rel.warnings, []);
+  await env.adapter.update(rel.id, rel.revision, { kind: "command", document: { name: "rel", frontmatter: {}, body: "New\n" } });
+  assert.equal(await env.read(join(env.dir, "commands", "rel.md")), '---\ndescription: "1:30"\n---\nNew\n');
+
+  // Unquoted, OpenCode reads a date: the whole config fails to load. Flagged.
+  await put(join(env.dir, "commands", "bad.md"), "---\ndescription: 2024-01-01\n---\nX\n");
+  assert.deepEqual((await env.item("command:bad")).warnings.map((w) => w.code), ["opencode-command-invalid"]);
+
+  await env.adapter.create(
+    { kind: "skill", document: { name: "dated", frontmatter: { description: "2024-01-01" }, body: "b" } },
+    { onConflict: "fail" }
+  );
+  assert.equal(await env.read(join(env.dir, "skills", "dated", "SKILL.md")), '---\nname: dated\ndescription: "2024-01-01"\n---\nb');
+  await put(join(env.dir, "skills", "undated", "SKILL.md"), "---\nname: undated\ndescription: 2024-01-01\n---\nb\n");
+  assert.deepEqual((await env.item("skill:undated")).warnings.map((w) => w.code), ["opencode-skill-invalid"]);
+});
+
+test("a `key: value: more` line loads through OpenCode's own fallback, so it is neither skipped nor unreadable", async (t) => {
+  const env = await setup(t);
+  await put(join(env.home, ".claude", "skills", "colon", "SKILL.md"), "---\nname: colon\ndescription: Use when: the user asks\n---\nbody\n");
+  await put(join(env.dir, "commands", "colcmd.md"), "---\ndescription: Review: the current diff\n---\nDo it\n");
+  const skill = await env.item("skill:colon");
+  assert.equal(skill.description, "Use when: the user asks");
+  assert.deepEqual([skill.enabled, skill.toggleable, skill.warnings], [true, true, []]);
+  await env.adapter.setEnabled(skill.id, skill.revision, false);
+  assert.equal((await env.item("skill:colon")).enabled, false);
+
+  const command = await env.item("command:colcmd");
+  assert.deepEqual([command.editable, command.warnings, command.description], [true, [], "Review: the current diff"]);
+  await env.adapter.update(command.id, command.revision, { kind: "command", document: { name: "colcmd", frontmatter: {}, body: "Again\n" } });
+  assert.equal(await env.read(join(env.dir, "commands", "colcmd.md")), '---\ndescription: "Review: the current diff"\n---\nAgain\n');
+});
+
+test("a skill switch carries a blanket deny from tools or another file instead of dropping it", async (t) => {
+  for (const layout of [
+    { target: '{\n  "tools": { "skill": false }\n}\n', other: null },
+    { target: "{}\n", other: '{ "permission": { "skill": "deny" } }' },
+    { target: "{}\n", other: '{ "tools": { "skill": false } }' }
+  ]) {
+    const env = await setup(t, { config: layout.target });
+    if (layout.other !== null) await put(join(env.dir, "config.json"), layout.other);
+    const before = await env.items();
+    assert.ok(before.filter((i) => i.kind === "skill").every((i) => !i.enabled), "a blanket deny turns every skill off");
+    const handoff = await env.item("skill:handoff");
+    await env.adapter.setEnabled(handoff.id, handoff.revision, true);
+    const after = await env.items();
+    assert.equal(after.find((i) => i.id === "skill:handoff")!.enabled, true);
+    assert.deepEqual(
+      after.filter((i) => i.kind === "skill" && i.id !== "skill:handoff" && i.enabled).map((i) => i.id),
+      [],
+      `no other skill turned on (${layout.target} / ${layout.other})`
+    );
+    assert.deepEqual((jsonc(await env.read(env.config)).permission as Record<string, unknown>).skill, { "*": "deny", handoff: "allow" });
+  }
+});
+
+test("an MCP server switched off with the newer `disabled` key is off, and an edit keeps it off", async (t) => {
+  const env = await setup(t, { config: '{\n  "mcp": {\n    "v2": { "type": "remote", "url": "https://a.invalid/", "disabled": true }\n  }\n}\n' });
+  const v2 = await env.item("mcp:v2");
+  assert.equal(v2.enabled, false);
+  await env.adapter.update(v2.id, v2.revision, { kind: "mcp", mcp: { name: "v2", transport: "http", url: "https://b.invalid/" } });
+  assert.deepEqual((jsonc(await env.read(env.config)).mcp as Record<string, unknown>).v2, {
+    type: "remote",
+    url: "https://b.invalid/",
+    enabled: false
+  });
+  const edited = await env.item("mcp:v2");
+  assert.equal(edited.enabled, false);
+
+  await put(env.config, '{\n  "mcp": {\n    "v2": { "type": "remote", "url": "https://a.invalid/", "disabled": true }\n  }\n}\n');
+  const off = await env.item("mcp:v2");
+  await env.adapter.setEnabled(off.id, off.revision, true);
+  assert.deepEqual((jsonc(await env.read(env.config)).mcp as Record<string, unknown>).v2, { type: "remote", url: "https://a.invalid/" });
+  assert.equal((await env.item("mcp:v2")).enabled, true);
+});
+
+test("a config key set twice refuses the edit instead of changing the copy OpenCode ignores", async (t) => {
+  const text =
+    '{\n  "mcp": { "x": { "type": "remote", "url": "https://a.invalid/" } },\n  "lsp": {},\n  "mcp": { "x": { "type": "remote", "url": "https://b.invalid/" } }\n}\n';
+  const env = await setup(t, { config: text });
+  const x = await env.item("mcp:x");
+  await rejectsWith(env.adapter.setEnabled(x.id, x.revision, false), "CONFIG_UNREADABLE", /set 2 times/);
+  assert.equal(await env.read(env.config), text);
+});
+
+test("replacing a skill never deletes a folder that holds a skill of another name", async (t) => {
+  const env = await setup(t);
+  await put(join(env.dir, "skills", "report", "SKILL.md"), "---\nname: zzz\ndescription: Z\n---\nz\n");
+  await rejectsWith(
+    env.adapter.create({ kind: "skill", document: { name: "report", frontmatter: { description: "P" }, body: "p" } }, { onConflict: "replace" }),
+    "INVALID_ITEM"
+  );
+  assert.equal(await env.read(join(env.dir, "skills", "report", "SKILL.md")), "---\nname: zzz\ndescription: Z\n---\nz\n");
+});
+
+test("a command's frontmatter name is the one OpenCode uses: warned, and a create under it is a clash", async (t) => {
+  const env = await setup(t);
+  await put(join(env.dir, "commands", "named.md"), "---\nname: other\ndescription: d\n---\nX\n");
+  assert.deepEqual((await env.item("command:named")).warnings.map((w) => w.code), ["opencode-command-renamed"]);
+  await rejectsWith(
+    env.adapter.create({ kind: "command", document: { name: "other", frontmatter: {}, body: "Y" } }, { onConflict: "fail" }),
+    "ITEM_EXISTS"
+  );
+  await rejectsWith(
+    env.adapter.create({ kind: "command", document: { name: "other", frontmatter: {}, body: "Y" } }, { onConflict: "replace" }),
+    "INVALID_ITEM"
+  );
+});
+
+test("plugins and config commands turned off and on keep their order and their own text", async (t) => {
+  const config = '{\n  "plugin": [\n    "p1",\n    ["p2", { "o": 1 }], // tuned\n    "p3"\n  ],\n  "command": {\n    // review things\n    "review": {\n      "template": "Review", // the prompt\n      "description": "Review"\n    },\n    "other": { "template": "x" }\n  }\n}\n';
+  const env = await setup(t, { config });
+  const toggle = async (id: string, on: boolean): Promise<void> => {
+    const item = await env.item(id);
+    await env.adapter.setEnabled(item.id, item.revision, on);
+  };
+  await toggle("plugin:p1", false);
+  await toggle("plugin:p3", false);
+  await toggle("plugin:p1", true);
+  await toggle("plugin:p3", true);
+  await toggle("plugin:p2", false);
+  await toggle("plugin:p2", true);
+  await toggle("command:review", false);
+  await toggle("command:review", true);
+  const text = await env.read(env.config);
+  assert.deepEqual(jsonc(text).plugin, ["p1", ["p2", { o: 1 }], "p3"]);
+  assert.ok(text.includes('["p2", { "o": 1 }]'), "the tuple keeps its own layout");
+  assert.ok(text.includes('    // review things\n    "review": {\n      "template": "Review", // the prompt'), text);
+  assert.deepEqual(Object.keys(jsonc(text).command as object), ["review", "other"]);
+});
+
+test("a config with a byte-order mark is edited and keeps it", async (t) => {
+  const env = await setup(t, { config: '﻿{\n  "mcp": { "x": { "type": "remote", "url": "https://a.invalid/" } }\n}\n' });
+  const x = await env.item("mcp:x");
+  await env.adapter.setEnabled(x.id, x.revision, false);
+  const text = await env.read(env.config);
+  assert.ok(text.startsWith("﻿{"));
+  assert.equal(((jsonc(text).mcp as Record<string, Record<string, unknown>>).x).enabled, false);
+});
+
+test("an agent's own permission rules that override a skill are warned about", async (t) => {
+  const env = await setup(t, { config: '{\n  "agent": { "build": { "permission": { "skill": { "handoff": "deny" } } } }\n}\n' });
+  const handoff = await env.item("skill:handoff");
+  assert.equal(handoff.enabled, true);
+  assert.deepEqual(handoff.warnings.map((w) => w.code), ["opencode-skill-agent-override"]);
+  assert.match(handoff.warnings[0]!.message, /build/);
+});
+
+test("Orquester's status plugin cannot be listed again as a plugin spec", async (t) => {
+  const env = await setup(t);
+  await rejectsWith(
+    env.adapter.create({ kind: "plugin", plugin: { spec: join(env.dir, "plugin", "orquester-status.js") } }, { onConflict: "fail" }),
+    "ITEM_LOCKED"
+  );
+});

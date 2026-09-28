@@ -23,7 +23,11 @@ import {
   parseTree,
   printParseErrorCode
 } from "jsonc-parser";
+import { AgentProfileError } from "../../errors.ts";
 import { stableStringify } from "../../infra/index.ts";
+
+/** A UTF-8 byte-order mark: {@link parseJsoncObject} reads past it; editors strip it first and put it back. */
+export const BOM = "﻿";
 
 /** OpenCode's own formatting for the text it inserts (`opencode mcp add`, `updateGlobal`). */
 const FORMATTING = { insertSpaces: true, tabSize: 2, eol: "\n" } as const;
@@ -49,7 +53,9 @@ function position(text: string, offset: number): string {
  * commas. An empty file is `{}` (OpenCode skips it). Any syntax error, or a
  * root that is not an object, is a failure with a message naming where.
  */
-export function parseJsoncObject(text: string): JsoncParseResult {
+export function parseJsoncObject(input: string): JsoncParseResult {
+  // A leading byte-order mark is not JSON, but OpenCode reads past it.
+  const text = input.startsWith(BOM) ? input.slice(BOM.length) : input;
   if (text.length === 0) {
     return { ok: true, value: {} };
   }
@@ -104,6 +110,34 @@ function treeOf(text: string): Node {
   return root;
 }
 
+/**
+ * Refuses a path through an object key that is set twice: the tree edits the
+ * FIRST one while OpenCode (like `JSON.parse`) keeps the LAST, so the edit
+ * would change nothing OpenCode sees.
+ */
+function assertNoDuplicateOnPath(root: Node, path: JSONPath): void {
+  let node: Node | undefined = root;
+  for (const [depth, segment] of path.entries()) {
+    if (node === undefined) return;
+    if (node.type === "object" && typeof segment === "string") {
+      const members: Node[] = (node.children ?? []).filter((member) => member.children?.[0]?.value === segment);
+      if (members.length > 1) {
+        const where = path.slice(0, depth + 1).join(".");
+        throw new AgentProfileError(
+          409,
+          "CONFIG_UNREADABLE",
+          `"${where}" is set ${members.length} times in the config; OpenCode uses the last one. Remove the duplicates by hand first.`
+        );
+      }
+      node = members[0]?.children?.[1];
+    } else if (node.type === "array" && typeof segment === "number") {
+      node = node.children?.[segment];
+    } else {
+      return;
+    }
+  }
+}
+
 function lineStart(text: string, offset: number): number {
   return text.lastIndexOf("\n", offset - 1) + 1;
 }
@@ -127,6 +161,17 @@ function scanAfter(text: string, offset: number): { comma: number | null; restEn
     while (p < text.length && (text[p] === " " || text[p] === "\t")) p += 1;
   };
   blanks();
+  // `"a": 1 /* note */,` — the comma may follow a comment on the same line.
+  for (let q = p; text.startsWith("/*", q); ) {
+    const close = text.indexOf("*/", q + 2);
+    if (close === -1 || text.slice(q, close).includes("\n")) break;
+    q = close + 2;
+    while (q < text.length && (text[q] === " " || text[q] === "\t")) q += 1;
+    if (text[q] === ",") {
+      p = q;
+      break;
+    }
+  }
   let comma: number | null = null;
   if (text[p] === ",") {
     comma = p;
@@ -151,6 +196,23 @@ function scanAfter(text: string, offset: number): { comma: number | null; restEn
   return { comma, restEnd: p, atLineEnd };
 }
 
+/** The offset of the next character after `offset` that is neither whitespace nor inside a comment. */
+function nextSignificant(text: string, offset: number): number {
+  let p = offset;
+  for (;;) {
+    while (p < text.length && /\s/.test(text[p]!)) p += 1;
+    if (text.startsWith("//", p)) {
+      const nl = text.indexOf("\n", p);
+      p = nl === -1 ? text.length : nl;
+    } else if (text.startsWith("/*", p)) {
+      const close = text.indexOf("*/", p + 2);
+      p = close === -1 ? text.length : close + 2;
+    } else {
+      return p;
+    }
+  }
+}
+
 /** Past the line break at `offset` (`\n` or `\r\n`); `offset` itself at the end of the text. */
 function pastLineBreak(text: string, offset: number): number {
   if (text.startsWith("\r\n", offset)) return offset + 2;
@@ -173,7 +235,14 @@ function removeNode(text: string, target: Node): string {
   const after = scanAfter(text, end);
   const wholeLines = (): TextEdit => ({ offset: start, length: pastLineBreak(text, after.restEnd) - start, content: "" });
   const edits: TextEdit[] = [];
-  if (after.comma !== null) {
+  const next = nextSignificant(text, end);
+  if (after.comma === null && text[next] === ",") {
+    // Leading-comma layout (`"a": 1` then `, "b": 2`): the separator after it goes too.
+    edits.push(ownLine && after.atLineEnd ? wholeLines() : { offset: target.offset, length: target.length, content: "" });
+    let stop = next + 1;
+    while (text[stop] === " " || text[stop] === "\t") stop += 1;
+    edits.push({ offset: next, length: stop - next, content: "" });
+  } else if (after.comma !== null) {
     if (ownLine && after.atLineEnd) {
       edits.push(wholeLines());
     } else {
@@ -216,18 +285,21 @@ function insertNode(
   container: Node,
   key: string | null,
   value: unknown,
-  index?: number
+  index?: number,
+  raw?: string
 ): string {
   const children = container.children ?? [];
   const eol = eolOf(text);
+  // `raw`: the value's own text from before (a turned-off entry put back), used as it was.
+  const valueText = raw !== undefined && sameValue(raw, value) ? raw : undefined;
   const member = (indent: string, pretty: boolean): string =>
-    `${key === null ? "" : `${JSON.stringify(key)}: `}${pretty ? render(value, indent, eol) : JSON.stringify(value)}`;
+    `${key === null ? "" : `${JSON.stringify(key)}: `}${valueText ?? (pretty ? render(value, indent, eol) : JSON.stringify(value))}`;
   if (children.length === 0) {
     // `{}` / `[]`: jsonc-parser's own insert reformats only this empty container.
     const at = key === null ? [...path, 0] : [...path, key];
     return applyEdits(text, modify(text, at, value, { formattingOptions: FORMATTING, isArrayInsertion: key === null }));
   }
-  if (key === null && index !== undefined && index < children.length) {
+  if (index !== undefined && index < children.length) {
     const next = children[Math.max(0, index)]!;
     const start = lineStart(text, next.offset);
     const indent = text.slice(start, next.offset);
@@ -268,6 +340,7 @@ function insertNode(
  */
 export function setJsonc(text: string, path: JSONPath, value: unknown): string {
   const root = treeOf(text);
+  assertNoDuplicateOnPath(root, path);
   const node = findNodeAtLocation(root, path);
   if (value === undefined) {
     if (node === undefined || path.length === 0) return text;
@@ -296,8 +369,9 @@ export function setJsonc(text: string, path: JSONPath, value: unknown): string {
 }
 
 /** Inserts `value` into the array at `path` before `index` (`index` = length appends); creates the array if missing. */
-export function insertJsoncArrayItem(text: string, path: JSONPath, index: number, value: unknown): string {
+export function insertJsoncArrayItem(text: string, path: JSONPath, index: number, value: unknown, raw?: string): string {
   const root = treeOf(text);
+  assertNoDuplicateOnPath(root, path);
   const array = findNodeAtLocation(root, path);
   if (array === undefined) {
     return setJsonc(text, path, [value]);
@@ -305,7 +379,37 @@ export function insertJsoncArrayItem(text: string, path: JSONPath, index: number
   if (array.type !== "array") {
     throw new Error(`${path.join(".")} is not a list`);
   }
-  return insertNode(text, path, array, null, value, index);
+  return insertNode(text, path, array, null, value, index, raw);
+}
+
+/**
+ * Adds `key` to the object at `path` before its `index`-th member (past the
+ * end appends); creates the object when missing. `raw` is the value's former
+ * text, reused when it still reads as `value`. The key must not exist yet.
+ */
+export function insertJsoncMember(text: string, path: JSONPath, key: string, index: number, value: unknown, raw?: string): string {
+  const root = treeOf(text);
+  assertNoDuplicateOnPath(root, path);
+  const object = findNodeAtLocation(root, path);
+  if (object === undefined) {
+    return setJsonc(text, [...path, key], value);
+  }
+  if (object.type !== "object") {
+    throw new Error(`${path.join(".")} is not an object`);
+  }
+  return insertNode(text, path, object, key, value, index, raw);
+}
+
+/** The text of the value at `path` as it is written; `undefined` when there is none. */
+export function jsoncValueText(text: string, path: JSONPath): string | undefined {
+  const node = findNodeAtLocation(treeOf(text), path);
+  return node === undefined ? undefined : text.slice(node.offset, node.offset + node.length);
+}
+
+function sameValue(raw: string, value: unknown): boolean {
+  const errors: ParseError[] = [];
+  const parsed: unknown = parse(raw, errors, { allowTrailingComma: true, disallowComments: false });
+  return errors.length === 0 && deepEqual(parsed, value);
 }
 
 function deepEqual(a: unknown, b: unknown): boolean {

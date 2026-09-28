@@ -93,6 +93,7 @@ export {
   runAgentCliOrThrow
 } from "./cli-runner.ts";
 export {
+  type FrontmatterYamlOptions,
   type MarkdownDocument,
   mergeFrontmatter,
   parseMarkdownDocument,

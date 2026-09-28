@@ -86,3 +86,21 @@ test("mergeFrontmatter: draft overrides in place, null removes, unmentioned keys
   assert.deepEqual(Object.keys(merged), ["name", "description", "custom", "model"]);
   assert.deepEqual(existing.license, "MIT", "the input is not mutated");
 });
+
+test("yaml 1.1 (js-yaml 3, OpenCode's reader): quotes what 1.1 would retype, and reads it back the way that reader does", () => {
+  const risky = ["2024-01-01", "1:30", "0b101", "1_000", "0x1F", "2001-12-14 21:59:43.10 -5", ".5", "yes", "~"];
+  for (const value of risky) {
+    const text = serializeMarkdownDocument({ description: value }, "Body\n", { yaml: "1.1" });
+    assert.match(text, /^---\ndescription: "/, `${value} is quoted: ${text}`);
+    assert.equal(parseMarkdownDocument(text, { yaml: "1.1" }).frontmatter.description, value);
+  }
+  // Unquoted, a 1.1 reader takes these for other types; only true/false are booleans for js-yaml 3.
+  const read = (line: string): unknown => parseMarkdownDocument(`---\n${line}\n---\n`, { yaml: "1.1" }).frontmatter.v;
+  assert.ok(read("v: 2024-01-01") instanceof Date);
+  assert.equal(read("v: 1:30"), 90);
+  assert.equal(read("v: 1_000"), 1000);
+  assert.equal(read("v: yes"), "yes");
+  assert.equal(read("v: true"), true);
+  // The default stays YAML 1.2.
+  assert.equal(parseMarkdownDocument("---\nv: 1_000\n---\n").frontmatter.v, "1_000");
+});

@@ -208,7 +208,12 @@ export function mcpEntryFromDraft(draft: McpServerDraft, existing: JsonObject | 
     if (headers !== undefined) entry.headers = headers;
     if (sameType && existing?.oauth !== undefined) entry.oauth = existing.oauth;
   }
-  if (existing !== null && typeof existing.enabled === "boolean") entry.enabled = existing.enabled;
+  if (existing !== null && typeof existing.disabled === "boolean") {
+    // The newer spelling of the switch; written back as the key this module owns.
+    entry.enabled = !existing.disabled;
+  } else if (existing !== null && typeof existing.enabled === "boolean") {
+    entry.enabled = existing.enabled;
+  }
   if (timeout !== undefined) entry.timeout = timeout;
   return entry;
 }

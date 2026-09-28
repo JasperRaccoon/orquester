@@ -15,7 +15,35 @@
  * (spec §4.5: OpenCode loses its whole config over a bad command frontmatter).
  */
 
-import { parse as parseYaml, stringify as stringifyYaml } from "yaml";
+import { type DocumentOptions, type ParseOptions, type SchemaOptions, parse as parseYaml, stringify as stringifyYaml } from "yaml";
+
+/**
+ * Which YAML the file's reader speaks. The default is YAML 1.2 (the `yaml`
+ * package). `"1.1"` is YAML 1.1 as js-yaml 3 reads it — gray-matter, and so
+ * OpenCode: `2024-01-01` is a date, `1:30` and `1_000` are numbers, but only
+ * `true`/`false` are booleans. Writing for it quotes every string such a
+ * reader would take for something else.
+ */
+export interface FrontmatterYamlOptions {
+  yaml?: "1.1";
+}
+
+/** js-yaml 3's booleans: `yes`/`no`/`on`/`off` stay strings. */
+const JS_YAML_BOOL = {
+  identify: (value: unknown) => typeof value === "boolean",
+  default: true,
+  tag: "tag:yaml.org,2002:bool",
+  test: /^(?:[Tt]rue|TRUE|[Ff]alse|FALSE)$/,
+  resolve: (source: string) => source.startsWith("t") || source.startsWith("T")
+};
+
+function yamlParseOptions(options: FrontmatterYamlOptions): (ParseOptions & DocumentOptions & SchemaOptions) | undefined {
+  if (options.yaml !== "1.1") return undefined;
+  return {
+    version: "1.1",
+    customTags: (tags) => [JS_YAML_BOOL, ...tags.filter((tag) => typeof tag === "string" || tag.tag !== JS_YAML_BOOL.tag)]
+  };
+}
 
 export interface MarkdownDocument {
   /** The YAML mapping; `{}` when there is none or it is empty. */
@@ -37,7 +65,7 @@ const CLOSE_RE = /^---[ \t]*(?:\r?\n|$)/m;
  * whole text is the body. Throws an `Error` naming the problem when the block
  * is not valid YAML or not a mapping (a list, a bare string).
  */
-export function parseMarkdownDocument(text: string): MarkdownDocument {
+export function parseMarkdownDocument(text: string, options: FrontmatterYamlOptions = {}): MarkdownDocument {
   const source = text.startsWith(BOM) ? text.slice(BOM.length) : text;
   const open = OPEN_RE.exec(source);
   if (open === null) {
@@ -52,7 +80,7 @@ export function parseMarkdownDocument(text: string): MarkdownDocument {
   const body = rest.slice(close.index + close[0].length);
   let parsed: unknown;
   try {
-    parsed = block.trim().length === 0 ? null : parseYaml(block);
+    parsed = block.trim().length === 0 ? null : parseYaml(block, yamlParseOptions(options));
   } catch (error) {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Invalid YAML frontmatter: ${message}`);
@@ -73,12 +101,16 @@ export function parseMarkdownDocument(text: string): MarkdownDocument {
  * itself starts with a `---` line, which would read back as a fence, and so
  * gets an empty block in front of it.
  */
-export function serializeMarkdownDocument(frontmatter: Record<string, unknown>, body: string): string {
+export function serializeMarkdownDocument(
+  frontmatter: Record<string, unknown>,
+  body: string,
+  options: FrontmatterYamlOptions = {}
+): string {
   const keys = Object.keys(frontmatter).filter((key) => frontmatter[key] !== undefined);
   if (keys.length === 0) {
     return OPEN_RE.test(body) ? `---\n---\n${body}` : body;
   }
-  const yaml = stringifyYaml(frontmatter, { lineWidth: 0 });
+  const yaml = stringifyYaml(frontmatter, options.yaml === "1.1" ? { lineWidth: 0, version: "1.1" } : { lineWidth: 0 });
   return `---\n${yaml}${yaml.endsWith("\n") ? "" : "\n"}---\n${body}`;
 }
 

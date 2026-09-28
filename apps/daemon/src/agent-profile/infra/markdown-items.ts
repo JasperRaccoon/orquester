@@ -13,7 +13,7 @@ import { join } from "node:path";
 import type { MarkdownDocumentDraft } from "@orquester/api";
 import { profileErrors } from "../errors.ts";
 import type { ProfileBackups } from "./backups.ts";
-import { mergeFrontmatter, parseMarkdownDocument, serializeMarkdownDocument } from "./frontmatter.ts";
+import { type FrontmatterYamlOptions, mergeFrontmatter, parseMarkdownDocument, serializeMarkdownDocument } from "./frontmatter.ts";
 import { type ProfileWriteResult, readTextIfExists, writeProfileFileVerified } from "./fs-write.ts";
 import { assertCommandName, assertSafeSegment, assertSkillName } from "./names.ts";
 import { isMissing } from "./tree.ts";
@@ -212,7 +212,7 @@ export async function readSkillFiles(dir: string): Promise<string[]> {
   return files.sort();
 }
 
-export interface MarkdownWriteOptions {
+export interface MarkdownWriteOptions extends FrontmatterYamlOptions {
   backups: ProfileBackups;
   agent: string;
   /**
@@ -227,7 +227,8 @@ export interface MarkdownWriteOptions {
 async function frontmatterFor(
   path: string,
   draft: MarkdownDocumentDraft,
-  mergeExisting: boolean
+  mergeExisting: boolean,
+  yaml: FrontmatterYamlOptions
 ): Promise<Record<string, unknown>> {
   const fresh = mergeFrontmatter({}, draft.frontmatter);
   if (!mergeExisting) {
@@ -239,7 +240,7 @@ async function frontmatterFor(
   }
   let existing: Record<string, unknown>;
   try {
-    existing = parseMarkdownDocument(text).frontmatter;
+    existing = parseMarkdownDocument(text, yaml).frontmatter;
   } catch (error) {
     throw profileErrors.unreadable(path, message(error));
   }
@@ -247,10 +248,10 @@ async function frontmatterFor(
 }
 
 /** Serializes and checks that the text reads back — frontmatter is validated before anything is written. */
-function render(frontmatter: Record<string, unknown>, body: string): string {
-  const text = serializeMarkdownDocument(frontmatter, body);
+function render(frontmatter: Record<string, unknown>, body: string, yaml: FrontmatterYamlOptions): string {
+  const text = serializeMarkdownDocument(frontmatter, body, yaml);
   try {
-    parseMarkdownDocument(text);
+    parseMarkdownDocument(text, yaml);
   } catch (error) {
     throw profileErrors.invalidItem(`The frontmatter cannot be written: ${message(error)}`);
   }
@@ -272,12 +273,12 @@ export async function writeSkill(
   assertSkillName(draft.name);
   assertSafeSegment(draft.name);
   const path = join(root, draft.name, SKILL_FILE);
-  const merged = await frontmatterFor(path, draft, options.mergeExisting ?? true);
+  const merged = await frontmatterFor(path, draft, options.mergeExisting ?? true, { yaml: options.yaml });
   const frontmatter = "name" in merged ? { ...merged, name: draft.name } : { name: draft.name, ...merged };
-  return writeProfileFileVerified(path, render(frontmatter, draft.body), {
+  return writeProfileFileVerified(path, render(frontmatter, draft.body, { yaml: options.yaml }), {
     backups: options.backups,
     agent: options.agent,
-    verify: parseMarkdownDocument
+    verify: (text) => parseMarkdownDocument(text, { yaml: options.yaml })
   });
 }
 
@@ -295,10 +296,10 @@ export async function writeCommand(
   const segments = draft.name.split("/");
   segments.forEach(assertSafeSegment);
   const path = `${join(root, ...segments)}.md`;
-  const frontmatter = await frontmatterFor(path, draft, options.mergeExisting ?? true);
-  return writeProfileFileVerified(path, render(frontmatter, draft.body), {
+  const frontmatter = await frontmatterFor(path, draft, options.mergeExisting ?? true, { yaml: options.yaml });
+  return writeProfileFileVerified(path, render(frontmatter, draft.body, { yaml: options.yaml }), {
     backups: options.backups,
     agent: options.agent,
-    verify: parseMarkdownDocument
+    verify: (text) => parseMarkdownDocument(text, { yaml: options.yaml })
   });
 }

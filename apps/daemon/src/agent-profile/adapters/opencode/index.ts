@@ -19,8 +19,9 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readFile, realpath, stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type {
   McpServerDraft,
   MarkdownDocumentDraft,
@@ -51,7 +52,7 @@ import {
   isValidSkillName,
   itemId,
   mergeFrontmatter,
-  parseMarkdownDocument,
+  type MarkdownDocument,
   pathKind,
   readSkillFiles,
   readTextIfExists,
@@ -71,21 +72,26 @@ import type {
 import {
   CONFIG_FILE_NAMES,
   type ConfigState,
+  agentsOverridingSkill,
   mergedWithTarget,
+  permissionConfig,
   readConfigState,
   skillAllowed
 } from "./config.ts";
 import {
+  BOM,
   type JsonObject,
   assertJsoncObject,
   insertJsoncArrayItem,
+  insertJsoncMember,
+  jsoncValueText,
   isJsonObject,
   parseJsoncObject,
   replaceJsoncObject,
   setJsonc
 } from "./jsonc.ts";
 import { mcpEntryFromDraft, mcpEntryFromPortable, mcpEntryType, mcpMeta, mcpPortable, mcpView } from "./mcp.ts";
-import { type FoundCommand, type FoundSkill, findCommands, findPluginFiles, findSkills } from "./scan.ts";
+import { type FoundCommand, type FoundSkill, findCommands, findPluginFiles, findSkills, parseOpenCodeDocument } from "./scan.ts";
 import {
   checkCommandDraftFrontmatter,
   checkCommandFrontmatter,
@@ -134,6 +140,10 @@ interface CommandFragment {
   origin: "config";
   name: string;
   entry: JsonObject;
+  /** The `command` key it followed (`null`: it was first); absent in fragments from before. */
+  after?: string | null;
+  /** Its value's text as it was written (comments, layout), put back when it still reads the same. */
+  text?: string;
 }
 
 /** The fragment a `plugin[]` entry keeps in the stash while off. */
@@ -141,6 +151,9 @@ interface PluginFragment {
   origin: "config";
   entry: unknown;
   index: number;
+  /** The package key of the entry it followed (`null`: it was first); absent in fragments from before. */
+  after?: string | null;
+  text?: string;
 }
 
 function warning(code: string, message: string, action?: ProfileItemWarning["action"]): ProfileItemWarning {
@@ -365,6 +378,14 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
       warnings.push(warning("opencode-skill-unreadable", `OpenCode skips it: ${skill.error}`, "open-file"));
     } else if (!skill.named) {
       warnings.push(warning("opencode-skill-no-name", "OpenCode skips it: its SKILL.md has no name.", "open-file"));
+    } else if (skill.frontmatter.description !== undefined && typeof skill.frontmatter.description !== "string") {
+      warnings.push(
+        warning(
+          "opencode-skill-invalid",
+          "OpenCode skips it: its description is not read as text (YAML 1.1 takes it for a date or a number); quote it.",
+          "open-file"
+        )
+      );
     } else if (skill.description === undefined) {
       warnings.push(warning("opencode-skill-no-description", "No description: OpenCode does not offer it to the model."));
     }
@@ -377,6 +398,16 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     const editable = plainOwn && skill.error === undefined && folder === skill.name && isValidSkillName(skill.name);
     const toggleable = skill.named && !/[*?]/.test(skill.name) && !config.broken;
     const enabled = skill.named ? skillAllowed(config.merged, skill.name) : false;
+    const overriding = skill.named ? agentsOverridingSkill(config.merged, skill.name) : [];
+    if (overriding.length > 0) {
+      warnings.push(
+        warning(
+          "opencode-skill-agent-override",
+          `The ${overriding.join(", ")} agent's own permission rules turn it ${enabled ? "off" : "on"} there, whatever this switch says.`,
+          "open-file"
+        )
+      );
+    }
     return {
       kind: "skill",
       skill,
@@ -481,6 +512,11 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
       } catch (error) {
         warnings.push(warning("opencode-command-invalid", `OpenCode cannot load its config with this file: ${message(error)}`, "open-file"));
       }
+    }
+    if (command.invokedAs !== undefined) {
+      warnings.push(
+        warning("opencode-command-renamed", `Its frontmatter names it "${command.invokedAs}": OpenCode runs it as /${command.invokedAs}.`, "open-file")
+      );
     }
     return {
       kind: "command",
@@ -676,7 +712,7 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     }
     const stash = entry.stash;
     if (stash.payloadPath !== null) {
-      const doc = parseMarkdownDocument(await readFile(stash.payloadPath, "utf8"));
+      const doc = parseOpenCodeDocument(await readFile(stash.payloadPath, "utf8"));
       return { frontmatter: doc.frontmatter, body: doc.body };
     }
     const data = stash.original.type === "fragment" ? (stash.original.data as Partial<CommandFragment>) : {};
@@ -722,7 +758,7 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
 
   private async writeConfig(config: ConfigState, text: string): Promise<void> {
     this.requireConfig(config);
-    await writeProfileFileVerified(config.targetPath, text, {
+    await writeProfileFileVerified(config.targetPath, config.targetBom ? `${BOM}${text}` : text, {
       backups: this.backups,
       agent: AGENT,
       // It holds MCP secrets: a new file is the owner's alone.
@@ -813,10 +849,15 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
       throw profileErrors.exists(name);
     }
     const existing = model.entries.get(itemId("skill", name));
-    if (existing !== undefined) {
-      if (existing.kind !== "skill" || !existing.item.deletable || existing.skill.dir !== join(this.skillsRoot(), name)) {
-        throw profileErrors.invalidItem(`"${name}" (${existing.item.source.label}) cannot be replaced from here.`);
-      }
+    if (existing === undefined) {
+      // The folder is taken by a skill of another name (OpenCode knows skills by their
+      // frontmatter name), or by something that is not a skill: replacing would delete it.
+      throw profileErrors.invalidItem(
+        `${join(this.skillsRoot(), name)} holds something other than the skill "${name}"; rename or delete it first.`
+      );
+    }
+    if (existing.kind !== "skill" || !existing.item.deletable || existing.skill.dir !== join(this.skillsRoot(), name)) {
+      throw profileErrors.invalidItem(`"${name}" (${existing.item.source.label}) cannot be replaced from here.`);
     }
     await removeProfilePath(join(this.skillsRoot(), name), { backups: this.backups, agent: AGENT });
     return name;
@@ -838,7 +879,7 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     await writeSkill(
       this.skillsRoot(),
       { name, frontmatter, body: typeof document.body === "string" ? document.body : "" },
-      { backups: this.backups, agent: AGENT, mergeExisting: false }
+      { backups: this.backups, agent: AGENT, mergeExisting: false, yaml: "1.1" }
     );
     return mutation([itemId("skill", name)], this.skillNotes(model.config, name));
   }
@@ -849,12 +890,25 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
 
   private async claimCommandName(model: Model, name: string, policy: ProfileConflictPolicy): Promise<{ name: string; replace: boolean }> {
     assertCommandName(name);
-    const taken = (candidate: string): boolean => model.entries.has(itemId("command", candidate));
+    // A file whose frontmatter `name` is this one already owns it in OpenCode.
+    const renamedTo = new Set(
+      [...model.entries.values()].flatMap((entry) =>
+        entry.kind === "command" && entry.origin === "file" && entry.command.invokedAs !== undefined ? [entry.command.invokedAs] : []
+      )
+    );
+    const taken = (candidate: string): boolean => model.entries.has(itemId("command", candidate)) || renamedTo.has(candidate);
     if (!taken(name)) return { name, replace: false };
     if (policy === "fail") throw profileErrors.exists(name);
     if (policy === "keep-both") return { name: keepBothName(name, taken, isValidCommandName), replace: false };
-    const existing = model.entries.get(itemId("command", name))!;
-    if (existing.kind !== "command" || existing.origin !== "file" || existing.root !== this.commandsRoot() || !existing.item.editable) {
+    const existing = model.entries.get(itemId("command", name));
+    if (
+      existing === undefined ||
+      renamedTo.has(name) ||
+      existing.kind !== "command" ||
+      existing.origin !== "file" ||
+      existing.root !== this.commandsRoot() ||
+      !existing.item.editable
+    ) {
       throw profileErrors.invalidItem(`"${name}" cannot be replaced from here: turn it on or delete it first.`);
     }
     return { name, replace: true };
@@ -872,7 +926,7 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     await writeCommand(
       this.commandsRoot(),
       { name, frontmatter, body: typeof document.body === "string" ? document.body : "" },
-      { backups: this.backups, agent: AGENT, mergeExisting: false }
+      { backups: this.backups, agent: AGENT, mergeExisting: false, yaml: "1.1" }
     );
     return mutation([itemId("command", name)]);
   }
@@ -882,6 +936,12 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
       throw profileErrors.invalidItem("OpenCode plugins are npm packages or local files, not marketplace plugins.");
     }
     const spec = await checkPluginSpec(draft.spec, this.ctx.homes.home);
+    if (isPathSpec(spec)) {
+      // OpenCode already loads Orquester's status plugin from its folder: listing it too would run it twice.
+      const real = await realpath(spec.startsWith("file://") ? fileURLToPath(spec) : spec).catch(() => null);
+      const locked = await realpath(join(this.dir, ORQUESTER_PLUGIN_REL)).catch(() => null);
+      if (real !== null && real === locked) throw profileErrors.locked(ORQUESTER_PLUGIN_REL);
+    }
     const model = await this.load();
     this.requireConfig(model.config);
     if (!model.pluginListInTarget) {
@@ -975,10 +1035,12 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     const body = typeof document.body === "string" ? document.body : entry.skill.body;
     const root = dirname(entry.skill.dir);
     if (document.name === entry.skill.name) {
-      await writeSkill(root, { name: entry.skill.name, frontmatter: draftFrontmatter, body }, {
+      // `merged` is the file's frontmatter as OpenCode reads it (its colon fallback included).
+      await writeSkill(root, { name: entry.skill.name, frontmatter: merged, body }, {
         backups: this.backups,
         agent: AGENT,
-        mergeExisting: true
+        mergeExisting: false,
+        yaml: "1.1"
       });
       return mutation([entry.item.id]);
     }
@@ -991,7 +1053,8 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     await writeSkill(root, { name: document.name, frontmatter: { ...merged, name: document.name }, body }, {
       backups: this.backups,
       agent: AGENT,
-      mergeExisting: false
+      mergeExisting: false,
+      yaml: "1.1"
     });
     await removeProfilePath(entry.skill.dir, { backups: this.backups, agent: AGENT });
     const notes = copied.skipped.length > 0 ? [`Left out while renaming (symlinks): ${copied.skipped.join(", ")}.`] : [];
@@ -1014,7 +1077,8 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
       await writeCommand(entry.root, { name: entry.command.name, frontmatter: merged, body }, {
         backups: this.backups,
         agent: AGENT,
-        mergeExisting: false
+        mergeExisting: false,
+        yaml: "1.1"
       });
       return mutation([entry.item.id]);
     }
@@ -1025,7 +1089,8 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     await writeCommand(entry.root, { name: document.name, frontmatter: merged, body }, {
       backups: this.backups,
       agent: AGENT,
-      mergeExisting: false
+      mergeExisting: false,
+      yaml: "1.1"
     });
     await removeProfilePath(entry.command.file, { backups: this.backups, agent: AGENT });
     return mutation([itemId("command", document.name)]);
@@ -1086,11 +1151,15 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     this.requireConfig(model.config);
     const path = ["mcp", entry.name];
     let text = model.config.targetText;
+    const target = entry.targetEntry;
+    if (target !== null && "disabled" in target) {
+      // The newer spelling of the switch: this module writes `enabled`, so the two never disagree.
+      text = setJsonc(text, [...path, "disabled"], undefined);
+    }
     if (!enabled) {
       text = setJsonc(text, [...path, "enabled"], false);
     } else {
-      const target = entry.targetEntry;
-      if (target !== null && mcpEntryType(target) === null) {
+      if (target !== null && mcpEntryType(target) === null && Object.keys(target).every((key) => key === "enabled" || key === "disabled")) {
         // An override with nothing else in it: drop it whole.
         text = setJsonc(text, path, undefined);
       } else if (target !== null && "enabled" in target) {
@@ -1103,6 +1172,12 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
         text = setJsonc(text, [...path, "enabled"], true);
       }
     }
+    const after = mergedWithTarget(model.config, text);
+    const effective = isJsonObject(after.mcp) ? after.mcp[entry.name] : undefined;
+    // (An override-only entry that is dropped leaves nothing: fine when turning on.)
+    if (isJsonObject(effective) ? (effective.enabled !== false) !== enabled : !enabled) {
+      throw profileErrors.invalidItem(`The config still turns "${entry.name}" ${enabled ? "off" : "on"} after this edit; change it by hand.`);
+    }
     await this.writeConfig(model.config, text);
     return mutation([entry.item.id]);
   }
@@ -1114,23 +1189,27 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
    * the object form OpenCode decodes it to (`{"*": action}`), which means the
    * same.
    */
-  private skillPermissionEdit(text: string, name: string, action: "deny" | "allow" | undefined): string {
+  private skillPermissionEdit(text: string, name: string, action: "deny" | "allow" | undefined, inherited?: string): string {
     const parsed = parseJsoncObject(text);
     if (!parsed.ok) throw profileErrors.invalidItem(parsed.error);
+    // A new `permission.skill` object REPLACES (not merges with) an action string the
+    // same key gets from another file or the legacy `tools.skill`: carry that one as `"*"`.
+    const fresh = (rule: "deny" | "allow"): JsonObject =>
+      inherited !== undefined ? { "*": inherited, [name]: rule } : { [name]: rule };
     const permission = parsed.value.permission;
     if (permission === undefined) {
-      return action === undefined ? text : setJsonc(text, ["permission", "skill", name], action);
+      return action === undefined ? text : setJsonc(text, ["permission", "skill"], fresh(action));
     }
     if (typeof permission === "string") {
       if (action === undefined) return text;
-      return setJsonc(text, ["permission"], { "*": permission, skill: { [name]: action } });
+      return setJsonc(text, ["permission"], { "*": permission, skill: fresh(action) });
     }
     if (!isJsonObject(permission)) {
       throw profileErrors.invalidItem('"permission" in the config is neither an action nor a set of rules; fix it by hand first.');
     }
     const skill = permission.skill;
     if (skill === undefined) {
-      return action === undefined ? text : setJsonc(text, ["permission", "skill", name], action);
+      return action === undefined ? text : setJsonc(text, ["permission", "skill"], fresh(action));
     }
     if (typeof skill === "string") {
       if (action === undefined) return text;
@@ -1160,9 +1239,11 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     this.requireConfig(model.config);
     const name = entry.skill.name;
     const allowedIn = (text: string): boolean => skillAllowed(mergedWithTarget(model.config, text), name);
+    const blanket = permissionConfig(model.config.merged).skill;
+    const inherited = typeof blanket === "string" ? blanket : undefined;
     let text: string;
     if (!enabled) {
-      text = this.skillPermissionEdit(model.config.targetText, name, "deny");
+      text = this.skillPermissionEdit(model.config.targetText, name, "deny", inherited);
       if (allowedIn(text)) {
         throw profileErrors.invalidItem(
           `A later permission rule in the config lets "${name}" through anyway; OpenCode applies the last matching rule. Move the skill rules after it by hand.`
@@ -1171,13 +1252,28 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     } else {
       text = this.skillPermissionEdit(model.config.targetText, name, undefined);
       if (!allowedIn(text)) {
-        text = this.skillPermissionEdit(text, name, "allow");
+        text = this.skillPermissionEdit(text, name, "allow", inherited);
       }
       if (!allowedIn(text)) {
         throw profileErrors.invalidItem(
           `A later permission rule in the config still denies "${name}"; OpenCode applies the last matching rule. Change it by hand.`
         );
       }
+    }
+    // The switch is for this skill alone: refuse an edit that would flip any other.
+    const after = mergedWithTarget(model.config, text);
+    const collateral = [...model.entries.values()].flatMap((other) =>
+      other.kind === "skill" &&
+      other.skill.named &&
+      other.skill.name !== name &&
+      skillAllowed(model.config.merged, other.skill.name) !== skillAllowed(after, other.skill.name)
+        ? [other.skill.name]
+        : []
+    );
+    if (collateral.length > 0) {
+      throw profileErrors.invalidItem(
+        `Turning "${name}" ${enabled ? "on" : "off"} here would also switch ${collateral.join(", ")}; change the permission rules by hand.`
+      );
     }
     await this.writeConfig(model.config, text);
     return mutation([entry.item.id]);
@@ -1199,10 +1295,28 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     let text: string;
     if (entry.kind === "command" && entry.origin === "config") {
       if (entry.targetEntry === null) throw profileErrors.notToggleable(item.name);
-      data = { origin: "config", name: entry.name, entry: entry.targetEntry };
+      const keys = Object.keys(isJsonObject(model.config.targetValue?.command) ? model.config.targetValue.command : {});
+      const at = keys.indexOf(entry.name);
+      const raw = jsoncValueText(model.config.targetText, ["command", entry.name]);
+      data = {
+        origin: "config",
+        name: entry.name,
+        entry: entry.targetEntry,
+        after: at > 0 ? keys[at - 1]! : null,
+        ...(raw !== undefined ? { text: raw } : {})
+      };
       text = setJsonc(model.config.targetText, ["command", entry.name], undefined);
     } else if (entry.kind === "plugin" && entry.origin === "config") {
-      data = { origin: "config", entry: entry.raw, index: entry.index };
+      const list = Array.isArray(model.config.merged.plugin) ? model.config.merged.plugin : [];
+      const previous = entry.index > 0 ? specOf(list[entry.index - 1]) : null;
+      const raw = jsoncValueText(model.config.targetText, ["plugin", entry.index]);
+      data = {
+        origin: "config",
+        entry: entry.raw,
+        index: entry.index,
+        after: previous === null ? null : pluginPackageKey(previous),
+        ...(raw !== undefined ? { text: raw } : {})
+      };
       text = setJsonc(model.config.targetText, ["plugin", entry.index], undefined);
     } else {
       throw profileErrors.notToggleable(item.name);
@@ -1238,7 +1352,10 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
       if (isJsonObject(target.command) && fragment.name in target.command) {
         throw profileErrors.stashConflict(`command.${fragment.name} in ${model.config.targetPath}`);
       }
-      text = setJsonc(text, ["command", fragment.name], fragment.entry);
+      const keys = Object.keys(isJsonObject(target.command) ? target.command : {});
+      // Back after the key it followed (first when it was first; last when that key is gone).
+      const at = fragment.after === null ? 0 : typeof fragment.after === "string" && keys.includes(fragment.after) ? keys.indexOf(fragment.after) + 1 : keys.length;
+      text = insertJsoncMember(text, ["command"], fragment.name, at, fragment.entry, typeof fragment.text === "string" ? fragment.text : undefined);
     } else {
       const fragment = data as unknown as PluginFragment;
       const spec = specOf(fragment.entry);
@@ -1256,9 +1373,19 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
       if (list.some((raw) => specOf(raw) !== null && pluginPackageKey(specOf(raw)!) === key)) {
         throw profileErrors.stashConflict(`"${key}" in the plugin list of ${model.config.targetPath}`);
       }
-      const index = Math.min(Math.max(0, typeof fragment.index === "number" ? fragment.index : list.length), list.length);
+      // Back after the entry it followed, so turning several off and on keeps their order.
+      const previous =
+        typeof fragment.after === "string"
+          ? list.findIndex((raw) => specOf(raw) !== null && pluginPackageKey(specOf(raw)!) === fragment.after)
+          : -1;
+      const index =
+        fragment.after === null
+          ? 0
+          : previous >= 0
+            ? previous + 1
+            : Math.min(Math.max(0, typeof fragment.index === "number" ? fragment.index : list.length), list.length);
       text = Array.isArray(target.plugin)
-        ? insertJsoncArrayItem(text, ["plugin"], index, fragment.entry)
+        ? insertJsoncArrayItem(text, ["plugin"], index, fragment.entry, typeof fragment.text === "string" ? fragment.text : undefined)
         : setJsonc(text, ["plugin"], [fragment.entry]);
     }
     await this.writeConfig(model.config, text);
@@ -1385,9 +1512,10 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     if (text === null) {
       throw profileErrors.importFailed(`"${requested}" has no ${SKILL_FILE}.`);
     }
-    let doc: ReturnType<typeof parseMarkdownDocument>;
+    let doc: MarkdownDocument;
     try {
-      doc = parseMarkdownDocument(text);
+      // Written by another agent or the converter (YAML 1.2); rewritten below for OpenCode.
+      doc = parseOpenCodeDocument(text, { yaml: undefined });
     } catch (error) {
       throw profileErrors.importFailed(`${SKILL_FILE} of "${requested}" cannot be read: ${message(error)}`);
     }
@@ -1395,10 +1523,11 @@ export class OpenCodeProfileAdapter implements ProfileAdapter {
     const model = await this.load();
     const name = await this.claimSkillName(model, requested, policy);
     const copied = await copyTree(source, join(this.skillsRoot(), name), { refuseSymlinks: false });
-    await writeSkill(this.skillsRoot(), { name, frontmatter: {}, body: doc.body }, {
+    await writeSkill(this.skillsRoot(), { name, frontmatter: doc.frontmatter, body: doc.body }, {
       backups: this.backups,
       agent: AGENT,
-      mergeExisting: true
+      mergeExisting: false,
+      yaml: "1.1"
     });
     const notes = copied.skipped.length > 0 ? [`Left out (symlinks and special files): ${copied.skipped.join(", ")}.`] : [];
     return mutation([itemId("skill", name)], [...notes, ...this.skillNotes(model.config, name)]);
