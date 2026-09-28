@@ -9,7 +9,9 @@ import type { AgentProfileAgentId } from "@orquester/api";
 import { agentProfileBackupsDir, agentProfileStashDir } from "@orquester/config";
 import { ProfileBackups, ProfileStash } from "../infra/index.ts";
 import { ClaudeProfileAdapter } from "./claude/index.ts";
+import { CodexProfileAdapter } from "./codex/index.ts";
 import { GrokProfileAdapter } from "./grok/index.ts";
+import { OpenCodeProfileAdapter } from "./opencode/index.ts";
 import type { AgentHomes, ProfileAdapter, ProfileAdapterContext } from "./types.ts";
 
 /** What the daemon hands the factory; everything per agent is derived from it by {@link adapterContext}. */
@@ -53,6 +55,8 @@ export function createAgentProfileAdapters(
   };
   return {
     claude: new ClaudeProfileAdapter(adapterContext(ctx, "claude"), deps),
-    grok: new GrokProfileAdapter(adapterContext(ctx, "grok"), deps)
+    codex: new CodexProfileAdapter(adapterContext(ctx, "codex"), deps),
+    grok: new GrokProfileAdapter(adapterContext(ctx, "grok"), deps),
+    opencode: new OpenCodeProfileAdapter(adapterContext(ctx, "opencode"), deps)
   };
 }

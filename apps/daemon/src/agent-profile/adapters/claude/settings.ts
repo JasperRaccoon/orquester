@@ -16,6 +16,7 @@
  * - `hooks.<Event>[group].hooks[handler]` — user hooks.
  */
 
+import { isManagedGroup } from "../../../agent-hooks.ts";
 import { hookItemId, type ProfileBackups, readTextIfExists, writeProfileFileVerified } from "../../infra/index.ts";
 import { profileErrors } from "../../errors.ts";
 
@@ -171,19 +172,6 @@ export function normalizeMatcher(matcher: unknown): string | null {
 /** The id of a hook: the event plus its matcher and whole handler object. */
 export function claudeHookId(event: string, matcher: string | null, handler: Record<string, unknown>): string {
   return hookItemId(event, { ...handler, matcher });
-}
-
-function groupCommands(group: unknown): string[] {
-  const hooks = isRecord(group) ? group.hooks : undefined;
-  if (!Array.isArray(hooks)) return [];
-  return hooks
-    .map((h) => (isRecord(h) ? h.command : undefined))
-    .filter((c): c is string => typeof c === "string");
-}
-
-/** Orquester's status hook group — the same test as `isManagedGroup` in `agent-hooks.ts`. */
-export function isManagedGroup(group: unknown): boolean {
-  return groupCommands(group).some((c) => c.includes("agent-hook.sh"));
 }
 
 /** Every handler in `doc.hooks`, in file order. Malformed groups and handlers are skipped. */
