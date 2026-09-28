@@ -1,4 +1,5 @@
 import type { ClientConfig, DaemonConfig } from "@orquester/config";
+import type { WorkflowSessionOwner } from "./workflows/types.ts";
 import type {
   AgentAdapterId,
   AgentChatGoalSummary,
@@ -22,6 +23,8 @@ export type RuntimeMode = "desktop-local" | "desktop-remote" | "web-remote";
  */
 export * from "./agent-chat/index.ts";
 export * from "./saved-prompts.ts";
+export * from "./prompt-variables.ts";
+export * from "./workflows/index.ts";
 
 export type {
   AgentChatBackgroundLiveness,
@@ -253,8 +256,13 @@ export interface OwnerSummary {
  */
 export type CreateProjectRequest =
   | { source?: "empty"; name: string }
-  /** `url`: full URL, `git@…`, or `owner/repo`; `name` overrides the dest dir. */
-  | { source: "clone"; url: string; name?: string }
+  /**
+   * `url`: full URL, `git@…`, or `owner/repo`; `name` overrides the dest dir. `ref` (optional)
+   * checks out a branch, tag or commit sha after the clone (≤ 250 chars, no leading `-`, no
+   * whitespace/control characters; 400 `INVALID_REF` otherwise). `unattended` (an automated
+   * caller — a workflow's temporary project): the clone is bounded at 10 min and never prompts.
+   */
+  | { source: "clone"; url: string; name?: string; ref?: string; unattended?: boolean }
   | {
       source: "create";
       owner: string;
@@ -1170,6 +1178,11 @@ export interface SessionSummary {
    * keeps starting turns for it — or null when it has none (goals §4.7).
    */
   goal?: AgentChatGoalSummary | null;
+  /**
+   * Set when an automated workflow started this session (workflows spec §5.10): the tab shows a
+   * Workflow chip linking to the run, and the workflow tab sweeper may close it.
+   */
+  owner?: WorkflowSessionOwner;
 }
 
 export interface CreateSessionRequest {
@@ -1210,6 +1223,8 @@ export interface CreateSessionRequest {
    * may leave it unset.
    */
   chat?: CreateAgentChatSessionFields;
+  /** The workflow run that starts this session (workflows spec §5.10). Persisted on the tab record. */
+  owner?: WorkflowSessionOwner;
 }
 
 /** Longest `CreateSessionRequest.initialCommand` the daemon will type. */

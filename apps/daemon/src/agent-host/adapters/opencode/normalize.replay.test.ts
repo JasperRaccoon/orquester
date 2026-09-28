@@ -927,7 +927,8 @@ test("12: the parent's `task` tool part supplies the role, the model and the too
   assert.equal(enriched.payload.role, "explore");
   assert.equal(enriched.payload.model, "openrouter/google/gemini-3.1-flash-lite");
   assert.equal(enriched.payload.toolUseId, "call_107260");
-  assert.match(String(enriched.payload.title), /@explore subagent/);
+  // The session's title, less the "(@explore subagent)" the role already says.
+  assert.equal(enriched.payload.title, "list files");
 });
 
 test("12: the child's own tool work reaches the roster as progress", () => {
@@ -942,6 +943,23 @@ test("12: the child's own tool work reaches the roster as progress", () => {
   // Its status transitions land as non-terminal patches.
   const statuses = eventsOfType(events, "task.updated").map((event) => event.payload.status);
   assert.ok(statuses.includes("running"), `saw ${JSON.stringify(statuses)}`);
+});
+
+test("12: the child's own steps are its roster usage, and never the parent's meter", () => {
+  const { events } = replayChildParent();
+  const usages = eventsOfType(events, "task.progress")
+    .map((event) => event.payload.usage)
+    .filter((usage) => usage !== undefined);
+  // The child's two `step-finish` parts (lines 161 and 174), summed once each
+  // however often a part is restated.
+  assert.deepEqual(usages.at(-1), {
+    totalTokens: 3538 + 3585,
+    inputTokens: 3454 + 3544,
+    cachedInputTokens: 0,
+    outputTokens: 16 + 68 + 18 + 23,
+    reasoningOutputTokens: 68 + 23,
+    toolUses: 1
+  });
 });
 
 test("12: a child's items and text are stamped with agentId; the parent's are not", () => {
@@ -1220,7 +1238,7 @@ test("a child's title change is a progress row; a re-stated title is not (observ
   const changed = eventsOfType(feed(run, retitled).flat(), "task.progress");
   assert.equal(changed.length, 1);
   assert.equal(changed[0]?.payload.summary, "list hidden files (@explore subagent)");
-  assert.equal(changed[0]?.payload.title, "list hidden files (@explore subagent)");
+  assert.equal(changed[0]?.payload.title, "list hidden files");
   assert.deepEqual(taskRows(feed(run, retitled).flat()), [], "re-stated, it is not a change");
 });
 
@@ -3120,6 +3138,60 @@ test("13: three session.error frames for one bad model collapse to one runtime.e
 test("13: a session.error settles the turn through a signal", () => {
   const { signals } = replay("13-error-shapes.ndjson");
   assert.ok(signals.some((signal) => signal.kind === "turn-failed"));
+});
+
+test("13: the recorded errors name no account failure", () => {
+  const { events } = replay("13-error-shapes.ndjson");
+  for (const error of eventsOfType(events, "runtime.error")) {
+    assert.equal(error.payload.reason, undefined);
+  }
+});
+
+test("an account failure on session.error carries a structured reason (workflows §5.4)", () => {
+  // No capture holds a limit or a refused login: the frames follow the
+  // recorded session.error envelope of 13, with the SDK's typed errors in it.
+  const { state, ctx } = replay("13-error-shapes.ndjson");
+  const sessionID = state.openCodeSessionId;
+  const reasons = (error: unknown): Array<[string | undefined, string | undefined]> => {
+    state.activeTurnId = "turn-limit";
+    state.lastSessionErrorMessage = undefined;
+    const { events } = normalizeOpenCodeEvent(
+      state,
+      { type: "session.error", properties: { sessionID, error } } as OpenCodeRawEvent,
+      ctx
+    );
+    return eventsOfType(events, "runtime.error").map((event) => [
+      event.payload.reason,
+      event.payload.resetsAt
+    ]);
+  };
+  const apiError = (statusCode: number, responseHeaders?: Record<string, string>): unknown => ({
+    name: "APIError",
+    data: {
+      message: `status ${statusCode}`,
+      statusCode,
+      isRetryable: false,
+      ...(responseHeaders !== undefined ? { responseHeaders } : {})
+    }
+  });
+  assert.deepEqual(reasons(apiError(429)), [["usage_limit", undefined]]);
+  // `ctx.nowIso` is 2026-09-21T00:00:00.000Z.
+  assert.deepEqual(reasons(apiError(429, { "Retry-After": "120" })), [
+    ["usage_limit", "2026-09-21T00:02:00.000Z"]
+  ]);
+  assert.deepEqual(reasons(apiError(429, { "retry-after-ms": "1500" })), [
+    ["usage_limit", "2026-09-21T00:00:01.500Z"]
+  ]);
+  assert.deepEqual(reasons(apiError(401)), [["auth", undefined]]);
+  assert.deepEqual(reasons(apiError(403)), [["auth", undefined]]);
+  assert.deepEqual(
+    reasons({ name: "ProviderAuthError", data: { providerID: "anthropic", message: "no key" } }),
+    [["auth", undefined]]
+  );
+  assert.deepEqual(reasons(apiError(500)), [[undefined, undefined]]);
+  assert.deepEqual(reasons({ name: "UnknownError", data: { message: "429 Too Many Requests" } }), [
+    [undefined, undefined]
+  ]);
 });
 
 test("14: a SIGTERM mid-turn leaves the capture with no farewell frame to decode", () => {

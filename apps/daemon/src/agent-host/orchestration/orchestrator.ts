@@ -86,7 +86,7 @@ import {
   AGENT_CHAT_REPLAY_PAYLOAD_BUDGET_BYTES
 } from "@orquester/api/agent-chat";
 
-import type { AccountHome } from "@orquester/api/agent-chat";
+import type { AccountHome, ProviderUsageWindow } from "@orquester/api/agent-chat";
 
 /**
  * The prefix the client puts on the turn it sends when the user clicks
@@ -3928,6 +3928,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       runtime.watchdog?.stop();
       await ingestion.forget(threadId);
       releaseProviderThreads(threadId);
+      liveUsageLimits.delete(threadId);
       runtimes.delete(threadId);
       loadingRuntimes.delete(threadId);
     });
@@ -4671,7 +4672,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           }
         : null,
       chatSessionStatus: head.session.status,
-      goal: goalSummaryOf(runtime, head)
+      goal: goalSummaryOf(runtime, head),
+      usageLimits: liveUsageLimits.get(threadId) ?? null
     };
   };
 
@@ -4759,14 +4761,47 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return null;
   };
 
+  /**
+   * Each thread's latest live account usage, for its summary (the daemon's
+   * usage service reads it per account). Memory only: a reading is only as
+   * good as the process that reported it, and the daemon persists its own.
+   */
+  const liveUsageLimits = new Map<string, HostThreadUsageLimits>();
+
+  const recordLiveUsageLimits = (event: RuntimeEvent): boolean => {
+    if (event.type !== "account.rate-limits.updated") return true;
+    const runtime = runtimes.get(event.threadId);
+    const head = runtime ? headOf(runtime) : null;
+    if (!head) return true;
+    const previous = liveUsageLimits.get(event.threadId);
+    // A reading under another account replaces the windows rather than merging
+    // them: the previous account's numbers are not this one's.
+    const sameAccount = previous !== undefined && previous.home === head.home && previous.accountId === head.accountId;
+    const byId = new Map((sameAccount ? previous.windows : []).map((window) => [window.id, window]));
+    for (const window of event.payload.limits.windows) {
+      byId.set(window.id, { ...byId.get(window.id), ...window });
+    }
+    liveUsageLimits.set(event.threadId, {
+      observedAt: clock.nowIso(),
+      home: head.home,
+      accountId: head.accountId,
+      windows: [...byId.values()]
+    });
+    // The provider snapshot describes the daemon user's own login (its probe
+    // runs there), so only a thread on that login may move its windows: a
+    // managed account's numbers merged into it read as the system login's.
+    return head.home === "system";
+  };
+
   const onAccountEvent = (event: RuntimeEvent): void => {
     const adapterId = adapterForThread(event.threadId);
     if (!adapterId) return;
+    const onSystemLogin = recordLiveUsageLimits(event);
     // Two different facts arrive on this hook: a rate-limit window and an auth
     // failure. `applyUsageLimits` ignores everything but the former, so the
     // latter needs its own sink or it is dropped on the floor and §7.7's toast
     // never fires.
-    snapshots.applyUsageLimits(adapterId, event);
+    if (onSystemLogin) snapshots.applyUsageLimits(adapterId, event);
     snapshots.applyAuthStatus?.(adapterId, event);
   };
 
@@ -6658,6 +6693,16 @@ export interface HostThreadSummary extends AgentChatSessionSummaryFields {
     kind: "approval" | "question";
     title: string;
   }>;
+  /** The thread's latest live account usage (`AgentHostThreadSummary.usageLimits`). */
+  usageLimits?: HostThreadUsageLimits | null;
+}
+
+/** Mirrors `AgentHostThreadUsageLimits` (`server/extra-routes.ts`). */
+export interface HostThreadUsageLimits {
+  observedAt: string;
+  home: "system" | "account";
+  accountId: string;
+  windows: ProviderUsageWindow[];
 }
 
 /**

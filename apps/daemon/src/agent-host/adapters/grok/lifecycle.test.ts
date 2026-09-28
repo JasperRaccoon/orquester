@@ -2278,3 +2278,78 @@ test("an answered approval is settled once, by the answer", async () => {
   assert.deepEqual(resolutions[0]!.payload, { requestType: "file_change_approval", decision: "accept" });
   await r.dispose();
 });
+
+// ---------------------------------------------------------------------------
+// Account failures carry a structured reason (workflows §5.4)
+// ---------------------------------------------------------------------------
+
+function runtimeErrors(events: readonly RuntimeEvent[]): Array<Extract<RuntimeEvent, { type: "runtime.error" }>> {
+  return events.filter(
+    (event): event is Extract<RuntimeEvent, { type: "runtime.error" }> => event.type === "runtime.error"
+  );
+}
+
+test("a rate_limit stop is a usage limit, named by its reason — with no reset time to give", async () => {
+  const r = await rig({ scenario: "rate-limit" });
+  await start(r);
+  void r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  await r.drain();
+  const errors = runtimeErrors(r.events);
+  assert.equal(errors.length, 1);
+  assert.equal(errors[0]!.payload.reason, "usage_limit");
+  assert.equal(errors[0]!.payload.resetsAt, undefined, "the frame names no reset");
+  await r.dispose();
+});
+
+for (const noPromptComplete of [false, true]) {
+  test(`an authentication_failed stop is a refused login, named by its reason${noPromptComplete ? " (no prompt_complete)" : ""}`, async () => {
+    const r = await rig({ scenario: "stop-failure", env: { GROK_MOCK_STOP_REASON: "authentication_failed", ...(noPromptComplete ? { GROK_MOCK_NO_PROMPT_COMPLETE: "1" } : {}) } });
+    await start(r);
+    void r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+    await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+    await r.drain();
+    const errors = runtimeErrors(r.events);
+    assert.equal(errors.length, 1, "reported once");
+    assert.equal(errors[0]!.payload.reason, "auth");
+    await r.dispose();
+  });
+}
+
+for (const [message, reason] of [
+  ["You are not authenticated.", "auth"],
+  ["Authentication failed: invalid_grant", "auth"],
+  ["upstream error 401 Unauthorized", "auth"],
+  ["xai: 429 grok-usage-exhausted", "usage_limit"],
+  ["model returned an empty response", undefined]
+] as const) {
+  test(`a prompt the CLI answers with "${message}" (-32603) names ${reason ?? "no account failure"}`, async () => {
+    const r = await rig({ scenario: "prompt-error", env: { GROK_MOCK_PROMPT_ERROR_CODE: "-32603", GROK_MOCK_PROMPT_ERROR_MESSAGE: message } });
+    await start(r);
+    void r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+    await r.waitFor((event) => event.type === "runtime.error", "runtime.error");
+    await r.drain();
+    const errors = runtimeErrors(r.events);
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0]!.payload.reason, reason);
+    await r.dispose();
+  });
+}
+
+for (const [code, reason] of [
+  [-32000, "auth"],
+  [-32003, "usage_limit"],
+  [-32603, undefined]
+] as const) {
+  test(`a prompt the CLI answers with ${code} names ${reason ?? "no account failure"}`, async () => {
+    const r = await rig({ scenario: "prompt-error", env: { GROK_MOCK_PROMPT_ERROR_CODE: String(code) } });
+    await start(r);
+    void r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+    await r.waitFor((event) => event.type === "runtime.error", "runtime.error");
+    await r.drain();
+    const errors = runtimeErrors(r.events);
+    assert.equal(errors.length, 1);
+    assert.equal(errors[0]!.payload.reason, reason);
+    await r.dispose();
+  });
+}

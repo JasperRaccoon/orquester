@@ -95,11 +95,12 @@ import { listAgentConversations } from "./agent-conversations.ts";
 import { claudeTimeoutEnv } from "./agent-timeout-env.ts";
 import { type ISessionManager, SessionError, createSessionManager, resumeLaunchArgs } from "./sessions";
 import { AgentChatService, ChatSessionError, type CreateAgentChatRequest } from "./agent-chat/service.ts";
+import { INVALID_OWNER, parseSessionOwner } from "./agent-chat/owner.ts";
 import { ChatAwareSessionManager } from "./agent-chat/session-router.ts";
 import { registerAgentChatRoutes } from "./agent-chat/proxy-routes.ts";
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
-import { RecentProjectsService } from "./recent-projects";
+import { RecentProjectsService, describeProjectPath } from "./recent-projects";
 import { SavedPromptError, SavedPromptsService, publishSavedPromptEvents } from "./saved-prompts.ts";
 import { detectRepoId } from "./repo-id";
 import { Tmux, sessionPath, tmuxAvailable, tmuxVersionOk } from "./tmux";
@@ -108,13 +109,32 @@ import { GrokDeviceLinkService } from "./grok-device-link.ts";
 import { retireModelProxy } from "./model-proxy-retirement.ts";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
+import { cloneRefProblem } from "./workflows/git-remote";
+import type { ProjectOps, WorkflowEngine } from "./workflows/contracts.ts";
+import { WorkflowService, publishWorkflowEvents } from "./workflows/service.ts";
+import { WorkflowSecretsService } from "./workflows/secrets.ts";
+import { FileRunStore } from "./workflows/run-store.ts";
+import { WorkflowStateStore } from "./workflows/state-store.ts";
+import { registerWorkflowRoutes } from "./workflows/routes.ts";
+import type { ValidationCatalog } from "./workflows/agent/validation-catalog.ts";
+import { consoleWorkflowLogger, createWorkflowDaemon } from "./workflows/daemon-wiring.ts";
+import { createInternalDaemonApi } from "./chat-client/index.ts";
 import { AgentAccountsService } from "./agent-accounts.ts";
 import { AgentAccountError } from "./agent-account-paths.ts";
 import { PushService, isValidPushEndpoint } from "./push";
 import { GitError, GitService, GitWatcher, passesGitEventFilter, workingDiffMaxBytes } from "./git";
 import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
-import { createClaudeSource, createCodexSource, createGrokSource, readUsagePrefs, shouldHideSystemUsage } from "./usage-sources";
+import {
+  createClaudeSource,
+  createCodexSource,
+  createGrokSource,
+  readUsagePrefs,
+  claudeLiveUsageFromWindows,
+  shouldHideSystemUsage,
+  type ClaudeUsageSource
+} from "./usage-sources";
+import { UsageStateFile } from "./usage-state";
 import { currentScopedWindows, currentWindow } from "./usage-parse";
 import { listArchiveEntries } from "./archive";
 import { ParquetRequestError, readParquetWindow } from "./parquet";
@@ -168,9 +188,14 @@ import {
   resolveDaemonPaths,
   savedPromptsPath,
   sessionsIndexPath,
+  workflowRunsDir,
+  workflowSecretsPath,
+  workflowStatePath,
+  workflowsPath,
   tmuxSocketPath,
   todosIndexPath,
   usageTokensCacheFile,
+  usageStateFile,
   workspacesMetaPath,
   isValidName
 } from "@orquester/config";
@@ -225,6 +250,14 @@ interface ResolvedPaths {
   recentProjectsFile: string;
   /** <appdir>/daemon/saved-prompts.json — the shared saved-prompt library. */
   savedPromptsFile: string;
+  /** <appdir>/daemon/workflows.json — automated workflow definitions (workflows spec §3.1). */
+  workflowsFile: string;
+  /** <appdir>/daemon/workflow-state.json — schedule/git cursors, account cooldowns. */
+  workflowStateFile: string;
+  /** <appdir>/daemon/workflow-secrets.json — secret values (0600; names only leave the daemon). */
+  workflowSecretsFile: string;
+  /** <appdir>/daemon/workflow-runs — one directory per run (§5.8). */
+  workflowRunsDir: string;
   /** <appdir>/daemon/push.json — Web Push VAPID keypair + subscriptions (0600). */
   pushConfigFile: string;
   workspacesDir: string;
@@ -357,6 +390,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     todosIndexFile: todosIndexPath(paths.baseDir),
     recentProjectsFile: recentProjectsPath(paths.baseDir),
     savedPromptsFile: savedPromptsPath(paths.baseDir),
+    workflowsFile: workflowsPath(paths.baseDir),
+    workflowStateFile: workflowStatePath(paths.baseDir),
+    workflowSecretsFile: workflowSecretsPath(paths.baseDir),
+    workflowRunsDir: workflowRunsDir(paths.baseDir),
     pushConfigFile: pushConfigPath(paths.baseDir),
     workspacesDir: expandVars(config.workspacesDir, paths.vars),
     keysDir: keysDir(paths.baseDir),
@@ -526,6 +563,28 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
   await savedPrompts.load();
+  // Automated workflows (workflows spec §3, §5.7, §5.8): definitions, secrets, runs and runtime
+  // state. Each store is tolerant at load — a file it cannot parse is moved aside, one it cannot
+  // read leaves that store read-only (503 WORKFLOWS_UNAVAILABLE) — so none of them blocks boot.
+  // The ENGINE is attached later (attachWorkflowEngine, after agentChat.init()); until then the
+  // routes serve definitions, secrets and run history from these stores alone.
+  const workflowSecrets = new WorkflowSecretsService({ file: resolved.workflowSecretsFile, logger: console });
+  await workflowSecrets.load();
+  // The agent catalogue validation checks chains against lives in the workflow daemon (built
+  // below, fed the daemon's own client at start): late-bound, nothing is checked before it.
+  let workflowValidationCatalog: ValidationCatalog | null = null;
+  const workflows = new WorkflowService({
+    file: resolved.workflowsFile,
+    logger: console,
+    secretNames: (workflowId) => workflowSecrets.names(workflowId),
+    savedPromptIds: () => savedPrompts.allIds(),
+    agentCatalog: () => workflowValidationCatalog?.current()
+  });
+  await workflows.load();
+  const workflowRuns = new FileRunStore({ dir: resolved.workflowRunsDir, logger: console });
+  await workflowRuns.init();
+  const workflowState = new WorkflowStateStore({ path: resolved.workflowStateFile, logger: console });
+  await workflowState.load();
   // Push a project's git status to whoever is looking at it. The watcher polls
   // ONLY projects with a live `/events?project=…` subscriber and only emits on a
   // real change, so an unwatched (or idle) repo costs nothing.
@@ -543,8 +602,18 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     agentChat.onRegistryEntryChanged(entry);
   });
   agentAccounts.events.on("changed", (payload) => broadcaster.publish("agent-accounts", "agent-accounts.changed", payload));
+  // Each Claude source's last reading and endpoint timing, persisted: a restart shows the last
+  // numbers at once and never re-asks the rate-limited usage endpoint inside its window.
+  const usageState = new UsageStateFile(usageStateFile(paths.baseDir));
+  await usageState.load();
   const claudeAccountSource = (home?: string) =>
-    createClaudeSource({ userhome: resolved.vars.userhome, now: () => Date.now(), claudeHome: home, logger: console });
+    createClaudeSource({
+      userhome: resolved.vars.userhome,
+      now: () => Date.now(),
+      claudeHome: home,
+      logger: console,
+      state: { store: usageState, key: `claude:${home ?? ""}` }
+    });
   const codexAccountSource = (home?: string) =>
     createCodexSource({ userhome: resolved.vars.userhome, now: () => Date.now(), codexHome: home, logger: console });
   const grokCliHome = process.env.GROK_HOME || join(resolved.vars.userhome, ".grok");
@@ -633,6 +702,29 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     now: () => Date.now()
   });
   usage.events.on("changed", (u) => broadcaster.publish("usage", "usage.changed", u));
+  // Live usage: every Claude chat thread reports its account's windows off its own model
+  // responses (`rate_limit_event.unifiedWindows`); the host hands the latest on in the thread's
+  // summary. It goes to that account's source — numbers that move with every response, at no
+  // cost to the usage endpoint's budget, which is then asked only for idle accounts.
+  let liveRecompute: ReturnType<typeof setTimeout> | undefined;
+  agentChat.setUsageLimitsListener(({ refId, limits }) => {
+    if (registry.get(refId)?.chat?.adapter !== "claude") return;
+    let home: string | undefined;
+    if (limits.home === "account") {
+      const managed = agentAccounts.list().accounts.some((a) => a.agent === "claude" && a.id === limits.accountId);
+      if (!managed) return;
+      home = agentAccounts.homePath("claude", limits.accountId);
+    }
+    const live = claudeLiveUsageFromWindows(limits.windows, limits.observedAt);
+    if (!live) return;
+    const source = usageSource("claude", claudeAccountSource, home) as ClaudeUsageSource;
+    if (!source.ingestLive(live) || liveRecompute) return;
+    liveRecompute = setTimeout(() => {
+      liveRecompute = undefined;
+      void usage.recompute();
+    }, 1_000);
+    liveRecompute.unref?.();
+  });
   // NOT started here: the first recompute needs the managed-accounts index
   // (loaded by agentAccounts.init() below). Started before it, the boot reading
   // saw zero managed accounts, fell back to the System login — expired on a host
@@ -786,6 +878,58 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // included, as `savedPrompt.upserted` (the whole prompt) / `savedPrompt.deleted`.
   publishSavedPromptEvents(savedPrompts, broadcaster);
 
+  // Workflows → event bus (channel "workflows"): `workflow.upserted` (the rail summary — the
+  // engine's, with live trigger state, once attached), `workflow.deleted`, `workflowSecrets.changed`
+  // (no names, no values). Run events are published by the engine itself.
+  //
+  // The workflow runtime (workflows/daemon-wiring.ts): the engine with every block executor, the
+  // agent block and its account preview, the scheduler and the git poller, and the ONE summary
+  // builder. Built here, started after `agentChat.init()` (below, once the unix app exists).
+  // Usage is read synchronously by account selection: the service's latest reading, kept current.
+  let workflowUsage: UsageResponse = { agents: [] };
+  let workflowUsageSeen = false;
+  usage.events.on("changed", (reading: UsageResponse) => {
+    workflowUsageSeen = true;
+    workflowUsage = reading;
+  });
+  // The service started above: take what it already holds (no recompute), unless a change beat us.
+  const cachedUsage = await usage.snapshot();
+  if (!workflowUsageSeen) workflowUsage = cachedUsage;
+  const workflowTmp = join(paths.baseDir, "tmp");
+  await mkdir(workflowTmp, { recursive: true }).catch(() => undefined);
+  const workflowDaemon = createWorkflowDaemon({
+    service: workflows,
+    secrets: workflowSecrets,
+    runStore: workflowRuns,
+    state: workflowState,
+    broadcaster,
+    usage: { snapshot: () => workflowUsage },
+    accounts: {
+      list: () => agentAccounts.list()
+    },
+    git,
+    gitRemote: accounts,
+    readWorkspaceMeta: async (workspace) =>
+      (await readWorkspacesMeta(resolved.workspacesMetaFile)).workspaces.find((w) => w.name === workspace) ?? null,
+    savedPrompts,
+    // Getters: PUT /api/config/daemon reassigns both in place.
+    workspacesDir: () => resolved.workspacesDir,
+    fsRoot: () => resolved.fsRoot,
+    appdirTmp: workflowTmp,
+    push,
+    logger: consoleWorkflowLogger
+  });
+  workflowValidationCatalog = workflowDaemon.validationCatalog;
+  publishWorkflowEvents({
+    service: workflows,
+    secrets: workflowSecrets,
+    // The runtime's view of the bus: its trigger-state watcher notes every row that goes out.
+    broadcaster: workflowDaemon.events,
+    // The builder itself — never `summarizeWorkflow`, which delegates to the engine, which calls
+    // this builder (the recursion the engine refuses).
+    summarize: (workflow) => workflowDaemon.summarize(workflow)
+  });
+
   // Server-side browser tabs (Design Mode). Chromium resolves through the
   // registry's probed browser entries; no bundled download. Only CDP-speaking
   // (Chromium-family) browsers can drive puppeteer-core — see CHROMIUM_FAMILY_IDS.
@@ -814,7 +958,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   grokDeviceLink.events.on("changed", (status) => broadcaster.publish("agent-accounts", "grok-link.changed", status));
   const services: Services = {
-    registry, sessions, grokDeviceLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat
+    registry, sessions, grokDeviceLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
+    workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
+    workflowProjects: workflowDaemon.runtime.projects,
+    workflowCatalogReady: () => workflowDaemon.validationCatalog.ready()
   };
 
   // The agent host (chat spec §3.1), adopted or spawned AFTER reattach so the
@@ -836,6 +983,38 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     mode: "local"
   });
   await unixServer.listen({ path: paths.socketPath });
+
+  // The daemon's in-process client of its OWN REST API for the workflow engine's agent blocks
+  // (workflows spec §2 "Driving agents"). Bound to the UNIX app on purpose: it is always on and
+  // never rebuilt, and it needs no bearer — the HTTP app is hot-reloadable (a reference to it goes
+  // stale on the next config change) and would 401 an unauthenticated call. Every route gate the
+  // GUI meets applies to the engine through it by construction. `fsRoot`/`workspacesDir` are read
+  // once here, as the MCP's per-request client reads them.
+  services.internalApi = createInternalDaemonApi({
+    app: unixServer,
+    broadcaster,
+    agentChat,
+    // Getters: the client lives as long as the daemon, and PUT /api/config/daemon moves both.
+    fsRoot: () => resolved.fsRoot,
+    workspacesDir: () => resolved.workspacesDir
+  });
+
+  /**
+   * Attach the workflow engine: after `agentChat.init()` (above — a resumed agent block re-enters
+   * its watcher against the adopted host) and after `services.internalApi` exists (the engine's
+   * ChatClient rides it). From then on the workflow routes run, test and cancel through it; before
+   * it they answer 503 ENGINE_UNAVAILABLE and history is read from the run store alone. `start`
+   * resumes every unfinished run, starts the queue and the sweepers, then arms the scheduler and the
+   * git poller. `stop()` below stops it before flushing the workflow stores.
+   */
+  const attachWorkflowEngine = (engine: WorkflowEngine): void => {
+    services.workflowEngine = engine;
+  };
+  attachWorkflowEngine(workflowDaemon.runtime.engine);
+  // Runs resume and missed schedules fire as the engine starts, and their account selection reads
+  // usage at once: let the first reading land first (the persisted one, usually no request at all).
+  await usage.whenFirstReading(15_000);
+  await workflowDaemon.start(services.internalApi).catch((error) => console.error("Workflow engine start failed", error));
 
   // The external HTTP transport is opt-in and hot-reloadable: changing its
   // config (password / host / port / enabled) restarts THIS transport only —
@@ -882,6 +1061,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 
   const stop = async () => {
     usage.stop();
+    clearTimeout(liveRecompute);
+    await usageState.flush();
+    // Workflows first: the engine stops its timers, triggers and sweepers (never a sandbox child —
+    // those are detached and survive, §5.8), then every workflow store's write chain is flushed.
+    // Both are fast; the 3 s backstop in cli.ts bounds them regardless.
+    await workflowDaemon.stop().catch((error) => console.error("Workflow engine stop failed", error));
+    await Promise.all([workflows.flush(), workflowSecrets.flush(), workflowRuns.flush(), workflowState.flush()]);
     agentAccounts.stopRefresher();
     gitWatcher.stop();
     // Detach (don't kill) sessions: the tmux backend leaves its server running so
@@ -960,6 +1146,28 @@ interface Services {
   recentProjects: RecentProjectsService;
   /** Daemon-owned saved-prompt library (the right rail), shared by every client. */
   savedPrompts: SavedPromptsService;
+  /** Automated workflow definitions (workflows spec §3.1). */
+  workflows: WorkflowService;
+  /** Workflow secrets — names out, values only to the engine (§5.7). */
+  workflowSecrets: WorkflowSecretsService;
+  /** Workflow runs on disk (§5.8). */
+  workflowRuns: FileRunStore;
+  /** Schedule/git cursors and account cooldowns (§3.1); the engine and triggers own its contents. */
+  workflowState: WorkflowStateStore;
+  /**
+   * The workflow engine, once `attachWorkflowEngine` (in `startDaemon`) has run; null before.
+   * The routes read it per request.
+   */
+  workflowEngine: WorkflowEngine | null;
+  /** Temporary-project deletes for the workflow delete cascade when the engine cannot do them. */
+  workflowProjects?: Pick<ProjectOps, "deleteProject">;
+  /** Brings the workflow validation's agent catalogue up to date (bounded) before a write. */
+  workflowCatalogReady?: () => Promise<void>;
+  /**
+   * The daemon's in-process, unauthenticated client of its own REST API, bound to the unix app
+   * (see its construction in `startDaemon`); null until that app exists. The engine's ChatClient.
+   */
+  internalApi: InjectDaemonApi | null;
   usage: UsageService;
   usageTokens: UsageTokensScanner;
   push: PushService;
@@ -1527,12 +1735,22 @@ export function createServer(
           if (preferredName !== undefined && !isValidName(preferredName)) {
             return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid name." });
           }
+          const refProblem = body.ref === undefined ? null : cloneRefProblem(body.ref);
+          if (refProblem) {
+            return reply.code(400).send({ code: "INVALID_REF", message: refProblem });
+          }
           await mkdir(workspaceDir, { recursive: true });
           const { name } = await accounts.cloneFromInput(
             accountId,
             body.url,
             preferredName,
-            workspaceDir
+            workspaceDir,
+            {
+              ...(body.ref === undefined ? {} : { ref: body.ref }),
+              // Only an automated caller (a workflow's temporary project) gets the 10-minute
+              // ceiling and the prompt-free env; the New Project dialog's clone is unbounded.
+              ...(body.unattended === true ? { unattended: true } : {})
+            }
           );
           // A stale archived name (dir removed outside orquester) would hide
           // the fresh clone — prune it, same as the empty branch above.
@@ -2951,6 +3169,17 @@ export function createServer(
 
   app.post("/api/sessions", async (request, reply): Promise<SessionSummary | void> => {
     const body = (request.body ?? {}) as CreateSessionRequest;
+    // workflows §5.10: only a chat tab can be a workflow's, and its owner must parse.
+    if (body.owner !== undefined) {
+      const owner = parseSessionOwner(body.owner);
+      if (!owner.ok || body.kind !== "agent-chat") {
+        return reply.code(400).send({
+          code: INVALID_OWNER,
+          message: owner.ok ? "owner is only accepted for agent-chat sessions." : owner.message
+        });
+      }
+      body.owner = owner.owner;
+    }
     // A chat tab takes the §6.1 path: the tab record, then the host thread. It
     // shares nothing with the PTY branch below.
     if (body.kind === "agent-chat") {
@@ -3425,6 +3654,26 @@ export function createServer(
       }
     }
   );
+
+  // Automated workflows (workflows spec §8.1) — definitions, runs, logs, secrets. Both
+  // transports; the bearer hook above gates HTTP. Secret values are write-only.
+  registerWorkflowRoutes(app, {
+    service: services.workflows,
+    secrets: services.workflowSecrets,
+    runStore: services.workflowRuns,
+    engine: () => services.workflowEngine,
+    ...(services.workflowProjects ? { projects: services.workflowProjects } : {}),
+    ...(services.workflowCatalogReady ? { agentCatalogReady: services.workflowCatalogReady } : {}),
+    savedPromptIds: () => services.savedPrompts.allIds(),
+    // `?projectPath=` names `<workspacesDir>/<ws>/<project>`, read per request (PUT
+    // /api/config/daemon can move the workspaces dir).
+    projectPathFilter: (projectPath) => {
+      const described = describeProjectPath(resolved.workspacesDir, projectPath);
+      return described
+        ? { path: join(resolved.workspacesDir, described.workspace, described.name), workspace: described.workspace }
+        : null;
+    }
+  });
 
   // Web Push (PWA attention notifications). Allowed on both transports like
   // /api/sessions and /api/accounts — the response never carries the VAPID

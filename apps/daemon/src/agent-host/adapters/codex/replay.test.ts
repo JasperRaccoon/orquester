@@ -784,6 +784,108 @@ describe("codex replay — 13 error envelopes", () => {
   });
 });
 
+describe("codex — account failures carry a structured reason (workflows §5.4)", () => {
+  // No capture holds a limit or a refused login; the frames below follow the
+  // recorded envelope of 13-error-envelopes exactly, only the
+  // `codexErrorInfo` differs (and the rate-limit body follows 01's).
+  function errorFrame(codexErrorInfo: unknown, willRetry: boolean): unknown {
+    return {
+      error: {
+        message: "{\"type\":\"error\",\"status\":429,\"error\":{\"message\":\"limit\"}}",
+        codexErrorInfo,
+        additionalDetails: null,
+        misalignment: null
+      },
+      willRetry,
+      threadId: "thread-1",
+      turnId: "turn-1"
+    };
+  }
+  function rateLimits(usedPercent: number, resetsAt: number | null): unknown {
+    return {
+      rateLimits: {
+        limitId: "codex",
+        limitName: null,
+        normalModelSlug: null,
+        primary: { usedPercent, windowDurationMins: 10080, resetsAt },
+        secondary: null,
+        credits: { hasCredits: false, unlimited: false, balance: "0" },
+        individualLimit: null,
+        spendControlReached: null,
+        planType: "pro",
+        rateLimitReachedType: null
+      }
+    };
+  }
+  function run(frames: Array<[string, unknown]>): RuntimeEvent["payload"][] {
+    const normaliser = new CodexNormaliser({ usage: new CodexUsageTracker() });
+    const out: RuntimeEvent["payload"][] = [];
+    for (const [method, params] of frames) {
+      for (const draft of normaliser.notification(method as never, params)) {
+        if (draft.type === "runtime.error" || draft.type === "runtime.warning") {
+          out.push(draft.payload);
+        }
+      }
+    }
+    return out;
+  }
+
+  for (const info of ["usageLimitExceeded", "rateLimitExceeded", "sessionBudgetExceeded"]) {
+    it(`a terminal ${info} is a usage limit`, () => {
+      const [payload] = run([["error", errorFrame(info, false)]]);
+      assert.equal((payload as { reason?: string }).reason, "usage_limit");
+      assert.equal((payload as { resetsAt?: string }).resetsAt, undefined, "no window said so");
+    });
+  }
+
+  it("the reset is the exhausted window's, from the last rate-limit report", () => {
+    const [payload] = run([
+      ["account/rateLimits/updated", rateLimits(100, 1790220221)],
+      ["error", errorFrame("usageLimitExceeded", false)]
+    ]);
+    assert.equal((payload as { reason?: string }).reason, "usage_limit");
+    assert.equal(
+      (payload as { resetsAt?: string }).resetsAt,
+      new Date(1790220221 * 1000).toISOString()
+    );
+  });
+
+  it("a window with headroom names no reset", () => {
+    const [payload] = run([
+      ["account/rateLimits/updated", rateLimits(30, 1790220221)],
+      ["error", errorFrame("usageLimitExceeded", false)]
+    ]);
+    assert.equal((payload as { resetsAt?: string }).resetsAt, undefined);
+  });
+
+  it("a retry that may still succeed carries no reason", () => {
+    const [payload] = run([["error", errorFrame("usageLimitExceeded", true)]]);
+    assert.equal((payload as { reason?: string }).reason, undefined);
+  });
+
+  it("unauthorized, and a 401 connection failure, are auth", () => {
+    const payloads = run([
+      ["error", errorFrame("unauthorized", false)],
+      ["error", errorFrame({ httpConnectionFailed: { httpStatusCode: 401 } }, false)],
+      ["error", errorFrame({ httpConnectionFailed: { httpStatusCode: 502 } }, false)],
+      ["error", errorFrame("other", false)]
+    ]);
+    assert.deepEqual(
+      payloads.map((payload) => (payload as { reason?: string }).reason),
+      ["auth", "auth", undefined, undefined]
+    );
+  });
+
+  it("the recorded error envelopes name no account failure", () => {
+    const { events } = replay("13-error-envelopes.ndjson");
+    for (const event of events) {
+      if (event.type === "runtime.error" || event.type === "runtime.warning") {
+        assert.equal((event.payload as { reason?: string }).reason, undefined);
+      }
+    }
+  });
+});
+
 describe("codex replay — 15 MCP elicitation", () => {
   it("the params are a rendered form with the approval kind in _meta", () => {
     const requests = inbound(readFixture("15-mcp-elicitation-approval.ndjson")).requests.filter(

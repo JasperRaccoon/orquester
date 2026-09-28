@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import {
   Archive,
   Box,
@@ -9,7 +9,8 @@ import {
   MoreVertical,
   Pencil,
   Plus,
-  Trash2
+  Trash2,
+  Workflow as WorkflowIcon
 } from "lucide-react";
 import { cn } from "../../lib/cn";
 import {
@@ -26,6 +27,10 @@ import { useAppStore } from "../../store/app";
 import { copyText } from "../../lib/clipboard";
 import type { ProjectSummary } from "../../types";
 import type { TodoListRecord } from "@orquester/api";
+import { useApi } from "../../context/orquester-context";
+import { useWorkflowsLoadStatus, useWorkflowTempProjects } from "../../lib/workflows/hooks";
+import { loadWorkflows } from "../../lib/workflows/store";
+import { isWorkflowTempProject, looksLikeWorkflowTempProject } from "../../lib/workflows/temp-projects";
 
 /** Sidebar view shown after entering a workspace: its projects. */
 export const ProjectList: React.FC = () => {
@@ -56,6 +61,18 @@ export const ProjectList: React.FC = () => {
 
   // Archived projects live only in the sidebar footer panel.
   const visibleProjects = projects.filter((p) => !p.isArchived);
+
+  // §5.10: a workflow run's temporary project carries a small marker. The
+  // workflows store is the evidence; it is asked for only when a project's
+  // name looks like one and nothing loaded the workflows yet.
+  const api = useApi();
+  const tempProjects = useWorkflowTempProjects();
+  const workflowsLoad = useWorkflowsLoadStatus();
+  const connected = useAppStore((s) => s.connectionStatus === "connected");
+  const anyLookalike = visibleProjects.some((p) => looksLikeWorkflowTempProject(p.name));
+  useEffect(() => {
+    if (connected && anyLookalike && workflowsLoad === "idle") void loadWorkflows(api);
+  }, [api, connected, anyLookalike, workflowsLoad]);
 
   const todoLists = todos
     .filter((t) => t.scope === "workspace" && t.refKey === currentWorkspace)
@@ -173,6 +190,15 @@ export const ProjectList: React.FC = () => {
             >
               <Box size={15} className="shrink-0 text-neutral-500" />
               <span className="flex-1 truncate">{project.name}</span>
+              {isWorkflowTempProject(project, tempProjects) ? (
+                <span
+                  title="Temporary project of a workflow run"
+                  aria-label="Temporary project of a workflow run"
+                  className="shrink-0 text-neutral-500"
+                >
+                  <WorkflowIcon size={12} aria-hidden />
+                </span>
+              ) : null}
             </button>
             <button
               type="button"

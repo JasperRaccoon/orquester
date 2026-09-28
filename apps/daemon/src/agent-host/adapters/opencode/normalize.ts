@@ -32,9 +32,11 @@ import type {
   CanonicalItemType,
   RuntimeEvent,
   RuntimeEventBase,
+  RuntimeFailureReason,
   RuntimeItemStatus,
   RuntimeTaskCompletedStatus,
   RuntimeTaskStatus,
+  RuntimeTaskUsage,
   TaskAgentLinkage,
   ToolLifecycleItemType,
   UserInputQuestion
@@ -61,6 +63,7 @@ import {
 } from "./ruleset.ts";
 import {
   accumulateStepUsage,
+  childAgentUsage,
   addRelatedSession,
   advanceOutputMark,
   claimPrompt,
@@ -234,6 +237,71 @@ export function sessionErrorMessage(error: unknown): string {
 }
 
 /**
+ * The account failure a `session.error` names (workflows §5.4), read off the
+ * SDK's typed error — never its message: `ProviderAuthError`, or an
+ * `APIError` whose `statusCode` is 401/403, is a refused login; an `APIError`
+ * with 429 is a usage limit, and its reset is the provider's `Retry-After`
+ * (`retry-after-ms` first), relative to `nowIso`. OpenCode retries a
+ * retryable 429 itself (`session.status {type:"retry"}`, which names no
+ * status code), so only the error it finally gives up with reaches here.
+ */
+export function sessionErrorFailure(
+  error: unknown,
+  nowIso: string
+): { reason: RuntimeFailureReason; resetsAt?: string } | undefined {
+  if (!isRecord(error)) {
+    return undefined;
+  }
+  if (error.name === "ProviderAuthError") {
+    return { reason: "auth" };
+  }
+  if (error.name !== "APIError" || !isRecord(error.data)) {
+    return undefined;
+  }
+  const status = error.data.statusCode;
+  if (status === 401 || status === 403) {
+    return { reason: "auth" };
+  }
+  if (status !== 429) {
+    return undefined;
+  }
+  const resetsAt = retryAfterIso(error.data.responseHeaders, nowIso);
+  return { reason: "usage_limit", ...(resetsAt !== undefined ? { resetsAt } : {}) };
+}
+
+/** `Retry-After` (seconds or an HTTP date) or `retry-after-ms`, as an ISO time. */
+function retryAfterIso(headers: unknown, nowIso: string): string | undefined {
+  if (!isRecord(headers)) {
+    return undefined;
+  }
+  const header = (name: string): string | undefined => {
+    for (const [key, value] of Object.entries(headers)) {
+      if (key.toLowerCase() === name && typeof value === "string" && value.trim().length > 0) {
+        return value.trim();
+      }
+    }
+    return undefined;
+  };
+  const now = Date.parse(nowIso);
+  if (!Number.isFinite(now)) {
+    return undefined;
+  }
+  const ms = header("retry-after-ms");
+  if (ms !== undefined && /^\d+(\.\d+)?$/.test(ms)) {
+    return new Date(now + Number(ms)).toISOString();
+  }
+  const after = header("retry-after");
+  if (after === undefined) {
+    return undefined;
+  }
+  if (/^\d+(\.\d+)?$/.test(after)) {
+    return new Date(now + Number(after) * 1000).toISOString();
+  }
+  const date = Date.parse(after);
+  return Number.isFinite(date) ? new Date(date).toISOString() : undefined;
+}
+
+/**
  * `Model not found: x` and `ProviderModelNotFoundError: Model not found: x`
  * are the same failure. The class prefix is what 1.18.5 adds on the re-emit,
  * so it is stripped for comparison only — never from what the user reads.
@@ -301,6 +369,11 @@ class Emitter {
     private readonly state: OpenCodeSessionState,
     private readonly ctx: NormalizeContext
   ) {}
+
+  /** The event clock, for a time an event states relative to now. */
+  nowIso(): string {
+    return this.ctx.nowIso();
+  }
 
   base(input: {
     turnId?: string | undefined;
@@ -946,10 +1019,16 @@ function demux(
       state.lastSessionErrorMessage = key;
 
       out.signal({ kind: "turn-failed", message });
+      const failure = sessionErrorFailure(error, out.nowIso());
       out.push({
         ...out.base({ raw }),
         type: "runtime.error",
-        payload: { message, class: "provider_error", detail: error }
+        payload: {
+          message,
+          class: "provider_error",
+          detail: error,
+          ...(failure !== undefined ? failure : {})
+        }
       });
       return;
     }
@@ -975,13 +1054,22 @@ function demux(
  * not trust it from the provider. `taskType: "subagent"` is what makes
  * `classifyTaskAgentKind` resolve it to `"agent"`.
  */
+/**
+ * A child session's title as the roster's name: OpenCode titles it
+ * `"<description> (@<agent> subagent)"`, and the agent rides as the role.
+ */
+function childAgentTitle(title: string): string {
+  const bare = title.replace(/\s*\(@[^()]+ subagent\)\s*$/u, "");
+  return bare.length > 0 ? bare : title;
+}
+
 function childLinkage(agent: OpenCodeChildAgent): TaskAgentLinkage {
   // The run's launch: the provider's call, or the adapter's own relaunch id.
   const toolUseId = agent.launchId ?? agent.toolUseId;
   return {
     taskType: "subagent",
     agentId: agent.sessionId,
-    ...(agent.title !== undefined ? { title: agent.title } : {}),
+    ...(agent.title !== undefined ? { title: childAgentTitle(agent.title) } : {}),
     ...(agent.role !== undefined ? { role: agent.role } : {}),
     ...(agent.model !== undefined ? { model: agent.model } : {}),
     ...(toolUseId !== undefined ? { toolUseId } : {}),
@@ -1099,6 +1187,29 @@ function emitTaskProgress(
       ...(extra.lastToolName !== undefined ? { lastToolName: extra.lastToolName } : {}),
       ...(extra.status !== undefined ? { status: extra.status } : {})
     }
+  });
+}
+
+/**
+ * The child's usage alone. No description: a tick with one also rewrites the
+ * agent's one progress row (`activities.ts`), blanking its last tool and its
+ * summary; the linkage carries the title.
+ */
+function emitTaskUsage(
+  state: OpenCodeSessionState,
+  agent: OpenCodeChildAgent,
+  usage: RuntimeTaskUsage,
+  raw: unknown,
+  out: Emitter
+): void {
+  if (agent.completed) {
+    return;
+  }
+  emitTaskStarted(state, agent, raw, out);
+  out.push({
+    ...out.base({ turnId: state.activeTurnId, agentId: agent.sessionId, raw }),
+    type: "task.progress",
+    payload: { ...childLinkage(agent), taskId: agent.sessionId, description: "", usage }
   });
 }
 
@@ -1899,9 +2010,24 @@ function demuxChild(
         }
       }
 
+      if (part.type === "step-finish" && role !== "user") {
+        // The child's own spend, step by step: its roster usage. A part is
+        // restated as it settles, so it is kept by id, never added twice.
+        const step = part as Extract<OpenCodePart, { type: "step-finish" }>;
+        const agent = ensureChildAgent(state, childSessionId);
+        (agent.stepTokens ??= new Map()).set(step.id, step.tokens);
+        const usage = childAgentUsage(agent);
+        if (usage !== undefined) {
+          emitTaskUsage(state, agent, usage, raw, out);
+        }
+      }
+
       if (part.type === "tool") {
         const tool = part as Extract<OpenCodePart, { type: "tool" }>;
         const agent = ensureChildAgent(state, childSessionId);
+        if (tool.state.status === "completed" || tool.state.status === "error") {
+          (agent.finishedCalls ??= new Set()).add(tool.callID);
+        }
         if (tool.state.status === "running" || tool.state.status === "pending") {
           // A call under way — an aborted one's closing frame is an `error`.
           reportChildRun(agent, "activity", out);

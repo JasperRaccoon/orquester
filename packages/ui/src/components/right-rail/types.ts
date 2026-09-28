@@ -1,7 +1,7 @@
 /** The right rail's panels, in rail order. */
-export type RightRailPanelId = "prompts" | "history";
+export type RightRailPanelId = "prompts" | "history" | "workflows";
 
-/** What both panels receive from the rail — docked on desktop, inside the sheet on mobile. */
+/** What every panel receives from the rail — docked on desktop, inside the sheet on mobile. */
 export interface RightRailPanelProps {
   /** The chat the panel acts on: the visible chat tab (the focused grid cell), or `null`. */
   sessionId: string | null;

@@ -1,0 +1,65 @@
+[
+  {
+    "url": "https://api.github.com/repos/octo-org/hello-world/pulls/42",
+    "id": 1934567890,
+    "node_id": "PR_kwDOA1b2c85zT3xy",
+    "html_url": "https://github.com/octo-org/hello-world/pull/42",
+    "number": 42,
+    "state": "open",
+    "locked": false,
+    "title": "Add retry to the uploader",
+    "user": { "login": "octocat", "id": 583231, "type": "User", "site_admin": false },
+    "body": "Retries 5xx responses with backoff.\r\n\r\nFixes #40",
+    "created_at": "2026-09-20T10:11:12Z",
+    "updated_at": "2026-09-27T08:00:00Z",
+    "closed_at": null,
+    "merged_at": null,
+    "merge_commit_sha": "e5bd3914e2e596debea16f433f57875b5b90bcd6",
+    "draft": false,
+    "head": {
+      "label": "octocat:feature/retry",
+      "ref": "feature/retry",
+      "sha": "6dcb09b5b57875f334f61aebed695e2e4193db5e",
+      "user": { "login": "octocat" },
+      "repo": { "full_name": "octocat/hello-world" }
+    },
+    "base": {
+      "label": "octo-org:main",
+      "ref": "main",
+      "sha": "7638417db6d59f3c431d3e1f261cc637155684cd",
+      "repo": { "full_name": "octo-org/hello-world" }
+    },
+    "author_association": "CONTRIBUTOR"
+  },
+  {
+    "url": "https://api.github.com/repos/octo-org/hello-world/pulls/41",
+    "id": 1934567000,
+    "html_url": "https://github.com/octo-org/hello-world/pull/41",
+    "number": 41,
+    "state": "closed",
+    "title": "Bump deps",
+    "user": { "login": "dependabot[bot]", "type": "Bot" },
+    "body": null,
+    "created_at": "2026-09-18T10:00:00Z",
+    "updated_at": "2026-09-26T12:30:00Z",
+    "closed_at": "2026-09-26T12:30:00Z",
+    "merged_at": "2026-09-26T12:30:00Z",
+    "head": { "label": "octo-org:dependabot/npm/x", "ref": "dependabot/npm/x", "sha": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa" },
+    "base": { "label": "octo-org:main", "ref": "main", "sha": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb" }
+  },
+  {
+    "url": "https://api.github.com/repos/octo-org/hello-world/pulls/39",
+    "id": 1934566000,
+    "html_url": "https://github.com/octo-org/hello-world/pull/39",
+    "number": 39,
+    "state": "closed",
+    "title": "Experiment",
+    "user": { "login": "hubot" },
+    "body": "",
+    "updated_at": "2026-09-25T09:00:00Z",
+    "closed_at": "2026-09-25T09:00:00Z",
+    "merged_at": null,
+    "head": { "ref": "experiment", "sha": "cccccccccccccccccccccccccccccccccccccccc" },
+    "base": { "ref": "develop", "sha": "dddddddddddddddddddddddddddddddddddddddd" }
+  }
+]

@@ -223,6 +223,11 @@ export class SavedPromptsService {
     return this.prompts.get(id);
   }
 
+  /** Every prompt's id, global and per project (workflow validation names a prompt by id). */
+  allIds(): string[] {
+    return [...this.prompts.keys()];
+  }
+
   async create(request: CreateSavedPromptRequest): Promise<SavedPrompt> {
     this.requireWritable();
     const fields = fieldsOf(request);

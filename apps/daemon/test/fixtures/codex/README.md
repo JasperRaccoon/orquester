@@ -937,3 +937,40 @@ the adapter (`goal.ts`, `session.ts`) relies on — goals spec §3.2 and §6.2.
 - **Times are unix SECONDS**: `createdAt`, `updatedAt` and `timeUsedSeconds`.
 - **Goals live in `goals_1.sqlite` under the thread's `CODEX_HOME`.** Another home is another goal
   store, which is why an account switch re-creates the goal there (goals spec §6.2.2).
+
+## 24. A two-child fan-out on the wire — observed on 0.155.1, not committed
+
+A throwaway `codex app-server` run on 2026-09-28 (0.155.1, `gpt-6-astra`, effort low, read-only
+sandbox) asked the model to `spawn_agent` two children, `lister` and `dater`, and `wait_agent` for
+both. Not committed as a fixture (it carries the host's hook and MCP configuration), but it settles
+part of what observations 19–21 left open:
+
+- Each spawn is `item/started` + `item/completed` of `subAgentActivity {kind: "started", id:
+  <the spawn call's id>, agentThreadId, agentPath: "/root/<name>"}` on the PARENT's thread, 1–2 ms
+  apart, BEFORE the child's own `turn/started` (~20 ms later). No `collabAgentToolCall` for the
+  spawn itself was sent; the only collab items were the two `wait` calls, with
+  `receiverThreadIds: []` and `prompt: null` (as in T3's 0.145.0 capture, observation 21).
+- No `thread/started` arrives for a child — its nickname (`agent_nickname`, e.g. "Lagrange"),
+  role and model live only in the child's rollout `session_meta`, never on this connection. The
+  roster's name is therefore the path's last segment.
+- The child sends its own `thread/tokenUsage/updated` (its thread's running total) — now the
+  roster's usage (`childAgentEvent`) — plus `thread/status/changed`, `hook/*` and
+  `mcpServer/startupStatus/updated`.
+- The end is `subAgentActivity {kind: "completed", id: "subagent-completed-<child turn id>"}` on the
+  parent, in the same millisecond as the child's `turn/completed`, and the `wait` call completes
+  right after it.
+
+What went wrong with it before: every roster tick of a child carried what the child was doing in
+`description`, and ingestion makes a tick's `description` the agent's title, so a live Codex agent
+read "agent <thread id>" (its `turn/started` tick), then "unknown" or its current command line.
+A tick now names the agent (`description` = the launch's name, empty when unknown), its activity
+rides `summary`, and only a CALL is a tick: a bare one would replace the agent's one progress row
+and blank its last tool.
+
+The end, likewise: the end record arrives twice (`item/started`, then `item/completed`, 3 ms
+apart) with the child's own `turn/completed` in between, so the adapter wrote two ends and an
+`idle` between them — the row read completed → idle → completed, and would have stayed `idle` had
+the second copy come first. Every `subAgentActivity` record is now written once (by record id),
+a child's `turn/completed` after its run's end record adds no status, and the child's last
+finished `agentMessage` (its `final_answer`, ~30 ms before the end record) is the `completed`
+end's `summary`: the agent's result, as Claude's is.

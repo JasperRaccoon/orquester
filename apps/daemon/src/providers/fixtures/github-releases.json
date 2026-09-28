@@ -1,0 +1,43 @@
+[
+  {
+    "url": "https://api.github.com/repos/octo-org/hello-world/releases/180000002",
+    "html_url": "https://github.com/octo-org/hello-world/releases/tag/v2.0.0-rc.1",
+    "id": 180000002,
+    "author": { "login": "octocat" },
+    "node_id": "RE_kwDOA1b2c84K1a2b",
+    "tag_name": "v2.0.0-rc.1",
+    "target_commitish": "main",
+    "name": "",
+    "draft": false,
+    "prerelease": true,
+    "created_at": "2026-09-27T09:00:00Z",
+    "published_at": "2026-09-27T09:05:00Z",
+    "assets": [],
+    "body": "Release candidate."
+  },
+  {
+    "url": "https://api.github.com/repos/octo-org/hello-world/releases/180000001",
+    "html_url": "https://github.com/octo-org/hello-world/releases/tag/v1.4.0",
+    "id": 180000001,
+    "tag_name": "v1.4.0",
+    "target_commitish": "main",
+    "name": "Hello World 1.4",
+    "draft": false,
+    "prerelease": false,
+    "created_at": "2026-09-01T09:00:00Z",
+    "published_at": "2026-09-01T09:10:00Z",
+    "body": "## Changes\n- faster\n"
+  },
+  {
+    "url": "https://api.github.com/repos/octo-org/hello-world/releases/180000003",
+    "html_url": "https://github.com/octo-org/hello-world/releases/tag/untagged-3f2a",
+    "id": 180000003,
+    "tag_name": "v2.0.0",
+    "name": "2.0 (draft)",
+    "draft": true,
+    "prerelease": false,
+    "created_at": "2026-09-28T09:00:00Z",
+    "published_at": null,
+    "body": null
+  }
+]

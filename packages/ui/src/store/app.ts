@@ -7,6 +7,8 @@ import { wakeBrowserChannels } from "../lib/transporters/ws-browser-channel";
 import { toRemoteConfig, toUiConnection } from "../lib/connections";
 import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-chat/providers";
 import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/store";
+import { applyWorkflowsEvent, resetWorkflows, workflowsStore } from "../lib/workflows/store";
+import { observeWorkflowRunEvent, resetWorkflowNotifications } from "../lib/workflows/notifications";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
 import {
   buildCredential,
@@ -117,7 +119,7 @@ import type {
   UsageResponse,
   UsageTokensResponse
 } from "@orquester/api";
-import { SAVED_PROMPTS_CHANNEL } from "@orquester/api";
+import { SAVED_PROMPTS_CHANNEL, WORKFLOWS_CHANNEL } from "@orquester/api";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -488,12 +490,29 @@ export interface TodoTab {
  * on the summary) and never open a thread. Read it through {@link tabSession} so
  * a surface that treats both arms alike says so once.
  */
+/**
+ * A client-local automated-workflow editor tab (workflows spec §7.2). Bound to
+ * a workflow by `workflowId`, one per workflow per project; `title` mirrors
+ * the workflow's name (kept in sync by `workflow.upserted`), and `runId` is the
+ * run the editor shows in its run view, when one was asked for. The tab is a
+ * view, not a binding: it opens in the project the rail is on, whatever
+ * project the workflow runs in.
+ */
+export interface WorkflowTab {
+  id: string;
+  projectPath: string;
+  workflowId: string;
+  title: string;
+  runId?: string | null;
+}
+
 export type ProjectTab =
   | { id: string; type: "session"; session: SessionSummary }
   | { id: string; type: "agent-chat"; sessionId: string; session: SessionSummary }
   | { id: string; type: "files"; title: string }
   | { id: string; type: "git"; title: string }
   | { id: string; type: "todo"; todoId: string; title: string }
+  | { id: string; type: "workflow"; workflowId: string; title: string; runId?: string | null }
   | { id: string; type: "browser"; browser: BrowserSummary };
 
 /** The two arms that carry a daemon session. */
@@ -779,6 +798,8 @@ export interface AppState {
   gitTabsByProject: Record<string, GitTab[]>;
   /** Client-local to-do tabs per context key (project path *or* workspace name). */
   todoTabsByContext: Record<string, TodoTab[]>;
+  /** Client-local automated-workflow editor tabs per project path. */
+  workflowTabsByProject: Record<string, WorkflowTab[]>;
   /** Server cache of to-do records (all loaded scopes/refs). */
   todos: TodoListRecord[];
   /**
@@ -955,6 +976,17 @@ export interface AppState {
   dismissNotice: () => void;
   openFileBrowser: () => void;
   openGit: () => void;
+  /**
+   * Open (or focus) the editor tab of workflow `workflowId` in project
+   * `projectPath` — one per workflow, reused when open; `runId` selects a run
+   * in its run view (`null` clears it; absent leaves it). `title` is used only
+   * when the workflows store does not know the workflow's name yet.
+   */
+  openWorkflowTab: (
+    projectPath: string,
+    workflowId: string,
+    opts?: { runId?: string | null; title?: string }
+  ) => void;
   openBrowser: (url?: string) => Promise<void>;
   closeTab: (id: string) => Promise<void>;
   /** Guarded close: opens a confirm for live sessions (returns true), else closes now. */
@@ -1080,6 +1112,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   fileTabsByProject: {},
   gitTabsByProject: {},
   todoTabsByContext: {},
+  workflowTabsByProject: {},
   todos: [],
   activeTabByProject: {},
   viewModeByProject: loadViewModes(),
@@ -1594,6 +1627,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       clearStoredUsername(api.connection.endpoint);
       invalidateProjectIndex();
       resetSavedPrompts();
+      resetWorkflows();
+      resetWorkflowNotifications();
       set({
         api: apiWithCredential(api, ""),
         connectionStatus: "error",
@@ -1619,6 +1654,8 @@ export const useAppStore = create<AppState>((set, get) => ({
         notice: null,
         protectArchived: false,
         protectArchivedLoaded: false,
+        // Workflow editor tabs name the previous daemon's workflows.
+        ...withoutWorkflowTabs(get()),
         authPrompt: { connectionId: api.connection.id }
       });
     }
@@ -1636,6 +1673,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     // prompts (`lib/saved-prompts/store.ts`).
     invalidateProjectIndex();
     resetSavedPrompts();
+    resetWorkflows();
+    resetWorkflowNotifications();
     // Reset all daemon-scoped state: a different server has its own data.
     set({
       api: new ApiClient(connection, buildTransporter(connection)),
@@ -1657,6 +1696,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       // next one. connect() reloads it from the newly selected daemon.
       protectArchived: false,
       protectArchivedLoaded: false,
+      // Workflow editor tabs name the previous daemon's workflows.
+      ...withoutWorkflowTabs(get()),
       sessions: [],
       browsers: [],
       accounts: []
@@ -2026,6 +2067,7 @@ export const useAppStore = create<AppState>((set, get) => ({
         state.fileTabsByProject,
         state.gitTabsByProject,
         state.todoTabsByContext,
+        state.workflowTabsByProject,
         project.path
       );
       return {
@@ -2462,6 +2504,42 @@ export const useAppStore = create<AppState>((set, get) => ({
           [project.path]: [tab]
         },
         activeTabByProject: { ...state.activeTabByProject, [project.path]: tab.id }
+      };
+    }),
+
+  openWorkflowTab: (projectPath, workflowId, opts) =>
+    set((state) => {
+      const known = workflowsStore.getState().summaries.get(workflowId)?.name;
+      const tabs = state.workflowTabsByProject[projectPath] ?? [];
+      const existing = tabs.find((t) => t.workflowId === workflowId);
+      const activeTabByProject = { ...state.activeTabByProject };
+      if (existing) {
+        activeTabByProject[projectPath] = existing.id;
+        const runId = opts && "runId" in opts ? (opts.runId ?? null) : existing.runId;
+        const title = known ?? existing.title;
+        if (runId === existing.runId && title === existing.title) {
+          return { activeTabByProject };
+        }
+        return {
+          activeTabByProject,
+          workflowTabsByProject: {
+            ...state.workflowTabsByProject,
+            [projectPath]: tabs.map((t) => (t.id === existing.id ? { ...t, runId, title } : t))
+          }
+        };
+      }
+      const tab: WorkflowTab = {
+        id: crypto.randomUUID(),
+        projectPath,
+        workflowId,
+        title: known ?? opts?.title?.trim() ?? "Workflow",
+        runId: opts?.runId ?? null
+      };
+      if (!tab.title) tab.title = "Workflow";
+      activeTabByProject[projectPath] = tab.id;
+      return {
+        activeTabByProject,
+        workflowTabsByProject: { ...state.workflowTabsByProject, [projectPath]: [...tabs, tab] }
       };
     }),
 
@@ -2949,6 +3027,23 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       return;
     }
+    if (event.channel === WORKFLOWS_CHANNEL) {
+      // The rail's workflows live in their own module store (idempotent,
+      // sanitised); this store mirrors only what its editor tabs show — a
+      // renamed workflow's title, a deleted workflow's tab closing.
+      const effect = applyWorkflowsEvent(event);
+      // A finished run raises its toast / Attention Center entry — unless a
+      // run view shows that very run right now (Runs mode, shown, the
+      // document visible: `setRunOnScreen`). A tab's remembered `runId` is
+      // not enough — it stays set while the tab is in Editor mode.
+      observeWorkflowRunEvent(event);
+      if (effect?.kind === "upserted") {
+        set((state) => renameWorkflowTabs(state, effect.workflow.id, effect.workflow.name));
+      } else if (effect?.kind === "deleted") {
+        set((state) => closeWorkflowTabs(state, effect.id));
+      }
+      return;
+    }
     if (event.channel === SAVED_PROMPTS_CHANNEL) {
       // The right rail's saved prompts live in their own module store; every
       // client's change lands there (idempotently — a mutation's own answer
@@ -3046,13 +3141,17 @@ setProviderSideEffects({
     })
 });
 
-/** First remaining tab id for a context (session, then browser, then file, then git, then to-do). */
+/**
+ * First remaining tab id for a context (session, then browser, then file, then
+ * git, then to-do, then workflow — `useProjectTabs`' order).
+ */
 function firstTabId(
   sessions: SessionSummary[],
   browsers: BrowserSummary[],
   fileTabs: Record<string, FileTab[]>,
   gitTabs: Record<string, GitTab[]>,
   todoTabs: Record<string, TodoTab[]>,
+  workflowTabs: Record<string, WorkflowTab[]>,
   path: string
 ): string | null {
   return (
@@ -3061,6 +3160,7 @@ function firstTabId(
     fileTabs[path]?.[0]?.id ??
     gitTabs[path]?.[0]?.id ??
     todoTabs[path]?.[0]?.id ??
+    workflowTabs[path]?.[0]?.id ??
     null
   );
 }
@@ -3072,12 +3172,13 @@ function reassignActive(
   browsers: BrowserSummary[],
   fileTabs: Record<string, FileTab[]>,
   gitTabs: Record<string, GitTab[]>,
-  todoTabs: Record<string, TodoTab[]>
+  todoTabs: Record<string, TodoTab[]>,
+  workflowTabs: Record<string, WorkflowTab[]>
 ): Record<string, string | null> {
   const next = { ...activeTabByProject };
   for (const [path, activeId] of Object.entries(next)) {
     if (activeId === removedId) {
-      next[path] = firstTabId(sessions, browsers, fileTabs, gitTabs, todoTabs, path);
+      next[path] = firstTabId(sessions, browsers, fileTabs, gitTabs, todoTabs, workflowTabs, path);
     }
   }
   return next;
@@ -3095,7 +3196,8 @@ function removeSession(state: AppState, id: string): Partial<AppState> {
       state.browsers,
       state.fileTabsByProject,
       state.gitTabsByProject,
-      state.todoTabsByContext
+      state.todoTabsByContext,
+      state.workflowTabsByProject
     )
   };
 }
@@ -3112,12 +3214,13 @@ function removeBrowser(state: AppState, id: string): Partial<AppState> {
       browsers,
       state.fileTabsByProject,
       state.gitTabsByProject,
-      state.todoTabsByContext
+      state.todoTabsByContext,
+      state.workflowTabsByProject
     )
   };
 }
 
-/** Drop a client-local (non-session) tab — file browser, git, OR to-do — by id. */
+/** Drop a client-local (non-session) tab — file browser, git, to-do OR workflow — by id. */
 function removeLocalTab(state: AppState, id: string): Partial<AppState> {
   const fileTabsByProject: Record<string, FileTab[]> = {};
   for (const [path, tabs] of Object.entries(state.fileTabsByProject)) {
@@ -3131,10 +3234,15 @@ function removeLocalTab(state: AppState, id: string): Partial<AppState> {
   for (const [key, tabs] of Object.entries(state.todoTabsByContext)) {
     todoTabsByContext[key] = tabs.filter((t) => t.id !== id);
   }
+  const workflowTabsByProject: Record<string, WorkflowTab[]> = {};
+  for (const [path, tabs] of Object.entries(state.workflowTabsByProject)) {
+    workflowTabsByProject[path] = tabs.filter((t) => t.id !== id);
+  }
   return {
     fileTabsByProject,
     gitTabsByProject,
     todoTabsByContext,
+    workflowTabsByProject,
     activeTabByProject: reassignActive(
       state.activeTabByProject,
       id,
@@ -3142,9 +3250,50 @@ function removeLocalTab(state: AppState, id: string): Partial<AppState> {
       state.browsers,
       fileTabsByProject,
       gitTabsByProject,
-      todoTabsByContext
+      todoTabsByContext,
+      workflowTabsByProject
     )
   };
+}
+
+/**
+ * Drop every workflow editor tab (a connection switch, a sign-out: they name
+ * the previous daemon's workflows), and any active-tab pointer at one.
+ */
+export function withoutWorkflowTabs(
+  state: Pick<AppState, "workflowTabsByProject" | "activeTabByProject">
+): Pick<AppState, "workflowTabsByProject" | "activeTabByProject"> {
+  const ids = new Set<string>();
+  for (const tabs of Object.values(state.workflowTabsByProject)) for (const tab of tabs) ids.add(tab.id);
+  const activeTabByProject: Record<string, string | null> = {};
+  for (const [path, id] of Object.entries(state.activeTabByProject)) activeTabByProject[path] = id !== null && ids.has(id) ? null : id;
+  return { workflowTabsByProject: {}, activeTabByProject };
+}
+
+/** Retitle every open editor tab of workflow `workflowId` (a `workflow.upserted` — a rename anywhere). */
+function renameWorkflowTabs(state: AppState, workflowId: string, title: string): Partial<AppState> {
+  let changed = false;
+  const next: Record<string, WorkflowTab[]> = {};
+  for (const [path, tabs] of Object.entries(state.workflowTabsByProject)) {
+    const hit = tabs.some((t) => t.workflowId === workflowId && t.title !== title);
+    next[path] = hit ? tabs.map((t) => (t.workflowId === workflowId ? { ...t, title } : t)) : tabs;
+    if (hit) changed = true;
+  }
+  // Identity kept when nothing changed: most upserts are run progress, not renames.
+  return changed ? { workflowTabsByProject: next } : {};
+}
+
+/** Close every editor tab of a deleted workflow, reassigning the active tab where it was one. */
+function closeWorkflowTabs(state: AppState, workflowId: string): Partial<AppState> {
+  let next: AppState = state;
+  for (const tabs of Object.values(state.workflowTabsByProject)) {
+    for (const tab of tabs) {
+      if (tab.workflowId === workflowId) next = { ...next, ...removeLocalTab(next, tab.id) };
+    }
+  }
+  return next === state
+    ? {}
+    : { workflowTabsByProject: next.workflowTabsByProject, activeTabByProject: next.activeTabByProject };
 }
 
 /**
@@ -3225,6 +3374,12 @@ function clearProjectLocalState(
       gridTracksByProject[path] = tracks;
     }
   }
+  const workflowTabsByProject: Record<string, WorkflowTab[]> = {};
+  for (const [path, tabs] of Object.entries(state.workflowTabsByProject)) {
+    if (!match(path)) {
+      workflowTabsByProject[path] = tabs;
+    }
+  }
   // To-do tabs are keyed by context key (project path here); drop matching keys.
   const todoTabsByContext: Record<string, TodoTab[]> = {};
   for (const [key, tabs] of Object.entries(state.todoTabsByContext)) {
@@ -3245,6 +3400,7 @@ function clearProjectLocalState(
     paneSizesByProject,
     gridTracksByProject,
     todoTabsByContext,
+    workflowTabsByProject,
     todos
   };
 }
@@ -3281,6 +3437,7 @@ export function useProjectTabs(): ProjectTab[] {
   const fileTabsByProject = useAppStore((s) => s.fileTabsByProject);
   const gitTabsByProject = useAppStore((s) => s.gitTabsByProject);
   const todoTabsByContext = useAppStore((s) => s.todoTabsByContext);
+  const workflowTabsByProject = useAppStore((s) => s.workflowTabsByProject);
   const project = useAppStore((s) => s.currentProject);
   const workspace = useAppStore((s) => s.currentWorkspace);
   return useMemo(() => {
@@ -3323,8 +3480,15 @@ export function useProjectTabs(): ProjectTab[] {
       .slice()
       .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt))
       .map<ProjectTab>((browser) => ({ id: browser.id, type: "browser", browser }));
-    return [...sessionTabs, ...browserTabs, ...fileTabs, ...gitTabs, ...todoTabs];
-  }, [sessions, browsers, fileTabsByProject, gitTabsByProject, todoTabsByContext, project, workspace]);
+    const workflowTabs = (workflowTabsByProject[key] ?? []).map<ProjectTab>((t) => ({
+      id: t.id,
+      type: "workflow",
+      workflowId: t.workflowId,
+      title: t.title,
+      runId: t.runId ?? null
+    }));
+    return [...sessionTabs, ...browserTabs, ...fileTabs, ...gitTabs, ...todoTabs, ...workflowTabs];
+  }, [sessions, browsers, fileTabsByProject, gitTabsByProject, todoTabsByContext, workflowTabsByProject, project, workspace]);
 }
 
 export function useActiveTabId(): string | null {

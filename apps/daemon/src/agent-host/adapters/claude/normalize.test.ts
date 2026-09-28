@@ -1418,6 +1418,40 @@ describe("claude normaliser — a turn the CLI starts itself keeps its opening m
     );
   });
 
+  it("a woken message says the session is working at its message_start, before its turn exists", () => {
+    // Workflows §5.5: the first block of a woken reply can stream for many seconds (a long
+    // thinking block) before the frame that opens its turn; the thread must not read idle then.
+    const normalizer = newNormalizer();
+    normalizer.sessionStateChanged("ready", "session:started");
+    const frames = openingTurn([
+      { type: "thinking", thinking: "Round 5 is clean." },
+      { type: "text", text: "All checks are now clean." }
+    ]);
+    const first = feedAll(normalizer, frames.slice(0, 1));
+    const states = (events: readonly RuntimeEvent[]) =>
+      events
+        .filter((event) => event.type === "session.state.changed")
+        .map((event) => [(event.payload as { state: string }).state, (event.payload as { reason?: string }).reason, event.turnId]);
+    assert.deepEqual(states(first), [["running", "wake:streaming", undefined]], "at the held message_start, with no turn");
+    const rest = feedAll(normalizer, [...frames.slice(1), result()]);
+    assert.ok(rest.some((event) => event.type === "turn.started"), "the woken turn still opens");
+    assert.deepEqual(states(rest), [["ready", "turn:settled", undefined]], "no second running, one ready at the end");
+  });
+
+  it("a woken message that stops with no turn opening puts the session back to ready", () => {
+    const normalizer = newNormalizer();
+    normalizer.sessionStateChanged("ready", "session:started");
+    const events = feedAll(normalizer, [
+      stream({ type: "message_start", message: { id: "msg_gone", role: "assistant", content: [], usage: {} } }),
+      stream({ type: "message_stop" })
+    ]);
+    assert.deepEqual(
+      events.filter((event) => event.type === "session.state.changed").map((event) => (event.payload as { state: string }).state),
+      ["running", "ready"]
+    );
+    assert.equal(events.some((event) => event.type === "turn.started"), false);
+  });
+
   it("a held message keeps every delta, however long its first block streams", () => {
     // The first block streams in full before the frame that opens the turn;
     // Opus can think for thousands of deltas, and a tool's input streams as
@@ -3516,5 +3550,160 @@ describe("claude normaliser — a background subagent outlives the parent's turn
       assert.ok(orphan);
       assert.deepEqual([orphan.payload.taskId, orphan.agentId], [undefined, undefined], taskId);
     }
+  });
+});
+
+describe("claude normaliser — account failures carry a structured reason (workflows §5.4)", () => {
+  // No capture holds a rejected window or a refused login (fixtures README
+  // observation 16 records only `allowed` frames): these frames follow the
+  // recorded `rate_limit_event` and the 16-errors failed `result` shapes.
+  const RESETS_AT = 1789969200;
+  const RESETS_ISO = new Date(RESETS_AT * 1000).toISOString();
+
+  function make(): ClaudeNormalizer {
+    const normalizer = new ClaudeNormalizer({ threadId: "t", clock: fixedClock(), ids: countingIds() });
+    normalizer.beginTurn({ turnId: "turn-1" });
+    return normalizer;
+  }
+  function rateLimit(status: string, resetsAt: number | undefined, rateLimitType = "five_hour"): SDKMessage {
+    return {
+      type: "rate_limit_event",
+      rate_limit_info: {
+        status,
+        ...(resetsAt !== undefined ? { resetsAt } : {}),
+        rateLimitType,
+        overageStatus: "rejected",
+        overageDisabledReason: "out_of_credits",
+        isUsingOverage: false
+      },
+      uuid: "u",
+      session_id: "s"
+    } as unknown as SDKMessage;
+  }
+  function failedResult(apiErrorStatus: number, sentence: string | null = "API Error"): SDKMessage {
+    return {
+      type: "result",
+      subtype: "success",
+      is_error: true,
+      api_error_status: apiErrorStatus,
+      duration_ms: 1,
+      duration_api_ms: 0,
+      num_turns: 1,
+      ...(sentence !== null ? { result: sentence } : {}),
+      stop_reason: "stop_sequence",
+      session_id: "s",
+      total_cost_usd: 0,
+      usage: { input_tokens: 0, output_tokens: 0 },
+      modelUsage: {},
+      permission_denials: [],
+      terminal_reason: "api_error",
+      uuid: "u"
+    } as unknown as SDKMessage;
+  }
+  function assistantError(error: string): SDKMessage {
+    return {
+      type: "assistant",
+      error,
+      uuid: "a",
+      session_id: "s",
+      parent_tool_use_id: null,
+      message: { id: "msg_err", role: "assistant", model: "<synthetic>", content: [] }
+    } as unknown as SDKMessage;
+  }
+  function failures(events: readonly RuntimeEvent[]): Array<[string, string | undefined, string | undefined]> {
+    return events
+      .filter((event) => event.type === "runtime.warning" || event.type === "runtime.error")
+      .map((event) => {
+        const payload = event.payload as { reason?: string; resetsAt?: string };
+        return [event.type, payload.reason, payload.resetsAt];
+      });
+  }
+
+  it("a rejected window's parked-turn warning is a usage limit with its reset", () => {
+    const events = make().handleMessage(rateLimit("rejected", RESETS_AT));
+    assert.deepEqual(failures(events), [["runtime.warning", "usage_limit", RESETS_ISO]]);
+  });
+
+  it("a window with no reset time names none", () => {
+    const events = make().handleMessage(rateLimit("rejected", undefined));
+    assert.deepEqual(failures(events), [["runtime.warning", "usage_limit", undefined]]);
+  });
+
+  it("an allowed window says nothing", () => {
+    assert.deepEqual(failures(make().handleMessage(rateLimit("allowed", RESETS_AT))), []);
+  });
+
+  it("a failed result after a rejected window is a usage limit, reset = the latest window", () => {
+    const normalizer = make();
+    normalizer.handleMessage(rateLimit("rejected", RESETS_AT));
+    normalizer.handleMessage(rateLimit("rejected", RESETS_AT + 3600, "seven_day"));
+    const events = normalizer.handleMessage(failedResult(429));
+    assert.deepEqual(failures(events), [
+      ["runtime.error", "usage_limit", new Date((RESETS_AT + 3600) * 1000).toISOString()]
+    ]);
+  });
+
+  it("a window that cleared no longer names the failure", () => {
+    const normalizer = make();
+    normalizer.handleMessage(rateLimit("rejected", RESETS_AT));
+    normalizer.handleMessage(rateLimit("allowed", RESETS_AT));
+    const events = normalizer.handleMessage(failedResult(500));
+    assert.deepEqual(failures(events), [["runtime.error", undefined, undefined]]);
+  });
+
+  it("an assistant frame flagged rate_limit makes the failed result a usage limit", () => {
+    const normalizer = make();
+    normalizer.handleMessage(assistantError("rate_limit"));
+    // No CLI sentence: the adapter's own hint is the message.
+    const events = normalizer.handleMessage(failedResult(429, null));
+    assert.deepEqual(failures(events), [["runtime.error", "usage_limit", undefined]]);
+    const error = events.find((event) => event.type === "runtime.error");
+    assert.match(
+      (error?.payload as { message: string }).message,
+      /^Claude usage limit reached\./,
+      "the message the legacy fallback reads is unchanged"
+    );
+  });
+
+  it("authentication_failed, and a 401 or 403, are auth", () => {
+    const normalizer = make();
+    normalizer.handleMessage(assistantError("authentication_failed"));
+    assert.deepEqual(failures(normalizer.handleMessage(failedResult(401))), [
+      ["runtime.error", "auth", undefined]
+    ]);
+    for (const status of [401, 403]) {
+      assert.deepEqual(failures(make().handleMessage(failedResult(status))), [
+        ["runtime.error", "auth", undefined]
+      ]);
+    }
+  });
+
+  it("a rejected window BETWEEN parent turns (background agents working on) still raises the usage limit, with no turn", () => {
+    const normalizer = new ClaudeNormalizer({ threadId: "t", clock: fixedClock(), ids: countingIds() });
+    const events = normalizer.handleMessage(rateLimit("rejected", RESETS_AT));
+    assert.deepEqual(failures(events), [["runtime.warning", "usage_limit", RESETS_ISO]]);
+    const warning = events.find((event) => event.type === "runtime.warning")!;
+    assert.equal(warning.turnId, undefined, "no turn to name");
+    // A re-fire of the same window between turns is announced once.
+    assert.deepEqual(failures(normalizer.handleMessage(rateLimit("rejected", RESETS_AT))), []);
+    // The window is still rejected when the next turn opens: its failed result names it.
+    normalizer.beginTurn({ turnId: "turn-2" });
+    assert.deepEqual(failures(normalizer.handleMessage(failedResult(429))), [["runtime.error", "usage_limit", RESETS_ISO]]);
+  });
+
+  it("a window that cleared between turns is not handed to the next turn", () => {
+    const normalizer = new ClaudeNormalizer({ threadId: "t", clock: fixedClock(), ids: countingIds() });
+    normalizer.handleMessage(rateLimit("rejected", RESETS_AT));
+    normalizer.handleMessage(rateLimit("allowed", RESETS_AT));
+    normalizer.beginTurn({ turnId: "turn-2" });
+    assert.deepEqual(failures(normalizer.handleMessage(failedResult(500))), [["runtime.error", undefined, undefined]]);
+  });
+
+  it("the recorded unknown-model failure names no account failure", () => {
+    const { events } = replayClaudeFixture("16-errors.ndjson");
+    assert.deepEqual(
+      failures(events).filter(([, reason]) => reason !== undefined),
+      []
+    );
   });
 });

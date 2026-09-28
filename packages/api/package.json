@@ -13,7 +13,9 @@
     "test": "node --import tsx --import ../../scripts/test/assert-ok.mjs --test $(find src -name '*.test.ts')"
   },
   "dependencies": {
-    "@orquester/config": "workspace:*"
+    "@dagrejs/dagre": "^3.1.1",
+    "@orquester/config": "workspace:*",
+    "croner": "^10.0.1"
   },
   "devDependencies": {
     "@types/node": "^22.19.21",

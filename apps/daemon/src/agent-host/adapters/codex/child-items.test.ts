@@ -213,14 +213,16 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
     for (const draft of [...started, ...chunks, ...completed].filter((d) => d.type !== "task.progress")) {
       assert.deepEqual(draft.providerRefs, { providerTurnId: CHILD_TURN, providerItemId: CALL });
     }
-    // The roster's tick stays: what the agent is doing, and its last tool.
+    // The roster's tick stays: what the agent is doing, and its last tool —
+    // never in `description`, which ingestion makes the agent's title.
     const ticks = [...started, ...completed].filter((draft) => draft.type === "task.progress");
     assert.equal(ticks.length, 2);
     for (const tick of ticks) {
       assert.equal(tick.agentId, CHILD);
-      assert.equal(payloadOf(tick).lastToolName, "command_execution");
-      assert.equal(payloadOf(tick).description, "pnpm test");
+      assert.equal(payloadOf(tick).lastToolName, "Shell");
+      assert.notEqual(payloadOf(tick).description, "pnpm test");
     }
+    assert.equal(payloadOf(ticks[0]!).summary, "pnpm test");
   });
 
   it("the parent's own item under the same raw id stays the parent's: its id, no owner", () => {
@@ -401,9 +403,11 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
     assert.equal(payloadOf(chunk[0]).streamKind, "file_change_output");
   });
 
-  it("a child's message and reasoning items stay roster ticks, never item rows", () => {
+  it("a child's message and reasoning items are neither item rows nor roster ticks", () => {
     // Only a call is a row: the child's own text streams are still dropped
-    // (its deltas are chatter), so its message items would be empty rows.
+    // (its deltas are chatter), so its message items would be empty rows. Nor
+    // are they ticks: a tick is the agent's one progress row, and one that
+    // names no call would blank its last tool.
     const n = make();
     turnStarted(n, PARENT, PARENT_TURN);
     launchChild(n);
@@ -419,10 +423,7 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
         questions: null
       })
     ];
-    assert.deepEqual(
-      drafts.map((draft) => draft.type),
-      ["task.progress", "task.progress"]
-    );
+    assert.deepEqual(drafts, []);
   });
 });
 
@@ -548,5 +549,123 @@ describe("a child's call through ingestion and the fold (Task 3)", () => {
       item.kind === "message" && item.role === "reasoning" ? [[item.text, item.agentId ?? "(parent)"]] : []
     );
     assert.deepEqual(blocks, [["Waiting on the explorer. It is still running.", "(parent)"]]);
+  });
+
+  it("a child's roster row keeps its launch's name through every tick, and carries its own usage", async () => {
+    // Every tick used to put what the child was doing in `description`, which
+    // ingestion makes the row's title: the roster read "agent <thread id>",
+    // "unknown" or the command line instead of the agent's name, and the
+    // child's own token usage was dropped (the Codex fleet of 2026-09-28).
+    const n = make();
+    const usage: CodexProtocol.v2.ThreadTokenUsageUpdatedNotification = {
+      threadId: CHILD,
+      turnId: CHILD_TURN,
+      tokenUsage: {
+        total: {
+          totalTokens: 29685,
+          inputTokens: 29620,
+          cachedInputTokens: 14592,
+          cacheWriteInputTokens: 0,
+          outputTokens: 65,
+          reasoningOutputTokens: 0
+        },
+        last: {
+          totalTokens: 14877,
+          inputTokens: 14847,
+          cachedInputTokens: 14592,
+          cacheWriteInputTokens: 0,
+          outputTokens: 30,
+          reasoningOutputTokens: 0
+        },
+        modelContextWindow: 258400
+      }
+    } as CodexProtocol.v2.ThreadTokenUsageUpdatedNotification;
+    const events = await ingestCodexDrafts([
+      turnStarted(n, PARENT, PARENT_TURN),
+      launchChild(n),
+      itemStarted(n, CHILD, CHILD_TURN, commandItem("call_1", "inProgress", null)),
+      itemCompleted(n, CHILD, CHILD_TURN, commandItem("call_1", "completed", "ok\n")),
+      n.notification("thread/tokenUsage/updated", usage)
+    ]);
+    const agent = foldCodexLog(events).roster.find((row) => row.id === CHILD);
+    assert.equal(agent?.title, "explorer");
+    assert.equal(agent?.lastToolName, "Shell");
+    assert.deepEqual(agent?.usage, {
+      totalTokens: 29685,
+      inputTokens: 29620,
+      cachedInputTokens: 14592,
+      outputTokens: 65,
+      reasoningOutputTokens: 0,
+      toolUses: 1
+    });
+    assert.equal(agent?.status, "running");
+  });
+
+  it("a child's own launch record starts its agent, owned by the child", async () => {
+    // A child spawning an agent of its own reports the launch on ITS thread;
+    // it used to be only an "unknown" tick of the child, and the grandchild
+    // had no start and no name.
+    const n = make();
+    const grandchild: CodexProtocol.v2.ThreadItem = {
+      type: "subAgentActivity",
+      id: "call_spawn",
+      kind: "started",
+      agentThreadId: "grandchild-thread",
+      agentPath: `${CHILD_PATH}/timeline`
+    };
+    const events = await ingestCodexDrafts([
+      turnStarted(n, PARENT, PARENT_TURN),
+      launchChild(n),
+      itemCompleted(n, CHILD, CHILD_TURN, grandchild),
+      turnStarted(n, "grandchild-thread", "grandchild-turn")
+    ]);
+    const roster = foldCodexLog(events).roster;
+    const row = roster.find((agent) => agent.id === "grandchild-thread");
+    assert.equal(row?.title, "timeline");
+    assert.equal(row?.parentAgentId, CHILD);
+    assert.equal(row?.status, "running");
+    assert.equal(roster.find((agent) => agent.id === CHILD)?.title, "explorer");
+  });
+
+  it("a child's end is ONE row, with its answer as the result, whichever order Codex sends it in", async () => {
+    // Observed on 0.155.1 (fixtures README observation 24): the end record
+    // comes twice, as item/started and item/completed, with the child's own
+    // turn/completed between the two. That wrote two ends and an `idle`
+    // between them, so the row read completed → idle → completed, and the
+    // child's answer — its last message — was dropped.
+    const endRecord = (kind: "completed" | "interrupted"): CodexProtocol.v2.ThreadItem => ({
+      type: "subAgentActivity",
+      id: `subagent-completed-${CHILD_TURN}`,
+      kind,
+      agentThreadId: CHILD,
+      agentPath: CHILD_PATH
+    });
+    const answer: CodexProtocol.v2.ThreadItem = {
+      type: "agentMessage",
+      id: "msg_answer",
+      text: "3 files, all clean.",
+      phase: "final_answer",
+      memoryCitation: null,
+      delivery: null,
+      questions: null
+    };
+    for (const kind of ["completed", "interrupted"] as const) {
+      const n = make();
+      const steps: RuntimeEventDraft[][] = [
+        turnStarted(n, PARENT, PARENT_TURN),
+        launchChild(n),
+        itemCompleted(n, CHILD, CHILD_TURN, answer),
+        itemStarted(n, PARENT, PARENT_TURN, endRecord(kind)),
+        turnCompleted(n, CHILD, CHILD_TURN, kind === "completed" ? "completed" : "interrupted"),
+        itemCompleted(n, PARENT, PARENT_TURN, endRecord(kind))
+      ];
+      const ends = steps
+        .flat()
+        .filter((draft) => draft.type === "task.completed" || draft.type === "task.updated");
+      assert.equal(ends.length, 1, `${kind}: one end, no idle and no second copy`);
+      const agent = foldCodexLog(await ingestCodexDrafts(steps)).roster.find((row) => row.id === CHILD);
+      assert.equal(agent?.status, kind === "completed" ? "completed" : "interrupted");
+      assert.equal(agent?.result, kind === "completed" ? "3 files, all clean." : null);
+    }
   });
 });

@@ -13,7 +13,7 @@ export {
 } from "./context/orquester-context";
 
 // Connection layer
-export { ApiClient, ApiError, type ApiRequestOptions } from "./lib/api-client";
+export { ApiClient, ApiError, WorkflowApiError, type ApiRequestOptions } from "./lib/api-client";
 export {
   type Transporter,
   type TransportRequest,
@@ -54,8 +54,89 @@ export {
   useActiveTabId,
   type AppState,
   type FileTab,
-  type ProjectTab
+  type ProjectTab,
+  type WorkflowTab
 } from "./store/app";
+// Automated workflows (the rail's module store, its hooks, the editor tab)
+export {
+  applyWorkflowsEvent,
+  loadWorkflowRun,
+  loadWorkflowRuns,
+  loadWorkflows,
+  loadWorkflowSecrets,
+  markWorkflowsStale,
+  resetWorkflows,
+  workflowsStore,
+  type WorkflowRunEntry,
+  type WorkflowRunsList,
+  type WorkflowsApi,
+  type WorkflowsState
+} from "./lib/workflows/store";
+export {
+  useWorkflowRun,
+  useWorkflowRuns,
+  useWorkflows,
+  useWorkflowSecrets,
+  useWorkflowsState
+} from "./lib/workflows/hooks";
+export * from "./components/workflows";
+// Automated workflows — seeing runs: the run view's components, its pure helpers, the notifications
+export * from "./components/workflows/runs";
+export * from "./lib/workflows/run-view";
+export * from "./lib/workflows/json-tree";
+export {
+  attentionEntryFor,
+  dismissWorkflowAttention,
+  dismissWorkflowToasts,
+  finishedRunNotice,
+  markWorkflowRunViewed,
+  notifyPrefsOf,
+  notifyWorkflowRunFinished,
+  observeWorkflowRunEvent,
+  resetWorkflowNotifications,
+  runOutcomeKind,
+  workflowNotificationsStore,
+  type WorkflowAttentionEntry,
+  type WorkflowNotificationsState,
+  type WorkflowNotifyPrefs,
+  type WorkflowRunNotice
+} from "./lib/workflows/notifications";
+// The workflow editor's state and pure helpers (the run view and the phone Steps view reuse them)
+export {
+  WorkflowEditor,
+  workflowEditorFor,
+  retainWorkflowEditor,
+  type WorkflowEditorState,
+  type EditorSelection,
+  type ChangeOptions
+} from "./lib/workflows/editor-store";
+export { deriveRunOverlay, type RunOverlay, type OverlayNodeState, type OverlayEdgeState } from "./lib/workflows/overlay";
+export {
+  nodeSummary,
+  BLOCK_ICONS,
+  accentClass,
+  blockAccent,
+  filterPalette,
+  PALETTE_GROUPS,
+  type NodeSummaryContext
+} from "./lib/workflows/catalog-ui";
+export {
+  serializeWorkflowSelection,
+  parseWorkflowClipboard,
+  pasteWorkflowClipboard,
+  duplicateWorkflowNodes
+} from "./lib/workflows/clipboard";
+// Automated workflows — a notification's run (the web host hands its link / message here)
+export {
+  parseWorkflowDeepLink,
+  parseWorkflowRunMessage,
+  requestWorkflowDeepLink,
+  stripWorkflowDeepLink,
+  WORKFLOW_RUN_MESSAGE,
+  type WorkflowDeepLink
+} from "./lib/workflows/deep-link";
+export { pickRunId, pickBlockId, type PhoneRunPane } from "./lib/workflows/runs-mode";
+export { canvasFitOptions, type CanvasFitOptions } from "./lib/workflows/canvas-fit";
 export * from "./hooks";
 export * from "./services";
 

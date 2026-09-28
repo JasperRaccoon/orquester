@@ -48,11 +48,13 @@ async function claudeTests() {
   assert.ok(a2 && a2.available);
   assert.equal(calls, 1, "must back off after 429 (no repeated fetch)");
 
-  // 200 then 429 → stale last-known carrying the real numbers.
+  // 200 then 429 → stale last-known carrying the real numbers. (No minimum interval here, so the
+  // second call asks the endpoint again at the same instant.)
   let mode: "ok" | "429" = "ok";
   const src = createClaudeSource({
     userhome: home,
     now,
+    minIntervalMs: 0,
     fetchImpl: async () =>
       mode === "ok"
         ? jsonRes(200, { five_hour: { utilization: 45, resets_at: "2026-07-07T10:00:00Z" }, seven_day: { utilization: 69 } })

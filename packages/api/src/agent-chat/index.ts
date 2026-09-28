@@ -16,6 +16,7 @@ export * from "./domain-events.ts";
 export * from "./thread.ts";
 export * from "./call-anchor.ts";
 export * from "./compaction.ts";
+export * from "./failure-reason.ts";
 export * from "./command-output.ts";
 export * from "./wire.ts";
 export * from "./fold.ts";

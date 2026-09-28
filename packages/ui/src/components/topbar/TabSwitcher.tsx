@@ -1,9 +1,10 @@
 import React, { useState } from "react";
-import { ChevronDown, Circle, FolderTree, GitBranch, Globe, ListTodo, Pencil, Trash2, X } from "lucide-react";
+import { ChevronDown, Circle, FolderTree, GitBranch, Globe, ListTodo, Pencil, Trash2, Workflow, X } from "lucide-react";
 import { BottomSheet, ConfirmDialog, DropdownEmpty } from "../ui";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { cn } from "../../lib/cn";
 import { getRegistryIcon } from "../../icons";
+import { WorkflowChip } from "../workflows/WorkflowChip";
 import {
   isSessionTab,
   tabSession,
@@ -28,6 +29,8 @@ const tabIcon = (tab: ProjectTab, size = 16) => {
     <GitBranch size={size} />
   ) : tab.type === "todo" ? (
     <ListTodo size={size} />
+  ) : tab.type === "workflow" ? (
+    <Workflow size={size} />
   ) : tab.type === "browser" ? (
     <Globe size={size} />
   ) : (
@@ -166,6 +169,8 @@ export const TabSwitcher: React.FC = () => {
                 <span className="min-w-0 flex-1 truncate">{tabLabel(tab)}</span>
                 {isActive && <Circle size={7} className="shrink-0 fill-neutral-300 text-neutral-300" />}
               </button>
+              {/* A sibling of the row, never inside it: a button cannot nest in a button. */}
+              <WorkflowChip session={tabSession(tab)} compact onOpened={close} />
               {canRename && (
                 <button
                   type="button"

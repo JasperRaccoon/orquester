@@ -41,12 +41,15 @@ const RETRIES = 3;
 /**
  * POST a chat command with a fresh commandId; retry 503 HOST_UNAVAILABLE (and
  * a thrown transport error) with the SAME id up to 3 times — the GUI's rule.
- * The minted id always wins: a `commandId` in `body` is overwritten.
+ * The minted id always wins: a `commandId` in `body` is overwritten. `opts.commandId` is the one
+ * exception, for a caller that persisted the id BEFORE the POST so a re-post after a crash is
+ * deduplicated by the host's receipts (the workflow engine, through chat-client); the MCP never
+ * passes it.
  */
-export async function sendCommand(api: DaemonApi, sessionId: string, name: AgentChatCommandName | "account", body: Record<string, unknown>, opts?: { retryDelayMs?: (attempt: number) => number }): Promise<{ seq: number }> {
+export async function sendCommand(api: DaemonApi, sessionId: string, name: AgentChatCommandName | "account", body: Record<string, unknown>, opts?: { retryDelayMs?: (attempt: number) => number; commandId?: string }): Promise<{ seq: number }> {
   const path = name === "account" ? agentChatRoutes.account(sessionId) : agentChatCommandPath(sessionId, name);
   const delay = opts?.retryDelayMs ?? defaultRetryDelay;
-  const payload = { ...body, commandId: mintCommandId() };
+  const payload = { ...body, commandId: opts?.commandId ?? mintCommandId() };
   // Every attempt returns or throws by the last one, so the loop needs no exit and nothing follows it.
   for (let attempt = 0; ; attempt += 1) {
     // Wait only between attempts: never before the first, never after the last.

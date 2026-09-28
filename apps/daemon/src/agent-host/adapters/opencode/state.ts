@@ -17,6 +17,7 @@ import type {
   CanonicalItemType,
   RuntimeMode,
   RuntimeTaskStatus,
+  RuntimeTaskUsage,
   TurnTokenUsage
 } from "@orquester/api/agent-chat";
 
@@ -599,6 +600,45 @@ export interface OpenCodeChildAgent {
    * {@link OPEN_CALLS_PER_CHILD_MAX}.
    */
   openCalls?: Map<string, OpenCodeOpenCall>;
+  /**
+   * Every `step-finish` of the child's own messages, by part id (a part is
+   * restated as it settles): the roster's usage, summed as the parent's turn
+   * sums its own steps — never the parent's meter.
+   */
+  stepTokens?: Map<string, OpenCodeTokens>;
+  /** The calls the child has finished, by call id — the roster's `toolUses`. */
+  finishedCalls?: Set<string>;
+}
+
+/** A child's usage for the roster, from its steps and its finished calls. */
+export function childAgentUsage(agent: OpenCodeChildAgent): RuntimeTaskUsage | undefined {
+  if (agent.stepTokens === undefined || agent.stepTokens.size === 0) {
+    return undefined;
+  }
+  let totalTokens = 0;
+  let inputTokens = 0;
+  let cachedInputTokens = 0;
+  let outputTokens = 0;
+  let reasoningOutputTokens = 0;
+  for (const tokens of agent.stepTokens.values()) {
+    const cacheRead = tokens.cache?.read ?? 0;
+    const cacheWrite = tokens.cache?.write ?? 0;
+    const input = (tokens.input ?? 0) + cacheRead + cacheWrite;
+    const output = (tokens.output ?? 0) + (tokens.reasoning ?? 0);
+    totalTokens += typeof tokens.total === "number" ? tokens.total : input + output;
+    inputTokens += input;
+    cachedInputTokens += cacheRead;
+    outputTokens += output;
+    reasoningOutputTokens += tokens.reasoning ?? 0;
+  }
+  return {
+    totalTokens,
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    reasoningOutputTokens,
+    ...(agent.finishedCalls !== undefined ? { toolUses: agent.finishedCalls.size } : {})
+  };
 }
 
 /** How many open calls a child's record keeps ({@link OpenCodeChildAgent.openCalls}). */

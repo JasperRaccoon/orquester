@@ -211,6 +211,51 @@ describe("claude subscription windows", () => {
     assert.equal(names.overageIncluded, "Fable");
   });
 
+  it("reads both account windows off CLI 2.1.280's unifiedWindows", () => {
+    // Verbatim shape of a live 2.1.280 frame (raw.ndjson, 2026-09-28).
+    const update = rateLimitEventToUpdate(
+      {
+        status: "allowed",
+        resetsAt: 1790623200,
+        rateLimitType: "five_hour",
+        overageStatus: "rejected",
+        overageDisabledReason: "out_of_credits",
+        isUsingOverage: false,
+        unifiedWindows: {
+          five_hour: { utilization: 0.04, resetsAt: 1790623200 },
+          seven_day: { utilization: 0.16, resetsAt: 1791158400 },
+          some_future_window: { utilization: 0.5, resetsAt: 1791158400 }
+        }
+      },
+      {}
+    );
+    assert.deepEqual(update, {
+      windows: [
+        {
+          id: CLAUDE_SESSION_WINDOW_ID,
+          kind: "session",
+          label: "Session",
+          windowDurationMins: 300,
+          usedPercent: 4,
+          resetsAt: new Date(1790623200 * 1000).toISOString()
+        },
+        {
+          id: CLAUDE_WEEKLY_WINDOW_ID,
+          kind: "weekly",
+          label: "Weekly",
+          windowDurationMins: 7 * 24 * 60,
+          usedPercent: 16,
+          resetsAt: new Date(1791158400 * 1000).toISOString()
+        }
+      ]
+    });
+    // A malformed block falls back to the top-level fields.
+    assert.equal(
+      rateLimitEventToUpdate({ rateLimitType: "five_hour", status: "allowed", unifiedWindows: { five_hour: {} } }, {}),
+      undefined
+    );
+  });
+
   it("maps a streamed event onto the row the probe drew, or onto nothing", () => {
     const update = rateLimitEventToUpdate(
       { rateLimitType: "five_hour", utilization: 0.98, resetsAt: 1789969200 },

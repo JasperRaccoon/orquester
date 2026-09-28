@@ -12,7 +12,11 @@
 
 import { EventEmitter } from "node:events";
 import { sep } from "node:path";
-import type { AgentChatSessionSummaryFields, SessionSummary } from "@orquester/api";
+import type {
+  AgentChatSessionSummaryFields,
+  SessionSummary,
+  WorkflowSessionOwner
+} from "@orquester/api";
 import type { AgentChatHome, SessionRecord } from "@orquester/config";
 
 /** Thrown for a refusal the route maps to a 400. */
@@ -33,6 +37,8 @@ export interface ChatSessionCreateInput {
   accountId: string;
   home: AgentChatHome;
   createdAt?: string;
+  /** The workflow run that started this tab (workflows spec §5.10), already validated by the route. */
+  owner?: WorkflowSessionOwner;
 }
 
 interface ChatSession {
@@ -118,7 +124,8 @@ export class ChatSessionManager {
       // strip and the Attention Center colour a chat row from.
       status: "running",
       order: input.order,
-      createdAt: input.createdAt ?? new Date().toISOString()
+      createdAt: input.createdAt ?? new Date().toISOString(),
+      ...(input.owner ? { owner: { ...input.owner } } : {})
     };
     this.sessions.set(input.id, {
       summary,
@@ -268,7 +275,9 @@ export class ChatSessionManager {
       cwd: s.summary.cwd,
       createdAt: s.summary.createdAt,
       accountId: s.summary.accountId,
-      chat: { ...s.chat }
+      chat: { ...s.chat },
+      // workflows §5.10: persisted so the Workflow chip and the tab sweeper survive a restart.
+      ...(s.summary.owner ? { owner: { ...s.summary.owner } } : {})
     }));
   }
 
@@ -295,7 +304,9 @@ export class ChatSessionManager {
         rows: 0,
         status: "running",
         order: record.order,
-        createdAt: record.createdAt
+        createdAt: record.createdAt,
+        // The tolerant parse already dropped a malformed owner (never the record).
+        ...(record.owner ? { owner: { ...record.owner } } : {})
       };
       this.sessions.set(record.id, {
         summary,

@@ -13,7 +13,8 @@ import {
   agentHostSocketPath,
   agentHostTokenPath,
   createDefaultClientConfig,
-  createDefaultDaemonConfig
+  createDefaultDaemonConfig,
+  parseSessionsConfig
 } from "@orquester/config";
 import { Broadcaster } from "../broadcaster.ts";
 import { createServer as createDaemonApp, relayedUploadClosesConnection } from "../index.ts";
@@ -30,7 +31,7 @@ import {
   PROVIDER_REFRESH_DEBOUNCE_MS,
   resolveHomeKind
 } from "./service.ts";
-import { ChatSessionError } from "./chat-sessions.ts";
+import { ChatSessionError, ChatSessionManager } from "./chat-sessions.ts";
 import { HostUnavailableError, type AgentHostClient } from "./host-client.ts";
 import { UploadTooLargeError } from "../upload-stream.ts";
 
@@ -577,6 +578,81 @@ test("a bad resume in the nested block is refused just as the flat one is", asyn
     (error: unknown) => error instanceof ChatSessionError && error.code === "RESUME_UNAVAILABLE"
   );
   assert.equal(f.created.length, 0);
+  await f.cleanup();
+});
+
+// --- workflows §5.10: the session owner ----------------------------------
+
+test("a workflow owner rides create → summary → sessions.json → re-adoption after a restart", async () => {
+  const f = await makeFixture(OPENCODE, null);
+  const owner = { kind: "workflow" as const, workflowId: "wf-1", runId: "run-1", nodeId: "node-1" };
+  const summary = await f.service.createSession(
+    { kind: "agent-chat", refId: "opencode", projectPath: "/w/p", cwd: "/w/p", owner },
+    0
+  );
+  assert.deepEqual(summary.owner, owner);
+  assert.deepEqual(f.service.chat.get(summary.id)?.owner, owner);
+  assert.deepEqual(f.service.chat.list("/w/p")[0]?.owner, owner);
+  // A §6.4 field update replaces the derived fields, never the owner.
+  const updated = f.service.chat.applyFields(summary.id, {
+    hasPendingApprovals: true,
+    hasPendingUserInput: false,
+    hasActionableProposedPlan: false,
+    backgroundLiveness: null,
+    latestTurn: null,
+    chatSessionStatus: "ready",
+    goal: null
+  });
+  assert.deepEqual(updated?.owner, owner);
+  assert.equal("owner" in (f.created[0] ?? {}), false, "the host thread knows nothing of workflows");
+
+  // What the index writes, read back through the tolerant parse a restart uses.
+  const onDisk = JSON.parse(JSON.stringify({ version: 1, sessions: f.service.chat.records() }));
+  assert.deepEqual(onDisk.sessions[0].owner, owner);
+  const reloaded = new ChatSessionManager();
+  reloaded.adopt(parseSessionsConfig(onDisk).sessions);
+  assert.deepEqual(reloaded.get(summary.id)?.owner, owner);
+  assert.deepEqual(reloaded.records()[0]?.owner, owner, "a re-write keeps it");
+  await f.cleanup();
+});
+
+test("a tab with no owner writes no owner key, and a malformed owner on disk costs only the owner", async () => {
+  const f = await makeFixture(OPENCODE, null);
+  const summary = await f.service.createSession(
+    { kind: "agent-chat", refId: "opencode", projectPath: "/w/p", cwd: "/w/p" },
+    0
+  );
+  assert.equal("owner" in summary, false);
+  const record = f.service.chat.records()[0]!;
+  assert.equal("owner" in record, false);
+  const reloaded = new ChatSessionManager();
+  reloaded.adopt(
+    parseSessionsConfig({ version: 1, sessions: [{ ...record, owner: { kind: "workflow", runId: 3 } }] })
+      .sessions
+  );
+  assert.equal(reloaded.get(summary.id)?.id, summary.id, "the tab survives");
+  assert.equal(reloaded.get(summary.id)?.owner, undefined);
+  await f.cleanup();
+});
+
+test("the service refuses a malformed owner before the tab or the thread exists", async () => {
+  const f = await makeFixture(OPENCODE, null);
+  await assert.rejects(
+    () =>
+      f.service.createSession(
+        {
+          kind: "agent-chat",
+          refId: "opencode",
+          projectPath: "/w/p",
+          cwd: "/w/p",
+          owner: { kind: "workflow", workflowId: "", runId: "r", nodeId: "n" }
+        },
+        0
+      ),
+    (error: unknown) => error instanceof ChatSessionError && error.code === "INVALID_OWNER"
+  );
+  assert.equal(f.created.length, 0);
+  assert.deepEqual(f.service.chat.list(), []);
   await f.cleanup();
 });
 
