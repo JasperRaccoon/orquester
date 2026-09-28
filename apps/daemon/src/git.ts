@@ -19,6 +19,8 @@ import { homedir } from "node:os";
 import { join, sep } from "node:path";
 import { promisify } from "node:util";
 
+import { stripUrlCredentials } from "./workflows/git-remote/remote-url";
+
 const run = promisify(execFile);
 
 type GitRunner = (
@@ -565,6 +567,30 @@ export class GitService {
       .map((l) => l.replace(/^refs\/remotes\//, ""));
 
     return { current, local, remote };
+  }
+
+  /**
+   * The fetch URL of `remote` (default `origin`), or null when the dir is no repo, the remote
+   * does not exist or its name is not a plain remote name. Any password/token in the URL's
+   * userinfo is removed (`https://user:tok@h/…` → `https://user@h/…`): the URL feeds trigger
+   * payloads and cards, and the account's own transport authenticates reads of it.
+   */
+  async remoteUrl(cwd: string, remote = "origin"): Promise<string | null> {
+    if (!/^[A-Za-z0-9._][A-Za-z0-9._/-]*$/.test(remote)) {
+      return null;
+    }
+    const { stdout, code } = await this.exec(cwd, ["remote", "get-url", remote], { allowFail: true });
+    const url = stdout.trim().split("\n")[0]?.trim() ?? "";
+    return code === 0 && url ? stripUrlCredentials(url) : null;
+  }
+
+  /** The checked-out branch's short name, or null (detached HEAD, no repo). */
+  async currentBranch(cwd: string): Promise<string | null> {
+    const { stdout, code } = await this.exec(cwd, ["symbolic-ref", "--quiet", "--short", "HEAD"], {
+      allowFail: true
+    });
+    const branch = stdout.trim();
+    return code === 0 && branch ? branch : null;
   }
 
   // --- Mutations ---------------------------------------------------------

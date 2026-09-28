@@ -113,6 +113,7 @@ import { CLIPROXY_RELEASE, defaultFetchTarball, installBinary, listPatches, roll
 import { accountPrefix } from "./cliproxy-seed.ts";
 import { Broadcaster } from "./broadcaster";
 import { AccountError, AccountsService } from "./accounts";
+import { cloneRefProblem } from "./workflows/git-remote";
 import { AgentAccountsService } from "./agent-accounts.ts";
 import { AgentAccountError } from "./agent-account-paths.ts";
 import { PushService, isValidPushEndpoint } from "./push";
@@ -2342,12 +2343,17 @@ export function createServer(
           if (preferredName !== undefined && !isValidName(preferredName)) {
             return reply.code(400).send({ code: "INVALID_NAME", message: "Invalid name." });
           }
+          const refProblem = body.ref === undefined ? null : cloneRefProblem(body.ref);
+          if (refProblem) {
+            return reply.code(400).send({ code: "INVALID_REF", message: refProblem });
+          }
           await mkdir(workspaceDir, { recursive: true });
           const { name } = await accounts.cloneFromInput(
             accountId,
             body.url,
             preferredName,
-            workspaceDir
+            workspaceDir,
+            body.ref === undefined ? {} : { ref: body.ref }
           );
           // A stale archived name (dir removed outside orquester) would hide
           // the fresh clone — prune it, same as the empty branch above.

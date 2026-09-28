@@ -256,8 +256,12 @@ export interface OwnerSummary {
  */
 export type CreateProjectRequest =
   | { source?: "empty"; name: string }
-  /** `url`: full URL, `git@…`, or `owner/repo`; `name` overrides the dest dir. */
-  | { source: "clone"; url: string; name?: string }
+  /**
+   * `url`: full URL, `git@…`, or `owner/repo`; `name` overrides the dest dir. `ref` (optional)
+   * checks out a branch, tag or commit sha after the clone (≤ 250 chars, no leading `-`, no
+   * whitespace/control characters; 400 `INVALID_REF` otherwise).
+   */
+  | { source: "clone"; url: string; name?: string; ref?: string }
   | {
       source: "create";
       owner: string;

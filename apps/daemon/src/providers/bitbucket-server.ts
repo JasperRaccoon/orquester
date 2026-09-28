@@ -6,6 +6,8 @@ import { Agent } from "undici";
 import { AccountError } from "../account-error";
 import type {
   CloneUrls,
+  ConditionalListOptions,
+  ConditionalPage,
   CreateRepoOpts,
   CredentialSpec,
   GitProvider,
@@ -13,9 +15,12 @@ import type {
   ParsedRepo,
   ProviderCreds,
   ProviderIdentity,
+  PullRequestInfo,
+  ReleaseInfo,
   SshProbe,
   UrlContext
 } from "./types";
+import { GitRemoteError, POLL_PAGE_SIZE } from "./types";
 
 /**
  * Bitbucket Server / Data Center ("Bitbucket Enterprise").
@@ -57,13 +62,24 @@ function base(creds: { baseUrl?: string }): string {
  * 401/403/409 without re-parsing the message. Still an `AccountError`, so route
  * handlers map `.status` exactly as before.
  */
-class DcHttpError extends AccountError {
+class DcHttpError extends GitRemoteError {
   constructor(
     status: number,
     message: string,
-    readonly httpStatus: number
+    override readonly httpStatus: number
   ) {
-    super(status, message);
+    super(
+      status,
+      message,
+      httpStatus === 429
+        ? "rate_limited"
+        : httpStatus === 401 || httpStatus === 403
+          ? "auth"
+          : httpStatus === 404
+            ? "not_found"
+            : "upstream",
+      httpStatus
+    );
   }
 }
 
@@ -162,14 +178,19 @@ async function dcFetch(url: string, init: RequestInit): Promise<Response> {
   }
 }
 
-/** Authenticated DC REST call returning the decoded body + response headers. */
+/**
+ * Authenticated DC REST call returning the status, decoded body and response
+ * headers. A 304 comes back as `{status: 304}` only when the caller sent an
+ * `etag` (`If-None-Match`); every other non-2xx throws `DcHttpError`.
+ */
 async function dcRequest(
   creds: ProviderCreds,
   method: string,
   path: string,
   body?: unknown,
-  retry = 1
-): Promise<{ data: any; headers: Headers }> {
+  opts: { retry?: number; etag?: string } = {}
+): Promise<{ status: number; data: any; headers: Headers }> {
+  const retry = opts.retry ?? 1;
   const dispatcher = await dispatcherFor(creds.caCertPath);
   const response = await dcFetch(`${base(creds)}${path}`, {
     method,
@@ -179,7 +200,8 @@ async function dcRequest(
       Authorization: `Bearer ${creds.token}`,
       Accept: "application/json",
       "User-Agent": "orquester",
-      ...(body ? { "Content-Type": "application/json" } : {})
+      ...(body ? { "Content-Type": "application/json" } : {}),
+      ...(opts.etag ? { "If-None-Match": opts.etag } : {})
     },
     body: body ? JSON.stringify(body) : undefined,
     // Non-standard RequestInit key understood by Node's undici-backed fetch.
@@ -188,7 +210,10 @@ async function dcRequest(
   if (response.status === 429 && retry > 0) {
     // DC rate limiting (token-bucket, admin-configured) — one backoff retry.
     await sleep(2000);
-    return dcRequest(creds, method, path, body, retry - 1);
+    return dcRequest(creds, method, path, body, { ...opts, retry: retry - 1 });
+  }
+  if (response.status === 304 && opts.etag) {
+    return { status: 304, data: undefined, headers: response.headers };
   }
   if (!response.ok) {
     const text = (await response.text().catch(() => "")).slice(0, 300);
@@ -199,6 +224,9 @@ async function dcRequest(
         response.status
       );
     }
+    if (response.status === 429) {
+      throw new DcHttpError(429, `Bitbucket Server ${method} ${path} → 429: rate limited. ${text}`, 429);
+    }
     const unauthorized = response.status === 401 || response.status === 403;
     const hint = unauthorized ? ` (check the token: ${SCOPES})` : "";
     throw new DcHttpError(
@@ -208,6 +236,7 @@ async function dcRequest(
     );
   }
   return {
+    status: response.status,
     data: response.status === 204 ? undefined : await response.json(),
     headers: response.headers
   };
@@ -612,5 +641,71 @@ export const bitbucketServerProvider: GitProvider = {
     // `URL.host` keeps a non-default port ("bb.corp.com:8443"); the context path
     // is irrelevant to git's credential lookup.
     return { host: new URL(base(ctx)).host, username: ctx.login };
+  },
+
+  supportsReleases: false,
+
+  /**
+   * `GET …/pull-requests?state=ALL&order=NEWEST` — one page. DC's NEWEST is by
+   * creation, so the page is re-sorted by `updatedDate` (most recent first).
+   * Needs an account: the instance's base URL (and its token) come from it.
+   */
+  async listPullRequests(
+    creds: ProviderCreds | null,
+    repo: ParsedRepo,
+    opts?: ConditionalListOptions
+  ): Promise<ConditionalPage<PullRequestInfo>> {
+    if (!creds?.token || !creds.baseUrl) {
+      throw new GitRemoteError(
+        400,
+        "Watching a Bitbucket Server repository needs a connected account with a token.",
+        "unsupported"
+      );
+    }
+    const res = await dcRequest(
+      creds,
+      "GET",
+      `/rest/api/1.0/projects/${encodeURIComponent(repo.owner)}/repos/${encodeURIComponent(repo.repo)}` +
+        `/pull-requests?state=ALL&order=NEWEST&limit=${POLL_PAGE_SIZE}`,
+      undefined,
+      { etag: opts?.etag }
+    );
+    if (res.status === 304) {
+      return { notModified: true };
+    }
+    const values: unknown[] = Array.isArray(res.data?.values) ? res.data.values : [];
+    const items = values
+      .filter((value): value is Record<string, unknown> => !!value && typeof value === "object")
+      .map(toServerPullRequest)
+      .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
+    const etag = res.headers.get("etag") ?? undefined;
+    return { items, ...(etag ? { etag } : {}) };
+  },
+
+  /** Bitbucket has no releases (the editor offers "tag" there). */
+  async listReleases(): Promise<ConditionalPage<ReleaseInfo>> {
+    return { items: [], unsupported: true };
   }
 };
+
+/** Map one DC pull request JSON object to `PullRequestInfo`. */
+export function toServerPullRequest(pr: any): PullRequestInfo {
+  const text = (value: unknown): string => (typeof value === "string" ? value : "");
+  const user = pr?.author?.user ?? {};
+  const selfLinks: unknown = pr?.links?.self;
+  const url = Array.isArray(selfLinks) ? text((selfLinks[0] as { href?: unknown } | undefined)?.href) : "";
+  const updated = typeof pr?.updatedDate === "number" ? pr.updatedDate : undefined;
+  const state = text(pr?.state);
+  return {
+    number: typeof pr?.id === "number" ? pr.id : 0,
+    title: text(pr?.title),
+    body: text(pr?.description),
+    url,
+    author: text(user.name) || text(user.slug) || text(user.displayName),
+    head: text(pr?.fromRef?.displayId),
+    base: text(pr?.toRef?.displayId),
+    headSha: text(pr?.fromRef?.latestCommit),
+    state: state === "OPEN" ? "open" : state === "MERGED" ? "merged" : "closed",
+    updatedAt: updated !== undefined ? new Date(updated).toISOString() : ""
+  };
+}

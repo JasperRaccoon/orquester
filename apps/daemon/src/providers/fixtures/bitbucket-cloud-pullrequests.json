@@ -1,0 +1,69 @@
+{
+  "pagelen": 50,
+  "size": 3,
+  "page": 1,
+  "values": [
+    {
+      "type": "pullrequest",
+      "id": 17,
+      "title": "Fix login redirect",
+      "description": "Redirects back to the page the user came from.",
+      "state": "OPEN",
+      "author": {
+        "type": "user",
+        "display_name": "Jane Doe",
+        "nickname": "jdoe",
+        "uuid": "{4c2d1f1e-0000-4000-8000-000000000001}",
+        "account_id": "5b10a2844c20165700ede21g"
+      },
+      "source": {
+        "branch": { "name": "bugfix/login-redirect" },
+        "commit": { "type": "commit", "hash": "1a2b3c4d5e6f", "links": { "html": { "href": "https://bitbucket.org/acme/web-app/commits/1a2b3c4d5e6f" } } },
+        "repository": { "full_name": "acme/web-app", "type": "repository" }
+      },
+      "destination": {
+        "branch": { "name": "main" },
+        "commit": { "type": "commit", "hash": "9f8e7d6c5b4a" },
+        "repository": { "full_name": "acme/web-app", "type": "repository" }
+      },
+      "merge_commit": null,
+      "comment_count": 2,
+      "task_count": 0,
+      "close_source_branch": true,
+      "closed_by": null,
+      "reason": "",
+      "created_on": "2026-09-26T08:00:00.123456+00:00",
+      "updated_on": "2026-09-27T14:02:03.654321+00:00",
+      "links": {
+        "self": { "href": "https://api.bitbucket.org/2.0/repositories/acme/web-app/pullrequests/17" },
+        "html": { "href": "https://bitbucket.org/acme/web-app/pull-requests/17" }
+      },
+      "summary": { "type": "rendered", "raw": "Redirects back to the page the user came from.", "markup": "markdown" }
+    },
+    {
+      "type": "pullrequest",
+      "id": 16,
+      "title": "Release 3.2",
+      "description": "",
+      "state": "MERGED",
+      "author": { "type": "user", "display_name": "Build Bot" },
+      "source": { "branch": { "name": "release/3.2" }, "commit": { "hash": "abcdefabcdef" } },
+      "destination": { "branch": { "name": "main" }, "commit": { "hash": "0123456789ab" } },
+      "merge_commit": { "hash": "fedcba987654" },
+      "updated_on": "2026-09-25T10:00:00.000000+00:00",
+      "links": { "html": { "href": "https://bitbucket.org/acme/web-app/pull-requests/16" } }
+    },
+    {
+      "type": "pullrequest",
+      "id": 15,
+      "title": "Try a new router",
+      "description": "Declined — see #14.",
+      "state": "DECLINED",
+      "author": { "type": "user", "display_name": "Jane Doe", "nickname": "jdoe" },
+      "source": { "branch": { "name": "spike/router" }, "commit": { "hash": "5555aaaa6666" } },
+      "destination": { "branch": { "name": "develop" }, "commit": { "hash": "7777bbbb8888" } },
+      "updated_on": "2026-09-20T10:00:00.000000+00:00",
+      "links": { "html": { "href": "https://bitbucket.org/acme/web-app/pull-requests/15" } }
+    }
+  ]
+}
