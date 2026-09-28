@@ -58,7 +58,7 @@ function checkRef(ref: string): string {
 
 function checkSubPath(segments: string[]): string | undefined {
   for (const segment of segments) {
-    if (segment === "." || segment === ".." || segment.includes("\\") || segment.includes("\0")) {
+    if (segment === "." || segment === ".." || /[/\\\0]/.test(segment)) {
       refuse("The URL's folder path is not a plain path inside the repository.");
     }
   }
