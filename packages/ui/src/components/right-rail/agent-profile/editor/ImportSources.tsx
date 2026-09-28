@@ -217,8 +217,10 @@ function importLabel(count: number): string {
 export const GitSource: React.FC<{
   kind: MarkdownKind;
   toolbar: React.ReactNode;
+  /** Unsaved work under another source (the Write draft). */
+  carriedDirty?: boolean;
   initial?: { url?: string; scan?: ProfileImportScanResponse; scanning?: boolean; scanError?: string };
-}> = ({ kind, toolbar, initial }) => {
+}> = ({ kind, toolbar, carriedDirty = false, initial }) => {
   const { agent, api } = useEditorEnv();
   const ids = useId();
   const touch = useTouch();
@@ -227,7 +229,7 @@ export const GitSource: React.FC<{
   const [scanError, setScanError] = useState<string | null>(initial?.scanError ?? null);
   const [showErrors, setShowErrors] = useState(false);
   const step = useImportStep(initial?.scan ? { scan: initial.scan, picks: defaultPicks(initial.scan.candidates) } : undefined);
-  useReportDirty(url.trim() !== "" || step.state !== null);
+  useReportDirty(carriedDirty || url.trim() !== "" || step.state !== null);
   const urlProblem = gitUrlError(url);
   const urlMessage = showErrors ? urlProblem : undefined;
 
@@ -323,8 +325,9 @@ export const GitSource: React.FC<{
 export const UploadSource: React.FC<{
   kind: MarkdownKind;
   toolbar: React.ReactNode;
+  carriedDirty?: boolean;
   initial?: { fileName?: string; progress?: number; scan?: ProfileImportScanResponse; uploadError?: string };
-}> = ({ kind, toolbar, initial }) => {
+}> = ({ kind, toolbar, carriedDirty = false, initial }) => {
   const { agent, api, variant } = useEditorEnv();
   const ids = useId();
   const inputRef = useRef<HTMLInputElement | null>(null);
@@ -334,7 +337,7 @@ export const UploadSource: React.FC<{
   const [dragging, setDragging] = useState(false);
   const step = useImportStep(initial?.scan ? { scan: initial.scan, picks: defaultPicks(initial.scan.candidates) } : undefined);
   const uploading = progress !== null;
-  useReportDirty(uploading || step.state !== null);
+  useReportDirty(carriedDirty || uploading || step.state !== null);
 
   const upload = async (file: File) => {
     const problem = uploadFileError(file.name);
@@ -487,8 +490,9 @@ type SnapshotLoad =
 export const CopySource: React.FC<{
   kind: MarkdownKind;
   toolbar: React.ReactNode;
+  carriedDirty?: boolean;
   initial?: { from?: AgentProfileAgentId; load?: SnapshotLoad; selected?: string };
-}> = ({ kind, toolbar, initial }) => {
+}> = ({ kind, toolbar, carriedDirty = false, initial }) => {
   const { agent, api } = useEditorEnv();
   const ids = useId();
   const choices = copySourceAgents(agent);
@@ -498,7 +502,7 @@ export const CopySource: React.FC<{
   const [attempt, setAttempt] = useState(0);
   const submit = useProfileSubmit();
   const preset = useRef(initial?.load !== undefined);
-  useReportDirty(false);
+  useReportDirty(carriedDirty);
 
   useEffect(() => {
     if (preset.current) {

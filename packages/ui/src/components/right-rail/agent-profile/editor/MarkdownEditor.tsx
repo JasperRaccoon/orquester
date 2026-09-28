@@ -46,16 +46,19 @@ export const MarkdownCreateEditor: React.FC<{ kind: MarkdownKind; initialSource?
   const { agent } = useEditorEnv();
   const [source, setSource] = useState<MarkdownSource>(initialSource);
   const model = useMemo(() => markdownEditorModel(agent, kind), [agent, kind]);
-  // The written draft outlives a look at another source.
-  const [form, setForm] = useState<MarkdownForm>(() => initialMarkdownForm(model));
+  // The written draft outlives a look at another source, and so does the
+  // unsaved-changes guard over it: the other sources report it with their own.
+  const [initialForm] = useState<MarkdownForm>(() => initialMarkdownForm(model));
+  const [form, setForm] = useState<MarkdownForm>(initialForm);
+  const written = markdownFormSignature(form) !== markdownFormSignature(initialForm);
   const toolbar = <SourceSwitcher value={source} onChange={setSource} />;
   switch (source) {
     case "git":
-      return <GitSource kind={kind} toolbar={toolbar} />;
+      return <GitSource kind={kind} toolbar={toolbar} carriedDirty={written} />;
     case "upload":
-      return <UploadSource kind={kind} toolbar={toolbar} />;
+      return <UploadSource kind={kind} toolbar={toolbar} carriedDirty={written} />;
     case "copy":
-      return <CopySource kind={kind} toolbar={toolbar} />;
+      return <CopySource kind={kind} toolbar={toolbar} carriedDirty={written} />;
     default:
       return <WriteSource kind={kind} model={model} form={form} setForm={setForm} toolbar={toolbar} />;
   }
@@ -95,9 +98,11 @@ const WriteSource: React.FC<{
   toolbar?: React.ReactNode;
   onReload?: () => void;
 }> = ({ kind, model, form, setForm, detail, toolbar, onReload }) => {
-  const env = useEditorEnv();
-  const { agent, api } = env;
-  const [initialSignature] = useState(() => markdownFormSignature(form));
+  const { agent, api } = useEditorEnv();
+  // A new item compares with the empty form (a draft kept across a source switch is still unsaved).
+  const [initialSignature] = useState(() =>
+    markdownFormSignature(detail ? form : initialMarkdownForm(model))
+  );
   const [showErrors, setShowErrors] = useState(false);
   const submit = useProfileSubmit();
   const validation = validateMarkdownForm(kind, model, form);
