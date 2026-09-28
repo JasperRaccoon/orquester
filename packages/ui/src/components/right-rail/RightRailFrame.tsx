@@ -8,6 +8,7 @@ import { RightRailDock } from "./RightRailDock";
 import { MobileSectionOverlay } from "./MobileSections";
 import type { RightRailPanelRegistry } from "./panels";
 import { toggleRightRailPanel, useRightRailState } from "./right-rail-state";
+import { AgentProfileEditorHost } from "./agent-profile/AgentProfileEditorHost";
 import { SavedPromptEditorHost } from "./saved-prompts/SavedPromptEditorHost";
 import type { RightRailPanelId } from "./types";
 
@@ -119,11 +120,18 @@ export const RightRailFrame: React.FC<{ children: React.ReactNode }> = ({ childr
 };
 
 /**
- * The saved-prompt editor, mounted once while a project is open — desktop or
- * mobile, whichever panel is showing — so both panels (docked, or a phone's
- * section) open it through `saved-prompts/editor-bridge.ts`.
+ * The rail's editors — the saved-prompt editor and the agent-profile editor —
+ * each mounted once while a project is open, desktop or mobile, whichever
+ * panel is showing, so both variants of a panel (docked, or a phone's
+ * section) open them through their bridges (`saved-prompts/editor-bridge.ts`,
+ * `agent-profile/editor-bridge.ts`).
  */
 export const RightRailEditorHost: React.FC = () => {
   const projectPath = useOpenProjectPath();
-  return projectPath !== null ? <SavedPromptEditorHost /> : null;
+  return projectPath !== null ? (
+    <>
+      <SavedPromptEditorHost />
+      <AgentProfileEditorHost />
+    </>
+  ) : null;
 };

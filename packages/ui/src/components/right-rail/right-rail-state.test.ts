@@ -98,6 +98,13 @@ test("the workflows panel is a panel like the others", () => {
   assert.equal(serializeRightRailState({ open: "workflows", width: 360 }), '{"v":1,"open":"workflows","width":360}');
 });
 
+test("the agent profile panel is a panel like the others", () => {
+  assert.equal(isRightRailPanelId("profile"), true);
+  assert.equal(isRightRailPanelId("Profile"), false);
+  assert.deepEqual(parseRightRailState('{"v":1,"open":"profile","width":420}'), { open: "profile", width: 420 });
+  assert.equal(serializeRightRailState({ open: "profile", width: 420 }), '{"v":1,"open":"profile","width":420}');
+});
+
 test("a stored width is clamped into range, and a nonsensical one is dropped", () => {
   const width = (value: string): number => parseRightRailState(`{"width":${value}}`).width;
   assert.equal(width("10"), RIGHT_RAIL_WIDTH_MIN, "too narrow → the minimum");
