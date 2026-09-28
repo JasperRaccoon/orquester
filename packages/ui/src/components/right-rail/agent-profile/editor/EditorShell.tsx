@@ -127,9 +127,10 @@ export const EditorShell: React.FC<EditorShellProps> = ({
         )}
       </header>
 
-      {toolbar ? <div className="shrink-0 border-b border-neutral-800 px-4 py-2.5">{toolbar}</div> : null}
-
+      {/* The toolbar reads the width too: the source switcher's short labels on a phone. */}
       <EditorWideContext.Provider value={isWide(width)}>
+        {toolbar ? <div className="shrink-0 border-b border-neutral-800 px-4 py-2.5">{toolbar}</div> : null}
+
         <div
           className={cn(
             "min-h-0 min-w-0 flex-1 overscroll-contain px-4 py-4",

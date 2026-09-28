@@ -184,7 +184,7 @@ export const CandidateChecklist: React.FC<{
                     ) : null}
                   </span>
                   {candidate.description ? (
-                    <span className="mt-0.5 line-clamp-2 block text-xs text-neutral-400">{candidate.description}</span>
+                    <span className="mt-0.5 line-clamp-2 text-xs text-neutral-400">{candidate.description}</span>
                   ) : null}
                   <span className="block truncate text-[11px] text-neutral-600" title={candidate.ref}>
                     {candidate.ref}
@@ -637,7 +637,7 @@ export const CopyItemList: React.FC<{
                     {item.name}
                   </span>
                   {item.description ? (
-                    <span className="mt-0.5 line-clamp-2 block text-xs text-neutral-400">{item.description}</span>
+                    <span className="mt-0.5 line-clamp-2 text-xs text-neutral-400">{item.description}</span>
                   ) : null}
                 </span>
               </label>

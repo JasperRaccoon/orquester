@@ -345,7 +345,7 @@ export const PluginPicker: React.FC<{
                       ) : null}
                     </span>
                     {plugin.description ? (
-                      <span className="mt-0.5 line-clamp-2 block text-xs text-neutral-400">{plugin.description}</span>
+                      <span title={plugin.description} className="mt-0.5 line-clamp-2 text-xs text-neutral-400">{plugin.description}</span>
                     ) : null}
                   </span>
                 </label>

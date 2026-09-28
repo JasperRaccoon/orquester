@@ -100,6 +100,13 @@ function buttonWith(html: string, label: string): string {
   return found;
 }
 
+/** The LAST button reading exactly `label`: the footer's, where a switcher segment reads the same. */
+function footerButton(html: string, label: string): string {
+  const found = (html.match(BUTTONS) ?? []).filter((button) => text(button).trim() === label).at(-1);
+  assert.ok(found, `a button reading "${label}"`);
+  return found;
+}
+
 const DISABLED = /<button\b[^>]*\sdisabled=""/;
 const isDisabled = (button: string): boolean => DISABLED.test(button);
 
@@ -243,6 +250,10 @@ for (const agent of AGENT_PROFILE_AGENTS) {
       const form = { ...initialMcpForm(agent), name: "docs", transport };
       const html = mcpView(agent, variant, form, { advancedOpen: true });
       assertEditorRules(html, what, variant);
+      assert.ok(
+        html.includes('<span class="shrink-0 whitespace-nowrap">Advanced</span><span class="ml-auto min-w-0 truncate'),
+        `${what}: "Advanced" never wraps; the field list beside it truncates`
+      );
       assert.ok(buttonWith(html, transport === "stdio" ? (variant === "phone" ? "stdio" : "Command (stdio)") : transport.toUpperCase()).includes('aria-pressed="true"'), `${what}: the transport is picked`);
       if (transport === "stdio") {
         assert.ok(html.includes(">Command") && html.includes(">Arguments") && html.includes(">Environment"), `${what}: command, args, env`);
@@ -433,9 +444,20 @@ for (const variant of VARIANTS) {
     assert.ok(write.includes('data-code-area=""'), `${what}: the body editor`);
     assert.ok(write.includes(kind === "skill" ? 'aria-label="Skill instructions"' : 'aria-label="Command prompt"'), `${what}: named`);
     assert.ok(write.includes(">More fields"), `${what}: optional fields folded`);
+    assert.ok(
+      write.includes('<span class="shrink-0 whitespace-nowrap">More fields</span><span class="ml-auto min-w-0 truncate'),
+      `${what}: "More fields" never wraps; the field list beside it truncates`
+    );
     if (kind === "skill") assert.ok(write.includes(">Description") && write.includes("aria-required"), "a skill's description is required");
-    const copyLabel = variant === "phone" ? "Copy" : "Copy from agent";
-    assert.ok(buttonWith(write, copyLabel), `${what}: the switcher fits (${copyLabel})`);
+    // The switcher is in the shell's toolbar, which reads the editor's width
+    // too: a phone shows the short labels, whole (spec §7.5, no clipping).
+    const switcher = (write.match(BUTTONS) ?? []).filter((button) => /aria-pressed=/.test(button)).map((button) => text(button).trim());
+    assert.deepEqual(
+      switcher.slice(0, 4),
+      variant === "phone" ? ["Write", "Git", "Upload", "Copy"] : ["Write", "Git URL", "Upload", "Copy from agent"],
+      `${what}: the switcher fits`
+    );
+    if (variant === "phone") assert.ok(write.includes('aria-label="Copy from agent"'), `${what}: a short label keeps its whole name`);
   }
 
   const sourceToolbar = createElement(SourceSwitcher, { value: "git", onChange: noop });
@@ -472,7 +494,7 @@ for (const variant of VARIANTS) {
   const copyToolbar = createElement(SourceSwitcher, { value: "copy", onChange: noop });
   const copyLoading = render(createElement(CopySource, { kind: "skill", toolbar: copyToolbar }), "grok", variant);
   assertEditorRules(copyLoading, `copy loading · ${variant}`, variant);
-  assert.ok(copyLoading.includes("Reading Claude") && isDisabled(buttonWith(copyLoading, "Copy")), "Copy: reading the first other agent");
+  assert.ok(copyLoading.includes("Reading Claude") && isDisabled(footerButton(copyLoading, "Copy")), "Copy: reading the first other agent");
   assert.ok(!copyLoading.includes('value="grok"'), "never the agent itself");
   const copyLoaded = render(
     createElement(CopySource, {
@@ -497,7 +519,7 @@ for (const variant of VARIANTS) {
   assertEditorRules(copyLoaded, `copy loaded · ${variant}`, variant);
   assert.ok(copyLoaded.includes("review-pr") && !copyLoaded.includes("from-plugin"), "only the agent's own skills");
   assert.ok(!copyLoaded.includes(">c<"), "only the same kind");
-  assert.ok(copyLoaded.includes('checked=""') && !isDisabled(buttonWith(copyLoaded, "Copy")), "one picked: Copy");
+  assert.ok(copyLoaded.includes('checked=""') && !isDisabled(footerButton(copyLoaded, "Copy")), "one picked: Copy");
   const notInstalled = render(
     createElement(CopySource, { kind: "skill", toolbar: copyToolbar, initial: { from: "codex", load: { status: "loaded", snapshot: snapshot("codex", [], false) } } }),
     "grok",
@@ -621,6 +643,9 @@ for (const variant of VARIANTS) {
   assert.ok(listed.includes('<option value="official"') && listed.includes('aria-label="Search plugins"'), "a marketplace and a search");
   assert.ok(listed.includes(">Installed<") && /<input[^>]*disabled=""[^>]*type="radio"|type="radio"[^>]*disabled=""/.test(listed), "installed ones marked and not pickable");
   assert.ok(listed.includes("TDD, debugging and planning skills"), "descriptions");
+  // `block` beside `line-clamp-2` would win the display and unclamp it.
+  const description = listed.match(/<span[^>]*>TDD, debugging and planning skills<\/span>/)?.[0] ?? "";
+  assert.ok(/\bline-clamp-2\b/.test(description) && !/\bblock\b/.test(description), "descriptions clamped to two lines");
   assert.ok(!isDisabled(buttonWith(listed, "Install linear")), "Install the pick");
   const failed = render(
     createElement(MarketplaceInstall, {

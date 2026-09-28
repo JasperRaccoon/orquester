@@ -246,9 +246,14 @@ export const MarkdownWriteView: React.FC<MarkdownWriteViewProps> = ({
                 touch ? "h-11" : "h-9"
               )}
             >
-              {open ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
-              More fields
-              <span className="ml-auto min-w-0 truncate font-normal text-neutral-500">
+              {open ? (
+                <ChevronDown size={14} aria-hidden className="shrink-0" />
+              ) : (
+                <ChevronRight size={14} aria-hidden className="shrink-0" />
+              )}
+              {/* Never wraps: the list of field names beside it gives way instead. */}
+              <span className="shrink-0 whitespace-nowrap">More fields</span>
+              <span className="ml-auto min-w-0 truncate pl-2 font-normal text-neutral-500">
                 {more.map((spec) => spec.label).join(", ")}
               </span>
             </button>

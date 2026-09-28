@@ -133,6 +133,30 @@ export function profileItemMetaParts(item: Pick<ProfileItem, "kind" | "name" | "
   return parts;
 }
 
+/**
+ * A row's second line: the meta as words, then the description. A hook with
+ * an event reads from its meta alone — event first, then the matcher — as
+ * the adapters each describe one differently ("PreToolUse · Bash",
+ * "Matcher: Bash", "Stop"), and the rows of one list should read alike.
+ */
+export function profileItemSecondLine(item: Pick<ProfileItem, "kind" | "name" | "description" | "meta">): string {
+  if (item.kind === "hook" && (item.meta?.event ?? "").trim() !== "") {
+    return profileItemMetaParts({ ...item, description: undefined }).join(" · ");
+  }
+  return [...profileItemMetaParts(item), ...(item.description ? [item.description] : [])].join(" · ");
+}
+
+/**
+ * The name as a row shows it. A hook is named by its command, whose absolute
+ * paths would fill the row before the part that tells hooks apart:
+ * `'/var/lib/orquester/daemon/hooks/agent-hook.sh' claude Stop` reads
+ * `'…/agent-hook.sh' claude Stop` (the tooltip keeps it whole).
+ */
+export function profileItemDisplayName(item: Pick<ProfileItem, "kind" | "name">): string {
+  if (item.kind !== "hook") return item.name;
+  return item.name.replace(/(^|[\s'"=])\/(?:[^\s'"/]+\/)+([^\s'"/]+)/g, "$1…/$2");
+}
+
 function metaPart(key: string, value: string, kind: ProfileItemKind, name: string, description: string): string | null {
   switch (key) {
     case "event":
@@ -380,15 +404,17 @@ export function instructionsLine(
 
 /**
  * Below this PANEL width (px) the agent picker is one dropdown rather than a
- * segmented control of four icon + name buttons: that needs about 290 px of
- * content to show "OpenCode" whole beside the others, and the panel keeps
- * 24 px of padding.
+ * segmented control of four icon + name buttons: those measure about 308 px
+ * with a wide system font (DejaVu Sans at 12 px) — the buttons, their gaps
+ * and the group's padding — and the panel keeps 24 px of padding, so a panel
+ * any narrower would clip "OpenCode". The dock's default 320 px (319 inside
+ * its border) shows the dropdown; a 360 px phone's section (352) the segments.
  */
-export const AGENT_PICKER_SEGMENTED_MIN_WIDTH = 320;
+export const AGENT_PICKER_SEGMENTED_MIN_WIDTH = 336;
 
 export function agentPickerLayout(panelWidth: number | null): "segmented" | "dropdown" {
-  // Not measured yet (the first paint, a static render): the dock's default
-  // width and a phone's full screen both fit the segments.
+  // Not measured yet (the first paint, a static render): a phone's full
+  // screen fits the segments.
   if (panelWidth === null) return "segmented";
   return panelWidth < AGENT_PICKER_SEGMENTED_MIN_WIDTH ? "dropdown" : "segmented";
 }

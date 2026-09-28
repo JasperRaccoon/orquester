@@ -233,8 +233,9 @@ export const InstructionsBody: React.FC<{
           ) : null}
         </div>
       ) : null}
-      <div className="flex shrink-0 items-center justify-between gap-2 text-[11px] text-neutral-500">
-        <span className="min-w-0 truncate">
+      <div className="flex shrink-0 items-start justify-between gap-2 text-[11px] leading-4 text-neutral-500">
+        {/* Wraps on a phone rather than clipping the sentence. */}
+        <span className="min-w-0">
           Applies to every chat and terminal session of this agent, in every project.
         </span>
         <span className="shrink-0 tabular-nums">{instructionsSummary(text, info.exists)}</span>

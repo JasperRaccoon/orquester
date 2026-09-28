@@ -131,7 +131,8 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
             <RailSearchInput
               value={props.query}
               onChange={props.onQueryChange}
-              placeholder={`Search ${label}'s profile…`}
+              // Short, so the narrowest dock never clips it; the name says whose.
+              placeholder="Search profile…"
               label={`Search ${label}'s profile`}
             />
             <KindChips chips={props.chips} value={props.kind} onChange={props.onKindChange} sheet={sheet} />
@@ -174,6 +175,7 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
               info={snapshot.instructions}
               now={props.now}
               sheet={sheet}
+              compact={pickerLayout === "dropdown"}
               onOpen={props.onOpenInstructions}
             />
           </>
@@ -263,7 +265,8 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
             Add
           </Button>
         )}
-        <p className="truncate text-center text-[11px] text-neutral-500">
+        {/* Wraps rather than clips: OpenCode's hint is two lines in a narrow dock. */}
+        <p className="text-balance text-center text-[11px] leading-4 text-neutral-500">
           {props.agent === "opencode"
             ? "Applies to new sessions · OpenCode servers restart when idle"
             : "Changes apply to new sessions"}

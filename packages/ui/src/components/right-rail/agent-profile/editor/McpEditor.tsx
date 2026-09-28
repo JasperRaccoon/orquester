@@ -260,14 +260,19 @@ export const McpFormView: React.FC<McpFormViewProps> = ({
             aria-controls={`${ids}-advanced`}
             onClick={() => setAdvanced((open) => !open)}
             className={cn(
-              "flex w-full items-center gap-1.5 rounded-md px-3 text-left text-xs font-medium text-neutral-300 hover:text-neutral-100",
+              "flex w-full min-w-0 items-center gap-1.5 rounded-md px-3 text-left text-xs font-medium text-neutral-300 hover:text-neutral-100",
               FOCUS_RING,
               touch ? "h-11" : "h-9"
             )}
           >
-            {advanced ? <ChevronDown size={14} aria-hidden /> : <ChevronRight size={14} aria-hidden />}
-            Advanced
-            <span className="ml-auto truncate font-normal text-neutral-500">
+            {advanced ? (
+              <ChevronDown size={14} aria-hidden className="shrink-0" />
+            ) : (
+              <ChevronRight size={14} aria-hidden className="shrink-0" />
+            )}
+            {/* Never wraps: Codex's long list of field names beside it gives way instead. */}
+            <span className="shrink-0 whitespace-nowrap">Advanced</span>
+            <span className="ml-auto min-w-0 truncate pl-2 font-normal text-neutral-500">
               {advancedFields.map((spec) => spec.label.replace(/ \(.*\)$/, "")).join(", ")}
             </span>
           </button>
