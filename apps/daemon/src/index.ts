@@ -1284,17 +1284,26 @@ export function createServer(
   app.addHook("onRequest", async (request, reply) => {
     // The multiplexed session WebSocket authenticates itself via a query token
     // (browsers can't set WS headers) and must skip the bearer logic below.
-    if (request.url.split("?")[0] === "/ws") {
+    const rawPath = request.url.split("?")[0] ?? "";
+    // The router matches the percent-DECODED path (`/%61pi/sessions` is routed to
+    // `/api/sessions`), so the gate is decided on the raw path, its decoded form AND the
+    // matched route's own pattern — never on the raw request line alone.
+    const routePath: string | undefined = request.routeOptions.url;
+    if (rawPath === "/ws" || routePath === "/ws") {
       return;
     }
 
     // Only the API + event stream are token-gated; the static web client, its
     // assets and the public auth-info endpoint load freely (the web app then
     // authenticates its API calls with the credential bearer).
-    const url = request.url.split("?")[0];
-    const needsAuth =
-      (url.startsWith("/api") || url.startsWith("/events") || url.startsWith("/mcp")) &&
-      url !== "/api/auth/info";
+    const decodedPath = safeDecodePath(rawPath);
+    const url = routePath ?? decodedPath ?? rawPath;
+    const gated = (path: string | undefined): boolean =>
+      path !== undefined &&
+      (path.startsWith("/api") || path.startsWith("/events") || path.startsWith("/mcp")) &&
+      path !== "/api/auth/info";
+    // A path that does not even decode is refused unless authenticated.
+    const needsAuth = decodedPath === undefined || gated(rawPath) || gated(decodedPath) || gated(routePath);
     if (!options.authRequired || !needsAuth) {
       return;
     }
@@ -4744,6 +4753,15 @@ function safeEqual(a: string, b: string): boolean {
   const ba = Buffer.from(a);
   const bb = Buffer.from(b);
   return ba.length === bb.length && timingSafeEqual(ba, bb);
+}
+
+/** A request path percent-decoded as the router sees it; `undefined` when it is not valid percent-encoding. */
+function safeDecodePath(path: string): string | undefined {
+  try {
+    return decodeURIComponent(path);
+  } catch {
+    return undefined;
+  }
 }
 
 /**
