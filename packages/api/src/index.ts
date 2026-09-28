@@ -1,4 +1,5 @@
 import type { ClientConfig, DaemonConfig } from "@orquester/config";
+import type { WorkflowSessionOwner } from "./workflows/types.ts";
 import type {
   AgentAdapterId,
   AgentChatGoalSummary,
@@ -23,6 +24,7 @@ export type RuntimeMode = "desktop-local" | "desktop-remote" | "web-remote";
 export * from "./agent-chat/index.ts";
 export * from "./cliproxy-launch-models.ts";
 export * from "./saved-prompts.ts";
+export * from "./workflows/index.ts";
 
 export type {
   AgentChatBackgroundLiveness,
@@ -1303,6 +1305,11 @@ export interface SessionSummary {
    * keeps starting turns for it — or null when it has none (goals §4.7).
    */
   goal?: AgentChatGoalSummary | null;
+  /**
+   * Set when an automated workflow started this session (workflows spec §5.10): the tab shows a
+   * Workflow chip linking to the run, and the workflow tab sweeper may close it.
+   */
+  owner?: WorkflowSessionOwner;
 }
 
 export interface CreateSessionRequest {
@@ -1349,6 +1356,8 @@ export interface CreateSessionRequest {
    * may leave it unset.
    */
   chat?: CreateAgentChatSessionFields;
+  /** The workflow run that starts this session (workflows spec §5.10). Persisted on the tab record. */
+  owner?: WorkflowSessionOwner;
 }
 
 /** Longest `CreateSessionRequest.initialCommand` the daemon will type. */

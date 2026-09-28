@@ -146,6 +146,26 @@ export function savedPromptsPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "saved-prompts.json");
 }
 
+/** Automated workflow definitions (docs/superpowers/specs/2026-09-28-automated-workflows-design.md §3.1). */
+export function workflowsPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "workflows.json");
+}
+
+/** Workflow runtime state: schedule/git cursors, account cooldowns (§3.1). */
+export function workflowStatePath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "workflow-state.json");
+}
+
+/** Workflow secret values; 0600 — values never leave the daemon (§5.7). */
+export function workflowSecretsPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "workflow-secrets.json");
+}
+
+/** Parent of every `<runId>/` run directory (§5.8). */
+export function workflowRunsDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "workflow-runs");
+}
+
 /** Web Push state (VAPID keypair + browser subscriptions); 0600 — holds the private key. */
 export function pushConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "push.json");
@@ -1875,3 +1895,5 @@ export function isValidName(name: string | undefined): name is string {
 }
 
 // assertInsideFsRoot / FsSandboxError moved to ./fs.ts (node-only; see that file).
+
+export * from "./workflows.ts";
