@@ -6,8 +6,9 @@
  */
 
 import type React from "react";
-import { Bookmark, History, Workflow, type LucideIcon } from "lucide-react";
+import { Bookmark, History, SlidersHorizontal, Workflow, type LucideIcon } from "lucide-react";
 
+import { AgentProfilePanel } from "./agent-profile/AgentProfilePanel";
 import { PromptHistoryPanel } from "./history/PromptHistoryPanel";
 import { SavedPromptsPanel } from "./saved-prompts/SavedPromptsPanel";
 import { WorkflowsPanel } from "./workflows/WorkflowsPanel";
@@ -58,11 +59,20 @@ export const RIGHT_RAIL_PANEL_REGISTRY: RightRailPanelRegistry = {
     get Component() {
       return WorkflowsPanel;
     }
+  },
+  profile: {
+    id: "profile",
+    title: "Agent profile",
+    shortTitle: "Profile",
+    Icon: SlidersHorizontal,
+    get Component() {
+      return AgentProfilePanel;
+    }
   }
 };
 
 /** Rail order, top to bottom (and a phone's section bar, left to right). */
-export const RIGHT_RAIL_PANEL_ORDER: readonly RightRailPanelId[] = ["prompts", "history", "workflows"];
+export const RIGHT_RAIL_PANEL_ORDER: readonly RightRailPanelId[] = ["prompts", "history", "workflows", "profile"];
 
 /** The dock's element id — what the active rail button `aria-controls`. */
 export const RIGHT_RAIL_DOCK_ID = "right-rail-dock";

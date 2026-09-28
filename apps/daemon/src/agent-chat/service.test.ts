@@ -92,6 +92,10 @@ interface Fixture {
   /** Every `POST /goals/resume-sessions` the fake host received, and its answer. */
   resumeRequests: string[];
   resumeAnswer: { status: number; body: unknown };
+  /** Agent profile §4.8: how many `POST /opencode/recycle-idle` reached the fake host. */
+  recycleRequests: number;
+  /** Its answer; `"drop"` tears the connection down unanswered. */
+  recycleAnswer: { status: number; body: unknown } | "drop";
   /** Every line the service and its supervisor logged. */
   logs: Array<{ level: "log" | "warn" | "error"; text: string }>;
   cleanup(): Promise<void>;
@@ -164,6 +168,8 @@ async function makeFixture(
     sessionStops: [],
     resumeRequests: [],
     resumeAnswer: { status: 200, body: { threadIds: [] } },
+    recycleRequests: 0,
+    recycleAnswer: { status: 200, body: { recycled: 0, deferred: 0 } },
     logs: [],
     service: null as unknown as AgentChatService,
     cleanup: async () => {
@@ -226,6 +232,18 @@ async function makeFixture(
       if (sessionStop && req.method === "POST") {
         state.sessionStops.push({ threadId: decodeURIComponent(sessionStop[1]!), body });
         res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ seq: 7 }));
+        return;
+      }
+      if (req.url === "/opencode/recycle-idle" && req.method === "POST") {
+        state.recycleRequests += 1;
+        const answer = state.recycleAnswer;
+        if (answer === "drop") {
+          req.socket.destroy();
+          return;
+        }
+        res
+          .writeHead(answer.status, { "content-type": "application/json" })
+          .end(JSON.stringify(answer.body));
         return;
       }
       if (req.url === "/goals/resume-sessions" && req.method === "POST") {
@@ -985,6 +1003,66 @@ test("agent goals §5.7, a host from before the hold: the snapshot read, the ses
     assert.equal(f.resumeRequests.length, 1, "taken: never asked again");
   } finally {
     await f.cleanup();
+  }
+});
+
+// Agent profile §4.8: after an OpenCode config write the daemon asks the host to
+// recycle OpenCode's idle servers. Fire-and-forget: it never throws, whatever
+// the host answers.
+
+test("agent profile §4.8: the OpenCode recycle reaches the host and reads its answer", async () => {
+  const f = await makeFixture(OPENCODE, null);
+  try {
+    f.recycleAnswer = { status: 200, body: { recycled: 2, deferred: 1 } };
+    await f.service.recycleIdleOpenCodeServers();
+    assert.equal(f.recycleRequests, 1);
+    assert.deepEqual(
+      f.logs.filter((line) => /OpenCode servers recycled/.test(line.text)).map((line) => [line.level, line.text]),
+      [["log", "OpenCode servers recycled: 2 now, 1 when idle"]]
+    );
+  } finally {
+    await f.cleanup();
+  }
+});
+
+test("agent profile §4.8: an older host's 404, a refusal, a dropped connection and a down host never throw", async () => {
+  const f = await makeFixture(OPENCODE, null);
+  try {
+    // The generic route-miss 404 of a host that predates the route.
+    f.recycleAnswer = {
+      status: 404,
+      body: { error: { code: "THREAD_NOT_FOUND", message: "No route for POST /opencode/recycle-idle." } }
+    };
+    await f.service.recycleIdleOpenCodeServers();
+    const lines = (pattern: RegExp) => f.logs.filter((line) => pattern.test(line.text));
+    assert.deepEqual(lines(/predates OpenCode server recycling/).map((line) => line.level), ["log"]);
+
+    f.recycleAnswer = { status: 503, body: { error: { code: "HOST_UNAVAILABLE", message: "stopping" } } };
+    await f.service.recycleIdleOpenCodeServers();
+    assert.deepEqual(
+      lines(/OpenCode server recycle/).map((line) => [line.level, line.text]),
+      [["warn", "agent host answered 503 to the OpenCode server recycle: stopping"]]
+    );
+
+    f.recycleAnswer = "drop";
+    await f.service.recycleIdleOpenCodeServers();
+    assert.deepEqual(lines(/agent host unavailable; OpenCode servers not recycled \(/).map((line) => line.level), ["log"]);
+    assert.equal(f.recycleRequests, 3);
+  } finally {
+    await f.cleanup();
+  }
+
+  // No host adopted: nothing is sent, and nothing throws.
+  const down = await makeFixture(OPENCODE, null, { adopt: false });
+  try {
+    await down.service.recycleIdleOpenCodeServers();
+    assert.equal(down.recycleRequests, 0);
+    assert.deepEqual(
+      down.logs.filter((line) => /OpenCode servers not recycled/.test(line.text)).map((line) => line.level),
+      ["log"]
+    );
+  } finally {
+    await down.cleanup();
   }
 });
 

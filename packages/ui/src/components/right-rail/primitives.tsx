@@ -164,6 +164,61 @@ export const RailEmptyState: React.FC<{
 );
 
 /**
+ * An on/off switch on a card (a workflow's Enabled, an agent-profile item's
+ * on/off): a 20 px track in a fixed-size target — 40 px tall on a phone
+ * (`sheet`) — so a row never shifts around it. `label` is its accessible name,
+ * `title` its tooltip. Disabled, it keeps its size.
+ */
+export const RailSwitch: React.FC<{
+  checked: boolean;
+  label: string;
+  title?: string;
+  sheet: boolean;
+  onChange: (checked: boolean) => void;
+  disabled?: boolean;
+  /** A change is in flight: it refuses clicks, yet keeps its focus. */
+  busy?: boolean;
+  className?: string;
+}> = ({ checked, label, title, sheet, onChange, disabled = false, busy = false, className }) => (
+  <button
+    type="button"
+    role="switch"
+    aria-checked={checked}
+    aria-label={label}
+    aria-busy={busy ? true : undefined}
+    aria-disabled={busy ? true : undefined}
+    title={title}
+    disabled={disabled}
+    onClick={() => {
+      if (!busy) onChange(!checked);
+    }}
+    className={cn(
+      "group inline-flex shrink-0 items-center justify-center rounded-md",
+      "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
+      "disabled:cursor-not-allowed aria-disabled:cursor-progress",
+      sheet ? "h-10 w-12" : "h-7 w-10",
+      className
+    )}
+  >
+    <span
+      aria-hidden
+      className={cn(
+        "relative inline-flex h-5 w-9 items-center rounded-full transition-colors",
+        "group-disabled:opacity-40 group-aria-disabled:opacity-60",
+        checked ? "bg-neutral-200" : "bg-neutral-700 group-enabled:group-hover:bg-neutral-600"
+      )}
+    >
+      <span
+        className={cn(
+          "inline-block h-3.5 w-3.5 rounded-full bg-neutral-950 transition-transform motion-reduce:transition-none",
+          checked ? "translate-x-[18px]" : "translate-x-[3px]"
+        )}
+      />
+    </span>
+  </button>
+);
+
+/**
  * The card chrome both panels use for a list row: resting, hovered, and the
  * expanded (selected) state the mockup's pinned card shows.
  */

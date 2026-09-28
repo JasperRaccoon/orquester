@@ -90,6 +90,13 @@ const PROVIDER_REFRESH_DEADLINE_MS = 30_000;
 const GOAL_HOLD_DEADLINE_MS = 5_000;
 
 /**
+ * Deadline on the agent profile §4.8 `POST /opencode/recycle-idle`. The host
+ * answers once every idle server it stopped is gone (each within its 1 s kill
+ * grace), so this only bounds a host that hangs.
+ */
+const OPENCODE_RECYCLE_DEADLINE_MS = 15_000;
+
+/**
  * Deadlines on the agent goals §5.7 legacy handover's host calls (a host from
  * before the goal hold): a thread snapshot, a session stop, and — on the
  * replacement — the resume of the sessions stopped. The supervisor awaits the
@@ -479,6 +486,53 @@ export class AgentChatService {
         this.providerRefreshInFlight.delete(adapterId);
       });
     this.providerRefreshInFlight.set(adapterId, task);
+  }
+
+  /**
+   * Agent profile §4.8: ask the agent host to restart OpenCode's idle servers
+   * (`POST /opencode/recycle-idle`) — `opencode serve` caches its global config
+   * for its whole life, so a config write reaches the next turn only through a
+   * fresh server. Busy servers are recycled by the host once they go idle.
+   *
+   * Never throws, and never needs awaiting (fire-and-forget after an OpenCode
+   * mutation). A host that predates the route (404), a host that is down or
+   * restarting, and a timeout are logged at info and otherwise ignored: the
+   * change then applies once OpenCode's server restarts on its own.
+   */
+  async recycleIdleOpenCodeServers(): Promise<void> {
+    if (!this.supervisor.isHealthy()) {
+      this.opts.logger?.log?.("agent host unavailable; OpenCode servers not recycled");
+      return;
+    }
+    try {
+      const response = await this.client.json<{
+        recycled?: unknown;
+        deferred?: unknown;
+        error?: { message?: unknown };
+      }>("POST", agentHostRoutes.recycleIdleOpenCode, {}, { timeoutMs: OPENCODE_RECYCLE_DEADLINE_MS });
+      if (response.status === 404) {
+        this.opts.logger?.log?.("agent host predates OpenCode server recycling; servers not recycled");
+        return;
+      }
+      if (response.status !== 200) {
+        const message = response.value?.error?.message;
+        this.opts.logger?.warn?.(
+          `agent host answered ${response.status} to the OpenCode server recycle` +
+            (typeof message === "string" && message ? `: ${message}` : "")
+        );
+        return;
+      }
+      const count = (value: unknown): number => (typeof value === "number" && Number.isFinite(value) ? value : 0);
+      this.opts.logger?.log?.(
+        `OpenCode servers recycled: ${count(response.value?.recycled)} now, ${count(response.value?.deferred)} when idle`
+      );
+    } catch (error) {
+      if (error instanceof HostUnavailableError) {
+        this.opts.logger?.log?.(`agent host unavailable; OpenCode servers not recycled (${error.message})`);
+        return;
+      }
+      this.opts.logger?.warn?.("OpenCode server recycle failed", error);
+    }
   }
 
   /** Await every in-flight provider nudge. The §9 drain seam a test waits on. */

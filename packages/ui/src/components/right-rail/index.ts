@@ -7,6 +7,16 @@ export {
 } from "./saved-prompts/editor-bridge";
 export { PromptHistoryPanel } from "./history/PromptHistoryPanel";
 export { WorkflowsPanel } from "./workflows/WorkflowsPanel";
+export { AgentProfilePanel } from "./agent-profile/AgentProfilePanel";
+export { AgentProfileEditorHost } from "./agent-profile/AgentProfileEditorHost";
+export {
+  notifyAgentProfileEditorSaved,
+  openAgentProfileEditor,
+  subscribeAgentProfileEditor,
+  subscribeAgentProfileEditorSaved,
+  type AgentProfileEditorRequest,
+  type AgentProfileEditorSaved
+} from "./agent-profile/editor-bridge";
 export {
   insertIntoChat,
   NO_CHAT_TARGET_REASON,

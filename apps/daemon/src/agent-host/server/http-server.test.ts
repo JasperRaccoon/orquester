@@ -33,6 +33,7 @@ import {
   agentHostRoutes,
   type AgentHostHealthResponse,
   type AgentHostHoldGoalsResponse,
+  type AgentHostRecycleOpenCodeResponse,
   type AgentHostResumeGoalSessionsResponse
 } from "../host-protocol.ts";
 import { createThreadIndex, type ThreadIndex } from "../index/index.ts";
@@ -1294,6 +1295,46 @@ describe("agent host server — the thread's prompts (the right rail's History)"
     } finally {
       await h.stop();
       await release();
+    }
+  });
+});
+
+describe("agent host server — agent profile §4.8, OpenCode server recycling", () => {
+  it("POST /opencode/recycle-idle answers the OpenCode adapter's counts", async () => {
+    let calls = 0;
+    const opencode = Object.assign(createScriptedAdapter({ id: "opencode" }), {
+      recycleIdleServers: async () => {
+        calls += 1;
+        return { recycled: 2, deferred: 1 };
+      }
+    });
+    const h = await harness({ adapters: { opencode } });
+    try {
+      const answered = await h.call("POST", agentHostRoutes.recycleIdleOpenCode);
+      assert.equal(answered.status, 200);
+      assert.deepEqual(answered.body, { recycled: 2, deferred: 1 } satisfies AgentHostRecycleOpenCodeResponse);
+      assert.equal(calls, 1);
+      assert.equal((await h.call("GET", agentHostRoutes.recycleIdleOpenCode)).status, 404, "only POST is the route");
+      assert.equal(calls, 1);
+      assert.equal(
+        (await h.call("POST", agentHostRoutes.recycleIdleOpenCode, undefined, "wrong-token")).status,
+        401,
+        "behind the host's auth like every route"
+      );
+      assert.equal(calls, 1);
+    } finally {
+      await h.stop();
+    }
+  });
+
+  it("recycles nothing when no adapter serves OpenCode", async () => {
+    const h = await harness({ adapters: { claude: createScriptedAdapter({ id: "claude" }) } });
+    try {
+      const answered = await h.call("POST", agentHostRoutes.recycleIdleOpenCode);
+      assert.equal(answered.status, 200);
+      assert.deepEqual(answered.body, { recycled: 0, deferred: 0 });
+    } finally {
+      await h.stop();
     }
   });
 });

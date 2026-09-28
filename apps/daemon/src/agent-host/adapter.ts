@@ -363,6 +363,15 @@ export interface AgentAdapter {
    */
   sweepEndedSession?(threadId: string): Promise<void>;
   /**
+   * Agent profile §4.8 (`POST /opencode/recycle-idle`), OpenCode only: restart
+   * the long-lived provider servers so the next turn reads config the agent
+   * profile just wrote. A server with nothing running is stopped now, one with
+   * work running when it next goes idle; running turns are never disturbed and
+   * no thread's session binding or cursor moves. `recycled` counts servers
+   * stopped by the call, `deferred` the ones left to recycle when idle.
+   */
+  recycleIdleServers?(): Promise<{ recycled: number; deferred: number }>;
+  /**
    * The host's teardown: never the user ending a session (see {@link
    * stopSession}). Called twice by it — by the adapter's own listener on the
    * host's abort signal, then by `main.ts`'s `stop()` — so no call may

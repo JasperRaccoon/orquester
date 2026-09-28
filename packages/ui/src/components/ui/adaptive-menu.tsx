@@ -2,6 +2,7 @@ import React, { useState } from "react";
 import { Dropdown } from "./dropdown";
 import { BottomSheet } from "./sheet";
 import { useIsDesktop } from "../../hooks/use-media-query";
+import { cn } from "../../lib/cn";
 
 export interface AdaptiveMenuProps {
   trigger: React.ReactNode;
@@ -17,6 +18,11 @@ export interface AdaptiveMenuProps {
    * existing menu keeps its focus behaviour.
    */
   focusOnOpen?: boolean;
+  /**
+   * Extra classes for the trigger's own `<button>` on both viewports — `flex
+   * w-full` for a full-width trigger (the Agent profile's "+ Add").
+   */
+  triggerClassName?: string;
 }
 
 /**
@@ -30,14 +36,21 @@ export const AdaptiveMenu: React.FC<AdaptiveMenuProps> = ({
   align,
   width,
   title,
-  focusOnOpen
+  focusOnOpen,
+  triggerClassName
 }) => {
   const isDesktop = useIsDesktop();
   const [open, setOpen] = useState(false);
 
   if (isDesktop) {
     return (
-      <Dropdown trigger={trigger} align={align} width={width} focusOnOpen={focusOnOpen}>
+      <Dropdown
+        trigger={trigger}
+        align={align}
+        width={width}
+        focusOnOpen={focusOnOpen}
+        triggerClassName={triggerClassName}
+      >
         {children}
       </Dropdown>
     );
@@ -45,7 +58,7 @@ export const AdaptiveMenu: React.FC<AdaptiveMenuProps> = ({
 
   return (
     <>
-      <button type="button" className="app-no-drag inline-flex" onClick={() => setOpen(true)}>
+      <button type="button" className={cn("app-no-drag inline-flex", triggerClassName)} onClick={() => setOpen(true)}>
         {trigger}
       </button>
       <BottomSheet open={open} onClose={() => setOpen(false)} title={title}>

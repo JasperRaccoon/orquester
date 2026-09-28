@@ -1,0 +1,296 @@
+/**
+ * The Agent profile panel's pure rules: the kind chips and their counts, the
+ * search, the grouping in `AGENT_PROFILE_KINDS` order, which state the list
+ * shows instead of rows, what a row's switch says and why it may be disabled,
+ * where an item can be copied to, and the instructions card's line. No React,
+ * no store — `list.logic.test.ts` owns them.
+ */
+
+import {
+  AGENT_PROFILE_AGENT_LABELS,
+  AGENT_PROFILE_AGENTS,
+  AGENT_PROFILE_KINDS,
+  PROFILE_COPYABLE_KINDS,
+  PROFILE_ITEM_KIND_LABELS,
+  PROFILE_ITEM_KINDS,
+  type AgentProfileAgentId,
+  type AgentProfileAgentSummary,
+  type AgentProfileSnapshot,
+  type ProfileInstructionsInfo,
+  type ProfileItem,
+  type ProfileItemKind
+} from "@orquester/api";
+
+import { formatAgo } from "../../../lib/workflows/format";
+
+export type ProfileKindFilter = "all" | ProfileItemKind;
+
+/** The chips' short labels ("MCP" rather than "MCP servers"). */
+export const PROFILE_KIND_CHIP_LABELS: Record<ProfileItemKind, string> = {
+  mcp: "MCP",
+  skill: "Skills",
+  plugin: "Plugins",
+  marketplace: "Marketplaces",
+  hook: "Hooks",
+  command: "Commands"
+};
+
+export interface ProfileKindChip {
+  id: ProfileKindFilter;
+  label: string;
+  count: number;
+}
+
+/** Items per kind. */
+export function profileKindCounts(items: readonly ProfileItem[]): Partial<Record<ProfileItemKind, number>> {
+  const counts: Partial<Record<ProfileItemKind, number>> = {};
+  for (const item of items) counts[item.kind] = (counts[item.kind] ?? 0) + 1;
+  return counts;
+}
+
+/** "All", then the kinds this agent has, in `AGENT_PROFILE_KINDS` order — each with its count. */
+export function profileKindChips(agent: AgentProfileAgentId, items: readonly ProfileItem[]): ProfileKindChip[] {
+  const counts = profileKindCounts(items);
+  return [
+    { id: "all", label: "All", count: items.length },
+    ...AGENT_PROFILE_KINDS[agent].map((kind) => ({
+      id: kind,
+      label: PROFILE_KIND_CHIP_LABELS[kind],
+      count: counts[kind] ?? 0
+    }))
+  ];
+}
+
+/** A kind filter that means something for `agent`; anything else is "all". */
+export function effectiveKindFilter(agent: AgentProfileAgentId, kind: ProfileKindFilter): ProfileKindFilter {
+  return kind === "all" || AGENT_PROFILE_KINDS[agent].includes(kind) ? kind : "all";
+}
+
+/** Every whitespace-separated word of `query` appears in the item's name, description or source. */
+export function matchesProfileQuery(item: ProfileItem, query: string): boolean {
+  const words = query.trim().toLowerCase().split(/\s+/).filter((word) => word.length > 0);
+  if (words.length === 0) return true;
+  const haystack = [item.name, item.description ?? "", item.source.label, ...Object.values(item.meta ?? {})]
+    .join("\n")
+    .toLowerCase();
+  return words.every((word) => haystack.includes(word));
+}
+
+export function filterProfileItems(
+  items: readonly ProfileItem[],
+  filter: { kind: ProfileKindFilter; query: string }
+): ProfileItem[] {
+  return items.filter(
+    (item) => (filter.kind === "all" || item.kind === filter.kind) && matchesProfileQuery(item, filter.query)
+  );
+}
+
+export interface ProfileItemGroup {
+  kind: ProfileItemKind;
+  /** The section label: "MCP servers", "Skills", … */
+  label: string;
+  items: ProfileItem[];
+}
+
+const byName = (a: ProfileItem, b: ProfileItem): number =>
+  a.name.localeCompare(b.name, undefined, { sensitivity: "base", numeric: true }) || a.id.localeCompare(b.id);
+
+/**
+ * One group per kind that has items, in `AGENT_PROFILE_KINDS[agent]` order
+ * (a kind the agent should not have — another daemon version — after them),
+ * each sorted by name.
+ */
+export function groupProfileItems(agent: AgentProfileAgentId, items: readonly ProfileItem[]): ProfileItemGroup[] {
+  const order: ProfileItemKind[] = [
+    ...AGENT_PROFILE_KINDS[agent],
+    ...PROFILE_ITEM_KINDS.filter((kind) => !AGENT_PROFILE_KINDS[agent].includes(kind))
+  ];
+  const groups: ProfileItemGroup[] = [];
+  for (const kind of order) {
+    const ofKind = items.filter((item) => item.kind === kind);
+    if (ofKind.length > 0) {
+      groups.push({ kind, label: PROFILE_ITEM_KIND_LABELS[kind].many, items: [...ofKind].sort(byName) });
+    }
+  }
+  return groups;
+}
+
+// ---------------------------------------------------------------------------
+// Agents
+// ---------------------------------------------------------------------------
+
+export interface AgentProfileAgentOption {
+  id: AgentProfileAgentId;
+  label: string;
+  /** `null` until the overview (or the agent's own snapshot) says. */
+  installed: boolean | null;
+  version?: string;
+}
+
+/** The picker's four agents, installed or not, as far as the overview and the loaded snapshots know. */
+export function agentProfileAgentOptions(
+  overview: readonly AgentProfileAgentSummary[] | null,
+  snapshots: Partial<Record<AgentProfileAgentId, AgentProfileSnapshot | null>> = {}
+): AgentProfileAgentOption[] {
+  return AGENT_PROFILE_AGENTS.map((id) => {
+    const snapshot = snapshots[id] ?? null;
+    const summary = overview?.find((entry) => entry.agent === id);
+    const installed = snapshot !== null ? snapshot.installed : (summary?.installed ?? null);
+    const version = snapshot?.version ?? summary?.version;
+    return { id, label: AGENT_PROFILE_AGENT_LABELS[id], installed, ...(version ? { version } : {}) };
+  });
+}
+
+/** The agent is known not to be installed: its snapshot says so, the load was refused so, or the overview says so. */
+export function isAgentNotInstalled(input: {
+  snapshot: AgentProfileSnapshot | null;
+  errorCode: string | null;
+  overviewInstalled: boolean | null;
+}): boolean {
+  if (input.snapshot !== null) return !input.snapshot.installed;
+  if (input.errorCode === "AGENT_NOT_INSTALLED") return true;
+  return input.overviewInstalled === false;
+}
+
+// ---------------------------------------------------------------------------
+// What the list shows
+// ---------------------------------------------------------------------------
+
+export type AgentProfileEmptyState =
+  | { kind: "loading" }
+  | { kind: "not-installed"; agent: AgentProfileAgentId }
+  | { kind: "error"; message: string }
+  /** The agent has nothing of any kind. */
+  | { kind: "none" }
+  /** A kind chip with nothing under it: "No MCP servers yet." */
+  | { kind: "empty-kind"; itemKind: ProfileItemKind }
+  | { kind: "no-matches"; query: string };
+
+/** What the list shows instead of rows, or `null` for rows. */
+export function agentProfileEmptyState(input: {
+  agent: AgentProfileAgentId;
+  status: "idle" | "loading" | "ready" | "error";
+  snapshot: AgentProfileSnapshot | null;
+  error: string | null;
+  notInstalled: boolean;
+  kind: ProfileKindFilter;
+  query: string;
+  /** How many rows the filter and the search leave. */
+  shown: number;
+}): AgentProfileEmptyState | null {
+  if (input.notInstalled) return { kind: "not-installed", agent: input.agent };
+  if (input.snapshot === null) {
+    if (input.status === "error") return { kind: "error", message: input.error ?? "The daemon did not answer." };
+    return { kind: "loading" };
+  }
+  if (input.shown > 0) return null;
+  const query = input.query.trim();
+  if (query.length > 0) return { kind: "no-matches", query };
+  if (input.kind !== "all") return { kind: "empty-kind", itemKind: input.kind };
+  return { kind: "none" };
+}
+
+/** "No MCP servers yet." */
+export function emptyKindTitle(kind: ProfileItemKind): string {
+  const many = PROFILE_ITEM_KIND_LABELS[kind].many;
+  // "MCP" stays upper case; the rest read as words ("No skills yet.").
+  return `No ${kind === "mcp" ? many : many.toLowerCase()} yet.`;
+}
+
+export function notInstalledTitle(agent: AgentProfileAgentId): string {
+  return `${AGENT_PROFILE_AGENT_LABELS[agent]} is not installed.`;
+}
+
+export const NOT_INSTALLED_HINT = "Install it from Settings → Agents.";
+
+// ---------------------------------------------------------------------------
+// A row
+// ---------------------------------------------------------------------------
+
+/** The switch's accessible name: what pressing it does. */
+export function switchLabel(item: Pick<ProfileItem, "name" | "enabled">): string {
+  return `${item.enabled ? "Turn off" : "Turn on"} ${item.name}`;
+}
+
+/** Why the switch is disabled, or `null` when it is not. */
+export function switchDisabledReason(item: ProfileItem): string | null {
+  if (item.toggleable) return null;
+  if (item.locked) {
+    return item.source.type === "cli"
+      ? "Locked — the agent's CLI manages this"
+      : "Locked — Orquester manages this";
+  }
+  const { source } = item;
+  if (source.type === "inherited") {
+    return source.ownerAgent !== undefined
+      ? `Manage in ${AGENT_PROFILE_AGENT_LABELS[source.ownerAgent]}`
+      : `Shared — manage it where it lives${item.path ? ` (${item.path})` : ""}`;
+  }
+  if (source.type === "plugin") return `Managed by plugin ${source.pluginId ?? source.label.replace(/^Plugin · /, "")}`;
+  if (source.type === "bundled") return "Bundled with the agent — can't be turned off here";
+  return "Can't be turned off here";
+}
+
+/** What the switch's tooltip says when it works. */
+export function switchTitle(item: ProfileItem): string {
+  if (item.enabled) return "On — loaded by new sessions";
+  return item.stashed ? "Off — set aside by Orquester until turned back on" : "Off — not loaded";
+}
+
+/** The other installed agents that have this item's kind, for "Copy to…" — none for a kind that does not copy. */
+export function copyTargets(
+  item: Pick<ProfileItem, "kind">,
+  agent: AgentProfileAgentId,
+  installed: (agent: AgentProfileAgentId) => boolean | null
+): AgentProfileAgentId[] {
+  if (!PROFILE_COPYABLE_KINDS.includes(item.kind)) return [];
+  return AGENT_PROFILE_AGENTS.filter(
+    (target) => target !== agent && AGENT_PROFILE_KINDS[target].includes(item.kind) && installed(target) === true
+  );
+}
+
+/** The agent an inherited item is managed in, when it names one. */
+export function manageInAgent(item: ProfileItem): AgentProfileAgentId | null {
+  return item.source.type === "inherited" ? (item.source.ownerAgent ?? null) : null;
+}
+
+// ---------------------------------------------------------------------------
+// The instructions card
+// ---------------------------------------------------------------------------
+
+export function fileNameOf(path: string): string {
+  const parts = path.split(/[\\/]/).filter((part) => part.length > 0);
+  return parts[parts.length - 1] ?? "";
+}
+
+/** "CLAUDE.md" and "42 lines · edited 2h ago" (or "Not created yet"). */
+export function instructionsLine(
+  info: ProfileInstructionsInfo,
+  now: number
+): { fileName: string; detail: string } {
+  const fileName = fileNameOf(info.path) || "Instructions";
+  if (!info.exists) return { fileName, detail: "Not created yet — click to write it" };
+  const parts = [`${info.lines} ${info.lines === 1 ? "line" : "lines"}`];
+  const ago = formatAgo(info.mtime ?? null, now);
+  if (ago.length > 0) parts.push(`edited ${ago}`);
+  return { fileName, detail: parts.join(" · ") };
+}
+
+// ---------------------------------------------------------------------------
+// Layout
+// ---------------------------------------------------------------------------
+
+/**
+ * Below this PANEL width (px) the agent picker is one dropdown rather than a
+ * segmented control of four icon + name buttons: that needs about 290 px of
+ * content to show "OpenCode" whole beside the others, and the panel keeps
+ * 24 px of padding.
+ */
+export const AGENT_PICKER_SEGMENTED_MIN_WIDTH = 320;
+
+export function agentPickerLayout(panelWidth: number | null): "segmented" | "dropdown" {
+  // Not measured yet (the first paint, a static render): the dock's default
+  // width and a phone's full screen both fit the segments.
+  if (panelWidth === null) return "segmented";
+  return panelWidth < AGENT_PICKER_SEGMENTED_MIN_WIDTH ? "dropdown" : "segmented";
+}

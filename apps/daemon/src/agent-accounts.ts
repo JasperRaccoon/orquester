@@ -1,7 +1,22 @@
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
-import { mkdir, writeFile, readFile, readFile as fsReadFile, rm, chmod, symlink, lstat, readlink, readdir, rename, copyFile } from "node:fs/promises";
-import { dirname, join, isAbsolute } from "node:path";
+import {
+  mkdir,
+  writeFile,
+  readFile,
+  readFile as fsReadFile,
+  rm,
+  chmod,
+  symlink,
+  lstat,
+  stat,
+  readlink,
+  readdir,
+  rename,
+  copyFile,
+  cp
+} from "node:fs/promises";
+import { basename, dirname, extname, join, isAbsolute } from "node:path";
 import { SYSTEM_ACCOUNT_ID, type AgentAccount, type AgentAccountsResponse } from "@orquester/api";
 import {
   parseAgentAccounts,
@@ -202,7 +217,7 @@ export class AgentAccountsService {
     // onboarding flags, MCP servers, skills/plugins and settings relative to
     // CLAUDE_CONFIG_DIR/CODEX_HOME. Seed the shared, non-credential config from the
     // system home so managed sessions keep them. Best-effort — never block a launch.
-    await this.syncAccountHome(agent, home).catch((e) =>
+    await this.syncAccountHome(agent, id, home).catch((e) =>
       this.opts.logger?.warn?.(`account home sync failed for ${agent}/${id}: ${String(e)}`)
     );
     if (agent === "claude") {
@@ -230,7 +245,7 @@ export class AgentAccountsService {
     return process.env.GROK_HOME || join(this.opts.userhome, ".grok");
   }
 
-  private async syncAccountHome(agent: ManagedAgent, home: string): Promise<void> {
+  private async syncAccountHome(agent: ManagedAgent, accountId: string, home: string): Promise<void> {
     if (agent === "grok") {
       // config.toml carries the critical `[compat.claude] hooks = false` (grok
       // reads Claude-compat surfaces via $HOME, and double-reporting hooks would
@@ -249,6 +264,12 @@ export class AgentAccountsService {
       await this.ensureSymlink(join(this.systemGrokHome(), "skills"), join(home, "skills"));
       // Conversation history — every account sees the same resume list.
       await this.ensureSharedDirSymlink(join(this.systemGrokHome(), "sessions"), join(home, "sessions"));
+      // Agent profile §5: the global instruction file, slash commands and rules
+      // are the owner's and account-agnostic — one copy, edited once, loaded by
+      // every account. (`agents/` is deliberately not shared: out of scope.)
+      await this.ensureSharedUserFileSymlink(join(this.systemGrokHome(), "AGENTS.md"), join(home, "AGENTS.md"), accountId);
+      await this.ensureSharedConfigDirSymlink(join(this.systemGrokHome(), "commands"), join(home, "commands"), accountId);
+      await this.ensureSharedConfigDirSymlink(join(this.systemGrokHome(), "rules"), join(home, "rules"), accountId);
       return;
     }
     if (agent === "claude") {
@@ -263,6 +284,9 @@ export class AgentAccountsService {
       // Conversation history lives in projects/ — share it so every account sees
       // (and appends to) the same "resume session" list.
       await this.ensureSharedDirSymlink(join(this.systemClaudeDir(), "projects"), join(home, "projects"));
+      // Agent profile §5: the global instructions and slash commands.
+      await this.ensureSharedUserFileSymlink(join(this.systemClaudeDir(), "CLAUDE.md"), join(home, "CLAUDE.md"), accountId);
+      await this.ensureSharedConfigDirSymlink(join(this.systemClaudeDir(), "commands"), join(home, "commands"), accountId);
     } else {
       // config.toml (MCPs, model defaults, project trust) and hooks.json hold no
       // identity — auth.json carries that — so share them live. Both are written
@@ -273,7 +297,160 @@ export class AgentAccountsService {
       for (const marker of [".personality_migration", ".sandbox_migration"]) {
         await this.copyIfMissing(join(this.systemCodexHome(), marker), join(home, marker));
       }
+      // Agent profile §5: user skills. Codex writes its bundled skills into
+      // `<CODEX_HOME>/skills/.system` at every start, so an account that has
+      // run holds a real `skills/` with at least that in it; the merge drops
+      // the account's `.system` when the shared dir has one (Codex re-creates
+      // it — through the link — on the next start) and never loses a user skill.
+      await this.ensureSharedConfigDirSymlink(join(this.systemCodexHome(), "skills"), join(home, "skills"), accountId, {
+        bundledDir: ".system"
+      });
     }
+  }
+
+  /**
+   * Share a user-authored config DIR (Claude/Grok `commands/`, Grok `rules/`,
+   * Codex `skills/`) — agent profile §5.
+   *
+   * - The shared dir is created (0700) when absent, so the link never dangles
+   *   and an item the owner adds later is seen by every account at once. It is
+   *   only created inside an agent home that exists.
+   * - A real dir already in the account home is merged into the shared one
+   *   first (`mergeKeepingBoth`): nothing is ever dropped but an identical
+   *   duplicate; on a name collision both are kept, the account's copy renamed
+   *   `<name>-<accountId prefix>`. `bundledDir` names a CLI-owned entry that is
+   *   discarded instead when the shared dir already has it.
+   * - Only a dir the merge emptied is replaced by the link; leftovers (a move
+   *   that failed) leave the account's dir in place, to be tried again.
+   * - A wrong symlink is replaced (removing a link removes no data); a regular
+   *   file where a dir belongs is left alone.
+   */
+  private async ensureSharedConfigDirSymlink(
+    target: string,
+    linkPath: string,
+    accountId: string,
+    options: { bundledDir?: string } = {}
+  ): Promise<void> {
+    const shared = await stat(target).catch(() => null);
+    if (shared && !shared.isDirectory()) {
+      this.opts.logger?.warn?.(`shared config ${target} is not a directory; not linking ${linkPath}`);
+      return;
+    }
+    if (!shared) {
+      if (!(await stat(dirname(target)).catch(() => null))?.isDirectory()) return; // agent home not set up
+      try {
+        await mkdir(target, { mode: 0o700 });
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
+          this.opts.logger?.warn?.(`creating shared dir ${target} failed: ${String(e)}`);
+          return;
+        }
+      }
+    }
+    const st = await lstat(linkPath).catch(() => null);
+    if (st) {
+      if (st.isSymbolicLink()) {
+        if ((await readlink(linkPath).catch(() => null)) === target) return; // already shared
+        await rm(linkPath, { force: true }).catch(() => undefined);
+      } else if (st.isDirectory()) {
+        await this.mergeKeepingBoth(linkPath, target, accountId, options.bundledDir);
+        if ((await readdir(linkPath).catch(() => ["x"])).length > 0) {
+          this.opts.logger?.warn?.(`could not merge all of ${linkPath} into ${target}; left in place`);
+          return;
+        }
+        await rm(linkPath, { recursive: true, force: true }).catch(() => undefined);
+      } else {
+        this.opts.logger?.warn?.(`${linkPath} is not a directory; not linking it to ${target}`);
+        return;
+      }
+    }
+    await symlink(target, linkPath).catch((e) => this.opts.logger?.warn?.(`shared config dir symlink ${linkPath} failed: ${String(e)}`));
+  }
+
+  /**
+   * Move every entry of the account's `src` dir into the shared `dst` dir, one
+   * level deep (a skill dir or a command file is one item — never merged
+   * file-by-file with another item of the same name):
+   * - absent in `dst` → moved;
+   * - present and byte-for-byte identical → the account's duplicate dropped;
+   * - present and different → both kept, the account's renamed
+   *   `<name>-<id8>` (before the extension for a file: `review-1a2b3c4d.md`);
+   * - `bundledDir` (Codex's `.system`) → the account's copy dropped when `dst`
+   *   has one, else moved like any other entry.
+   */
+  private async mergeKeepingBoth(src: string, dst: string, accountId: string, bundledDir?: string): Promise<void> {
+    let entries;
+    try {
+      entries = await readdir(src, { withFileTypes: true });
+    } catch {
+      return;
+    }
+    for (const e of entries) {
+      const s = join(src, e.name);
+      const d = join(dst, e.name);
+      const existing = await lstat(d).catch(() => null);
+      if (!existing) {
+        await moveEntry(s, d).catch((err) => this.opts.logger?.warn?.(`moving ${s} to ${d} failed: ${String(err)}`));
+        continue;
+      }
+      if (e.name === bundledDir || (await sameTree(s, d))) {
+        await rm(s, { recursive: true, force: true }).catch(() => undefined);
+        continue;
+      }
+      const isFile = !e.isDirectory();
+      const renamed = await freeName(dst, suffixedName(e.name, `-${accountPrefix(accountId)}`, isFile), isFile);
+      await moveEntry(s, join(dst, renamed)).catch((err) =>
+        this.opts.logger?.warn?.(`moving ${s} to ${join(dst, renamed)} failed: ${String(err)}`)
+      );
+    }
+  }
+
+  /**
+   * Share a user-authored config FILE (Claude `CLAUDE.md`, Grok `AGENTS.md`) —
+   * agent profile §5. Unlike `ensureSharedFileSymlink` (daemon-written files,
+   * where a stale home copy is simply replaced) this file is the owner's text,
+   * so an account's own copy is never deleted unread:
+   *
+   * - no shared file yet → the account's file is MOVED to the shared path;
+   * - both exist, identical → the account's duplicate is dropped;
+   * - both exist, different → the shared one wins and the account's is kept
+   *   beside it as `<name>.account-<id8>.bak` (a name no CLI loads).
+   *
+   * The link is made even while the shared file does not exist. That dangling
+   * link is deliberate: every CLI reads it as a missing file (probed on
+   * 2026-09-28 against Claude Code 2.1.280 and Grok 1.0.34 with strace: the
+   * open/stat answers ENOENT and startup carries on), and the file appears in
+   * every account the moment the owner — or a session, writing through the
+   * link — creates it. Only made inside an agent home that exists.
+   */
+  private async ensureSharedUserFileSymlink(target: string, linkPath: string, accountId: string): Promise<void> {
+    if (!(await stat(dirname(target)).catch(() => null))?.isDirectory()) return; // agent home not set up
+    const st = await lstat(linkPath).catch(() => null);
+    if (st) {
+      if (st.isSymbolicLink()) {
+        if ((await readlink(linkPath).catch(() => null)) === target) return; // already shared
+        await rm(linkPath, { force: true }).catch(() => undefined);
+      } else if (st.isFile()) {
+        const shared = await lstat(target).catch(() => null);
+        try {
+          if (!shared) {
+            await moveEntry(linkPath, target);
+          } else if (await sameTree(linkPath, target)) {
+            await rm(linkPath, { force: true });
+          } else {
+            const backup = await freeName(dirname(target), `${basename(target)}.account-${accountPrefix(accountId)}.bak`, true);
+            await moveEntry(linkPath, join(dirname(target), backup));
+          }
+        } catch (e) {
+          this.opts.logger?.warn?.(`could not merge ${linkPath} into ${target}; left in place: ${String(e)}`);
+          return;
+        }
+      } else {
+        this.opts.logger?.warn?.(`${linkPath} is not a file; not linking it to ${target}`);
+        return;
+      }
+    }
+    await symlink(target, linkPath).catch((e) => this.opts.logger?.warn?.(`shared file symlink ${linkPath} failed: ${String(e)}`));
   }
 
   /** Share a conversation-history DIR (Claude projects/, Codex sessions/). If the
@@ -563,6 +740,61 @@ export class AgentAccountsService {
       throw new AgentAccountError("A credential file (upload) or an absolute host path is required.");
     }
     return readFile(input.from.trim(), "utf8");
+  }
+}
+
+/** The first 8 characters of an account id, filename-safe (ids are UUIDs). */
+function accountPrefix(accountId: string): string {
+  return accountId.slice(0, 8).replace(/[^A-Za-z0-9_-]/g, "_");
+}
+
+/** `review.md` + `-x` → `review-x.md` for a file; `my-skill` + `-x` → `my-skill-x` for a dir or a dotfile. */
+function suffixedName(name: string, suffix: string, isFile: boolean): string {
+  const ext = isFile ? extname(name) : "";
+  return ext && ext !== name ? `${name.slice(0, -ext.length)}${suffix}${ext}` : `${name}${suffix}`;
+}
+
+/** `name` if nothing in `dir` holds it, else `name` with `-2`, `-3`, … before its extension. */
+async function freeName(dir: string, name: string, isFile: boolean): Promise<string> {
+  for (let n = 1; ; n += 1) {
+    const candidate = n === 1 ? name : suffixedName(name, `-${n}`, isFile);
+    if (!(await lstat(join(dir, candidate)).catch(() => null))) return candidate;
+  }
+}
+
+/** Rename, or copy-then-remove across filesystems. Never overwrites `dst`. */
+async function moveEntry(src: string, dst: string): Promise<void> {
+  try {
+    await rename(src, dst);
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code !== "EXDEV") throw e;
+    await cp(src, dst, { recursive: true, errorOnExist: true, force: false, verbatimSymlinks: true });
+    await rm(src, { recursive: true, force: true });
+  }
+}
+
+/** Same kind and same bytes, recursively (a symlink compares by its target text). */
+async function sameTree(a: string, b: string): Promise<boolean> {
+  try {
+    const [sa, sb] = await Promise.all([lstat(a), lstat(b)]);
+    if (sa.isSymbolicLink() || sb.isSymbolicLink()) {
+      return sa.isSymbolicLink() && sb.isSymbolicLink() && (await readlink(a)) === (await readlink(b));
+    }
+    if (sa.isFile() && sb.isFile()) {
+      return sa.size === sb.size && (await readFile(a)).equals(await readFile(b));
+    }
+    if (sa.isDirectory() && sb.isDirectory()) {
+      const [ea, eb] = await Promise.all([readdir(a), readdir(b)]);
+      if (ea.length !== eb.length) return false;
+      const names = new Set(eb);
+      for (const name of ea) {
+        if (!names.has(name) || !(await sameTree(join(a, name), join(b, name)))) return false;
+      }
+      return true;
+    }
+    return false;
+  } catch {
+    return false;
   }
 }
 

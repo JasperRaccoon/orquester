@@ -1,5 +1,5 @@
 /** The right rail's panels, in rail order. */
-export type RightRailPanelId = "prompts" | "history" | "workflows";
+export type RightRailPanelId = "prompts" | "history" | "workflows" | "profile";
 
 /** What every panel receives from the rail — docked on desktop, inside the sheet on mobile. */
 export interface RightRailPanelProps {
