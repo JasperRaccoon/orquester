@@ -13,7 +13,52 @@
 import type { Dirent } from "node:fs";
 import { readFile, readdir, realpath, stat } from "node:fs/promises";
 import { join } from "node:path";
-import { SKILL_FILE, parseMarkdownDocument } from "../../infra/index.ts";
+import { type FrontmatterYamlOptions, type MarkdownDocument, SKILL_FILE, parseMarkdownDocument } from "../../infra/index.ts";
+
+/** How OpenCode reads a markdown file's frontmatter: gray-matter, i.e. js-yaml 3 (YAML 1.1). */
+export const OPENCODE_YAML: FrontmatterYamlOptions = { yaml: "1.1" };
+
+/**
+ * OpenCode's `fallbackSanitization`: a top-level `key: value` line whose
+ * unquoted value holds another `:` becomes a `key: |-` block, so
+ * `description: Use when: …` still loads.
+ */
+function sanitizeFrontmatter(text: string): string {
+  const match = /^---\r?\n([\s\S]*?)\r?\n---/.exec(text);
+  if (match === null) return text;
+  const block = match[1]!;
+  const lines = block.split(/\r?\n/).flatMap((line) => {
+    if (line.trim().startsWith("#") || line.trim() === "" || /^\s+/.test(line)) return [line];
+    const kv = /^([a-zA-Z_][a-zA-Z0-9_]*)\s*:\s*(.*)$/.exec(line);
+    if (kv === null) return [line];
+    const value = kv[2]!.trim();
+    if (value === "" || value === ">" || value === "|" || value.startsWith('"') || value.startsWith("'")) return [line];
+    if (!value.includes(":")) return [line];
+    return [`${kv[1]}: |-`, `  ${value}`];
+  });
+  return text.replace(block, () => lines.join("\n"));
+}
+
+/**
+ * A markdown file as OpenCode reads it: YAML 1.1 frontmatter and, when that
+ * does not parse, OpenCode's own retry after {@link sanitizeFrontmatter}.
+ * Throws the first parse's error when both fail. `yaml` overrides the dialect
+ * (a file another agent wrote).
+ */
+export function parseOpenCodeDocument(text: string, yaml: FrontmatterYamlOptions = OPENCODE_YAML): MarkdownDocument {
+  try {
+    return parseMarkdownDocument(text, yaml);
+  } catch (error) {
+    const source = text.startsWith("﻿") ? text.slice(1) : text;
+    const sanitized = sanitizeFrontmatter(source);
+    if (sanitized === source) throw error;
+    try {
+      return parseMarkdownDocument(sanitized, yaml);
+    } catch {
+      throw error;
+    }
+  }
+}
 
 /** Deepest folder level searched below a root; far past any real layout, short of a runaway tree. */
 const MAX_DEPTH = 8;
@@ -121,7 +166,7 @@ export async function findSkills(root: string, options: { dot: boolean }): Promi
       continue;
     }
     try {
-      const doc = parseMarkdownDocument(text);
+      const doc = parseOpenCodeDocument(text);
       const name = typeof doc.frontmatter.name === "string" && doc.frontmatter.name.length > 0 ? doc.frontmatter.name : null;
       const description = doc.frontmatter.description;
       skills.push({
@@ -151,6 +196,12 @@ export async function findSkills(root: string, options: { dot: boolean }): Promi
 export interface FoundCommand {
   /** `review`, `git/pr`. */
   name: string;
+  /**
+   * The name OpenCode registers it under when the frontmatter's own `name`
+   * (a string) differs from the path: OpenCode spreads the frontmatter over
+   * `{name: <path>}`, so that key wins.
+   */
+  invokedAs?: string;
   file: string;
   text: string;
   frontmatter: Record<string, unknown>;
@@ -173,10 +224,12 @@ export async function findCommands(root: string): Promise<FoundCommand[]> {
       continue;
     }
     try {
-      const doc = parseMarkdownDocument(text);
+      const doc = parseOpenCodeDocument(text);
       const description = doc.frontmatter.description;
+      const own = doc.frontmatter.name;
       commands.push({
         name,
+        ...(typeof own === "string" && own !== name ? { invokedAs: own } : {}),
         file: file.path,
         text,
         frontmatter: doc.frontmatter,

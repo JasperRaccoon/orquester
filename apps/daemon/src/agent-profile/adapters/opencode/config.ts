@@ -14,7 +14,7 @@
 import { join } from "node:path";
 import type { ProfileFileError } from "@orquester/api";
 import { readTextIfExists } from "../../infra/index.ts";
-import { type JsonObject, isJsonObject, parseJsoncObject } from "./jsonc.ts";
+import { BOM, type JsonObject, isJsonObject, parseJsoncObject } from "./jsonc.ts";
 
 /** The global config files in OpenCode's load order. */
 export const CONFIG_FILE_NAMES = ["config.json", "opencode.json", "opencode.jsonc"] as const;
@@ -43,8 +43,10 @@ export interface ConfigState {
   /** The file every edit goes to (it may not exist yet). */
   targetPath: string;
   targetName: ConfigFileName;
-  /** The target's current text, or the text a new file starts from. */
+  /** The target's current text (without a byte-order mark), or the text a new file starts from. */
   targetText: string;
+  /** The target starts with a byte-order mark: a write puts it back in front of `targetText`. */
+  targetBom: boolean;
   /** The target's parsed value (`{}` for a new file); `null` when it does not parse. */
   targetValue: JsonObject | null;
   /** The config OpenCode ends up with; files that do not parse are left out. */
@@ -54,12 +56,29 @@ export interface ConfigState {
   broken: boolean;
 }
 
-/** OpenCode's per-file decode of the parts this adapter reads: a `permission` action string is `{"*": action}`. */
+/**
+ * OpenCode's per-file decode of the parts this adapter reads: a `permission`
+ * action string is `{"*": action}`, and an MCP entry's newer `disabled`
+ * flag is lowered to `enabled: !disabled`.
+ */
 export function decodeConfigFile(value: JsonObject): JsonObject {
-  if (typeof value.permission === "string") {
-    return { ...value, permission: { "*": value.permission } };
+  let out = value;
+  if (typeof out.permission === "string") {
+    out = { ...out, permission: { "*": out.permission } };
   }
-  return value;
+  if (isJsonObject(out.mcp) && Object.values(out.mcp).some((entry) => isJsonObject(entry) && typeof entry.disabled === "boolean")) {
+    const mcp: JsonObject = {};
+    for (const [name, entry] of Object.entries(out.mcp)) {
+      if (isJsonObject(entry) && typeof entry.disabled === "boolean") {
+        const { disabled, ...rest } = entry;
+        mcp[name] = { ...rest, enabled: !disabled };
+      } else {
+        mcp[name] = entry;
+      }
+    }
+    out = { ...out, mcp };
+  }
+  return out;
 }
 
 /** remeda's `mergeDeep`, as OpenCode merges its config files: objects key by key, anything else replaced. */
@@ -84,6 +103,7 @@ export function mergeConfigValues(values: readonly JsonObject[]): JsonObject {
 export async function readConfigState(dir: string): Promise<ConfigState> {
   const files: ConfigFile[] = [];
   const fileErrors: ProfileFileError[] = [];
+  const boms = new Set<string>();
   for (const name of CONFIG_FILE_NAMES) {
     const path = join(dir, name);
     let text: string | null;
@@ -97,6 +117,11 @@ export async function readConfigState(dir: string): Promise<ConfigState> {
     }
     if (text === null) {
       continue;
+    }
+    if (text.startsWith(BOM)) {
+      // Edited without it; `targetBom` puts it back on write.
+      text = text.slice(BOM.length);
+      boms.add(path);
     }
     const parsed = parseJsoncObject(text);
     if (parsed.ok) {
@@ -115,6 +140,7 @@ export async function readConfigState(dir: string): Promise<ConfigState> {
     targetPath: join(dir, targetName),
     targetName,
     targetText,
+    targetBom: boms.has(join(dir, targetName)),
     targetValue: target === undefined ? {} : target.value,
     merged: mergeConfigValues(files.flatMap((file) => (file.value === null ? [] : [file.value]))),
     fileErrors,
@@ -191,17 +217,39 @@ function toolsPermission(tools: unknown): JsonObject {
   return out;
 }
 
+/** The global `permission` rules as OpenCode reads them: the legacy `tools` map folded in front. */
+export function permissionConfig(merged: JsonObject): JsonObject {
+  const config: JsonObject = isJsonObject(merged.permission) ? merged.permission : {};
+  return isJsonObject(merged.tools) ? mergeDeep(toolsPermission(merged.tools), config) : config;
+}
+
+/**
+ * The agents whose own `permission` rules (`agent.<name>.permission`, applied
+ * after the global ones) decide the skill differently from the global config.
+ */
+export function agentsOverridingSkill(merged: JsonObject, name: string): string[] {
+  const agents = isJsonObject(merged.agent) ? merged.agent : {};
+  const global = skillAllowed(merged, name);
+  return Object.entries(agents).flatMap(([agent, value]) => {
+    const permission = isJsonObject(value) ? value.permission : undefined;
+    const own = isJsonObject(permission) ? permission : typeof permission === "string" ? { "*": permission } : null;
+    if (own === null) return [];
+    return (evaluatePermission(merged, "skill", name, own) !== "deny") === global ? [] : [agent];
+  });
+}
+
 /**
  * What the global config decides for `permission` on `pattern` — the build
  * agent's view: OpenCode's defaults (`"*": "allow"`) then the config's rules,
- * the last matching rule winning. Agent-specific overrides are not included.
+ * the last matching rule winning. `extra` (an agent's own rules) goes after
+ * them; without it agent-specific overrides are not included.
  */
-export function evaluatePermission(merged: JsonObject, permission: string, pattern: string): string {
-  let config: JsonObject = isJsonObject(merged.permission) ? merged.permission : {};
-  if (isJsonObject(merged.tools)) {
-    config = mergeDeep(toolsPermission(merged.tools), config);
-  }
-  const rules: PermissionRule[] = [{ permission: "*", pattern: "*", action: "allow" }, ...rulesFromConfig(config)];
+export function evaluatePermission(merged: JsonObject, permission: string, pattern: string, extra: JsonObject = {}): string {
+  const rules: PermissionRule[] = [
+    { permission: "*", pattern: "*", action: "allow" },
+    ...rulesFromConfig(permissionConfig(merged)),
+    ...rulesFromConfig(extra)
+  ];
   for (let i = rules.length - 1; i >= 0; i -= 1) {
     const rule = rules[i]!;
     if (wildcardMatch(permission, rule.permission) && wildcardMatch(pattern, rule.pattern)) {

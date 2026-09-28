@@ -1,6 +1,55 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { assertJsoncObject, insertJsoncArrayItem, parseJsoncObject, replaceJsoncObject, setJsonc } from "./jsonc.ts";
+import { AgentProfileError } from "../../errors.ts";
+import {
+  assertJsoncObject,
+  insertJsoncArrayItem,
+  insertJsoncMember,
+  jsoncValueText,
+  parseJsoncObject,
+  replaceJsoncObject,
+  setJsonc
+} from "./jsonc.ts";
+
+test("a member whose comma follows a comment, or a leading-comma layout, is removed cleanly", () => {
+  assert.equal(setJsonc('{\n  "a": 1 /* note */,\n  "b": 2\n}\n', ["a"], undefined), '{\n  "b": 2\n}\n');
+  assert.equal(setJsonc('{ "a": 1 /* note */, "b": 2 }', ["a"], undefined), '{ "b": 2 }');
+  assert.equal(setJsonc('{\n  "a": 1\n  , "b": 2\n}\n', ["a"], undefined), '{\n  "b": 2\n}\n');
+  assert.equal(setJsonc('{\n  "a": 1 /* c */,\n  "b": 2\n}\n', ["b"], undefined), '{\n  "a": 1 /* c */\n}\n');
+  assert.equal(
+    setJsonc('{\n  "plugin": [\n    "a" /* first */,\n    "b"\n  ]\n}\n', ["plugin", 0], undefined),
+    '{\n  "plugin": [\n    "b"\n  ]\n}\n'
+  );
+  assert.deepEqual(assertJsoncObject(setJsonc('{\n  "x": 0\n  , "a": 1\n  , "b": 2\n}\n', ["a"], undefined)), { x: 0, b: 2 });
+});
+
+test("an edit through a key that is set twice is refused: OpenCode reads the last one", () => {
+  const text = '{\n  "mcp": { "x": { "enabled": true } },\n  "lsp": {},\n  "mcp": { "x": { "enabled": true } }\n}\n';
+  assert.throws(
+    () => setJsonc(text, ["mcp", "x", "enabled"], false),
+    (error: unknown) => error instanceof AgentProfileError && error.code === "CONFIG_UNREADABLE" && /"mcp" is set 2 times/.test(error.message)
+  );
+  assert.equal(setJsonc(text, ["lsp", "a"], 1).includes('"a": 1'), true, "other keys still edit");
+});
+
+test("a byte-order mark is read past", () => {
+  assert.deepEqual(parseJsoncObject('﻿{ "a": 1 }'), { ok: true, value: { a: 1 } });
+});
+
+test("members and elements go back at a position with their own text", () => {
+  const text = '{\n  "command": {\n    // first\n    "b": { "template": "x" }\n  }\n}\n';
+  const raw = '{ "template": "y" } /* kept? */';
+  assert.equal(
+    insertJsoncMember(text, ["command"], "a", 0, { template: "y" }, '{ "template": "y" }'),
+    '{\n  "command": {\n    // first\n    "a": { "template": "y" },\n    "b": { "template": "x" }\n  }\n}\n'
+  );
+  assert.ok(!insertJsoncMember(text, ["command"], "a", 0, { template: "z" }, raw).includes("kept?"), "stale text is not reused");
+  assert.equal(jsoncValueText(text, ["command", "b"]), '{ "template": "x" }');
+  assert.equal(
+    insertJsoncArrayItem('{ "p": ["a", "c"] }', ["p"], 1, ["b", { o: 1 }], '["b", {"o": 1}]'),
+    '{ "p": ["a", ["b", {"o": 1}], "c"] }'
+  );
+});
 
 const BASE = `{
   "$schema": "https://opencode.ai/config.json",

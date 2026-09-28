@@ -193,9 +193,14 @@ interface Loaded {
   userConfig: UserConfig | null;
   configError: string | null;
   hooksDoc: CodexHooksDocument | null;
+  /** `hooks.json` as read (`null`: missing); a write refuses when the file moved since. */
+  hooksText: string | null;
   hooksError: string | null;
   hookEntries: CodexHookEntry[];
+  /** `hooks/list` by key; its keys use {@link metaHooksPath}. */
   hooksMeta: Map<string, CodexHookMetadata>;
+  /** The system `hooks.json` as the app-server keys it (canonical). */
+  metaHooksPath: string;
   items: ProfileItem[];
   refs: Map<string, { item: ProfileItem; ref: ItemRef }>;
   fileErrors: ProfileFileError[];
@@ -238,6 +243,8 @@ function splitPluginId(id: string): { name: string; marketplace: string } {
 export class CodexProfileAdapter implements ProfileAdapter {
   readonly agent = AGENT;
   private client: CodexConfigClient | null = null;
+  /** The `codex` binary {@link client} was made for. */
+  private clientBin: string | null = null;
 
   constructor(
     private readonly ctx: ProfileAdapterContext,
@@ -303,6 +310,13 @@ export class CodexProfileAdapter implements ProfileAdapter {
     if (bin === null) {
       throw profileErrors.notInstalled(LABEL);
     }
+    if (this.client !== null && this.clientBin !== bin) {
+      // Codex was reinstalled or moved (Settings → Agents): the old binary may be gone.
+      const stale = this.client;
+      this.client = null;
+      void stale.close().catch((error: unknown) => this.warn("closing the previous app-server failed", error));
+    }
+    this.clientBin = bin;
     this.client ??= (this.deps.configClient ?? createCodexAppServerClient)({
       bin,
       codexHome: this.codexHome,
@@ -399,15 +413,25 @@ export class CodexProfileAdapter implements ProfileAdapter {
 
     // hooks.json
     let hooksDoc: CodexHooksDocument | null = null;
+    let hooksText: string | null = null;
     let hooksError: string | null = null;
     try {
-      const text = await readTextIfExists(this.hooksPath);
-      hooksDoc = text === null ? emptyHooksDocument() : parseHooksDocument(text);
+      hooksText = await readTextIfExists(this.hooksPath);
+      hooksDoc = hooksText === null ? emptyHooksDocument() : parseHooksDocument(hooksText);
     } catch (error) {
       hooksError = message(error);
       fileErrors.push({ path: this.hooksPath, message: hooksError });
     }
     const hookEntries = hooksDoc === null ? [] : listHookEntries(hooksDoc);
+    const metaHooksPath = await this.canonicalHooksPath();
+    let hookPaths = [this.hooksPath];
+    if (hookEntries.length > 0) {
+      try {
+        hookPaths = await this.hookPaths();
+      } catch (error) {
+        this.warn("listing the account homes failed", error);
+      }
+    }
     const hooksMeta = new Map<string, CodexHookMetadata>();
     for (const entry of hooksList?.data ?? []) {
       for (const hook of entry.hooks) {
@@ -443,16 +467,18 @@ export class CodexProfileAdapter implements ProfileAdapter {
     await this.skillItems(skillsList, userConfig, add, fileErrors);
     await this.pluginItems(userConfig, pluginsInstalled, pluginDetails, add);
     this.marketplaceItems(userConfig, pluginsInstalled, add);
-    this.hookItems(hookEntries, userConfig, hooksMeta, add);
+    this.hookItems(hookEntries, userConfig, hooksMeta, metaHooksPath, hookPaths, add);
     await this.commandItems(add, fileErrors);
 
     return {
       userConfig,
       configError,
       hooksDoc,
+      hooksText,
       hooksError,
       hookEntries,
       hooksMeta,
+      metaHooksPath,
       items: [...refs.values()].map((entry) => entry.item),
       refs,
       fileErrors,
@@ -770,13 +796,15 @@ export class CodexProfileAdapter implements ProfileAdapter {
     entries: CodexHookEntry[],
     userConfig: UserConfig | null,
     hooksMeta: Map<string, CodexHookMetadata>,
+    metaHooksPath: string,
+    paths: readonly string[],
     add: (item: ProfileItem, ref: ItemRef) => void
   ): void {
     const state = this.hookState(userConfig);
     const ids = hookEntryIds(entries);
     entries.forEach((entry, index) => {
       const key = stateKey(this.hooksPath, entry);
-      const meta = hooksMeta.get(key);
+      const meta = hooksMeta.get(stateKey(metaHooksPath, entry));
       const own = state[key];
       const enabled = meta?.enabled ?? own?.enabled !== false;
       const isCommand = entry.handler.type === "command" && typeof entry.handler.command === "string";
@@ -800,6 +828,18 @@ export class CodexProfileAdapter implements ProfileAdapter {
             message: "Changed since Codex trusted it: it does not run until trusted again.",
             action: "trust"
           });
+        } else if (userConfig !== null) {
+          // Trusted here, but each home Codex loads it from keeps its own trust: an account
+          // added after the hook was trusted (or a hand edit) leaves it silently skipped there.
+          const expected = meta?.currentHash ?? hash;
+          const missing = paths.filter((path) => state[stateKey(path, entry)]?.trusted_hash !== expected).length;
+          if (missing > 0) {
+            warnings.push({
+              code: "hook-untrusted-elsewhere",
+              message: `Not trusted in ${missing} of the ${paths.length} Codex homes that load it: it does not run there until trusted.`,
+              action: "trust"
+            });
+          }
         }
       }
       const command = typeof entry.handler.command === "string" ? entry.handler.command : String(entry.handler.type);
@@ -1124,14 +1164,35 @@ export class CodexProfileAdapter implements ProfileAdapter {
   // Hooks: the one place `hooks.json` and `hooks.state` change together
   // -------------------------------------------------------------------------
 
-  /** Every path `hooks.json` is seen from: the system one, then each account home linked to the same file. */
+  /**
+   * `hooks.json` as Codex keys it when it is GIVEN `CODEX_HOME` (this
+   * adapter's app-server, every managed-account session): Codex canonicalizes
+   * that directory first. Without `CODEX_HOME` (a session on the daemon user's
+   * own home) it keys `~/.codex/hooks.json` as it is — {@link hooksPath}.
+   */
+  private async canonicalHooksPath(home: string = this.codexHome): Promise<string> {
+    return join(await realOrSelf(home), "hooks.json");
+  }
+
+  /**
+   * Every path `hooks.json` is seen from, spelled as Codex spells it in state
+   * keys: the system one, then each account home linked to the same file —
+   * each also by its canonical spelling when a symlink makes it differ.
+   */
   private async hookPaths(): Promise<string[]> {
-    const paths = [this.hooksPath];
+    const paths: string[] = [];
+    const add = (path: string): void => {
+      if (!paths.includes(path)) paths.push(path);
+    };
+    add(this.hooksPath);
+    add(await this.canonicalHooksPath());
     const target = await resolveWriteTarget(this.hooksPath);
     for (const home of await this.ctx.accountHomes()) {
       const path = join(home, "hooks.json");
-      if (paths.includes(path) || (await pathKind(path).catch(() => null)) === null) continue;
-      if ((await resolveWriteTarget(path).catch(() => null)) === target) paths.push(path);
+      if ((await pathKind(path).catch(() => null)) === null) continue;
+      if ((await resolveWriteTarget(path).catch(() => null)) !== target) continue;
+      add(path);
+      add(await this.canonicalHooksPath(home));
     }
     return paths;
   }
@@ -1231,6 +1292,11 @@ export class CodexProfileAdapter implements ProfileAdapter {
       paths: await this.hookPaths(),
       ...(position !== undefined && freshState !== undefined ? { set: [{ position, entry: freshState }] } : {})
     });
+    if ((await readTextIfExists(this.hooksPath)) !== loaded.hooksText) {
+      // Something else (Orquester's own hook installer at a session launch, a hand edit)
+      // rewrote it since it was read: writing ours would drop that change.
+      throw profileErrors.conflict();
+    }
     const written = await writeProfileFileVerified(this.hooksPath, serializeHooksDocument(doc), {
       backups: this.deps.backups,
       agent: AGENT,
@@ -1341,7 +1407,7 @@ export class CodexProfileAdapter implements ProfileAdapter {
     }
     const entry = ref.entry;
     const hash =
-      loaded.hooksMeta.get(stateKey(this.hooksPath, entry))?.currentHash ??
+      loaded.hooksMeta.get(stateKey(loaded.metaHooksPath, entry))?.currentHash ??
       codexHookHash(entry.eventSnake, entry.handler, entry.matcher);
     if (hash === null) {
       throw profileErrors.invalid("Codex does not run this kind of hook.");

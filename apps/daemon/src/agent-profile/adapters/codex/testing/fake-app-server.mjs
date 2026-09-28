@@ -24,7 +24,14 @@ import {
 import { join } from "node:path";
 import { parse, patch, stringify } from "@decimalturn/toml-patch";
 
-const CODEX_HOME = process.env.CODEX_HOME;
+// Codex canonicalizes a CODEX_HOME it is given: hook state keys spell the realpath.
+const CODEX_HOME = (() => {
+  try {
+    return realpathSync(process.env.CODEX_HOME);
+  } catch {
+    return process.env.CODEX_HOME;
+  }
+})();
 const HOME = process.env.HOME;
 const CONFIG = join(CODEX_HOME, "config.toml");
 const HANG = new Set((process.env.FAKE_CODEX_HANG ?? "").split(",").filter(Boolean));

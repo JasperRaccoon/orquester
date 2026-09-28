@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { cp, lstat, mkdir, mkdtemp, readFile, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { cp, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
@@ -27,6 +27,7 @@ interface Fixture {
   mkt: string;
   log: string;
   adapter: CodexProfileAdapter;
+  ctx: ProfileAdapterContext;
   configText(): Promise<string>;
   config(): Promise<Record<string, any>>;
   hooksDoc(): Promise<{ hooks: Record<string, Array<{ matcher?: string; hooks: Array<Record<string, unknown>> }>> }>;
@@ -43,7 +44,12 @@ async function writeSkillFile(dir: string, name: string, description: string, bo
 
 /** A temp tree shaped like this host's real ~/.codex (secrets replaced) and two managed account homes. */
 async function makeFixture(
-  options: { wrap?: (client: CodexConfigClient) => CodexConfigClient; bin?: string | null } = {}
+  options: {
+    wrap?: (client: CodexConfigClient) => CodexConfigClient;
+    bin?: string | null;
+    /** Runs whenever the adapter lists the account homes (a test's hook into a mutation). */
+    onAccountHomes?: () => Promise<void>;
+  } = {}
 ): Promise<Fixture> {
   const root = await mkdtemp(join(tmpdir(), "codex-profile-"));
   const home = join(root, "home");
@@ -175,7 +181,10 @@ async function makeFixture(
     },
     appdir,
     bin: options.bin === undefined ? "/usr/local/bin/codex" : options.bin,
-    accountHomes: async () => accounts,
+    accountHomes: async () => {
+      await options.onAccountHomes?.();
+      return accounts;
+    },
     logger: { info: () => undefined, warn: () => undefined },
     now: () => new Date()
   };
@@ -193,6 +202,7 @@ async function makeFixture(
     mkt,
     log,
     adapter,
+    ctx,
     configText: () => readFile(join(codexHome, "config.toml"), "utf8"),
     // Plain objects (the TOML parser answers null-prototype ones).
     config: async () => JSON.parse(JSON.stringify(parseToml(await readFile(join(codexHome, "config.toml"), "utf8")))),
@@ -782,6 +792,130 @@ describe("CodexProfileAdapter", () => {
       } finally {
         await racy.adapter.close();
         await rm(racy.root, { recursive: true, force: true });
+      }
+    });
+
+    it("warns about a hook an account home does not trust, and trust() writes it there", async () => {
+      // An account added after the hook was trusted: its hooks.json link carries no trust entry yet.
+      const late = join(f.appdir, "daemon", "agent-accounts", "codex", "a3", "home");
+      await mkdir(late, { recursive: true });
+      await symlink(join(f.codexHome, "config.toml"), join(late, "config.toml"));
+      await symlink(join(f.codexHome, "hooks.json"), join(late, "hooks.json"));
+      f.accounts.push(late);
+
+      const item = (await f.adapter.snapshot()).items.find((i) => i.name === "notify-send done")!;
+      assert.deepEqual(item.warnings.map((w) => [w.code, w.action]), [["hook-untrusted-elsewhere", "trust"]]);
+      assert.match(item.warnings[0].message, /1 of the 4/);
+      const managed = (await f.adapter.snapshot()).items.filter((i) => i.kind === "hook" && i.locked);
+      assert.ok(managed.every((i) => i.warnings.length === 0), "Orquester's own hooks are trusted by its installer");
+
+      await f.adapter.trust(item.id, item.revision);
+      const state = (await f.config()).hooks.state;
+      assert.equal(
+        state[`${join(late, "hooks.json")}:stop:0:0`].trusted_hash,
+        codexHookHash("stop", { type: "command", command: "notify-send done", timeout: 30 }, undefined)
+      );
+      assert.deepEqual((await f.item(item.id)).warnings, []);
+    });
+
+    it("keys an account home reached through a symlink by its realpath too, as Codex canonicalizes CODEX_HOME", async () => {
+      const real = join(f.root, "elsewhere", "a4", "home");
+      await mkdir(real, { recursive: true });
+      await symlink(join(f.codexHome, "config.toml"), join(real, "config.toml"));
+      await symlink(join(f.codexHome, "hooks.json"), join(real, "hooks.json"));
+      const linked = join(f.appdir, "daemon", "agent-accounts", "codex", "a4");
+      await mkdir(linked, { recursive: true });
+      await symlink(real, join(linked, "home"));
+      f.accounts.push(join(linked, "home"));
+      // What a session of that account (CODEX_HOME=<linked>/home) keys its hooks by: the realpath.
+      const canonical = join(await realpath(real), "hooks.json");
+      const doc0 = await f.hooksDoc();
+      const managedHash = codexHookHash("stop", doc0.hooks.Stop[1].hooks[0], undefined)!;
+      await writeFile(
+        join(f.codexHome, "config.toml"),
+        `${await f.configText()}\n[hooks.state."${canonical}:stop:1:0"]\nenabled = true\ntrusted_hash = "${managedHash}"\n`
+      );
+
+      await f.adapter.create({ kind: "hook", hook: { event: "Stop", command: "say finished" } }, { onConflict: "fail" });
+      const state = (await f.config()).hooks.state;
+      assert.deepEqual(state[`${canonical}:stop:2:0`], { enabled: true, trusted_hash: managedHash }, "managed trust moved");
+      assert.equal(
+        state[`${canonical}:stop:1:0`].trusted_hash,
+        codexHookHash("stop", { type: "command", command: "say finished" }, undefined),
+        "the new hook is trusted where the account's sessions look"
+      );
+    });
+
+    it("refuses to overwrite a hooks.json rewritten while the mutation ran", async () => {
+      await f.adapter.close();
+      let armed = false;
+      const racy = await makeFixture({
+        onAccountHomes: async () => {
+          if (!armed) return;
+          const doc = JSON.parse(await readFile(join(racy.codexHome, "hooks.json"), "utf8"));
+          doc.hooks.SessionEnd = [{ hooks: [{ type: "command", command: "added meanwhile" }] }];
+          await writeFile(join(racy.codexHome, "hooks.json"), JSON.stringify(doc));
+        }
+      });
+      try {
+        const stateBefore = await racy.configText();
+        armed = true;
+        await assert.rejects(
+          racy.adapter.create({ kind: "hook", hook: { event: "Stop", command: "x" } }, { onConflict: "fail" }),
+          assertProfileError("PROFILE_CONFLICT", 409)
+        );
+        armed = false;
+        const doc = await racy.hooksDoc();
+        assert.equal(doc.hooks.SessionEnd[0].hooks[0].command, "added meanwhile", "the other writer's change survives");
+        assert.equal(doc.hooks.Stop.length, 2);
+        assert.equal(await racy.configText(), stateBefore);
+      } finally {
+        await racy.adapter.close();
+        await rm(racy.root, { recursive: true, force: true });
+      }
+    });
+  });
+
+  describe("the app-server", () => {
+    it("starts a new app-server when the registry's codex binary moves", async () => {
+      await f.adapter.close();
+      let bin = "/old/bin/codex";
+      const made: string[] = [];
+      const closing: Promise<void>[] = [];
+      const adapter = new CodexProfileAdapter(
+        {
+          ...f.ctx,
+          get bin() {
+            return bin;
+          }
+        },
+        {
+          backups: new ProfileBackups({ dir: agentProfileBackupsDir(f.appdir) }),
+          stash: new ProfileStash({ dir: agentProfileStashDir(f.appdir) }),
+          configClient: (opts) => {
+            made.push(opts.bin);
+            const client = new CodexAppServerClient({ ...opts, bin: process.execPath, args: [FAKE, "app-server"], killGraceMs: 200 });
+            return {
+              call: (method, params, options) => client.call(method, params, options),
+              close: () => {
+                const done = client.close();
+                closing.push(done);
+                return done;
+              }
+            };
+          }
+        }
+      );
+      try {
+        await adapter.snapshot();
+        await adapter.snapshot();
+        bin = "/new/bin/codex";
+        await adapter.snapshot();
+        assert.deepEqual(made, ["/old/bin/codex", "/new/bin/codex"]);
+        assert.equal(closing.length, 1, "the old app-server was closed");
+      } finally {
+        await adapter.close();
+        await Promise.all(closing);
       }
     });
   });
