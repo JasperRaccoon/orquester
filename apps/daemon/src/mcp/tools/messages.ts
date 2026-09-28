@@ -76,7 +76,6 @@ const waitFields = {
  * user may want most while an approval waits.
  */
 async function readyToSend(api: DaemonApi, summary: SessionSummary, opts: { hostGoal?: boolean } = {}): Promise<ThreadSnapshotPayload> {
-  if (summary.chatSessionStatus === "error") throw new ToolError("SESSION_BUSY", "This session's agent is in an error state. Call stop_session first, then send again.");
   const snap = await readThread(api, summary.id);
   if (opts.hostGoal) return snap;
   const { approvals, userInputs } = snap.pending;

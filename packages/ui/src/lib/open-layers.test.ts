@@ -9,7 +9,7 @@
 import assert from "node:assert/strict";
 import { afterEach, describe, it } from "node:test";
 
-import { isAnyLayerOpen, openLayer, openLayerEffect } from "./open-layers.ts";
+import { isAnyLayerOpen, openLayer, openLayerEffect, openTrackedLayer } from "./open-layers.ts";
 
 describe("the open-layer registry", () => {
   const opened: Array<() => void> = [];
@@ -91,6 +91,17 @@ describe("a layer's effect across React's lifecycle", () => {
     const cleanup = openLayerEffect(true);
     assert.equal(isAnyLayerOpen(), true);
     cleanup?.();
+    assert.equal(isAnyLayerOpen(), false);
+  });
+
+  it("a tracked layer knows when a newer one (a dropdown inside a sheet) is above it", () => {
+    const sheet = openTrackedLayer();
+    assert.equal(sheet.isTopmost(), true);
+    const dropdown = openLayer();
+    assert.equal(sheet.isTopmost(), false, "the dropdown owns Escape");
+    dropdown();
+    assert.equal(sheet.isTopmost(), true);
+    sheet.release();
     assert.equal(isAnyLayerOpen(), false);
   });
 });

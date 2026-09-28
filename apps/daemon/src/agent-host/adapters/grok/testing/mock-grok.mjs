@@ -391,6 +391,34 @@ async function runPrompt(id, params) {
     return;
   }
 
+  if (scenario === "rate-limit") {
+    // T3's rate-limit stop (never captured on 1.0.34, Grok fixtures README
+    // observation on error shapes): `prompt_complete` names it first, as
+    // every captured stop does, then the RPC result repeats it.
+    notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason: "rate_limit" });
+    result(id, { stopReason: "rate_limit", _meta: { sessionId, promptId } });
+    return;
+  }
+
+  if (scenario === "stop-failure") {
+    // A failing stop reason (`GROK_MOCK_STOP_REASON`, e.g. `authentication_failed`, which the
+    // binary names but no capture holds), with or without the `prompt_complete` that usually
+    // precedes the RPC result (`GROK_MOCK_NO_PROMPT_COMPLETE=1`).
+    const stopReason = process.env.GROK_MOCK_STOP_REASON ?? "authentication_failed";
+    if (process.env.GROK_MOCK_NO_PROMPT_COMPLETE !== "1") notify("_x.ai/session/prompt_complete", { sessionId, promptId, stopReason });
+    result(id, { stopReason, _meta: { sessionId, promptId } });
+    return;
+  }
+
+  if (scenario === "prompt-error") {
+    // The prompt RPC answered with an error: `GROK_MOCK_PROMPT_ERROR_CODE`
+    // picks the code (ACP's -32000 authentication required, T3's -32003).
+    const code = Number(process.env.GROK_MOCK_PROMPT_ERROR_CODE ?? "-32603");
+    const message = process.env.GROK_MOCK_PROMPT_ERROR_MESSAGE ?? "Prompt failed";
+    send({ jsonrpc: "2.0", id, error: { code, message } });
+    return;
+  }
+
   if (scenario === "permission" || scenario === "cancel" || scenario === "permission-exit") {
     notify("session/update", {
       sessionId,

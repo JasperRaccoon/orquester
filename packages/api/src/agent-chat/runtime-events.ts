@@ -935,15 +935,30 @@ export interface ModelReroutedPayload {
   reason: string;
 }
 
+/**
+ * Why a turn could not go on, when the adapter KNOWS (workflows spec §5.4): `usage_limit` — the
+ * account's quota is exhausted (Claude's parked `rate_limit_event`, Codex `usageLimitExceeded` /
+ * `rateLimitExceeded` / `sessionBudgetExceeded`, Grok `stopReason: "rate_limit"`); `auth` — the
+ * account's login was refused. Absent = not known to be either. The workflow engine's account
+ * failover reads this instead of matching message text.
+ */
+export type RuntimeFailureReason = "usage_limit" | "auth";
+
 export interface RuntimeWarningPayload {
   message: string;
   detail?: unknown;
+  reason?: RuntimeFailureReason;
+  /** ISO time the limit resets, when the provider says. */
+  resetsAt?: string;
 }
 
 export interface RuntimeErrorPayload {
   message: string;
   class: RuntimeErrorClass;
   detail?: unknown;
+  reason?: RuntimeFailureReason;
+  /** ISO time the limit resets, when the provider says. */
+  resetsAt?: string;
 }
 
 // ---------------------------------------------------------------------------

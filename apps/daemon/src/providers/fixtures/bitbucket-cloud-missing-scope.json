@@ -1,0 +1,10 @@
+{
+  "type": "error",
+  "error": {
+    "message": "Your credentials lack one or more required privilege scopes.",
+    "detail": {
+      "granted": ["read:repository:bitbucket", "read:user:bitbucket", "read:workspace:bitbucket"],
+      "required": ["read:pullrequest:bitbucket"]
+    }
+  }
+}

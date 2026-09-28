@@ -590,6 +590,31 @@ describe("tool progress, denials and diagnostics (§5.1 catch-all)", () => {
     assert.equal(warning!.summary, "unmapped frame xyz");
   });
 
+  it("an account failure's reason and reset reach the activity payload (workflows §5.4)", () => {
+    const [error] = runtimeEventToActivities(
+      runtimeEvent("runtime.error", {
+        message: "Claude usage limit reached. Send the message again once the limit resets.",
+        class: "provider_error",
+        reason: "usage_limit",
+        resetsAt: "2026-09-28T22:40:00.000Z"
+      })
+    );
+    assert.equal(payloadOf(error!).reason, "usage_limit");
+    assert.equal(payloadOf(error!).resetsAt, "2026-09-28T22:40:00.000Z");
+
+    const [warning] = runtimeEventToActivities(
+      runtimeEvent("runtime.warning", { message: "Claude usage limit reached.", reason: "auth" })
+    );
+    assert.equal(payloadOf(warning!).reason, "auth");
+    assert.equal("resetsAt" in payloadOf(warning!), false);
+
+    // A payload without the fields is exactly the row it always was.
+    const [plain] = runtimeEventToActivities(
+      runtimeEvent("runtime.error", { message: "boom", class: "provider_error" })
+    );
+    assert.deepEqual(payloadOf(plain!), { message: "boom", class: "provider_error" });
+  });
+
   it("hooks, plans and reroutes become rows", () => {
     assert.equal(
       runtimeEventToActivities(

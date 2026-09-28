@@ -3,6 +3,8 @@ import type { OwnerSummary, RepoSummary } from "@orquester/api";
 import { AccountError } from "../account-error";
 import type {
   CloneUrls,
+  ConditionalListOptions,
+  ConditionalPage,
   CreateRepoOpts,
   CredentialSpec,
   GitProvider,
@@ -10,9 +12,12 @@ import type {
   ParsedRepo,
   ProviderCreds,
   ProviderIdentity,
+  PullRequestInfo,
+  ReleaseInfo,
   SshProbe,
   UrlContext
 } from "./types";
+import { GitRemoteError, POLL_PAGE_SIZE, retryAfterMs } from "./types";
 
 const GITHUB_API = "https://api.github.com";
 
@@ -38,6 +43,74 @@ export interface CreateRepoOptions {
   description?: string;
 }
 
+/**
+ * One GitHub REST request, never throwing on the HTTP status. `token: null`
+ * reads anonymously (public repos; 60 requests/hour per IP). `extraHeaders`
+ * carries `If-None-Match` for the polling listings.
+ */
+async function githubFetch(
+  token: string | null,
+  method: "GET" | "POST" | "DELETE",
+  path: string,
+  body?: unknown,
+  extraHeaders?: Record<string, string>
+): Promise<Response> {
+  try {
+    return await fetch(`${GITHUB_API}${path}`, {
+      method,
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        Accept: "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "orquester",
+        ...(body ? { "Content-Type": "application/json" } : {}),
+        ...extraHeaders
+      },
+      body: body ? JSON.stringify(body) : undefined
+    });
+  } catch (error) {
+    throw new GitRemoteError(
+      502,
+      `GitHub ${method} ${path} failed: ${error instanceof Error ? error.message : "network error"}`,
+      "upstream"
+    );
+  }
+}
+
+/**
+ * The error for a non-2xx GitHub answer: a rate limit (a 429, or a 403 that
+ * says the quota is spent or asks to retry later) is a 429 `rate_limited`
+ * carrying when to retry; any other 401/403 a 400 (a bad/expired token or
+ * missing scope — the route maps it to a client error); the rest a 502.
+ */
+async function githubError(response: Response, method: string, path: string): Promise<GitRemoteError> {
+  const detail = await response.text().catch(() => "");
+  const retryAfter = retryAfterMs(response.headers.get("retry-after"));
+  const remaining = response.headers.get("x-ratelimit-remaining");
+  if (response.status === 429 || (response.status === 403 && (remaining === "0" || retryAfter !== undefined))) {
+    const reset = Number(response.headers.get("x-ratelimit-reset"));
+    const wait =
+      retryAfter ?? (Number.isFinite(reset) && reset > 0 ? Math.max(0, reset * 1000 - Date.now()) : undefined);
+    return new GitRemoteError(
+      429,
+      `GitHub ${method} ${path} → ${response.status}: rate limit exceeded${
+        wait !== undefined ? ` (retry in ${Math.ceil(wait / 1000)} s)` : ""
+      }. ${detail.slice(0, 200)}`,
+      "rate_limited",
+      response.status,
+      wait
+    );
+  }
+  const unauthorized = response.status === 401 || response.status === 403;
+  const hint = unauthorized ? ` (check the token's scopes: ${SCOPES})` : "";
+  return new GitRemoteError(
+    unauthorized ? 400 : 502,
+    `GitHub ${method} ${path} → ${response.status}${hint}. ${detail.slice(0, 200)}`,
+    unauthorized ? "auth" : response.status === 404 ? "not_found" : "upstream",
+    response.status
+  );
+}
+
 /** Authenticated GitHub REST call; throws AccountError on a non-2xx. */
 async function github(
   token: string,
@@ -45,29 +118,83 @@ async function github(
   path: string,
   body?: unknown
 ): Promise<Response> {
-  const response = await fetch(`${GITHUB_API}${path}`, {
-    method,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      Accept: "application/vnd.github+json",
-      "X-GitHub-Api-Version": "2022-11-28",
-      "User-Agent": "orquester",
-      ...(body ? { "Content-Type": "application/json" } : {})
-    },
-    body: body ? JSON.stringify(body) : undefined
-  });
+  const response = await githubFetch(token, method, path, body);
   if (!response.ok) {
-    const detail = await response.text().catch(() => "");
-    const hint =
-      response.status === 401 || response.status === 403
-        ? ` (check the token's scopes: ${SCOPES})`
-        : "";
-    throw new AccountError(
-      response.status === 401 || response.status === 403 ? 400 : 502,
-      `GitHub ${method} ${path} → ${response.status}${hint}. ${detail.slice(0, 200)}`
-    );
+    throw await githubError(response, method, path);
   }
   return response;
+}
+
+/**
+ * A conditional GET for the polling listings: `If-None-Match` with the last
+ * ETag, a 304 → `notModified` (free on GitHub's rate limit), else the decoded
+ * array (anything else reads as empty) and the new ETag.
+ */
+async function githubConditionalList(
+  token: string | null,
+  path: string,
+  etag: string | undefined
+): Promise<{ notModified: true } | { notModified?: false; etag?: string; values: Record<string, unknown>[] }> {
+  const response = await githubFetch(token, "GET", path, undefined, etag ? { "If-None-Match": etag } : undefined);
+  if (response.status === 304) {
+    return { notModified: true };
+  }
+  if (!response.ok) {
+    throw await githubError(response, "GET", path);
+  }
+  const page = (await response.json().catch(() => [])) as unknown;
+  const values = Array.isArray(page)
+    ? page.filter((value): value is Record<string, unknown> => !!value && typeof value === "object")
+    : [];
+  const nextEtag = response.headers.get("etag") ?? undefined;
+  return { values, ...(nextEtag ? { etag: nextEtag } : {}) };
+}
+
+function text(value: unknown): string {
+  return typeof value === "string" ? value : "";
+}
+
+function loginOf(value: unknown): string {
+  return value && typeof value === "object" ? text((value as { login?: unknown }).login) : "";
+}
+
+/** Map one GitHub pull JSON object (`GET /repos/:o/:r/pulls`) to `PullRequestInfo`. */
+export function toGithubPullRequest(pull: Record<string, unknown>): PullRequestInfo {
+  const head = (pull.head ?? {}) as { ref?: unknown; sha?: unknown };
+  const base = (pull.base ?? {}) as { ref?: unknown };
+  const merged = typeof pull.merged_at === "string" && pull.merged_at.length > 0;
+  return {
+    number: typeof pull.number === "number" ? pull.number : 0,
+    title: text(pull.title),
+    body: text(pull.body),
+    url: text(pull.html_url),
+    author: loginOf(pull.user),
+    head: text(head.ref),
+    base: text(base.ref),
+    headSha: text(head.sha),
+    state: merged ? "merged" : pull.state === "open" ? "open" : "closed",
+    updatedAt: text(pull.updated_at)
+  };
+}
+
+/** Map one GitHub release JSON object (`GET /repos/:o/:r/releases`) to `ReleaseInfo`. */
+export function toGithubRelease(release: Record<string, unknown>): ReleaseInfo {
+  const tag = text(release.tag_name);
+  const id = release.id;
+  return {
+    id: typeof id === "number" || typeof id === "string" ? String(id) : "",
+    name: text(release.name) || tag,
+    tag,
+    body: text(release.body),
+    url: text(release.html_url),
+    prerelease: release.prerelease === true,
+    draft: release.draft === true,
+    publishedAt: typeof release.published_at === "string" ? release.published_at : null
+  };
+}
+
+function repoPath(repo: ParsedRepo): string {
+  return `/repos/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}`;
 }
 
 /** `github()` + JSON decode (204s and empty bodies come back as `{}`). */
@@ -310,5 +437,41 @@ export const githubProvider: GitProvider = {
 
   credentialSpec(ctx): CredentialSpec {
     return { host: "github.com", username: ctx.login };
+  },
+
+  supportsReleases: true,
+
+  async listPullRequests(
+    creds: ProviderCreds | null,
+    repo: ParsedRepo,
+    opts?: ConditionalListOptions
+  ): Promise<ConditionalPage<PullRequestInfo>> {
+    const page = await githubConditionalList(
+      creds?.token || null,
+      `${repoPath(repo)}/pulls?state=all&sort=updated&direction=desc&per_page=${POLL_PAGE_SIZE}`,
+      opts?.etag
+    );
+    if (page.notModified) {
+      return { notModified: true };
+    }
+    return { items: page.values.map(toGithubPullRequest), ...(page.etag ? { etag: page.etag } : {}) };
+  },
+
+  async listReleases(
+    creds: ProviderCreds | null,
+    repo: ParsedRepo,
+    opts?: ConditionalListOptions
+  ): Promise<ConditionalPage<ReleaseInfo>> {
+    // GitHub lists releases newest first (by creation); drafts only reach a
+    // token with push access.
+    const page = await githubConditionalList(
+      creds?.token || null,
+      `${repoPath(repo)}/releases?per_page=${POLL_PAGE_SIZE}`,
+      opts?.etag
+    );
+    if (page.notModified) {
+      return { notModified: true };
+    }
+    return { items: page.values.map(toGithubRelease), ...(page.etag ? { etag: page.etag } : {}) };
   }
 };

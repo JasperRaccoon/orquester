@@ -737,6 +737,18 @@ export function formatUsageLimitWait(waitMs: number): string {
   return minutes === 0 ? `${hours}h` : `${hours}h ${minutes}m`;
 }
 
+/**
+ * The ISO time a `rate_limit_info` window resets (`resetsAt` is epoch
+ * SECONDS on the wire), for the structured `resetsAt` a usage-limit warning
+ * or error carries (workflows §5.4). Undefined when the frame names none.
+ */
+export function rateLimitResetsAtIso(info: unknown): string | undefined {
+  if (info === null || typeof info !== "object") {
+    return undefined;
+  }
+  return isoFromEpochSeconds((info as Record<string, unknown>).resetsAt);
+}
+
 /** True when a `rate_limit_info` says the window is currently blocking. */
 export function isRateLimitBlocking(info: unknown): boolean {
   if (info === null || typeof info !== "object") {

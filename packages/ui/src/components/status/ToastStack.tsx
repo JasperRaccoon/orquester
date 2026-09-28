@@ -5,6 +5,7 @@ import { ConnectionStatusToast } from "./ConnectionStatusToast";
 import { ModelWarningToast } from "./ModelWarningToast";
 import { NoticeToast } from "./NoticeToast";
 import { ResumeErrorToast } from "./ResumeErrorToast";
+import { WorkflowRunToast } from "../workflows/runs/WorkflowRunToast";
 
 /**
  * The one floating toast region. Each toast used to portal its own
@@ -15,7 +16,8 @@ import { ResumeErrorToast } from "./ResumeErrorToast";
  *
  * Order is by urgency: transport trouble first (it explains why the others may
  * be failing), then launch-time warnings, then the agent-auth failure (every
- * turn on that thread will fail until it is fixed), then plain notices.
+ * turn on that thread will fail until it is fixed), then a finished workflow
+ * run, then plain notices.
  */
 export const ToastStack: React.FC = () =>
   createPortal(
@@ -24,6 +26,7 @@ export const ToastStack: React.FC = () =>
       <ModelWarningToast />
       <ResumeErrorToast />
       <AgentAuthErrorToast />
+      <WorkflowRunToast />
       <NoticeToast />
     </div>,
     document.body

@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Dot, FolderTree, GitBranch, Globe, ListTodo, Pencil, Trash2, X } from "lucide-react";
+import { Dot, FolderTree, GitBranch, Globe, ListTodo, Pencil, Trash2, Workflow, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { shortAccountLabel } from "../../lib/account-label";
 import { getRegistryIcon } from "../../icons";
@@ -7,6 +7,7 @@ import { ConfirmDialog } from "../ui";
 import { ContextMenu, type ContextMenuItem } from "../ui/context-menu";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { isLegacyAgentTerminal } from "../../lib/session-kind";
+import { WorkflowChip } from "../workflows/WorkflowChip";
 import {
   isSessionTab,
   tabSession,
@@ -185,6 +186,8 @@ export const TabStrip: React.FC = () => {
           <GitBranch size={13} />
         ) : tab.type === "todo" ? (
           <ListTodo size={13} />
+        ) : tab.type === "workflow" ? (
+          <Workflow size={13} />
         ) : tab.type === "browser" ? (
           <Globe size={13} />
         ) : (
@@ -257,6 +260,7 @@ export const TabStrip: React.FC = () => {
                 legacy terminal
               </span>
             ) : null}
+            <WorkflowChip session={session} className="ml-1" />
             {modelLabel ? (
               <span
                 className="ml-1 rounded bg-warn-500/15 px-1 text-[10px] text-warn-300"

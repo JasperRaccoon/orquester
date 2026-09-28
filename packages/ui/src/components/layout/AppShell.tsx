@@ -9,6 +9,7 @@ import { ToastStack } from "../status";
 import { CommandPalette } from "../command-palette";
 import { GlobalShortcutListener } from "../attention";
 import { MobileSectionNav, RightRailEditorHost, RightRailFrame, useMobileSection } from "../right-rail";
+import { WorkflowsHost } from "../workflows/WorkflowsHost";
 import { CloseSessionConfirm } from "./CloseSessionConfirm";
 
 /**
@@ -46,5 +47,6 @@ export const AppShell: React.FC = () => (
     <CommandPalette />
     <GlobalShortcutListener />
     <RightRailEditorHost />
+    <WorkflowsHost />
   </div>
 );

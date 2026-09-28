@@ -146,6 +146,26 @@ export function savedPromptsPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "saved-prompts.json");
 }
 
+/** Automated workflow definitions (docs/superpowers/specs/2026-09-28-automated-workflows-design.md §3.1). */
+export function workflowsPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "workflows.json");
+}
+
+/** Workflow runtime state: schedule/git cursors, account cooldowns (§3.1). */
+export function workflowStatePath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "workflow-state.json");
+}
+
+/** Workflow secret values; 0600 — values never leave the daemon (§5.7). */
+export function workflowSecretsPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "workflow-secrets.json");
+}
+
+/** Parent of every `<runId>/` run directory (§5.8). */
+export function workflowRunsDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "workflow-runs");
+}
+
 /** Web Push state (VAPID keypair + browser subscriptions); 0600 — holds the private key. */
 export function pushConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "push.json");
@@ -737,6 +757,20 @@ export const sessionChatRecordSchema = z.object({
 });
 export type SessionChatRecord = z.infer<typeof sessionChatRecordSchema>;
 
+/**
+ * The automated workflow run that started a chat tab (workflows spec §5.10). Mirrors
+ * `WorkflowSessionOwner` in `@orquester/api`. The daemon validates a create request's `owner`
+ * against this same schema (400 `INVALID_OWNER`), so what reaches `sessions.json` always parses.
+ */
+const ownerIdSchema = z.string().max(200).regex(/\S/, "must not be blank");
+export const workflowSessionOwnerSchema = z.object({
+  kind: z.literal("workflow"),
+  workflowId: ownerIdSchema,
+  runId: ownerIdSchema,
+  nodeId: ownerIdSchema
+});
+export type WorkflowSessionOwnerRecord = z.infer<typeof workflowSessionOwnerSchema>;
+
 export const sessionRecordSchema = z.object({
   id: z.string().min(1),
   title: z.string(),
@@ -766,7 +800,12 @@ export const sessionRecordSchema = z.object({
   // Agent-chat tabs only (kind "agent-chat"). Absent for terminals. See
   // parseSessionsConfig: a bad chat block drops that ONE session, never the
   // index — an unparseable index disables orphan reaping for every terminal.
-  chat: sessionChatRecordSchema.optional()
+  chat: sessionChatRecordSchema.optional(),
+  // Set when an automated workflow run started this (chat) tab (workflows spec §5.10).
+  // Tolerant: a malformed owner — a newer shape, a hand edit — is DROPPED, never the record
+  // (`.catch`), so a bad owner can't cost the user a tab. An older daemon strips the key on
+  // rollback, which only loses the Workflow chip.
+  owner: workflowSessionOwnerSchema.optional().catch(undefined)
 });
 
 export const sessionsConfigSchema = z.object({
@@ -1875,3 +1914,5 @@ export function isValidName(name: string | undefined): name is string {
 }
 
 // assertInsideFsRoot / FsSandboxError moved to ./fs.ts (node-only; see that file).
+
+export * from "./workflows.ts";

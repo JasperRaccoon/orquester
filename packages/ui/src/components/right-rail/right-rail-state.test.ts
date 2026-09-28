@@ -13,6 +13,7 @@ import {
   RIGHT_RAIL_WIDTH_MIN,
   __resetRightRailStoreForTests,
   clampRightRailWidth,
+  isRightRailPanelId,
   loadRightRailState,
   parseRightRailState,
   resetRightRailWidth,
@@ -86,9 +87,15 @@ test("each field is validated on its own: one bad field never costs the others",
     open: "history",
     width: 400
   });
-  for (const open of ["true", "1", '"History"', '{"id":"prompts"}', '["prompts"]']) {
+  for (const open of ["true", "1", '"History"', '"Workflows"', '{"id":"prompts"}', '["prompts"]']) {
     assert.equal(parseRightRailState(`{"open":${open}}`).open, null, `open ${open}`);
   }
+});
+
+test("the workflows panel is a panel like the others", () => {
+  assert.equal(isRightRailPanelId("workflows"), true);
+  assert.deepEqual(parseRightRailState('{"v":1,"open":"workflows","width":360}'), { open: "workflows", width: 360 });
+  assert.equal(serializeRightRailState({ open: "workflows", width: 360 }), '{"v":1,"open":"workflows","width":360}');
 });
 
 test("a stored width is clamped into range, and a nonsensical one is dropped", () => {

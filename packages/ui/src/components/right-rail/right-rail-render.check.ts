@@ -29,6 +29,7 @@ import { openProjectPathOf, RightRailRow } from "./RightRailFrame";
 import { MOBILE_SECTION_BAR_MAX, MobileSectionBar, MobileSectionView, splitSectionItems } from "./MobileSections";
 import { __resetRightRailStoreForTests } from "./right-rail-state";
 import { SavedPromptsPanel } from "./saved-prompts/SavedPromptsPanel";
+import { WorkflowsPanel } from "./workflows/WorkflowsPanel";
 import type { RightRailPanelId, RightRailPanelProps } from "./types";
 
 const NOOP = (): void => {};
@@ -48,7 +49,8 @@ const fakePanel =
 
 const FAKES: RightRailPanelRegistry = {
   prompts: { ...RIGHT_RAIL_PANEL_REGISTRY.prompts, Component: fakePanel("prompts") },
-  history: { ...RIGHT_RAIL_PANEL_REGISTRY.history, Component: fakePanel("history") }
+  history: { ...RIGHT_RAIL_PANEL_REGISTRY.history, Component: fakePanel("history") },
+  workflows: { ...RIGHT_RAIL_PANEL_REGISTRY.workflows, Component: fakePanel("workflows") }
 };
 
 // No storage under node: the rail's state lives in memory for this script.
@@ -62,6 +64,9 @@ assert.equal(RIGHT_RAIL_PANEL_REGISTRY.prompts.Component, SavedPromptsPanel, "Sa
 assert.equal(RIGHT_RAIL_PANEL_REGISTRY.history.Component, PromptHistoryPanel, "History renders the real panel");
 assert.equal(RIGHT_RAIL_PANEL_REGISTRY.prompts.title, "Saved prompts");
 assert.equal(RIGHT_RAIL_PANEL_REGISTRY.history.title, "History & checkpoints");
+assert.equal(RIGHT_RAIL_PANEL_REGISTRY.workflows.Component, WorkflowsPanel, "Workflows renders the real panel");
+assert.equal(RIGHT_RAIL_PANEL_REGISTRY.workflows.title, "Automated workflows");
+assert.equal(RIGHT_RAIL_PANEL_REGISTRY.workflows.shortTitle, "Workflows");
 
 // ---------------------------------------------------------------------------
 // The icon rail
@@ -72,12 +77,14 @@ const buttons = (html: string): string[] => html.match(/<button[^>]*>/g) ?? [];
 
 {
   const html = render(createElement(RightRail, { open: "prompts", onToggle: NOOP }));
-  const [prompts, history, ...rest] = buttons(html);
-  assert.equal(rest.length, 0, "exactly two buttons");
+  const [prompts, history, workflows, ...rest] = buttons(html);
+  assert.equal(rest.length, 0, "exactly three buttons");
   assert.ok(prompts?.includes('aria-label="Saved prompts"'), "Saved prompts comes first");
   assert.ok(prompts?.includes('title="Saved prompts"'), "with its tooltip");
   assert.ok(history?.includes('aria-label="History &amp; checkpoints"'), "then History & checkpoints");
   assert.ok(history?.includes('title="History &amp; checkpoints"'));
+  assert.ok(workflows?.includes('aria-label="Automated workflows"'), "then Automated workflows, third");
+  assert.ok(workflows?.includes('aria-pressed="false"') && !workflows?.includes("aria-controls"));
   assert.ok(prompts?.includes('aria-pressed="true"'), "the open panel's button is pressed");
   assert.ok(history?.includes('aria-pressed="false"'), "the other is not");
   assert.ok(prompts?.includes('aria-controls="right-rail-dock"'), "the pressed one controls the dock");
@@ -85,7 +92,7 @@ const buttons = (html: string): string[] => html.match(/<button[^>]*>/g) ?? [];
   assert.ok(/class="[^"]*\bbg-neutral-800\b[^"]*\bring-1\b/.test(prompts ?? ""), "pressed reads as a raised square");
   assert.ok(/class="[^"]*\btext-neutral-500\b/.test(history ?? ""), "the other stays muted");
   assert.ok(/aria-label="Side panels"[^>]*class="[^"]*\bw-11\b/.test(html), "a labelled w-11 column");
-  assert.equal((html.match(/<svg/g) ?? []).length, 2, "one icon per button");
+  assert.equal((html.match(/<svg/g) ?? []).length, 3, "one icon per button");
 }
 
 {
@@ -176,9 +183,10 @@ setActiveChatTab(null);
   const html = render(createElement(MobileSectionBar, { active: null, onSelect: NOOP, chatTab: true, panels: FAKES }));
   assert.ok(html.startsWith('<nav aria-label="Sections"'), "a labelled nav");
   const items = buttons(html);
-  assert.equal(items.length, 3, "Chat, Prompts, History");
+  assert.equal(items.length, 4, "Chat, Prompts, History, Workflows");
   assert.ok(items[0]?.includes('aria-current="page"'), "the tab content is the current one");
   assert.ok(html.includes(">Chat</span>") && html.includes(">Prompts</span>") && html.includes(">History</span>"));
+  assert.ok(html.includes(">Workflows</span>"), "the workflows section by its short title");
   assert.ok(!html.includes(">More</span>"), "no More while everything fits");
 
   const onTerminal = render(createElement(MobileSectionBar, { active: "history", onSelect: NOOP, chatTab: false, panels: FAKES }));

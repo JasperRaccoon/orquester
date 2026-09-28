@@ -10,7 +10,7 @@ import { MAX_ERROR_MESSAGE_CHARS } from "./result.ts";
 import { FakeDaemonApi } from "./testing.ts";
 import { allTools, argumentProblems, argumentsSchema, registerMcp, SERVER_INSTRUCTIONS, SERVER_VERSION, type McpDeps } from "./server.ts";
 
-const EXPECTED_TOOLS = ["list_projects", "list_agents", "list_conversations", "list_sessions", "get_session", "get_turn_diff", "create_session", "update_session", "interrupt_session", "stop_session", "close_session", "revert_session", "compact_session", "search_sessions", "send_message", "implement_plan", "read_transcript", "read_tool_output", "answer_question", "dismiss_question", "resolve_approval", "wait_for_session", "get_usage", "get_cost", "list_files", "read_file", "list_todos", "create_todo", "update_todo", "delete_todo", "toggle_todo_item"];
+const EXPECTED_TOOLS = ["list_projects", "list_agents", "list_conversations", "list_sessions", "get_session", "get_turn_diff", "create_session", "update_session", "interrupt_session", "stop_session", "close_session", "revert_session", "compact_session", "search_sessions", "send_message", "implement_plan", "read_transcript", "read_tool_output", "answer_question", "dismiss_question", "resolve_approval", "wait_for_session", "get_usage", "get_cost", "list_files", "read_file", "list_todos", "create_todo", "update_todo", "delete_todo", "toggle_todo_item", "list_workflow_block_types", "list_workflows", "get_workflow", "create_workflow", "update_workflow", "validate_workflow", "delete_workflow", "run_workflow", "list_workflow_runs", "get_workflow_run", "cancel_workflow_run", "list_workflow_secrets", "set_workflow_secret"];
 
 // Spec §4.5's annotation rules, spelled out literally so a drifting constant fails here too. A read, a todo tool and a
 // file tool touch only the daemon's own state (openWorldHint: false); a tool that drives an agent keeps the default.
@@ -55,7 +55,21 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   update_todo: { required: ["id"], annotations: closed(WRITE_IDEMPOTENT) },
   delete_todo: { required: ["id"], annotations: closed(DESTROY) },
   // Omitting `checked` flips the item, so a repeated call is not a no-op: not idempotent.
-  toggle_todo_item: { required: ["id", "item"], annotations: closed(WRITE) }
+  toggle_todo_item: { required: ["id", "item"], annotations: closed(WRITE) },
+  // Automated workflows (workflows spec §8.3). run_workflow drives agents, so no tool that writes claims a closed world.
+  list_workflow_block_types: { required: [], annotations: READ },
+  list_workflows: { required: [], annotations: READ },
+  get_workflow: { required: ["workflowId"], annotations: READ },
+  create_workflow: { required: ["name", "project", "nodes"], annotations: WRITE },
+  update_workflow: { required: ["workflowId", "revision", "ops"], annotations: WRITE },
+  validate_workflow: { required: ["workflow"], annotations: READ },
+  delete_workflow: { required: ["workflowId", "confirm"], annotations: DESTROY },
+  run_workflow: { required: ["workflowId"], annotations: WRITE },
+  list_workflow_runs: { required: ["workflowId"], annotations: READ },
+  get_workflow_run: { required: ["runId"], annotations: READ },
+  cancel_workflow_run: { required: ["runId"], annotations: WRITE_IDEMPOTENT },
+  list_workflow_secrets: { required: [], annotations: READ },
+  set_workflow_secret: { required: ["name", "value"], annotations: WRITE_IDEMPOTENT }
 };
 
 type ListedTool = { name: string; title?: string; description: string; annotations?: object; inputSchema: { properties?: Record<string, { description?: string }>; required?: string[]; additionalProperties?: unknown } };
@@ -89,13 +103,13 @@ const MCP_HEADERS = { accept: "application/json, text/event-stream", "content-ty
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const ticks = async (n: number) => { for (let i = 0; i < n; i += 1) await tick(); };
 
-test("tools/list is exactly the 31 spec tools, each with a title, annotations and described params", async () => {
+test("tools/list is exactly the 44 spec tools (31 + 13 workflow tools), each with a title, annotations and described params", async () => {
   const app = mcpApp({ createApi: () => new FakeDaemonApi() });
   try {
     const list = await postMcp(app, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
     const tools = list.result.tools as ListedTool[];
     assert.deepEqual(tools.map((t) => t.name), EXPECTED_TOOLS);
-    assert.equal(tools.length, 31);
+    assert.equal(tools.length, 44);
     for (const t of tools) {
       assert.ok(t.title, `${t.name} has a title`);
       assert.ok(t.annotations, `${t.name} has annotations`);

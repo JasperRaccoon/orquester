@@ -6,10 +6,11 @@
  */
 
 import type React from "react";
-import { Bookmark, History, type LucideIcon } from "lucide-react";
+import { Bookmark, History, Workflow, type LucideIcon } from "lucide-react";
 
 import { PromptHistoryPanel } from "./history/PromptHistoryPanel";
 import { SavedPromptsPanel } from "./saved-prompts/SavedPromptsPanel";
+import { WorkflowsPanel } from "./workflows/WorkflowsPanel";
 import type { RightRailPanelId, RightRailPanelProps } from "./types";
 
 export interface RightRailPanelSpec {
@@ -48,11 +49,20 @@ export const RIGHT_RAIL_PANEL_REGISTRY: RightRailPanelRegistry = {
     get Component() {
       return PromptHistoryPanel;
     }
+  },
+  workflows: {
+    id: "workflows",
+    title: "Automated workflows",
+    shortTitle: "Workflows",
+    Icon: Workflow,
+    get Component() {
+      return WorkflowsPanel;
+    }
   }
 };
 
 /** Rail order, top to bottom (and a phone's section bar, left to right). */
-export const RIGHT_RAIL_PANEL_ORDER: readonly RightRailPanelId[] = ["prompts", "history"];
+export const RIGHT_RAIL_PANEL_ORDER: readonly RightRailPanelId[] = ["prompts", "history", "workflows"];
 
 /** The dock's element id — what the active rail button `aria-controls`. */
 export const RIGHT_RAIL_DOCK_ID = "right-rail-dock";

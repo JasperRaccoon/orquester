@@ -227,6 +227,18 @@ export class PushService {
     }
   }
 
+  /**
+   * A finished workflow run's push (workflows spec §5.11). The caller debounces per workflow; this
+   * only delivers. `workflowId`/`runId` ride the payload for the deep link. Never throws.
+   */
+  async notifyWorkflowRun(payload: { title: string; body: string; tag: string; workflowId: string; runId: string }): Promise<void> {
+    try {
+      await this.deliver(JSON.stringify({ ...payload, sessionId: "" }));
+    } catch (error) {
+      this.logger.error("workflow push failed", error);
+    }
+  }
+
   /** Send a fixed test payload to every subscription; returns the count delivered. */
   async sendTest(): Promise<number> {
     const payload = JSON.stringify({

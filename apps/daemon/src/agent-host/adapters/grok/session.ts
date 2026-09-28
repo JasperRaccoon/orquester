@@ -38,7 +38,12 @@ import type { ClassifiedStderrLine } from "../../support/stderr.ts";
 import { appendAttachmentPathLines } from "../attachment-lines.ts";
 import { AcpConnection } from "./acp/connection.ts";
 import type { AcpFrameDirection } from "./acp/peer.ts";
-import { ACP_ERROR_CODES, AcpRpcError, classifyAcpError } from "./acp/errors.ts";
+import {
+  ACP_ERROR_CODES,
+  AcpRpcError,
+  acpFailureReason,
+  classifyAcpError
+} from "./acp/errors.ts";
 import type {
   InitializeResponse,
   LoadSessionResponse,
@@ -301,6 +306,22 @@ interface ActiveTurn {
    * since no RPC of ours answers it. Cleared when a steer takes the turn over.
    */
   wakePromptId?: string;
+  /** The account failure its stop reason named was reported (once, whichever frame said it first). */
+  accountFailureReported?: boolean;
+}
+
+/**
+ * The account failure a prompt's stop reason names (workflows §5.4). `rate_limit` is T3's; the
+ * binary also names `authentication_failed` among its `StopFailure` reasons (fixtures README
+ * observation 50) — never captured, since a refused login cannot be recorded without logging the
+ * account out.
+ */
+export function grokStopFailure(stopReason: unknown): { reason: "usage_limit" | "auth"; message: string } | null {
+  if (stopReason === "rate_limit") return { reason: "usage_limit", message: "Grok usage limit reached. Try again later." };
+  if (stopReason === "authentication_failed") {
+    return { reason: "auth", message: "Grok is not logged in: the account's sign-in was refused. Sign it in again." };
+  }
+  return null;
 }
 
 /** One live `grok agent stdio` child. */
@@ -1093,6 +1114,8 @@ export class GrokSession {
           // one carrying both the usage block and the resulting context size,
           // so it wins over the `turn_completed` notification that races it.
           const fromResult = parsePromptResultUsage(response._meta);
+          // `prompt_complete` normally says it first; a prompt without one still reports it.
+          this.reportStopFailure(response.stopReason);
           this.settleTurn(turnId, epoch, {
             stopReason: response.stopReason ?? null,
             // No `prompt_complete` arrived (a locally handled slash command
@@ -1130,10 +1153,12 @@ export class GrokSession {
             { stopReason: null },
             error instanceof Error ? error.message : String(error)
           );
+          const reason = acpFailureReason(error);
           this.emitEvent(
             this.normalizer.event("runtime.error", {
               message: error instanceof Error ? error.message : String(error),
-              class: classifyAcpError(error)
+              class: classifyAcpError(error),
+              ...(reason !== undefined ? { reason } : {})
             })
           );
         });
@@ -1324,14 +1349,26 @@ export class GrokSession {
           }
         : {})
     };
-    if (params.stopReason === "rate_limit") {
-      this.emitEvent(
-        this.normalizer.event("runtime.error", {
-          message: "Grok usage limit reached. Try again later.",
-          class: "provider_error"
-        })
-      );
+    this.reportStopFailure(params.stopReason);
+  }
+
+  /** A usage limit or a refused login the active turn's stop reason names, reported once per turn. */
+  private reportStopFailure(stopReason: unknown): void {
+    const turn = this.activeTurn;
+    const failure = grokStopFailure(stopReason);
+    if (turn === null || turn.settled || failure === null || turn.accountFailureReported === true) {
+      return;
     }
+    turn.accountFailureReported = true;
+    this.emitEvent(
+      this.normalizer.event("runtime.error", {
+        message: failure.message,
+        class: "provider_error",
+        // The frame names no reset time (workflows §5.4: the engine then
+        // cools the account by its usage snapshot, else an hour).
+        reason: failure.reason
+      })
+    );
   }
 
   private settleTurn(

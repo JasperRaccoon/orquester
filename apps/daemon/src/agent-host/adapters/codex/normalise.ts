@@ -24,6 +24,7 @@ import {
   type RuntimeContentStreamKind,
   type RuntimeErrorClass,
   type RuntimeEvent,
+  type RuntimeFailureReason,
   type RuntimeEventRaw,
   type RuntimeTurnState,
   type UserInputQuestion
@@ -142,6 +143,17 @@ export class CodexNormaliser {
   private turnEffort: string | null = null;
   /** The last error notification of the active turn, for its `errorMessage`. */
   private lastTurnError: string | null = null;
+  /**
+   * The account's rate-limit windows as `account/rateLimits/updated` last
+   * reported them, keyed `<limitId>:<primary|secondary>`, so a terminal
+   * usage-limit error can say when the exhausted window resets (workflows
+   * §5.4) — the error itself names no reset time. Sparse updates merge: a
+   * `null` window is "not reported", never "cleared".
+   */
+  private readonly rateLimitWindows = new Map<
+    string,
+    { usedPercent: number; resetsAt: number | null }
+  >();
   /** Agent paths seen, so the `/root` trap never registers the root as a child. */
   private readonly knownAgentPaths = new Set<string>();
   /** Child thread id → its live turn id, so Stop can reach the fleet (§4.5). */
@@ -241,6 +253,47 @@ export class CodexNormaliser {
   /** True when `turn/completed` has already settled this turn (Q1 finding 3). */
   hasSettled(turnId: string): boolean {
     return this.settledTurns.has(turnId);
+  }
+
+  private rememberRateLimitWindows(snapshot: CodexProtocol.v2.RateLimitSnapshot): void {
+    const limitId = snapshot.limitId ?? "codex";
+    for (const [slot, window] of [
+      ["primary", snapshot.primary],
+      ["secondary", snapshot.secondary]
+    ] as const) {
+      if (window === null) {
+        continue;
+      }
+      this.rateLimitWindows.set(`${limitId}:${slot}`, {
+        usedPercent: window.usedPercent,
+        resetsAt: window.resetsAt
+      });
+    }
+  }
+
+  /**
+   * When the account can work again: the LATEST reset among the windows last
+   * reported exhausted (`usedPercent` >= 100). Undefined when no window was
+   * reported exhausted — the reset is then unknown, never guessed.
+   */
+  private exhaustedWindowResetsAt(): string | undefined {
+    let latest: number | undefined;
+    for (const window of this.rateLimitWindows.values()) {
+      if (
+        window.usedPercent >= 100 &&
+        window.resetsAt !== null &&
+        Number.isFinite(window.resetsAt) &&
+        window.resetsAt > 0 &&
+        (latest === undefined || window.resetsAt > latest)
+      ) {
+        latest = window.resetsAt;
+      }
+    }
+    if (latest === undefined) {
+      return undefined;
+    }
+    const date = new Date(latest * 1000);
+    return Number.isNaN(date.getTime()) ? undefined : date.toISOString();
   }
 
   /**
@@ -828,13 +881,19 @@ export class CodexNormaliser {
             }
           ];
         }
+        // Only the TERMINAL error names an account failure (workflows §5.4):
+        // a retry that may still succeed is not acted on.
+        const reason = failureReasonOf(p.error.codexErrorInfo);
+        const resetsAt = reason === "usage_limit" ? this.exhaustedWindowResetsAt() : undefined;
         return [
           {
             type: "runtime.error",
             payload: {
               message,
               class: errorClassOf(p.error.codexErrorInfo),
-              detail: { codexErrorInfo: p.error.codexErrorInfo }
+              detail: { codexErrorInfo: p.error.codexErrorInfo },
+              ...(reason !== undefined ? { reason } : {}),
+              ...(resetsAt !== undefined ? { resetsAt } : {})
             },
             ...(p.turnId.length > 0 ? { turnId: p.turnId } : {}),
             raw: raw()
@@ -888,6 +947,7 @@ export class CodexNormaliser {
       // --------------------------------------------------------------- account
       case "account/rateLimits/updated": {
         const p = params as CodexProtocol.v2.AccountRateLimitsUpdatedNotification;
+        this.rememberRateLimitWindows(p.rateLimits);
         return [
           {
             type: "account.rate-limits.updated",
@@ -2031,6 +2091,33 @@ const MAX_ERROR_CHARS = 600;
 
 function truncate(value: string): string {
   return value.length <= MAX_ERROR_CHARS ? value : `${value.slice(0, MAX_ERROR_CHARS - 1)}…`;
+}
+
+/**
+ * The account failure a TERMINAL error names (workflows §5.4), read off
+ * `codexErrorInfo` alone — never the message. A connection failure the
+ * server stamped 401 is a refused login too.
+ */
+export function failureReasonOf(
+  info: CodexProtocol.v2.CodexErrorInfo | null
+): RuntimeFailureReason | undefined {
+  if (info === null) {
+    return undefined;
+  }
+  if (typeof info !== "string") {
+    const inner = Object.values(info)[0] as { httpStatusCode?: unknown } | undefined;
+    return inner?.httpStatusCode === 401 ? "auth" : undefined;
+  }
+  switch (info) {
+    case "usageLimitExceeded":
+    case "rateLimitExceeded":
+    case "sessionBudgetExceeded":
+      return "usage_limit";
+    case "unauthorized":
+      return "auth";
+    default:
+      return undefined;
+  }
 }
 
 function errorClassOf(info: CodexProtocol.v2.CodexErrorInfo | null): RuntimeErrorClass {

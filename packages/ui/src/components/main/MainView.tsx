@@ -1,5 +1,5 @@
 import React from "react";
-import { FolderTree, GitBranch, Globe, ListTodo, X } from "lucide-react";
+import { FolderTree, GitBranch, Globe, ListTodo, Workflow, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { EmptyState } from "./EmptyState";
 import { ProjectOverview } from "./ProjectOverview";
@@ -8,6 +8,7 @@ import { TerminalView } from "../terminal";
 import { FileBrowser } from "../files";
 import { GitView } from "../git";
 import { TodoView } from "../todo";
+import { WorkflowEditorTab } from "../workflows/WorkflowEditorTab";
 import { BrowserView } from "../browser";
 import { getRegistryIcon } from "../../icons";
 import { SessionStatusDot } from "../ui/session-status-dot";
@@ -37,6 +38,8 @@ function cellIcon(tab: ProjectTab): React.ReactNode {
     <GitBranch size={13} />
   ) : tab.type === "todo" ? (
     <ListTodo size={13} />
+  ) : tab.type === "workflow" ? (
+    <Workflow size={13} />
   ) : tab.type === "browser" ? (
     <Globe size={13} />
   ) : (
@@ -348,6 +351,15 @@ export const MainView: React.FC = () => {
                   <FileBrowser rootPath={ctx.kind === "project" ? ctx.project.path : ""} active={show} />
                 ) : tab.type === "browser" ? (
                   <BrowserView browser={tab.browser} active={active} />
+                ) : tab.type === "workflow" ? (
+                  <WorkflowEditorTab
+                    workflowId={tab.workflowId}
+                    title={tab.title}
+                    runId={tab.runId ?? null}
+                    projectPath={ctx.kind === "project" ? ctx.project.path : ""}
+                    active={active}
+                    show={show}
+                  />
                 ) : (
                   <TodoView todoId={tab.todoId} active={active} />
                 )}

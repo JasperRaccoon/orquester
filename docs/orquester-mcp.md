@@ -15,7 +15,8 @@ the reply back in the same call; set, follow and pause an agent's own goal; answ
 questions and tool approvals; read status,
 transcripts, a tool call's whole output, subagents and per-turn diffs; search the text of every
 chat; wait until a session needs attention; and read quota and estimated cost. The shared todo lists
-and sandboxed file reads are there too. That is **31 tools** (§6).
+and sandboxed file reads are there too. That is **31 tools** (§6) — plus **13 automated-workflow
+tools** that build, edit, run and inspect the daemon's n8n-like workflows (§12), 44 in all.
 
 Apart from the todo and file tools, which use the daemon's todo store and its sandboxed file
 reader directly, the tools are a thin in-process client of the daemon's own REST API: every call
@@ -528,13 +529,12 @@ and its default model (the flagged one, else the first) are never shed.
   "/goal resume"` picks it up again.
 - **`stop_session`** — stops the provider process but keeps the tab, its history and its resume
   cursor; the next `send_message` resumes the conversation. A session whose `chat.sessionStatus` is
-  `error` refuses messages and every other command except `revert_session`, so this is how you
-  recover it. The refusal comes in two forms: `send_message` and `implement_plan` answer
-  `SESSION_BUSY` (`… Call stop_session first, then send again.`), while `update_session` (a model,
-  option or permission change), `interrupt_session`, `compact_session`, `answer_question`,
-  `dismiss_question` and `resolve_approval` pass through the host's `COMMAND_REJECTED`
-  (`This thread's session is in an error state. Stop the session or rewind to continue.`). Either
-  way: `stop_session`, then try again. For Grok it also stops the processes the agent's work
+  `error` still takes a message — `send_message` and `implement_plan` restart it from its cursor,
+  as they resume a stopped one — but refuses every other command except `revert_session`:
+  `update_session` (a model, option or permission change), `interrupt_session`, `compact_session`,
+  `answer_question`, `dismiss_question` and `resolve_approval` pass through the host's
+  `COMMAND_REJECTED` (`This thread's session is in an error state. Stop the session or rewind to
+  continue.`). Send a message, or `stop_session`, then try again. For Grok it also stops the processes the agent's work
   started — its background shells and whatever they run (a dev server), which the Grok CLI starts
   outside its own process tree: a deploy, a restart or a crash leaves those running (their task
   rows close saying so), and only the user ending the session (this, or `close_session`) stops them
@@ -635,8 +635,8 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
 - **`send_message`** — needs `text` (at most 120 000 characters after trimming) or at least one
   attachment. It is refused with `PENDING_REQUEST` while a question or an approval is open — the
   message names each one and the tool that answers it, like the GUI's "answer the request above
-  first"; a Codex `/goal` (below) is the one message that goes through, as it does in the GUI —
-  and with `SESSION_BUSY` while the session is in `error` (`stop_session` first).
+  first"; a Codex `/goal` (below) is the one message that goes through, as it does in the GUI. A
+  session in `error` is restarted from its cursor by the message, as the GUI's composer does.
   `planMode: true` needs an agent with the plan toggle (`supports.planMode`); OpenCode's plan agent
   is a model option instead, `update_session {options: {"agent": "plan"}}`. Attachments are
   validated and uploaded first; a refused one fails the call before anything is sent. While a turn
@@ -1149,6 +1149,13 @@ Never send `update_todo` a body marked `bodyTruncated`: it is only the list's he
 would be lost. Tick items with `toggle_todo_item` (it edits the full stored body), rename with
 `name` alone (the body is kept), or put new items in a new list.
 
+### Automated workflows
+
+`list_workflow_block_types`, `list_workflows`, `get_workflow`, `create_workflow`,
+`update_workflow`, `validate_workflow`, `delete_workflow`, `run_workflow`, `list_workflow_runs`,
+`get_workflow_run`, `cancel_workflow_run`, `list_workflow_secrets` and `set_workflow_secret` —
+see §12.
+
 ---
 
 ## 7. Workflows
@@ -1490,8 +1497,8 @@ still not for polling loops.
 | `SESSION_NOT_FOUND` | No open tab has that id (closed, or a typo) — `list_sessions`. A wait on one session fails with it as soon as that session closes. So does `revert_session` when the session closes while it waits for the rewind. |
 | `NOT_A_CHAT_SESSION` | The tool needs a chat tab; terminal tabs can only be listed and closed. |
 | `PENDING_REQUEST` | The agent is waiting on a question or an approval; the message names each request and the tool that answers it. |
-| `SESSION_BUSY` | A turn is running (`update_session` without `force`, `revert_session`, an account switch — wait for it, or `interrupt_session`; while a Codex goal continues, an account switch needs the goal paused and its turn over: `interrupt_session` does both), a rewind still running after 10 s (`revert_session`: do not call it again — it has landed once `get_session`'s `chat.turnCount` comes down to `keepTurns`), the session is in `error` (`stop_session`, then send again), or the project already has 24 running sessions (`close_session` some). |
-| `COMMAND_REJECTED` (`… in an error state …`) | The session's `chat.sessionStatus` is `error`, and the host lets only `stop_session` and `revert_session` through (`send_message` and `implement_plan` say `SESSION_BUSY` instead). `stop_session`, then try again. Other `COMMAND_REJECTED` messages are the host's own refusal, passed through — `Rewind failed: …` from `revert_session`, for one. |
+| `SESSION_BUSY` | A turn is running (`update_session` without `force`, `revert_session`, an account switch — wait for it, or `interrupt_session`; while a Codex goal continues, an account switch needs the goal paused and its turn over: `interrupt_session` does both), a rewind still running after 10 s (`revert_session`: do not call it again — it has landed once `get_session`'s `chat.turnCount` comes down to `keepTurns`), or the project already has 24 running sessions (`close_session` some). |
+| `COMMAND_REJECTED` (`… in an error state …`) | The session's `chat.sessionStatus` is `error`, and the host lets only a message (`send_message`, `implement_plan` — it restarts the session), `stop_session` and `revert_session` through. Send a message, or `stop_session`, then try again. Other `COMMAND_REJECTED` messages are the host's own refusal, passed through — `Rewind failed: …` from `revert_session`, for one. |
 | `INVALID_ARGUMENT` naming an agent, model or option | Take the values from `list_agents`. "Still loading … models" means the catalogue is being probed — retry shortly. `<model> takes no options` (Claude's `haiku`) — send it without `options`. A model marked `optionsOmitted` has options: `list_agents {agent, model}`. |
 | `INVALID_ARGUMENT: Invalid arguments for <tool>: …` | An argument failed the tool's schema: a wrong type, a value out of range, an empty string, a missing required field, or an argument name the tool does not have (`Unrecognized key(s)`). The message names each bad field (at most five) and why; `tools/list` describes every parameter. |
 | JSON-RPC error `-32602` (`Tool … not found`) | No tool has that name: a typo, or a client still holding an old tool list (see the stale-guidance row below). |
@@ -1510,6 +1517,250 @@ still not for polling loops.
 
 ---
 
+## 12. Automated workflows
+
+Orquester runs **automated workflows**: n8n-like graphs of blocks — triggers (manual, schedule,
+git events), agents, JavaScript code, shell scripts, HTTP requests, if/switch/merge/wait/stop,
+sub-workflows — owned by the daemon and shown in the right rail's "Automated workflows" panel and
+the workflow editor tab. These 13 tools let an agent do what the editor does: "create a workflow
+that does X, Y, Z", "edit workflow X to add this path", "run it and tell me what happened". They
+are clients of the daemon's `/api/workflows*`, `/api/workflow-runs*` and `/api/workflow-secrets*`
+routes, like every other tool; everything a tool changes shows up live in the editor and the rail.
+
+### Tools
+
+| Tool | Input | Returns |
+|---|---|---|
+| `list_workflow_block_types` | `type?` | `{types: [{type, category, title, description, handles, output, example, configSchema}], expressionGuide, authoringGuide, configSchemasOmitted?}` — **read it first** |
+| `list_workflows` | `project?` | `{workflows: [{workflowId, name, enabled, revision, project, projectPath?, triggers: [text], nodeCount, errorCount, lastRun?, activeRuns, updatedAt}]}` |
+| `get_workflow` | `workflowId`, `node?` | `{workflowId, name, revision, enabled, project, problems, errorCount, warningCount, connections, workflow}` — or, with `node`, that one block and its connections |
+| `create_workflow` | `name`, `description?`, `project`, `settings?`, `nodes`, `edges? = []`, `enabled? = false` | `{created: true, workflowId, revision, problems, …, connections, workflow, next?}` |
+| `update_workflow` | `workflowId`, `revision`, `ops` (1–500) | `{updated: true, workflowId, revision, problems, …, connections, workflow}` |
+| `validate_workflow` | `workflow` | `{valid, problems, errorCount, warningCount}` — a missing id, revision, timestamp, block position, edge id or edge `sourceHandle` is filled in |
+| `delete_workflow` | `workflowId`, `confirm: true` | `{deleted: true, workflowId}` |
+| `run_workflow` | `workflowId`, `input?`, `wait? = false`, `timeoutSeconds? = 300` (≤ 600), `force? = false` | `{runId, status: "started"}`; with `wait`, `{runId, finished, timedOut?, run, blocks, outputNote?}`; skipped: `{runId: null, skipped: "overlap", message}` |
+| `list_workflow_runs` | `workflowId`, `before?`, `limit? = 20` (≤ 50) | `{runs: [RunSummary], before}` — `before: null` = no more |
+| `get_workflow_run` | `runId`, `includeOutputs? = true`, `nodeId?`, `outputOffset? = 0` | `{run, blocks, outputNote?}`; with `nodeId`, `{run, block, output}` or a window `{outputText, offset, totalBytes, nextOffset?}` |
+| `cancel_workflow_run` | `runId` | `{cancelRequested: true, runId, run?}` |
+| `list_workflow_secrets` | `workflowId?` | `{secrets: [{name, scope, workflowId?, updatedAt, short?}]}` — names only |
+| `set_workflow_secret` | `name`, `value`, `workflowId?` | `{set: true, name, scope, workflowId?, warning?}` |
+
+- **`project`** is `{kind: "existing", project: "<workspace>/<project>" or an absolute path}`
+  (resolved exactly like every other tool's `project`, §5), or `{kind: "temp", workspace, source:
+  {kind: "empty"} | {kind: "clone", url, ref?}}` — a fresh project per run in that workspace,
+  cloned with the workspace's git account. `list_workflows`' `project` is a plain project argument.
+- **Blocks** are `{type, name?, config?, position?, disabled?, notes?, retry?, timeoutMinutes?,
+  projectOverride?}`. `config` is merged over the type's default config, so only what differs is
+  needed; a missing name is minted (`Agent`, `Agent2`, …). Positions are optional: without any,
+  the daemon lays the whole graph out.
+- **Edges** name blocks by **name** (or id): `{source, sourceHandle?, target}`, `sourceHandle`
+  defaulting to `success`.
+- **`settings`**: `overlap` (`skip` — the default: a trigger that fires while a run is active is
+  skipped —, `queue`, `parallel`), `maxConcurrent` (1–8, parallel only), `timezone` (IANA;
+  defaults to the daemon host's own zone), `runTimeoutMinutes`, `notify {onFailure, onSuccess}`,
+  `keepFailedTempDays` (0–30).
+- A new workflow is **disabled** unless `enabled: true` — its schedule and git triggers do not
+  fire. Manual runs (`run_workflow`) work either way. Enabling is refused while the definition has
+  a problem of severity `error`.
+- **`problems`** come back on every read and write: `{severity: "error" | "warning" | "info", code,
+  message, nodeId?, edgeId?, field?}`, errors first, at most 100 (`problemsOmitted` counts the
+  rest). Errors (a cycle, a reference to an unknown block, `{{ }}` in a shell script…) block
+  enabling; warnings (a secret in an agent prompt, an unknown secret name…) do not.
+- **`revision`** moves by one on every save. `update_workflow` must send the revision it last read
+  (`get_workflow`, or the previous write's answer).
+
+### Authoring rules (what `list_workflow_block_types`' `authoringGuide` teaches)
+
+- Blocks read earlier outputs through expressions: `{{ nodes.<Name>.output… }}`, `{{ input }}`
+  (the output of the block feeding this one), `{{ trigger… }}`, `{{ run… }}`, `{{ project… }}`,
+  `{{ secrets.NAME }}`, with filters (`| json`, `| compact`, `| default("x")`, `| length`, …). The
+  `expressionGuide` has the full grammar.
+- Output handles: triggers `success`; agent, code, shell, http, merge, wait and workflow `success`
+  and `error`; if `true` / `false` / `error`; switch `case:0`, `case:1`, …, `default`, `error`;
+  stop and note none. A failed block with no `error` edge fails the run. A block all of whose
+  incoming edges are dead (an if's other branch) is skipped.
+- **Shell scripts never contain `{{ }}`** (validation refuses it): map values to environment
+  variables in the block's `env` list and read `"$NAME"` in the script.
+- **Code** is an ES module whose default export `async function ({ input, nodes, trigger,
+  secrets, log, stop })` returns the block's output; a throw fails the block; `stop(reason)` ends
+  the run as stopped.
+- **Agent blocks run full-access and unattended** in a new chat session (no approvals, no
+  questions) until the agent finishes; the output is `{text, sessionId, agent, model, accountId,
+  durationMs, hops}` — ask for JSON in the prompt to parse `text` downstream. `chain` is the
+  agent/model fallback order (take the models from `list_agents`); accounts are chosen by usage and
+  switched on usage limits.
+- **`rename_node` rewrites every `{{ }}` reference** (and an agent's `session.fromNode`), **not a
+  name inside a code block's JavaScript** — update that source yourself.
+- **Edit with `update_workflow` ops, never by recreating a workflow**, and call `get_workflow` first
+  for the current revision.
+
+### Patch ops (`update_workflow`)
+
+Ops apply in order to a copy; if one fails, **nothing is saved** and the error names it:
+`ops[<index>] (<op>) failed: <why>. Nothing was saved.`, with `detail: {opIndex, op}`. A block is
+named by id or name everywhere.
+
+| Op | Fields | Notes |
+|---|---|---|
+| `add_node` | `node: {type, name?, config?, position?, disabled?, notes?, retry?, timeoutMinutes?, projectOverride?}` | As in `create_workflow`; placed next to its neighbours when it has no position. |
+| `update_node` | `node`, `set: {name?, config?, position?, disabled?, notes?, retry?, timeoutMinutes?, projectOverride?}` | `set.config` merges **one level deep**: each top-level config key sent replaces that key whole (send the whole `prompt` object, the whole `rules` list), `null` removes it. `null` clears an optional field. A block's `id` and `type` never change. |
+| `remove_node` | `node` | Removes its edges (and pinned output) too. |
+| `rename_node` | `node`, `to` | Rewrites every `{{ nodes.<old>… }}` reference. |
+| `connect` | `source`, `sourceHandle?` (= `success`), `target` | The handle must be one the source has. |
+| `disconnect` | `edgeId`, or `source`, `sourceHandle?`, `target` | Without `sourceHandle`, every edge between the two goes. |
+| `set_settings` | `settings` | Merged; `notify` merged one level deeper. |
+| `set_project` | `project` | The same shape as `create_workflow`'s. |
+| `set_enabled` | `enabled` | Refused while the result has errors. |
+| `set_name` | `name`, `description?` (`null` clears) | |
+| `set_pinned` | `node`, `output` (`null` unpins) | A pinned output stands in for the block in test runs. |
+
+### Runs
+
+`run_workflow` starts a manual run (the trigger's output is `{kind: "manual", input}`, so a block
+reads the input as `{{ trigger.input… }}`). With `wait: true` it waits — on the daemon's event bus
+(`workflowRun.updated` / `workflowRun.finished` on the `workflows` channel), re-reading the run
+every 10 s only as a safety net, never polling — for at most `timeoutSeconds`, then answers the
+run as it stands: `finished: true`, or `finished: false, timedOut: true` for a run still going
+(the run itself goes on; `get_workflow_run` later, or `cancel_workflow_run`). Agent blocks can
+take hours: for those, start without `wait` and check back. When the overlap policy skips the run
+(`overlap: "skip"` and a run already active) the answer is `{runId: null, skipped: "overlap"}`;
+`force: true` runs anyway.
+
+A run's view lists every block in the definition's order: `status` (`pending`, `queued`,
+`running`, `waiting`, `succeeded`, `failed`, `skipped`, `cancelled`), `handle` (the output it
+finished on), `attempt`, `error {kind, message}`, `warnings`, and for an agent block its
+`sessionId` (open it with `read_transcript`), `hops` (account switches and handoffs) and
+`selection` (why that account). **Outputs are fitted to one result**: small ones come back whole
+as `output`, and when they do not all fit, the largest become `outputText` — the head of their
+JSON — with `outputTruncated: true` (the daemon's own preview cut sets it too). Read a whole
+output with `get_workflow_run {runId, nodeId}`: it answers `output` when it fits, else a window of
+its JSON text (`outputText`, `offset`, `totalBytes`, `nextOffset`); call again with
+`outputOffset = nextOffset` until there is none.
+
+### Secrets
+
+`list_workflow_secrets` lists names only — values never leave the daemon. `set_workflow_secret`
+creates or replaces one (global, or a workflow's own with `workflowId`); it is write-only, but
+**the value you pass is in your own transcript and tool logs**: prefer asking the user to set it
+in the Orquester UI. Blocks read secrets as `{{ secrets.NAME }}` (HTTP fields, shell `env` values)
+or `secrets.NAME` in code; stored outputs and logs show `«secret:NAME»` instead of the value
+(values under 4 characters are not redacted — the answer warns).
+
+### Size and errors
+
+Every result stays under the 60 000-byte cap on its own. `get_workflow` and the write answers cut
+long texts (code sources, prompts) to one common length and name them in `truncatedFields` (read
+one block with more room through `get_workflow {workflowId, node}`, and **never send a cut text
+back**); large pinned outputs are summarised (`pinnedOmitted`); `list_workflow_block_types` drops
+config schemas largest first (`configSchemasOmitted` — `{type}` returns one whole); runs fit their
+outputs as above.
+
+Errors keep the daemon's codes, with a hint: `WORKFLOW_NOT_FOUND` (`list_workflows`),
+`RUN_NOT_FOUND` (`list_workflow_runs`), `NODE_NOT_FOUND` (it lists the blocks),
+`REVISION_CONFLICT` (**re-read with `get_workflow`**, then send the ops again),
+`INVALID_WORKFLOW` (its problems are in the message — up to eight — and all of them in
+`detail.problems`; also an op or entry the daemon refused, named by the index its body carries
+(`opIndex`) — `update_workflow` names `ops[i]`, `create_workflow` names `nodes[i]` or `edges[i]`),
+`INVALID_REQUEST` (a malformed request body or query), `RUN_NOT_ACTIVE` (cancelling a run that
+already ended), `SECRET_INVALID`, `LIMIT_EXCEEDED`, `WORKFLOWS_UNAVAILABLE` (the daemon cannot
+write its workflows file right now).
+
+### Worked example: the Jira fixer
+
+The request: *"Every 15 minutes, fetch new Jira tickets labelled orquester-fix; if there are none,
+stop; otherwise have Claude fix them in acme/api and move the fixed ones to Done."*
+
+1. `list_workflow_block_types {}` — the block configs, the expression guide, the authoring guide.
+   `list_agents {agent: "claude"}` — the model to put in the agent's chain.
+
+2. Create it (the secrets it reads are set in step 3):
+
+```
+create_workflow {
+  "name": "Jira fixer",
+  "project": { "kind": "existing", "project": "acme/api" },
+  "nodes": [
+    { "type": "trigger.schedule", "name": "Every15Min",
+      "config": { "preset": { "kind": "minutes", "every": 15 }, "cron": "*/15 * * * *" } },
+    { "type": "code", "name": "FetchTickets",
+      "config": { "source": "export default async function ({ secrets, log }) {\n  const res = await fetch(`${secrets.JIRA_BASE_URL}/rest/api/3/search/jql`, { method: \"POST\", headers: { Authorization: `Basic ${secrets.JIRA_AUTH}`, \"Content-Type\": \"application/json\" }, body: JSON.stringify({ jql: \"labels = orquester-fix AND status = \\\"To Do\\\"\", fields: [\"summary\", \"description\"] }) });\n  if (!res.ok) throw new Error(`Jira: HTTP ${res.status}`);\n  const tickets = ((await res.json()).issues ?? []).map((i) => ({ key: i.key, summary: i.fields.summary }));\n  log(`${tickets.length} ticket(s)`);\n  return { tickets };\n}\n" } },
+    { "type": "if", "name": "HasTickets",
+      "config": { "rules": [{ "left": "{{ nodes.FetchTickets.output.tickets | length }}", "op": "gt", "right": "0" }] } },
+    { "type": "stop", "name": "NothingToDo", "config": { "as": "success", "message": "No new tickets" } },
+    { "type": "agent", "name": "FixTickets",
+      "config": {
+        "prompt": { "kind": "text", "text": "Fix these Jira tickets in {project} on {branch}, one commit per ticket (\"KEY: …\"). Do not push.\n{{ nodes.FetchTickets.output.tickets | json }}\nReply with ONLY this JSON: {\"fixed\": [\"KEY-1\"]}" },
+        "chain": [{ "agent": "claude", "model": "opus" }] } },
+    { "type": "code", "name": "MarkDone",
+      "config": { "source": "export default async function ({ nodes, secrets }) {\n  const { fixed } = JSON.parse(/\\{[\\s\\S]*\\}/.exec(nodes.FixTickets.output.text)[0]);\n  for (const key of fixed) {\n    await fetch(`${secrets.JIRA_BASE_URL}/rest/api/3/issue/${key}/transitions`, { method: \"POST\", headers: { Authorization: `Basic ${secrets.JIRA_AUTH}`, \"Content-Type\": \"application/json\" }, body: JSON.stringify({ transition: { id: secrets.JIRA_DONE_ID } }) });\n  }\n  return { moved: fixed };\n}\n" } }
+  ],
+  "edges": [
+    { "source": "Every15Min", "target": "FetchTickets" },
+    { "source": "FetchTickets", "target": "HasTickets" },
+    { "source": "HasTickets", "sourceHandle": "true", "target": "FixTickets" },
+    { "source": "HasTickets", "sourceHandle": "false", "target": "NothingToDo" },
+    { "source": "FixTickets", "target": "MarkDone" }
+  ]
+}
+→ { "created": true, "workflowId": "5f0c…", "revision": 0, "enabled": false, "project": "acme/api",
+    "problems": [ /* warnings about the unset secrets, if any */ ], "errorCount": 0,
+    "connections": ["Every15Min → FetchTickets", "FetchTickets → HasTickets",
+                    "HasTickets (true) → FixTickets", "HasTickets (false) → NothingToDo",
+                    "FixTickets → MarkDone"],
+    "workflow": { /* the stored definition: ids, positions, defaults filled in */ },
+    "next": "It is disabled: … run_workflow runs it now." }
+```
+
+3. Secrets — best set by the user in the UI; otherwise
+   `set_workflow_secret {"name": "JIRA_AUTH", "value": "…", "workflowId": "5f0c…"}` (and
+   `JIRA_BASE_URL`, `JIRA_DONE_ID`).
+
+4. "Also post to Slack when tickets were moved, fail loudly when the fix fails, and run hourly" —
+   an edit, not a new workflow:
+
+```
+update_workflow { "workflowId": "5f0c…", "revision": 0, "ops": [
+  { "op": "add_node", "node": { "type": "http", "name": "NotifySlack", "config": {
+      "method": "POST", "url": "https://hooks.slack.com/services/{{ secrets.SLACK_PATH }}",
+      "body": { "kind": "json", "value": "{ \"text\": {{ nodes.MarkDone.output.moved | compact | json }} }" } } } },
+  { "op": "connect", "source": "MarkDone", "target": "NotifySlack" },
+  { "op": "add_node", "node": { "type": "stop", "name": "Failed", "config": { "as": "failure", "message": "The Jira fixer failed" } } },
+  { "op": "connect", "source": "FixTickets", "sourceHandle": "error", "target": "Failed" },
+  { "op": "rename_node", "node": "NothingToDo", "to": "NoTickets" },
+  { "op": "update_node", "node": "Every15Min", "set": { "config": {
+      "preset": { "kind": "hours", "every": 1, "atMinute": 0 }, "cron": "0 * * * *" } } }
+] }
+→ { "updated": true, "revision": 1, "errorCount": 0, "connections": [ /* …, "MarkDone → NotifySlack",
+    "FixTickets (error) → Failed", "HasTickets (false) → NoTickets" */ ], "workflow": { /* … */ } }
+```
+
+   Had someone edited the workflow in the editor since step 2, this answers
+   `REVISION_CONFLICT` — `get_workflow`, then send the ops again with the new revision.
+
+5. Test it, then turn it on:
+
+```
+run_workflow { "workflowId": "5f0c…", "wait": true, "timeoutSeconds": 600 }
+→ { "runId": "r-81…", "finished": true,
+    "run": { "status": "succeeded", "durationMs": 412345, "finalOutput": { "moved": ["PROJ-7"] } },
+    "blocks": [
+      { "name": "Every15Min", "status": "succeeded", "handle": "success", "output": { "kind": "manual", "input": null } },
+      { "name": "FetchTickets", "status": "succeeded", "output": { "tickets": [{ "key": "PROJ-7", "summary": "…" }] } },
+      { "name": "HasTickets", "status": "succeeded", "handle": "true", "output": { /* … */ } },
+      { "name": "NoTickets", "status": "skipped" },
+      { "name": "FixTickets", "status": "succeeded", "sessionId": "c-19…", "hops": [ /* … */ ], "output": { "text": "{\"fixed\":[\"PROJ-7\"]}", /* … */ } },
+      { "name": "MarkDone", "status": "succeeded", "output": { "moved": ["PROJ-7"] } },
+      { "name": "NotifySlack", "status": "succeeded", "output": { "status": 200, /* … */ } },
+      { "name": "Failed", "status": "skipped" } ] }
+
+update_workflow { "workflowId": "5f0c…", "revision": 1, "ops": [{ "op": "set_enabled", "enabled": true }] }
+```
+
+   `read_transcript {sessionId: "c-19…"}` shows what the agent did in its session.
+
+---
+
 *Design reference: `docs/superpowers/specs/2026-09-22-orquester-mcp-v2-design.md`.
 Implementation: `apps/daemon/src/mcp/` — `server.ts` (the mount and the tool list), `daemon-api.ts`
-(the in-process client), `views.ts`, `transcript.ts`, `wait.ts`, `attachments.ts` and `tools/`.*
+(the in-process client), `views.ts`, `transcript.ts`, `wait.ts`, `attachments.ts` and `tools/`
+(`tools/workflows.ts` for §12; its design: `docs/superpowers/specs/2026-09-28-automated-workflows-design.md` §8).*

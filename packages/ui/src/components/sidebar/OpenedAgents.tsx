@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Bot, ChevronDown, ChevronRight, Dot } from "lucide-react";
+import { Bot, ChevronDown, ChevronRight, Dot, Workflow as WorkflowIcon } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { ContextMenu } from "../ui/context-menu";
@@ -22,6 +22,7 @@ import {
   saveOpenedAgentsCollapsed
 } from "../../lib/opened-agents";
 import { useAppStore, useThreadUnread } from "../../store/app";
+import { WorkflowAttention, useWorkflowAttention } from "../workflows/runs/WorkflowAttention";
 import {
   attentionKey,
   focusAgentSession,
@@ -173,6 +174,8 @@ export const OpenedAgents: React.FC = () => {
   const workspacesLoading = useAppStore((s) => s.workspacesLoading);
   const derived = useAgentSessions();
   const index = useProjectIndex();
+  // Failed workflow runs: the Attention Center's other source (workflows spec §5.11).
+  const workflowFailures = useWorkflowAttention().length;
 
   const [collapsed, setCollapsed] = useState(loadOpenedAgentsCollapsed);
   const [seenKeys, setSeenKeys] = useState<ReadonlySet<string>>(() => new Set());
@@ -278,12 +281,22 @@ export const OpenedAgents: React.FC = () => {
             {flaggedCount > 0 && <span>· {flaggedCount}</span>}
           </span>
         )}
+        {workflowFailures > 0 && (
+          <span
+            title={`${workflowFailures} failed workflow run${workflowFailures === 1 ? "" : "s"}`}
+            className="ml-1.5 flex items-center gap-1 text-xs font-medium tabular-nums text-danger"
+          >
+            <WorkflowIcon size={12} />
+            <span>{workflowFailures}</span>
+          </span>
+        )}
       </button>
 
       {expanded && (
         // Bounded so a long agent list can't crowd the workspace/project list
         // out of the sidebar; it scrolls on its own past that.
         <div className="max-h-[40vh] overflow-y-auto px-2 pb-2">
+          <WorkflowAttention touch={!isDesktop} />
           {/* An index built before the workspace list loaded is empty-but-
               resolved — that's "still loading", not "no sessions". */}
           {index === null || (entries.length === 0 && workspacesLoading) ? (

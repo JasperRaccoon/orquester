@@ -1,0 +1,452 @@
+/* The automated-workflow editor's canvas layer (workflows spec §7.2, §7.5).
+ *
+ * React Flow's own stylesheet, then its variables mapped onto Orquester's theme
+ * (`--n-*` neutrals, `--sem-*` status) so every scheme × light/dark reads
+ * native, then the editor's block accents and run-overlay motion. Inlined by
+ * Vite's postcss-import from the top of globals.css, before Tailwind runs: a
+ * Tailwind utility on the same element wins at equal specificity.
+ *
+ * Colours are theme variables only; the per-mode accent triples below are the
+ * one exception, and they are status-like (a category, not a surface), so
+ * they stay scheme-independent like the `--sem-*` scale. Every looping
+ * animation has a static fallback under `prefers-reduced-motion`.
+ */
+
+@import "@xyflow/react/dist/style.css";
+
+/* ===========================================================================
+ * 1. Accents — one RGB triple per category and mode
+ * ======================================================================== */
+
+:root,
+[data-mode="dark"] {
+  --wf-trigger: 251 191 36; /* amber-400  */
+  --wf-agent: 167 139 250; /* violet-400 */
+  --wf-code: 96 165 250; /* blue-400   */
+  --wf-http: 45 212 191; /* teal-400   */
+  --wf-flow: var(--n-400);
+  --wf-note-yellow: 250 204 21;
+  --wf-note-blue: 96 165 250;
+  --wf-note-green: 74 222 128;
+  --wf-note-pink: 244 114 182;
+  --wf-note-purple: 167 139 250;
+  --wf-note-neutral: var(--n-400);
+  --wf-note-alpha: 0.1;
+  --wf-grid-dot: var(--n-800);
+}
+
+[data-mode="light"] {
+  --wf-trigger: 217 119 6; /* amber-600  */
+  --wf-agent: 124 58 237; /* violet-600 */
+  --wf-code: 37 99 235; /* blue-600   */
+  --wf-http: 13 148 136; /* teal-600   */
+  --wf-flow: var(--n-500);
+  --wf-note-yellow: 234 179 8;
+  --wf-note-blue: 59 130 246;
+  --wf-note-green: 34 197 94;
+  --wf-note-pink: 236 72 153;
+  --wf-note-purple: 139 92 246;
+  --wf-note-neutral: var(--n-500);
+  --wf-note-alpha: 0.16;
+  --wf-grid-dot: var(--n-300);
+}
+
+.wf-accent-trigger {
+  --wf-accent: var(--wf-trigger);
+}
+.wf-accent-agent {
+  --wf-accent: var(--wf-agent);
+}
+.wf-accent-code {
+  --wf-accent: var(--wf-code);
+}
+.wf-accent-http {
+  --wf-accent: var(--wf-http);
+}
+.wf-accent-flow,
+.wf-accent-note {
+  --wf-accent: var(--wf-flow);
+}
+
+.wf-note-yellow {
+  --wf-note: var(--wf-note-yellow);
+}
+.wf-note-blue {
+  --wf-note: var(--wf-note-blue);
+}
+.wf-note-green {
+  --wf-note: var(--wf-note-green);
+}
+.wf-note-pink {
+  --wf-note: var(--wf-note-pink);
+}
+.wf-note-purple {
+  --wf-note: var(--wf-note-purple);
+}
+.wf-note-neutral {
+  --wf-note: var(--wf-note-neutral);
+}
+
+/* ===========================================================================
+ * 2. React Flow, themed
+ * ======================================================================== */
+
+.wf-canvas .react-flow {
+  --xy-background-color: rgb(var(--n-950));
+  --xy-background-pattern-dots-color: rgb(var(--wf-grid-dot));
+  --xy-edge-stroke: rgb(var(--n-600));
+  --xy-edge-stroke-width: 1.5;
+  --xy-edge-stroke-selected: rgb(var(--n-200));
+  --xy-connectionline-stroke: rgb(var(--n-400));
+  --xy-connectionline-stroke-width: 1.5;
+  --xy-attribution-background-color: transparent;
+  --xy-minimap-background-color: rgb(var(--n-900));
+  --xy-minimap-mask-background-color: rgb(var(--n-950) / 0.55);
+  --xy-minimap-mask-stroke-color: rgb(var(--n-600));
+  --xy-minimap-mask-stroke-width: 1;
+  --xy-minimap-node-background-color: rgb(var(--n-700));
+  --xy-node-background-color: transparent;
+  --xy-node-border: none;
+  --xy-node-boxshadow-selected: none;
+  --xy-node-boxshadow-hover: none;
+  --xy-node-border-radius: 12px;
+  --xy-handle-background-color: rgb(var(--n-900));
+  --xy-handle-border-color: rgb(var(--n-500));
+  --xy-selection-background-color: rgb(var(--n-500) / 0.08);
+  --xy-selection-border: 1px dashed rgb(var(--n-500) / 0.8);
+  --xy-controls-button-background-color: rgb(var(--n-900));
+  --xy-controls-button-background-color-hover: rgb(var(--n-800));
+  --xy-controls-button-color: rgb(var(--n-300));
+  --xy-controls-button-color-hover: rgb(var(--n-50));
+  --xy-controls-button-border-color: rgb(var(--n-800));
+  --xy-controls-box-shadow: 0 8px 24px -12px rgb(0 0 0 / 0.5);
+  --xy-edge-label-background-color: rgb(var(--n-900));
+  --xy-edge-label-color: rgb(var(--n-300));
+  font-family: inherit;
+}
+
+/* React Flow's credit stays (MIT, and its authors ask), quiet and themed. */
+.wf-canvas .react-flow__attribution {
+  background: transparent;
+  padding: 0 6px;
+  font-size: 9px;
+  opacity: 0.55;
+}
+
+.wf-canvas .react-flow__attribution a {
+  color: rgb(var(--n-600));
+}
+
+.wf-canvas .react-flow__node {
+  /* Our cards draw their own chrome; React Flow's default frame stays off. */
+  padding: 0;
+  border: none;
+  background: transparent;
+  box-shadow: none;
+  border-radius: 12px;
+}
+
+.wf-canvas .react-flow__node:focus-visible {
+  outline: none;
+}
+
+.wf-canvas .react-flow__node:focus-visible > .wf-block {
+  box-shadow:
+    0 0 0 2px rgb(var(--n-950)),
+    0 0 0 4px rgb(var(--n-400));
+}
+
+.wf-canvas .react-flow__controls {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgb(var(--n-800));
+}
+
+.wf-canvas .react-flow__controls-button {
+  width: 30px;
+  height: 30px;
+}
+
+.wf-canvas .react-flow__controls-button svg {
+  max-width: 13px;
+  max-height: 13px;
+}
+
+.wf-canvas .react-flow__minimap {
+  border-radius: 10px;
+  overflow: hidden;
+  border: 1px solid rgb(var(--n-800));
+  box-shadow: 0 8px 24px -12px rgb(0 0 0 / 0.5);
+}
+
+.wf-canvas .react-flow__selection {
+  border-radius: 8px;
+}
+
+/* Edges: a wide invisible hit path, the drawn path above it. */
+.wf-canvas .react-flow__edge .react-flow__edge-interaction {
+  stroke-width: 24;
+}
+
+.wf-canvas .react-flow__edge.selected .wf-edge-path,
+.wf-canvas .react-flow__edge:focus-visible .wf-edge-path {
+  stroke: rgb(var(--n-200));
+}
+
+.wf-edge-path {
+  transition: stroke 120ms ease;
+}
+
+.wf-edge-error {
+  stroke: rgb(var(--sem-danger-400) / 0.75);
+  stroke-dasharray: 6 5;
+}
+
+.wf-edge-dead {
+  stroke: rgb(var(--n-700));
+  stroke-dasharray: 2 5;
+  opacity: 0.6;
+}
+
+.wf-edge-taken {
+  stroke: rgb(var(--sem-ok-400) / 0.85);
+  stroke-width: 2;
+}
+
+.wf-edge-active {
+  stroke: rgb(var(--sem-info-400));
+  stroke-width: 2;
+  stroke-dasharray: 8 6;
+  animation: wf-edge-flow 0.9s linear infinite;
+}
+
+@keyframes wf-edge-flow {
+  to {
+    stroke-dashoffset: -14;
+  }
+}
+
+/* Handles: a small dot drawn inside a ≥ 28 px transparent hit area. */
+.wf-canvas .react-flow__handle.wf-handle {
+  width: 28px;
+  height: 28px;
+  min-width: 28px;
+  min-height: 28px;
+  border: none;
+  background: transparent;
+  border-radius: 999px;
+}
+
+.wf-canvas .react-flow__handle.wf-handle::after {
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 10px;
+  height: 10px;
+  transform: translate(-50%, -50%);
+  border-radius: 999px;
+  background: rgb(var(--n-900));
+  border: 1.5px solid rgb(var(--wf-handle-color, var(--n-500)));
+  transition:
+    transform 120ms ease,
+    background-color 120ms ease;
+  pointer-events: none;
+}
+
+.wf-canvas .react-flow__handle.wf-handle:hover::after,
+.wf-canvas .react-flow__handle.wf-handle.connectingto::after,
+.wf-canvas .react-flow__handle.wf-handle.connectingfrom::after {
+  transform: translate(-50%, -50%) scale(1.35);
+  background: rgb(var(--wf-handle-color, var(--n-400)));
+}
+
+.wf-canvas .react-flow__handle.wf-handle.connectionindicator {
+  cursor: crosshair;
+}
+
+/* ===========================================================================
+ * 3. Blocks
+ * ======================================================================== */
+
+.wf-block-disabled {
+  background-image: repeating-linear-gradient(
+    -45deg,
+    rgb(var(--n-700) / 0.18) 0 6px,
+    transparent 6px 12px
+  );
+}
+
+.wf-ring-running {
+  animation: wf-ring-pulse 1.8s ease-in-out infinite;
+}
+
+@keyframes wf-ring-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 2px rgb(var(--sem-info-400) / 0.9), 0 0 0 6px rgb(var(--sem-info-400) / 0.18);
+  }
+  50% {
+    box-shadow: 0 0 0 2px rgb(var(--sem-info-400) / 0.9), 0 0 0 10px rgb(var(--sem-info-400) / 0.04);
+  }
+}
+
+.wf-add-hint {
+  animation: wf-hint 2.4s ease-in-out infinite;
+}
+
+@keyframes wf-hint {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgb(var(--n-400) / 0.35);
+  }
+  50% {
+    box-shadow: 0 0 0 10px rgb(var(--n-400) / 0);
+  }
+}
+
+.wf-tidy .react-flow__node {
+  transition: transform 320ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wf-edge-active {
+    animation: none;
+    stroke-dasharray: none;
+  }
+  /* Specific enough to beat the card's own Tailwind shadow. */
+  .wf-block.wf-ring-running {
+    animation: none;
+    box-shadow: 0 0 0 2px rgb(var(--sem-info-400) / 0.9);
+  }
+  .wf-add-hint {
+    animation: none;
+  }
+  .wf-tidy .react-flow__node {
+    transition: none;
+  }
+}
+
+/* ===========================================================================
+ * 4. The prompt editor's template tokens (CodeMirror decorations)
+ * ======================================================================== */
+
+.wf-cm .cm-wf-expr {
+  color: rgb(var(--wf-agent));
+  background: rgb(var(--wf-agent) / 0.1);
+  border-radius: 3px;
+}
+
+.wf-cm .cm-wf-var {
+  color: rgb(var(--wf-trigger));
+  background: rgb(var(--wf-trigger) / 0.1);
+  border-radius: 3px;
+}
+
+.wf-cm .cm-wf-secret {
+  color: rgb(var(--sem-warn-400));
+  background: rgb(var(--sem-warn-400) / 0.12);
+  border-radius: 3px;
+}
+
+/* ===========================================================================
+ * 5. Phones (workflows spec §7.4)
+ * ======================================================================== */
+
+/* Tap-to-connect: the blocks a tapped output may feed (their ring is Tailwind's; this breathes). */
+.wf-connect-target {
+  animation: wf-connect-pulse 1.6s ease-in-out infinite;
+}
+
+@keyframes wf-connect-pulse {
+  50% {
+    filter: brightness(1.18);
+  }
+}
+
+/* A sheet slides up. */
+.wf-sheet {
+  animation: wf-sheet-in 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+}
+
+.wf-sheet-backdrop {
+  animation: wf-fade-in 180ms ease-out;
+}
+
+@keyframes wf-sheet-in {
+  from {
+    transform: translateY(100%);
+  }
+}
+
+@keyframes wf-fade-in {
+  from {
+    opacity: 0;
+  }
+}
+
+/* Finger-sized forms: fields at least 40 px, 16 px text (no zoom on focus),
+   selects that open the phone's own picker, sliders with a big thumb. */
+.wf-touch input:not([type="checkbox"]):not([type="radio"]):not([type="range"]),
+.wf-touch select {
+  min-height: 40px;
+  font-size: 16px;
+}
+
+.wf-touch textarea {
+  font-size: 16px;
+}
+
+.wf-touch .wf-cm .cm-editor {
+  font-size: 16px;
+}
+
+.wf-touch .wf-cm .cm-line {
+  line-height: 24px;
+}
+
+.wf-touch [role="radiogroup"] > [role="radio"] {
+  min-height: 36px;
+}
+
+.wf-touch input[type="checkbox"] {
+  width: 20px;
+  height: 20px;
+}
+
+.wf-touch input[type="range"] {
+  height: 36px;
+}
+
+.wf-touch input[type="range"]::-webkit-slider-thumb {
+  width: 26px;
+  height: 26px;
+}
+
+.wf-touch input[type="range"]::-moz-range-thumb {
+  width: 26px;
+  height: 26px;
+}
+
+/* The full-screen editor fills its box. */
+.wf-fullscreen-editor .wf-cm,
+.wf-fullscreen-editor .cm-theme,
+.wf-fullscreen-editor .cm-editor {
+  height: 100%;
+}
+
+.wf-fullscreen-editor .wf-cm {
+  border: none;
+  border-radius: 0;
+  background: transparent;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .wf-connect-target {
+    animation: none;
+  }
+  .wf-sheet,
+  .wf-sheet-backdrop {
+    animation: none;
+  }
+}

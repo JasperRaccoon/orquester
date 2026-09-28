@@ -36,6 +36,39 @@ test("sessionRecordSchema round-trips accountId so reattach keeps the account pi
   assert.equal(noAccount.sessions[0].accountId, undefined);
 });
 
+test("sessionRecordSchema keeps a workflow owner and drops a malformed one, never the record", () => {
+  const base = {
+    id: "c1",
+    title: "Claude",
+    order: 0,
+    projectPath: "/p",
+    refId: "claude",
+    kind: "agent-chat" as const,
+    cwd: "/p",
+    createdAt: "2026-09-28T00:00:00.000Z",
+    chat: { threadId: "c1", accountId: "", home: "system" as const, lastSeq: 0 }
+  };
+  const owner = { kind: "workflow" as const, workflowId: "w1", runId: "r1", nodeId: "n1" };
+  const kept = parseSessionsConfig({ version: 1, sessions: [{ ...base, owner }] });
+  assert.deepEqual(kept.sessions[0].owner, owner);
+  // Absent: no key at all, so a re-written record stays byte-identical to an old one.
+  const absent = parseSessionsConfig({ version: 1, sessions: [base] });
+  assert.equal("owner" in absent.sessions[0], false);
+  for (const bad of [
+    { ...owner, kind: "cron" },
+    { ...owner, runId: "" },
+    { ...owner, nodeId: "   " },
+    { ...owner, workflowId: "x".repeat(201) },
+    "workflow",
+    null
+  ]) {
+    const parsed = parseSessionsConfig({ version: 1, sessions: [{ ...base, owner: bad }] });
+    assert.equal(parsed.sessions.length, 1, `record survives ${JSON.stringify(bad)}`);
+    assert.equal(parsed.sessions[0].owner, undefined);
+    assert.equal(parsed.sessions[0].chat?.threadId, "c1");
+  }
+});
+
 test("assertInsideFsRoot allows in-root paths and rejects escapes", async () => {
   const root = await mkdtemp(join(tmpdir(), "fsroot-"));
   await mkdir(join(root, "ws"), { recursive: true });

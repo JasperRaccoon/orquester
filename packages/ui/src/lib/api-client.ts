@@ -98,6 +98,30 @@ import {
   type AgentChatTransport
 } from "./agent-chat/transport";
 import { fsPathQuery } from "./fs-path-query";
+import { buildQueryString } from "./transporter";
+import { workflowRoutes } from "@orquester/api";
+import type {
+  AccountPreviewRequest,
+  AccountPreviewResponse,
+  CreateWorkflowRequest,
+  GetWorkflowNodeOutputResponse,
+  GetWorkflowResponse,
+  GetWorkflowRunResponse,
+  ListWorkflowRunsResponse,
+  ListWorkflowSecretsResponse,
+  ListWorkflowsResponse,
+  PatchWorkflowRequest,
+  ReplaceWorkflowRequest,
+  RunWorkflowRequest,
+  RunWorkflowResponse,
+  SchedulePreviewResponse,
+  ValidateWorkflowRequest,
+  ValidateWorkflowResponse,
+  WorkflowBlockTypesResponse,
+  WorkflowErrorCode,
+  WorkflowProblem,
+  WorkflowWriteResponse
+} from "@orquester/api";
 import { agentChatRoutes } from "@orquester/api/agent-chat";
 import type {
   ThreadItemOutputResponse,
@@ -122,11 +146,18 @@ export interface ApiRequestOptions {
 function serverMessageFromBody(body: unknown): string | null {
   // Daemon error bodies carry either `{ message }` (git/registry) or `{ error }`
   // (cliproxy refusals, fs) — accept both so refusal reasons reach the UI.
+  // The workflow routes nest it: `{ error: { code, message } }`.
   if (body && typeof body === "object") {
     for (const key of ["message", "error"] as const) {
       const value = (body as Record<string, unknown>)[key];
       if (typeof value === "string" && value.trim()) {
         return value.trim();
+      }
+      if (key === "error" && value && typeof value === "object") {
+        const nested = (value as Record<string, unknown>).message;
+        if (typeof nested === "string" && nested.trim()) {
+          return nested.trim();
+        }
       }
     }
   }
@@ -627,6 +658,197 @@ export class ApiClient {
   /** An Insert or a Send used the prompt: bumps `lastUsedAt` / `useCount`. */
   markSavedPromptUsed(id: string): Promise<SavedPrompt> {
     return this.send("POST", `/api/saved-prompts/${encodeURIComponent(id)}/used`);
+  }
+
+  // --- Automated workflows (workflows spec §8.1) ---------------------------
+
+  /**
+   * One workflow route: a refusal is a {@link WorkflowApiError} carrying the
+   * daemon's `code` and, for `INVALID_WORKFLOW`, its `problems`.
+   */
+  private async workflowSend<T>(
+    method: TransportMethod,
+    path: string,
+    options: ApiRequestOptions = {}
+  ): Promise<T> {
+    try {
+      return await this.send<T>(method, path, options);
+    } catch (error) {
+      if (error instanceof ApiError && !(error instanceof WorkflowApiError)) {
+        throw WorkflowApiError.from(error, method, path);
+      }
+      throw error;
+    }
+  }
+
+  /** Every workflow's rail row; `projectPath` narrows to that project's. */
+  listWorkflows(projectPath?: string | null, signal?: AbortSignal): Promise<ListWorkflowsResponse> {
+    return this.workflowSend("GET", workflowRoutes.list, {
+      query: projectPath ? { projectPath } : undefined,
+      signal
+    });
+  }
+
+  getWorkflow(id: string, signal?: AbortSignal): Promise<GetWorkflowResponse> {
+    return this.workflowSend("GET", workflowRoutes.workflow(id), { signal });
+  }
+
+  createWorkflow(req: CreateWorkflowRequest): Promise<WorkflowWriteResponse> {
+    return this.workflowSend("POST", workflowRoutes.create, { body: req });
+  }
+
+  /** Replace the whole definition; a stale `revision` is a 409 `REVISION_CONFLICT`. */
+  replaceWorkflow(id: string, req: ReplaceWorkflowRequest): Promise<WorkflowWriteResponse> {
+    return this.workflowSend("PUT", workflowRoutes.workflow(id), { body: req });
+  }
+
+  /** Atomic patch operations (§8.2). */
+  patchWorkflow(id: string, req: PatchWorkflowRequest): Promise<WorkflowWriteResponse> {
+    return this.workflowSend("POST", workflowRoutes.patch(id), { body: req });
+  }
+
+  validateWorkflow(req: ValidateWorkflowRequest, signal?: AbortSignal): Promise<ValidateWorkflowResponse> {
+    return this.workflowSend("POST", workflowRoutes.validate, { body: req, signal });
+  }
+
+  duplicateWorkflow(id: string): Promise<WorkflowWriteResponse> {
+    return this.workflowSend("POST", workflowRoutes.duplicate(id));
+  }
+
+  /** Cancels its runs and deletes them and its secrets. */
+  deleteWorkflow(id: string): Promise<void> {
+    return this.workflowSend("DELETE", workflowRoutes.workflow(id));
+  }
+
+  /** `{runId}`, or `{runId:null, skipped:"overlap"}` when the overlap policy skipped it (`force` overrides). */
+  runWorkflow(id: string, req: RunWorkflowRequest = {}): Promise<RunWorkflowResponse> {
+    return this.workflowSend("POST", workflowRoutes.run(id), { body: req });
+  }
+
+  /** "Test block": one block, its upstream inputs from pinned data or the last run. */
+  testWorkflowNode(id: string, nodeId: string, req: RunWorkflowRequest = {}): Promise<RunWorkflowResponse> {
+    return this.workflowSend("POST", workflowRoutes.testNode(id, nodeId), { body: req });
+  }
+
+  listWorkflowRuns(
+    id: string,
+    opts: { before?: string | null; limit?: number } = {},
+    signal?: AbortSignal
+  ): Promise<ListWorkflowRunsResponse> {
+    return this.workflowSend("GET", workflowRoutes.runs(id), {
+      query: { before: opts.before ?? undefined, limit: opts.limit },
+      signal
+    });
+  }
+
+  getWorkflowRun(runId: string, signal?: AbortSignal): Promise<GetWorkflowRunResponse> {
+    return this.workflowSend("GET", workflowRoutes.runDetail(runId), { signal });
+  }
+
+  cancelWorkflowRun(runId: string): Promise<void> {
+    return this.workflowSend("POST", workflowRoutes.runCancel(runId));
+  }
+
+  deleteWorkflowRunTempProject(runId: string): Promise<void> {
+    return this.workflowSend("POST", workflowRoutes.runDeleteTempProject(runId));
+  }
+
+  /** A block's whole output (a run summary carries only a preview). */
+  getWorkflowNodeOutput(runId: string, nodeId: string, signal?: AbortSignal): Promise<GetWorkflowNodeOutputResponse> {
+    return this.workflowSend("GET", workflowRoutes.nodeOutput(runId, nodeId), { signal });
+  }
+
+  /**
+   * A code/shell block's log as a chunked stream (`…/log?stream=&offset=&follow=1`),
+   * read like the other chunked routes: decoded text chunks, then `onEnd`.
+   * Open it only while the log is on screen, and close the handle when it leaves.
+   */
+  openWorkflowNodeLog(
+    runId: string,
+    nodeId: string,
+    opts: { stream?: "stdout" | "stderr"; offset?: number; follow?: boolean },
+    handlers: StreamHandlers
+  ): StreamHandle {
+    const query = buildQueryString({
+      stream: opts.stream,
+      offset: opts.offset,
+      follow: opts.follow ? 1 : undefined
+    });
+    return this.transporter.openStream(`${workflowRoutes.nodeLog(runId, nodeId)}${query}`, handlers);
+  }
+
+  /**
+   * One window of a code/shell block's log (`…/log?stream=&offset=&maxBytes=`,
+   * no follow): the redacted text plus the daemon's own position in the RAW
+   * file (`X-Log-Next-Offset`) — the only offset a resume may use, since
+   * redaction changes the text's length. A non-2xx answer throws.
+   */
+  async readWorkflowNodeLogWindow(
+    runId: string,
+    nodeId: string,
+    opts: { stream?: "stdout" | "stderr"; offset?: number; maxBytes?: number },
+    signal?: AbortSignal
+  ): Promise<WorkflowLogWindow> {
+    const path = workflowRoutes.nodeLog(runId, nodeId);
+    if (!this.transporter.requestBytes) throw new Error("Logs are not supported on this connection.");
+    const response = await this.transporter.requestBytes({
+      method: "GET",
+      path,
+      query: { stream: opts.stream, offset: opts.offset, maxBytes: opts.maxBytes },
+      signal
+    });
+    if (!response.ok) {
+      let body: unknown;
+      try {
+        const text = new TextDecoder().decode(response.data);
+        body = text ? JSON.parse(text) : undefined;
+      } catch {
+        body = undefined;
+      }
+      throw new WorkflowApiError(response.status, "GET", path, response.headers, body);
+    }
+    return parseWorkflowLogWindow(response.data, response.headers ?? {}, opts.offset ?? 0);
+  }
+
+  /** "Who would run now?" for an agent block's chain. */
+  previewWorkflowAccount(req: AccountPreviewRequest, signal?: AbortSignal): Promise<AccountPreviewResponse> {
+    return this.workflowSend("POST", workflowRoutes.accountPreview, { body: req, signal });
+  }
+
+  previewWorkflowSchedule(
+    opts: { cron: string; tz?: string; count?: number },
+    signal?: AbortSignal
+  ): Promise<SchedulePreviewResponse> {
+    return this.workflowSend("GET", workflowRoutes.schedulePreview, {
+      query: { cron: opts.cron, tz: opts.tz, count: opts.count },
+      signal
+    });
+  }
+
+  workflowBlockTypes(signal?: AbortSignal): Promise<WorkflowBlockTypesResponse> {
+    return this.workflowSend("GET", workflowRoutes.blockTypes, { signal });
+  }
+
+  /** Secret NAMES (never values): the global ones, plus `workflowId`'s own when given. */
+  listWorkflowSecrets(workflowId?: string | null, signal?: AbortSignal): Promise<ListWorkflowSecretsResponse> {
+    return this.workflowSend("GET", workflowRoutes.secrets, {
+      query: workflowId ? { workflowId } : undefined,
+      signal
+    });
+  }
+
+  /** Set or replace a secret (write-only); global without `workflowId`. */
+  setWorkflowSecret(name: string, value: string, workflowId?: string | null): Promise<void> {
+    return this.workflowSend("PUT", workflowRoutes.secret(name), {
+      query: workflowId ? { workflowId } : undefined,
+      body: { value }
+    });
+  }
+
+  deleteWorkflowSecret(name: string, workflowId?: string | null): Promise<void> {
+    return this.workflowSend("DELETE", workflowRoutes.secret(name), {
+      query: workflowId ? { workflowId } : undefined
+    });
   }
 
   // --- Git -----------------------------------------------------------------
@@ -1162,6 +1384,41 @@ export class ApiClient {
   }
 }
 
+export interface WorkflowLogWindow {
+  text: string;
+  /** Where the next window starts, in the raw file's bytes (the daemon's word). */
+  nextOffset: number;
+  /** The window reached the file's end (as it is now). */
+  eof: boolean;
+  /** The file's size when read. */
+  size: number;
+  /** The daemon still writes this log (the block runs). */
+  live: boolean;
+}
+
+function headerOf(headers: Record<string, string>, name: string): string | undefined {
+  if (name in headers) return headers[name];
+  const lower = name.toLowerCase();
+  for (const [key, value] of Object.entries(headers)) if (key.toLowerCase() === lower) return value;
+  return undefined;
+}
+
+/** A log window's body and `X-Log-*` headers. Headers missing (a proxy stripped them): the window is the whole rest. */
+export function parseWorkflowLogWindow(data: ArrayBuffer, headers: Record<string, string>, offset: number): WorkflowLogWindow {
+  const text = new TextDecoder().decode(data);
+  const next = Number(headerOf(headers, "x-log-next-offset"));
+  const size = Number(headerOf(headers, "x-log-size"));
+  const eofHeader = headerOf(headers, "x-log-eof");
+  const nextOffset = Number.isFinite(next) && next >= offset ? next : offset + data.byteLength;
+  return {
+    text,
+    nextOffset,
+    eof: eofHeader === undefined ? true : eofHeader === "1",
+    size: Number.isFinite(size) ? size : nextOffset,
+    live: headerOf(headers, "x-log-live") === "1"
+  };
+}
+
 export class ApiError extends Error {
   constructor(
     public readonly status: number,
@@ -1214,5 +1471,84 @@ export class ApiError extends Error {
     }
     const seconds = Number(raw);
     return Number.isFinite(seconds) && seconds > 0 ? seconds : null;
+  }
+}
+
+const WORKFLOW_ERROR_CODES: ReadonlySet<string> = new Set<WorkflowErrorCode>([
+  "WORKFLOW_NOT_FOUND",
+  "RUN_NOT_FOUND",
+  "NODE_NOT_FOUND",
+  "REVISION_CONFLICT",
+  "INVALID_WORKFLOW",
+  "INVALID_REQUEST",
+  "WORKFLOWS_UNAVAILABLE",
+  "LIMIT_EXCEEDED",
+  "SECRET_INVALID",
+  "RUN_NOT_ACTIVE",
+  "ENGINE_UNAVAILABLE"
+]);
+
+/** One validation problem off the wire, field by field; `null` when unusable. */
+function sanitizeWorkflowProblem(value: unknown): WorkflowProblem | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  const severity = record.severity;
+  if (severity !== "error" && severity !== "warning" && severity !== "info") return null;
+  if (typeof record.message !== "string") return null;
+  const problem: WorkflowProblem = {
+    severity,
+    code: typeof record.code === "string" ? record.code : "unknown",
+    message: record.message
+  };
+  if (typeof record.nodeId === "string") problem.nodeId = record.nodeId;
+  if (typeof record.edgeId === "string") problem.edgeId = record.edgeId;
+  if (typeof record.field === "string") problem.field = record.field;
+  return problem;
+}
+
+/**
+ * A refused workflow route (`{ error: { code, message, problems? } }`). An
+ * {@link ApiError}, so every generic handler still reads it; `code` is `null`
+ * for a body that named none (an older daemon's route-miss 404, a proxy error).
+ */
+export class WorkflowApiError extends ApiError {
+  constructor(
+    status: number,
+    method: string,
+    path: string,
+    headers?: Record<string, string>,
+    body?: unknown
+  ) {
+    super(status, method, path, headers, body);
+    this.name = "WorkflowApiError";
+  }
+
+  static from(error: ApiError, method: string, path: string): WorkflowApiError {
+    return new WorkflowApiError(error.status, method, path, error.headers, error.body);
+  }
+
+  private get errorObject(): Record<string, unknown> | null {
+    const body = this.body;
+    if (!body || typeof body !== "object") return null;
+    const inner = (body as Record<string, unknown>).error;
+    return inner && typeof inner === "object" && !Array.isArray(inner) ? (inner as Record<string, unknown>) : null;
+  }
+
+  /** The daemon's code, when it is one this client knows. */
+  get code(): WorkflowErrorCode | null {
+    const code = this.errorObject?.code ?? (this.body as { code?: unknown } | undefined)?.code;
+    return typeof code === "string" && WORKFLOW_ERROR_CODES.has(code) ? (code as WorkflowErrorCode) : null;
+  }
+
+  /** `INVALID_WORKFLOW`'s problems (sanitized); `[]` otherwise. */
+  get problems(): WorkflowProblem[] {
+    const raw = this.errorObject?.problems;
+    if (!Array.isArray(raw)) return [];
+    const problems: WorkflowProblem[] = [];
+    for (const entry of raw) {
+      const problem = sanitizeWorkflowProblem(entry);
+      if (problem !== null) problems.push(problem);
+    }
+    return problems;
   }
 }

@@ -578,7 +578,9 @@ export interface AgentChatErrorEnvelope {
 /**
  * Commands answered with 409 for a thread in `error`, **except**
  * `session/stop` and `revert` (§6.2) — without that carve-out a session wedged
- * in `starting` or `error` would be unrecoverable.
+ * in `starting` or `error` would be unrecoverable. A `turn` is let through as
+ * well while the thread's log is readable: its send path restarts the errored
+ * session from the persisted cursor.
  */
 export const COMMANDS_ALLOWED_IN_ERROR_STATE: ReadonlySet<AgentChatCommandName> = new Set<
   AgentChatCommandName
