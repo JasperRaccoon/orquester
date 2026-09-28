@@ -2712,7 +2712,7 @@ sandbox so experiments don't touch your real `~/.orquester`. Its committed
   **unhashed root static** that the SW **precaches with the shell** (`SHELL_PRECACHE` next to
   `/index.html`) and serves network-first with the cached fallback, so first paint stays themed
   offline; it must genuinely exist in `apps/web/dist` — `pnpm build` after touching it, same trap
-  as `sw.js`, and changing the precache list means bumping the SW `VERSION` (now v5).
+  as `sw.js`, and changing the precache list means bumping the SW `VERSION` (now v6).
 - **Theming is data, not component logic — and the boot script must stay external.** Every surface
   already paints with Tailwind's `neutral` scale, so `packages/ui/tailwind-preset.ts` remaps that
   scale to `rgb(var(--n-<step>) / <alpha-value>)` and a colour scheme becomes eleven RGB triples
