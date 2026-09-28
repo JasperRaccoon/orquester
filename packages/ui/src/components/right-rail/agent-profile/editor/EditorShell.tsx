@@ -36,6 +36,11 @@ export interface EditorPrimaryAction {
   tone?: "default" | "danger";
 }
 
+/** Ctrl/Cmd+Enter, the editors' Save — not an IME's Enter, not a held repeat. */
+export function isSaveChord(event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "repeat" | "isComposing">): boolean {
+  return event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.repeat && !event.isComposing;
+}
+
 export interface EditorShellProps {
   title: string;
   /** Under the title; defaults to the agent's name. */
@@ -82,11 +87,13 @@ export const EditorShell: React.FC<EditorShellProps> = ({
         // to its content, or to this height for an editor that fills.
         phone ? "flex-1" : fill && "h-[min(88vh,860px)]"
       )}
-      onKeyDown={(event) => {
-        if (event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.defaultPrevented) {
-          event.preventDefault();
-          if (canSubmit) primary.onClick();
-        }
+      // Capture, so the chord saves from inside CodeMirror too: its own keymap
+      // binds Mod-Enter (insert a blank line) and would take the key first.
+      onKeyDownCapture={(event) => {
+        if (!isSaveChord(event.nativeEvent)) return;
+        event.preventDefault();
+        event.stopPropagation();
+        if (canSubmit) primary.onClick();
       }}
     >
       <header

@@ -497,6 +497,27 @@ const switchOf = (row: string): string => row.match(/<button[^>]*role="switch"[^
 }
 
 // ---------------------------------------------------------------------------
+// Every control shows a focus ring, in every state (spec §7.5)
+// ---------------------------------------------------------------------------
+
+{
+  const states = [
+    viewProps({ loadError: "The daemon did not answer.", notice: { tone: "ok", text: "Saved." } }),
+    viewProps({ variant: "sheet", loadError: "The daemon did not answer." }),
+    viewProps({ snap: null, status: "error", error: "offline" }),
+    viewProps({ snap: snapshot("claude", { items: [] }), kind: "mcp" }),
+    viewProps({ variant: "sheet", confirming: { itemId: OFF.id, kind: "delete" } }),
+    viewProps({ width: 280 })
+  ];
+  for (const props of states) {
+    const html = view(props);
+    for (const button of html.match(/<button\b[^>]*>/g) ?? []) {
+      assert.match(button, /focus-visible:ring/, `a focus ring on ${button}`);
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
 // A row on its own: the menu's items
 // ---------------------------------------------------------------------------
 

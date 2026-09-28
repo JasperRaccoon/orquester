@@ -63,6 +63,18 @@ export function copySourceAgents(agent: AgentProfileAgentId): AgentProfileAgentI
   return AGENT_PROFILE_AGENTS.filter((other) => other !== agent);
 }
 
+/**
+ * The agent "Copy from agent" starts on: the first other one not known to be
+ * missing (`installed` answers `null` while the overview has not said).
+ */
+export function defaultCopySource(
+  agent: AgentProfileAgentId,
+  installed: (agent: AgentProfileAgentId) => boolean | null
+): AgentProfileAgentId {
+  const choices = copySourceAgents(agent);
+  return choices.find((choice) => installed(choice) !== false) ?? choices[0]!;
+}
+
 /** The other agent's own items of this kind — the only ones a copy takes. */
 export function copyableItems(snapshot: AgentProfileSnapshot | null, kind: ProfileItemKind): ProfileItem[] {
   if (!snapshot || !PROFILE_COPYABLE_KINDS.includes(kind)) return [];

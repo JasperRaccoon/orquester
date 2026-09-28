@@ -101,8 +101,10 @@ export function closedSaveFailure(info: ProfileErrorInfo): string {
 }
 
 /**
- * The refusal above the Save bar. `name` refusals are the name field's (not
- * repeated here); `onReload` is what "Changed on disk" offers.
+ * The refusal above the Save bar. `name` refusals are the name field's when
+ * the editor has one (`nameShown`: not repeated here) — an editor without one
+ * (an import, a copy, a plugin install, a hook) shows them here, or they would
+ * be said nowhere; `onReload` is what "Changed on disk" offers.
  * `onResolveConflict` is for a CREATE only: an edit's `ITEM_EXISTS` (a rename
  * onto a name that is taken) is a plain refusal, since `PUT …/items/:id` takes
  * no `onConflict` — offering Replace / Keep both there would only send the
@@ -113,9 +115,11 @@ export const SubmitStatus: React.FC<{
   onResolveConflict?: (policy: "replace" | "keep-both") => void;
   onDismiss?: () => void;
   onReload?: () => void;
-}> = ({ state, onResolveConflict, onDismiss, onReload }) => {
+  /** The editor shows `INVALID_NAME` beside its own name field. */
+  nameShown?: boolean;
+}> = ({ state, onResolveConflict, onDismiss, onReload, nameShown = false }) => {
   const { error, placement } = state;
-  if (error === null || placement === "name") return null;
+  if (error === null || (placement === "name" && nameShown)) return null;
   if (placement === "exists" && onResolveConflict) {
     return (
       <Banner

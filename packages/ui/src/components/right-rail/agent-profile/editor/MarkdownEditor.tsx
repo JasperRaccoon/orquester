@@ -138,7 +138,7 @@ const WriteSource: React.FC<{
       toolbar={toolbar}
       fill
       status={
-        <SubmitStatus state={submit} onResolveConflict={detail ? undefined : submit.resolveConflict} onDismiss={submit.clear} onReload={onReload} />
+        <SubmitStatus state={submit} onResolveConflict={detail ? undefined : submit.resolveConflict} onDismiss={submit.clear} onReload={onReload} nameShown />
       }
       primary={{ label: detail ? "Save" : kind === "skill" ? "Create skill" : "Create command", busy: submit.busy, onClick: save }}
     >

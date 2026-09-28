@@ -35,16 +35,17 @@ import {
   type ProfileItemDetail
 } from "@orquester/api";
 
+import { agentProfileStore, resetAgentProfile } from "../../../../lib/agent-profile/store";
 import type { ApiClient } from "../../../../lib/api-client";
 import { AgentProfileEditorHost } from "../AgentProfileEditorHost";
 import { CreateEditor, DetailEditor, EditLoader, ReadOnlyDetail } from "./AgentProfileEditor";
 import { DiscardConfirm, focusOpener, needsInitialFocus } from "./EditorFrame";
-import { EditorShell } from "./EditorShell";
+import { EditorShell, isSaveChord } from "./EditorShell";
 import { EditorEnvContext, type EditorEnv } from "./env";
 import { HookFormView } from "./HookEditor";
 import { initialHookForm, validateHookForm } from "./hook.logic";
 import { CollisionPrompt, CopySource, GitSource, UploadSource } from "./ImportSources";
-import { InstructionsConflict, InstructionsEditor } from "./InstructionsEditor";
+import { InstructionsConflict, InstructionsEditor, MIGRATE_CONFLICT_MESSAGE } from "./InstructionsEditor";
 import type { EditorVariant } from "./layout.logic";
 import { MarkdownCreateEditor, MarkdownEditEditor, SourceSwitcher } from "./MarkdownEditor";
 import { MarketplaceFormView } from "./MarketplaceEditor";
@@ -366,9 +367,24 @@ for (const variant of VARIANTS) {
   assert.ok(!renamedOntoTaken.includes(">Replace<") && !renamedOntoTaken.includes(">Keep both<"), "without a Replace that cannot work");
 
   const nameOnly = renderToStaticMarkup(
-    createElement(SubmitStatus, { state: { error: { code: "INVALID_NAME", status: 400, message: "Bad" }, placement: "name" } })
+    createElement(SubmitStatus, {
+      state: { error: { code: "INVALID_NAME", status: 400, message: "Bad" }, placement: "name" },
+      nameShown: true
+    })
   );
   assert.equal(nameOnly, "", "a name refusal is the name field's, not repeated above Save");
+  // An import, a copy, a plugin install: no name field to say it beside.
+  const noNameField = render(
+    inShell(
+      "body",
+      createElement(SubmitStatus, {
+        state: { error: { code: "INVALID_NAME", status: 400, message: '"My_Skill" is not a valid skill name.' }, placement: "name" }
+      })
+    ),
+    "claude",
+    variant
+  );
+  assert.ok(noNameField.includes('role="alert"') && noNameField.includes("is not a valid skill name."), "said above Save instead of nowhere");
 
   const collision = render(inShell("body", createElement(CollisionPrompt, { names: ["tdd", "ship"], onResolve: noop, onCancel: noop })), "claude", variant);
   assert.ok(collision.includes("2 of these already exist") && collision.includes("tdd, ship"), "picked collisions ask first");
@@ -473,6 +489,27 @@ for (const variant of VARIANTS) {
   assert.ok(notInstalled.includes("Codex is not installed"), "an agent that is not installed");
   const copyFailed = render(createElement(CopySource, { kind: "skill", toolbar: copyToolbar, initial: { load: { status: "error", message: "boom" } } }), "grok", variant);
   assert.ok(copyFailed.includes("boom") && buttonWith(copyFailed, "Retry"), "a failed read, with Retry");
+}
+
+// Copy from agent: an agent the overview knows is missing is offered last-resort, never first.
+{
+  agentProfileStore.setState({
+    overview: {
+      agents: [
+        { agent: "claude", installed: true, counts: {} },
+        { agent: "codex", installed: false, counts: {} },
+        { agent: "grok", installed: true, counts: {} },
+        { agent: "opencode", installed: true, counts: {} }
+      ],
+      status: "ready",
+      error: null,
+      stale: false
+    }
+  });
+  const html = render(createElement(CopySource, { kind: "skill", toolbar: createElement(SourceSwitcher, { value: "copy", onChange: noop }) }), "claude", "desktop");
+  resetAgentProfile();
+  assert.ok(html.includes("Reading Grok"), "starts on the first installed other agent");
+  assert.ok(html.includes(">Codex (not installed)</option>"), "the missing one says so");
 }
 
 // Edit: fields prefilled, unknown keys kept and listed, the skill's other files read-only.
@@ -709,6 +746,14 @@ for (const variant of VARIANTS) {
   const source = (file: string): string =>
     readFileSync(join(here, file), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
 
+  // The editors with a name field say INVALID_NAME there; every other one above Save.
+  for (const file of ["McpEditor.tsx", "MarkdownEditor.tsx", "MarketplaceEditor.tsx"]) {
+    assert.match(source(file), /<SubmitStatus[^>]*\bnameShown\b/, `${file}: its name field says it`);
+  }
+  for (const file of ["ImportSources.tsx", "PluginEditor.tsx", "HookEditor.tsx", "InstructionsEditor.tsx"]) {
+    assert.doesNotMatch(source(file), /nameShown/, `${file}: no name field, so the banner says it`);
+  }
+
   // Edits offer no Replace / Keep both; creates do.
   for (const file of ["McpEditor.tsx", "HookEditor.tsx", "MarkdownEditor.tsx"]) {
     assert.match(source(file), /onResolveConflict=\{detail \? undefined : submit\.resolveConflict\}/, `${file}: conflict answers for a create only`);
@@ -730,6 +775,20 @@ for (const variant of VARIANTS) {
     closedSaveFailure({ code: "AGENT_CLI_FAILED", status: 502, message: "claude plugin install failed" }),
     "Your change was not saved: claude plugin install failed"
   );
+
+  // Ctrl/Cmd+Enter saves from anywhere in the editor — CodeMirror included,
+  // whose keymap binds Mod-Enter itself: the shell takes it in the capture phase.
+  assert.match(source("EditorShell.tsx"), /onKeyDownCapture=\{\(event\) => \{\s*if \(!isSaveChord\(event\.nativeEvent\)\) return;\s*event\.preventDefault\(\);\s*event\.stopPropagation\(\);/);
+  const chord = { key: "Enter", metaKey: false, ctrlKey: true, repeat: false, isComposing: false };
+  assert.equal(isSaveChord(chord), true);
+  assert.equal(isSaveChord({ ...chord, ctrlKey: false, metaKey: true }), true);
+  assert.equal(isSaveChord({ ...chord, ctrlKey: false }), false, "plain Enter types");
+  assert.equal(isSaveChord({ ...chord, isComposing: true }), false, "an IME's Enter");
+  assert.equal(isSaveChord({ ...chord, repeat: true }), false, "a held chord saves once");
+
+  // Grok's GROK.md move refused as stale: re-read and say so, rather than a dead end.
+  assert.match(source("InstructionsEditor.tsx"), /if \(info\.code === "PROFILE_CONFLICT"\) \{\s*setMigrateError\(MIGRATE_CONFLICT_MESSAGE\);\s*setAttempt\(\(n\) => n \+ 1\);/);
+  assert.match(MIGRATE_CONFLICT_MESSAGE, /reloaded/);
 
   // The focus rules themselves.
   const body = { focus: noop } as unknown as HTMLElement;
