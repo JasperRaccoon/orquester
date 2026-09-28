@@ -70,7 +70,7 @@ export const EditorShell: React.FC<EditorShellProps> = ({
   const rootRef = useRef<HTMLDivElement | null>(null);
   const width = useElementWidth(rootRef, useInitialWidth());
   const sub = subtitle ?? agentLabel(env.agent);
-  const canSubmit = primary !== null && !primary.disabled && !primary.busy;
+  const canSubmit = primary !== null && !primary.disabled && !primary.busy && env.connected;
 
   return (
     <div
@@ -154,7 +154,7 @@ export const EditorShell: React.FC<EditorShellProps> = ({
           {primary !== null ? (
             <button
               type="button"
-              disabled={!canSubmit || !env.connected}
+              disabled={!canSubmit}
               title={!env.connected ? "Not connected to the daemon" : primary.title}
               onClick={primary.onClick}
               className={cn(
