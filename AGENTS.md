@@ -215,6 +215,10 @@ agent host's thread index, is a derived cache of NDJSON logs — see "Agent chat
             hooks/ (managed agent hook script)
             cliproxy/ state.json (model proxy config + routerProviders)  secrets.json (0600)
                       config.yaml (generated)  token  auth/  logs/  claude-home-<entryId>/
+            workflows.json (automated workflow definitions)  workflow-state.json (trigger
+                      cursors, account cooldowns)  workflow-secrets.json (0600, values)
+            workflow-runs/ index.json + <runId>/ (run.json, events.ndjson, nodes/<id>/<attempt>/)
+  tmp/          the workflow sandbox's TMPDIR (TMPDIR of the daemon too, in production)
   workspaces/   <workspace>/<project> dirs (the file-browser sandbox root, fsRoot)
 ```
 
@@ -2100,8 +2104,11 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
 Start here: `apps/daemon/src/agent-host/README.md` (module map + package ownership).
 
 **Orquester MCP** (`apps/daemon/src/mcp/`). `POST /mcp` lets an external agent drive chat sessions
-the way the chat GUI does: 31 tools (catalogue, sessions, search, messages, tool output, requests,
-waiting, usage, files, todos) and no terminal I/O — terminal tabs are only listed and closed. It is
+the way the chat GUI does: 44 tools — 31 for chat (catalogue, sessions, search, messages, tool
+output, requests, waiting, usage, files, todos) and 13 for automated workflows
+(`tools/workflows.ts`: block types, list/get/create/update/validate/delete, run with a bus-driven
+wait, runs, a run's outputs, cancel, secret names and a write-only set; see "Automated workflows"
+below and `docs/orquester-mcp.md` §12) — and no terminal I/O — terminal tabs are only listed and closed. It is
 mounted **only on the HTTP transport** (`mode:"remote"`, behind the global bearer hook; the
 unauthenticated unix socket never serves it) as a stateless Streamable-HTTP endpoint with one
 `McpServer` per request, a 16 MiB body limit and `405` for `GET`/`DELETE`. Every tool but the kept
@@ -2188,6 +2195,143 @@ strictly (`argumentsSchema`, `.strict()` at the top level): an argument name the
 is refused and named, never silently dropped — `tools/list` already advertises
 `additionalProperties: false`. Tool docs: `docs/orquester-mcp.md`; design: the v2 spec,
 `docs/superpowers/specs/2026-09-22-orquester-mcp-v2-design.md`.
+
+### Automated workflows (`apps/daemon/src/workflows`, `packages/api/src/workflows`, `packages/ui/src/components/workflows`)
+
+An n8n-like automation engine owned by the daemon: a workflow is a graph of blocks — triggers
+(manual, schedule, git), **agent** blocks that drive a chat session through the same routes the GUI
+uses, **code** (a JS module) and **shell** blocks in a detached sandbox, **http**, and flow blocks
+(**if**, **switch**, **merge**, **stop**, **wait**, a sub-**workflow**) — shown in the right rail's
+"Automated workflows" panel and the workflow editor tab. Design spec:
+`docs/superpowers/specs/2026-09-28-automated-workflows-design.md` (authoritative).
+
+**Modules.** `packages/api/src/workflows/` holds everything the daemon, the UI and the MCP share:
+wire types, the per-block catalogue, the `{{ … }}` expression parser/renderer, graph validation
+(`validateWorkflow`), the patch ops (`applyWorkflowPatch`) and the readiness walk; the on-disk zod
+schemas live in `@orquester/config` (`workflows.ts`). Daemon side (`apps/daemon/src/workflows/`),
+every module behind the seams of `contracts.ts`:
+
+| Module | Role |
+|---|---|
+| `service.ts` · `secrets.ts` · `run-store.ts` · `state-store.ts` | definitions (revisions, tolerant load) · secret values (names out) · runs on disk + index + retention · trigger cursors and cooldowns |
+| `routes.ts` · `summary.ts` · `errors.ts` | the REST surface (below) · the ONE rail-row builder · `{error: {code, message, problems?, opIndex?}}` |
+| `engine.ts` · `run-context.ts` · `scheduler-queue.ts` | run queue (overlap, global caps), graph walk, attempts/retries, persistence, resume, redaction, throttled run events, sub-workflows |
+| `nodes/*` · `sandbox/*` | block executors · the detached child supervisor (`runner.mjs`), env, log reader, redactor |
+| `agent/*` | the agent block: account selection (`select.ts`), failover (`failover.ts`), the watcher (`watch.ts`), cooldowns, the account preview |
+| `triggers/*` · `git-remote/*` | the scheduler (croner computes, one timer fires) · the git poller (`ls-remote` + provider REST) |
+| `factory.ts` · `daemon-wiring.ts` | the runtime (engine + executors + sweepers) · **the whole wiring `startDaemon` runs** (`createWorkflowDaemon`: runtime, scheduler, poller, summary builder, trigger-state watcher) |
+| `projects.ts` · `prompt-renderer.ts` · `notifier.ts` · `sweepers.ts` | temp projects over the daemon's own routes · saved-prompt `{variables}` daemon-side · pushes · hourly retention/temp-project/tab sweeps |
+
+**Wiring** (`startDaemon`, `index.ts`): the four stores load right after saved prompts (each is
+tolerant — a file it cannot parse is moved aside, one it cannot read leaves that store read-only and
+its mutations answer 503 `WORKFLOWS_UNAVAILABLE`; none blocks boot); `createWorkflowDaemon` is built
+next to them; after `agentChat.init()` and once the unix app and `services.internalApi` exist,
+`attachWorkflowEngine(engine)` then `workflowDaemon.start(internalApi)` — resume every unfinished
+run, start the queue and the sweepers, then the scheduler (its boot catch-up) and the git poller.
+Until then the routes serve definitions, secrets and run history from the stores and answer 503
+`ENGINE_UNAVAILABLE` to anything that must act. `stop()` stops the triggers and the engine FIRST
+(fast, kills nothing), then flushes the four stores — inside the 3 s backstop.
+
+**Appdir additions:** `<appdir>/daemon/workflows.json` (definitions), `workflow-state.json`
+(schedule and git cursors, account cooldowns, REST ETags — a cache of progress, never an
+authority), `workflow-secrets.json` (0600; `{global, workflows: {<id>: …}}`), `workflow-runs/`
+(`index.json`, rebuildable, and one `<runId>/` per run: `run.json` — the frozen definition, trigger
+payload, per-block state and `waitingOn` — `events.ndjson`, and `nodes/<nodeId>/<attempt>/` with
+`stdout.log`, `stderr.log`, `exit.json`, `result.json`, big outputs); `<appdir>/tmp` is the sandbox's
+`TMPDIR`.
+
+**Routes** (both transports; bearer auth on HTTP), all spelled in `workflowRoutes`:
+
+| | |
+|---|---|
+| Definitions | `GET /api/workflows?projectPath=` · `POST /api/workflows` (201) · `GET/PUT/DELETE /api/workflows/:id` (`revision`, 409 `REVISION_CONFLICT`) · `POST …/:id/patch {revision, ops}` · `POST …/:id/duplicate` · `POST /api/workflows/validate {workflow}` |
+| Catalogue & previews | `GET /api/workflows/block-types` · `GET /api/workflows/schedule-preview?cron=&tz=&count=` · `POST /api/workflows/account-preview {chain, projectPath?}` |
+| Runs | `POST /api/workflows/:id/run {input?, test?, fromNodeId?, retryOf?, force?}` → `{runId}` or `{skipped: "overlap"}` · `POST …/:id/nodes/:nodeId/test` · `GET …/:id/runs?before=&limit=` · `GET /api/workflow-runs/:runId` · `…/nodes/:nodeId/output` · `…/nodes/:nodeId/log?stream=&offset=&maxBytes=&follow=1` · `POST …/cancel` · `POST …/delete-temp-project` |
+| Secrets | `GET /api/workflow-secrets?workflowId=` (names) · `PUT/DELETE /api/workflow-secrets/:name?workflowId=` (write-only) |
+
+Events on the `"workflows"` channel: `workflow.upserted` (the rail row), `workflow.deleted`,
+`workflowRun.started` / `.updated` (a delta, throttled) / `.finished`, `workflowSecrets.changed`.
+
+**Gotchas that bite:**
+
+- **Agents are driven only through the daemon's own REST, in-process, over the UNIX app.**
+  `services.internalApi` (`createInternalDaemonApi`, `chat-client/`) is an `InjectDaemonApi` bound
+  to the always-on unix-socket app with no authorization: the HTTP app is hot-reloadable (a
+  reference goes stale on the next config change) and would 401 a bearer-less call. So every gate
+  the GUI meets — the family gate, the seeded-account gate, the claudex model gate, tab-then-thread,
+  `HOST_UNAVAILABLE` — applies to workflows by construction. Its `fsRoot`/`workspacesDir` are
+  GETTERS, as are the runtime's and the repo resolver's: `PUT /api/config/daemon` moves both in
+  place. The engine reuses the MCP's helpers (`chat-client/index.ts` re-exports them, never
+  wrappers) and, like the MCP, never touches a service for a session.
+- **Every wait is resumable: `WaitingOn` is on disk BEFORE the side effect.** A block persists what
+  it waits on (`setWaitingOn`, resolved only once `run.json` holds it) before it acts: an agent
+  command's `commandId` is minted and written before its POST (a re-post after a crash is deduped
+  by the host's receipts — the e2e proves one turn, not two); a process's pid + `/proc` starttime; a
+  timer's wall-clock `until`; a child run's id; an HTTP call (a GET/HEAD is re-issued, anything else
+  fails `interrupted`, retryable). Deadlines are wall clock, so a restart never extends them.
+  `engine.resume()` rebuilds every unfinished run from `run.json` and re-enters each block from its
+  `waitingOn`.
+- **Sandbox children are detached and outlive the daemon.** Code and shell run under `runner.mjs`
+  in their own session (`setsid`), with file-based IO under the attempt dir; the runner writes
+  `exit.json` even when the daemon is down, and a restarted daemon adopts the process (pid +
+  starttime) or reads its exit. `stop()` never kills one; a run's cancel or timeout kills the
+  group (SIGTERM, SIGKILL after 5 s). Env is built explicitly (the `sessionEnvBase` rule, never a
+  spread of `process.env`), carrying `ORQUESTER_AGENT_LAUNCH` so Settings → System can list and
+  kill a leftover.
+- **Shell scripts never interpolate.** Validation refuses `{{ … }}` in a shell script
+  (`shell_template`): values — secrets, branch names, PR titles, anything attacker-controllable —
+  reach a script only through its `env` mapping. HTTP and code take them as data.
+- **Secret values never cross the wire and are redacted everywhere they are kept.** The API returns
+  names (scope, `updatedAt`, `short`) only. Every value ≥ 4 characters is replaced by
+  `«secret:NAME»` in block outputs, errors, warnings, run events, `run.json` and `events.ndjson`
+  BEFORE it is kept — downstream blocks read the redacted value too — and logs are redacted as they
+  are served (the raw attempt log on disk keeps what the process printed). `input.json` (which
+  carries them to a code block) is 0600 and deleted when the attempt ends.
+- **The failover invariant: a usage limit or an auth failure never fails an agent block while an
+  eligible candidate remains in its chain.** Detection is structured (`reason: "usage_limit" |
+  "auth"`, `resetsAt` on the runtime error/warning), legacy message prefixes only for an older host.
+  The loop: cool the account (in `workflow-state.json`, shared by every workflow), interrupt and
+  wait for idle, switch to the next account of the SAME family in the SAME session
+  (`POST …/account`, "continue where you stopped"), else hand off to the next chain entry in a NEW
+  session with a handoff prompt, else fail `all_burnt` or wait for the earliest reset. At most 12
+  hops; every hop recorded on the block. The account preview route runs the very selection the
+  block runs, over the same cooldowns.
+- **The summary recursion trap.** A rail row is built by ONE function, `buildWorkflowSummary`
+  (`summary.ts`), with the live trigger state; the daemon's builder is
+  `workflowDaemon.summarize`. The routes' `summarizeWorkflow` DELEGATES to `engine.summarize`,
+  which calls the builder it was given — so the builder must never be `summarizeWorkflow` (the
+  engine throws on the loop). `publishWorkflowEvents` gets the builder itself.
+- **Triggers poll; nothing listens.** No webhooks: the scheduler owns one unref'd timer (at most
+  60 s ahead, a run missed by more than 15 minutes is a `skipped` stub, never a burst of catch-up
+  runs; the advanced cursor is written BEFORE the fire), and the git poller runs one poller per
+  repo key (`ls-remote` every 60 s, PR/release REST every 120–180 s with ETags; a first poll only
+  baselines; fired keys are a persisted dedup ring, so a restart never re-fires; a failing poll
+  backs off to 15 min and fires nothing). Their state rides the rail as `nextRunAt` /
+  `lastPollAt` / `lastError`; a trigger-state watcher (`daemon-wiring.ts`) republishes a row when
+  `nextRunAt` or `lastError` moves without an edit — never on `lastPollAt` alone.
+- **Deleting a workflow takes what it owns, and only that.** The definition goes first (no trigger
+  fires it again), active runs are cancelled and waited for (bounded, 10 s) — a run of a deleted
+  workflow deletes its own temporary project as it ends — then the temporary projects its finished
+  runs KEPT (a failed run keeps one `keepFailedTempDays`, and its run record is the only thing that
+  names it), then its runs and its secrets. Run retention (100 per workflow, 30 days) likewise
+  skips a run whose temporary project is still there until the sweeper has deleted the project,
+  and the sweeper deletes projects BEFORE retention runs. An existing project is never touched.
+- **Workflow tabs.** Agent sessions carry `owner: {kind: "workflow", workflowId, runId, nodeId}`;
+  the hourly sweeper closes one in an existing project `workflowTabRetentionDays` (7) after its run
+  ended — never one the user wrote in since — and, when the run record is gone (retention, a
+  deleted workflow), once that window has passed since the later of the tab's creation and the
+  user's last message in it.
+
+**Tests.** Unit tests beside every module (fakes in `workflows/testing/` and
+`workflows/agent/testing/`: `FakeChatHost`, `FakeClock`, `ManualClock`), and the end-to-end proof,
+in-process on a temp appdir through the real wiring (`workflows/testing/daemon-harness.ts` boots
+`createWorkflowDaemon` + the real routes + the real stores, exactly as `startDaemon` does; a second
+`boot()` over the same root is a restart): `e2e.test.ts` (code → IF → shell → HTTP with every
+block, edge and event checked; secrets redacted in outputs, files and the log route; a restart mid
+shell block; the schedule trigger on a manual clock; the git trigger through the poller; the delete
+cascade), `e2e-agent.test.ts` (agent blocks through the engine against `FakeChatHost`: a same-family
+switch and a cross-family handoff, cooldowns, the preview; a restart mid-turn that sends the turn
+once) and `e2e-mcp.test.ts` (the MCP workflow tools against the real routes).
 
 ### Key runtime flows
 
@@ -2840,4 +2984,10 @@ password secrecy + patching remain the real mitigations. It costs two loosened u
 | Agent chat: goals (the provider-owned goal mirror, per-provider goal handling, Codex's host `/goal`, the goal watchdog window, the goal chip) | `docs/superpowers/specs/2026-09-24-agent-goals-design.md`, `packages/api/src/agent-chat/goal.ts`, `apps/daemon/src/agent-host/adapters/{claude,codex,grok}/`, `parseHostGoalCommand` in `apps/daemon/src/agent-host/orchestration/slash.ts`, `decideGoalCommand`/`goalContinuingNow`/`stopContinuingGoal`/`holdContinuingGoals`/`resumeGoalSessionsAfterHandover` in `apps/daemon/src/agent-host/orchestration/orchestrator.ts`, the deploy hold's daemon half in `apps/daemon/src/agent-chat/supervisor.ts` (`requestHoldGoals`, and for a host from before the hold `stopLegacyGoalsAtTheirBoundary`/`legacyGoalTurnOf`), the goal window in `apps/daemon/src/agent-host/{support/deadline.ts,orchestration/turn-watchdog.ts}`, the `goal-continuing` rung in `apps/daemon/src/agent-chat/activity-ladder.ts`, `packages/ui/src/components/agent-chat/status/` (the goal chip) |
 | Agent chat: protocol fixtures (read the per-provider `README.md`) | `apps/daemon/test/fixtures/{claude,codex,opencode,grok}/` |
 | Orquester MCP (tools, in-process client, waits) | `apps/daemon/src/mcp/server.ts`, `…/daemon-api.ts`, `…/wait.ts`, `…/tools/` |
+| Automated workflows: the daemon wiring (runtime, scheduler, git poller, summary builder) | `apps/daemon/src/workflows/daemon-wiring.ts`, `factory.ts`, the `createWorkflowDaemon` / `attachWorkflowEngine` block in `apps/daemon/src/index.ts` |
+| Automated workflows: engine, blocks, sandbox, persistence and resume | `apps/daemon/src/workflows/{engine.ts,run-context.ts,contracts.ts,run-store.ts}`, `…/nodes/`, `…/sandbox/` |
+| Automated workflows: agent block (selection, failover, watcher, cooldowns) | `apps/daemon/src/workflows/agent/`, `apps/daemon/src/chat-client/index.ts` |
+| Automated workflows: triggers, routes, secrets, shared contracts | `apps/daemon/src/workflows/{triggers/,git-remote/,routes.ts,secrets.ts,summary.ts}`, `packages/api/src/workflows/`, `packages/config/src/workflows.ts`, `docs/superpowers/specs/2026-09-28-automated-workflows-design.md` |
+| Automated workflows: end-to-end tests and harness | `apps/daemon/src/workflows/e2e*.test.ts`, `apps/daemon/src/workflows/testing/daemon-harness.ts` |
+| Automated workflows: UI (rail panel, editor, run view) | `packages/ui/src/components/workflows/`, `packages/ui/src/lib/workflows/` |
 | Deployment | `deploy/` + `docs/superpowers/specs|plans/2026-06-19-remote-*.md` |

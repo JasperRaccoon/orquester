@@ -277,6 +277,10 @@ describe("sweepers", () => {
       { id: "s-recent", kind: "agent-chat", projectPath: "/w/ws/app", owner: owner("recent") },
       { id: "s-running", kind: "agent-chat", projectPath: "/w/ws/app", owner: owner("running") },
       { id: "s-gone", kind: "agent-chat", projectPath: "/w/ws/app", owner: owner("swept-long-ago") },
+      // Run records gone (retention, a deleted workflow): the tab's own clock decides.
+      { id: "s-gone-old", kind: "agent-chat", projectPath: "/w/ws/app", createdAt: "2026-09-10T10:00:00.000Z", owner: owner("swept-1") },
+      { id: "s-gone-talked", kind: "agent-chat", projectPath: "/w/ws/app", createdAt: "2026-09-10T10:00:00.000Z", owner: owner("swept-2") },
+      { id: "s-gone-young", kind: "agent-chat", projectPath: "/w/ws/app", createdAt: "2026-09-25T10:00:00.000Z", owner: owner("swept-3") },
       { id: "s-temp", kind: "agent-chat", projectPath: "/w/ws/wf-old", owner: owner("old") },
       { id: "s-user", kind: "agent-chat", projectPath: "/w/ws/app" }
     ];
@@ -292,6 +296,7 @@ describe("sweepers", () => {
     const { api, calls } = fakeApi((method, path) => {
       if (method === "GET" && path === "/api/sessions") return { status: 200, body: sessions };
       if (method === "GET" && path.includes("s-talked")) return { status: 200, body: thread("2026-09-21T09:00:00.000Z") };
+      if (method === "GET" && path.includes("s-gone-talked")) return { status: 200, body: thread("2026-09-26T09:00:00.000Z") };
       if (method === "GET") return { status: 200, body: thread(null) };
       return { status: 204, body: null };
     });
@@ -302,8 +307,9 @@ describe("sweepers", () => {
     assert.deepEqual(projects.deleted, ["/w/ws/wf-old"]);
     assert.deepEqual((await runStore.load("old"))!.tempProject, { path: "/w/ws/wf-old", deleted: true });
     assert.equal((await runStore.load("fresh"))!.tempProject?.deleted, false);
-    assert.deepEqual(report.tabsClosed, ["s-old"]);
+    assert.deepEqual(report.tabsClosed, ["s-old", "s-gone-old"]);
     assert.ok(calls.some((call) => call.method === "DELETE" && call.path === "/api/sessions/s-old"));
+    assert.ok(calls.some((call) => call.method === "DELETE" && call.path === "/api/sessions/s-gone-old"));
     assert.equal(runStore.sweeps, 1);
     void DAY;
   });

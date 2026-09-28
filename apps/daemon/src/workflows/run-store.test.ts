@@ -158,6 +158,25 @@ test("sweep keeps the newest N and nothing older than the retention, and never a
   assert.ok(!(await readdir(dir)).includes("run-5"));
 });
 
+test("sweep keeps a run whose temporary project is still there, until the project is deleted", async () => {
+  const dir = await scratch();
+  const now = new Date("2026-09-28T12:00:00.000Z");
+  const store = new FileRunStore({ dir, logger: quiet().logger, now: () => now, runsPerWorkflow: 1, runRetentionDays: 1 });
+  await store.init();
+  const kept = { path: "/w/ws/wf-kept", deleted: false, deleteAfter: at(-60) };
+  await store.create(run("run-new", { queuedAt: at(0), endedAt: at(0), status: "succeeded" }));
+  await store.create(run("run-kept", { queuedAt: at(10), endedAt: at(10), status: "failed", tempProject: kept }));
+  await store.create(run("run-plain", { queuedAt: at(20), endedAt: at(20), status: "failed" }));
+  await store.sweep();
+  assert.deepEqual((await store.listForWorkflow("wf-1", { limit: 10 })).runs.map((r) => r.id), ["run-new", "run-kept"]);
+  // The sweeper deleted the project: the next retention sweep takes the run.
+  const loaded = (await store.load("run-kept"))!;
+  loaded.tempProject = { path: kept.path, deleted: true };
+  await store.save(loaded);
+  await store.sweep();
+  assert.deepEqual((await store.listForWorkflow("wf-1", { limit: 10 })).runs.map((r) => r.id), ["run-new"]);
+});
+
 test("events append as NDJSON; attempt dirs and output files live under the run", async () => {
   const dir = await scratch();
   const store = new FileRunStore({ dir, logger: quiet().logger });

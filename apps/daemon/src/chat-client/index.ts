@@ -20,7 +20,7 @@
 import type { FastifyInstance } from "fastify";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { AgentChatService } from "../agent-chat/service.ts";
-import { InjectDaemonApi } from "../mcp/daemon-api.ts";
+import { InjectDaemonApi, type LivePath } from "../mcp/daemon-api.ts";
 
 // --- the seam ---------------------------------------------------------------
 export { InjectDaemonApi } from "../mcp/daemon-api.ts";
@@ -79,8 +79,9 @@ export interface InternalDaemonApiOptions {
   broadcaster: Broadcaster;
   /** For attachment uploads; `null` answers 503 `HOST_UNAVAILABLE`, as the MCP does. */
   agentChat: Pick<AgentChatService, "uploadAttachment"> | null;
-  fsRoot: string;
-  workspacesDir: string;
+  /** Getters for a long-lived client: `PUT /api/config/daemon` moves both in place. */
+  fsRoot: LivePath;
+  workspacesDir: LivePath;
 }
 
 /**

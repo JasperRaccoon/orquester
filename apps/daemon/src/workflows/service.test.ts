@@ -193,6 +193,7 @@ test("a bad patch op is 400 INVALID_WORKFLOW naming the op, and changes nothing"
     "INVALID_WORKFLOW"
   );
   assert.match(error.message, /^Operation 1:/);
+  assert.equal(error.body().error.opIndex, 1, "the body names the op (the MCP's update_workflow reads it)");
   assert.equal(service.get(created.id)!.name, "Nightly");
   assert.equal(service.get(created.id)!.revision, 0);
 });

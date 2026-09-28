@@ -329,6 +329,10 @@ export class FileRunStore implements RunStore {
     for (const list of this.byWorkflow.values()) {
       list.forEach((summary, position) => {
         if (isRunActive(summary.status)) return;
+        // A run still holding a temporary project is kept until the sweeper deletes the project
+        // (`deleteAfter`): its record is the only thing that names the project, so dropping it first
+        // would leak the directory for good (a failing schedule passes 100 runs in hours).
+        if (summary.tempProject && !summary.tempProject.deleted) return;
         const at = Date.parse(summary.endedAt ?? summary.queuedAt);
         const tooOld = Number.isFinite(at) && at < cutoff;
         if (position >= this.runsPerWorkflow || tooOld) doomed.push(summary.id);
@@ -439,7 +443,9 @@ export class FileRunStore implements RunStore {
     await this.eventWrites.get(runId)?.catch(() => undefined);
     this.writers.delete(runId);
     this.eventWrites.delete(runId);
-    await rm(join(this.dir, runId), { recursive: true, force: true }).catch((error) =>
+    // Retries: a detached sandbox runner of a run being cancelled can still write its exit.json into
+    // an attempt directory while the tree is removed (ENOTEMPTY); a later write finds no directory.
+    await rm(join(this.dir, runId), { recursive: true, force: true, maxRetries: 5, retryDelay: 50 }).catch((error) =>
       this.logger.warn(`workflow run ${runId} could not be deleted (${(error as NodeJS.ErrnoException)?.code ?? String(error)})`)
     );
   }

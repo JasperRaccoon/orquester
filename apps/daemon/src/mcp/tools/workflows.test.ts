@@ -129,7 +129,7 @@ test("create_workflow: a temp project passes through; unknown projects and bad a
 
 test("create_workflow: a refused edge is named by its index; enabling with errors carries the problems in the text and detail", async (t) => {
   const api = await sandbox(t);
-  const edge = await rejects(call(api, "create_workflow", { name: "X", project: { kind: "existing", project: "acme/api" }, nodes: [{ type: "trigger.manual", name: "Go" }, { type: "code", name: "Work" }], edges: [{ source: "Go", target: "Work" }, { source: "Go", target: "Nobody" }] }), "INVALID_REQUEST", /^edges\[1\]: .*Nobody/);
+  const edge = await rejects(call(api, "create_workflow", { name: "X", project: { kind: "existing", project: "acme/api" }, nodes: [{ type: "trigger.manual", name: "Go" }, { type: "code", name: "Work" }], edges: [{ source: "Go", target: "Work" }, { source: "Go", target: "Nobody" }] }), "INVALID_WORKFLOW", /^edges\[1\]: (?!Item).*Nobody/);
   assert.equal((edge.detail as { opIndex: number }).opIndex, 3);
   const invalid = await rejects(call(api, "create_workflow", { name: "X", enabled: true, project: { kind: "existing", project: "acme/api" }, nodes: [{ type: "trigger.manual", name: "Go" }, { type: "shell", name: "Sh", config: { script: "echo {{ trigger.input }}" } }], edges: [{ source: "Go", target: "Sh" }] }), "INVALID_WORKFLOW", /Problems: error shell_template/);
   const detail = invalid.detail as { problems: { code: string }[]; errorCount: number };
@@ -190,7 +190,7 @@ test("update_workflow: a stale revision says to re-read; a failing op is named b
   const api = await sandbox(t);
   const id = (await createJira(api)).workflowId as string;
   await rejects(call(api, "update_workflow", { workflowId: id, revision: 7, ops: [{ op: "set_enabled", enabled: false }] }), "REVISION_CONFLICT", /get_workflow/);
-  const e = await rejects(call(api, "update_workflow", { workflowId: id, revision: 0, ops: [{ op: "add_node", node: { type: "code", name: "Extra" } }, { op: "connect", source: "Extra", target: "Ghost" }] }), "INVALID_REQUEST", /^ops\[1\] \(connect\) failed: .*Ghost.*Nothing was saved\.$/);
+  const e = await rejects(call(api, "update_workflow", { workflowId: id, revision: 0, ops: [{ op: "add_node", node: { type: "code", name: "Extra" } }, { op: "connect", source: "Extra", target: "Ghost" }] }), "INVALID_WORKFLOW", /^ops\[1\] \(connect\) failed: (?!Operation).*Ghost.*Nothing was saved\.$/);
   assert.deepEqual({ opIndex: (e.detail as { opIndex: number }).opIndex, op: (e.detail as { op: string }).op }, { opIndex: 1, op: "connect" });
   assert.equal(api.workflows.get(id)!.revision, 0);
   assert.ok(!api.workflows.get(id)!.nodes.some((n) => n.name === "Extra"));

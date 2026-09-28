@@ -24,12 +24,18 @@ export interface DaemonApi {
 
 type ChatUploads = Pick<AgentChatService, "uploadAttachment">;
 
+/** A path the client reads: fixed, or read at every use (a long-lived client follows `PUT /api/config/daemon`). */
+export type LivePath = string | (() => string);
+
 export class InjectDaemonApi implements DaemonApi {
-  readonly fsRoot: string;
-  readonly workspacesDir: string;
-  constructor(private readonly opts: { app: FastifyInstance; authorization: string | undefined; agentChat: ChatUploads | null; broadcaster: Broadcaster; fsRoot: string; workspacesDir: string }) {
-    this.fsRoot = opts.fsRoot;
-    this.workspacesDir = opts.workspacesDir;
+  constructor(private readonly opts: { app: FastifyInstance; authorization: string | undefined; agentChat: ChatUploads | null; broadcaster: Broadcaster; fsRoot: LivePath; workspacesDir: LivePath }) {}
+
+  get fsRoot(): string {
+    return typeof this.opts.fsRoot === "function" ? this.opts.fsRoot() : this.opts.fsRoot;
+  }
+
+  get workspacesDir(): string {
+    return typeof this.opts.workspacesDir === "function" ? this.opts.workspacesDir() : this.opts.workspacesDir;
   }
 
   async request(method: DaemonMethod, path: string, opts?: { query?: Record<string, string>; body?: unknown }): Promise<DaemonResponse> {

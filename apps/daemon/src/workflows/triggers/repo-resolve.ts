@@ -21,8 +21,8 @@ export interface RepoResolverDeps {
   git: { remoteUrl(cwd: string): Promise<string | null> };
   /** The workspace's `workspaces.json` side-table entry (by workspace NAME), or null. */
   readWorkspaceMeta(workspace: string): Promise<{ gitAccountId?: string | null } | null | undefined>;
-  /** `<appdir>/workspaces`. */
-  workspacesDir: string;
+  /** `<appdir>/workspaces` — a getter in the daemon (`PUT /api/config/daemon` moves it in place). */
+  workspacesDir: string | (() => string);
 }
 
 /** `<workspacesDir>/<ws>/<project>` → `<ws>`; null for any other shape. */
@@ -50,7 +50,7 @@ export function createRepoResolver(deps: RepoResolverDeps): ResolveRepo {
     }
     const project = workflow.project;
     if (project.kind === "existing") {
-      const workspace = workspaceOfProject(deps.workspacesDir, project.projectPath);
+      const workspace = workspaceOfProject(typeof deps.workspacesDir === "function" ? deps.workspacesDir() : deps.workspacesDir, project.projectPath);
       if (workspace === null) return null;
       let url: string | null;
       try {

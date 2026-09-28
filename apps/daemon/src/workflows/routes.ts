@@ -108,6 +108,8 @@ const LOG_WINDOW_DEFAULT = 256 * 1024;
 const LOG_WINDOW_MAX = 4 * 1024 * 1024;
 const SCHEDULE_PREVIEW_DEFAULT = 5;
 const SCHEDULE_PREVIEW_MAX = 20;
+/** How long deleting a workflow waits for its cancelled runs to end. */
+const CANCEL_WAIT_MS = 10_000;
 
 const CONFIG_SCHEMAS: Record<WorkflowNodeType, ZodTypeAny> = {
   "trigger.manual": triggerManualConfigSchema,
@@ -160,8 +162,10 @@ export function summarizeWorkflow(
 
 /**
  * Delete a workflow and everything it owns: the definition first (so no trigger fires it again),
- * then its active runs are cancelled through the engine (when attached), then its runs and its
- * secrets are deleted. Project directories are never touched.
+ * then its active runs are cancelled through the engine (when attached — a run of a deleted
+ * workflow deletes its own temporary project as it ends), then the temporary projects its FINISHED
+ * runs kept (a failed run keeps one `keepFailedTempDays`, and only its run record would ever sweep
+ * it — the record goes next), then its runs and its secrets. An existing project is never touched.
  */
 export async function deleteWorkflowCascade(
   deps: Pick<WorkflowRouteDeps, "service" | "secrets" | "runStore" | "engine">,
@@ -171,8 +175,35 @@ export async function deleteWorkflowCascade(
   await deps.service.delete(id, revision);
   const engine = deps.engine();
   if (engine !== null) {
+    const cancelled: string[] = [];
     for (const run of deps.runStore.activeForWorkflow(id)) {
+      cancelled.push(run.id);
       await engine.cancel(run.id).catch((error) => console.error(`Failed to cancel workflow run ${run.id}`, error));
+    }
+    // Let the cancelled runs end (bounded): each deletes its own temporary project as it ends, and
+    // its sandbox children are killed before the run directory goes.
+    if (cancelled.length > 0 && engine.waitForRun) {
+      const waitForRun = engine.waitForRun.bind(engine);
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      await Promise.race([
+        Promise.all(cancelled.map((runId) => waitForRun(runId).catch(() => undefined))),
+        new Promise<void>((resolveTimeout) => {
+          timer = setTimeout(resolveTimeout, CANCEL_WAIT_MS);
+        })
+      ]);
+      clearTimeout(timer);
+    }
+    let before: string | undefined;
+    for (let page = 0; page < 50; page += 1) {
+      const listing = await deps.runStore.listForWorkflow(id, before !== undefined ? { before, limit: 100 } : { limit: 100 });
+      for (const run of listing.runs) {
+        if (!run.tempProject || run.tempProject.deleted) continue;
+        await engine
+          .deleteTempProject(run.id)
+          .catch((error) => console.error(`Failed to delete the temporary project of workflow run ${run.id}`, error));
+      }
+      if (listing.before === null) break;
+      before = listing.before;
     }
   }
   await deps.runStore.deleteForWorkflow(id);
