@@ -35,15 +35,24 @@ export function deferred<T = void>(): Deferred<T> {
 /** One-permit semaphore, FIFO. The prompt path takes it; so do compact and rollback. */
 export class Mutex {
   private tail: Promise<void> = Promise.resolve();
+  /** Callers holding or queued for the permit. */
+  private pending = 0;
+
+  /** True from the moment `run` is called until its work (and every queued one) settles. */
+  get busy(): boolean {
+    return this.pending > 0;
+  }
 
   async run<T>(work: () => Promise<T>): Promise<T> {
+    this.pending += 1;
     const previous = this.tail;
     const gate = deferred<void>();
     this.tail = gate.promise;
-    await previous.catch(() => undefined);
     try {
+      await previous.catch(() => undefined);
       return await work();
     } finally {
+      this.pending -= 1;
       gate.resolve();
     }
   }

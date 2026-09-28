@@ -183,8 +183,27 @@ export const agentHostRoutes = {
    * a turn, as for a §5.5 handover mark, and Codex continues the goal by
    * itself.
    */
-  resumeGoalSessions: "/goals/resume-sessions"
+  resumeGoalSessions: "/goals/resume-sessions",
+
+  /**
+   * Agent profile §4.8: `POST` → {@link AgentHostRecycleOpenCodeResponse}.
+   * `opencode serve` caches its global config for its whole life, so after the
+   * agent profile writes OpenCode config the daemon asks the host to stop
+   * every OpenCode server with nothing running (the next turn starts a fresh
+   * one) and to recycle each busy one once it goes idle. Additive: a host that
+   * predates the route answers its generic route-miss 404, which the daemon
+   * ignores — `AGENT_HOST_PROTOCOL_VERSION` did not move for it.
+   */
+  recycleIdleOpenCode: "/opencode/recycle-idle"
 } as const;
+
+/** `POST /opencode/recycle-idle` (agent profile §4.8). */
+export interface AgentHostRecycleOpenCodeResponse {
+  /** OpenCode servers stopped by this request. */
+  recycled: number;
+  /** Servers with work running, marked to be recycled once when they go idle. */
+  deferred: number;
+}
 
 /** `POST /goals/hold` (agent goals §5.7). */
 export interface AgentHostHoldGoalsResponse {

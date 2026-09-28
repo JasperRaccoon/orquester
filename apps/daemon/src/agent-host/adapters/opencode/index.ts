@@ -18,7 +18,7 @@
  * | `state.ts` | Per-thread mutable state, text merging, usage accumulation |
  * | `normalize.ts` | The pure frame → `RuntimeEvent` demux (replayed by the tests) |
  * | `session.ts` | The three completion machines, turns, interrupt, compaction, rollback |
- * | `server.ts` | The ref-counted per-project server pool |
+ * | `server.ts` | The ref-counted per-project server pool, and its recycle (agent profile §4.8, `recycleIdleServers` here) |
  * | `snapshot.ts` | `GET /provider` → models + auth + commands + skills |
  * | `cli-inventory.ts` | The machine-level CLI catalogue, for a cwd-less probe |
  * | `history.ts` | A `readThread` snapshot replayed as runtime events (E6) |
@@ -61,7 +61,11 @@ import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
 import { spawnProviderChild } from "../../support/spawn.ts";
 import { StderrCapture } from "../../support/stderr.ts";
 import { OpenCodeThreadSession } from "./session.ts";
-import { OpenCodeServerPool, type OpenCodeServerHandle } from "./server.ts";
+import {
+  OpenCodeServerPool,
+  type OpenCodeServerHandle,
+  type OpenCodeServerPoolOptions
+} from "./server.ts";
 import { meetsMinimumOpenCodeVersion, parseSemver } from "./semver.ts";
 import { loadInventoryFromCli } from "./cli-inventory.ts";
 import { projectOpenCodeHistory } from "./history.ts";
@@ -151,10 +155,28 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   private readonly contextLimits = new Map<string, Promise<Map<string, number>>>();
   private binPath: string | undefined;
   private stopped = false;
+  /**
+   * Agent profile §4.8 — server recycling. Each live session's start input,
+   * so a thread whose idle session a recycle let go of can be told apart and,
+   * as a backstop, brought back by `sendTurn` (`recycled`).
+   */
+  private readonly startInputs = new Map<string, StartSessionInput>();
+  private readonly recycled = new Map<string, StartSessionInput>();
+  /** Projects whose server was busy when a recycle was asked for: recycled once, when idle. */
+  private readonly recyclePending = new Set<string>();
+  /** Projects with a re-check scheduled, so a burst of events costs one check. */
+  private readonly recycleScheduled = new Set<string>();
+  /** Every re-check and the server stop it started, until done (`recycleSettled`). */
+  private readonly recycleWork = new Set<Promise<void>>();
 
-  constructor(ctx: AdapterContext) {
+  constructor(
+    ctx: AdapterContext,
+    seams: { pool?: Pick<OpenCodeServerPoolOptions, "startServer" | "fetchImpl"> } = {}
+  ) {
     this.ctx = ctx;
     this.pool = new OpenCodeServerPool({
+      ...seams.pool,
+      onRelease: (projectDir) => this.scheduleRecycleCheck(projectDir),
       logger: ctx.logger,
       resolveBin: () => this.resolveBin(),
       buildEnv: ({ projectDir }) =>
@@ -220,6 +242,11 @@ class OpenCodeAdapterImpl implements AgentAdapter {
           if (self.stopped) {
             return;
           }
+          // The consumer has taken every event: a recycle deferred only
+          // because its threads' events were still undelivered can go now.
+          for (const projectDir of self.recyclePending) {
+            self.scheduleRecycleCheck(projectDir);
+          }
           await new Promise<void>((resolve) => {
             self.queueWaiters.push(resolve);
           });
@@ -235,6 +262,143 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     for (const waiter of waiters) {
       waiter();
     }
+    if (this.recyclePending.size > 0) {
+      this.scheduleRecycleCheck(this.servers.get(event.threadId)?.projectDir);
+    }
+  }
+
+  // -- server recycling (agent profile §4.8) ------------------------------
+
+  /**
+   * `POST /opencode/recycle-idle`: `opencode serve` reads its global config
+   * once, at start, so after the agent profile writes OpenCode config every
+   * server has to be restarted before a turn sees it. Each project's server is
+   * stopped now when nothing runs on it — every session on it idle
+   * (`isIdleForRecycle`), no probe or session start holding it, none of its
+   * threads' events still undelivered. Its threads' sessions are let go of
+   * silently (`detachForRecycle`: no `session.exited`, cursor untouched), and
+   * each thread's next turn starts a fresh server through the host's usual
+   * `ensureSession`. A server with work running is marked instead and recycled
+   * ONCE, the first time it is found idle afterwards (re-checked after its
+   * events, a released reference and each operation's end); running turns are
+   * never disturbed.
+   *
+   * `recycled` counts servers stopped by this call, `deferred` the ones marked.
+   */
+  async recycleIdleServers(): Promise<{ recycled: number; deferred: number }> {
+    if (this.stopped || this.ctx.signal.aborted) {
+      return { recycled: 0, deferred: 0 };
+    }
+    let recycled = 0;
+    let deferred = 0;
+    const stops: Promise<void>[] = [];
+    for (const projectDir of new Set([...this.pool.projects(), ...this.recyclePending])) {
+      const outcome = this.tryRecycle(projectDir);
+      if (outcome === "busy") {
+        deferred += 1;
+        this.recyclePending.add(projectDir);
+        continue;
+      }
+      this.recyclePending.delete(projectDir);
+      if (outcome !== null) {
+        recycled += 1;
+        stops.push(outcome);
+      }
+    }
+    if (recycled > 0 || deferred > 0) {
+      this.ctx.logger.info("opencode servers recycled for a config change", { recycled, deferred });
+    }
+    await Promise.all(stops);
+    return { recycled, deferred };
+  }
+
+  /** Every scheduled recycle re-check, and the stop it started, settled. The test drain. */
+  async recycleSettled(): Promise<void> {
+    while (this.recycleWork.size > 0) {
+      await Promise.all([...this.recycleWork]);
+    }
+  }
+
+  /**
+   * Recycle this project's server if nothing runs on it — synchronously, so no
+   * turn can be admitted between the check and the let-go. The stop it starts,
+   * `"busy"` when something runs, null when no server runs for the project.
+   */
+  private tryRecycle(projectDir: string): Promise<void> | "busy" | null {
+    if (this.pool.isStarting(projectDir)) {
+      // It may have read the config before the write: recycle it once it is up and idle.
+      return "busy";
+    }
+    if (!this.pool.isWarm(projectDir)) {
+      return null;
+    }
+    const onServer = [...this.sessions].filter(
+      ([threadId]) => this.servers.get(threadId)?.projectDir === projectDir
+    );
+    const threadIds = new Set(onServer.map(([threadId]) => threadId));
+    if (
+      // A reference no idle session accounts for: a probe, or a session starting.
+      this.pool.refCount(projectDir) !== onServer.length ||
+      onServer.some(([, session]) => !session.isIdleForRecycle()) ||
+      // The host has not taken the thread's latest events yet (a turn's end).
+      this.queue.some((event) => threadIds.has(event.threadId))
+    ) {
+      return "busy";
+    }
+    const url = this.pool.list().find((server) => server.projectDir === projectDir)?.url;
+    for (const [threadId, session] of onServer) {
+      const input = this.startInputs.get(threadId);
+      if (!session.detachForRecycle()) {
+        // Cannot happen after the check above; never stop a server under a live session.
+        return "busy";
+      }
+      if (input !== undefined) {
+        this.recycled.set(threadId, { ...input, resumeCursor: session.resumeCursor });
+      }
+    }
+    if (url !== undefined) {
+      this.contextLimits.delete(url);
+    }
+    return this.pool.recycle(projectDir) ?? "busy";
+  }
+
+  /** Re-check a deferred recycle once the current burst of work has run (never a timer). */
+  private scheduleRecycleCheck(projectDir: string | undefined): void {
+    if (
+      projectDir === undefined ||
+      this.stopped ||
+      !this.recyclePending.has(projectDir) ||
+      this.recycleScheduled.has(projectDir)
+    ) {
+      return;
+    }
+    this.recycleScheduled.add(projectDir);
+    const work = new Promise<void>((resolve) => setImmediate(resolve))
+      .then(async () => {
+        this.recycleScheduled.delete(projectDir);
+        if (this.stopped || !this.recyclePending.has(projectDir)) {
+          return;
+        }
+        const outcome = this.tryRecycle(projectDir);
+        if (outcome === "busy") {
+          return;
+        }
+        this.recyclePending.delete(projectDir);
+        if (outcome !== null) {
+          this.ctx.logger.info("opencode server recycled once idle", { projectDir });
+          await outcome;
+        }
+      })
+      .catch((error: unknown) => {
+        this.ctx.logger.warn("opencode deferred server recycle failed", {
+          projectDir,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      });
+    this.recycleWork.add(work);
+    void work.then(() => {
+      this.recycleWork.delete(work);
+    });
   }
 
   // -- binary --------------------------------------------------------------
@@ -534,6 +698,9 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       // so a resume cursor is never advanced by two processes.
       await live.stop({ reason: "restarted", hostInitiated: true });
     }
+    // A thread a server recycle let go of comes back through here like any
+    // other start: the host hands in the binding's cursor.
+    this.recycled.delete(input.threadId);
 
     const start = this.doStartSession(input).finally(() => {
       this.starting.delete(input.threadId);
@@ -572,6 +739,7 @@ class OpenCodeAdapterImpl implements AgentAdapter {
           onClosed: (threadId) => {
             this.sessions.delete(threadId);
             this.servers.delete(threadId);
+            this.startInputs.delete(threadId);
           }
         },
         {
@@ -586,6 +754,7 @@ class OpenCodeAdapterImpl implements AgentAdapter {
         }
       );
       this.sessions.set(input.threadId, session);
+      this.startInputs.set(input.threadId, input);
       // §4.6.4: the per-cwd catalogue refresh is forked so it never delays the
       // turn that follows.
       void this.refreshSnapshot({ cwd }).catch(() => undefined);
@@ -637,7 +806,16 @@ class OpenCodeAdapterImpl implements AgentAdapter {
    * session is indistinguishable from a fresh one.
    */
   async sendTurn(input: SendTurnInput): Promise<SendTurnResult> {
-    const session = this.sessions.get(input.threadId);
+    let session = this.sessions.get(input.threadId);
+    const recycled = this.recycled.get(input.threadId);
+    if (session === undefined && recycled !== undefined) {
+      // Backstop for agent profile §4.8: the host's `ensureSession` restarts a
+      // thread a recycle let go of, and nothing it awaits sits between that
+      // and this call — but should a turn ever arrive first, it brings the
+      // session back from where the recycle left it rather than failing.
+      await this.startSession(recycled);
+      session = this.sessions.get(input.threadId);
+    }
     if (session === undefined) {
       throw new Error(
         `OpenCode has no live session for thread ${input.threadId}; start one first.`
@@ -648,7 +826,21 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       // does not declare `promptlessTurnContinuation`.
       throw new Error("OpenCode does not support a continuation turn with no prompt.");
     }
-    return await session.sendTurn(input);
+    try {
+      return await session.sendTurn(input);
+    } finally {
+      this.noteSettled(input.threadId);
+    }
+  }
+
+  /**
+   * An operation that held the session's prompt lock ended: a recycle
+   * deferred behind it may go now (the lock's release emits no event).
+   */
+  private noteSettled(threadId: string): void {
+    if (this.recyclePending.size > 0) {
+      this.scheduleRecycleCheck(this.servers.get(threadId)?.projectDir);
+    }
   }
 
   async interruptTurn(threadId: string, turnId?: string): Promise<void> {
@@ -674,7 +866,11 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   }
 
   async compact(threadId: string): Promise<void> {
-    await this.require(threadId).compact();
+    try {
+      await this.require(threadId).compact();
+    } finally {
+      this.noteSettled(threadId);
+    }
   }
 
   async readThread(threadId: string): Promise<ThreadSnapshot> {
@@ -715,14 +911,22 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     if (!Number.isInteger(numTurns) || numTurns <= 0) {
       throw new Error("OpenCode rollback needs a positive number of turns.");
     }
-    return await session.rollbackThread(numTurns, target);
+    try {
+      return await session.rollbackThread(numTurns, target);
+    } finally {
+      this.noteSettled(threadId);
+    }
   }
 
   async stopSession(threadId: string): Promise<void> {
+    // A thread a recycle let go of has no session to stop; forget how to bring it back.
+    this.recycled.delete(threadId);
     await this.sessions.get(threadId)?.stop({ reason: "stopped by host", hostInitiated: true });
   }
 
   async stopAll(): Promise<void> {
+    this.recyclePending.clear();
+    this.recycled.clear();
     const sessions = [...this.sessions.values()];
     await Promise.all(
       sessions.map(async (session) =>

@@ -101,6 +101,32 @@ test("a healthy peer is adopted, and the URL comes off stdout", async () => {
   }
 });
 
+test("recycle (agent profile §4.8) stops only an unheld server, and the next start waits for the old child to be gone", async () => {
+  const peer = makePeer();
+  const controller = new AbortController();
+  const pool = makePool(peer, { MOCK_MODE: "ok" }, controller);
+  try {
+    const first = await pool.acquire(peer.dir);
+    assert.equal(pool.recycle(peer.dir), null, "a held server is never recycled");
+    assert.equal(first.hasExited(), false);
+    first.release();
+
+    const stopped = pool.recycle(peer.dir);
+    assert.ok(stopped !== null, "an unheld server is stopped now, idle timer or not");
+    assert.equal(pool.isWarm(peer.dir), false, "and is never handed out again");
+    const second = await pool.acquire(peer.dir);
+    assert.equal(first.hasExited(), true, "the fresh server started only once the old one was gone");
+    assert.notEqual(second.pid, first.pid);
+    await stopped;
+    assert.equal(pool.recycle("/no/such/project"), null, "nothing runs there");
+    second.release();
+  } finally {
+    await pool.stopAll();
+    controller.abort();
+    peer.cleanup();
+  }
+});
+
 test("`/global/health` is reached WITH the credential, as the real server demands", async () => {
   const peer = makePeer();
   const controller = new AbortController();

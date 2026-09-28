@@ -206,7 +206,11 @@ export function buildRuntimeInstructions(model: string): string {
 export interface OpenCodeThreadSessionDeps {
   ctx: AdapterContext;
   emit: (event: RuntimeEvent) => void;
-  /** Called exactly once, after `session.exited` has been emitted. */
+  /**
+   * Called exactly once: after `session.exited` has been emitted, or — for a
+   * server recycle (`detachForRecycle`) — when the idle session is let go of
+   * with no exit at all.
+   */
   onClosed: (threadId: string) => void;
   /**
    * The wait between two attempts: the event stream's reconnect, and every
@@ -581,6 +585,68 @@ export class OpenCodeThreadSession {
   /** Whether any subagent is still live — §6.4's `backgroundLiveness` input. */
   hasLiveSubagents(): boolean {
     return hasLiveChildAgents(this.state);
+  }
+
+  /**
+   * Agent profile §4.8: nothing runs on this thread — no turn, no prompt or
+   * compaction or rollback in progress, no run the server says is busy, no
+   * interrupt ending, no request waiting on the user, no live subagent (a
+   * background `task` can wake the parent later, which needs the stream).
+   * Only such a session may be let go of by a server recycle.
+   */
+  isIdleForRecycle(): boolean {
+    const state = this.state;
+    return (
+      !this.closed &&
+      !this.promptLock.busy &&
+      state.activeTurnId === undefined &&
+      !state.parentBusy &&
+      !state.hostCompacting &&
+      !state.interrupting &&
+      state.failedStopTurnId === undefined &&
+      state.promptAdmission === undefined &&
+      state.pendingIdleReconciliation === undefined &&
+      state.cancellation === undefined &&
+      state.pendingPermissions.size === 0 &&
+      state.pendingQuestions.size === 0 &&
+      state.heldRequestIds.size === 0 &&
+      state.requestRelationRetries.size === 0 &&
+      this.interruptFlights.size === 0 &&
+      this.descendantAborts.size === 0 &&
+      !this.hasLiveSubagents()
+    );
+  }
+
+  /**
+   * Agent profile §4.8: let go of an IDLE session so its project's server can
+   * be recycled — the event stream closed, the server reference dropped, the
+   * adapter told (`onClosed`) — WITHOUT `session.exited`.
+   *
+   * Deliberately silent: an exit would be ingested as `thread.session-set
+   * {status: "stopped"}` on every idle thread of the project, a change the user
+   * did not make, turning each tab to "Send a new message to continue". Nothing
+   * is lost by not saying it: there is no turn, request or task to settle
+   * (that is what idle means), and the resume cursor is untouched — it is the
+   * upstream `ses_…` id, which the next server serves from the same store. The
+   * thread is then exactly where a host restart leaves an idle thread: head
+   * `ready`, no live session, and the next turn's `ensureSession` starts one
+   * from the binding's cursor.
+   *
+   * Refuses (false) unless {@link isIdleForRecycle}.
+   */
+  detachForRecycle(): boolean {
+    if (!this.isIdleForRecycle()) {
+      return false;
+    }
+    this.closed = true;
+    this.state.stopped = true;
+    this.closing = Promise.resolve();
+    this.closed$.resolve();
+    this.cancelIdleReconciliation();
+    this.pumpAbort.abort();
+    this.server.release();
+    this.deps.onClosed(this.state.threadId);
+    return true;
   }
 
   private normalizeContext(): NormalizeContext {
