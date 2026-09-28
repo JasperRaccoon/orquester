@@ -528,13 +528,12 @@ and its default model (the flagged one, else the first) are never shed.
   "/goal resume"` picks it up again.
 - **`stop_session`** — stops the provider process but keeps the tab, its history and its resume
   cursor; the next `send_message` resumes the conversation. A session whose `chat.sessionStatus` is
-  `error` refuses messages and every other command except `revert_session`, so this is how you
-  recover it. The refusal comes in two forms: `send_message` and `implement_plan` answer
-  `SESSION_BUSY` (`… Call stop_session first, then send again.`), while `update_session` (a model,
-  option or permission change), `interrupt_session`, `compact_session`, `answer_question`,
-  `dismiss_question` and `resolve_approval` pass through the host's `COMMAND_REJECTED`
-  (`This thread's session is in an error state. Stop the session or rewind to continue.`). Either
-  way: `stop_session`, then try again. For Grok it also stops the processes the agent's work
+  `error` still takes a message — `send_message` and `implement_plan` restart it from its cursor,
+  as they resume a stopped one — but refuses every other command except `revert_session`:
+  `update_session` (a model, option or permission change), `interrupt_session`, `compact_session`,
+  `answer_question`, `dismiss_question` and `resolve_approval` pass through the host's
+  `COMMAND_REJECTED` (`This thread's session is in an error state. Stop the session or rewind to
+  continue.`). Send a message, or `stop_session`, then try again. For Grok it also stops the processes the agent's work
   started — its background shells and whatever they run (a dev server), which the Grok CLI starts
   outside its own process tree: a deploy, a restart or a crash leaves those running (their task
   rows close saying so), and only the user ending the session (this, or `close_session`) stops them
@@ -635,8 +634,8 @@ read_transcript { "sessionId": "3f2a9c4e-6b1d-4e8a-9f0c-2d7b5e1a8c33", "beforeTu
 - **`send_message`** — needs `text` (at most 120 000 characters after trimming) or at least one
   attachment. It is refused with `PENDING_REQUEST` while a question or an approval is open — the
   message names each one and the tool that answers it, like the GUI's "answer the request above
-  first"; a Codex `/goal` (below) is the one message that goes through, as it does in the GUI —
-  and with `SESSION_BUSY` while the session is in `error` (`stop_session` first).
+  first"; a Codex `/goal` (below) is the one message that goes through, as it does in the GUI. A
+  session in `error` is restarted from its cursor by the message, as the GUI's composer does.
   `planMode: true` needs an agent with the plan toggle (`supports.planMode`); OpenCode's plan agent
   is a model option instead, `update_session {options: {"agent": "plan"}}`. Attachments are
   validated and uploaded first; a refused one fails the call before anything is sent. While a turn
@@ -1490,8 +1489,8 @@ still not for polling loops.
 | `SESSION_NOT_FOUND` | No open tab has that id (closed, or a typo) — `list_sessions`. A wait on one session fails with it as soon as that session closes. So does `revert_session` when the session closes while it waits for the rewind. |
 | `NOT_A_CHAT_SESSION` | The tool needs a chat tab; terminal tabs can only be listed and closed. |
 | `PENDING_REQUEST` | The agent is waiting on a question or an approval; the message names each request and the tool that answers it. |
-| `SESSION_BUSY` | A turn is running (`update_session` without `force`, `revert_session`, an account switch — wait for it, or `interrupt_session`; while a Codex goal continues, an account switch needs the goal paused and its turn over: `interrupt_session` does both), a rewind still running after 10 s (`revert_session`: do not call it again — it has landed once `get_session`'s `chat.turnCount` comes down to `keepTurns`), the session is in `error` (`stop_session`, then send again), or the project already has 24 running sessions (`close_session` some). |
-| `COMMAND_REJECTED` (`… in an error state …`) | The session's `chat.sessionStatus` is `error`, and the host lets only `stop_session` and `revert_session` through (`send_message` and `implement_plan` say `SESSION_BUSY` instead). `stop_session`, then try again. Other `COMMAND_REJECTED` messages are the host's own refusal, passed through — `Rewind failed: …` from `revert_session`, for one. |
+| `SESSION_BUSY` | A turn is running (`update_session` without `force`, `revert_session`, an account switch — wait for it, or `interrupt_session`; while a Codex goal continues, an account switch needs the goal paused and its turn over: `interrupt_session` does both), a rewind still running after 10 s (`revert_session`: do not call it again — it has landed once `get_session`'s `chat.turnCount` comes down to `keepTurns`), or the project already has 24 running sessions (`close_session` some). |
+| `COMMAND_REJECTED` (`… in an error state …`) | The session's `chat.sessionStatus` is `error`, and the host lets only a message (`send_message`, `implement_plan` — it restarts the session), `stop_session` and `revert_session` through. Send a message, or `stop_session`, then try again. Other `COMMAND_REJECTED` messages are the host's own refusal, passed through — `Rewind failed: …` from `revert_session`, for one. |
 | `INVALID_ARGUMENT` naming an agent, model or option | Take the values from `list_agents`. "Still loading … models" means the catalogue is being probed — retry shortly. `<model> takes no options` (Claude's `haiku`) — send it without `options`. A model marked `optionsOmitted` has options: `list_agents {agent, model}`. |
 | `INVALID_ARGUMENT: Invalid arguments for <tool>: …` | An argument failed the tool's schema: a wrong type, a value out of range, an empty string, a missing required field, or an argument name the tool does not have (`Unrecognized key(s)`). The message names each bad field (at most five) and why; `tools/list` describes every parameter. |
 | JSON-RPC error `-32602` (`Tool … not found`) | No tool has that name: a typo, or a client still holding an old tool list (see the stale-guidance row below). |

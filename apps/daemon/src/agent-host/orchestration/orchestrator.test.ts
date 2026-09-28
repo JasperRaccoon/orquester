@@ -1507,10 +1507,8 @@ describe("orchestrator — revert (§5.5)", () => {
 });
 
 describe("orchestrator — error state and session stop (§6.2)", () => {
-  it("refuses every command except session/stop and revert while the session is in error", async () => {
-    const host = createTestHost();
-    const threadId = await host.createThread();
-    await host.orchestrator.ingestionSink(threadId, [
+  const errorSession = (host: ReturnType<typeof createTestHost>, threadId: string) =>
+    host.orchestrator.ingestionSink(threadId, [
       {
         eventId: "err",
         threadId,
@@ -1522,13 +1520,59 @@ describe("orchestrator — error state and session stop (§6.2)", () => {
         metadata: {}
       }
     ]);
+
+  it("refuses every command but a message, session/stop and revert while the session is in error", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await errorSession(host, threadId);
     await assert.rejects(
-      () => host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "hi" }),
+      () => host.orchestrator.command(threadId, "interrupt", { commandId: cmd() }),
       (error: unknown) => isAgentChatCommandError(error) && error.code === "COMMAND_REJECTED"
     );
     const stop = await host.orchestrator.command(threadId, "session/stop", { commandId: cmd() });
     assert.ok(stop.seq > 0);
     await host.settle();
+    await host.stop();
+  });
+
+  it("a message sent into an errored session restarts it and is sent", async () => {
+    // A host restart that could not continue a turn settles the session as
+    // `error` and says "Send a new message to continue": the message must do
+    // exactly that, with no stop first.
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await errorSession(host, threadId);
+    const receipt = await host.orchestrator.command(threadId, "turn", {
+      commandId: cmd(),
+      input: "continue"
+    });
+    await host.settle();
+    assert.ok(receipt.seq > 0);
+    const kinds = host.adapter.calls.filter((call) => call.threadId === threadId).map((call) => call.kind);
+    assert.ok(kinds.includes("startSession"), "the session is started again");
+    assert.equal(kinds.filter((kind) => kind === "sendTurn").length, 1);
+    assert.ok(!kinds.includes("prepareUserEnd"), "a restart is not the user's end");
+    const read = await host.orchestrator.readThread(threadId);
+    assert.equal(read.kind, "snapshot");
+    if (read.kind === "snapshot") assert.notEqual(read.thread.head.session.status, "error");
+    await host.stop();
+  });
+
+  it("a message sent into an errored but still live session stops it before starting again", async () => {
+    const host = createTestHost();
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    assert.equal(host.adapter.hasSession(threadId), true);
+    await errorSession(host, threadId);
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "continue" });
+    await host.settle();
+    const kinds = host.adapter.calls.filter((call) => call.threadId === threadId).map((call) => call.kind);
+    const restart = kinds.slice(kinds.indexOf("sendTurn") + 1);
+    assert.deepEqual(
+      restart.filter((kind) => ["stopSession", "startSession", "sendTurn", "sweepEndedSession"].includes(kind)),
+      ["stopSession", "startSession", "sendTurn"]
+    );
     await host.stop();
   });
 

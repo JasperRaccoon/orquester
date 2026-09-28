@@ -75,14 +75,15 @@ test("send_message without wait returns sent; attachments are uploaded first and
   assert.equal(r.outcome, "sent"); assert.equal(h.api.uploads.length, 1); assert.equal(h.api.uploads[0].meta.type, "image/png");
 });
 
-test("send_message refusals: empty, pending request, error state, plan mode unsupported", async (t) => {
+test("send_message refusals: empty, pending request, plan mode unsupported; an errored session is sent to", async (t) => {
   const h = await harness(); t.after(h.close);
   const run = (a: Record<string, unknown>, ctx = h.ctx) => tool("send_message").run({ planMode: false, wait: false, timeoutMs: 1000, ...a }, ctx);
   await assert.rejects(run({ sessionId: "c1", text: "  " }), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
   const pending = await harness([chatSummary({ hasPendingUserInput: true })], snapshot({ pending: { approvals: [], userInputs: [{ requestId: "q1", createdAt: stamp(1), dismissible: false, questions: [{ id: "x", header: "H", question: "X?", options: [], multiSelect: false, allowCustomAnswer: true }] }] } })); t.after(pending.close);
   await assert.rejects(run({ sessionId: "c1", text: "hi" }, pending.ctx), (e: { code: string; detail: { questions: string[] } }) => e.code === "PENDING_REQUEST" && e.detail.questions[0] === "q1");
   const err = await harness([chatSummary({ chatSessionStatus: "error" })]); t.after(err.close);
-  await assert.rejects(run({ sessionId: "c1", text: "hi" }, err.ctx), (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && /stop_session/.test(e.message));
+  err.api.on("POST", "/api/sessions/c1/turn", { status: 200, body: { seq: 2 } });
+  assert.equal((await run({ sessionId: "c1", text: "hi" }, err.ctx)).outcome, "sent", "an errored session is restarted by the next message");
   const stopped = await harness([chatSummary({ chatSessionStatus: "stopped" })]); t.after(stopped.close);
   stopped.api.on("POST", "/api/sessions/c1/turn", { status: 200, body: { seq: 2 } });
   assert.equal((await run({ sessionId: "c1", text: "hi" }, stopped.ctx)).outcome, "sent", "a stopped session resumes on the next message");
@@ -315,18 +316,16 @@ test("send_message with wait into a running turn: the steered turn's reply and i
   assert.equal(r.outcome, "completed"); assert.equal(r.turnId, "t2"); assert.equal(r.reply, "steered answer");
 });
 
-test("send_message refusals upload nothing; plan mode needs a known capability; an errored session points at stop_session only", async (t) => {
+test("send_message refusals upload nothing; plan mode needs a known capability", async (t) => {
   const png = [{ name: "a.png", base64: Buffer.from("png").toString("base64") }];
   const run = (ctx: ToolContext, a: Record<string, unknown> = {}) => tool("send_message").run({ sessionId: "c1", text: "hi", attachments: png, planMode: false, wait: false, timeoutMs: 1000, ...a }, ctx);
   const pending = await harness([chatSummary({ hasPendingApprovals: true })], snapshot({ pending: { approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(5) }], userInputs: [] } })); t.after(pending.close);
   await assert.rejects(run(pending.ctx), (e: { code: string }) => e.code === "PENDING_REQUEST");
-  const err = await harness([chatSummary({ chatSessionStatus: "error" })]); t.after(err.close);
-  await assert.rejects(run(err.ctx), (e: { code: string; message: string }) => e.code === "SESSION_BUSY" && /stop_session/.test(e.message) && !/revert_session/.test(e.message));
   // The provider list could not be read: get_session reports supports.planMode false, and the gate agrees.
   const blind = await harness(); t.after(blind.close);
   blind.api.on("GET", "/api/agent/providers", { status: 503, body: { error: { code: "HOST_UNAVAILABLE", message: "The agent host is restarting." } } });
   await assert.rejects(run(blind.ctx, { planMode: true }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /plan mode/i.test(e.message));
-  for (const h of [pending, err, blind]) {
+  for (const h of [pending, blind]) {
     assert.equal(h.api.uploads.length, 0, "nothing was uploaded");
     assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was posted");
   }
