@@ -1,0 +1,130 @@
+/**
+ * One save at a time, and what its refusal means: `INVALID_NAME` goes beside
+ * the name field, `ITEM_EXISTS` asks Replace / Keep both and sends the same
+ * request again with that `onConflict`, `PROFILE_CONFLICT` says "Changed on
+ * disk" and offers Reload, anything else is the banner above the Save bar.
+ * A save that lands closes the editor and tells the panel — even if the
+ * editor was closed while it was in flight.
+ */
+
+import React, { useCallback, useEffect, useRef, useState } from "react";
+
+import type { ProfileConflictPolicy, ProfileMutationResponse } from "@orquester/api";
+
+import { useEditorEnv } from "./env";
+import { profileError, profileErrorPlacement, type ProfileErrorInfo, type ProfileErrorPlacement } from "./errors";
+import { Banner, SmallButton } from "./fields";
+
+export type MutationSend = (onConflict?: ProfileConflictPolicy) => Promise<ProfileMutationResponse>;
+
+export interface SubmitState {
+  busy: boolean;
+  error: ProfileErrorInfo | null;
+  placement: ProfileErrorPlacement | null;
+}
+
+export interface ProfileSubmit extends SubmitState {
+  run(send: MutationSend, onConflict?: ProfileConflictPolicy): Promise<void>;
+  /** The Replace / Keep both answer to an `ITEM_EXISTS`. */
+  resolveConflict(policy: Exclude<ProfileConflictPolicy, "fail">): void;
+  clear(): void;
+  /** The name field's refusal, when the daemon's answer was about the name. */
+  nameError: string | undefined;
+}
+
+export function useProfileSubmit(): ProfileSubmit {
+  const env = useEditorEnv();
+  const [state, setState] = useState<SubmitState>({ busy: false, error: null, placement: null });
+  const inFlight = useRef(false);
+  const lastSend = useRef<MutationSend | null>(null);
+  const alive = useRef(true);
+  useEffect(() => {
+    alive.current = true;
+    return () => {
+      alive.current = false;
+    };
+  }, []);
+
+  const run = useCallback(
+    async (send: MutationSend, onConflict?: ProfileConflictPolicy) => {
+      if (inFlight.current) return;
+      inFlight.current = true;
+      lastSend.current = send;
+      setState({ busy: true, error: null, placement: null });
+      try {
+        const response = await send(onConflict);
+        inFlight.current = false;
+        env.finish(response);
+      } catch (error) {
+        inFlight.current = false;
+        if (!alive.current) return;
+        const info = profileError(error);
+        setState({ busy: false, error: info, placement: profileErrorPlacement(info) });
+      }
+    },
+    [env]
+  );
+
+  const resolveConflict = useCallback(
+    (policy: Exclude<ProfileConflictPolicy, "fail">) => {
+      const send = lastSend.current;
+      if (send) void run(send, policy);
+    },
+    [run]
+  );
+
+  const clear = useCallback(() => {
+    setState((current) => (current.error === null ? current : { busy: current.busy, error: null, placement: null }));
+  }, []);
+
+  return {
+    ...state,
+    run,
+    resolveConflict,
+    clear,
+    nameError: state.placement === "name" ? state.error?.message : undefined
+  };
+}
+
+/**
+ * The refusal above the Save bar. `name` refusals are the name field's (not
+ * repeated here); `onReload` is what "Changed on disk" offers.
+ */
+export const SubmitStatus: React.FC<{
+  state: Pick<SubmitState, "error" | "placement">;
+  onResolveConflict?: (policy: "replace" | "keep-both") => void;
+  onDismiss?: () => void;
+  onReload?: () => void;
+}> = ({ state, onResolveConflict, onDismiss, onReload }) => {
+  const { error, placement } = state;
+  if (error === null || placement === "name") return null;
+  if (placement === "exists" && onResolveConflict) {
+    return (
+      <Banner
+        tone="warn"
+        title="It already exists"
+        actions={
+          <>
+            <SmallButton onClick={() => onResolveConflict("replace")}>Replace</SmallButton>
+            <SmallButton onClick={() => onResolveConflict("keep-both")}>Keep both</SmallButton>
+            {onDismiss ? <SmallButton onClick={onDismiss}>Cancel</SmallButton> : null}
+          </>
+        }
+      >
+        {error.message} Replace it, or keep both (the new one gets a suffix)?
+      </Banner>
+    );
+  }
+  if (placement === "changed") {
+    return (
+      <Banner
+        tone="warn"
+        title="Changed on disk"
+        actions={onReload ? <SmallButton onClick={onReload}>Reload (discard my changes)</SmallButton> : undefined}
+      >
+        {error.message}
+      </Banner>
+    );
+  }
+  return <Banner tone="error">{error.message}</Banner>;
+};
