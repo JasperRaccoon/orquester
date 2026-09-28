@@ -1126,9 +1126,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Both are fast; the 3 s backstop in cli.ts bounds them regardless.
     await workflowDaemon.stop().catch((error) => console.error("Workflow engine stop failed", error));
     await Promise.all([workflows.flush(), workflowSecrets.flush(), workflowRuns.flush(), workflowState.flush()]);
-    // Agent profile: its watchers and debounce timers, then each adapter's long-lived helpers.
-    await agentProfile.stop().catch((error) => console.error("Agent profile stop failed", error));
-    await agentProfileImports.stop().catch((error) => console.error("Agent profile imports stop failed", error));
+    // Agent profile: its watchers and debounce timers, each adapter's long-lived helpers (a codex
+    // app-server may take its whole kill grace to exit) and the import trees. Started here, awaited
+    // last: it must not hold up the session and agent-host shutdown below within cli.ts's 3 s backstop.
+    const agentProfileStopped = Promise.all([
+      agentProfile.stop().catch((error) => console.error("Agent profile stop failed", error)),
+      agentProfileImports.stop().catch((error) => console.error("Agent profile imports stop failed", error))
+    ]);
     agentAccounts.stopRefresher();
     gitWatcher.stop();
     // Detach (don't kill) sessions: the tmux backend leaves its server running so
@@ -1143,6 +1147,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     const unixClosed = unixServer.close();
     unixServer.server.closeAllConnections?.();
     await unixClosed.catch(() => undefined);
+    await agentProfileStopped;
   };
 
   console.log(`Orquester daemon ${daemonId} on unix:${paths.socketPath} (workspaces: ${resolved.workspacesDir})`);

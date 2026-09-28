@@ -197,7 +197,8 @@ test("mutations to one agent run one at a time, in order; a failure does not bre
   await rejectsWith(second, 409, "PROFILE_CONFLICT");
   const removed = await third;
   assert.deepEqual(removed.itemIds, ["mcp:a"]);
-  assert.deepEqual(h.adapters.claude.calls, ["create", "snapshot", "setEnabled", "remove", "snapshot"]);
+  // A failed write re-reads the snapshot too (it may have written part of its work).
+  assert.deepEqual(h.adapters.claude.calls, ["create", "snapshot", "setEnabled", "snapshot", "remove", "snapshot"]);
   assert.deepEqual(
     removed.snapshot.items.map((item) => item.id),
     ["mcp:one"],
@@ -391,6 +392,34 @@ test("afterWrite runs after each successful write only, and its failures never f
   assert.deepEqual(seen, ["opencode", "opencode", "opencode"]);
   assert.ok(h.warnings.some((line) => line.includes("recycle threw")));
   assert.ok(h.warnings.some((line) => line.includes("recycle rejected")));
+});
+
+test("a mutation that fails after writing part of its work still announces the change and runs afterWrite", async () => {
+  const seen: AgentProfileAgentId[] = [];
+  const imports: ProfileImports = {
+    scanGit: async () => assert.fail("not scanned"),
+    scanUpload: async () => assert.fail("not scanned"),
+    take: async (_agent, _importId, picks) => ({
+      items: picks.map((name) => ({ kind: "command" as const, name, frontmatter: {}, body: "" })),
+      release: async () => undefined
+    })
+  };
+  const h = harness({ imports, afterWrite: (agent) => void seen.push(agent) });
+  h.adapters.opencode.items = [fakeItem("command", "two")];
+  const baseline = await h.service.snapshot("opencode");
+
+  // "one" lands, then "two" collides: the import fails with the first item already written.
+  await rejectsWith(h.service.createFromImport("opencode", "imp", ["one", "two"]), 409, "ITEM_EXISTS");
+  assert.deepEqual(h.adapters.opencode.items.map((item) => item.id), ["command:two", "command:one"]);
+  const after = await h.service.snapshot("opencode");
+  assert.notEqual(after.revision, baseline.revision);
+  assert.deepEqual(h.events, [{ agent: "opencode", revision: after.revision }], "the partial write is announced");
+  assert.deepEqual(seen, ["opencode"], "OpenCode servers are recycled for the partial write");
+
+  // A failure that wrote nothing announces nothing and recycles nothing.
+  await rejectsWith(h.service.createFromImport("opencode", "imp", ["two"]), 409, "ITEM_EXISTS");
+  assert.equal(h.events.length, 1);
+  assert.deepEqual(seen, ["opencode"]);
 });
 
 // ---------------------------------------------------------------------------

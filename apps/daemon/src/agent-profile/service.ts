@@ -19,7 +19,8 @@
  * - **Every mutation answers the fresh snapshot** read inside the same queue
  *   slot, right after the write (a copy answers the TARGET's), then emits
  *   `changed` if the snapshot revision moved and calls `afterWrite(agent)`
- *   fire-and-forget.
+ *   fire-and-forget. A mutation that fails re-reads the snapshot too (it may
+ *   have written part of its work) and calls `afterWrite` when it moved.
  * - **`changed` is deduped per agent**: it is emitted only when the snapshot
  *   revision differs from the last one noted, whether a mutation, a read or
  *   the file watcher computed it. Revisions computed out of order (a slow read
@@ -512,11 +513,36 @@ export class AgentProfileService {
   ): Promise<ProfileMutationResponse> {
     const adapter = this.installedAdapter(agent);
     return this.enqueue(agent, async () => {
-      const result = await run(adapter);
+      const before = this.revisions.get(agent)?.revision;
+      let result: AdapterMutationResult;
+      try {
+        result = await run(adapter);
+      } catch (error) {
+        await this.settleFailedMutation(agent, before);
+        throw error;
+      }
       this.notifyAfterWrite(agent);
       const snapshot = await this.readSnapshot(agent, "mutation");
       return { snapshot, itemIds: [...result.itemIds], notes: [...result.notes] };
     });
+  }
+
+  /**
+   * A mutation that failed may still have written part of its work (the first
+   * items of a multi-item import, a hook written before its trust state): the
+   * snapshot is re-read in the same queue slot so a moved revision is announced,
+   * and `afterWrite` runs when it moved. Never throws: the caller rethrows the
+   * mutation's own error.
+   */
+  private async settleFailedMutation(agent: AgentProfileAgentId, before: string | undefined): Promise<void> {
+    try {
+      const snapshot = await this.readSnapshot(agent, "mutation");
+      if (before !== undefined && snapshot.revision !== before) {
+        this.notifyAfterWrite(agent);
+      }
+    } catch (error) {
+      this.logger.warn(`agent profile: re-reading ${AGENT_PROFILE_AGENT_LABELS[agent]} after a failed change failed: ${describe(error)}`);
+    }
   }
 
   private notifyAfterWrite(agent: AgentProfileAgentId): void {
