@@ -119,6 +119,8 @@ import { registerWorkflowRoutes } from "./workflows/routes.ts";
 import { AgentProfileService, publishAgentProfileEvents } from "./agent-profile/service.ts";
 import { registerAgentProfileRoutes } from "./agent-profile/routes.ts";
 import { createAgentProfileAdapters } from "./agent-profile/adapters/index.ts";
+import { createProfileConverter } from "./agent-profile/convert.ts";
+import { ProfileImportStore } from "./agent-profile/import.ts";
 import { resolveAgentHomes } from "./agent-profile/homes.ts";
 import type { ValidationCatalog } from "./workflows/agent/validation-catalog.ts";
 import { consoleWorkflowLogger, createWorkflowDaemon } from "./workflows/daemon-wiring.ts";
@@ -889,7 +891,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // writes hook trust for every managed home). Its watchers are armed once the transports serve
   // (`agentProfile.start()` below) and closed in `stop()`; changes go out on "agent-profile".
   const agentProfileHomes = resolveAgentHomes(env, resolved.vars.userhome);
-  const agentProfile = new AgentProfileService({
+  // Git and upload imports (spec §6); `existing` marks the candidates the agent already has.
+  const agentProfileImports: ProfileImportStore = new ProfileImportStore({
+    dir: agentProfileImportsDir(paths.baseDir),
+    existing: async (agent): Promise<Set<string>> => {
+      const snapshot = await agentProfile.snapshot(agent);
+      return new Set(snapshot.items.map((item) => `${item.kind}:${item.name}`));
+    },
+    logger: { info: (message) => console.log(message), warn: (message) => console.warn(message) }
+  });
+  const agentProfile: AgentProfileService = new AgentProfileService({
     adapters: createAgentProfileAdapters({
       homes: agentProfileHomes,
       appdir: paths.baseDir,
@@ -912,6 +923,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       return installed && entry?.version ? { installed, version: entry.version } : { installed };
     },
     homes: agentProfileHomes,
+    converter: createProfileConverter({ tempRoot: agentProfileImportsDir(paths.baseDir) }),
+    imports: agentProfileImports,
+    // `opencode serve` caches its global config for its whole life: after an OpenCode write the
+    // host recycles its idle servers so the next turn reads the new config (spec §4.8).
+    afterWrite: (agent) => (agent === "opencode" ? agentChat.recycleIdleOpenCodeServers() : undefined),
     logger: console
   });
   publishAgentProfileEvents(agentProfile, broadcaster);
@@ -1112,6 +1128,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     await Promise.all([workflows.flush(), workflowSecrets.flush(), workflowRuns.flush(), workflowState.flush()]);
     // Agent profile: its watchers and debounce timers, then each adapter's long-lived helpers.
     await agentProfile.stop().catch((error) => console.error("Agent profile stop failed", error));
+    await agentProfileImports.stop().catch((error) => console.error("Agent profile imports stop failed", error));
     agentAccounts.stopRefresher();
     gitWatcher.stop();
     // Detach (don't kill) sessions: the tmux backend leaves its server running so

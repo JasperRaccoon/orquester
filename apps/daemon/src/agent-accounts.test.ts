@@ -500,6 +500,18 @@ test("Codex: skills/ merges user skills, drops the account's bundled .system whe
   assert.deepEqual((await readdir(shared)).sort(), [".system", "dup", `dup-${f.id8}`, "mine"].sort());
 });
 
+test("Codex: AGENTS.md is shared — linked even before it exists, and an account's own copy moves across", async () => {
+  const f = await linkingFixture("codex");
+  await writeFile(join(f.home, "AGENTS.md"), "account rules");
+  await f.launch();
+  assert.equal(await readlink(join(f.home, "AGENTS.md")), join(f.system, "AGENTS.md"));
+  assert.equal(await readFile(join(f.system, "AGENTS.md"), "utf8"), "account rules");
+
+  const g = await linkingFixture("codex");
+  await g.launch();
+  assert.equal(await readlink(join(g.home, "AGENTS.md")), join(g.system, "AGENTS.md"), "dangling until the owner writes it");
+});
+
 test("Codex: the account's .system moves across when the shared skills/ has none; an absent shared dir is created", async () => {
   const f = await linkingFixture("codex");
   await mkdir(join(f.home, "skills", ".system", "imagegen"), { recursive: true });

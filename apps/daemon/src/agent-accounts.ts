@@ -305,6 +305,8 @@ export class AgentAccountsService {
       await this.ensureSharedConfigDirSymlink(join(this.systemCodexHome(), "skills"), join(home, "skills"), accountId, {
         bundledDir: ".system"
       });
+      // …and the global instruction file, which Codex reads from `$CODEX_HOME/AGENTS.md`.
+      await this.ensureSharedUserFileSymlink(join(this.systemCodexHome(), "AGENTS.md"), join(home, "AGENTS.md"), accountId);
     }
   }
 
