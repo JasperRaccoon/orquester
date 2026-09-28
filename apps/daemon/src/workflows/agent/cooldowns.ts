@@ -14,6 +14,8 @@ import { cooldownKey } from "./families.ts";
 export const MAX_COOLDOWN_MS = 8 * 24 * 60 * 60_000;
 /** No reset known, or an auth failure: try again in an hour. */
 export const DEFAULT_COOLDOWN_MS = 60 * 60_000;
+/** A limit with no known reset that repeats on the same account doubles its cooldown, up to this. */
+export const MAX_ESCALATED_COOLDOWN_MS = 4 * 60 * 60_000;
 
 function isActive(cooldown: AccountCooldown, nowMs: number): boolean {
   const until = Date.parse(cooldown.until);
@@ -48,22 +50,25 @@ export function createCooldownStore(stateStore: WorkflowStateStore, clock: Pick<
  *     `exclude` set, not this);
  *   - usage limit: the provider's `resetsAt` when it is in the future and at most 8 days out; else
  *     the reset of the account's burnt window from the usage snapshot (`burntWindowResetAt`), under
- *     the same bounds; else now + 1 h.
+ *     the same bounds; else now + 1 h — doubled for every earlier cooldown the same block gave the
+ *     same key (`strikes`: 1 h, 2 h, then 4 h at most), so a wait-for-reset on an account that
+ *     never names its reset does not wake every hour to hit the same limit again.
  */
 export function cooldownUntil(input: {
   resetsAt?: string;
   usageResetAt?: string;
   now: Date;
   reason: AccountCooldown["reason"];
+  strikes?: number;
 }): Date {
   const nowMs = input.now.getTime();
-  const fallback = new Date(nowMs + DEFAULT_COOLDOWN_MS);
-  if (input.reason === "auth") return fallback;
+  if (input.reason === "auth") return new Date(nowMs + DEFAULT_COOLDOWN_MS);
   for (const stamp of [input.resetsAt, input.usageResetAt]) {
     const t = stamp ? Date.parse(stamp) : Number.NaN;
     if (Number.isFinite(t) && t > nowMs && t - nowMs <= MAX_COOLDOWN_MS) return new Date(t);
   }
-  return fallback;
+  const strikes = Math.max(0, Math.min(16, Math.floor(input.strikes ?? 0)));
+  return new Date(nowMs + Math.min(DEFAULT_COOLDOWN_MS * 2 ** strikes, MAX_ESCALATED_COOLDOWN_MS));
 }
 
 /** The record `CooldownStore.set` takes. */
@@ -72,6 +77,7 @@ export function buildCooldown(input: {
   usageResetAt?: string;
   now: Date;
   reason: AccountCooldown["reason"];
+  strikes?: number;
   detail?: string;
 }): AccountCooldown {
   return {

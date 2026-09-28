@@ -196,6 +196,33 @@ test("a background agent waking the parent into a provider-started turn is waite
   assert.equal(sc.host.session(out.sessionId).turns.length, 2);
 });
 
+test("a wake that becomes a turn only 20 s after the background work ended is still waited for (a held Claude wake)", async () => {
+  const behaviour = () => [
+    { kind: "say" as const, text: "started a helper" },
+    { kind: "background" as const, steps: [{ kind: "wait" as const, ms: 10_000 }, { kind: "wake" as const, delayMs: 20_000, steps: [{ kind: "say" as const, text: "helper reported: all green" }] }] }
+  ];
+  const sc = new Scenario({ accounts: CLAUDE, behaviour });
+  const out = outputOf((await sc.run(testWorkflow([agentNode("n1")]), "n1")).result);
+  assert.equal(out.text, "helper reported: all green", "the woken reply, not the launch message");
+  assert.equal(sc.host.session(out.sessionId).turns.length, 2);
+
+  // The old 5 s window alone finished on the launch message: the regression this guards.
+  const old = new Scenario({ accounts: CLAUDE, behaviour, timings: { wakeQuietMs: 5_000 } });
+  assert.equal(outputOf((await old.run(testWorkflow([agentNode("n1")]), "n1")).result).text, "started a helper");
+});
+
+test("background work that ended with no wake finishes after the 90 s wake window", async () => {
+  const sc = new Scenario({
+    accounts: CLAUDE,
+    behaviour: () => [{ kind: "say", text: "spawned" }, { kind: "background", steps: [{ kind: "wait", ms: 10_000 }] }]
+  });
+  const start = sc.clock.now().getTime();
+  const out = outputOf((await sc.run(testWorkflow([agentNode("n1")]), "n1")).result);
+  assert.equal(out.text, "spawned");
+  const took = sc.clock.now().getTime() - start;
+  assert.ok(took >= 100_000 && took < 130_000, `took ${took}`);
+});
+
 test("a quiet window catches a wake that comes right after the turn settles", async () => {
   const sc = new Scenario({
     accounts: CLAUDE,

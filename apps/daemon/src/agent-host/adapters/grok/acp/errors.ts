@@ -161,9 +161,14 @@ export function classifyAcpError(
 }
 
 /**
- * The account failure an RPC error names (workflows §5.4), by its CODE alone
- * — never by its message: T3's typed rate-limit code is a usage limit, ACP's
- * authentication-required code a refused login. Anything else names none.
+ * The account failure an RPC error names (workflows §5.4). By its CODE first — T3's typed
+ * rate-limit code is a usage limit, ACP's authentication-required code a refused login — and,
+ * since CLI 1.0.34 produces neither code in any capture, by the CLI's own wording of a refused
+ * login or an exhausted quota on the error's message or data ({@link grokAuthFailureText},
+ * {@link grokUsageLimitText}). Only an RPC error is read this way — the answer to OUR request
+ * (`session/prompt`, `session/new`), never stderr, where a failing MCP server prints its own
+ * `AuthRequired` / 401 lines (fixtures README observations 30, 46) that say nothing about the
+ * account. Anything else names none.
  */
 export function acpFailureReason(error: unknown): "usage_limit" | "auth" | undefined {
   if (!(error instanceof AcpRpcError)) {
@@ -174,9 +179,46 @@ export function acpFailureReason(error: unknown): "usage_limit" | "auth" | undef
       return "usage_limit";
     case ACP_ERROR_CODES.authRequired:
       return "auth";
-    default:
+    default: {
+      const text = `${error.wireMessage} ${dataText(error.data)}`;
+      if (grokAuthFailureText(text)) return "auth";
+      if (grokUsageLimitText(text)) return "usage_limit";
       return undefined;
+    }
   }
+}
+
+/**
+ * The Grok CLI's words for a login it cannot use. Not captured (a refused login could not be
+ * recorded without logging the account out — fixtures README "Error shapes"); what IS known is the
+ * CLI's own vocabulary: `grok models` prints "You are not authenticated." with no login (fixture
+ * `12-cli-text/`, observation 2), the probe's advice is `grok login`, the binary names the
+ * `authentication_failed` stop reason (observation 50), and the xAI OAuth server answers a revoked
+ * or expired refresh with `invalid_grant`.
+ */
+export function grokAuthFailureText(text: string): boolean {
+  return (
+    /\bnot (?:authenticated|logged[ -]?in|signed[ -]?in)\b/i.test(text) ||
+    /\bauthentication[ _-]?(?:failed|required|error)\b/i.test(text) ||
+    /\bunauthori[sz]ed\b/i.test(text) ||
+    /\binvalid_grant\b/i.test(text) ||
+    /\b(?:access|refresh|oauth|auth) token (?:has )?(?:expired|been revoked|is (?:invalid|expired|revoked))\b/i.test(text) ||
+    /\brun [`'"]?grok login\b/i.test(text)
+  );
+}
+
+/**
+ * The words of an exhausted quota on an RPC error: xAI's `…-usage-exhausted` 429 (the model
+ * proxy's accepted risk, AGENTS.md), a bare 429 / "too many requests", or a rate / usage limit.
+ */
+export function grokUsageLimitText(text: string): boolean {
+  return (
+    /usage[-_ ]exhausted/i.test(text) ||
+    /\b429\b/.test(text) ||
+    /\btoo many requests\b/i.test(text) ||
+    /\b(?:rate|usage)[-_ ]limit(?:ed| reached| exceeded)?\b/i.test(text) ||
+    /\bquota (?:exceeded|exhausted)\b/i.test(text)
+  );
 }
 
 function dataText(data: unknown): string {

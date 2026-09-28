@@ -77,7 +77,7 @@ import {
   type FailoverDeps,
   type FailoverMemory
 } from "./failover.ts";
-import { cooldownFamilyOf, defaultUsesAccount, type UsesAccount } from "./families.ts";
+import { cooldownSubject, defaultUsesAccount, type UsesAccount } from "./families.ts";
 import {
   buildHandoffPrompt,
   clipUtf8,
@@ -87,6 +87,7 @@ import {
   renderVariables,
   withAutonomyNote
 } from "./prompt.ts";
+import { protectSecrets, revealSecrets } from "./secret-text.ts";
 import { describeSkips } from "./select.ts";
 import { autonomousAnswers, autonomousDecision, DEFAULT_WATCH_TIMINGS, observe, waitForIdle, watchAgent, type WatchTimings } from "./watch.ts";
 
@@ -169,9 +170,13 @@ export interface AgentBlockState {
   startedAt: string;
   /** Wall clock: `maxMinutes` from the start, pushed out by every wait for a reset. */
   deadlineAt: string;
-  /** The prompt after `{{…}}` (before `{variables}`). */
+  /**
+   * The prompt after `{{…}}` (before `{variables}`). Like `prompt`, `pendingInput` and
+   * `commandBody.input`, it never holds a secret's value: each is kept with the secret's marker
+   * (`protectSecrets`) and revealed only in the body POSTed (§5.7 — this state lands in `run.json`).
+   */
   template?: string;
-  /** The original rendered prompt, without the autonomy note. */
+  /** The original rendered prompt, without the autonomy note (secrets as markers). */
   prompt?: string;
   warnings: string[];
   /** The chain failover walks: the block's own, or — continuing a session — the creating block's. */
@@ -404,10 +409,10 @@ class AgentBlockRun {
         ...labels
       });
       if (!vars.ok) return this.fail("expression", `The prompt's variables could not be rendered: ${vars.message}`);
-      this.st.prompt = vars.text;
+      this.st.prompt = this.protect(vars.text);
     }
     this.st.next = c;
-    this.st.pendingInput = withAutonomyNote(this.st.prompt, this.config.autonomyNote);
+    this.st.pendingInput = this.protect(withAutonomyNote(this.st.prompt, this.config.autonomyNote));
     this.st.hopVia = "initial";
     this.st.creatingSince = this.now().toISOString();
     this.st.phase = "creating";
@@ -439,6 +444,7 @@ class AgentBlockRun {
       chainIndex = 0;
     }
     const label = this.deps.accounts.list().accounts.find((a) => a.id === accountId)?.label;
+    const subject = cooldownSubject(agent, model, accountId, this.usesAccount);
     const current: AgentCandidate = {
       chainIndex,
       agent,
@@ -446,7 +452,8 @@ class AgentBlockRun {
       options,
       accountId,
       ...(label ? { accountLabel: label } : accountId === "system" ? { accountLabel: "System" } : {}),
-      family: cooldownFamilyOf(agent, model, this.usesAccount)
+      family: subject.family,
+      cooldownAccount: subject.account
     };
     this.st.chain = chain;
     const refused = this.renderTemplate();
@@ -455,7 +462,7 @@ class AgentBlockRun {
       const labels = await this.catalog.labels(agent, model);
       const vars = await renderVariables(this.st.template!, { prompts: this.deps.prompts, projectPath: this.ctx.project.path, timeZone: this.ctx.workflow.settings.timezone, ...labels });
       if (!vars.ok) return this.fail("expression", `The prompt's variables could not be rendered: ${vars.message}`);
-      this.st.prompt = vars.text;
+      this.st.prompt = this.protect(vars.text);
     }
     this.st.current = current;
     this.st.sessionId = sessionId;
@@ -521,10 +528,11 @@ class AgentBlockRun {
     const obs = await this.readSession(sessionId);
     if (!obs) return this.fail("agent_error", "The agent's session was closed.");
     this.st.baseline = takeBaseline(obs.summary, obs.snapshot, this.now());
-    this.st.pendingInput = input;
+    const kept = this.protect(input);
+    this.st.pendingInput = kept;
     this.st.command = "turn";
     this.st.commandId = this.deps.mintId();
-    this.st.commandBody = { input, interactionMode: "default" };
+    this.st.commandBody = { input: kept, interactionMode: "default" };
     this.st.phase = "sending";
     await this.persist();
     return null;
@@ -789,13 +797,13 @@ class AgentBlockRun {
     } catch (error) {
       this.ctx.log.debug("agent block: git status for the handoff failed", { error: String(error) });
     }
-    this.st.pendingInput = buildHandoffPrompt({
+    this.st.pendingInput = this.protect(buildHandoffPrompt({
       originalPrompt: this.st.prompt ?? "",
       previousAgent: previous.agent,
       previousMessages,
       gitStatus,
       autonomyNote: this.config.autonomyNote
-    });
+    }));
     this.st.creatingSince = this.now().toISOString();
     this.st.phase = "creating";
     await this.persist();
@@ -848,8 +856,8 @@ class AgentBlockRun {
     const source = promptSource(this.config, this.deps.prompts);
     if (!source.ok) return source.message;
     const rendered = renderExpressions(source.template, this.ctx);
-    this.st.template = rendered.text;
-    this.st.warnings.push(...rendered.warnings);
+    this.st.template = this.protect(rendered.text);
+    this.st.warnings.push(...rendered.warnings.map((w) => this.protect(w)));
     if (rendered.warnings.length) this.ctx.update({ warnings: [...this.st.warnings] });
     return null;
   }
@@ -913,7 +921,9 @@ class AgentBlockRun {
   private async post(name: "turn" | "interrupt" | "answer" | "approval" | "account"): Promise<void> {
     const sessionId = this.st.sessionId!;
     const commandId = this.st.commandId!;
-    const body = this.st.commandBody ?? {};
+    const kept = this.st.commandBody ?? {};
+    // The real secret values exist only in the body sent, never in the state kept (`protectSecrets`).
+    const body = typeof kept.input === "string" ? { ...kept, input: revealSecrets(kept.input, this.ctx.secrets) } : kept;
     await this.transient(() => sendCommand(this.api, sessionId, name, body, { commandId, retryDelayMs: () => 0 }).then(() => undefined));
   }
 
@@ -965,6 +975,11 @@ class AgentBlockRun {
       }, Math.max(0, at - this.now().getTime()));
       signal.addEventListener("abort", onAbort, { once: true });
     });
+  }
+
+  /** A text as the state may keep it: every secret value as its marker. */
+  private protect(text: string): string {
+    return protectSecrets(text, this.ctx.secrets);
   }
 
   private async persist(): Promise<void> {

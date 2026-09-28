@@ -59,3 +59,13 @@ test("buildCooldown makes the persisted record", () => {
   });
   assert.deepEqual(buildCooldown({ now: NOW, reason: "auth" }), { until: at(HOUR), reason: "auth", setAt: at(0) });
 });
+
+test("cooldownUntil: a limit with no known reset escalates per strike (1 h, 2 h, 4 h at most); a known reset never does", () => {
+  const base = { now: NOW, reason: "usage_limit" as const };
+  assert.equal(cooldownUntil({ ...base, strikes: 0 }).toISOString(), at(HOUR));
+  assert.equal(cooldownUntil({ ...base, strikes: 1 }).toISOString(), at(2 * HOUR));
+  assert.equal(cooldownUntil({ ...base, strikes: 2 }).toISOString(), at(4 * HOUR));
+  assert.equal(cooldownUntil({ ...base, strikes: 9 }).toISOString(), at(4 * HOUR));
+  assert.equal(cooldownUntil({ ...base, strikes: 5, resetsAt: at(30 * 60_000) }).toISOString(), at(30 * 60_000));
+  assert.equal(cooldownUntil({ now: NOW, reason: "auth", strikes: 5 }).toISOString(), at(HOUR), "auth stays an hour");
+});

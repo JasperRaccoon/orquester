@@ -32,7 +32,7 @@ import {
 import type { AccountCooldown } from "@orquester/config";
 import type { AccountsReader, Clock, CooldownStore, UsageReader } from "../contracts.ts";
 import { buildCooldown } from "./cooldowns.ts";
-import { accountFamilyOf, cooldownFamilyOf, cooldownKey, defaultUsesAccount, type UsesAccount } from "./families.ts";
+import { accountFamilyOf, cooldownKey, cooldownSubject, defaultUsesAccount, isProxyLauncher, type UsesAccount } from "./families.ts";
 import { burntWindowResetAt, formatDuration, selectAccount, type SelectAccountInput } from "./select.ts";
 
 /** The agent/model/account a block runs (or is about to run) on. */
@@ -43,8 +43,14 @@ export interface AgentCandidate {
   options: { id: string; value: string | boolean }[];
   accountId: string;
   accountLabel?: string;
-  /** `cooldownFamilyOf(agent, model)` — the key family of its cooldowns and exclusions. */
+  /** `cooldownSubject(agent, model, accountId).family` — the key family of its cooldowns and exclusions. */
   family: string;
+  /**
+   * `cooldownSubject(...).account` — the key's account part: the account id, "proxy" for a proxy
+   * launcher's own pick, the provider for an accountless launch. Absent on a state persisted before
+   * it existed (the account id then).
+   */
+  cooldownAccount?: string;
 }
 
 export interface FailoverDeps {
@@ -65,10 +71,16 @@ export interface FailoverMemory {
   badChains: number[];
   /** Skips this block recorded itself (catalogue, refused accounts), shown with every selection. */
   extraSkips: AccountSkip[];
+  /**
+   * `<family>:<accountId>` → how often THIS block cooled it down. A limit that names no reset is
+   * cooled 1 h, then 2 h, 4 h … (`buildCooldown`'s `strikes`), so a long wait-for-reset does not
+   * wake hourly to hit the same wall. Absent on a state persisted before it existed.
+   */
+  strikes?: Record<string, number>;
 }
 
 export function emptyMemory(): FailoverMemory {
-  return { tried: {}, unusable: [], badChains: [], extraSkips: [] };
+  return { tried: {}, unusable: [], badChains: [], extraSkips: [], strikes: {} };
 }
 
 /** Keys the next selection must pass over: unusable ones, and tried ones still cooling down. */
@@ -83,6 +95,7 @@ export function excludedKeys(memory: FailoverMemory, now: Date): Set<string> {
 }
 
 export function candidateFromChoice(choice: NonNullable<AccountSelectionDecision["chosen"]>, usesAccount: UsesAccount = defaultUsesAccount): AgentCandidate {
+  const subject = cooldownSubject(choice.agent, choice.model, choice.accountId, usesAccount);
   return {
     chainIndex: choice.chainIndex,
     agent: choice.agent,
@@ -90,12 +103,13 @@ export function candidateFromChoice(choice: NonNullable<AccountSelectionDecision
     options: choice.options ?? [],
     accountId: choice.accountId,
     ...(choice.accountLabel ? { accountLabel: choice.accountLabel } : {}),
-    family: cooldownFamilyOf(choice.agent, choice.model, usesAccount)
+    family: subject.family,
+    cooldownAccount: subject.account
   };
 }
 
-export function candidateKey(candidate: Pick<AgentCandidate, "family" | "accountId">): string {
-  return cooldownKey(candidate.family, candidate.accountId);
+export function candidateKey(candidate: Pick<AgentCandidate, "family" | "accountId" | "cooldownAccount">): string {
+  return cooldownKey(candidate.family, candidate.cooldownAccount ?? candidate.accountId);
 }
 
 /** Does this candidate run under a managed account (so an in-session switch means anything)? */
@@ -111,22 +125,32 @@ export async function coolDown(
   failure: { reason: AccountCooldown["reason"]; resetsAt?: string; message?: string }
 ): Promise<AccountCooldown> {
   const now = deps.clock.now();
-  const usageFamily = accountFamilyOf(candidate.agent) ?? candidate.agent;
+  // The usage snapshot describes managed accounts and a family's system login only: an accountless
+  // launch (OpenCode, a claudex router / xAI model) and a proxy launcher's own pick have no row of
+  // their own — reading the family's system row there would cool them by another quota's reset.
+  const accountFamily = accountFamilyOf(candidate.agent);
+  const hasUsageRow =
+    accountFamily !== null &&
+    isAccountful(candidate, deps.usesAccount) &&
+    !(isProxyLauncher(candidate.agent) && candidate.accountId === SYSTEM_ACCOUNT_ID);
   const usageResetAt =
-    failure.reason === "usage_limit"
-      ? burntWindowResetAt({ usage: deps.usage.snapshot(), family: usageFamily, accountId: candidate.accountId, now })
+    failure.reason === "usage_limit" && hasUsageRow
+      ? burntWindowResetAt({ usage: deps.usage.snapshot(), family: accountFamily, accountId: candidate.accountId, now })
       : undefined;
+  const key = candidateKey(candidate);
+  const strikes = memory.strikes?.[key] ?? 0;
   const cooldown = buildCooldown({
     ...(failure.resetsAt ? { resetsAt: failure.resetsAt } : {}),
     ...(usageResetAt ? { usageResetAt } : {}),
     now,
     reason: failure.reason,
+    strikes,
     ...(failure.message ? { detail: failure.message.slice(0, 500) } : {})
   });
-  const key = candidateKey(candidate);
   memory.tried[key] = cooldown.until;
+  memory.strikes = { ...(memory.strikes ?? {}), [key]: strikes + 1 };
   if (failure.reason === "auth" && !memory.unusable.includes(key)) memory.unusable.push(key);
-  await deps.cooldowns.set(candidate.family, candidate.accountId, cooldown);
+  await deps.cooldowns.set(candidate.family, candidate.cooldownAccount ?? candidate.accountId, cooldown);
   return cooldown;
 }
 
@@ -221,9 +245,18 @@ export async function pickCandidate(
   };
 }
 
-/** The hop cap (§5.4): a block runs on at most this many hops, the initial one included. */
+/**
+ * The hop cap (§5.4): a block runs on at most this many hops, the initial one included. A hop that
+ * RESUMES after a wait for a reset (`via: "resumed"`) is not counted: it is the same work going on
+ * once the quota refilled, and `whenAllBurnt: "wait-for-reset"` bounds those by `maxWaitHours`
+ * already — counted, a 48 h wait with hourly unknown-reset cooldowns ran out of hops after 12.
+ */
+export function countedHops(hops: readonly AgentHop[]): number {
+  return hops.filter((hop) => hop.via !== "resumed").length;
+}
+
 export function hopCapReached(hops: readonly AgentHop[]): boolean {
-  return hops.length >= WORKFLOW_LIMITS.maxAgentHops;
+  return countedHops(hops) >= WORKFLOW_LIMITS.maxAgentHops;
 }
 
 /**

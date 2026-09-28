@@ -320,7 +320,7 @@ test("nothing eligible anywhere: chosen null and the earliest instant a candidat
   const decision = selectAccount(
     input({
       chain: [entry("claude", "m", { maxWeeklyPct: 0 }), entry("opencode", "anthropic/claude-sonnet")],
-      cooldowns: { "claude:a-eduard": cooldown(20 * HOUR), "opencode:system": cooldown(30 * HOUR) }
+      cooldowns: { "claude:a-eduard": cooldown(20 * HOUR), "opencode:provider:anthropic": cooldown(30 * HOUR) }
     })
   );
   assert.equal(decision.chosen, null);
@@ -350,10 +350,10 @@ test("opencode has no accounts: one system candidate, only its cooldown applies"
   assert.equal(decision.chosen?.accountLabel, "System");
   assert.equal(decision.reason, "opencode: has no managed accounts — runs on the system login");
   assert.deepEqual(decision.skipped, []);
-  const cooled = selectAccount(input({ chain: [entry("opencode", "m")], cooldowns: { "opencode:system": cooldown(HOUR) } }));
+  const cooled = selectAccount(input({ chain: [entry("opencode", "m")], cooldowns: { "opencode:model:m": cooldown(HOUR) } }));
   assert.equal(cooled.chosen, null);
   assert.equal(cooled.earliestResetAt, at(HOUR));
-  const tried = selectAccount(input({ chain: [entry("opencode", "m")], exclude: new Set(["opencode:system"]) }));
+  const tried = selectAccount(input({ chain: [entry("opencode", "m")], exclude: new Set(["opencode:model:m"]) }));
   assert.equal(tried.chosen, null);
   assert.equal(tried.skipped[0]!.why, "unavailable");
 });
@@ -378,13 +378,13 @@ test("claudex/claudemix: only seeded accounts; router and xAI models run without
   );
   assert.equal(xai.chosen?.accountId, "system");
   assert.equal(xai.reason, "claudex: serves grok-4.5 without an account — runs on the system login");
-  // A router model, through the injected predicate; its cooldown is keyed on the launcher.
+  // A router model, through the injected predicate; its cooldown is keyed on its router provider.
   const providers = [{ id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", preset: "openrouter", models: [{ name: "moonshotai/kimi-k3", alias: "kimi-k3" }], keyVerifiedAt: null, createdAt: at(-DAY) }] as RouterProvider[];
   const usesAccount = createUsesAccount(() => providers);
   const router = selectAccount(input({ usage, accounts, seededAccountIds, usesAccount, chain: [entry("claudex", "kimi-k3")] }));
   assert.equal(router.chosen?.accountId, "system");
   const routerCooled = selectAccount(
-    input({ usage, accounts, seededAccountIds, usesAccount, cooldowns: { "claudex:system": cooldown(HOUR) }, chain: [entry("claudex", "kimi-k3")] })
+    input({ usage, accounts, seededAccountIds, usesAccount, cooldowns: { "claudex:router:openrouter": cooldown(HOUR) }, chain: [entry("claudex", "kimi-k3")] })
   );
   assert.equal(routerCooled.chosen, null);
 
@@ -457,4 +457,31 @@ test("formatDuration", () => {
   assert.equal(formatDuration(12 * MIN + 30_000), "12m");
   assert.equal(formatDuration(10_000), "<1m");
   assert.equal(formatDuration(-5), "<1m");
+});
+
+test("accountless cooldowns are per provider: one provider's limit never cools another's entries", () => {
+  const providers = [
+    { id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", preset: "openrouter", models: [{ name: "moonshotai/kimi-k3", alias: "kimi-k3" }], keyVerifiedAt: null, createdAt: at(-DAY) },
+    { id: "tokenrouter", label: "TokenRouter", baseUrl: "https://tokenrouter.example/v1", preset: "tokenrouter", models: [{ name: "deepseek-v4" }], keyVerifiedAt: null, createdAt: at(-DAY) }
+  ] as RouterProvider[];
+  const usesAccount = createUsesAccount(() => providers);
+  const chain = [
+    entry("opencode", "anthropic/claude-sonnet"),
+    entry("opencode", "openai/gpt-5"),
+    entry("claudex", "kimi-k3"),
+    entry("claudex", "deepseek-v4"),
+    entry("claudex", "grok-4.5"),
+    entry("claudex", "gpt-5.5", { includeSystem: true, accounts: ["system"] }),
+    entry("codex", "gpt-5.5", { includeSystem: true })
+  ];
+  const cooldowns = { "opencode:provider:anthropic": cooldown(HOUR), "claudex:router:openrouter": cooldown(HOUR), "claudex:xai": cooldown(HOUR), "claudex:proxy": cooldown(HOUR) };
+  const chosenAt = (index: number): number | undefined =>
+    selectAccount(input({ usesAccount, cooldowns, chain, onlyChainIndex: index, accounts: accountsOf(), seededAccountIds: new Set() })).chosen?.chainIndex;
+  assert.equal(chosenAt(0), undefined, "anthropic is cooling");
+  assert.equal(chosenAt(1), 1, "openai is another provider");
+  assert.equal(chosenAt(2), undefined, "openrouter is cooling");
+  assert.equal(chosenAt(3), 3, "tokenrouter is another provider");
+  assert.equal(chosenAt(4), undefined, "xai is cooling");
+  assert.equal(chosenAt(5), undefined, "the proxy's own pick is cooling");
+  assert.equal(chosenAt(6), 6, "the proxy's pick is not codex's system login");
 });

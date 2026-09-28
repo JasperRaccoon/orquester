@@ -42,7 +42,7 @@ import {
 } from "@orquester/api";
 import type { AccountCooldown, AccountPolicy, AgentChainEntry } from "@orquester/config";
 import { currentWindow } from "../../usage-parse.ts";
-import { accountFamilyOf, cooldownKey, defaultUsesAccount, isProxyLauncher, type UsesAccount } from "./families.ts";
+import { accountFamilyOf, cooldownKey, cooldownSubject, defaultUsesAccount, isProxyLauncher, type UsesAccount } from "./families.ts";
 
 /** A usage reading older than this is unknown (the usage service polls every 5 minutes). */
 export const DEFAULT_USAGE_STALE_AFTER_MS = 20 * 60_000;
@@ -53,10 +53,10 @@ export interface SelectAccountInput {
   accounts: AgentAccountsResponse;
   /** claudex/claudemix: the managed account ids seeded into the model proxy. */
   seededAccountIds: Set<string>;
-  /** Active cooldowns keyed `<family>:<accountId>` (`CooldownStore.list()`); expired ones are ignored anyway. */
+  /** Active cooldowns keyed by `cooldownSubject` (`CooldownStore.list()`); expired ones are ignored anyway. */
   cooldowns: Record<string, AccountCooldown>;
   now: Date;
-  /** `<family>:<accountId>` keys already tried in this block (`cooldownKey`). */
+  /** `cooldownSubject` keys already tried in this block (`cooldownKey`). */
   exclude?: Set<string>;
   /** Start at this chain entry (0-based). */
   fromChainIndex?: number;
@@ -238,7 +238,7 @@ function freedAt(blockers: Blocker[]): number | undefined {
 export interface RankedCandidate {
   accountId: string;
   label?: string;
-  /** The key family (`cooldownKey(family, accountId)`): the account family, or the refId when accountless. */
+  /** The key family (`cooldownSubject(...).family`): the account family, or the refId when accountless / the proxy's pick. */
   family: string;
   /** "none" = an accountless launch (no usage applies). */
   usage: "known" | "unknown" | "none";
@@ -275,6 +275,10 @@ export function rankChainEntry(input: SelectAccountInput, chainIndex: number): C
   const accountFamily = accountFamilyOf(entry.agent);
   const accountless = accountFamily === null || !usesAccount(entry.agent, entry.model);
   const family = accountless ? entry.agent : accountFamily;
+  const keyOf = (accountId: string): string => {
+    const subject = cooldownSubject(entry.agent, entry.model, accountId, usesAccount);
+    return cooldownKey(subject.family, subject.account);
+  };
   const skipped: AccountSkip[] = [];
   let earliestFreeAt: number | undefined;
   const freesAt = (t: number | undefined): void => {
@@ -286,7 +290,7 @@ export function rankChainEntry(input: SelectAccountInput, chainIndex: number): C
   };
   // Cooldown, then "already tried": true when the candidate is out.
   const cooledOrTried = (candidate: Candidate): boolean => {
-    const key = cooldownKey(family, candidate.accountId);
+    const key = keyOf(candidate.accountId);
     const cooldown = input.cooldowns[key];
     const until = cooldown ? Date.parse(cooldown.until) : Number.NaN;
     if (cooldown && Number.isFinite(until) && until > nowMs) {

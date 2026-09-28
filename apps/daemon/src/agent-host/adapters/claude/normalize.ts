@@ -219,6 +219,13 @@ export interface ClaudeTurnState {
   announcedUsageLimitKeys: Set<string>;
 }
 
+/** The part of a turn's state a `rate_limit_event` writes — also kept between turns. */
+type RateLimitState = Pick<ClaudeTurnState, "rejectedRateLimitTypes" | "rejectedRateLimitResets" | "announcedUsageLimitKeys">;
+
+function emptyRateLimitState(): RateLimitState {
+  return { rejectedRateLimitTypes: new Set(), rejectedRateLimitResets: new Map(), announcedUsageLimitKeys: new Set() };
+}
+
 export interface NormalizerOptions {
   threadId: string;
   clock: Clock;
@@ -373,6 +380,8 @@ export class ClaudeNormalizer {
   lastAssistantUuid: string | undefined;
 
   turnState: ClaudeTurnState | undefined;
+  /** The rate-limit bookkeeping of the gap between parent turns (`handleRateLimitEvent`). */
+  private betweenTurnsRateLimits: RateLimitState = emptyRateLimitState();
   /**
    * The parent API message that began streaming while NO turn was open, held
    * frame by frame and replayed into whichever turn opens next (`beginTurn`).
@@ -390,6 +399,11 @@ export class ClaudeNormalizer {
    * lost its opening thinking.
    */
   private preTurnStream: { frames: StreamEventMessage[] } | undefined;
+  /**
+   * A held message said the session is working again (`wakeStarted`) and no turn has opened since:
+   * if the message is dropped with no turn, the session goes back to `ready` (`wakeDropped`).
+   */
+  private wakeSignalled = false;
   /**
    * The stream join, scoped to the MESSAGE rather than the turn: the parent
    * message streaming now (`message_start`), the content blocks it streamed in
@@ -843,11 +857,15 @@ export class ClaudeNormalizer {
       compactedSinceLatestAssistantUsage: false,
       hasSubagents: false,
       nextSyntheticAssistantBlockIndex: -1,
-      rejectedRateLimitTypes: new Set(),
-      rejectedRateLimitResets: new Map(),
+      // A window rejected while no turn was open is still rejected: a failed
+      // result of this turn names it (`usageLimitFailure`).
+      rejectedRateLimitTypes: new Set(this.betweenTurnsRateLimits.rejectedRateLimitTypes),
+      rejectedRateLimitResets: new Map(this.betweenTurnsRateLimits.rejectedRateLimitResets),
       latestAssistantRateLimited: false,
       announcedUsageLimitKeys: new Set()
     };
+    this.betweenTurnsRateLimits = emptyRateLimitState();
+    this.wakeSignalled = false;
     this.turnState = turn;
     // A turn that opens takes no call already in flight. A woken parent (each
     // background agent that finishes wakes it) streams before the complete
@@ -913,6 +931,29 @@ export class ClaudeNormalizer {
     return true;
   }
 
+  /**
+   * The CLI started answering by itself (a background agent or shell finished and woke the
+   * parent): the session is working from this `message_start` on, though the turn it opens only
+   * exists once the message's first block is complete (`preTurnStream`). Said at once, as the
+   * session's state — `session.state.changed {running}` with no turn, a shape the fold already
+   * knows (the CLI's own `session_state_changed`, an `api_retry`), so no log reads differently —
+   * or the thread read idle and finished for as long as the first block streamed (a long thinking
+   * block: many seconds), and a workflow's done-detection took the woken reply for no reply at
+   * all.
+   */
+  private wakeStarted(): RuntimeEvent[] {
+    const events = this.sessionStateChanged("running", "wake:streaming");
+    if (events.length > 0) this.wakeSignalled = true;
+    return events;
+  }
+
+  /** The held message ended with no turn opening: back to `ready`, when the wake said `running`. */
+  private wakeDropped(): RuntimeEvent[] {
+    if (!this.wakeSignalled || this.turnState !== undefined) return [];
+    this.wakeSignalled = false;
+    return this.sessionStateChanged("ready", "wake:dropped");
+  }
+
   /** Feed the held message into the turn that just opened (see `preTurnStream`). */
   private replayPreTurnStream(): RuntimeEvent[] {
     const held = this.preTurnStream;
@@ -967,6 +1008,7 @@ export class ClaudeNormalizer {
       // and the projection would flip a turn that never existed (§4.5).
       // A message still held for a turn that never opened ends with it.
       this.preTurnStream = undefined;
+      events.push(...this.wakeDropped());
       events.push(...this.emitThreadTokenUsage(usageSnapshot, "claude/result", result ?? { status }));
       return events;
     }
@@ -1036,6 +1078,8 @@ export class ClaudeNormalizer {
     // waiting for its turn, or the join of a stream that is going away.
     this.dropPendingNested();
     this.preTurnStream = undefined;
+    // The session is going away: its exit is the state that follows.
+    this.wakeSignalled = false;
     this.streamMessageId = null;
     this.streamedBlocks.clear();
     this.snapshotBlockCursor.clear();
@@ -1420,8 +1464,14 @@ export class ClaudeNormalizer {
     }
 
     // A message streaming before its turn opens waits for it (`preTurnStream`).
-    if (this.turnState === undefined && this.holdPreTurnFrame(message)) {
-      return events;
+    if (this.turnState === undefined) {
+      const wasHeld = this.preTurnStream !== undefined;
+      if (this.holdPreTurnFrame(message)) {
+        if (event.type === "message_start") events.push(...this.wakeStarted());
+        return events;
+      }
+      // A held message that stopped with no turn claiming it: no woken turn is coming from it.
+      if (wasHeld && this.preTurnStream === undefined) events.push(...this.wakeDropped());
     }
 
     if (event.type === "message_start") {
@@ -3494,30 +3544,36 @@ export class ClaudeNormalizer {
 
     const record = info as Record<string, unknown>;
     const limitType = typeof record.rateLimitType === "string" ? record.rateLimitType : "unknown";
-    const turn = this.turnState;
+    // With no parent turn open — background agents working on after their
+    // parent's turn ended (CLI 2.1.280's `run_in_background` default) — the
+    // limit is still THIS account's, and it stops that work as surely as a
+    // turn's: the rejected windows are kept between turns (handed to the next
+    // turn that opens, `beginTurn`) and the warning goes out with no turn id,
+    // so a workflow's failover sees it (workflows §5.4). Until 2026-09-28 a
+    // limit between turns raised nothing at all.
+    const state = this.turnState ?? this.betweenTurnsRateLimits;
     const blocked = isRateLimitBlocking(info);
     const resetsAt = rateLimitResetsAtIso(info);
-    if (turn) {
-      if (blocked) {
-        turn.rejectedRateLimitTypes.add(limitType);
-        if (resetsAt !== undefined) {
-          turn.rejectedRateLimitResets.set(limitType, resetsAt);
-        } else {
-          turn.rejectedRateLimitResets.delete(limitType);
-        }
-      } else if (isRateLimitClearing(info)) {
-        turn.rejectedRateLimitTypes.delete(limitType);
-        turn.rejectedRateLimitResets.delete(limitType);
+    if (blocked) {
+      state.rejectedRateLimitTypes.add(limitType);
+      if (resetsAt !== undefined) {
+        state.rejectedRateLimitResets.set(limitType, resetsAt);
+      } else {
+        state.rejectedRateLimitResets.delete(limitType);
       }
+    } else if (isRateLimitClearing(info)) {
+      state.rejectedRateLimitTypes.delete(limitType);
+      state.rejectedRateLimitResets.delete(limitType);
     }
 
-    if (blocked && turn) {
+    if (blocked) {
       // A parked window re-fires while the remaining wait shrinks, and a turn
       // can park on more than one window, so the announcement is tracked as a
-      // per-turn set of limit identities rather than one slot.
+      // per-turn (else per-gap-between-turns) set of limit identities rather
+      // than one slot.
       const key = `${limitType}:${String(record.resetsAt ?? "unknown")}`;
-      if (!turn.announcedUsageLimitKeys.has(key)) {
-        turn.announcedUsageLimitKeys.add(key);
+      if (!state.announcedUsageLimitKeys.has(key)) {
+        state.announcedUsageLimitKeys.add(key);
         events.push(
           this.warning(
             describeUsageLimit({

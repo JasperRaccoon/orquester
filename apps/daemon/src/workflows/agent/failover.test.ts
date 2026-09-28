@@ -3,9 +3,15 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AgentChainEntry, AgentHop } from "@orquester/api";
+import type { AgentChainEntry, AgentHop, UsageResponse } from "@orquester/api";
+import type { RouterProvider } from "@orquester/config";
 import type { NodeResult } from "../contracts.ts";
 import type { AgentBlockOutput } from "./executor.ts";
+import { candidateFromChoice, candidateKey, coolDown, countedHops, emptyMemory, hopCapReached, type FailoverDeps } from "./failover.ts";
+import { createUsesAccount } from "./families.ts";
+import { FakeClock } from "./testing/fake-clock.ts";
+import { MemoryCooldowns, staticAccounts, staticUsage } from "./testing/fake-context.ts";
+import { FakeChatHost } from "./testing/fake-chat-host.ts";
 import { AUTONOMY_NOTE, CONTINUE_AFTER_SWITCH, handoffNotice } from "./prompt.ts";
 import { byAccount, type ProviderStep } from "./testing/fake-chat-host.ts";
 import { account, agentNode, testWorkflow } from "./testing/fake-context.ts";
@@ -254,4 +260,82 @@ test("a model the catalogue does not list skips its chain entry (why: catalog) a
   const out = outputOf(result);
   assert.equal(out.agent, "codex");
   assert.ok(fc.live().selection!.skipped.some((s) => s.why === "catalog" && s.agent === "claude"));
+});
+
+test("wait-for-reset over 48 h with limits that never name a reset: resumed hops are not counted, cooldowns escalate", async () => {
+  const sc = new Scenario({ accounts: [account("claude", "a1", "alpha")], behaviour: () => [] });
+  const start = sc.clock.now().getTime();
+  let calls = 0;
+  // 13 limits in a row (no resetsAt, no usage reading → the 1 h fallback, escalating), then the work.
+  sc.host.behaviour = () => (++calls <= 13 ? [{ kind: "limit" }] : ok("finally done"));
+  const wf = testWorkflow([agentNode("n1", { whenAllBurnt: { kind: "wait-for-reset", maxWaitHours: 48 }, maxMinutes: 60 })]);
+  const out = outputOf((await sc.run(wf, "n1")).result);
+  assert.equal(out.text, "finally done");
+  assert.equal(sc.host.sessions.size, 1, "always the same session");
+  assert.equal(out.hops.length, 14, "more hops than the cap of 12");
+  assert.equal(countedHops(out.hops), 1, "only the initial hop counts");
+  assert.ok(out.hops.slice(1).every((h) => h.via === "resumed" && h.accountId === "a1"));
+  const waited = sc.clock.now().getTime() - start;
+  // 1 h + 2 h + 4 h × 11 = 47 h: escalated, and still inside the 48 h budget.
+  assert.ok(waited >= 47 * HOUR && waited < 48 * HOUR, `waited ${waited / HOUR} h`);
+});
+
+test("hopCapReached counts every hop but a resumed one", () => {
+  const hop = (via: AgentHop["via"]): AgentHop => ({ agent: "claude", model: "opus", accountId: "a", sessionId: "s", startedAt: "2026-09-28T12:00:00.000Z", via });
+  assert.equal(hopCapReached([hop("initial"), ...Array.from({ length: 30 }, () => hop("resumed"))]), false);
+  assert.equal(hopCapReached([hop("initial"), ...Array.from({ length: 11 }, () => hop("switched"))]), true);
+  assert.equal(hopCapReached([hop("initial"), ...Array.from({ length: 10 }, () => hop("handoff")), hop("resumed")]), false);
+});
+
+test("coolDown keys accountless launches by provider and never reads another quota's reset", async () => {
+  const clock = new FakeClock();
+  const now = clock.now().getTime();
+  const inDays = (d: number): string => new Date(now + d * 24 * HOUR).toISOString();
+  // The codex system login and a codex account are burnt for days; nothing else has a reading.
+  const burnt = { percent: 100, resetsAt: inDays(5) };
+  const usage: UsageResponse = {
+    agents: [
+      {
+        id: "codex",
+        available: true,
+        stale: false,
+        session: null,
+        weekly: null,
+        asOf: clock.now().toISOString(),
+        system: { id: "system", label: "System", available: true, stale: false, session: null, weekly: burnt, asOf: clock.now().toISOString() },
+        accounts: [{ id: "c1", label: "c1", available: true, stale: false, session: null, weekly: { percent: 100, resetsAt: inDays(3) }, asOf: clock.now().toISOString() }],
+        aggregate: { strategy: "worst-account", accountCount: 1 }
+      }
+    ]
+  };
+  const providers = [{ id: "openrouter", label: "OpenRouter", baseUrl: "https://openrouter.ai/api/v1", preset: "openrouter", models: [{ name: "kimi-k3" }], keyVerifiedAt: null, createdAt: inDays(-1) }] as RouterProvider[];
+  const usesAccount = createUsesAccount(() => providers);
+  const cooldowns = new MemoryCooldowns(clock);
+  const deps: FailoverDeps = { usage: staticUsage(usage), accounts: staticAccounts(new FakeChatHost({ clock })), cooldowns, usesAccount, clock };
+  const memory = emptyMemory();
+  const choice = (agent: string, model: string, accountId: string) => candidateFromChoice({ agent, model, accountId, chainIndex: 0 }, usesAccount);
+
+  const router = choice("claudex", "kimi-k3", "system");
+  assert.equal(candidateKey(router), "claudex:router:openrouter");
+  await coolDown(deps, memory, router, { reason: "usage_limit" });
+  assert.equal(cooldowns.entries["claudex:router:openrouter"]!.until, new Date(now + HOUR).toISOString(), "not the codex system row's 5-day reset");
+  assert.equal(cooldowns.entries["codex:system"], undefined, "the codex system login is untouched");
+
+  const proxyPick = choice("claudex", "gpt-5", "system");
+  assert.equal(candidateKey(proxyPick), "claudex:proxy");
+  await coolDown(deps, memory, proxyPick, { reason: "usage_limit" });
+  assert.equal(cooldowns.entries["claudex:proxy"]!.until, new Date(now + HOUR).toISOString());
+  assert.equal(cooldowns.entries["codex:system"], undefined);
+
+  const seeded = choice("claudex", "gpt-5", "c1");
+  assert.equal(candidateKey(seeded), "codex:c1");
+  await coolDown(deps, memory, seeded, { reason: "usage_limit" });
+  assert.equal(cooldowns.entries["codex:c1"]!.until, inDays(3), "a managed account's burnt window still counts");
+
+  const oc = choice("opencode", "anthropic/claude-sonnet", "system");
+  await coolDown(deps, memory, oc, { reason: "usage_limit" });
+  assert.ok(cooldowns.entries["opencode:provider:anthropic"]);
+  // A repeat with no known reset escalates.
+  await coolDown(deps, memory, oc, { reason: "usage_limit" });
+  assert.equal(cooldowns.entries["opencode:provider:anthropic"]!.until, new Date(now + 2 * HOUR).toISOString());
 });

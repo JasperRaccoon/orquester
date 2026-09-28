@@ -429,6 +429,12 @@ path the CLI split across two chunks. Nothing waits on a sleep: wait on a receip
     content, never with its frame count, and loses nothing: no thinking, no tool input.
   - The held message is dropped at `message_stop`, at a turn-less `result` and in
     `closeLiveTasks`.
+  - The held `message_start` says the session is working at once: `session.state.changed
+    {running}` with no turn (`wakeStarted`, reason `wake:streaming`), a shape the fold already
+    knows, so no existing log folds differently and no version moves; a held message dropped
+    with no turn opening says `ready` again (`wakeDropped`). Before, the thread read idle and
+    finished for as long as the first block streamed, and a workflow's done-detection read the
+    launch message as the agent's answer.
   - The stream join (`streamMessageId`, `streamedBlocks`, `snapshotBlockCursor`) is scoped to the
     MESSAGE, not the turn. A message can outlive the turn it started in: `sendTurn` settles a
     stale synthetic turn and opens the user's while the CLI's own message is still streaming.
@@ -2295,7 +2301,20 @@ Events on the `"workflows"` channel: `workflow.upserted` (the rail row), `workfl
   (`POST …/account`, "continue where you stopped"), else hand off to the next chain entry in a NEW
   session with a handoff prompt, else fail `all_burnt` or wait for the earliest reset. At most 12
   hops; every hop recorded on the block. The account preview route runs the very selection the
-  block runs, over the same cooldowns.
+  block runs, over the same cooldowns. **A cooldown key names exactly one quota**
+  (`cooldownSubject`, `agent/families.ts`): a managed account `<family>:<id>`; the proxy
+  launchers' own pick `claudex:proxy` / `claudemix:proxy` (never the family's system login); an
+  accountless launch by its provider — `opencode:provider:<providerID>`,
+  `claudex:router:<routerProviderId>`, `claudex:xai` — so one provider's 429 never cools another's
+  entries, in any workflow; and the usage snapshot's burnt-window reset is read only for an
+  account that HAS a usage row. A limit with no known reset cools 1 h, then 2 h, then 4 h for
+  repeats within one block, and a hop that resumes after a wait for a reset (`via: "resumed"`) does
+  not count against the 12-hop cap (`maxWaitHours` bounds those).
+- **An agent block never persists a secret's value.** Its `WaitingOn` state (template, prompt,
+  pending input, command body) lands in `run.json` unredacted, so every secret value is kept as a
+  private-use marker (`agent/secret-text.ts`) and revealed only in the body POSTed — a resumed send
+  reads the run's secrets again. Done-detection after background work that ended with no turn
+  settling since waits 90 s (`wakeQuietMs`, `agent/watch.ts`), not 5 s, for a wake that lags.
 - **The summary recursion trap.** A rail row is built by ONE function, `buildWorkflowSummary`
   (`summary.ts`), with the live trigger state; the daemon's builder is
   `workflowDaemon.summarize`. The routes' `summarizeWorkflow` DELEGATES to `engine.summarize`,

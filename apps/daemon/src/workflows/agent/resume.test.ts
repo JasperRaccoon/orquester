@@ -165,3 +165,39 @@ test("the deadline is wall-clock: a resumed block does not get its maxMinutes ag
   const took = sc.clock.now().getTime() - start;
   assert.ok(took < 31 * 60_000, `took ${took}`);
 });
+
+// Secrets (§5.7): the state the block persists (WaitingOn → run.json, unredacted) never holds a
+// secret's value — only its marker; the POSTed body carries the real value, a resumed send too.
+const SECRET = "tok-9f8e7d6c5b4a";
+const SECRET_WF = () =>
+  testWorkflow([agentNode("n1", { prompt: { kind: "text", text: "Deploy with token {{ secrets.API_TOKEN }} now." } })]);
+
+for (const phase of ["creating", "sending"] as const) {
+  test(`a secret in the prompt is never persisted, and a restart at ${phase} still sends the real value`, async () => {
+    const sc = new Scenario({ accounts: CLAUDE, behaviour: () => [{ kind: "say", text: "deployed" }] });
+    const run = await sc.runWithRestart(SECRET_WF(), "n1", { phase }, { extra: { secrets: { API_TOKEN: SECRET } } });
+    assert.equal(run.crashed, true);
+    assert.equal(outputOf(run.result).text, "deployed");
+    for (const persisted of [...run.first.persisted, ...run.second!.persisted]) {
+      assert.ok(!JSON.stringify(persisted ?? null).includes(SECRET), `persisted state holds the secret: ${JSON.stringify(persisted)}`);
+    }
+    const sent = sc.host.turnLog.map((t) => t.input);
+    assert.equal(sent.length, 1);
+    assert.ok(sent[0]!.startsWith(`Deploy with token ${SECRET} now.`), sent[0]);
+    assert.ok(!sent[0]!.includes(""), "no marker reaches the agent");
+  });
+}
+
+test("a handoff prompt carrying the secret keeps it out of the state and sends the real value", async () => {
+  const sc = new Scenario({ accounts: [CLAUDE[0]!, ...CODEX], behaviour: byAccount({ a1: [{ kind: "limit" }], c1: [{ kind: "say", text: "codex done" }] }) });
+  const chain: AgentChainEntry[] = [
+    { agent: "claude", model: "opus", accounts: { ...FIXED } },
+    { agent: "codex", model: "gpt-5", accounts: { ...FIXED } }
+  ];
+  const wf = testWorkflow([agentNode("n1", { chain, prompt: { kind: "text", text: "Use {{ secrets.API_TOKEN }}." } })]);
+  const run = await sc.runWithRestart(wf, "n1", { phase: "creating", occurrence: 2 }, { extra: { secrets: { API_TOKEN: SECRET } } });
+  assert.equal(outputOf(run.result).text, "codex done");
+  for (const persisted of [...run.first.persisted, ...run.second!.persisted]) assert.ok(!JSON.stringify(persisted ?? null).includes(SECRET));
+  const handoff = sc.host.turnLog.find((t) => t.refId === "codex")!.input;
+  assert.ok(handoff.startsWith(`Use ${SECRET}.`), handoff);
+});
