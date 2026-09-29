@@ -39,16 +39,12 @@ const HAIKU: ProviderModel = {
 };
 
 test("the reasoning descriptor is found under any of the four adapters' ids", () => {
-  assert.equal(findReasoningDescriptor(OPUS)?.id, "effort");
-  assert.equal(
-    findReasoningDescriptor({
+  for (const id of ["effort", "reasoningEffort", "variant"]) {
+    assert.equal(findReasoningDescriptor({
       ...HAIKU,
-      capabilities: {
-        optionDescriptors: [{ id: "variant", label: "Reasoning", type: "select", options: [] }]
-      }
-    })?.id,
-    "variant"
-  );
+      capabilities: { optionDescriptors: [{ id, label: "Reasoning", type: "select", options: [] }] }
+    })?.id, id);
+  }
   assert.equal(findReasoningDescriptor(HAIKU), null);
   assert.equal(findReasoningDescriptor(null), null);
 });

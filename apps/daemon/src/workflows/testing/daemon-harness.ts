@@ -49,9 +49,7 @@ export class FakeGitRemote implements GitRemoteReader {
   tags: Record<string, { sha: string; commit: string }> = {};
   defaultBranch: string | undefined = "main";
   lsError: Error | null = null;
-  lsCalls: { accountId: string | null; url: string }[] = [];
-  async lsRemote(accountId: string | null, url: string, opts?: { defaultBranch?: boolean }): Promise<LsRemoteResult> {
-    this.lsCalls.push({ accountId, url });
+  async lsRemote(_accountId: string | null, _url: string, opts?: { defaultBranch?: boolean }): Promise<LsRemoteResult> {
     if (this.lsError) throw this.lsError;
     return { heads: { ...this.heads }, tags: structuredClone(this.tags), ...(opts?.defaultBranch && this.defaultBranch ? { defaultBranch: this.defaultBranch } : {}) };
   }

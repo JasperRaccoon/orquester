@@ -124,7 +124,6 @@ export interface AgentHostServer {
   listen(): Promise<void>;
   close(): Promise<void>;
   readonly server: Server;
-  readonly openStreams: number;
 }
 
 function constantTimeEquals(left: string, right: string): boolean {
@@ -859,9 +858,6 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
 
   return {
     server,
-    get openStreams() {
-      return streams.size;
-    },
     async listen(): Promise<void> {
       if (!socketPath.startsWith("\\\\.\\pipe\\")) {
         await mkdir(dirname(socketPath), { recursive: true });

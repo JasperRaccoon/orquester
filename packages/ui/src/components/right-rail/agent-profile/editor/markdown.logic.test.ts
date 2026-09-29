@@ -7,17 +7,8 @@ import {
   markdownDraftFromForm,
   markdownEditorModel,
   markdownFormFromDocument,
-  markdownNameError,
-  markdownNameHint,
   validateMarkdownForm
 } from "./markdown.logic";
-
-test("a skill's name field is the name input, never a second field", () => {
-  const model = markdownEditorModel("claude", "skill");
-  assert.equal(model.fields.some((field) => field.key === "name"), false);
-  assert.equal(model.fields[0]!.key, "description");
-  assert.deepEqual(model.keptKeys, []);
-});
 
 test("a new skill's switches start at the CLI's defaults and send nothing until changed", () => {
   const model = markdownEditorModel("claude", "skill");
@@ -80,28 +71,13 @@ test("a command carries no frontmatter name and keeps a name key found on disk",
   assert.deepEqual(frontmatterDraft("command", model, form), { description: "Review", subtask: true });
 });
 
-test("names: skills are hyphenated lowercase words, commands may have one folder", () => {
-  assert.equal(markdownNameError("skill", "my-skill"), undefined);
-  assert.ok(markdownNameError("skill", "My Skill"));
-  assert.ok(markdownNameError("skill", "a--b"));
-  assert.ok(markdownNameError("skill", "x".repeat(65)));
-  assert.ok(markdownNameError("skill", ""));
-  assert.equal(markdownNameError("command", "git/pr"), undefined);
-  assert.ok(markdownNameError("command", "a/b/c"));
-  assert.ok(markdownNameError("skill", "git/pr"));
-});
-
 test("names: Grok's commands are flat files — a folder is refused before the daemon does", () => {
   const grok = markdownEditorModel("grok", "command");
-  assert.equal(grok.flatCommands, true);
-  assert.equal(markdownEditorModel("claude", "command").flatCommands, false);
-  assert.match(markdownNameError("command", "git/pr", { flatCommands: true }) ?? "", /No folder/);
-  assert.equal(markdownNameError("command", "git-pr", { flatCommands: true }), undefined);
   const form = initialMarkdownForm(grok, "git/pr", "Body");
-  assert.match(validateMarkdownForm("command", grok, form).errors.name ?? "", /No folder/);
+  assert.equal(validateMarkdownForm("command", grok, form).valid, false);
   assert.equal(validateMarkdownForm("command", markdownEditorModel("opencode", "command"), form).errors.name, undefined);
-  assert.match(markdownNameHint("command", grok), /no folder/);
-  assert.match(markdownNameHint("command", markdownEditorModel("claude", "command")), /git\/pr/);
+  form.name = "git-pr";
+  assert.equal(validateMarkdownForm("command", grok, form).valid, true);
 });
 
 test("validation: a skill needs its description and a body; a command's description is optional", () => {

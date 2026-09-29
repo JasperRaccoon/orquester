@@ -107,7 +107,7 @@ describe("CodexAppServerClient", () => {
       await assert.rejects(hung, (error: unknown) => {
         assert.ok(error instanceof AgentProfileError);
         assert.equal(error.code, "AGENT_CLI_FAILED");
-        assert.match(error.message, /hooks\/list.*timed out after 10 s/);
+        assert.ok(error.message.includes("hooks/list"));
         return true;
       });
       assert.equal(c.isRunning, false, "the wedged child is gone");

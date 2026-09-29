@@ -36,7 +36,6 @@ import type {
   ProjectOps,
   PromptRenderer,
   RunStore,
-  SandboxRunner,
   SecretStore,
   UsageReader,
   WorkflowLogger,
@@ -47,7 +46,6 @@ import { createNodeExecutors } from "./nodes/index.ts";
 import { createWorkflowNotifier, type WorkflowPushSender } from "./notifier.ts";
 import { createProjectOps } from "./projects.ts";
 import { createPromptRenderer } from "./prompt-renderer.ts";
-import type { EngineLimits } from "./run-context.ts";
 import { createSandboxRunner } from "./sandbox/sandbox.ts";
 import { createWorkflowSweepers, type WorkflowSweepers } from "./sweepers.ts";
 
@@ -94,10 +92,6 @@ export interface WorkflowRuntimeDeps {
   createAccountPreview?: (deps: AccountPreviewFactoryDeps) => (chain: AgentChainEntry[], projectPath?: string) => Promise<AccountSelectionDecision>;
   logger: WorkflowLogger;
   clock?: Clock;
-  mintId?: MintId;
-  /** A sandbox runner other than the default detached one (tests). */
-  sandbox?: SandboxRunner;
-  limits?: Partial<EngineLimits>;
 }
 
 /** What `createAgentExecutor` (agent/executor.ts `AgentExecutorDeps`) is handed. */
@@ -153,10 +147,9 @@ export function createWorkflowRuntime(deps: WorkflowRuntimeDeps): WorkflowRuntim
   };
   const projects = createProjectOps({ api: () => api, git: deps.git, workspacesDir: deps.workspacesDir, fsRoot: deps.fsRoot });
   const prompts = createPromptRenderer({ git: deps.git, savedPrompts: deps.savedPrompts, now: () => clock.now() });
-  const sandbox =
-    deps.sandbox ?? createSandboxRunner({ clock, logger: deps.logger, ...(deps.appdirTmp !== undefined ? { appdirTmp: deps.appdirTmp } : {}) });
+  const sandbox = createSandboxRunner({ clock, logger: deps.logger, ...(deps.appdirTmp !== undefined ? { appdirTmp: deps.appdirTmp } : {}) });
   const notifier = createWorkflowNotifier({ push: deps.push, clock, logger: deps.logger });
-  const mintId = deps.mintId ?? randomUUID;
+  const mintId = randomUUID;
   const agent = deps.createAgentExecutor?.({
     usage: deps.usage,
     accounts: deps.accounts,
@@ -189,8 +182,7 @@ export function createWorkflowRuntime(deps: WorkflowRuntimeDeps): WorkflowRuntim
     ...(accountPreview ? { accountPreview } : {}),
     clock,
     mintId,
-    logger: deps.logger,
-    ...(deps.limits ? { limits: deps.limits } : {})
+    logger: deps.logger
   });
 
   const sweepers = createWorkflowSweepers({

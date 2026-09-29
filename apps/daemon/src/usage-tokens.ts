@@ -34,7 +34,7 @@ function resolveModelKey(model: string): string | null {
   return best;
 }
 
-function estimateCostParts(
+export function estimateCostParts(
   model: string,
   tok: { input: number; output: number; cacheRead: number; cacheWrite: number; cacheWrite1h: number }
 ): { input: number; output: number; cache: number } | null {
@@ -67,7 +67,7 @@ interface RawRow {
   dedupId?: string;
 }
 
-export function aggregateRows(raw: RawRow[]): UsageTokenRow[] {
+function aggregateRows(raw: RawRow[]): UsageTokenRow[] {
   const byKey = new Map<string, UsageTokenRow>();
   for (const r of raw) {
     const key = `${r.agent}|${r.model}|${r.day}`;

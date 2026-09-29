@@ -54,24 +54,10 @@ describe("applyFrame — snapshots", () => {
     assert.equal(foldStateFromSnapshot(snapshot({ goal: null, seq: 3 })).goal, null);
     // A host that predates goals sends none at all.
     assert.equal(foldStateFromSnapshot(snapshot({ seq: 3 })).goal, null);
-    // Raw JSON never reaches typed code: a goal that does not validate is none,
-    // and one carrying junk is adopted without it.
-    for (const broken of [
-      { ...goal, status: "done" },
-      { ...goal, objective: "" },
-      { objective: "Make CI green", status: "active" },
-      "Make CI green"
-    ]) {
-      assert.equal(
-        foldStateFromSnapshot(snapshot({ goal: broken as never, seq: 3 })).goal,
-        null,
-        JSON.stringify(broken)
-      );
-    }
-    assert.deepEqual(
-      foldStateFromSnapshot(snapshot({ goal: { ...goal, rounds: -1, junk: 1 } as never, seq: 3 }))
-        .goal,
-      { objective: goal.objective, status: goal.status, lastCheck: goal.lastCheck, updatedAt: goal.updatedAt }
+    // Verify this boundary validates once; individual schema rules live in the API tests.
+    assert.equal(
+      foldStateFromSnapshot(snapshot({ goal: { ...goal, status: "done" } as never, seq: 3 })).goal,
+      null
     );
   });
 });

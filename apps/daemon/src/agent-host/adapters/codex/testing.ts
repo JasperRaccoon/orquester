@@ -94,7 +94,7 @@ export type MockTurnScript =
   | { kind: "text"; text: string }
   | { kind: "command-approval"; command: string; availableDecisions?: unknown[]; afterAsking?: MockParentAskEnd }
   | { kind: "file-change-approval"; path: string; diff: string; /** Stay silent after the answer, until a wire notification or interrupt. */ holdAfterApproval?: boolean }
-  | { kind: "user-input"; questionId: string; header: string; question: string; options: { label: string; description: string }[]; isOther?: boolean; isBlocking?: boolean; /** Append a question the filter must drop, to exercise the partial-refusal rule. */ withUnrenderable?: boolean; afterAsking?: MockParentAskEnd }
+  | { kind: "user-input"; questionId: string; header: string; question: string; options: { label: string; description: string }[] | null; isOther?: boolean; isSecret?: boolean; isBlocking?: boolean; /** Append a question the filter must drop, to exercise the partial-refusal rule. */ withUnrenderable?: boolean; afterAsking?: MockParentAskEnd }
   | {
       kind: "elicitation";
       serverName: string;
@@ -174,6 +174,8 @@ interface MockGoal {
 }
 
 export interface MockConfig {
+  emptyCatalog?: boolean;
+  skillName?: string;
   userAgent?: string;
   stderr?: string;
   /** Never answer `initialize`, to exercise the handshake deadline. */
@@ -527,10 +529,10 @@ async function runTurn(turnId, script) {
         threadId, turnId, itemId,
         questions: script.withUnrenderable
           ? [
-              { id: script.questionId, header: script.header, question: script.question, isOther: script.isOther === true, isSecret: false, options: script.options },
+              { id: script.questionId, header: script.header, question: script.question, isOther: script.isOther === true, isSecret: script.isSecret === true, options: script.options },
               { id: "unrenderable", header: "H", question: "Q?", isOther: false, isSecret: false, options: null }
             ]
-          : [{ id: script.questionId, header: script.header, question: script.question, isOther: script.isOther === true, isSecret: false, options: script.options }],
+          : [{ id: script.questionId, header: script.header, question: script.question, isOther: script.isOther === true, isSecret: script.isSecret === true, options: script.options }],
         isBlocking: script.isBlocking !== false, autoResolutionMs: null
       });
       if (script.afterAsking) {
@@ -806,17 +808,9 @@ function handle(frame) {
       send({ method: "turn/completed", params: { threadId, turn: turnObject(turnId, "interrupted") } });
       return;
     }
-    case "thread/compact/start": {
+    case "thread/compact/start":
       send({ id, result: {} });
-      const turnId = threadId + "-compact-" + ++turnSeq;
-      activeTurnId = turnId;
-      send({ method: "turn/started", params: { threadId, turn: turnObject(turnId, "inProgress") } });
-      send({ method: "item/started", params: { item: { type: "contextCompaction", id: "compaction-1" }, threadId, turnId, startedAtMs: 0 } });
-      send({ method: "item/completed", params: { item: { type: "contextCompaction", id: "compaction-1" }, threadId, turnId, completedAtMs: 1 } });
-      send({ method: "turn/completed", params: { threadId, turn: turnObject(turnId, "completed") } });
-      activeTurnId = null;
       return;
-    }
     case "thread/turns/list": {
       const queued = readFileSync(config.notificationPath, "utf8");
       for (const line of queued.slice(notificationOffset).split("\\n")) {
@@ -846,10 +840,10 @@ function handle(frame) {
       send({ id, result: { account: { type: "chatgpt", email: "user@example.invalid", planType: "pro" }, requiresOpenaiAuth: true } });
       return;
     case "model/list":
-      send({ id, result: { data: [{ id: "gpt-5.5", model: "gpt-5.5", upgrade: null, upgradeInfo: null, availabilityNux: null, displayName: "GPT-5.5", description: "", modelSpecialty: null, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "low", description: "fast" }, { reasoningEffort: "medium", description: "balanced" }], defaultReasoningEffort: "medium", inputModalities: ["text"], supportsPersonality: false, multiAgentVersion: null, additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, isDefault: true }], nextCursor: null } });
+      send({ id, result: { data: config.emptyCatalog ? [] : [{ id: "gpt-5.5", model: "gpt-5.5", upgrade: null, upgradeInfo: null, availabilityNux: null, displayName: "GPT-5.5", description: "", modelSpecialty: null, hidden: false, supportedReasoningEfforts: [{ reasoningEffort: "low", description: "fast" }, { reasoningEffort: "medium", description: "balanced" }], defaultReasoningEffort: "medium", inputModalities: ["text"], supportsPersonality: false, multiAgentVersion: null, additionalSpeedTiers: [], serviceTiers: [], defaultServiceTier: null, isDefault: true }], nextCursor: null } });
       return;
     case "skills/list":
-      send({ id, result: { data: [{ cwd: process.cwd(), skills: [{ name: "demo", description: "a demo skill", path: "/skills/demo/SKILL.md", scope: "repo", enabled: true, pluginId: null }], errors: [] }] } });
+      send({ id, result: { data: [{ cwd: process.cwd(), skills: config.emptyCatalog ? [] : [{ name: config.skillName ?? "demo", description: "a demo skill", path: "/skills/demo/SKILL.md", scope: "repo", enabled: true, pluginId: null }], errors: [] }] } });
       return;
     case "account/rateLimits/read":
       send({ id, result: { ordinaryUsageAllowed: true, rateLimits: { limitId: "codex", limitName: null, normalModelSlug: null, primary: { usedPercent: 30, windowDurationMins: 10080, resetsAt: 1790220221 }, secondary: null, credits: null, individualLimit: null, spendControlReached: false, planType: "pro", rateLimitReachedType: null }, rateLimitsByLimitId: null, rateLimitResetCredits: null, accountId: null, rateLimitUpsell: null } });

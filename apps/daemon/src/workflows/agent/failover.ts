@@ -242,7 +242,7 @@ export async function pickCandidate(
  * once the quota refilled, and `whenAllBurnt: "wait-for-reset"` bounds those by `maxWaitHours`
  * already — counted, a 48 h wait with hourly unknown-reset cooldowns ran out of hops after 12.
  */
-export function countedHops(hops: readonly AgentHop[]): number {
+function countedHops(hops: readonly AgentHop[]): number {
   return hops.filter((hop) => hop.via !== "resumed").length;
 }
 

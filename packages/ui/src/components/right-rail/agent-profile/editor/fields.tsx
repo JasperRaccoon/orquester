@@ -125,7 +125,7 @@ export const TextArea = React.forwardRef<
 });
 TextArea.displayName = "TextArea";
 
-export interface SelectOption {
+interface SelectOption {
   value: string;
   label: string;
   disabled?: boolean;
@@ -222,7 +222,7 @@ export function Segmented<T extends string>({
 }
 
 /** A switch with its label and help, the whole row finger-sized on a phone. */
-export const SwitchRow: React.FC<{
+const SwitchRow: React.FC<{
   id: string;
   label: string;
   help?: string;

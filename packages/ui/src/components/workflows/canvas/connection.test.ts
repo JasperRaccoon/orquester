@@ -18,7 +18,7 @@ const def = () =>
     [edge("t", "a"), edge("a", "b")]
   );
 
-describe("connectionRefusal", () => {
+describe("workflow connections", () => {
   it("accepts an output into a block that takes input", () => {
     assert.equal(connectionRefusal(def(), { source: "b", sourceHandle: "success", target: "i" }), null);
     assert.equal(connectionRefusal(def(), { source: "i", sourceHandle: "false", target: "s" }), null);

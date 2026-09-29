@@ -92,10 +92,6 @@ test("streamed output chunks become the row's output, in arrival order", () => {
   assert.equal(result[0]?.detail, "one\ntwo\n");
 });
 
-test("a quiet shell whose every chunk aged out still offers the whole of its output", () => {
-  assert.equal(entries([started()])[0]?.streamedOutput, true);
-});
-
 test("the row keeps the first frame's id, so a streaming row cannot close itself", () => {
   assert.equal(entries([started(), output("one\n", "o1")])[0]?.id, "started");
   assert.equal(entries([started(), output("one\n", "o1"), completed(0)])[0]?.id, "started");

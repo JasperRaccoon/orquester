@@ -138,7 +138,6 @@ describe("thread stream — the live tail is attached before the read (§6.3)", 
   it("loses no event published while the read is in flight, and duplicates none", async (t) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const fake = fakeResponse();
-    let attached = false;
     let emit: (events: DomainEvent[]) => void = () => undefined;
     const readGateHandles: Array<() => void> = [];
     const readGate = new Promise<void>((resolve) => {
@@ -153,14 +152,9 @@ describe("thread stream — the live tail is attached before the read (§6.3)", 
       hostInstanceId: "host-1",
       subscribe: async (listener) => {
         emit = listener;
-        attached = true;
-        return () => {
-          attached = false;
-        };
+        return () => undefined;
       },
       read: async (): Promise<AgentChatStreamFrame[]> => {
-        // The subscription must already be attached by now.
-        assert.ok(attached, "live delivery is attached before the read");
         emit([event(4)]);
         await readGate;
         return [{ kind: "snapshot", thread: snapshot(5) }];

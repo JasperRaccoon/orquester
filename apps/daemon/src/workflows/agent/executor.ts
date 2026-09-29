@@ -1041,7 +1041,7 @@ class AgentBlockRun {
  * view cap and cut at `maxAgentTextBytes`. A settled turn with no text (a woken turn that only ran
  * tools) falls back to the newest earlier one this block owns; never to a turn from before the block.
  */
-export function finalText(snap: ThreadSnapshotPayload, sessionStartTurnId: string | null): { text: string; truncated: boolean } {
+function finalText(snap: ThreadSnapshotPayload, sessionStartTurnId: string | null): { text: string; truncated: boolean } {
   const copies = repairsReEmittedAssistantCopies(snap.head.adapter) ? reEmittedAssistantCopies(snap.items) : undefined;
   for (let i = snap.turns.length - 1; i >= 0; i -= 1) {
     const turn = snap.turns[i]!;
@@ -1054,7 +1054,7 @@ export function finalText(snap: ThreadSnapshotPayload, sessionStartTurnId: strin
 }
 
 /** The parent's assistant messages since the block began in this session, oldest first — for a handoff. */
-export function parentAssistantText(snap: ThreadSnapshotPayload, sessionStartTurnId: string | null): string {
+function parentAssistantText(snap: ThreadSnapshotPayload, sessionStartTurnId: string | null): string {
   let startAt = 0;
   if (sessionStartTurnId !== null) {
     const idx = snap.items.findIndex((item) => item.turnId === sessionStartTurnId);

@@ -13,7 +13,6 @@ import {
   createEmptyThreadState,
   type DomainEvent,
   type RuntimeEvent,
-  type ThreadActivityItem,
   type ThreadFoldState
 } from "@orquester/api/agent-chat";
 
@@ -65,13 +64,10 @@ interface HostIngestion {
 }
 
 /**
- * One thread's ingestion, driven step by step, and the log it writes. Its
- * clock starts at `startIso`: ingestion stamps a line with its runtime event's
- * `createdAt` and only a buffer's flush with its own clock, so a test that
- * reads the log's times runs both as one.
+ * One thread's ingestion, driven step by step, and the log it writes.
  */
-export function createHostIngestion(options: { startIso?: string } = {}): HostIngestion {
-  const clock = new FakeClock(options.startIso);
+export function createHostIngestion(): HostIngestion {
+  const clock = new FakeClock();
 
   const sink = new RecordingSink();
   const ingestion = createIngestion({
@@ -95,20 +91,4 @@ export function createHostIngestion(options: { startIso?: string } = {}): HostIn
     log,
     fold: () => log().reduce(applyDomainEvent, createEmptyThreadState())
   };
-}
-
-/**
- * The newest write of every activity in the log, in log order — what the
- * host's `readItem` answers for an id (§5.6: the row as ingestion wrote it,
- * never slimmed, but for a `tool.updated`, which it stores slimmed).
- */
-export function loggedActivities(events: readonly DomainEvent[]): ThreadActivityItem[] {
-  const newest = new Map<string, ThreadActivityItem>();
-  for (const event of events) {
-    if (event.type === "thread.activity-appended") {
-      newest.delete(event.payload.activity.id);
-      newest.set(event.payload.activity.id, event.payload.activity);
-    }
-  }
-  return [...newest.values()];
 }

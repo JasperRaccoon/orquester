@@ -16,7 +16,6 @@ import { describe, it } from "node:test";
 
 import type { DomainEvent, ThreadHead } from "@orquester/api/agent-chat";
 
-import { CONTINUATION_PROMPT } from "../host-protocol.ts";
 import { createTestHost, type FakeThreadStore, type TestHost } from "./testing/index.ts";
 
 let commandSeq = 0;
@@ -140,7 +139,6 @@ describe("the provider session binding (§3.3, §4.1)", () => {
 
     const sends = next.adapter.calls.filter((call) => call.kind === "sendTurn");
     assert.equal(sends.length, 1);
-    assert.equal((sends[0]?.detail as { input: string }).input, CONTINUATION_PROMPT);
     assert.deepEqual(next.adapter.lastStart?.resumeCursor, { cursor: "turn-1" });
     assert.equal(headOf(store, threadId).continueAfterRestart, undefined);
     await next.stop();

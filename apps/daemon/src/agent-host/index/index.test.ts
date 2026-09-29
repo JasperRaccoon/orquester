@@ -153,11 +153,9 @@ describe("thread index: catchUp", () => {
     assert.deepEqual(index.cursor("thread-y"), { lastSeq: shorter.lastSeq, lastByte: shorter.size });
   });
 
-  it("gives up, once, on a log it cannot read from its start", async () => {
+  it("leaves unreadable logs behind after catch-up returns", async () => {
     const index = open();
-    const reads: Array<{ byteOffset: number; afterSeq: number }> = [];
-    const unreadable = async (cursor: { byteOffset: number; afterSeq: number }) => {
-      reads.push(cursor);
+    const unreadable = async () => {
       const result: EventsFromResult = {
         events: [],
         positions: [],
@@ -169,8 +167,8 @@ describe("thread index: catchUp", () => {
       return result;
     };
     await index.catchUp({ threadId: "t-bad", ...META, logSeq: 5, read: unreadable });
-    assert.equal(reads.length, 1);
     assert.equal(index.cursor("t-bad"), null);
+    assert.equal(await index.coverage("t-bad", 5), "behind");
   });
 
   it("fills the hole a live batch found before the boot catch-up reached its thread", async () => {

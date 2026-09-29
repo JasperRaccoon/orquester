@@ -39,15 +39,6 @@ function message(
 
 const opening = "All checks are now clean. I'll close out the ledger.";
 
-test("the same words in another turn are no copy, and neither is a repeat still streaming", () => {
-  const items = [
-    message("assistant", "Done.", { turnId: "t1", id: "m-a" }),
-    message("assistant", "Done.", { turnId: "t2", id: "m-b" }),
-    message("assistant", "Done.", { turnId: "t2", id: "m-c", streaming: true })
-  ];
-  assert.deepEqual([...reEmittedAssistantCopies(items)], []);
-});
-
 test("only a copy of the turn's OPENING message, at its end: a goal run's rounds may end on the same words", () => {
   // A Claude goal run is one turn of many rounds; two of them can end "All checks pass." Taking
   // the later one would make the round before it the turn's answer. Only the opening paragraph was

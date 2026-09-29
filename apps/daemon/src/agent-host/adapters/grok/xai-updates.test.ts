@@ -803,8 +803,7 @@ test("replayed frames of all five kinds emit nothing and leave nothing live", ()
 test("an unknown private update still warns", () => {
   const r = rig();
   const events = r.live({ sessionUpdate: "definitely_new_update", payload: 1 });
-  assert.deepEqual(
-    only(events, "runtime.warning").map((event) => event.payload.message),
-    ["grok: unmapped _x.ai/session_notification update"]
-  );
+  const warnings = only(events, "runtime.warning");
+  assert.equal(warnings.length, 1);
+  assert.deepEqual(warnings[0]?.payload.detail, { sessionUpdate: "definitely_new_update" });
 });

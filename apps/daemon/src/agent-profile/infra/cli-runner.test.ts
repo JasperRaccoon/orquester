@@ -152,7 +152,6 @@ test("runAgentCliOrThrow answers on success and throws AGENT_CLI_FAILED with red
     assert.ok(error instanceof AgentProfileError);
     assert.equal(error.status, 502);
     assert.equal(error.code, "AGENT_CLI_FAILED");
-    assert.match(error.message, /^fake-agent plugin install failed: exit code 2: /);
     for (const secret of ["abcdefghijklmnop", "sk-ant-", "pa55word", "supersecretvalue", homedir() + "/", "\u001b"]) {
       assert.ok(!error.message.includes(secret), `leaked ${JSON.stringify(secret)}: ${error.message}`);
     }

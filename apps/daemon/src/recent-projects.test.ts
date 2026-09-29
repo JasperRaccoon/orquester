@@ -3,7 +3,6 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { MAX_RECENT_PROJECTS } from "@orquester/config";
 import { RecentProjectsService, describeProjectPath } from "./recent-projects.ts";
 
 async function scratch(): Promise<string> {
@@ -56,7 +55,7 @@ test("markInteracted upserts newest-first, counts, caps, and persists", async ()
   await service.load();
 
   const projects: string[] = [];
-  for (let i = 0; i < MAX_RECENT_PROJECTS + 5; i++) {
+  for (let i = 0; i < 30 + 5; i++) {
     const path = join(root, "acme", `p${String(i).padStart(2, "0")}`);
     await mkdir(path, { recursive: true });
     projects.push(path);
@@ -64,7 +63,7 @@ test("markInteracted upserts newest-first, counts, caps, and persists", async ()
   }
 
   let list = await service.list();
-  assert.equal(list.length, MAX_RECENT_PROJECTS);
+  assert.equal(list.length, 30);
   assert.equal(list[0].path, projects[projects.length - 1]);
   assert.deepEqual(
     { name: list[0].name, workspace: list[0].workspace, interactionCount: list[0].interactionCount },
@@ -75,10 +74,10 @@ test("markInteracted upserts newest-first, counts, caps, and persists", async ()
 
   // Re-marking bumps the entry to the front and increments its count; a
   // trailing slash is the same project, not a second entry.
-  const revisited = projects[projects.length - MAX_RECENT_PROJECTS];
+  const revisited = projects[projects.length - 30];
   await service.markInteracted(`${revisited}/`);
   list = await service.list();
-  assert.equal(list.length, MAX_RECENT_PROJECTS);
+  assert.equal(list.length, 30);
   assert.equal(list[0].path, revisited);
   assert.equal(list[0].interactionCount, 2);
 
@@ -237,17 +236,6 @@ test("an unreadable side-table keeps the previous curtain rather than un-hiding"
   await rm(root, { recursive: true, force: true });
 });
 
-test("without a side-table reader nothing is ever reported archived", async () => {
-  const root = await scratch();
-  const path = join(root, "acme", "site");
-  await mkdir(path, { recursive: true });
-  const service = new RecentProjectsService(join(root, "recent-projects.json"), root);
-  await service.load();
-  await service.markInteracted(path);
-  assert.equal((await service.list())[0]?.isArchived, undefined);
-
-  await rm(root, { recursive: true, force: true });
-});
 
 test("load survives a corrupt file and drops only the bad entries", async () => {
   const root = await scratch();

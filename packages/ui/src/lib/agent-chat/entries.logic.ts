@@ -32,7 +32,6 @@ import {
   isAgentOwnedActivity,
   isCompactionActivity,
   isPlanImplementationMessage,
-  PLAN_IMPLEMENTATION_PROMPT_PREFIX,
   reEmittedAssistantCopies
 } from "@orquester/api/agent-chat";
 
@@ -79,13 +78,6 @@ export interface TimelineEntriesProjection {
   readonly entries: TimelineEntry[];
 }
 
-/**
- * The §7.3 prefix a plan-implementing turn carries — one spelling in
- * `@orquester/api/agent-chat`, shared with the host and the MCP.
- * *T3: `proposedPlan.ts:73`.*
- */
-export { PLAN_IMPLEMENTATION_PROMPT_PREFIX };
-
 // ---------------------------------------------------------------------------
 // Payload readers (the §5.6 allow-list, and nothing else)
 // ---------------------------------------------------------------------------
@@ -114,7 +106,7 @@ const asStringArray = (value: unknown): string[] =>
  * does not, so `cancelled`/`interrupted` map to `failed` — a stopped tool is
  * still a call that did not deliver.*
  */
-export function toolLifecycleStatusFromPayload(
+function toolLifecycleStatusFromPayload(
   payload: Record<string, unknown> | null
 ): WorkLogToolLifecycleStatus | undefined {
   switch (payload?.status) {
@@ -748,7 +740,7 @@ function isPlanBoundaryToolActivity(activity: ThreadActivityItem): boolean {
 export { compactionMarkerState, isCompactionActivity };
 
 /** Before/after token counts, carried on the event and formatted client-side (§7.3). */
-export function compactionTokens(activity: ThreadActivityItem): {
+function compactionTokens(activity: ThreadActivityItem): {
   beforeTokens?: number;
   afterTokens?: number;
 } {

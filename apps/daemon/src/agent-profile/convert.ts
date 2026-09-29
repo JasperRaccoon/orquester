@@ -79,7 +79,7 @@ export type ProfileConverter = (
   to: AgentProfileAgentId
 ) => ProfileConversion;
 
-export interface ProfileConverterOptions {
+interface ProfileConverterOptions {
   /**
    * Where converted skill copies are written (`convert-*` directories). The
    * daemon passes `agentProfileImportsDir(appdir)`.
@@ -100,7 +100,7 @@ function canonicalKey(key: string): string {
   return key.toLowerCase().replaceAll("_", "-");
 }
 
-export interface MappedFrontmatter {
+interface MappedFrontmatter {
   frontmatter: Record<string, unknown>;
   /** Keys left out because `to` does not use them, in their original spelling and order. */
   dropped: string[];
@@ -314,7 +314,7 @@ function positiveNumber(value: unknown): number | null {
  *   with a note otherwise (`enabled_tools`, `disabled_tools`, `required` are
  *   Codex-only). Only keys are ever named in a note, never values.
  */
-export function mapMcpAdvanced(
+function mapMcpAdvanced(
   advanced: Record<string, unknown> | undefined,
   to: AgentProfileAgentId
 ): { advanced: Record<string, unknown>; notes: string[] } {

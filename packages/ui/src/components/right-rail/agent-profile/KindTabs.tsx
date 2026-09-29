@@ -22,7 +22,7 @@ import type { ProfileItemKind } from "@orquester/api";
 import { cn } from "../../../lib/cn";
 import type { ProfileKindTab } from "./list.logic";
 
-export const PROFILE_KIND_ICONS: Record<ProfileItemKind, LucideIcon> = {
+const PROFILE_KIND_ICONS: Record<ProfileItemKind, LucideIcon> = {
   mcp: Server,
   skill: Sparkles,
   plugin: Puzzle,
@@ -53,7 +53,7 @@ export function kindTabKeyTarget(key: string, index: number, count: number): num
   }
 }
 
-export interface KindTabsProps {
+interface KindTabsProps {
   tabs: readonly ProfileKindTab[];
   value: ProfileItemKind;
   onChange: (kind: ProfileItemKind) => void;
@@ -88,8 +88,6 @@ export const KindTabs: React.FC<KindTabsProps> = ({ tabs, value, onChange, searc
         role="tablist"
         aria-label="Kinds"
         aria-orientation="horizontal"
-        data-kind-tabs=""
-        data-searching={searching ? "" : undefined}
         onKeyDown={onKeyDown}
         className={cn(
           "flex flex-wrap transition-opacity",
@@ -135,7 +133,6 @@ export const KindTabs: React.FC<KindTabsProps> = ({ tabs, value, onChange, searc
               />
               {tab.label}
               <span
-                data-kind-count=""
                 className={cn(
                   "ml-0.5 inline-flex min-w-[1.25rem] items-center justify-center rounded-full text-[10.5px] font-semibold leading-4 tabular-nums",
                   sheet ? "px-1.5" : "px-1",
@@ -154,7 +151,7 @@ export const KindTabs: React.FC<KindTabsProps> = ({ tabs, value, onChange, searc
         })}
       </div>
       {searching ? (
-        <p data-kind-tabs-searching="" className="flex items-center gap-1.5 px-0.5 text-[11px] leading-4 text-neutral-500">
+        <p className="flex items-center gap-1.5 px-0.5 text-[11px] leading-4 text-neutral-500">
           <Search size={11} aria-hidden className="shrink-0" />
           <span className="min-w-0 break-words">
             Searching all kinds — clear the search to return to {tabs.find((tab) => tab.id === value)?.label ?? "the tab"}

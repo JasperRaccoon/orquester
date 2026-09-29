@@ -1,5 +1,9 @@
 # Test cleanup record
 
+This directory archives earlier cleanup decisions, including the incoming `7f3516cd` cleanup and older linked reports. [The slop audit](../slop-audit.md) records the final merged decisions and verification; it supersedes historical dispositions here when review retained an assertion or production interface.
+
+The cleanup starting at `9675e822` is summarized in [current.md](current.md). Its full original disposition ledgers are preserved in [commit `7f3516cd`](https://github.com/JasperRaccoon/orquester/commit/7f3516cd). The scope summaries retain concrete change reasons, risks, validation, and unique safeguards; repetitive unchanged-test inventories and temporary runner log paths are omitted. The report below describes the earlier cleanup from `008f84e6`.
+
 Cleanup is completed and verified across the original repository and the incoming remote changes. These reports record every disposition, its independent contract or deletion reason, and validation. The merge preserves upstream commits `b72cefb2` and `8dcbdc61`, which retire the model proxy and its launchers; their new and changed tests received the same audit.
 
 The baseline is commit `008f84e6`: **497 test/check files**, comprising 466 `.test.ts` files and 31 standalone `.check.ts` files, with **7,558 named test definitions**. Parameterized definitions count once in this inventory; their runtime executions can be more numerous. The deployment smoke script adds ten original scenarios. The baseline repository test command passed.
@@ -119,7 +123,6 @@ passed; no generated bindings, runtime state, credentials, build artifacts or de
 changes were introduced by the cleanup. These final gates supersede all temporary
 errors described in the scope reports during concurrent edits or merge resolution.
 
-Validation logs are retained under `/tmp/orquester-test-cleanup/`: `merged-check.log`,
-`merged-test.log`, `merged-build.log` and `merged-smoke.log`. The original cleanup is
+The original cleanup is
 commit `89f36b03`; the merge containing this report incorporates remote `8dcbdc61`
 and the audited incoming-test follow-ups. No required verification was skipped.

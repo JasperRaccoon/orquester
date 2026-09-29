@@ -195,7 +195,7 @@ export const GOAL_CONTINUING_SWITCH_REFUSAL = "Pause the goal before switching a
  * `identitySwitchRefusal`): paused already, set going again by the next agent
  * host, and taken back — paused for good — by the user's own `/goal pause`.
  */
-export const GOAL_HELD_SWITCH_REFUSAL =
+const GOAL_HELD_SWITCH_REFUSAL =
   "The goal is paused for an Orquester update and resumes by itself once the agent host has restarted. Send /goal pause to keep it paused, then switch accounts.";
 
 /** The host's own words for a switch refused during a compaction (`identitySwitchRefusal`). */

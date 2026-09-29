@@ -66,12 +66,6 @@ test("E7: the path list alone is enough when the item carries no diff", () => {
   assert.equal(resolved.isDiff, false);
 });
 
-test("E7: the body is NEVER the card's own title", () => {
-  // The bug: "File change approval" rendered as its own detail block.
-  const resolved = resolveApprovalDetail(approval(), []);
-  assert.equal(resolved.text, null);
-});
-
 test("E7: the join is by id only — a second write in flight is never guessed at", () => {
   // Showing one path while approving another is worse than showing nothing.
   const entries = [

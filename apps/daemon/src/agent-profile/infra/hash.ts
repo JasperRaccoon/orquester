@@ -15,7 +15,7 @@ import { type ProfileItemKind, isProfileItemKind } from "@orquester/api";
  * past what a per-item conflict check or a handful of hooks per event can
  * collide on, and short enough to read in a URL.
  */
-export const PROFILE_HASH_LENGTH = 16;
+const PROFILE_HASH_LENGTH = 16;
 
 /**
  * `JSON.stringify` with every object's keys sorted, recursively — the same

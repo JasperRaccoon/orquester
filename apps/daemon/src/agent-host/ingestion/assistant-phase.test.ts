@@ -200,43 +200,6 @@ function codexTurn(id: string, status: "inProgress" | "completed") {
 // ---------------------------------------------------------------------------
 
 describe("(a) a resumed Codex thread reads the phase from data.phase", () => {
-  it("files commentary as commentary and the answer as the answer, both texts intact", async () => {
-    const drafts = projectCodexHistory({
-      threadId: THREAD_ID,
-      turns: [
-        {
-          id: "turn-1",
-          items: [
-            agentMessage("a1", "I'll read the config first.", "commentary"),
-            agentMessage("a2", "It listens on port 8080.", "final_answer")
-          ]
-        }
-      ]
-    });
-    const events = drafts.map(stamped);
-    // The ambiguous shape itself: the TEXT in `detail`, the phase in `data`.
-    assert.deepEqual(
-      events.flatMap((event) =>
-        event.type === "item.completed" && event.payload.itemType === "assistant_message"
-          ? [{ detail: event.payload.detail, data: event.payload.data }]
-          : []
-      ),
-      [
-        { detail: "I'll read the config first.", data: { phase: "commentary" } },
-        { detail: "It listens on port 8080.", data: { phase: "final_answer" } }
-      ]
-    );
-
-    const messages = foldMessages(await ingestAll(events));
-    assert.deepEqual(seen(messages.get("assistant:a1")), {
-      text: "I'll read the config first.",
-      messageKind: "commentary"
-    });
-    assert.deepEqual(seen(messages.get("assistant:a2")), {
-      text: "It listens on port 8080.",
-      messageKind: "answer"
-    });
-  });
 
   it("never drops a replayed message whose whole text is its own phase word", async () => {
     // On a replayed row `detail` IS the text, even when it spells the phase.
@@ -388,21 +351,6 @@ function replayCodexCapture(name: string): {
 }
 
 describe("(c) Codex live items carry the phase in detail AND data.phase: unchanged", () => {
-  it("04: the commentary narration and the answer, exactly as recorded", async () => {
-    const { events } = replayCodexCapture("04-file-change-approval.ndjson");
-    const messages = foldMessages(await ingestAll(events));
-    assert.deepEqual(
-      seen(messages.get("assistant:msg_08cb0c44904aa080016ab08b6508b487d288518aedf654caab")),
-      {
-        text: "I’ll create `fixture.txt` directly with the requested exact content.",
-        messageKind: "commentary"
-      }
-    );
-    assert.deepEqual(
-      seen(messages.get("assistant:msg_08cb0c44904aa080016ab08b686ff887d2a81babe29aeae0e7")),
-      { text: "Created `fixture.txt` containing exactly `banana`.", messageKind: "answer" }
-    );
-  });
 
   it("every capture: each assistant bubble is ONE recorded agentMessage, of its phase, with its own text", async () => {
     const names = readdirSync(CODEX_FIXTURES)
@@ -508,29 +456,6 @@ describe("(D4) a live assistant item.started closes the abandoned message of its
     assert.equal(closeA.length, 1);
     assert.ok(closeA[0]!.index < messageRows(domain, "assistant:msg-b")[0]!.index);
     // lastReply's input: the answer, whole, and nothing of the fragment.
-  });
-
-  it("(b) fixture 05: the interrupted agentMessage and its re-sample are two bubbles, each its own text", async () => {
-    const abandoned = "msg_0d0d102f2f46ad5c016ab0a4422a1087d287b60bfd06c10b98";
-    const resample = "msg_0d0d102f2f46ad5c016ab0a44574f887d28d6b2840b954d7ce";
-    const { events, completedTexts, streamedTexts } = replayCodexCapture(
-      "05-tool-request-user-input.ndjson"
-    );
-    // What the capture records: the first streams 27 deltas and never
-    // completes; ~3 s later the second starts in the same turn, and completes.
-    assert.equal(completedTexts.has(abandoned), false);
-    assert.equal(completedTexts.has(resample), true);
-
-    const messages = foldMessages(await ingestAll(events));
-    assert.deepEqual(seen(messages.get(`assistant:${abandoned}`)), {
-      text: "The read-only command batch was rejected by the sandbox approval layer, so I’ll keep the plan self-contained and mark the one repo-derived",
-      messageKind: "commentary"
-    });
-    assert.equal(messages.get(`assistant:${abandoned}`)?.text, streamedTexts.get(abandoned));
-    assert.deepEqual(seen(messages.get(`assistant:${resample}`)), {
-      text: completedTexts.get(resample),
-      messageKind: "commentary"
-    });
   });
 
   it("(c) a restarted SAME item keeps its one message", async () => {

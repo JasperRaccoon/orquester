@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { editToml, getTomlPath, parseToml, renderTomlValue } from "./toml-patch.ts";
+import { editToml, getTomlPath, parseToml } from "./toml-patch.ts";
 
 /** Shaped like this host's real `~/.grok/config.toml`, plus comments and an MCP server. */
 const HOST_CONFIG = `# Grok config — hand-edited notes survive every edit
@@ -66,23 +66,6 @@ describe("grok toml-patch", () => {
     assert.deepEqual(getTomlPath(parseToml(out), ["plugins", "disabled"]), ["lua-lsp"]);
   });
 
-  it("edits the multi-line plugins array in place", () => {
-    const out = editToml(HOST_CONFIG, [
-      { op: "set", path: ["plugins", "enabled"], value: ["superpowers", "hookify", "feature-dev"] }
-    ]);
-    assert.deepEqual(getTomlPath(parseToml(out), ["plugins", "enabled"]), ["superpowers", "hookify", "feature-dev"]);
-    assert.ok(out.includes('  "hookify", # the rule writer'));
-    assert.ok(out.includes(COMPAT_BLOCK));
-  });
-
-  it("appends a new [mcp_servers.<name>] table at the end instead of a root dotted key", () => {
-    const out = editToml(HOST_CONFIG, [
-      { op: "set", path: ["mcp_servers", "files"], value: { command: "npx", args: ["-y", "fs"], env: { A: "1" } } }
-    ]);
-    assert.ok(out.endsWith('\n\n[mcp_servers.files]\ncommand = "npx"\nargs = [ "-y", "fs" ]\nenv = { A = "1" }\n'));
-    assert.ok(out.startsWith("# Grok config"));
-  });
-
   it("deletes a table with its sub-tables and leaves the rest byte-for-byte", () => {
     const out = editToml(HOST_CONFIG, [{ op: "delete", path: ["mcp_servers", "jira"] }]);
     assert.equal(getTomlPath(parseToml(out), ["mcp_servers", "jira"]), undefined);
@@ -107,27 +90,10 @@ describe("grok toml-patch", () => {
     assert.ok(out.includes("[mcp_servers.jira.env]"));
   });
 
-  it("creates a missing table for a new key at the end", () => {
-    const out = editToml(HOST_CONFIG, [{ op: "set", path: ["skills", "disabled"], value: ["wip"] }]);
-    assert.ok(out.endsWith('\n\n[skills]\ndisabled = [ "wip" ]\n'));
-  });
-
-  it("indents a key added to an indented table like its siblings", () => {
-    const text = `[a]\n  x = 1\n  # trailing\n\n[b]\ny = 2\n`;
-    const out = editToml(text, [{ op: "set", path: ["a", "z"], value: true }]);
-    assert.equal(out, `[a]\n  x = 1\n  z = true\n  # trailing\n\n[b]\ny = 2\n`);
-  });
-
   it("falls back to the library when the parent is an inline table", () => {
     const text = `mcp_servers = { a = { command = "x" } }\n`;
     const out = editToml(text, [{ op: "set", path: ["mcp_servers", "b"], value: { command: "y" } }]);
     assert.deepEqual(parseToml(out).mcp_servers, { a: { command: "x" }, b: { command: "y" } });
-  });
-
-  it("writes into an empty document and skips no-op edits", () => {
-    assert.equal(editToml("", [{ op: "set", path: ["skills", "disabled"], value: ["a"] }]), '[skills]\ndisabled = [ "a" ]\n');
-    assert.equal(editToml(HOST_CONFIG, [{ op: "delete", path: ["nope", "x"] }]), HOST_CONFIG);
-    assert.equal(editToml(HOST_CONFIG, [{ op: "set", path: ["compat", "claude", "hooks"], value: false }]), HOST_CONFIG);
   });
 
   it("edits the trailing-comma arrays Grok's own CLI writes", () => {
@@ -143,9 +109,4 @@ describe("grok toml-patch", () => {
     assert.throws(() => editToml(HOST_CONFIG, [{ op: "set", path: ["cli", "installer", "x"], value: 1 }]), /not a table/);
   });
 
-  it("renders values on one line with quoted keys where needed", () => {
-    assert.equal(renderTomlValue({ "X-Y": "1", "a b": "q\"" }), '{ X-Y = "1", "a b" = "q\\"" }');
-    assert.equal(renderTomlValue(["a"]), '[ "a" ]');
-    assert.throws(() => parseToml("a = "), Error);
-  });
 });

@@ -66,7 +66,7 @@ const PAYLOAD = "payload";
 const MAX_ENCODED_ID = 200;
 
 /** The directory name an id is stored under. */
-export function encodeStashId(id: string): string {
+function encodeStashId(id: string): string {
   const encoded = Buffer.from(id, "utf8").toString("base64url");
   // `~` is outside base64url's alphabet, so a hashed name never collides with an encoded one.
   return encoded.length <= MAX_ENCODED_ID ? encoded : `~${createHash("sha256").update(id).digest("hex")}`;
@@ -111,7 +111,7 @@ export class ProfileStash {
   }
 
   /** The directory an entry lives in (whether or not it exists). */
-  entryDir(agent: string, kind: ProfileItemKind, id: string): string {
+  private entryDir(agent: string, kind: ProfileItemKind, id: string): string {
     assertSafeSegment(agent);
     if (!isProfileItemKind(kind)) {
       throw profileErrors.invalid(`Unknown item kind "${String(kind)}".`);

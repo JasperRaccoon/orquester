@@ -17,7 +17,6 @@ import {
 import type { ThreadFoldState } from "./fold.ts";
 import type { DomainEvent } from "./domain-events.ts";
 import type { ThreadActivityItem, ThreadMessageItem } from "./thread.ts";
-import { deriveLatestTurn } from "./turn-state.ts";
 import { activity, agentTask, created, ev, resetActivityIds, resetSeq, session } from "./test-helpers.ts";
 
 function fold(events: DomainEvent[]): ThreadFoldState {
@@ -210,7 +209,6 @@ test("an interrupt settles the turn interrupted and keeps its completedAt", () =
   ]);
   assert.equal(state.turns[0]?.state, "interrupted");
   assert.ok(state.turns[0]?.completedAt, "an interrupted turn still records when it ended");
-  assert.deepEqual(deriveLatestTurn(state.turns)?.state, "interrupted");
 });
 
 test("an error session fails the turn", () => {
@@ -363,28 +361,6 @@ test("an activity with a known id is replaced in place, not appended", () => {
   assert.equal(activities(state).length, 1);
   assert.equal(activities(state)[0]?.summary, "done");
   assert.equal(state.activities.length, 1);
-});
-
-test("pending is re-derived from the activity fold and tombstoned by a resolution", () => {
-  reset();
-  let state = fold([
-    created(),
-    ev("thread.activity-appended", {
-      activity: activity("approval.requested", {
-        requestId: "r1",
-        requestType: "command_execution_approval"
-      })
-    })
-  ]);
-  assert.equal(state.pending.approvals.length, 1);
-  state = applyDomainEvent(
-    state,
-    ev("thread.activity-appended", {
-      activity: activity("approval.resolved", { requestId: "r1", decision: "accept" })
-    })
-  );
-  assert.deepEqual(state.pending.approvals, []);
-  assert.ok(state.closedRequestIds.has("r1"));
 });
 
 test("a tombstoned request stays closed after its resolution ages out of retention", () => {
@@ -566,45 +542,6 @@ test("the roster re-derives on task rows and interrupts live rows when the sessi
 
 // --- retention -------------------------------------------------------------
 
-test("activities are retained at the window, keeping an unresolved async question", () => {
-  reset();
-  const events: DomainEvent[] = [created()];
-  events.push(
-    ev("thread.activity-appended", {
-      activity: activity(
-        "user-input.requested",
-        {
-          requestId: "q1",
-          responseMode: "message",
-          questions: [{ id: "a", header: "h", question: "q", options: [{ label: "yes" }] }]
-        },
-        { id: "question" }
-      )
-    })
-  );
-  // The question counts toward the trigger (design B), so the question and
-  // LIMIT + SLACK rows are one past it: the trim cuts the parent window back to
-  // its last LIMIT rows and keeps the still-open question ahead of them.
-  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK; i += 1) {
-    events.push(
-      ev("thread.activity-appended", {
-        activity: activity("tool.completed", { toolUseId: `t${i}` }, { id: `noise-${i}` })
-      })
-    );
-  }
-  const beforeTrim = fold(events.slice(0, -1));
-  assert.equal(
-    beforeTrim.activities.length,
-    ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK,
-    "nothing is trimmed while the slack lasts"
-  );
-  const state = fold(events);
-  assert.equal(state.activities.length, ACTIVITY_RETENTION_LIMIT + 1);
-  assert.equal(state.activities[0]?.id, "question", "a still-open async question is never scrolled out");
-  assert.equal(state.activities[1]?.id, `noise-${ACTIVITY_RETENTION_SLACK}`);
-  assert.equal(state.pending.userInputs.length, 1);
-});
-
 test("a compaction marker never ages out of the window", () => {
   reset();
   // A busy thread writes 500 tool rows in minutes; the marker is where the
@@ -759,8 +696,8 @@ test("a revert truncates by retained turn id and recomputes the latest turn", ()
   ]);
   assert.deepEqual(activities(state).map((entry) => entry.id), ["act-1", "act-2"]);
   assert.equal(state.head?.turnCount, 2);
-  assert.equal(deriveLatestTurn(state.turns)?.turnId, "T-2");
-  assert.equal(deriveLatestTurn(state.turns)?.state, "completed");
+  assert.equal(state.turns.at(-1)?.turnId, "T-2");
+  assert.equal(state.turns.at(-1)?.state, "completed");
 });
 
 test("turn-less rows survive a revert", () => {
@@ -868,7 +805,6 @@ test("a revert on a thread with no checkpoints keeps exactly the first `target` 
   assert.deepEqual(activities(state).map((entry) => entry.id), ["act-1", "act-2"]);
   assert.deepEqual(state.turns.map((turn) => turn.turnId), ["T-1", "T-2"]);
   assert.equal(state.head?.turnCount, 2);
-  assert.equal(deriveLatestTurn(state.turns)?.turnId, "T-2");
 });
 
 test("densely numbered checkpoints go with their turns, not with their counts", () => {
@@ -911,7 +847,6 @@ test("a sparse checkpoint list never reorders the retained turns", () => {
     ]
   );
   assert.deepEqual(state.checkpoints.map((entry) => entry.turnId), ["T-2"]);
-  assert.equal(deriveLatestTurn(state.turns)?.turnId, "T-3");
   assert.deepEqual(userMessageIds(state), ["user:1", "user:2", "user:3"]);
 });
 
@@ -1073,72 +1008,23 @@ test("toThreadSnapshot carries each turn's prompt through, before and after a re
 });
 
 test("fold — the resume cursor outlives a session block that omits it (kept across a settle, replaced only explicitly)", () => {
-    const base = {
-      threadId: "t",
-      seq: 0,
-      occurredAt: "2026-09-22T05:00:00.000Z"
-    };
-    const created: DomainEvent = {
-      ...base,
-      seq: 1,
-      type: "thread.created",
-      payload: {
-        head: {
-          id: "t",
-          projectPath: "/p",
-          cwd: "/p",
-          title: "t",
-          adapter: "claude",
-          refId: "claude",
-          accountId: "",
-          home: "system",
-          modelSelection: { model: "default" },
-          runtimeMode: "full-access",
-          session: { status: "idle", activeTurnId: null },
-          turnCount: 0,
-          seq: 1,
-          createdAt: base.occurredAt,
-          updatedAt: base.occurredAt
-        }
-      }
-    } as unknown as DomainEvent;
-    const withCursor: DomainEvent = {
-      ...base,
-      seq: 2,
-      type: "thread.session-set",
-      payload: {
-        session: {
-          status: "starting",
-          activeTurnId: null,
-          providerThreadId: "e5914086",
-          resumeCursor: { resume: "e5914086", turnCount: 0 }
-        }
-      }
-    } as unknown as DomainEvent;
-    const settled: DomainEvent = {
-      ...base,
-      seq: 3,
-      type: "thread.session-set",
-      payload: { session: { status: "ready", activeTurnId: null } }
-    } as unknown as DomainEvent;
-    const replaced: DomainEvent = {
-      ...base,
-      seq: 4,
-      type: "thread.session-set",
-      payload: {
-        session: {
-          status: "starting",
-          activeTurnId: null,
-          providerThreadId: "new",
-          resumeCursor: { resume: "new", turnCount: 1 }
-        }
-      }
-    } as unknown as DomainEvent;
-    let state = foldThread([created, withCursor, settled]);
-    assert.deepEqual(state.head?.session.resumeCursor, { resume: "e5914086", turnCount: 0 });
-    assert.equal(state.head?.session.providerThreadId, "e5914086");
-    assert.equal(state.head?.session.status, "ready");
-    state = foldThread([created, withCursor, settled, replaced]);
-    assert.deepEqual(state.head?.session.resumeCursor, { resume: "new", turnCount: 1 });
-    assert.equal(state.head?.session.providerThreadId, "new");
+  reset();
+  let state = foldThread([
+    created(),
+    ev("thread.session-set", { session: session("starting", null, {
+      providerThreadId: "e5914086",
+      resumeCursor: { resume: "e5914086", turnCount: 0 }
+    }) }),
+    ev("thread.session-set", { session: session("ready") })
+  ]);
+  assert.deepEqual(state.head?.session.resumeCursor, { resume: "e5914086", turnCount: 0 });
+  assert.equal(state.head?.session.providerThreadId, "e5914086");
+  assert.equal(state.head?.session.status, "ready");
+
+  state = applyDomainEvent(state, ev("thread.session-set", { session: session("starting", null, {
+    providerThreadId: "new",
+    resumeCursor: { resume: "new", turnCount: 1 }
+  }) }));
+  assert.deepEqual(state.head?.session.resumeCursor, { resume: "new", turnCount: 1 });
+  assert.equal(state.head?.session.providerThreadId, "new");
 });

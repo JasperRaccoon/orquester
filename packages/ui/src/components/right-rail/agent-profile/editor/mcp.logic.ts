@@ -42,12 +42,12 @@ export interface SecretRow {
 }
 
 let rowSeq = 0;
-export function nextRowId(): string {
+function nextRowId(): string {
   rowSeq += 1;
   return `row-${rowSeq}`;
 }
 
-export function secretRowsFromView(entries: readonly SecretEntryView[] | undefined): SecretRow[] {
+function secretRowsFromView(entries: readonly SecretEntryView[] | undefined): SecretRow[] {
   return (entries ?? []).map((entry) => ({ id: nextRowId(), key: entry.key, value: "", state: "existing" }));
 }
 
@@ -163,7 +163,7 @@ export function splitCommandLine(line: string): string[] {
 
 const ASSIGNMENT = /^([A-Za-z_][A-Za-z0-9_]*)=([\s\S]*)$/;
 
-export interface ParsedCommandLine {
+interface ParsedCommandLine {
   command: string;
   args: string[];
   /** Leading `NAME=value` words (`FOO=1 npx server`): they belong in env. */
@@ -195,7 +195,7 @@ export function parsePastedCommandLine(text: string): ParsedCommandLine | null {
 // ---------------------------------------------------------------------------
 
 /** An advanced field's value as edited: text for number/string/string-list (one per line), or a switch. */
-export type AdvancedValue = string | boolean;
+type AdvancedValue = string | boolean;
 
 export interface McpForm {
   name: string;
@@ -210,7 +210,7 @@ export interface McpForm {
 }
 
 /** What the form started from, for the draft's merge rules. */
-export interface McpFormOrigin {
+interface McpFormOrigin {
   /** The server's name on disk (edit), else `null`. */
   name: string | null;
   /** Its advanced values on disk, including keys the editor does not show (kept as they are). */
@@ -271,7 +271,7 @@ export function hasAdvancedValues(agent: AgentProfileAgentId, form: McpForm): bo
   });
 }
 
-export function splitListText(text: string): string[] {
+function splitListText(text: string): string[] {
   return text
     .split(/[\n,]/)
     .map((entry) => entry.trim())
@@ -355,7 +355,7 @@ export interface McpValidation {
   };
 }
 
-export function mcpNameError(name: string): string | undefined {
+function mcpNameError(name: string): string | undefined {
   const trimmed = name.trim();
   if (trimmed === "") return "Name the server";
   if (trimmed.length > PROFILE_MCP_NAME_MAX) return `At most ${PROFILE_MCP_NAME_MAX} characters`;

@@ -19,7 +19,7 @@ export const VALIDATION_CATALOG_WAIT_MS = 3_000;
  * The catalogue as validation reads it. A provider's models count as LOADED only once it has been
  * probed (a pending snapshot — status `unknown` — carries a fallback list, not the provider's own).
  */
-export function toValidationCatalog(agents: readonly AgentView[]): WorkflowAgentCatalog {
+function toValidationCatalog(agents: readonly AgentView[]): WorkflowAgentCatalog {
   return {
     agents: agents.map((agent) => {
       const loaded = agent.models.length > 0 && agent.status !== "unknown";

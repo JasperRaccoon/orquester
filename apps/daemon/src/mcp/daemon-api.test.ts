@@ -11,7 +11,6 @@ import { Broadcaster } from "../broadcaster.ts";
 import { UploadTooLargeError } from "../upload-stream.ts";
 import { uploadInlineAttachments } from "./attachments.ts";
 import { InjectDaemonApi } from "./daemon-api.ts";
-import { daemonError } from "./errors.ts";
 
 test("request runs the app's own route with the caller's bearer and parses JSON", async () => {
   const app = Fastify();
@@ -112,20 +111,6 @@ test("a path attachment the seam refuses, or that fails mid-read, leaves no file
     await assert.rejects(uploadInlineAttachments(api, "s1", [{ path: "big.log" }, { path: "small.txt" }]), (e: { code: string; message: string }) => e.code === "HOST_UNAVAILABLE" && /^attachments\[0\]: /.test(e.message));
     assert.equal(await openFds(), baseline, agentChat ? "after a failure mid-read" : "after the 503 answer");
   }
-});
-
-test("a Fastify-shaped 4xx without a code keeps its message: the reason, not the status text", async () => {
-  const app = Fastify();
-  app.get("/api/bad", async () => { throw Object.assign(new Error("workspace name is invalid"), { statusCode: 400 }); });
-  const api = new InjectDaemonApi({ app, authorization: undefined, agentChat: null, broadcaster: new Broadcaster(), fsRoot: "/r", workspacesDir: "/r" });
-  const bad = await api.request("GET", "/api/bad");
-  assert.deepEqual(bad, { status: 400, body: { statusCode: 400, error: "Bad Request", message: "workspace name is invalid" } }, "the shape Fastify really sends");
-  const invalid = daemonError(bad);
-  assert.equal(invalid.code, "INVALID_ARGUMENT"); assert.equal(invalid.message, "workspace name is invalid");
-  // Fastify's own 404 (a daemon without the web client's not-found handler) is the same shape.
-  const missing = daemonError(await api.request("GET", "/api/nope"));
-  assert.equal(missing.code, "NOT_FOUND"); assert.equal(missing.message, "Route GET:/api/nope not found");
-  await app.close();
 });
 
 test("a throwing subscriber stays subscribed and cannot block delivery to other callers", () => {

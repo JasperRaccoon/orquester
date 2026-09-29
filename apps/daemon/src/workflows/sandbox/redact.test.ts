@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import { createChunkRedactor, createRedactor } from "./redact.ts";
+import { createRedactor } from "./redact.ts";
 
 describe("createRedactor", () => {
   const redactor = createRedactor({ API_TOKEN: "tok-12345", SHORT: "abc", LONG: "tok-12345-extended", PIN: "9876" });
@@ -36,32 +36,5 @@ describe("createRedactor", () => {
   test("special regex characters in a value are literal", () => {
     const special = createRedactor({ P: "a.b*c(d)" });
     assert.equal(special.text("a.b*c(d) axbbc(d)"), "«secret:P» axbbc(d)", "the value is matched literally");
-  });
-});
-
-describe("streaming redaction", () => {
-  const redactor = createRedactor({ TOKEN: "s3cr3t-value", OTHER: "s3cr3t-value-longer", SHORTER: "zzzz" });
-  const text = "start s3cr3t-value mid s3cr3t-value-longer zzzz and zzz s3cr3t-valu end s3cr3t-value";
-  const expected = "start «secret:TOKEN» mid «secret:OTHER» «secret:SHORTER» and zzz s3cr3t-valu end «secret:TOKEN»";
-
-  test("every two-chunk split replaces complete secrets with their placeholders", () => {
-    for (let cut = 0; cut <= text.length; cut += 1) {
-      const stream = createChunkRedactor(redactor);
-      const out = stream.push(text.slice(0, cut)) + stream.push(text.slice(cut)) + stream.flush();
-      assert.equal(out, expected, `split at ${cut}`);
-    }
-  });
-
-  test("one character at a time never emits part of a secret", () => {
-    const stream = redactor.stream();
-    let out = "";
-    for (const char of text) {
-      const piece = stream.push(char);
-      out += piece;
-      assert.equal(out.includes("s3cr3t-value-"), false, "never a prefix of the longer secret");
-    }
-    out += stream.flush();
-    assert.equal(out, expected, "the whole stream has the specified placeholders");
-    assert.equal(out.includes("s3cr3t-value "), false, "no secret leaked");
   });
 });

@@ -101,14 +101,14 @@ function editorLabel(request: AgentProfileEditorRequest, kind: ProfileItemKind |
   return kindTitle("create", kind ?? request.kind);
 }
 
-/** What the request opens. Exported for the render checks. */
-export const EditorBody: React.FC<{ request: AgentProfileEditorRequest; kind: ProfileItemKind | null }> = ({ request, kind }) => {
+/** What the request opens. */
+const EditorBody: React.FC<{ request: AgentProfileEditorRequest; kind: ProfileItemKind | null }> = ({ request, kind }) => {
   if (request.mode === "instructions") return <InstructionsEditor />;
   if (request.mode === "edit") return <EditLoader itemId={request.itemId} />;
   return <CreateEditor kind={kind ?? request.kind} />;
 };
 
-export const CreateEditor: React.FC<{ kind: ProfileItemKind }> = ({ kind }) => {
+const CreateEditor: React.FC<{ kind: ProfileItemKind }> = ({ kind }) => {
   switch (kind) {
     case "mcp":
       return <McpEditor />;
@@ -124,23 +124,18 @@ export const CreateEditor: React.FC<{ kind: ProfileItemKind }> = ({ kind }) => {
   }
 };
 
-export type DetailLoad =
+type DetailLoad =
   | { status: "loading" }
   | { status: "error"; message: string; code: string | null }
   | { status: "loaded"; detail: ProfileItemDetail; seq: number };
 
 /** Edit: read the item's editable detail first, then open its kind's editor on it. */
-export const EditLoader: React.FC<{ itemId: string; initial?: DetailLoad }> = ({ itemId, initial }) => {
+const EditLoader: React.FC<{ itemId: string }> = ({ itemId }) => {
   const { agent, api } = useEditorEnv();
-  const [load, setLoad] = useState<DetailLoad>(initial ?? { status: "loading" });
+  const [load, setLoad] = useState<DetailLoad>({ status: "loading" });
   const [attempt, setAttempt] = useState(0);
-  const preset = useRef(initial !== undefined);
 
   useEffect(() => {
-    if (preset.current) {
-      preset.current = false;
-      return;
-    }
     const controller = new AbortController();
     setLoad({ status: "loading" });
     api.getAgentProfileItem(agent, itemId, controller.signal).then(
@@ -177,7 +172,7 @@ export const EditLoader: React.FC<{ itemId: string; initial?: DetailLoad }> = ({
   return <DetailEditor key={load.seq} detail={load.detail} onReload={reload} />;
 };
 
-export const DetailEditor: React.FC<{ detail: ProfileItemDetail; onReload: () => void }> = ({ detail, onReload }) => {
+const DetailEditor: React.FC<{ detail: ProfileItemDetail; onReload: () => void }> = ({ detail, onReload }) => {
   if (!detail.item.editable) return <ReadOnlyDetail detail={detail} />;
   switch (detail.kind) {
     case "mcp":
@@ -193,7 +188,7 @@ export const DetailEditor: React.FC<{ detail: ProfileItemDetail; onReload: () =>
 };
 
 /** Plugins and marketplaces are installed and removed, never edited; locked and inherited items belong elsewhere. */
-export const ReadOnlyDetail: React.FC<{ detail: ProfileItemDetail }> = ({ detail }) => {
+const ReadOnlyDetail: React.FC<{ detail: ProfileItemDetail }> = ({ detail }) => {
   const rows: [string, string][] = [["Source", detail.item.source.label]];
   if (detail.kind === "plugin") {
     const { plugin } = detail;

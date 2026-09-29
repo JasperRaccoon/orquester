@@ -185,7 +185,7 @@ function secretKeys(entries: readonly SecretEntryView[] | undefined): { key: str
 }
 
 /** A URL as a result shows it: credentials written into it (`https://user:token@host`) replaced by `***`. */
-export function redactUrlCredentials(url: string): string {
+function redactUrlCredentials(url: string): string {
   return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#\s]+@/i, "$1***@");
 }
 
@@ -378,7 +378,7 @@ function secretEntries(map: Record<string, string> | undefined): SecretEntryDraf
  * The update's entries: every current key kept (`{keep: true}`) unless the patch names it — a string replaces it,
  * null removes it — then the patch's new keys. Only keys are read from `current`; values never pass through here.
  */
-export function mergeSecretEntries(current: readonly SecretEntryView[] | undefined, patch: Record<string, string | null> | undefined): SecretEntryDraft[] {
+function mergeSecretEntries(current: readonly SecretEntryView[] | undefined, patch: Record<string, string | null> | undefined): SecretEntryDraft[] {
   const out: SecretEntryDraft[] = [];
   const seen = new Set<string>();
   for (const entry of current ?? []) {

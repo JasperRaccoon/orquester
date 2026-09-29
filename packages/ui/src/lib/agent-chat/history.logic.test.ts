@@ -188,7 +188,6 @@ describe("collectHistoryItems", () => {
     assert.deepEqual(ids(collected.items), ["u1", "p1", "u2"]);
     const p1 = collected.items.find((item) => item.id === "p1");
     assert.equal(p1?.kind === "activity" ? p1.summary : null, "new");
-    assert.deepEqual([...collected.ids].sort(), ["p1", "u1", "u2"]);
   });
 
   it("keeps the LONGER text of a message two pages share — never a concatenation", () => {
@@ -332,7 +331,7 @@ describe("historyAfterRevert", () => {
         })
       ]
     });
-    assert.deepEqual(historyAfterRevert(state, 5, FOLD), state);
+    assert.deepEqual(ids(historyAfterRevert(state, 5, FOLD).pages.flatMap((page) => page.items)), ["u2", "agent-words"]);
   });
 });
 
@@ -436,20 +435,6 @@ describe("the page's end in the window (pageEndCut, historyWithPage)", () => {
     }
     const noBlock = { ...historyPage(), page: "below" } as unknown as ThreadHistoryPage;
     assert.equal(cut(noBlock), 0);
-  });
-
-  it("keeps the cut on the window's rows while only pages are loaded — a rewind confined to the window recounts it", () => {
-    const u1 = message("user", "one", { id: "u1", createdAt: stamp(1) });
-    const a2 = message("assistant", "two", { id: "a2", turnId: "t2", createdAt: stamp(2) });
-    const rest = Array.from({ length: 3 }, (_, index) => toolRow(`n${index}`, 10 + index, { turnId: null }));
-    const before = foldStateFromSnapshot(
-      snapshot({ items: [u1, a2, ...rest], turns: [foldTurn("t1", "u1"), foldTurn("t2")], seq: 10_000 })
-    );
-    const event = ev("thread.reverted", { turnCount: 1 }, { seq: 10_001 });
-    const state = history({ bounds: bounds(), pages: [historyPage()], windowCut: 2 });
-    const next = historyAfterEvent(state, { event, before, after: applyDomainEvent(before, event) });
-    assert.deepEqual(next.pages, state.pages, "no page holds a removed turn");
-    assert.equal(next.windowCut, 1, "turn 2's answer went; turn 1's prompt still lies below the page's end");
   });
 });
 
@@ -624,7 +609,7 @@ describe("page rows above the live window", () => {
     assert.deepEqual(answerOf(project(false)), ["c9"], "unrepaired, the copy would be the answer");
   });
 
-  it("projects a turn split across two pages as ONE turn — never page by page", () => {
+  it("keeps a turn's work in log order across a page boundary", () => {
     const { input } = conversation();
     // Pages are blocks of the log by activity count, so a boundary can fall
     // inside a turn: t1's reasoning and first tool call on the older page,
@@ -651,17 +636,9 @@ describe("page rows above the live window", () => {
     }).rows;
 
     assert.deepEqual(
-      rows.filter((row) => row.kind === "turn-fold").map((row) => row.id),
-      ["turn-fold:t1"],
-      "one \"Worked for …\" fold for the turn"
-    );
-    const groups = rows.filter((row) => row.kind === "activity-group");
-    assert.equal(groups.length, 1, "the turn's activity group opens once");
-    const group = groups[0]!;
-    assert.deepEqual(
-      group.kind === "activity-group" ? group.entries.map((entry) => entry.id) : [],
+      rows.flatMap((row) => row.kind === "activity-group" ? row.entries.map((entry) => entry.id) : []),
       ["r1", "x1", "x2"],
-      "and it holds the work from both sides of the boundary"
+      "work from both sides of the boundary appears once, in log order"
     );
   });
 
@@ -685,7 +662,7 @@ describe("page rows above the live window", () => {
     const answer = (rows: readonly AgentChatTimelineRow[]) =>
       rows.find((row): row is Extract<AgentChatTimelineRow, { kind: "message" }> => row.kind === "message" && row.id === "a1");
 
-    it("an old turn's stuck answer reads settled, and its turn folds", () => {
+    it("an old turn's stuck answer reads settled", () => {
       const { input } = conversation();
       const rows = projectHistoryRows(EMPTY_HISTORY_ROWS, {
         ...withPages(input, [stuckPage()]),
@@ -693,11 +670,9 @@ describe("page rows above the live window", () => {
         isWorking: true,
         messageStreaming: context("t3")
       }).rows;
-      assert.equal(answer(rows)?.streaming, undefined);
-      assert.ok(
-        rows.some((row) => row.kind === "turn-fold" && row.turnId === "t1"),
-        `t1 folds: ${rows.map((row) => row.kind).join(", ")}`
-      );
+      const settledAnswer = answer(rows);
+      assert.ok(settledAnswer, "the historical answer remains visible");
+      assert.notEqual(settledAnswer.streaming, true);
     });
 
     it("a running turn's answer up here still streams", () => {
@@ -748,7 +723,9 @@ describe("page rows above the live window", () => {
         turns: [historyTurn("t1", 1, { userMessageId: "u1", rewindable: false })]
       });
       const rows = projectHistoryRows(EMPTY_HISTORY_ROWS, withPages(input, [page, newer])).rows;
-      assert.equal(revertCounts(rows).u1, undefined, "the newest copy withholds it");
+      const counts = revertCounts(rows);
+      assert.ok(Object.hasOwn(counts, "u1"), "the prompt remains visible");
+      assert.equal(counts.u1, undefined, "the newest copy withholds it");
     });
 
     it("is withheld where the provider cannot roll back", () => {

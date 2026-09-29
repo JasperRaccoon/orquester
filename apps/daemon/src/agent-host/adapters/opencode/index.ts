@@ -310,7 +310,7 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     return { recycled, deferred };
   }
 
-  /** Every scheduled recycle re-check, and the stop it started, settled. The test drain. */
+  /** Wait for scheduled recycle checks and stops, including checks queued while draining. */
   async recycleSettled(): Promise<void> {
     while (this.recycleWork.size > 0) {
       await Promise.all([...this.recycleWork]);
@@ -1012,7 +1012,7 @@ export const createOpenCodeAdapter: AdapterFactory = async (
   return await Promise.resolve(adapter);
 };
 
-export { OpenCodeAdapterImpl };
+export type { OpenCodeAdapterImpl };
 
 /** §3.2 layer one — the pending seed the snapshot registry reads at construction. */
 export { pendingSnapshot as pendingOpenCodeSnapshot } from "./snapshot.ts";

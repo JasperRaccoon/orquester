@@ -16,7 +16,7 @@ import {
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { ProfileStash, encodeStashId } from "./stash.ts";
+import { ProfileStash } from "./stash.ts";
 import { pathKind } from "./tree.ts";
 
 interface Scratch {
@@ -47,7 +47,6 @@ test("a stashed file moves out and restores byte for byte, mode and all", async 
 
   const entry = await stash.stashPath("claude", "command", "command:git/pr", "git/pr", file, { description: "PR" });
   assert.equal(await pathKind(file), null, "moved out");
-  assert.equal(entry.dir, join(root, "stash", "claude", "command", encodeStashId("command:git/pr")));
   assert.deepEqual(await readFile(entry.payloadPath!), bytes);
 
   const manifest = JSON.parse(await readFile(join(entry.dir, "manifest.json"), "utf8"));
@@ -133,20 +132,6 @@ test("stashing an id that is already stashed is refused; remove() then re-stash 
   });
 });
 
-test("fragments round trip through the manifest", async (t) => {
-  const { stash } = await scratch(t);
-  const id = "hook:PreToolUse:0123456789abcdef";
-  const data = { event: "PreToolUse", matcher: "Bash", hook: { type: "command", command: "echo 'hi'", timeout: 5 } };
-  const entry = await stash.stashFragment("claude", "hook", id, "echo 'hi'", data);
-  assert.equal(entry.payloadPath, null);
-  assert.deepEqual((await stash.get("claude", "hook", id))?.original, { type: "fragment", data });
-  await assert.rejects(stash.stashFragment("claude", "hook", id, "again", data), { code: "PROFILE_CONFLICT" });
-  await assert.rejects(stash.restorePath("claude", "hook", id), { code: "ITEM_NOT_FOUND" }, "not a path entry");
-
-  assert.equal(await stash.remove("claude", "hook", id), true);
-  assert.equal(await stash.get("claude", "hook", id), null);
-});
-
 test("list is sorted, per agent, and skips broken entries with a warning", async (t) => {
   const { root, stash, warnings } = await scratch(t);
   for (const name of ["zeta", "alpha"]) {
@@ -185,8 +170,7 @@ test("list is sorted, per agent, and skips broken entries with a warning", async
 
 test("a leftover entry that is not usable is replaced instead of blocking the id", async (t) => {
   const { root, stash } = await scratch(t);
-  const dir = stash.entryDir("claude", "command", "command:cmd");
-  await mkdir(dir, { recursive: true });
+  const { dir } = await stash.stashFragment("claude", "command", "command:cmd", "cmd", {});
   await writeFile(join(dir, "manifest.json"), "{half-written");
   const file = join(root, "cmd.md");
   await writeFile(file, "x");
@@ -194,15 +178,13 @@ test("a leftover entry that is not usable is replaced instead of blocking the id
   assert.equal(await readFile(entry.payloadPath!, "utf8"), "x");
 });
 
-test("ids are encoded safely; very long ids are hashed", async (t) => {
+test("long item ids round trip and unsafe stash owners are refused", async (t) => {
   const { stash } = await scratch(t);
-  assert.equal(encodeStashId("command:git/pr"), Buffer.from("command:git/pr").toString("base64url"));
-  const long = `plugin:${"x".repeat(300)}`;
-  assert.match(encodeStashId(long), /^~[0-9a-f]{64}$/);
-  await stash.stashFragment("claude", "plugin", long, "x", { a: 1 });
-  assert.equal((await stash.get("claude", "plugin", long))?.id, long);
-  assert.throws(() => stash.entryDir("../claude", "hook", "x"), { code: "INVALID_NAME" });
-  assert.throws(() => stash.entryDir("claude", "nope" as "hook", "x"), { code: "INVALID_REQUEST" });
+  const long = "hook:Stop:" + "x".repeat(1000);
+  await stash.stashFragment("claude", "hook", long, "stop", { command: "echo hi" });
+  const entry = await stash.get("claude", "hook", long);
+  assert.deepEqual(entry?.original, { type: "fragment", data: { command: "echo hi" } });
+  await assert.rejects(stash.stashFragment("../outside", "hook", long, "stop", {}), { code: "INVALID_NAME" });
 });
 
 test("stash and restore across filesystems copy, fsync and remove", async (t) => {

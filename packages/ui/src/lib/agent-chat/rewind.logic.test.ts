@@ -6,8 +6,7 @@ import type { ThreadMessageItem,Turn } from "@orquester/api/agent-chat";
 import type { AgentChatTimelineRow } from "./contracts";
 import {
 createEscapeSequence,
-deriveRewindTargets,
-ESCAPE_SEQUENCE_WINDOW_MS
+deriveRewindTargets
 } from "./rewind.logic";
 
 function userRow(id: string, text: string, revertTurnCount?: number, attachments = 0): AgentChatTimelineRow {
@@ -92,7 +91,7 @@ describe("deriveRewindTargets", () => {
 
 describe("createEscapeSequence", () => {
   it("completes on the second press inside the window and then starts over", () => {
-    const sequence = createEscapeSequence(600);
+    const sequence = createEscapeSequence();
     assert.equal(sequence.press(1_000), false);
     assert.equal(sequence.press(1_400), true);
     // A third press is a fresh first press, not a second double.
@@ -101,14 +100,14 @@ describe("createEscapeSequence", () => {
   });
 
   it("a press outside the window is a first press", () => {
-    const sequence = createEscapeSequence(ESCAPE_SEQUENCE_WINDOW_MS);
+    const sequence = createEscapeSequence();
     assert.equal(sequence.press(1_000), false);
-    assert.equal(sequence.press(1_000 + ESCAPE_SEQUENCE_WINDOW_MS + 1), false);
-    assert.equal(sequence.press(1_000 + ESCAPE_SEQUENCE_WINDOW_MS + 100), true);
+    assert.equal(sequence.press(1_601), false);
+    assert.equal(sequence.press(1_700), true);
   });
 
   it("reset forgets the first press", () => {
-    const sequence = createEscapeSequence(600);
+    const sequence = createEscapeSequence();
     sequence.press(1_000);
     sequence.reset();
     assert.equal(sequence.press(1_100), false);

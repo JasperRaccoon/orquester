@@ -11,11 +11,11 @@ import type { NodeExecutionContext, PromptRenderer } from "../contracts.ts";
 import { tailUtf8, truncateUtf8 } from "../run-context.ts";
 
 /** §5.1 step 3 — appended to every prompt this block sends while `autonomyNote` is on. */
-export const AUTONOMY_NOTE =
+const AUTONOMY_NOTE =
   "You are running unattended inside an automated workflow. No human will answer. Never ask questions or wait for confirmation; make reasonable decisions and complete the task fully.";
 
 /** §5.4 step 3 — the first message after an in-session account switch. */
-export const CONTINUE_AFTER_SWITCH =
+const CONTINUE_AFTER_SWITCH =
   "You were interrupted by a usage limit and have been moved to another account. Continue the task from exactly where you stopped.";
 
 /** §5.5 — the custom answer to a question that allows one. */
@@ -25,7 +25,7 @@ export const AUTONOMOUS_ANSWER = "No user is available. Choose the most reasonab
  * §5.4 step 4 — the handoff paragraph (the agent is named), saying why the previous agent stopped:
  * a usage limit, a refused login, or (with no known reason) neither.
  */
-export function handoffNotice(agent: string, reason?: AgentFailureReason): string {
+function handoffNotice(agent: string, reason?: AgentFailureReason): string {
   const why =
     reason === "usage_limit"
       ? "was cut off by a usage limit"
@@ -78,7 +78,7 @@ export function buildHandoffPrompt(input: {
 }
 
 /** §5.4 step 3 for an account whose login was refused (the account moved for a sign-in failure). */
-export const CONTINUE_AFTER_AUTH_SWITCH =
+const CONTINUE_AFTER_AUTH_SWITCH =
   "Your previous account's login failed and you have been moved to another account. Continue the task from exactly where you stopped.";
 
 /**

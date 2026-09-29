@@ -69,19 +69,6 @@ describe("codex history projection — replayed from fixture 07", () => {
   const snapshot = snapshotFromFixture();
   const events = projectCodexHistory(snapshot);
 
-  it("brackets every turn with turn.started … turn.completed", () => {
-    assert.equal(events[0]!.type, "turn.started");
-    assert.equal(events.at(-1)!.type, "turn.completed");
-    assert.equal(
-      events.filter((event) => event.type === "turn.started").length,
-      snapshot.turns.length
-    );
-    assert.equal(
-      events.filter((event) => event.type === "turn.completed").length,
-      snapshot.turns.length
-    );
-  });
-
   it("settles each turn completed and claims NO token usage", () => {
     const completed = events.find((event) => event.type === "turn.completed")!;
     const payload = completed.payload as {

@@ -149,12 +149,6 @@ function rosterRow(drafts: readonly RuntimeEventDraft[]): RuntimeSubagent {
 }
 
 describe("a collab child's launch record carries a launch id (I1)", () => {
-  it("subAgentActivity started starts the task under codex-launch:<item id>", () => {
-    const start = startOf(launch(make()));
-    assert.equal(start.payload.taskId, CHILD);
-    assert.equal(start.payload.toolUseId, `codex-launch:${LAUNCH_ITEM}`);
-  });
-
   it("the launch's own first turn is not a second start", () => {
     const normaliser = make();
     launch(normaliser);

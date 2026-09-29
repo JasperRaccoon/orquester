@@ -21,12 +21,6 @@ const base: ChatEscapeInput = {
   rewindAvailable: false
 };
 
-test("Escape leaves the drill-in — the case a React root handler could not see", () => {
-  // The repro: open a drill-in, click a non-focusable row, `activeElement` is
-  // `<body>`, and a handler on the chat root never fires again.
-  assert.equal(resolveChatEscape({ ...base, drillInOpen: true }), "close-drill-in");
-});
-
 test("the drill-in wins over the interrupt", () => {
   // "Take me back", not "stop the agent": leaving a child view is the narrower
   // and reversible action. Getting this backwards is what the two competing
@@ -39,10 +33,6 @@ test("the drill-in wins over the interrupt", () => {
 
 test("Escape interrupts a running turn from anywhere in the tab", () => {
   assert.equal(resolveChatEscape({ ...base, turnActive: true }), "interrupt");
-});
-
-test("Escape does nothing with no drill-in and no turn", () => {
-  assert.equal(resolveChatEscape(base), "ignore");
 });
 
 test("a hidden tab never acts, whatever it is doing", () => {

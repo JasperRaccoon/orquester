@@ -4,11 +4,9 @@
  * the installed ones marked); with no marketplace yet it says so and offers to
  * add one. OpenCode: an npm package or a file path. Plugins are installed and
  * removed, never edited. Rules: `plugin.logic.ts`.
- *
- * Takes an optional `initial` state so a render check can draw every step.
  */
 
-import React, { useEffect, useId, useRef, useState } from "react";
+import React, { useEffect, useId, useState } from "react";
 import { Search } from "lucide-react";
 
 import type { AgentProfileSnapshot, MarketplacePluginEntry } from "@orquester/api";
@@ -32,21 +30,21 @@ import {
 } from "./plugin.logic";
 import { SubmitStatus, useProfileSubmit } from "./use-submit";
 
-export const PluginEditor: React.FC<{ initial?: MarketplaceInstallInitial }> = ({ initial }) => {
+export const PluginEditor: React.FC = () => {
   const { agent } = useEditorEnv();
-  return pluginInstallMode(agent) === "spec" ? <SpecInstall /> : <MarketplaceInstall initial={initial} />;
+  return pluginInstallMode(agent) === "spec" ? <SpecInstall /> : <MarketplaceInstall />;
 };
 
 // ---------------------------------------------------------------------------
 // OpenCode: a spec
 // ---------------------------------------------------------------------------
 
-export const SpecInstall: React.FC<{ initialSpec?: string; showErrors?: boolean }> = ({ initialSpec = "", showErrors: forceErrors }) => {
+const SpecInstall: React.FC = () => {
   const { agent, api } = useEditorEnv();
   const ids = useId();
   const touch = useTouch();
-  const [spec, setSpec] = useState(initialSpec);
-  const [showErrors, setShowErrors] = useState(forceErrors ?? false);
+  const [spec, setSpec] = useState("");
+  const [showErrors, setShowErrors] = useState(false);
   const submit = useProfileSubmit();
   const problem = pluginSpecError(spec);
   const message = showErrors ? problem : undefined;
@@ -118,34 +116,20 @@ export const SpecInstall: React.FC<{ initialSpec?: string; showErrors?: boolean 
 
 type Load<T> = { status: "loading" } | { status: "error"; message: string } | { status: "loaded"; value: T };
 
-export interface MarketplaceInstallInitial {
-  snapshot?: Load<AgentProfileSnapshot>;
-  marketplace?: string;
-  plugins?: Load<MarketplacePluginEntry[]>;
-  query?: string;
-  selected?: string;
-}
-
-export const MarketplaceInstall: React.FC<{ initial?: MarketplaceInstallInitial }> = ({ initial }) => {
+const MarketplaceInstall: React.FC = () => {
   const env = useEditorEnv();
   const { agent, api } = env;
   const ids = useId();
-  const [snapshot, setSnapshot] = useState<Load<AgentProfileSnapshot>>(initial?.snapshot ?? { status: "loading" });
-  const [marketplace, setMarketplace] = useState<string | null>(initial?.marketplace ?? null);
-  const [plugins, setPlugins] = useState<Load<MarketplacePluginEntry[]>>(initial?.plugins ?? { status: "loading" });
-  const [query, setQuery] = useState(initial?.query ?? "");
-  const [selected, setSelected] = useState<string | null>(initial?.selected ?? null);
+  const [snapshot, setSnapshot] = useState<Load<AgentProfileSnapshot>>({ status: "loading" });
+  const [marketplace, setMarketplace] = useState<string | null>(null);
+  const [plugins, setPlugins] = useState<Load<MarketplacePluginEntry[]>>({ status: "loading" });
+  const [query, setQuery] = useState("");
+  const [selected, setSelected] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const submit = useProfileSubmit();
-  const presetSnapshot = useRef(initial?.snapshot !== undefined);
-  const presetPlugins = useRef(initial?.plugins !== undefined);
   useReportDirty(false);
 
   useEffect(() => {
-    if (presetSnapshot.current) {
-      presetSnapshot.current = false;
-      return;
-    }
     const controller = new AbortController();
     setSnapshot({ status: "loading" });
     api.getAgentProfile(agent, controller.signal).then(
@@ -166,10 +150,6 @@ export const MarketplaceInstall: React.FC<{ initial?: MarketplaceInstallInitial 
   }, [api, agent, attempt]);
 
   useEffect(() => {
-    if (presetPlugins.current) {
-      presetPlugins.current = false;
-      return;
-    }
     if (marketplace === null) return;
     const controller = new AbortController();
     setPlugins({ status: "loading" });
@@ -263,7 +243,7 @@ export const MarketplaceInstall: React.FC<{ initial?: MarketplaceInstallInitial 
   );
 };
 
-export const PluginPicker: React.FC<{
+const PluginPicker: React.FC<{
   idPrefix: string;
   plugins: Load<MarketplacePluginEntry[]>;
   query: string;

@@ -43,7 +43,7 @@ function asTrimmedString(value: unknown): string | null {
  * counts: labels are not unique when tools execute in parallel, so an
  * anonymous call must pass through rather than swallow its siblings.
  */
-export function stableToolCallId(activity: ThreadActivityItem): string | null {
+function stableToolCallId(activity: ThreadActivityItem): string | null {
   const payload = asRecord(activity.payload);
   if (payload === null) {
     return null;
@@ -106,7 +106,7 @@ function isResolvableContextWindowActivity(activity: ThreadActivityItem): boolea
  * nothing. Malformed rows pass through untouched rather than shadowing a valid
  * earlier row.
  */
-export function dropStaleContextWindowActivities(
+function dropStaleContextWindowActivities(
   activities: readonly ThreadActivityItem[]
 ): ThreadActivityItem[] {
   const latestIndexByTurn = new Map<string | null, number>();
@@ -161,7 +161,7 @@ function toolLifecycleIdentity(activity: ThreadActivityItem): string | null {
  * **after** the update within the turn — a later update belongs to a
  * subsequent call reusing the same identity and is still in flight.
  */
-export function dropSupersededToolUpdatedActivities(
+function dropSupersededToolUpdatedActivities(
   activities: readonly ThreadActivityItem[]
 ): ThreadActivityItem[] {
   const latestCompletionByKey = new Map<string, number>();

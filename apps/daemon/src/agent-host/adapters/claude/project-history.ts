@@ -63,7 +63,7 @@ interface PendingToolUse {
  * `system` transcript row, a malformed entry — yields `undefined` and is
  * skipped rather than guessed at.
  */
-export function readHistoryMessage(item: unknown): HistoryMessage | undefined {
+function readHistoryMessage(item: unknown): HistoryMessage | undefined {
   if (item === null || typeof item !== "object") {
     return undefined;
   }

@@ -26,7 +26,7 @@ import {
 import { formatAgo } from "../../../lib/workflows/format";
 
 /** The tabs' short labels ("MCP" rather than "MCP servers"). */
-export const PROFILE_KIND_TAB_LABELS: Record<ProfileItemKind, string> = {
+const PROFILE_KIND_TAB_LABELS: Record<ProfileItemKind, string> = {
   mcp: "MCP",
   skill: "Skills",
   plugin: "Plugins",
@@ -42,7 +42,7 @@ export interface ProfileKindTab {
 }
 
 /** Items per kind. */
-export function profileKindCounts(items: readonly ProfileItem[]): Partial<Record<ProfileItemKind, number>> {
+function profileKindCounts(items: readonly ProfileItem[]): Partial<Record<ProfileItemKind, number>> {
   const counts: Partial<Record<ProfileItemKind, number>> = {};
   for (const item of items) counts[item.kind] = (counts[item.kind] ?? 0) + 1;
   return counts;
@@ -401,7 +401,7 @@ export function manageInAgent(item: ProfileItem): AgentProfileAgentId | null {
 // The instructions card
 // ---------------------------------------------------------------------------
 
-export function fileNameOf(path: string): string {
+function fileNameOf(path: string): string {
   const parts = path.split(/[\\/]/).filter((part) => part.length > 0);
   return parts[parts.length - 1] ?? "";
 }
@@ -431,7 +431,7 @@ export function instructionsLine(
  * any narrower would clip "OpenCode". The dock's default 320 px (319 inside
  * its border) shows the dropdown; a 360 px phone's section (352) the segments.
  */
-export const AGENT_PICKER_SEGMENTED_MIN_WIDTH = 336;
+const AGENT_PICKER_SEGMENTED_MIN_WIDTH = 336;
 
 export function agentPickerLayout(panelWidth: number | null): "segmented" | "dropdown" {
   // Not measured yet (the first paint, a static render): a phone's full

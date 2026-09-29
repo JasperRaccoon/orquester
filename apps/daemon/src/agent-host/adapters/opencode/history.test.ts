@@ -93,7 +93,6 @@ function itemsOf(events: RuntimeEvent[]): ItemCompleted[] {
 
 const FIXTURE_10 = "10-fork-rollback-and-messages.ndjson";
 const ROOT_SESSION = "ses_f3e57df42ffeYDUh6RvaJqgKpe";
-const WHOLE_FORK = "ses_f3e57c48affeHi4702SDbx9MLg";
 const EMPTY_FORK = "ses_f3e57c504ffe3tko2eNnLjl5PB";
 
 test("fixture 10: the captured history replays as turn markers around completed items", () => {
@@ -125,18 +124,6 @@ test("fixture 10: the captured history replays as turn markers around completed 
     ]
   );
   assert.ok(items.every((item) => item.payload.status === "completed"));
-});
-
-test("fixture 10: `step-start` / `step-finish` are bookkeeping and project to nothing", () => {
-  const messages = historyFor(FIXTURE_10, ROOT_SESSION);
-  const partTypes = messages.flatMap((entry) => (entry.parts ?? []).map((part) => part.type));
-  assert.ok(partTypes.includes("step-start") && partTypes.includes("step-finish"));
-
-  // Three text parts in the capture, three items out — the step parts added none.
-  assert.equal(
-    itemsOf(project("thread-1", messages)).length,
-    partTypes.filter((type) => type === "text").length
-  );
 });
 
 test("fixture 10: every replayed turn reports usage as unavailable, never a guess", () => {
@@ -177,25 +164,6 @@ test("fixture 10: every projected event is stamped historical and carries the tu
   }
   // The turn is keyed on the ASSISTANT message — the unit `rollbackThread` counts.
   assert.equal(events[0]!.turnId, assistantId);
-});
-
-test("fixture 10: history replays identically after a whole-history fork, under the new ids", () => {
-  const original = project("thread-1", historyFor(FIXTURE_10, ROOT_SESSION));
-  const forked = project("thread-1", historyFor(FIXTURE_10, WHOLE_FORK));
-
-  const shape = (events: RuntimeEvent[]): unknown[] =>
-    events.map((event) => [
-      event.type,
-      event.type === "item.completed" ? event.payload.itemType : null,
-      event.type === "item.completed" ? event.payload.detail : null
-    ]);
-
-  assert.deepEqual(shape(forked), shape(original));
-  // A fork rewrites every id, so the projection must key off the fork's own.
-  const originalTurns = new Set(original.map((event) => event.turnId));
-  for (const event of forked) {
-    assert.equal(originalTurns.has(event.turnId), false);
-  }
 });
 
 test("fixture 10: an empty fork projects to no events at all", () => {

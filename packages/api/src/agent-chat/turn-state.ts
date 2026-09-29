@@ -9,7 +9,6 @@
  */
 
 import type {
-  LatestTurnSummary,
   ThreadSessionStatus,
   Turn,
   TurnState
@@ -74,26 +73,5 @@ export function applySessionStatusToTurn(
     // turn's `completedAt` can only hold a mid-turn placeholder-checkpoint
     // timestamp, so it is overwritten rather than preserved.
     completedAt: at
-  };
-}
-
-/**
- * The compact row every ambient surface reads off `SessionSummary` (§6.4).
- * Returns `null` for a thread with no turns.
- *
- * "Latest" is positional, not chronological: the fold appends turns in the
- * order they were requested, and the last row is the one the composer, the
- * tab strip and the Attention Center all talk about.
- */
-export function deriveLatestTurn(turns: readonly Turn[]): LatestTurnSummary | null {
-  const turn = turns.length > 0 ? turns[turns.length - 1] : undefined;
-  if (!turn) {
-    return null;
-  }
-  return {
-    turnId: turn.turnId,
-    state: turn.state,
-    startedAt: turn.startedAt,
-    completedAt: turn.completedAt
   };
 }

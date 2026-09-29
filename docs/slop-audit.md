@@ -86,8 +86,10 @@ are grouped because their common verification is the full repository typecheck.
 
 ## Provider adapters
 
-Generated bindings and protocol captures are unchanged. Fixture documentation was
-read before editing. Unknown-event warnings, provider-specific compatibility,
+Generated bindings and retained protocol captures are unchanged. The incoming
+cleanup removed five unused Claude captures and updated their provenance README;
+fixture documentation and consumers were checked during integration.
+Unknown-event warnings, provider-specific compatibility,
 process shutdown, approval handling, resume identity and observed protocol tests remain.
 
 | Change | Evidence / reason | Risk / verification |
@@ -161,6 +163,38 @@ conflict retains every incoming tool in the simplified static tool list.
 | Redact complete URL userinfo in MCP profile summaries and metadata | The original matcher stopped at the first `@`; real adapters also expose URLs in description and metadata, bypassing the detail view's redaction. | Proven behavior correction: regressions include multiple `@` characters and real OpenCode routes, with the configured URL unchanged on disk. |
 | Preserve conflict error when refresh fails | A failed snapshot refresh was incorrectly reported as proof that the item was deleted. | Proven behavior correction: write-conflict plus unavailable-refresh regression preserves the original error; successful refresh still enriches conflicts. |
 
+## Integration of upstream test cleanup
+
+While the verified cleanup commit `d079cdbd` was being prepared, upstream advanced
+to `0b773dc9`, incorporating test cleanup `7f3516cd`. Each subsystem owner reviewed
+the incoming runtime changes, deleted assertions, surviving coverage, and automatic
+merges. The incoming dead test seams, private exports, receipt-based waits, and
+justified duplicate-test deletions were retained. The following corrections keep
+distinct behavioral contracts covered without restoring broad duplicate matrices.
+
+| Merged decision | Reason / risk | Verification |
+| --- | --- | --- |
+| Keep the verified assertion fixture from `d079cdbd` | Incoming readiness code still used CommonJS and changed the position-sensitive fixture; source-message checks were absent. | Positive/negative controls and the complete pre-merge suite; unchanged ten-second assertion deadline. |
+| Keep incoming authenticated HTTP stop/handover tests | They exercise the actual route and awaited shutdown callback, replacing manual mark/stop calls and wall-time assumptions. | Real helper termination and handover checks. |
+| Keep the existing OpenCode recycle drain and later-idle regression | Removing the drain also removed the only proof that a deferred recycle is consumed once. | Real server replacement, then no second replacement on later idles; no sleeps. |
+| Retain a focused Codex compact request test | Inbound normalizer replay cannot detect a missing outbound RPC or wrong provider thread ID. | Actual method and parameter contract through the existing mock server. |
+| Retain ingestion forget/liveness coverage | Session-exit cleanup does not exercise explicit forget. | Real registry count transitions from one live task to zero. |
+| Retain encoded command IDs, empty instruction revisions, locked-file refusal, and Codex client rotation tests | Service or parser tests do not cover these HTTP, locked-write, or process-lifecycle boundaries. | Literal encoded route, create-if-absent revision, unchanged malformed file, and actual old-client process exit. |
+| Retain summary push suppression and valid continuing goals | Ladder unit tests cannot detect incorrect summary wiring; false-only fixtures cannot detect a dropped true flag. | Live-background error notification case and boundary sanitizer assertions. |
+| Retain Bitbucket endpoint origin/context-path coverage | A permissive polling mock would accept a request that silently dropped the configured base path. | Path/origin checks independent of request order or query ordering. |
+| Wait for BEL attention rather than the first PTY output chunk | Ordinary output can arrive before the chunk containing BEL. | Event-driven condition wait with the existing deadline and real PTY tests. |
+| Preserve caller-supplied workflow positions and usage cost provenance | These are persisted user data and scanner output contracts, not incidental layout or helper representation. | Assertions folded into existing create/add and incremental scanner tests. |
+| Retain silent-continuation baseline and auth-cause prompts | A shared text reader does not own the backward turn scan; usage-limit text is wrong for authentication failure. | Existing continuation and switch/handoff tests, with direct output assertions. |
+| Retain MCP subscription disposal, bounded waiting, and structured pending details | Lower-level waits use another subscription; message text alone does not prove programmatic response details. | Existing request/wait tests plus the retained URL credential and conflict regressions. |
+| Retain plan copy, generated-prompt ownership, insertion boundaries, answer clearing, and preview disposal | Helper tests or directly seeded state miss these live caller contracts. | Compact existing-case assertions, including actual Blob URL revocation. |
+| Retain prompt-history selector identity and counts above one | External-store subscriptions require a new reference; a single-item fixture cannot detect a count-always-one bug. | Existing selector test and a two-MCP profile fixture. |
+| Remove obsolete SSR scripts and newly orphaned UI forwarding exports | Source/markup inventories did not execute effects; incoming changes removed the final forwarding consumers. | Keep the live keyboard decision, form, persistence, and rendering-source typechecks; no claim of DOM interaction coverage. |
+| Remove the MCP E2E success artifact and leftover redactor local | The artifact hardcoded success and duplicated responses in an unmanaged temporary directory; the local only forwarded its object. | Retained real HTTP assertions and streaming redactor tests. |
+| Condense incoming disposition ledgers | Thousands of unchanged-test KEEP rows and repeated methodology added little beyond the source tests. | Preserve concrete change reasons, risks, unique safeguards and provenance; original ledgers remain in `7f3516cd`. |
+
+The files under `docs/test-cleanup` describe that incoming historical audit. This
+section records where its proposed removals were superseded during integration.
+
 ## Retained complexity
 
 Preserved authentication and secret handling, realpath containment, append-only log
@@ -196,10 +230,11 @@ sometimes finish with the wrong message instead of hanging. The identical fixtur
 without the shim failed with `Wrong assertion source: false == true`, while the
 configured test passed. No assertion preload implementation changed.
 
-Final validation:
+Final validation after integrating `0b773dc9`:
 
 - `pnpm check`: all seven workspace packages passed after the final fixture change.
-- `pnpm test`: 6,328 tests passed, with no failures or skips; all package check
+- `pnpm test`: 5,792 tests passed (config 26, API 400, daemon 4,126, UI 1,240),
+  with no failures, cancellations or skips; all package check
   scripts passed. Workspace concurrency was one with eight available CPUs to
   reduce shared-host contention; no tests were filtered out.
 - `pnpm build`: web, desktop main/UI, and Linux AppImage packaging passed. Existing

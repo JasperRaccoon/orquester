@@ -35,7 +35,6 @@ export {
   writeProfileFileVerified
 } from "./fs-write.ts";
 export {
-  PROFILE_HASH_LENGTH,
   type HookIdentity,
   contentHash,
   hookItemId,
@@ -45,7 +44,6 @@ export {
 } from "./hash.ts";
 export {
   SKILL_FILE,
-  SKILL_FILES_MAX,
   type MarkdownWriteOptions,
   type ScannedCommand,
   type ScannedSkill,
@@ -70,8 +68,7 @@ export {
   type StashEntry,
   type StashManifest,
   type StashOriginal,
-  ProfileStash,
-  encodeStashId
+  ProfileStash
 } from "./stash.ts";
 export { type CopyResult, type PathKind, copyTree, pathKind } from "./tree.ts";
 export { SecretDigester } from "./secret-digest.ts";

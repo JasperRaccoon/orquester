@@ -1,4 +1,6 @@
 import { test } from "node:test";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import assert from "node:assert/strict";
 import { mkdtemp, mkdir, readFile, writeFile, stat, lstat, symlink, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -6,12 +8,14 @@ import { join } from "node:path";
 import { AgentHooks } from "./agent-hooks.ts";
 
 const silent = { error: () => {} };
+const run = promisify(execFile);
+const recordArguments = '#!/bin/sh\nprintf "%s\\n" "$@"\n';
 
 async function scratch(): Promise<string> {
   return mkdtemp(join(tmpdir(), "orq-agent-hooks-"));
 }
 
-test("claude install is awaited, quotes the command, and creates 0600 settings + 0755 script", async () => {
+test("claude install is awaited and creates 0600 settings + 0755 script", async () => {
   const s = await scratch();
   try {
     const hooks = new AgentHooks(join(s, "d"), join(s, "h"), silent);
@@ -24,8 +28,8 @@ test("claude install is awaited, quotes the command, and creates 0600 settings +
 
     const settings = JSON.parse(await readFile(join(s, "h", ".claude", "settings.json"), "utf8"));
     const command: string = settings.hooks.Stop[0].hooks[0].command;
-    assert.ok(command.startsWith("'"), "script path is POSIX single-quoted");
-    assert.ok(command.endsWith(" claude Stop"));
+    await writeFile(join(s, "d", "hooks", "agent-hook.sh"), recordArguments);
+    assert.equal((await run("sh", ["-c", command])).stdout, "claude\nStop\n");
   } finally {
     await rm(s, { recursive: true, force: true });
   }
@@ -218,13 +222,13 @@ test("grok install writes a solely-owned orquester.json with grok-labelled notif
       "Stop",
       "UserPromptSubmit"
     ]);
+    await writeFile(join(s, "d", "hooks", "agent-hook.sh"), recordArguments);
     type Group = { hooks: Array<{ type: string; command: string }> };
     for (const [event, groups] of Object.entries(doc.hooks as Record<string, Group[]>)) {
       assert.equal(groups.length, 1, `${event} has exactly the managed group`);
       const handler = groups[0].hooks[0];
       assert.equal(handler.type, "command");
-      assert.ok(handler.command.startsWith("'"), "script path is POSIX single-quoted");
-      assert.ok(handler.command.endsWith(` grok ${event}`), "events are labelled grok, not claude");
+      assert.equal((await run("sh", ["-c", handler.command])).stdout, `grok\n${event}\n`);
     }
     // Grok can read ~/.claude/settings.json; we must never rely on it.
     await assert.rejects(stat(join(s, "h", ".claude", "settings.json")), "no claude settings written");

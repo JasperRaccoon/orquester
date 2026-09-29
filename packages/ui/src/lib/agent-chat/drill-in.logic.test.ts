@@ -81,8 +81,13 @@ function messageRow(rows: readonly AgentChatTimelineRow[], id: string): MessageR
 const turnFolds = (rows: readonly AgentChatTimelineRow[]): string[] =>
   rows.flatMap((row) => (row.kind === "turn-fold" ? [row.turnId] : []));
 
-const foldLabels = (rows: readonly AgentChatTimelineRow[]): string[] =>
-  rows.flatMap((row) => (row.kind === "turn-fold" ? [row.label] : []));
+function elapsedSeconds(label: string): number {
+  const parts = [...label.matchAll(/(\d+(?:\.\d+)?)\s*(h|m|s)\b/g)];
+  assert.ok(parts.length > 0, `fold has a readable duration: ${label}`);
+  return parts.reduce((seconds, match) => seconds + Number(match[1]) * ({ h: 3600, m: 60, s: 1 }[match[2]!] ?? 0), 0);
+}
+const foldDurations = (rows: readonly AgentChatTimelineRow[]): number[] =>
+  rows.flatMap((row) => (row.kind === "turn-fold" ? [elapsedSeconds(row.label)] : []));
 
 describe("a drill-in's words read as streaming only while something can still write them", () => {
   it("an old log's stuck turnless agent message is no 'Thinking' shimmer, and its settled turn folds", () => {
@@ -139,7 +144,7 @@ describe("a drill-in's words read as streaming only while something can still wr
     assert.deepEqual(turnFolds(settled.stable.result), ["t1"]);
   });
 
-  it("keeps the child's own rows only, and every unchanged row object across a re-derivation", () => {
+  it("keeps only the selected child's rows when the agent selection changes", () => {
     const context = messageStreamingContext({
       head: head({ session: { status: "ready", activeTurnId: null } }),
       roster: [{ id: "a1", status: "completed" }]
@@ -226,7 +231,7 @@ describe("a turn fold's timing: the parent's turn in the parent view, the agent'
       turns: thread.turns,
       supportsConversationRollback: false
     });
-    assert.deepEqual(foldLabels(parent), ["Worked for 9.0s"]);
+    assert.deepEqual(foldDurations(parent), [9]);
     // The drill-in is projected from the same thread view, its turns included — and times the agent's work by the
     // agent's own rows: its call ran for most of an hour, however soon the parent's turn settled.
     const drillIn = projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
@@ -234,7 +239,7 @@ describe("a turn fold's timing: the parent's turn in the parent view, the agent'
       agentId: "a1",
       messageStreaming: NOTHING_STREAMS
     });
-    assert.deepEqual(foldLabels(drillIn.stable.result), ["Worked for 59m 58s"]);
+    assert.deepEqual(foldDurations(drillIn.stable.result), [3598]);
   });
 });
 
@@ -300,19 +305,19 @@ describe("a drill-in's 'Worked for …' follows a streaming thinking block", () 
 
   it("each token moves the label of the fold the thought ends, and consecutive tokens keep the fast path", () => {
     const first = drill(EMPTY_AGENT_DRILL_IN, thought);
-    assert.deepEqual(foldLabels(first.stable.result), ["Worked for 2.0s", "Worked for 1.0s"]);
+    assert.deepEqual(foldDurations(first.stable.result), [2, 1]);
 
     const second = drill(first, written("The build passed", 17));
-    assert.deepEqual(foldLabels(second.stable.result), ["Worked for 2.0s", "Worked for 6.0s"]);
+    assert.deepEqual(foldDurations(second.stable.result), [2, 6]);
 
     const third = drill(second, written("The build passed; now the tests", 46));
-    assert.deepEqual(foldLabels(third.stable.result), ["Worked for 2.0s", "Worked for 35s"]);
+    assert.deepEqual(foldDurations(third.stable.result), [2, 35]);
   });
 
   it("once the thought settles, its fold closes on its final duration", () => {
     const streaming = drill(drill(EMPTY_AGENT_DRILL_IN, thought), written("The build passed", 17));
     const closed = drill(streaming, written("The build passed.", 53, false));
-    assert.deepEqual(foldLabels(closed.stable.result), ["Worked for 2.0s", "Worked for 42s"]);
+    assert.deepEqual(foldDurations(closed.stable.result), [2, 42]);
   });
 
   it("a LIVE agent writing the same thought folds nothing of its run: it is the running response", () => {
@@ -322,7 +327,7 @@ describe("a drill-in's 'Worked for …' follows a streaming thinking block", () 
       agentId: "a1",
       messageStreaming: working
     });
-    assert.deepEqual(foldLabels(live.stable.result), [], "unfolded, as the thread's running turn is");
+    assert.deepEqual(foldDurations(live.stable.result), [], "unfolded, as the thread's running turn is");
     const group = live.stable.result.find((row) => row.kind === "activity-group");
     assert.equal(group?.kind === "activity-group" && group.active, true, "and its thought is the live group");
   });
@@ -690,7 +695,7 @@ describe("a launch prompt times only the rows right after it (content review I1)
     roster: [{ id: "a1", status: "completed" }]
   });
   const labels = (items: ThreadItem[], messageStreaming = settled, startedAt: number | null = null) =>
-    foldLabels(
+    foldDurations(
       projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
         items,
         agentId: "a1",
@@ -709,7 +714,7 @@ describe("a launch prompt times only the rows right after it (content review I1)
       done("late", 1_000, "t2"),
       said("late-words", 1_010, "t2")
     ];
-    assert.deepEqual(labels(items), ["Worked for 10s"], "timed from 1 000 s, never from the launch at 1 s");
+    assert.deepEqual(labels(items), [10], "timed from 1 000 s, never from the launch at 1 s");
   });
 
   it("a relaunch followed by a turnless row: the next turn's fold is its own rows' span", () => {
@@ -722,7 +727,7 @@ describe("a launch prompt times only the rows right after it (content review I1)
       done("t3-call", 3_000, "t3"),
       said("t3-words", 3_005, "t3")
     ];
-    assert.deepEqual(labels(items), ["Worked for 2.0s", "Worked for 5.0s"]);
+    assert.deepEqual(labels(items), [2, 5]);
   });
 
   it("and so while the agent is live on a third run: the earlier runs' folds keep their own spans", () => {
@@ -745,12 +750,12 @@ describe("a launch prompt times only the rows right after it (content review I1)
         { id: "run", agentId: "a1", turnId: "t4", createdAt: stamp(4_001) }
       )
     ];
-    assert.deepEqual(labels(items, live, 4_000), ["Worked for 2.0s", "Worked for 5.0s"]);
+    assert.deepEqual(labels(items, live, 4_000), [2, 5]);
   });
 
   it("rows right after the prompt, on its launch turn: their fold is timed from the prompt", () => {
     const items = [launch("start", 1, "Survey the repo.", "call-agent"), done("first", 2, "t1"), said("words", 10, "t1")];
-    assert.deepEqual(labels(items), ["Worked for 9.0s"]);
+    assert.deepEqual(labels(items), [9]);
   });
 
   it("the thread's own timeline is unchanged: its prompt still times a turn whose first rows rode none", () => {
@@ -779,7 +784,7 @@ describe("a launch prompt times only the rows right after it (content review I1)
       activeTurnStartedAt: null,
       supportsConversationRollback: false
     });
-    assert.deepEqual(foldLabels(rows), ["Worked for 16m 49s"], "from the prompt at 1 s, as before");
+    assert.deepEqual(foldDurations(rows), [1009], "from the prompt at 1 s, as before");
   });
 });
 
@@ -823,7 +828,7 @@ describe("a relaunch inside the same parent turn heads a run of its own (content
     const rows = project().stable.result;
     const at = (id: string) => rows.findIndex((row) => row.id === id);
     const folds = rows.filter((row): row is Extract<AgentChatTimelineRow, { kind: "turn-fold" }> => row.kind === "turn-fold");
-    assert.deepEqual(folds.map((fold) => fold.label), ["Worked for 11s", "Worked for 10s"]);
+    assert.deepEqual(folds.map((fold) => elapsedSeconds(fold.label)), [11, 10]);
     assert.ok(at(folds[0]!.id) > at("agent-prompt:L1") && at(folds[0]!.id) < at("agent-prompt:L2"), "run 1's fold under L1");
     assert.ok(at(folds[1]!.id) > at("agent-prompt:L2"), "run 2's fold under L2");
     assert.notEqual(folds[0]!.id, folds[1]!.id, "two folds, two rows");
@@ -878,141 +883,6 @@ describe("a drill-in holds its disclosure sets only while their members stay the
     assert.deepEqual(expandedGroups(first), ["activity-group:th0"]);
     const swapped = project(first, ["activity-group:th1"]);
     assert.deepEqual(expandedGroups(swapped), ["activity-group:th1"], "as many groups open, but another one");
-  });
-});
-
-describe("a prompted, relaunched agent's streamed tokens re-derive nothing a full projection would not (content review Minor 1)", () => {
-  /**
-   * Launch `L1` (the parent's row, on its turn `t1`) and its run — `ls` and an answer — then a relaunch
-   * `L2` inside the same turn and its run: `npm test` and a thought still being written. The roster reads
-   * the agent idle while the parent's `t1` runs, so the thought streams by its turn and both runs fold:
-   * run 2's fold is timed by its clock, which reads the thought's position.
-   */
-  const launch = (id: string, at: number, prompt: string, toolUseId: string, turnId = "t1"): ThreadItem =>
-    activity(
-      "task.started",
-      { taskId: "a1", agentKind: "agent", taskType: "subagent", title: "Survey", toolUseId, prompt },
-      { id, turnId, tone: "info", createdAt: stamp(at) }
-    );
-  const done = (id: string, at: number, turnId: string | null = "t1"): ThreadItem =>
-    activity(
-      "tool.completed",
-      { itemType: "command_execution", toolUseId: `call-${id}`, title: id, command: id, status: "completed" },
-      { id, agentId: "a1", turnId, createdAt: stamp(at) }
-    );
-  const base: ThreadItem[] = [
-    launch("L1", 1, "Find every caller of parse().", "call-1"),
-    done("ls", 2),
-    message("assistant", "Found three.", { id: "found", agentId: "a1", turnId: "t1", createdAt: stamp(4) }),
-    launch("L2", 6, "Now check the tests.", "call-2"),
-    done("npm-test", 7)
-  ];
-  const thinking = message("reasoning", "", { id: "think", agentId: "a1", turnId: "t1", streaming: true, createdAt: stamp(8) });
-  const thought = (text: string, at: number, streaming = true): ThreadMessageItem => ({
-    ...thinking,
-    text,
-    streaming,
-    updatedAt: stamp(at)
-  });
-  const waiting = message("reasoning", "Waiting on CI", { id: "wait", agentId: "a1", turnId: null, createdAt: stamp(31) });
-  const writingIn = (turnId: string) =>
-    messageStreamingContext({
-      head: head({ session: { status: "running", activeTurnId: turnId } }),
-      roster: [{ id: "a1", status: "idle" }]
-    });
-  const inT1 = writingIn("t1");
-  // The parent moved on to `t2`, where the third run's thought streams.
-  const inT2 = writingIn("t2");
-
-  interface Step {
-    readonly name: string;
-    readonly items: readonly ThreadItem[];
-    readonly collapsed: readonly string[];
-    readonly context?: typeof inT1;
-    /** Only streamed text moved since the step before: the fast paths take it. */
-    readonly token: boolean;
-  }
-  const RUN_1_FOLD = "t1@agent-prompt:L1";
-  const NO_COLLAPSE: readonly string[] = [];
-  const COLLAPSE_RUN_1: readonly string[] = [RUN_1_FOLD];
-  // A row a frame did not touch is the same object in the next one, as the store keeps it.
-  const settledThought = thought("The tests pass; one is slow: parse.", 30, false);
-  const restamped: ThreadItem = { ...waiting, turnId: "t2" };
-  const thirdLaunch = launch("L3", 40, "Fix the slow one.", "call-3", "t2");
-  const fix = done("fix", 41, "t2");
-  const fixing = (text: string, at: number): ThreadMessageItem => ({
-    ...thinking,
-    id: "think-3",
-    turnId: "t2",
-    text,
-    createdAt: stamp(42),
-    updatedAt: stamp(at)
-  });
-  const steps: readonly Step[] = [
-    { name: "first frame", items: [...base, thought("The tests", 8)], collapsed: NO_COLLAPSE, token: false },
-    { name: "a token", items: [...base, thought("The tests pass", 12)], collapsed: NO_COLLAPSE, token: true },
-    { name: "another token", items: [...base, thought("The tests pass; one is slow", 20)], collapsed: NO_COLLAPSE, token: true },
-    { name: "run 1's fold collapsed", items: [...base, thought("The tests pass; one is slow", 20)], collapsed: COLLAPSE_RUN_1, token: false },
-    { name: "a token while collapsed", items: [...base, thought("The tests pass; one is slow: parse", 25)], collapsed: COLLAPSE_RUN_1, token: true },
-    { name: "the thought settles", items: [...base, settledThought], collapsed: COLLAPSE_RUN_1, token: false },
-    { name: "a turnless row arrives", items: [...base, settledThought, waiting], collapsed: COLLAPSE_RUN_1, token: false },
-    {
-      name: "that row is re-stamped with a turn: its key moves in place",
-      items: [...base, settledThought, restamped],
-      collapsed: COLLAPSE_RUN_1,
-      token: false
-    },
-    {
-      name: "a third launch, and its thought streaming in the parent's next turn",
-      items: [...base, settledThought, restamped, thirdLaunch, fix, fixing("Fixing", 42)],
-      collapsed: COLLAPSE_RUN_1,
-      context: inT2,
-      token: false
-    },
-    {
-      name: "a token of the third run's thought",
-      items: [...base, settledThought, restamped, thirdLaunch, fix, fixing("Fixing the loop", 49)],
-      collapsed: COLLAPSE_RUN_1,
-      context: inT2,
-      token: true
-    }
-  ];
-  const project = (previous: AgentDrillInProjection, step: Step): AgentDrillInProjection =>
-    projectAgentDrillIn(previous, {
-      items: step.items,
-      agentId: "a1",
-      messageStreaming: step.context ?? inT1,
-      disclosures: { expandedGroupIds: [], collapsedTurnIds: step.collapsed }
-    });
-  /** Every step projected twice: on from the step before, and from nothing. */
-  const walk = (): { step: Step; held: AgentDrillInProjection; fresh: AgentDrillInProjection; before: AgentDrillInProjection }[] => {
-    let held = EMPTY_AGENT_DRILL_IN;
-    return steps.map((step) => {
-      const before = held;
-      held = project(held, step);
-      return { step, held, fresh: project(EMPTY_AGENT_DRILL_IN, step), before };
-    });
-  };
-
-  it("the walk means what it says: the labels move with the tokens, a collapse closes run 1, the third run folds on its own", () => {
-    const labels = walk().map(({ held }) => foldLabels(held.stable.result));
-    assert.deepEqual(labels.slice(0, 3), [
-      ["Worked for 3.0s", "Worked for 2.0s"],
-      ["Worked for 3.0s", "Worked for 6.0s"],
-      ["Worked for 3.0s", "Worked for 14s"]
-    ]);
-    const collapsed = walk()[3]!.held.stable.result.map((row) => row.id);
-    assert.ok(
-      !collapsed.some((id) => id.includes("call-ls")) && collapsed.some((id) => id.includes("call-npm-test")),
-      `run 1's work is behind its fold, run 2's is not: ${collapsed.join(", ")}`
-    );
-    const third = walk().slice(8).map(({ held }) => held.stable.result);
-    assert.deepEqual(turnFolds(third[1]!), [RUN_1_FOLD, "t1@agent-prompt:L2", "t2@agent-prompt:L3"]);
-    assert.deepEqual(
-      [foldLabels(third[0]!).at(-1), foldLabels(third[1]!).at(-1)],
-      ["Worked for 2.0s", "Worked for 9.0s"],
-      "the third run's fold is timed from its own prompt, and its thought's token moves it"
-    );
   });
 });
 

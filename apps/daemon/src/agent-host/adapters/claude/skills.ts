@@ -84,7 +84,7 @@ function unquote(value: string): string {
  * guessed at, and a frontmatter block whose opening fence never closes is
  * `missing`, exactly as an unparsable one is `malformed`.
  */
-export function parseSkillFrontmatter(contents: string): SkillFrontmatter {
+function parseSkillFrontmatter(contents: string): SkillFrontmatter {
   const match = FRONTMATTER_PATTERN.exec(contents);
   if (!match) {
     return { kind: "missing" };

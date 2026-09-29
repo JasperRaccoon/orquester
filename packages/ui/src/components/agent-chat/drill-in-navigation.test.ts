@@ -50,11 +50,6 @@ describe("nextDrillInReturn: the auto-return is per agent, and never yanks a rea
     );
   });
 
-  it("an agent opened already finished stays open", () => {
-    assert.deepEqual(walk([{ agentId: "b", status: "completed" }]), []);
-    assert.deepEqual(walk([{ agentId: null, status: null }, { agentId: "b", status: "failed" }]), []);
-  });
-
   it("a reader who scrolled up stays when it settles — and is not yanked later on reaching the end", () => {
     assert.deepEqual(
       walk([

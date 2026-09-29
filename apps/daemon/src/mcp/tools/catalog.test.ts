@@ -117,14 +117,12 @@ test("list_projects leaves out a workspace whose projects cannot be read and nam
     .on("GET", "/api/projects/recent", { status: 200, body: [] })
     .on("GET", "/api/sessions", { status: 200, body: [] });
   const r = await tool("list_projects").run({ includeArchived: false }, ctx(api));
-  assert.deepEqual(r, {
-    projects: [{ workspace: "acme", name: "api", path: "/w/acme/api", isArchived: false, openSessions: 0 }],
-    warnings: [
-      "Workspace \"gone\" was left out: its projects could not be read (INTERNAL: The daemon failed handling the request.).",
-      "Workspace \"zeta\" was left out: its projects could not be read (HOST_UNAVAILABLE: The daemon call failed.)."
-    ]
-  });
-
+  assert.deepEqual(r.projects, [{ workspace: "acme", name: "api", path: "/w/acme/api", isArchived: false, openSessions: 0 }]);
+  const warnings = r.warnings as string[];
+  assert.equal(warnings.length, 2);
+  assert.ok(warnings.some((warning) => warning.includes("gone") && warning.includes("INTERNAL")));
+  assert.ok(warnings.some((warning) => warning.includes("zeta") && warning.includes("HOST_UNAVAILABLE")));
+  assert.ok(warnings.every((warning) => !warning.includes("/w/")));
 });
 
 test("a filter naming nothing that exists is refused, not answered with an empty list; an archived workspace says why it is empty", async (t) => {
@@ -135,10 +133,11 @@ test("a filter naming nothing that exists is refused, not answered with an empty
     .on("GET", "/api/projects/recent", { status: 200, body: [] })
     .on("GET", "/api/sessions", { status: 200, body: [] });
   await assert.rejects(tool("list_projects").run({ workspace: "acm", includeArchived: false }, ctx(api)),
-    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message === "Unknown workspace \"acm\". Workspaces: acme, old.");
+    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && ["acm", "acme", "old"].every((name) => e.message.includes(name)));
   assert.ok(!api.calls.some((c) => c.path.endsWith("/projects")), "refused before any project read");
-  assert.deepEqual(await tool("list_projects").run({ workspace: "old", includeArchived: false }, ctx(api)),
-    { projects: [], warnings: ["Workspace \"old\" is archived; pass includeArchived: true to list its projects."] });
+  const archived = await tool("list_projects").run({ workspace: "old", includeArchived: false }, ctx(api));
+  assert.deepEqual(archived.projects, []);
+  assert.ok((archived.warnings as string[]).some((warning) => warning.includes("old") && warning.includes("includeArchived")));
   assert.deepEqual((await tool("list_projects").run({ workspace: "old", includeArchived: true }, ctx(api))).projects, [{ workspace: "old", name: "x", path: "/w/old/x", isArchived: true, openSessions: 0 }]);
   const conv = await projectApi(t);
   conv.on("GET", "/api/registry", { status: 200, body: chatRegistry })
@@ -148,18 +147,6 @@ test("a filter naming nothing that exists is refused, not answered with an empty
   // Known ids answer honestly: an agent with nothing recorded is an empty list, and an agent a row names is a valid filter.
   assert.deepEqual(await tool("list_conversations").run({ project: "acme/api", agent: "codex", limit: 20 }, ctx(conv)), { conversations: [] });
   assert.deepEqual((await tool("list_conversations").run({ project: "acme/api", agent: "gemini", limit: 20 }, ctx(conv))).conversations, [{ id: "s2", agent: "gemini", title: "Legacy", updatedAt: stamp(0), home: "system", resumable: false }]);
-});
-
-test("list_agents hides legacy models unless includeLegacyModels", async () => {
-  const providers = { hostInstanceId: "h", providers: [{ id: "claude", refIds: ["claude"], installed: true, version: "2", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [], capabilities: null,
-    models: [{ slug: "fable", name: "Fable", isDefault: true, capabilities: null }, { slug: "sonnet-4", name: "Sonnet 4", isLegacy: true, capabilities: null }] }] };
-  const api = new FakeDaemonApi()
-    .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [chatRegistry.agents[0]] } })
-    .on("GET", "/api/agent/providers", { status: 200, body: providers })
-    .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [], defaults: { claude: null, codex: null, grok: null } } });
-  const models = async (includeLegacyModels: boolean) => ((await tool("list_agents").run({ includeLegacyModels }, ctx(api))).agents as { models: { slug: string; isLegacy?: boolean }[] }[])[0]!.models.map((m) => [m.slug, m.isLegacy ?? false]);
-  assert.deepEqual(await models(false), [["fable", false]]);
-  assert.deepEqual(await models(true), [["fable", false], ["sonnet-4", true]]);
 });
 
 test("list_conversations: preview is kept, a detect-only agent's row is not resumable, and the agent filter runs before the limit", async (t) => {

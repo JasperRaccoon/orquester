@@ -6,7 +6,6 @@ import {
   resolvePromptVariables,
   type PromptVariableSource
 } from "./prompt-variables.ts";
-import { escapePromptVariables } from "./saved-prompts.ts";
 
 const PROJECT = "/w/acme/app";
 // 2026-03-07 23:30 UTC: already the 8th in Tokyo, still the 7th in New York.
@@ -88,11 +87,6 @@ describe("resolvePromptVariables", () => {
     const result = await resolvePromptVariables("{branch}", aborting);
     assert.equal(result.ok, false);
     assert.equal(!result.ok && result.failure, "cancelled");
-  });
-
-  it("text inserted by a workflow expression and escaped stays literal", async () => {
-    const inserted = escapePromptVariables("user wrote {diff} and {date}");
-    assert.equal(await render(`Title: ${inserted}. Today: {date}`), "Title: user wrote {diff} and {date}. Today: 2026-03-07");
   });
 
   it("no project reads as no repository", async () => {

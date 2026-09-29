@@ -3,43 +3,22 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { aggregateRows, UsageTokensScanner } from "./usage-tokens.ts";
-
-for (const [model, cost, breakdown] of [
-  ["claude-opus-4-8", 30, { input: 5, output: 25, cache: 0 }],
-  ["claude-fable-5", 60, { input: 10, output: 50, cache: 0 }],
-  ["gpt-5.6-sol", 35, { input: 5, output: 30, cache: 0 }],
-  ["claude-opus-4-8-20260115", 30, { input: 5, output: 25, cache: 0 }],
-  ["gpt-5.4-codex-preview", 11.25, { input: 1.25, output: 10, cache: 0 }],
-  ["made-up-model", null, null]
-] as const) {
-  test(`aggregateRows prices ${model}`, () => {
-    const [row] = aggregateRows([
-      { agent: "agent", model, day: "2026-07-07", input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }
-    ]);
-    assert.equal(row.costUsd, cost);
-    assert.deepEqual(row.costBreakdown, breakdown);
-  });
-}
+import { estimateCostParts, UsageTokensScanner } from "./usage-tokens.ts";
 
 test("1h-TTL cache writes bill at 2x input, 5m at 1.25x", () => {
   // 1M total writes, 400k of them 1h: 600k*6.25 + 400k*10 = 3.75 + 4.00
-  const [row] = aggregateRows([
-    { agent: "claude", model: "claude-opus-4-8", day: "2026-07-07", input: 0, output: 0, cacheRead: 0, cacheWrite: 1_000_000, cacheWrite1h: 400_000 }
-  ]);
-  assert.equal(row.costUsd, 7.75);
-  assert.deepEqual(row.costBreakdown, { input: 0, output: 0, cache: 7.75 });
+  const cost = estimateCostParts("claude-opus-4-8", { input: 0, output: 0, cacheRead: 0, cacheWrite: 1_000_000, cacheWrite1h: 400_000 });
+  assert.equal(cost?.cache, 7.75);
 });
 
-test("aggregateRows groups by agent/model/day and sums tokens", () => {
-  const rows = aggregateRows([
-    { agent: "claude", model: "claude-opus-4-8", day: "2026-07-07", input: 10, output: 2, cacheRead: 1, cacheWrite: 0, cacheWrite1h: 0 },
-    { agent: "claude", model: "claude-opus-4-8", day: "2026-07-07", input: 5, output: 3, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }
-  ]);
-  assert.equal(rows.length, 1);
-  assert.equal(rows[0].inputTokens, 15);
-  assert.equal(rows[0].outputTokens, 5);
-  assert.equal(rows[0].costSource, "api_equivalent");
+test("unknown model yields null cost", () => {
+  assert.equal(estimateCostParts("made-up-model", { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }), null);
+});
+
+test("versioned model ids stay priced (F1)", () => {
+  const tokens = { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 };
+  assert.notEqual(estimateCostParts("claude-opus-4-8-20260115", tokens), null);
+  assert.notEqual(estimateCostParts("gpt-5.4-codex-preview", tokens), null);
 });
 
 const T0 = () => Date.parse("2026-07-07T00:00:00Z");
@@ -129,30 +108,6 @@ test("scanClaude dedupes repeated message.id+requestId across files (F2)", async
   assert.equal(row?.outputTokens, 4);
 });
 
-test("scanCodex reads model from turn_context payload and prices it (F4)", async () => {
-  delete process.env.CODEX_HOME;
-  const home = await mkdtemp(join(tmpdir(), "orq-utok-model-"));
-  const sdir = join(home, ".codex", "sessions");
-  await mkdir(sdir, { recursive: true });
-  const line = (o: unknown) => JSON.stringify(o);
-  await writeFile(
-    join(sdir, "s.jsonl"),
-    [
-      line({ type: "session_meta", payload: { session_id: "x", model_provider: "openai" } }),
-      line({ type: "turn_context", payload: { turn_id: "t1", model: "gpt-5.4-codex" } }),
-      line({ timestamp: "2026-07-07T00:00:00Z", type: "event_msg", payload: { type: "token_count", info: { total_token_usage: { total_tokens: 100 }, last_token_usage: { input_tokens: 80, output_tokens: 20, cached_input_tokens: 0, total_tokens: 100 } } } })
-    ].join("\n"),
-    "utf8"
-  );
-  const scanner = new UsageTokensScanner({ userhome: home, cacheFile: join(home, "c.json"), now: T0 });
-  await scanner.init();
-  const snap = await scanner.snapshot(true);
-  const row = snap.rows.find((r) => r.agent === "codex");
-  assert.ok(row);
-  assert.equal(row?.model, "gpt-5.4-codex");
-  assert.ok(row?.costUsd && row.costUsd > 0); // priced, not null
-});
-
 test("recompute caches unchanged files and stays correct on partial rescan (F5)", async () => {
   delete process.env.CLAUDE_CONFIG_DIR;
   const home = await mkdtemp(join(tmpdir(), "orq-utok-cache-"));
@@ -230,6 +185,8 @@ test("codex parser state (model, cumulative gate) carries across appended chunks
   assert.equal(row?.model, "gpt-5.4-codex");
   assert.equal(row?.inputTokens, 120); // 80 + 40, duplicate gated
   assert.equal(row?.outputTokens, 30); // 20 + 10
+  assert.ok(row?.costUsd && row.costUsd > 0);
+  assert.equal(row?.costSource, "api_equivalent");
 });
 
 test("an unterminated tail line is counted once, then not double-counted when completed", async () => {

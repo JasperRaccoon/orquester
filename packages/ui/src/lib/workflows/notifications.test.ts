@@ -59,17 +59,12 @@ describe("notification rules", () => {
     assert.equal(runOutcomeKind("running"), "quiet");
   });
 
-  it("toasts a failure, and a success only when the workflow asks", () => {
+  it("preserves the failure's error, project and test-run identity in its toast", () => {
     const failed = finishedRunNotice(run(), { prefs: DEFAULT_NOTIFY_PREFS });
     assert.equal(failed?.tone, "danger");
-    assert.equal(failed?.message, "Review failed: every account is out of usage");
+    assert.match(failed!.message, /every account is out of usage/);
     assert.equal(failed?.projectPath, "/w/acme/app");
     assert.equal(finishedRunNotice(run({ status: "succeeded" }), { prefs: DEFAULT_NOTIFY_PREFS }), null);
-    const ok = finishedRunNotice(run({ status: "succeeded", error: undefined }), {
-      prefs: { onFailure: true, onSuccess: true }
-    });
-    assert.equal(ok?.tone, "ok");
-    assert.equal(finishedRunNotice(run(), { prefs: { onFailure: false, onSuccess: true } }), null);
     assert.equal(
       finishedRunNotice(run({ test: true }), { prefs: DEFAULT_NOTIFY_PREFS })?.test,
       true

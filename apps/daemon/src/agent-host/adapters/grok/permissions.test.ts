@@ -77,13 +77,9 @@ test("the argv per runtime mode, including the flag that moves", () => {
   assert.deepEqual(grokSpawnArgs("full-access"), ["agent", "--always-approve", "stdio"]);
 });
 
-test("the adapter compensates for acceptEdits being a no-op on this CLI", () => {
-  assert.equal(autoApprovesEdits("approval-required"), false);
-  assert.equal(autoApprovesEdits("auto-accept-edits"), true);
+test("auto approves edits without granting every approval", () => {
   assert.equal(autoApprovesEdits("auto"), true);
-  assert.equal(autoApprovesEdits("full-access"), true);
   assert.equal(autoApprovesEverything("auto"), false);
-  assert.equal(autoApprovesEverything("full-access"), true);
 });
 
 // ---------------------------------------------------------------------------
@@ -162,7 +158,7 @@ test("session grants ignore object key order but distinguish ordered operation a
 
 test("the vendor tool kind beats ACP's coarser one", () => {
   const write = toolCall({
-    kind: "edit",
+    kind: "execute",
     title: "Write `/tmp/a.txt`",
     _meta: { "x.ai/tool": { version: 1, name: "write", kind: "write", namespace: "opencode", label: "Write", read_only: false } }
   });

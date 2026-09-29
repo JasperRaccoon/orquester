@@ -357,18 +357,6 @@ test("listPullRequests refuses a URL the account's provider cannot parse, and an
   await assert.rejects(svc.listPullRequests(null, "a/b"), (error: unknown) => error instanceof GitRemoteError);
 });
 
-test("listReleases: GitHub lists, Bitbucket answers unsupported without a request", async () => {
-  const urls = stubFetch("[]");
-  const svc = service(fakeExec().exec);
-  assert.deepEqual(await svc.listReleases("gh", "https://github.com/o/r.git"), { items: [] });
-  assert.match(urls[0], /\/repos\/o\/r\/releases\?per_page=50/);
-  assert.deepEqual(await svc.listReleases("cloud", "https://bitbucket.org/acme/web-app"), {
-    items: [],
-    unsupported: true
-  });
-  assert.equal(urls.length, 1);
-});
-
 test("an abbreviated commit no ref resolves fails clearly and removes the clone (never fetches a prefix)", async () => {
   const short = SHA.slice(0, 12);
   const dest = join(workspace, "wf-g");

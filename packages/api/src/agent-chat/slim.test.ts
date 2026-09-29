@@ -7,10 +7,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseGoalUpdatedPayload } from "./goal.ts";
-import {
-  slimActivityPayload,
-  summarizeToolTextOutput
-} from "./slim.ts";
+import { slimActivityPayload } from "./slim.ts";
 
 function record(value: unknown): Record<string, unknown> {
   assert.ok(value !== null && typeof value === "object", "expected a record");
@@ -23,18 +20,18 @@ test("a non-record payload passes through", () => {
   assert.equal(slimActivityPayload(7), 7);
 });
 
-test("summarizeToolTextOutput takes the first meaningful line, elided at 84", () => {
-  assert.equal(summarizeToolTextOutput("   \n\n  first line  \nsecond"), "first line");
-  const long = "x".repeat(200);
-  const summary = summarizeToolTextOutput(long)!;
-  assert.equal(summary.length, 84);
-  assert.ok(summary.endsWith("…"));
+test("wire command output keeps the first meaningful line, elided at 84", () => {
+  for (const [output, expected] of [["   \n\n  first line  \nsecond", "first line"], ["x".repeat(200), `${"x".repeat(83)}…`]]) {
+    const slim = record(slimActivityPayload({ data: { rawOutput: output } }));
+    assert.deepEqual(record(slim.data).rawOutput, { content: expected });
+  }
 });
 
-test("summarizeToolTextOutput falls back to an N-lines count", () => {
-  assert.equal(summarizeToolTextOutput("```\n```\n"), "2 lines");
-  assert.equal(summarizeToolTextOutput("```"), null, "one unrenderable line has no summary");
-  assert.equal(summarizeToolTextOutput(""), null);
+test("wire output uses a line-count fallback only for multiple unrenderable lines", () => {
+  for (const [output, expected] of [["```\n```\n", { content: "2 lines" }], ["```", undefined], ["", undefined]]) {
+    const slim = record(slimActivityPayload({ data: { rawOutput: output } }));
+    assert.deepEqual(record(slim.data).rawOutput, expected);
+  }
 });
 
 test("tool output is summarised and the row is flagged truncated", () => {
@@ -134,14 +131,6 @@ test("a declined nested item re-stamps too, and a real success is left alone", (
     ).status,
     "completed"
   );
-});
-
-test("every string is capped at 16 KiB and the row flagged truncated", () => {
-  const huge = "a".repeat(16_384 + 1_000);
-  const slim = record(slimActivityPayload({ itemType: "error", detail: huge, data: {} }));
-  const detail = slim.detail as string;
-  assert.equal(byteLength(detail), 16_384 + byteLength("\u2026"));
-  assert.equal(slim.truncated, true);
 });
 
 test("a compaction summary survives slimming, capped and flagged", () => {

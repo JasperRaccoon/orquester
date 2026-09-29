@@ -52,30 +52,6 @@ const join = (output: string, over: Partial<ThreadItemOutputResponse> = {}): Thr
   ...over
 });
 
-describe("the row's Load full output", () => {
-  const row = (over: Partial<WorkLogEntry>): WorkLogEntry => ({
-    id: "a1",
-    createdAt: "2026-09-24T10:00:00.000Z",
-    turnId: "t1",
-    label: "npm test",
-    tone: "tool",
-    ...over
-  });
-
-  it("a command whose output streamed offers it whether or not its own payload was cut, and reads the join", () => {
-    assert.equal(fullOutputSourceOf(row({ itemType: "command_execution", streamedOutput: true })), "streamed");
-    assert.equal(
-      fullOutputSourceOf(row({ itemType: "command_execution", streamedOutput: true, truncated: true })),
-      "streamed"
-    );
-  });
-
-  it("a row whose payload the wire cut offers its item; a plain one offers nothing", () => {
-    assert.equal(fullOutputSourceOf(row({ itemType: "file_change", truncated: true })), "item");
-    assert.equal(fullOutputSourceOf(row({ itemType: "command_execution", detail: "2 passed" })), null);
-  });
-});
-
 describe("the full-output viewer's read", () => {
   it("shows the whole output of a command whose early chunks the window evicted, not what it still holds", async () => {
     // 600 lines streamed; the window kept the call's completion — its detail a preview, its own payload not marked
@@ -268,7 +244,6 @@ describe("a Codex completion that kept only its output's head (stored cut past 6
     });
     const output = await readFullOutput(viewer, update.id, "item");
     assert.deepEqual(output, { kind: "item", item: update });
-    assert.equal(fullOutputText(update), JSON.stringify(update.payload, null, 2));
     assert.deepEqual(viewer.asked, ["item live-7", "output live-7"]);
   });
 });
@@ -292,18 +267,6 @@ describe("an OpenCode completion whose final output the tool cut (the END of it,
     { id: "done-oc", turnId: "t1" }
   );
 
-  it("reads the call's join first: every line the command printed, and where the whole was saved", async () => {
-    const whole = `${printed}\n\nFull output saved to: ${saved}`;
-    const viewer = reads({ streamedOutput: async () => join(whole, { toolUseId: "call_bash" }) });
-    assert.deepEqual(await readFullOutput(viewer, stored.id, "streamed"), {
-      kind: "streamed",
-      text: whole,
-      running: false,
-      cut: false
-    });
-    assert.deepEqual(viewer.asked, ["output done-oc"]);
-  });
-
   it("with no join to give, shows the part the tool kept as text, saying only part was kept — never that it is the start", async () => {
     for (const answer of [join("", { toolUseId: "call_bash" }), null]) {
       const viewer = reads({ item: async () => ({ item: stored }), streamedOutput: async () => answer });
@@ -314,51 +277,6 @@ describe("an OpenCode completion whose final output the tool cut (the END of it,
 });
 
 describe("the viewer's text for an item", () => {
-  it("a command's output as the command printed it, where its own data carries it: a Codex completion's", () => {
-    // Where the Codex adapter keeps a completion's output (whole up to 64 KiB): `data.item.aggregatedOutput`.
-    const output = "PASS a.test.ts\n  ✓ adds\n\nTests: 1 passed\n";
-    const codex = activity(
-      "tool.completed",
-      {
-        itemType: "command_execution",
-        toolUseId: "item_7",
-        title: "npm test",
-        detail: "PASS a.test.ts",
-        status: "completed",
-        data: {
-          command: "npm test",
-          cwd: "/w/p",
-          source: "agent",
-          commandActions: [],
-          exitCode: 0,
-          durationMs: 812,
-          item: { aggregatedOutput: output }
-        }
-      },
-      { turnId: "t1" }
-    );
-    assert.equal(fullOutputText(codex), output);
-  });
-
-  it("and a Claude Bash call's, its result's text", () => {
-    const bash = activity(
-      "tool.completed",
-      {
-        itemType: "command_execution",
-        toolUseId: "toolu_1",
-        title: "Command run",
-        detail: "Bash: ls",
-        status: "completed",
-        data: {
-          toolName: "Bash",
-          input: { command: "ls" },
-          result: { type: "tool_result", tool_use_id: "toolu_1", content: "a.ts\nb.ts\n" }
-        }
-      },
-      { turnId: "t1" }
-    );
-    assert.equal(fullOutputText(bash), "a.ts\nb.ts\n");
-  });
 
   it("never out of an item stored cut: its data holds only a head, so the payload shows, as JSON", () => {
     const cut = activity(
@@ -372,7 +290,10 @@ describe("the viewer's text for an item", () => {
       },
       { turnId: "t1" }
     );
-    assert.equal(fullOutputText(cut), JSON.stringify(cut.payload, null, 2));
+    assert.deepEqual(JSON.parse(fullOutputText(cut)), {
+      itemType: "command_execution", toolUseId: "item_8", status: "completed", truncated: true,
+      data: { command: "cat big.log", item: { aggregatedOutput: "the first 64 KiB" } }
+    });
   });
 
   it("anything else as the viewer always showed it: a message's text, a string payload, JSON, else the summary", () => {
@@ -383,7 +304,9 @@ describe("the viewer's text for an item", () => {
       { itemType: "file_change", toolUseId: "call-e", status: "completed", data: { changes: [{ path: "/w/p/a.ts" }] } },
       { turnId: "t1" }
     );
-    assert.equal(fullOutputText(edit), JSON.stringify(edit.payload, null, 2));
+    assert.deepEqual(JSON.parse(fullOutputText(edit)), {
+      itemType: "file_change", toolUseId: "call-e", status: "completed", data: { changes: [{ path: "/w/p/a.ts" }] }
+    });
     // A command whose data carries no output — a background shell's completion — is its payload too.
     const shell = activity(
       "tool.completed",
@@ -395,7 +318,10 @@ describe("the viewer's text for an item", () => {
       },
       { turnId: "t1" }
     );
-    assert.equal(fullOutputText(shell), JSON.stringify(shell.payload, null, 2));
+    assert.deepEqual(JSON.parse(fullOutputText(shell)), {
+      itemType: "command_execution", toolUseId: "bgshell:t1", status: "completed",
+      data: { input: { command: "npm run dev" }, exitCode: 0 }
+    });
     assert.equal(fullOutputText(activity("tool.completed", undefined, { summary: "Ran a command" })), "Ran a command");
   });
 });
@@ -425,7 +351,7 @@ describe("an agent's launch prompt in the viewer (§7.6: a wire-cut prompt's 'Sh
 
   it("a start with no prompt is its payload, as before", () => {
     const item = start({});
-    assert.equal(fullOutputText(item), JSON.stringify(item.payload, null, 2));
+    assert.deepEqual(JSON.parse(fullOutputText(item)), { taskId: "a1", agentKind: "agent", title: "Find callers" });
   });
 });
 

@@ -17,14 +17,6 @@ function turn(turnId: string | null, extra: Partial<Turn> = {}): Turn {
   };
 }
 
-test("startedTurns keeps only rows with a provider turn id, in order", () => {
-  const turns = [turn("a"), turn(null), turn("b"), turn("c")];
-  assert.deepEqual(
-    startedTurns(turns).map((entry) => entry.turnId),
-    ["a", "b", "c"]
-  );
-});
-
 test("a duplicate id counts once, so later ordinals stay aligned", () => {
   const turns = [turn("a"), turn("b"), turn("b"), turn("c")];
   assert.deepEqual(

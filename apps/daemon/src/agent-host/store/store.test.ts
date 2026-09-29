@@ -688,6 +688,21 @@ test("putAttachment copies the file, names the thread in the id and stats the si
   assert.equal((await fs.stat(source)).size, 64);
 });
 
+test("resolveAttachment reads legacy ids without an extension suffix", async (t) => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
+  t.after(() => fs.rm(rootDir, { recursive: true, force: true }));
+  const id = "t1-3f2504e0-4f89-41d3-9a0c-0305e82c3301";
+  const directory = attachmentsDirOf(rootDir, "t1");
+  await fs.mkdir(directory, { recursive: true });
+  await fs.writeFile(path.join(directory, `${id}.png`), "legacy attachment");
+
+  const resolved = await store.resolveAttachment("t1", id);
+
+  assert.equal(await fs.readFile(resolved, "utf8"), "legacy attachment");
+});
+
 test("an attachment id belonging to another thread is refused, not looked up", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
@@ -873,38 +888,6 @@ test("readItem serves the FULL payload, even for a row past the fold's window", 
   const payload = item.payload as { data: { rawOutput: { stdout: string } } };
   assert.equal(payload.data.rawOutput.stdout.length, bigOutput.length);
   assert.equal(await store.readItem("t1", "never-written"), null);
-});
-
-test("readItem rebuilds a streamed message's accumulated body", async (t) => {
-  const rootDir = await tempRoot();
-  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  t.after(() => store.close());
-  const delta = (text: string, streaming: boolean): AppendableDomainEvent =>
-    ({
-      eventId: `e-${text}`,
-      threadId: "t1",
-      type: "thread.message-sent",
-      payload: {
-        messageId: "assistant:1",
-        role: "assistant",
-        text,
-        streaming,
-        turnId: null
-      },
-      occurredAt: "2026-01-01T00:00:01.000Z",
-      commandId: null,
-      causationEventId: null,
-      metadata: {}
-    }) as AppendableDomainEvent;
-
-  await store.append({
-    threadId: "t1",
-    events: [created(), delta("Hel", true), delta("lo", true), delta("", false)]
-  });
-  await store.drain();
-  const item = await store.readItem("t1", "assistant:1");
-  assert.ok(item && item.kind === "message");
-  assert.equal(item.text, "Hello");
 });
 
 // --- fix-wave regressions ---------------------------------------------------

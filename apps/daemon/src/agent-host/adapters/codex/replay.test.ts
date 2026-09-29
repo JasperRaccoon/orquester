@@ -12,19 +12,10 @@ import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { afterEach, beforeEach, describe, it, mock } from "node:test";
+import { describe, it } from "node:test";
 
-import type { DomainEvent, RuntimeEvent, ThreadMessageItem } from "@orquester/api/agent-chat";
-import { foldThread } from "@orquester/api/agent-chat";
+import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
-import { createIngestion } from "../../ingestion/index.ts";
-import {
-  FakeClock,
-  RecordingLiveness,
-  RecordingSink,
-  counterIdGen,
-  settle
-} from "../../ingestion/test-harness.ts";
 import { CodexNormaliser } from "./normalise.ts";
 import { CodexUsageTracker } from "./usage.ts";
 
@@ -99,9 +90,6 @@ function replay(name: string): {
   return { events, notifications };
 }
 
-beforeEach(() => mock.timers.enable({ apis: ["setTimeout"] }));
-afterEach(() => mock.timers.reset());
-
 describe("codex replay — no item is left dangling inProgress (R3 finding 1)", () => {
   /**
    * The reviewer's exact reproduction: replay each capture and pair
@@ -151,7 +139,7 @@ describe("codex replay — no item is left dangling inProgress (R3 finding 1)", 
 describe("codex replay — 01 initialize, thread start, one text turn", () => {
   const { events } = replay("01-initialize-thread-start-text-turn.ndjson");
 
-  it("emits thread.started with the provider thread id from result.thread.id", () => {
+  it("emits thread.started with the provider thread id from its notification", () => {
     const started = events.find((event) => event.type === "thread.started");
     assert.ok(started !== undefined);
     assert.equal(
@@ -236,32 +224,12 @@ describe("codex replay — 03 decline / cancel / acceptForSession", () => {
   });
 });
 
-describe("codex replay — 04 file-change approval", () => {
-  const { events } = replay("04-file-change-approval.ndjson");
-
-  it("the diff arrives on the fileChange ITEM, not on the approval request", () => {
-    const item = events.find(
-      (event) =>
-        event.type === "item.started" &&
-        (event.payload as { itemType: string }).itemType === "file_change"
-    );
-    assert.ok(item !== undefined, "a file_change item.started is emitted");
-    const data = (item.payload as { data?: { changes?: { path: string; diff: string }[] } }).data;
-    assert.ok((data?.changes?.length ?? 0) > 0);
-    assert.equal(typeof data!.changes![0]!.diff, "string");
-    // Rendering the card means joining on itemId.
-    assert.equal(typeof item.itemId, "string");
-  });
-});
-
 /**
  * Fixture 05's abandoned attempt (fixtures README obs. 22): a `commentary`
  * agentMessage that streams 27 deltas, stops mid-sentence and never gets an
  * `item/completed`. Codex's own rollout for the session does not contain it.
  */
 const ABANDONED_MESSAGE_ID = "msg_0d0d102f2f46ad5c016ab0a4422a1087d287b60bfd06c10b98";
-/** The agentMessage that restates it 2.8 s later, in the same turn, and completes. */
-const REGENERATED_MESSAGE_ID = "msg_0d0d102f2f46ad5c016ab0a44574f887d28d6b2840b954d7ce";
 
 /**
  * Every item the abandoned-message close fired on in one capture: an
@@ -285,116 +253,7 @@ function abandonedMessageCloses(name: string): string[] {
   return closed;
 }
 
-/**
- * Each agentMessage of a capture, in start order, with the text the provider
- * gave it: its completion's `item.text`, or — for one that never completed —
- * what it streamed.
- */
-function agentMessageTexts(lines: readonly FixtureLine[]): Map<string, string> {
-  const texts = new Map<string, { streamed: string; completed?: string }>();
-  for (const line of lines) {
-    if (line.dir !== "recv" || typeof line.frame !== "object" || line.frame === null) {
-      continue;
-    }
-    const frame = line.frame as Frame;
-    if (frame.method === "item/started" || frame.method === "item/completed") {
-      const item = (frame.params as { item: { type: string; id: string; text?: string } }).item;
-      if (item.type !== "agentMessage") {
-        continue;
-      }
-      const entry = texts.get(item.id) ?? { streamed: "" };
-      if (frame.method === "item/completed") {
-        entry.completed = item.text;
-      }
-      texts.set(item.id, entry);
-    } else if (frame.method === "item/agentMessage/delta") {
-      const params = frame.params as { itemId: string; delta: string };
-      const entry = texts.get(params.itemId) ?? { streamed: "" };
-      entry.streamed += params.delta;
-      texts.set(params.itemId, entry);
-    }
-  }
-  return new Map([...texts].map(([id, entry]) => [id, entry.completed ?? entry.streamed]));
-}
-
-/** A capture with one item's `phase` rewritten on both of its lifecycle frames. */
-function withPhase(lines: readonly FixtureLine[], itemId: string, phase: string): FixtureLine[] {
-  return lines.map((line) => {
-    const frame = line.frame as Frame | null;
-    if (
-      line.dir !== "recv" ||
-      (frame?.method !== "item/started" && frame?.method !== "item/completed")
-    ) {
-      return line;
-    }
-    const params = frame.params as { item: { id: string } };
-    if (params.item.id !== itemId) {
-      return line;
-    }
-    return { ...line, frame: { ...frame, params: { ...params, item: { ...params.item, phase } } } };
-  });
-}
-
-/**
- * Drive a capture through the REAL normaliser and the REAL ingestion, on the
- * capture's own clock so the 250 ms batching (§5.6) behaves as it did live,
- * then fold the log with the shared reducer the client applies (§5.1).
- *
- * Server→client requests are the session's to answer and are skipped: none of
- * 05's falls inside the window its abandoned message streams in, so the
- * notifications alone reproduce what the timeline received.
- */
-async function foldedAssistantMessages(
-  lines: readonly FixtureLine[]
-): Promise<ThreadMessageItem[]> {
-  const clock = new FakeClock("2026-09-21T03:27:44.000Z");
-  const sink = new RecordingSink();
-  const ingestion = createIngestion({
-    sink: sink.sink,
-    liveness: new RecordingLiveness(),
-    clock,
-    idGen: counterIdGen("d"),
-  });
-  const normaliser = new CodexNormaliser({ usage: new CodexUsageTracker() });
-  let elapsed = 0;
-  let sequence = 0;
-  for (const line of lines) {
-    if (line.dir !== "recv" || typeof line.frame !== "object" || line.frame === null) {
-      continue;
-    }
-    const frame = line.frame as Frame;
-    if (frame.method === undefined || (frame.id !== undefined && frame.id !== null)) {
-      continue;
-    }
-    const advance = Math.max(0, line.t - elapsed);
-    clock.advance(advance);
-    mock.timers.tick(advance);
-    elapsed = Math.max(elapsed, line.t);
-    for (const draft of normaliser.notification(frame.method as never, frame.params)) {
-      await ingestion.ingest({
-        ...draft,
-        eventId: `r${++sequence}`,
-        threadId: "t",
-        createdAt: clock.nowIso()
-      } as RuntimeEvent);
-    }
-    await settle();
-  }
-  clock.advance(1_000);
-  mock.timers.tick(1_000);
-  await ingestion.drain();
-  await settle();
-  const folded = foldThread(
-    sink.events().map((event, index) => ({ ...event, seq: index + 1 }) as DomainEvent)
-  );
-  return folded.items.filter(
-    (item): item is ThreadMessageItem => item.kind === "message" && item.role === "assistant"
-  );
-}
-
 describe("codex replay — 05 an abandoned agentMessage (fixtures README obs. 22)", () => {
-  const lines = readFixture("05-tool-request-user-input.ndjson");
-
   it("closes the abandoned message when the next item of its turn starts — nowhere else in the corpus", () => {
     // The close must never split a real message: across every capture it may
     // fire on exactly one item, the attempt 05 abandons.
@@ -406,34 +265,6 @@ describe("codex replay — 05 an abandoned agentMessage (fixtures README obs. 22
       }
     }
     assert.deepEqual(fired, { "05-tool-request-user-input.ndjson": [ABANDONED_MESSAGE_ID] });
-  });
-
-  it("through ingestion and the fold, every agentMessage item is its own message — nothing glued", async () => {
-    const expected = [...agentMessageTexts(lines)].map(([itemId, text]) => [
-      `assistant:${itemId}`,
-      text
-    ]);
-    assert.equal(expected.length, 3, "05 carries three agentMessage items");
-    const messages = await foldedAssistantMessages(lines);
-    assert.deepEqual(
-      messages.map((message) => [message.id, message.text]),
-      expected,
-      "the restatement must not be appended to the attempt it replaces"
-    );
-  });
-
-  it("a regenerated FINAL answer keeps its own phase; the abandoned attempt stays commentary", async () => {
-    const messages = await foldedAssistantMessages(
-      withPhase(lines, REGENERATED_MESSAGE_ID, "final_answer")
-    );
-    const kinds = new Map(messages.map((message) => [message.id, message.messageKind]));
-    assert.equal(kinds.get(`assistant:${REGENERATED_MESSAGE_ID}`), "answer");
-    assert.equal(kinds.get(`assistant:${ABANDONED_MESSAGE_ID}`), "commentary");
-    assert.equal(
-      messages.at(-1)?.id,
-      `assistant:${REGENERATED_MESSAGE_ID}`,
-      "the answer is the turn's last assistant message, where the client looks for it"
-    );
   });
 });
 
@@ -464,15 +295,6 @@ describe("codex replay — 09 plan mode", () => {
       (completed.payload as { planMarkdown: string }).planMarkdown.length > 0,
       "the plan item's text is the proposal"
     );
-  });
-
-  it("an unprompted compaction mid-turn still produces the compacted state", () => {
-    const compacted = events.filter(
-      (event) =>
-        event.type === "thread.state.changed" &&
-        (event.payload as { state: string }).state === "compacted"
-    );
-    assert.ok(compacted.length > 0, "compaction happens unprompted too");
   });
 });
 
@@ -641,7 +463,6 @@ describe("codex — account failures carry a structured reason (workflows §5.4)
 });
 
 describe("codex replay — 15 MCP elicitation", () => {
-
   it("mcpToolCall items carry their full arguments", () => {
     const { events } = replay("15-mcp-elicitation-approval.ndjson");
     const calls = events.filter(

@@ -5,10 +5,7 @@ import type { WorkflowBlockStatus, WorkflowNodeType } from "./types.ts";
 import {
   computeReadiness,
   downstreamOf,
-  executableNodes,
-  findCycles,
   reachableFromTriggers,
-  topologicalOrder,
   upstreamOf,
   type ReadinessState
 } from "./graph.ts";
@@ -61,54 +58,11 @@ describe("order and reachability", () => {
     ]
   );
 
-  it("topological order, ties by definition order, notes excluded", () => {
-    assert.deepEqual(topologicalOrder(g), ["t", "a", "b", "m", "c", "x"]);
-    assert.deepEqual(executableNodes(g).map((node) => node.id), ["c", "t", "a", "b", "m", "x"]);
-  });
-
   it("upstream / downstream / reachable", () => {
     assert.deepEqual([...upstreamOf(g, "c")].sort(), ["a", "b", "m", "t"]);
     assert.deepEqual([...downstreamOf(g, "t")].sort(), ["a", "b", "c", "m"]);
     assert.deepEqual([...upstreamOf(g, "t")], []);
     assert.deepEqual([...reachableFromTriggers(g)].sort(), ["a", "b", "c", "m", "t"]);
-  });
-
-  it("cycles", () => {
-    const cyclic = graph(
-      [
-        ["t", "trigger.manual"],
-        ["a", "code"],
-        ["b", "code"],
-        ["c", "code"],
-        ["d", "code"]
-      ],
-      [
-        ["t", "a"],
-        ["a", "b"],
-        ["b", "c"],
-        ["c", "a"],
-        ["d", "d"]
-      ]
-    );
-    assert.equal(topologicalOrder(cyclic), null);
-    const cycles = findCycles(cyclic).map((cycle) => [...cycle].sort());
-    assert.deepEqual(cycles.sort(), [["a", "b", "c"], ["d"]]);
-    assert.deepEqual(findCycles(g), []);
-  });
-
-  it("ignores edges to missing nodes and to notes", () => {
-    const g2 = graph(
-      [
-        ["t", "trigger.manual"],
-        ["n", "note"]
-      ],
-      [
-        ["t", "n"],
-        ["t", "ghost"]
-      ]
-    );
-    assert.deepEqual(topologicalOrder(g2), ["t"]);
-    assert.deepEqual(findCycles(g2), []);
   });
 });
 

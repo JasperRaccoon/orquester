@@ -103,8 +103,6 @@ export interface SavedPromptsServiceOptions {
   /** …and must realpath inside this sandbox root (the file browser's `fsRoot`). */
   fsRoot: () => string;
   logger?: Pick<Console, "warn" | "error">;
-  /** The clock every stamp is read from; injected by tests. */
-  now?: () => Date;
 }
 
 /**
@@ -156,14 +154,12 @@ export class SavedPromptsService {
   private readonly workspacesDir: () => string;
   private readonly fsRoot: () => string;
   private readonly logger: Pick<Console, "warn" | "error">;
-  private readonly now: () => Date;
 
   constructor(options: SavedPromptsServiceOptions) {
     this.file = options.file;
     this.workspacesDir = options.workspacesDir;
     this.fsRoot = options.fsRoot;
     this.logger = options.logger ?? console;
-    this.now = options.now ?? (() => new Date());
   }
 
   /**
@@ -431,7 +427,7 @@ export class SavedPromptsService {
     // The client lists never-used prompts newest first, so each starter is
     // stamped a millisecond before the one above it: they list in this
     // order, the order the rail's design shows them in.
-    const start = this.now().getTime();
+    const start = new Date().getTime();
     STARTER_PROMPTS.forEach((starter, index) => {
       const now = new Date(start - index).toISOString();
       const prompt: SavedPrompt = {
@@ -459,7 +455,7 @@ export class SavedPromptsService {
    * copy of the user's prompts — and the library is read-only instead.
    */
   private async quarantine(detail: string): Promise<void> {
-    const aside = `${this.file}.corrupt-${this.now().toISOString().replace(/[:.]/g, "-")}`;
+    const aside = `${this.file}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
     try {
       await rename(this.file, aside);
     } catch (error) {
@@ -500,7 +496,7 @@ export class SavedPromptsService {
   }
 
   private timestamp(): string {
-    return this.now().toISOString();
+    return new Date().toISOString();
   }
 }
 

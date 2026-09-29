@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
-import { codexTrustHash } from "../../../agent-hooks.ts";
 import {
   type CodexHookEntry,
   type CodexHooksDocument,
@@ -55,27 +54,10 @@ const OBSERVED: Array<{ event: string; matcher?: string; handler: Record<string,
 ];
 
 describe("codex hooks — identity and trust", () => {
-  it("snake-cases every Codex event", () => {
-    assert.equal(eventSnake("PreToolUse"), "pre_tool_use");
-    assert.equal(eventSnake("SubagentStop"), "subagent_stop");
-    assert.equal(eventSnake("PostCompact"), "post_compact");
-    assert.equal(eventSnake("Stop"), "stop");
-    assert.equal(eventSnake("UserPromptSubmit"), "user_prompt_submit");
-  });
 
   it("reproduces the hash codex-cli 0.155.1 reports for every event and field variation", () => {
     for (const { event, matcher, handler, hash } of OBSERVED) {
       assert.equal(codexHookHash(eventSnake(event), handler, matcher), hash, `${event} ${String(handler.command)}`);
-    }
-  });
-
-  it("agrees with agent-hooks' codexTrustHash for the managed handlers", () => {
-    for (const [event, matcher] of [["session_start", undefined], ["pre_tool_use", "*"], ["stop", undefined]] as const) {
-      const command = `'/x/agent-hook.sh' codex ${event}`;
-      assert.equal(
-        codexHookHash(event, { type: "command", command, timeout: 10 }, matcher),
-        codexTrustHash(event, command, matcher)
-      );
     }
   });
 
@@ -148,64 +130,6 @@ describe("codex hooks — re-keying hooks.state", () => {
     return next;
   }
 
-  it("moves managed and user entries on every path when a group is inserted before the managed one", () => {
-    const user = { type: "command", command: "lint", timeout: 30 };
-    const doc: CodexHooksDocument = {
-      hooks: { PreToolUse: [{ matcher: "Bash", hooks: [user] }, { matcher: "*", hooks: [managed("PreToolUse")] }] }
-    };
-    const state = {
-      ...stateFor(doc, { "pre_tool_use:0:0": { enabled: false } }),
-      "/elsewhere/hooks.json:pre_tool_use:0:0": { enabled: true, trusted_hash: "sha256:other" }
-    };
-    const before = listHookEntries(doc);
-    const added = { type: "command", command: "fmt" };
-    doc.hooks.PreToolUse.splice(1, 0, { hooks: [added] });
-    const after = listHookEntries(doc);
-    const addedAt = after.find((entry) => entry.handler === added)!;
-    const addedHash = codexHookHash("pre_tool_use", added, undefined)!;
-    const result = rekeyHookState({
-      before,
-      after,
-      moved: movedBy(before, after),
-      state,
-      paths: PATHS,
-      set: [{ position: addedAt, entry: { enabled: true, trusted_hash: addedHash } }]
-    });
-    const next = apply(state, result);
-    const managedHash = codexHookHash("pre_tool_use", managed("PreToolUse"), "*");
-    for (const path of PATHS) {
-      assert.deepEqual(next[`${path}:pre_tool_use:0:0`], {
-        enabled: false,
-        trusted_hash: codexHookHash("pre_tool_use", user, "Bash")
-      });
-      assert.deepEqual(next[`${path}:pre_tool_use:1:0`], { enabled: true, trusted_hash: addedHash });
-      assert.deepEqual(next[`${path}:pre_tool_use:2:0`], { enabled: true, trusted_hash: managedHash });
-    }
-    // Another path's entries are not ours to move.
-    assert.deepEqual(next["/elsewhere/hooks.json:pre_tool_use:0:0"], { enabled: true, trusted_hash: "sha256:other" });
-    assert.equal(result.remove.size, 0);
-  });
-
-  it("drops the entries of a removed hook and shifts the rest back", () => {
-    const first = { type: "command", command: "one" };
-    const second = { type: "command", command: "two" };
-    const doc: CodexHooksDocument = {
-      hooks: { Stop: [{ hooks: [first] }, { hooks: [second] }, { hooks: [managed("Stop")] }] }
-    };
-    const state = stateFor(doc, { "stop:1:0": { enabled: false } });
-    const before = listHookEntries(doc);
-    doc.hooks.Stop.splice(0, 1);
-    const after = listHookEntries(doc);
-    const result = rekeyHookState({ before, after, moved: movedBy(before, after), state, paths: PATHS });
-    const next = apply(state, result);
-    for (const path of PATHS) {
-      assert.deepEqual(next[`${path}:stop:0:0`], { enabled: false, trusted_hash: codexHookHash("stop", second, undefined) });
-      assert.deepEqual(next[`${path}:stop:1:0`], { enabled: true, trusted_hash: codexHookHash("stop", managed("Stop"), undefined) });
-      assert.equal(next[`${path}:stop:2:0`], undefined);
-      assert.ok(result.remove.has(`${path}:stop:2:0`));
-    }
-  });
-
   it("repairs an entry already keyed to the wrong position by its trusted hash", () => {
     const user = { type: "command", command: "mine" };
     const doc: CodexHooksDocument = { hooks: { Stop: [{ hooks: [user] }, { hooks: [managed("Stop")] }] } };
@@ -245,12 +169,4 @@ describe("codex hooks — re-keying hooks.state", () => {
     assert.equal(next[`${SYS}:stop:2:0`], undefined);
   });
 
-  it("writes nothing when nothing moved", () => {
-    const doc: CodexHooksDocument = { hooks: { Stop: [{ hooks: [{ type: "command", command: "x" }] }] } };
-    const state = stateFor(doc);
-    const entries = listHookEntries(doc);
-    const result = rekeyHookState({ before: entries, after: entries, moved: movedBy(entries, entries), state, paths: PATHS });
-    assert.equal(result.write.size, 0);
-    assert.equal(result.remove.size, 0);
-  });
 });

@@ -164,7 +164,7 @@ function renderTomlKey(segment: string): string {
 }
 
 /** A value as the right-hand side of `key = …`, on one line (tables inline). */
-export function renderTomlValue(value: unknown): string {
+function renderTomlValue(value: unknown): string {
   const text = stringify({ t: { v: value } });
   const line = text.split(/\r?\n/).find((entry) => entry.startsWith("v = "));
   if (line === undefined) {

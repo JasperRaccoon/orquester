@@ -37,9 +37,9 @@ import { AgentProfileError, profileErrors } from "../../errors.ts";
 import { buildAgentCliEnv, redactCliOutput } from "../../infra/index.ts";
 
 /** Close the app-server after this long with no call pending. */
-export const CODEX_CONFIG_IDLE_MS = 30_000;
+const CODEX_CONFIG_IDLE_MS = 30_000;
 /** Default per-call deadline (the `initialize` handshake included). */
-export const CODEX_CONFIG_CALL_TIMEOUT_MS = 10_000;
+const CODEX_CONFIG_CALL_TIMEOUT_MS = 10_000;
 /** `plugin/install` clones and materializes a plugin: a longer deadline. */
 export const CODEX_PLUGIN_INSTALL_TIMEOUT_MS = 120_000;
 /** Bytes of stderr kept for an error message. */
@@ -52,21 +52,21 @@ const STDERR_TAIL_BYTES = 4096;
 export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
 
 /** `ConfigLayerSource`, reduced to what the adapter reads. */
-export type CodexConfigLayerSource = { type: string; file?: string; profile?: string | null } & Record<string, unknown>;
+type CodexConfigLayerSource = { type: string; file?: string; profile?: string | null } & Record<string, unknown>;
 
-export interface CodexConfigLayer {
+interface CodexConfigLayer {
   name: CodexConfigLayerSource;
   version: string;
   config: JsonValue;
   disabledReason?: string | null;
 }
 
-export interface CodexConfigReadParams {
+interface CodexConfigReadParams {
   includeLayers?: boolean;
   cwd?: string | null;
 }
 
-export interface CodexConfigReadResult {
+interface CodexConfigReadResult {
   config: Record<string, unknown>;
   origins: Record<string, unknown>;
   layers: CodexConfigLayer[] | null;
@@ -80,7 +80,7 @@ export interface CodexConfigEdit {
   mergeStrategy: "replace" | "upsert";
 }
 
-export interface CodexConfigBatchWriteParams {
+interface CodexConfigBatchWriteParams {
   edits: CodexConfigEdit[];
   filePath?: string | null;
   /** The user layer's `version` from `config/read`; a mismatch answers `configVersionConflict`. */
@@ -88,7 +88,7 @@ export interface CodexConfigBatchWriteParams {
   reloadUserConfig?: boolean;
 }
 
-export interface CodexConfigWriteResult {
+interface CodexConfigWriteResult {
   status: "ok" | "okOverridden";
   version: string;
   filePath: string;
@@ -107,11 +107,11 @@ export interface CodexSkillMetadata {
   pluginId: string | null;
 }
 
-export interface CodexSkillsListResult {
+interface CodexSkillsListResult {
   data: { cwd: string; skills: CodexSkillMetadata[]; errors: { path: string; message: string }[] }[];
 }
 
-export interface CodexSkillsConfigWriteParams {
+interface CodexSkillsConfigWriteParams {
   /** Canonicalized to the realpath by Codex; enabling removes the `[[skills.config]]` entry. */
   path?: string | null;
   name?: string | null;
@@ -136,7 +136,7 @@ export interface CodexHookMetadata {
   trustStatus: "managed" | "untrusted" | "trusted" | "modified";
 }
 
-export interface CodexHooksListResult {
+interface CodexHooksListResult {
   data: { cwd: string; hooks: CodexHookMetadata[]; warnings: string[]; errors: { path: string; message: string }[] }[];
 }
 
@@ -152,7 +152,7 @@ export interface CodexPluginSummary {
   interface: { displayName: string | null; shortDescription: string | null } | null;
 }
 
-export interface CodexPluginMarketplaceEntry {
+interface CodexPluginMarketplaceEntry {
   name: string;
   /** `null` for a remote-only catalog. */
   path: string | null;
@@ -165,7 +165,7 @@ export interface CodexPluginListResult {
   marketplaceLoadErrors: unknown[];
 }
 
-export interface CodexPluginReadParams {
+interface CodexPluginReadParams {
   marketplacePath?: string | null;
   remoteMarketplaceName?: string | null;
   pluginName: string;
@@ -183,20 +183,20 @@ export interface CodexPluginReadResult {
   };
 }
 
-export interface CodexPluginInstallParams {
+interface CodexPluginInstallParams {
   marketplacePath?: string | null;
   remoteMarketplaceName?: string | null;
   pluginName: string;
 }
 
-export interface CodexMarketplaceAddParams {
+interface CodexMarketplaceAddParams {
   /** `owner/repo`, a git URL, or a local marketplace path. */
   source: string;
   refName?: string | null;
   sparsePaths?: string[] | null;
 }
 
-export interface CodexMarketplaceAddResult {
+interface CodexMarketplaceAddResult {
   marketplaceName: string;
   installedRoot: string;
   alreadyAdded: boolean;
@@ -252,7 +252,7 @@ export interface CodexConfigClientOptions {
 
 export type CodexConfigClientFactory = (options: CodexConfigClientOptions) => CodexConfigClient;
 
-export interface CodexAppServerClientOptions extends CodexConfigClientOptions {
+interface CodexAppServerClientOptions extends CodexConfigClientOptions {
   /** Arguments to `bin`; `["app-server"]` unless a test runs a fake. */
   args?: readonly string[];
   idleMs?: number;

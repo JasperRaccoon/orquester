@@ -61,7 +61,7 @@ export async function markClaudeProjectTrusted(
  * Pure half of {@link markClaudeProjectTrusted}. Returns the config to write,
  * or null when nothing would change (no write churn on every turn).
  */
-export function applyClaudeProjectTrust(
+function applyClaudeProjectTrust(
   config: Record<string, unknown>,
   projectDir: string
 ): Record<string, unknown> | null {

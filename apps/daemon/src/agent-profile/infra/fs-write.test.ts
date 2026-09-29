@@ -18,7 +18,6 @@ import { join } from "node:path";
 import test from "node:test";
 import { ProfileBackups } from "./backups.ts";
 import {
-  readTextIfExists,
   removeProfilePath,
   resolveWriteTarget,
   writeProfileFile,
@@ -114,7 +113,7 @@ test("a symlink loop is refused", async (t) => {
   const { root, opts } = await scratch(t);
   await symlink(join(root, "b"), join(root, "a"));
   await symlink(join(root, "a"), join(root, "b"));
-  await assert.rejects(writeProfileFile(join(root, "a"), "x", opts));
+  await assert.rejects(writeProfileFile(join(root, "a"), "x", opts), { code: "ELOOP" });
 });
 
 test("writing onto a directory is refused", async (t) => {
@@ -185,19 +184,6 @@ test("removeProfilePath backs up and deletes files and trees; a symlink loses on
 
   assert.deepEqual(await removeProfilePath(join(root, "nothing"), opts), { removed: false, backup: null });
   assert.equal((await backups.list("claude")).length, 3);
-});
-
-test("readTextIfExists and pathKind", async (t) => {
-  const { root } = await scratch(t);
-  await writeFile(join(root, "f"), "text");
-  await symlink(join(root, "f"), join(root, "l"));
-  assert.equal(await readTextIfExists(join(root, "f")), "text");
-  assert.equal(await readTextIfExists(join(root, "missing")), null);
-  assert.equal(await readTextIfExists(join(root, "f", "under-a-file")), null);
-  assert.equal(await pathKind(join(root, "f")), "file");
-  assert.equal(await pathKind(join(root, "l")), "symlink");
-  assert.equal(await pathKind(root), "dir");
-  assert.equal(await pathKind(join(root, "missing")), null);
 });
 
 test("copyTree follows the root, refuses or skips inner symlinks", async (t) => {

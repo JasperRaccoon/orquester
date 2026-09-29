@@ -160,7 +160,7 @@ interface CodexResumeCursor {
  * `..`-shaped or flag-shaped id is a corrupt cursor, and §4.1 says a corrupt
  * cursor means no resume.
  */
-export function parseResumeCursor(value: unknown): CodexResumeCursor | null {
+function parseResumeCursor(value: unknown): CodexResumeCursor | null {
   if (typeof value !== "object" || value === null) {
     return null;
   }
@@ -2797,7 +2797,7 @@ function requestedSchemaIsEmpty(
   return Object.keys(properties).length === 0;
 }
 
-export function toUserInputQuestions(
+function toUserInputQuestions(
   questions: readonly CodexProtocol.v2.ToolRequestUserInputQuestion[]
 ): UserInputQuestion[] {
   const out: UserInputQuestion[] = [];
@@ -2836,7 +2836,7 @@ export function toUserInputQuestions(
  * accepted by the server verbatim. A question the user did not answer is
  * omitted rather than sent empty.
  */
-export function toCodexAnswers(
+function toCodexAnswers(
   questions: readonly Pick<UserInputQuestion, "id">[],
   answers: Record<string, unknown>
 ): Record<string, CodexProtocol.v2.ToolRequestUserInputAnswer> {

@@ -323,19 +323,25 @@ describe("provider snapshot registry (§3.2, §6.3)", () => {
       assert.equal(raw.providers.claude?.identity.adapterId, "claude");
       assert.equal(raw.providers.claude?.identity.hostProtocolVersion, 1);
 
-      // The filename alone is not trusted as a routing key.
-      await writeCache(stateDir, {
-        claude: { identity: identityFor("claude"), snapshot: snapshotFor("codex") }
-      });
-      const reloaded = createProviderSnapshotRegistry({
-        probes: [],
+      const reload = () => createProviderSnapshotRegistry({
+        probes: [{ id: "claude", refresh: async () => snapshotFor("claude") }],
         stateDir,
         logger: createRecordingLogger(),
         clock: createTestClock(0)
       });
-      await reloaded.load();
-      assert.equal(reloaded.get("claude"), null);
-      reloaded.stop();
+      const valid = reload();
+      await valid.load();
+      assert.equal(valid.get("claude")?.version, "1.0.0");
+      valid.stop();
+
+      // Only the payload identity changes; the provider remains configured.
+      await writeCache(stateDir, {
+        claude: { ...raw.providers.claude!, snapshot: snapshotFor("codex") }
+      });
+      const mismatched = reload();
+      await mismatched.load();
+      assert.equal(mismatched.get("claude"), null);
+      mismatched.stop();
     });
   });
 

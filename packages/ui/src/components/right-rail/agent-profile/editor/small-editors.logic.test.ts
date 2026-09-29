@@ -6,7 +6,7 @@ import { test } from "node:test";
 import type { AgentProfileSnapshot, ProfileImportCandidate, ProfileItem } from "@orquester/api";
 
 import { isAbort, profileError, profileErrorPlacement } from "./errors";
-import { eventTakesMatcher, hookDraftFromForm, hookEvents, initialHookForm, validateHookForm } from "./hook.logic";
+import { eventTakesMatcher, hookDraftFromForm, initialHookForm, validateHookForm } from "./hook.logic";
 import {
   copyableItems,
   copySourceAgents,
@@ -16,11 +16,10 @@ import {
   pickedCollisions,
   toggleAllPicks,
   togglePick,
-  uploadFileError,
-  uploadPercent
+  uploadFileError
 } from "./import.logic";
-import { instructionsFileName, instructionsSummary, overwriteInstructions } from "./instructions.logic";
-import { assumedWidth, isWide, kindTitle } from "./layout.logic";
+import { overwriteInstructions } from "./instructions.logic";
+
 import {
   initialMarketplaceForm,
   marketplaceDraftFromForm,
@@ -50,12 +49,7 @@ test("hook: a multi-line command keeps its inner lines", () => {
 });
 
 test("hook: the agent's events, an unlisted event on disk kept selectable, validation", () => {
-  assert.equal(hookEvents("opencode").length, 0);
-  assert.equal(hookEvents("codex").includes("Interrupt"), true);
-  assert.equal(hookEvents("claude", "Custom")[0], "Custom");
-  assert.equal(initialHookForm("claude").event, "PreToolUse");
   const edit = initialHookForm("claude", { event: "Stop", command: "x", timeoutSec: 5 });
-  assert.deepEqual(edit, { event: "Stop", matcher: "", command: "x", timeout: "5" });
   const bad = validateHookForm("claude", { event: "Nope", matcher: "", command: " ", timeout: "0" });
   assert.deepEqual(Object.keys(bad.errors).sort(), ["command", "event", "timeout"]);
   assert.equal(validateHookForm("claude", edit).valid, true);
@@ -161,9 +155,6 @@ test("import: git URLs, upload names, upload progress", () => {
   assert.equal(uploadFileError("skills.ZIP"), undefined);
   assert.equal(uploadFileError("review.md"), undefined);
   assert.ok(uploadFileError("skills.tar.gz"));
-  assert.equal(uploadPercent(50, 200), 25);
-  assert.equal(uploadPercent(5, 0), 0);
-  assert.equal(uploadPercent(300, 200), 100);
 });
 
 test("copy: every other agent; only the source agent's own items of the kind", () => {
@@ -186,7 +177,7 @@ test("copy: every other agent; only the source agent's own items of the kind", (
 
 test("instructions: overwrite re-reads for the fresh revision, then writes mine", async () => {
   const calls: string[] = [];
-  const response = await overwriteInstructions(
+  await overwriteInstructions(
     {
       read: async () => {
         calls.push("read");
@@ -204,21 +195,6 @@ test("instructions: overwrite re-reads for the fresh revision, then writes mine"
     "mine"
   );
   assert.deepEqual(calls, ["read", "write codex fresh mine"]);
-  assert.deepEqual(response.notes, ["Saved"]);
-  assert.equal(instructionsFileName("/var/lib/orquester/.claude/CLAUDE.md"), "CLAUDE.md");
-  assert.equal(instructionsSummary("", false), "New file");
-  assert.equal(instructionsSummary("a\nb", true), "2 lines · 3 B");
-});
-
-test("layout: width breakpoints and titles", () => {
-  assert.equal(isWide(assumedWidth("desktop")), true);
-  assert.equal(isWide(assumedWidth("phone")), false);
-  assert.equal(kindTitle("create", "mcp"), "New MCP server");
-  assert.equal(kindTitle("edit", "mcp"), "Edit MCP server");
-  assert.equal(kindTitle("create", "skill"), "New skill");
-  assert.equal(kindTitle("create", "plugin"), "Install a plugin");
-  assert.equal(kindTitle("create", "marketplace"), "Add a marketplace");
-  assert.equal(kindTitle("edit", "hook"), "Edit hook");
 });
 
 test("errors: the daemon's nested code and message; placement by code", () => {
@@ -236,7 +212,6 @@ test("errors: the daemon's nested code and message; placement by code", () => {
   assert.equal(profileErrorPlacement({ code: "PROFILE_CONFLICT", status: 409, message: "" }), "changed");
   assert.equal(profileErrorPlacement({ code: "AGENT_CLI_FAILED", status: 502, message: "" }), "general");
   assert.deepEqual(profileError(new Error("offline")), { code: null, status: null, message: "offline" });
-  assert.equal(profileError(undefined).message, "Something went wrong.");
   assert.equal(isAbort({ name: "AbortError" }), true);
   assert.equal(isAbort(new Error("x")), false);
 });

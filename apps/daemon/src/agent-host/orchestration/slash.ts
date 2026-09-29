@@ -126,25 +126,6 @@ export function parseHostGoalCommand(
 }
 
 /**
- * A turn whose text starts with `/` is a command invocation for every CLI in
- * the matrix, and that single fact is what makes forwarding work at all
- * (§4.6.9). Orquester never prefixes, indents or wraps such a turn — this
- * predicate exists so the rule is assertable rather than merely observed.
- */
-export function isSlashInvocation(text: string): boolean {
-  return /^\/[^\s/]+(?:\s|$)/u.test(text);
-}
-
-/**
- * The host's whole send-path text policy: return the input unchanged. It is a
- * function rather than an omission so a future prompt-injecting feature has to
- * delete this comment to break §4.6.9.
- */
-export function providerInputFor(text: string): string {
-  return text;
-}
-
-/**
  * The refusal message for a provider command the host blocks, or null.
  *
  * §4.6.5(c)/§4.6.6: Grok's `/always-approve` is the only one — a provider-side

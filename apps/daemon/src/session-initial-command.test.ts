@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -29,15 +30,11 @@ const registry = {
   }
 } as Pick<RegistryService, "get"> as RegistryService;
 
-async function waitFor(poll: () => boolean, timeoutMs = 5000): Promise<void> {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    if (poll()) {
-      return;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
+async function outputContains(manager: LocalSessionManager, id: string, text: string): Promise<void> {
+  const signal = AbortSignal.timeout(10_000);
+  while (!manager.buffer(id).includes(text)) {
+    await once(manager.lifecycle, "output", { signal });
   }
-  throw new Error(`timed out after ${timeoutMs}ms`);
 }
 
 test("initialCommand is typed into the fresh PTY and run by the shell", async () => {
@@ -53,7 +50,7 @@ test("initialCommand is typed into the fresh PTY and run by the shell", async ()
       // already on its way, with no sleep and no follow-up input frame.
       initialCommand: "printf 'orq-typed-%s\\n' ok"
     });
-    await waitFor(() => mgr.buffer(session.id).includes("orq-typed-ok"));
+    await outputContains(mgr, session.id, "orq-typed-ok");
     // Typed, not executed out-of-band: the shell echoed the source line too.
     assert.match(mgr.buffer(session.id), /printf 'orq-typed-%s/);
   } finally {
@@ -69,7 +66,7 @@ test("a blank initialCommand writes nothing to the PTY", async () => {
   // "\n" would still satisfy `read` and print an empty READ[]).
   const echoOnce: RegistryEntry = {
     ...SHELL,
-    args: ["-c", "IFS= read -r line; printf 'READ[%s]\\n' \"$line\"; sleep 5"]
+    args: ["-c", "IFS= read -r line; printf 'READ[%s]\\n' \"$line\""]
   };
   const mgr = new LocalSessionManager({
     get: (id: string) => (id === echoOnce.id ? echoOnce : undefined)
@@ -82,17 +79,11 @@ test("a blank initialCommand writes nothing to the PTY", async () => {
       cwd: root,
       initialCommand: "   "
     });
-    await new Promise((resolve) => setTimeout(resolve, 400));
-    assert.equal(mgr.buffer(blank.id).includes("READ["), false, "whitespace must not be typed");
-
-    const typed = await mgr.create({
-      kind: "shell",
-      refId: "sh",
-      projectPath: root,
-      cwd: root,
-      initialCommand: "hello there"
-    });
-    await waitFor(() => mgr.buffer(typed.id).includes("READ[hello there]"));
+    // The next line must be the first one read: a queued blank command would
+    // consume the read and print READ[] before this sentinel can be accepted.
+    mgr.input(blank.id, "sentinel\r");
+    await outputContains(mgr, blank.id, "READ[sentinel]");
+    assert.doesNotMatch(mgr.buffer(blank.id), /READ\[\]/);
   } finally {
     mgr.closeAll();
     await rm(root, { recursive: true, force: true });

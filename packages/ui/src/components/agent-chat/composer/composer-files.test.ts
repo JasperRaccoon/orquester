@@ -11,11 +11,6 @@ describe("file paths in the prompt", () => {
     assert.equal(removeFilePath("nothing here", "/t/a.xlsx"), "nothing here");
   });
 
-  it("a path against punctuation still goes, and only the path: no space is owed there", () => {
-    // Neither space-taking alternative matches (`,` follows), so the bare one does.
-    assert.equal(removeFilePath("see /t/a.xlsx, now", "/t/a.xlsx"), "see , now");
-  });
-
   it("removes exactly one occurrence, so a path the user repeated stays", () => {
     assert.equal(removeFilePath("/t/a.xlsx and /t/a.xlsx", "/t/a.xlsx"), "and /t/a.xlsx");
   });

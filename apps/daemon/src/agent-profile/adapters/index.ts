@@ -15,7 +15,7 @@ import { OpenCodeProfileAdapter } from "./opencode/index.ts";
 import type { AgentHomes, ProfileAdapter, ProfileAdapterContext } from "./types.ts";
 
 /** What the daemon hands the factory; everything per agent is derived from it by {@link adapterContext}. */
-export interface AgentProfileAdapterFactoryContext {
+interface AgentProfileAdapterFactoryContext {
   homes: AgentHomes;
   /** `<appdir>`. */
   appdir: string;

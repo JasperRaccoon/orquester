@@ -23,8 +23,7 @@ import type { OpenCodeRawEvent } from "../protocol.ts";
  * message: milliseconds since the epoch (fixture 12, line 187). A test that
  * reads times runs its clocks from here.
  */
-export const WOKEN_AT_MS = 1_789_961_358_831;
-const CREATED = WOKEN_AT_MS;
+const CREATED = 1_789_961_358_831;
 
 /**
  * The answer a background run's end prompts its caller with: the user

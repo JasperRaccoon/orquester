@@ -486,7 +486,7 @@ export const createCodexAdapter: AdapterFactory = async (
  * not shell-expand env values, so `CODEX_HOME=~/.codex_work` reaches codex
  * verbatim and it errors that the path does not exist.
  */
-export function resolveCodexHome(path: string | undefined): string | null {
+function resolveCodexHome(path: string | undefined): string | null {
   if (path === undefined || path.length === 0) {
     return null;
   }
@@ -507,7 +507,7 @@ function defaultCodexHome(): string {
  * §4.6.4: a probe that comes back empty NEVER blanks a non-empty cached list,
  * and at most 16 cwds are retained per provider, oldest evicted.
  */
-export function mergeSnapshot(
+function mergeSnapshot(
   previous: ProviderSnapshot | null,
   next: ProviderSnapshot,
   probedCwds: string[]

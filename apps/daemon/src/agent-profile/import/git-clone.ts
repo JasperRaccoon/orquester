@@ -23,7 +23,7 @@ export type GitCloneFn = (
   options: { timeoutMs: number }
 ) => Promise<void>;
 
-export interface GitCloneOptions {
+interface GitCloneOptions {
   timeoutMs: number;
   /** `GIT_ALLOW_PROTOCOL`; `https:ssh` by default. Tests widen it to `file` for a local bare repo. */
   allowProtocols?: string;
@@ -34,7 +34,7 @@ export interface GitCloneOptions {
 const DETAIL_MAX = 1000;
 
 /** The `git clone` argv for `url` at `ref` into `dest`. */
-export function gitCloneArgs(url: string, ref: string | undefined, dest: string): string[] {
+function gitCloneArgs(url: string, ref: string | undefined, dest: string): string[] {
   return [
     "clone",
     "--depth",

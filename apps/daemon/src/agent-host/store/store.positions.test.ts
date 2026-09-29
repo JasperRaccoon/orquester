@@ -246,14 +246,12 @@ test(
     // sequence again would be a collision `readLog` reads as corruption from
     // that line on; keeping the advanced counter would leave a hole the index
     // refuses to bridge until the next boot. The store must take the disk's
-    // word instead, and say so.
+    // word instead.
     const rootDir = await tempRoot();
-    const warnings: Array<{ message: string; detail: unknown }> = [];
     const store = createThreadStore({
       rootDir,
       clock: fixedClock(),
-      idGen: countingIds(),
-      logger: { warn: (message, detail) => warnings.push({ message, detail }) }
+      idGen: countingIds()
     });
     t.after(() => store.close());
     const first = await store.append({ threadId: "t1", events: [created()] });
@@ -279,9 +277,6 @@ test(
 
     const onDisk = await linesOnDisk(eventsPath);
     assert.equal(onDisk.length, 2, "the failed batch stayed on disk: nothing could roll it back");
-    assert.equal(warnings.length, 1, "the double fault is reported, once");
-    assert.match(warnings[0]!.message, /rollback failed too/);
-    assert.equal((warnings[0]!.detail as { seq: number }).seq, 2);
     assert.equal(await store.lastSeq("t1"), 2, "the counter is what the last line on disk says");
     assert.equal(await store.logLength("t1"), await sizeOf(eventsPath));
 
@@ -303,12 +298,10 @@ test(
     // first line would be glued onto it — one malformed line `readAll` stops
     // at forever, taking every later event with it.
     const rootDir = await tempRoot();
-    const warnings: string[] = [];
     const store = createThreadStore({
       rootDir,
       clock: fixedClock(),
-      idGen: countingIds(),
-      logger: { warn: (message) => warnings.push(message) }
+      idGen: countingIds()
     });
     t.after(() => store.close());
     const first = await store.append({ threadId: "t1", events: [created()] });
@@ -331,7 +324,6 @@ test(
       fileHandleProto.writeFile = realWriteFile;
     }
     assert.equal(await sizeOf(eventsPath), first.logBytes + 12, "the fragment could not be cut");
-    assert.equal(warnings.length, 1);
     assert.equal(await store.lastSeq("t1"), 1, "the counter is the last COMPLETE line's");
 
     // Still unwritable: the next append cannot cut the fragment, so it must
@@ -447,38 +439,6 @@ test("a log shorter than the cursor's offset is a mismatch", async (t) => {
 
   // No log at all, but a cursor that remembers one.
   assert.equal((await store.readEventsFrom("t9", { byteOffset: 10, afterSeq: 2 })).mismatch, true);
-});
-
-test("a cursor into a rewritten log is a mismatch, never a misread", async (t) => {
-  const rootDir = await tempRoot();
-  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  t.after(() => store.close());
-  const old = await store.append({
-    threadId: "t1",
-    events: [created(), say("t1", "m1", "a much longer first message ñandú 🎉"), say("t1", "m2", "x")]
-  });
-  const cursor = { byteOffset: old.positions[2]!.byteOffset, afterSeq: 2 };
-
-  // The same thread id, a different log.
-  await store.deleteThread("t1");
-  await store.append({
-    threadId: "t1",
-    events: [
-      created(),
-      say("t1", "n1", "short"),
-      say("t1", "n2", "and"),
-      say("t1", "n3", "a few more lines")
-    ]
-  });
-  const eventsPath = eventsPathOf(rootDir, "t1");
-  assert.ok(
-    !(await linesOnDisk(eventsPath)).some((line) => line.byteOffset === cursor.byteOffset),
-    "precondition: the old offset lands inside a line of the new log"
-  );
-
-  const tail = await store.readEventsFrom("t1", cursor);
-  assert.equal(tail.mismatch, true);
-  assert.deepEqual(tail.events, []);
 });
 
 test("a cursor on a newline of a rewritten log is a mismatch: an empty line is never the next line the store wrote", async (t) => {

@@ -82,13 +82,3 @@ export function planClaudeSkillDispatch(
     skillName: last.name
   };
 }
-
-/**
- * §4.6.9: a turn whose text already opens with a slash command is never
- * prefixed, indented or wrapped — prefixing it turns the command into prose
- * and the CLI never runs it. Orquester ships no prompt-injected effort level,
- * so this is a rule the send path asserts rather than a workaround it applies.
- */
-export function startsWithSlashCommand(text: string): boolean {
-  return /^\/[^\s/]+(?:\s|$)/u.test(text);
-}

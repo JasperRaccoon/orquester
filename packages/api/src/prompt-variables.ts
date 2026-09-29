@@ -17,17 +17,17 @@ import type { GitStatusResponse, GitWorkingDiffResponse } from "./index.ts";
 import { promptVariablesUsed, renderPromptTemplate, type PromptVariableName } from "./saved-prompts.ts";
 
 /** `GIT_WORKING_DIFF_DEFAULT_MAX_BYTES` (index.ts) — restated so this module does not import the root at load. */
-export const PROMPT_DIFF_MAX_BYTES = 64 * 1024;
+const PROMPT_DIFF_MAX_BYTES = 64 * 1024;
 
-export const NO_GIT_REPOSITORY = "(no git repository)";
-export const NO_UNCOMMITTED_CHANGES = "(no uncommitted changes)";
-export const DETACHED_HEAD = "(detached HEAD)";
+const NO_GIT_REPOSITORY = "(no git repository)";
+const NO_UNCOMMITTED_CHANGES = "(no uncommitted changes)";
+const DETACHED_HEAD = "(detached HEAD)";
 /** A repo whose status names no branch and is not detached — a daemon edge case. */
-export const NO_BRANCH = "(no branch)";
+const NO_BRANCH = "(no branch)";
 /** `{changedFiles}` lists at most this many files, then says how many more. */
-export const CHANGED_FILES_MAX_LINES = 500;
+const CHANGED_FILES_MAX_LINES = 500;
 /** What an aborted resolve answers; the caller that aborted it does not show it. */
-export const RESOLVE_CANCELLED = "Cancelled.";
+const RESOLVE_CANCELLED = "Cancelled.";
 
 /** Where the values come from. */
 export interface PromptVariableSource {
@@ -195,14 +195,14 @@ export function projectNamesFromPath(projectPath: string): { project: string; wo
 }
 
 /** `{branch}`: the branch, "(detached HEAD)", or "(no git repository)". `null` = no project to read. */
-export function branchText(status: GitStatusResponse | null): string {
+function branchText(status: GitStatusResponse | null): string {
   if (status === null || !status.isRepo) return NO_GIT_REPOSITORY;
   if (status.detached) return DETACHED_HEAD;
   return typeof status.branch === "string" && status.branch.length > 0 ? status.branch : NO_BRANCH;
 }
 
 /** `{changedFiles}`: `"<status> <path>"` per file (`"<status> <old> -> <new>"` for a rename or copy). */
-export function changedFilesText(status: GitStatusResponse | null): string {
+function changedFilesText(status: GitStatusResponse | null): string {
   if (status === null || !status.isRepo) return NO_GIT_REPOSITORY;
   const files = Array.isArray(status.files) ? status.files : [];
   if (files.length === 0) return NO_UNCOMMITTED_CHANGES;
@@ -219,7 +219,7 @@ export function changedFilesText(status: GitStatusResponse | null): string {
  * `{diff}`: the patch; then, when the daemon cut it, a line saying so; then the untracked files,
  * which a patch against HEAD cannot show.
  */
-export function diffText(diff: GitWorkingDiffResponse | null): string {
+function diffText(diff: GitWorkingDiffResponse | null): string {
   if (diff === null || !diff.isRepo) return NO_GIT_REPOSITORY;
   const patch = typeof diff.diff === "string" ? diff.diff.replace(/\n+$/, "") : "";
   const untracked = Array.isArray(diff.untracked)
@@ -258,14 +258,14 @@ function zonedFields(now: Date, timeZone: string): { year: string; month: string
 }
 
 /** `{date}`: `YYYY-MM-DD` in `timeZone`, else in the runtime's local zone. */
-export function formatPromptDate(now: Date, timeZone?: string): string {
+function formatPromptDate(now: Date, timeZone?: string): string {
   const zoned = timeZone ? zonedFields(now, timeZone) : null;
   if (zoned) return `${zoned.year}-${zoned.month}-${zoned.day}`;
   return `${now.getFullYear()}-${pad2(now.getMonth() + 1)}-${pad2(now.getDate())}`;
 }
 
 /** `{time}`: `HH:MM` (24 h) in `timeZone`, else in the runtime's local zone. */
-export function formatPromptTime(now: Date, timeZone?: string): string {
+function formatPromptTime(now: Date, timeZone?: string): string {
   const zoned = timeZone ? zonedFields(now, timeZone) : null;
   if (zoned) return `${zoned.hour}:${zoned.minute}`;
   return `${pad2(now.getHours())}:${pad2(now.getMinutes())}`;

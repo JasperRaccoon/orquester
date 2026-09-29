@@ -9,9 +9,7 @@ import type { Workflow } from "@orquester/api";
 
 import type { NodeExecutorRegistry, PersistedRun, ProjectContext } from "./contracts.ts";
 import { createHttpExecutor } from "./nodes/http.ts";
-import { EngineStoppedError } from "./run-context.ts";
 import {
-  controlledExecutor,
   edge,
   FakeProjects,
   FakeSandbox,
@@ -53,16 +51,6 @@ function restartable(workflows: Workflow[]) {
 }
 
 describe("engine fixes: nothing runs unrecorded after stop()", () => {
-  test("setWaitingOn rejects once the engine stopped", async () => {
-    const http = controlledExecutor("http");
-    const h = createHarness({ workflows: [workflow("w1", [T(), node("H", "http", { url: "https://x.test" })], [edge("T", "H")])], executors: { http } });
-    await h.engine.run("w1", {});
-    await flush();
-    const ctx = http.calls[0]!.ctx;
-    await h.engine.stop();
-    await assert.rejects(ctx.setWaitingOn({ kind: "http", method: "POST", startedAt: new Date().toISOString() }), EngineStoppedError);
-  });
-
   test("an HTTP POST reached after stop() is not sent; the resumed run sends it exactly once", async (t) => {
     const env = restartable([workflow("w1", [T(), node("H", "http", { method: "POST", url: "https://api.test/x" })], [edge("T", "H")])]);
     const gate = deferred();

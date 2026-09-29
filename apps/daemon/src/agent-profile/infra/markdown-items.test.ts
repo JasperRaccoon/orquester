@@ -4,8 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { ProfileBackups } from "./backups.ts";
-import { parseMarkdownDocument } from "./frontmatter.ts";
-import { SKILL_FILES_MAX, readSkillFiles, scanCommands, scanSkills, writeCommand, writeSkill } from "./markdown-items.ts";
+import { readSkillFiles, scanCommands, scanSkills, writeSkill } from "./markdown-items.ts";
 
 async function scratch(t: test.TestContext): Promise<{ root: string; backups: ProfileBackups }> {
   const root = await realpath(await mkdtemp(join(tmpdir(), "orquester-profile-md-")));
@@ -110,47 +109,6 @@ test("readSkillFiles lists the other files, skipping node_modules and .git, neve
 
   assert.deepEqual(await readSkillFiles(skill), ["linked-dir", "refs/SKILL.md", "scripts/run.sh"]);
 
-  const many = join(root, "many");
-  await mkdir(many);
-  await Promise.all(Array.from({ length: SKILL_FILES_MAX + 20 }, (_, i) => writeFile(join(many, `f${i}`), "")));
-  assert.equal((await readSkillFiles(many)).length, SKILL_FILES_MAX);
-});
-
-test("writeSkill creates SKILL.md with the name first, then merges edits into what is on disk", async (t) => {
-  const { root, backups } = await scratch(t);
-  const skills = join(root, "skills");
-  const opts = { backups, agent: "opencode" };
-  const created = await writeSkill(skills, { name: "review", frontmatter: { description: "Review" }, body: "Do it.\n" }, opts);
-  assert.equal(created.path, join(skills, "review", "SKILL.md"));
-  assert.equal(created.backup, null);
-  assert.equal(await readFile(created.path, "utf8"), "---\nname: review\ndescription: Review\n---\nDo it.\n");
-
-  // A key only on disk survives, null removes, and the name always matches the directory.
-  await writeFile(created.path, "---\nname: review\ndescription: Review\nlicense: MIT\ncustom: 1\n---\nDo it.\n");
-  const edited = await writeSkill(
-    skills,
-    { name: "review", frontmatter: { description: "Better", license: null, name: "other" }, body: "New body\n" },
-    opts
-  );
-  assert.ok(edited.backup !== null);
-  assert.deepEqual(parseMarkdownDocument(await readFile(edited.path, "utf8")), {
-    frontmatter: { name: "review", description: "Better", custom: 1 },
-    body: "New body\n",
-    hadFrontmatter: true
-  });
-
-  const replaced = await writeSkill(
-    skills,
-    { name: "review", frontmatter: { description: "Fresh" }, body: "" },
-    { ...opts, mergeExisting: false }
-  );
-  assert.deepEqual(parseMarkdownDocument(await readFile(replaced.path, "utf8")).frontmatter, {
-    name: "review",
-    description: "Fresh"
-  });
-
-  await assert.rejects(writeSkill(skills, { name: "Bad Name", frontmatter: {}, body: "" }, opts), { code: "INVALID_NAME" });
-  await assert.rejects(writeSkill(skills, { name: "../x", frontmatter: {}, body: "" }, opts), { code: "INVALID_NAME" });
 });
 
 test("writeSkill writes through a symlinked skill directory and refuses to merge into a broken file", async (t) => {
@@ -168,28 +126,4 @@ test("writeSkill writes through a symlinked skill directory and refuses to merge
     code: "CONFIG_UNREADABLE"
   });
   assert.equal(await readFile(join(skills, "broken", "SKILL.md"), "utf8"), "---\nname: [\n---\n", "left untouched");
-});
-
-test("writeCommand writes nested names and merges frontmatter", async (t) => {
-  const { root, backups } = await scratch(t);
-  const commands = join(root, "commands");
-  const opts = { backups, agent: "claude" };
-  const result = await writeCommand(commands, { name: "git/pr", frontmatter: { description: "PR" }, body: "Open a PR\n" }, opts);
-  assert.equal(result.path, join(commands, "git", "pr.md"));
-  assert.equal(await readFile(result.path, "utf8"), "---\ndescription: PR\n---\nOpen a PR\n");
-
-  await writeFile(result.path, "---\ndescription: PR\nmodel: opus\n---\nOpen a PR\n");
-  await writeCommand(commands, { name: "git/pr", frontmatter: { "argument-hint": "[branch]" }, body: "B\n" }, opts);
-  assert.deepEqual(parseMarkdownDocument(await readFile(result.path, "utf8")).frontmatter, {
-    description: "PR",
-    model: "opus",
-    "argument-hint": "[branch]"
-  });
-
-  const bare = await writeCommand(commands, { name: "plain", frontmatter: {}, body: "Just text\n" }, opts);
-  assert.equal(await readFile(bare.path, "utf8"), "Just text\n");
-
-  for (const name of ["a/b/c", "../x", "UPPER", ""]) {
-    await assert.rejects(writeCommand(commands, { name, frontmatter: {}, body: "" }, opts), { code: "INVALID_NAME" }, name);
-  }
 });

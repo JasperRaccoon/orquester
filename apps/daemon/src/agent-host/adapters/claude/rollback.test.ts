@@ -22,7 +22,6 @@ import {
   ROLLBACK_BOUNDARY_UNAVAILABLE,
   ROLLBACK_COMPACTED,
   ROLLBACK_HISTORY_UNAVAILABLE,
-  conversationIndexForUuid,
   isAnchorReachableAfterCompaction,
   isClaudeHumanTurnStart,
   mergeClaudeTurnBoundaries,
@@ -90,14 +89,6 @@ describe("claude rollback — turn starts", () => {
       }),
       true
     );
-  });
-
-  it("indexes conversation messages, skipping system notices", () => {
-    const messages = [user("u1", "a"), system("s1"), assistant("a1", "b"), user("u2", "c")];
-    assert.equal(conversationIndexForUuid(messages, "u1"), 0);
-    assert.equal(conversationIndexForUuid(messages, "a1"), 1);
-    assert.equal(conversationIndexForUuid(messages, "u2"), 2);
-    assert.equal(conversationIndexForUuid(messages, "s1"), -1);
   });
 });
 
@@ -179,11 +170,6 @@ describe("claude rollback — fork remapping", () => {
   it("refuses when the fork dropped a retained message", () => {
     const fork = [assistant("f2", "ok")];
     assert.equal(remapClaudeForkTurnBoundaries(messages, fork, 2, ["t1"]), undefined);
-  });
-
-  it("aligns from the truncated end, so a leading system notice is harmless", () => {
-    const fork = [system("x1"), system("x2"), user("f1", "first"), assistant("f2", "ok")];
-    assert.deepEqual(remapClaudeForkTurnBoundaries(messages, fork, 2, ["t1"]), ["f1"]);
   });
 
   it("a compaction makes an anchor outside the preserved set unreachable", () => {

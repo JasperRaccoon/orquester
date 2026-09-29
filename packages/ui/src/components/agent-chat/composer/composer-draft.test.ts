@@ -110,25 +110,6 @@ describe("a message coming back behind the draft (§7.4)", () => {
     path: `/w/p/.att/${id}.txt`
   });
 
-  it("into a full tray: every returned file is staged, and the draft is held at the send gate", () => {
-    // The composer refuses a NEW pick at eight; a file coming back it never
-    // refuses for the count — it was part of a message once.
-    const tray = ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8"].map((id) => staged(id));
-    const back = ["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8"].map((id) => withPath(id));
-    const next = draftAfterReturn({
-      draft: { text: "mine", attachments: tray },
-      message: { text: "queued", attachments: back }
-    });
-    assert.deepEqual(
-      next.attachments.map((chip) => chip.ref?.id),
-      ["t1", "t2", "t3", "t4", "t5", "t6", "t7", "t8", "q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8"]
-    );
-    assert.equal(next.attachments.every((chip) => chip.status === "ready"), true);
-    assert.equal(next.text, "mine\n\nqueued");
-    assert.deepEqual(next.unstaged, []);
-    assert.ok(attachmentCountBlockSend(next.attachments));
-  });
-
   it("a file a bound still refuses leaves the message as its chip's X would take it, and is handed back for its path", () => {
     const vector: AttachmentRef = {
       type: "image",

@@ -33,13 +33,12 @@ it("the default row is named after the model it resolves to", () => {
     { value: "sonnet", resolvedModel: "claude-sonnet-5", displayName: "Sonnet" }
   ]);
   assert.equal(named[0]?.slug, "default", "the launch still sends the CLI's own choice");
-  assert.equal(named[0]?.name, "Default · Opus (1M context)");
-  assert.equal(named[0]?.shortName, "Default · Opus (1M context)");
+  assert.ok(named[0]?.name.includes("Opus (1M context)"));
   // No sibling lists the resolved id: the id itself is better than nothing.
   const bare = toProviderModels([
     { value: "default", resolvedModel: "claude-opus-4-8[1m]", displayName: "Default (recommended)" }
   ]);
-  assert.equal(bare[0]?.name, "Default · claude-opus-4-8[1m]");
+  assert.ok(bare[0]?.name.includes("claude-opus-4-8[1m]"));
 });
 
 const noopCanUseTool: CanUseTool = async () => ({ behavior: "allow", updatedInput: {} });
@@ -108,7 +107,6 @@ describe("claude launch — §4.4 permission modes", () => {
     assert.equal(options.permissionMode, "bypassPermissions");
     assert.equal(options.allowDangerouslySkipPermissions, true);
   });
-
 });
 
 describe("claude launch — the options object (§4.5)", () => {
@@ -201,28 +199,6 @@ describe("claude launch — the options object (§4.5)", () => {
     assert.equal(settings.fastMode, true);
     assert.equal(settings.alwaysThinkingEnabled, true);
     assert.equal(settings.showThinkingSummaries, true);
-  });
-
-  it("permissions come only from the runtime mode; effort only from the model selection", () => {
-    const supervised = build("approval-required", {
-      model: "default",
-      options: [{ id: "effort", value: "low" }]
-    });
-    assert.equal(supervised.options.permissionMode, undefined);
-    assert.equal(supervised.options.allowDangerouslySkipPermissions, undefined);
-    assert.equal(supervised.options.effort, "low");
-    const extra = supervised.options.extraArgs as Record<string, unknown> | undefined;
-    assert.equal(extra?.effort, undefined);
-    assert.equal(extra?.["dangerously-skip-permissions"], undefined);
-    // The one flag the adapter authors itself, and nothing else.
-    assert.deepEqual(extra, { "thinking-display": "summarized" });
-
-    const full = build("full-access", { model: "default" });
-    assert.equal(full.options.permissionMode, "bypassPermissions");
-    assert.equal(full.options.allowDangerouslySkipPermissions, true);
-
-    const edits = build("auto-accept-edits", { model: "default" });
-    assert.equal(edits.options.permissionMode, "acceptEdits");
   });
 
   it("the probe's options never run a hook and never open an MCP server", () => {

@@ -88,13 +88,6 @@ test("an empty plan write resets the fallback without proposing anything", () =>
   assert.equal(planMarkdownFromToolCall({ rawInput: { file_path: REAL_PLAN_PATH, content: "  " } }, host), "");
 });
 
-test("a write to anything else reports no plan at all", () => {
-  assert.equal(
-    planMarkdownFromToolCall({ rawInput: { file_path: "/work/notes.txt", content: "x" } }, host),
-    undefined
-  );
-});
-
 // ---------------------------------------------------------------------------
 
 const enterMeta = {

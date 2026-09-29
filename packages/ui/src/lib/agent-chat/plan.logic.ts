@@ -21,9 +21,7 @@ import type { ThreadActivityItem } from "@orquester/api/agent-chat";
 import { buildPlanImplementationPrompt } from "@orquester/api/agent-chat";
 
 import type { ActivePlanState, AgentChatActions } from "./contracts";
-import { PLAN_IMPLEMENTATION_PROMPT_PREFIX, type ProposedPlanEntry } from "./entries.logic";
-
-export { PLAN_IMPLEMENTATION_PROMPT_PREFIX };
+import type { ProposedPlanEntry } from "./entries.logic";
 
 // ---------------------------------------------------------------------------
 // The checklist

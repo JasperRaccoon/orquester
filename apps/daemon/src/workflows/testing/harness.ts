@@ -6,7 +6,6 @@ import type { DaemonApi } from "../../mcp/daemon-api.ts";
 import type { NodeExecutionContext, NodeExecutor, NodeExecutorRegistry, NodeResult, WorkflowNotifier } from "../contracts.ts";
 import { createWorkflowEngine, type WorkflowRuntimeEngine } from "../engine.ts";
 import { createNodeExecutors } from "../nodes/index.ts";
-import type { EngineLimits } from "../run-context.ts";
 import {
   FakeProjects,
   FakeSandbox,
@@ -52,7 +51,6 @@ export function scripted<T extends NodeExecutionContext["node"]["type"]>(
 export interface HarnessOptions {
   workflows?: Workflow[];
   executors?: NodeExecutorRegistry;
-  limits?: Partial<EngineLimits>;
   clock?: ManualClock;
   runStore?: InMemoryRunStore;
   store?: InMemoryWorkflowStore;
@@ -124,8 +122,7 @@ export function createHarness(options: HarnessOptions = {}): Harness {
     summarize,
     clock,
     mintId: options.mintId ?? sequentialIds("run"),
-    logger,
-    ...(options.limits ? { limits: options.limits } : {})
+    logger
   });
   return {
     engine,

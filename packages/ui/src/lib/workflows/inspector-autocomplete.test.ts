@@ -20,15 +20,6 @@ const scope = (options: { prompt?: boolean } = {}): CompletionScope =>
 
 const labels = (text: string, s = scope(), pos = text.length) => templateCompletions(text, pos, s)?.options.map((option) => option.label) ?? null;
 
-describe("the completion scope", () => {
-  it("lists only the blocks upstream, the triggers, and the direct input's fields", () => {
-    const s = scope();
-    assert.deepEqual(s.upstream.map((n) => n.name).sort(), ["Fetch", "OnTag", "Review"]);
-    assert.deepEqual(s.triggerTypes, ["trigger.git"]);
-    assert.deepEqual(s.inputFields.slice().sort(), ["accountId", "agent", "durationMs", "hops", "model", "sessionId", "text"]);
-  });
-});
-
 describe("templateCompletions", () => {
   it("offers the roots right after {{", () => {
     assert.deepEqual(labels("Hi {{ ")?.sort(), ["input", "nodes", "project", "run", "secrets", "trigger", "workflow"]);

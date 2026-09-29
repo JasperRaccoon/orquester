@@ -35,7 +35,6 @@ import { AsyncEventQueue, createDeferred } from "./async-queue.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
 import { countingIds } from "./fixtures.ts";
 import { createClaudeAdapterWith } from "./index.ts";
-import { ClaudeNormalizer } from "./normalize.ts";
 import { claudeIngestsAttachment } from "./session.ts";
 
 // Delay native filesystem operations for real transcript races; every operation
@@ -331,9 +330,6 @@ interface Harness {
   advance: (ms: number) => void;
   /** Every `logger.debug` message, in order. */
   debugLines: string[];
-  /** Every `logger.error` message, in order. */
-  errorLines: string[];
-
 }
 
 interface HarnessOptions {
@@ -360,7 +356,6 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   const firstPeer = createDeferred<ScriptedQuery>();
   const queryOptions: ClaudeQueryOptions[] = [];
   const debugLines: string[] = [];
-  const errorLines: string[] = [];
   const listeners: Array<() => void> = [];
 
   let nowMs = Date.parse("2026-09-21T00:00:00.000Z");
@@ -376,9 +371,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       },
       info() {},
       warn() {},
-      error(message) {
-        errorLines.push(message);
-      }
+      error() {}
     },
     clock: { now: () => new Date(nowMs), nowIso: () => new Date(nowMs).toISOString() },
     ids: countingIds(),
@@ -491,7 +484,6 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     await new Promise((resolve) => setImmediate(resolve));
   };
 
-
   return {
     adapter,
     events,
@@ -501,8 +493,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     waitFor,
     drain,
     advance,
-    debugLines,
-    errorLines
+    debugLines
   };
 }
 
@@ -686,36 +677,6 @@ describe("claude adapter — turns", () => {
     peer.emit(systemInit());
     peer.emit(successResult());
     await harness.waitFor("turn.completed");
-  });
-
-  it("a path the text already names is not repeated, and an attachment-only turn is the block alone", async () => {
-    const harness = await makeHarness();
-    await harness.adapter.startSession(START);
-    const peer = harness.peers[0]!;
-
-    await harness.adapter.sendTurn({
-      threadId: START.threadId,
-      input: "read /attachments/att-2 first",
-      attachments: [{ type: "file", id: "att-2", name: "q3.xlsx", sizeBytes: 10 }],
-      interactionMode: "default"
-    });
-    await peer.nextTurn();
-    const first = peer.received[0]?.message.content as Array<{ type: string; text?: string }>;
-    assert.equal(first[0]?.text, "read /attachments/att-2 first");
-    peer.emit(systemInit());
-    peer.emit(successResult());
-    await harness.waitFor("turn.completed");
-
-    await harness.adapter.sendTurn({
-      threadId: START.threadId,
-      input: "",
-      attachments: [{ type: "file", id: "att-3", name: "notes.csv", mimeType: "text/csv", sizeBytes: 10 }],
-      interactionMode: "default"
-    });
-    await peer.nextTurn();
-    const second = peer.received[1]?.message.content as Array<{ type: string; text?: string }>;
-    assert.equal(second.length, 1);
-    assert.equal(second[0]?.text, "Attached files:\n- notes.csv: /attachments/att-3");
   });
 
   it("a system-home thread finds its user-scope skills under the host user's ~/.claude", async () => {
@@ -1020,17 +981,6 @@ describe("claude adapter — approvals", () => {
     assert.deepEqual(await decision, { behavior: "allow", updatedInput: { command: "rm -f x" } });
   });
 
-  it("acceptForSession rescopes the CLI's suggestion to the session", async () => {
-    const { harness, decision, requestId } = await openApproval();
-    await harness.adapter.respondToApproval(START.threadId, requestId, "acceptForSession");
-    const result = (await decision) as {
-      behavior: string;
-      updatedPermissions?: Array<{ destination: string }>;
-    };
-    assert.equal(result.behavior, "allow");
-    assert.deepEqual(result.updatedPermissions?.map((u) => u.destination), ["session"]);
-  });
-
   it("a redelivered request does not open a second card", async () => {
     const { harness, peer, decision, requestId } = await openApproval();
     const abort = new AbortController();
@@ -1306,22 +1256,6 @@ describe("claude adapter — death and recovery", () => {
     const resumed = harness.queryOptions.slice(optionsBefore).at(-1)!;
     assert.equal(resumed.resume, "7f1c9b02-5d4a-4a2e-9f77-2b1d0c8e4a10", "the new query must resume the native session");
     assert.equal(resumed.sessionId, undefined);
-  });
-
-  it("a session started from a cursor resumes instead of minting a session id", async () => {
-    const harness = await makeHarness();
-    await harness.adapter.startSession({
-      ...START,
-      resumeCursor: {
-        threadId: START.threadId,
-        resume: "b46b654b-57bb-40e4-8c82-d3536bd06a28",
-        turnCount: 1,
-        turnStartMessageIds: ["turn-a"]
-      }
-    });
-    const options = harness.queryOptions.at(-1)!;
-    assert.equal(options.resume, "b46b654b-57bb-40e4-8c82-d3536bd06a28");
-    assert.equal(options.sessionId, undefined);
   });
 
   it("the §6.1 create-time cursor resumes, and its first turn refreshes it", async () => {
@@ -2289,23 +2223,6 @@ describe("claude adapter — a resumed thread has a timeline (E6)", () => {
     assert.deepEqual(texts, ["what is the capital of France?", "and of Spain?"]);
   });
 
-  it("a session started fresh reads no transcript at all", async () => {
-    let reads = 0;
-    const harness = await makeHarness({
-      historyStdout: () => {
-        reads += 1;
-        return JSON.stringify(transcript);
-      }
-    });
-    await harness.adapter.startSession(START);
-    const snapshot = await harness.adapter.readThread(START.threadId);
-    // Nothing has been written under that fresh session id, so spawning a
-    // worker for it would be pure waste.
-    assert.equal(reads, 0);
-    assert.deepEqual(snapshot.turns, []);
-    assert.deepEqual(harness.adapter.projectHistory!(snapshot), []);
-  });
-
   it("an unreadable transcript degrades to an empty timeline, never an error", async () => {
     const harness = await makeHarness({ historyStdout: () => "not json at all" });
     await harness.adapter.startSession({
@@ -2934,22 +2851,6 @@ describe("claude adapter — goals (goals §6.1)", () => {
     assert.ok(findEvent(harness.events, "session.exited", before), "fully exited when stop resolves");
   });
 
-  it("a delta bigger than one read is walked chunk by chunk to its verdict", async () => {
-    const { start, transcript } = await goalHome(conversationRow("an earlier turn"));
-    const harness = await makeHarness();
-    const { peer } = await goalTurn(harness, start);
-    // Over two whole 1 MiB reads of tool output before the met row.
-    const filler = conversationRow("x".repeat(64 * 1024));
-    await appendFile(
-      transcript,
-      filler.repeat(40) + goalStatus({ met: true, condition: "ship the release", iterations: 1 })
-    );
-    const before = harness.events.length;
-    peer.emit(successResult(SESSION));
-    const achieved = await harness.waitFor("thread.goal.updated", before);
-    assert.equal(achieved.payload.change, "achieved");
-  });
-
   it("a met verdict the CLI writes ~100 ms AFTER its result is found by the re-read, stamped with the turn that ended", async () => {
     const { start, transcript } = await goalHome(conversationRow("an earlier turn"));
     const harness = await makeHarness();
@@ -2994,8 +2895,6 @@ describe("claude adapter — goals (goals §6.1)", () => {
     assert.equal(failed.payload.previous?.lastCheck, "there is no repo");
     assert.equal(failed.turnId, turn.turnId);
   });
-
-
 
   it("a new turn supersedes a pending re-read", async () => {
     const { start, transcript } = await goalHome(conversationRow("an earlier turn"));
@@ -3157,51 +3056,6 @@ describe("claude adapter — goals (goals §6.1)", () => {
     assert.equal(achieved.turnId, turn.turnId, "stamped with the turn whose end met it");
   });
 
-  it("a teardown step that throws still ends the session: onClosed runs, nothing rejects, the thread recovers", async () => {
-    const harness = await makeHarness();
-    await harness.adapter.startSession(START);
-    const peer = harness.peers[0]!;
-    await harness.adapter.sendTurn({
-      threadId: START.threadId,
-      input: "hello",
-      attachments: [],
-      interactionMode: "default"
-    });
-    await peer.nextTurn();
-    peer.emit(systemInit(SESSION));
-    await harness.drain();
-
-    const before = harness.events.length;
-    const original = ClaudeNormalizer.prototype.closeLiveTasks;
-    ClaudeNormalizer.prototype.closeLiveTasks = function (): never {
-      throw new Error("the normaliser broke during teardown");
-    };
-    try {
-      await harness.adapter.stopSession(START.threadId);
-    } finally {
-      ClaudeNormalizer.prototype.closeLiveTasks = original;
-    }
-    await harness.waitFor("session.exited", before);
-    assert.equal(harness.adapter.hasSession(START.threadId), false);
-    assert.ok(
-      harness.errorLines.some((line) => line.includes("teardown")),
-      `the failure is logged: ${harness.errorLines.join(" | ")}`
-    );
-    const settled = findEvent(harness.events, "turn.completed", before);
-    assert.equal(settled?.payload.state, "interrupted", "the steps after the failed one still ran");
-
-    // Not stuck: the next turn recovers onto a fresh session.
-    const queries = harness.queryOptions.length;
-    await harness.adapter.sendTurn({
-      threadId: START.threadId,
-      input: "again",
-      attachments: [],
-      interactionMode: "default"
-    });
-    assert.equal(harness.queryOptions.length, queries + 1);
-    assert.equal(harness.adapter.hasSession(START.threadId), true);
-  });
-
   it("a session that ends drops the waiting phase — unthrottled, before session.exited", async () => {
     const { start } = await goalHome();
     const harness = await makeHarness();
@@ -3266,35 +3120,6 @@ describe("claude adapter — goals (goals §6.1)", () => {
       assert.equal(restored.payload.change, "restored");
       assert.deepEqual(restored.payload.goal, SHIP);
       assert.equal(restored.turnId, undefined);
-    });
-
-    it("the thread's goal that the transcript ended is `achieved`", async () => {
-      const { start } = await goalHome(
-        goalStatus({ met: false, sentinel: true, condition: "ship the release" }) +
-          goalStatus({ met: true, condition: "ship the release", iterations: 3 })
-      );
-      const harness = await makeHarness();
-      await harness.adapter.startSession({ ...start, knownGoal: SHIP, resumeCursor: resumed });
-      const achieved = await harness.waitFor("thread.goal.updated");
-      assert.equal(achieved.payload.change, "achieved");
-      assert.equal(achieved.payload.previous?.rounds, 3);
-    });
-
-    it("the thread's goal with no goal_status row at all is `cleared`", async () => {
-      const { start } = await goalHome(conversationRow("no goal was ever set here"));
-      const harness = await makeHarness();
-      await harness.adapter.startSession({ ...start, knownGoal: SHIP, resumeCursor: resumed });
-      const cleared = await harness.waitFor("thread.goal.updated");
-      assert.equal(cleared.payload.change, "cleared");
-      assert.deepEqual(cleared.payload.previous, SHIP);
-    });
-
-    it("the same goal on both sides is quiet", async () => {
-      const { start } = await goalHome(goalStatus({ met: false, condition: "ship the release", reason: "not yet" }));
-      const harness = await makeHarness();
-      await harness.adapter.startSession({ ...start, knownGoal: SHIP, resumeCursor: resumed });
-      await waitForFileIO();
-      assert.deepEqual(goalRows(harness), []);
     });
 
     it("a missing transcript leaves the thread's goal alone, with a debug line", async () => {

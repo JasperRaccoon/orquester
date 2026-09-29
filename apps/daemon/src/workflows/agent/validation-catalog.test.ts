@@ -1,27 +1,29 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AgentView } from "../../chat-client/index.ts";
 import { FakeChatHost } from "./testing/fake-chat-host.ts";
 import { FakeClock } from "./testing/fake-clock.ts";
-import { createValidationCatalog, toValidationCatalog } from "./validation-catalog.ts";
+import { createValidationCatalog } from "./validation-catalog.ts";
 
-function view(id: string, over: Partial<AgentView> = {}): AgentView {
-  return { id, enabled: true, status: "ready", models: [{ slug: "m1", name: "M1", isDefault: true, options: [] }], ...over } as AgentView;
-}
-
-test("a provider's models count only once it has been probed", () => {
-  const catalog = toValidationCatalog([
-    view("claude"),
-    view("codex", { status: "unknown" }),
-    view("opencode", { models: [] }),
-    view("grok", { enabled: false })
-  ]);
-  assert.deepEqual(catalog.agents, [
-    { id: "claude", enabled: true, models: ["m1"] },
-    { id: "codex", enabled: true, models: null },
-    { id: "opencode", enabled: true, models: null },
-    { id: "grok", enabled: false, models: ["m1"] }
-  ]);
+test("a provider's models count only once it has been probed", async () => {
+  const host = new FakeChatHost({ clock: new FakeClock() });
+  const request = host.request.bind(host);
+  host.request = async (method, path, opts) => {
+    const response = await request(method, path, opts);
+    if (path === "/api/agent/providers") {
+      const body = response.body as { providers: { id: string; status: string; models: unknown[] }[] };
+      for (const provider of body.providers) {
+        if (provider.id === "codex") provider.status = "unknown";
+        if (provider.id === "opencode") provider.models = [];
+      }
+    }
+    return response;
+  };
+  const catalog = createValidationCatalog({ api: () => host });
+  await catalog.ready();
+  const models = (id: string) => catalog.current()?.agents.find((agent) => agent.id === id)?.models;
+  assert.deepEqual(models("claude"), ["opus", "sonnet"]);
+  assert.equal(models("codex"), null);
+  assert.equal(models("opencode"), null);
 });
 
 test("nothing is known before the client is attached; ready() then reads the host's catalogue", async () => {

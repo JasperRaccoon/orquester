@@ -3,9 +3,6 @@
  * Upload scan into a checklist of what they found, and Import takes the ticked
  * ones — asking Replace or Keep both first when a ticked one already exists;
  * Copy from agent takes one of another agent's own items of the same kind.
- *
- * Each takes an optional `initial` state so a render check can draw every
- * step without a daemon.
  */
 
 import React, { useEffect, useId, useRef, useState } from "react";
@@ -51,9 +48,9 @@ interface ScanState {
   picks: string[];
 }
 
-function useImportStep(initial?: ScanState) {
+function useImportStep() {
   const { agent, api } = useEditorEnv();
-  const [state, setState] = useState<ScanState | null>(initial ?? null);
+  const [state, setState] = useState<ScanState | null>(null);
   const [asking, setAsking] = useState(false);
   const submit = useProfileSubmit();
   const collisions = state ? pickedCollisions(state.scan.candidates, state.picks) : [];
@@ -105,7 +102,7 @@ function useImportStep(initial?: ScanState) {
   };
 }
 
-export const CollisionPrompt: React.FC<{
+const CollisionPrompt: React.FC<{
   names: string[];
   onResolve: (policy: "replace" | "keep-both") => void;
   onCancel: () => void;
@@ -126,7 +123,7 @@ export const CollisionPrompt: React.FC<{
   </Banner>
 );
 
-export const CandidateChecklist: React.FC<{
+const CandidateChecklist: React.FC<{
   candidates: readonly ProfileImportCandidate[];
   picks: readonly string[];
   notes: readonly string[];
@@ -221,16 +218,15 @@ export const GitSource: React.FC<{
   toolbar: React.ReactNode;
   /** Unsaved work under another source (the Write draft). */
   carriedDirty?: boolean;
-  initial?: { url?: string; scan?: ProfileImportScanResponse; scanning?: boolean; scanError?: string };
-}> = ({ kind, toolbar, carriedDirty = false, initial }) => {
+}> = ({ kind, toolbar, carriedDirty = false }) => {
   const { agent, api } = useEditorEnv();
   const ids = useId();
   const touch = useTouch();
-  const [url, setUrl] = useState(initial?.url ?? "");
-  const [scanning, setScanning] = useState(initial?.scanning ?? false);
-  const [scanError, setScanError] = useState<string | null>(initial?.scanError ?? null);
+  const [url, setUrl] = useState("");
+  const [scanning, setScanning] = useState(false);
+  const [scanError, setScanError] = useState<string | null>(null);
   const [showErrors, setShowErrors] = useState(false);
-  const step = useImportStep(initial?.scan ? { scan: initial.scan, picks: defaultPicks(initial.scan.candidates) } : undefined);
+  const step = useImportStep();
   useReportDirty(carriedDirty || url.trim() !== "" || step.state !== null);
   const urlProblem = gitUrlError(url);
   const urlMessage = showErrors ? urlProblem : undefined;
@@ -328,16 +324,15 @@ export const UploadSource: React.FC<{
   kind: MarkdownKind;
   toolbar: React.ReactNode;
   carriedDirty?: boolean;
-  initial?: { fileName?: string; progress?: number; scan?: ProfileImportScanResponse; uploadError?: string };
-}> = ({ kind, toolbar, carriedDirty = false, initial }) => {
+}> = ({ kind, toolbar, carriedDirty = false }) => {
   const { agent, api, variant } = useEditorEnv();
   const ids = useId();
   const inputRef = useRef<HTMLInputElement | null>(null);
-  const [fileName, setFileName] = useState<string | null>(initial?.fileName ?? null);
-  const [progress, setProgress] = useState<number | null>(initial?.progress ?? null);
-  const [uploadError, setUploadError] = useState<string | null>(initial?.uploadError ?? null);
+  const [fileName, setFileName] = useState<string | null>(null);
+  const [progress, setProgress] = useState<number | null>(null);
+  const [uploadError, setUploadError] = useState<string | null>(null);
   const [dragging, setDragging] = useState(false);
-  const step = useImportStep(initial?.scan ? { scan: initial.scan, picks: defaultPicks(initial.scan.candidates) } : undefined);
+  const step = useImportStep();
   const uploading = progress !== null;
   useReportDirty(carriedDirty || uploading || step.state !== null);
 
@@ -493,8 +488,7 @@ export const CopySource: React.FC<{
   kind: MarkdownKind;
   toolbar: React.ReactNode;
   carriedDirty?: boolean;
-  initial?: { from?: AgentProfileAgentId; load?: SnapshotLoad; selected?: string };
-}> = ({ kind, toolbar, carriedDirty = false, initial }) => {
+}> = ({ kind, toolbar, carriedDirty = false }) => {
   const { agent, api } = useEditorEnv();
   const ids = useId();
   const choices = copySourceAgents(agent);
@@ -503,19 +497,14 @@ export const CopySource: React.FC<{
     const known = agentProfileStore.getState().overview.agents;
     return (other: AgentProfileAgentId): boolean | null => known?.find((entry) => entry.agent === other)?.installed ?? null;
   });
-  const [from, setFrom] = useState<AgentProfileAgentId>(() => initial?.from ?? defaultCopySource(agent, installedOf));
-  const [load, setLoad] = useState<SnapshotLoad>(initial?.load ?? { status: "loading" });
-  const [selected, setSelected] = useState<string | null>(initial?.selected ?? null);
+  const [from, setFrom] = useState<AgentProfileAgentId>(() => defaultCopySource(agent, installedOf));
+  const [load, setLoad] = useState<SnapshotLoad>({ status: "loading" });
+  const [selected, setSelected] = useState<string | null>(null);
   const [attempt, setAttempt] = useState(0);
   const submit = useProfileSubmit();
-  const preset = useRef(initial?.load !== undefined);
   useReportDirty(carriedDirty);
 
   useEffect(() => {
-    if (preset.current) {
-      preset.current = false;
-      return;
-    }
     const controller = new AbortController();
     setLoad({ status: "loading" });
     api.getAgentProfile(from, controller.signal).then(
@@ -598,7 +587,7 @@ export const CopySource: React.FC<{
   );
 };
 
-export const CopyItemList: React.FC<{
+const CopyItemList: React.FC<{
   name: string;
   legend: string;
   items: { id: string; name: string; description?: string }[];

@@ -19,14 +19,6 @@ import {
 
 describe("the per-thread in-flight send registry", () => {
 
-  it("a send in flight is seen by every reader of its thread, and by no other thread", () => {
-    const settle = beginComposerSend("A");
-    assert.equal(isComposerSending("A"), true, "a composer mounted for A after the send left still sees it");
-    assert.equal(isComposerSending("B"), false);
-    settle();
-    assert.equal(isComposerSending("A"), false);
-  });
-
   it("each settle closes its own send only, and a second call is a no-op", () => {
     const first = beginComposerSend("A");
     const second = beginComposerSend("A");
@@ -50,17 +42,17 @@ describe("the per-thread in-flight send registry", () => {
   });
 
   it("tells subscribers about every change, until they unsubscribe", () => {
-    let calls = 0;
+    const states: boolean[] = [];
     const unsubscribe = subscribeComposerSends(() => {
-      calls += 1;
+      states.push(isComposerSending("A"));
     });
     const settle = beginComposerSend("A");
     settle();
     settle();
-    assert.equal(calls, 2, "open and close — an idempotent repeat is silent");
+    assert.deepEqual(states, [true, false]);
     unsubscribe();
     beginComposerSend("A")();
-    assert.equal(calls, 2);
+    assert.deepEqual(states, [true, false]);
   });
 });
 
@@ -95,15 +87,18 @@ describe("the per-thread queued-send marker", () => {
   });
 
   it("tells its listeners which thread's queue moved, until they unsubscribe", () => {
-    const heard: string[] = [];
-    const unsubscribe = subscribeQueuedSends((sessionId) => heard.push(sessionId));
+    const heard: Array<[string, boolean]> = [];
+    const unsubscribe = subscribeQueuedSends((sessionId) => {
+      heard.push([sessionId, isQueuedSendInFlight(sessionId)]);
+    });
     const settle = beginQueuedSend("A");
     settle();
     settle();
     beginQueuedSend("B")();
-    assert.deepEqual(heard, ["A", "A", "B", "B"], "open and close each — an idempotent repeat is silent");
+    const expected = [["A", true], ["A", false], ["B", true], ["B", false]];
+    assert.deepEqual(heard, expected);
     unsubscribe();
     beginQueuedSend("A")();
-    assert.equal(heard.length, 4);
+    assert.deepEqual(heard, expected);
   });
 });

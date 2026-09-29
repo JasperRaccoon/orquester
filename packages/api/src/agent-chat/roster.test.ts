@@ -12,7 +12,6 @@ import {
   deriveAgentPanelModel,
   foldSubagentActivities
 } from "./roster.ts";
-import { ROSTER_LIMIT } from "./thread.ts";
 import { activity, agentTask, resetActivityIds } from "./test-helpers.ts";
 import type { RuntimeSubagent } from "./thread.ts";
 
@@ -197,7 +196,7 @@ test("usage max-merges field-wise and a partial terminal frame keeps the breakdo
       agentTask("t1", { usage: { totalTokens: 100, inputTokens: 60, outputTokens: 40 } })
     ),
     // A late duplicate must not shrink or double-count.
-    activity("task.progress", agentTask("t1", { usage: { totalTokens: 100 } })),
+    activity("task.progress", agentTask("t1", { usage: { totalTokens: 90, inputTokens: 10, outputTokens: 5 } })),
     activity("task.completed", agentTask("t1", { status: "completed", usage: { totalTokens: 150 } }))
   ]);
   const agent = byId(agents, "t1");
@@ -520,31 +519,17 @@ test("counts split waiting and idle out of running and settled", () => {
   );
 });
 
-test("the roster caps at ROSTER_LIMIT, evicting live rows last", () => {
-  resetActivityIds();
-  const rows = [];
-  for (let i = 0; i < ROSTER_LIMIT + 20; i += 1) {
-    rows.push(activity("task.started", agentTask(`t${i}`)));
-    // Settle everything but the last ten so the ranking has something to do.
-    if (i < ROSTER_LIMIT + 10) {
-      rows.push(activity("task.completed", agentTask(`t${i}`, { status: "completed" })));
-    }
-  }
-  const agents = foldSubagentActivities(rows);
-  assert.equal(agents.length, ROSTER_LIMIT);
-  const live = agents.filter((agent) => agent.status === "running");
-  assert.equal(live.length, 10, "every live row survives the cap");
-});
-
 test("the cap evicts by rank but returns survivors in first-seen order", () => {
   // R8 m8: the ranked array was returned as the roster, so crossing 100 rows
   // reordered every surviving row (settled ones came back newest-first) —
   // against §7.6's "without reshuffling rows that stay visible".
   resetActivityIds();
   const rows = [];
-  for (let i = 0; i < ROSTER_LIMIT + 20; i += 1) {
+  for (let i = 0; i < 120; i += 1) {
     rows.push(activity("task.started", agentTask(`t${String(i).padStart(3, "0")}`)));
-    if (i < ROSTER_LIMIT + 10) {
+    if (i === 1) {
+      rows.push(activity("task.updated", agentTask("t001", { status: "idle" })));
+    } else if (i > 1) {
       rows.push(
         activity("task.completed", agentTask(`t${String(i).padStart(3, "0")}`, {
           status: "completed"
@@ -553,11 +538,11 @@ test("the cap evicts by rank but returns survivors in first-seen order", () => {
     }
   }
   const agents = foldSubagentActivities(rows);
-  assert.equal(agents.length, ROSTER_LIMIT);
+  assert.equal(agents.length, 100);
 
   assert.deepEqual(agents.map((agent) => agent.id),
-    Array.from({ length: 100 }, (_, index) => `t${String(index + 20).padStart(3, "0")}`),
-    "survivors keep their original insertion order");
+    ["t000", "t001", ...Array.from({ length: 98 }, (_, index) => `t${String(index + 22).padStart(3, "0")}`)],
+    "older running/idle tasks survive ahead of newer settled tasks, in original order");
 });
 
 test("a resume reopens even when the NEW run's in-place progress row precedes the OLD run's terminal row", () => {

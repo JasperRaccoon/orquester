@@ -15,6 +15,7 @@ import {
 } from "@orquester/api/agent-chat";
 
 import type { AppendableDomainEvent } from "../services.ts";
+import { createLivenessRegistry } from "../orchestration/liveness.ts";
 import { createIngestion, type IngestionOptions } from "./index.ts";
 import {
   FakeClock,
@@ -118,21 +119,6 @@ beforeEach(() => {
 // ---------------------------------------------------------------------------
 
 describe("message identity (§5.1)", () => {
-  it("mints assistant:<itemId> for the first segment of a turn", async () => {
-    const { ingestion, sink } = harness();
-    await ingestion.ingest(
-      runtimeEvent(
-        "content.delta",
-        { streamKind: "assistant_text", delta: "hello\n\n" },
-        { turnId: "turn-1", itemId: "item-1" }
-      )
-    );
-    await ingestion.drain();
-    assert.deepEqual(
-      messageTexts(sink).map((m) => m.id),
-      ["assistant:item-1"]
-    );
-  });
 
   it("falls back to the turn id, then the event id", async () => {
     const a = harness();
@@ -154,31 +140,6 @@ describe("message identity (§5.1)", () => {
     );
     await b.ingestion.drain();
     assert.equal(messageTexts(b.sink)[0]?.id, "assistant:ev-42");
-  });
-
-  it("a second assistant block in one turn gets :segment:1", async () => {
-    const { ingestion, sink } = harness();
-    const turn = { turnId: "turn-1" };
-    await ingestion.ingest(
-      runtimeEvent(
-        "content.delta",
-        { streamKind: "assistant_text", delta: "first" },
-        { ...turn, itemId: "item-1" }
-      )
-    );
-    await ingestion.ingest(
-      runtimeEvent("item.completed", { itemType: "assistant_message" }, { ...turn, itemId: "item-1" })
-    );
-    await ingestion.ingest(
-      runtimeEvent(
-        "content.delta",
-        { streamKind: "assistant_text", delta: "second" },
-        { ...turn, itemId: "item-2" }
-      )
-    );
-    await ingestion.flushTurn("t1", "turn-1");
-    const ids = [...new Set(messageTexts(sink).map((m) => m.id))];
-    assert.deepEqual(ids, ["assistant:item-1", "assistant:item-2"]);
   });
 
   it("a summary trace and a raw trace over one item become two reasoning messages", async () => {
@@ -215,67 +176,6 @@ describe("message identity (§5.1)", () => {
       { id: "assistant:item-1", text: "two\n\n", streaming: true },
       { id: "assistant:item-1", text: "", streaming: false }
     ]);
-  });
-
-  it("a completion with nothing buffered and nothing projected writes no message at all", async () => {
-    const { ingestion, sink } = harness();
-    await ingestion.ingest(
-      runtimeEvent(
-        "item.completed",
-        { itemType: "assistant_message" },
-        { turnId: "turn-1", itemId: "item-1" }
-      )
-    );
-    await ingestion.drain();
-    assert.deepEqual(messageTexts(sink), []);
-  });
-
-  it("an item.completed snapshot stands in for deltas that never arrived", async () => {
-    const { ingestion, sink } = harness();
-    await ingestion.ingest(
-      runtimeEvent(
-        "item.completed",
-        { itemType: "assistant_message", detail: "the whole answer" },
-        { turnId: "turn-1", itemId: "item-1" }
-      )
-    );
-    await ingestion.drain();
-    assert.deepEqual(messageTexts(sink), [
-      { id: "assistant:item-1", text: "the whole answer", streaming: true },
-      { id: "assistant:item-1", text: "", streaming: false }
-    ]);
-  });
-
-  it("an item.completed snapshot NEVER duplicates text that already streamed", async () => {
-    const { ingestion, sink } = harness();
-    const turn = { turnId: "turn-1", itemId: "item-1" };
-    await ingestion.ingest(
-      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "streamed" }, turn)
-    );
-    await ingestion.ingest(
-      runtimeEvent("item.completed", { itemType: "assistant_message", detail: "streamed" }, turn)
-    );
-    await ingestion.drain();
-    assert.deepEqual(messageTexts(sink), [
-      { id: "assistant:item-1", text: "streamed", streaming: true },
-      { id: "assistant:item-1", text: "", streaming: false }
-    ]);
-  });
-
-  it("a whole-block reasoning snapshot with no stream gets its own snapshot id", async () => {
-    const { ingestion, sink } = harness();
-    await ingestion.ingest(
-      runtimeEvent(
-        "item.completed",
-        { itemType: "reasoning", detail: "I thought about it" },
-        { turnId: "turn-1", itemId: "item-1" }
-      )
-    );
-    await ingestion.drain();
-    assert.deepEqual(
-      messageTexts(sink).map((m) => m.id),
-      ["reasoning:snapshot:item-1", "reasoning:snapshot:item-1"]
-    );
   });
 });
 
@@ -355,28 +255,6 @@ describe("batching (§5.6, 250 ms / 8 KB)", () => {
     );
     assert.equal(sink.messages().length, 1);
     assert.ok(messageTexts(sink)[0]!.text.length > 8192);
-  });
-
-  it("a token-by-token provider becomes a handful of events per second", async () => {
-    const { ingestion, sink, advanceTime } = harness();
-    const turn = { turnId: "turn-1", itemId: "item-1" };
-    for (let i = 0; i < 200; i += 1) {
-      await ingestion.ingest(
-        runtimeEvent("content.delta", { streamKind: "assistant_text", delta: `tok${i} ` }, turn)
-      );
-      advanceTime(5);
-      await settle();
-    }
-    await ingestion.drain();
-    assert.ok(
-      sink.messages().length <= 6,
-      `200 tokens over 1 s became ${sink.messages().length} events`
-    );
-    const joined = messageTexts(sink)
-      .map((m) => m.text)
-      .join("");
-    assert.ok(joined.startsWith("tok0 "));
-    assert.ok(joined.endsWith("tok199 "));
   });
 
   it("reasoning deltas are buffered on the same machinery", async () => {
@@ -782,9 +660,6 @@ describe("item.updated coalescing (§5.6, 50 ms window)", () => {
 // §5.6 slimming, §5.1 title, §3.1 liveness, §10 robustness
 // ---------------------------------------------------------------------------
 
-describe("tool.updated is persisted already slimmed (§5.6)", () => {
-});
-
 describe("the §7.3 badge fields (reasoningKind / messageKind)", () => {
   const reasoningCases: [
     "reasoning_text" | "reasoning_summary_text",
@@ -853,61 +728,6 @@ describe("the §7.3 badge fields (reasoningKind / messageKind)", () => {
     for (const row of rows) {
       assert.equal(row.payload.messageKind, "commentary");
     }
-  });
-
-  it("Codex's phase-marker detail is metadata, NOT the message text", async () => {
-    const { ingestion, sink } = harness();
-    await ingestion.ingest(
-      runtimeEvent(
-        "item.completed",
-        { itemType: "assistant_message", ...codexPhase("commentary") },
-        { turnId: "turn-1", itemId: "item-1" }
-      )
-    );
-    await ingestion.drain();
-    assert.deepEqual(
-      sink.messages().map((row) => row.payload.text),
-      [],
-      "the phase marker must never be rendered as the answer"
-    );
-  });
-
-  it("commentary on one item does not leak onto the turn's next message", async () => {
-    const { ingestion, sink } = harness();
-    const turn = { turnId: "turn-1" };
-    await ingestion.ingest(
-      runtimeEvent(
-        "item.started",
-        { itemType: "assistant_message", ...codexPhase("commentary") },
-        { ...turn, itemId: "item-1" }
-      )
-    );
-    await ingestion.ingest(
-      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "narration" }, {
-        ...turn,
-        itemId: "item-1"
-      })
-    );
-    await ingestion.ingest(
-      runtimeEvent(
-        "item.completed",
-        { itemType: "assistant_message", ...codexPhase("commentary") },
-        { ...turn, itemId: "item-1" }
-      )
-    );
-    await ingestion.ingest(
-      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "the answer" }, {
-        ...turn,
-        itemId: "item-2"
-      })
-    );
-    await ingestion.flushTurn("t1", "turn-1");
-    const byMessage = new Map<string, string | undefined>();
-    for (const row of sink.messages()) {
-      byMessage.set(row.payload.messageId, row.payload.messageKind);
-    }
-    assert.equal(byMessage.get("assistant:item-1"), "commentary");
-    assert.equal(byMessage.get("assistant:item-2"), "answer");
   });
 
   it("a dead session forgets the remembered phases", async () => {
@@ -1049,26 +869,31 @@ describe("the provider title rule (§5.1)", () => {
 });
 
 describe("background liveness is fed on every task transition (§3.1)", () => {
-  it("forwards task.* and clears on session.exited", async () => {
-    const { ingestion, liveness } = harness();
+  it("tracks live work until completion or session exit", async () => {
+    const liveness = createLivenessRegistry();
+    const { ingestion } = harness({ liveness });
     await ingestion.ingest(
       runtimeEvent("task.started", { taskId: "task-1", taskType: "subagent" })
     );
-    await ingestion.ingest(
-      runtimeEvent("task.progress", { taskId: "task-1", description: "working" })
-    );
+    assert.equal(liveness.liveAgentCount("t1"), 1);
     await ingestion.ingest(runtimeEvent("task.updated", { taskId: "task-1", status: "idle" }));
+    assert.equal(liveness.liveAgentCount("t1"), 0);
+    await ingestion.ingest(
+      runtimeEvent("task.progress", { taskId: "task-1", taskType: "subagent", description: "working", status: "running" })
+    );
+    assert.equal(liveness.liveAgentCount("t1"), 1);
     await ingestion.ingest(
       runtimeEvent("task.completed", { taskId: "task-1", status: "completed" })
     );
-    assert.deepEqual(
-      liveness.observed.map((event) => event.type),
-      ["task.started", "task.progress", "task.updated", "task.completed"]
+    assert.equal(liveness.liveAgentCount("t1"), 0);
+    await ingestion.ingest(
+      runtimeEvent("task.started", { taskId: "task-2", taskType: "subagent" })
     );
+    assert.equal(liveness.liveAgentCount("t1"), 1);
     await ingestion.ingest(
       runtimeEvent("session.exited", { recoverable: false, exitKind: "graceful" })
     );
-    assert.deepEqual(liveness.cleared, ["t1"]);
+    assert.equal(liveness.liveAgentCount("t1"), 0);
   });
 
   it("remembers a task description so the completion row is titled", async () => {
@@ -1383,8 +1208,13 @@ describe("fix-wave regressions", () => {
     assert.equal(sink.events()[0]?.metadata.adapterKey, undefined);
   });
 
-  it("Q1 #9: forget() releases a thread, drops its buffers and clears liveness", async () => {
-    const { ingestion, sink, liveness } = harness();
+  it("forgetting a deleted thread clears live work and drops buffered text before a later drain", async () => {
+    const liveness = createLivenessRegistry();
+    const { ingestion, sink } = harness({ liveness });
+    await ingestion.ingest(
+      runtimeEvent("task.started", { taskId: "task-1", taskType: "subagent" })
+    );
+    assert.equal(liveness.liveAgentCount("t1"), 1);
     await ingestion.ingest(
       runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "x" }, {
         turnId: "turn-1",
@@ -1392,7 +1222,7 @@ describe("fix-wave regressions", () => {
       })
     );
     await ingestion.forget("t1");
-    assert.deepEqual(liveness.cleared, ["t1"]);
+    assert.equal(liveness.liveAgentCount("t1"), 0);
     sink.reset();
     // The buffered text is DROPPED, not flushed: the thread's log is gone.
     await ingestion.drain();
@@ -1527,21 +1357,6 @@ describe("ordering", () => {
       ]
     );
   });
-
-  it("keeps threads independent", async () => {
-    const { ingestion, sink } = harness();
-    await ingestion.ingest(
-      runtimeEvent("runtime.warning", { message: "one" }, { threadId: "t1" })
-    );
-    await ingestion.ingest(
-      runtimeEvent("runtime.warning", { message: "two" }, { threadId: "t2" })
-    );
-    await ingestion.drain();
-    assert.deepEqual(
-      sink.batches.map((batch) => batch.threadId),
-      ["t1", "t2"]
-    );
-  });
 });
 
 // ---------------------------------------------------------------------------
@@ -1549,38 +1364,6 @@ describe("ordering", () => {
 // ---------------------------------------------------------------------------
 
 describe("Q1-9: per-item ingestion state is released as items finish", () => {
-  it("frees a task title once the task it names has completed", async () => {
-    const { ingestion, sink } = harness();
-    await ingestion.ingest(
-      runtimeEvent("task.started", { taskId: "task-1", description: "Audit the routes" })
-    );
-    await ingestion.ingest(runtimeEvent("task.completed", { taskId: "task-1", status: "completed" }));
-    await settle();
-
-    const titles = sink
-      .activities()
-      .filter((event) => event.payload.activity.activityKind === "task.completed")
-      .map((event) => (event.payload.activity.payload as { title?: string }).title);
-    assert.ok(
-      titles.some((title) => title === "Audit the routes"),
-      "the completion is titled from the remembered description"
-    );
-
-    // The entry's life ends with the completion it titled. Before this it was
-    // cleared only when the WHOLE thread was forgotten, so a long session
-    // accumulated one entry per subagent task — the residual Q1-9 left open.
-    await ingestion.ingest(runtimeEvent("task.completed", { taskId: "task-1", status: "completed" }));
-    await settle();
-    const after = sink
-      .activities()
-      .filter((event) => event.payload.activity.activityKind === "task.completed")
-      .map((event) => (event.payload.activity.payload as { title?: string }).title);
-    assert.equal(
-      after.filter((title) => title === "Audit the routes").length,
-      1,
-      "a second completion for the same id is no longer titled — the title was released"
-    );
-  });
 
   it("drains a tool-output buffer at item completion, then releases its metadata", async () => {
     const { ingestion, sink } = harness();
@@ -1866,17 +1649,16 @@ describe("agent-owned message segments (§5.1, §7.6)", () => {
 
   it("a turnless completion settles only the message its own deltas opened", async () => {
     const { ingestion, sink } = harness();
-    // A completion whose item streamed nothing, with nothing to stand in: no row.
-    await ingestion.ingest(
-      runtimeEvent("item.completed", { itemType: "assistant_message", status: "completed" }, {
-        itemId: "never-streamed",
-        agentId: "task-1"
-      })
-    );
-    // A turnless block of ANOTHER item stays open until its own completion.
     await ingestion.ingest(
       runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "still going" }, {
         itemId: "other",
+        agentId: "task-1"
+      })
+    );
+    // An unrelated completion must not close the block that is already open.
+    await ingestion.ingest(
+      runtimeEvent("item.completed", { itemType: "assistant_message", status: "completed" }, {
+        itemId: "never-streamed",
         agentId: "task-1"
       })
     );

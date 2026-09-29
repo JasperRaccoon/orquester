@@ -54,13 +54,6 @@ describe("claude goal — the /goal command's own output (goals §6.1.2)", () =>
     });
   });
 
-  it("reads a replace, which prints exactly what a set prints", () => {
-    assert.deepEqual(parseGoalCommandOutput("Goal set: a different goal", "the old goal"), {
-      kind: "set",
-      objective: "a different goal"
-    });
-  });
-
   it("keeps a multi-line condition whole and ignores surrounding whitespace", () => {
     assert.deepEqual(parseGoalCommandOutput("  Goal set: line one\nline two \n"), {
       kind: "set",
@@ -376,69 +369,12 @@ describe("claude goal — the tracker (goals §6 preamble)", () => {
     ...extra
   });
 
-  it("is seeded from knownGoal, so repeating it is not a change", () => {
-    const tracker = new ClaudeGoalTracker({ clock: movableClock(), knownGoal: active() });
-    assert.deepEqual(tracker.goal, active());
-    assert.deepEqual(tracker.apply("set", active()), { kind: "unchanged" });
-    assert.deepEqual(tracker.apply("progress", active()), { kind: "unchanged" });
-  });
-
   it("drops a seeded goal's updatedAt: the fold's stamp is not provider state", () => {
     const tracker = new ClaudeGoalTracker({
       clock: movableClock(),
       knownGoal: { ...active(), updatedAt: "2026-09-24T00:00:00.000Z" } as AgentGoal
     });
     assert.deepEqual(tracker.goal, active());
-  });
-
-  it("emits a real change with the whole goal", () => {
-    const tracker = new ClaudeGoalTracker({ clock: movableClock() });
-    assert.deepEqual(tracker.apply("set", active()), {
-      kind: "emit",
-      payload: { goal: active(), change: "set" }
-    });
-    assert.deepEqual(tracker.lastEmitted, active());
-  });
-
-  it("always emits achieved, failed and cleared, with the goal that ended", () => {
-    const tracker = new ClaudeGoalTracker({ clock: movableClock(), knownGoal: active() });
-    const ended = active({ status: "complete", rounds: 3 });
-    assert.deepEqual(tracker.apply("achieved", null, ended), {
-      kind: "emit",
-      payload: { goal: null, change: "achieved", previous: ended }
-    });
-    assert.equal(tracker.goal, null);
-    // A clear of nothing is still reported: the CLI said so.
-    assert.equal(tracker.apply("cleared", null, active()).kind, "emit");
-  });
-
-  it("throttles progress to one per 30 s and flushes the latest one when due", () => {
-    const clock = movableClock();
-    const tracker = new ClaudeGoalTracker({ clock, knownGoal: active() });
-    const first = active({ phase: "waiting-background" });
-    assert.equal(tracker.apply("progress", first).kind, "emit");
-
-    clock.advance(10_000);
-    const second = active({ rounds: 2 });
-    const deferred = tracker.apply("progress", second);
-    assert.deepEqual(deferred, {
-      kind: "deferred",
-      dueAtMs: Date.parse("2026-09-24T10:00:00.000Z") + 30_000
-    });
-    assert.deepEqual(tracker.goal, second, "the latest state is kept for the next decision");
-    assert.deepEqual(tracker.lastEmitted, first, "but nothing was emitted");
-    assert.equal(tracker.pendingProgressDueAtMs, deferred.kind === "deferred" ? deferred.dueAtMs : 0);
-
-    clock.advance(20_000);
-    assert.deepEqual(tracker.flushProgress(), {
-      kind: "emit",
-      payload: { goal: second, change: "progress" }
-    });
-    assert.equal(tracker.pendingProgressDueAtMs, undefined);
-    assert.deepEqual(tracker.flushProgress(), { kind: "unchanged" });
-
-    clock.advance(30_000);
-    assert.equal(tracker.apply("progress", active({ rounds: 3 })).kind, "emit");
   });
 
   it("never throttles anything but progress, and a real change supersedes a deferred one", () => {

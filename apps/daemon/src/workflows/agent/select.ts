@@ -83,7 +83,7 @@ function resolvePolicy(policy: Partial<AccountPolicy> | undefined): ResolvedPoli
 // Usage join
 // ---------------------------------------------------------------------------
 
-export interface UsageReading {
+interface UsageReading {
   known: boolean;
   /** Why the usage is unknown, e.g. "no usage reading", "usage reading is 34m old". */
   unknownWhy?: string;
@@ -228,7 +228,7 @@ function freedAt(blockers: Blocker[]): number | undefined {
 // One chain entry
 // ---------------------------------------------------------------------------
 
-export interface RankedCandidate {
+interface RankedCandidate {
   accountId: string;
   label?: string;
   /** The key family (`cooldownSubject(...).family`): the account family, or the refId when accountless. */
@@ -240,7 +240,7 @@ export interface RankedCandidate {
   reason: string;
 }
 
-export interface ChainEntryEvaluation {
+interface ChainEntryEvaluation {
   chainIndex: number;
   entry: AgentChainEntry;
   family: string;
@@ -259,7 +259,7 @@ interface Candidate {
   order: number;
 }
 
-export function rankChainEntry(input: SelectAccountInput, chainIndex: number): ChainEntryEvaluation {
+function rankChainEntry(input: SelectAccountInput, chainIndex: number): ChainEntryEvaluation {
   const entry = input.chain[chainIndex]!;
   const policy = resolvePolicy(entry.accounts);
   const now = input.now;

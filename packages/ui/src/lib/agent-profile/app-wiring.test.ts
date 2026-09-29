@@ -1,12 +1,13 @@
-/** Agent-profile events reach the module store through the app's actual event router. */
+/** App-store channel routing; store.test.ts owns cache/reset behavior. */
 
 import assert from "node:assert/strict";
+
 import { describe, it } from "node:test";
 
 import { AGENT_PROFILE_CHANNEL, type AgentProfileAgentId, type AgentProfileSnapshot } from "@orquester/api";
 
 import { useAppStore } from "../../store/app.ts";
-import { agentProfileEntry, loadAgentProfile, resetAgentProfile, type AgentProfileApi } from "./store.ts";
+import { agentProfileStore, loadAgentProfile, resetAgentProfile, type AgentProfileApi } from "./store.ts";
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -58,7 +59,7 @@ describe("the app store routes agent-profile events", () => {
     await settle();
     await settle();
     assert.deepEqual(api.gets, ["claude", "claude"]);
-    assert.equal(agentProfileEntry("claude").snapshot?.revision, "r2");
+    assert.equal(agentProfileStore.getState().agents.claude.snapshot?.revision, "r2");
   });
 
   it("the same message on another channel does not", async () => {
@@ -70,11 +71,4 @@ describe("the app store routes agent-profile events", () => {
     assert.deepEqual(api.gets, ["claude"]);
   });
 
-  it("a malformed payload is ignored without a throw", () => {
-    resetAgentProfile();
-    assert.doesNotThrow(() => {
-      useAppStore.getState().applyEvent(event(AGENT_PROFILE_CHANNEL, "agentProfile.changed", null));
-      useAppStore.getState().applyEvent(event(AGENT_PROFILE_CHANNEL, "agentProfile.changed", 7));
-    });
-  });
 });

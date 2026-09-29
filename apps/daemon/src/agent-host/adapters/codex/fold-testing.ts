@@ -13,7 +13,6 @@ import {
   createEmptyThreadState,
   type DomainEvent,
   type RuntimeEvent,
-  type ThreadActivityItem,
   type ThreadFoldState
 } from "@orquester/api/agent-chat";
 
@@ -88,20 +87,4 @@ export async function ingestCodexDrafts(
 /** The thread the log folds to, by the real fold. */
 export function foldCodexLog(events: readonly DomainEvent[]): ThreadFoldState {
   return events.reduce(applyDomainEvent, createEmptyThreadState());
-}
-
-/**
- * The newest write of every activity in the log, in log order — what the
- * host's `readItem` answers for an id (§5.6: the row as ingestion wrote it,
- * never slimmed, but for a `tool.updated`, which it stores slimmed).
- */
-export function loggedActivities(events: readonly DomainEvent[]): ThreadActivityItem[] {
-  const newest = new Map<string, ThreadActivityItem>();
-  for (const event of events) {
-    if (event.type === "thread.activity-appended") {
-      newest.delete(event.payload.activity.id);
-      newest.set(event.payload.activity.id, event.payload.activity);
-    }
-  }
-  return [...newest.values()];
 }

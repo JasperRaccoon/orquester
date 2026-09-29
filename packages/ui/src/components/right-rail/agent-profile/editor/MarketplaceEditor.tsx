@@ -63,7 +63,7 @@ const SOURCE_OPTIONS: { id: MarketplaceSourceType; label: string; shortLabel?: s
   { id: "path", label: "Local path", shortLabel: "Path" }
 ];
 
-export const MarketplaceFormView: React.FC<{
+const MarketplaceFormView: React.FC<{
   form: MarketplaceForm;
   onChange: (patch: Partial<MarketplaceForm>) => void;
   validation: MarketplaceValidation;

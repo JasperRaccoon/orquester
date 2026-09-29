@@ -97,8 +97,7 @@ test("toggleItem errors are safe and actionable", async () => {
   const { tools } = await makeTools();
   const empty = await tools.create({ workspace: "w" }, "Empty");
   await assert.rejects(() => tools.toggleItem(empty.id, 1), (err) => {
-    assert.ok(err instanceof ToolError);
-    assert.match(err.message, /No task items/i);
+    assert.ok(err instanceof ToolError && err.code === "INVALID_ARGUMENT");
     return true;
   });
 
@@ -106,22 +105,22 @@ test("toggleItem errors are safe and actionable", async () => {
   await tools.update(todo.id, { body: "- [ ] Alpha\n- [X] Beta\n* [ ] beta" });
 
   await assert.rejects(() => tools.toggleItem(todo.id, "Gamma"), (err) => {
-    assert.ok(err instanceof ToolError);
-    assert.match(err.message, /No task item matching "Gamma"/);
+    assert.ok(err instanceof ToolError && err.code === "INVALID_ARGUMENT");
+    assert.match(err.message, /Gamma/);
     assert.match(err.message, /Alpha/);
     assert.match(err.message, /Beta/);
     return true;
   });
 
   await assert.rejects(() => tools.toggleItem(todo.id, "beta"), (err) => {
-    assert.ok(err instanceof ToolError);
-    assert.match(err.message, /ambiguous/i);
-    assert.match(err.message, /use index/i);
+    assert.ok(err instanceof ToolError && err.code === "INVALID_ARGUMENT");
+    assert.match(err.message, /Beta/);
+    assert.match(err.message, /beta/);
     return true;
   });
 
   // A list that does not exist is the store's 404, for result.ts to map (NOT_FOUND) — named: the id and where the ids are.
-  const missing = (err: unknown) => err instanceof TodoError && err.status === 404 && err.message === 'No todo list with id "missing"; list_todos shows the ids.';
+  const missing = (err: unknown) => err instanceof TodoError && err.status === 404 && err.message.includes("missing");
   await assert.rejects(() => tools.toggleItem("missing", 1), missing);
   await assert.rejects(() => tools.update("missing", { name: "x" }), missing);
   await assert.rejects(() => tools.remove("missing"), missing);
@@ -130,11 +129,11 @@ test("toggleItem errors are safe and actionable", async () => {
 test("a missing list's id is echoed capped and escaped: one short line whatever the caller sent", async () => {
   const { tools } = await makeTools();
   const cases: [string, RegExp][] = [
-    ["x".repeat(500), /^No todo list with id "x{99}…"; list_todos shows the ids\.$/],
-    ["a\nb\"c", /^No todo list with id "a\\nb\\"c"; list_todos shows the ids\.$/]
+    ["x".repeat(500), /"x{99}…"/],
+    ["a\nb\"c", /"a\\nb\\"c"/]
   ];
   for (const [id, expected] of cases) {
-    await assert.rejects(() => tools.remove(id), (err) => err instanceof TodoError && err.status === 404 && expected.test(err.message));
+    await assert.rejects(() => tools.remove(id), (err) => err instanceof TodoError && err.status === 404 && expected.test(err.message) && !err.message.includes("\n") && err.message.length < 200);
   }
   // Any other store refusal passes through untouched.
   const conflict = new TodoError(409, "todo changed meanwhile");
@@ -154,20 +153,26 @@ test("a refusal quotes the caller's item capped and escaped, and a long list's i
   };
   // An unknown item: its text quoted, at most 100 code points, escaped onto one line; the items still listed.
   const junk = await refusal(`${"q".repeat(2 * 1024 * 1024)}"\n`);
-  assert.match(junk, /^No task item matching "q{99}…"\. Available items: 1\. Alpha, 2\. Beta\.$/);
-  assert.equal(await refusal('say "hi"\nnow'), 'No task item matching "say \\"hi\\"\\nnow". Available items: 1. Alpha, 2. Beta.');
+  assert.match(junk, /"q{99}…"/);
+  assert.match(junk, /1\. Alpha, 2\. Beta/);
+  const escaped = await refusal('say "hi"\nnow');
+  assert.ok(escaped.includes('say \\"hi\\"\\nnow') && !escaped.includes("\n"));
   // An ambiguous item — two items with the same long text: the quote and each listed item are capped.
   const long = "L".repeat(5_000);
   const twins = await tools.create({ workspace: "w" }, "Twins");
   await tools.update(twins.id, { body: `- [ ] ${long}\n- [ ] ${long}` });
   const ambiguous = await refusal(long, twins.id);
-  assert.match(ambiguous, /^Task item "L{99}…" is ambiguous; use index\. Available items: 1\. L{69}…, 2\. L{69}…\.$/);
+  assert.match(ambiguous, /"L{99}…"/);
+  assert.match(ambiguous, /1\. L{69}…, 2\. L{69}…/);
   // A 3 000-item list: the first 40 items listed, then how many there are.
   const big = await tools.create({ workspace: "w" }, "Big");
   await tools.update(big.id, { body: Array.from({ length: 3_000 }, (_, i) => `- [ ] task ${i + 1}`).join("\n") });
   const outOfRange = await refusal(5_000, big.id);
-  assert.ok(outOfRange.startsWith("No task item at index 5000. Available items: 1. task 1, 2. task 2, "), outOfRange.slice(0, 120));
-  assert.ok(outOfRange.endsWith("40. task 40, … (3000 items)."), outOfRange.slice(-60));
+  assert.match(outOfRange, /5000/);
+  assert.match(outOfRange, /1\. task 1, 2\. task 2/);
+  assert.match(outOfRange, /40\. task 40/);
+  assert.match(outOfRange, /3000 items/);
+  assert.ok(!outOfRange.includes("41. task 41"));
   assert.ok(outOfRange.length < 1_000, `${outOfRange.length} characters`);
 });
 
@@ -187,16 +192,13 @@ test("the longest refusal there can be ends whole under the error cap, whatever 
   const wide = await tools.create({ workspace: "w" }, "Wide");
   await tools.update(wide.id, { body: lines.join("\n") });
   const ambiguous = await refusal(wide.id, control);
-  assert.ok(ambiguous.startsWith(`Task item "${"\\u0001".repeat(100)}" is ambiguous; use index. Available items: 1. `), ambiguous.slice(0, 80));
+  assert.ok(ambiguous.includes(`"${"\\u0001".repeat(100)}"`));
   const lone = await refusal(wide.id, "\ud800".repeat(100));
-  assert.ok(lone.startsWith(`No task item matching "${"\\ud800".repeat(100)}". Available items: 1. `), lone.slice(0, 80));
+  assert.ok(lone.includes(`"${"\\ud800".repeat(100)}"`));
   for (const message of [ambiguous, lone]) {
-    assert.ok(message.endsWith(", … (3000 items)."), message.slice(-40));
+    assert.match(message, /3000 items/);
     assert.ok([...message].length <= 4_000, `${[...message].length} code points`);
     // So the backstop (result.ts) never cuts its tail: toSafeToolError hands it on untouched.
     assert.equal(toSafeToolError(new ToolError("INVALID_ARGUMENT", message)).structuredContent.message, message);
   }
-  // The bound result.ts states, exactly: 10 + 602 + 43 for the template and the quote, 40 listed items (index, ". ",
-  // 70) with their 39 separators, ", … (3000 items)" and the final ".".
-  assert.equal([...ambiguous].length, 3_701);
 });

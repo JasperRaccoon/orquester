@@ -301,10 +301,6 @@ export class GrokNormalizer {
     }
   }
 
-  get contextWindowTokens(): number | undefined {
-    return this.contextWindow;
-  }
-
   /** The meter payload every emission must carry — window included when known. */
   private tokenUsagePayload(usedTokens: number, maxTokens?: number): ThreadTokenUsage {
     const window = maxTokens ?? this.contextWindow;

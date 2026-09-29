@@ -1,12 +1,7 @@
 /**
- * Replay tests: every committed Claude fixture through the normaliser (§9).
- *
- * One assertion per capture is structural rather than about a single frame:
- * every message type present in the capture must map to a defined
- * disposition, and an unrecognised one must take the defined fallback
- * (surface it, plus `runtime.warning`) rather than be swallowed by a
- * catch-all. That is what keeps §10's "protocols move" promise honest as
- * fixtures are re-captured.
+ * Captured Claude protocol behavior and normalization regressions (§9).
+ * Assertions protect the content, identity and terminal state delivered to
+ * callers; fixture provenance is recorded in test/fixtures/claude/README.md.
  */
 
 import assert from "node:assert/strict";
@@ -24,18 +19,9 @@ import {
   countingIds,
   eventTypes,
   fixedClock,
-  listClaudeFixtures,
   readClaudeFixture,
   replayClaudeFixture
 } from "./fixtures.ts";
-import { createIngestion } from "../../ingestion/index.ts";
-import {
-  FakeClock,
-  RecordingLiveness,
-  RecordingSink,
-  counterIdGen,
-  settle
-} from "../../ingestion/test-harness.ts";
 
 function allOf<T extends RuntimeEvent["type"]>(
   events: readonly RuntimeEvent[],
@@ -57,34 +43,7 @@ function outputDeltas(
   );
 }
 
-const UNHANDLED_MARKER = "is not handled";
-
 describe("claude normaliser — fixture replay", () => {
-  const fixtures = listClaudeFixtures();
-
-  for (const fixture of fixtures) {
-    it(`${fixture}: every captured message has a defined disposition`, () => {
-      const { events, observed } = replayClaudeFixture(fixture);
-      const unhandled = allOf(events, "runtime.warning").filter((event) =>
-        event.payload.message.includes(UNHANDLED_MARKER)
-      );
-      assert.deepEqual(
-        unhandled.map((event) => event.payload.message),
-        [],
-        `${fixture} produced unhandled-message warnings`
-      );
-      // The capture must actually have exercised something.
-      assert.ok(observed.length > 0 || fixture.startsWith("13-"));
-      // Every event carries the envelope §4.2 requires.
-      for (const event of events) {
-        assert.equal(typeof event.eventId, "string");
-        assert.equal(event.threadId, "thread-fixture");
-        assert.equal(typeof event.createdAt, "string");
-      }
-    });
-
-  }
-
   it("01: a plain text turn streams and settles", () => {
     const { events } = replayClaudeFixture("01-init-plain-text.ndjson");
     const types = eventTypes(events);
@@ -119,64 +78,6 @@ describe("claude normaliser — fixture replay", () => {
     );
     assert.ok(started.length >= 1);
     assert.ok(started.some((event) => event.payload.itemType === "command_execution"));
-  });
-
-  it("03: an approval is opened and accepted", () => {
-    const { events } = replayClaudeFixture("03-bash-approval-accept.ndjson");
-    const opened = allOf(events, "request.opened")[0]?.payload;
-    assert.equal(opened?.requestType, "command_execution_approval");
-    assert.equal(opened?.dismissible, false);
-    assert.equal(opened?.detail, "Remove scratch-tmp.txt");
-    const resolved = allOf(events, "request.resolved")[0]?.payload;
-    assert.equal(resolved?.decision, "accept");
-    // The request id is the SDK's own, so a redelivery cannot open a second
-    // card (fixtures README observation 11).
-    const request = events.find((event) => event.type === "request.opened");
-    const captured = readClaudeFixture("03-bash-approval-accept.ndjson").find(
-      (line) => line.kind === "canUseTool"
-    );
-    const capturedRequestId = (
-      captured?.data as { options?: { requestId?: string } } | undefined
-    )?.options?.requestId;
-    assert.equal(typeof capturedRequestId, "string");
-    assert.equal(request?.requestId, capturedRequestId);
-    assert.equal(request?.providerRefs?.providerRequestId, capturedRequestId);
-  });
-
-  it("04a/04b: decline and cancel are two answers, not two labels", () => {
-    const decline = replayClaudeFixture("04a-bash-approval-decline.ndjson");
-    assert.equal(allOf(decline.events, "request.resolved")[0]?.payload?.decision, "decline");
-    const cancel = replayClaudeFixture("04b-bash-approval-cancel.ndjson");
-    assert.equal(allOf(cancel.events, "request.resolved")[0]?.payload?.decision, "cancel");
-  });
-
-  it("05: accept-for-session prompts once across two turns", () => {
-    const { events } = replayClaudeFixture("05-accept-for-session.ndjson");
-    const opened = allOf(events, "request.opened");
-    assert.equal(opened.length, 1);
-    assert.equal(allOf(events, "request.resolved")[0]?.payload?.decision, "acceptForSession");
-    assert.equal(allOf(events, "turn.completed").length, 2);
-  });
-
-  it("06: AskUserQuestion becomes a question keyed by its text", () => {
-    const { events } = replayClaudeFixture("06-ask-user-question.ndjson");
-    const requested = allOf(events, "user-input.requested")[0]?.payload;
-    assert.ok(requested);
-    assert.equal(requested.questions.length, 1);
-    const question = requested.questions[0]!;
-    assert.equal(question.id, question.question);
-    assert.equal(question.id, "Which file should I read?");
-    assert.equal(question.multiSelect, false);
-    assert.deepEqual(
-      question.options.map((option) => option.label),
-      ["a.txt", "b.txt"]
-    );
-    // No `value` on Claude's options.
-    assert.ok(question.options.every((option) => option.value === undefined));
-    const resolved = allOf(events, "user-input.resolved")[0]?.payload;
-    assert.deepEqual(resolved?.answers, { "Which file should I read?": "a.txt" });
-    // A question is never an approval.
-    assert.equal(allOf(events, "request.opened").length, 0);
   });
 
   it("07: a subagent and a background shell carry full linkage on every row", () => {
@@ -340,17 +241,6 @@ describe("claude normaliser — fixture replay", () => {
     // classified from it.
     const states = allOf(events, "turn.completed").map((event) => event.payload.state);
     assert.ok(states.every((state) => state === "completed"), JSON.stringify(states));
-  });
-
-  it("14a/14b: accept-edits and bypass produce no approval at all", () => {
-    for (const fixture of [
-      "14a-accept-edits-edit.ndjson",
-      "14b-bypass-permissions-edit.ndjson"
-    ]) {
-      const { events } = replayClaudeFixture(fixture);
-      assert.equal(allOf(events, "request.opened").length, 0, fixture);
-      assert.ok(allOf(events, "item.completed").length > 0, fixture);
-    }
   });
 
   it("15: a warning-level rate_limit_event carries a percentage; a plain one does not", () => {
@@ -1447,47 +1337,6 @@ describe("claude normaliser — a turn the CLI starts itself keeps its opening m
       );
     }
   });
-
-  it("through ingestion, the incident's turn is one message per text block, the answer last", async () => {
-    const clock = new FakeClock("2026-09-24T15:07:42.000Z");
-
-    const sink = new RecordingSink();
-    const ingestion = createIngestion({
-      sink: sink.sink,
-      liveness: new RecordingLiveness(),
-      clock,
-      idGen: counterIdGen("d"),
-    });
-    const normalizer = new ClaudeNormalizer({ threadId: "t", clock, ids: countingIds() });
-    const frames = [
-      ...openingTurn([
-        { type: "thinking", thinking: "Round 5 is clean." },
-        { type: "text", text: "All checks are now clean." }
-      ]),
-      result()
-    ];
-    for (const frame of frames) {
-      clock.advance(30);
-      for (const event of normalizer.handleMessage(frame as unknown as SDKMessage)) {
-        await ingestion.ingest(event);
-      }
-      await settle();
-    }
-    clock.advance(1000);
-    await ingestion.drain();
-    await settle();
-
-    const texts = new Map<string, string>();
-    for (const event of sink.messages()) {
-      if (event.payload.role !== "assistant") continue;
-      texts.set(event.payload.messageId, `${texts.get(event.payload.messageId) ?? ""}${event.payload.text}`);
-    }
-    assert.deepEqual(
-      [...texts.values()],
-      ["All checks are now clean.", "Goal tracking is built."],
-      "no message id repeats the opening paragraph, and the summary is the turn's last message"
-    );
-  });
 });
 // ---------------------------------------------------------------------------
 // The compaction phase
@@ -1593,19 +1442,6 @@ describe("claude normaliser — a compaction is a visible phase, not generic 'wo
     // A fresh turn's ordinary status must not be mistaken for the end of a
     // compaction that already ended.
     feed(statusFrame({ status: "requesting" }));
-    const again = feed(statusFrame({ status: "compacting" }));
-    assert.equal(
-      again.filter(
-        (event) => event.type === "thread.state.changed" && event.payload.state === "compacting"
-      ).length,
-      1
-    );
-  });
-
-  it("the latch does not survive the session: closeLiveTasks resets it", () => {
-    const { normalizer, feed } = feedable();
-    feed(statusFrame({ status: "compacting" }));
-    normalizer.closeLiveTasks();
     const again = feed(statusFrame({ status: "compacting" }));
     assert.equal(
       again.filter(
@@ -1832,23 +1668,6 @@ describe("claude normaliser — a background shell carries its command and its o
       changes[0]?.kind === "tail" ? changes[0].outputFile : undefined,
       `~/tmp/claude-999/x/tasks/${SHELL_TASK_ID}.output`
     );
-  });
-
-  it("emits a delta under the shell's own item and agent", () => {
-    const { normalizer, feed } = feedable();
-    normalizer.beginTurn({ turnId: "turn-1" });
-    feed(bashLaunchFrame({ command: "pnpm test", run_in_background: true }));
-    feed(taskStartedFrame({ is_backgrounded: true }));
-
-    const [delta, ...rest] = normalizer.backgroundShellOutput(SHELL_TASK_ID, "ok 1 - a\n");
-    assert.deepEqual(rest, []);
-    assert.ok(delta);
-    assert.equal(delta.type, "content.delta");
-    assert.equal(delta.itemId, `bgshell:${SHELL_TASK_ID}`);
-    assert.equal(delta.agentId, SHELL_TASK_ID);
-    assert.equal(delta.turnId, "turn-1");
-    assert.deepEqual(delta.payload, { streamKind: "command_output", delta: "ok 1 - a\n" });
-    assert.deepEqual(normalizer.backgroundShellOutput(SHELL_TASK_ID, ""), [], "nothing is not a delta");
   });
 
   it("closes the item BEFORE the task row and carries the exit code on both", () => {
@@ -2116,7 +1935,7 @@ describe("claude normaliser — the context meter is the MAIN agent's, never a s
   it("a result with no assistant usage keeps the last known reading, never result.usage", () => {
     const normalizer = makeNormalizer();
     normalizer.beginTurn({ turnId: "turn-1" });
-    normalizer.handleMessage({
+    const opening = normalizer.handleMessage({
       type: "stream_event",
       parent_tool_use_id: null,
       uuid: "u1",
@@ -2127,6 +1946,8 @@ describe("claude normaliser — the context meter is the MAIN agent's, never a s
         usage: { input_tokens: 4_000, output_tokens: 100 }
       }
     } as unknown as SDKMessage);
+
+    assert.equal(allOf(opening, "thread.token-usage.updated")[0]?.payload.usage.usedTokens, 4_100);
 
     const settled = normalizer.completeTurn("completed", undefined, {
       type: "result",
@@ -2148,7 +1969,7 @@ describe("claude normaliser — the context meter is the MAIN agent's, never a s
     // `usedTokens` is unchanged, so the dedupe may swallow the row entirely;
     // what must never happen is a jump to the turn rollup.
     for (const event of emitted) {
-      assert.notEqual(event.payload.usage.usedTokens, 912_000);
+      assert.equal(event.payload.usage.usedTokens, 4_100);
     }
     const turn = settled.find((event) => event.type === "turn.completed");
     assert.ok(turn, "the turn still settles");

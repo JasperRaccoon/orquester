@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { afterEach, test } from "node:test";
 
-import { agentProfileEntry, resetAgentProfile } from "../../../../lib/agent-profile/store";
+import { agentProfileStore, resetAgentProfile } from "../../../../lib/agent-profile/store";
 import { subscribeAgentProfileEditorSaved, type AgentProfileEditorSaved } from "../editor-bridge";
 import { publishSaved } from "./saved";
 
@@ -43,7 +43,7 @@ test("a save puts the answer's snapshot in the store and tells the panel what ch
     notes: ["Saved — applies to new sessions", 42]
   });
   stop();
-  const entry = agentProfileEntry("grok");
+  const entry = agentProfileStore.getState().agents.grok;
   assert.equal(entry.snapshot?.revision, "r2");
   assert.deepEqual(entry.snapshot?.items.map((item) => item.id), ["mcp:docs"]);
   assert.deepEqual(heard, [{ agent: "grok", itemIds: ["mcp:docs"], notes: ["Saved — applies to new sessions"] }]);
@@ -53,6 +53,6 @@ test("an answer without a usable snapshot still tells the panel, and leaves the 
   const { heard, stop } = listen();
   publishSaved("codex", { snapshot: { agent: "nobody" }, itemIds: "nope" });
   stop();
-  assert.equal(agentProfileEntry("codex").snapshot, null);
+  assert.equal(agentProfileStore.getState().agents.codex.snapshot, null);
   assert.deepEqual(heard, [{ agent: "codex", itemIds: [], notes: [] }]);
 });

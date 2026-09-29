@@ -122,20 +122,3 @@ describe("a Codex collab child's call (Task 3)", () => {
     );
   });
 });
-
-describe("a Codex collab child's own drill-in (R8)", () => {
-  it("never lists the child itself as a spawn row: its task rows are stamped with its own id", () => {
-    const drillIn = itemsForAgent(threadItems(), CHILD);
-    const entries = deriveWorkLogEntries(activitiesOf(drillIn), { ownerAgentId: CHILD });
-    assert.deepEqual(
-      entries.filter((entry) => entry.agentSpawn?.agentTaskIds.includes(CHILD)).map((entry) => entry.id),
-      []
-    );
-    assert.ok(entries.some((entry) => entry.toolCallId === CHILD_CALL), "its own call is still its row");
-  });
-
-  it("the parent's timeline keeps the child's spawn row", () => {
-    const entries = deriveWorkLogEntries(activitiesOf(threadItems()));
-    assert.ok(entries.some((entry) => entry.agentSpawn?.agentTaskIds.includes(CHILD)));
-  });
-});

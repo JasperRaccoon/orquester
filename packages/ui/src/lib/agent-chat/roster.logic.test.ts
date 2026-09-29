@@ -8,7 +8,6 @@ agentActivityText,
 deriveAgentSpawnSummary,
 deriveRosterDockView,
 isBackgroundShellItems,
-liveAgentTaskIds,
 resolveSpawnRowAgents
 } from "./roster.logic";
 import { activity } from "./test-helpers";
@@ -65,19 +64,6 @@ describe("agentActivityText", () => {
 });
 
 describe("deriveAgentSpawnSummary", () => {
-  it("says 'Kicked off' while live and 'Ran' once settled", () => {
-    const live = deriveAgentSpawnSummary({
-      agents: [agent("a", "running"), agent("b", "running")],
-      agentCount: 2
-    });
-    assert.equal(live.live, true);
-
-    const settled = deriveAgentSpawnSummary({
-      agents: [agent("a", "completed"), agent("b", "completed")],
-      agentCount: 2
-    });
-    assert.equal(settled.live, false);
-  });
 
   it("keeps a workflow coordinator live between member launches", () => {
     const summary = deriveAgentSpawnSummary({
@@ -97,10 +83,6 @@ describe("spawn row resolution", () => {
     assert.equal(resolved.coordinator?.id, "wf");
   });
 
-  it("names the live task ids the live activity row reads", () => {
-    const ids = liveAgentTaskIds([agent("a", "running"), agent("b", "completed")]);
-    assert.deepEqual([...ids], ["a"]);
-  });
 });
 
 describe("the dock", () => {

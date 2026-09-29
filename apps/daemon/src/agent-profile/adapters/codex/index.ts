@@ -141,7 +141,7 @@ import {
 const AGENT = "codex";
 const LABEL = "Codex";
 
-export interface CodexProfileAdapterDeps {
+interface CodexProfileAdapterDeps {
   backups: ProfileBackups;
   stash: ProfileStash;
   configClient?: CodexConfigClientFactory;

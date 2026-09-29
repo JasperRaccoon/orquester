@@ -8,67 +8,37 @@
 import assert from "node:assert/strict";
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { describe, it } from "node:test";
+import { describe, it, type TestContext } from "node:test";
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 
 import type { ProviderSnapshot, RuntimeEvent } from "@orquester/api/agent-chat";
 
 import { AsyncEventQueue } from "./event-queue.ts";
-import { mergeSnapshot, resolveCodexHome } from "./index.ts";
+import { createCodexAdapter } from "./index.ts";
+import { createFakeContext, writeMockCodexServer, type MockConfig } from "./testing.ts";
 import { classifyItem, type CodexThreadItem } from "./items.ts";
-import { codexSlashCommands } from "./probe.ts";
 import { normaliseSkillMentions } from "./modes.ts";
 import { CodexUsageTracker, usageWindowsFromRateLimits } from "./usage.ts";
 
 describe("item classification — typed on the generated discriminants", () => {
-  const cases: { item: CodexThreadItem; itemType: string; bypass: boolean }[] = [
-    { item: { type: "userMessage", id: "i", clientId: null, content: [] }, itemType: "user_message", bypass: true },
-    {
-      item: { type: "agentMessage", id: "i", text: "t", phase: "final_answer", memoryCitation: null, delivery: null, questions: null },
-      itemType: "assistant_message",
-      bypass: true
-    },
-    { item: { type: "reasoning", id: "i", summary: [], content: [] }, itemType: "reasoning", bypass: true },
-    { item: { type: "plan", id: "i", text: "p" }, itemType: "plan", bypass: true },
-    {
-      item: { type: "commandExecution", id: "i", pluginId: null, scriptPath: null, command: "ls", cwd: "/", processId: null, source: "agent", status: "inProgress", commandActions: [], aggregatedOutput: null, exitCode: null, durationMs: null },
-      itemType: "command_execution",
-      bypass: false
-    },
-    {
-      item: { type: "fileChange", id: "i", changes: [{ path: "/a", kind: { type: "add" }, diff: "d" }], status: "completed" },
-      itemType: "file_change",
-      bypass: false
-    },
-    {
-      item: { type: "mcpToolCall", id: "i", server: "s", tool: "t", status: "completed", arguments: {}, appContext: null, pluginId: null, readOnlyHint: true, result: null, error: null, durationMs: 1 },
-      itemType: "mcp_tool_call",
-      bypass: false
-    },
+  const cases: { item: CodexThreadItem; itemType: string }[] = [
     {
       item: { type: "dynamicToolCall", id: "i", namespace: null, tool: "t", arguments: {}, status: "completed", contentItems: null, success: true, durationMs: 1 },
-      itemType: "dynamic_tool_call",
-      bypass: false
+      itemType: "dynamic_tool_call"
     },
     {
       item: { type: "collabAgentToolCall", id: "i", tool: "spawnAgent", status: "inProgress", senderThreadId: "a", receiverThreadIds: [], prompt: null, model: null, reasoningEffort: null, agentsStates: {} },
-      itemType: "collab_agent_tool_call",
-      bypass: false
+      itemType: "collab_agent_tool_call"
     },
-    { item: { type: "webSearch", id: "i", query: "q", action: null, results: null }, itemType: "web_search", bypass: false },
-    { item: { type: "imageView", id: "i", path: "/a.png" }, itemType: "image_view", bypass: false },
-    { item: { type: "enteredReviewMode", id: "i", review: "r" }, itemType: "review_entered", bypass: true },
-    { item: { type: "exitedReviewMode", id: "i", review: "r" }, itemType: "review_exited", bypass: true },
-    { item: { type: "contextCompaction", id: "i" }, itemType: "context_compaction", bypass: true },
-    { item: { type: "subAgentActivity", id: "i", kind: "started", agentThreadId: "a", agentPath: "/root/marlow" }, itemType: "unknown", bypass: true },
-    { item: { type: "hookPrompt", id: "i", fragments: [] }, itemType: "unknown", bypass: true },
-    { item: { type: "sleep", id: "i", durationMs: 1000 }, itemType: "unknown", bypass: true }
+    { item: { type: "webSearch", id: "i", query: "q", action: null, results: null }, itemType: "web_search" },
+    { item: { type: "imageView", id: "i", path: "/a.png" }, itemType: "image_view" },
+    { item: { type: "sleep", id: "i", durationMs: 1000 }, itemType: "unknown" }
   ];
 
   for (const testCase of cases) {
     it(`${testCase.item.type} → ${testCase.itemType}`, () => {
       const classified = classifyItem(testCase.item);
       assert.equal(classified.itemType, testCase.itemType);
-      assert.equal(classified.timelineBypass, testCase.bypass);
       assert.equal(classified.unknownType, undefined);
     });
   }
@@ -87,23 +57,6 @@ describe("item classification — typed on the generated discriminants", () => {
       agentsStates: {}
     });
     assert.equal(classified.status, "failed");
-  });
-
-  it("a commentary agentMessage keeps its phase for live and replayed display", () => {
-    const classified = classifyItem({
-      type: "agentMessage",
-      id: "i",
-      text: "I'll do X next",
-      phase: "commentary",
-      memoryCitation: null,
-      delivery: null,
-      questions: null
-    });
-    // Ingestion reads the phase from `data.phase` (`assistantPhase`,
-    // `ingestion/index.ts`); `detail` is its mirror, a marker only because
-    // the two agree.
-    assert.equal((classified.data as { phase?: unknown } | undefined)?.phase, "commentary");
-    assert.equal(classified.detail, "commentary");
   });
 
   it("the answer carries its phase the same way, and no phase means no marker", () => {
@@ -375,31 +328,6 @@ describe("rate limits", () => {
   });
 });
 
-describe("§4.6.2 / §4.6.3 the Codex command catalogue", () => {
-
-  it("NEVER synthesises a provider /effort — it is client-only (§4.6.5(a))", () => {
-    // R2 finding 2 / fix-wave arbitration: a provider `/effort` row put two
-    // entries in the menu, and picking the provider one inserted the literal
-    // `/effort ` and forwarded it to a CLI that does not implement it.
-    const withReasoning = [
-      {
-        slug: "m",
-        name: "M",
-        capabilities: {
-          optionDescriptors: [{ id: "effort", label: "Reasoning", type: "select" as const, options: [] }]
-        }
-      }
-    ];
-    for (const models of [[], [{ slug: "m", name: "M", capabilities: null }], withReasoning]) {
-      assert.deepEqual(
-        codexSlashCommands(models).map((c) => c.name),
-        ["compact", "feedback"],
-        "only /compact is synthesised by an adapter"
-      );
-    }
-  });
-});
-
 describe("§4.6.8 skill mentions are normalised to `$name`", () => {
   it("rewrites any currency symbol, because that is where $ sits on other layouts", () => {
     assert.equal(normaliseSkillMentions("run €review please"), "run $review please");
@@ -424,116 +352,80 @@ describe("§4.6.8 skill mentions are normalised to `$name`", () => {
   });
 });
 
-describe("§4.5 CODEX_HOME is tilde-expanded in the adapter", () => {
-  it("expands ~ and ~/ because spawn does NOT shell-expand an env value", () => {
-    // `CODEX_HOME=~/.codex_work` otherwise reaches codex verbatim and it errors
-    // that the path does not exist.
-    assert.equal(resolveCodexHome("~"), homedir());
-    assert.equal(resolveCodexHome("~/.codex_work"), join(homedir(), ".codex_work"));
+function adapterRig(t: TestContext) {
+  const server = writeMockCodexServer({});
+  const extraDirs: string[] = [];
+  const fake = createFakeContext({
+    resolveBin: () => Promise.resolve(server.bin),
+    buildEnv: ({ home }) => ({ PATH: process.env.PATH ?? "", HOME: homedir(), CODEX_HOME: home.path })
   });
+  const adapter = createCodexAdapter(fake.context);
+  t.after(async () => {
+    await (await adapter).stopAll();
+    for (const dir of [server.dir, ...extraDirs]) rmSync(dir, { recursive: true, force: true });
+  });
+  return {
+    adapter, rawFrames: fake.rawFrames, dir: server.dir,
+    nextProbe(config: Omit<MockConfig, "logPath">) {
+      const replacement = writeMockCodexServer(config);
+      extraDirs.push(replacement.dir);
+      writeFileSync(server.bin, readFileSync(replacement.bin));
+    }
+  };
+}
 
-  it("passes an absolute path verbatim and refuses a relative one", () => {
-    assert.equal(resolveCodexHome("/var/lib/x/.codex"), "/var/lib/x/.codex");
-    assert.equal(resolveCodexHome("relative/.codex"), null);
-    assert.equal(resolveCodexHome(undefined), null);
-    assert.equal(resolveCodexHome(""), null);
+describe("§4.5 CODEX_HOME reaches the provider as an absolute path", () => {
+  it("expands tilde homes and preserves an absolute account home on session start", async (t) => {
+    const r = adapterRig(t);
+    const adapter = await r.adapter;
+    await adapter.refreshSnapshot({ cwd: process.cwd() });
+    for (const [path, expected] of [["~", homedir()], ["~/.codex_work", join(homedir(), ".codex_work")], ["/var/lib/x/.codex", "/var/lib/x/.codex"]]) {
+      await adapter.startSession({
+        threadId: "home-test", cwd: process.cwd(), home: { kind: "system", path },
+        modelSelection: { model: "gpt-5.5" }, runtimeMode: "approval-required"
+      });
+      const initialized = r.rawFrames.map(({ frame }) =>
+        (frame as { frame?: { result?: { codexHome?: string } } }).frame?.result
+      ).filter((result) => result?.codexHome !== undefined).at(-1);
+      assert.equal(initialized?.codexHome, expected);
+    }
   });
 });
 
-describe("§4.6.4 snapshot merging", () => {
-  const base = (overrides: Partial<ProviderSnapshot> = {}): ProviderSnapshot => ({
-    id: "codex",
-    refIds: ["codex"],
-    installed: true,
-    version: "0.154.0",
-    status: "ready",
-    auth: { status: "authenticated" },
-    checkedAt: "2026-09-21T00:00:00.000Z",
-    models: [],
-    slashCommands: [],
-    skills: [],
-    capabilities: {
-      sessionModelSwitch: "in-session",
-      showPlanModeToggle: true,
-      reportsContextWindow: true,
-      compaction: { type: "native" }
-    },
-    ...overrides
+describe("§4.6.4 public provider snapshots", () => {
+  it("an empty probe preserves the cached model and skills, including its cwd overlay", async (t) => {
+    const r = adapterRig(t);
+    const adapter = await r.adapter;
+    const cwd = process.cwd();
+    await adapter.refreshSnapshot({ cwd });
+    r.nextProbe({ emptyCatalog: true });
+    const snapshot = await adapter.refreshSnapshot({ cwd });
+    assert.deepEqual(snapshot.models.map((model) => model.slug), ["gpt-5.5"]);
+    assert.deepEqual(snapshot.skills.map((skill) => skill.name), ["demo"]);
+    assert.deepEqual(snapshot.workspaceSnapshots?.find((entry) => entry.cwd === cwd)?.skills.map((skill) => skill.name), ["demo"]);
   });
 
-  it("a probe that comes back empty NEVER blanks a non-empty cached list", () => {
-    const previous = base({
-      models: [{ slug: "gpt-5.5", name: "GPT-5.5", capabilities: null }],
-      skills: [{ name: "s", path: "/s", enabled: true }]
-    });
-    const merged = mergeSnapshot(previous, base(), []);
-    assert.equal(merged.models.length, 1);
-    assert.equal(merged.skills.length, 1);
+  it("re-probing a cwd replaces its skills without duplicating its overlay", async (t) => {
+    const r = adapterRig(t);
+    const adapter = await r.adapter;
+    const cwd = process.cwd();
+    await adapter.refreshSnapshot({ cwd });
+    r.nextProbe({ skillName: "updated" });
+    const snapshot = await adapter.refreshSnapshot({ cwd });
+    assert.deepEqual(snapshot.workspaceSnapshots?.map((entry) => [entry.cwd, entry.skills.map((skill) => skill.name)]), [[cwd, ["updated"]]]);
   });
 
-  it("keeps at most 16 cwd overlays, oldest evicted", () => {
-    const probed: string[] = [];
-    let snapshot: ProviderSnapshot | null = null;
-    for (let index = 0; index < 16 + 4; index += 1) {
-      snapshot = mergeSnapshot(
-        snapshot,
-        base({
-          workspaceSnapshots: [
-            {
-              cwd: `/p/${index}`,
-              checkedAt: "2026-09-21T00:00:00.000Z",
-              slashCommands: [],
-              skills: [{ name: `s${index}`, path: "/s", enabled: true }]
-            }
-          ]
-        }),
-        probed
-      );
+  it("retains the most recent 16 cwd overlays and evicts the oldest", async (t) => {
+    const r = adapterRig(t);
+    const adapter = await r.adapter;
+    let snapshot: ProviderSnapshot | undefined;
+    for (let index = 0; index < 20; index += 1) {
+      const cwd = join(r.dir, String(index));
+      mkdirSync(cwd);
+      snapshot = await adapter.refreshSnapshot({ cwd });
     }
-    assert.equal(snapshot!.workspaceSnapshots?.length, 16);
-    assert.equal(snapshot!.workspaceSnapshots?.[0]?.cwd, "/p/4", "the four oldest were evicted");
-  });
-
-  it("re-probing a cwd refreshes it in place rather than duplicating it", () => {
-    const probed: string[] = [];
-    const overlay = (skill: string) =>
-      base({
-        workspaceSnapshots: [
-          {
-            cwd: "/p",
-            checkedAt: "2026-09-21T00:00:00.000Z",
-            slashCommands: [],
-            skills: [{ name: skill, path: "/s", enabled: true }]
-          }
-        ]
-      });
-    const merged = mergeSnapshot(mergeSnapshot(null, overlay("a"), probed), overlay("b"), probed);
-    assert.equal(merged.workspaceSnapshots?.length, 1);
-    assert.equal(merged.workspaceSnapshots?.[0]?.skills[0]?.name, "b");
-  });
-
-  it("an empty overlay keeps the previous one for that cwd", () => {
-    const probed: string[] = [];
-    const first = mergeSnapshot(
-      null,
-      base({
-        workspaceSnapshots: [
-          {
-            cwd: "/p",
-            checkedAt: "x",
-            slashCommands: [],
-            skills: [{ name: "a", path: "/s", enabled: true }]
-          }
-        ]
-      }),
-      probed
-    );
-    const second = mergeSnapshot(
-      first,
-      base({ workspaceSnapshots: [{ cwd: "/p", checkedAt: "y", slashCommands: [], skills: [] }] }),
-      probed
-    );
-    assert.equal(second.workspaceSnapshots?.[0]?.skills[0]?.name, "a");
+    assert.deepEqual(snapshot?.workspaceSnapshots?.map((entry) => entry.cwd),
+      Array.from({ length: 16 }, (_, index) => join(r.dir, String(index + 4))));
   });
 });
 
