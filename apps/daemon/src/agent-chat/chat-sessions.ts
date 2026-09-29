@@ -11,7 +11,6 @@
  */
 
 import { EventEmitter } from "node:events";
-import { sep } from "node:path";
 import type {
   AgentChatSessionSummaryFields,
   SessionSummary,
@@ -49,7 +48,7 @@ interface ChatSession {
 
 /**
  * Owns the chat tabs. Deliberately *not* an `ISessionManager`: it has no PTY,
- * no scrollback and no input. {@link createChatAwareSessionManager} joins it to
+ * no scrollback and no input. {@link ChatAwareSessionManager} joins it to
  * the PTY backend behind the one interface the daemon's routes already use.
  */
 export class ChatSessionManager {
@@ -183,17 +182,6 @@ export class ChatSessionManager {
     }
   }
 
-  closeByProjectPrefix(prefix: string): string[] {
-    const closed: string[] = [];
-    for (const [id, session] of [...this.sessions]) {
-      const project = session.summary.projectPath;
-      if (project === prefix || project.startsWith(prefix + sep)) {
-        if (this.close(id)) closed.push(id);
-      }
-    }
-    return closed;
-  }
-
   /**
    * Re-point a tab at another managed account (§3.4's account switch).
    *
@@ -319,11 +307,6 @@ export class ChatSessionManager {
       });
     }
   }
-
-  /** Test/teardown helper: forget everything without emitting deletes upstream. */
-  clear(): void {
-    this.sessions.clear();
-  }
 }
 
 /** Only the derived §6.4 fields are compared — never `activity`, which is derived from them. */
@@ -360,5 +343,3 @@ function sameLatestTurn(
     a.completedAt === b.completedAt
   );
 }
-
-export type { ChatSession };

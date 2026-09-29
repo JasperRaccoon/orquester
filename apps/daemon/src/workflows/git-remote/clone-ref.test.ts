@@ -8,14 +8,13 @@ import {
   fetchCommitArgs,
   isFullSha,
   isMissingRemoteRef,
-  MAX_CLONE_REF_LENGTH,
   mayBeAbbreviatedSha
 } from "./clone-ref";
 
 const SHA = "6dcb09b5b57875f334f61aebed695e2e4193db5e";
 
 test("cloneRefProblem accepts branches, tags and shas", () => {
-  for (const ok of ["main", "feature/retry", "v1.2.3", "release-2026.09", SHA, "a".repeat(MAX_CLONE_REF_LENGTH)]) {
+  for (const ok of ["main", "feature/retry", "v1.2.3", "release-2026.09", SHA, "a".repeat(250)]) {
     assert.equal(cloneRefProblem(ok), null, ok);
   }
 });
@@ -23,7 +22,7 @@ test("cloneRefProblem accepts branches, tags and shas", () => {
 test("cloneRefProblem refuses empty, long, option-like, whitespace and control characters", () => {
   for (const bad of [
     "",
-    "a".repeat(MAX_CLONE_REF_LENGTH + 1),
+    "a".repeat(251),
     "-b",
     "--upload-pack=x",
     "has space",

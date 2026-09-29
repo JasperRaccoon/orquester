@@ -69,14 +69,6 @@ export function daemonConfigDir(baseDir: string): string {
   return joinPath(baseDir, "daemon");
 }
 
-export function appLogsDir(baseDir: string): string {
-  return joinPath(appConfigDir(baseDir), "logs");
-}
-
-export function daemonLogsDir(baseDir: string): string {
-  return joinPath(daemonConfigDir(baseDir), "logs");
-}
-
 export function appConfigPath(baseDir: string): string {
   return joinPath(appConfigDir(baseDir), "app.json");
 }
@@ -113,7 +105,7 @@ export function defaultSocketPath(baseDir: string, platform: RuntimePlatform): s
 /**
  * Unix socket of the dedicated tmux server that owns session PTYs. Lives beside
  * the daemon socket under <appdir>/daemon so it inherits the same perms/backup
- * and (per Phase 0's PrivateTmp=false) is reachable across daemon restarts.
+ * and is reachable across daemon restarts (PrivateTmp=false).
  */
 export function tmuxSocketPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "tmux.sock");
@@ -212,7 +204,6 @@ export function usageStateFile(baseDir: string): string {
 //       events.ndjson      append-only domain events, per-thread monotonic seq
 //       raw.ndjson         provider frames, rotated (§3.1)
 //       attachments/<id>.<ext>
-//     receipts.json        commandId -> {seq, status}, a ring of 500
 //   <appdir>/daemon/agent-host.sock    the host's HTTP-over-unix-socket API
 //   <appdir>/daemon/agent-host.token   0600 shared secret, daemon <-> host
 //
@@ -242,11 +233,6 @@ export function agentChatThreadMetaPath(baseDir: string, threadId: string): stri
 /** The durable domain-event log. Not rotated — it is the record (§3.1). */
 export function agentChatThreadEventsPath(baseDir: string, threadId: string): string {
   return joinPath(agentChatThreadDir(baseDir, threadId), "events.ndjson");
-}
-
-/** Untranslated provider frames. Rotated: 10 MiB per file, 10 files, 14 days. */
-export function agentChatThreadRawPath(baseDir: string, threadId: string): string {
-  return joinPath(agentChatThreadDir(baseDir, threadId), "raw.ndjson");
 }
 
 /** Attachment bytes. Never in an event and never inline on the wire (§5.1). */
@@ -282,11 +268,6 @@ export function agentChatThreadStatePath(baseDir: string, threadId: string): str
  */
 export function agentChatIndexPath(baseDir: string): string {
   return joinPath(agentChatDir(baseDir), "index.sqlite");
-}
-
-/** The bounded command-receipt ring shared by every thread. */
-export function agentChatReceiptsPath(baseDir: string): string {
-  return joinPath(agentChatDir(baseDir), "receipts.json");
 }
 
 /** The agent host's control socket (named pipe on Windows). */
@@ -558,9 +539,6 @@ export function agentAccountsFile(baseDir: string): string {
 export function agentAccountsDir(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "agent-accounts");
 }
-export function agentAccountHome(baseDir: string, agent: string, id: string): string {
-  return joinPath(agentAccountsDir(baseDir), agent, id, "home");
-}
 
 export const appConfigSchema = z.object({
   version: z.literal(1).default(1),
@@ -727,7 +705,7 @@ export function serializeAccountsConfig(config: AccountsConfig): unknown {
 export const workspaceMetaSchema = z.object({
   /** Workspace directory name — the stable identifier (paths contain $vars). */
   name: z.string().min(1),
-  /** Git account this workspace is bound to (Phase 4); undefined = default identity. */
+  /** Git account this workspace is bound to; undefined = default identity. */
   gitAccountId: z.string().optional(),
   /** ISO timestamp the workspace was created through orquester. */
   createdAt: z.string(),
@@ -1224,10 +1202,6 @@ export const todosConfigSchema = z.object({
 });
 export type TodosConfig = z.infer<typeof todosConfigSchema>;
 
-export function createDefaultTodosConfig(): TodosConfig {
-  return { version: 1, todos: [] };
-}
-
 export function parseTodosConfig(raw: unknown): TodosConfig {
   return todosConfigSchema.parse(raw);
 }
@@ -1328,10 +1302,6 @@ export type SavedPromptRecord = z.infer<typeof savedPromptRecordSchema>;
 export interface SavedPromptsConfig {
   version: 1;
   prompts: SavedPromptRecord[];
-}
-
-export function createDefaultSavedPromptsConfig(): SavedPromptsConfig {
-  return { version: 1, prompts: [] };
 }
 
 /**

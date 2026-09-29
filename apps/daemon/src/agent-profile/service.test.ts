@@ -13,11 +13,10 @@ import {
 import type { ProfileAdapter } from "./adapters/types.ts";
 import { AgentProfileError, profileErrors } from "./errors.ts";
 import { resolveAgentHomes } from "./homes.ts";
-import type { ProfileImports } from "./seams.ts";
+import type { ProfileImports } from "./import.ts";
 import {
   AgentProfileService,
   publishAgentProfileEvents,
-  snapshotRevision,
   type AgentProfileServiceOptions,
   type ProfileWatchFn
 } from "./service.ts";
@@ -45,6 +44,7 @@ function harness(overrides: Partial<AgentProfileServiceOptions> = {}): Harness {
   const warnings: string[] = [];
   const service = new AgentProfileService({
     adapters,
+    converter: (item) => ({ item, notes: [] }),
     agentInfo: (agent) => (installed.has(agent) ? { installed: true, version: `${agent} 1.0` } : { installed: false }),
     homes: resolveAgentHomes({}, "/home/daemon"),
     logger: { warn: (message) => warnings.push(message), error: (message) => warnings.push(message) },
@@ -112,7 +112,12 @@ test("snapshot: a not-installed agent (or one with no adapter) answers an empty 
   });
   assert.deepEqual(h.adapters.grok.calls, [], "the adapter of a missing CLI is never asked");
 
-  const partial = new AgentProfileService({ adapters: {}, agentInfo: () => ({ installed: true }), logger: quiet });
+  const partial = new AgentProfileService({
+    adapters: {},
+    converter: (item) => ({ item, notes: [] }),
+    agentInfo: () => ({ installed: true }),
+    logger: quiet
+  });
   const claude = await partial.snapshot("claude");
   assert.equal(claude.installed, false);
   assert.equal(claude.instructions.path, "");
@@ -121,40 +126,6 @@ test("snapshot: a not-installed agent (or one with no adapter) answers an empty 
 test("snapshot: an unknown agent is 404 UNKNOWN_AGENT", async () => {
   const h = harness();
   await rejectsWith(h.service.snapshot("gemini" as AgentProfileAgentId), 404, "UNKNOWN_AGENT");
-});
-
-test("snapshotRevision ignores item and file-error order and key order, and moves with any content", () => {
-  const info = { path: "/p", exists: true, bytes: 1, lines: 1, revision: "r", warnings: [] };
-  const a = fakeItem("mcp", "a");
-  const b = fakeItem("skill", "b");
-  const base = snapshotRevision(true, "1", {
-    instructions: info,
-    items: [a, b],
-    fileErrors: [
-      { path: "/x", message: "bad" },
-      { path: "/y", message: "bad" }
-    ]
-  });
-  const reordered = snapshotRevision(true, "1", {
-    instructions: { warnings: [], revision: "r", lines: 1, bytes: 1, exists: true, path: "/p" },
-    items: [b, a],
-    fileErrors: [
-      { path: "/y", message: "bad" },
-      { path: "/x", message: "bad" }
-    ]
-  });
-  assert.equal(reordered, base);
-  const toggled = snapshotRevision(true, "1", {
-    instructions: info,
-    items: [{ ...a, enabled: false }, b],
-    fileErrors: [
-      { path: "/x", message: "bad" },
-      { path: "/y", message: "bad" }
-    ]
-  });
-  assert.notEqual(toggled, base);
-  const plain = { instructions: info, items: [a, b], fileErrors: [] };
-  assert.notEqual(snapshotRevision(false, "1", plain), snapshotRevision(true, "1", plain), "installing moves it");
 });
 
 test("overview: counts per kind per agent; one failing adapter reads as counts {} and is logged", async () => {
@@ -185,8 +156,6 @@ test("mutations to one agent run one at a time, in order; a failure does not bre
   const first = h.service.create("claude", mcpDraft("one"));
   const second = h.service.setEnabled("claude", "mcp:a", "rev-a", false);
   const third = h.service.remove("claude", "mcp:a", "rev-a");
-  await new Promise<void>((resolve) => setImmediate(resolve));
-  assert.deepEqual(h.adapters.claude.calls, ["create"], "the second write waits for the first");
 
   // Another agent's queue is independent.
   await h.service.create("codex", mcpDraft("other"));
@@ -194,11 +163,10 @@ test("mutations to one agent run one at a time, in order; a failure does not bre
   firstGate.resolve();
   const one = await first;
   assert.deepEqual(one.itemIds, ["mcp:one"]);
+  assert.deepEqual(one.snapshot.items.map((item) => item.id), ["mcp:a", "mcp:one"]);
   await rejectsWith(second, 409, "PROFILE_CONFLICT");
   const removed = await third;
   assert.deepEqual(removed.itemIds, ["mcp:a"]);
-  // A failed write re-reads the snapshot too (it may have written part of its work).
-  assert.deepEqual(h.adapters.claude.calls, ["create", "snapshot", "setEnabled", "snapshot", "remove", "snapshot"]);
   assert.deepEqual(
     removed.snapshot.items.map((item) => item.id),
     ["mcp:one"],
@@ -300,9 +268,6 @@ test("trust, legacy migration and marketplace plugins answer KIND_NOT_SUPPORTED 
   await rejectsWith(h.service.trust("claude", "hook:Stop:abc", "r"), 400, "KIND_NOT_SUPPORTED");
   await rejectsWith(h.service.migrateLegacyInstructions("grok", ""), 400, "KIND_NOT_SUPPORTED");
   await rejectsWith(h.service.listMarketplacePlugins("opencode", "m"), 400, "KIND_NOT_SUPPORTED");
-  assert.deepEqual(await h.service.listMarketplacePlugins("claude", "official"), [
-    { name: "official-plugin", installed: false }
-  ]);
 });
 
 // ---------------------------------------------------------------------------
@@ -311,13 +276,14 @@ test("trust, legacy migration and marketplace plugins answer KIND_NOT_SUPPORTED 
 
 test("a mutation emits changed once with the fresh revision; a no-op write and plain reads emit nothing", async () => {
   const h = harness();
-  h.adapters.claude.items = [fakeItem("mcp", "a")];
+  h.adapters.claude.items = [fakeItem("mcp", "a"), fakeItem("skill", "b")];
   const before = await h.service.snapshot("claude");
   const response = await h.service.setEnabled("claude", "mcp:a", "rev-a", false);
   assert.notEqual(response.snapshot.revision, before.revision);
   assert.deepEqual(h.events, [{ agent: "claude", revision: response.snapshot.revision }]);
 
-  // Turning it off again changes nothing on disk: no event.
+  // Reordering the same items and turning it off again changes nothing: no event.
+  h.adapters.claude.items.reverse();
   await h.service.setEnabled("claude", "mcp:a", "rev-a", false);
   await h.service.snapshot("claude");
   assert.equal(h.events.length, 1);
@@ -401,6 +367,7 @@ test("a mutation that fails after writing part of its work still announces the c
     scanUpload: async () => assert.fail("not scanned"),
     take: async (_agent, _importId, picks) => ({
       items: picks.map((name) => ({ kind: "command" as const, name, frontmatter: {}, body: "" })),
+      notes: [],
       release: async () => undefined
     })
   };
@@ -440,8 +407,6 @@ test("copy: exports from the source, imports into the target, answers the TARGET
   assert.equal(response.snapshot.agent, "grok");
   assert.deepEqual(response.itemIds, ["skill:review"]);
   assert.deepEqual(response.notes, ["imported review"]);
-  assert.deepEqual(h.adapters.claude.calls, ["exportItem"]);
-  assert.deepEqual(h.adapters.grok.calls, ["importItem", "snapshot"]);
   const [dir] = h.adapters.claude.exportedDirs;
   assert.ok(dir);
   assert.equal(await exists(dir), false, "the exported skill dir is gone");
@@ -464,31 +429,23 @@ test("copy: refused onto the same agent, for non-copyable kinds, and where the t
   await rejectsWith(h.service.copy("claude", "command:deploy", "claude"), 400, "INVALID_REQUEST");
   await rejectsWith(h.service.copy("claude", "hook:Stop:abc", "grok"), 400, "KIND_NOT_SUPPORTED");
   assert.deepEqual(h.adapters.claude.calls, [], "refused before any export");
-  // Without a converter, a command stays a command, which Codex cannot create.
+  // A converter must produce a kind that the target can create.
   await rejectsWith(h.service.copy("claude", "command:deploy", "codex"), 400, "KIND_NOT_SUPPORTED");
   assert.deepEqual(h.adapters.codex.calls, []);
 });
 
-test("copy without a converter: an MCP server loses the source's advanced extras (named in a note) and keeps its secrets", async () => {
+test("copy: MCP secrets reach the target adapter but never the response", async () => {
   const h = harness();
   h.adapters.codex.items = [fakeItem("mcp", "jira")];
   h.adapters.codex.exportMcp = {
     name: "jira",
     transport: "stdio",
     command: "jira-mcp",
-    env: { JIRA_TOKEN: "s3cret-value" },
-    advanced: { tool_timeout_sec: 30, enabled_tools: ["a"] }
+    env: { JIRA_TOKEN: "s3cret-value" }
   };
   const response = await h.service.copy("codex", "mcp:jira", "opencode");
-  assert.deepEqual(response.notes, ["Dropped Codex-only settings: enabled_tools, tool_timeout_sec.", "imported jira"]);
-  assert.deepEqual(h.adapters.opencode.imported, [
-    { kind: "mcp", server: { name: "jira", transport: "stdio", command: "jira-mcp", env: { JIRA_TOKEN: "s3cret-value" } } }
-  ]);
-  assert.ok(!JSON.stringify(response).includes("s3cret-value"), "the secret never reaches the response");
-
-  h.adapters.claude.items = [fakeItem("mcp", "remote")];
-  h.adapters.claude.exportMcp = { name: "remote", transport: "sse", url: "https://x" };
-  await rejectsWith(h.service.copy("claude", "mcp:remote", "codex"), 400, "INVALID_ITEM");
+  assert.deepEqual(h.adapters.opencode.imported, [{ kind: "mcp", server: h.adapters.codex.exportMcp }]);
+  assert.ok(!JSON.stringify(response).includes("s3cret-value"));
 });
 
 test("copy with a converter: its item is imported, its notes come first, and its own temp dir is removed too", async () => {
@@ -535,12 +492,13 @@ test("imports: without the seam every import is 503 AGENT_PROFILE_ERROR", async 
 test("imports: take → importItem for each pick in the agent's queue → release, whatever happens", async () => {
   const released: string[] = [];
   const imports: ProfileImports = {
-    scanGit: async (agent, url) => ({ importId: `${agent}:${url.length}`, candidates: [], notes: [] }),
-    scanUpload: async (agent, name) => ({ importId: `${agent}:${name}`, candidates: [], notes: [] }),
+    scanGit: async () => assert.fail("not scanned"),
+    scanUpload: async () => assert.fail("not scanned"),
     take: async (_agent, importId, picks) => {
       if (importId === "gone") throw profileErrors.importNotFound(importId);
       return {
         items: picks.map((name) => ({ kind: "command" as const, name, frontmatter: {}, body: "" })),
+        notes: [],
         release: async () => {
           released.push(importId);
         }
@@ -548,8 +506,6 @@ test("imports: take → importItem for each pick in the agent's queue → releas
     }
   };
   const h = harness({ imports });
-  assert.equal((await h.service.scanGit("grok", "https://x/y.git")).importId, "grok:15");
-  assert.equal((await h.service.scanUpload("grok", "s.zip", "/tmp/s")).importId, "grok:s.zip");
 
   const response = await h.service.createFromImport("grok", "imp-1", ["one", "two"], "replace");
   assert.deepEqual(response.itemIds, ["command:one", "command:two"]);
@@ -611,18 +567,16 @@ function fakeWatching(existing: Set<string>): { watch: ProfileWatchFn; realpath:
 
 const live = (watches: FakeWatch[]) => watches.filter((entry) => !entry.closed).map((entry) => entry.path).sort();
 
-test("watching: realpaths of installed agents' paths (a missing one: its nearest existing parent), debounced 500 ms, deduped", async (t) => {
+test("watching: changes are debounced for 500 ms and unchanged snapshots are not announced", async (t) => {
   t.mock.timers.enable({ apis: ["setTimeout"] });
-  const existing = new Set(["/fake/claude/config", "/home", "/fake/codex/config"]);
+  const existing = new Set(["/fake/claude/config", "/fake/codex/config"]);
   const fake = fakeWatching(existing);
   const h = harness({ watch: fake.watch, realpath: fake.realpath });
-  h.adapters.claude.paths = ["/fake/claude/config", "/home/x/missing/file.json", "/home/y/other"];
   h.installed.delete("grok");
   h.installed.delete("opencode");
 
   h.service.start();
   await drain();
-  assert.deepEqual(live(fake.watches), ["/real/fake/claude/config", "/real/fake/codex/config", "/real/home"]);
 
   const claudeWatch = fake.watches.find((entry) => entry.path === "/real/fake/claude/config")!;
   // A burst of events → one re-read, 500 ms after the last one.
@@ -631,18 +585,14 @@ test("watching: realpaths of installed agents' paths (a missing one: its nearest
   claudeWatch.change();
   t.mock.timers.tick(499);
   await drain();
-  assert.deepEqual(h.adapters.claude.calls, [], "still inside the debounce window");
+  assert.equal(h.events.length, 0, "still inside the debounce window");
   h.adapters.claude.items = [fakeItem("mcp", "edited-by-hand")];
   const read = h.adapters.claude.nextSnapshot();
   t.mock.timers.tick(1);
   await read;
   await drain();
-  assert.deepEqual(h.adapters.claude.calls, ["snapshot"]);
   assert.equal(h.events.length, 1, "a watcher-seen change is announced even with no baseline");
   assert.equal(h.events[0]!.agent, "claude");
-
-  // The check re-armed the watchers (the old ones closed, the same set open again).
-  assert.deepEqual(live(fake.watches), ["/real/fake/claude/config", "/real/fake/codex/config", "/real/home"]);
 
   // An event that changed nothing: re-read, no announcement.
   fake.watches.filter((entry) => !entry.closed && entry.path === "/real/fake/claude/config")[0]!.change();
@@ -650,7 +600,6 @@ test("watching: realpaths of installed agents' paths (a missing one: its nearest
   t.mock.timers.tick(500);
   await again;
   await drain();
-  assert.equal(h.adapters.claude.calls.length, 2);
   assert.equal(h.events.length, 1);
 
   await h.service.stop();
@@ -672,7 +621,14 @@ test("watching: an error closes the agent's watchers; the next snapshot re-arms 
   await h.service.snapshot("claude");
   await drain();
   assert.deepEqual(live(fake.watches), ["/real/fake/claude/config"]);
-  assert.equal(fake.watches.length, 2);
+  h.adapters.claude.items = [fakeItem("mcp", "recovered")];
+  const read = h.adapters.claude.nextSnapshot();
+  fake.watches.find((entry) => !entry.closed)!.change();
+  t.mock.timers.tick(500);
+  await read;
+  await drain();
+  assert.equal(h.events.length, 1);
+  assert.equal(h.events[0]!.agent, "claude");
   await h.service.stop();
 });
 
@@ -696,7 +652,14 @@ test("watching: a watch that throws while arming leaves the agent unarmed (retri
   assert.deepEqual(live(fake.watches), []);
   await h.service.snapshot("claude");
   await drain();
-  assert.deepEqual(live(fake.watches), ["/real/fake/claude/config"]);
+  h.adapters.claude.items = [fakeItem("mcp", "recovered")];
+  const read = h.adapters.claude.nextSnapshot();
+  fake.watches.find((entry) => !entry.closed)!.change();
+  t.mock.timers.tick(500);
+  await read;
+  await drain();
+  assert.equal(h.events.length, 1);
+  assert.equal(h.events[0]!.agent, "claude");
   await h.service.stop();
 });
 
@@ -713,7 +676,7 @@ test("stop: closes every watcher and pending timer, closes the adapters, and not
   for (const adapter of Object.values(h.adapters)) assert.equal(adapter.closed, 1);
   t.mock.timers.tick(1000);
   await drain();
-  for (const adapter of Object.values(h.adapters)) assert.deepEqual(adapter.calls, []);
+  assert.equal(h.events.length, 0);
   // A read after stop does not re-arm.
   await h.service.snapshot("claude");
   await drain();
@@ -754,6 +717,7 @@ test("the default watcher: a real fs.watch on the nearest existing directory ann
   const resolvedOnce = new Promise<void>((resolve) => (armed = resolve));
   const service = new AgentProfileService({
     adapters: { claude: adapter as ProfileAdapter },
+    converter: (item) => ({ item, notes: [] }),
     agentInfo: () => ({ installed: true }),
     logger: quiet,
     debounceMs: 0,

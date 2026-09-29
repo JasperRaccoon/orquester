@@ -160,7 +160,7 @@ function canonicalize(value: unknown): unknown {
 }
 
 /** The timeout Codex runs (and hashes) a handler with. */
-export function effectiveTimeoutSec(snake: string, timeout: unknown): number {
+function effectiveTimeoutSec(snake: string, timeout: unknown): number {
   const short = SHORT_TIMEOUT_EVENTS.has(snake);
   let value = typeof timeout === "number" && Number.isFinite(timeout) ? Math.floor(timeout) : undefined;
   if (value === undefined) {

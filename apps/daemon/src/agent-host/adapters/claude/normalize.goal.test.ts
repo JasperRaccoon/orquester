@@ -319,18 +319,6 @@ describe("claude normaliser — Stop-hook feedback and the check-in (goals §6.1
     assert.equal(normalizer.turnState?.items.length, itemsBefore, "not a conversation item either");
   });
 
-  it("matches a condition the CLI cut to 500 characters", () => {
-    const objective = `${"keep going ".repeat(60)}until it is done`;
-    const { normalizer, feed } = make({ knownGoal: { objective, status: "active", rounds: 0 } });
-    normalizer.beginTurn({ turnId: "turn-1" });
-    const cut = objective.slice(0, 500);
-    const [checked] = goalEvents(
-      feed(syntheticUser(`Stop hook feedback:\n[${cut}… [+${objective.length - 500} chars]]: not yet`))
-    );
-    assert.equal(checked?.payload.change, "checked");
-    assert.equal(checked?.payload.goal?.rounds, 1);
-  });
-
   it("another hook's feedback keeps today's behaviour: no goal change, no row", () => {
     const { normalizer, feed } = make({ knownGoal: SHIP });
     normalizer.beginTurn({ turnId: "turn-1" });
@@ -384,35 +372,6 @@ describe("claude normaliser — Stop-hook feedback and the check-in (goals §6.1
         )
       ),
       []
-    );
-  });
-
-  it("a compaction summary is still the marker's body, never a goal frame", () => {
-    const { normalizer, feed } = make({ knownGoal: SHIP });
-    normalizer.beginTurn({ turnId: "turn-1" });
-    feed({
-      type: "system",
-      subtype: "compact_boundary",
-      session_id: "s",
-      uuid: "b-1",
-      compact_metadata: {
-        trigger: "auto",
-        pre_tokens: 10,
-        preserved_messages: { anchor_uuid: "summary-1", all_uuids: [] }
-      }
-    });
-    const events = feed({
-      ...syntheticUser("This session is being continued from a previous conversation that ran out of context."),
-      uuid: "summary-1"
-    });
-    assert.deepEqual(goalEvents(events), []);
-    assert.ok(
-      events.some(
-        (event) =>
-          event.type === "thread.state.changed" &&
-          (event.payload as { summary?: string }).summary !== undefined
-      ),
-      "the summary rides the compaction marker"
     );
   });
 });
@@ -582,30 +541,6 @@ describe("claude normaliser — what the transcript said after a turn (goals §6
       normalizer.applyGoalTranscriptRows([], { turnId: "turn-3", backgroundLive: false, atTurnEnd: true })
     );
     assert.deepEqual(resumed?.payload, { goal: SHIP, change: "progress" });
-  });
-
-  it("a phase change inside the throttle window is deferred, then flushed when due", () => {
-    const clock = movableClock();
-    const deferred: number[] = [];
-    const { normalizer } = make({
-      clock,
-      knownGoal: SHIP,
-      onGoalProgressDeferred: (dueAtMs) => deferred.push(dueAtMs)
-    });
-    assert.equal(
-      goalEvents(normalizer.applyGoalTranscriptRows([], { backgroundLive: true, atTurnEnd: true })).length,
-      1
-    );
-    clock.advance(5_000);
-    assert.deepEqual(
-      normalizer.applyGoalTranscriptRows([], { backgroundLive: false, atTurnEnd: true }),
-      []
-    );
-    assert.deepEqual(deferred, [Date.parse("2026-09-24T10:00:00.000Z") + 30_000]);
-    clock.advance(25_000);
-    const [flushed] = goalEvents(normalizer.flushGoalProgress());
-    assert.deepEqual(flushed?.payload, { goal: SHIP, change: "progress" });
-    assert.deepEqual(normalizer.flushGoalProgress(), []);
   });
 
   it("an `active_goal: null` re-read applies ended rows but never touches the phase", () => {

@@ -1,8 +1,7 @@
 # Deploy templates
 
 Server-config templates for running the orquester daemon on a VPS behind Caddy.
-See `docs/superpowers/specs/2026-06-19-remote-vps-deployment-design.md` (Phase 0)
-and `docs/superpowers/plans/2026-06-19-remote-phase0-vps-provisioning.md`.
+Use the repository-root `./deploy.sh` for provisioning and deployment commands.
 
 - `orquester.service` → `/etc/systemd/system/orquester.service`
   - Runs the daemon via `node --import tsx` (the repo is `noEmit`; no dist build).
@@ -17,13 +16,12 @@ and `docs/superpowers/plans/2026-06-19-remote-phase0-vps-provisioning.md`.
 - `devtools-user.sh` → user-space tool installer (no root); also runnable from a session to refresh
   `uv`/`cargo-audit` in the appdir.
 - `sudoers.d/orquester-pkg` → scoped passwordless sudo (`apt`/`apt-get`/`dpkg`) for the service user.
-  ≈root — see `docs/superpowers/specs/2026-07-01-vps-session-devtools-scoped-sudo-design.md`.
+  These package-management commands effectively grant root access.
 - `targets.conf.example` → copy to `deploy/targets.conf` (**gitignored** — real hosts, never committed)
   and fill in one `[name]` section per VPS.
 - `lib/` → helpers for the repo-root `./deploy.sh` (deploy / provision / verify / rollback / logs /
   rotate-password): `common.sh` (targets.conf parser, ssh/scp helpers, output) plus the payloads
   `remote-update.sh` and `remote-provision.sh`, which are `scp`'d to the VPS and run there.
-  Design: `docs/superpowers/specs/2026-07-25-deploy-sh-lifecycle-tool-design.md`.
 
 `./deploy.sh provision <target>` installs the templates above onto a fresh VPS; the rest of this
 file documents what those templates are for.

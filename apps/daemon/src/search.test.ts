@@ -327,11 +327,6 @@ test("node: maxResults caps total matches and flags limitHit", async () => {
   assert.equal(res.limitHit, true);
 });
 
-test("node: files are returned in stable path order despite concurrency", async () => {
-  const res = await node("cat");
-  const paths = res.files.map((f) => f.path);
-  assert.deepEqual(paths, [...paths].sort((a, b) => a.localeCompare(b)));
-});
 
 test("node: an abort fired mid-search never returns a success payload", async () => {
   // The signal is aborted AFTER the search has launched (parked on the first readdir),

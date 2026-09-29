@@ -55,7 +55,7 @@ function parseUsage(value: unknown): AgentUsage | null {
 }
 
 /** One persisted entry, or undefined when it does not parse. */
-export function parseUsageRecord(value: unknown): ClaudeUsageRecord | undefined {
+function parseUsageRecord(value: unknown): ClaudeUsageRecord | undefined {
   if (!value || typeof value !== "object") return undefined;
   const row = value as Record<string, unknown>;
   return {

@@ -16,7 +16,9 @@ questions and tool approvals; read status,
 transcripts, a tool call's whole output, subagents and per-turn diffs; search the text of every
 chat; wait until a session needs attention; and read quota and estimated cost. The shared todo lists
 and sandboxed file reads are there too. That is **31 tools** (§6) — plus **13 automated-workflow
-tools** that build, edit, run and inspect the daemon's n8n-like workflows (§12), 44 in all.
+tools** that build, edit, run and inspect the daemon's n8n-like workflows (§12), and **13
+agent-profile tools** that manage each agent CLI's own global MCP servers, skills, plugins,
+marketplaces, hooks, commands and instruction file (§13): 57 in all.
 
 Apart from the todo and file tools, which use the daemon's todo store and its sandboxed file
 reader directly, the tools are a thin in-process client of the daemon's own REST API: every call
@@ -1145,6 +1147,13 @@ would be lost. Tick items with `toggle_todo_item` (it edits the full stored body
 `get_workflow_run`, `cancel_workflow_run`, `list_workflow_secrets` and `set_workflow_secret` —
 see §12.
 
+### Agent profiles
+
+`list_agent_profiles`, `get_agent_profile`, `get_agent_profile_item`, `create_agent_profile_item`,
+`update_agent_profile_item`, `set_agent_profile_item_enabled`, `delete_agent_profile_item`,
+`copy_agent_profile_item`, `trust_agent_profile_hook`, `get_agent_instructions`,
+`write_agent_instructions`, `import_agent_profile_items` and `list_marketplace_plugins` — see §13.
+
 ---
 
 ## 7. Workflows
@@ -1462,6 +1471,9 @@ stays open.
 - **Some calls cannot be undone.** `close_session` deletes the chat thread (the provider's
   transcript stays resumable, OpenCode's aside); `revert_session` drops turns from the conversation
   and does not restore files.
+- **Agent-profile writes reach every later session.** An MCP server, hook, plugin or instruction
+  text added through §13 is loaded by every later session of that CLI on the host, and hooks and
+  stdio MCP servers run commands — treat these tools like editing the owner's shell profile.
 
 `read_file`/`list_files` widen the read surface: file contents inside the sandbox (including
 `.env`s or tokens developers keep in workspaces) flow to the driving model, exactly like transcript
@@ -1749,7 +1761,185 @@ update_workflow { "workflowId": "5f0c…", "revision": 1, "ops": [{ "op": "set_e
 
 ---
 
+## 13. Agent profiles
+
+Orquester's right rail has an **Agent profile** panel that edits each agent CLI's *own* global
+configuration: MCP servers, skills, plugins, plugin marketplaces, hooks, slash commands and the
+global instruction file (Claude's `~/.claude/CLAUDE.md`; Codex's, Grok's and OpenCode's
+`AGENTS.md`). These 13 tools do the same, for `claude`, `codex`, `grok` and `opencode`. They are
+clients of the daemon's `/api/agent-profile*` routes — the panel's own — so every write goes to the
+CLI's native file through the same adapter, backup and validation, and shows up live in the panel.
+The CLIs' files stay the only source of truth: what a tool writes is what the next session of that
+CLI loads.
+
+### Tools
+
+| Tool | Input | Returns |
+|---|---|---|
+| `list_agent_profiles` | `installedOnly? = false` | `{agents: [{agent, label, installed, version?, counts: {mcp?, skill?, plugin?, marketplace?, hook?, command?}}]}` |
+| `get_agent_profile` | `agent`, `kind?`, `query?` | `{agent, label, installed, version?, counts, instructions, fileErrors?, authoring, matched, truncated, items: [Item], omitted?, note?}` |
+| `get_agent_profile_item` | `agent`, `id` | `{agent, item: Item + path?}` and, by kind, `mcp` (secrets as keys), `document: {frontmatter, body}` + `files?` (skill/command; `bodyTruncated?`), `hook`, `plugin` or `marketplace` |
+| `create_agent_profile_item` | `agent`, exactly one of `mcp`, `skill`, `command`, `hook`, `plugin`, `marketplace`; `onConflict? = "fail"` | `{created: true, agent, kind, itemIds, notes, items: [Item]}` |
+| `update_agent_profile_item` | `agent`, `id`, `revision?`, exactly one of `mcp`, `skill`, `command`, `hook` (the item's kind) | `{updated: true, agent, previousId, itemIds, notes, items}` |
+| `set_agent_profile_item_enabled` | `agent`, `id`, `enabled`, `revision?` | `{enabled, agent, itemIds, notes, items}` |
+| `delete_agent_profile_item` | `agent`, `id`, `revision?`, `confirm: true` | `{deleted: true, agent, id, notes}` |
+| `copy_agent_profile_item` | `agent`, `id`, `toAgent`, `onConflict? = "fail"` | `{copied: true, fromAgent, fromId, agent: <toAgent>, itemIds, notes, items}` |
+| `trust_agent_profile_hook` | `agent`, `id`, `revision?` | `{trusted: true, agent, itemIds, notes, items}` — Codex hooks only |
+| `get_agent_instructions` | `agent`, `offset? = 0` | `{agent, instructions: {path, exists, bytes, lines, mtime?, revision, warnings?}, totalChars, text, truncated?, nextOffset?}` |
+| `write_agent_instructions` | `agent`, `text`, `revision?` | `{written: true, agent, instructions, notes}` |
+| `import_agent_profile_items` | `agent`, then either `url` (scan) or `importId` + `picks` (import); `onConflict? = "fail"` | scan: `{scanned: true, importId, candidates: [{ref, kind, name, description?, exists}], notes, next}`; import: `{imported: true, itemIds, notes, items}` |
+| `list_marketplace_plugins` | `agent`, `marketplace` | `{agent, marketplace, plugins: [{name, description?, version?, installed}]}` |
+
+An **Item** is `{id, kind, name, description?, enabled, stashed?, source, sourceType, ownerAgent?,
+pluginId?, locked, toggleable, editable, deletable, warnings?, meta?, revision}`:
+
+- **`id`** is stable and content-derived: `<kind>:<name>` (`mcp:jira`, `skill:handoff`,
+  `plugin:superpowers@claude-plugins-official`), hooks `hook:<event>:<16 hex>` — so **a hook's id
+  changes when it is edited**, and a rename changes any item's id: a write's `itemIds` names the
+  new one.
+- **`source`** says where it comes from (`User`, `Plugin · superpowers`, `From Claude`,
+  `Orquester`…) and `sourceType` its class: `user` items are yours to edit; `plugin`, `inherited`,
+  `bundled`, `orquester` and `cli` items are managed elsewhere — `editable`, `toggleable` and
+  `deletable` say what the daemon will allow (it answers `NOT_EDITABLE`, `NOT_TOGGLEABLE`,
+  `NOT_DELETABLE` or `ITEM_LOCKED` otherwise).
+- **`warnings`** are the panel's amber chips: `{code, message, action?}` — `action: "trust"` on a
+  Codex hook Codex will not run until trusted (`trust_agent_profile_hook`).
+- **`fileErrors`** (on `get_agent_profile`) lists config files the daemon could not parse: the list
+  is partial, and every write to such a file answers `CONFIG_UNREADABLE` until it is fixed by hand.
+
+`get_agent_profile`'s **`authoring`** tells you what the agent accepts before you write:
+`kinds`, `creatableKinds` (Codex cannot create commands; OpenCode has no hooks or marketplaces),
+`copyableKinds` (`mcp`, `skill`, `command`), `mcpTransports`, `mcpAdvancedFields` (the per-agent
+extras, e.g. Codex `startup_timeout_sec`, `enabled_tools`), `hookEvents` and `frontmatterFields`
+for skills and commands. `kind` narrows the list to one kind; `query` keeps items whose id, name,
+description or source contains the text (case-insensitive). A list too big for one result keeps
+its head: `truncated: true`, `omitted`, and a note to narrow it.
+
+### Creating and editing
+
+`create_agent_profile_item` takes the object named after the kind:
+
+- **`mcp`**: `{name, transport?, command?, args?, cwd?, env?, url?, headers?, advanced?}` —
+  `transport` defaults to `http` when `url` is given, else `stdio`; stdio takes `command`, `args`,
+  `cwd`, `env`; http/sse take `url`, `headers` (the other side's fields are refused). **`env` and
+  `headers` are `{KEY: value}` maps.** Names: a letter or `_`, then letters, digits, `_`, `-`.
+- **`skill`** / **`command`**: `{name, frontmatter?, body?}` — a skill needs
+  `frontmatter.description`; a command's name may have one folder level (`git/pr`).
+- **`hook`**: `{event, matcher?, command, timeoutSec?}` — `event` from `authoring.hookEvents`.
+- **`plugin`**: `{plugin, marketplace}` (from `list_marketplace_plugins`), or OpenCode's `{spec}`
+  (an npm spec or a file path).
+- **`marketplace`**: `{name?, source: {type: "github", repo: "owner/repo", ref?} | {type: "git",
+  url, ref?} | {type: "path", path}}`.
+
+`onConflict` decides a name collision: `fail` (the default — `ITEM_EXISTS`), `replace`, or
+`keep-both` (the new one gets a suffixed name).
+
+`update_agent_profile_item` takes the object named after **the item's own kind** (`mcp`, `skill`,
+`command` or `hook`; plugins and marketplaces cannot be edited — remove and reinstall) with **only
+what changes**; everything you leave out keeps its current value:
+
+- a new `name` renames the item (`itemIds` has the new id, `previousId` the old);
+- **MCP `env` / `headers`: a key set to a string sets or replaces that value, a key set to `null`
+  is removed, and every key you do not mention is kept as it is** (the tool sends it as
+  `{key, keep: true}`, so its value never leaves the daemon). `args` replaces the whole list;
+  `cwd: null` removes it; `advanced` keys merge the same way (`null` removes one). Switching
+  between stdio and http/sse drops the old side's fields — send `command` or `url` for the new one;
+- skill/command `frontmatter`: only the keys you name change, `null` removes one; `body` is the
+  whole new body — omit it to keep the current one;
+- hook `matcher: null` / `timeoutSec: null` remove them.
+
+```
+update_agent_profile_item { "agent": "codex", "id": "mcp:jira",
+  "mcp": { "env": { "JIRA_API_TOKEN": "<new token>", "JIRA_EMAIL": null } } }
+→ { "updated": true, "agent": "codex", "previousId": "mcp:jira", "itemIds": ["mcp:jira"], "notes": [],
+    "items": [{ "id": "mcp:jira", "kind": "mcp", "name": "jira", "enabled": true, "source": "User", …, "revision": "9c1e…" }] }
+```
+
+Here `JIRA_API_TOKEN` is replaced, `JIRA_EMAIL` removed, and any other key (say `JIRA_URL`) kept.
+
+`set_agent_profile_item_enabled` turns an item off natively where the CLI has a switch, or moves it
+to Orquester's stash (and back) where it has none (`stashed: true` while off).
+`delete_agent_profile_item` needs `confirm: true` (Orquester keeps a backup of every file it
+rewrites, but nothing here restores one). `copy_agent_profile_item` converts an MCP server, skill
+or command to another agent's format — MCP secret values move daemon-side, never through you — and
+names in `notes` what the target could not hold (a Codex copy of a command becomes a skill).
+
+### Revisions
+
+Every item has a `revision` (a hash of its content and on/off state), and so does the instruction
+file. **`revision` is optional on every write:** when you omit it, the tool reads the current one
+just before writing — right for most edits. Pass the revision you read when you want the write to
+fail if someone (the owner in the panel, the CLI itself) changed the item in between: the daemon
+then answers **`PROFILE_CONFLICT`**, and the tool adds the item's fresh summary under
+`detail.item` (or `detail.itemGone: true` when it no longer exists under that id) — re-check, then
+retry with the new revision. `write_agent_instructions`' conflict carries `detail.instructions`
+(the file's current info); its `revision: ""` means "the file must not exist yet".
+
+### Instructions
+
+`get_agent_instructions` returns the whole file when it fits; a longer one comes in pages —
+`truncated: true`, and `nextOffset` to pass back as `offset`. `write_agent_instructions` **replaces
+the whole file**: read it, change it, send the complete text — never a partial or a cut page.
+
+### Imports from Git
+
+Two calls. First `{agent, url}`: the daemon clones the repository (https or ssh; a
+`…/tree/<ref>/<path>` URL picks a folder; a URL with credentials in it is refused — use ssh or the
+host's own git credentials) and scans it for skills (folders with a `SKILL.md`) and commands (`.md`
+files) → `{importId, candidates: [{ref, kind, name, exists}]}`. Then `{agent, importId, picks:
+[ref…], onConflict?}` imports those candidates; a candidate with `exists: true` needs `replace` or
+`keep-both`. A scan is single-use and expires after 15 minutes (`IMPORT_NOT_FOUND`: scan again).
+The URL is never echoed back. (The panel's zip/markdown upload is not exposed over the MCP.)
+
+### Secrets
+
+**MCP env and header values are write-only.** A tool takes them as `{KEY: value}` maps and passes
+them to the daemon, which writes them into the CLI's own config file; no result, error or log ever
+contains a value — every view of a server lists `{key, set: true}` only (the tool rebuilds each
+entry from its key, whatever the route sends). Credentials written into an MCP server's or a git
+marketplace's URL (`https://user:token@host/…`) are shown as `https://***@host/…`; an update that
+does not name `url` keeps the real one. But **the values you pass stay in your own
+transcript and tool logs**: prefer asking the user to enter secrets in the Orquester UI, and use
+`update_agent_profile_item` with the keys you do not touch left out rather than resending them.
+
+### Errors
+
+The daemon's codes pass through unchanged, a hint appended where a tool helps: `UNKNOWN_AGENT`,
+`AGENT_NOT_INSTALLED` (`list_agent_profiles`), `KIND_NOT_SUPPORTED` (`authoring.creatableKinds`),
+`ITEM_NOT_FOUND` (`get_agent_profile`), `ITEM_EXISTS` (`onConflict`), `ITEM_LOCKED`,
+`NOT_EDITABLE`, `NOT_TOGGLEABLE`, `NOT_DELETABLE`, `INVALID_NAME`, `INVALID_ITEM` (the agent's own
+rule, e.g. OpenCode needs a skill description), `INVALID_REQUEST`, `PROFILE_CONFLICT` (above),
+`CONFIG_UNREADABLE`, `STASH_CONFLICT`, `AGENT_CLI_FAILED` (a CLI call such as a plugin install
+failed; its redacted stderr is in the message), `WRITE_VERIFY_FAILED` (the file no longer parsed
+and was restored), `IMPORT_NOT_FOUND`, `IMPORT_FAILED`, `AGENT_PROFILE_ERROR`. Argument problems
+the tool catches itself — no kind object or two of them, a stdio field on an http server — are
+`INVALID_ARGUMENT`.
+
+### Example: add an MCP server to every installed agent
+
+```
+list_agent_profiles { "installedOnly": true }
+→ { "agents": [ { "agent": "claude", "installed": true, "version": "2.1.3", "counts": { "mcp": 3, "skill": 12 } },
+                { "agent": "opencode", "installed": true, "counts": { "mcp": 2, "skill": 4 } } ] }
+
+create_agent_profile_item { "agent": "claude",
+  "mcp": { "name": "jira", "command": "node", "args": ["/srv/jira/index.js"], "env": { "JIRA_API_TOKEN": "<token>" } } }
+→ { "created": true, "agent": "claude", "kind": "mcp", "itemIds": ["mcp:jira"], "notes": [], "items": [ { "id": "mcp:jira", … } ] }
+
+copy_agent_profile_item { "agent": "claude", "id": "mcp:jira", "toAgent": "opencode" }
+→ { "copied": true, "fromAgent": "claude", "agent": "opencode", "itemIds": ["mcp:jira"],
+    "notes": ["OpenCode servers restart when idle to pick this up."], "items": [ … ] }
+
+get_agent_profile_item { "agent": "opencode", "id": "mcp:jira" }
+→ { "agent": "opencode", "item": { … },
+    "mcp": { "name": "jira", "transport": "stdio", "command": "node", "args": ["/srv/jira/index.js"],
+             "env": [ { "key": "JIRA_API_TOKEN", "set": true } ] }, "secretsNote": "…" }
+```
+
+---
+
 *Design reference: `docs/superpowers/specs/2026-09-22-orquester-mcp-v2-design.md`.
 Implementation: `apps/daemon/src/mcp/` — `server.ts` (the mount and the tool list), `daemon-api.ts`
 (the in-process client), `views.ts`, `transcript.ts`, `wait.ts`, `attachments.ts` and `tools/`
-(`tools/workflows.ts` for §12; its design: `docs/superpowers/specs/2026-09-28-automated-workflows-design.md` §8).*
+(`tools/workflows.ts` for §12; its design: `docs/superpowers/specs/2026-09-28-automated-workflows-design.md` §8;
+`tools/agent-profile.ts` for §13, over the routes of `docs/superpowers/specs/2026-09-28-agent-profile-design.md` §8).*

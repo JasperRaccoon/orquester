@@ -69,7 +69,6 @@ import { redactStderr } from "../support/stderr.ts";
 import { DeadlineExceededError, withDeadline } from "../support/deadline.ts";
 import type { Orchestrator } from "../orchestration/orchestrator.ts";
 import {
-  agentHostExtraRoutes,
   type AgentHostThreadSummary,
   type AttachmentPathResponse
 } from "./extra-routes.ts";
@@ -125,7 +124,6 @@ export interface AgentHostServer {
   listen(): Promise<void>;
   close(): Promise<void>;
   readonly server: Server;
-  readonly openStreams: number;
 }
 
 function constantTimeEquals(left: string, right: string): boolean {
@@ -316,17 +314,6 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       ...(options.secretLiterals !== undefined ? { literals: options.secretLiterals } : {})
     });
   const streams = new Set<ThreadStream>();
-
-  const handleCommand = async (
-    response: ServerResponse,
-    request: IncomingMessage,
-    threadId: string,
-    name: AgentChatCommandName
-  ): Promise<void> => {
-    const body = await readJsonBody(request);
-    const receipt = await orchestrator.command(threadId, name, body);
-    sendJson(response, 200, receipt);
-  };
 
   const handleAttachmentUpload = async (
     request: IncomingMessage,
@@ -825,7 +812,9 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
 
     const commandName = rest.slice(1);
     if (method === "POST" && COMMAND_NAMES.has(commandName)) {
-      await handleCommand(response, request, threadId, commandName as AgentChatCommandName);
+      const body = await readJsonBody(request);
+      const receipt = await orchestrator.command(threadId, commandName as AgentChatCommandName, body);
+      sendJson(response, 200, receipt);
       return;
     }
 
@@ -869,9 +858,6 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
 
   return {
     server,
-    get openStreams() {
-      return streams.size;
-    },
     async listen(): Promise<void> {
       if (!socketPath.startsWith("\\\\.\\pipe\\")) {
         await mkdir(dirname(socketPath), { recursive: true });

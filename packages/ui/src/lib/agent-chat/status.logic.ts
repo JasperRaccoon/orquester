@@ -1,10 +1,10 @@
 /**
- * Agent chat — the status line, the §6.4 activity ladder and the context-window
- * meter (spec §6.4, §7.6, §7.7).
+ * Agent chat — status labels, sidebar receding and context-window activity
+ * selection (spec §6.4, §7.6, §7.7).
  *
  * Ported from T3 Code (MIT): `packages/shared/src/agentAwareness.ts:76-113`
  * (the ladder and both race fallbacks), `apps/web/src/lib/contextWindow.ts`
- * (`deriveLatestContextWindowSnapshot`, `formatContextWindowTokens`) and
+ * (`deriveLatestContextWindowSnapshot`) and
  * `apps/web/src/components/Sidebar.logic.ts` (unread, recede).
  *
  * The ladder lives here **once**: §6.4 says this ladder, and no per-surface
@@ -194,54 +194,6 @@ export function resolveActivityLabel(input: {
 // Context window (§7.6)
 // ---------------------------------------------------------------------------
 
-/**
- * Without `maxTokens` there is **no ring and no percentage, only a bare
- * total** — on an adapter with `reportsContextWindow: false` the meter
- * degrades rather than showing zeros (§7.6).
- *
- * *T3: `contextWindow.ts:28-75`.*
- */
-export interface ContextWindowSnapshot {
-  usedTokens: number;
-  maxTokens: number | null;
-  autoCompactAtTokens: number | null;
-  totalProcessedTokens: number | null;
-  remainingTokens: number | null;
-  usedPercentage: number | null;
-  remainingPercentage: number | null;
-  updatedAt: string | null;
-}
-
-export function contextWindowSnapshot(
-  usage: ThreadTokenUsage | null,
-  updatedAt: string | null = null
-): ContextWindowSnapshot | null {
-  if (!usage || !Number.isFinite(usage.usedTokens) || usage.usedTokens < 0) {
-    return null;
-  }
-  const maxTokens =
-    typeof usage.maxTokens === "number" && Number.isFinite(usage.maxTokens) && usage.maxTokens > 0
-      ? usage.maxTokens
-      : null;
-  const usedPercentage = maxTokens !== null ? Math.min(100, (usage.usedTokens / maxTokens) * 100) : null;
-  return {
-    usedTokens: usage.usedTokens,
-    maxTokens,
-    autoCompactAtTokens:
-      typeof usage.autoCompactAtTokens === "number" && Number.isFinite(usage.autoCompactAtTokens)
-        ? usage.autoCompactAtTokens
-        : null,
-    totalProcessedTokens:
-      typeof usage.totalProcessedTokens === "number" && Number.isFinite(usage.totalProcessedTokens)
-        ? usage.totalProcessedTokens
-        : null,
-    remainingTokens: maxTokens !== null ? Math.max(0, Math.round(maxTokens - usage.usedTokens)) : null,
-    usedPercentage,
-    remainingPercentage: usedPercentage !== null ? Math.max(0, 100 - usedPercentage) : null,
-    updatedAt
-  };
-}
-
 /** The latest `context-window.updated` activity, newest first. *T3: `contextWindow.ts:28-42`.* */
 export function latestContextWindowActivity(
   activities: readonly ThreadActivityItem[]
@@ -279,32 +231,4 @@ export function latestContextWindowActivity(
     return { usage, updatedAt: activity.createdAt };
   }
   return null;
-}
-
-/** *T3: `contextWindow.ts:77-90`.* */
-export function formatContextWindowTokens(value: number | null): string {
-  if (value === null || !Number.isFinite(value)) {
-    return "0";
-  }
-  if (value < 1_000) {
-    return `${Math.round(value)}`;
-  }
-  if (value < 10_000) {
-    return `${(value / 1_000).toFixed(1).replace(/\.0$/, "")}k`;
-  }
-  if (value < 1_000_000) {
-    return `${Math.round(value / 1_000)}k`;
-  }
-  return `${(value / 1_000_000).toFixed(1).replace(/\.0$/, "")}m`;
-}
-
-/** The auto-compaction sentence under the meter. *T3: `ContextWindowMeter.logic.ts:100-110`.* */
-export function autoCompactionSentence(snapshot: ContextWindowSnapshot | null): string | null {
-  if (!snapshot || snapshot.autoCompactAtTokens === null || snapshot.maxTokens === null) {
-    return null;
-  }
-  const at = formatContextWindowTokens(snapshot.autoCompactAtTokens);
-  return snapshot.usedTokens >= snapshot.autoCompactAtTokens
-    ? `Compacts automatically past ${at} tokens — the next turn may compact.`
-    : `Compacts automatically at ${at} tokens.`;
 }

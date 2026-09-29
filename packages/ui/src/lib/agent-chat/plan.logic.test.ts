@@ -2,11 +2,9 @@ import assert from "node:assert/strict";
 import { beforeEach,describe,it } from "node:test";
 
 import {
-buildProposedPlanMarkdownFilename,
 deriveActivePlanState,
 findLatestProposedPlan,
 hasActionableProposedPlan,
-PLAN_IMPLEMENTATION_PROMPT_PREFIX,
 planProgress,
 proposedPlanTitle,
 resolvePlanFollowUpSubmission,
@@ -75,8 +73,7 @@ describe("the implement/refine split button", () => {
   it("implements with an empty draft and leaves plan mode", () => {
     const result = resolvePlanFollowUpSubmission({ draftText: "   ", planMarkdown: "# Plan\nbody" });
     assert.equal(result.interactionMode, "default");
-    assert.ok(result.text.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX));
-    assert.ok(result.text.includes("# Plan"));
+    assert.equal(result.text, "PLEASE IMPLEMENT THIS PLAN:\n# Plan\nbody");
   });
 
   it("refines with draft text and stays in plan mode", () => {
@@ -124,8 +121,6 @@ describe("proposal helpers", () => {
   it("reads the title from the first heading", () => {
     assert.equal(proposedPlanTitle("# Ship it\nbody"), "Ship it");
     assert.equal(proposedPlanTitle("no heading"), null);
-    assert.equal(buildProposedPlanMarkdownFilename("# Ship it!"), "ship-it.md");
-    assert.equal(buildProposedPlanMarkdownFilename("no heading"), "plan.md");
   });
 
   it("picks the current turn's proposal, else the newest of any turn", () => {
@@ -136,46 +131,24 @@ describe("proposal helpers", () => {
   });
 });
 
-describe("what the plan card's Copy and Download hand over (§7.3)", () => {
-  /** The store's `readFullPlanMarkdown` stand-in: records which proposal it read. */
-  const reader = (answer: () => Promise<string>) => {
-    const reads: string[] = [];
-    return {
-      reads,
-      read: (plan: { id: string }) => {
-        reads.push(plan.id);
-        return answer();
-      }
-    };
-  };
-
-  it("is an intact plan's own markdown, answered at once with nothing read", () => {
-    const store = reader(async () => "never read");
-    const text = wholePlanMarkdown({ id: "p1", planMarkdown: "# Ship it\n\nstep" }, store.read);
-    // Synchronous, so the clipboard write stays inside the click.
+describe("the plan card's Copy and Download content", () => {
+  it("returns an intact plan synchronously without reading it", () => {
+    const text = wholePlanMarkdown({ id: "p1", planMarkdown: "# Ship it\n\nstep" }, async () => {
+      assert.fail("an intact plan must stay inside the clipboard gesture");
+    });
     assert.equal(text, "# Ship it\n\nstep");
-    assert.deepEqual(store.reads, []);
   });
 
-  it("reads a plan the wire cut (§5.6) back whole, by its proposal id", async () => {
-    const whole = `# Ship it\n\n${"step\n".repeat(4_000)}done`;
-    const store = reader(async () => whole);
-    const text = wholePlanMarkdown({ id: "p-cut", planMarkdown: "# Ship it\n\nstep…", truncated: true }, store.read);
-    assert.ok(text instanceof Promise, "a cut plan is read before anything is handed over");
-    assert.equal(await text, whole);
-    assert.deepEqual(store.reads, ["p-cut"]);
-  });
-
-  it("fails rather than ever hand over the cut text", async () => {
-    const store = reader(() =>
-      Promise.reject(new Error("The full plan could not be loaded, so nothing was sent. Try again."))
-    );
+  it("reads a truncated proposal by id and never falls back to its cut text", async () => {
+    const plan = { id: "p-cut", planMarkdown: "# Ship it\n\nstep…", truncated: true as const };
+    const whole = "# Ship it\n\nstep one\nstep two";
+    assert.equal(await wholePlanMarkdown(plan, async (requested) => {
+      assert.equal(requested.id, "p-cut");
+      return whole;
+    }), whole);
     await assert.rejects(
-      Promise.resolve(
-        wholePlanMarkdown({ id: "p-cut", planMarkdown: "# Ship it\n\nstep…", truncated: true }, store.read)
-      ),
-      /full plan could not be loaded/
+      Promise.resolve(wholePlanMarkdown(plan, async () => { throw new Error("Full plan unavailable"); })),
+      /Full plan unavailable/
     );
-    assert.deepEqual(store.reads, ["p-cut"]);
   });
 });

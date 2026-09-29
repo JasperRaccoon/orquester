@@ -11,7 +11,7 @@ import type {
   PluginInstallDraft
 } from "@orquester/api";
 
-export type PluginInstallMode = "marketplace" | "spec";
+type PluginInstallMode = "marketplace" | "spec";
 
 export function pluginInstallMode(agent: AgentProfileAgentId): PluginInstallMode {
   return agent === "opencode" ? "spec" : "marketplace";

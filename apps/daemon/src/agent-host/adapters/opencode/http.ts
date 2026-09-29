@@ -47,7 +47,7 @@ export class OpenCodeHttpError extends Error {
 }
 
 /** A transport failure — the server went away, DNS, a reset socket. */
-export class OpenCodeTransportError extends Error {
+class OpenCodeTransportError extends Error {
   readonly method: string;
   readonly path: string;
 
@@ -114,7 +114,7 @@ export function isOpenCodeNotFound(cause: unknown): boolean {
   return false;
 }
 
-export interface OpenCodeClientOptions {
+interface OpenCodeClientOptions {
   baseUrl: string;
   /** Absolute, already resolved — a bad directory is silently served, never rejected. */
   directory: string;
@@ -124,7 +124,7 @@ export interface OpenCodeClientOptions {
   fetchImpl?: typeof fetch;
 }
 
-export interface OpenCodeRequestOptions {
+interface OpenCodeRequestOptions {
   timeoutMs: number;
   /** Suppressed from the deadline label only; the path is enough for logs. */
   label?: string;
@@ -137,7 +137,7 @@ export interface OpenCodeRequestOptions {
  * `Authorization: Basic base64("opencode:<password>")` — the literal username
  * is load-bearing (fixtures README observation 20).
  */
-export function basicAuthHeader(password: string): string {
+function basicAuthHeader(password: string): string {
   return `Basic ${Buffer.from(`opencode:${password}`, "utf8").toString("base64")}`;
 }
 
@@ -154,17 +154,6 @@ export class OpenCodeClient {
     this.password = options.serverPassword;
     this.hostSignal = options.signal;
     this.doFetch = options.fetchImpl ?? fetch;
-  }
-
-  /** A client for the same server scoped to a different directory. */
-  withDirectory(directory: string): OpenCodeClient {
-    return new OpenCodeClient({
-      baseUrl: this.baseUrl,
-      directory,
-      ...(this.password !== undefined ? { serverPassword: this.password } : {}),
-      ...(this.hostSignal !== undefined ? { signal: this.hostSignal } : {}),
-      fetchImpl: this.doFetch
-    });
   }
 
   url(path: string, query?: Record<string, string | undefined>): string {

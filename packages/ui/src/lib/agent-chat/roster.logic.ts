@@ -36,29 +36,6 @@ export function isTerminalSubagentStatus(status: RuntimeSubagentStatus): boolean
 }
 
 /**
- * The three in-flight statuses — `pending`, `running`, `waiting` — all present
- * as **one steady "working" look**, because a queued or waiting subagent is
- * still the fleet doing its job. An **idle but resumable agent reads as settled
- * (muted)**, never as in-motion: a live-coloured idle dot reads as stuck.
- *
- * *T3: `AgentsPanel.tsx:32-49`.*
- */
-export type RosterRowLook = "working" | "settled" | "failed" | "stopped";
-
-export function rosterRowLook(status: RuntimeSubagentStatus): RosterRowLook {
-  if (isActiveSubagentStatus(status)) {
-    return "working";
-  }
-  if (status === "failed") {
-    return "failed";
-  }
-  if (status === "cancelled" || status === "interrupted") {
-    return "stopped";
-  }
-  return "settled";
-}
-
-/**
  * A **background shell's** second line (§7.6).
  *
  * A shell is not a subagent and must not be described like one: the agent
@@ -409,13 +386,6 @@ export function deriveRosterDockView(input: {
 // The liveness banner (§7.6)
 // ---------------------------------------------------------------------------
 
-export interface LivenessBannerView {
-  visible: boolean;
-  title: string;
-  /** "Stopping…" holds until `backgroundLiveness` clears, not until the command returns. */
-  stopLabel: string;
-}
-
 /**
  * The `working` banner's title, kind-aware like the roster's count line: a
  * background shell is not an agent, so "9 agents working" for eight subagents
@@ -432,30 +402,4 @@ export function workingLivenessTitle(liveAgentCount: number, liveShellCount = 0)
   if (agents > 0) return `${agentLabel} working`;
   if (shells > 0) return `${shellLabel} running`;
   return "Background work";
-}
-
-/**
- * While `backgroundLiveness` is non-null and **no turn is working**, a banner
- * sits in the notice stack at activity priority with one **Stop** button.
- * "N agents working" — or "Background work" when the live agent count is zero —
- * for `working`, "Monitoring" for `monitoring`.
- *
- * *T3: `apps/web/src/components/ChatView.tsx:6225-6303`.*
- */
-export function deriveLivenessBanner(input: {
-  backgroundLiveness: "working" | "monitoring" | null;
-  isTurnWorking: boolean;
-  liveAgentCount: number;
-  /** Background shells still running — named apart from the agents. */
-  liveShellCount?: number;
-  stopping: boolean;
-}): LivenessBannerView {
-  if (input.backgroundLiveness === null || input.isTurnWorking) {
-    return { visible: false, title: "", stopLabel: "Stop" };
-  }
-  const title =
-    input.backgroundLiveness === "monitoring"
-      ? "Monitoring"
-      : workingLivenessTitle(input.liveAgentCount, input.liveShellCount);
-  return { visible: true, title, stopLabel: input.stopping ? "Stopping…" : "Stop" };
 }

@@ -8,13 +8,14 @@
 
 import { escapePromptVariables, renderTemplate, WORKFLOW_LIMITS, type AgentBlockConfig, type AgentFailureReason } from "@orquester/api";
 import type { NodeExecutionContext, PromptRenderer } from "../contracts.ts";
+import { tailUtf8, truncateUtf8 } from "../run-context.ts";
 
 /** §5.1 step 3 — appended to every prompt this block sends while `autonomyNote` is on. */
-export const AUTONOMY_NOTE =
+const AUTONOMY_NOTE =
   "You are running unattended inside an automated workflow. No human will answer. Never ask questions or wait for confirmation; make reasonable decisions and complete the task fully.";
 
 /** §5.4 step 3 — the first message after an in-session account switch. */
-export const CONTINUE_AFTER_SWITCH =
+const CONTINUE_AFTER_SWITCH =
   "You were interrupted by a usage limit and have been moved to another account. Continue the task from exactly where you stopped.";
 
 /** §5.5 — the custom answer to a question that allows one. */
@@ -24,7 +25,7 @@ export const AUTONOMOUS_ANSWER = "No user is available. Choose the most reasonab
  * §5.4 step 4 — the handoff paragraph (the agent is named), saying why the previous agent stopped:
  * a usage limit, a refused login, or (with no known reason) neither.
  */
-export function handoffNotice(agent: string, reason?: AgentFailureReason): string {
+function handoffNotice(agent: string, reason?: AgentFailureReason): string {
   const why =
     reason === "usage_limit"
       ? "was cut off by a usage limit"
@@ -42,20 +43,13 @@ export function withAutonomyNote(text: string, autonomyNote: boolean): string {
 /** The longest prefix of `text` within `maxBytes` UTF-8 bytes, never splitting a code point. */
 export function clipUtf8(text: string, maxBytes: number): { text: string; truncated: boolean } {
   if (Buffer.byteLength(text, "utf8") <= maxBytes) return { text, truncated: false };
-  const buf = Buffer.from(text, "utf8");
-  let end = Math.max(0, maxBytes);
-  // Step back over continuation bytes so the cut lands on a code point boundary.
-  while (end > 0 && (buf[end]! & 0xc0) === 0x80) end -= 1;
-  return { text: buf.subarray(0, end).toString("utf8"), truncated: true };
+  return { text: truncateUtf8(text, maxBytes), truncated: true };
 }
 
 /** The longest SUFFIX of `text` within `maxBytes` UTF-8 bytes (the newest part of a transcript). */
 export function clipUtf8Tail(text: string, maxBytes: number): { text: string; truncated: boolean } {
   if (Buffer.byteLength(text, "utf8") <= maxBytes) return { text, truncated: false };
-  const buf = Buffer.from(text, "utf8");
-  let start = Math.max(0, buf.length - maxBytes);
-  while (start < buf.length && (buf[start]! & 0xc0) === 0x80) start += 1;
-  return { text: buf.subarray(start).toString("utf8"), truncated: true };
+  return { text: tailUtf8(text, maxBytes), truncated: true };
 }
 
 /**
@@ -84,7 +78,7 @@ export function buildHandoffPrompt(input: {
 }
 
 /** §5.4 step 3 for an account whose login was refused (the account moved for a sign-in failure). */
-export const CONTINUE_AFTER_AUTH_SWITCH =
+const CONTINUE_AFTER_AUTH_SWITCH =
   "Your previous account's login failed and you have been moved to another account. Continue the task from exactly where you stopped.";
 
 /**

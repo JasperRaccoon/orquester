@@ -1,4 +1,4 @@
-import React, { useCallback, useRef, useState } from "react";
+import { useCallback, useRef, useState } from "react";
 import { Trash2, Upload, Star } from "lucide-react";
 import type { AgentAccount, AgentAccountAgent } from "@orquester/api";
 import { Button, Input } from "../ui";

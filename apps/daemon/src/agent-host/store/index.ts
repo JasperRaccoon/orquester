@@ -307,13 +307,6 @@ export interface AgentThreadStore extends ThreadStore {
     window: ThreadItemOutputWindowQuery
   ): Promise<ThreadItemOutputWindowResponse | null>;
   /**
-   * Run the host-wide sweep now: the raw-log ceiling plus every attachment
-   * TTL. Equivalent to `pruneAttachments()` with no arguments; exposed so the
-   * host can sweep once at boot (what accumulated while it was down) and so a
-   * test can drive it without waiting for the interval.
-   */
-  sweepNow(): Promise<void>;
-  /**
    * Cheap boot cleanup: prune pending/partial uploads and rotated raw logs
    * without reading or folding any conversation history.
    */
@@ -796,7 +789,6 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
   }
 
   async function writeBinding(binding: ProviderSessionBinding): Promise<void> {
-    await fsp.mkdir(threadDir(rootDir, binding.threadId), { recursive: true });
     await atomicWriteFile(
       threadBindingPath(rootDir, binding.threadId),
       `${JSON.stringify({ version: 1, ...binding }, null, 2)}\n`
@@ -1547,10 +1539,6 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
 
     pendingAttachmentsDir(): string {
       return pendingDir;
-    },
-
-    async sweepNow(): Promise<void> {
-      await store.pruneAttachments();
     },
 
     async sweepStartup(): Promise<void> {

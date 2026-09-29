@@ -159,7 +159,7 @@ function numberOr(value: unknown, fallback: number): number {
 }
 
 /** exit.json + result.json of a finished attempt, or null when exit.json is not there (yet). */
-export async function readSandboxExit(attemptDir: string): Promise<SandboxExitDetail | null> {
+async function readSandboxExit(attemptDir: string): Promise<SandboxExitDetail | null> {
   const record = asRecord(await readJson(join(attemptDir, "exit.json")));
   if (record === null) {
     return null;
@@ -271,7 +271,7 @@ export function createSandboxRunner(options: SandboxRunnerOptions = {}): Detaile
     await awaitGone(handle, 2_000);
   };
 
-  const readExit = (attemptDir: string): Promise<SandboxExitDetail | null> => readSandboxExit(attemptDir);
+  const readExit = readSandboxExit;
 
   const readHandle = async (attemptDir: string): Promise<SandboxHandle | null> => {
     const record = (await readJson(join(attemptDir, "handle.json"))) as Partial<SandboxHandle> | null | undefined;

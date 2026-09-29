@@ -231,4 +231,4 @@ const readToolOutput = defineTool({
   }
 });
 
-export const outputTools: ToolDef[] = [readToolOutput] as ToolDef[];
+export const outputTools: ToolDef[] = [readToolOutput];

@@ -67,7 +67,6 @@ import { profileErrors } from "../../errors.ts";
 import {
   type ProfileBackups,
   type ProfileStash,
-  type runAgentCliOrThrow,
   SKILL_FILE,
   assertSkillName,
   contentHash,
@@ -139,22 +138,12 @@ import {
   portableFromEntry
 } from "./mcp.ts";
 
-export {
-  CodexAppServerClient,
-  type CodexConfigClient,
-  type CodexConfigClientFactory,
-  type CodexConfigClientOptions,
-  createCodexAppServerClient
-} from "./codex-config-client.ts";
-
 const AGENT = "codex";
 const LABEL = "Codex";
 
-export interface CodexProfileAdapterDeps {
+interface CodexProfileAdapterDeps {
   backups: ProfileBackups;
   stash: ProfileStash;
-  /** Unused by Codex (every write goes through the app-server); kept so the four adapters share one shape. */
-  runCli?: typeof runAgentCliOrThrow;
   configClient?: CodexConfigClientFactory;
 }
 
@@ -444,7 +433,7 @@ export class CodexProfileAdapter implements ProfileAdapter {
 
     let instructions: ProfileInstructionsInfo;
     try {
-      instructions = (await this.readInstructionsFile()).info;
+      instructions = (await this.readInstructions()).info;
     } catch (error) {
       fileErrors.push({ path: this.instructionsPath, message: message(error) });
       instructions = { path: this.instructionsPath, exists: true, bytes: 0, lines: 0, revision: "", warnings: [] };
@@ -1669,7 +1658,7 @@ export class CodexProfileAdapter implements ProfileAdapter {
   // Instructions
   // -------------------------------------------------------------------------
 
-  private async readInstructionsFile(): Promise<{ text: string; info: ProfileInstructionsInfo }> {
+  async readInstructions(): Promise<{ text: string; info: ProfileInstructionsInfo }> {
     const text = await readTextIfExists(this.instructionsPath);
     const warnings: ProfileItemWarning[] = [];
     const override = await readTextIfExists(this.overridePath).catch(() => null);
@@ -1699,10 +1688,6 @@ export class CodexProfileAdapter implements ProfileAdapter {
         warnings
       }
     };
-  }
-
-  async readInstructions(): Promise<{ text: string; info: ProfileInstructionsInfo }> {
-    return this.readInstructionsFile();
   }
 
   async writeInstructions(text: string, revision: string): Promise<AdapterMutationResult> {

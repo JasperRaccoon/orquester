@@ -47,7 +47,7 @@ function compareVersions(left: string, right: string): number {
   return 0;
 }
 
-export interface VersionGateResult {
+interface VersionGateResult {
   ok: boolean;
   message?: string;
 }

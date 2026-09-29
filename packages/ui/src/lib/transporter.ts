@@ -7,8 +7,7 @@
  *  - desktop (remote): a custom HTTP-client transporter
  *  - web:              an HTTP transporter wrapping `fetch`
  *
- * Keeping this interface tiny means the rest of the app (ApiClient, services,
- * hooks) never needs to know how bytes reach the daemon.
+ * The API client and UI do not need to know how bytes reach the daemon.
  */
 
 export type TransportMethod = "GET" | "POST" | "PUT" | "PATCH" | "DELETE";
@@ -46,9 +45,6 @@ export interface TransportResponse<T = unknown> {
   data: T;
   headers?: Record<string, string>;
 }
-
-/** Handler invoked for every event pushed over a realtime subscription. */
-export type EventHandler = (event: unknown) => void;
 
 export interface StreamHandlers {
   /** A decoded text chunk arrived. */

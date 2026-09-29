@@ -29,7 +29,7 @@ function optionTitle(option: AgentProfileAgentOption): string {
   return option.version ? `${option.label} ${option.version}` : option.label;
 }
 
-export interface AgentPickerProps {
+interface AgentPickerProps {
   agents: readonly AgentProfileAgentOption[];
   value: AgentProfileAgentId;
   onChange: (agent: AgentProfileAgentId) => void;
@@ -49,7 +49,6 @@ export const AgentPicker: React.FC<AgentPickerProps> = ({ agents, value, onChang
         triggerClassName={cn("flex w-full rounded-lg", FOCUS_RING)}
         trigger={
           <span
-            data-agent-picker="dropdown"
             className={cn(
               "flex w-full min-w-0 items-center gap-2 rounded-lg bg-neutral-900/60 px-2.5 text-left text-[13px] font-medium text-neutral-100 ring-1 ring-neutral-800 transition-colors hover:ring-neutral-700",
               sheet ? "h-10" : "h-8"
@@ -92,7 +91,6 @@ export const AgentPicker: React.FC<AgentPickerProps> = ({ agents, value, onChang
     <div
       role="group"
       aria-label="Agent"
-      data-agent-picker="segmented"
       className="flex items-center gap-0.5 rounded-lg bg-neutral-900/60 p-0.5 ring-1 ring-neutral-800"
     >
       {agents.map((option) => {

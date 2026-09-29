@@ -8,8 +8,8 @@
  * This is the container: the store (`lib/agent-profile`), which agent is
  * shown (`default-agent.ts`), the editor bridge, the confirms (a dialog
  * docked, the row itself on a phone) and the copy's name-collision question.
- * What it draws is `AgentProfilePanelView`. The kind filter outlives a
- * remount (module memory); the last picked agent is the store's (persisted).
+ * What it draws is `AgentProfilePanelView`. The last picked agent and each
+ * agent's last kind tab are the store's (persisted on this device).
  */
 
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -34,8 +34,10 @@ import {
   copyAgentProfileItem,
   dismissAgentProfileNotice,
   lastAgentProfileAgent,
+  lastAgentProfileTab,
   loadAgentProfile,
   rememberAgentProfileAgent,
+  rememberAgentProfileTab,
   removeAgentProfileItem,
   setAgentProfileItemEnabled,
   setAgentProfileNotice,
@@ -58,17 +60,14 @@ import {
   agentProfileAgentOptions,
   agentProfileEmptyState,
   copyTargets,
-  effectiveKindFilter,
+  effectiveKindTab,
   filterProfileItems,
   groupProfileItems,
   isAgentNotInstalled,
-  profileKindChips,
-  type ProfileKindFilter
+  profileItemKindOfId,
+  profileKindTabs
 } from "./list.logic";
 import type { ProfileRowConfirm } from "./ProfileItemRow";
-
-/** The kind filter outlives a remount (the rail closing, a phone's section). Memory only. */
-const remembered: { kind: ProfileKindFilter } = { kind: "all" };
 
 /** How long a saved item stays outlined. */
 const HIGHLIGHT_MS = 2_500;
@@ -127,8 +126,8 @@ export const AgentProfilePanel: React.FC<RightRailPanelProps> = ({ sessionId, va
   const { snapshot, status, error, errorCode } = view.entry;
 
   const [query, setQuery] = useState("");
-  const [kindState, setKindState] = useState<ProfileKindFilter>(() => remembered.kind);
-  const kind = effectiveKindFilter(agent, kindState);
+  // Each agent's tab, as picked in this panel; else as remembered on this device.
+  const [tabs, setTabs] = useState<Partial<Record<AgentProfileAgentId, ProfileItemKind>>>({});
   const [pendingDelete, setPendingDelete] = useState<ProfileItem | null>(null);
   const [confirming, setConfirming] = useState<Confirming>(null);
   const [conflict, setConflict] = useState<{ item: ProfileItem; toAgent: AgentProfileAgentId } | null>(null);
@@ -137,10 +136,20 @@ export const AgentProfilePanel: React.FC<RightRailPanelProps> = ({ sessionId, va
   const now = useMinuteClock();
   const sheet = variant === "sheet";
 
-  const setKind = useCallback((next: ProfileKindFilter) => {
-    remembered.kind = next;
-    setKindState(next);
+  // Remembered on this device only for a kind the agent has (the store refuses the rest).
+  const showTab = useCallback((forAgent: AgentProfileAgentId, next: ProfileItemKind) => {
+    rememberAgentProfileTab(forAgent, next);
+    setTabs((current) => (current[forAgent] === next ? current : { ...current, [forAgent]: next }));
   }, []);
+
+  // Picking a tab while searching leaves the search for that tab.
+  const pickTab = useCallback(
+    (next: ProfileItemKind) => {
+      setQuery("");
+      showTab(agent, next);
+    },
+    [agent, showTab]
+  );
 
   const pick = useCallback((next: AgentProfileAgentId) => {
     setPicked(next);
@@ -153,7 +162,8 @@ export const AgentProfilePanel: React.FC<RightRailPanelProps> = ({ sessionId, va
   }, []);
 
   // What the editor saved: its notes as the notice, and the item revealed —
-  // the filter cleared so it shows, scrolled to and outlined for a moment.
+  // the search cleared and its kind's tab shown, scrolled to and outlined
+  // for a moment.
   useEffect(
     () =>
       subscribeAgentProfileEditorSaved((saved) => {
@@ -163,11 +173,13 @@ export const AgentProfilePanel: React.FC<RightRailPanelProps> = ({ sessionId, va
         });
         void loadAgentProfile(api, saved.agent, { force: true });
         if (saved.agent !== agent) return;
+        const itemId = saved.itemIds[0] ?? null;
         setQuery("");
-        setKind("all");
-        setHighlightId(saved.itemIds[0] ?? null);
+        const savedKind = itemId === null ? null : profileItemKindOfId(itemId);
+        if (savedKind !== null) showTab(agent, savedKind);
+        setHighlightId(itemId);
       }),
-    [agent, api, setKind]
+    [agent, api, showTab]
   );
 
   useEffect(() => {
@@ -177,9 +189,10 @@ export const AgentProfilePanel: React.FC<RightRailPanelProps> = ({ sessionId, va
   }, [highlightId]);
 
   const items = useMemo(() => snapshot?.items ?? [], [snapshot]);
+  const kindTabs = useMemo(() => profileKindTabs(agent, items), [agent, items]);
+  const kind = effectiveKindTab(kindTabs, tabs[agent] ?? lastAgentProfileTab(agent));
   const filtered = useMemo(() => filterProfileItems(items, { kind, query }), [items, kind, query]);
   const groups = useMemo(() => groupProfileItems(agent, filtered), [agent, filtered]);
-  const chips = useMemo(() => profileKindChips(agent, items), [agent, items]);
 
   // Scroll the saved item into view once it is listed (it may arrive with the reload).
   useEffect(() => {
@@ -285,8 +298,8 @@ export const AgentProfilePanel: React.FC<RightRailPanelProps> = ({ sessionId, va
         query={query}
         onQueryChange={setQuery}
         kind={kind}
-        onKindChange={setKind}
-        chips={chips}
+        onKindChange={pickTab}
+        tabs={kindTabs}
         snapshot={snapshot}
         groups={groups}
         empty={empty}

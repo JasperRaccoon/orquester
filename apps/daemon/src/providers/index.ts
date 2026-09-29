@@ -6,8 +6,8 @@ import { bitbucketServerProvider } from "./bitbucket-server";
 import { githubProvider } from "./github";
 import type { GitProvider } from "./types";
 
-/** Registry of implemented providers (partial while providers land task by task). */
-const REGISTRY: Partial<Record<GitProviderId, GitProvider>> = {
+/** Registry of implemented git-hosting providers. */
+const REGISTRY: Record<GitProviderId, GitProvider> = {
   github: githubProvider,
   "bitbucket-cloud": bitbucketCloudProvider,
   "bitbucket-server": bitbucketServerProvider

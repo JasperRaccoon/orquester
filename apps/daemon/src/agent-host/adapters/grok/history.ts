@@ -71,7 +71,7 @@ export type GrokHistoryItem =
       readonly errorMessage?: string;
     };
 
-export function isGrokHistoryItem(value: unknown): value is GrokHistoryItem {
+function isGrokHistoryItem(value: unknown): value is GrokHistoryItem {
   if (value === null || typeof value !== "object") {
     return false;
   }

@@ -50,11 +50,6 @@ export interface QuestionCardProps {
   onCarryTextToDraft: (text: string) => void;
   /** The compact layout used while the mobile composer is collapsed (§7.8). */
   compact?: boolean;
-  /**
-   * Retained for API compatibility; the compact layout now opens the card's
-   * own field instead (R8-B2), because the composer has no answer path.
-   */
-  onRequestCustomAnswerFocus?: () => void;
   /** `false` while this tab is open but not visible — gates the digit keys. */
   active?: boolean;
 }

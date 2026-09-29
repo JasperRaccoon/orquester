@@ -13,7 +13,6 @@ import { kindTitle } from "./layout.logic";
 import {
   initialMarketplaceForm,
   marketplaceDraftFromForm,
-  marketplaceFormSignature,
   validateMarketplaceForm,
   type MarketplaceForm,
   type MarketplaceSourceType,
@@ -28,7 +27,7 @@ export const MarketplaceEditor: React.FC = () => {
   const [showErrors, setShowErrors] = useState(false);
   const submit = useProfileSubmit();
   const validation = validateMarketplaceForm(form);
-  useReportDirty(marketplaceFormSignature(form) !== marketplaceFormSignature(initial));
+  useReportDirty(JSON.stringify(form) !== JSON.stringify(initial));
 
   const change = useCallback(
     (patch: Partial<MarketplaceForm>) => {
@@ -64,7 +63,7 @@ const SOURCE_OPTIONS: { id: MarketplaceSourceType; label: string; shortLabel?: s
   { id: "path", label: "Local path", shortLabel: "Path" }
 ];
 
-export const MarketplaceFormView: React.FC<{
+const MarketplaceFormView: React.FC<{
   form: MarketplaceForm;
   onChange: (patch: Partial<MarketplaceForm>) => void;
   validation: MarketplaceValidation;

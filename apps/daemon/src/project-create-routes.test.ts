@@ -31,9 +31,10 @@ async function harness(): Promise<{
     fsRoot: workspacesDir
   } as unknown as CreateServerArgs[1];
 
-  // The routes under test never touch a service; the rest of the surface is
-  // registered but never called (see devtools-routes.test.ts for the pattern).
-  const services = {} as unknown as CreateServerArgs[4];
+  // An inert session factory lets valid input pass the HTTP validation seam.
+  const services = {
+    sessions: { create: async () => ({ id: "created", projectPath: "" }) }
+  } as unknown as CreateServerArgs[4];
 
   const app = createServer(
     createDefaultDaemonConfig({ env: {} }),
@@ -136,8 +137,7 @@ test("initialCommand is rejected when it is over-long or carries control bytes",
     assert.equal(res.json().code, "INVALID_INITIAL_COMMAND");
   }
 
-  // A well-formed one gets past the bound (and only then fails on this
-  // harness's absent registry) — the guard is a bound, not a blanket refusal.
+  // A valid request succeeds, so a blanket refusal cannot satisfy this test.
   const ok = await create("npm create vite@latest . -- --template react-ts");
-  assert.notEqual(ok.json().code, "INVALID_INITIAL_COMMAND");
+  assert.equal(ok.statusCode, 200, ok.body);
 });

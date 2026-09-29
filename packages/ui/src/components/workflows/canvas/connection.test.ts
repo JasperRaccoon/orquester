@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { edge, node, sequentialIds, workflow } from "../../../lib/workflows/testing.ts";
-import { connectBlocks, connectionRefusal, isValidWorkflowConnection } from "./connection.ts";
+import { connectBlocks, connectionRefusal } from "./connection.ts";
 import { addBlock, removeElements } from "./ops.ts";
 
 const def = () =>
@@ -18,11 +18,11 @@ const def = () =>
     [edge("t", "a"), edge("a", "b")]
   );
 
-describe("isValidConnection", () => {
+describe("workflow connections", () => {
   it("accepts an output into a block that takes input", () => {
-    assert.equal(isValidWorkflowConnection(def(), { source: "b", sourceHandle: "success", target: "i" }), true);
-    assert.equal(isValidWorkflowConnection(def(), { source: "i", sourceHandle: "false", target: "s" }), true);
-    assert.equal(isValidWorkflowConnection(def(), { source: "a", sourceHandle: "error", target: "s" }), true);
+    assert.equal(connectionRefusal(def(), { source: "b", sourceHandle: "success", target: "i" }), null);
+    assert.equal(connectionRefusal(def(), { source: "i", sourceHandle: "false", target: "s" }), null);
+    assert.equal(connectionRefusal(def(), { source: "a", sourceHandle: "error", target: "s" }), null);
   });
 
   it("refuses cycles, self-loops and duplicates", () => {

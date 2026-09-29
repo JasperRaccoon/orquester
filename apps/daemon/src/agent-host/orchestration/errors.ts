@@ -98,9 +98,6 @@ export const commandRejected = (message: string, detail?: unknown): AgentChatCom
 export const compactionUnavailable = (message: string): AgentChatCommandError =>
   new AgentChatCommandError("COMPACTION_UNAVAILABLE", message);
 
-export const hostUnavailable = (message: string): AgentChatCommandError =>
-  new AgentChatCommandError("HOST_UNAVAILABLE", message);
-
 /** Rebuild the recorded rejection of a previously-rejected `commandId` (§6.2). */
 export function replayRecordedRejection(error: {
   code: string;

@@ -50,4 +50,4 @@ const waitForSession = defineTool({
   }
 });
 
-export const watchTools: ToolDef[] = [waitForSession] as ToolDef[];
+export const watchTools: ToolDef[] = [waitForSession];

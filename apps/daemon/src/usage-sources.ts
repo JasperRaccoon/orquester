@@ -30,11 +30,11 @@ function retryAfterMs(res: Response, floorMs: number): number {
 }
 
 /** Anthropic's usage endpoint answers ~1 request per 5 minutes per account (429, `retry-after: 300`). */
-export const CLAUDE_USAGE_MIN_INTERVAL_MS = 5 * 60_000;
+const CLAUDE_USAGE_MIN_INTERVAL_MS = 5 * 60_000;
 /** A live reading (off a model response) this recent makes a poll pointless. */
-export const CLAUDE_LIVE_FRESH_MS = 5 * 60_000;
+const CLAUDE_LIVE_FRESH_MS = 5 * 60_000;
 /** A reading older than this is served greyed. */
-export const CLAUDE_USAGE_STALE_AFTER_MS = 15 * 60_000;
+const CLAUDE_USAGE_STALE_AFTER_MS = 15 * 60_000;
 /** A `Retry-After` longer than this is not believed. */
 const CLAUDE_MAX_RETRY_AFTER_MS = 24 * 60 * 60_000;
 
@@ -108,7 +108,6 @@ export function createClaudeSource(opts: {
   const doFetch = fetch;
   const claudeHome = opts.claudeHome || process.env.CLAUDE_CONFIG_DIR || join(opts.userhome, ".claude");
   const credsFile = join(claudeHome, ".credentials.json");
-  const minIntervalMs = CLAUDE_USAGE_MIN_INTERVAL_MS;
   let record: ClaudeUsageRecord = opts.state?.store.get(opts.state.key) ?? {
     lastGood: null,
     lastFetchAt: 0,
@@ -160,7 +159,7 @@ export function createClaudeSource(opts: {
     // A stamp in the future (the clock moved back) is not believed.
     const sinceFetch = now - record.lastFetchAt;
     const sinceLive = now - record.liveAt;
-    if (sinceFetch >= 0 && sinceFetch < minIntervalMs) return serve();
+    if (sinceFetch >= 0 && sinceFetch < CLAUDE_USAGE_MIN_INTERVAL_MS) return serve();
     if (record.lastGood && sinceLive >= 0 && sinceLive < CLAUDE_LIVE_FRESH_MS) return serve();
     if (now < record.retryAt && record.retryAt - now <= CLAUDE_MAX_RETRY_AFTER_MS) return serve();
     if (expired) return serve();
@@ -179,7 +178,7 @@ export function createClaudeSource(opts: {
       });
       if (res.status === 429) {
         // Floor at the endpoint's own window, persisted: a restart must not re-ask.
-        const wait = Math.min(retryAfterMs(res, minIntervalMs), CLAUDE_MAX_RETRY_AFTER_MS);
+        const wait = Math.min(retryAfterMs(res, CLAUDE_USAGE_MIN_INTERVAL_MS), CLAUDE_MAX_RETRY_AFTER_MS);
         save({ ...record, retryAt: now + wait, failed: true });
         opts.logger?.warn?.("usage: claude usage endpoint rate-limited (429); backing off");
         return serve();
@@ -218,8 +217,6 @@ export function createClaudeSource(opts: {
         stale: false,
         session,
         weekly,
-        // Model-scoped weeklies ride only the endpoint: kept from its last reading.
-        ...(good?.scopedWindows ? { scopedWindows: good.scopedWindows } : {}),
         asOf: new Date(reading.observedAt).toISOString()
       },
       liveAt: reading.observedAt,
@@ -263,38 +260,6 @@ async function fromGrokAuthJson(file: string): Promise<GrokCredential | null> {
   }
 }
 
-/**
- * The Grok OAuth bearer, read-only, from any credential store on this host:
- *  1. managed grok account homes (`agent-accounts/grok/<id>/home/auth.json`,
- *     freshest by `expires_at` — kept alive by the accounts refresher), else
- *  2. the grok CLI's own `<grokHome>/auth.json` (refreshed whenever the CLI runs).
- * When `authFile` is set, only that managed-home auth.json is read (per-account
- * poll). This is the ONE sanctioned reader of xai token material outside the
- * accounts subsystem: the token stays inside this closure and never reaches an
- * AgentUsage payload.
- */
-async function readGrokCredential(
-  grokHome: string,
-  managedAuthFiles: readonly string[] = [],
-  authFile?: string
-): Promise<GrokCredential | null> {
-  if (authFile) return fromGrokAuthJson(authFile);
-
-  // Managed account homes: freshest credential wins.
-  // Used only for the System aggregate when managed files are still in the chain
-  // (no per-account poll); multi-account wiring passes authFile instead.
-  let bestManaged: GrokCredential | null = null;
-  for (const file of managedAuthFiles) {
-    const cred = await fromGrokAuthJson(file);
-    if (cred && (!bestManaged || (cred.expiresAtMs ?? 0) > (bestManaged.expiresAtMs ?? 0))) {
-      bestManaged = cred;
-    }
-  }
-  if (bestManaged) return bestManaged;
-
-  return fromGrokAuthJson(join(grokHome, "auth.json"));
-}
-
 /** Attach a single labeled account row so the usage panel matches Claude/Codex. */
 function withGrokAccountLabel(agent: AgentUsage, email: string | null): AgentUsage {
   if (!email) return agent;
@@ -326,10 +291,6 @@ export function createGrokSource(opts: {
   grokHome: string;
   /** When set, ONLY this managed-home `auth.json` is used (per-account poll). */
   authFile?: string;
-  /** Managed grok account `auth.json` paths for the System (no-authFile) chain.
-   *  Re-evaluated per poll — accounts come and go without a daemon restart.
-   *  Pass `() => []` when multi-account wiring polls managed homes separately. */
-  managedGrokAuthFiles?: () => string[];
   now: () => number;
   logger?: Pick<Console, "warn">;
 }): () => Promise<AgentUsage | null> {
@@ -354,11 +315,7 @@ export function createGrokSource(opts: {
   };
 
   return async () => {
-    const cred = await readGrokCredential(
-      opts.grokHome,
-      opts.managedGrokAuthFiles?.() ?? [],
-      opts.authFile
-    );
+    const cred = await fromGrokAuthJson(opts.authFile || join(opts.grokHome, "auth.json"));
     if (!cred) return null; // genuinely not linked/logged in
 
     const signedIn = (): AgentUsage =>
@@ -417,7 +374,7 @@ export function createGrokSource(opts: {
 async function rolloutsNewestFirst(sessionsDir: string): Promise<string[]> {
   let entries: string[];
   try {
-    entries = await readdir(sessionsDir, { recursive: true } as { recursive: true });
+    entries = await readdir(sessionsDir, { recursive: true });
   } catch {
     return []; // no sessions dir yet
   }
@@ -506,10 +463,7 @@ export async function shouldHideSystemUsage(
 
   if (agent === "grok") {
     // System for Grok is the CLI login only (managed homes are polled separately).
-    const sys = await readGrokCredential(
-      opts.grokHome || process.env.GROK_HOME || join(opts.userhome, ".grok"),
-      []
-    );
+    const sys = await fromGrokAuthJson(join(opts.grokHome || process.env.GROK_HOME || join(opts.userhome, ".grok"), "auth.json"));
     if (!sys) return true; // nothing to show on System
     if (sys.expiresAtMs !== null && sys.expiresAtMs <= opts.now) return true;
     if (!sys.email && !sys.userId) return false;

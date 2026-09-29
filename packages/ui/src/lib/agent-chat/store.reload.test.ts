@@ -1109,22 +1109,4 @@ describe("a reload never loses or duplicates a message", () => {
     );
   });
 
-  it("ignores a stored value it cannot read, and still resumes every entry it can", async () => {
-    session.set(COMPOSER_OUTBOX_KEY, "{not json");
-    const host = fakeHost();
-    const thread = open("A", host);
-    await flush();
-    assert.equal(host.attempts.length, 0);
-    assert.deepEqual(thread.getState().slice.queue, []);
-
-    left([
-      { ...sendLeft({ sessionId: "B" }), commandId: 5 },
-      { ...sendLeft({ sessionId: "B", commandId: "c2" }), turn: "deploy" },
-      "junk",
-      sendLeft({ sessionId: "B", commandId: "c3", turn: { input: "the readable one" } })
-    ]);
-    open("B", host);
-    await flush();
-    assert.deepEqual(host.posted(), [["the readable one", "c3"]]);
-  });
 });

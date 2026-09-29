@@ -90,5 +90,4 @@ describe("§3.2 layer one: every adapter's pendingSnapshot()", () => {
       "no message at all is not a pending seed either"
     );
   });
-
 });

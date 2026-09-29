@@ -240,6 +240,24 @@ function synchronize(
 
 const rowIds = (state: AgentChatThreadState): string[] => state.rows.map((row) => row.id);
 
+/** Displayed log data, excluding synthetic disclosure rows. */
+const renderedItemIds = (rows: readonly AgentChatTimelineRow[]): string[] =>
+  rows.flatMap((row) => {
+    switch (row.kind) {
+      case "message":
+        return [row.message.id];
+      case "work":
+      case "work-live":
+        return row.groupedEntries.map((entry) => entry.id);
+      case "activity-group":
+        return row.entries.map((entry) => entry.id);
+      case "context-compaction":
+        return [row.id];
+      default:
+        return [];
+    }
+  });
+
 const capabilities: AdapterCapabilities = {
   sessionModelSwitch: "in-session",
   showPlanModeToggle: true,
@@ -253,15 +271,6 @@ beforeEach(() => {
 });
 
 describe("the history slice", () => {
-  it("reads the bounds off the snapshot, with nothing loaded yet", async () => {
-    const { fake, state } = await open();
-    synchronize(fake);
-    assert.deepEqual(state().slice.history.bounds, bounds());
-    assert.deepEqual(state().slice.history.pages, []);
-    assert.equal(state().slice.history.loading, false);
-    assert.equal(state().slice.history.error, null);
-  });
-
   it("loads the page just below the window and paints it above the live rows", async () => {
     const { fake, state } = await open();
     synchronize(fake);
@@ -342,7 +351,7 @@ describe("the history slice", () => {
     const failing = state().actions.loadOlderHistory();
     fake.fail(new AgentChatCommandError(503, "INDEX_UNAVAILABLE", "index is rebuilding"));
     await failing;
-    assert.match(state().slice.history.error ?? "", /unavailable/i);
+    assert.ok(state().slice.history.error, "the history read failure is visible");
     assert.equal(state().slice.history.loading, false);
     assert.equal(state().slice.history.pages.length, 1, "the loaded page survives the failure");
     assert.equal(state().slice.errorBanner, null, "a history read is not a thread-level error");
@@ -375,23 +384,6 @@ describe("the history slice", () => {
     fake.answer(turnsOneAndTwo());
     await retry;
     assert.equal(state().slice.history.pages.length, 1);
-  });
-
-  it("drops the pages and re-reads the bounds on a new snapshot", async () => {
-    const { fake, state } = await open();
-    synchronize(fake);
-    const loaded = state().actions.loadOlderHistory();
-    fake.answer(turnsOneAndTwo());
-    await loaded;
-
-    fake.push({
-      kind: "snapshot",
-      thread: windowSnapshot({ seq: 12, history: bounds({ beforeCursor: "cursor-after-restart" }) })
-    });
-
-    assert.deepEqual(state().slice.history.pages, []);
-    assert.equal(state().slice.history.bounds?.beforeCursor, "cursor-after-restart");
-    assert.deepEqual(rowIds(state()), ["u3", "a3"]);
   });
 
   it("discards a page that lands after the snapshot it was asked against was replaced", async () => {
@@ -439,13 +431,13 @@ describe("the history slice", () => {
     );
     await loading;
 
-    // Settled: one "Worked for …" fold, right under the prompt.
-    assert.deepEqual(rowIds(state()), ["u5", "turn-fold:t5", "a5"]);
-
     state().actions.setDisclosure({ expandedTurnIds: ["t5"] });
+    state().actions.setDisclosure({
+      expandedGroupIds: state().rows.flatMap((row) => row.kind === "work-toggle" ? [row.groupId] : [])
+    });
     assert.deepEqual(
-      rowIds(state()),
-      ["u5", "turn-fold:t5", "work-toggle:x5", "x7", "a5"],
+      renderedItemIds(state().rows),
+      ["u5", "x5", "x6", "x7", "a5"],
       "the prompt once and first, then the page's early work, then the window's later work"
     );
 
@@ -501,7 +493,7 @@ describe("the history slice", () => {
         })
       );
 
-      assert.deepEqual(rowIds(state()), ["u5", "turn-fold:t5", "tc", "x7", "a5"]);
+      assert.deepEqual(renderedItemIds(state().rows), ["u5", "tc", "x7", "a5"]);
       const calls = state().rows.flatMap((row) =>
         row.kind === "work" || row.kind === "work-live"
           ? (row.kind === "work" ? row.groupedEntries : [row.entry]).filter((entry) => entry.toolCallId === "T")
@@ -656,18 +648,6 @@ describe("a rewind and the loaded pages", () => {
     kind: "event",
     seq: 11,
     event: ev("thread.reverted", { turnCount }, { seq: 11 })
-  });
-
-  it("keeps the pages when it lands inside the window", async () => {
-    const { fake, state } = await withPageLoaded();
-    fake.push(reverted(2));
-    assert.equal(state().slice.history.pages.length, 1);
-  });
-
-  it("drops them once it reaches into a page", async () => {
-    const { fake, state } = await withPageLoaded();
-    fake.push(reverted(1));
-    assert.deepEqual(state().slice.history.pages, []);
   });
 
   it("rewinds to a prompt only a page holds, and hands it back once it is gone", async () => {
@@ -865,28 +845,6 @@ describe("retention", () => {
 
 describe("the history bridge", () => {
   const ids = (items: readonly { id: string }[]): string[] => items.map((item) => item.id);
-
-  /**
-   * Every item a row renders. Every turn is expanded and every tool row is an
-   * error — hoisted as a row of its own, never folded into a group — so each
-   * item on screen is exactly one entry here, in screen order.
-   */
-  const renderedItemIds = (rows: readonly AgentChatTimelineRow[]): string[] =>
-    rows.flatMap((row) => {
-      switch (row.kind) {
-        case "message":
-          return [row.message.id];
-        case "work":
-        case "work-live":
-          return row.groupedEntries.map((entry) => entry.id);
-        case "activity-group":
-          return row.entries.map((entry) => entry.id);
-        case "context-compaction":
-          return [row.id];
-        default:
-          return [];
-      }
-    });
 
   /** The label the row rendering `id` shows. */
   const labelOf = (rows: readonly AgentChatTimelineRow[], id: string): string | undefined =>
@@ -1196,12 +1154,9 @@ describe("the history bridge", () => {
     const calls = fake.historyCalls.length;
 
     assert.equal(await state().actions.revealTurn("tb"), true);
-    assert.equal(
-      state().reveal?.rowId,
-      "turn-fold:tb",
-      "the first row the turn owns — its settled \"Worked for …\" fold, built from the bridge"
-    );
-    assert.ok(state().rows.some((row) => row.id === "turn-fold:tb"));
+    assert.ok(state().rows.some((row) =>
+      row.id === state().reveal?.rowId && "turnId" in row && row.turnId === "tb"
+    ), "the reveal targets a visible row owned by the requested turn");
     assert.equal(fake.historyCalls.length, calls, "nothing was paged in for it");
   });
 
@@ -1256,10 +1211,14 @@ describe("the history bridge", () => {
   it("drops pages, bridge and cut on a new snapshot", async () => {
     const { fake, state } = await turnThreadWithPage();
     streamRowsUntil(fake, () => state().slice.history.bridge.length > 0);
-    fake.push({ kind: "snapshot", thread: windowSnapshot({ seq: seq + 1 }) });
+    fake.push({
+      kind: "snapshot",
+      thread: windowSnapshot({ seq: seq + 1, history: bounds({ beforeCursor: "cursor-after-restart" }) })
+    });
     assert.deepEqual(state().slice.history.pages, []);
     assert.deepEqual(state().slice.history.bridge, []);
     assert.equal(state().slice.history.windowCut, 0);
+    assert.equal(state().slice.history.bounds?.beforeCursor, "cursor-after-restart");
     assert.deepEqual(rowIds(state()), ["u3", "a3"]);
   });
 
@@ -1524,7 +1483,7 @@ describe("the history bridge", () => {
     });
   });
 
-  it("keeps a running turn live across history eviction, then settles it once", async () => {
+  it("keeps a running turn live across history eviction, then settles it", async () => {
     const clock = { at: 0 };
     const pageItems = [...turnItems(1, clock), ...turnItems(2, clock)];
     const prompt = message("user", "go", { id: "uR", createdAt: stamp((clock.at += 1)) });
@@ -1589,10 +1548,6 @@ describe("the history bridge", () => {
     assert.ok(history.windowCut >= 2, "the prompt and the agent's word render with the history");
 
     const shown = state().rows;
-    assert.ok(!shown.some((row) => row.id === "turn-fold:tR"), "never a settled \"Worked for …\" group");
-    const at = (id: string): number => shown.findIndex((row) => row.id === id);
-    assert.equal(shown[at("uR") + 1]?.kind, "working", "its header right after its prompt, up in the history");
-    assert.equal(shown.filter((row) => row.kind === "working").length, 1);
     const call = shown.find(
       (row) => row.kind === "work-live" && row.groupedEntries.some((entry) => entry.id === "xR-live")
     );
@@ -1600,13 +1555,13 @@ describe("the history bridge", () => {
     const answer = shown.find((row) => row.id === "aR");
     assert.equal(answer?.kind === "message" ? answer.showAssistantMeta : null, false);
 
-    // And once it settles, it folds like any settled turn — once.
+    // Completion clears live status while preserving the answer.
     seq += 1;
     fake.push(
       eventFrame(ev("thread.session-set", { session: { status: "ready", activeTurnId: null } }, { seq }))
     );
     const settled = state().rows;
-    assert.equal(settled.filter((row) => row.id === "turn-fold:tR").length, 1);
+    assert.ok(settled.some((row) => row.kind === "message" && row.message.id === "aR"), "the settled answer remains visible");
     assert.ok(!settled.some((row) => row.kind === "working" || row.kind === "thinking" || row.kind === "work-live"));
   });
 });

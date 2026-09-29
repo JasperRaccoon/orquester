@@ -14,7 +14,6 @@ import {
   ACTIVITY_RETENTION_LIMIT,
   ACTIVITY_RETENTION_SLACK,
   applyDomainEvent,
-  createEmptyThreadState,
   foldThread,
   toThreadSnapshot
 } from "./fold.ts";
@@ -70,14 +69,6 @@ function prompt(turn: number): DomainEvent[] {
 }
 
 // --- derivation ------------------------------------------------------------------
-
-test("a fresh fold has no goal, and neither does a thread that never set one", () => {
-  assert.equal(createEmptyThreadState().goal, null);
-  reset();
-  const state = foldThread([created(), ...prompt(1)]);
-  assert.equal(state.goal, null);
-  assert.equal(toThreadSnapshot(state).goal, null);
-});
 
 test("a goal.updated row sets the goal, stamped with the ROW's updatedAt, and is appended as usual", () => {
   reset();

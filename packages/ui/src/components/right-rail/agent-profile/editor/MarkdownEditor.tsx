@@ -26,7 +26,6 @@ import {
   markdownDraftFromForm,
   markdownEditorModel,
   markdownFormFromDocument,
-  markdownFormSignature,
   markdownNameHint,
   SKILL_BODY_PLACEHOLDER,
   validateMarkdownForm,
@@ -40,18 +39,15 @@ import { SubmitStatus, useProfileSubmit } from "./use-submit";
 type MarkdownDetail = Extract<ProfileItemDetail, { kind: "skill" | "command" }>;
 
 /** "+ Add" → Skill or Command: the source switcher over the four sources. */
-export const MarkdownCreateEditor: React.FC<{ kind: MarkdownKind; initialSource?: MarkdownSource }> = ({
-  kind,
-  initialSource = "write"
-}) => {
+export const MarkdownCreateEditor: React.FC<{ kind: MarkdownKind }> = ({ kind }) => {
   const { agent } = useEditorEnv();
-  const [source, setSource] = useState<MarkdownSource>(initialSource);
+  const [source, setSource] = useState<MarkdownSource>("write");
   const model = useMemo(() => markdownEditorModel(agent, kind), [agent, kind]);
   // The written draft outlives a look at another source, and so does the
   // unsaved-changes guard over it: the other sources report it with their own.
   const [initialForm] = useState<MarkdownForm>(() => initialMarkdownForm(model));
   const [form, setForm] = useState<MarkdownForm>(initialForm);
-  const written = markdownFormSignature(form) !== markdownFormSignature(initialForm);
+  const written = JSON.stringify(form) !== JSON.stringify(initialForm);
   const toolbar = <SourceSwitcher value={source} onChange={setSource} />;
   switch (source) {
     case "git":
@@ -65,7 +61,7 @@ export const MarkdownCreateEditor: React.FC<{ kind: MarkdownKind; initialSource?
   }
 };
 
-export const SourceSwitcher: React.FC<{ value: MarkdownSource; onChange: (source: MarkdownSource) => void }> = ({
+const SourceSwitcher: React.FC<{ value: MarkdownSource; onChange: (source: MarkdownSource) => void }> = ({
   value,
   onChange
 }) => (
@@ -102,12 +98,12 @@ const WriteSource: React.FC<{
   const { agent, api } = useEditorEnv();
   // A new item compares with the empty form (a draft kept across a source switch is still unsaved).
   const [initialSignature] = useState(() =>
-    markdownFormSignature(detail ? form : initialMarkdownForm(model))
+    JSON.stringify(detail ? form : initialMarkdownForm(model))
   );
   const [showErrors, setShowErrors] = useState(false);
   const submit = useProfileSubmit();
   const validation = validateMarkdownForm(kind, model, form);
-  useReportDirty(markdownFormSignature(form) !== initialSignature);
+  useReportDirty(JSON.stringify(form) !== initialSignature);
 
   const change = useCallback(
     (patch: Partial<MarkdownForm>) => {
@@ -158,7 +154,7 @@ const WriteSource: React.FC<{
   );
 };
 
-export interface MarkdownWriteViewProps {
+interface MarkdownWriteViewProps {
   kind: MarkdownKind;
   mode: "create" | "edit";
   model: MarkdownEditorModel;
@@ -170,11 +166,9 @@ export interface MarkdownWriteViewProps {
   /** A skill's other files (read-only). */
   files?: string[];
   onSave?: () => void;
-  /** Checks: draw "More fields" open. */
-  moreOpen?: boolean;
 }
 
-export const MarkdownWriteView: React.FC<MarkdownWriteViewProps> = ({
+const MarkdownWriteView: React.FC<MarkdownWriteViewProps> = ({
   kind,
   mode,
   model,
@@ -184,8 +178,7 @@ export const MarkdownWriteView: React.FC<MarkdownWriteViewProps> = ({
   showErrors,
   nameError,
   files,
-  onSave,
-  moreOpen
+  onSave
 }) => {
   const ids = useId();
   const touch = useTouch();
@@ -196,7 +189,6 @@ export const MarkdownWriteView: React.FC<MarkdownWriteViewProps> = ({
   const more = model.fields.filter((spec) => !spec.required);
   const [open, setOpen] = useState(
     () =>
-      moreOpen ??
       more.some((spec) => {
         const value = form.values[spec.key];
         return spec.type === "boolean" ? spec.key in model.original : typeof value === "string" && value.trim() !== "";

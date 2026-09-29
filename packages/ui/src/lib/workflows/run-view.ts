@@ -106,16 +106,6 @@ export function isBlockLive(status: WorkflowBlockStatus): boolean {
   return status === "running" || status === "waiting" || status === "queued";
 }
 
-/** Whether anything on screen needs a ticking clock (a live run or block). */
-export function runNeedsTicker(
-  run: Pick<WorkflowRunSummary, "status"> | null | undefined,
-  blocks?: Readonly<Record<string, Pick<WorkflowBlockRun, "status">>> | null
-): boolean {
-  if (run && isRunActive(run.status)) return true;
-  if (!blocks) return false;
-  return Object.values(blocks).some((block) => isBlockLive(block.status));
-}
-
 // ---------------------------------------------------------------------------
 // Status vocabulary
 // ---------------------------------------------------------------------------
@@ -275,14 +265,6 @@ export function runOutcomeText(run: WorkflowRunSummary, now: number): string {
       if (run.skipReason === "missed") return "Skipped — the daemon was down when it was due";
       return "Skipped";
   }
-}
-
-/** Why a skipped run row is muted: its reason in a few words. */
-export function runSkipReasonText(run: Pick<WorkflowRunSummary, "status" | "skipReason">): string | null {
-  if (run.status !== "skipped") return null;
-  if (run.skipReason === "overlap") return "still running";
-  if (run.skipReason === "missed") return "missed";
-  return "skipped";
 }
 
 // ---------------------------------------------------------------------------

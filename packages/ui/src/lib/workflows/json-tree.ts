@@ -47,13 +47,13 @@ export function jsonChildCount(value: unknown): number {
 const IDENT = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
 
 /** One step of a path: `.key`, `["odd key"]` or `[3]`. */
-export function jsonPathSegment(key: string | number): string {
+function jsonPathSegment(key: string | number): string {
   if (typeof key === "number") return `[${key}]`;
   return IDENT.test(key) ? `.${key}` : `[${JSON.stringify(key)}]`;
 }
 
 /** `parent` extended by `key`; a root path of "" starts bare (`items[0]`, not `.items[0]`). */
-export function jsonChildPath(parent: string, key: string | number): string {
+function jsonChildPath(parent: string, key: string | number): string {
   const segment = jsonPathSegment(key);
   if (parent === "" && segment.startsWith(".")) return segment.slice(1);
   return `${parent}${segment}`;
@@ -155,9 +155,4 @@ export const JSON_STRING_CLIP = 2_000;
 export function clipString(text: string, max = JSON_STRING_CLIP): { text: string; clipped: boolean } {
   if (text.length <= max) return { text, clipped: false };
   return { text: text.slice(0, max), clipped: true };
-}
-
-/** The `{{…}}` expression for a copied path: `{{nodes.Review.output.items[0]}}`. */
-export function jsonExpression(path: string): string {
-  return path ? `{{${path}}}` : "";
 }

@@ -5,7 +5,7 @@ import type { UsageTokenRow, UsageTokensResponse } from "@orquester/api";
 // USD per 1,000,000 tokens. Update when models ship. Subscription users don't
 // pay per token — this is an "API-equivalent" estimate, labeled as such.
 // cacheWrite5m/1h: prompt-cache writes bill 1.25x/2x input depending on TTL.
-export const MODEL_PRICING: Record<
+const MODEL_PRICING: Record<
   string,
   { input: number; output: number; cacheRead?: number; cacheWrite5m?: number; cacheWrite1h?: number }
 > = {
@@ -25,7 +25,7 @@ export const MODEL_PRICING: Record<
 // never equal the bare pricing keys. Resolve a raw id to a known key by exact
 // match, then by longest matching prefix (which also absorbs a trailing
 // `-YYYYMMDD` release-date suffix). Genuinely unknown models resolve to null.
-export function resolveModelKey(model: string): string | null {
+function resolveModelKey(model: string): string | null {
   if (MODEL_PRICING[model]) return model;
   let best: string | null = null;
   for (const key of Object.keys(MODEL_PRICING)) {
@@ -52,15 +52,6 @@ export function estimateCostParts(
   };
 }
 
-export function estimateCostUsd(
-  _agent: string,
-  model: string,
-  tok: { input: number; output: number; cacheRead: number; cacheWrite: number; cacheWrite1h: number }
-): number | null {
-  const parts = estimateCostParts(model, tok);
-  return parts ? parts.input + parts.output + parts.cache : null;
-}
-
 interface RawRow {
   agent: string;
   model: string;
@@ -76,7 +67,7 @@ interface RawRow {
   dedupId?: string;
 }
 
-export function aggregateRows(raw: RawRow[]): UsageTokenRow[] {
+function aggregateRows(raw: RawRow[]): UsageTokenRow[] {
   const byKey = new Map<string, UsageTokenRow>();
   for (const r of raw) {
     const key = `${r.agent}|${r.model}|${r.day}`;
@@ -131,7 +122,7 @@ function dayOf(iso: string | undefined, fallbackMs: number): string {
 /** Parse a Claude `projects/**.jsonl` transcript into per-turn rows. Each row
  *  carries a dedupId (message.id + requestId, the fields ccusage hashes) so
  *  turns copied into resumed/branched transcripts are counted only once. */
-function parseClaudeFile(text: string, mtimeMs: number, label: string): RawRow[] {
+function parseClaudeFile(text: string, mtimeMs: number): RawRow[] {
   const rows: RawRow[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -155,7 +146,7 @@ function parseClaudeFile(text: string, mtimeMs: number, label: string): RawRow[]
     const dedupId =
       typeof messageId === "string" && typeof requestId === "string" ? `${messageId}:${requestId}` : undefined;
     rows.push({
-      agent: label,
+      agent: "claude",
       model: obj?.message?.model ?? "unknown",
       day: dayOf(obj?.timestamp, mtimeMs),
       input,
@@ -200,7 +191,7 @@ interface CodexParseState {
  *  aren't double-counted. `input_tokens` already INCLUDES the cached tokens,
  *  so subtract them and record the non-cached remainder as `input` (cached
  *  goes to `cacheRead` and is billed at the cheaper cache-read rate). */
-function parseCodexFile(text: string, mtimeMs: number, state: CodexParseState, label: string): RawRow[] {
+function parseCodexFile(text: string, mtimeMs: number, state: CodexParseState): RawRow[] {
   const rows: RawRow[] = [];
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
@@ -220,7 +211,7 @@ function parseCodexFile(text: string, mtimeMs: number, state: CodexParseState, l
     const last = info?.last_token_usage ?? {};
     const cached = last.cached_input_tokens ?? last.cache_read_input_tokens ?? 0;
     rows.push({
-      agent: label,
+      agent: "codex",
       model: state.model,
       day: dayOf(obj?.timestamp, mtimeMs),
       input: Math.max(0, (last.input_tokens ?? 0) - cached),
@@ -326,11 +317,11 @@ export class UsageTokensScanner {
   }
 
   private async doRecompute(): Promise<void> {
-    const files: { path: string; agent: "claude" | "codex"; label: string }[] = [];
-    for (const { dir, label } of await this.homeDirs("claude", "CLAUDE_CONFIG_DIR", "projects"))
-      for (const f of await walkJsonl(dir)) files.push({ path: f, agent: "claude", label });
-    for (const { dir, label } of await this.homeDirs("codex", "CODEX_HOME", "sessions"))
-      for (const f of await walkJsonl(dir)) files.push({ path: f, agent: "codex", label });
+    const files: { path: string; agent: "claude" | "codex" }[] = [];
+    for (const dir of await this.homeDirs("claude", "CLAUDE_CONFIG_DIR", "projects"))
+      for (const f of await walkJsonl(dir)) files.push({ path: f, agent: "claude" });
+    for (const dir of await this.homeDirs("codex", "CODEX_HOME", "sessions"))
+      for (const f of await walkJsonl(dir)) files.push({ path: f, agent: "codex" });
 
     // Drop cache entries for files that no longer exist.
     const present = new Set(files.map((f) => f.path));
@@ -339,7 +330,7 @@ export class UsageTokensScanner {
     // Re-read only new/changed files (mtime or size differs from the cache) —
     // and for append-only growth, only the appended bytes.
     const done = new Set<string>();
-    for (const { path, agent, label } of files) {
+    for (const { path, agent } of files) {
       if (done.has(path)) continue; // a path can appear once per home dir; parse it once
       done.add(path);
       let st;
@@ -351,7 +342,7 @@ export class UsageTokensScanner {
       }
       const cached = this.fileCache.get(path);
       if (cached && cached.mtimeMs === st.mtimeMs && cached.size === st.size) continue;
-      await this.updateFile(path, agent, label, { mtimeMs: st.mtimeMs, size: st.size });
+      await this.updateFile(path, agent, { mtimeMs: st.mtimeMs, size: st.size });
     }
 
     // Assemble with deterministic cross-file dedup (first file wins by sorted
@@ -382,7 +373,6 @@ export class UsageTokensScanner {
   private async updateFile(
     path: string,
     agent: "claude" | "codex",
-    label: string,
     st: { mtimeMs: number; size: number }
   ): Promise<void> {
     const cached = this.fileCache.get(path);
@@ -410,12 +400,12 @@ export class UsageTokensScanner {
     const completeBuf = lastNl >= 0 ? buf.subarray(0, lastNl + 1) : Buffer.alloc(0);
     const tailBuf = lastNl >= 0 ? buf.subarray(lastNl + 1) : buf;
     if (agent === "claude") {
-      entry.rows.push(...parseClaudeFile(completeBuf.toString("utf8"), st.mtimeMs, label));
-      entry.tailRows = tailBuf.length > 0 ? parseClaudeFile(tailBuf.toString("utf8"), st.mtimeMs, label) : [];
+      entry.rows.push(...parseClaudeFile(completeBuf.toString("utf8"), st.mtimeMs));
+      entry.tailRows = tailBuf.length > 0 ? parseClaudeFile(tailBuf.toString("utf8"), st.mtimeMs) : [];
     } else {
-      entry.rows.push(...parseCodexFile(completeBuf.toString("utf8"), st.mtimeMs, entry.codexState, label));
+      entry.rows.push(...parseCodexFile(completeBuf.toString("utf8"), st.mtimeMs, entry.codexState));
       entry.tailRows =
-        tailBuf.length > 0 ? parseCodexFile(tailBuf.toString("utf8"), st.mtimeMs, { ...entry.codexState }, label) : [];
+        tailBuf.length > 0 ? parseCodexFile(tailBuf.toString("utf8"), st.mtimeMs, { ...entry.codexState }) : [];
     }
     entry.bytesParsed = start + completeBuf.length;
     entry.mtimeMs = st.mtimeMs;
@@ -423,34 +413,30 @@ export class UsageTokensScanner {
     this.fileCache.set(path, entry);
   }
 
-  /** Host home + every managed-account home for an agent (M3: managed-account
-   *  sessions write transcripts under their own CONFIG_DIR/CODEX_HOME). */
+  /** Host home + managed-account transcript directories, deduplicated by realpath. */
   private async homeDirs(
     agent: "claude" | "codex",
     envVar: string,
     subdir: string
-  ): Promise<{ dir: string; label: string }[]> {
-    const host = {
-      dir: join(process.env[envVar] || join(this.opts.userhome, agent === "claude" ? ".claude" : ".codex"), subdir),
-      label: agent
-    };
+  ): Promise<string[]> {
+    const host = join(process.env[envVar] || join(this.opts.userhome, agent === "claude" ? ".claude" : ".codex"), subdir);
     const managed = (this.opts.accountHomes?.() ?? [])
       .filter((a) => a.agent === agent)
-      .map((a) => ({ dir: join(a.home, subdir), label: agent }));
+      .map((a) => join(a.home, subdir));
     // Managed homes now symlink their history dir to the shared store — dedupe by
     // realpath so a shared transcript isn't counted once per account.
     const seen = new Set<string>();
-    const out: { dir: string; label: string }[] = [];
-    for (const item of [host, ...managed]) {
-      let real = item.dir;
+    const out: string[] = [];
+    for (const dir of [host, ...managed]) {
+      let real = dir;
       try {
-        real = await realpath(item.dir);
+        real = await realpath(dir);
       } catch {
         /* missing dir → keep the given path (walkJsonl handles absence) */
       }
       if (seen.has(real)) continue;
       seen.add(real);
-      out.push(item);
+      out.push(dir);
     }
     return out;
   }

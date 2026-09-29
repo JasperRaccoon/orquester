@@ -1,4 +1,4 @@
-import { rm } from "node:fs/promises";
+import { copyFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { context, build, type BuildOptions } from "esbuild";
@@ -22,7 +22,6 @@ const options: BuildOptions = {
       name: "copy-assets",
       setup(build) {
         build.onEnd(async () => {
-          const { copyFile } = await import("node:fs/promises");
           const outDir = path.join(root, "dist-electron");
           await copyFile(path.join(root, "src", "preload.cjs"), path.join(outDir, "preload.cjs"));
           // App logo assets loaded by the main process at runtime (tray + window icon).

@@ -12,7 +12,7 @@ import { parseStat } from "../../agent-host/support/leftover-processes.ts";
 export const HAS_PROC = process.platform === "linux";
 
 /** State + starttime of a pid off `/proc/<pid>/stat`, or null when it is gone/unreadable. */
-export function readProcStat(pid: number): { state: string; starttime: number } | null {
+function readProcStat(pid: number): { state: string; starttime: number } | null {
   if (!HAS_PROC || !Number.isInteger(pid) || pid <= 0) {
     return null;
   }

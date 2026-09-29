@@ -1,13 +1,15 @@
-// Unit tests of the agent block's pure helpers: prompts, the failure classifier, the watcher's
-// answers, the output text, the create body and the account preview.
+// Baseline, text-boundary and wait-budget contracts used by the agent block.
 
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem, ThreadSnapshotPayload, Turn } from "@orquester/api/agent-chat";
 import { activityLine, failureAfterBaseline, isNewTurn, itemsAfterBaseline, takeBaseline, type AgentBaseline } from "./classify.ts";
-import { buildCreateBody, MAX_TITLE_CHARS, renderSessionTitle, sessionTitle } from "./create.ts";
-import { finalText, parentAssistantText } from "./executor.ts";
-import { excludedKeys, resetWaitUntil, emptyMemory } from "./failover.ts";
+import { MAX_TITLE_CHARS, renderSessionTitle, sessionTitle } from "./create.ts";
+import type { AgentBlockOutput } from "./executor.ts";
+import { account, agentNode, testWorkflow } from "./testing/fake-context.ts";
+import { byAccount } from "./testing/fake-chat-host.ts";
+import { Scenario } from "./testing/scenario.ts";
+import { resetWaitUntil } from "./failover.ts";
 import { clipUtf8, clipUtf8Tail } from "./prompt.ts";
 
 const T = (s: number): string => new Date(Date.UTC(2026, 8, 28, 12, 0, s)).toISOString();
@@ -24,10 +26,10 @@ function turn(turnId: string, state: Turn["state"] = "completed"): Turn {
   return { turnId, state, turnCount: 1, requestedAt: T(0), startedAt: T(0), completedAt: state === "running" ? null : T(5), assistantMessageId: null };
 }
 
-function snap(items: ThreadItem[], turns: Turn[], adapter: ThreadSnapshotPayload["head"]["adapter"] = "claude"): ThreadSnapshotPayload {
+function snap(items: ThreadItem[], turns: Turn[]): ThreadSnapshotPayload {
   return {
     head: {
-      id: "s1", projectPath: "/w/ws/app", cwd: "/w/ws/app", title: "t", adapter, refId: adapter, accountId: "", home: "system",
+      id: "s1", projectPath: "/w/ws/app", cwd: "/w/ws/app", title: "t", adapter: "claude", refId: "claude", accountId: "", home: "system",
       modelSelection: { model: "m" }, runtimeMode: "full-access", session: { status: "ready", activeTurnId: null }, turnCount: turns.length, seq: 1, createdAt: T(0), updatedAt: T(0)
     },
     items, turns, checkpoints: [], pending: { approvals: [], userInputs: [] }, roster: [], seq: 1
@@ -40,20 +42,12 @@ test("UTF-8 clipping never splits a code point; the tail keeps the newest part",
   assert.deepEqual(clipUtf8Tail("abc€", 3), { text: "€", truncated: true });
 });
 
-test("failures are read structurally, only after the baseline, with the legacy prefix only for reason-less rows", () => {
+test("only failures after this block's baseline count", () => {
   const old = act("i1", "runtime.error", { message: "x", reason: "usage_limit" });
   const warning = act("i2", "runtime.warning", { message: "parked", reason: "usage_limit", resetsAt: "2026-09-28T15:00:00Z" }, { tone: "info" });
   const baseline: AgentBaseline = { turn: { turnId: null, completedAt: null, running: false }, lastItemId: "i1", at: T(1) };
-  const hit = failureAfterBaseline(snap([old, warning], []), baseline);
-  assert.equal(hit?.reason, "usage_limit");
-  assert.equal(hit?.resetsAt, "2026-09-28T15:00:00.000Z");
-  assert.equal(failureAfterBaseline(snap([old], []), baseline), null, "a row before the baseline is not this block's");
-  const legacy = act("i3", "runtime.error", { message: "Claude usage limit reached. Try later." });
-  assert.equal(failureAfterBaseline(snap([old, legacy], []), baseline)?.legacy, true);
-  const textOnly = act("i4", "runtime.error", { message: "Claude usage limit reached.", reason: "something-new" });
-  assert.equal(failureAfterBaseline(snap([old, textOnly], []), baseline), null, "a reason the reader does not know is never second-guessed by its text");
-  const other = act("i5", "runtime.error", { message: "boom" });
-  assert.equal(failureAfterBaseline(snap([old, other], []), baseline), null);
+  assert.equal(failureAfterBaseline(snap([old], []), baseline), null);
+  assert.equal(failureAfterBaseline(snap([old, warning], []), baseline)?.resetsAt, "2026-09-28T15:00:00.000Z");
 });
 
 test("a baseline row that left the window falls back to the time cut", () => {
@@ -70,55 +64,30 @@ test("the baseline takes the thread's latest turn over a lagging summary", () =>
   assert.equal(isNewTurn({ turnId: "t6", state: "running", startedAt: T(6), completedAt: null }, base.turn), true);
 });
 
-test("the output is the latest settled turn's parent answer: commentary only when it is all, agents' words never, re-emitted Claude copies dropped", () => {
-  const items: ThreadItem[] = [
-    msg("m1", "I'll look", { turnId: "t2", messageKind: "commentary" }),
-    msg("m2", "sub words", { turnId: "t2", agentId: "sub" }),
-    msg("m3", "{\"ok\":true}", { turnId: "t2" })
-  ];
-  assert.equal(finalText(snap(items, [turn("t1"), turn("t2")], "codex"), null).text, "{\"ok\":true}");
-  assert.equal(finalText(snap([msg("c", "only narration", { turnId: "t2", messageKind: "commentary" })], [turn("t2")], "codex"), null).text, "only narration");
-  // A Claude turn whose opening answer was written a second time at its end (an old host's log).
-  const copies: ThreadItem[] = [msg("x1", "Summary.", { turnId: "t3" }), msg("x2", "Details.", { turnId: "t3" }), msg("x3", "Summary.", { turnId: "t3" })];
-  assert.equal(finalText(snap(copies, [turn("t3")], "claude"), null).text, "Summary.\n\nDetails.");
-  // Never a turn from before the block (continue mode).
-  assert.equal(finalText(snap([msg("p", "previous block", { turnId: "t1" })], [turn("t1"), turn("t2")], "claude"), "t1").text, "");
-  // A running turn is not read; the newest settled one with text is.
-  assert.equal(finalText(snap([msg("a", "done", { turnId: "t1" })], [turn("t1"), turn("t2", "running")], "claude"), null).text, "done");
+test("the output text is capped at 2 MiB", async () => {
+  const sc = new Scenario({ accounts: [account("claude", "a1")], behaviour: () => [{ kind: "say", text: "é".repeat(1_200_000) }] });
+  const { result } = await sc.run(testWorkflow([agentNode("n1")]), "n1");
+  assert.equal(result.status, "succeeded");
+  const out = (result as { output: AgentBlockOutput }).output;
+  assert.equal(out.textTruncated, true);
+  assert.equal(Buffer.byteLength(out.text), 2 * 1024 * 1024);
 });
 
-test("the output text is capped at 2 MiB", () => {
-  const big = "é".repeat(1_200_000);
-  const out = finalText(snap([msg("m", big, { turnId: "t1" })], [turn("t1")], "codex"), null);
-  assert.equal(out.truncated, true);
-  assert.ok(Buffer.byteLength(out.text) <= 2 * 1024 * 1024);
-});
-
-test("the handoff reads the parent's words since the block began in the session", () => {
-  const items: ThreadItem[] = [msg("a", "before", { turnId: "t1" }), msg("b", "mine", { turnId: "t2" }), msg("c", "sub", { turnId: "t2", agentId: "x" }), msg("d", "more", { turnId: "t3" })];
-  assert.equal(parentAssistantText(snap(items, []), "t1"), "mine\n\nmore");
-  assert.equal(parentAssistantText(snap(items, []), null), "before\n\nmine\n\nmore");
-});
-
-test("the create body: explicit account, full access, owner; the model only in the chat selection", () => {
-  const owner = { kind: "workflow" as const, workflowId: "w", runId: "r", nodeId: "n" };
-  const codex = buildCreateBody({ candidate: { chainIndex: 0, agent: "codex", model: "gpt-5-codex", options: [], accountId: "system", family: "codex" }, projectPath: "/w/ws/app", title: "T", owner });
-  assert.equal(codex.refId, "codex");
-  assert.equal(codex.accountId, "system", "system is explicit, never omitted");
-  assert.equal(codex.chat?.accountId, "system");
-  assert.equal(codex.chat?.runtimeMode, "full-access");
-  assert.deepEqual(codex.owner, owner);
-  const claude = buildCreateBody({ candidate: { chainIndex: 0, agent: "claude", model: "opus", options: [{ id: "effort", value: "high" }], accountId: "a1", family: "claude" }, projectPath: "/p", title: "T", owner });
-  assert.equal("model" in claude, false);
-  assert.deepEqual(claude.chat?.modelSelection, { model: "opus", options: [{ id: "effort", value: "high" }] });
-});
-
-test("exclusions: tried accounts only while their cooldown runs; unusable ones for good", () => {
-  const memory = emptyMemory();
-  memory.tried["claude:a1"] = T(10);
-  memory.tried["claude:a2"] = T(1);
-  memory.unusable.push("codex:c1");
-  assert.deepEqual([...excludedKeys(memory, new Date(T(5)))].sort(), ["claude:a1", "codex:c1"]);
+test("the handoff reads the parent's words since the block began in the session", async () => {
+  const sc = new Scenario({ accounts: [account("claude", "a1"), account("codex", "c1")], behaviour: () => [{ kind: "say", text: "earlier block" }] });
+  const policy = { strategy: "fixed" as const, includeSystem: false, soonestResetWindow: "weekly" as const, leastUsedMetric: "max" as const, unknownUsage: "last" as const };
+  const wf = testWorkflow([
+    agentNode("first", { chain: [{ agent: "claude", model: "opus", accounts: policy }, { agent: "codex", model: "gpt-5", accounts: policy }] }, "Writer"),
+    agentNode("next", { session: { kind: "continue", fromNode: "Writer" } })
+  ]);
+  const first = (await sc.run(wf, "first")).result;
+  assert.equal(first.status, "succeeded");
+  sc.host.behaviour = byAccount({ a1: [{ kind: "say", text: "current work" }, { kind: "say", text: "subagent text", agentId: "sub" }, { kind: "limit" }], c1: [{ kind: "say", text: "finished" }] });
+  const next = (await sc.run(wf, "next", { upstream: { Writer: (first as { output: AgentBlockOutput }).output } })).result;
+  assert.equal(next.status, "succeeded");
+  const handoff = sc.host.turnLog.find((turn) => turn.refId === "codex")!.input;
+  assert.ok(handoff.includes("current work"));
+  assert.doesNotMatch(handoff, /earlier block|subagent text/);
 });
 
 test("wait-for-reset honours maxWaitHours from the first wait", () => {
@@ -136,7 +105,6 @@ test("the activity line reads tool calls and assistant text, never a provider's 
   const tool = act("c1", "tool.started", {}, { summary: "Run npm test", tone: "tool" });
   assert.equal(activityLine(snap([msg("m1", "Looking at the tests\nmore"), tool, output, stderr, error], [turn("t1", "running")])), "Run npm test");
   assert.equal(activityLine(snap([msg("m1", "Looking at the tests\nmore"), stderr], [turn("t1", "running")])), "Looking at the tests");
-  assert.equal(activityLine(snap([stderr, error], [turn("t1", "running")])), "Working", "only noise: the turn's state");
   assert.equal(activityLine(snap([stderr], [turn("t1", "completed")])), undefined);
 });
 

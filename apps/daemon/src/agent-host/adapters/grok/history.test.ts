@@ -358,12 +358,13 @@ test("a tool call is kept, and it flushes the text before it", () => {
   assert.equal((items[1] as { toolCallId: string }).toolCallId, "call-1");
 });
 
-test("an unterminated tail is kept under a synthetic id rather than lost", () => {
+test("an unterminated replay tail preserves its user message", () => {
   const collector = new GrokHistoryCollector();
   collector.observeAcpUpdate({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "q" } });
   const turns = collector.snapshotTurns();
   assert.equal(turns.length, 1);
-  assert.match(turns[0].id, /^grok-history-/);
+  assert.ok(turns[0].id.length > 0);
+  assert.deepEqual(turns[0].items, [{ kind: "user_message", text: "q" }]);
 });
 
 test("non-text content and an id-less tool call are ignored, never thrown on", () => {

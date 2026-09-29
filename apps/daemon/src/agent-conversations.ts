@@ -1,5 +1,5 @@
 /**
- * Past conversations of every installed coding agent, scoped to one project.
+ * Past Claude, Codex and Grok conversations, scoped to one project.
  *
  * Each CLI persists its own history in its own home dir in its own format, so
  * there is one lister per agent and a common `AgentConversationSummary` shape
@@ -7,15 +7,6 @@
  * best-effort and independently try/caught to `[]`, so a missing dir, a
  * half-written JSON line or a permission error can only shrink the result —
  * never fail the request.
- *
- * SQLite-backed agents (opencode) are stubbed: Node 20 has no `node:sqlite` and
- * the daemon deliberately ships no native deps.
- *
- * There is one lister per agent the catalog can still LAUNCH. The chat design
- * spec §5.3 dropped gemini, kimi, agy, cline and deepcode from the registry, so
- * their listers went with them: a resume row naming an agent no agent row
- * serves is a dead offer, and a picked conversation would only be refused at
- * create time.
  */
 import { createReadStream } from "node:fs";
 import { readdir, readFile, realpath, stat } from "node:fs/promises";
@@ -75,10 +66,9 @@ export async function listAgentConversations(
   const listers: Array<() => Promise<AgentConversationSummary[]>> = [
     () => listClaude(projectPath, roots.claude),
     () => listCodex(projectPath, roots.codex),
-    () => listGrok(projectPath, roots.grok),
-    () => listOpencode(projectPath)
+    () => listGrok(projectPath, roots.grok)
   ];
-  const results = await Promise.all(listers.map((run) => safely(run)));
+  const results = await Promise.all(listers.map(safely));
   const sorted = results
     .flat()
     .sort((a, b) => (a.updatedAt < b.updatedAt ? 1 : a.updatedAt > b.updatedAt ? -1 : 0));
@@ -549,16 +539,6 @@ async function listGrok(projectPath: string, roots: readonly AgentHomeRoot[]): P
     return summary;
   });
   return rows.filter(isDefined);
-}
-
-// ---------------------------------------------------------------------------
-// SQLite-backed agents — stubbed until the daemon can read SQLite without a
-// native dependency (Node 20 has no `node:sqlite`).
-// ---------------------------------------------------------------------------
-
-/** History lives in `~/.local/share/opencode/opencode.db` (table `session`). */
-async function listOpencode(_projectPath: string): Promise<AgentConversationSummary[]> {
-  return [];
 }
 
 // ---------------------------------------------------------------------------

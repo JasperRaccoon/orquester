@@ -6,19 +6,17 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { derivePendingRequests, parseQuestions, requestKindFromRequestType } from "./pending.ts";
+import { derivePendingRequests } from "./pending.ts";
 import { activity, resetActivityIds } from "./test-helpers.ts";
 
-test("requestKindFromRequestType maps every native spelling", () => {
-  assert.equal(requestKindFromRequestType("command_execution_approval"), "command");
-  assert.equal(requestKindFromRequestType("exec_command_approval"), "command");
-  assert.equal(requestKindFromRequestType("dynamic_tool_call"), "command");
-  assert.equal(requestKindFromRequestType("file_read_approval"), "file-read");
-  assert.equal(requestKindFromRequestType("apply_patch_approval"), "file-change");
-  assert.equal(requestKindFromRequestType("file_change_approval"), "file-change");
-  assert.equal(requestKindFromRequestType("mcp_elicitation_approval"), "mcp-elicitation");
-  assert.equal(requestKindFromRequestType("permission_approval"), "permission");
-  assert.equal(requestKindFromRequestType("nonsense"), null);
+test("native approval types retain their canonical kinds in pending requests", () => {
+  resetActivityIds();
+  const types = ["command_execution_approval", "exec_command_approval", "dynamic_tool_call", "file_read_approval",
+    "apply_patch_approval", "file_change_approval", "mcp_elicitation_approval", "permission_approval"];
+  const pending = derivePendingRequests(types.map((requestType) =>
+    activity("approval.requested", { requestId: requestType, requestType })));
+  assert.deepEqual(pending.approvals.map((entry) => entry.requestKind),
+    ["command", "command", "command", "file-read", "file-change", "file-change", "mcp-elicitation", "permission"]);
 });
 
 test("tracks open approvals and removes resolved ones", () => {
@@ -49,12 +47,8 @@ test("a REPLAY of a resolved request cannot reopen it", () => {
     { requestId: "r1", decision: "decline" },
     { createdAt: "2026-01-01T00:00:02.000Z" }
   );
-  // Out-of-order delivery: the resolution is seen first, then the request it
-  // closed. The seed is what carries the ordering across that.
-  const pending = derivePendingRequests([resolved, requested], {
-    closed: new Set(["r1"]),
-    closedAt: new Map([["r1", resolved.createdAt]])
-  });
+  // Out-of-order delivery: the resolution is seen first, then the request it closed.
+  const pending = derivePendingRequests([resolved, requested]);
   assert.deepEqual(pending.approvals, []);
 });
 
@@ -243,8 +237,8 @@ test("an unrecognised `responseMode` is not a message-mode question", () => {
   assert.equal(pending.userInputs[0]?.dismissible, false);
 });
 
-test("parseQuestions preserves native answer keys and drops unanswerable cards", () => {
-  const questions = parseQuestions([
+test("pending questions preserve native answer keys and drop unanswerable cards", () => {
+  const pending = derivePendingRequests([activity("user-input.requested", { requestId: "q1", questions: [
     {
       // Claude looks answers up by the full question text: NOT trimmed.
       id: "  Which file? ",
@@ -257,7 +251,8 @@ test("parseQuestions preserves native answer keys and drops unanswerable cards",
     { id: "x", header: "h", question: "q", options: [], allowCustomAnswer: false },
     // No option but free text allowed: kept.
     { id: "y", header: "h", question: "q", options: [], allowCustomAnswer: true }
-  ]);
+  ] })]);
+  const questions = pending.userInputs[0]!.questions;
   assert.equal(questions.length, 2);
   assert.equal(questions[0]?.id, "  Which file? ");
   assert.deepEqual(questions[0]?.options.map((option) => option.label), ["a.ts"]);

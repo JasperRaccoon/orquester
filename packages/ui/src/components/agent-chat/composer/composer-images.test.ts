@@ -31,11 +31,16 @@ describe("image placeholders", () => {
     assert.equal(removeImagePlaceholder("no images here", 1), "no images here");
   });
 
-  it("revokes every preview URL a chip set holds, and only those", (t) => {
-    const revoked: string[] = [];
-    t.mock.method(URL, "revokeObjectURL", (url: string) => revoked.push(url));
-    revokeImagePreviews([{ previewUrl: "blob:a" }, {}, { previewUrl: "blob:b" }]);
-    assert.deepEqual(revoked, ["blob:a", "blob:b"]);
+  it("releases every staged preview without revoking an unrelated image", async (t) => {
+    const previews = ["first", "second"].map((text) => URL.createObjectURL(new Blob([text])));
+    const other = URL.createObjectURL(new Blob(["still visible"]));
+    t.after(() => {
+      for (const url of [...previews, other]) URL.revokeObjectURL(url);
+    });
+    for (const url of previews) assert.equal((await fetch(url)).ok, true);
+    revokeImagePreviews([{ previewUrl: previews[0] }, {}, { previewUrl: previews[1] }]);
+    for (const url of previews) await assert.rejects(fetch(url));
+    assert.equal(await (await fetch(other)).text(), "still visible");
   });
 
   it("hands chips back without their revoked preview URLs, and the rest untouched", () => {

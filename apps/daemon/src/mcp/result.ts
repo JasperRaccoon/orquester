@@ -21,11 +21,7 @@ export function capText(text: string, maxChars: number): { text: string; truncat
   return { text, truncated: false };
 }
 
-/**
- * `text` in at most `max` code points, the last of them a "…" when anything was cut: how the tools shorten a text they
- * quote in a message — a caller's value (an item, a tool name, an id) or a list's own text. (transcript.ts keeps its
- * own copy, `capped`.)
- */
+/** `text` in at most `max` code points, ending in "…" when cut. */
 export function clipText(text: string, max: number): string {
   return capText(text, max).truncated ? `${capText(text, max - 1).text}…` : text;
 }

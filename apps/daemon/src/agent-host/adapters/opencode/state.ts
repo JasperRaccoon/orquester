@@ -98,7 +98,7 @@ export function mergeOpenCodeAssistantText(
  * the 30 000 characters it keeps: `"...\n\n"`, then the last 30 000 (`Ze` in
  * 1.18.32's `ShellTool.run`, read from the source — not captured).
  */
-export const OUTPUT_WINDOW_HEAD = "...\n\n";
+const OUTPUT_WINDOW_HEAD = "...\n\n";
 
 /**
  * Value → chunk, for a running command part's `state.metadata.output`, which
@@ -315,7 +315,7 @@ export interface OpenCodeStepUsage {
   tokens: OpenCodeTokens;
 }
 
-export interface OpenCodeTurnTokenUsageAccumulator {
+interface OpenCodeTurnTokenUsageAccumulator {
   partIds: Set<string>;
   /**
    * The prompts whose replies' steps count as this turn's own: the ids the
@@ -664,7 +664,7 @@ export interface OpenCodeOpenCall {
  * `command_output` chunks already showed — and the message holding the part,
  * so a removed message drops its parts' marks.
  */
-export interface OpenCodeOutputMark {
+interface OpenCodeOutputMark {
   messageId: string;
   value: string;
 }

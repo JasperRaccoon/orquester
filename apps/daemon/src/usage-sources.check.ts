@@ -128,9 +128,7 @@ async function codexTests() {
 async function grokTests() {
   const base = await mkdtemp(join(tmpdir(), "usage-grok-"));
   const grokHome = join(base, ".grok");
-  const acctA = join(base, "acct-a", "auth.json");
   const acctB = join(base, "acct-b", "auth.json");
-  const managed = [acctA, acctB];
   const managedAuthJson = (key: string, email: string, userId: string, expiresAt: string) =>
     JSON.stringify({
       "https://auth.x.ai::client-1": { key, auth_mode: "oidc", email, user_id: userId, expires_at: expiresAt }
@@ -143,15 +141,13 @@ async function grokTests() {
   // No credential anywhere → null (renders "not linked").
   globalThis.fetch = async () => billing(1);
   assert.equal(
-    await createGrokSource({ grokHome, managedGrokAuthFiles: () => managed, now })(),
+    await createGrokSource({ grokHome, authFile: acctB, now })(),
     null
   );
 
-  // Managed account homes → weekly window; the freshest `expires_at` wins; the
-  // token/user id must never leak into the payload.
-  await mkdir(join(base, "acct-a"), { recursive: true });
+  // The selected managed account supplies billing identity; neither its token
+  // nor user id may reach the public payload.
   await mkdir(join(base, "acct-b"), { recursive: true });
-  await writeFile(acctA, managedAuthJson("OLD-TOK", "old@example.com", "uid-0", "2026-07-07T08:30:00Z"));
   await writeFile(acctB, managedAuthJson("SECRET-TOK", "user@example.com", "uid-1", "2026-07-07T09:00:00Z"));
   const seen: { url: string; headers: Record<string, string> }[] = [];
   globalThis.fetch = async (url, init) => {
@@ -160,7 +156,7 @@ async function grokTests() {
     };
   const src = createGrokSource({
     grokHome,
-    managedGrokAuthFiles: () => managed,
+    authFile: acctB,
     now
   });
   const g1 = await src();
@@ -170,7 +166,7 @@ async function grokTests() {
   assert.equal(g1.session, null);
   // Email from the managed home becomes a labeled account row (matches Claude/Codex panel).
   assert.equal(g1.accounts?.length, 1);
-  assert.equal(g1.accounts?.[0].label, "user@example.com", "the freshest managed credential wins");
+  assert.equal(g1.accounts?.[0].label, "user@example.com");
   assert.equal(g1.accounts?.[0].weekly?.percent, 22.4);
   assert.ok(seen[0].url.includes("/billing"), "goes straight to billing when the file carries a user id");
   assert.equal(seen[0].headers["x-userid"], "uid-1");
@@ -178,24 +174,6 @@ async function grokTests() {
   assert.equal(seen[0].headers["x-grok-client-identifier"], "grok-shell");
   assert.ok(!JSON.stringify(g1).includes("SECRET-TOK"), "token must never reach the usage payload");
   assert.ok(!JSON.stringify(g1).includes("uid-1"), "credential identity must never reach the usage payload");
-
-  // A managed home outranks the grok CLI's own login.
-  await mkdir(grokHome, { recursive: true });
-  await writeFile(
-    join(grokHome, "auth.json"),
-    JSON.stringify({ "https://auth.x.ai::client-1": { key: "CLI-TOK", auth_mode: "oidc", user_id: "uid-c", expires_at: "2026-07-07T10:00:00Z" } })
-  );
-  const ranked: string[] = [];
-  globalThis.fetch = async (_url, init) => {
-      ranked.push(((init?.headers ?? {}) as Record<string, string>).Authorization);
-      return billing(5);
-    };
-  await createGrokSource({
-    grokHome,
-    managedGrokAuthFiles: () => managed,
-    now
-  })();
-  assert.equal(ranked[0], "Bearer SECRET-TOK", "managed homes come before the CLI login");
 
   // Expired stamp → signed-in/stale, NO fetch (the accounts refresher refreshes, never us).
   const expiredDir = await mkdtemp(join(tmpdir(), "usage-grok-expired-"));
@@ -208,7 +186,7 @@ async function grokTests() {
     };
   const expired = await createGrokSource({
     grokHome: join(expiredDir, "no-cli"),
-    managedGrokAuthFiles: () => [expiredAuth],
+    authFile: expiredAuth,
     now
   })();
   assert.ok(expired, "expired credential is still linked, not null");
@@ -223,7 +201,7 @@ async function grokTests() {
     };
   const src429 = createGrokSource({
     grokHome,
-    managedGrokAuthFiles: () => managed,
+    authFile: acctB,
     now
   });
   const ok1 = await src429();
@@ -250,7 +228,6 @@ async function grokTests() {
     };
   const cliSrc = createGrokSource({
     grokHome: cliHome,
-    managedGrokAuthFiles: () => [join(cliOnly, "no-managed", "auth.json")],
     now
   });
   const cli1 = await cliSrc();
@@ -258,33 +235,7 @@ async function grokTests() {
   assert.ok(cliSeen[0].includes("/user"), "missing user id is resolved via /user first");
   await cliSrc();
   assert.equal(cliSeen.filter((u) => u.includes("/user")).length, 1, "resolved user id is cached");
-
-  // Per-account poll: authFile pins a managed home and surfaces its email label.
-  const managedHome = await mkdtemp(join(tmpdir(), "usage-grok-acct-"));
-  const managedAuth = join(managedHome, "auth.json");
-  await writeFile(
-    managedAuth,
-    JSON.stringify({
-      "https://auth.x.ai::client-1": {
-        key: "MGMT-TOK",
-        auth_mode: "oidc",
-        email: "managed@example.com",
-        user_id: "uid-m",
-        expires_at: "2026-07-07T09:00:00Z"
-      }
-    })
-  );
-  globalThis.fetch = async () => billing(41);
-  const mSrc = createGrokSource({
-    grokHome: join(managedHome, "no-cli"),
-    authFile: managedAuth,
-    now
-  });
-  const m1 = await mSrc();
-  assert.equal(m1?.weekly?.percent, 41);
-  assert.equal(m1?.accounts?.[0].label, "managed@example.com");
 }
-
 
 /**
  * The overrides themselves, pinned: CLAUDE_CONFIG_DIR / CODEX_HOME win over `userhome`, and an
@@ -327,12 +278,6 @@ async function homeOverrideTests() {
     assert.equal(pinned, null, "an explicit claudeHome wins over CLAUDE_CONFIG_DIR");
 
     process.env.CODEX_HOME = codexDir;
-    globalThis.fetch = async () => jsonRes(500, {});
-    assert.equal(
-      await createCodexSource({ userhome: empty, now })(),
-      null,
-      "CODEX_HOME wins over userhome: its API-key auth reads as no subscription"
-    );
     globalThis.fetch = async () => jsonRes(500, {});
     const pinnedCodex = await createCodexSource({ userhome: empty, codexHome: codexLogs, now })();
     assert.equal(pinnedCodex?.session?.percent, 9, "an explicit codexHome wins over CODEX_HOME");

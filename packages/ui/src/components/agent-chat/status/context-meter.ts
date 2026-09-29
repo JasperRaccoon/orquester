@@ -134,9 +134,3 @@ export function formatAutoCompactionSentence(
     ? `Context for ${modelLabel} compacts automatically when needed.`
     : "Context compacts automatically when needed.";
 }
-
-/** `used/total` for the popover header, or the bare total when degraded. */
-export function formatContextUsage(model: ContextMeterModel): string {
-  if (model.maxTokens === null) return formatContextTokens(model.usedTokens);
-  return `${formatContextTokens(model.usedTokens)}/${formatContextTokens(model.maxTokens)}`;
-}

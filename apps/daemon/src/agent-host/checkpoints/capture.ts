@@ -19,8 +19,7 @@ import path from "node:path";
 
 import { GitError, GitExitError, type GitRunner } from "./git.ts";
 
-/** `VcsProcess.CHECKPOINT_CAPTURE_OPERATION` — the retrying operation. */
-export const CHECKPOINT_CAPTURE_OPERATION = "checkpoints.capture";
+const CHECKPOINT_CAPTURE_OPERATION = "checkpoints.capture";
 
 const CHECKPOINT_RECOVERY_MAX_CANDIDATES = 64;
 const CHECKPOINT_RECOVERY_TIMEOUT_MS = 5_000;
@@ -471,10 +470,7 @@ async function stageWorkingTree(
         throw error;
       }
       await stageFiles(exclusions, controller.signal);
-    } catch (retryError) {
-      if (retryError === error) {
-        throw error;
-      }
+    } catch {
       // The original failure stands: the recovery is a best effort, not a
       // second class of error.
       throw error;

@@ -41,9 +41,6 @@ export const DEFAULT_APPROVAL_OPTIONS: readonly ApprovalOption[] = [
   { decision: "accept", label: "Approve" }
 ] as const;
 
-/** `decline` and `cancel` are two answers, not two labels for one (§4.3). */
-export const FILE_CHANGE_APPROVAL_OPTIONS: readonly ApprovalOption[] = DEFAULT_APPROVAL_OPTIONS;
-
 /**
  * Map one of our five decisions onto the command-approval enum.
  *

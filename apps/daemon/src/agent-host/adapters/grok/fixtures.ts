@@ -6,9 +6,6 @@
  * from `grok 1.0.34`. This module only reads them; it holds no assertions, so
  * a test can feed the same frames through the normaliser, through the peer, or
  * through the catalog check without three copies of the parser.
- *
- * NOT test-only code by accident: the same reader is what `smoke.ts` uses to
- * print a diff between a live run and the recorded one.
  */
 
 import { readFileSync, readdirSync } from "node:fs";
@@ -20,7 +17,7 @@ export const GROK_FIXTURES_DIR = join(
   "../../../../test/fixtures/grok"
 );
 
-export interface CaptureEntry {
+interface CaptureEntry {
   /** Milliseconds since the child was spawned. */
   readonly t: number;
   readonly dir: "send" | "recv" | "stderr" | "note";
@@ -49,7 +46,7 @@ export interface JsonRpcFrame {
   readonly error?: { code: number; message: string; data?: unknown };
 }
 
-export function isJsonRpc(frame: unknown): frame is JsonRpcFrame {
+function isJsonRpc(frame: unknown): frame is JsonRpcFrame {
   return frame !== null && typeof frame === "object" && !Array.isArray(frame);
 }
 
@@ -63,17 +60,6 @@ export function agentFrames(entries: readonly CaptureEntry[]): JsonRpcFrame[] {
     out.push(entry.frame);
   }
   return out;
-}
-
-/** The `initialize` response of a capture, which every file begins with. */
-export function initializeResponse(entries: readonly CaptureEntry[]): Record<string, unknown> | undefined {
-  for (const frame of agentFrames(entries)) {
-    const result = frame.result as { protocolVersion?: unknown } | undefined;
-    if (result !== undefined && typeof result.protocolVersion === "number") {
-      return result as Record<string, unknown>;
-    }
-  }
-  return undefined;
 }
 
 /** The `session/prompt` results of a capture, in order. */

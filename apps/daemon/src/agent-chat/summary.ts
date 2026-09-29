@@ -275,7 +275,7 @@ export class AgentChatSummaryService {
   private applyFields(
     threadId: string,
     fields: AgentChatSessionSummaryFields,
-    pendingRequests: readonly AgentHostPendingRequest[] = []
+    pendingRequests: readonly AgentHostPendingRequest[]
   ): void {
     if (!this.opts.chat.has(threadId)) {
       // A thread the daemon has no tab for (closed here, still live there).
@@ -392,16 +392,7 @@ export class AgentChatSummaryService {
     before: ReadonlyMap<string, AgentHostPendingRequest>,
     after: readonly AgentHostPendingRequest[]
   ): Map<string, AgentHostPendingRequest> {
-    const next = new Map<string, AgentHostPendingRequest>();
-    for (const request of after) {
-      if (!request || typeof request.requestId !== "string" || !request.requestId) continue;
-      if (request.kind !== "approval" && request.kind !== "question") continue;
-      next.set(request.requestId, {
-        requestId: request.requestId,
-        kind: request.kind,
-        title: typeof request.title === "string" ? request.title : ""
-      });
-    }
+    const next = new Map(after.map((request) => [request.requestId, request]));
     for (const [requestId, request] of next) {
       if (before.has(requestId)) continue;
       this.publishPending(threadId, request, true);
@@ -478,15 +469,6 @@ function settledSince(turn: LatestTurnSummary | null, since: number): boolean {
 }
 
 /**
- * Keep only the seven §6.4 fields (goals §4.7 added `goal`), each only when
- * it has the right shape.
- *
- * This is another process's JSON reaching typed code, so it goes through
- * field-wise validation with a fallback exactly as AGENTS.md requires of every
- * persisted/adapter load: a field written by a newer host with an unexpected
- * type is dropped rather than trusted, because the ladder branches on it.
- */
-/**
  * The `pendingRequests` half of the same body, validated row-wise. A malformed
  * row is dropped rather than published: `agentChat.pending` carries a
  * `requestId` a client will post an approval against, so a row without a usable
@@ -537,6 +519,15 @@ function sanitizeUsageLimits(value: unknown): AgentHostThreadUsageLimits | null 
   return { observedAt: row.observedAt, home: row.home, accountId: row.accountId, windows };
 }
 
+/**
+ * Keep only the seven §6.4 fields (goals §4.7 added `goal`), each only when
+ * it has the right shape.
+ *
+ * This is another process's JSON reaching typed code, so it goes through
+ * field-wise validation with a fallback exactly as AGENTS.md requires of every
+ * persisted/adapter load: a field written by a newer host with an unexpected
+ * type is dropped rather than trusted, because the ladder branches on it.
+ */
 function sanitizeFields(value: unknown): AgentChatSessionSummaryFields {
   const fields: AgentChatSessionSummaryFields = {};
   if (!value || typeof value !== "object") {

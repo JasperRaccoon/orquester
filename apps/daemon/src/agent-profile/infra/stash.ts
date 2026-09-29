@@ -66,7 +66,7 @@ const PAYLOAD = "payload";
 const MAX_ENCODED_ID = 200;
 
 /** The directory name an id is stored under. */
-export function encodeStashId(id: string): string {
+function encodeStashId(id: string): string {
   const encoded = Buffer.from(id, "utf8").toString("base64url");
   // `~` is outside base64url's alphabet, so a hashed name never collides with an encoded one.
   return encoded.length <= MAX_ENCODED_ID ? encoded : `~${createHash("sha256").update(id).digest("hex")}`;
@@ -111,7 +111,7 @@ export class ProfileStash {
   }
 
   /** The directory an entry lives in (whether or not it exists). */
-  entryDir(agent: string, kind: ProfileItemKind, id: string): string {
+  private entryDir(agent: string, kind: ProfileItemKind, id: string): string {
     assertSafeSegment(agent);
     if (!isProfileItemKind(kind)) {
       throw profileErrors.invalid(`Unknown item kind "${String(kind)}".`);
@@ -219,21 +219,6 @@ export class ProfileStash {
     await moveEntry(entry.payloadPath, target);
     await rm(entry.dir, { recursive: true, force: true });
     return target;
-  }
-
-  /**
-   * Turns a `fragment` entry back on: answers its data and deletes the entry.
-   * Throws `ITEM_NOT_FOUND` for no such fragment entry. The entry is gone once
-   * this returns — when putting the data back can fail, read it with
-   * {@link get} instead and {@link remove} the entry after the write.
-   */
-  async takeFragment(agent: string, kind: ProfileItemKind, id: string): Promise<unknown> {
-    const entry = await this.get(agent, kind, id);
-    if (entry === null || entry.original.type !== "fragment") {
-      throw profileErrors.notFound(id);
-    }
-    await rm(entry.dir, { recursive: true, force: true });
-    return entry.original.data;
   }
 
   /** Deletes an entry for good (delete of an item that is off). Answers whether one was there. */

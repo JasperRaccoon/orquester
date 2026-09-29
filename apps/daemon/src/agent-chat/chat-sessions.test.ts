@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { test } from "node:test";
-import type { CreateSessionRequest, SessionSummary } from "@orquester/api";
+import type { SessionSummary } from "@orquester/api";
 import { parseSessionsConfig, type SessionRecord } from "@orquester/config";
 import { ChatSessionManager } from "./chat-sessions.ts";
 import { ChatAwareSessionManager, type ChatSessionLifecycle } from "./session-router.ts";

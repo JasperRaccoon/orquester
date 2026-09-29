@@ -98,7 +98,7 @@ export function failureAfterBaseline(snap: ThreadSnapshotPayload, baseline: Agen
 
 /**
  * The latest turn is not the one the baseline saw: another turn, or — when the baseline saw a turn
- * running — that same turn, now settled (the chat-client's `turnOutcome` rule).
+ * running — that same turn, now settled.
  */
 export function isNewTurn(latest: LatestTurnSummary | null | undefined, baseline: TurnBaseline): boolean {
   if (!latest) return false;

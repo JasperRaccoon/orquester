@@ -212,19 +212,16 @@ import fastifyStatic from "@fastify/static";
 import websocketPlugin from "@fastify/websocket";
 import { WebSocket as UpstreamWebSocket } from "ws";
 import Fastify, { type FastifyInstance, type FastifyReply } from "fastify";
-import { spawn } from "node:child_process";
 import { createReadStream, createWriteStream, existsSync, type WriteStream } from "node:fs";
-import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, writeFile } from "node:fs/promises";
+import { chmod, lstat, mkdir, readFile, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { homedir, platform as osPlatform } from "node:os";
-import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
+import { basename, dirname, join, resolve, sep } from "node:path";
 import { fsPathFromQuery } from "./fs-path-query.js";
-import { stat } from "node:fs/promises";
 import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { request as httpRequest, type IncomingMessage } from "node:http";
 import bcrypt from "bcryptjs";
 
 const daemonId = randomUUID();
-const packageVersion = "0.0.0";
 
 /**
  * Hard ceiling on a single /api/fs/raw read: the in-memory + in-app download
@@ -630,7 +627,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     createGrokSource({
       grokHome: grokCliHome,
       authFile: home ? join(home, "auth.json") : undefined,
-      managedGrokAuthFiles: () => [],
       now: () => Date.now(),
       logger: console
     });
@@ -705,8 +701,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     fetchClaude: () => agentWithAccounts("claude", claudeAccountSource),
     readCodex: () => agentWithAccounts("codex", codexAccountSource),
     readGrok: () => agentWithAccounts("grok", grokAccountSource),
-    getPrefs: () => readUsagePrefs(resolved.appConfigFile),
-    now: () => Date.now()
+    getPrefs: () => readUsagePrefs(resolved.appConfigFile)
   });
   usage.events.on("changed", (u) => broadcaster.publish("usage", "usage.changed", u));
   // Live usage: every Claude chat thread reports its account's windows off its own model
@@ -1163,36 +1158,18 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 /** One launch-env contribution: env vars, optional unsets, effective account. */
 type LaunchEnv = { env: Record<string, string>; unset?: string[]; accountId?: string };
 
-/**
- * Merge two launch-env contributions into one. `b` wins on any key collision;
- * `unset` lists concatenate; the effective `accountId` is taken from `a`,
- * falling back to `b`. Returns null when neither contributes.
- */
-function composeExtraEnv(a: LaunchEnv | null, b: LaunchEnv | null): LaunchEnv | null {
-  if (!a && !b) return null;
-  const unset = [...(a?.unset ?? []), ...(b?.unset ?? [])];
-  const merged: LaunchEnv = { env: { ...a?.env, ...b?.env } };
-  if (unset.length > 0) merged.unset = unset;
-  if (a?.accountId !== undefined) merged.accountId = a.accountId;
-  else if (b?.accountId !== undefined) merged.accountId = b.accountId;
-  return merged;
-}
-
-/**
- * Compose the full launch env for one agent session from its contributors.
- * This is the whole body of the session manager's `resolveExtraEnv` seam, lifted
- * out as a pure function (the managed-account contribution is passed in already
- * resolved) so the composition — which launchers get the Claude timeout env, and
- * that the managed account keeps supplying the effective `accountId` — is
- * exercised by tests rather than only by a live launch. The three timeout keys
- * collide with nothing.
- */
+/** Add Claude timeouts while preserving the managed account and credential removals. */
 export function buildAgentLaunchEnv(
   entryId: string,
   claudeTimeoutMinutes: number,
   accountEnv: LaunchEnv | null
 ): LaunchEnv | null {
-  return composeExtraEnv(accountEnv, claudeTimeoutEnv(entryId, claudeTimeoutMinutes));
+  const timeoutEnv = claudeTimeoutEnv(entryId, claudeTimeoutMinutes);
+  if (!accountEnv && !timeoutEnv) return null;
+  const merged: LaunchEnv = { env: { ...accountEnv?.env, ...timeoutEnv?.env } };
+  if (accountEnv?.unset?.length) merged.unset = [...accountEnv.unset];
+  if (accountEnv?.accountId !== undefined) merged.accountId = accountEnv.accountId;
+  return merged;
 }
 
 /** On-disk credential filename per managed agent. */
@@ -1260,7 +1237,7 @@ export function createServer(
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
-  const { registry, sessions, accounts, git, gitWatcher, todos, recentProjects, usage, usageTokens, push, agentAccounts } = services;
+  const { registry, sessions, accounts, git, todos, recentProjects, usage, usageTokens, push, agentAccounts } = services;
 
   const app = Fastify({
     // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
@@ -4755,13 +4732,6 @@ async function writeJsonFile(file: string, value: unknown): Promise<void> {
  *  per-request auth stays cheap. */
 function hashPassword(plaintext: string): string {
   return bcrypt.hashSync(plaintext, bcrypt.genSaltSync(12));
-}
-
-/** Constant-time string comparison. */
-function safeEqual(a: string, b: string): boolean {
-  const ba = Buffer.from(a);
-  const bb = Buffer.from(b);
-  return ba.length === bb.length && timingSafeEqual(ba, bb);
 }
 
 /** A request path percent-decoded as the router sees it; `undefined` when it is not valid percent-encoding. */

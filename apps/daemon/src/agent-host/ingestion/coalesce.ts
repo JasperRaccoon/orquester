@@ -43,7 +43,7 @@ function asTrimmedString(value: unknown): string | null {
  * counts: labels are not unique when tools execute in parallel, so an
  * anonymous call must pass through rather than swallow its siblings.
  */
-export function stableToolCallId(activity: ThreadActivityItem): string | null {
+function stableToolCallId(activity: ThreadActivityItem): string | null {
   const payload = asRecord(activity.payload);
   if (payload === null) {
     return null;
@@ -106,7 +106,7 @@ function isResolvableContextWindowActivity(activity: ThreadActivityItem): boolea
  * nothing. Malformed rows pass through untouched rather than shadowing a valid
  * earlier row.
  */
-export function dropStaleContextWindowActivities(
+function dropStaleContextWindowActivities(
   activities: readonly ThreadActivityItem[]
 ): ThreadActivityItem[] {
   const latestIndexByTurn = new Map<string | null, number>();
@@ -161,10 +161,10 @@ function toolLifecycleIdentity(activity: ThreadActivityItem): string | null {
  * **after** the update within the turn — a later update belongs to a
  * subsequent call reusing the same identity and is still in flight.
  */
-export function dropSupersededToolUpdatedActivities(
+function dropSupersededToolUpdatedActivities(
   activities: readonly ThreadActivityItem[]
 ): ThreadActivityItem[] {
-  const completionIndicesByKey = new Map<string, number[]>();
+  const latestCompletionByKey = new Map<string, number>();
   for (let index = 0; index < activities.length; index += 1) {
     const activity = activities[index]!;
     if (activity.activityKind !== "tool.completed") {
@@ -174,15 +174,9 @@ export function dropSupersededToolUpdatedActivities(
     if (identity === null) {
       continue;
     }
-    const key = `${activity.turnId ?? ""}\u0000${identity}`;
-    const indices = completionIndicesByKey.get(key);
-    if (indices !== undefined) {
-      indices.push(index);
-    } else {
-      completionIndicesByKey.set(key, [index]);
-    }
+    latestCompletionByKey.set(coalesceKey(activity, identity), index);
   }
-  if (completionIndicesByKey.size === 0) {
+  if (latestCompletionByKey.size === 0) {
     return activities as ThreadActivityItem[];
   }
   return activities.filter((activity, index) => {
@@ -193,8 +187,8 @@ export function dropSupersededToolUpdatedActivities(
     if (identity === null) {
       return true;
     }
-    const indices = completionIndicesByKey.get(`${activity.turnId ?? ""}\u0000${identity}`);
-    return !(indices?.some((completionIndex) => completionIndex > index) ?? false);
+    const latestCompletion = latestCompletionByKey.get(coalesceKey(activity, identity));
+    return latestCompletion === undefined || latestCompletion <= index;
   });
 }
 
@@ -212,7 +206,7 @@ export function dropSupersededToolUpdatedActivities(
  * Never throws: W2 owns the slimmer, and a failure there must cost the row its
  * size, not its existence.
  */
-export function slimActivity(activity: ThreadActivityItem): ThreadActivityItem {
+function slimActivity(activity: ThreadActivityItem): ThreadActivityItem {
   try {
     const payload = slimActivityPayload(activity.payload);
     return payload === activity.payload ? activity : { ...activity, payload };

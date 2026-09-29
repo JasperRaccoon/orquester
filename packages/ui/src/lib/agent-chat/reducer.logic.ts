@@ -188,7 +188,7 @@ export function foldStateFromSnapshot(snapshot: ThreadSnapshotPayload): ThreadFo
 // Fold → slice
 // ---------------------------------------------------------------------------
 
-/** §5.1: a turn is settled by session status; `deriveLatestTurn`'s row, locally. */
+/** §5.1: a turn is settled by session status; the latest-turn summary, locally. */
 function latestTurnState(fold: ThreadFoldState): TurnState | null {
   const latest = fold.turns.at(-1);
   return latest ? latest.state : null;

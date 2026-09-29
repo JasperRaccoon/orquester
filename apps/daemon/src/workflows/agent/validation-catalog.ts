@@ -22,7 +22,7 @@ export const VALIDATION_CATALOG_WAIT_MS = 3_000;
  * the same registry and snapshots: a provider's models count as LOADED only while it is `ready`
  * (a pending or failed probe may carry a bundled fallback list, not the provider's own).
  */
-export function toValidationCatalog(agents: readonly AgentView[]): WorkflowAgentCatalog {
+function toValidationCatalog(agents: readonly AgentView[]): WorkflowAgentCatalog {
   return toWorkflowAgentCatalog(agents);
 }
 

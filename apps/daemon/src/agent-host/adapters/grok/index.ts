@@ -459,7 +459,7 @@ class GrokAdapter implements AgentAdapter {
 
   async readThread(threadId: string): Promise<ThreadSnapshot> {
     const session = this.requireSession(threadId);
-    return await Promise.resolve({ threadId: session.threadId, turns: session.turns });
+    return { threadId: session.threadId, turns: session.turns };
   }
 
   /**
@@ -744,7 +744,5 @@ function grokBlockedCommandError(): Error & { code: string; status: number } {
 export const createGrokAdapter: AdapterFactory = async (
   context: AdapterContext
 ): Promise<AgentAdapter> => {
-  // Acquiring an adapter happens BEFORE the command gate opens (§3.1), so a
-  // factory may do real work — but must not start a provider session.
-  return await Promise.resolve(new GrokAdapter(context));
+  return new GrokAdapter(context);
 };

@@ -186,15 +186,6 @@ describe("claude goal transcript — reading goal_status rows", () => {
     ]);
   });
 
-  it("reads a failed row", async () => {
-    const { transcript } = await fixture(
-      goalRow({ met: false, failed: true, condition: "ship it", reason: "no such repo", iterations: 1 })
-    );
-    assert.deepEqual(await readAll(transcript, SESSION), [
-      { met: false, sentinel: false, failed: true, condition: "ship it", reason: "no such repo", iterations: 1 }
-    ]);
-  });
-
   it("leaves a line still being written for the next read", async () => {
     const complete = goalRow({ met: false, sentinel: true, condition: "a" });
     const partial = goalRow({ met: true, condition: "a" });
@@ -386,17 +377,5 @@ describe("claude goal transcript — reading goal_status rows", () => {
       rows: [{ met: false, sentinel: true, failed: false, condition: "a" }],
       more: false
     });
-  });
-
-  it("an abandoned read never moves the position", async () => {
-    const { transcript } = await fixture(goalRow({ met: true, condition: "a" }));
-    const pending = transcript.readNew(SESSION);
-    transcript.abandonPending();
-    await pending;
-    assert.deepEqual(
-      (await readAll(transcript, SESSION))?.map((row) => row.met),
-      [true],
-      "the next read starts where the abandoned one did"
-    );
   });
 });

@@ -93,11 +93,11 @@ import type { ClaudeScopedLimitNames } from "./usage.ts";
  * The fixed message `ExitPlanMode` is always denied with: the plan is a
  * client-owned card, never the SDK's gate (§4.5).
  */
-export const EXIT_PLAN_MODE_DENY_MESSAGE =
+const EXIT_PLAN_MODE_DENY_MESSAGE =
   "The client captured your proposed plan. Stop here and wait for the user's feedback or implementation request in a later turn.";
 
 /** The literal turn a `/compact` compaction sends (§4.1 `compaction`). */
-export const COMPACT_COMMAND = "/compact";
+const COMPACT_COMMAND = "/compact";
 
 /**
  * How often a background shell's output file is re-read. The CLI streams that
@@ -129,14 +129,14 @@ const GOAL_TRANSCRIPT_READ_DEADLINE_MS = 5_000;
  * The resume scan reads a WHOLE transcript for its last `goal_status` row
  * (goals §6.1.5) — tens of megabytes on a long thread — so it gets longer.
  */
-export const GOAL_TRANSCRIPT_SCAN_DEADLINE_MS = 30_000;
+const GOAL_TRANSCRIPT_SCAN_DEADLINE_MS = 30_000;
 
 /**
  * How long a stop waits for goal reads already in flight before
  * `session.exited` goes out. A read that met the goal just before a stop
  * would otherwise be dropped: nothing may follow `session.exited`.
  */
-export const GOAL_WORK_SETTLE_DEADLINE_MS = 5_000;
+const GOAL_WORK_SETTLE_DEADLINE_MS = 5_000;
 
 /**
  * When a turn-end walk found no verdict, the transcript is read again after
@@ -212,7 +212,7 @@ interface PendingUserInput {
   settle: (answers: Record<string, unknown> | null) => void;
 }
 
-export interface ClaudeSessionOptions {
+interface ClaudeSessionOptions {
   context: AdapterContext;
   deps: ClaudeAdapterDeps;
   threadId: string;

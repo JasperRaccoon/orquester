@@ -55,7 +55,7 @@ export interface ClaudeHistoryReader {
   }): Promise<{ sessionId: string }>;
 }
 
-export interface ClaudeHistoryReaderOptions {
+interface ClaudeHistoryReaderOptions {
   /** The complete child env; carries this thread's `CLAUDE_CONFIG_DIR`. */
   env: Record<string, string>;
   /** Where a spawned worker runs. */

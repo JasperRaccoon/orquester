@@ -50,7 +50,7 @@ const DANGER_ACTION = "text-danger hover:bg-danger-500/10 hover:text-danger";
 /** A question asked on the row itself (the sheet): delete it, or what to do about a name taken on a copy. */
 export type ProfileRowConfirm = { kind: "delete" } | { kind: "conflict"; toAgent: AgentProfileAgentId };
 
-export interface ProfileItemRowProps {
+interface ProfileItemRowProps {
   item: ProfileItem;
   agent: AgentProfileAgentId;
   variant: "docked" | "sheet";

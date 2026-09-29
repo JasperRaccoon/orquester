@@ -9,13 +9,14 @@
  * into — so no `opencode`, no account and no network.
  *
  * Nothing here sleeps: every wait is on an emitted event, a recorded request,
- * a server's exit (the pool's kill resolves on it) or the adapter's own
- * `recycleSettled()` drain.
+ * the real spawned child's close event, or the recycle scheduler's drain.
  */
 
 import assert from "node:assert/strict";
+import childProcess, { type SpawnOptions } from "node:child_process";
 import { mkdtemp, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { syncBuiltinESMExports } from "node:module";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,8 +24,8 @@ import test from "node:test";
 
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
-import type { AdapterContext, StartSessionInput } from "../../adapter.ts";
-import { OpenCodeAdapterImpl } from "./index.ts";
+import type { AgentAdapter, AdapterContext, StartSessionInput } from "../../adapter.ts";
+import { createOpenCodeAdapter, type OpenCodeAdapterImpl } from "./index.ts";
 import { createHostIngestion, HOST_THREAD_ID } from "./testing/host.ts";
 import { makePeer, type Peer } from "./testing/peer.ts";
 import { deferred } from "./util.ts";
@@ -142,6 +143,8 @@ function json(res: ServerResponse, body: unknown, status = 200): void {
 
 interface Harness {
   adapter: OpenCodeAdapterImpl;
+  recycleIdleServers: NonNullable<AgentAdapter["recycleIdleServers"]>;
+  waitForExit(server: PeerServer): Promise<void>;
   fake: FakeOpenCode;
   servers: PeerServer[];
   events: RuntimeEvent[];
@@ -150,12 +153,23 @@ interface Harness {
    * start forks settled — a probe holding the server is in-flight work, and
    * the recycle counts below are about the thread's own session.
    */
-  start(extra?: Partial<StartSessionInput>): Promise<Awaited<ReturnType<OpenCodeAdapterImpl["startSession"]>>>;
+  start(extra?: Partial<StartSessionInput>): Promise<Awaited<ReturnType<AgentAdapter["startSession"]>>>;
   waitFor(type: RuntimeEvent["type"], from?: number): Promise<RuntimeEvent>;
   dispose(): Promise<void>;
 }
 
-async function makeHarness(): Promise<Harness> {
+async function makeHarness(t: test.TestContext): Promise<Harness> {
+  const exits = new Map<number, Promise<void>>();
+  const spawn = childProcess.spawn;
+  const observed = t.mock.method(childProcess, "spawn", (command: string, args: readonly string[], options: SpawnOptions) => {
+    const child = spawn(command, args, options);
+    if (child.pid !== undefined) {
+      exits.set(child.pid, new Promise((resolve) => child.once("close", () => resolve())));
+    }
+    return child;
+  });
+  syncBuiltinESMExports();
+  t.after(() => { observed.mock.restore(); syncBuiltinESMExports(); });
   const fake = new FakeOpenCode();
   await new Promise<void>((resolve) => fake.http.listen(0, "127.0.0.1", resolve));
   const upstream = `http://127.0.0.1:${(fake.http.address() as AddressInfo).port}`;
@@ -196,7 +210,8 @@ async function makeHarness(): Promise<Harness> {
     modelSelection: { model: "openrouter/google/gemini-3.1-flash-lite" },
     runtimeMode: "approval-required"
   };
-  const adapter = new OpenCodeAdapterImpl(ctx);
+  const adapter = await createOpenCodeAdapter(ctx) as OpenCodeAdapterImpl;
+  assert.ok(adapter.recycleIdleServers !== undefined);
   // The host's one consumer of the adapter's stream.
   const consumed = (async () => {
     for await (const event of adapter.events) {
@@ -211,6 +226,12 @@ async function makeHarness(): Promise<Harness> {
   })();
   return {
     adapter,
+    recycleIdleServers: adapter.recycleIdleServers.bind(adapter),
+    waitForExit(server) {
+      const exit = exits.get(server.pid);
+      assert.ok(exit !== undefined, "the peer is a real child of this test");
+      return exit;
+    },
     fake,
     servers: fake.servers,
     events,
@@ -286,14 +307,14 @@ function sessionIdOf(h: Harness): string {
 // Tests
 // ---------------------------------------------------------------------------
 
-test("an idle project's server is stopped now, with no session.exited, and the thread's next start gets a fresh server", async () => {
-  const h = await makeHarness();
+test("an idle project's server is stopped now, with no session.exited, and the thread's next start gets a fresh server", async (t) => {
+  const h = await makeHarness(t);
   try {
     const first = await h.start();
     await h.waitFor("session.state.changed");
     const sessionId = sessionIdOf(h);
 
-    assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 1, deferred: 0 });
+    assert.deepEqual(await h.recycleIdleServers(), { recycled: 1, deferred: 0 });
     assert.equal(gone(h.servers[0]!), true, "the idle server is gone once the route answers");
     assert.equal(h.adapter.hasSession(HOST_THREAD_ID), false);
     assert.deepEqual(h.adapter.listSessions(), []);
@@ -330,19 +351,19 @@ test("an idle project's server is stopped now, with no session.exited, and the t
   }
 });
 
-test("a busy server is deferred, recycled once when its turn ends, and not again on later idles", async () => {
-  const h = await makeHarness();
+test("a busy server is deferred, recycled once when its turn ends, and not again on later idles", async (t) => {
+  const h = await makeHarness(t);
   try {
     const first = await h.start();
     await h.waitFor("session.state.changed");
     const sessionId = sessionIdOf(h);
     await sendTurn(h);
 
-    assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 0, deferred: 1 });
+    assert.deepEqual(await h.recycleIdleServers(), { recycled: 0, deferred: 1 });
     assert.equal(gone(h.servers[0]!), false, "a running turn is never disturbed");
     assert.equal(h.adapter.hasSession(HOST_THREAD_ID), true);
     // Asked again while still busy: still one server, still deferred.
-    assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 0, deferred: 1 });
+    assert.deepEqual(await h.recycleIdleServers(), { recycled: 0, deferred: 1 });
 
     // The turn ends; the deferred recycle goes once the host has its events.
     const turnStart = h.events.length;
@@ -350,12 +371,12 @@ test("a busy server is deferred, recycled once when its turn ends, and not again
     runTurnToIdle(h.fake, sessionId, messageId);
     const completed = await h.waitFor("turn.completed", turnStart);
     assert.ok(completed.type === "turn.completed" && completed.payload.state === "completed");
-    await h.adapter.recycleSettled();
+    await h.waitForExit(h.servers[0]!);
     assert.equal(gone(h.servers[0]!), true, "recycled once idle");
     assert.equal(h.adapter.hasSession(HOST_THREAD_ID), false);
     assert.equal(h.events.some((event) => event.type === "session.exited"), false);
 
-    // Back on a fresh server, another turn to idle: no second recycle.
+    // A consumed config-change mark must not recycle a later server at its next idle.
     await h.start({ resumeCursor: first.resumeCursor });
     await sendTurn(h);
     const again = h.events.length;
@@ -370,13 +391,13 @@ test("a busy server is deferred, recycled once when its turn ends, and not again
   }
 });
 
-test("a turn that reaches a recycled thread before its restart brings the session back itself", async () => {
-  const h = await makeHarness();
+test("a turn that reaches a recycled thread before its restart brings the session back itself", async (t) => {
+  const h = await makeHarness(t);
   try {
     await h.start();
     await h.waitFor("session.state.changed");
     const sessionId = sessionIdOf(h);
-    assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 1, deferred: 0 });
+    assert.deepEqual(await h.recycleIdleServers(), { recycled: 1, deferred: 0 });
 
     const turnPath = await sendTurn(h);
     assert.equal(turnPath, `/session/${sessionId}/prompt_async`, "the same upstream session");
@@ -387,13 +408,13 @@ test("a turn that reaches a recycled thread before its restart brings the sessio
   }
 });
 
-test("nothing running means nothing recycled; a user's session stop after a recycle forgets the thread", async () => {
-  const h = await makeHarness();
+test("nothing running means nothing recycled; a user's session stop after a recycle forgets the thread", async (t) => {
+  const h = await makeHarness(t);
   try {
-    assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 0, deferred: 0 });
+    assert.deepEqual(await h.recycleIdleServers(), { recycled: 0, deferred: 0 });
     await h.start();
     await h.waitFor("session.state.changed");
-    assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 1, deferred: 0 });
+    assert.deepEqual(await h.recycleIdleServers(), { recycled: 1, deferred: 0 });
     await h.adapter.stopSession(HOST_THREAD_ID);
     await assert.rejects(
       h.adapter.sendTurn({ threadId: HOST_THREAD_ID, input: "hi", attachments: [], interactionMode: "default" }),
@@ -405,13 +426,13 @@ test("nothing running means nothing recycled; a user's session stop after a recy
   }
 });
 
-test("history reads and rewind on a recycled idle thread bring its session back (the host calls them without ensureSession)", async () => {
-  const h = await makeHarness();
+test("history reads and rewind on a recycled idle thread bring its session back (the host calls them without ensureSession)", async (t) => {
+  const h = await makeHarness(t);
   try {
     await h.start();
     await h.waitFor("session.state.changed");
     const sessionId = sessionIdOf(h);
-    assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 1, deferred: 0 });
+    assert.deepEqual(await h.recycleIdleServers(), { recycled: 1, deferred: 0 });
     assert.equal(h.adapter.hasSession(HOST_THREAD_ID), false);
 
     const snapshot = await h.adapter.readThread(HOST_THREAD_ID);
@@ -423,10 +444,10 @@ test("history reads and rewind on a recycled idle thread bring its session back 
       "the same upstream session is read"
     );
 
-    assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 1, deferred: 0 });
+    assert.deepEqual(await h.recycleIdleServers(), { recycled: 1, deferred: 0 });
     await assert.rejects(
       h.adapter.rollbackThread(HOST_THREAD_ID, 1, { firstRemovedTurnId: "msg_unknown", droppedTurnIds: ["msg_unknown"], retainedTurnIds: [] }),
-      (error: Error) => !/no live session/.test(error.message),
+      /the turn to rewind to is no longer in this session/,
       "a rewind reaches the session instead of failing for a missing one"
     );
     assert.equal(h.servers.length, 3);
@@ -435,8 +456,8 @@ test("history reads and rewind on a recycled idle thread bring its session back 
   }
 });
 
-test("a recycle never stops the server under a history read; it goes once the read ends", async () => {
-  const h = await makeHarness();
+test("a recycle never stops the server under a history read; it goes once the read ends", async (t) => {
+  const h = await makeHarness(t);
   try {
     await h.start();
     await h.waitFor("session.state.changed");
@@ -445,11 +466,11 @@ test("a recycle never stops the server under a history read; it goes once the re
     const reading = h.adapter.readThread(HOST_THREAD_ID);
     await h.fake.messagesRequested.promise;
 
-    assert.deepEqual(await h.adapter.recycleIdleServers(), { recycled: 0, deferred: 1 });
+    assert.deepEqual(await h.recycleIdleServers(), { recycled: 0, deferred: 1 });
     assert.equal(gone(h.servers[0]!), false, "the read's server stays up");
     gate.resolve();
     await reading;
-    await h.adapter.recycleSettled();
+    await h.waitForExit(h.servers[0]!);
     assert.equal(gone(h.servers[0]!), true, "recycled once the read ended");
     assert.equal(h.events.some((event) => event.type === "session.exited"), false);
   } finally {

@@ -28,6 +28,7 @@ import {
 } from "@orquester/api";
 import { writeFileAtomic } from "../agent-hooks.ts";
 import type { PersistedRun, RunStore } from "./contracts.ts";
+import { jsonBytes, toRunSummary } from "./run-context.ts";
 
 export interface RunStoreOptions {
   /** `workflowRunsDir(baseDir)`. */
@@ -35,49 +36,10 @@ export interface RunStoreOptions {
   logger?: Pick<Console, "warn" | "error">;
 }
 
-/** The summary fields of a run — the one derivation every list, index and event uses. */
-export function runSummaryOf(run: PersistedRun | WorkflowRun): WorkflowRunSummary {
-  const summary: WorkflowRunSummary = {
-    id: run.id,
-    workflowId: run.workflowId,
-    workflowName: run.workflowName,
-    status: run.status,
-    trigger: { ...run.trigger },
-    test: run.test,
-    queuedAt: run.queuedAt
-  };
-  const optional = [
-    "skipReason",
-    "startedAt",
-    "endedAt",
-    "durationMs",
-    "current",
-    "error",
-    "errorKind",
-    "projectPath",
-    "tempProject",
-    "parentRunId",
-    "retryOf"
-  ] as const satisfies readonly (keyof WorkflowRunSummary)[];
-  for (const key of optional) {
-    if (run[key] !== undefined) (summary as unknown as Record<string, unknown>)[key] = structuredClone(run[key]);
-  }
-  return summary;
-}
-
 /** Newest first: `queuedAt` descending, then id descending (deterministic). */
 function newestFirst(a: WorkflowRunSummary, b: WorkflowRunSummary): number {
   if (a.queuedAt !== b.queuedAt) return a.queuedAt < b.queuedAt ? 1 : -1;
   return a.id < b.id ? 1 : a.id > b.id ? -1 : 0;
-}
-
-function jsonBytes(value: unknown): number {
-  try {
-    const text = JSON.stringify(value);
-    return text === undefined ? 0 : Buffer.byteLength(text, "utf8");
-  } catch {
-    return Number.POSITIVE_INFINITY;
-  }
 }
 
 /** A block output cut to the inline preview: whole when it fits, else the head of its JSON text. */
@@ -172,7 +134,7 @@ export class FileRunStore implements RunStore {
   save(run: PersistedRun): Promise<void> {
     if (!isRunId(run.id) || this.deleted.has(run.id)) return Promise.resolve();
     const content = `${JSON.stringify(run)}\n`;
-    this.index(runSummaryOf(run));
+    this.index(toRunSummary(run));
     let writer = this.writers.get(run.id);
     if (writer === undefined) {
       writer = { writing: Promise.resolve(), queued: null, content };
@@ -391,7 +353,7 @@ export class FileRunStore implements RunStore {
         this.logger.warn(`workflow-runs/${runId}/run.json is unreadable; the run is not listed.`);
         continue;
       }
-      this.entries.set(runId, { summary: runSummaryOf(run), size: info.size, mtimeMs: info.mtimeMs });
+      this.entries.set(runId, { summary: toRunSummary(run), size: info.size, mtimeMs: info.mtimeMs });
     }
     for (const entry of this.entries.values()) this.addToWorkflow(entry.summary);
     for (const list of this.byWorkflow.values()) list.sort(newestFirst);

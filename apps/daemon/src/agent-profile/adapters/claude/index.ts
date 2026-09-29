@@ -50,6 +50,7 @@ import {
 } from "@orquester/api";
 import { agentProfileImportsDir } from "@orquester/config";
 import { profileErrors } from "../../errors.ts";
+import { SecretDigester } from "../../infra/secret-digest.ts";
 import {
   type ProfileBackups,
   type ProfileStash,
@@ -86,7 +87,6 @@ import type {
 } from "../types.ts";
 import { type ClaudeJsonDoc, mcpServersOf, parseClaudeJson, updateClaudeJsonMcpServers } from "./claude-json.ts";
 import {
-  SecretDigester,
   definitionFromDraft,
   definitionFromPortable,
   mcpTarget,
@@ -101,7 +101,6 @@ import {
   marketplaceSourceArg,
   parseInstalledPlugins,
   parseKnownMarketplaces,
-  pluginCachePresent,
   pluginProvides,
   readMarketplaceCatalog,
   readPluginManifest,
@@ -182,7 +181,7 @@ interface LoadedState {
   fileErrors: ProfileFileError[];
 }
 
-export interface ClaudeProfileAdapterDeps {
+interface ClaudeProfileAdapterDeps {
   backups: ProfileBackups;
   stash: ProfileStash;
   runCli?: typeof runAgentCliOrThrow;
@@ -344,10 +343,6 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
     };
   }
 
-  private mcpRevisionContent(def: Record<string, unknown>): unknown {
-    return this.secrets.masked(def);
-  }
-
   private async loadMcp(state: LoadedState, pluginMcp: Entry[]): Promise<void> {
     const servers = state.claudeJson === null ? {} : mcpServersOf(state.claudeJson);
     for (const [name, def] of Object.entries(servers)) {
@@ -382,7 +377,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
               offNote: `Turning it off adds it to deniedMcpServers in settings.json, which also blocks a project MCP server named "${name}".`
             }
           },
-          this.mcpRevisionContent(def)
+          this.secrets.masked(def)
         )
       });
     }
@@ -434,7 +429,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
     const out = { plugins: [] as Entry[], skills: [] as Entry[], commands: [] as Entry[], mcp: [] as Entry[] };
     for (const plugin of state.plugins) {
       const read = await this.tolerant(state, plugin.installPath, null, async () => {
-        if (!(await pluginCachePresent(plugin.installPath))) return null;
+        if ((await pathKind(plugin.installPath)) === null) return null;
         const manifest = await readPluginManifest(plugin.installPath);
         const skills = await scanSkills(join(plugin.installPath, "skills"));
         const commands = await scanCommands(join(plugin.installPath, "commands"), { nested: true });
@@ -506,7 +501,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
               path: plugin.installPath,
               meta: { transport: mcpTransportOf(def) ?? String(def.type), ...(target !== undefined ? { target } : {}) }
             },
-            { plugin: plugin.id, def: this.mcpRevisionContent(def) }
+            { plugin: plugin.id, def: this.secrets.masked(def) }
           )
         });
       }
@@ -1067,7 +1062,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
       (servers) => {
         const current = servers[name];
         // The lock's fresh copy must still be what the owner edited.
-        if (!isRecord(current) || contentHash({ content: this.mcpRevisionContent(current), enabled }) !== revision) {
+        if (!isRecord(current) || contentHash({ content: this.secrets.masked(current), enabled }) !== revision) {
           throw profileErrors.conflict();
         }
         if (nextName !== name && nextName in servers) throw profileErrors.exists(nextName);
@@ -1290,7 +1285,7 @@ export class ClaudeProfileAdapter implements ProfileAdapter {
           this.ctx.homes.claudeJson,
           (servers) => {
             const current = servers[entry.name];
-            if (!isRecord(current) || contentHash({ content: this.mcpRevisionContent(current), enabled }) !== revision) {
+            if (!isRecord(current) || contentHash({ content: this.secrets.masked(current), enabled }) !== revision) {
               throw profileErrors.conflict();
             }
             delete servers[entry.name];

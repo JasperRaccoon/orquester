@@ -61,4 +61,4 @@ const readFile = defineTool({
   }
 });
 
-export const fileTools: ToolDef[] = [listFiles, readFile] as ToolDef[];
+export const fileTools: ToolDef[] = [listFiles, readFile];

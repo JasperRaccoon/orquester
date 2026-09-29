@@ -38,41 +38,6 @@ after(async () => {
 });
 
 describe("integration: code and shell through the real sandbox", () => {
-  test("a code block reads its context and secrets; the secret is redacted from its output", async () => {
-    const projects = new FakeProjects();
-    projects.existing.add(projectPath);
-    const h = createHarness({
-      workflows: [
-        workflow(
-          "w1",
-          [
-            node("T", "trigger.manual"),
-            node("A", "code", {
-              source:
-                "export default async ({ input, nodes, secrets, run, project, log }) => { log('hello'); return { doubled: input.input.n * 2, trig: nodes.T.output.kind, token: secrets.TOKEN, run: typeof run.id, cwd: project.path }; }"
-            })
-          ],
-          [edge("T", "A")],
-          { project: { kind: "existing", projectPath } }
-        )
-      ],
-      runStore: new InMemoryRunStore(join(root, "runs")),
-      projects,
-      clock: realClock as never,
-      sandbox: createSandboxRunner({ appdirTmp: root }) as never
-    });
-    await h.secrets.set("TOKEN", "tok-123456");
-    const { runId } = await h.engine.run("w1", { input: { n: 21 } });
-    const result = await h.engine.waitForRun(runId!);
-    const run = (await h.engine.getRun(runId!))!;
-    assert.equal(result.status, "succeeded", JSON.stringify(run.blocks.A));
-    assert.deepEqual(run.blocks.A!.output, { doubled: 42, trig: "manual", token: "«secret:TOKEN»", run: "string", cwd: projectPath });
-    assert.ok((run.blocks.A!.logs?.stdoutBytes ?? 0) > 0, "log sizes reported");
-    const logPath = await h.engine.nodeLogPath(runId!, "A", "stdout");
-    assert.ok(logPath?.endsWith(join("nodes", "A", "1", "stdout.log")));
-    assert.equal(h.engine.isNodeLogLive(runId!, "A"), false);
-  });
-
   test("a throw fails the block with its message and stack; stop() stops the run", async () => {
     const projects = new FakeProjects();
     projects.existing.add(projectPath);

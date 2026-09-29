@@ -50,14 +50,14 @@ export const XAI_ROUTED_METHODS: ReadonlySet<string> = new Set<string>([
  * liveness registry's in `fold-seam.test.ts` — sees the real gaps: a monitor's
  * line before the wake it caused, ten seconds between heartbeats.
  */
-export const CAPTURE_EPOCH_MS = Date.UTC(2026, 8, 25, 12, 0, 0);
+const CAPTURE_EPOCH_MS = Date.UTC(2026, 8, 25, 12, 0, 0);
 
 export interface TurnCursor {
   current: string | undefined;
 }
 
 /** What a test can do at a recorded harness note. */
-export interface DriverControl {
+interface DriverControl {
   readonly grok: GrokNormalizer;
   readonly turn: TurnCursor;
   /** Settle the open turn as the session's `interrupt` does (a Stop). */

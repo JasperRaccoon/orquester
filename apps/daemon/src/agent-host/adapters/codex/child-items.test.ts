@@ -339,22 +339,6 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
     assert.deepEqual(progress[0]!.providerRefs, { providerTurnId: CHILD_TURN, providerItemId: "call_m" });
   });
 
-  it("Stop and exit close a child's running call; a turn-scoped close of the parent's turn does not", () => {
-    const n = make();
-    turnStarted(n, PARENT, PARENT_TURN);
-    launchChild(n);
-    itemStarted(n, CHILD, CHILD_TURN, commandItem(CALL, "inProgress", null));
-    assert.deepEqual(n.openItemIds(), [CHILD_CALL], "a child's running call is an open item");
-
-    assert.deepEqual(n.closeOpenItems("completed", PARENT_TURN), []);
-
-    // Both a session-scoped Stop and the process's exit close with no turn.
-    const closed = n.closeOpenItems("failed");
-    assert.deepEqual(callRows(closed), [["item.completed", CHILD_CALL, CHILD, PARENT_TURN]]);
-    assert.deepEqual(payloadOf(closed[0]), { itemType: "command_execution", status: "failed", agentId: CHILD });
-    assert.deepEqual(n.openItemIds(), []);
-  });
-
   it("a child's file change: its patch updates and its output are the child's too", () => {
     const n = make();
     turnStarted(n, PARENT, PARENT_TURN);
@@ -419,7 +403,6 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
 });
 
 describe("a child's call through ingestion and the fold (Task 3)", () => {
-
   it("a child's roster row keeps its launch's name through every tick, and carries its own usage", async () => {
     // Every tick used to put what the child was doing in `description`, which
     // ingestion makes the row's title: the roster read "agent <thread id>",

@@ -88,13 +88,10 @@ import {
   sleepUntil,
   toRunSummary,
   EngineStoppedError,
-  WorkflowEngineError,
-  type EngineLimits
+  WorkflowEngineError
 } from "./run-context.ts";
 import { createSlotPool, type SlotPool } from "./scheduler-queue.ts";
 import { createRedactor, type SecretRedactor } from "./sandbox/redact.ts";
-
-export { WorkflowEngineError } from "./run-context.ts";
 
 /** The services an executor gets, minus what the engine provides itself. */
 export type EngineServiceDeps = Omit<EngineServices, "runChild" | "awaitRun" | "clock" | "mintId" | "logger" | "store">;
@@ -114,7 +111,6 @@ export interface WorkflowEngineOptions {
   clock: Clock;
   mintId: MintId;
   logger: WorkflowLogger;
-  limits?: Partial<EngineLimits>;
 }
 
 export type RunResult = WorkflowRunSummary & { finalOutput?: unknown };
@@ -271,7 +267,7 @@ function isValidResult(value: unknown): value is NodeResult {
 // ---------------------------------------------------------------------------
 
 export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRuntimeEngine {
-  const limits: EngineLimits = { ...DEFAULT_ENGINE_LIMITS, ...opts.limits };
+  const limits = DEFAULT_ENGINE_LIMITS;
   const { clock, logger, runStore, store } = opts;
   const agentSlots: SlotPool = createSlotPool(limits.maxConcurrentAgentBlocks);
   const processSlots: SlotPool = createSlotPool(limits.maxConcurrentProcesses);

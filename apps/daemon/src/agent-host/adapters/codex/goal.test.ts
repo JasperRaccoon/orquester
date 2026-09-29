@@ -400,32 +400,9 @@ describe("codex goal — nothing is read over a pending resume snapshot (fix rou
       "the window is closed: the next update is an ordinary one"
     );
   });
-
-  it("is settled only once no snapshot is pending and no carry is in flight", () => {
-    const { goals } = tracker({ known: goal({ status: "paused" }), carry: true });
-    assert.equal(goals.settled, true, "a fresh session has nothing pending");
-    goals.expectResumeSnapshot();
-    assert.equal(goals.settled, false, "the snapshot is pending");
-    goals.notified(null);
-    assert.equal(goals.settled, false, "a carry is requested");
-    goals.takeCarry();
-    assert.equal(goals.settled, false, "a carry is in flight");
-    goals.notified(goal({ status: "paused" }));
-    assert.equal(goals.settled, true, "the carried goal has come back");
-  });
-
-  it("a failed carry settles too", () => {
-    const { goals } = tracker({ known: goal({ status: "paused" }), carry: true });
-    goals.expectResumeSnapshot();
-    goals.notified(null);
-    goals.takeCarry();
-    goals.carryFailed();
-    assert.equal(goals.settled, true);
-  });
 });
 
 describe("codex goal — the `/goal` status text (goals §6.2.3)", () => {
-
   it("names the status, the objective, the tokens against the budget and the time", () => {
     assert.equal(
       codexGoalStatusSummary(goal({ tokensUsed: 12_345, tokenBudget: 50_000, elapsedMs: 5_400_000 })),

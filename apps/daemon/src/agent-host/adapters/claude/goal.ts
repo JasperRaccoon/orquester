@@ -53,10 +53,10 @@ export const GOAL_WAITING_BACKGROUND_PHASE = "waiting-background";
 export const GOAL_COMMAND_NAME = "goal";
 
 /** How a "not met" check starts — the CLI's `Stop` + ` hook feedback:\n`. */
-export const STOP_HOOK_FEEDBACK_PREFIX = "Stop hook feedback:\n";
+const STOP_HOOK_FEEDBACK_PREFIX = "Stop hook feedback:\n";
 
 /** How a deferred evaluation's check-in starts. */
-export const GOAL_CHECK_IN_PREFIX = "Goal check-in: «";
+const GOAL_CHECK_IN_PREFIX = "Goal check-in: «";
 
 /**
  * Where the CLI cuts the condition quoted in a Stop-hook feedback once the
@@ -70,7 +70,7 @@ const STOP_HOOK_CONDITION_CUT = 500;
 // ---------------------------------------------------------------------------
 
 /** What one `/goal` output says. `other`: a refusal or anything else — no goal change. */
-export type ClaudeGoalCommandOutput =
+type ClaudeGoalCommandOutput =
   | { kind: "set"; objective: string }
   | { kind: "cleared"; objective: string }
   | { kind: "none" }
@@ -267,7 +267,7 @@ export function parseGoalCheckIn(text: string): { backgroundRunning: boolean } |
 const MAX_DATE_MS = 8.64e15;
 
 /** An `active_goal` frame's `value`, read field-wise. */
-export interface ClaudeActiveGoal {
+interface ClaudeActiveGoal {
   condition: string;
   iterations: number;
   /** `set_at` (epoch ms) as ISO. */
@@ -497,11 +497,10 @@ export type ClaudeGoalDecision =
   | { kind: "deferred"; dueAtMs: number }
   | { kind: "unchanged" };
 
-export interface ClaudeGoalTrackerOptions {
+interface ClaudeGoalTrackerOptions {
   clock: Clock;
   /** The fold's goal when the session starts (goals §5.3). */
   knownGoal?: AgentGoal | null;
-  throttleMs?: number;
 }
 
 /**
@@ -512,7 +511,6 @@ export interface ClaudeGoalTrackerOptions {
  */
 export class ClaudeGoalTracker {
   private readonly clock: Clock;
-  private readonly throttleMs: number;
   private current: AgentGoal | null;
   private emitted: AgentGoal | null;
   private lastProgressAtMs: number | undefined;
@@ -520,7 +518,6 @@ export class ClaudeGoalTracker {
 
   constructor(options: ClaudeGoalTrackerOptions) {
     this.clock = options.clock;
-    this.throttleMs = options.throttleMs ?? GOAL_PROGRESS_THROTTLE_MS;
     // Through the parser: the fold's goal carries an `updatedAt` that is not
     // provider state, and nothing from another process reaches typed code raw.
     const known = parseAgentGoal(options.knownGoal ?? null);
@@ -563,7 +560,7 @@ export class ClaudeGoalTracker {
       return { kind: "unchanged" };
     }
     if (change === "progress" && options?.immediate !== true && this.lastProgressAtMs !== undefined) {
-      const dueAtMs = this.lastProgressAtMs + this.throttleMs;
+      const dueAtMs = this.lastProgressAtMs + GOAL_PROGRESS_THROTTLE_MS;
       if (this.clock.now().getTime() < dueAtMs) {
         this.progressDueAtMs = dueAtMs;
         return { kind: "deferred", dueAtMs };

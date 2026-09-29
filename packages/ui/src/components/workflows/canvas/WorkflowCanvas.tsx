@@ -13,7 +13,7 @@
  * so its toolbar can zoom); `StandaloneWorkflowCanvas` brings its own.
  */
 
-import React, { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
+import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRef, useState } from "react";
 import {
   Background,
   BackgroundVariant,

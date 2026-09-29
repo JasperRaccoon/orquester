@@ -51,14 +51,6 @@ export const TONE_TEXT: Record<RunTone, string> = {
   neutral: "text-neutral-500"
 };
 
-export const TONE_DOT: Record<RunTone, string> = {
-  ok: "bg-ok",
-  danger: "bg-danger",
-  warn: "bg-warn",
-  info: "bg-info",
-  neutral: "bg-neutral-500"
-};
-
 /** A soft tinted surface for a status pill / a selected live row. */
 export const TONE_SOFT: Record<RunTone, string> = {
   ok: "bg-ok/10 text-ok ring-ok/25",

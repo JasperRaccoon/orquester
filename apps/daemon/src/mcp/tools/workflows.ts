@@ -982,4 +982,4 @@ const setSecret = defineTool({
 export const workflowTools: ToolDef[] = [
   listBlockTypes, listWorkflows, getWorkflow, createWorkflow, updateWorkflow, validateWorkflowTool, deleteWorkflow,
   runWorkflow, listRuns, getRun, cancelRun, listSecrets, setSecret
-] as ToolDef[];
+];

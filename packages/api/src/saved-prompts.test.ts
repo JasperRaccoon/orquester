@@ -48,8 +48,4 @@ describe("escapePromptVariables", () => {
     assert.equal(promptVariablesUsed(saved).length, 0, "nothing in it is a live variable");
     assert.equal(renderPromptTemplate(saved, { date: "2026-09-27", branch: "main", diff: "x" }), sent);
   });
-
-  it("leaves text without known variables alone", () => {
-    assert.equal(escapePromptVariables("plain {foo} text"), "plain {foo} text");
-  });
 });

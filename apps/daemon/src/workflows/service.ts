@@ -49,6 +49,7 @@ import { writeFileAtomic } from "../agent-hooks.ts";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { WorkflowStore } from "./contracts.ts";
 import { excerpt, invalidRequest, WorkflowError, workflowNotFound } from "./errors.ts";
+import { jsonBytes } from "./run-context.ts";
 
 export interface WorkflowServiceOptions {
   /** `workflowsPath(baseDir)`. */
@@ -64,15 +65,6 @@ export interface WorkflowServiceOptions {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
-}
-
-function jsonBytes(value: unknown): number {
-  try {
-    const text = JSON.stringify(value);
-    return text === undefined ? 0 : Buffer.byteLength(text, "utf8");
-  } catch {
-    return Number.POSITIVE_INFINITY;
-  }
 }
 
 function patchError(error: unknown, what: "op" | "item"): WorkflowError {

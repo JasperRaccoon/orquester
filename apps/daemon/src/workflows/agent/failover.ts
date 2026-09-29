@@ -148,7 +148,7 @@ export async function coolDown(
 }
 
 /** The selection input over the live readers. */
-export function selectionInput(deps: FailoverDeps, chain: AgentChainEntry[], memory: FailoverMemory): SelectAccountInput {
+function selectionInput(deps: FailoverDeps, chain: AgentChainEntry[], memory: FailoverMemory): SelectAccountInput {
   const now = deps.clock.now();
   return {
     chain,
@@ -242,7 +242,7 @@ export async function pickCandidate(
  * once the quota refilled, and `whenAllBurnt: "wait-for-reset"` bounds those by `maxWaitHours`
  * already — counted, a 48 h wait with hourly unknown-reset cooldowns ran out of hops after 12.
  */
-export function countedHops(hops: readonly AgentHop[]): number {
+function countedHops(hops: readonly AgentHop[]): number {
   return hops.filter((hop) => hop.via !== "resumed").length;
 }
 

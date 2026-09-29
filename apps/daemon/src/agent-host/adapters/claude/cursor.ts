@@ -23,8 +23,6 @@
  * still written, because an older host reads nothing else.
  */
 
-const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-
 /**
  * The same shape rule the host's §6.1 create-time resume
  * (`orchestration/resume.ts`) and the terminal launch path (`resumeLaunchArgs`
@@ -80,10 +78,6 @@ export interface ClaudeResumeCursor {
    * derives them from the legacy list then.
    */
   turnBoundaries?: ClaudeTurnBoundary[];
-}
-
-export function isUuid(value: unknown): value is string {
-  return typeof value === "string" && UUID_RE.test(value);
 }
 
 /**

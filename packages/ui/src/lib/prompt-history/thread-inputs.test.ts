@@ -101,7 +101,7 @@ describe("createHistoryThreadSelector", () => {
     const running = select(threadState({ ...base, turnStatus: "running" }));
     assert.equal(running.busy.isTurnActive, true);
     const settled = select(threadState({ ...base, turnStatus: "completed" }));
-    assert.notEqual(settled, running);
+    assert.notEqual(settled, running, "useSyncExternalStore needs a new snapshot to notify History");
     assert.deepEqual(settled.busy, { isTurnActive: false, reverting: false, hasPendingRequest: false });
     const approval = { requestId: "r1", requestKind: "command", createdAt: prompt.createdAt } as PendingApproval;
     assert.equal(select(threadState({ ...base, approvals: [approval] })).busy.hasPendingRequest, true);

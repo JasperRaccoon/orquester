@@ -78,7 +78,7 @@ interface ThreadLivenessState {
   turnStartedAt: number | null;
 }
 
-export interface LivenessRegistryOptions {
+interface LivenessRegistryOptions {
   clock?: Clock;
 }
 
@@ -197,12 +197,12 @@ export function createLivenessRegistry(
   const expire = (state: ThreadLivenessState): void => {
     const now = clock.now().getTime();
     const cutoff = now - BACKGROUND_LIVENESS_TTL_MS;
-    for (const [taskId, lastSeenAt] of [...state.monitors]) {
+    for (const [taskId, lastSeenAt] of state.monitors) {
       if (lastSeenAt <= cutoff) {
         state.monitors.delete(taskId);
       }
     }
-    for (const [taskId, expiresAt] of [...state.agents]) {
+    for (const [taskId, expiresAt] of state.agents) {
       if (expiresAt !== null && expiresAt <= now) {
         state.agents.delete(taskId);
       }
@@ -310,7 +310,7 @@ export function createLivenessRegistry(
         if (turnStartedAt !== null) {
           // A watch loop that reported nothing for the whole turn was already
           // not live while the agent worked.
-          for (const [taskId, lastSeenAt] of [...state.monitors]) {
+          for (const [taskId, lastSeenAt] of state.monitors) {
             if (lastSeenAt < turnStartedAt) {
               state.monitors.delete(taskId);
             }

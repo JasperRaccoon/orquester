@@ -84,7 +84,7 @@ deleted and rebuilt from the logs. Tests use the real driver in a temp dir.
    first and then continued; the rest wait in `bootSettlePending` for their first load, which
    settles and repairs the same way.
 3. `store.sweepStartup()` — fired, never awaited: stale partial uploads and the raw-log ceiling,
-   no log read. The deep sweep (`sweepNow`: snapshot + tail, threads with stored attachments only)
+   no log read. The deep sweep (`pruneAttachments`: snapshot + tail, threads with stored attachments only)
    runs on the store's 6 h schedule.
 4. `host.openGate()` — readiness. Queued commands and the daemon's health probe are released.
 5. `snapshots.startBootRefresh()` — never awaited; probes only the providers that hydrated no

@@ -30,9 +30,6 @@ ReactDOM.createRoot(document.getElementById("root")!).render(
 declare global {
   interface Window {
     orquesterDesktop: DesktopBridge & {
-      runtime: "desktop";
-      dataDir?: string;
-      socketPath?: string;
       defaultConnection: UiConnection;
       windowControls: WindowControls;
       /** Optional host hook the shared theme lib calls (lib/theme.ts) so the

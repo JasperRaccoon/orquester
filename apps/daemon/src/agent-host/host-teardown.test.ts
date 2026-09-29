@@ -30,13 +30,18 @@ import { fileURLToPath } from "node:url";
 import {
   agentChatThreadEventsPath,
   agentChatThreadLeftoverWorkPath,
-  agentChatThreadMetaPath
+  agentChatThreadMetaPath,
+  agentHostSocketPath,
+  agentHostTokenPath
 } from "@orquester/config";
 import type { DomainEvent, ThreadActivityItem } from "@orquester/api/agent-chat";
 
 import type { AdapterLogger } from "./adapter.ts";
 import { writeMockCodexServer } from "./adapters/codex/testing.ts";
 import { startAgentHost, type AgentHost } from "./main.ts";
+import { AgentHostClient } from "../agent-chat/host-client.ts";
+import { agentHostRoutes } from "./host-protocol.ts";
+import { withDeadline } from "./support/deadline.ts";
 
 const GROK_MOCK = join(dirname(fileURLToPath(import.meta.url)), "adapters/grok/testing/mock-grok.mjs");
 
@@ -142,6 +147,7 @@ interface Rig {
   /** The host's environment: a second host on the same appdir starts with it. */
   env: NodeJS.ProcessEnv;
   host: AgentHost;
+  stopped: Promise<void>;
   /**
    * Every host started on this rig, in order, `host` first: a test's
    * `finally` stops each, so a failure fails — a host left running (its
@@ -158,8 +164,8 @@ async function writeShim(home: string, name: string, script: string): Promise<vo
   chmodSync(shim, 0o755);
 }
 
-async function startHost(appdir: string, env: NodeJS.ProcessEnv): Promise<AgentHost> {
-  const host = await startAgentHost({ appdir, env, logger: quiet });
+async function startHost(appdir: string, env: NodeJS.ProcessEnv, onStopped: () => void): Promise<AgentHost> {
+  const host = await startAgentHost({ appdir, env, logger: quiet, onStopped });
   try {
     await host.ready;
   } catch (error) {
@@ -184,6 +190,18 @@ async function stopHosts(rig: Rig | undefined): Promise<void> {
   }
 }
 
+async function stopThroughHttp(rig: Rig, markedThreadIds: string[]): Promise<void> {
+  const token = (await readFile(agentHostTokenPath(rig.appdir), "utf8")).trim();
+  const client = new AgentHostClient({
+    socketPath: agentHostSocketPath(rig.appdir, process.platform === "win32" ? "win32" : "linux"),
+    token: () => token
+  });
+  const response = await client.json("POST", agentHostRoutes.stop);
+  assert.equal(response.status, 200);
+  assert.deepEqual(response.value, { ok: true, markedThreadIds });
+  await withDeadline(rig.stopped, { label: "intentional host stop", timeoutMs: 15_000 });
+}
+
 /**
  * A host on a temp appdir whose PATH resolves exactly `shims` — name → the
  * script the shim runs under this node.
@@ -200,8 +218,10 @@ async function bootHost(shims: Record<string, string>, extraEnv: Record<string, 
     await writeShim(home, name, script);
   }
   const env = { HOME: home, PATH: "/usr/bin:/bin", ORQUESTER_APPDIR: appdir, TMPDIR: join(appdir, "tmp"), ...extraEnv };
-  const host = await startHost(appdir, env);
-  return { root, appdir, project, env, host, hosts: [host] };
+  let onStopped!: () => void;
+  const stopped = new Promise<void>((resolve) => { onStopped = resolve; });
+  const host = await startHost(appdir, env, onStopped);
+  return { root, appdir, project, env, host, stopped, hosts: [host] };
 }
 
 /** Start a Grok thread `t1` whose turn leaves the mock's `leftover` work running, and settle it. */
@@ -285,7 +305,7 @@ test(
 );
 
 test(
-  "a helper that ignores SIGTERM is killed inside the SIGTERM path's 3 s backstop",
+  "an authenticated host stop reaps a helper that ignores SIGTERM before reporting completion",
   { skip: process.platform !== "linux" },
   async () => {
     const mark = randomUUID();
@@ -295,14 +315,10 @@ test(
       await grokTurnWithLeftovers(rig, { GROK_RIG_MARK: mark, GROK_MOCK_HELPER_IGNORES_TERM: "1" });
       assert.equal(launched(mark).helper.length, 1, "the helper runs");
 
-      // The process entry exits 3 s after a SIGTERM whatever the stop is
-      // doing (`main.ts`): the helper's SIGKILL must land well before that.
-      const began = performance.now();
-      await rig.host.stop();
-      const took = performance.now() - began;
-
+      // Grok's lifecycle test owns the exact TERM-to-KILL grace. Here the
+      // host's completion callback must wait for the real helper to be gone.
+      await stopThroughHttp(rig, []);
       assert.deepEqual(launched(mark).helper, [], "only the SIGKILL ends it, and it came");
-      assert.ok(took < 3_000, `the teardown took ${Math.round(took)} ms, past the SIGTERM backstop`);
     } finally {
       reap(`GROK_RIG_MARK=${mark}`);
       await rig?.host.stop();
@@ -544,8 +560,7 @@ async function handover(
     interactionMode: "default"
   });
   const first = runningTurn(await running)!;
-  assert.deepEqual(await rig.host.orchestrator.markThreadsForContinuation(), ["t1"], "/stop marks it");
-  await rig.host.stop();
+  await stopThroughHttp(rig, ["t1"]);
 
   const stopped = await readMeta(rig.appdir, "t1");
   assert.equal(stopped.session.status, "stopped", "the teardown's rows reached the log");

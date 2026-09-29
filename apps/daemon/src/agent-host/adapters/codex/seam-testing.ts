@@ -73,7 +73,7 @@ function trackHandled(adapter: AgentAdapter): { adapter: AgentAdapter; handled: 
   return { adapter: { ...adapter, events }, handled };
 }
 
-export interface OrchestratedCodex {
+interface OrchestratedCodex {
   orchestrator: Orchestrator;
   /** The one thread's log, as the store holds it. */
   log: () => DomainEvent[];

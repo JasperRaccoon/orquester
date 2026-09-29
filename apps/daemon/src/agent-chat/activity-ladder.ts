@@ -123,24 +123,11 @@ function isPlanReady(fields: AgentChatSessionSummaryFields): boolean {
   );
 }
 
-/**
- * The goal rung's predicate (goals §4.7, §5.5): the HOST's `continuing`,
- * taken as it is. The host decides it — an `active` goal on a provider that
- * starts turns by itself, on a live session or one a restart's resume is still
- * owed — and it is what keeps "a goal never masks an error" true: an errored
- * session reads as continuing only while that resume is pending (a goal turn
- * a restart killed, settled as an error), and never otherwise. A refusal
- * re-derived here would raise the very "finished" stamp and push the host
- * withheld.
- */
-function isGoalContinuing(fields: AgentChatSessionSummaryFields): boolean {
-  return fields.goal?.continuing === true;
-}
-
 export function resolveChatActivity(fields: AgentChatSessionSummaryFields): ChatActivityResolution {
   const turn = fields.latestTurn ?? null;
   const session = fields.chatSessionStatus;
-  const goalContinues = isGoalContinuing(fields);
+  // Trust the host's continuation flag, including a goal awaiting resume after a restart.
+  const goalContinues = fields.goal?.continuing === true;
 
   if (fields.hasPendingApprovals) {
     return { rung: "approval", state: "waiting", attention: "needs-input" };
@@ -214,15 +201,7 @@ export type ChatPushType = "needs-input" | "finished" | "plan-ready";
  * still running would push "finished" while work is live.
  */
 export function pushTypeForFields(fields: AgentChatSessionSummaryFields): ChatPushType | null {
-  const type = pushTypeForRungInternal(resolveChatActivity(fields).rung);
-  if (type === "finished" && fields.backgroundLiveness != null) {
-    return null;
-  }
-  return type;
-}
-
-function pushTypeForRungInternal(rung: ChatActivityRung): ChatPushType | null {
-  switch (rung) {
+  switch (resolveChatActivity(fields).rung) {
     case "approval":
     case "question":
       return "needs-input";
@@ -230,7 +209,7 @@ function pushTypeForRungInternal(rung: ChatActivityRung): ChatPushType | null {
       return "plan-ready";
     case "completed":
     case "error":
-      return "finished";
+      return fields.backgroundLiveness != null ? null : "finished";
     default:
       return null;
   }

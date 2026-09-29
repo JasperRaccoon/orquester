@@ -31,7 +31,7 @@ export function clampInspectorWidth(width: number): number {
 }
 
 /** A stored payload, field by field; anything unreadable falls back to the default. */
-export function parseEditorLayout(raw: unknown): WorkflowEditorLayout {
+function parseEditorLayout(raw: unknown): WorkflowEditorLayout {
   let value: unknown = raw;
   if (typeof raw === "string") {
     try {

@@ -15,7 +15,7 @@
 //     (latestTurn, chatSessionStatus, pending flags, the actionable plan, backgroundLiveness).
 //
 // Provider behaviour is scripted per turn (`behaviour`): a list of steps — reply, ask, ask for an
-// approval, hit a usage limit (failed turn, parked Claude warning, at start, legacy text), fail
+// approval, hit a usage limit (failed turn, parked Claude warning, at start), fail
 // auth, fail, propose a plan, start background work (which can hit a limit, or wake the parent into
 // a provider-started turn), or hang. Time is the injected fake clock's; nothing here sleeps.
 
@@ -96,9 +96,8 @@ export type ProviderStep =
    * A usage limit. Default: a `runtime.error {reason:"usage_limit"}` and the turn settles `failed`.
    * `parked`: a Claude-style `runtime.warning` and the turn stays running until interrupted.
    * `atStart`: the provider never starts — the turn fails with no turn id and the session reads `error`.
-   * `legacy`: no `reason` field — only the legacy message prefix says what it is.
    */
-  | { kind: "limit"; resetsAt?: string; parked?: boolean; atStart?: boolean; legacy?: boolean; message?: string }
+  | { kind: "limit"; resetsAt?: string; parked?: boolean; atStart?: boolean; message?: string }
   /** The login was refused: `runtime.error {reason:"auth"}`, turn failed, session `error`. */
   | { kind: "auth"; message?: string }
   /** An ordinary failure with no reason: turn failed, session `error` with `lastError`. */
@@ -223,10 +222,6 @@ export class FakeChatHost implements DaemonApi {
     const entry = { listener };
     this.listeners.add(entry);
     return () => { this.listeners.delete(entry); };
-  }
-
-  listenerCount(): number {
-    return this.listeners.size;
   }
 
   async uploadAttachment(): Promise<{ status: number; value: unknown }> {
@@ -803,8 +798,7 @@ function limitMessage(refId: string, step: { resetsAt?: string }): string {
   return `${who} usage limit reached.${step.resetsAt ? ` Resets at ${step.resetsAt}.` : ""}`;
 }
 
-function limitPayload(message: string, step: { resetsAt?: string; legacy?: boolean }, kind: "error" | "warning"): Record<string, unknown> {
-  if (step.legacy) return kind === "error" ? { message, class: "provider_error" } : { message };
+function limitPayload(message: string, step: { resetsAt?: string }, kind: "error" | "warning"): Record<string, unknown> {
   return {
     message,
     ...(kind === "error" ? { class: "provider_error" } : {}),

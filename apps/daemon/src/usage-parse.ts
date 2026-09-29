@@ -1,6 +1,6 @@
 import type { AgentUsage, ScopedUsageWindow, UsageWindow } from "@orquester/api";
 
-export type ClaudeCreds = { subscriptionType?: string; rateLimitTier?: string };
+type ClaudeCreds = { subscriptionType?: string; rateLimitTier?: string };
 
 /** 0–100, or null when absent/garbage. Drops the leak-bug value (>101) and clamps 100–101→100. */
 function clampPercent(v: unknown): number | null {
@@ -146,7 +146,7 @@ function codexSlotFor(win: UsageWindow, limitSeconds: number | null, now: number
 }
 
 /** Slot raw Codex windows into session/weekly by duration, not primary/secondary. */
-export function assignCodexWindows(
+function assignCodexWindows(
   windows: Array<{ win: UsageWindow | null; limitSeconds: number | null }>,
   now: number
 ): { session: UsageWindow | null; weekly: UsageWindow | null } {
@@ -190,11 +190,6 @@ function whamWindow(w: unknown, now: number): UsageWindow | null {
   return win;
 }
 
-function titleCasePlan(plan: unknown): string | undefined {
-  if (typeof plan !== "string" || !plan) return undefined;
-  return plan.charAt(0).toUpperCase() + plan.slice(1);
-}
-
 export function parseCodexWhamUsage(json: unknown, now: number): AgentUsage {
   const root = typeof json === "object" && json !== null ? (json as Record<string, unknown>) : {};
   const rl = typeof root.rate_limit === "object" && root.rate_limit !== null ? (root.rate_limit as Record<string, unknown>) : {};
@@ -210,7 +205,7 @@ export function parseCodexWhamUsage(json: unknown, now: number): AgentUsage {
     id: "codex",
     available,
     stale: false,
-    plan: titleCasePlan(root.plan_type),
+    plan: codexPlanLabel(root.plan_type),
     session,
     weekly,
     asOf: available ? new Date(now).toISOString() : undefined

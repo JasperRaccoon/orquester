@@ -423,10 +423,6 @@ export interface WorkflowsFile {
   extra: Record<string, unknown>;
 }
 
-export function createDefaultWorkflowsFile(): WorkflowsFile {
-  return { version: 1, workflows: [], rejected: [], extra: {} };
-}
-
 /**
  * A record that fails its schema is set aside in `rejected` and the rest load. The OUTER
  * shape throws — a version other than 1 included — which the daemon reads as "not mine to

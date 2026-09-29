@@ -56,34 +56,6 @@ test("read_tool_output validates byte-window bounds and applies documented defau
   assert.throws(() => parse(tool, { sessionId: "c1", itemId: "" }));
 });
 
-test("a Codex command answers its item's whole aggregatedOutput as command-output — not the wire's one-line preview", async () => {
-  const output = `\n> api@1.0.0 test\n${Array.from({ length: 300 }, (_, i) => `ok ${i} - parses case ${i}`).join("\n")}\n  # pass 300\n`;
-  const row = commandRow({ item: { type: "commandExecution", command: "pnpm test", aggregatedOutput: output, exitCode: 0 } });
-  const api = holding(row);
-  const r = await read(api, { itemId: row.id });
-  assert.deepEqual(r, { itemId: row.id, kind: "command-output", text: output, offset: 0, totalBytes: Buffer.byteLength(output) });
-  // What the transcript carries instead: the first meaningful line, with `truncated` promising the rest.
-  const wire = slimActivityPayload(row.payload) as { truncated?: unknown; data: { item: { aggregatedOutput: string } } };
-  assert.equal(wire.truncated, true);
-  assert.equal(wire.data.item.aggregatedOutput, "> api@1.0.0 test");
-  assert.deepEqual(api.calls.map((c) => `${c.method} ${c.path}`), ["GET /api/sessions", `GET ${agentChatRoutes.item("c1", row.id)}`]);
-});
-
-test("a Grok command answers rawOutput's stdout then its stderr, and ACP content blocks where rawOutput has no text", async () => {
-  const streams = commandRow({ kind: "execute", command: "make", rawOutput: { stdout: "building\n  done\n", stderr: "warning: deprecated flag\n", exit_code: 0 } });
-  assert.deepEqual(await read(holding(streams), { itemId: streams.id }), {
-    itemId: streams.id, kind: "command-output", text: "building\n  done\nwarning: deprecated flag\n", offset: 0, totalBytes: 41
-  });
-  const acp = commandRow({ kind: "execute", command: "ls", rawOutput: { type: "Bash", output: [97, 10], exit_code: 0 }, content: [
-    { type: "content", content: { type: "text", text: "a.ts\n" } },
-    { type: "diff", path: "b.ts", oldText: "", newText: "x" },
-    { type: "content", content: { type: "text", text: "  c.ts" } }
-  ] });
-  const r = await read(holding(acp), { itemId: acp.id });
-  assert.equal(r.kind, "command-output");
-  assert.equal(r.text, "a.ts\n  c.ts");
-});
-
 test("a message answers its text, and any other item the GUI viewer's text: a string payload as it is, else indented JSON, else the summary", async () => {
   const reply = message("assistant", `Done.\n\n${"The migration ran. ".repeat(2_000)}`);
   assert.deepEqual(await read(holding(reply), { itemId: reply.id }), { itemId: reply.id, kind: "message", text: reply.text, offset: 0, totalBytes: Buffer.byteLength(reply.text) });
@@ -237,6 +209,15 @@ const shellDone = () => activity("tool.completed", {
   data: { toolName: "Bash", input: { command: "make -j8" }, background: true, exitCode: 0 }
 }, { tone: "tool", agentId: "task-1", summary: "Background shell" });
 
+test("the item's own unslimmed output takes precedence over the streamed copy", async () => {
+  const output = `${Array.from({ length: 100 }, (_, i) => `ok ${i}`).join("\n")}\n`;
+  const row = activity("tool.completed", { itemType: "command_execution", toolUseId: "call-1", title: "pnpm test", status: "completed", data: { item: { command: "pnpm test", aggregatedOutput: output } } }, { tone: "tool" });
+  const api = streaming(row, joinedOutput({ toolUseId: "call-1", output: "the streamed copy" }));
+  const r = await read(api, { itemId: row.id });
+  assert.deepEqual([r.kind, r.text, "running" in r], ["command-output", output, false]);
+  assert.ok(!api.calls.some((c) => c.path.endsWith("/output")), "the join was never read");
+});
+
 for (const [host, answering] of HOSTS) {
   test(`${host}: a background shell's output — in no item's data — answers the host's join as command-output`, async () => {
     const row = shellDone();
@@ -244,7 +225,6 @@ for (const [host, answering] of HOSTS) {
     const r = await read(api, { itemId: row.id });
     const text = "make: entering\n  [100%] linked\n";
     assert.deepEqual(r, { itemId: row.id, kind: "command-output", text, offset: 0, totalBytes: Buffer.byteLength(text) });
-    assert.deepEqual(api.calls.map((c) => `${c.method} ${c.path}`), ["GET /api/sessions", `GET ${agentChatRoutes.item("c1", row.id)}`, `GET ${agentChatRoutes.itemOutput("c1", row.id)}`]);
   });
 
   test(`${host}: a running call answers its output so far with running: true, and says truncated when the host's cap cut it`, async () => {
@@ -262,14 +242,6 @@ for (const [host, answering] of HOSTS) {
     }
   });
 
-  test(`${host}: the item's own unslimmed output comes first: the host's join is never asked for it`, async () => {
-    const output = `${Array.from({ length: 100 }, (_, i) => `ok ${i}`).join("\n")}\n`;
-    const row = activity("tool.completed", { itemType: "command_execution", toolUseId: "call-1", title: "pnpm test", status: "completed", data: { item: { command: "pnpm test", aggregatedOutput: output } } }, { tone: "tool" });
-    const api = answering(row, joinedOutput({ toolUseId: "call-1", output: "the streamed copy" }));
-    const r = await read(api, { itemId: row.id });
-    assert.deepEqual([r.kind, r.text, "running" in r], ["command-output", output, false]);
-    assert.ok(!api.calls.some((c) => c.path.endsWith("/output")), "the join was never read");
-  });
 
   test(`${host}: a stored-slimmed update is never command-output: its data is the preview — the join answers, else its payload`, async () => {
     const output = `${Array.from({ length: 50 }, (_, i) => `test ${i} passed`).join("\n")}\n`;

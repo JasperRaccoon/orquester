@@ -25,7 +25,7 @@ import { pipeline } from "node:stream/promises";
 import yauzl from "yauzl";
 import { isAgentProfileError, profileErrors } from "../errors.ts";
 
-export interface ZipLimits {
+interface ZipLimits {
   maxEntries: number;
   maxBytes: number;
 }
@@ -40,7 +40,7 @@ function refuse(message: string): never {
 }
 
 /** The entry's path segments; throws on anything that is not a plain relative path. */
-export function zipEntrySegments(fileName: string): string[] {
+function zipEntrySegments(fileName: string): string[] {
   if (fileName.includes("\0") || fileName.includes("\\")) refuse(`"${fileName.replaceAll("\0", "\\0")}" has an invalid name.`);
   if (fileName.startsWith("/") || /^[A-Za-z]:/.test(fileName)) refuse(`"${fileName}" is an absolute path.`);
   const segments = fileName.split("/").filter((segment) => segment.length > 0);

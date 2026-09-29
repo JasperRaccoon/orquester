@@ -17,8 +17,7 @@ import {
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
-import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { realpath } from "node:fs/promises";
+import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -81,7 +80,7 @@ export type AccountsExec = (
 ) => Promise<{ stdout: string; stderr: string }>;
 
 /** Options for `cloneRepo` / `cloneFromInput`. */
-export interface CloneOptions {
+interface CloneOptions {
   /**
    * Branch, tag or commit to check out. A full sha is cloned then checked out detached (fetched
    * by id when the clone did not bring it); a name is cloned with `--branch` (a tag leaves a
@@ -99,7 +98,7 @@ export interface CloneOptions {
 }
 
 /** Options for `lsRemote`. */
-export interface LsRemoteOptions {
+interface LsRemoteOptions {
   /** Default 30 s. */
   timeoutMs?: number;
   /**
@@ -112,12 +111,7 @@ export interface LsRemoteOptions {
 }
 
 /** Default ceiling on one `git ls-remote`. */
-export const LS_REMOTE_TIMEOUT_MS = 30_000;
-
-/** Replace any `//user:secret@` (and an http(s) `//token@`) userinfo in git's output before it reaches an error message. */
-function redactUserinfo(text: string): string {
-  return redactUrlUserinfo(text);
-}
+const LS_REMOTE_TIMEOUT_MS = 30_000;
 
 /** True when a rejected exec was killed by its `timeout`. */
 function timedOut(error: unknown): boolean {
@@ -131,7 +125,7 @@ function remoteGitError(what: string, error: unknown, timeoutMs: number): GitRem
   if (timedOut(error)) {
     return new GitRemoteError(504, `${what} timed out after ${Math.round(timeoutMs / 1000)} s.`, "timeout");
   }
-  const detail = redactUserinfo(errText(error));
+  const detail = redactUrlUserinfo(errText(error));
   if (
     /Authentication failed|Permission denied|could not read (Username|Password)|terminal prompts disabled|HTTP (401|403)|Invalid username or password/i.test(
       detail
@@ -194,7 +188,7 @@ function pickCloneUrl(
 }
 
 /** Derive the repo name (the dir `git clone` would create) from a clone URL. */
-export function repoNameFrom(cloneUrl: string): string {
+function repoNameFrom(cloneUrl: string): string {
   const tail = cloneUrl.split("/").pop() ?? "";
   return tail.replace(/\.git$/i, "");
 }
@@ -330,13 +324,8 @@ export class AccountsService {
   }
 
   /** Internal lookup (keeps `keyPath` in process; never returned to clients). */
-  private async find(id: string): Promise<Account | undefined> {
-    return (await this.read()).accounts.find((a) => a.id === id);
-  }
-
-  /** 404-throwing wrapper around `find()`. */
   private async requireAccount(id: string): Promise<Account> {
-    const account = await this.find(id);
+    const account = (await this.read()).accounts.find((a) => a.id === id);
     if (!account) {
       throw new AccountError(404, "Account not found.");
     }
@@ -910,7 +899,7 @@ export class AccountsService {
           "timeout"
         );
       }
-      const detail = redactUserinfo(errText(error));
+      const detail = redactUrlUserinfo(errText(error));
       if (/HTTP 410/.test(detail)) {
         return new AccountError(
           400,
@@ -969,7 +958,7 @@ export class AccountsService {
       }
       throw new AccountError(
         400,
-        `Cloned, but could not check out ${commit}: ${redactUserinfo(errText(error))}`
+        `Cloned, but could not check out ${commit}: ${redactUrlUserinfo(errText(error))}`
       );
     }
   }
@@ -1137,7 +1126,7 @@ export class AccountsService {
    * repo under a bound workspace via the `includeIf` rule, so everything set
    * here applies to that workspace's terminals/agents and ONLY them.
    */
-  async writeIncludeFile(account: Account): Promise<string> {
+  private async writeIncludeFile(account: Account): Promise<string> {
     const includePath = this.includePath(account);
     const sshCommand = sshCommandFor(account, await this.knownHosts(account));
     await this.git(["config", "--file", includePath, "user.name", account.gitName]);

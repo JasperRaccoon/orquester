@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import type { AgentConversationSummary } from "@orquester/api";
 
-import { isAgentLikeSession, isChatResumableConversation, isChatSession, isDefaultThreadTitle, isLegacyAgentTerminal, isPtySession, isResumableByAgent, isResumableByInstalledAgent } from "./session-kind.ts";
+import { isAgentLikeSession, isChatResumableConversation, isChatSession, isDefaultThreadTitle, isLegacyAgentTerminal, isResumableByAgent, isResumableByInstalledAgent } from "./session-kind.ts";
 
 test("the three session kinds are classified without overlap", () => {
   const shell = { kind: "shell" } as const;
@@ -21,10 +21,6 @@ test("the three session kinds are classified without overlap", () => {
   assert.deepEqual(
     [shell, legacy, chat].map(isAgentLikeSession),
     [false, true, true]
-  );
-  assert.deepEqual(
-    [shell, legacy, chat].map(isPtySession),
-    [true, true, false]
   );
 });
 

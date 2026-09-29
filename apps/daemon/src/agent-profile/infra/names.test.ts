@@ -4,13 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import { AgentProfileError } from "../errors.ts";
-import {
-  assertCommandName,
-  assertInside,
-  assertMcpServerName,
-  assertSafeSegment,
-  assertSkillName
-} from "./names.ts";
+import { assertInside, assertSafeSegment } from "./names.ts";
 
 function code(fn: () => unknown): string | null {
   try {
@@ -29,17 +23,6 @@ test("assertSafeSegment refuses separators, NUL, .., leading dots and empty", ()
   for (const bad of ["", "a/b", "a\\b", "a\0b", "..", "a..b", ".hidden", "."]) {
     assert.equal(code(() => assertSafeSegment(bad)), "INVALID_NAME", JSON.stringify(bad));
   }
-});
-
-test("the per-kind name assertions apply the shared rules", () => {
-  assert.equal(code(() => assertSkillName("brainstorming")), null);
-  assert.equal(code(() => assertSkillName("Bad_Name")), "INVALID_NAME");
-  assert.equal(code(() => assertSkillName("a".repeat(65))), "INVALID_NAME");
-  assert.equal(code(() => assertCommandName("git/pr")), null);
-  assert.equal(code(() => assertCommandName("a/b/c")), "INVALID_NAME");
-  assert.equal(code(() => assertMcpServerName("jira-cloud")), null);
-  assert.equal(code(() => assertMcpServerName("trailing_")), "INVALID_NAME");
-  assert.equal(code(() => assertMcpServerName("1abc")), "INVALID_NAME");
 });
 
 test("assertInside resolves symlinks and refuses escapes", async (t) => {

@@ -105,7 +105,7 @@ const PROVIDER_BIN_CHECK_INTERVAL_MS = 5_000;
 /** At most this many per-cwd overlays are retained per provider (§4.6.4). */
 const MAX_WORKSPACE_SNAPSHOTS = 16;
 
-export interface ProviderProbe {
+interface ProviderProbe {
   id: AgentAdapterId;
   refresh(input?: { cwd?: string }): Promise<ProviderSnapshot>;
   /**
@@ -162,7 +162,7 @@ export interface ProviderProbe {
  * All three come from one `realpath` + one `stat` — **never** from spawning the
  * CLI.
  */
-export interface ProviderCacheIdentity {
+interface ProviderCacheIdentity {
   /** The CLI this snapshot was probed against, absolute, or `null` for none. */
   binPath?: string | null;
   /** The CLI version the probe read, when it read one. */
@@ -240,7 +240,7 @@ interface PersistedIdentity extends ProviderCacheIdentity {
 /** The current on-disk cache format. v1 carried no identity and is discarded. */
 const PROVIDER_SNAPSHOT_CACHE_VERSION = 2;
 
-export interface ProviderSnapshotRegistryOptions {
+interface ProviderSnapshotRegistryOptions {
   probes: ProviderProbe[];
   /** `<appdir>/daemon/agent` — the cache lands beside the thread store. */
   stateDir: string;
@@ -394,21 +394,6 @@ function parseCachedSnapshots(raw: unknown): Map<AgentAdapterId, CachedEntry> {
     });
   }
   return parsed;
-}
-
-/**
- * Is a cached row still describing THIS host's installation?
- *
- * The same comparison a live read makes ({@link sameBinIdentity}), so a cache
- * written before an update moved the CLI — the symlink repointed, the file
- * rewritten — is discarded rather than rendered, and the boot probe of layer
- * three repopulates it.
- */
-function isCachedEntryCorrelated(
-  cached: PersistedIdentity,
-  current: ProviderCacheIdentity | undefined
-): boolean {
-  return current === undefined ? true : sameBinIdentity(cached, current);
 }
 
 function mergeUsageWindows(
@@ -789,15 +774,11 @@ export function createProviderSnapshotRegistry(
       });
   };
 
-  const checkBinIdentities = (): void => {
-    for (const adapterId of probes.keys()) {
-      checkBinIdentity(adapterId);
-    }
-  };
-
   return {
     all(): ProviderSnapshot[] {
-      checkBinIdentities();
+      for (const adapterId of probes.keys()) {
+        checkBinIdentity(adapterId);
+      }
       return ADAPTER_IDS.map((id) => snapshots.get(id)).filter(
         (snapshot): snapshot is ProviderSnapshot => snapshot !== undefined
       );
@@ -911,13 +892,7 @@ export function createProviderSnapshotRegistry(
 
     addWatcher(): () => void {
       watchers += 1;
-      // The pre-adoption stopgap, kept as a **belt-and-braces no-op**: with
-      // layers one to three in place every provider already holds either a
-      // correlated cached snapshot or a live probe result by the time a client
-      // subscribes, so `probed` is full and this does nothing. It still fires
-      // on the one path that skips `startBootRefresh()` — a host built without
-      // it, as several unit tests are — rather than leaving a provider with
-      // nothing but its pending seed until the interval elapses.
+      // A watcher can prime a registry whose boot refresh has not started.
       if (!primed && ADAPTER_IDS.some((id) => probes.has(id) && !probed.has(id))) {
         primed = true;
         void refreshUnprobedNow();
@@ -963,7 +938,7 @@ export function createProviderSnapshotRegistry(
           continue;
         }
         const current = identityOf(id);
-        if (!isCachedEntryCorrelated(entry.identity, current)) {
+        if (current !== undefined && !sameBinIdentity(entry.identity, current)) {
           options.logger.warn("provider status cache identity mismatch, ignoring", {
             adapterId: id,
             cachedBinPath: entry.identity.binPath ?? null,

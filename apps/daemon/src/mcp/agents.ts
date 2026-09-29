@@ -5,9 +5,9 @@ import { ToolError } from "./errors.ts";
 import { clipText, MAX_ECHO_CHARS, resultBytes } from "./result.ts";
 
 const EFFORT_OPTION_IDS: Record<AgentAdapterId, string> = { claude: "effort", codex: "effort", opencode: "variant", grok: "reasoningEffort" };
-export interface AgentModelOptionView { id: string; label: string; type: "select" | "boolean"; description?: string; values?: { id: string; label: string; description?: string; isDefault?: boolean }[] }
-export interface AgentModelView { slug: string; name: string; shortName?: string; isDefault: boolean; isLegacy?: boolean; options: AgentModelOptionView[] }
-export interface AgentAccountView { id: string; label: string; email: string | null; plan: string | null; needsReauth: boolean; isDefault: boolean }
+interface AgentModelOptionView { id: string; label: string; type: "select" | "boolean"; description?: string; values?: { id: string; label: string; description?: string; isDefault?: boolean }[] }
+interface AgentModelView { slug: string; name: string; shortName?: string; isDefault: boolean; isLegacy?: boolean; options: AgentModelOptionView[] }
+interface AgentAccountView { id: string; label: string; email: string | null; plan: string | null; needsReauth: boolean; isDefault: boolean }
 /** What an agent supports, as list_agents and get_session both report it (`supportsFrom`). */
 export interface AgentSupports { planMode: boolean; rollback: boolean; compaction: boolean; backgroundTasks: boolean; goals: AdapterGoalSupport | null }
 /** `enabled` is the registry's: false when the agent's CLI was not found on this host. */
@@ -112,9 +112,9 @@ export async function loadAgents(api: DaemonApi, opts?: { includeLegacyModels?: 
 }
 
 /** A model as list_agents lists it: whole, or — shed to fit the result — without its options, marked `optionsOmitted`. */
-export type ListedModelView = AgentModelView | (Omit<AgentModelView, "options"> & { optionsOmitted: true });
+type ListedModelView = AgentModelView | (Omit<AgentModelView, "options"> & { optionsOmitted: true });
 /** An agent as list_agents lists it: when models were left out to fit, `modelsTruncated` and the catalogue's `modelCount`. */
-export type ListedAgentView = Omit<AgentView, "models"> & { models: ListedModelView[]; modelsTruncated?: true; modelCount?: number };
+type ListedAgentView = Omit<AgentView, "models"> & { models: ListedModelView[]; modelsTruncated?: true; modelCount?: number };
 
 const withoutOptions = ({ options: _options, ...model }: AgentModelView): ListedModelView => ({ ...model, optionsOmitted: true });
 

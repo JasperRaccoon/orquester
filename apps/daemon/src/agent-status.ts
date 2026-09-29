@@ -23,17 +23,6 @@ export function classifyAgentEvent(
   }
 }
 
-function toolName(payload: unknown): string {
-  return typeof (payload as { tool_name?: unknown })?.tool_name === "string"
-    ? ((payload as { tool_name: string }).tool_name)
-    : "";
-}
-
-/** Claude auto-allows AskUserQuestion, so it never reaches PermissionRequest. */
-function isAskUserQuestion(payload: unknown): boolean {
-  return toolName(payload) === "AskUserQuestion";
-}
-
 function isPermissionNotification(payload: unknown): boolean {
   const message = (payload as { message?: unknown })?.message;
   return typeof message === "string" && /permission|approv|waiting for your input/i.test(message);
@@ -45,7 +34,8 @@ function classifyClaude(event: string, payload: unknown): HookEventClass | null 
     case "PostToolUse":
       return "working";
     case "PreToolUse":
-      return isAskUserQuestion(payload) ? "waiting" : "working";
+      // Claude auto-allows AskUserQuestion, so it never reaches PermissionRequest.
+      return (payload as { tool_name?: unknown })?.tool_name === "AskUserQuestion" ? "waiting" : "working";
     case "PermissionRequest":
       return "waiting";
     case "Notification":

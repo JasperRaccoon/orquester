@@ -49,7 +49,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
  * an unreadable or half-understood one degrades to "no launcher env" rather
  * than failing the thread.
  */
-export function parseThreadLaunchConfig(value: unknown): ThreadLaunchConfig | null {
+function parseThreadLaunchConfig(value: unknown): ThreadLaunchConfig | null {
   if (!isRecord(value)) {
     return null;
   }

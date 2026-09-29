@@ -25,9 +25,7 @@ const GIT_TRANSIENT_RETRIES = 2;
 const GIT_TRANSIENT_RETRY_DELAY_MS = 75;
 const OUTPUT_TRUNCATED_MARKER = "\n\n[truncated]";
 
-export type GitOutputMode = "truncate" | "error";
-
-export interface GitRunInput {
+interface GitRunInput {
   /** Names the step in an error message. Never a path, never user text. */
   operation: string;
   cwd: string;
@@ -39,7 +37,7 @@ export interface GitRunInput {
   timeoutMs?: number;
   maxOutputBytes?: number;
   /** `truncate` keeps what fits; `error` fails rather than return a half answer. */
-  outputMode?: GitOutputMode;
+  outputMode?: "truncate" | "error";
   appendTruncationMarker?: boolean;
   /**
    * Called with every stdout chunk **before** the output cap is applied, so a
@@ -53,7 +51,7 @@ export interface GitRunInput {
   signal?: AbortSignal;
 }
 
-export interface GitRunResult {
+interface GitRunResult {
   exitCode: number;
   stdout: string;
   stderr: string;
@@ -72,7 +70,7 @@ export class GitError extends Error {
   }
 }
 
-export class GitSpawnError extends GitError {
+class GitSpawnError extends GitError {
   constructor(operation: string, cause: Error) {
     super(operation, `git failed to start (${operation}): ${cause.message}`);
     this.name = "GitSpawnError";

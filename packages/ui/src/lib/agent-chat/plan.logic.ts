@@ -21,9 +21,7 @@ import type { ThreadActivityItem } from "@orquester/api/agent-chat";
 import { buildPlanImplementationPrompt } from "@orquester/api/agent-chat";
 
 import type { ActivePlanState, AgentChatActions } from "./contracts";
-import { PLAN_IMPLEMENTATION_PROMPT_PREFIX, type ProposedPlanEntry } from "./entries.logic";
-
-export { PLAN_IMPLEMENTATION_PROMPT_PREFIX };
+import type { ProposedPlanEntry } from "./entries.logic";
 
 // ---------------------------------------------------------------------------
 // The checklist
@@ -118,76 +116,6 @@ export function planProgress(plan: ActivePlanState | null): {
 export function proposedPlanTitle(planMarkdown: string): string | null {
   const heading = /^\s{0,3}#{1,6}\s+(.+)$/m.exec(planMarkdown)?.[1]?.trim();
   return heading && heading.length > 0 ? heading : null;
-}
-
-/** *T3: `proposedPlan.ts:6-20`.* */
-export function stripDisplayedPlanMarkdown(planMarkdown: string): string {
-  const lines = planMarkdown.trimEnd().split(/\r?\n/);
-  const source = lines[0] && /^\s{0,3}#{1,6}\s+/.test(lines[0]) ? lines.slice(1) : [...lines];
-  while (source[0]?.trim().length === 0) {
-    source.shift();
-  }
-  const firstHeading = source[0] ? /^\s{0,3}#{1,6}\s+(.+)$/.exec(source[0]) : null;
-  if (firstHeading?.[1]?.trim().toLowerCase() === "summary") {
-    source.shift();
-    while (source[0]?.trim().length === 0) {
-      source.shift();
-    }
-  }
-  return source.join("\n");
-}
-
-/** *T3: `proposedPlan.ts:22-60`.* */
-export function buildCollapsedProposedPlanPreviewMarkdown(
-  planMarkdown: string,
-  options?: { maxLines?: number }
-): string {
-  const maxLines = options?.maxLines ?? 8;
-  const lines = stripDisplayedPlanMarkdown(planMarkdown)
-    .trimEnd()
-    .split(/\r?\n/)
-    .map((line) => line.trimEnd());
-  const preview: string[] = [];
-  let visible = 0;
-  let hasMore = false;
-  for (const line of lines) {
-    const isVisible = line.trim().length > 0;
-    if (isVisible && visible >= maxLines) {
-      hasMore = true;
-      break;
-    }
-    preview.push(line);
-    if (isVisible) {
-      visible += 1;
-    }
-  }
-  while (preview.length > 0 && preview.at(-1)?.trim().length === 0) {
-    preview.pop();
-  }
-  if (preview.length === 0) {
-    return proposedPlanTitle(planMarkdown) ?? "Plan preview unavailable.";
-  }
-  if (hasMore) {
-    preview.push("", "...");
-  }
-  return preview.join("\n");
-}
-
-function sanitizePlanFileSegment(input: string): string {
-  const sanitized = input
-    .toLowerCase()
-    .replace(/[`'".,!?()[\]{}]+/g, "")
-    .replace(/[^a-z0-9]+/g, "-")
-    .replace(/^-+|-+$/g, "");
-  return sanitized.length > 0 ? sanitized : "plan";
-}
-
-export function buildProposedPlanMarkdownFilename(planMarkdown: string): string {
-  return `${sanitizePlanFileSegment(proposedPlanTitle(planMarkdown) ?? "plan")}.md`;
-}
-
-export function normalizePlanMarkdownForExport(planMarkdown: string): string {
-  return `${planMarkdown.trimEnd()}\n`;
 }
 
 /**

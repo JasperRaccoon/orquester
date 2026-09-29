@@ -22,7 +22,7 @@
  * The frames the adapter genuinely maps. The demux switch over this union ends
  * in `satisfies never` (§4.2/§10).
  */
-export const HANDLED_EVENT_TYPES = [
+const HANDLED_EVENT_TYPES = [
   "session.created",
   "session.updated",
   "session.deleted",
@@ -44,7 +44,7 @@ export const HANDLED_EVENT_TYPES = [
   "command.executed"
 ] as const;
 
-export type HandledEventType = (typeof HANDLED_EVENT_TYPES)[number];
+type HandledEventType = (typeof HANDLED_EVENT_TYPES)[number];
 
 /**
  * Documented (or, for `server.heartbeat`, observed) frames the adapter
@@ -174,7 +174,7 @@ export interface OpenCodeMessageInfo {
   time?: { created?: number; completed?: number };
 }
 
-export interface OpenCodeToolStateBase {
+interface OpenCodeToolStateBase {
   status: "pending" | "running" | "completed" | "error";
   input?: Record<string, unknown>;
   output?: string;
@@ -241,12 +241,12 @@ export interface OpenCodePermissionRequest {
   tool?: { messageID: string; callID: string };
 }
 
-export interface OpenCodeQuestionOption {
+interface OpenCodeQuestionOption {
   label: string;
   description?: string;
 }
 
-export interface OpenCodeQuestion {
+interface OpenCodeQuestion {
   question: string;
   header: string;
   options: OpenCodeQuestionOption[];
@@ -260,14 +260,14 @@ export interface OpenCodeQuestionRequest {
   tool?: { messageID: string; callID: string };
 }
 
-export interface OpenCodeTodo {
+interface OpenCodeTodo {
   id?: string;
   content: string;
   status: "pending" | "in_progress" | "completed" | "cancelled" | (string & {});
   priority?: string;
 }
 
-export type OpenCodeSessionStatus =
+type OpenCodeSessionStatus =
   | { type: "idle" }
   | { type: "busy" }
   | { type: "retry"; attempt?: number; message?: string };

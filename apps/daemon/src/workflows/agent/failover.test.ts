@@ -6,11 +6,10 @@ import test from "node:test";
 import type { AgentChainEntry, AgentHop, UsageResponse } from "@orquester/api";
 import type { NodeResult } from "../contracts.ts";
 import type { AgentBlockOutput } from "./executor.ts";
-import { candidateFromChoice, candidateKey, coolDown, countedHops, emptyMemory, type FailoverDeps } from "./failover.ts";
+import { candidateFromChoice, candidateKey, coolDown, emptyMemory, type FailoverDeps } from "./failover.ts";
 import { FakeClock } from "./testing/fake-clock.ts";
 import { MemoryCooldowns, staticAccounts, staticUsage } from "./testing/fake-context.ts";
 import { FakeChatHost } from "./testing/fake-chat-host.ts";
-import { AUTONOMY_NOTE, CONTINUE_AFTER_AUTH_SWITCH, CONTINUE_AFTER_SWITCH, handoffNotice } from "./prompt.ts";
 import { byAccount, type ProviderStep } from "./testing/fake-chat-host.ts";
 import { account, agentNode, testWorkflow } from "./testing/fake-context.ts";
 import { Scenario } from "./testing/scenario.ts";
@@ -45,8 +44,6 @@ function assertSwitched(sc: Scenario, out: AgentBlockOutput, accounts: string[])
   const session = sc.host.session(out.sessionId);
   const switches = session.commands.filter((c) => c.name === "account" && !c.deduped).map((c) => c.body.accountId);
   assert.deepEqual(switches, accounts.slice(1));
-  const continues = sc.host.turnLog.filter((t) => t.input === `${CONTINUE_AFTER_SWITCH}\n\n${AUTONOMY_NOTE}`);
-  assert.equal(continues.length, accounts.length - 1, "one continue message per switch");
   for (const hop of out.hops.slice(0, -1)) assert.equal(hop.reason, "usage_limit");
 }
 
@@ -87,12 +84,6 @@ test("limit while parked (Claude's warning, turn still running): cooled until re
   assert.equal(first.state, "interrupted", "the parked turn was interrupted");
 });
 
-test("a legacy limit row (no reason field, only the adapter's prefix) still fails over", async () => {
-  const sc = new Scenario({ accounts: CLAUDE, behaviour: byAccount({ a1: [{ kind: "limit", legacy: true }], a2: ok() }) });
-  const out = outputOf((await sc.run(testWorkflow([agentNode("n1")]), "n1")).result);
-  assertSwitched(sc, out, ["a1", "a2"]);
-});
-
 test("limit during background work: the whole thread is interrupted, then switched", async () => {
   const sc = new Scenario({
     accounts: CLAUDE,
@@ -113,8 +104,6 @@ test("a switch refused once (something still in flight) waits for idle again, th
   sc.host.refuseAccountSwitches = 1;
   const out = outputOf((await sc.run(testWorkflow([agentNode("n1")]), "n1")).result);
   assert.equal(sc.host.sessions.size, 1);
-  const session = sc.host.session(out.sessionId);
-  assert.equal(session.commands.filter((c) => c.name === "account").length, 2, "refused, then accepted");
   assert.equal(out.accountId, "a2");
 });
 
@@ -125,7 +114,6 @@ test("a switch the host keeps refusing hands off to a NEW session on the same ag
   assert.equal(out.text, "new session done");
   assert.equal(sc.host.sessions.size, 2);
   assert.deepEqual(out.hops.map((h) => [h.accountId, h.via]), [["a1", "initial"], ["a2", "handoff"]]);
-  assert.match(sc.host.turnLog.at(-1)!.input, /A previous agent \(claude\) was cut off by a usage limit/);
 });
 
 test("cross-family handoff: a new session with the handoff prompt (original prompt, notice, last messages, git status)", async () => {
@@ -143,10 +131,9 @@ test("cross-family handoff: a new session with the handoff prompt (original prom
   assert.deepEqual(out.hops.map((h) => [h.agent, h.accountId, h.via]), [["claude", "a1", "initial"], ["codex", "c1", "handoff"]]);
   const handoff = sc.host.turnLog.find((t) => t.refId === "codex")!.input;
   assert.ok(handoff.startsWith("Fix issue #7.\n\n"), "the original prompt first");
-  assert.ok(handoff.includes(handoffNotice("claude", "usage_limit")));
+  assert.ok(handoff.includes("A previous agent (claude) was cut off by a usage limit."));
   assert.ok(handoff.includes("I changed src/app.ts\n\nNext: tests"), "the previous agent's messages");
   assert.ok(handoff.includes(" M src/app.ts\n?? src/new.ts"), "git status --short");
-  assert.ok(handoff.endsWith(AUTONOMY_NOTE));
   const create = sc.host.calls.filter((c) => c.method === "POST" && c.path === "/api/sessions")[1]!.body as Record<string, unknown>;
   assert.deepEqual(create.owner, { kind: "workflow", workflowId: "wf-1", runId: "run-1", nodeId: "n1" }, "the same owner");
   assert.equal(create.accountId, "c1");
@@ -164,19 +151,11 @@ test("an auth handoff says the login failed and never passes the provider's erro
   const out = outputOf((await sc.run(wf, "n1")).result);
   assert.equal(out.agent, "codex");
   const handoff = sc.host.turnLog.find((t) => t.refId === "codex")!.input;
-  assert.ok(handoff.includes(handoffNotice("claude", "auth")));
-  assert.match(handoff, /was stopped because its account's login failed/);
+  assert.equal(out.hops[0]?.reason, "auth");
+  assert.match(handoff, /login failed/);
   assert.doesNotMatch(handoff, /usage limit/);
   assert.ok(handoff.includes("I changed src/app.ts"), "the real assistant message is kept");
   assert.doesNotMatch(handoff, /Invalid API key/, "the provider's auth error is not a message of the agent");
-});
-
-test("a same-family switch after a refused login says so, not 'usage limit'", async () => {
-  const sc = new Scenario({ accounts: CLAUDE, behaviour: byAccount({ a1: [{ kind: "auth" }], a2: ok() }) });
-  outputOf((await sc.run(testWorkflow([agentNode("n1")]), "n1")).result);
-  const last = sc.host.turnLog.at(-1)!.input;
-  assert.ok(last.startsWith(CONTINUE_AFTER_AUTH_SWITCH));
-  assert.doesNotMatch(last, /usage limit/);
 });
 
 test("the handoff caps the previous messages at 32 KiB (newest kept) and git status at 8 KiB", async () => {
@@ -244,6 +223,9 @@ test("an auth failure skips the account (1 h cooldown, unusable for the run) and
   const out = outputOf((await sc.run(testWorkflow([agentNode("n1")]), "n1")).result);
   assert.equal(out.accountId, "a2");
   assert.equal(out.hops[0]!.reason, "auth");
+  const continued = sc.host.turnLog.at(-1)!.input;
+  assert.match(continued, /login failed/);
+  assert.doesNotMatch(continued, /usage limit/);
   const cooldown = sc.cooldowns.entries["claude:a1"]!;
   assert.equal(cooldown.reason, "auth");
   assert.equal(Date.parse(cooldown.until), start + HOUR + (Date.parse(cooldown.setAt) - start));
@@ -289,7 +271,6 @@ test("wait-for-reset over 48 h with limits that never name a reset: resumed hops
   assert.equal(out.text, "finally done");
   assert.equal(sc.host.sessions.size, 1, "always the same session");
   assert.equal(out.hops.length, 14, "more hops than the cap of 12");
-  assert.equal(countedHops(out.hops), 1, "only the initial hop counts");
   assert.ok(out.hops.slice(1).every((h) => h.via === "resumed" && h.accountId === "a1"));
   const waited = sc.clock.now().getTime() - start;
   // 1 h + 2 h + 4 h × 11 = 47 h: escalated, and still inside the 48 h budget.

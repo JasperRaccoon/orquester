@@ -47,7 +47,7 @@ export class EngineStoppedError extends Error {
 // Limits
 // ---------------------------------------------------------------------------
 
-export interface EngineLimits {
+interface EngineLimits {
   maxConcurrentRuns: number;
   maxConcurrentAgentBlocks: number;
   maxConcurrentProcesses: number;
@@ -165,6 +165,12 @@ export function jsonText(value: unknown): string | undefined | null {
   }
 }
 
+/** Unserializable values exceed any finite JSON size limit. */
+export function jsonBytes(value: unknown): number {
+  const text = jsonText(value);
+  return text === null ? Number.POSITIVE_INFINITY : text === undefined ? 0 : Buffer.byteLength(text, "utf8");
+}
+
 /** The first `maxBytes` UTF-8 bytes of `text`, never splitting a character. */
 export function truncateUtf8(text: string, maxBytes: number): string {
   if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
@@ -199,6 +205,7 @@ export function outputPreview(value: unknown, maxBytes: number): string {
 // Views
 // ---------------------------------------------------------------------------
 
+/** Summary fields shared by the engine's events and the persisted run index. */
 export function toRunSummary(run: PersistedRun): WorkflowRunSummary {
   const summary: WorkflowRunSummary = {
     id: run.id,
@@ -213,11 +220,11 @@ export function toRunSummary(run: PersistedRun): WorkflowRunSummary {
   if (run.startedAt !== undefined) summary.startedAt = run.startedAt;
   if (run.endedAt !== undefined) summary.endedAt = run.endedAt;
   if (run.durationMs !== undefined) summary.durationMs = run.durationMs;
-  if (run.current !== undefined) summary.current = { ...run.current };
+  if (run.current !== undefined) summary.current = structuredClone(run.current);
   if (run.error !== undefined) summary.error = run.error;
   if (run.errorKind !== undefined) summary.errorKind = run.errorKind;
   if (run.projectPath !== undefined) summary.projectPath = run.projectPath;
-  if (run.tempProject !== undefined) summary.tempProject = { ...run.tempProject };
+  if (run.tempProject !== undefined) summary.tempProject = structuredClone(run.tempProject);
   if (run.parentRunId !== undefined) summary.parentRunId = run.parentRunId;
   if (run.retryOf !== undefined) summary.retryOf = run.retryOf;
   return summary;
@@ -226,8 +233,6 @@ export function toRunSummary(run: PersistedRun): WorkflowRunSummary {
 /** A block as it crosses the wire: no `waitingOn`, no output file path. */
 export function publicBlock(block: PersistedBlockState): WorkflowBlockRun {
   const { waitingOn: _waitingOn, outputFile: _outputFile, ...rest } = block;
-  void _waitingOn;
-  void _outputFile;
   return structuredClone(rest);
 }
 

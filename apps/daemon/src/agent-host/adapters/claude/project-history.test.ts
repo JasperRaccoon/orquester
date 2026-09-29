@@ -14,7 +14,7 @@ import type { RuntimeEvent, ThreadSnapshot } from "@orquester/api/agent-chat";
 import { HISTORICAL_RAW_SOURCE } from "@orquester/api/agent-chat";
 
 import { countingIds, fixedClock, readClaudeFixture, replayClaudeFixture } from "./fixtures.ts";
-import { projectClaudeHistory, readHistoryMessage } from "./project-history.ts";
+import { projectClaudeHistory } from "./project-history.ts";
 import { groupClaudeHistoryTurns } from "./rollback.ts";
 
 type EventOf<T extends RuntimeEvent["type"]> = Extract<RuntimeEvent, { type: T }>;
@@ -265,20 +265,6 @@ describe("claude history projection — shapes", () => {
     assert.ok((tool?.payload.data as { deniedReason?: string }).deniedReason?.includes("Blocked"));
   });
 
-  it("reads both item shapes and skips anything else", () => {
-    // A live turn's item is a bare body…
-    assert.equal(readHistoryMessage({ role: "user", content: [] })?.role, "user");
-    // …a transcript row wraps it and names its own type.
-    assert.equal(
-      readHistoryMessage({ type: "assistant", uuid: "u", message: { role: "assistant", content: [] } })
-        ?.role,
-      "assistant"
-    );
-    for (const bad of [null, undefined, 7, "x", {}, { type: "system", message: {} }]) {
-      assert.equal(readHistoryMessage(bad), undefined, JSON.stringify(bad));
-    }
-  });
-
   it("survives a string `content`, which is what a compacted thread holds", () => {
     const events = project({
       threadId: "t",
@@ -460,35 +446,6 @@ describe("claude history projection — grouping a native transcript", () => {
     // The tool result belongs to the turn it answered, not to a new one.
     assert.equal(turns[0]!.items.length, 3);
     assert.equal(turns[1]!.items.length, 1);
-  });
-
-  it("projects a grouped transcript end to end", () => {
-    const turns = groupClaudeHistoryTurns([
-      {
-        type: "user",
-        uuid: "turn-a",
-        parent_tool_use_id: null,
-        message: { role: "user", content: [{ type: "text", text: "hello" }] }
-      },
-      {
-        type: "assistant",
-        uuid: "a1",
-        parent_tool_use_id: null,
-        message: { role: "assistant", content: [{ type: "text", text: "hi" }] }
-      }
-    ]);
-    const events = project({ threadId: "t", turns });
-    assert.deepEqual(
-      events.map((event) => event.type),
-      [
-        "turn.started",
-        "item.completed",
-        "content.delta",
-        "item.completed",
-        "turn.completed"
-      ]
-    );
-    assert.equal(allOf(events, "turn.started")[0]!.turnId, "turn-a");
   });
 });
 

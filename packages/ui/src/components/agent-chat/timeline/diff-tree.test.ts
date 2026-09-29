@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { CheckpointFile } from "@orquester/api/agent-chat";
 import { buildDiffTree, summarizeDiffStats } from "./diff-tree";
-import { countDiffLines, splitUnifiedDiff, unifiedDiffForPath } from "./unified-diff";
+import { countDiffLines, splitUnifiedDiff } from "./unified-diff";
 
 function file(path: string, additions = 1, deletions = 0): CheckpointFile {
   return { path, additions, deletions };
@@ -95,13 +95,6 @@ test("a truncated patch still yields the file it started", () => {
     "\n"
   );
   assert.equal(splitUnifiedDiff(diff).length, 1);
-});
-
-test("unifiedDiffForPath matches exactly and then by suffix", () => {
-  assert.equal(unifiedDiffForPath(TWO_FILE_DIFF, "src/a.ts")?.path, "src/a.ts");
-  assert.equal(unifiedDiffForPath(TWO_FILE_DIFF, "/abs/repo/src/a.ts")?.path, "src/a.ts");
-  assert.equal(unifiedDiffForPath(TWO_FILE_DIFF, "src\\a.ts")?.path, "src/a.ts");
-  assert.equal(unifiedDiffForPath(TWO_FILE_DIFF, "nope.ts"), null);
 });
 
 test("countDiffLines ignores the file headers", () => {

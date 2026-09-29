@@ -13,9 +13,8 @@
 
 import type { AgentAdapterId, Checkpoint, CheckpointFile } from "@orquester/api/agent-chat";
 
-import type { CaptureResult, CheckpointService, Clock, TurnDiffSummary } from "../services.ts";
+import type { CheckpointService, Clock } from "../services.ts";
 import {
-  CHECKPOINT_CAPTURE_OPERATION,
   captureCheckpoint,
   isInsideWorkTree,
   resolveCheckpointCommit
@@ -44,12 +43,6 @@ const CHECKPOINT_DIFF_CACHE_LIMIT = 32;
  * of them would be ~320 MB of retained V8 strings on a 2 GB VPS.
  */
 const CHECKPOINT_DIFF_CACHE_MAX_BYTES = 32 * 1024 * 1024;
-
-/**
- * The one adapter without conversation rollback (§4.5 Grok, §5.5 step 2).
- * Checked before anything on disk is touched.
- */
-const CONVERSATION_ROLLBACK_UNSUPPORTED: ReadonlySet<string> = new Set<AgentAdapterId>(["grok"]);
 
 /** A revert asked of an adapter that cannot roll its conversation back. */
 export class CheckpointRollbackUnsupportedError extends Error {
@@ -109,55 +102,10 @@ export class CheckpointRefDeleteError extends Error {
   }
 }
 
-export interface CheckpointServiceOptions extends GitRunnerOptions {
+interface CheckpointServiceOptions extends GitRunnerOptions {
   clock?: Clock;
   /** Best-effort diagnostics; never throws into a turn. */
   log?: (message: string, detail?: Record<string, unknown>) => void;
-}
-
-/**
- * Inputs the host may enrich. Every extra field is optional: with none of them
- * the service derives everything it can from the refs on disk, which is what a
- * test (and a host that lost `meta.json`) gets.
- */
-export interface CaptureBaselineInput {
-  threadId: string;
-  cwd: string;
-  /** The fold's checkpoint rows, so a placeholder counts toward the turn count. */
-  checkpoints?: readonly Checkpoint[];
-  /**
-   * The turn this baseline precedes, when the caller knows it. Recorded as the
-   * thread's started turn (T3's `startedTurns`), which is what lets a stale
-   * `turn.aborted` for some *other* turn be refused at turn end.
-   */
-  turnId?: string | null;
-  /**
-   * The baseline's own turn count — the ordinal of the turn about to start,
-   * minus one (§5.5: checkpoints are numbered by turn ORDER). Overrides the
-   * derived counter. Anything but a non-negative integer is ignored.
-   */
-  turnCount?: number;
-}
-
-export interface CaptureTurnEndInput {
-  threadId: string;
-  cwd: string;
-  turnId: string | null;
-  assistantMessageId: string | null;
-  checkpoints?: readonly Checkpoint[];
-  /** When set, only this turn may produce a completion checkpoint (§5.4). */
-  activeTurnId?: string | null;
-  /**
-   * The turn the host recorded as started, when it tracks one itself. Overrides
-   * what `captureBaseline` recorded for this thread.
-   */
-  startedTurnId?: string | null;
-  /**
-   * The completing turn's ordinal (§5.5). Preferred over a placeholder's count
-   * and over the derived `highest + 1`. Anything but a positive integer is
-   * ignored.
-   */
-  turnCount?: number;
 }
 
 /** How many completed turn ids are remembered per thread, for replay refusal. */
@@ -223,14 +171,6 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     }
   };
 
-  const rememberCompletedTurn = (threadId: string, turnId: string): void => {
-    remember(completedTurns, threadId, turnId);
-  };
-
-  const rememberTruncatedTurn = (threadId: string, turnId: string): void => {
-    remember(truncatedTurns, threadId, turnId);
-  };
-
   const dropCache = (threadId: string): void => {
     const prefix = `${threadId}\u0000`;
     for (const [key, value] of diffCache) {
@@ -272,32 +212,6 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     diffCacheBytes += size;
   };
 
-  /** Every turn count this thread has a ref for, ascending. */
-  const listRefTurnCounts = async (threadId: string, cwd: string): Promise<number[]> => {
-    const namespace = checkpointRefNamespace(threadId);
-    const result = await runner.run({
-      operation: "checkpoints.listRefs",
-      cwd,
-      args: ["for-each-ref", "--format=%(refname)", namespace],
-      maxOutputBytes: 1_000_000,
-      // A truncated listing is indistinguishable from a complete one, and every
-      // caller (prune, cap, delete) would then silently leave refs behind.
-      outputMode: "error"
-    });
-    const counts: number[] = [];
-    for (const line of result.stdout.split("\n")) {
-      const ref = line.trim();
-      if (ref.length === 0) {
-        continue;
-      }
-      const turnCount = turnCountFromCheckpointRef(threadId, ref);
-      if (turnCount !== null) {
-        counts.push(turnCount);
-      }
-    }
-    return counts.sort((left, right) => left - right);
-  };
-
   /** Every ref under the thread's prefix, whatever its shape. */
   const listRefNames = async (threadId: string, cwd: string): Promise<string[]> => {
     const result = await runner.run({
@@ -305,12 +219,22 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
       cwd,
       args: ["for-each-ref", "--format=%(refname)", checkpointRefNamespace(threadId)],
       maxOutputBytes: 1_000_000,
+      // A truncated listing would silently leave refs behind during pruning.
       outputMode: "error"
     });
     return result.stdout
       .split("\n")
       .map((line) => line.trim())
       .filter((line) => line.length > 0);
+  };
+
+  /** Every turn count this thread has a ref for, ascending. */
+  const listRefTurnCounts = async (threadId: string, cwd: string): Promise<number[]> => {
+    const refs = await listRefNames(threadId, cwd);
+    return refs
+      .map((ref) => turnCountFromCheckpointRef(threadId, ref))
+      .filter((count): count is number => count !== null)
+      .sort((left, right) => left - right);
   };
 
   /**
@@ -406,7 +330,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     dropCache(threadId);
   };
 
-  const captureBaseline = async (input: CaptureBaselineInput): Promise<CaptureResult | null> => {
+  const captureBaseline: CheckpointService["captureBaseline"] = async (input) => {
     // Recorded before the early returns: knowing which turn started is useful
     // even when the ref is already there (the second, idempotent call).
     if (typeof input.turnId === "string" && input.turnId.length > 0) {
@@ -446,7 +370,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     return { turnCount, ref, status: "ready" };
   };
 
-  const captureTurnEnd = async (input: CaptureTurnEndInput): Promise<TurnDiffSummary | null> => {
+  const captureTurnEnd: CheckpointService["captureTurnEnd"] = async (input) => {
     const { threadId, cwd, turnId } = input;
     // When a primary turn is active, only that turn may produce a completion
     // checkpoint.
@@ -551,7 +475,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     }
     dropCache(threadId);
     if (turnId !== null) {
-      rememberCompletedTurn(threadId, turnId);
+      remember(completedTurns, threadId, turnId);
     }
 
     let files: CheckpointFile[] = [];
@@ -628,13 +552,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     return emptyTree.stdout.trim();
   };
 
-  const readTurnDiff = async (input: {
-    threadId: string;
-    cwd: string;
-    fromTurnCount: number;
-    toTurnCount: number;
-    ignoreWhitespace?: boolean;
-  }): Promise<string> => {
+  const readTurnDiff: CheckpointService["readTurnDiff"] = async (input) => {
     const ignoreWhitespace = input.ignoreWhitespace ?? true;
     // `from === to` short-circuits without touching git.
     if (input.fromTurnCount === input.toTurnCount) {
@@ -690,12 +608,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     return result.stdout;
   };
 
-  const pruneAbove = async (input: {
-    threadId: string;
-    cwd: string;
-    targetTurnCount: number;
-    droppedTurnCounts?: readonly number[];
-  }): Promise<void> => {
+  const pruneAbove: CheckpointService["pruneAbove"] = async (input) => {
     // A revert truncates the conversation, and a turn that was in flight when
     // it happened is now a turn that no longer exists (E2E #E8: its late
     // capture otherwise lands a `thread.turn-diff-completed` above the revert
@@ -705,7 +618,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     // alone, so no legitimate capture is lost.
     const started = startedTurns.get(input.threadId);
     if (started !== undefined) {
-      rememberTruncatedTurn(input.threadId, started);
+      remember(truncatedTurns, input.threadId, started);
       startedTurns.delete(input.threadId);
     }
     if (!(await isInsideWorkTree(runner, input.cwd))) {
@@ -724,7 +637,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     dropCache(input.threadId);
   };
 
-  const deleteThreadRefs = async (input: { threadId: string; cwd: string }): Promise<void> => {
+  const deleteThreadRefs: CheckpointService["deleteThreadRefs"] = async (input) => {
     // Per-thread memory goes whatever git says: the thread is being deleted,
     // so nothing may keep growing on its behalf.
     startedTurns.delete(input.threadId);
@@ -738,8 +651,8 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     dropCache(input.threadId);
   };
 
-  const assertRollbackSupported = (adapter: AgentAdapterId): void => {
-    if (CONVERSATION_ROLLBACK_UNSUPPORTED.has(adapter)) {
+  const assertRollbackSupported: CheckpointService["assertRollbackSupported"] = (adapter) => {
+    if (adapter === "grok") {
       throw new CheckpointRollbackUnsupportedError(adapter);
     }
   };

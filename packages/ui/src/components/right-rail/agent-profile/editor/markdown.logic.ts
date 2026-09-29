@@ -24,7 +24,7 @@ import {
 
 export type MarkdownKind = "skill" | "command";
 
-export type FieldValue = string | boolean;
+type FieldValue = string | boolean;
 
 export interface MarkdownForm {
   name: string;
@@ -56,11 +56,11 @@ const FLAT_COMMAND_AGENTS: readonly AgentProfileAgentId[] = ["grok"];
  */
 const BOOLEAN_DEFAULTS: Readonly<Record<string, boolean>> = { "user-invocable": true };
 
-export function booleanDefault(key: string): boolean {
+function booleanDefault(key: string): boolean {
   return BOOLEAN_DEFAULTS[key] ?? false;
 }
 
-export function frontmatterFields(agent: AgentProfileAgentId, kind: MarkdownKind): readonly ProfileFieldSpec[] {
+function frontmatterFields(agent: AgentProfileAgentId, kind: MarkdownKind): readonly ProfileFieldSpec[] {
   return PROFILE_FRONTMATTER_FIELDS[agent][kind] ?? [];
 }
 
@@ -179,7 +179,7 @@ export function markdownDraftFromForm(
   return { name: form.name.trim(), frontmatter: frontmatterDraft(kind, model, form), body: form.body };
 }
 
-export function markdownNameError(
+function markdownNameError(
   kind: MarkdownKind,
   name: string,
   options: { flatCommands?: boolean } = {}
@@ -231,10 +231,6 @@ export function validateMarkdownForm(kind: MarkdownKind, model: MarkdownEditorMo
   if (form.body.trim() === "") errors.body = kind === "skill" ? "Write the skill's instructions" : "Write the command's prompt";
   const valid = errors.name === undefined && errors.body === undefined && Object.keys(errors.fields).length === 0;
   return { valid, errors };
-}
-
-export function markdownFormSignature(form: MarkdownForm): string {
-  return JSON.stringify(form);
 }
 
 export const SKILL_BODY_PLACEHOLDER =

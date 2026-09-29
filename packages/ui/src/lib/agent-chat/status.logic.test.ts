@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { beforeEach,describe,it } from "node:test";
 
 import {
-contextWindowSnapshot,
 isCompactingThread,
 latestContextWindowActivity
 } from "./status.logic";
@@ -13,30 +12,6 @@ beforeEach(() => {
 });
 
 describe("context window", () => {
-  it("degrades to a bare total without maxTokens — never zeros", () => {
-    const snapshot = contextWindowSnapshot({ usedTokens: 1_234 });
-    assert.equal(snapshot?.usedTokens, 1_234);
-    assert.equal(snapshot?.maxTokens, null);
-    assert.equal(snapshot?.usedPercentage, null);
-    assert.equal(snapshot?.remainingTokens, null);
-  });
-
-  it("computes the ring when maxTokens is present", () => {
-    const snapshot = contextWindowSnapshot({ usedTokens: 50, maxTokens: 200 });
-    assert.equal(snapshot?.usedPercentage, 25);
-    assert.equal(snapshot?.remainingTokens, 150);
-    assert.equal(snapshot?.remainingPercentage, 75);
-  });
-
-  it("clamps an over-full window at 100 %", () => {
-    assert.equal(contextWindowSnapshot({ usedTokens: 300, maxTokens: 200 })?.usedPercentage, 100);
-  });
-
-  it("is null for a missing or negative reading", () => {
-    assert.equal(contextWindowSnapshot(null), null);
-    assert.equal(contextWindowSnapshot({ usedTokens: -1 }), null);
-  });
-
   it("reads the newest context-window activity and skips malformed ones", () => {
     const found = latestContextWindowActivity([
       activity("context-window.updated", { usedTokens: 10, maxTokens: 100 }, { createdAt: stamp(1) }),

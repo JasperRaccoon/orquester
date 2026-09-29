@@ -142,8 +142,6 @@ export interface RewindFacts {
   latestCompactionAt: string | null;
 }
 
-export const NO_REWIND_FACTS: RewindFacts = { targets: NO_REWIND_TARGETS, latestCompactionAt: null };
-
 // ---------------------------------------------------------------------------
 // One prompt
 // ---------------------------------------------------------------------------

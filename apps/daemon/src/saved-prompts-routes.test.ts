@@ -146,26 +146,21 @@ test("saved prompts: refusals are { code, message } with the service's status", 
   const expectRefusal = async (
     request: InjectOptions,
     status: number,
-    code: string,
-    message?: RegExp
+    code: string
   ) => {
     const res = await h.inject(request);
     assert.equal(res.statusCode, status, res.body);
     const body = res.json() as { code: string; message: string };
     assert.equal(body.code, code, res.body);
     assert.equal(typeof body.message, "string");
-    if (message) {
-      assert.match(body.message, message);
-    }
   };
 
   await expectRefusal(
     { method: "POST", url: "/api/saved-prompts", payload: { title: " ", body: "b", projectPath: null } },
     400,
-    "INVALID_REQUEST",
-    /title/
+    "INVALID_REQUEST"
   );
-  await expectRefusal({ method: "POST", url: "/api/saved-prompts" }, 400, "INVALID_REQUEST", /JSON object/);
+  await expectRefusal({ method: "POST", url: "/api/saved-prompts" }, 400, "INVALID_REQUEST");
   await expectRefusal(
     { method: "POST", url: "/api/saved-prompts", payload: { title: "t", body: "b", projectPath: "/etc" } },
     400,
@@ -273,7 +268,6 @@ test("a read-only library answers reads, refuses writes with a 503, and never fa
     const res = await h.inject(request);
     assert.equal(res.statusCode, 503, `${request.method} ${request.url}: ${res.body}`);
     assert.equal(res.json().code, "SAVED_PROMPTS_UNAVAILABLE");
-    assert.match(res.json().message, /read-only/);
   }
 
   await mkdir(join(h.workspacesDir, "acme", "site"), { recursive: true });

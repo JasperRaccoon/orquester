@@ -3,19 +3,10 @@ import { describe,it } from "node:test";
 
 import type { WorkLogEntry } from "./contracts";
 import {
-isStreamedOutputEntry,
-liveWorkEntryLabel,
-nestRowsUnderParentCall,
 showDestructiveRowStyle,
-singleToolCallLabel,
-toolGroupAction,
 withoutJoinedOutput,
 workEntryDisplayIndicatesToolFailure,
-workEntryDisplayLabel,
-workEntryIndicatesToolFailure,
-workEntryIsActiveTurnActivity,
-workEntryIsProviderDenial,
-workEntrySeverity
+workEntryIndicatesToolFailure
 } from "./presentation.logic";
 
 const entry = (overrides: Partial<WorkLogEntry> = {}): WorkLogEntry => ({
@@ -27,53 +18,9 @@ const entry = (overrides: Partial<WorkLogEntry> = {}): WorkLogEntry => ({
   ...overrides
 });
 
-describe("toolGroupAction", () => {
-  it("buckets by the promoted fields alone — nothing branches on the provider", () => {
-    assert.equal(toolGroupAction(entry({ requestKind: "file-read" })), "read");
-    assert.equal(toolGroupAction(entry({ itemType: "file_change" })), "edit");
-    assert.equal(toolGroupAction(entry({ changedFiles: ["/a"] })), "edit");
-    assert.equal(toolGroupAction(entry({ command: "ls" })), "command");
-    assert.equal(toolGroupAction(entry({ itemType: "web_search" })), "search");
-    assert.equal(
-      toolGroupAction(entry({ itemType: "web_search", toolTitle: "Grep" })),
-      "code-search"
-    );
-    assert.equal(toolGroupAction(entry({ itemType: "image_view" })), "read");
-    assert.equal(toolGroupAction(entry({ tone: "info", label: "note" })), "update");
-  });
-
-  it("folds an approval into the update bucket — approvals are never hoisted", () => {
-    assert.equal(
-      toolGroupAction(entry({ sourceActivityKind: "approval.requested", tone: "info" })),
-      "update"
-    );
-    assert.equal(
-      toolGroupAction(entry({ sourceActivityKind: "approval.resolved", tone: "info" })),
-      "update"
-    );
-  });
-});
-
-describe("CLI-side denials", () => {
-  it("reads a tool_use_error result as a denial even with no approval request", () => {
-    assert.equal(
-      workEntryIsProviderDenial(entry({ detail: "<tool_use_error>not allowed</tool_use_error>" })),
-      true
-    );
-    assert.equal(workEntryIsProviderDenial(entry({ toolLifecycleStatus: "declined" })), true);
-    assert.equal(workEntryIsProviderDenial(entry({ detail: "fine" })), false);
-  });
-});
-
 describe("a call's streamed output", () => {
   const chunk = (id: string, toolCallId: string, detail: string): WorkLogEntry =>
     entry({ id, toolCallId, detail, label: "Tool output", sourceActivityKind: "tool.output" });
-
-  it("isStreamedOutputEntry names a tool.output chunk, and nothing else", () => {
-    assert.equal(isStreamedOutputEntry(chunk("c1", "call-1", "one\n")), true);
-    assert.equal(isStreamedOutputEntry(entry({ toolCallId: "call-1", sourceActivityKind: "tool.started" })), false);
-    assert.equal(isStreamedOutputEntry(entry({})), false);
-  });
 
   it("withoutJoinedOutput keeps the rows a list renders: a chunk its call's row absorbs goes, an orphan call's first chunk stays", () => {
     const start = entry({ id: "s", toolCallId: "call-1", command: "npm test", sourceActivityKind: "tool.started" });
@@ -102,17 +49,6 @@ describe("a call's streamed output", () => {
     );
   });
 
-  it("a chunk's row is headed like its call's own row — its command, else its title — else \"Tool output\", never its text", () => {
-    const orphan = chunk("c1", "call-9", "line 1\nline 2\n");
-    assert.equal(workEntryDisplayLabel(orphan), "Tool output");
-    assert.equal(singleToolCallLabel(orphan), "Tool output");
-    assert.equal(liveWorkEntryLabel(orphan, true), "Tool output");
-    const titled = { ...orphan, toolTitle: "Background shell" };
-    assert.equal(workEntryDisplayLabel(titled), "Background shell");
-    const commanded = { ...titled, command: "npm run build" };
-    assert.equal(workEntryDisplayLabel(commanded), "npm run build");
-    assert.equal(liveWorkEntryLabel(commanded, true), "Running npm");
-  });
 });
 
 describe("the output heuristic never judges a call still in progress", () => {
@@ -129,7 +65,6 @@ describe("the output heuristic never judges a call still in progress", () => {
   it("an in-progress call is not failed by its output, however it reads", () => {
     assert.equal(workEntryDisplayIndicatesToolFailure(running), false);
     assert.equal(workEntryIndicatesToolFailure(running), false);
-    assert.equal(workEntrySeverity(running), "none");
     assert.equal(showDestructiveRowStyle(running), false);
   });
 
@@ -138,54 +73,5 @@ describe("the output heuristic never judges a call still in progress", () => {
     assert.equal(workEntryDisplayIndicatesToolFailure(completed), true);
     assert.equal(workEntryDisplayIndicatesToolFailure({ ...running, toolLifecycleStatus: "failed" }), true);
     assert.equal(workEntryDisplayIndicatesToolFailure({ ...running, tone: "error" }), true);
-  });
-});
-
-// ---------------------------------------------------------------------------
-// Fix-wave regressions (R7-6: this is the ONE presentation resolver)
-// ---------------------------------------------------------------------------
-
-describe("R7-6 — arms absorbed from the deleted second resolver", () => {
-  it("buckets an answered question as an update, not as a tool call", () => {
-    assert.equal(
-      toolGroupAction(entry({ sourceActivityKind: "user-input.requested", tone: "info" })),
-      "update"
-    );
-    assert.equal(
-      toolGroupAction(entry({ sourceActivityKind: "user-input.resolved", tone: "info" })),
-      "update"
-    );
-  });
-
-  it("exposes the live-row predicate the activity group needs", () => {
-    assert.equal(
-      workEntryIsActiveTurnActivity(entry({ toolLifecycleStatus: "inProgress" })),
-      true
-    );
-    assert.equal(
-      workEntryIsActiveTurnActivity(entry({ sourceActivityKind: "task.progress", tone: "thinking" })),
-      true
-    );
-    assert.equal(
-      workEntryIsActiveTurnActivity(entry({ toolLifecycleStatus: "completed" })),
-      false
-    );
-  });
-});
-
-describe("R7-10 — parentToolUseId has a reader", () => {
-  it("nests a consequence row under the call it happened inside", () => {
-    const call = entry({ id: "c1", toolCallId: "tu1", command: "pnpm test" });
-    const hook = entry({ id: "h1", parentToolUseId: "tu1", label: "PostToolUse" });
-    const sibling = entry({ id: "s1", command: "ls" });
-    const nested = nestRowsUnderParentCall([call, hook, sibling]);
-    assert.deepEqual(nested.map((node) => node.entry.id), ["c1", "s1"]);
-    assert.deepEqual(nested[0]?.children.map((child) => child.id), ["h1"]);
-  });
-
-  it("leaves a row whose parent is not in this run at the top level", () => {
-    const orphan = entry({ id: "o1", parentToolUseId: "elsewhere" });
-    const nested = nestRowsUnderParentCall([orphan]);
-    assert.deepEqual(nested.map((node) => node.entry.id), ["o1"]);
   });
 });

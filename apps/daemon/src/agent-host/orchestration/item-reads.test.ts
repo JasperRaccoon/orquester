@@ -1,8 +1,7 @@
 /**
- * The orchestrator's item reads over the REAL store (`createThreadStore`): `GET …/items/:itemId` and
- * `GET …/items/:itemId/output?offset=&maxBytes=` reach the store's own paths — its item cursor and tool-output cache —
- * which the host's HTTP and MCP harnesses, running on the in-memory fake, never do.
- * Message reconstruction after retention is owned by store/tool-output.test.ts.
+ * Public item reads over the real store: resident streamed messages and full
+ * prompts remain readable even when the wire snapshot slims their content.
+ * Retained-message reconstruction and output windows belong to store/tool-output.test.ts.
  */
 
 import assert from "node:assert/strict";
@@ -36,10 +35,6 @@ function sinkEvent(threadId: string, type: string, payload: unknown): Appendable
 }
 const said = (threadId: string, messageId: string, text: string, streaming: boolean): AppendableDomainEvent =>
   sinkEvent(threadId, "thread.message-sent", { messageId, role: "assistant", text, streaming, turnId: null });
-const shellRow = (threadId: string, id: string, activityKind: string, payload: Record<string, unknown>): AppendableDomainEvent =>
-  sinkEvent(threadId, "thread.activity-appended", {
-    activity: { kind: "activity", id, tone: "tool", activityKind, summary: activityKind, payload: { toolUseId: "bgshell:task-1", ...payload }, turnId: null, createdAt: "2026-09-24T10:00:00.000Z", updatedAt: "2026-09-24T10:00:00.000Z" }
-  });
 
 describe("the orchestrator's item reads over the real store", () => {
   it("reads the complete resident message after streamed deltas", async (t) => {
@@ -85,30 +80,5 @@ describe("the orchestrator's item reads over the real store", () => {
 
     const stored = await host.orchestrator.readItem(threadId, "re-start");
     assert.equal(stored?.kind === "activity" ? (stored.payload as Record<string, unknown>).prompt : null, prompt);
-  });
-
-  it("serves output windows including newly appended output and completion", async (t) => {
-    const { host } = await realStoreHost(t);
-    const threadId = await host.createThread();
-    await host.orchestrator.ingestionSink(threadId, [
-      shellRow(threadId, "shell-start", "tool.started", { itemType: "command_execution" }),
-      shellRow(threadId, "o1", "tool.output", { streamKind: "command_output", delta: "one\n" }),
-      shellRow(threadId, "o2", "tool.output", { streamKind: "command_output", delta: "  two\n" })
-    ]);
-    await host.settle();
-
-    const first = await host.orchestrator.readToolOutputWindow(threadId, "shell-start", { offset: 0, maxBytes: 4 });
-    assert.deepEqual(first, { toolUseId: "bgshell:task-1", offset: 0, text: "one\n", totalBytes: 10, nextOffset: 4, complete: false, truncated: false });
-
-    await host.orchestrator.ingestionSink(threadId, [
-      shellRow(threadId, "o3", "tool.output", { streamKind: "command_output", delta: "three\n" }),
-      shellRow(threadId, "shell-done", "tool.completed", { itemType: "command_execution" })
-    ]);
-    await host.settle();
-
-    const next = await host.orchestrator.readToolOutputWindow(threadId, "shell-start", { offset: 4, maxBytes: 100 });
-    assert.deepEqual(next, { toolUseId: "bgshell:task-1", offset: 4, text: "  two\nthree\n", totalBytes: 16, complete: true, truncated: false });
-
-    assert.deepEqual(await host.orchestrator.readToolOutput(threadId, "shell-start"), { toolUseId: "bgshell:task-1", output: "one\n  two\nthree\n", complete: true, truncated: false });
   });
 });

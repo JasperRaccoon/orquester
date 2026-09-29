@@ -146,7 +146,7 @@ export interface LeftoverClosing {
   readonly requestId?: string;
 }
 
-export interface LeftoverWorkInput {
+interface LeftoverWorkInput {
   /** Stamped on every row. */
   readonly now: string;
   /** A fresh activity id, asked once per row. */

@@ -73,7 +73,6 @@ import { WorkflowEngineError } from "./run-context.ts";
 import {
   engineUnavailable,
   invalidRequest,
-  isWorkflowError,
   nodeNotFound,
   runNotFound,
   WorkflowError,
@@ -253,7 +252,7 @@ export async function deleteWorkflowCascade(
 }
 
 function sendError(reply: FastifyReply, error: unknown): FastifyReply {
-  if (isWorkflowError(error)) {
+  if (error instanceof WorkflowError) {
     return reply.code(error.status).send(error.body());
   }
   // The engine's refusals carry their status, code and (INVALID_WORKFLOW) problems.

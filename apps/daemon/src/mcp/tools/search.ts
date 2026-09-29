@@ -115,4 +115,4 @@ const searchSessions = defineTool({
   }
 });
 
-export const searchTools: ToolDef[] = [searchSessions] as ToolDef[];
+export const searchTools: ToolDef[] = [searchSessions];

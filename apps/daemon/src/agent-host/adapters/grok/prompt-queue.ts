@@ -42,7 +42,7 @@ export interface CliPrompt {
 }
 
 /** What one parent-session `_x.ai/queue/changed` says. */
-export type QueueObservation =
+type QueueObservation =
   /** One of ours is running (it was listed first): the turn claims it. */
   | { readonly kind: "ours"; readonly promptId: string }
   /** The CLI started a prompt of its own, first seen now. */
@@ -71,7 +71,7 @@ function monitorTaskIdsIn(runningText: unknown): string[] {
  * `_meta.promptId`, a private-channel update's own `prompt_id` (hooks,
  * `turn_completed`, `last_turn_summary`) else its `_meta.promptId`.
  */
-export function framePromptId(params: unknown): string | undefined {
+function framePromptId(params: unknown): string | undefined {
   const record = params as { update?: { prompt_id?: unknown }; _meta?: { promptId?: unknown } } | null;
   const own = record?.update?.prompt_id;
   if (typeof own === "string" && own.length > 0) {

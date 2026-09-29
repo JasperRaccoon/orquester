@@ -3,7 +3,7 @@
 // AccountsService and every step is testable with a fake exec.
 
 /** Longest ref a request may name. */
-export const MAX_CLONE_REF_LENGTH = 250;
+const MAX_CLONE_REF_LENGTH = 250;
 
 /** Default ceiling on a whole clone (every step it takes). */
 export const DEFAULT_CLONE_TIMEOUT_MS = 10 * 60_000;

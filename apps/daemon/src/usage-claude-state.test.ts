@@ -13,23 +13,12 @@ import test from "node:test";
 import {
   claudeLiveUsageFromWindows,
   createClaudeSource,
-  type ClaudeUsageRecord,
-  type ClaudeUsageStateStore
+  type ClaudeUsageRecord
 } from "./usage-sources.ts";
-import { UsageStateFile, parseUsageRecord } from "./usage-state.ts";
+import { UsageStateFile } from "./usage-state.ts";
 
 const NOW = Date.parse("2026-09-28T14:00:00Z");
 const MIN = 60_000;
-
-class MemoryStore implements ClaudeUsageStateStore {
-  readonly records = new Map<string, ClaudeUsageRecord>();
-  get(key: string) {
-    return this.records.get(key);
-  }
-  set(key: string, record: ClaudeUsageRecord) {
-    this.records.set(key, record);
-  }
-}
 
 async function claudeHome(t: test.TestContext): Promise<string> {
   const home = await mkdtemp(join(tmpdir(), "usage-state-"));
@@ -92,7 +81,7 @@ test("asks the endpoint at most once per window, even with nothing to show", asy
 
 test("a restart keeps the last reading and waits out the window the previous process opened", async (t) => {
   const home = await claudeHome(t);
-  const store = new MemoryStore();
+  const store = new Map<string, ClaudeUsageRecord>();
   const api = endpoint(t, [{ status: 200, body: usageBody(10, 90) }, { status: 200, body: usageBody(11, 91) }]);
   const make = (now: number) =>
     createClaudeSource({ userhome: home, claudeHome: home, now: () => now, state: { store, key: "claude:a" } });
@@ -110,7 +99,7 @@ test("a restart keeps the last reading and waits out the window the previous pro
 
 test("a 429's Retry-After survives a restart and the last reading is served greyed meanwhile", async (t) => {
   const home = await claudeHome(t);
-  const store = new MemoryStore();
+  const store = new Map<string, ClaudeUsageRecord>();
   const api = endpoint(t, [
     { status: 200, body: usageBody(10, 50) },
     { status: 429, retryAfter: "1800" },
@@ -179,9 +168,9 @@ test("a live reading on an account with no reading yet stands on its own", async
 
 test("a stamp from the future (the clock moved back) does not block the endpoint", async (t) => {
   const home = await claudeHome(t);
-  const store = new MemoryStore();
+  const store = new Map<string, ClaudeUsageRecord>();
   store.set("k", { lastGood: null, lastFetchAt: NOW + 60 * MIN, retryAt: NOW + 100 * 24 * 60 * MIN, liveAt: 0, failed: false });
-  const api = endpoint(t, [{ status: 200, body: usageBody(5, 6) }]);
+  endpoint(t, [{ status: 200, body: usageBody(5, 6) }]);
   const source = createClaudeSource({ userhome: home, claudeHome: home, now: () => NOW, state: { store, key: "k" } });
   assert.equal((await source())?.session?.percent, 5);
 });
@@ -209,11 +198,12 @@ test("UsageStateFile round-trips, drops what does not parse and moves a corrupt 
   await read.load();
   assert.deepEqual(read.get("claude:/a"), record);
 
-  await writeFile(file, JSON.stringify({ version: 1, sources: { good: record, bad: "x", noUsage: { lastGood: { id: "codex" }, lastFetchAt: 5 } } }));
+  await writeFile(file, JSON.stringify({ version: 1, sources: { good: record, bad: "x", empty: null, noUsage: { lastGood: { id: "codex" }, lastFetchAt: 5 } } }));
   const tolerant = new UsageStateFile(file);
   await tolerant.load();
   assert.deepEqual(tolerant.get("good"), record);
   assert.equal(tolerant.get("bad"), undefined);
+  assert.equal(tolerant.get("empty"), undefined);
   assert.deepEqual(tolerant.get("noUsage"), { lastGood: null, lastFetchAt: 5, retryAt: 0, liveAt: 0, failed: false });
 
   await writeFile(file, "{not json");
@@ -221,7 +211,6 @@ test("UsageStateFile round-trips, drops what does not parse and moves a corrupt 
   await corrupt.load();
   assert.equal(corrupt.get("good"), undefined);
   assert.equal((await readdir(join(dir, "daemon"))).some((name) => name.startsWith("usage-state.json.corrupt-")), true);
-  assert.equal(parseUsageRecord(null), undefined);
 });
 
 test("a thread's live windows become the account's session and weekly readings", () => {

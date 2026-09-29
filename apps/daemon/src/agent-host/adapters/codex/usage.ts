@@ -157,12 +157,6 @@ export class CodexUsageTracker {
     }
     return { ...base, usageStatus: "complete", inputTokens, outputTokens };
   }
-
-  /** Forget a turn without settling it (the turn never really started). */
-  forgetTurn(turnId: string): void {
-    this.turnBaselines.delete(turnId);
-    this.turnObserved.delete(turnId);
-  }
 }
 
 /**

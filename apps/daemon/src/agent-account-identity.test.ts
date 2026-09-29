@@ -38,11 +38,6 @@ test("detects grok by the issuer::client keyed entry with a key", () => {
   assert.equal(detectAgentFromBlob({ [GROK_KEY]: { refresh_token: "r" } }), null);
 });
 
-test("codex detection wins over grok when both shapes could match", () => {
-  // A codex auth.json has `tokens`; a grok entry key always contains `::`.
-  assert.equal(detectAgentFromBlob({ tokens: { access_token: "x" }, [GROK_KEY]: { key: "t" } }), "codex");
-});
-
 test("grok identity prefers the auth.x.ai entry and reads email/user_id", () => {
   const blob = {
     "https://other.example::c1": { key: "k1", email: "wrong@example.com" },

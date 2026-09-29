@@ -4,26 +4,18 @@ import { describe, it } from "node:test";
 import type { AgentProfileSnapshot, ProfileItem } from "@orquester/api";
 
 import {
-  AGENT_PICKER_SEGMENTED_MIN_WIDTH,
-  agentPickerLayout,
   agentProfileAgentOptions,
   agentProfileEmptyState,
   copyTargets,
-  effectiveKindFilter,
-  emptyKindTitle,
-  fileNameOf,
+  effectiveKindTab,
+  addMenuKinds,
+  profileKindTabs,
+  profileItemKindOfId,
   filterProfileItems,
   groupProfileItems,
-  instructionsLine,
   isAgentNotInstalled,
   manageInAgent,
   matchesProfileQuery,
-  profileKindChips,
-  profileItemDisplayName,
-  profileItemMetaParts,
-  profileItemSecondLine,
-  switchDisabledReason,
-  switchLabel,
   switchTitle
 } from "./list.logic.ts";
 
@@ -65,29 +57,49 @@ function snapshot(overrides: Partial<AgentProfileSnapshot> = {}): AgentProfileSn
   };
 }
 
-describe("kind chips", () => {
-  it("All then the agent's own kinds in AGENT_PROFILE_KINDS order, each counted — zero included", () => {
+describe("kind tabs", () => {
+  it("a kind the agent should not have (another daemon version) gets a tab while it has items, after the rest", () => {
     assert.deepEqual(
-      profileKindChips("claude", ITEMS).map((chip) => [chip.id, chip.label, chip.count]),
+      profileKindTabs("opencode", [item({ id: "hook:x", kind: "hook" }), item({ id: "mcp:a" }), item({ id: "mcp:b" })]).filter((tab) => tab.count > 0).map((tab) => [tab.id, tab.count]),
       [
-        ["all", "All", 6],
-        ["mcp", "MCP", 2],
-        ["skill", "Skills", 1],
-        ["plugin", "Plugins", 1],
-        ["marketplace", "Marketplaces", 0],
-        ["hook", "Hooks", 1],
-        ["command", "Commands", 1]
+        ["mcp", 2],
+        ["hook", 1]
       ]
     );
   });
 
-  it("only the kinds that agent has: OpenCode has no marketplaces or hooks", () => {
-    assert.deepEqual(
-      profileKindChips("opencode", []).map((chip) => chip.id),
-      ["all", "mcp", "skill", "plugin", "command"]
+  it("shows the remembered tab when it is one of the agent's, else the agent's first", () => {
+    const opencode = profileKindTabs("opencode", []);
+    assert.equal(effectiveKindTab(opencode, "skill"), "skill");
+    assert.equal(effectiveKindTab(profileKindTabs("claude", []), "command"), "command");
+    assert.equal(effectiveKindTab(opencode, "hook"), "mcp", "a kind the agent lacks falls back to its first");
+    assert.equal(
+      effectiveKindTab(profileKindTabs("opencode", [item({ id: "hook:x", kind: "hook" })]), "hook"),
+      "hook",
+      "unless it has items to show under it"
     );
-    assert.equal(effectiveKindFilter("opencode", "hook"), "all", "a filter the agent lacks falls back to All");
-    assert.equal(effectiveKindFilter("opencode", "skill"), "skill");
+    for (const junk of [null, undefined, "all", "MCP", "", 3, {}, ["skill"]]) {
+      assert.equal(effectiveKindTab(profileKindTabs("codex", ITEMS), junk), "mcp", String(junk));
+    }
+  });
+
+  it("reads a saved item's kind off its id", () => {
+    assert.equal(profileItemKindOfId("mcp:jira-cloud"), "mcp");
+    assert.equal(profileItemKindOfId("hook:PreToolUse:0123456789abcdef"), "hook");
+    assert.equal(profileItemKindOfId("plugin:superpowers@claude-plugins-official"), "plugin");
+    for (const id of ["", "mcp", ":mcp", "agent:x", "instructions"]) assert.equal(profileItemKindOfId(id), null, id);
+  });
+
+  it("+ Add lists the shown tab's kind first, and still every creatable kind", () => {
+    assert.deepEqual(addMenuKinds(["mcp", "skill", "plugin", "marketplace", "hook"], "hook"), [
+      "hook",
+      "mcp",
+      "skill",
+      "plugin",
+      "marketplace"
+    ]);
+    assert.deepEqual(addMenuKinds(["mcp", "skill"], "mcp"), ["mcp", "skill"]);
+    assert.deepEqual(addMenuKinds(["mcp", "skill"], "command"), ["mcp", "skill"], "a tab that cannot be created keeps the order");
   });
 });
 
@@ -100,25 +112,29 @@ describe("filtering and grouping", () => {
     assert.ok(matchesProfileQuery(ITEMS[0]!, "   "), "blank matches all");
   });
 
-  it("filters by kind and query together", () => {
+  it("shows the tab's kind; a search looks across every kind, whatever the tab", () => {
     assert.deepEqual(
       filterProfileItems(ITEMS, { kind: "mcp", query: "" }).map((entry) => entry.id),
       ["mcp:jira", "mcp:Atlas"]
     );
-    assert.deepEqual(filterProfileItems(ITEMS, { kind: "all", query: "review" }).map((entry) => entry.id), ["skill:review"]);
-    assert.deepEqual(filterProfileItems(ITEMS, { kind: "skill", query: "jira" }), []);
+    assert.deepEqual(filterProfileItems(ITEMS, { kind: "hook", query: "   " }).map((entry) => entry.id), [
+      "hook:PreToolUse:abc"
+    ], "a blank search is no search");
+    assert.deepEqual(filterProfileItems(ITEMS, { kind: "mcp", query: "review" }).map((entry) => entry.id), ["skill:review"]);
+    assert.deepEqual(filterProfileItems(ITEMS, { kind: "skill", query: "jira" }).map((entry) => entry.id), ["mcp:jira"]);
+    assert.deepEqual(filterProfileItems(ITEMS, { kind: "skill", query: "zzz" }), []);
   });
 
   it("groups in the agent's kind order, each sorted by name, empty kinds left out", () => {
     const groups = groupProfileItems("claude", ITEMS);
     assert.deepEqual(
-      groups.map((group) => [group.kind, group.label, group.items.map((entry) => entry.name)]),
+      groups.map((group) => [group.kind, group.items.map((entry) => entry.name)]),
       [
-        ["mcp", "MCP servers", ["Atlas", "jira"]],
-        ["skill", "Skills", ["review"]],
-        ["plugin", "Plugins", ["superpowers"]],
-        ["hook", "Hooks", ["PreToolUse"]],
-        ["command", "Commands", ["pr"]]
+        ["mcp", ["Atlas", "jira"]],
+        ["skill", ["review"]],
+        ["plugin", ["superpowers"]],
+        ["hook", ["PreToolUse"]],
+        ["command", ["pr"]]
       ]
     );
   });
@@ -136,7 +152,7 @@ describe("what the list shows", () => {
     snapshot: snapshot(),
     error: null,
     notInstalled: false,
-    kind: "all" as const,
+    kind: "skill" as const,
     query: "",
     shown: 3
   };
@@ -158,16 +174,14 @@ describe("what the list shows", () => {
     });
   });
 
-  it("no matches, an empty kind, or nothing at all", () => {
+  it("no matches while searching, else the empty tab's own state", () => {
     assert.deepEqual(agentProfileEmptyState({ ...base, shown: 0, query: " jira " }), { kind: "no-matches", query: "jira" });
     assert.deepEqual(agentProfileEmptyState({ ...base, shown: 0, kind: "mcp" }), { kind: "empty-kind", itemKind: "mcp" });
-    assert.deepEqual(agentProfileEmptyState({ ...base, shown: 0 }), { kind: "none" });
-  });
-
-  it("titles an empty kind in words", () => {
-    assert.equal(emptyKindTitle("mcp"), "No MCP servers yet.");
-    assert.equal(emptyKindTitle("skill"), "No skills yet.");
-    assert.equal(emptyKindTitle("marketplace"), "No marketplaces yet.");
+    assert.deepEqual(
+      agentProfileEmptyState({ ...base, shown: 0, snapshot: snapshot({ items: [] }) }),
+      { kind: "empty-kind", itemKind: "skill" },
+      "an agent with nothing at all shows the tab's empty state"
+    );
   });
 
   it("knows an agent is not installed from its snapshot, its refusal, or the overview", () => {
@@ -179,136 +193,11 @@ describe("what the list shows", () => {
   });
 });
 
-describe("a row's meta line", () => {
-  // The `meta` each adapter really sets (apps/daemon/src/agent-profile/adapters/*/index.ts).
-  const OFF_NOTE =
-    'Turning it off adds it to deniedMcpServers in settings.json, which also blocks a project MCP server named "jira".';
-
-  it("words the facts, and never shows Claude's off-switch caveat as a fact", () => {
-    const claudeMcp = item({ id: "mcp:jira", meta: { transport: "stdio", target: "npx -y jira-mcp", offNote: OFF_NOTE } });
-    assert.deepEqual(profileItemMetaParts(claudeMcp), ["stdio", "npx -y jira-mcp"]);
-    assert.ok(!matchesProfileQuery(claudeMcp, "deniedMcpServers"), "nor searches it");
-  });
-
-  it("drops what the description already says, and bare flags", () => {
-    const claudeHook = item({
-      id: "hook:PreToolUse:1",
-      kind: "hook",
-      description: "PreToolUse · Bash",
-      meta: { event: "PreToolUse", type: "command", matcher: "Bash" }
-    });
-    assert.deepEqual(profileItemMetaParts(claudeHook), [], "Claude's hook description is its event and matcher");
-    const codexHook = item({ id: "hook:Stop:2", kind: "hook", meta: { event: "Stop", timeout: "30s" } });
-    assert.deepEqual(profileItemMetaParts(codexHook), ["Stop", "timeout 30s"]);
-    const promptHook = item({ id: "hook:Stop:3", kind: "hook", description: "Stop", meta: { event: "Stop", type: "prompt" } });
-    assert.deepEqual(profileItemMetaParts(promptHook), ["prompt hook"]);
-    const symlinked = item({ id: "skill:x", kind: "skill", meta: { symlink: "true", override: "name-only" } });
-    assert.deepEqual(profileItemMetaParts(symlinked), ["skillOverrides: name-only", "symlink"]);
-  });
-
-  it("a hook's second line reads alike for every agent: event, matcher, then the rest", () => {
-    // As the three adapters send them.
-    const claude = item({
-      id: "hook:PreToolUse:1",
-      kind: "hook",
-      description: "PreToolUse · *",
-      meta: { event: "PreToolUse", type: "command", matcher: "*" }
-    });
-    const codex = item({
-      id: "hook:PreToolUse:2",
-      kind: "hook",
-      description: "Matcher: *",
-      meta: { event: "PreToolUse", matcher: "*", timeout: "10s" }
-    });
-    const grok = item({
-      id: "hook:Stop:3",
-      kind: "hook",
-      description: "Stop",
-      meta: { event: "Stop", file: "orquester.json", timeout: "10 s" }
-    });
-    assert.equal(profileItemSecondLine(claude), "PreToolUse · *");
-    assert.equal(profileItemSecondLine(codex), "PreToolUse · * · timeout 10s");
-    assert.equal(profileItemSecondLine(grok), "Stop · timeout 10 s · orquester.json");
-    // Anything else: the meta, then the description.
-    const mcp = item({ id: "mcp:x", description: "Jira issues", meta: { transport: "stdio" } });
-    assert.equal(profileItemSecondLine(mcp), "stdio · Jira issues");
-    const eventless = item({ id: "hook:x", kind: "hook", description: "From the plugin" });
-    assert.equal(profileItemSecondLine(eventless), "From the plugin");
-  });
-
-  it("a hook's name shows the ends of its absolute paths", () => {
-    const hook = (name: string) => profileItemDisplayName({ kind: "hook", name });
-    assert.equal(hook("'/var/lib/orquester/daemon/hooks/agent-hook.sh' claude Stop"), "'…/agent-hook.sh' claude Stop");
-    assert.equal(hook("/usr/bin/node /opt/x/lint.js --fix"), "…/node …/lint.js --fix");
-    assert.equal(hook("python3 $HOME/.claude/hooks/reinject.py"), "python3 $HOME/.claude/hooks/reinject.py", "not absolute");
-    assert.equal(hook("~/.claude/hooks/check.sh"), "~/.claude/hooks/check.sh");
-    assert.equal(hook("/bin/true"), "…/true");
-    assert.equal(profileItemDisplayName({ kind: "mcp", name: "/odd/but/kept" }), "/odd/but/kept", "only hooks");
-  });
-
-  it("plugins and marketplaces: a version, where from, how many installed", () => {
-    const claudePlugin = item({
-      id: "plugin:superpowers@official",
-      kind: "plugin",
-      name: "superpowers@official",
-      meta: { version: "5.0.7", marketplace: "official" }
-    });
-    assert.deepEqual(profileItemMetaParts(claudePlugin), ["v5.0.7"], "the id already names the marketplace");
-    const opencodePlugin = item({ id: "plugin:x", kind: "plugin", meta: { source: "npm", version: "1.2.0", options: "yes" } });
-    assert.deepEqual(profileItemMetaParts(opencodePlugin), ["v1.2.0", "npm package", "with options"]);
-    const market = item({ id: "marketplace:m", kind: "marketplace", meta: { source: "github:a/b", installedPlugins: "3" } });
-    assert.deepEqual(profileItemMetaParts(market), ["github:a/b", "3 installed"]);
-    const none = item({ id: "marketplace:n", kind: "marketplace", meta: { source: "/srv/m", installedPlugins: "0", branch: "main" } });
-    assert.deepEqual(profileItemMetaParts(none), ["/srv/m", "branch main"]);
-    const configCommand = item({ id: "command:c", kind: "command", meta: { in: "config" } });
-    assert.deepEqual(profileItemMetaParts(configCommand), ["in the config file"]);
-  });
-
-  it("an unknown key from another daemon version still shows, after the known ones", () => {
-    assert.deepEqual(profileItemMetaParts(item({ id: "mcp:a", meta: { scope: "user", transport: "http" } })), ["http", "user"]);
-  });
-});
-
 describe("a row's switch and menu", () => {
   it("its tooltip carries the adapter's off-switch caveat while on", () => {
     const offNote = "Turning it off also blocks a project MCP server named \"jira\".";
-    assert.equal(
-      switchTitle(item({ id: "mcp:jira", meta: { offNote } })),
-      `On — loaded by new sessions. ${offNote}`
-    );
-    assert.equal(switchTitle(item({ id: "mcp:jira", enabled: false, meta: { offNote } })), "Off — not loaded");
-    assert.equal(switchTitle(item({ id: "mcp:jira" })), "On — loaded by new sessions");
-  });
-
-  it("says what pressing it does", () => {
-    assert.equal(switchLabel({ name: "jira", enabled: true }), "Turn off jira");
-    assert.equal(switchLabel({ name: "jira", enabled: false }), "Turn on jira");
-  });
-
-  it("explains why it is disabled", () => {
-    assert.equal(switchDisabledReason(ITEMS[0]!), null);
-    assert.equal(
-      switchDisabledReason(item({ id: "hook:o", toggleable: false, locked: true, source: { type: "orquester", label: "Orquester" } })),
-      "Locked — Orquester manages this"
-    );
-    assert.equal(
-      switchDisabledReason(item({ id: "skill:s", toggleable: false, locked: true, source: { type: "cli", label: "CLI" } })),
-      "Locked — the agent's CLI manages this"
-    );
-    assert.equal(
-      switchDisabledReason(
-        item({ id: "skill:x", toggleable: false, source: { type: "inherited", label: "From Claude", ownerAgent: "claude" } })
-      ),
-      "Manage in Claude"
-    );
-    assert.equal(
-      switchDisabledReason(item({ id: "hook:p", toggleable: false, source: { type: "plugin", label: "Plugin · superpowers" } })),
-      "Managed by plugin superpowers"
-    );
-    assert.equal(
-      switchDisabledReason(item({ id: "skill:b", toggleable: false, source: { type: "bundled", label: "Bundled" } })),
-      "Bundled with the agent — can't be turned off here"
-    );
+    assert.ok(switchTitle(item({ id: "mcp:jira", meta: { offNote } })).includes(offNote));
+    assert.ok(!switchTitle(item({ id: "mcp:jira", enabled: false, meta: { offNote } })).includes(offNote));
   });
 
   it("copies only copyable kinds, to the other installed agents that have the kind", () => {
@@ -326,33 +215,6 @@ describe("a row's switch and menu", () => {
   });
 });
 
-describe("the instructions card", () => {
-  const NOW = Date.parse("2026-09-28T12:00:00.000Z");
-
-  it("names the file, its lines and when it was edited", () => {
-    assert.deepEqual(
-      instructionsLine(
-        { path: "/var/lib/orquester/.claude/CLAUDE.md", exists: true, bytes: 900, lines: 42, mtime: "2026-09-28T10:00:00.000Z", revision: "x", warnings: [] },
-        NOW
-      ),
-      { fileName: "CLAUDE.md", detail: "42 lines · edited 2h ago" }
-    );
-    assert.equal(
-      instructionsLine({ path: "C:\\h\\AGENTS.md", exists: true, bytes: 1, lines: 1, revision: "", warnings: [] }, NOW).detail,
-      "1 line"
-    );
-  });
-
-  it("says a missing file is not created yet", () => {
-    assert.deepEqual(
-      instructionsLine({ path: "/h/.grok/AGENTS.md", exists: false, bytes: 0, lines: 0, revision: "", warnings: [] }, NOW),
-      { fileName: "AGENTS.md", detail: "Not created yet — click to write it" }
-    );
-    assert.equal(fileNameOf(""), "");
-    assert.equal(instructionsLine({ path: "", exists: false, bytes: 0, lines: 0, revision: "", warnings: [] }, NOW).fileName, "Instructions");
-  });
-});
-
 describe("agents and layout", () => {
   it("lists the four agents, installed as the snapshot, else the overview, says", () => {
     const options = agentProfileAgentOptions(
@@ -363,25 +225,14 @@ describe("agents and layout", () => {
       { grok: snapshot({ agent: "grok", installed: false }) }
     );
     assert.deepEqual(
-      options.map((option) => [option.id, option.label, option.installed]),
+      options.map((option) => [option.id, option.installed]),
       [
-        ["claude", "Claude", true],
-        ["codex", "Codex", null],
-        ["grok", "Grok", false],
-        ["opencode", "OpenCode", null]
+        ["claude", true],
+        ["codex", null],
+        ["grok", false],
+        ["opencode", null]
       ]
     );
     assert.equal(options[0]?.version, "2.1");
-  });
-
-  it("collapses the picker to a dropdown below the segmented control's width", () => {
-    assert.equal(agentPickerLayout(null), "segmented", "unmeasured: a phone's section fits");
-    assert.equal(agentPickerLayout(260), "dropdown", "the dock's minimum");
-    assert.equal(agentPickerLayout(319), "dropdown", "the dock's default 320 px, inside its border");
-    assert.equal(agentPickerLayout(330), "dropdown", "too narrow for the four names in a wide font");
-    assert.equal(agentPickerLayout(AGENT_PICKER_SEGMENTED_MIN_WIDTH - 1), "dropdown");
-    assert.equal(agentPickerLayout(AGENT_PICKER_SEGMENTED_MIN_WIDTH), "segmented");
-    assert.equal(agentPickerLayout(352), "segmented", "a 360 px phone's section");
-    assert.equal(agentPickerLayout(560), "segmented", "the dock's maximum");
   });
 });

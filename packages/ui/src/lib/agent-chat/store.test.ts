@@ -21,9 +21,6 @@ import type {
 } from "@orquester/api/agent-chat";
 
 let registerComposerHandle: typeof import("../../components/agent-chat/composer/composer-bridge")["registerComposerHandle"];
-import { draftAfterReturn, loadComposerDraft } from "../../components/agent-chat/composer/composer-draft";
-import type { StagedAttachment } from "../../components/agent-chat/composer/ComposerAttachments";
-import { attachmentCountBlockSend } from "../../components/agent-chat/composer/composer-submission";
 import type { AgentChatThreadState, ThreadStore } from "./store";
 let createThreadStore: typeof import("./store")["createThreadStore"];
 let releaseThreadStore: typeof import("./store")["releaseThreadStore"];
@@ -410,8 +407,14 @@ describe("commands", () => {
 
   it("omits turnId unless the session is running", async () => {
     const { api, fake } = await store();
+    fake.push({ kind: "snapshot", thread: snapshot({ head: head({ session: { status: "ready", activeTurnId: "old-turn" } }), seq: 1 }) });
     await api.getState().actions.interrupt();
-    assert.equal("turnId" in (fake.posted[0]?.body ?? {}), false);
+    assert.equal(fake.posted[0]?.name, "interrupt");
+    assert.equal("turnId" in fake.posted[0]!.body, false);
+
+    fake.push({ kind: "snapshot", thread: snapshot({ head: head({ session: { status: "running", activeTurnId: "current-turn" } }), seq: 2 }) });
+    await api.getState().actions.interrupt();
+    assert.equal(fake.posted[1]?.body.turnId, "current-turn");
   });
 });
 
@@ -1211,23 +1214,18 @@ describe("a send outlives its store generation", () => {
     const stored = persisted().Q!;
     assert.equal(stored.text, "first\n\nsecond");
     assert.equal(stored.attachments.length, 16);
-    const loaded = loadComposerDraft({ ...stored, context: [] });
-    assert.equal(loaded.attachments.length, 16, "the next mount loads every one of them");
-    assert.ok(attachmentCountBlockSend(loaded.attachments));
   });
 
-  /** A mounted composer whose live draft is `live`, merging a returned message the way the real one does. */
-  function mountComposer(sessionId: string, live: { text: string; attachments: StagedAttachment[] }) {
+  function mountComposer(sessionId: string, refused: AttachmentRef[] = []) {
     const inserted: string[] = [];
+    const returned: { text: string; attachments: readonly AttachmentRef[] }[] = [];
     const unregister = registerComposerHandle(sessionId, {
       insertText: (text) => void inserted.push(text),
       // A NEW pick into a full tray is refused; a returned file never comes this way.
       stageAttachment: () => false,
       returnMessage: (message) => {
-        const next = draftAfterReturn({ draft: live, message });
-        live.text = next.text;
-        live.attachments = next.attachments;
-        return next.unstaged;
+        returned.push(message);
+        return refused;
       },
       focusAtEnd: () => {},
       openControl: () => {},
@@ -1235,19 +1233,20 @@ describe("a send outlives its store generation", () => {
       submitText: () => ({ ok: false, reason: "not in this test" }),
       restoreFailedSend: () => false
     });
-    return { live, inserted, unregister };
+    return { returned, inserted, unregister };
   }
 
-  it("with a composer mounted, every returned file is staged as returning, and nothing is parked behind it", async () => {
+  it("with a composer mounted, the returned message reaches it without a hidden persisted copy", async () => {
     const { api, state } = await store("R");
-    const tray = loadComposerDraft({ text: "", attachments: eight("t"), context: [] }).attachments;
-    const composer = mountComposer("R", { text: "mine", attachments: tray });
+    const composer = mountComposer("R");
     try {
       api.getState().actions.queueMessage(queued("queued", eight("q")));
       api.getState().actions.returnQueuedToComposer(state().slice.queue[0]!.id);
 
-      assert.equal(composer.live.attachments.length, 16, "the eight never refuse a file coming back");
-      assert.equal(composer.live.text, "mine\n\nqueued");
+      assert.deepEqual(composer.returned.map((message) => ({
+        text: message.text,
+        files: message.attachments.map((attachment) => attachment.id)
+      })), [{ text: "queued", files: ["q1", "q2", "q3", "q4", "q5", "q6", "q7", "q8"] }]);
       assert.deepEqual(composer.inserted, [], "nothing refused, so nothing written as a path");
       assert.deepEqual(state().draft.attachments, [], "nothing parked where the composer's next save drops it");
       assert.equal(state().draft.text, "");
@@ -1266,15 +1265,14 @@ describe("a send outlives its store generation", () => {
       sizeBytes: 12,
       path: "/w/p/.att/diagram.svg"
     };
-    const composer = mountComposer("R", { text: "", attachments: [] });
+    const composer = mountComposer("R", [vector]);
     try {
       api.getState().actions.queueMessage(queued("see [Image #1]", [vector]));
       api.getState().actions.returnQueuedToComposer(state().slice.queue[0]!.id);
 
-      assert.equal(composer.live.text, "see", "its placeholder names nothing now");
-      assert.deepEqual(composer.live.attachments, []);
       assert.deepEqual(composer.inserted, ["/w/p/.att/diagram.svg"], "the bridge's fallback: a path the user can see");
       assert.deepEqual(state().draft.attachments, []);
+      assert.equal(state().draft.text, "");
     } finally {
       composer.unregister();
     }

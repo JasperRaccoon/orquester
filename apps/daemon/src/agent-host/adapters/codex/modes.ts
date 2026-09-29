@@ -19,7 +19,7 @@ import type { InteractionMode, RuntimeMode } from "@orquester/api/agent-chat";
 
 import type { CodexProtocol } from "./_generated/index.ts";
 
-export interface CodexThreadConfig {
+interface CodexThreadConfig {
   approvalPolicy: CodexProtocol.v2.AskForApproval;
   sandbox: CodexProtocol.v2.SandboxMode;
   approvalsReviewer: CodexProtocol.v2.ApprovalsReviewer;

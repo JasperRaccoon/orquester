@@ -14,11 +14,10 @@ import {
   discoverClaudeSkills,
   parseFrontmatterBoolean,
   parseLenientJson,
-  parseSkillFrontmatter,
   readSkillOverridesFromSettings,
   skillOverrideSettingsPaths
 } from "./skills.ts";
-import { planClaudeSkillDispatch, startsWithSlashCommand } from "./skill-dispatch.ts";
+import { planClaudeSkillDispatch } from "./skill-dispatch.ts";
 import { buildAskUserQuestionReply, parseAskUserQuestionInput } from "./questions.ts";
 
 let root: string;
@@ -178,11 +177,6 @@ describe("claude skills — parsers", () => {
     assert.equal(parseFrontmatterBoolean("maybe"), undefined);
   });
 
-  it("reports a missing frontmatter block as missing, not malformed", () => {
-    assert.deepEqual(parseSkillFrontmatter("# Just a heading\n"), { kind: "missing" });
-    assert.equal(parseSkillFrontmatter("---\ndescription: x\n---\nbody").kind, "parsed");
-  });
-
   it("tolerates comments and trailing commas in a settings file", () => {
     assert.deepEqual(parseLenientJson('{ "a": 1, /* x */ "b": [2,], }'), { a: 1, b: [2] });
     assert.equal(parseLenientJson("{ not json"), undefined);
@@ -229,13 +223,6 @@ describe("claude skill dispatch — §4.6.8", () => {
   it("leaves an unknown mention literal — a $HOME in prose is not a command", () => {
     assert.equal(planClaudeSkillDispatch("set $HOME to /tmp", known), undefined);
     assert.equal(planClaudeSkillDispatch("costs $5k this month", known), undefined);
-  });
-
-  it("recognises a prompt that already opens with a slash command (§4.6.9)", () => {
-    assert.equal(startsWithSlashCommand("/compact"), true);
-    assert.equal(startsWithSlashCommand("/review the diff"), true);
-    assert.equal(startsWithSlashCommand("please /review"), false);
-    assert.equal(startsWithSlashCommand("//not-a-command"), false);
   });
 });
 

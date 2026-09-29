@@ -16,7 +16,6 @@ import {
   HOOK_MATCHER_PLACEHOLDER,
   hookDraftFromForm,
   hookEvents,
-  hookFormSignature,
   initialHookForm,
   validateHookForm,
   type HookForm,
@@ -34,7 +33,7 @@ export const HookEditor: React.FC<{ detail?: HookDetail; onReload?: () => void }
   const [showErrors, setShowErrors] = useState(false);
   const submit = useProfileSubmit();
   const validation = validateHookForm(agent, form, detail?.hook.event);
-  useReportDirty(hookFormSignature(form) !== hookFormSignature(initial));
+  useReportDirty(JSON.stringify(form) !== JSON.stringify(initial));
 
   const change = useCallback(
     (patch: Partial<HookForm>) => {
@@ -68,7 +67,7 @@ export const HookEditor: React.FC<{ detail?: HookDetail; onReload?: () => void }
   );
 };
 
-export const HookFormView: React.FC<{
+const HookFormView: React.FC<{
   form: HookForm;
   onChange: (patch: Partial<HookForm>) => void;
   validation: HookValidation;

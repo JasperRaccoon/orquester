@@ -7,9 +7,7 @@ import { listAgentConversations } from "./agent-conversations.ts";
 
 /**
  * The listers read the daemon user's REAL history dirs by default, so every
- * test pins the three system homes at empty scratch dirs first. (Kimi's index
- * is not relocatable, but it is keyed by workDir and these project paths are
- * unique temp dirs, so it can never match.)
+ * test pins the three system homes at empty scratch dirs first.
  */
 async function scratch(): Promise<string> {
   const root = await mkdtemp(join(tmpdir(), "orquester-conversations-"));

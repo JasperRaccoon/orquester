@@ -1,9 +1,7 @@
 /**
  * Agent chat — the client-side seams (spec §7.2, §7.3, §7.4).
  *
- * Types only. `hooks.ts` ships inert stubs so components compile today;
- * package **W11** replaces them with the real store slice and transport.
- * This file is additive-only afterwards.
+ * Shared view models for the thread store, hooks and components.
  */
 
 import type {
@@ -23,7 +21,6 @@ import type {
   ProviderSnapshot,
   RuntimeMode,
   RuntimeSubagent,
-  ThreadActivityItem,
   ThreadGoal,
   ThreadHead,
   ThreadHistoryBounds,
@@ -96,8 +93,6 @@ export interface QueuedComposerMessage {
    * (§6.2). A failed send is held with a new one: the user's next send of it
    * is a new command, as it always was. Optional so a message built elsewhere
    * still types; the store mints one for any queued without it.
-   *
-   * *Added with the reload-safe queue; `contracts.ts` stays additive-only.*
    */
   commandId?: string;
   text: string;
@@ -113,8 +108,6 @@ export interface QueuedComposerMessage {
    * seen its queue for a while — shown as the thread's banner wherever the
    * queue comes back with it: the thread's next store generation, or the
    * next page after a reload. A held row with no banner never says why.
-   *
-   * *Added with the reload-safe queue; `contracts.ts` stays additive-only.*
    */
   holdReason?: string;
   queuedAt: string;
@@ -131,8 +124,6 @@ export interface QueuedComposerMessage {
  * `snapshot` frame resets it (bounds re-read, pages and bridge dropped), and
  * so does a rewind that reaches into a loaded page or a bridge row. In memory
  * only — it rides the retained thread snapshot and nothing is persisted.
- *
- * *Added with the thread index; `contracts.ts` stays additive-only.*
  */
 export interface AgentChatHistoryState {
   /** The snapshot's `history` block; null from a host that predates the index. */
@@ -148,8 +139,6 @@ export interface AgentChatHistoryState {
    * first one was on its way), oldest first — what sits between the newest
    * page and the window. Without it every eviction opened a hole there until
    * the chat was reloaded. Only rows the parent timeline renders are kept.
-   *
-   * *Added with the history bridge; `contracts.ts` stays additive-only.*
    */
   bridge: readonly ThreadItem[];
   /**
@@ -160,8 +149,6 @@ export interface AgentChatHistoryState {
    * against 500), and an agent's launch row or a compaction marker outlives
    * everything, so such rows render with the history, in their place, and
    * not below it. Zero with nothing loaded.
-   *
-   * *Added with the history bridge; `contracts.ts` stays additive-only.*
    */
   windowCut: number;
   /**
@@ -170,8 +157,6 @@ export interface AgentChatHistoryState {
    * whatever that snapshot's `hasOlder` said, and its cursor names the block
    * below the window as it WAS — so the first page is asked for without one.
    * Reset by the next snapshot.
-   *
-   * *Added with the history bridge; `contracts.ts` stays additive-only.*
    */
   windowEvicted: boolean;
   /** A `GET …/history` is in flight; the "Load older turns" row spins. */
@@ -211,8 +196,6 @@ export interface AgentChatThreadSlice {
   /**
    * The indexed history below the retained window — its bounds and the pages
    * pulled in so far (design 2026-09-23 §C).
-   *
-   * *Added with the thread index; `contracts.ts` stays additive-only.*
    */
   history: AgentChatHistoryState;
   /**
@@ -220,8 +203,6 @@ export interface AgentChatThreadSlice {
    * then every live `goal.updated` row that parses. `null` when the thread has
    * none — and from a host that predates goals. The fold's own object, so it
    * keeps its identity through every event that does not move it.
-   *
-   * *Added with agent goals; `contracts.ts` stays additive-only.*
    */
   goal: ThreadGoal | null;
 }
@@ -231,8 +212,6 @@ export interface AgentChatThreadSlice {
  * (design 2026-09-23 "Client"). The timeline scrolls `rowId` to the top of
  * the viewport, disarms follow, and acknowledges the `nonce`; a newer request
  * replaces an unhandled one.
- *
- * *Added with the thread index; `contracts.ts` stays additive-only.*
  */
 export interface AgentChatRevealRequest {
   turnId: string;
@@ -278,8 +257,6 @@ export interface WorkLogEntry {
    * True when §5.6's slimming dropped something and `GET …/items/:itemId`
    * genuinely holds more, so the expanded row may offer "load full output".
    * Mirrors `ThreadActivityPayloadFields.truncated`.
-   *
-   * *Added by W12; additive to the foundation's contract.*
    */
   truncated?: boolean;
   /**
@@ -304,8 +281,6 @@ export interface WorkLogEntry {
    * belongs under the call that triggered it, not beside it. §5.1 promotes it
    * out of the payload precisely so the presentation layer can read it without
    * decoding.
-   *
-   * *Added by W11 in the fix wave (R7-10); `contracts.ts` stays additive-only.*
    */
   parentToolUseId?: string;
   agentRole?: string;
@@ -328,8 +303,6 @@ export interface WorkLogEntry {
    * Present on a compaction marker. Carried on `thread.state.changed` and
    * formatted client-side (§7.3 — differs from T3, which bakes the numbers
    * into a server-side label the row never reads).
-   *
-   * *Added by W11; `contracts.ts` stays additive-only.*
    */
   compaction?: {
     /**
@@ -368,8 +341,6 @@ export interface WorkLogEntry {
    * and is not `progress`. The label is the row's own summary; this is what
    * the marker needs beyond it, read off the goal the row is about (the
    * current one, or the one that ended).
-   *
-   * *Added with agent goals; `contracts.ts` stays additive-only.*
    */
   goal?: {
     change: AgentGoalChange;
@@ -491,8 +462,6 @@ export type AgentChatTimelineRow =
    * Its own row like the compaction marker, never grouped — and, unlike it,
    * never folded into a settled turn: the story of the goal outlives the work
    * it drove.
-   *
-   * *Added with agent goals; additive to the contract.*
    */
   | {
       kind: "goal-marker";
@@ -615,8 +584,6 @@ export interface AgentChatActions {
      * back to the draft, a re-post after a reload included — the plan stays
      * there to implement again, and a chip's `/goal …` is never glued onto
      * what the user is typing.
-     *
-     * *Added with the reload-safe sends; `contracts.ts` stays additive-only.*
      */
     generatedPrompt?: boolean;
   }): Promise<void>;
@@ -691,8 +658,6 @@ export interface AgentChatActions {
    * **and** the shape of the page under it. The timeline calls this as the
    * user scrolls (debounced by the caller); the disclosures come from the
    * slice, so a caller may pass the position fields alone.
-   *
-   * *Added by W11; `contracts.ts` stays additive-only.*
    */
   rememberScroll(position: Partial<RememberedTimelinePosition>): void;
   dismissErrorBanner(): void;
@@ -710,9 +675,6 @@ export interface AgentChatActions {
    * Empty drafts are dropped from storage rather than stored, so a send that
    * clears the composer must reach this immediately: a write held back by the
    * debounce would let a reload resurrect a message that was already sent.
-   *
-   * *Added by W13 (as `takeDraft`) and turned into a save when the composer
-   * became the owner of nothing; `contracts.ts` stays additive-only.*
    */
   saveDraft(draft: ComposerDraft): void;
   /** Re-read the thread (a host instance change, or a user retry). */
@@ -733,8 +695,6 @@ export interface AgentChatActions {
    * Overlapping calls share the one chain in flight, and a page that lands
    * after a snapshot (or a rewind) replaced the history it was asked against
    * is dropped, and ends the chain.
-   *
-   * *Added with the thread index; `contracts.ts` stays additive-only.*
    */
   loadOlderHistory(): Promise<void>;
   /**
@@ -744,21 +704,17 @@ export interface AgentChatActions {
    * bounded at 25 pages. Resolves `true` once a reveal request is set, and
    * `false` for a turn the thread no longer has or cannot reach. Never
    * rejects.
-   *
-   * *Added with the thread index; `contracts.ts` stays additive-only.*
    */
   revealTurn(turnId: string): Promise<boolean>;
   /**
    * The timeline handled the reveal request carrying `nonce`; clear it. A
    * stale nonce clears nothing, so a newer request is never dropped.
-   *
-   * *Added with the thread index; `contracts.ts` stays additive-only.*
    */
   acknowledgeReveal(nonce: number): void;
 }
 
 // ---------------------------------------------------------------------------
-// View-model hook signatures (implemented by W11 in `hooks.ts`)
+// View-model hook signatures (`hooks.ts`)
 // ---------------------------------------------------------------------------
 
 export interface AgentChatThreadView {
@@ -773,9 +729,6 @@ export interface AgentChatThreadView {
    * timeline projection's `proposedPlans`, which never leaves the store.
    * `id`/`turnId` ride along so a consumer can tell one proposal from the next
    * without diffing markdown.
-   *
-   * *Added by W15, widened by W11 in the fix wave (R8-B1 / R7-2);
-   * `contracts.ts` stays additive-only.*
    */
   actionableProposedPlan: {
     id: string;
@@ -787,14 +740,10 @@ export interface AgentChatThreadView {
   /**
    * True while a `/revert` is in flight — §7.5's one reason the composer goes
    * `inert`, so a turn cannot race history the host is rewriting.
-   *
-   * *Added by W15; `contracts.ts` stays additive-only.*
    */
   reverting: boolean;
   /**
    * The turn the timeline should bring on screen, until it acknowledges it.
-   *
-   * *Added with the thread index; `contracts.ts` stays additive-only.*
    */
   reveal: AgentChatRevealRequest | null;
 }
@@ -828,8 +777,6 @@ export interface AgentChatStatusView {
    * The provider is compacting the conversation — the store's own phase, the
    * one the timeline's live placeholders show. The account chip names it the
    * way the host's refusal does (goals §5.5, fix round 2).
-   *
-   * *Added with agent goals; `contracts.ts` stays additive-only.*
    */
   isCompacting: boolean;
 }
@@ -840,12 +787,3 @@ export type UseAgentChatPending = (sessionId: string) => AgentChatPendingView;
 export type UseAgentChatStatus = (sessionId: string) => AgentChatStatusView;
 /** `refId` is the registry id; the hook maps it to its adapter's snapshot. */
 export type UseProviderSnapshot = (refId: string) => ProviderSnapshot | null;
-
-/** Narrowing helpers the row components use instead of re-deriving. */
-export function isActivityEntry(item: ThreadItem): item is ThreadActivityItem {
-  return item.kind === "activity";
-}
-
-export function isMessageEntry(item: ThreadItem): item is ThreadMessageItem {
-  return item.kind === "message";
-}

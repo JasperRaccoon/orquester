@@ -120,7 +120,7 @@ interface ReadTarget {
   generation: number;
 }
 
-export interface ClaudeGoalTranscriptOptions {
+interface ClaudeGoalTranscriptOptions {
   configDir: string;
   cwd: string;
 }

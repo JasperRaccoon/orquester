@@ -237,21 +237,3 @@ export type FollowUpBehavior = "steer" | "queue";
 
 /** `alternate` is mod+Enter: it inverts the preference for that one message. */
 export type ComposerSubmissionIntent = "foreground" | "alternate";
-
-/**
- * **One setting with a per-message inversion.** A plain send follows the
- * preference; holding the mod key with Enter does the opposite for that one
- * message.
- *
- * *T3: `apps/web/src/components/ChatView.tsx:7629-7658` — the same XOR.*
- */
-export function shouldQueueSubmission(input: {
-  followUpBehavior: FollowUpBehavior;
-  submissionIntent: ComposerSubmissionIntent;
-  isRunning: boolean;
-}): boolean {
-  if (!input.isRunning) {
-    return false;
-  }
-  return (input.followUpBehavior === "queue") !== (input.submissionIntent === "alternate");
-}

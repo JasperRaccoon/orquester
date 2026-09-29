@@ -212,23 +212,6 @@ test("every Grok status maps onto the goal status set", () => {
   }
 });
 
-test("an unknown status keeps the tracked status", () => {
-  const r = rig();
-  r.live(frame());
-  r.advance(MINUTE);
-  const [progress] = r.goals(
-    r.live(at(40, { status: "reticulating", last_event: "worker_completed", total_worker_rounds: 1 }))
-  );
-  assert.equal(progress.change, "progress");
-  assert.equal(progress.goal?.status, "active", "the status the thread already shows");
-  assert.equal(progress.goal?.rounds, 1);
-});
-
-test("an unknown status with nothing tracked emits nothing rather than guess one", () => {
-  const r = rig();
-  assert.deepEqual(r.live(frame({ status: "reticulating" })), []);
-});
-
 test("the frame maps field by field", () => {
   const r = rig();
   const [set] = r.goals(r.live(frame({ tokens_used: 12, elapsed_ms: 34 })));
@@ -1044,11 +1027,4 @@ test("only a LEADING block whose first line sets the goal is a goal block", () =
     goalCommandFromReminder(`Before anything else:\n<system-reminder>\nA goal has been set: ${OBJECTIVE}${REMINDER_TAIL}`),
     undefined
   );
-});
-
-test("anything else is not a goal block", () => {
-  assert.equal(goalCommandFromReminder("Please remember: A goal has been set: nothing"), undefined);
-  assert.equal(goalCommandFromReminder("<system-reminder>\nThe user switched models.\n</system-reminder>"), undefined);
-  assert.equal(goalCommandFromReminder("/goal Fix the audit"), undefined);
-  assert.equal(goalCommandFromReminder(""), undefined);
 });

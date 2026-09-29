@@ -6,10 +6,8 @@ import type { RuntimeSubagent,RuntimeSubagentStatus,ThreadItem } from "@orqueste
 import {
 agentActivityText,
 deriveAgentSpawnSummary,
-deriveLivenessBanner,
 deriveRosterDockView,
 isBackgroundShellItems,
-liveAgentTaskIds,
 resolveSpawnRowAgents
 } from "./roster.logic";
 import { activity } from "./test-helpers";
@@ -66,19 +64,6 @@ describe("agentActivityText", () => {
 });
 
 describe("deriveAgentSpawnSummary", () => {
-  it("says 'Kicked off' while live and 'Ran' once settled", () => {
-    const live = deriveAgentSpawnSummary({
-      agents: [agent("a", "running"), agent("b", "running")],
-      agentCount: 2
-    });
-    assert.equal(live.live, true);
-
-    const settled = deriveAgentSpawnSummary({
-      agents: [agent("a", "completed"), agent("b", "completed")],
-      agentCount: 2
-    });
-    assert.equal(settled.live, false);
-  });
 
   it("keeps a workflow coordinator live between member launches", () => {
     const summary = deriveAgentSpawnSummary({
@@ -98,10 +83,6 @@ describe("spawn row resolution", () => {
     assert.equal(resolved.coordinator?.id, "wf");
   });
 
-  it("names the live task ids the live activity row reads", () => {
-    const ids = liveAgentTaskIds([agent("a", "running"), agent("b", "completed")]);
-    assert.deepEqual([...ids], ["a"]);
-  });
 });
 
 describe("the dock", () => {
@@ -127,29 +108,6 @@ describe("the dock", () => {
     const view = deriveRosterDockView({ roster, expanded: false, turnSettled: true });
     assert.equal(view.pinnedBackground.length, 0);
     assert.equal(view.visible.length, 0);
-  });
-});
-
-describe("the liveness banner", () => {
-  it("shows only when liveness is non-null and no turn is working", () => {
-    assert.equal(
-      deriveLivenessBanner({
-        backgroundLiveness: "working",
-        isTurnWorking: true,
-        liveAgentCount: 2,
-        stopping: false
-      }).visible,
-      false
-    );
-    assert.equal(
-      deriveLivenessBanner({
-        backgroundLiveness: null,
-        isTurnWorking: false,
-        liveAgentCount: 0,
-        stopping: false
-      }).visible,
-      false
-    );
   });
 });
 

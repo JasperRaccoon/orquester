@@ -1,14 +1,13 @@
 /**
- * The Agent profile panel as drawn (spec §7.3): the agent picker, the search
- * and the kind chips at the top; the notice, the unreadable-files banner, the
- * instructions card and the items grouped by kind scrolling between; "+ Add"
- * and its hint pinned at the bottom.
+ * The Agent profile panel as drawn (spec §7.3): the agent picker, the
+ * instructions card, the search and the kind tabs pinned at the top; the
+ * notice, the unreadable-files banner and the shown tab's items — or, while
+ * searching, the matches of every kind grouped by kind — scrolling between;
+ * "+ Add" (the shown tab's kind first) and its hint pinned at the bottom.
  *
  * Presentational — `AgentProfilePanel` owns the store, the editor bridge and
- * the confirms — so a static render check draws every state from plain
- * props. The layout follows the PANEL's own width (`useElementWidth`), never
- * the viewport's: the dock spans 260–560 px on any screen. A check passes
- * `width` to draw a given one.
+ * the confirms. The layout follows the panel's own width (`useElementWidth`),
+ * never the viewport's: the dock spans 260–560 px on any screen.
  */
 
 import React from "react";
@@ -33,17 +32,18 @@ import { DropdownItem } from "../../ui/dropdown";
 import { RailEmptyState, RailSearchInput, RailSectionLabel } from "../primitives";
 import { AgentPicker } from "./AgentPicker";
 import { InstructionsCard } from "./InstructionsCard";
-import { KindChips } from "./KindChips";
+import { KindTabs, kindTabId } from "./KindTabs";
 import {
+  addMenuKinds,
   agentPickerLayout,
   emptyKindTitle,
+  isProfileSearchActive,
   NOT_INSTALLED_HINT,
   notInstalledTitle,
   type AgentProfileAgentOption,
   type AgentProfileEmptyState,
   type ProfileItemGroup,
-  type ProfileKindChip,
-  type ProfileKindFilter
+  type ProfileKindTab
 } from "./list.logic";
 import { ProfileItemRow, type ProfileRowConfirm } from "./ProfileItemRow";
 
@@ -62,20 +62,19 @@ export interface ProfileItemActions {
   cancelConfirm: () => void;
 }
 
-export interface AgentProfilePanelViewProps {
+interface AgentProfilePanelViewProps {
   variant: "docked" | "sheet";
-  /** The panel's width (px) to lay out for; measured when omitted. */
-  width?: number | null;
   agent: AgentProfileAgentId;
   agents: readonly AgentProfileAgentOption[];
   onAgentChange: (agent: AgentProfileAgentId) => void;
   query: string;
   onQueryChange: (query: string) => void;
-  kind: ProfileKindFilter;
-  onKindChange: (kind: ProfileKindFilter) => void;
-  chips: readonly ProfileKindChip[];
+  /** The kind tab shown (the search, while on, looks past it). */
+  kind: ProfileItemKind;
+  onKindChange: (kind: ProfileItemKind) => void;
+  tabs: readonly ProfileKindTab[];
   snapshot: AgentProfileSnapshot | null;
-  /** The items the filter and the search leave, grouped by kind. */
+  /** The shown tab's items, or while searching the matches of every kind — grouped by kind. */
   groups: readonly ProfileItemGroup[];
   /** What the list shows instead of rows, or `null`. */
   empty: AgentProfileEmptyState | null;
@@ -107,17 +106,18 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
   // Only the picker's layout is kept, so a dock drag re-renders the panel
   // when it crosses the breakpoint, never on every pixel.
   const [rootRef, measuredLayout] = useElementWidth<HTMLDivElement, "segmented" | "dropdown">(agentPickerLayout);
-  const pickerLayout =
-    props.width !== undefined ? agentPickerLayout(props.width) : (measuredLayout ?? agentPickerLayout(null));
+  const pickerLayout = measuredLayout ?? agentPickerLayout(null);
   const label = AGENT_PROFILE_AGENT_LABELS[props.agent];
   const { snapshot, empty } = props;
   const notInstalled = empty?.kind === "not-installed";
   const hasSnapshot = snapshot !== null && !notInstalled;
-  const filtering = props.kind !== "all" || props.query.trim().length > 0;
+  const searching = isProfileSearchActive(props.query);
   const canAdd = hasSnapshot && props.creatableKinds.length > 0;
+  const baseId = React.useId();
+  const panelId = `${baseId}-list`;
 
   return (
-    <div ref={rootRef} data-agent-profile-panel="" className="flex min-h-0 flex-1 flex-col">
+    <div ref={rootRef} className="flex min-h-0 flex-1 flex-col">
       <div className="shrink-0 space-y-2 px-3 pb-2 pt-1">
         <AgentPicker
           agents={props.agents}
@@ -128,6 +128,13 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
         />
         {hasSnapshot ? (
           <>
+            <InstructionsCard
+              info={snapshot.instructions}
+              now={props.now}
+              sheet={sheet}
+              compact={pickerLayout === "dropdown"}
+              onOpen={props.onOpenInstructions}
+            />
             <RailSearchInput
               value={props.query}
               onChange={props.onQueryChange}
@@ -135,15 +142,29 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
               placeholder="Search profile…"
               label={`Search ${label}'s profile`}
             />
-            <KindChips chips={props.chips} value={props.kind} onChange={props.onKindChange} sheet={sheet} />
+            <KindTabs
+              tabs={props.tabs}
+              value={props.kind}
+              onChange={props.onKindChange}
+              searching={searching}
+              sheet={sheet}
+              baseId={baseId}
+              panelId={panelId}
+            />
           </>
         ) : null}
       </div>
 
       <div
         ref={props.listRef}
+        id={panelId}
         tabIndex={-1}
-        aria-label={`${label}'s profile`}
+        // The shown tab's panel; while searching, the results of every kind.
+        role={hasSnapshot && !searching ? "tabpanel" : undefined}
+        aria-labelledby={hasSnapshot && !searching ? kindTabId(baseId, props.kind) : undefined}
+        aria-label={
+          !hasSnapshot ? `${label}'s profile` : searching ? `Search results in ${label}'s profile` : undefined
+        }
         aria-busy={empty?.kind === "loading" ? true : undefined}
         className="min-h-0 flex-1 space-y-1.5 overflow-y-auto px-3 pb-3 focus:outline-none"
       >
@@ -168,19 +189,6 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
         ) : null}
         {hasSnapshot && snapshot.fileErrors.length > 0 ? <FileErrorsBanner snapshot={snapshot} /> : null}
 
-        {hasSnapshot && !filtering ? (
-          <>
-            <RailSectionLabel>Instructions</RailSectionLabel>
-            <InstructionsCard
-              info={snapshot.instructions}
-              now={props.now}
-              sheet={sheet}
-              compact={pickerLayout === "dropdown"}
-              onOpen={props.onOpenInstructions}
-            />
-          </>
-        ) : null}
-
         {empty !== null ? (
           <EmptyState
             empty={empty}
@@ -192,12 +200,14 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
           />
         ) : (
           props.groups.map((group) => (
-            // One section per kind; its label is the group's heading.
-            <section key={group.kind} aria-label={group.label} className="space-y-1.5 pt-2">
-              <RailSectionLabel>
-                {group.label}
-                <span className="ml-1.5 tabular-nums text-neutral-600">{group.items.length}</span>
-              </RailSectionLabel>
+            // One section per kind; while searching (every kind), its label heads it.
+            <section key={group.kind} aria-label={group.label} className={cn("space-y-1.5", searching && "pt-2")}>
+              {searching ? (
+                <RailSectionLabel>
+                  {group.label}
+                  <span className="ml-1.5 tabular-nums text-neutral-600">{group.items.length}</span>
+                </RailSectionLabel>
+              ) : null}
               {group.items.map((item) => (
                 <ProfileItemRow
                   key={item.id}
@@ -253,7 +263,7 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
               </span>
             }
           >
-            {props.creatableKinds.map((kind) => (
+            {addMenuKinds(props.creatableKinds, props.kind).map((kind) => (
               <DropdownItem key={kind} onClick={() => props.onAdd(kind)} className={cn(sheet && "py-3")}>
                 {PROFILE_ITEM_KIND_LABELS[kind].one}
               </DropdownItem>
@@ -391,13 +401,6 @@ const EmptyState: React.FC<{
               Retry
             </Button>
           }
-        />
-      );
-    case "none":
-      return (
-        <RailEmptyState
-          title={`${agentLabel} has no MCP servers, skills or plugins yet.`}
-          hint="Add one below, or copy one from another agent."
         />
       );
     case "empty-kind":

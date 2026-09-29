@@ -9,10 +9,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import type { DomainEvent, RuntimeEvent, ThreadActivityItem } from "@orquester/api/agent-chat";
+import {
+  PLAN_IMPLEMENTATION_PROMPT_PREFIX,
+  type DomainEvent,
+  type RuntimeEvent,
+  type ThreadActivityItem
+} from "@orquester/api/agent-chat";
 
-import { createTestHost, createScriptedAdapter, type TestHost } from "./testing/index.ts";
-import { PLAN_IMPLEMENTATION_PROMPT_PREFIX } from "./orchestrator.ts";
+import { createTestHost, type TestHost } from "./testing/index.ts";
 
 let seq = 0;
 const cmd = (): string => `fw-${(seq += 1)}`;
@@ -283,49 +287,6 @@ describe("R5-1: activity payloads are slimmed on the way out, not on disk", () =
       ((full.payload as { data?: { output?: string } }).data?.output ?? "").length,
       huge.length
     );
-    await host.stop();
-  });
-});
-
-describe("R5-5: the client's title seed is not a manual rename", () => {
-  it("a seed leaves the provider free to retitle; a user rename does not", async () => {
-    const host = createTestHost();
-    const threadId = await host.createThread();
-
-    await host.orchestrator.updateThread(threadId, { title: "First prompt…", seed: true });
-    assert.equal(host.orchestrator.threadContext(threadId)?.titleManual, false);
-
-    await host.orchestrator.updateThread(threadId, { title: "Mine" });
-    assert.equal(host.orchestrator.threadContext(threadId)?.titleManual, true);
-    await host.stop();
-  });
-});
-
-describe("R1-6: a pending turn cannot pin a thread busy forever", () => {
-  it("the reconcile settles a turn start whose effect never ran", async () => {
-    const host = createTestHost();
-    const threadId = await host.createThread();
-    // A `/turn` that committed its rows and then lost the host: block the
-    // effect so only the command's events land.
-    host.adapter.failNext("failStartSession", new Error("host died before the send"));
-    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
-    await host.settle();
-
-    const stalled = createTestHost({ store: host.store });
-    // Older than the grace window.
-    stalled.clock.set(host.clock.now().getTime() + 10 * 60_000);
-    await stalled.orchestrator.reconcile();
-    await stalled.settle();
-
-    const turns = (await stalled.orchestrator.readThread(threadId, undefined)) as {
-      kind: "snapshot";
-      thread: { turns: Array<{ state: string }> };
-    };
-    assert.ok(
-      turns.thread.turns.every((turn) => turn.state !== "pending"),
-      "a pending turn nothing will ever start must be settled"
-    );
-    await stalled.stop();
     await host.stop();
   });
 });

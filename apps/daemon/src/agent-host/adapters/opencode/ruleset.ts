@@ -17,7 +17,7 @@ import type {
 
 import type { OpenCodePermissionReply, OpenCodePermissionRequest } from "./protocol.ts";
 
-export interface OpenCodePermissionRule {
+interface OpenCodePermissionRule {
   permission: string;
   pattern: string;
   action: "allow" | "ask" | "deny";

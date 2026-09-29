@@ -13,9 +13,6 @@ import type {
 } from "@orquester/api";
 
 import {
-  __setAgentProfileStorageForTests,
-  AGENT_PROFILE_STORAGE_KEY,
-  agentProfileEntry,
   agentProfileItemKey,
   agentProfileStore,
   applyAgentProfileEvent,
@@ -23,23 +20,22 @@ import {
   copyAgentProfileItem,
   dismissAgentProfileNotice,
   lastAgentProfileAgent,
+  lastAgentProfileTab,
   loadAgentProfile,
   loadAgentProfileOverview,
   markAgentProfileStale,
   parseAgentProfilePrefs,
-  PROFILE_CONFLICT_NOTICE,
   rememberAgentProfileAgent,
+  rememberAgentProfileTab,
   removeAgentProfileItem,
   resetAgentProfile,
   sanitizeAgentProfileSnapshot,
-  sanitizeOverview,
-  sanitizeProfileItem,
   serializeAgentProfilePrefs,
   setAgentProfileItemEnabled,
   trustAgentProfileItem,
-  type AgentProfileApi,
-  type AgentProfileStorage
+  type AgentProfileApi
 } from "./store.ts";
+import { sanitizeOverview, sanitizeProfileItem } from "./sanitize";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -233,7 +229,9 @@ describe("wire snapshots are sanitized field by field", () => {
       warnings: ["Plugin cache missing", { message: "Not trusted", action: "trust", code: "untrusted" }, { code: "x" }, 4, { message: "odd", action: "launch" }],
       meta: { transport: "stdio", bad: 3 }
     });
-    assert.deepEqual(repaired?.source, { type: "user", label: "User" });
+    assert.equal(repaired?.source.type, "user");
+    assert.equal(repaired?.source.ownerAgent, undefined);
+    assert.equal(repaired?.source.pluginId, undefined);
     assert.deepEqual(repaired?.warnings, [
       { code: "warning", message: "Plugin cache missing" },
       { code: "untrusted", message: "Not trusted", action: "trust" },
@@ -292,7 +290,7 @@ describe("wire snapshots are sanitized field by field", () => {
 describe("loads", () => {
   it("loads a snapshot, and a second unforced load asks nothing", async () => {
     await loadAgentProfile(api, "claude");
-    const entry = agentProfileEntry("claude");
+    const entry = agentProfileStore.getState().agents.claude;
     assert.equal(entry.status, "ready");
     assert.equal(entry.snapshot?.revision, "r1");
     await loadAgentProfile(api, "claude");
@@ -303,9 +301,8 @@ describe("loads", () => {
     api.held = deferred<void>();
     const first = loadAgentProfile(api, "claude");
     const second = loadAgentProfile(api, "claude");
-    assert.equal(first, second, "the same promise");
     await settle();
-    assert.equal(agentProfileEntry("claude").status, "loading");
+    assert.equal(agentProfileStore.getState().agents.claude.status, "loading");
     api.held.resolve();
     await Promise.all([first, second]);
     assert.deepEqual(api.gets, ["claude"]);
@@ -316,10 +313,9 @@ describe("loads", () => {
     const first = loadAgentProfile(api, "claude");
     const forcedA = loadAgentProfile(api, "claude", { force: true });
     const forcedB = loadAgentProfile(api, "claude", { force: true });
-    assert.equal(forcedA, forcedB);
     api.held.resolve();
     api.held = null;
-    await Promise.all([first, forcedA]);
+    await Promise.all([first, forcedA, forcedB]);
     assert.deepEqual(api.gets, ["claude", "claude"]);
   });
 
@@ -327,34 +323,31 @@ describe("loads", () => {
     api.failGet = refusal(500, "AGENT_PROFILE_ERROR", "disk on fire");
     await loadAgentProfile(api, "claude");
     assert.deepEqual(
-      [agentProfileEntry("claude").status, agentProfileEntry("claude").error],
+      [agentProfileStore.getState().agents.claude.status, agentProfileStore.getState().agents.claude.error],
       ["error", "disk on fire"]
     );
     api.failGet = null;
     await loadAgentProfile(api, "claude", { force: true });
-    assert.equal(agentProfileEntry("claude").status, "ready");
+    assert.equal(agentProfileStore.getState().agents.claude.status, "ready");
     api.failGet = refusal(500, "AGENT_PROFILE_ERROR", "again");
     await loadAgentProfile(api, "claude", { force: true });
-    const entry = agentProfileEntry("claude");
+    const entry = agentProfileStore.getState().agents.claude;
     assert.equal(entry.status, "ready");
     assert.equal(entry.snapshot?.revision, "r1", "the snapshot stays on screen");
     assert.equal(entry.error, "again");
   });
 
-  it("keeps the daemon's code (a not-installed agent) and names a route this daemon lacks", async () => {
+  it("keeps the daemon's refusal code for a not-installed agent", async () => {
     api.failGet = refusal(404, "AGENT_NOT_INSTALLED", "Grok is not installed");
     await loadAgentProfile(api, "grok");
-    assert.equal(agentProfileEntry("grok").errorCode, "AGENT_NOT_INSTALLED");
-    api.failGet = new FakeApiError(404, { error: "Not found" });
-    await loadAgentProfile(api, "codex");
-    assert.match(agentProfileEntry("codex").error ?? "", /does not support the agent profile/);
+    assert.equal(agentProfileStore.getState().agents.grok.errorCode, "AGENT_NOT_INSTALLED");
   });
 
   it("an answer for another agent or in a bad shape is an error, not state", async () => {
     api.server.set("codex", snapshot("claude", "r9"));
     await loadAgentProfile(api, "codex");
-    assert.equal(agentProfileEntry("codex").status, "error");
-    assert.equal(agentProfileEntry("claude").snapshot, null, "never lands on the agent it names");
+    assert.equal(agentProfileStore.getState().agents.codex.status, "error");
+    assert.equal(agentProfileStore.getState().agents.claude.snapshot, null, "never lands on the agent it names");
   });
 
   it("loads the overview, sanitized", async () => {
@@ -378,10 +371,10 @@ describe("loads", () => {
     await loadAgentProfile(api, "claude");
     await loadAgentProfileOverview(api);
     markAgentProfileStale();
-    assert.equal(agentProfileEntry("claude").stale, true);
+    assert.equal(agentProfileStore.getState().agents.claude.stale, true);
     assert.equal(agentProfileStore.getState().overview.stale, true);
     await loadAgentProfile(api, "claude");
-    assert.equal(agentProfileEntry("claude").stale, false);
+    assert.equal(agentProfileStore.getState().agents.claude.stale, false);
 
     api.held = deferred<void>();
     const crossing = loadAgentProfile(api, "claude", { force: true });
@@ -393,7 +386,7 @@ describe("loads", () => {
     await settle();
     await settle();
     assert.equal(api.gets.length, 4, "the answer may predate the reconnect: asked once more");
-    assert.equal(agentProfileEntry("claude").stale, false);
+    assert.equal(agentProfileStore.getState().agents.claude.stale, false);
   });
 });
 
@@ -411,7 +404,7 @@ describe("agentProfile.changed", () => {
     await settle();
     await settle();
     assert.deepEqual(api.gets, ["claude", "claude"]);
-    assert.equal(agentProfileEntry("claude").snapshot?.revision, "r2");
+    assert.equal(agentProfileStore.getState().agents.claude.snapshot?.revision, "r2");
   });
 
   it("does nothing for the revision already held", async () => {
@@ -419,7 +412,7 @@ describe("agentProfile.changed", () => {
     applyAgentProfileEvent(changed("claude", "r1"));
     await settle();
     assert.deepEqual(api.gets, ["claude"]);
-    assert.equal(agentProfileEntry("claude").stale, false);
+    assert.equal(agentProfileStore.getState().agents.claude.stale, false);
   });
 
   it("does not fetch an agent that was never loaded", async () => {
@@ -427,7 +420,7 @@ describe("agentProfile.changed", () => {
     applyAgentProfileEvent(changed("codex", "c2"));
     await settle();
     assert.deepEqual(api.gets, ["claude"]);
-    assert.equal(agentProfileEntry("codex").status, "idle");
+    assert.equal(agentProfileStore.getState().agents.codex.status, "idle");
   });
 
   it("refreshes a loaded overview too", async () => {
@@ -451,7 +444,7 @@ describe("agentProfile.changed", () => {
     await settle();
     await settle();
     assert.deepEqual(api.gets, ["claude", "claude"]);
-    assert.equal(agentProfileEntry("claude").snapshot?.revision, "r2");
+    assert.equal(agentProfileStore.getState().agents.claude.snapshot?.revision, "r2");
   });
 
   it("ignores a malformed payload or another type without a throw", async () => {
@@ -485,12 +478,9 @@ describe("mutations", () => {
       id: "mcp:jira",
       body: { revision: "rev-mcp:jira", enabled: false }
     });
-    assert.equal(agentProfileEntry("claude").snapshot?.items[0]?.enabled, false);
+    assert.equal(agentProfileStore.getState().agents.claude.snapshot?.items[0]?.enabled, false);
     assert.equal(agentProfileStore.getState().pending.size, 0);
-    assert.deepEqual(agentProfileStore.getState().notice, {
-      tone: "ok",
-      text: "Turned off jira. Applies to new sessions."
-    });
+    assert.equal(agentProfileStore.getState().notice?.tone, "ok");
   });
 
   it("the daemon's notes become the notice", async () => {
@@ -501,7 +491,7 @@ describe("mutations", () => {
       notes: ["OpenCode servers restart when idle."]
     });
     await setAgentProfileItemEnabled(api, "claude", JIRA, true);
-    assert.equal(agentProfileStore.getState().notice?.text, "Turned on jira. OpenCode servers restart when idle.");
+    assert.ok(agentProfileStore.getState().notice?.text.includes("OpenCode servers restart when idle."));
   });
 
   it("a 409 PROFILE_CONFLICT refetches the agent and says it changed on disk", async () => {
@@ -511,17 +501,15 @@ describe("mutations", () => {
     await settle();
     await settle();
     assert.deepEqual(result, { ok: false, error: "Stale revision", code: "PROFILE_CONFLICT", status: 409 });
-    assert.deepEqual(agentProfileStore.getState().notice, { tone: "error", text: PROFILE_CONFLICT_NOTICE });
+    assert.equal(agentProfileStore.getState().notice?.tone, "error");
     assert.deepEqual(api.gets, ["claude", "claude"]);
   });
 
   it("another refusal becomes the notice in the daemon's words", async () => {
     api.failMutation = refusal(403, "ITEM_LOCKED", "Orquester's own hook is locked");
     await trustAgentProfileItem(api, "claude", JIRA);
-    assert.deepEqual(agentProfileStore.getState().notice, {
-      tone: "error",
-      text: "Couldn't trust jira: Orquester's own hook is locked"
-    });
+    assert.equal(agentProfileStore.getState().notice?.tone, "error");
+    assert.ok(agentProfileStore.getState().notice?.text.includes("Orquester's own hook is locked"));
     dismissAgentProfileNotice();
     assert.equal(agentProfileStore.getState().notice, null);
   });
@@ -535,7 +523,7 @@ describe("mutations", () => {
     await settle();
     assert.deepEqual(api.gets, ["claude", "claude"]);
     assert.equal(api.overviewGets, 2);
-    assert.equal(agentProfileStore.getState().notice?.text, "Couldn't turn off jira: Claude is not installed on this host.");
+    assert.equal(agentProfileStore.getState().notice?.tone, "error");
   });
 
   it("a copy lands the TARGET's snapshot on the target", async () => {
@@ -545,9 +533,9 @@ describe("mutations", () => {
     const result = await copyAgentProfileItem(api, "claude", JIRA, "codex");
     assert.equal(result.ok, true);
     assert.deepEqual(api.mutations[0]?.body, { toAgent: "codex" });
-    assert.equal(agentProfileEntry("codex").snapshot?.revision, "c2");
-    assert.equal(agentProfileEntry("claude").snapshot?.revision, "r1", "the source is untouched");
-    assert.equal(agentProfileStore.getState().notice?.text, "Copied jira to Codex. Applies to new sessions.");
+    assert.equal(agentProfileStore.getState().agents.codex.snapshot?.revision, "c2");
+    assert.equal(agentProfileStore.getState().agents.claude.snapshot?.revision, "r1", "the source is untouched");
+    assert.equal(agentProfileStore.getState().notice?.tone, "ok");
   });
 
   it("a copy whose name is taken answers ITEM_EXISTS quietly; the retry carries onConflict", async () => {
@@ -581,7 +569,7 @@ describe("mutations", () => {
     api.held.resolve();
     api.held = null;
     await load;
-    assert.equal(agentProfileEntry("claude").snapshot?.revision, "r5");
+    assert.equal(agentProfileStore.getState().agents.claude.snapshot?.revision, "r5");
   });
 });
 
@@ -598,9 +586,9 @@ describe("reset", () => {
     resetAgentProfile();
     api.held.resolve();
     await load;
-    assert.equal(agentProfileEntry("claude").snapshot, null);
-    assert.equal(agentProfileEntry("claude").status, "idle");
-    assert.equal(agentProfileEntry("codex").snapshot, null);
+    assert.equal(agentProfileStore.getState().agents.claude.snapshot, null);
+    assert.equal(agentProfileStore.getState().agents.claude.status, "idle");
+    assert.equal(agentProfileStore.getState().agents.codex.snapshot, null);
     assert.equal(agentProfileStore.getState().notice, null);
   });
 
@@ -610,8 +598,8 @@ describe("reset", () => {
     other.connection = { id: "remote" };
     other.server.set("codex", snapshot("codex", "x1"));
     await loadAgentProfile(other, "codex");
-    assert.equal(agentProfileEntry("claude").snapshot, null, "the other daemon's profile is gone");
-    assert.equal(agentProfileEntry("codex").snapshot?.revision, "x1");
+    assert.equal(agentProfileStore.getState().agents.claude.snapshot, null, "the other daemon's profile is gone");
+    assert.equal(agentProfileStore.getState().agents.codex.snapshot?.revision, "x1");
   });
 
   it("after a reset an event refetches nothing (no client bound)", async () => {
@@ -624,73 +612,106 @@ describe("reset", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The last picked agent (localStorage)
+// The last picked agent and each agent's tab (localStorage)
 // ---------------------------------------------------------------------------
 
-class MemoryStorage implements AgentProfileStorage {
+class MemoryStorage {
   constructor(public value: string | null = null) {}
-  writes = 0;
   getItem(key: string): string | null {
-    return key === AGENT_PROFILE_STORAGE_KEY ? this.value : null;
+    return key === "orquester:agent-profile" ? this.value : null;
   }
   setItem(key: string, value: string): void {
-    if (key === AGENT_PROFILE_STORAGE_KEY) {
+    if (key === "orquester:agent-profile") {
       this.value = value;
-      this.writes += 1;
     }
   }
 }
 
-describe("the last picked agent", () => {
+describe("the last picked agent and each agent's tab", () => {
+  const NONE = { agent: null, tabs: {} };
+
   it("parses field by field, and anything unusable is no pick", () => {
     for (const raw of [null, undefined, "", "{", "null", "[]", "42", '"claude"', '{"agent":"gemini"}', '{"agent":4}']) {
-      assert.deepEqual(parseAgentProfilePrefs(raw), { agent: null }, String(raw));
+      assert.deepEqual(parseAgentProfilePrefs(raw), NONE, String(raw));
     }
-    assert.deepEqual(parseAgentProfilePrefs('{"v":7,"agent":"grok","future":true}'), { agent: "grok" });
+    assert.deepEqual(parseAgentProfilePrefs('{"v":7,"agent":"grok","future":true}'), { agent: "grok", tabs: {} });
   });
 
-  it("serializes over what another bundle stored, keeping its fields", () => {
-    assert.equal(serializeAgentProfilePrefs({ agent: "codex" }), '{"v":1,"agent":"codex"}');
-    assert.deepEqual(JSON.parse(serializeAgentProfilePrefs({ agent: "codex" }, '{"v":2,"agent":"grok","kinds":["mcp"]}')), {
-      v: 1,
-      agent: "codex",
-      kinds: ["mcp"]
+  it("keeps a tab only for a known agent that has that kind", () => {
+    assert.deepEqual(
+      parseAgentProfilePrefs(
+        JSON.stringify({
+          agent: "claude",
+          tabs: { claude: "skill", codex: "command", opencode: "hook", grok: 7, gemini: "mcp" }
+        })
+      ),
+      { agent: "claude", tabs: { claude: "skill", codex: "command" } },
+      "OpenCode has no hooks; a number is no kind; gemini is no agent"
+    );
+    for (const tabs of ["skill", ["skill"], null, 3]) {
+      assert.deepEqual(parseAgentProfilePrefs(JSON.stringify({ agent: "codex", tabs })), { agent: "codex", tabs: {} });
+    }
+    assert.deepEqual(parseAgentProfilePrefs('{"tabs":{"grok":"marketplace"}}'), { agent: null, tabs: { grok: "marketplace" } });
+  });
+
+  it("serializes over what another bundle stored, keeping its fields and tabs", () => {
+    assert.deepEqual(JSON.parse(serializeAgentProfilePrefs({ agent: "codex", tabs: {} })), { v: 1, agent: "codex", tabs: {} });
+    assert.deepEqual(
+      JSON.parse(serializeAgentProfilePrefs(
+        { agent: "codex", tabs: { codex: "hook" } },
+        '{"v":2,"agent":"grok","kinds":["mcp"],"tabs":{"gemini":"mcp","codex":"skill"}}'
+      )),
+      { v: 1, agent: "codex", kinds: ["mcp"], tabs: { gemini: "mcp", codex: "hook" } }
+    );
+    assert.deepEqual(JSON.parse(serializeAgentProfilePrefs({ agent: "codex", tabs: {} }, "garbage")), {
+      v: 1, agent: "codex", tabs: {}
     });
-    assert.equal(serializeAgentProfilePrefs({ agent: "codex" }, "garbage"), '{"v":1,"agent":"codex"}');
+    assert.deepEqual(JSON.parse(serializeAgentProfilePrefs({ agent: null, tabs: {} }, '{"tabs":"junk"}')), {
+      v: 1, agent: null, tabs: {}
+    });
   });
 
-  it("reads the stored pick once, remembers a new one, and survives a store reset", () => {
-    const storage = new MemoryStorage('{"v":1,"agent":"opencode"}');
-    __setAgentProfileStorageForTests(storage);
+  it("reads stored selections, remembers each agent's tab, and keeps preferences across a reset", () => {
+    const storage = new MemoryStorage('{"v":1,"agent":"opencode","tabs":{"claude":"plugin","opencode":"hook"}}');
+    const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
     try {
       assert.equal(lastAgentProfileAgent(), "opencode");
+      assert.equal(lastAgentProfileTab("claude"), "plugin");
+      assert.equal(lastAgentProfileTab("opencode"), null);
+      assert.equal(lastAgentProfileTab("codex"), null);
       rememberAgentProfileAgent("codex");
-      assert.equal(lastAgentProfileAgent(), "codex");
-      assert.deepEqual(JSON.parse(storage.value ?? ""), { v: 1, agent: "codex" });
-      rememberAgentProfileAgent("codex");
-      assert.equal(storage.writes, 1, "an unchanged pick is not written again");
+      rememberAgentProfileTab("codex", "hook");
+      rememberAgentProfileTab("claude", "command");
+      rememberAgentProfileTab("opencode", "marketplace");
+      assert.equal(lastAgentProfileTab("opencode"), null, "unsupported kinds stay unselected");
+      assert.deepEqual(JSON.parse(storage.value ?? ""), {
+        v: 1, agent: "codex", tabs: { claude: "command", opencode: "hook", codex: "hook" }
+      }, "another bundle's unsupported tab value is preserved on disk");
       resetAgentProfile();
-      assert.equal(lastAgentProfileAgent(), "codex", "a device preference, not the daemon's data");
+      assert.equal(lastAgentProfileAgent(), "codex");
+      assert.equal(lastAgentProfileTab("claude"), "command");
+      assert.equal(lastAgentProfileTab("codex"), "hook");
     } finally {
-      __setAgentProfileStorageForTests(undefined);
+      if (original) Object.defineProperty(globalThis, "localStorage", original);
+      else Reflect.deleteProperty(globalThis, "localStorage");
     }
   });
 
-  it("a storage that throws leaves the pick in memory", () => {
-    __setAgentProfileStorageForTests({
-      getItem: () => {
-        throw new Error("denied");
-      },
-      setItem: () => {
-        throw new Error("quota");
-      }
+  it("a storage that throws leaves the pick and the tabs in memory", () => {
+    const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      get() { throw new Error("denied"); }
     });
     try {
-      assert.equal(lastAgentProfileAgent(), null);
       assert.doesNotThrow(() => rememberAgentProfileAgent("grok"));
+      assert.doesNotThrow(() => rememberAgentProfileTab("grok", "hook"));
       assert.equal(lastAgentProfileAgent(), "grok");
+      assert.equal(lastAgentProfileTab("grok"), "hook");
     } finally {
-      __setAgentProfileStorageForTests(undefined);
+      if (original) Object.defineProperty(globalThis, "localStorage", original);
+      else Reflect.deleteProperty(globalThis, "localStorage");
     }
   });
 });

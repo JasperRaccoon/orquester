@@ -13,7 +13,6 @@ import {
   MAX_TURN_INPUT_CHARS,
   RUNTIME_MODES,
   SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES,
-  type AgentChatCommandName,
   type ApprovalDecision,
   type AttachmentRef,
   type ComposerContextRecord,
@@ -287,17 +286,3 @@ export function parseOptionalTurnId(value: unknown): string | undefined {
   }
   return value;
 }
-
-/** Every §6.2 command name, used by the router to reject an unknown path. */
-export const COMMAND_NAMES: ReadonlySet<AgentChatCommandName> = new Set<AgentChatCommandName>([
-  "turn",
-  "interrupt",
-  "approval",
-  "answer",
-  "dismiss",
-  "revert",
-  "compact",
-  "mode",
-  "background",
-  "session/stop"
-]);

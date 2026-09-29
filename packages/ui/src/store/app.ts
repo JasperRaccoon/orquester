@@ -84,7 +84,6 @@ import { ProjectSetupError } from "../lib/project-setup-error";
 import { invalidateProjectIndex } from "../lib/project-index";
 import type { HttpClient } from "../lib/http-client";
 import type { Transporter } from "../lib/transporter";
-import { workspaceService } from "../services";
 import type {
   AccountSummary,
   AccountTestResult,
@@ -95,7 +94,6 @@ import type {
   OwnerSummary,
   ProjectSummary,
   RegistryEntry,
-  RegistryKind,
   RegistryResponse,
   RepoSummary,
   SessionSummary,
@@ -472,7 +470,6 @@ export interface GitTab {
  *  the record's name (kept in sync by the todo.* event handler + rename). */
 export interface TodoTab {
   id: string;         // tab id
-  contextKey: string; // project path or workspace name (the map key)
   todoId: string;
   title: string;
 }
@@ -568,13 +565,6 @@ export function currentContext(state: Pick<AppState, "currentProject" | "current
     return { kind: "workspace", key: state.currentWorkspace, workspace: state.currentWorkspace };
   }
   return null;
-}
-
-/** The (scope, refKey) a to-do list gets in a given context. */
-export function todoRefOf(ctx: TabContext): { scope: TodoScope; refKey: string } {
-  return ctx.kind === "project"
-    ? { scope: "project", refKey: ctx.key }
-    : { scope: "workspace", refKey: ctx.key };
 }
 
 // Monotonic sequence bumped on every "session.activity" event. `loadSessions`
@@ -1008,7 +998,6 @@ export interface AppState {
   setChatPrefs: (patch: Partial<ChatPrefs>) => void;
   /** Remember the permission mode a launcher row will start this agent in. */
   setPreferredRuntimeMode: (agent: string, mode: AgentRuntimeMode) => void;
-  setTerminalFontSize: (size: number) => void;
   nudgeTerminalFontSize: (delta: number) => void;
   setColorScheme: (scheme: ColorScheme) => void;
   setThemeMode: (mode: ThemeMode) => void;
@@ -1820,7 +1809,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     set({ workspacesLoading: true });
     try {
-      set({ workspaces: await workspaceService.list(api) });
+      set({ workspaces: await api.listWorkspaces() });
     } catch (error) {
       // A wrong/stale token surfaces here — clear it and re-prompt. (Normally the
       // establish() pre-check catches this first; this is the defensive fallback
@@ -1848,7 +1837,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!api) {
       return;
     }
-    await workspaceService.create(api, name, gitAccountId);
+    await api.createWorkspace({ name, gitAccountId });
     await get().loadWorkspaces();
   },
 
@@ -1861,7 +1850,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     // `<wsPath>/<project>`. Used to purge path-keyed client-local tab state.
     const ws = get().workspaces.find((w) => w.name === name);
     const prefix = ws?.path;
-    await workspaceService.delete(api, name);
+    await api.deleteWorkspace(name);
     if (get().currentWorkspace === name) {
       get().closeWorkspace();
     }
@@ -1899,7 +1888,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     set({ projectsLoading: true });
     try {
-      set({ projects: await workspaceService.listProjects(api, workspace) });
+      set({ projects: await api.listProjects(workspace) });
     } catch (error) {
       console.error("[orquester] failed to load projects", error);
     } finally {
@@ -1913,7 +1902,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!api || !workspace) {
       return;
     }
-    await workspaceService.createProject(api, workspace, req);
+    await api.createProject(workspace, req);
     await get().loadProjects();
   },
 
@@ -1925,7 +1914,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     // Phase 1 — the directory. A failure here is a plain create failure and
     // propagates as-is (nothing exists yet, so the caller may retry).
-    const project = await workspaceService.createProject(api, workspace, req);
+    const project = await api.createProject(workspace, req);
     await get().loadProjects();
     get().openProject(project);
 
@@ -1970,7 +1959,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!api) {
       return;
     }
-    await workspaceService.deleteProject(api, project.workspace, project.name);
+    await api.deleteProject(project.workspace, project.name);
     set((state) => {
       const next = clearProjectLocalState(state, (path) => path === project.path);
       // If the open project was deleted, drop it from the main view.
@@ -1991,7 +1980,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     const ws = get().workspaces.find((w) => w.name === name);
-    await workspaceService.setWorkspaceArchived(api, name, isArchived);
+    await api.updateWorkspace(name, { isArchived });
     if (isArchived) {
       if (get().currentWorkspace === name) {
         get().closeWorkspace();
@@ -2011,7 +2000,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!api) {
       return;
     }
-    await workspaceService.setProjectArchived(api, project.workspace, project.name, isArchived);
+    await api.updateProject(project.workspace, project.name, { isArchived });
     if (isArchived && get().currentProject?.path === project.path) {
       set({ currentProject: null });
     }
@@ -2712,13 +2701,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       return { preferredModelByAgent };
     }),
 
-  setTerminalFontSize: (size) =>
-    set(() => {
-      const next = clampTerminalFontSize(size);
-      saveTerminalFontSize(next);
-      return { terminalFontSize: next };
-    }),
-
   nudgeTerminalFontSize: (delta) =>
     set((state) => {
       const next = clampTerminalFontSize(state.terminalFontSize + delta);
@@ -2892,7 +2874,6 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       const tab: TodoTab = {
         id: crypto.randomUUID(),
-        contextKey: key,
         todoId: rec.id,
         title: rec.name
       };

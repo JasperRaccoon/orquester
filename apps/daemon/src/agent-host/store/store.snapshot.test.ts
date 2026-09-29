@@ -136,21 +136,6 @@ test("a saved fold snapshot loads back as written, on a reopened store", async (
   assert.deepEqual(tail.events, []);
 });
 
-test("extras are optional and stay absent when none were given", async (t) => {
-  const rootDir = await tempRoot();
-  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  t.after(() => store.close());
-  const { appended, state } = await seeded(store);
-
-  await store.saveFoldSnapshot({ threadId: "t1", seq: appended.seq, logBytes: appended.logBytes, state });
-
-  const raw = JSON.parse(await fs.readFile(statePathOf(rootDir, "t1"), "utf8")) as object;
-  assert.equal("extras" in raw, false);
-  const loaded = await store.loadFoldSnapshot("t1");
-  assert.ok(loaded);
-  assert.equal(loaded.extras, undefined);
-});
-
 test("state.json sits where @orquester/config says, 0600, written by rename", async (t) => {
   const appdir = await tempRoot();
   // `rootDir` is `<appdir>/daemon/agent`, exactly as the host wires it.
@@ -273,20 +258,6 @@ test("a save whose state is not folded to its seq is refused loudly", async (t) 
     /seq/
   );
   await assert.rejects(fs.stat(statePathOf(rootDir, "t1")), { code: "ENOENT" });
-});
-
-test("deleteThread removes the snapshot with the thread", async (t) => {
-  const rootDir = await tempRoot();
-  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  t.after(() => store.close());
-  const { appended, state } = await seeded(store);
-  await store.saveFoldSnapshot({ threadId: "t1", seq: appended.seq, logBytes: appended.logBytes, state });
-  await fs.stat(statePathOf(rootDir, "t1"));
-
-  await store.deleteThread("t1");
-
-  await assert.rejects(fs.stat(statePathOf(rootDir, "t1")), { code: "ENOENT" });
-  assert.equal(await store.loadFoldSnapshot("t1"), null);
 });
 
 test("a snapshot save queued behind a delete does not bring the thread back", async (t) => {

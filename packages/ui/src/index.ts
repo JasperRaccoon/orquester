@@ -20,7 +20,6 @@ export {
   type TransportResponse,
   type TransportMethod,
   type BinaryBody,
-  type EventHandler,
   type StreamHandle,
   type StreamHandlers,
   buildQueryString
@@ -138,7 +137,6 @@ export {
 export { pickRunId, pickBlockId, type PhoneRunPane } from "./lib/workflows/runs-mode";
 export { canvasFitOptions, type CanvasFitOptions } from "./lib/workflows/canvas-fit";
 export * from "./hooks";
-export * from "./services";
 
 // Components
 export * from "./components/ui";
@@ -171,8 +169,6 @@ export type {
   RegistryResponse,
   SessionStatus,
   SessionSummary,
-  AgentSummary,
-  OpenTargetSummary,
   ProjectSummary,
   WorkspaceSummary
 } from "./types";

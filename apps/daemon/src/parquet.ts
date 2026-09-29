@@ -15,8 +15,8 @@ import {
 import { compressors } from "hyparquet-compressors";
 import type { FsParquetResponse, ParquetColumn } from "@orquester/api";
 
-export const DEFAULT_LIMIT = 200;
-export const MAX_LIMIT = 1000;
+const DEFAULT_LIMIT = 200;
+const MAX_LIMIT = 1000;
 /** Sorting materializes one full column + an index permutation — cap the rows. */
 const MAX_SORT_ROWS = 2_000_000;
 const CELL_MAX_CHARS = 500;

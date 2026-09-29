@@ -159,7 +159,7 @@ const getTurnDiff = defineTool({
     const result = { turn: res.toTurnCount, fromTurn: res.fromTurnCount, files: listed.files, ...(listed.omitted ? { filesTruncated: true, omittedFiles: listed.omitted } : {}), diff: "", truncated: false };
     // The diff gets whatever the rest of the result leaves of the result budget, so the whole
     // result survives `ok()` intact instead of being shed to a bare prefix.
-    const diff = fitJsonBytes(res.diff, MAX_RESULT_BYTES - Buffer.byteLength(JSON.stringify(result), "utf8"));
+    const diff = fitJsonBytes(res.diff, MAX_RESULT_BYTES - resultBytes(result));
     return { ...result, diff: diff.text, truncated: diff.truncated };
   }
 });
@@ -545,4 +545,4 @@ const compactSession = defineTool({
   }
 });
 
-export const sessionTools: ToolDef[] = [listSessionsTool, getSession, getTurnDiff, createSession, updateSession, interruptSession, stopSession, closeSession, revertSession, compactSession] as ToolDef[];
+export const sessionTools: ToolDef[] = [listSessionsTool, getSession, getTurnDiff, createSession, updateSession, interruptSession, stopSession, closeSession, revertSession, compactSession];

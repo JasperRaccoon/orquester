@@ -32,17 +32,6 @@ const SCOPES = "write:public_key, user:email, read:user, repo, read:org";
  * `Authorization` header — never in a URL, argv, or log line.
  */
 
-/** Options for creating a repo: `owner` may be the user's `login` or an org. */
-export interface CreateRepoOptions {
-  /** The chosen owner (the user's login or an org login). */
-  owner: string;
-  /** The authenticated user's own login (to decide user vs. org endpoint). */
-  login: string;
-  name: string;
-  visibility: "private" | "public";
-  description?: string;
-}
-
 /**
  * One GitHub REST request, never throwing on the HTTP status. `token: null`
  * reads anonymously (public repos; 60 requests/hour per IP). `extraHeaders`
@@ -246,36 +235,8 @@ function nextPageUrl(linkHeader: string | null): string | undefined {
   return undefined;
 }
 
-/**
- * List every repo the account can reach (owner/collaborator/org member),
- * following `Link` pagination to completion. The first request goes through the
- * shared `github()` helper; subsequent pages reuse the absolute `next` URLs.
- */
-export async function listRepos(token: string): Promise<RepoSummary[]> {
-  const repos: RepoSummary[] = [];
-  let url:
-    | string
-    | undefined = `${GITHUB_API}/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=pushed`;
-  while (url) {
-    // `url` is absolute; pass the path-relative remainder to github() so the
-    // Bearer auth/error shape is shared (the next-page URLs carry api.github.com).
-    const path = url.slice(GITHUB_API.length);
-    const response = await github(token, "GET", path);
-    const page = (await response.json()) as unknown;
-    if (Array.isArray(page)) {
-      for (const repo of page) {
-        if (repo && typeof repo === "object") {
-          repos.push(toRepoSummary(repo as Record<string, unknown>));
-        }
-      }
-    }
-    url = nextPageUrl(response.headers.get("link"));
-  }
-  return repos;
-}
-
 /** List the org logins the account belongs to (for the create-owner picker). */
-export async function listOrgs(token: string): Promise<string[]> {
+async function listOrgs(token: string): Promise<string[]> {
   const response = await github(token, "GET", "/user/orgs?per_page=100");
   const orgs = (await response.json()) as unknown;
   if (!Array.isArray(orgs)) {
@@ -286,26 +247,6 @@ export async function listOrgs(token: string): Promise<string[]> {
       org && typeof org === "object" ? (org as { login?: unknown }).login : undefined
     )
     .filter((login): login is string => typeof login === "string");
-}
-
-/**
- * Create a repo under the user (`POST /user/repos` when `owner === login`) or an
- * org (`POST /orgs/:owner/repos`). `auto_init: true` so the repo has a default
- * branch + README and the immediate clone is non-empty.
- */
-export async function createRepo(token: string, opts: CreateRepoOptions): Promise<RepoSummary> {
-  const body = {
-    name: opts.name,
-    private: opts.visibility === "private",
-    auto_init: true,
-    ...(opts.description ? { description: opts.description } : {})
-  };
-  const path =
-    opts.owner === opts.login
-      ? "/user/repos"
-      : `/orgs/${encodeURIComponent(opts.owner)}/repos`;
-  const response = await github(token, "POST", path, body);
-  return toRepoSummary((await response.json()) as Record<string, unknown>);
 }
 
 /** The first two fields of an OpenSSH public key ("<type> <base64>") — the form GitHub stores. */
@@ -383,8 +324,30 @@ export const githubProvider: GitProvider = {
     await github(creds.token, "DELETE", `/user/keys/${encodeURIComponent(keyId)}`);
   },
 
-  listRepos(creds): Promise<RepoSummary[]> {
-    return listRepos(creds.token);
+  /**
+   * List every repo the account can reach (owner/collaborator/org member),
+   * following `Link` pagination to completion. The first request goes through the
+   * shared `github()` helper; subsequent pages reuse the absolute `next` URLs.
+   */
+  async listRepos(creds): Promise<RepoSummary[]> {
+    const repos: RepoSummary[] = [];
+    let url: string | undefined = `${GITHUB_API}/user/repos?affiliation=owner,collaborator,organization_member&per_page=100&sort=pushed`;
+    while (url) {
+      // `url` is absolute; pass the path-relative remainder to github() so the
+      // Bearer auth/error shape is shared (the next-page URLs carry api.github.com).
+      const path = url.slice(GITHUB_API.length);
+      const response = await github(creds.token, "GET", path);
+      const page = (await response.json()) as unknown;
+      if (Array.isArray(page)) {
+        for (const repo of page) {
+          if (repo && typeof repo === "object") {
+            repos.push(toRepoSummary(repo as Record<string, unknown>));
+          }
+        }
+      }
+      url = nextPageUrl(response.headers.get("link"));
+    }
+    return repos;
   },
 
   async listOwners(creds, identity): Promise<OwnerSummary[]> {
@@ -395,8 +358,24 @@ export const githubProvider: GitProvider = {
     ];
   },
 
-  createRepo(creds, identity, opts: CreateRepoOpts): Promise<RepoSummary> {
-    return createRepo(creds.token, { ...opts, login: identity.login });
+  /**
+   * Create a repo under the user (`POST /user/repos` when `owner === login`) or an
+   * org (`POST /orgs/:owner/repos`). `auto_init: true` so the repo has a default
+   * branch + README and the immediate clone is non-empty.
+   */
+  async createRepo(creds, identity, opts: CreateRepoOpts): Promise<RepoSummary> {
+    const body = {
+      name: opts.name,
+      private: opts.visibility === "private",
+      auto_init: true,
+      ...(opts.description ? { description: opts.description } : {})
+    };
+    const path =
+      opts.owner === identity.login
+        ? "/user/repos"
+        : `/orgs/${encodeURIComponent(opts.owner)}/repos`;
+    const response = await github(creds.token, "POST", path, body);
+    return toRepoSummary((await response.json()) as Record<string, unknown>);
   },
 
   parseRepoUrl(input: string, _ctx: UrlContext): ParsedRepo | null {

@@ -22,7 +22,7 @@ import type { ApprovalDecision } from "@orquester/api/agent-chat";
  * live session and the fixture replay harness so a replay exercises the same
  * routing decision the adapter makes, rather than the harness's own copy of it.
  */
-export type CanUseToolRoute = "user-input" | "proposed-plan" | "approval";
+type CanUseToolRoute = "user-input" | "proposed-plan" | "approval";
 
 export function claudeCanUseToolRoute(toolName: string): CanUseToolRoute {
   if (toolName === "AskUserQuestion") {
@@ -52,14 +52,14 @@ export function claudeRequestKey(
   return trimmed.length > 0 ? trimmed : fallback();
 }
 
-export const DECLINE_MESSAGE = "User declined tool execution.";
-export const CANCEL_MESSAGE = "User cancelled tool execution.";
+const DECLINE_MESSAGE = "User declined tool execution.";
+const CANCEL_MESSAGE = "User cancelled tool execution.";
 /**
  * `acceptAlways` has no expression through `canUseTool`. Denying with a plain
  * message would read to the model as a refusal of the work; this says what
  * actually happened so it can offer the session-scoped option instead.
  */
-export const ACCEPT_ALWAYS_UNSUPPORTED_MESSAGE =
+const ACCEPT_ALWAYS_UNSUPPORTED_MESSAGE =
   "Claude Code cannot grant a permanent permission from here. Use \"Always allow this session\" instead.";
 
 /**

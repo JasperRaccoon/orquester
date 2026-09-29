@@ -28,4 +28,3 @@ release/
 
 # Local Claude Code config/workflows
 /.claude/
-node_modules

@@ -1,16 +1,4 @@
-/**
- * Claude adapter — two tiny async primitives.
- *
- * `AsyncEventQueue` backs `AgentAdapter.events` (§4.1): one producer (the
- * session), one consumer (the host's ingestion). `PromptQueue` backs the
- * long-lived streaming input the SDK reads (§4.5 "Prompt feeding is a
- * long-lived streaming input") — `sendTurn` only ever offers onto it, and
- * `query()` is never re-made per turn.
- *
- * Neither is unbounded by accident: the event queue is drained by the host on
- * the same tick it is written, and the prompt queue only ever holds turns the
- * user actually sent.
- */
+/** The adapter event stream and the deferred promises used by its SDK session. */
 
 export class AsyncEventQueue<T> implements AsyncIterable<T> {
   private readonly items: T[] = [];
@@ -45,10 +33,6 @@ export class AsyncEventQueue<T> implements AsyncIterable<T> {
     }
   }
 
-  get size(): number {
-    return this.items.length;
-  }
-
   [Symbol.asyncIterator](): AsyncIterator<T> {
     return {
       next: (): Promise<IteratorResult<T>> => {
@@ -72,28 +56,14 @@ export interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T) => void;
   reject: (error: unknown) => void;
-  settled: () => boolean;
 }
 
 export function createDeferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
-  let done = false;
   const promise = new Promise<T>((res, rej) => {
-    resolve = (value) => {
-      if (done) {
-        return;
-      }
-      done = true;
-      res(value);
-    };
-    reject = (error) => {
-      if (done) {
-        return;
-      }
-      done = true;
-      rej(error);
-    };
+    resolve = res;
+    reject = rej;
   });
-  return { promise, resolve, reject, settled: () => done };
+  return { promise, resolve, reject };
 }

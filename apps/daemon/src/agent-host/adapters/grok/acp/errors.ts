@@ -39,8 +39,6 @@ export const ACP_ERROR_CODES = {
   rateLimit: -32003
 } as const;
 
-export type AcpErrorCode = (typeof ACP_ERROR_CODES)[keyof typeof ACP_ERROR_CODES];
-
 /** The wire shape of a JSON-RPC error object. */
 export interface AcpErrorPayload {
   readonly code: number;
@@ -101,47 +99,11 @@ export class AcpProtocolError extends Error {
   }
 }
 
-/**
- * `-32602` with `data` naming an unknown session. The session is gone, so the
- * caller must restart rather than retry — the same verdict for both spellings
- * the CLI produces (`"unknown session id"` on `session/prompt`, `FS_NOT_FOUND`
- * on `session/load`).
- */
-export function isUnknownSessionError(error: unknown): boolean {
-  if (!(error instanceof AcpRpcError)) {
-    return false;
-  }
-  if (error.code === ACP_ERROR_CODES.invalidParams && dataText(error.data).includes("unknown session")) {
-    return true;
-  }
-  return (
-    error.code === ACP_ERROR_CODES.internalError &&
-    (dataText(error.data).includes("FS_NOT_FOUND") || /path not found/i.test(error.message))
-  );
-}
-
-/** `-32602` with `data: "unknown model id"` — including the `grok-build` slug. */
-export function isUnknownModelError(error: unknown): boolean {
-  return (
-    error instanceof AcpRpcError &&
-    error.code === ACP_ERROR_CODES.invalidParams &&
-    dataText(error.data).includes("unknown model")
-  );
-}
-
-/** `-32601`, the one code that is safe to classify on alone (§10). */
-export function isMethodNotFoundError(error: unknown): boolean {
-  return error instanceof AcpRpcError && error.code === ACP_ERROR_CODES.methodNotFound;
-}
-
 /** The §4.2 `runtime.error` class for a failure that reached the adapter. */
 export function classifyAcpError(
   error: unknown
 ): "provider_error" | "transport_error" | "validation_error" | "unknown" {
-  if (error instanceof AcpTransportClosedError) {
-    return "transport_error";
-  }
-  if (error instanceof AcpProtocolError) {
+  if (error instanceof AcpTransportClosedError || error instanceof AcpProtocolError) {
     return "transport_error";
   }
   if (error instanceof AcpRpcError) {
@@ -149,10 +111,6 @@ export function classifyAcpError(
       case ACP_ERROR_CODES.invalidParams:
       case ACP_ERROR_CODES.invalidRequest:
         return "validation_error";
-      case ACP_ERROR_CODES.methodNotFound:
-      case ACP_ERROR_CODES.internalError:
-      case ACP_ERROR_CODES.rateLimit:
-        return "provider_error";
       default:
         return "provider_error";
     }

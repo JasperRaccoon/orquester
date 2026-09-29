@@ -159,12 +159,12 @@ function applyEdit(doc: TomlTable, edit: TomlEdit): void {
 // ---------------------------------------------------------------------------
 
 /** A key segment as TOML writes it: bare when it can be, else a basic string. */
-export function renderTomlKey(segment: string): string {
+function renderTomlKey(segment: string): string {
   return /^[A-Za-z0-9_-]+$/.test(segment) ? segment : JSON.stringify(segment);
 }
 
 /** A value as the right-hand side of `key = …`, on one line (tables inline). */
-export function renderTomlValue(value: unknown): string {
+function renderTomlValue(value: unknown): string {
   const text = stringify({ t: { v: value } });
   const line = text.split(/\r?\n/).find((entry) => entry.startsWith("v = "));
   if (line === undefined) {

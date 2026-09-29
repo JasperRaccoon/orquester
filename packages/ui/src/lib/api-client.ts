@@ -4,7 +4,6 @@ import type {
   AgentAccount,
   AgentAccountsResponse,
   AgentConversationsResponse,
-  AgentSummary,
   AuthInfoResponse,
   BrowserSummary,
   BrowserSuggestionsResponse,
@@ -44,7 +43,6 @@ import type {
   KillProcessResponse,
   MarkRecentProjectRequest,
   OpenResult,
-  OpenTargetSummary,
   OwnerSummary,
   ProjectSummary,
   ProjectTemplatesResponse,
@@ -130,7 +128,6 @@ import type {
   SchedulePreviewResponse,
   ValidateWorkflowRequest,
   ValidateWorkflowResponse,
-  WorkflowBlockTypesResponse,
   WorkflowErrorCode,
   WorkflowProblem,
   WorkflowWriteResponse
@@ -190,9 +187,7 @@ function serverFieldFromBody(body: unknown): string | null {
 /**
  * ApiClient is the "server manager": it owns the active {@link UiConnection}
  * and its {@link Transporter}, and exposes typed daemon endpoints to the
- * services/hooks above it. It does not know or care which transport is in use.
- *
- * NOTE: skeleton — endpoints are wired but no client-side logic/caching yet.
+ * UI above it. It does not know or care which transport is in use.
  */
 export class ApiClient {
   /** Multiplexed session I/O (web/HTTP); null on transports without it (unix). */
@@ -913,10 +908,6 @@ export class ApiClient {
     });
   }
 
-  workflowBlockTypes(signal?: AbortSignal): Promise<WorkflowBlockTypesResponse> {
-    return this.workflowSend("GET", workflowRoutes.blockTypes, { signal });
-  }
-
   /** Secret NAMES (never values): the global ones, plus `workflowId`'s own when given. */
   listWorkflowSecrets(workflowId?: string | null, signal?: AbortSignal): Promise<ListWorkflowSecretsResponse> {
     return this.workflowSend("GET", workflowRoutes.secrets, {
@@ -1068,16 +1059,6 @@ export class ApiClient {
     );
   }
 
-  // Catalog (agents / open targets)
-
-  listAgents(signal?: AbortSignal): Promise<AgentSummary[]> {
-    return this.send("GET", "/api/agents", { signal });
-  }
-
-  listOpenTargets(signal?: AbortSignal): Promise<OpenTargetSummary[]> {
-    return this.send("GET", "/api/open-targets", { signal });
-  }
-
   // Registry (shells & agents)
 
   listRegistry(signal?: AbortSignal): Promise<RegistryResponse> {
@@ -1137,10 +1118,6 @@ export class ApiClient {
 
   updateRegistryEntry(id: string): Promise<RegistryActionResult> {
     return this.send("POST", `/api/registry/${encodeURIComponent(id)}/update`);
-  }
-
-  registryVersion(id: string): Promise<RegistryActionResult> {
-    return this.send("GET", `/api/registry/${encodeURIComponent(id)}/version`);
   }
 
   /** Launch an ide/file-explorer/browser target on a path. */

@@ -63,15 +63,6 @@ test("claude: unexpired system credentials keep the System row", async () => {
   });
 });
 
-test("claude: missing credentials file does not hide (source already reports null)", async () => {
-  await withTmp(async (dir) => {
-    assert.equal(
-      await shouldHideSystemUsage("claude", { userhome: dir, now: NOW, claudeHome: join(dir, ".claude") }),
-      false
-    );
-  });
-});
-
 test("codex: system account matching a managed account_id hides the System row", async () => {
   await withTmp(async (dir) => {
     const sys = join(dir, ".codex");

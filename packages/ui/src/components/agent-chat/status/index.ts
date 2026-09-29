@@ -25,7 +25,6 @@ export {
   deriveContextMeter,
   formatAutoCompactionSentence,
   formatContextTokens,
-  formatContextUsage,
   type ContextMeterInput,
   type ContextMeterModel
 } from "./context-meter";

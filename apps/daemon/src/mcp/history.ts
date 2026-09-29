@@ -19,7 +19,7 @@ export interface HistoryUnavailable {
   reason: "unavailable" | "limit";
 }
 
-export interface OlderHistory {
+interface OlderHistory {
   /** The snapshot with the pages read merged under its window (`mergeHistoryPages`); the snapshot itself when none was. */
   snapshot: ThreadSnapshotPayload;
   unavailable: HistoryUnavailable | null;

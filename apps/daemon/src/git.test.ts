@@ -74,7 +74,7 @@ test("serializes concurrent git mutations in the same repository", async () => {
   const calls: string[] = [];
   const commands = [deferred(), deferred()];
   const git = new GitService({
-    runner: async (_file, args, options) => {
+    runner: async (_file, _args, options) => {
       calls.push(options.cwd);
       return commands[calls.length - 1].promise;
     }
@@ -455,17 +455,17 @@ test("a stash sha mismatch is a 409 against real git, and drops nothing", async 
 // --- Working diff (a saved prompt's {diff}) -------------------------------------
 
 test("workingDiffMaxBytes parses an integer, defaults, and clamps", () => {
-  assert.equal(workingDiffMaxBytes(undefined), GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
-  assert.equal(workingDiffMaxBytes(""), GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
-  assert.equal(workingDiffMaxBytes("lots"), GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
-  assert.equal(workingDiffMaxBytes(Number.NaN), GIT_WORKING_DIFF_DEFAULT_MAX_BYTES);
+  assert.equal(workingDiffMaxBytes(undefined), 65_536);
+  assert.equal(workingDiffMaxBytes(""), 65_536);
+  assert.equal(workingDiffMaxBytes("lots"), 65_536);
+  assert.equal(workingDiffMaxBytes(Number.NaN), 65_536);
   assert.equal(workingDiffMaxBytes("1000"), 1000);
   assert.equal(workingDiffMaxBytes("1000.9"), 1000);
   assert.equal(workingDiffMaxBytes(1000.9), 1000);
   assert.equal(workingDiffMaxBytes("0"), 1);
   assert.equal(workingDiffMaxBytes("-5"), 1);
-  assert.equal(workingDiffMaxBytes(String(GIT_WORKING_DIFF_MAX_BYTES + 1)), GIT_WORKING_DIFF_MAX_BYTES);
-  assert.equal(workingDiffMaxBytes(Number.POSITIVE_INFINITY), GIT_WORKING_DIFF_MAX_BYTES);
+  assert.equal(workingDiffMaxBytes(String(524_288 + 1)), 524_288);
+  assert.equal(workingDiffMaxBytes(Number.POSITIVE_INFINITY), 524_288);
 });
 
 test("an overflow on a read that did not ask for a cap is still an error", async () => {

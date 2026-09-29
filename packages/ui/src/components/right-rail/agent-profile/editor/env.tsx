@@ -2,7 +2,7 @@
  * What every agent-profile editor reads from the one that opened it: the
  * agent, the client, phone or desktop, and the verbs that close it — so the
  * nine editors never thread them through props. `AgentProfileEditor`
- * provides it; the render checks provide a fake.
+ * provides it.
  */
 
 import React, { createContext, useContext, useEffect, useState } from "react";
@@ -10,7 +10,7 @@ import React, { createContext, useContext, useEffect, useState } from "react";
 import type { AgentProfileAgentId, ProfileItemKind, ProfileMutationResponse } from "@orquester/api";
 
 import type { ApiClient } from "../../../../lib/api-client";
-import { assumedWidth, isWide, type EditorVariant } from "./layout.logic";
+import { isWide, type EditorVariant } from "./layout.logic";
 
 export interface EditorEnv {
   agent: AgentProfileAgentId;
@@ -32,8 +32,6 @@ export interface EditorEnv {
   setSaving(saving: boolean): void;
   /** Turn a create editor into another kind's ("Add a marketplace" from the plugin installer). */
   switchKind(kind: ProfileItemKind): void;
-  /** The width assumed before the editor measures itself (checks pass one per variant). */
-  initialWidth?: number;
 }
 
 export const EditorEnvContext = createContext<EditorEnv | null>(null);
@@ -87,11 +85,6 @@ export const EditorWideContext = createContext(true);
 
 export function useEditorWide(): boolean {
   return useContext(EditorWideContext);
-}
-
-export function useInitialWidth(): number {
-  const env = useEditorEnv();
-  return env.initialWidth ?? assumedWidth(env.variant);
 }
 
 export { isWide };

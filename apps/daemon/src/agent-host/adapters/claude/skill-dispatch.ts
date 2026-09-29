@@ -28,7 +28,7 @@
 const SKILL_MENTION_PATTERN =
   /(^|\s)\p{Sc}(?![0-9][0-9_]*(?:[kKmMbBtT]|[eE][0-9]+)?(?:\s|$))(?=[a-zA-Z0-9:_-]*[a-zA-Z])([a-zA-Z0-9][a-zA-Z0-9:_-]*)(?=\s|$)/gu;
 
-export interface ClaudeSkillDispatch {
+interface ClaudeSkillDispatch {
   /** Text before the dispatched mention, or `undefined` when it opens the prompt. */
   readonly leadingText: string | undefined;
   /** `/name` plus the trailing text, ready to be the message's last text block. */
@@ -81,14 +81,4 @@ export function planClaudeSkillDispatch(
     commandText: `/${last.name}${trailing}`.trimEnd(),
     skillName: last.name
   };
-}
-
-/**
- * §4.6.9: a turn whose text already opens with a slash command is never
- * prefixed, indented or wrapped — prefixing it turns the command into prose
- * and the CLI never runs it. Orquester ships no prompt-injected effort level,
- * so this is a rule the send path asserts rather than a workaround it applies.
- */
-export function startsWithSlashCommand(text: string): boolean {
-  return /^\/[^\s/]+(?:\s|$)/u.test(text);
 }

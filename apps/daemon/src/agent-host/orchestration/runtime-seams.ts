@@ -30,13 +30,11 @@ export interface Deferred<T> {
   readonly promise: Promise<T>;
   resolve(value: T): void;
   reject(error: unknown): void;
-  readonly settled: boolean;
 }
 
 export function createDeferred<T = void>(): Deferred<T> {
   let resolve!: (value: T) => void;
   let reject!: (error: unknown) => void;
-  let settled = false;
   const promise = new Promise<T>((res, rej) => {
     resolve = res;
     reject = rej;
@@ -45,19 +43,8 @@ export function createDeferred<T = void>(): Deferred<T> {
   promise.catch(() => undefined);
   return {
     promise,
-    resolve: (value: T) => {
-      if (settled) return;
-      settled = true;
-      resolve(value);
-    },
-    reject: (error: unknown) => {
-      if (settled) return;
-      settled = true;
-      reject(error);
-    },
-    get settled() {
-      return settled;
-    }
+    resolve,
+    reject
   };
 }
 
@@ -74,23 +61,16 @@ export interface SerialQueue {
   run<T>(task: () => Promise<T>): Promise<T>;
   /** Resolves when the queue is empty and the running task has finished (§9). */
   drain(): Promise<void>;
-  readonly size: number;
 }
 
 export function createSerialQueue(): SerialQueue {
   let tail: Promise<unknown> = Promise.resolve();
-  let size = 0;
   return {
     run<T>(task: () => Promise<T>): Promise<T> {
-      size += 1;
       const result = tail.then(task, task);
       tail = result.then(
-        () => {
-          size -= 1;
-        },
-        () => {
-          size -= 1;
-        }
+        () => undefined,
+        () => undefined
       );
       return result;
     },
@@ -101,9 +81,6 @@ export function createSerialQueue(): SerialQueue {
         previous = tail;
         await tail.catch(() => undefined);
       }
-    },
-    get size() {
-      return size;
     }
   };
 }

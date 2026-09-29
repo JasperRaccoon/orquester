@@ -99,14 +99,6 @@ export class TestLog {
     return position.byteOffset + position.byteLength;
   }
 
-  event(seq: number): DomainEvent {
-    const found = this.lines.find((entry) => entry.position.seq === seq);
-    if (found === undefined) {
-      throw new Error(`no event for seq ${seq}`);
-    }
-    return found.event;
-  }
-
   /** The events a history page reads: every line inside `[fromByte, toByte)`. */
   slice(fromByte: number, toByte: number): DomainEvent[] {
     return this.lines

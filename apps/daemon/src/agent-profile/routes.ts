@@ -79,7 +79,7 @@ export interface AgentProfileRouteDeps {
 }
 
 /** A JSON body carrying a skill, a command or an instruction file: room for large markdown. */
-export const AGENT_PROFILE_BODY_LIMIT = 4 * 1024 * 1024;
+const AGENT_PROFILE_BODY_LIMIT = 4 * 1024 * 1024;
 
 const TEXT_MAX = AGENT_PROFILE_BODY_LIMIT;
 const NAME_MAX = 256;
@@ -320,7 +320,7 @@ function errorBody(code: AgentProfileErrorBody["error"]["code"], message: string
 }
 
 /** Maps any error to `{error: {code, message}}`; the real text of an unexpected one goes to the log only. */
-export function sendError(request: FastifyRequest, reply: FastifyReply, error: unknown): FastifyReply {
+function sendError(request: FastifyRequest, reply: FastifyReply, error: unknown): FastifyReply {
   if (isAgentProfileError(error)) {
     return reply.code(error.status).send(errorBody(error.code, error.message));
   }
@@ -354,9 +354,7 @@ function refuseUnread(request: FastifyRequest, reply: FastifyReply, error: unkno
 // Parsing
 // ---------------------------------------------------------------------------
 
-function invalid(message: string): AgentProfileError {
-  return profileErrors.invalid(message);
-}
+const invalid = profileErrors.invalid;
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
@@ -453,7 +451,7 @@ type CreateBody =
   | { draft: ProfileItemDraft; onConflict: ProfileConflictPolicy }
   | { import: { importId: string; picks: string[] }; onConflict: ProfileConflictPolicy };
 
-export function parseCreateBody(raw: unknown): CreateBody {
+function parseCreateBody(raw: unknown): CreateBody {
   const body = objectBody(raw);
   const hasDraft = body.draft !== undefined;
   const hasImport = body.import !== undefined;
@@ -467,7 +465,7 @@ export function parseCreateBody(raw: unknown): CreateBody {
 }
 
 /** A {@link ProfileItemDraft} with only its known fields, each checked. */
-export function parseDraft(raw: unknown, field: string): ProfileItemDraft {
+function parseDraft(raw: unknown, field: string): ProfileItemDraft {
   if (!isRecord(raw)) throw invalid(`${field} must be an object.`);
   switch (raw.kind) {
     case "mcp":
@@ -522,7 +520,7 @@ function parseMcpDraft(raw: unknown, field: string): McpServerDraft {
  * absent key is removed (spec §8). Messages name the key and the index,
  * NEVER the value.
  */
-export function parseSecretEntries(raw: unknown, field: string): SecretEntryDraft[] {
+function parseSecretEntries(raw: unknown, field: string): SecretEntryDraft[] {
   if (!Array.isArray(raw)) throw invalid(`${field} must be an array of {key, value} or {key, keep: true}.`);
   if (raw.length > LIST_MAX) throw invalid(`${field} has more than ${LIST_MAX} entries.`);
   const seen = new Set<string>();

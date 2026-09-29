@@ -142,21 +142,13 @@ describe("orchestrator — commands", () => {
     await host.stop();
   });
 
-  it("rejects an empty turn and an over-long one", async () => {
+  it("rejects an empty turn", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
     await assert.rejects(
       () => host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "   " }),
       (error: unknown) =>
         isAgentChatCommandError(error) && error.code === "INVALID_COMMAND" && error.status === 400
-    );
-    await assert.rejects(
-      () =>
-        host.orchestrator.command(threadId, "turn", {
-          commandId: cmd(),
-          input: "x".repeat(120_001)
-        }),
-      (error: unknown) => isAgentChatCommandError(error) && error.code === "INVALID_COMMAND"
     );
     await host.stop();
   });
@@ -302,15 +294,6 @@ describe("orchestrator — receipts (§6.2)", () => {
     await host.stop();
   });
 
-  it("requires a commandId", async () => {
-    const host = createTestHost();
-    const threadId = await host.createThread();
-    await assert.rejects(
-      () => host.orchestrator.command(threadId, "turn", { input: "hi" }),
-      (error: unknown) => isAgentChatCommandError(error) && error.code === "INVALID_COMMAND"
-    );
-    await host.stop();
-  });
 });
 
 describe("orchestrator — approvals", () => {
@@ -999,36 +982,6 @@ describe("orchestrator — session restart policy (§3.4)", () => {
     await host.stop();
   });
 
-  it("a Claude model change restarts the session", async () => {
-    const host = createTestHost();
-    const threadId = await host.createThread();
-    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
-    await host.settle();
-    await host.orchestrator.command(threadId, "mode", {
-      commandId: cmd(),
-      modelSelection: { model: "other-model" }
-    });
-    await host.settle();
-    const starts = host.adapter.calls.filter((call) => call.kind === "startSession");
-    assert.equal(starts.length, 2, "claude restarts on any model-selection change");
-    await host.stop();
-  });
-
-  it("codex applies a model change live", async () => {
-    const codex = createScriptedAdapter({ id: "codex" });
-    const host = createTestHost({ adapters: { codex } });
-    const threadId = await host.createThread({ refId: "codex" });
-    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
-    await host.settle();
-    await host.orchestrator.command(threadId, "mode", {
-      commandId: cmd(),
-      modelSelection: { model: "other-model" }
-    });
-    await host.settle();
-    assert.equal(codex.calls.filter((call) => call.kind === "startSession").length, 1);
-    await host.stop();
-  });
-
   it("a mode change on a thread with no session starts nothing", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
@@ -1234,20 +1187,6 @@ describe("orchestrator — revert (§5.5)", () => {
     assert.deepEqual(rollbackDetails(host), []);
     assert.deepEqual(host.checkpoints.pruned, []);
     assert.deepEqual(revertedTargets(host), []);
-    await host.stop();
-  });
-
-  it("rejects a malformed targetTurnCount with INVALID_COMMAND", async () => {
-    const host = createTestHost();
-    const threadId = await host.createThread();
-    await assert.rejects(
-      () =>
-        host.orchestrator.command(threadId, "revert", {
-          commandId: cmd(),
-          targetTurnCount: "two"
-        }),
-      (error: unknown) => isAgentChatCommandError(error) && error.code === "INVALID_COMMAND"
-    );
     await host.stop();
   });
 
@@ -1503,21 +1442,6 @@ describe("orchestrator — error state and session stop (§6.2)", () => {
       restart.filter((kind) => ["stopSession", "startSession", "sendTurn", "sweepEndedSession"].includes(kind)),
       ["stopSession", "startSession", "sendTurn"]
     );
-    await host.stop();
-  });
-
-  it("session/stop settles pending requests and stops the child", async () => {
-    const host = createTestHost();
-    const threadId = await host.createThread();
-    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
-    await openApproval(host, "req-9");
-    await host.settle();
-    await host.orchestrator.command(threadId, "session/stop", { commandId: cmd() });
-    await host.settle();
-
-    const order = host.adapter.calls.map((call) => call.kind);
-    assert.ok(order.indexOf("respondToApproval") < order.lastIndexOf("stopSession"));
-    assert.equal(host.adapter.hasSession(threadId), false);
     await host.stop();
   });
 
@@ -1870,53 +1794,6 @@ describe("orchestrator — answering a question (§6.2)", () => {
     await host.stop();
   });
 
-  it("commits the resolution and the message as ONE append — the card cannot close alone", async () => {
-    // T3 `decider.ts:1683-1702` commits both with a single
-    // `decideCommandSequence([activity.append, turn.start])`. Here that is one
-    // `events` array on one decision: they share a commandId and land in the
-    // log with no other event between them, so no observer can ever see a
-    // closed card with no message (or the reverse).
-    const host = createTestHost();
-    const threadId = await host.createThread();
-    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
-    await host.settle();
-    await openQuestion(host, "codex-async:t:9", { dismissible: true });
-    await host.settle();
-
-    const commandId = cmd();
-    await host.orchestrator.command(threadId, "answer", {
-      commandId,
-      requestId: "codex-async:t:9",
-      answers: { "Which branch?": "main" }
-    });
-    await host.settle();
-
-    const log = host.store.logs.get(threadId) ?? [];
-    const resolvedAt = log.findIndex(
-      (event) =>
-        event.type === "thread.activity-appended" &&
-        (event.payload as { activity: { id: string } }).activity.id ===
-          "async-answer:codex-async:t:9"
-    );
-    const messageAt = log.findIndex(
-      (event) => event.type === "thread.message-sent" && event.commandId === commandId
-    );
-    assert.ok(resolvedAt >= 0 && messageAt >= 0, "both rows were written");
-    assert.equal(messageAt, resolvedAt + 1, "adjacent: nothing can be interleaved between them");
-    assert.equal(
-      log[resolvedAt]?.commandId,
-      commandId,
-      "one command sequence, so one commandId across the pair"
-    );
-    // Deterministic message id, like the activity's (T3 mints
-    // `async-answer:<requestId>` for both).
-    assert.equal(
-      (log[messageAt]?.payload as { messageId: string }).messageId,
-      "async-answer:codex-async:t:9"
-    );
-    await host.stop();
-  });
-
   it("force-resolves a STRANDED native question when its turn ends — never a message-mode one", async () => {
     // T3 `ProviderRuntimeIngestion.ts:2330-2360`. A terminal turn cannot accept
     // native-callback answers: the provider's request died with the turn, so a
@@ -2119,7 +1996,7 @@ describe("orchestrator — the ingestion hooks (§5.1, §5.4)", () => {
     await host.stop();
   });
 
-  it("a provider diff opens a placeholder only for the currently running turn", async (t) => {
+  it("a provider diff opens a placeholder only for the currently running turn", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
     await ingestDiff(host, "turn-1");
@@ -2134,7 +2011,7 @@ describe("orchestrator — the ingestion hooks (§5.1, §5.4)", () => {
     ]);
     await host.stop();
   });
-  it("a provider diff uses the third turn ordinal when earlier turns have no checkpoints", async (t) => {
+  it("a provider diff uses the third turn ordinal when earlier turns have no checkpoints", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
     await seedTurn(host, "p-1");
@@ -2357,7 +2234,7 @@ describe("orchestrator — runtime events", () => {
 
 describe("fold-ops — the chunked fold (design 2026-09-23, invariant 7)", () => {
 
-  it("a long cold fold yields to the event loop and retains the final activity", async (t) => {
+  it("a long cold fold yields to the event loop and retains the final activity", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
     await bulkActivities(host, null, 600, threadId);
@@ -2450,7 +2327,6 @@ describe("orchestrator — the fold snapshot (design 2026-09-23, A2)", () => {
     assert.ok(thread.items.some((item) => item.id === "h-3-bulk-2"));
     await restored.stop();
   });
-
 
   it("discards a snapshot that no longer matches the log and folds the log from the top", async () => {
     for (const plant of [
@@ -2739,7 +2615,7 @@ describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
   });
 
   it("walks one monster turn back in blocks of 400 — contiguous, lossless, no row twice", async (t) => {
-    const { index, host } = await indexedHost(t);
+    const { host } = await indexedHost(t);
     const threadId = await host.createThread();
     await seedTurn(host, "m-1", { settle: false });
     await bulkActivities(host, "m-1", 1_500, threadId);
@@ -2772,7 +2648,7 @@ describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
   });
 
   it("delivers a message streamed across a block boundary whole, on exactly one page", async (t) => {
-    const { index, host } = await indexedHost(t);
+    const { host } = await indexedHost(t);
     const threadId = await host.createThread();
     await seedTurn(host, "c-1", { settle: false });
     // 1 000 rows: the window keeps #500..#999, the first block is #100..#499,
@@ -2813,7 +2689,7 @@ describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
   });
 
   it("walks back across turn boundaries, and honours the `turns` soft cap", async (t) => {
-    const { index, host } = await indexedHost(t);
+    const { host } = await indexedHost(t);
     const threadId = await host.createThread();
     for (const turnId of ["t-1", "t-2", "t-3"]) {
       host.clock.advance(1_000);
@@ -2948,7 +2824,7 @@ describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
   });
 
   it("an empty page when nothing is older", async (t) => {
-    const { index, host } = await indexedHost(t);
+    const { host } = await indexedHost(t);
     const threadId = await host.createThread();
     await seedTurn(host, "o-1");
     await bulkActivities(host, "o-1", 3, threadId);

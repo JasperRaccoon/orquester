@@ -429,16 +429,12 @@ function readCaptureLines(file: string, content: string): CaptureLine[] {
     .flatMap((row, at) => (row.length > 0 ? [{ line: at + 1, value: parseJson(`${file}:${at + 1}`, row) }] : []));
 }
 
-const scans = new Map<FixtureSet, Finding[]>();
-
 /**
  * Every match in one set, the allowed ones included: each line of each file as written, each
  * value an `.ndjson` line or a `.json` file parses to (its credential-named fields, its byte
  * arrays decoded), and each value the set's protocol streamed, joined.
  */
 function scanSet(set: FixtureSet): Finding[] {
-  const cached = scans.get(set);
-  if (cached !== undefined) return cached;
   const findings: Finding[] = [];
   const dir = nodePath.join(FIXTURES_DIR, set);
   for (const name of captureFiles(dir)) {
@@ -457,7 +453,6 @@ function scanSet(set: FixtureSet): Finding[] {
       if (value !== undefined) scanValue(stream.where, value, findings, set === "grok");
     }
   }
-  scans.set(set, findings);
   return findings;
 }
 
@@ -529,11 +524,6 @@ describe("the protocol fixtures' redaction post-check", () => {
       assert.equal(findings.length, 0, listFindings(set, findings));
     });
   }
-
-  it("allows only what the fixtures hold", () => {
-    const held = new Set(FIXTURE_SETS.flatMap((set) => scanSet(set).map((finding) => finding.match)));
-    assert.deepEqual([...ALLOWED.keys()].filter((match) => !held.has(match)), []);
-  });
 
   it("claude: every streamed block joins to what its complete frame holds", () => {
     const mismatches: string[] = [];

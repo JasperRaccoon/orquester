@@ -411,11 +411,8 @@ async function runPrompt(id, params) {
   }
 
   if (scenario === "prompt-error") {
-    // The prompt RPC answered with an error: `GROK_MOCK_PROMPT_ERROR_CODE`
-    // picks the code (ACP's -32000 authentication required, T3's -32003).
-    const code = Number(process.env.GROK_MOCK_PROMPT_ERROR_CODE ?? "-32603");
     const message = process.env.GROK_MOCK_PROMPT_ERROR_MESSAGE ?? "Prompt failed";
-    send({ jsonrpc: "2.0", id, error: { code, message } });
+    send({ jsonrpc: "2.0", id, error: { code: -32603, message } });
     return;
   }
 

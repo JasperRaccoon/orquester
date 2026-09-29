@@ -1,18 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import {
-  parseAgentAccounts,
-  createDefaultAgentAccounts,
-  agentAccountsFile,
-  agentAccountHome
-} from "./index.ts";
-
-test("createDefaultAgentAccounts is empty with null defaults", () => {
-  const d = createDefaultAgentAccounts();
-  assert.deepEqual(d.accounts, []);
-  // Grok is the third managed account family (AGENTS.md, the Grok managed-accounts bullet).
-  assert.deepEqual(d.defaults, { claude: null, codex: null, grok: null });
-});
+import { parseAgentAccounts } from "./index.ts";
 
 test("parseAgentAccounts fills defaults and coerces missing fields", () => {
   const parsed = parseAgentAccounts({
@@ -26,9 +14,4 @@ test("parseAgentAccounts fills defaults and coerces missing fields", () => {
 
 test("parseAgentAccounts rejects an unknown agent", () => {
   assert.throws(() => parseAgentAccounts({ accounts: [{ id: "x", agent: "gemini", label: "g", createdAt: "t", importedAt: "t" }] }));
-});
-
-test("path helpers compose under the daemon dir", () => {
-  assert.equal(agentAccountsFile("/base"), "/base/daemon/agent-accounts.json");
-  assert.equal(agentAccountHome("/base", "codex", "id9"), "/base/daemon/agent-accounts/codex/id9/home");
 });

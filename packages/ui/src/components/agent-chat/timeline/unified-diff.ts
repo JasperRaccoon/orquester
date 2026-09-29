@@ -102,17 +102,6 @@ export function splitUnifiedDiff(diff: string): UnifiedDiffFile[] {
   return files;
 }
 
-/** One named file's patch out of a multi-file diff, or `null` when absent. */
-export function unifiedDiffForPath(diff: string, path: string): UnifiedDiffFile | null {
-  const normalized = path.replaceAll("\\", "/");
-  const files = splitUnifiedDiff(diff);
-  return (
-    files.find((file) => file.path === normalized) ??
-    files.find((file) => normalized.endsWith(`/${file.path}`) || file.path.endsWith(`/${normalized}`)) ??
-    null
-  );
-}
-
 /** Added/removed line counts, for a row's inline `+n −m` chip. */
 export function countDiffLines(patch: string): { additions: number; deletions: number } {
   let additions = 0;

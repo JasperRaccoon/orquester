@@ -93,15 +93,14 @@ plus `CLAUDE_CODE_AUTO_CONNECT_IDE=0`, `CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL=1`,
 > run on a capture. Hook coverage was obtained instead from a project-level `.claude/settings.json`
 > in the sandbox; see observation **9**.
 
+The 13 retained replay fixtures are listed below. The protocol observations also preserve
+excerpts from the permission and question captures that do not need full raw replay files.
+
 | # | File | `Options` beyond the common set | Demonstrates |
 |---|---|---|---|
 | 1 | `01-init-plain-text.ndjson` | none (default model → `claude-opus-4-8[1m]`) | init + one plain-text turn: `system/init`, `rate_limit_event`, the full `stream_event` delta sequence, `assistant`, `result` with `usage`/`modelUsage`/`total_cost_usd`. Also carries the `initializationResult()` response. |
 | 2 | `02-tool-read-auto-allowed.ndjson` | `model:"sonnet"`, `canUseTool` installed | `Read` (and an `ls` `Bash`) in the default mode: `tool_use` → `tool_result` blocks, and **zero** `canUseTool` calls — see observation **1**. |
 | 3 | `03-bash-approval-accept.ndjson` | `model:"sonnet"`, `canUseTool` | a Bash call that really does prompt (`rm -f …`) → `accept` = `{behavior:"allow", updatedInput}`. Records the callback's full argument set incl. `suggestions`. |
-| 4a | `04a-bash-approval-decline.ndjson` | same | `decline` = `{behavior:"deny", message:"User declined tool execution."}` |
-| 4b | `04b-bash-approval-cancel.ndjson` | same | `cancel` = `{behavior:"deny", message:"User cancelled tool execution."}` — byte-identical wire shape to 4a apart from the message, plus the `permission_denials` row on the `result`. |
-| 5 | `05-accept-for-session.ndjson` | same, 2 turns | `acceptForSession`: allow **+** `updatedPermissions` rescoped to `destination:"session"` (T3's `toSessionPermissionUpdates`), then the same tool in a second turn with **no** second prompt. The sandbox also had a slow (3 s) `PreToolUse` hook for this run. |
-| 6 | `06-ask-user-question.ndjson` | `model:"sonnet"`, `canUseTool` | `AskUserQuestion` intercepted before any approval logic; answered by **question text**, and the CLI's echo proving the key is the text. |
 | 7 | `07-subagent-task.ndjson` | `model:"sonnet"`, 2 turns | a subagent (`system/task_started` → `task_progress` → `task_updated` → `task_notification`, `parent_tool_use_id` on the nested messages) and a **background** Bash task (`system/background_tasks_changed`). |
 | 8 | `08-todowrite.ndjson` | `model:"sonnet"` | the step-list tools — which are **`TaskCreate` / `TaskUpdate`**, not `TodoWrite`. See observation **3**. |
 | 9 | `09-plan-mode-exitplanmode-denied.ndjson` | `model:"sonnet"`, `setPermissionMode("plan")` before the turn, back to `"default"` after | plan mode; `ExitPlanMode` arriving through `canUseTool` and being denied with T3's fixed message; the plan markdown **and** the new `planFilePath`. |
@@ -110,13 +109,12 @@ plus `CLAUDE_CODE_AUTO_CONNECT_IDE=0`, `CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL=1`,
 | 12 | `12-compact.ndjson` | `model:"sonnet"`, 3 turns | `/compact` sent as an ordinary streamed turn: `system/compact_boundary` with `compact_metadata`, and the odd `result` shape a compaction turn produces. |
 | 13 | `13-probe-never-yielding.ndjson` | `persistSession:false`, `abortController`, `settings:{disableAllHooks:true}`, `allowedTools:[]`, `mcpServers:{}`, `strictMcpConfig:true`, `stderr:()=>{}` — **no `includePartialMessages`, no `canUseTool`**, and a prompt generator that never yields | the capability probe. `initializationResult`, `supportedCommands` (43), `supportedModels` (5), `supportedAgents` (5), `mcpServerStatus`, the usage API and `getContextUsage`. **No API call is made, so this one is free to re-capture.** |
 | 14a | `14a-accept-edits-edit.ndjson` | `permissionMode:"acceptEdits"` | a `Write` plus a mutating `Bash` under accept-edits: **zero** `canUseTool` calls. |
-| 14b | `14b-bypass-permissions-edit.ndjson` | `permissionMode:"bypassPermissions"` + `allowDangerouslySkipPermissions:true` | the same two tools under full access: also zero calls. |
 | 15 | `15-rate-limits-and-usage.ndjson` | `model:"haiku"` | the `rate_limit_event` the CLI emits unprompted, plus the two read-only usage APIs mid-session. No quota was deliberately consumed. |
 | 16 | `16-errors.ndjson` | phase A `model:"claude-does-not-exist-9"`; phase B `model:"sonnet"` | an unknown model (a `result` that says `subtype:"success"` while `is_error:true`), and two failing tools (`Bash` exiting 1, `Read` on a missing file). |
 
 ## What the capture contains, in aggregate
 
-SDK message `type`/`subtype` values observed across all 18 files:
+SDK message `type`/`subtype` values observed across the original 18 capture scenarios:
 
 ```
 assistant                          command_lifecycle              rate_limit_event
@@ -140,7 +138,7 @@ Tool names seen: `Agent`, `AskUserQuestion`, `Bash`, `ExitPlanMode`, `Read`, `Ta
 
 Every place reality differs from spec §4.5 (Claude) / §4.4 / §4.2 or from T3's
 `apps/server/src/provider/Layers/ClaudeAdapter.ts`. **This is the part the adapter author must
-read.** Frames are quoted from the committed fixtures.
+read.** Frames are quoted from the capture session; retained raw fixtures are listed above.
 
 ### 1. `canUseTool` is *not* the whole approval surface — the CLI gates first, silently
 
@@ -174,7 +172,7 @@ Spec §4.4 maps Accept-edits to `permissionMode: acceptEdits` and expects only *
 auto-accepted. In this CLI, `14a-accept-edits-edit.ndjson` runs **both** a `Write` **and**
 `Bash {"command":"rm -f scratch-tmp.txt"}` — the exact command that prompts in `default` mode —
 and records `{"note":"finished","canUseToolCalls":0,"mode":"acceptEdits"}`.
-`14b-bypass-permissions-edit.ndjson` is the same: `canUseToolCalls: 0`.
+The full-access capture (14b) is the same: `canUseToolCalls: 0`.
 
 So of the four `RuntimeMode`s, only **`approval-required`** ever produces an approval card through
 `canUseTool`, and even then only for what the CLI chooses to ask about (observation 1). The
@@ -278,7 +276,7 @@ Other notes on this group:
 
 ### 5. `system/init` is emitted **once per turn**, not once per session
 
-Every multi-turn fixture shows it. `05-accept-for-session.ndjson` (2 turns) contains two
+Every multi-turn fixture shows it. The session-approval capture (05, 2 turns) contains two
 `system/init` messages; `12-compact.ndjson` (3 turns) contains four — one per turn plus one
 immediately after the compaction boundary; `07-subagent-task.ndjson` two.
 
@@ -393,7 +391,7 @@ Spec §4.5: *"There are no SDK hooks — the `hook.*` events are the user's own 
 reported back as `system` messages."* Not in 2.1.210.
 
 The sandbox's `.claude/settings.json` configured a `PreToolUse` hook on `Bash` that wrote a marker
-file and slept 3 s. In `05-accept-for-session.ndjson` the hook demonstrably ran — the marker file
+file and slept 3 s. In the session-approval capture (05) the hook demonstrably ran — the marker file
 appeared, and the gap between the `tool_use` at `t=2924` and the `canUseTool` call at `t=5967` is
 the hook's 3 s — yet the file contains **zero** `hook_started`, `hook_progress` or `hook_response`
 messages. Same in `04a` with a fast hook.
@@ -479,7 +477,7 @@ T3 reads `signal`, `suggestions` and `toolUseID` only.
 - `suggestions` confirms §4.3's rationale: the first suggestion really does target
   `destination: "localSettings"`, so echoing it verbatim for `acceptForSession` would write a
   permanent rule into `.claude/settings.local.json`. The rescope to `"session"` is load-bearing.
-  The capture also verifies it **works**: `05-accept-for-session.ndjson` records
+  The capture also verifies it **works**: the session-approval capture (05) records
   `canUseToolCalls: 1` after two turns that each ran the same `rm -f`.
 
 `AskUserQuestion` and `ExitPlanMode` arrive with **no `suggestions` key at all** (`06`, `09`), so
@@ -487,7 +485,7 @@ T3 reads `signal`, `suggestions` and `toolUseID` only.
 
 ### 12. `AskUserQuestion`: the "id is the question text" rule is confirmed, and the option shape is fixed
 
-`06-ask-user-question.ndjson`. The tool input:
+Question capture 06 recorded this tool input:
 
 ```json
 {"questions":[{"question":"Which file should I read?","header":"File choice","options":[{"label":"a.txt","description":"Read a.txt and report its first word"},{"label":"b.txt","description":"Read b.txt and report its first word"}],"multiSelect":false}]}

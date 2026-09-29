@@ -35,9 +35,8 @@ export {
 
 export {
   deriveAgentSpawnSummary,
-  type AgentSpawnSummary,
-  type AgentSpawnTone
-} from "./spawn-summary";
+  type AgentSpawnSummary
+} from "../../../lib/agent-chat/roster.logic";
 
 export {
   TOOL_PREFIX,

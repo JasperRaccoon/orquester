@@ -61,7 +61,7 @@ export interface ConfigState {
  * action string is `{"*": action}`, and an MCP entry's newer `disabled`
  * flag is lowered to `enabled: !disabled`.
  */
-export function decodeConfigFile(value: JsonObject): JsonObject {
+function decodeConfigFile(value: JsonObject): JsonObject {
   let out = value;
   if (typeof out.permission === "string") {
     out = { ...out, permission: { "*": out.permission } };
@@ -82,7 +82,7 @@ export function decodeConfigFile(value: JsonObject): JsonObject {
 }
 
 /** remeda's `mergeDeep`, as OpenCode merges its config files: objects key by key, anything else replaced. */
-export function mergeDeep(target: JsonObject, source: JsonObject): JsonObject {
+function mergeDeep(target: JsonObject, source: JsonObject): JsonObject {
   const out: JsonObject = { ...target };
   for (const [key, value] of Object.entries(source)) {
     const existing = out[key];
@@ -92,7 +92,7 @@ export function mergeDeep(target: JsonObject, source: JsonObject): JsonObject {
 }
 
 /** Merges already-parsed file values in load order (each decoded first). */
-export function mergeConfigValues(values: readonly JsonObject[]): JsonObject {
+function mergeConfigValues(values: readonly JsonObject[]): JsonObject {
   let merged: JsonObject = {};
   for (const value of values) {
     merged = mergeDeep(merged, decodeConfigFile(value));
@@ -173,7 +173,7 @@ interface PermissionRule {
 }
 
 /** OpenCode's wildcard: `*` any run, `?` one character, a trailing ` *` also matches nothing. */
-export function wildcardMatch(value: string, pattern: string): boolean {
+function wildcardMatch(value: string, pattern: string): boolean {
   const subject = value.replaceAll("\\", "/");
   let source = pattern
     .replaceAll("\\", "/")
@@ -244,7 +244,7 @@ export function agentsOverridingSkill(merged: JsonObject, name: string): string[
  * the last matching rule winning. `extra` (an agent's own rules) goes after
  * them; without it agent-specific overrides are not included.
  */
-export function evaluatePermission(merged: JsonObject, permission: string, pattern: string, extra: JsonObject = {}): string {
+function evaluatePermission(merged: JsonObject, permission: string, pattern: string, extra: JsonObject = {}): string {
   const rules: PermissionRule[] = [
     { permission: "*", pattern: "*", action: "allow" },
     ...rulesFromConfig(permissionConfig(merged)),

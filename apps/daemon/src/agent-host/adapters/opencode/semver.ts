@@ -11,7 +11,7 @@
  * case a lexicographic compare gets wrong.
  */
 
-export interface Semver {
+interface Semver {
   major: number;
   minor: number;
   patch: number;
@@ -36,7 +36,7 @@ export function parseSemver(value: string | null | undefined): Semver | null {
 }
 
 /** `-1 | 0 | 1`, or `null` when either side is unparseable. */
-export function compareSemver(left: string, right: string): number | null {
+function compareSemver(left: string, right: string): number | null {
   const a = parseSemver(left);
   const b = parseSemver(right);
   if (a === null || b === null) {
@@ -60,9 +60,6 @@ export function compareSemver(left: string, right: string): number | null {
  * allowed to fail on the first unrecognised frame (§10).
  */
 export const MINIMUM_OPENCODE_VERSION = "1.14.19";
-
-/** The version the committed fixtures were captured from (§9 provenance). */
-export const VALIDATED_OPENCODE_VERSION = "1.18.5";
 
 export function meetsMinimumOpenCodeVersion(version: string | null | undefined): boolean {
   if (typeof version !== "string") {

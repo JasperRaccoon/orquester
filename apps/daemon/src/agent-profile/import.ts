@@ -56,13 +56,13 @@ import { extractZip } from "./import/zip.ts";
 import { SKILL_FILE, assertInside, parseMarkdownDocument, redactCliOutput, serializeMarkdownDocument } from "./infra/index.ts";
 
 export type { GitCloneFn } from "./import/git-clone.ts";
-export { gitClone, gitCloneArgs } from "./import/git-clone.ts";
+export { gitClone } from "./import/git-clone.ts";
 export { type GitImportSource, parseGitImportUrl } from "./import/git-url.ts";
 
 /** How long a scan's tree waits for its picks. */
-export const IMPORT_TTL_MS = 15 * 60_000;
+const IMPORT_TTL_MS = 15 * 60_000;
 
-export interface ProfileImportLimits {
+interface ProfileImportLimits {
   /** Deadline of a `git clone`. */
   cloneTimeoutMs: number;
   /** Largest checkout (sum of file sizes, `.git` excluded). */
@@ -77,7 +77,7 @@ export interface ProfileImportLimits {
   maxOpenImports: number;
 }
 
-export const DEFAULT_IMPORT_LIMITS: ProfileImportLimits = {
+const DEFAULT_IMPORT_LIMITS: ProfileImportLimits = {
   cloneTimeoutMs: 60_000,
   maxCloneBytes: 50 * 1024 * 1024,
   maxZipEntries: 5000,
@@ -153,7 +153,7 @@ export class ProfileImportStore implements ProfileImports {
   constructor(options: ProfileImportStoreOptions) {
     this.dir = options.dir;
     this.existing = options.existing;
-    this.clone = options.clone ?? ((url, ref, dest, o) => gitClone(url, ref, dest, o));
+    this.clone = options.clone ?? gitClone;
     this.now = options.now ?? (() => new Date());
     this.ttlMs = options.ttlMs ?? IMPORT_TTL_MS;
     this.limits = { ...DEFAULT_IMPORT_LIMITS, ...options.limits };

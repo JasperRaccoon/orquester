@@ -12,7 +12,7 @@ import type {
   WriteProfileInstructionsRequest
 } from "@orquester/api";
 
-export interface InstructionsIo {
+interface InstructionsIo {
   read(agent: AgentProfileAgentId): Promise<ProfileInstructionsResponse>;
   write(agent: AgentProfileAgentId, request: WriteProfileInstructionsRequest): Promise<ProfileMutationResponse>;
 }

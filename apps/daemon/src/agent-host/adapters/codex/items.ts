@@ -32,12 +32,6 @@ export interface ClassifiedItem {
    * event as its `truncated` (§5.6), so no reader takes the head for the whole.
    */
   truncated?: true;
-  /**
-   * True when the item must not become a timeline row of its own: it is the
-   * message/reasoning/plan stream, already carried by `content.delta` and the
-   * message path, or a review marker that nothing renders (§4.2).
-   */
-  timelineBypass: boolean;
   /** Set when the type string is not in this build's catalogue (§10). */
   unknownType?: string;
 }
@@ -57,16 +51,15 @@ export interface ClassifiedItem {
 export function classifyItem(item: CodexThreadItem): ClassifiedItem {
   switch (item.type) {
     case "userMessage":
-      return { itemType: "user_message", timelineBypass: true };
+      return { itemType: "user_message" };
 
     case "hookPrompt":
       // A hook's injected prompt fragment — provider bookkeeping, never a row.
-      return { itemType: "unknown", timelineBypass: true };
+      return { itemType: "unknown" };
 
     case "agentMessage":
       return {
         itemType: "assistant_message",
-        timelineBypass: true,
         ...(item.phase !== null ? { detail: item.phase } : {}),
         data: {
           phase: item.phase,
@@ -79,18 +72,17 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
       return {
         itemType: "dynamic_tool_call",
         title: item.name,
-        timelineBypass: false,
         data: { name: item.name, namespace: item.namespace }
       };
 
     case "plan":
-      return { itemType: "plan", timelineBypass: true, data: { text: item.text } };
+      return { itemType: "plan", data: { text: item.text } };
 
     case "reasoning":
       // Observed with EMPTY summary and content on this CLI even with
       // `-c model_reasoning_summary=detailed`: a reasoning row must tolerate
       // having no text ever (fixtures README observation 18).
-      return { itemType: "reasoning", timelineBypass: true };
+      return { itemType: "reasoning" };
 
     case "commandExecution": {
       // The output arrives whole in `aggregatedOutput`, and for a command that
@@ -107,7 +99,6 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
         title: item.command,
         ...(item.aggregatedOutput !== null ? { detail: item.aggregatedOutput } : {}),
         ...(output?.truncated === true ? { truncated: true } : {}),
-        timelineBypass: false,
         data: {
           command: item.command,
           cwd: item.cwd,
@@ -125,7 +116,6 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
         itemType: "file_change",
         status: patchStatus(item.status),
         title: fileChangeTitle(item.changes),
-        timelineBypass: false,
         data: { changes: item.changes }
       };
 
@@ -135,7 +125,6 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
         status: mcpStatus(item.status),
         title: `${item.server}: ${item.tool}`,
         ...(item.error !== null ? { detail: item.error.message } : {}),
-        timelineBypass: false,
         data: {
           server: item.server,
           tool: item.tool,
@@ -150,7 +139,6 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
         itemType: "dynamic_tool_call",
         status: dynamicStatus(item.status),
         title: item.namespace !== null ? `${item.namespace}: ${item.tool}` : item.tool,
-        timelineBypass: false,
         data: { tool: item.tool, namespace: item.namespace, arguments: item.arguments }
       };
 
@@ -160,7 +148,6 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
         status: collabStatus(item.status),
         title: item.tool,
         ...(item.prompt !== null ? { detail: item.prompt } : {}),
-        timelineBypass: false,
         data: {
           tool: item.tool,
           senderThreadId: item.senderThreadId,
@@ -176,7 +163,6 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
       // forever (§4.5 "Trap"). It is a task signal, never a timeline row.
       return {
         itemType: "unknown",
-        timelineBypass: true,
         data: {
           kind: item.kind,
           agentThreadId: item.agentThreadId,
@@ -188,7 +174,6 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
       return {
         itemType: "web_search",
         title: item.query,
-        timelineBypass: false,
         data: { query: item.query, action: item.action }
       };
 
@@ -196,7 +181,6 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
       return {
         itemType: "image_view",
         title: item.path,
-        timelineBypass: false,
         data: { path: item.path }
       };
 
@@ -204,14 +188,12 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
       return {
         itemType: "unknown",
         title: `sleep ${item.durationMs}ms`,
-        timelineBypass: true,
         data: { durationMs: item.durationMs }
       };
 
     case "imageGeneration":
       return {
         itemType: "unknown",
-        timelineBypass: true,
         ...(item.revisedPrompt !== null ? { title: item.revisedPrompt } : {}),
         data: { status: item.status }
       };
@@ -219,15 +201,15 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
     case "enteredReviewMode":
       // Classified and then dropped: the two review types stay in the closed
       // enum exactly as in T3, but nothing starts a review here (§4.2, §2).
-      return { itemType: "review_entered", timelineBypass: true };
+      return { itemType: "review_entered" };
 
     case "exitedReviewMode":
-      return { itemType: "review_exited", timelineBypass: true };
+      return { itemType: "review_exited" };
 
     case "contextCompaction":
       // The ONLY signal that compaction happened: `thread/compacted` never
       // fires on this CLI (fixtures README observation 8).
-      return { itemType: "context_compaction", timelineBypass: true };
+      return { itemType: "context_compaction" };
 
     default: {
       // `satisfies never` proves the 19 generated arms are all handled; a new
@@ -237,7 +219,6 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
       const type = (item as { type?: unknown }).type;
       return {
         itemType: "unknown",
-        timelineBypass: false,
         unknownType: typeof type === "string" ? type : "(no type)"
       };
     }

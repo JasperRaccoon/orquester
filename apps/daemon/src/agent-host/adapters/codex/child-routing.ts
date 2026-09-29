@@ -29,7 +29,7 @@
  * - `drop` — child chatter that would rewrite parent state if forwarded.
  * - `parent` — parent-owned or unknown; forwarded unchanged.
  */
-export type CodexChildNotificationRoute = "agent-event" | "parent" | "drop";
+type CodexChildNotificationRoute = "agent-event" | "parent" | "drop";
 
 /**
  * The child's own lifecycle, and the rows of its own calls.

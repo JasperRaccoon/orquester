@@ -255,7 +255,7 @@ function goalOf(frame: GoalFrame, same: AgentGoal | null, lastCheck: string | un
 // The tracker
 // ---------------------------------------------------------------------------
 
-export interface GrokGoalTrackerOptions {
+interface GrokGoalTrackerOptions {
   /** The goal the thread shows (`StartSessionInput.knownGoal`); absent/`null`: none. */
   readonly knownGoal?: AgentGoal | null;
   now(): number;

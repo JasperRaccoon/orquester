@@ -4,7 +4,6 @@ import {
   mkdir,
   writeFile,
   readFile,
-  readFile as fsReadFile,
   rm,
   chmod,
   symlink,
@@ -60,7 +59,7 @@ export type ManagedAgent = "claude" | "codex" | "grok";
 
 const CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json", grok: "auth.json" } as const;
 
-export interface AgentAccountsOptions {
+interface AgentAccountsOptions {
   indexFile: string;
   accountsDir: string;
   /** Daemon HOME — the source of the shared Claude/Codex config seeded into homes. */
@@ -524,14 +523,14 @@ export class AgentAccountsService {
   private async seedClaudeConfig(home: string): Promise<void> {
     let sys: any;
     try {
-      sys = JSON.parse(await fsReadFile(this.systemClaudeConfigFile(), "utf8"));
+      sys = JSON.parse(await readFile(this.systemClaudeConfigFile(), "utf8"));
     } catch {
       return; // no system config to seed from
     }
     const homeFile = join(home, ".claude.json");
     let existing: any = null;
     try {
-      existing = JSON.parse(await fsReadFile(homeFile, "utf8"));
+      existing = JSON.parse(await readFile(homeFile, "utf8"));
     } catch {
       /* first seed */
     }
@@ -656,16 +655,16 @@ export class AgentAccountsService {
     try {
       const home = this.homePath(agent, id);
       if (agent === "claude") {
-        const creds = JSON.parse(await fsReadFile(join(home, ".credentials.json"), "utf8"));
+        const creds = JSON.parse(await readFile(join(home, ".credentials.json"), "utf8"));
         const exp = creds?.claudeAiOauth?.expiresAt;
         return typeof exp === "number" ? exp : null;
       }
       if (agent === "grok") {
-        const entry = grokAuthEntry(JSON.parse(await fsReadFile(join(home, "auth.json"), "utf8")));
+        const entry = grokAuthEntry(JSON.parse(await readFile(join(home, "auth.json"), "utf8")));
         const at = typeof entry?.expires_at === "string" ? Date.parse(entry.expires_at) : NaN;
         return Number.isFinite(at) ? at : null;
       }
-      const auth = JSON.parse(await fsReadFile(join(home, "auth.json"), "utf8"));
+      const auth = JSON.parse(await readFile(join(home, "auth.json"), "utf8"));
       const claims = typeof auth?.tokens?.access_token === "string" ? decodeJwtPayload(auth.tokens.access_token) : null;
       const exp = claims?.exp;
       return typeof exp === "number" ? exp * 1000 : null;
@@ -687,7 +686,7 @@ export class AgentAccountsService {
       const credsPath = join(home, CRED_FILENAME[agent]);
       let creds: any;
       try {
-        creds = JSON.parse(await fsReadFile(credsPath, "utf8"));
+        creds = JSON.parse(await readFile(credsPath, "utf8"));
       } catch {
         return;
       }
@@ -756,7 +755,7 @@ export class AgentAccountsService {
     }
   }
 
-  async persist(): Promise<void> {
+  private async persist(): Promise<void> {
     await mkdir(dirname(this.opts.indexFile), { recursive: true });
     await writeFile(this.opts.indexFile, JSON.stringify(this.index, null, 2), { mode: 0o600 });
   }

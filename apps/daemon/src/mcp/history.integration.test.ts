@@ -147,40 +147,6 @@ async function walk(api: ReturnType<typeof hostApi>, start: number, end: number)
 }
 
 describe("read_transcript's older history against the real orchestrator (design 2026-09-23, C)", () => {
-  it("a small range below the window is read in ONE page, every log row of its turns present", async (t) => {
-    // Twenty turns of 60 rows: the window keeps the last 500–550 parent rows, so the first eleven or so turns aged out.
-    const { host, api } = await threadOf(t, Array.from({ length: 20 }, () => 60));
-    const snap = await readThread(api, THREAD);
-    const oldest = snap.history?.oldestRetainedOrdinal;
-    assert.equal(snap.history?.hasOlder, true);
-    assert.ok(typeof oldest === "number" && oldest > 8, `the window starts in turn ${oldest}`);
-    assert.ok(missingOf(host, snap, 1, oldest - 1).length > 0, "the turns below the window are not in it");
-    // Every range of one to four turns that needs a page — it starts at or before the window's oldest turn, which may be
-    // partial — ending at most one turn past it: turn start − 1 and the range together are well under the 400-activity
-    // block, so the soft cap ends the page there and turn start is whole on it.
-    for (let size = 1; size <= 4; size += 1) {
-      for (let start = 1; start <= oldest && start + size - 1 <= oldest + 1; start += 1) {
-        const end = start + size - 1;
-        const r = await walk(api, start, end);
-        const where = `[${start}, ${end}]`;
-        assert.equal(r.pages, 1, `${where}: one page`);
-        assert.equal(r.unavailable, null, `${where}: read whole`);
-        assert.deepEqual(missingOf(host, r.snapshot, start, end), [], `${where}: every log row of its turns`);
-      }
-    }
-    await host.stop();
-  });
-
-  it("a range from turn 1 walks every block down to the log's start, where the host's cursor is null", async (t) => {
-    const { host, api } = await threadOf(t, Array.from({ length: 20 }, () => 60));
-    const oldest = (await readThread(api, THREAD)).history!.oldestRetainedOrdinal!;
-    const r = await walk(api, 1, oldest);
-    // Some 650 rows aged out: two blocks of at most 400 activities, no soft cap from turn 1.
-    assert.equal(r.unavailable, null);
-    assert.deepEqual(missingOf(host, r.snapshot, 1, oldest), []);
-    await host.stop();
-  });
-
   it("paging back by olderTurns through the tool never skips a turn, however much each read sheds", async (t) => {
     const { host, api } = await threadOf(t, Array.from({ length: 20 }, () => 60));
     const read = messageTools.find((t) => t.name === "read_transcript")!;

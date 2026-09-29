@@ -7,7 +7,7 @@
  * `GROK.md` gets a "Move GROK.md into AGENTS.md".
  */
 
-import React, { useCallback, useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useState } from "react";
 
 import type { ProfileInstructionsInfo, ProfileInstructionsResponse } from "@orquester/api";
 
@@ -24,32 +24,27 @@ import { publishSaved } from "./saved";
 import { SubmitStatus, useProfileSubmit } from "./use-submit";
 
 /** A move refused because the file changed on disk: it was re-read, and can be moved again. */
-export const MIGRATE_CONFLICT_MESSAGE = "The file changed on disk and was reloaded — move it again.";
+const MIGRATE_CONFLICT_MESSAGE = "The file changed on disk and was reloaded — move it again.";
 
-export type InstructionsLoad =
+type InstructionsLoad =
   | { status: "loading" }
   | { status: "error"; message: string }
   | { status: "loaded"; response: ProfileInstructionsResponse };
 
-export const InstructionsEditor: React.FC<{ initial?: { load: InstructionsLoad; text?: string } }> = ({ initial }) => {
+export const InstructionsEditor: React.FC = () => {
   const env = useEditorEnv();
   const { agent, api } = env;
-  const [load, setLoad] = useState<InstructionsLoad>(initial?.load ?? { status: "loading" });
-  const [text, setText] = useState(initial?.text ?? (initial?.load.status === "loaded" ? initial.load.response.text : ""));
+  const [load, setLoad] = useState<InstructionsLoad>({ status: "loading" });
+  const [text, setText] = useState("");
   const [attempt, setAttempt] = useState(0);
   const [migrating, setMigrating] = useState(false);
   const [migrateError, setMigrateError] = useState<string | null>(null);
   const submit = useProfileSubmit();
-  const preset = useRef(initial !== undefined);
   const loaded = load.status === "loaded" ? load.response : null;
   const dirty = loaded !== null && text !== loaded.text;
   useReportDirty(dirty);
 
   useEffect(() => {
-    if (preset.current) {
-      preset.current = false;
-      return;
-    }
     const controller = new AbortController();
     setLoad({ status: "loading" });
     api.getAgentProfileInstructions(agent, controller.signal).then(
@@ -167,7 +162,7 @@ function readInstructions(raw: unknown): ProfileInstructionsResponse {
   return { text: typeof record.text === "string" ? record.text : "", info: sanitizeInstructions(record.info) };
 }
 
-export const InstructionsConflict: React.FC<{ message: string; onReload: () => void; onOverwrite: () => void }> = ({
+const InstructionsConflict: React.FC<{ message: string; onReload: () => void; onOverwrite: () => void }> = ({
   message,
   onReload,
   onOverwrite
@@ -188,7 +183,7 @@ export const InstructionsConflict: React.FC<{ message: string; onReload: () => v
   </Banner>
 );
 
-export const InstructionsBody: React.FC<{
+const InstructionsBody: React.FC<{
   info: ProfileInstructionsInfo;
   text: string;
   onChange: (text: string) => void;

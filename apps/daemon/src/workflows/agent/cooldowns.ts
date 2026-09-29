@@ -54,7 +54,7 @@ export function createCooldownStore(stateStore: WorkflowStateStore, clock: Pick<
  *     same key (`strikes`: 1 h, 2 h, then 4 h at most), so a wait-for-reset on an account that
  *     never names its reset does not wake every hour to hit the same limit again.
  */
-export function cooldownUntil(input: {
+function cooldownUntil(input: {
   resetsAt?: string;
   usageResetAt?: string;
   now: Date;

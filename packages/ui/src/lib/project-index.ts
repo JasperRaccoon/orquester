@@ -1,5 +1,4 @@
 import { useSyncExternalStore } from "react";
-import { workspaceService } from "../services";
 import type { ApiClient } from "./api-client";
 import type { ProjectSummary, WorkspaceSummary } from "../types";
 
@@ -83,7 +82,7 @@ export async function refreshProjectIndex(
     workspaces
       .filter((workspace) => !workspace.isArchived)
       .map((workspace) =>
-        workspaceService.listProjects(api, workspace.name, signal).catch(() => null)
+        api.listProjects(workspace.name, signal).catch(() => null)
       )
   );
   const visible = new Map<string, ProjectSummary>();

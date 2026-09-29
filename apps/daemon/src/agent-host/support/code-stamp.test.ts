@@ -3,7 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
-import { codeStampsDiffer, readCodeStamp } from "./code-stamp.ts";
+import { readCodeStamp } from "./code-stamp.ts";
 
 const SHA_A = "a".repeat(40);
 const SHA_B = "b".repeat(40);
@@ -64,15 +64,5 @@ describe("readCodeStamp", () => {
       assert.equal(readCodeStamp(root), null);
       assert.equal(readCodeStamp(join(root, "missing")), null);
     });
-  });
-});
-
-describe("codeStampsDiffer", () => {
-  it("only two known, different stamps differ", () => {
-    assert.equal(codeStampsDiffer(SHA_A, SHA_B), true);
-    assert.equal(codeStampsDiffer(SHA_A, SHA_A), false);
-    assert.equal(codeStampsDiffer(null, SHA_A), false);
-    assert.equal(codeStampsDiffer(SHA_A, undefined), false);
-    assert.equal(codeStampsDiffer(null, null), false);
   });
 });

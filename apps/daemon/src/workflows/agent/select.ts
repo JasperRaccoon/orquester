@@ -56,8 +56,6 @@ export interface SelectAccountInput {
   now: Date;
   /** `cooldownSubject` keys already tried in this block (`cooldownKey`). */
   exclude?: Set<string>;
-  /** Start at this chain entry (0-based). */
-  fromChainIndex?: number;
   /** Consider only this chain entry (the in-session account switch). */
   onlyChainIndex?: number;
 }
@@ -66,7 +64,7 @@ type ResolvedPolicy = Required<Pick<AccountPolicy, "strategy" | "includeSystem" 
   Pick<AccountPolicy, "accounts" | "maxSessionPct" | "maxWeeklyPct" | "scoped">;
 
 /** Fills the schema's defaults, for a chain entry that did not go through the zod parse (a preview body). */
-export function resolvePolicy(policy: Partial<AccountPolicy> | undefined): ResolvedPolicy {
+function resolvePolicy(policy: Partial<AccountPolicy> | undefined): ResolvedPolicy {
   const p = policy ?? {};
   return {
     strategy: p.strategy ?? "least-used",
@@ -85,7 +83,7 @@ export function resolvePolicy(policy: Partial<AccountPolicy> | undefined): Resol
 // Usage join
 // ---------------------------------------------------------------------------
 
-export interface UsageReading {
+interface UsageReading {
   known: boolean;
   /** Why the usage is unknown, e.g. "no usage reading", "usage reading is 34m old". */
   unknownWhy?: string;
@@ -104,7 +102,7 @@ type UsageSource = Pick<UsageAccount | AgentUsage, "available" | "stale" | "sess
  * login's reading then). `hasManagedAccounts` defaults to what the usage row says (the worst-account
  * aggregate is built only when managed accounts exist).
  */
-export function usageSourceFor(usage: UsageResponse, family: string, accountId: string, hasManagedAccounts?: boolean): UsageSource | undefined {
+function usageSourceFor(usage: UsageResponse, family: string, accountId: string, hasManagedAccounts?: boolean): UsageSource | undefined {
   const row = usage.agents.find((agent) => agent.id === family);
   if (!row) return undefined;
   if (accountId === SYSTEM_ACCOUNT_ID) {
@@ -115,7 +113,7 @@ export function usageSourceFor(usage: UsageResponse, family: string, accountId: 
   return row.accounts?.find((account) => account.id === accountId);
 }
 
-export function readUsage(
+function readUsage(
   usage: UsageResponse,
   family: string,
   accountId: string,
@@ -187,7 +185,7 @@ const pct = (value: number): string => `${Math.round(value)}%`;
 const sameLabel = (a: string, b: string): boolean => a.trim().toLowerCase() === b.trim().toLowerCase();
 
 /** Every threshold a known reading breaks for this model (empty = within policy). */
-export function thresholdBlockers(reading: UsageReading, policy: ResolvedPolicy, model: string): Blocker[] {
+function thresholdBlockers(reading: UsageReading, policy: ResolvedPolicy, model: string): Blocker[] {
   const blockers: Blocker[] = [];
   const check = (name: string, window: UsageWindow | null, max: number | undefined): void => {
     if (!window) return;
@@ -230,7 +228,7 @@ function freedAt(blockers: Blocker[]): number | undefined {
 // One chain entry
 // ---------------------------------------------------------------------------
 
-export interface RankedCandidate {
+interface RankedCandidate {
   accountId: string;
   label?: string;
   /** The key family (`cooldownSubject(...).family`): the account family, or the refId when accountless. */
@@ -242,7 +240,7 @@ export interface RankedCandidate {
   reason: string;
 }
 
-export interface ChainEntryEvaluation {
+interface ChainEntryEvaluation {
   chainIndex: number;
   entry: AgentChainEntry;
   family: string;
@@ -261,7 +259,7 @@ interface Candidate {
   order: number;
 }
 
-export function rankChainEntry(input: SelectAccountInput, chainIndex: number): ChainEntryEvaluation {
+function rankChainEntry(input: SelectAccountInput, chainIndex: number): ChainEntryEvaluation {
   const entry = input.chain[chainIndex]!;
   const policy = resolvePolicy(entry.accounts);
   const now = input.now;
@@ -436,7 +434,7 @@ export function selectAccount(input: SelectAccountInput): AccountSelectionDecisi
   if (input.onlyChainIndex !== undefined) {
     if (input.onlyChainIndex >= 0 && input.onlyChainIndex < input.chain.length) indices.push(input.onlyChainIndex);
   } else {
-    for (let i = Math.max(0, input.fromChainIndex ?? 0); i < input.chain.length; i++) indices.push(i);
+    for (let i = 0; i < input.chain.length; i++) indices.push(i);
   }
   const skipped: AccountSkip[] = [];
   let earliest: number | undefined;
@@ -481,16 +479,6 @@ export function selectAccount(input: SelectAccountInput): AccountSelectionDecisi
     skipped,
     ...(earliest !== undefined ? { earliestResetAt: new Date(earliest).toISOString() } : {})
   };
-}
-
-/**
- * The next eligible account of the SAME chain entry — the in-session account switch of §5.4 step 3
- * (same registry entry, same model; the thread is re-pointed, not replaced). `input.exclude` should
- * hold the account that just hit its limit (and every one tried before it).
- */
-export function sameFamilyAlternatives(input: SelectAccountInput, currentChainIndex: number): AccountSelectionDecision {
-  const { fromChainIndex: _from, ...rest } = input;
-  return selectAccount({ ...rest, onlyChainIndex: currentChainIndex });
 }
 
 // ---------------------------------------------------------------------------

@@ -1,7 +1,6 @@
 /**
  * Mounted once by the app shell. It
  *
- * - plugs the real run view into every editor tab (`registerWorkflowRunsMode`);
  * - opens a workflow run asked for from anywhere (a chat tab's Workflow chip,
  *   through `lib/workflows/open-bridge.ts`) as the workflow's editor tab in
  *   Runs mode — in the open project, else the workflow's own;
@@ -26,10 +25,6 @@ import { markWorkflowRunViewed } from "../../lib/workflows/notifications";
 import { showRunInWorkflowTabs, subscribeOpenWorkflowRun } from "../../lib/workflows/open-bridge";
 import { loadWorkflows, workflowsStore } from "../../lib/workflows/store";
 import { useAppStore } from "../../store/app";
-import { renderWorkflowRunsMode } from "./RunsMode";
-import { registerWorkflowRunsMode } from "./WorkflowEditorTab";
-
-registerWorkflowRunsMode(renderWorkflowRunsMode);
 
 /** Open the workflow's editor tab in `projectPath` (jumping there when it is not the open one), on `runId`. */
 function openInProject(projectPath: string, link: WorkflowDeepLink, title: string | undefined): void {

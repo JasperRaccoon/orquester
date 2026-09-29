@@ -61,7 +61,7 @@ function sanitizeSource(value: unknown): ProfileItemSource {
  * first draft) is taken as a warning with no code; anything else malformed is
  * dropped.
  */
-export function sanitizeWarnings(value: unknown): ProfileItemWarning[] {
+function sanitizeWarnings(value: unknown): ProfileItemWarning[] {
   if (!Array.isArray(value)) return [];
   const warnings: ProfileItemWarning[] = [];
   for (const raw of value) {
@@ -192,7 +192,7 @@ export function sanitizeAgentProfileSnapshot(value: unknown): AgentProfileSnapsh
   return snapshot;
 }
 
-export function sanitizeAgentSummary(value: unknown): AgentProfileAgentSummary | null {
+function sanitizeAgentSummary(value: unknown): AgentProfileAgentSummary | null {
   if (!isRecord(value) || !isAgentProfileAgentId(value.agent)) return null;
   const counts: AgentProfileAgentSummary["counts"] = {};
   if (isRecord(value.counts)) {

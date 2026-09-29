@@ -49,7 +49,7 @@ test("import claude requires a label and stores subscriptionType as plan", async
   assert.equal(creds.claudeAiOauth.refreshToken, "r");
 });
 
-test("resolveLaunchEnv maps claude to CLAUDE_CONFIG_DIR + unset, codex to CODEX_HOME", async () => {
+test("resolveLaunchEnv selects Claude/Codex homes and unsets competing API credentials", async () => {
   const { svc } = await makeService();
   const claude = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t" } }), label: "L" });
   const cEnv = await svc.resolveLaunchEnv("claude", claude.id);
@@ -58,6 +58,7 @@ test("resolveLaunchEnv maps claude to CLAUDE_CONFIG_DIR + unset, codex to CODEX_
   const codex = await svc.importAccount({ content: JSON.stringify({ tokens: { access_token: "a", id_token: jwt({ email: "z@z.com" }) } }) });
   const xEnv = await svc.resolveLaunchEnv("codex", codex.id);
   assert.equal(xEnv?.env.CODEX_HOME, svc.homePath("codex", codex.id));
+  assert.deepEqual(xEnv?.unset, ["OPENAI_API_KEY"]);
 });
 
 test("resolveLaunchEnv falls back to the default account, then System(null)", async () => {
@@ -196,14 +197,6 @@ test("an account the retired model proxy owned is refreshed by the account servi
   assert.equal(auth.tokens.access_token, "NEW");
   assert.equal(auth.tokens.refresh_token, "NEWR");
   assert.equal(auth.tokens.account_id, "acc1");
-});
-
-test("resolveLaunchEnv unsets OPENAI_API_KEY for a managed Codex session", async () => {
-  const { svc } = await makeService();
-  const acct = await svc.importAccount({ content: JSON.stringify({ tokens: { access_token: "a", id_token: jwt({ email: "z@z.com" }) } }) });
-  const env = await svc.resolveLaunchEnv("codex", acct.id);
-  assert.equal(env?.env.CODEX_HOME, svc.homePath("codex", acct.id));
-  assert.deepEqual(env?.unset, ["OPENAI_API_KEY"]);
 });
 
 test("resolveLaunchEnv seeds a Claude home: onboarding, mcps, stripped identity, symlinked skills/plugins", async () => {

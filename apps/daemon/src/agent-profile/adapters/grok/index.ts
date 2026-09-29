@@ -127,7 +127,7 @@ import {
   replaceHandler,
   serializeHookFile
 } from "./hooks.ts";
-import { SecretDigester } from "../claude/mcp.ts";
+import { SecretDigester } from "../../infra/secret-digest.ts";
 import { type GrokInspect, parseGrokInspect } from "./inspect.ts";
 import { type TomlEdit, type TomlTable, editToml, getTomlPath, isTable, parseToml } from "./toml-patch.ts";
 
@@ -144,9 +144,9 @@ const TIMEOUTS = {
 } as const;
 
 /** Orquester's own status hooks: listed, locked, never written. */
-export const GROK_ORQUESTER_HOOK_FILE = "orquester.json";
+const GROK_ORQUESTER_HOOK_FILE = "orquester.json";
 /** Where hooks created from the panel go. */
-export const GROK_PROFILE_HOOK_FILE = "profile.json";
+const GROK_PROFILE_HOOK_FILE = "profile.json";
 const CONFIG_TOML = "config.toml";
 
 const ENV_KEY = /^[A-Za-z_][A-Za-z0-9_]*$/;
@@ -226,7 +226,7 @@ interface Model {
   fileErrors: ProfileFileError[];
 }
 
-export interface GrokProfileAdapterDeps {
+interface GrokProfileAdapterDeps {
   backups: ProfileBackups;
   stash: ProfileStash;
   runCli?: typeof runAgentCliOrThrow;
@@ -240,7 +240,7 @@ function message(error: unknown): string {
  * A parser's complaint without the text it quotes: TOML and JSON errors
  * echo the offending line, which can hold a secret (an MCP env value).
  */
-export function safeParseError(kind: "TOML" | "JSON", error: unknown): string {
+function safeParseError(kind: "TOML" | "JSON", error: unknown): string {
   const text = message(error);
   const at = /\((\d+), (\d+)\)/.exec(text) ?? /line (\d+) column (\d+)/i.exec(text);
   if (at !== null) {

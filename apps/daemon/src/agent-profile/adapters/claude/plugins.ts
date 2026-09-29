@@ -8,7 +8,7 @@
 import { readdir, readFile } from "node:fs/promises";
 import { join } from "node:path";
 import type { MarketplaceSource } from "@orquester/api";
-import { pathKind, readTextIfExists } from "../../infra/index.ts";
+import { readTextIfExists } from "../../infra/index.ts";
 import { isRecord, parseJsonText } from "./settings.ts";
 
 /** One user-scope record of `installed_plugins.json`. */
@@ -219,9 +219,4 @@ export async function pluginProvides(
     if (!counts[key]) delete counts[key];
   }
   return counts;
-}
-
-/** Whether the plugin's cached copy is still on disk. */
-export async function pluginCachePresent(installPath: string): Promise<boolean> {
-  return (await pathKind(installPath)) !== null;
 }

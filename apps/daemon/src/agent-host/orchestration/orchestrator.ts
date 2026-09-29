@@ -42,6 +42,7 @@ import {
   deserializeFoldState,
   encodeHistoryCursor,
   isHistoricalRuntimeEvent,
+  isPlanImplementationMessage,
   isUnfinishedGoal,
   recallablePromptText,
   SETTLED_TURN_STATES,
@@ -51,7 +52,6 @@ import {
   type AgentAdapterId,
   type AgentChatCommandName,
   type AgentChatGoalSummary,
-  type AgentChatSessionSummaryFields,
   type AgentGoal,
   type AttachmentRef,
   type ComposerContextRecord,
@@ -89,19 +89,7 @@ import {
   AGENT_CHAT_REPLAY_PAYLOAD_BUDGET_BYTES
 } from "@orquester/api/agent-chat";
 
-import type { AccountHome, ProviderUsageWindow } from "@orquester/api/agent-chat";
-
-/**
- * The prefix the client puts on the turn it sends when the user clicks
- * Implement: one spelling in `@orquester/api/agent-chat`, shared with the UI
- * and the MCP, and read back only through `isPlanImplementationMessage`.
- * Re-exported so existing imports from this module keep working.
- */
-import {
-  isPlanImplementationMessage,
-  PLAN_IMPLEMENTATION_PROMPT_PREFIX
-} from "@orquester/api/agent-chat";
-export { PLAN_IMPLEMENTATION_PROMPT_PREFIX };
+import type { AccountHome } from "@orquester/api/agent-chat";
 
 import { stat } from "node:fs/promises";
 
@@ -136,6 +124,7 @@ import {
   CheckpointTurnRangeError
 } from "../checkpoints/index.ts";
 import type { IndexedItemPosition, IndexedTurn, ThreadIndex } from "../index/index.ts";
+import type { AgentHostThreadSummary, AgentHostThreadUsageLimits } from "../server/extra-routes.ts";
 import { referencedTurnId } from "../index/turn-reference.ts";
 import { slimActivityEvent } from "../ingestion/coalesce.ts";
 import { bindingResumeCursor } from "../store/binding.ts";
@@ -194,8 +183,7 @@ import {
   blockedProviderCommandMessage,
   COMPACT_COMMAND_TEXT,
   isHostNativeCompact,
-  parseHostGoalCommand,
-  providerInputFor
+  parseHostGoalCommand
 } from "./slash.ts";
 import { createTurnWatchdog, stalledTurnMessage, type TurnWatchdog } from "./turn-watchdog.ts";
 import { checkMinimumVersion } from "./version-gate.ts";
@@ -221,13 +209,8 @@ import { isUsableConversationId, resumeCursorFor } from "./resume.ts";
 // Dependencies
 // ---------------------------------------------------------------------------
 
-export interface ResolvedLaunch {
-  adapter: AgentAdapterId;
-  home: AccountHome;
-}
-
 /** The snapshot registry, plus the change flag `agent.providers.changed` needs. */
-export type HostProviderSnapshotRegistry = ProviderSnapshotRegistry & {
+type HostProviderSnapshotRegistry = ProviderSnapshotRegistry & {
   /** §7.7: an `auth.status {error}` from a turn must reach the snapshot. */
   applyAuthStatus?(adapterId: AgentAdapterId, event: RuntimeEvent): void;
   /** Monotonic; lets the daemon notice a host-triggered change (§6.4). */
@@ -305,7 +288,7 @@ export interface OrchestratorOptions {
   index?: ThreadIndex;
 }
 
-export interface ThreadSubscription {
+interface ThreadSubscription {
   /** Stamped events, in order, exactly as they were persisted. */
   onEvents(events: DomainEvent[]): void;
 }
@@ -640,7 +623,7 @@ export interface Orchestrator {
     turnCount: number,
     options?: { ignoreWhitespace?: boolean }
   ): Promise<{ fromTurnCount: number; toTurnCount: number; diff: string } | null>;
-  summary(threadId: string): HostThreadSummary | null;
+  summary(threadId: string): AgentHostThreadSummary | null;
 
   subscribe(threadId: string, subscription: ThreadSubscription): Promise<() => void>;
 
@@ -2142,7 +2125,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     try {
       const result = await adapter.sendTurn({
         threadId: runtime.id,
-        input: providerInputFor(turn.input),
+        input: turn.input,
         // Each carries the STAT'd size; the adapter names in an
         // `Attached files:` block whatever it does not ingest natively (§4.1).
         attachments,
@@ -4516,7 +4499,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // the byte budget is measured before the replay is used. Measured on the
       // SLIMMED row, because the budget bounds what goes on the wire — sizing
       // the persisted payload would force a snapshot for a range that fits.
-      bytes += serializedSize(slimmed);
+      bytes += Buffer.byteLength(JSON.stringify(slimmed));
       if (bytes > AGENT_CHAT_REPLAY_PAYLOAD_BUDGET_BYTES) {
         return null;
       }
@@ -4629,7 +4612,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
     });
 
-  const summary = (threadId: string): HostThreadSummary | null => {
+  const summary = (threadId: string): AgentHostThreadSummary | null => {
     const runtime = runtimes.get(threadId);
     const head = runtime ? headOf(runtime) : null;
     if (!runtime || !head) return null;
@@ -4761,7 +4744,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
    * usage service reads it per account). Memory only: a reading is only as
    * good as the process that reported it, and the daemon persists its own.
    */
-  const liveUsageLimits = new Map<string, HostThreadUsageLimits>();
+  const liveUsageLimits = new Map<string, AgentHostThreadUsageLimits>();
 
   const recordLiveUsageLimits = (event: RuntimeEvent): boolean => {
     if (event.type !== "account.rate-limits.updated") return true;
@@ -5997,7 +5980,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // §3.4's bounded grace window. A `/turn` commits its message and its
     // pending turn row BEFORE the effect runs, so a host that dies in that
     // window leaves a `pending` turn with an idle head: not "orphaned" by the
-    // filter above, but `deriveLatestTurn` reports it forever and the status
+    // filter above, but the latest-turn summary reports it forever and the status
     // line shows the thread working with nothing behind it. Its settle is the
     // reconcile's first row when it writes one, and ends this orphan's running
     // turn with the pending one.
@@ -6680,29 +6663,6 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 }
 
 /**
- * The §6.4 fields plus the open requests behind two of the booleans. Declared
- * here rather than on `AgentChatSessionSummaryFields`, which is the shared
- * client-facing contract; this shape never leaves the host↔daemon socket.
- */
-export interface HostThreadSummary extends AgentChatSessionSummaryFields {
-  pendingRequests: Array<{
-    requestId: string;
-    kind: "approval" | "question";
-    title: string;
-  }>;
-  /** The thread's latest live account usage (`AgentHostThreadSummary.usageLimits`). */
-  usageLimits?: HostThreadUsageLimits | null;
-}
-
-/** Mirrors `AgentHostThreadUsageLimits` (`server/extra-routes.ts`). */
-export interface HostThreadUsageLimits {
-  observedAt: string;
-  home: "system" | "account";
-  accountId: string;
-  windows: ProviderUsageWindow[];
-}
-
-/**
  * §3.3's orphan predicate: a turn was in flight, or a continuation was
  * prepared and never sent — or an intentional stop marked a running turn that
  * the host's own teardown then settled ({@link continuesSettledTurn}). One
@@ -6734,7 +6694,7 @@ function isLiveOrphan(head: ThreadHead): boolean {
  * then reads settled, and without this the next host left the turn
  * interrupted and the marker on the head for good (final review A r1, I1).
  * The marked turn must still be the thread's LATEST turn (positional, as
- * `deriveLatestTurn` reads it — a newer turn, even one only requested, means
+ * the latest-turn summary reads it — a newer turn, even one only requested, means
  * the user moved on) and settled `interrupted`: a turn that ended on its own
  * between the mark and the teardown is not continued. And the marker must be
  * STAMPED (`markedAt`, on every marker this code writes): an older host could
@@ -7478,12 +7438,6 @@ function questionTitle(question: PendingUserInput): string {
   return text && text.length > 0 ? text : "Answer a question";
 }
 
-const sizeCache = new WeakMap<object, number>();
-
-/**
- * An event's serialized size is measured once and cached by identity, since one
- * event object is shared by every stream watching that thread (§6.3).
- */
 /**
  * Give every projected history row a time that sorts BEFORE the thread's own
  * first row (E2E R2-2).
@@ -7514,14 +7468,4 @@ function stampHistoryTimes<TEvent extends { createdAt?: string }>(
     }
     return { ...event, createdAt: new Date(anchorMs - (events.length - index)).toISOString() };
   });
-}
-
-export function serializedSize(value: object): number {
-  const cached = sizeCache.get(value);
-  if (cached !== undefined) {
-    return cached;
-  }
-  const bytes = Buffer.byteLength(JSON.stringify(value));
-  sizeCache.set(value, bytes);
-  return bytes;
 }

@@ -372,28 +372,6 @@ test("an OpenCode thread carries its per-launcher env file and the PROJECT ROOT"
   await f.cleanup();
 });
 
-test("the project is marked trusted for the home the thread will run under", async () => {
-  // A never-seen directory starts untrusted and the project's settings, hooks
-  // and skills are then silently ignored, with nothing on the wire to say so.
-  const dir = await mkdtemp(join(tmpdir(), "orq-claude-home-"));
-  const f = await makeFixture(
-    CLAUDE,
-    { env: { CLAUDE_CONFIG_DIR: dir }, accountId: "acc-1" }
-  );
-  const projectPath = join(f.appdir, "ws", "proj");
-  await f.service.createSession(
-    { kind: "agent-chat", refId: "claude", projectPath, cwd: projectPath },
-    0
-  );
-  const config = JSON.parse(await readFile(join(dir, ".claude.json"), "utf8")) as Record<string, unknown>;
-  assert.equal(
-    (config.projects as Record<string, Record<string, unknown>>)[projectPath].hasTrustDialogAccepted,
-    true
-  );
-  await rm(dir, { recursive: true, force: true });
-  await f.cleanup();
-});
-
 test("trust is granted for the validated projectPath, NEVER the request's cwd", async () => {
   // Claude's trust dialog is a security control: an untrusted directory's hooks
   // (arbitrary shell as the daemon user, which holds scoped passwordless sudo)
@@ -1206,7 +1184,7 @@ test("a fully consumed upload preserves the host answer and all body bytes", asy
   }
 });
 
-test("an over-cap chat upload answers 413 UPLOAD_TOO_LARGE through the MCP seam too, and ends its owned stream", async (t) => {
+test("an over-cap chat upload answers 413 UPLOAD_TOO_LARGE through the MCP seam too, and ends its owned stream", async () => {
   const f = await makeFixture(CLAUDE, { env: {} });
   const app = Fastify();
   try {

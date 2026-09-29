@@ -54,7 +54,6 @@ import {
   safeJson,
   summarizeToolRequest,
   titleForTool,
-  toolInputFingerprint,
   toolResultStreamKind,
   trimmedString,
   tryParseJsonRecord
@@ -181,7 +180,7 @@ interface StepListEntry {
   blockedBy: Set<string>;
 }
 
-export interface ClaudeTurnState {
+interface ClaudeTurnState {
   turnId: string;
   startedAt: string;
   /**
@@ -299,7 +298,7 @@ const BACKGROUND_SHELL_LAUNCH_RE =
 /** `Background command "…" completed (exit code 2)` — the only exit code the CLI reports. */
 const BACKGROUND_SHELL_EXIT_CODE_RE = /\(exit code\s+(-?\d+)\)/;
 
-export function parseBackgroundShellLaunch(
+function parseBackgroundShellLaunch(
   text: string
 ): { taskId: string; outputFile: string } | undefined {
   const match = BACKGROUND_SHELL_LAUNCH_RE.exec(text);
@@ -325,7 +324,7 @@ export function parseBackgroundShellLaunch(
   return { taskId, outputFile };
 }
 
-export function parseBackgroundShellExitCode(summary: unknown): number | undefined {
+function parseBackgroundShellExitCode(summary: unknown): number | undefined {
   if (typeof summary !== "string") {
     return undefined;
   }
@@ -440,7 +439,6 @@ export class ClaudeNormalizer {
 
   private threadStartedEmitted = false;
   private lastSessionState: RuntimeSessionState | undefined;
-  private lastSessionStateReason: string | undefined;
   /**
    * True between the first `status: "compacting"` frame and the status that
    * ends it (or its boundary). A latch, because the CLI sends the same frame
@@ -604,7 +602,6 @@ export class ClaudeNormalizer {
       return [];
     }
     this.lastSessionState = state;
-    this.lastSessionStateReason = reason;
     return [
       {
         ...this.base({ turnId: this.activeTurnId }),
@@ -996,7 +993,7 @@ export class ClaudeNormalizer {
     if (accumulatedTotal !== undefined) {
       this.lastKnownTotalProcessedTokens = accumulatedTotal;
     }
-    const usageSnapshot = this.turnUsageSnapshot(result);
+    const usageSnapshot = this.turnUsageSnapshot();
 
     const turn = this.turnState;
     if (!turn) {
@@ -1614,7 +1611,7 @@ export class ClaudeNormalizer {
       this.inFlightTools.set(event.index, next);
 
       const fingerprint =
-        parsed && Object.keys(parsed).length > 0 ? toolInputFingerprint(parsed) : undefined;
+        parsed && Object.keys(parsed).length > 0 ? safeJson(parsed) : undefined;
       if (!parsed || fingerprint === undefined || tool.lastEmittedInputFingerprint === fingerprint) {
         return events;
       }
@@ -1727,7 +1724,7 @@ export class ClaudeNormalizer {
       input: toolInput,
       partialInputJson: "",
       ...(Object.keys(toolInput).length > 0
-        ? { lastEmittedInputFingerprint: toolInputFingerprint(toolInput) }
+        ? { lastEmittedInputFingerprint: safeJson(toolInput) }
         : {}),
       ...(owningAgentId !== undefined ? { agentId: owningAgentId } : {}),
       ...(parentToolUseId !== undefined ? { parentToolUseId } : {}),
@@ -3274,7 +3271,7 @@ export class ClaudeNormalizer {
           detail: summarizeToolRequest(toolName, toolInput),
           input: toolInput,
           partialInputJson: "",
-          lastEmittedInputFingerprint: toolInputFingerprint(toolInput),
+          lastEmittedInputFingerprint: safeJson(toolInput),
           ...(owningTaskId !== undefined ? { agentId: owningTaskId } : {}),
           parentToolUseId,
           // A nested frame never opens a turn: between parent turns the call
@@ -4125,9 +4122,7 @@ export class ClaudeNormalizer {
     ];
   }
 
-  private turnUsageSnapshot(
-    result: SDKResultMessage | undefined
-  ): ClaudeTokenUsageSnapshot | undefined {
+  private turnUsageSnapshot(): ClaudeTokenUsageSnapshot | undefined {
     const maxTokens = this.lastKnownContextWindow;
     const totalProcessed = this.lastKnownTotalProcessedTokens;
     const fromAssistant = normalizeActiveTokenUsage(
@@ -4177,7 +4172,7 @@ function readToolUseResult(message: SDKMessage): Record<string, unknown> | undef
  * The opening sentence of the CLI's own compaction summary. Only ever used
  * when a boundary named no `anchor_uuid` — the anchor is the real join.
  */
-export const COMPACT_SUMMARY_PREAMBLE =
+const COMPACT_SUMMARY_PREAMBLE =
   "This session is being continued from a previous conversation that ran out of context.";
 
 /**
@@ -4185,7 +4180,7 @@ export const COMPACT_SUMMARY_PREAMBLE =
  * `preserved_segment.anchor_uuid` — the same uuid in every capture, but the
  * two blocks are written independently and either may be absent.
  */
-export function compactionAnchorUuid(compactMetadata: unknown): string | undefined {
+function compactionAnchorUuid(compactMetadata: unknown): string | undefined {
   if (compactMetadata === null || typeof compactMetadata !== "object") {
     return undefined;
   }
@@ -4382,7 +4377,7 @@ function previewUnknownSdkContent(message: unknown): string | undefined {
   return preview.length > 200 ? `${preview.slice(0, 197)}...` : preview;
 }
 
-export function describeUnknownSdkMessage(kind: string, message: unknown): string {
+function describeUnknownSdkMessage(kind: string, message: unknown): string {
   const preview = previewUnknownSdkContent(message);
   return preview === undefined ? `${kind} is not handled.` : `${kind} is not handled: ${preview}`;
 }
@@ -4465,7 +4460,7 @@ function isInterruptedResult(result: SDKResultMessage): boolean {
  * `terminal_reason` is **absent** on a compaction result, so it can never be
  * read unconditionally.
  */
-export function resultOutcome(
+function resultOutcome(
   result: SDKResultMessage,
   failureHint?: string
 ): { status: RuntimeTurnState; errorMessage: string | undefined } {
@@ -4525,7 +4520,7 @@ export function resultOutcome(
 }
 
 /** The structured failure a warning or error carries (workflows §5.4). */
-export interface ClaudeFailure {
+interface ClaudeFailure {
   reason: RuntimeFailureReason;
   resetsAt?: string;
 }
@@ -4552,7 +4547,7 @@ function failureFields(failure: ClaudeFailure | undefined): {
  * nothing cleared since; its reset is the LATEST such window names, since the
  * account works again only once every one of them has reset.
  */
-export function resultFailure(
+function resultFailure(
   result: SDKResultMessage,
   turn: Pick<
     ClaudeTurnState,

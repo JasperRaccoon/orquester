@@ -21,12 +21,3 @@ export function savedPromptErrorStatus(error: unknown): number | null {
   const status = (error as { status?: unknown }).status;
   return typeof status === "number" ? status : null;
 }
-
-/** The daemon's error code (`body.code`, e.g. `INVALID_PROJECT_PATH`) an `ApiError` carries, else `null`. */
-export function savedPromptErrorCode(error: unknown): string | null {
-  if (typeof error !== "object" || error === null) return null;
-  const body = (error as { body?: unknown }).body;
-  if (typeof body !== "object" || body === null) return null;
-  const code = (body as { code?: unknown }).code;
-  return typeof code === "string" && code.length > 0 ? code : null;
-}

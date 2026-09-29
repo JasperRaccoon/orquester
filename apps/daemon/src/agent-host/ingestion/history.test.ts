@@ -1,12 +1,4 @@
-/**
- * History replay (E6), driven by the FOUR adapters' own `projectHistory`
- * output rather than by hand-built events.
- *
- * A resumed thread replays nothing onto its message stream (§4.5), so its
- * timeline is rebuilt from the provider's native transcript. What this file
- * pins is the half ingestion owns: a replayed transcript becomes messages,
- * activities and settled turns — and touches nothing that is live.
- */
+/** Historical runtime events rebuild the timeline without changing live work. */
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
@@ -16,19 +8,14 @@ import {
   createEmptyThreadState,
   type DomainEvent,
   type RuntimeEvent,
-  type ThreadMessageItem,
-  type ThreadSnapshot
+  type ThreadMessageItem
 } from "@orquester/api/agent-chat";
 
-import { projectClaudeHistory } from "../adapters/claude/project-history.ts";
-import { projectCodexHistory } from "../adapters/codex/history.ts";
-import { projectGrokHistory } from "../adapters/grok/history.ts";
-import { projectOpenCodeHistory } from "../adapters/opencode/history.ts";
 import type { AppendableDomainEvent } from "../services.ts";
+import { createLivenessRegistry } from "../orchestration/liveness.ts";
 import { createIngestion } from "./index.ts";
 import {
   FakeClock,
-  RecordingLiveness,
   RecordingSink,
   counterIdGen,
   runtimeEvent
@@ -39,17 +26,19 @@ const THREAD_ID = "t1";
 function harness() {
   const clock = new FakeClock();
   const sink = new RecordingSink();
-  const liveness = new RecordingLiveness();
+  const liveness = createLivenessRegistry();
+  const checkpointCalls: string[] = [];
   const ingestion = createIngestion({
     sink: sink.sink,
     liveness,
     clock,
     idGen: counterIdGen(),
-    placeholderCheckpoint: () => {
-      throw new Error("history must never mint a checkpoint");
+    placeholderCheckpoint: ({ turnId }) => {
+      checkpointCalls.push(turnId);
+      return { turnCount: 1 };
     }
   });
-  return { ingestion, sink, liveness };
+  return { ingestion, sink, liveness, checkpointCalls };
 }
 
 async function replay(events: readonly RuntimeEvent[]) {
@@ -101,198 +90,6 @@ function messages(events: AppendableDomainEvent[]): ThreadMessageItem[] {
 function roleText(events: AppendableDomainEvent[]): string[] {
   return messages(events).map((message) => `${message.role}:${message.text}`);
 }
-
-// ---------------------------------------------------------------------------
-// Per-adapter replay, from each adapter's real projection
-// ---------------------------------------------------------------------------
-
-describe("E6: a replayed transcript rebuilds the timeline", () => {
-  it("claude: the user's own prompts survive the replay", async () => {
-    const snapshot: ThreadSnapshot = {
-      threadId: THREAD_ID,
-      turns: [
-        {
-          id: "turn-1",
-          items: [
-            {
-              type: "user",
-              message: { role: "user", content: [{ type: "text", text: "add a test" }] },
-              uuid: "u1",
-              timestamp: "2026-09-21T10:00:00.000Z"
-            },
-            {
-              type: "assistant",
-              message: {
-                role: "assistant",
-                content: [{ type: "text", text: "Added it." }]
-              },
-              uuid: "a1",
-              timestamp: "2026-09-21T10:00:05.000Z"
-            }
-          ]
-        }
-      ]
-    };
-    const events = projectClaudeHistory(snapshot, {
-      ids: counterIdGen("ce"),
-      clock: new FakeClock()
-    });
-    assert.ok(events.length > 0, "the projection produced nothing to ingest");
-    for (const event of events) {
-      assert.equal(event.raw?.source, HISTORICAL_RAW_SOURCE);
-    }
-
-    const { sink } = await replay(events);
-    const text = roleText(sink.events());
-    assert.ok(
-      text.includes("user:add a test"),
-      `the user's prompt is missing from ${JSON.stringify(text)}`
-    );
-    assert.ok(text.some((entry) => entry.startsWith("assistant:")));
-  });
-
-  it("claude: a replayed compaction summary is a marker row, not a giant user bubble", async () => {
-    const summary =
-      "This session is being continued from a previous conversation.\n\n1. Fixed the composer.";
-    const snapshot: ThreadSnapshot = {
-      threadId: THREAD_ID,
-      turns: [
-        {
-          id: "turn-1",
-          items: [
-            {
-              type: "user",
-              uuid: "sum-1",
-              isCompactSummary: true,
-              message: { role: "user", content: summary }
-            },
-            {
-              type: "assistant",
-              uuid: "a1",
-              message: { role: "assistant", content: [{ type: "text", text: "Carrying on." }] }
-            }
-          ]
-        }
-      ]
-    };
-    const { sink } = await replay(
-      projectClaudeHistory(snapshot, { ids: counterIdGen("ce"), clock: new FakeClock() })
-    );
-    assert.deepEqual(
-      roleText(sink.events()).filter((entry) => entry.startsWith("user:")),
-      [],
-      "the user never wrote this"
-    );
-    const marker = sink
-      .activities()
-      .map((event) => event.payload.activity)
-      .find((activity) => activity.activityKind === "context-compaction");
-    assert.ok(marker, "the compaction is still on the timeline");
-    assert.equal((marker.payload as { summary?: string }).summary, summary);
-  });
-
-  it("codex: user and assistant items both become messages", async () => {
-    const snapshot: ThreadSnapshot = {
-      threadId: THREAD_ID,
-      turns: [
-        {
-          id: "turn-1",
-          items: [
-            { type: "userMessage", id: "u1", content: [{ type: "text", text: "hello" }] },
-            { type: "agentMessage", id: "a1", text: "I'll check", phase: "commentary" },
-            { type: "agentMessage", id: "a2", text: "hi there", phase: "final_answer" }
-          ]
-        }
-      ]
-    };
-    const drafts = projectCodexHistory(snapshot);
-    assert.ok(drafts.length > 0);
-    const events = drafts.map(
-      (draft, index) =>
-        ({
-          eventId: `xe${index}`,
-          threadId: THREAD_ID,
-          createdAt: "2026-09-21T10:00:00.000Z",
-          ...draft
-        }) as RuntimeEvent
-    );
-    for (const event of events) {
-      assert.equal(event.raw?.source, HISTORICAL_RAW_SOURCE);
-    }
-
-    const { sink } = await replay(events);
-    assert.deepEqual(roleText(sink.events()), ["user:hello", "assistant:I'll check", "assistant:hi there"]);
-    assert.deepEqual(
-      sink.ofType("thread.message-sent")
-        .filter((event) => event.payload.role === "assistant")
-        .map((event) => event.payload.messageKind),
-      ["commentary", "answer"]
-    );
-  });
-
-  it("opencode: a user text part becomes the user's message", async () => {
-    const snapshot: ThreadSnapshot = {
-      threadId: THREAD_ID,
-      turns: [
-        {
-          id: "turn-1",
-          items: [
-            { id: "m1", role: "user", time: { created: 1_789_000_000_000 } },
-            { id: "m2", role: "assistant", time: { created: 1_789_000_001_000 } },
-            { id: "p1", messageID: "m1", type: "text", text: "run the tests" },
-            { id: "p2", messageID: "m2", type: "text", text: "All green." }
-          ]
-        }
-      ]
-    };
-    const events = projectOpenCodeHistory(snapshot, {
-      eventId: (() => {
-        let n = 0;
-        return () => `oe${++n}`;
-      })(),
-      nowIso: () => "2026-09-21T10:00:00.000Z"
-    });
-    assert.ok(events.length > 0);
-    const { sink } = await replay(events);
-    const text = roleText(sink.events());
-    assert.ok(text.includes("user:run the tests"), JSON.stringify(text));
-    assert.ok(text.includes("assistant:All green."));
-  });
-
-  it("grok: every replayed event carries the shared historical source", async () => {
-    const snapshot: ThreadSnapshot = {
-      threadId: THREAD_ID,
-      turns: [
-        {
-          id: "turn-1",
-          items: [
-            { kind: "user_message", text: "what changed?" },
-            { kind: "assistant_message", text: "Three files." }
-          ]
-        }
-      ]
-    };
-    let n = 0;
-    const events = projectGrokHistory(snapshot, {
-      threadId: THREAD_ID,
-      stamp: () => ({ eventId: `ge${++n}`, createdAt: "2026-09-21T10:00:00.000Z" })
-    });
-    assert.ok(events.length > 0);
-    // grok once marked the replay on `raw.method` alone, which ingestion had
-    // to special-case or its whole transcript would have been ingested as
-    // LIVE. It now carries the shared source, so the special case is gone —
-    // this pins the contract that let it go.
-    for (const event of events) {
-      assert.equal(event.raw?.source, HISTORICAL_RAW_SOURCE);
-    }
-
-    const { sink, liveness } = await replay(events);
-    assert.deepEqual(roleText(sink.events()), ["user:what changed?", "assistant:Three files."]);
-    // The real point: it was NOT treated as live.
-    assert.equal(sink.ofType("thread.session-set").length, 0);
-    assert.deepEqual(liveness.observed, []);
-  });
-});
 
 // ---------------------------------------------------------------------------
 // The invariants a replayed row owes, whatever produced it
@@ -378,16 +175,16 @@ describe("E6: a replayed row never looks live", () => {
   });
 
   it("history feeds neither liveness nor the checkpoint service", async () => {
-    const { liveness, sink } = await replay([
+    const { liveness, sink, checkpointCalls } = await replay([
       historical("turn.started", {}, { turnId: "turn-1" }),
       historical("task.started", { taskId: "task-1", taskType: "subagent" }, {
         turnId: "turn-1"
       }),
-      // The harness's placeholderCheckpoint THROWS; reaching it fails the test.
       historical("turn.diff.updated", { unifiedDiff: "d" }, { turnId: "turn-1" }),
       historical("turn.completed", { state: "completed" }, { turnId: "turn-1" })
     ]);
-    assert.deepEqual(liveness.observed, [], "a replayed task is not live work");
+    assert.equal(liveness.liveAgentCount(THREAD_ID), 0, "a replayed task is not live work");
+    assert.deepEqual(checkpointCalls, [], "history never invokes checkpoint creation");
     assert.equal(sink.ofType("thread.turn-diff-completed").length, 0);
   });
 

@@ -57,7 +57,6 @@ export function ContextMeter({
   compactDisabledReason = null
 }: ContextMeterProps): React.ReactElement {
   const percent = formatMeterPercent(model.usedPercentage);
-  const overloaded = isMeterOverloaded(model.usedPercentage);
   // One identity per thread: the Dropdown's dismiss effect is keyed on it.
   const dismissOn = React.useMemo(() => dismissWhenChatTabLeaves(sessionId ?? null), [sessionId]);
   const label =

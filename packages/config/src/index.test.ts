@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
-import { mkdtemp, mkdir } from "node:fs/promises";
+import { mkdtemp, mkdir, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { isValidName, parseAgentThreadHead, parseSessionsConfig } from "./index.ts";
 import { assertInsideFsRoot, FsSandboxError } from "./fs.ts";
@@ -69,8 +69,9 @@ test("sessionRecordSchema keeps a workflow owner and drops a malformed one, neve
   }
 });
 
-test("assertInsideFsRoot allows in-root paths and rejects escapes", async () => {
+test("assertInsideFsRoot allows in-root paths and rejects escapes", async (t) => {
   const root = await mkdtemp(join(tmpdir(), "fsroot-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, "ws"), { recursive: true });
   assert.equal(await assertInsideFsRoot(root, join(root, "ws")), join(root, "ws"));
   // not-yet-existing child still passes (deepest existing ancestor is realpath'd)

@@ -9,7 +9,6 @@ holdAtFront,
 isQueuedMessageDue,
 latestCompletedToolActivityId,
 nextDueQueuedMessage,
-shouldQueueSubmission,
 takeQueued,
 type QueueState
 } from "./queue.logic";
@@ -143,27 +142,5 @@ describe("latestCompletedToolActivityId", () => {
       { id: "a2", activityKind: "tool.updated", createdAt: "2026-01-01T00:00:09.000Z" }
     ]);
     assert.equal(id, "a3");
-  });
-});
-
-describe("steer versus queue", () => {
-  it("is one setting with a per-message inversion", () => {
-    const run = (followUpBehavior: "steer" | "queue", intent: "foreground" | "alternate") =>
-      shouldQueueSubmission({ followUpBehavior, submissionIntent: intent, isRunning: true });
-    assert.equal(run("queue", "foreground"), true);
-    assert.equal(run("queue", "alternate"), false);
-    assert.equal(run("steer", "foreground"), false);
-    assert.equal(run("steer", "alternate"), true);
-  });
-
-  it("never queues when no turn is running", () => {
-    assert.equal(
-      shouldQueueSubmission({
-        followUpBehavior: "queue",
-        submissionIntent: "foreground",
-        isRunning: false
-      }),
-      false
-    );
   });
 });

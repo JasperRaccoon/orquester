@@ -137,7 +137,7 @@ export type OpenCodeHeldRequest =
   | { type: "permission"; request: OpenCodePermissionRequest; cardOnly?: boolean }
   | { type: "question"; request: OpenCodeQuestionRequest };
 
-export interface NormalizeResult {
+interface NormalizeResult {
   events: RuntimeEvent[];
   signals: NormalizerSignal[];
 }
@@ -193,7 +193,7 @@ export function toToolLifecycleItemType(toolName: string): ToolLifecycleItemType
  *
  * *T3: `opencodeRuntime.ts:439-448`.*
  */
-export function openCodeQuestionId(index: number, header: string): string {
+function openCodeQuestionId(index: number, header: string): string {
   const slug = header
     .trim()
     .toLowerCase()
@@ -201,7 +201,7 @@ export function openCodeQuestionId(index: number, header: string): string {
   return slug.length > 0 ? `question-${index}-${slug}` : `question-${index}`;
 }
 
-export function normalizeQuestions(request: OpenCodeQuestionRequest): UserInputQuestion[] {
+function normalizeQuestions(request: OpenCodeQuestionRequest): UserInputQuestion[] {
   return request.questions.map((question, index) => ({
     id: openCodeQuestionId(index, question.header ?? ""),
     header: question.header ?? "",
@@ -220,7 +220,7 @@ export function normalizeQuestions(request: OpenCodeQuestionRequest): UserInputQ
  * appears inside the message, sometimes behind a full bun stack trace
  * (fixtures README observation 13). Truncate before it reaches the user.
  */
-export function sessionErrorMessage(error: unknown): string {
+function sessionErrorMessage(error: unknown): string {
   if (!isRecord(error)) {
     return "OpenCode session failed.";
   }
@@ -245,7 +245,7 @@ export function sessionErrorMessage(error: unknown): string {
  * retryable 429 itself (`session.status {type:"retry"}`, which names no
  * status code), so only the error it finally gives up with reaches here.
  */
-export function sessionErrorFailure(
+function sessionErrorFailure(
   error: unknown,
   nowIso: string
 ): { reason: RuntimeFailureReason; resetsAt?: string } | undefined {

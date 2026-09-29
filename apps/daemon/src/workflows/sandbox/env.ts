@@ -32,10 +32,6 @@ export interface SandboxEnvInput {
   env: Readonly<Record<string, string>>;
   /** `<appdir>/tmp`. */
   tmpDir: string;
-  /** One per attempt; minted when omitted. */
-  launchId?: string;
-  /** Test seam: the daemon's environment to read HOME/USER/LANG from (never spread). */
-  processEnv?: NodeJS.ProcessEnv;
 }
 
 function currentUser(processEnv: NodeJS.ProcessEnv): string | undefined {
@@ -47,8 +43,8 @@ function currentUser(processEnv: NodeJS.ProcessEnv): string | undefined {
 }
 
 /** The default `<appdir>/tmp`: the daemon's own TMPDIR (systemd points it there), else the OS's. */
-export function defaultSandboxTmpDir(processEnv: NodeJS.ProcessEnv = process.env): string {
-  return processEnv.TMPDIR && processEnv.TMPDIR.length > 0 ? processEnv.TMPDIR : tmpdir();
+export function defaultSandboxTmpDir(): string {
+  return process.env.TMPDIR && process.env.TMPDIR.length > 0 ? process.env.TMPDIR : tmpdir();
 }
 
 /**
@@ -56,7 +52,7 @@ export function defaultSandboxTmpDir(processEnv: NodeJS.ProcessEnv = process.env
  * a NUL byte (neither can reach a child process intact).
  */
 export function buildSandboxEnv(input: SandboxEnvInput): Record<string, string> {
-  const processEnv = input.processEnv ?? process.env;
+  const processEnv = process.env;
   const env: Record<string, string> = {
     PATH: sessionPath(),
     HOME: processEnv.HOME && processEnv.HOME.length > 0 ? processEnv.HOME : homedir(),
@@ -79,6 +75,6 @@ export function buildSandboxEnv(input: SandboxEnvInput): Record<string, string> 
   }
   env[WORKFLOW_RUN_ID_ENV_VAR] = input.runId;
   env[WORKFLOW_ID_ENV_VAR] = input.workflowId;
-  env[AGENT_LAUNCH_ENV_VAR] = input.launchId ?? randomUUID();
+  env[AGENT_LAUNCH_ENV_VAR] = randomUUID();
   return env;
 }

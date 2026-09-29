@@ -87,17 +87,7 @@ export const REGISTRY = {
       chat: { adapter: "codex" as const }
     },
     {
-      // DETECT-ONLY on purpose — no installCmd/updateCmd, so Settings → Agents
-      // shows it only once a `deepseek` binary is already on PATH and the
-      // Install button stays disabled.
-      //
-      // The command this used to carry (`npm i -g @deepseek-ai/deepseek-cli`)
-      // 404s: DeepSeek publishes no such package, and no official DeepSeek
-      // coding-agent CLI exists on npm. The unscoped `deepseek-cli` name IS
-      // taken (1.0.2, Jan 2025) but by an unaffiliated single-maintainer
-      // OpenAI-SDK wrapper, not an agent harness — pointing an in-app Install
-      // button at a stranger's package is worse than offering no install at
-      // all. Restore an installCmd only if DeepSeek ships a first-party CLI.
+      // Detect-only until a first-party installer is available.
       id: "deepseek",
       name: "DeepSeek",
       kind: "agent",
@@ -292,25 +282,6 @@ export function resumeArgsFor(agentId: string, conversationId: string): string[]
   // Function replacer: an id containing `$&`/`$1` must be substituted
   // literally, not re-expanded by String.replace's pattern syntax.
   return entry?.resumeArgs?.map((arg) => arg.replace(/\{id\}/g, () => conversationId)) ?? [];
-}
-
-/**
- * Whether `agentId` has a known resume flag at all — i.e. whether
- * {@link resumeArgsFor} can ever return a non-empty result for it. The UI gates
- * its "resume a past conversation" affordances on this so it never offers a
- * resume the daemon would refuse with `RESUME_UNAVAILABLE`.
- *
- * Read from the same static catalog `resumeArgsFor` uses (not the runtime
- * registry entry), so the answer matches the daemon exactly — including for a
- * user-defined `agents.json` override, whose id the catalog does not know and
- * which therefore genuinely cannot resume. Shared UI/daemon gate in the spirit
- * of {@link CHROMIUM_FAMILY_IDS}.
- */
-export function canResumeAgent(agentId: string): boolean {
-  // Answered by running the real resolver rather than re-reading the catalog:
-  // the two can never drift (the placeholder id is irrelevant — only the arity
-  // of the result matters).
-  return resumeArgsFor(agentId, "x").length > 0;
 }
 
 /**

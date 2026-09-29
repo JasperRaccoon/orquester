@@ -1,8 +1,5 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import Fastify from "fastify";
-import { Broadcaster } from "../broadcaster.ts";
-import { InjectDaemonApi } from "./daemon-api.ts";
 import { daemonError } from "./errors.ts";
 
 test("daemonError reads the chat envelope, the flat shape and a bare string", () => {
@@ -33,15 +30,6 @@ test("a 5xx without a deliberate code never echoes the body (spec §4.5)", () =>
   // A route's own 5xx code is deliberate and passes through.
   const own = daemonError({ status: 500, body: { code: "CONFIG_UNREADABLE", message: "daemon.json is unreadable; refusing to overwrite it." } });
   assert.equal(own.code, "CONFIG_UNREADABLE"); assert.match(own.message, /daemon\.json/);
-});
-
-test("a real Fastify crash, errno code and all, maps to INTERNAL without its path", async () => {
-  const app = Fastify();
-  app.get("/crash", async () => { throw Object.assign(new Error("ENOENT: no such file or directory, open '/home/x/secret'"), { code: "ENOENT" }); });
-  const api = new InjectDaemonApi({ app, authorization: undefined, agentChat: null, broadcaster: new Broadcaster(), fsRoot: "/r", workspacesDir: "/r" });
-  const err = daemonError(await api.request("GET", "/crash"));
-  assert.equal(err.code, "INTERNAL"); assert.ok(!err.message.includes("/home"));
-  await app.close();
 });
 
 test("a 4xx whose body names nothing falls back to the status table and never echoes the body", () => {

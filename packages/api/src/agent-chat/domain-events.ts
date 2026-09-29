@@ -316,24 +316,6 @@ export type DomainEvent =
 
 export type DomainEventType = DomainEvent["type"];
 
-/** Every persisted type, in the order §5.1 lists them. */
-export const DOMAIN_EVENT_TYPES = [
-  "thread.created",
-  "thread.meta-updated",
-  "thread.runtime-mode-set",
-  "thread.message-sent",
-  "thread.turn-start-requested",
-  "thread.turn-interrupt-requested",
-  "thread.approval-response-requested",
-  "thread.user-input-response-requested",
-  "thread.session-set",
-  "thread.activity-appended",
-  "thread.turn-diff-completed",
-  "thread.checkpoint-revert-requested",
-  "thread.reverted",
-  "thread.deleted"
-] as const satisfies readonly DomainEventType[];
-
 // ---------------------------------------------------------------------------
 // Receipts (§5.1, §6.2)
 // ---------------------------------------------------------------------------
@@ -356,6 +338,3 @@ export interface CommandReceipt {
   /** The recorded rejection, replayed verbatim on a retry. */
   error?: { code: string; message: string; detail?: unknown };
 }
-
-/** `receipts.json` is a ring of this many entries (§5.1). */
-export const RECEIPTS_RING_SIZE = 500;

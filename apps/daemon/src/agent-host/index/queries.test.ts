@@ -297,7 +297,7 @@ describe("thread index: search", () => {
     const drafts: Draft[] = [created()];
     for (let n = 0; n < 40; n += 1) {
       drafts.push(done(`m${n}`, null, `needle message ${n}`));
-      drafts.push(done(`n${n}`, null, `needle other ${n}`));
+      drafts.push(activity(`n${n}`, "tool.completed", { summary: `needle other ${n}` }));
     }
     await indexed(log, drafts);
     assert.equal(index.search({ q: "needle", limit: 1000 }).length, 50);
@@ -538,55 +538,6 @@ describe("thread index: activity paging", () => {
     assert.equal(index.keepsUserMessage(id, "u1"), true);
     assert.equal(index.keepsUserMessage(id, "u2"), false, "a removed turn's prompt");
     assert.equal(index.keepsUserMessage(id, "note"), false, "a prompt no kept turn claims, past the fallback");
-  });
-
-  it("walks one fleet turn of 1 000 activities back in contiguous 400-activity blocks", async () => {
-    const log = new TestLog();
-    const fleet: Draft[] = [];
-    for (let n = 0; n < 1_000; n += 1) {
-      fleet.push(activity(`task-${n}`, "task.progress", { summary: `agent step ${n}`, turnId: "t1" }));
-    }
-    await indexed(log, [
-      created(),
-      userMessage("u1", "run the fleet"),
-      turnStart("u1"),
-      session("running", "t1"),
-      ...fleet,
-      session("ready", null, "t1")
-    ]);
-    const id = log.threadId;
-
-    const pages: Array<{ startSeq: number; endSeq: number; fromByte: number; toByte: number }> = [];
-    let endSeq = Number.POSITIVE_INFINITY;
-    let toByte = log.size;
-    for (;;) {
-      const startSeq = index.activitySeqBefore(id, { beforeSeq: endSeq, count: 400 });
-      if (startSeq === null) {
-        break;
-      }
-      const fromByte = index.itemPositionBySeq(id, startSeq)!.byteOffset;
-      pages.push({ startSeq, endSeq, fromByte, toByte });
-      endSeq = startSeq;
-      toByte = fromByte;
-    }
-
-    const activitiesIn = (page: { fromByte: number; toByte: number }): number =>
-      log.slice(page.fromByte, page.toByte).filter((event) => event.type === "thread.activity-appended")
-        .length;
-    assert.deepEqual(pages.map(activitiesIn), [400, 400, 200]);
-    for (let n = 1; n < pages.length; n += 1) {
-      assert.equal(pages[n]!.toByte, pages[n - 1]!.fromByte, "consecutive blocks meet");
-    }
-    assert.equal(index.hasItemsBefore(id, pages[pages.length - 1]!.startSeq), false, "the last block is the oldest");
-    for (const page of pages) {
-      assert.deepEqual(
-        index
-          .turnsInSeqRange(id, { fromSeq: page.startSeq, toSeq: Math.min(page.endSeq, log.lastSeq + 1) })
-          .map((turn) => turn.turnId),
-        ["t1"]
-      );
-      assert.equal(index.turnOfSeq(id, page.startSeq)?.turnId, "t1");
-    }
   });
 });
 

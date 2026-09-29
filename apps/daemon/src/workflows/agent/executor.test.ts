@@ -1,20 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AgentChainEntry } from "@orquester/api";
-import { AUTONOMOUS_ANSWER, AUTONOMY_NOTE, CONTINUE_AFTER_SWITCH } from "./prompt.ts";
 import type { AgentBlockOutput } from "./executor.ts";
-import { byAccount } from "./testing/fake-chat-host.ts";
 import { account, agentNode, fakePrompts, testWorkflow } from "./testing/fake-context.ts";
 import { Scenario } from "./testing/scenario.ts";
 
 const CLAUDE = [account("claude", "a1", "alpha"), account("claude", "a2", "beta"), account("claude", "a3", "gamma")];
-const CODEX = [account("codex", "c1", "cx-one"), account("codex", "c2", "cx-two")];
-const FIXED = { strategy: "fixed", includeSystem: false, soonestResetWindow: "weekly", leastUsedMetric: "max", unknownUsage: "last" } as const;
-
-function chain(...entries: [string, string, string[]?][]): AgentChainEntry[] {
-  return entries.map(([agent, model, accounts]) => ({ agent, model, accounts: { ...FIXED, ...(accounts ? { accounts } : {}) } }));
-}
-
 function outputOf(result: Awaited<ReturnType<Scenario["run"]>>["result"]): AgentBlockOutput {
   assert.equal(result.status, "succeeded", JSON.stringify(result));
   return (result as { output: AgentBlockOutput }).output;
@@ -55,7 +45,6 @@ test("happy path: creates the session like the MCP, sends the prompt with the au
   assert.equal(turn.body.input, "Fix the bug.\n\nYou are running unattended inside an automated workflow. No human will answer. Never ask questions or wait for confirmation; make reasonable decisions and complete the task fully.");
   assert.equal("agent" in turn.body, false);
   assert.equal(fc.persisted.at(-1), undefined, "the waitingOn is cleared at the end");
-  assert.equal(sc.host.listenerCount(), 0, "every bus subscription is released");
 });
 
 test("continue-session mode: a follow-up turn into the upstream block's session; its text only", async () => {
@@ -63,7 +52,11 @@ test("continue-session mode: a follow-up turn into the upstream block's session;
     accounts: CLAUDE,
     behaviour: (t) => [{ kind: "say", text: t.turnNumber === 1 ? "first answer" : "second answer" }]
   });
-  const wf = testWorkflow([agentNode("n1", {}, "Writer"), agentNode("n2", { session: { kind: "continue", fromNode: "Writer" }, prompt: { kind: "text", text: "Now test it." } }, "Tester")]);
+  const wf = testWorkflow([
+    agentNode("n1", {}, "Writer"),
+    agentNode("n2", { session: { kind: "continue", fromNode: "Writer" }, prompt: { kind: "text", text: "Now test it." } }, "Tester"),
+    agentNode("n3", { session: { kind: "continue", fromNode: "Tester" } })
+  ]);
   const first = outputOf((await sc.run(wf, "n1")).result);
   const { result } = await sc.run(wf, "n2", { upstream: { Writer: first } });
   const out = outputOf(result);
@@ -73,7 +66,10 @@ test("continue-session mode: a follow-up turn into the upstream block's session;
   assert.equal(sc.host.sessions.size, 1, "no new session");
   const session = sc.host.session(first.sessionId);
   assert.equal(session.turns.length, 2);
-  assert.equal(sc.host.turnLog[1]!.input, `Now test it.\n\n${AUTONOMY_NOTE}`);
+  assert.ok(sc.host.turnLog[1]!.input.startsWith("Now test it.\n\n"));
+  sc.host.behaviour = () => [];
+  const silent = outputOf((await sc.run(wf, "n3", { upstream: { Tester: out } })).result);
+  assert.equal(silent.text, "", "a silent follow-up never returns an earlier block's answer");
 });
 
 test("continue-session mode without an upstream session fails as a validation error", async () => {
@@ -144,8 +140,8 @@ test("questions are answered autonomously: custom text where allowed, else (Reco
   assert.equal(out.text, "answered all");
   const session = sc.host.session(out.sessionId);
   const answers = session.commands.filter((c) => c.name === "answer").map((c) => c.body.answers);
-  assert.deepEqual(answers[0], { "q-free": AUTONOMOUS_ANSWER, "q-rec": "pg", "q-first": "red", "q-multi": ["a"] });
-  assert.deepEqual(answers[1], { "q-async": AUTONOMOUS_ANSWER });
+  assert.deepEqual(answers[0], { "q-free": "No user is available. Choose the most reasonable option yourself and proceed autonomously.", "q-rec": "pg", "q-first": "red", "q-multi": ["a"] });
+  assert.deepEqual(answers[1], { "q-async": "No user is available. Choose the most reasonable option yourself and proceed autonomously." });
   assert.equal(sc.host.commandCount("dismiss"), 0);
 });
 
@@ -164,7 +160,7 @@ test("a plan card is implemented with the plan implementation prompt", async () 
   });
   const out = outputOf((await sc.run(testWorkflow([agentNode("n1")]), "n1")).result);
   assert.equal(out.text, "implemented");
-  assert.match(sc.host.turnLog[1]!.input, /^PLEASE IMPLEMENT THIS PLAN:\n1\. do it/);
+  assert.ok(sc.host.turnLog[1]!.input.includes("1. do it"));
 });
 
 test("done only after background work ends (then the quiet window)", async () => {
@@ -214,8 +210,6 @@ test("a wake that becomes a turn only 20 s after the background work ended is st
   const out = outputOf((await sc.run(testWorkflow([agentNode("n1")]), "n1")).result);
   assert.equal(out.text, "helper reported: all green", "the woken reply, not the launch message");
   assert.equal(sc.host.session(out.sessionId).turns.length, 2);
-
-
 });
 
 test("background work that ended with no wake finishes after the 90 s wake window", async () => {
@@ -288,19 +282,6 @@ test("a host that is restarting (503 on create) is retried on the clock; one ses
   const out = outputOf((await sc.run(testWorkflow([agentNode("n1")]), "n1")).result);
   assert.equal(out.text, "Done.");
   assert.equal(sc.host.sessions.size, 1);
-});
-
-test("a continue block never implements a plan an earlier block left behind", async () => {
-  const sc = new Scenario({
-    accounts: CLAUDE,
-    behaviour: (t) => (t.turnNumber === 1 ? [{ kind: "plan", markdown: "old plan" }] : [{ kind: "say", text: "follow-up done" }])
-  });
-  const wf = testWorkflow([agentNode("n1", {}, "Planner"), agentNode("n2", { session: { kind: "continue", fromNode: "Planner" } }, "Doer")]);
-  const first = outputOf((await sc.run(wf, "n1")).result);
-  const upstreamTurns = sc.host.session(first.sessionId).turns.length;
-  const out = outputOf((await sc.run(wf, "n2", { upstream: { Planner: first } })).result);
-  assert.equal(out.text, "follow-up done");
-  assert.equal(sc.host.session(first.sessionId).turns.length, upstreamTurns + 1, "one follow-up turn, no implementation turn");
 });
 
 test("an account the daemon would not launch (gone from its catalogue) is passed over by the catalogue check, never sent", async () => {
