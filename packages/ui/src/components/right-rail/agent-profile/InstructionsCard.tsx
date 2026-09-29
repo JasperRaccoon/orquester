@@ -43,7 +43,6 @@ export const InstructionsCard: React.FC<{
   return (
     <button
       type="button"
-      data-profile-instructions=""
       title={info.path ? `Edit ${info.path}` : "Edit the instructions"}
       onClick={onOpen}
       className={cn(

@@ -413,3 +413,7 @@ Baseline: `9675e822`. This is the pre-edit disposition ledger; implementation an
 - Remove the obsolete `managedGrokAuthFiles: () => []` startup argument at the accounts/usage agent’s request; that agent owns the source removal and corresponding audit.
 - Targeted command from `apps/daemon`: `node --import tsx --import ../../scripts/test/assert-ok.mjs --import ./test/quiet-mock-timers.mjs --test <the 24 files above>`. Root gates: `pnpm check`, `pnpm test`, `pnpm build`, `git diff --check`.
 - Inventory: 233 original named tests in this scope.
+
+## Completed validation
+
+The focused 24-file run exercised 231 remaining tests: 230 passed, and the assertion child hit its pre-import startup deadline. After the documented readiness rewrite, that isolated regression passed. A focused saved-prompt/session/process run passed all 51 cases. The final pre-merge repository run passed all 5,793 tests and every standalone check, including the corrected assertion case and timestamp comparison. `pnpm check` passed every workspace. Final merged gates and emitted-bundle browser artifacts are recorded in [current.md](current.md).

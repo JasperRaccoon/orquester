@@ -20,11 +20,13 @@ import {
   copyAgentProfileItem,
   dismissAgentProfileNotice,
   lastAgentProfileAgent,
+  lastAgentProfileTab,
   loadAgentProfile,
   loadAgentProfileOverview,
   markAgentProfileStale,
   parseAgentProfilePrefs,
   rememberAgentProfileAgent,
+  rememberAgentProfileTab,
   removeAgentProfileItem,
   resetAgentProfile,
   sanitizeAgentProfileSnapshot,
@@ -610,7 +612,7 @@ describe("reset", () => {
 });
 
 // ---------------------------------------------------------------------------
-// The last picked agent (localStorage)
+// The last picked agent and each agent's tab (localStorage)
 // ---------------------------------------------------------------------------
 
 class MemoryStorage {
@@ -625,43 +627,78 @@ class MemoryStorage {
   }
 }
 
-describe("the last picked agent", () => {
+describe("the last picked agent and each agent's tab", () => {
+  const NONE = { agent: null, tabs: {} };
+
   it("parses field by field, and anything unusable is no pick", () => {
     for (const raw of [null, undefined, "", "{", "null", "[]", "42", '"claude"', '{"agent":"gemini"}', '{"agent":4}']) {
-      assert.deepEqual(parseAgentProfilePrefs(raw), { agent: null }, String(raw));
+      assert.deepEqual(parseAgentProfilePrefs(raw), NONE, String(raw));
     }
-    assert.deepEqual(parseAgentProfilePrefs('{"v":7,"agent":"grok","future":true}'), { agent: "grok" });
+    assert.deepEqual(parseAgentProfilePrefs('{"v":7,"agent":"grok","future":true}'), { agent: "grok", tabs: {} });
   });
 
-  it("serializes over what another bundle stored, keeping its fields", () => {
-    assert.equal(serializeAgentProfilePrefs({ agent: "codex" }), '{"v":1,"agent":"codex"}');
-    assert.deepEqual(JSON.parse(serializeAgentProfilePrefs({ agent: "codex" }, '{"v":2,"agent":"grok","kinds":["mcp"]}')), {
-      v: 1,
-      agent: "codex",
-      kinds: ["mcp"]
+  it("keeps a tab only for a known agent that has that kind", () => {
+    assert.deepEqual(
+      parseAgentProfilePrefs(
+        JSON.stringify({
+          agent: "claude",
+          tabs: { claude: "skill", codex: "command", opencode: "hook", grok: 7, gemini: "mcp" }
+        })
+      ),
+      { agent: "claude", tabs: { claude: "skill", codex: "command" } },
+      "OpenCode has no hooks; a number is no kind; gemini is no agent"
+    );
+    for (const tabs of ["skill", ["skill"], null, 3]) {
+      assert.deepEqual(parseAgentProfilePrefs(JSON.stringify({ agent: "codex", tabs })), { agent: "codex", tabs: {} });
+    }
+    assert.deepEqual(parseAgentProfilePrefs('{"tabs":{"grok":"marketplace"}}'), { agent: null, tabs: { grok: "marketplace" } });
+  });
+
+  it("serializes over what another bundle stored, keeping its fields and tabs", () => {
+    assert.deepEqual(JSON.parse(serializeAgentProfilePrefs({ agent: "codex", tabs: {} })), { v: 1, agent: "codex", tabs: {} });
+    assert.deepEqual(
+      JSON.parse(serializeAgentProfilePrefs(
+        { agent: "codex", tabs: { codex: "hook" } },
+        '{"v":2,"agent":"grok","kinds":["mcp"],"tabs":{"gemini":"mcp","codex":"skill"}}'
+      )),
+      { v: 1, agent: "codex", kinds: ["mcp"], tabs: { gemini: "mcp", codex: "hook" } }
+    );
+    assert.deepEqual(JSON.parse(serializeAgentProfilePrefs({ agent: "codex", tabs: {} }, "garbage")), {
+      v: 1, agent: "codex", tabs: {}
     });
-    assert.equal(serializeAgentProfilePrefs({ agent: "codex" }, "garbage"), '{"v":1,"agent":"codex"}');
+    assert.deepEqual(JSON.parse(serializeAgentProfilePrefs({ agent: null, tabs: {} }, '{"tabs":"junk"}')), {
+      v: 1, agent: null, tabs: {}
+    });
   });
 
-  it("reads the stored pick once, remembers a new one, and survives a store reset", () => {
-    const storage = new MemoryStorage('{"v":1,"agent":"opencode"}');
+  it("reads stored selections, remembers each agent's tab, and keeps preferences across a reset", () => {
+    const storage = new MemoryStorage('{"v":1,"agent":"opencode","tabs":{"claude":"plugin","opencode":"hook"}}');
     const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
     Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
     try {
       assert.equal(lastAgentProfileAgent(), "opencode");
+      assert.equal(lastAgentProfileTab("claude"), "plugin");
+      assert.equal(lastAgentProfileTab("opencode"), null);
+      assert.equal(lastAgentProfileTab("codex"), null);
       rememberAgentProfileAgent("codex");
-      assert.equal(lastAgentProfileAgent(), "codex");
-      assert.deepEqual(JSON.parse(storage.value ?? ""), { v: 1, agent: "codex" });
-      rememberAgentProfileAgent("codex");
+      rememberAgentProfileTab("codex", "hook");
+      rememberAgentProfileTab("claude", "command");
+      rememberAgentProfileTab("opencode", "marketplace");
+      assert.equal(lastAgentProfileTab("opencode"), null, "unsupported kinds stay unselected");
+      assert.deepEqual(JSON.parse(storage.value ?? ""), {
+        v: 1, agent: "codex", tabs: { claude: "command", opencode: "hook", codex: "hook" }
+      }, "another bundle's unsupported tab value is preserved on disk");
       resetAgentProfile();
-      assert.equal(lastAgentProfileAgent(), "codex", "a device preference, not the daemon's data");
+      assert.equal(lastAgentProfileAgent(), "codex");
+      assert.equal(lastAgentProfileTab("claude"), "command");
+      assert.equal(lastAgentProfileTab("codex"), "hook");
     } finally {
       if (original) Object.defineProperty(globalThis, "localStorage", original);
       else Reflect.deleteProperty(globalThis, "localStorage");
     }
   });
 
-  it("a storage that throws leaves the pick in memory", () => {
+  it("a storage that throws leaves the pick and the tabs in memory", () => {
     const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
     Object.defineProperty(globalThis, "localStorage", {
       configurable: true,
@@ -669,7 +706,9 @@ describe("the last picked agent", () => {
     });
     try {
       assert.doesNotThrow(() => rememberAgentProfileAgent("grok"));
+      assert.doesNotThrow(() => rememberAgentProfileTab("grok", "hook"));
       assert.equal(lastAgentProfileAgent(), "grok");
+      assert.equal(lastAgentProfileTab("grok"), "hook");
     } finally {
       if (original) Object.defineProperty(globalThis, "localStorage", original);
       else Reflect.deleteProperty(globalThis, "localStorage");

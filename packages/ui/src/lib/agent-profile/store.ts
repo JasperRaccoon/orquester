@@ -20,8 +20,9 @@
  *
  * Per connection: `resetAgentProfile()` runs on a connection switch and a
  * sign-out (the app store), and a call through a client of another connection
- * resets first. The last picked agent is a device preference, persisted in
- * localStorage (`orquester:agent-profile`) and kept across a reset. No React
+ * resets first. The last picked agent and each agent's last kind tab are
+ * device preferences, persisted in localStorage (`orquester:agent-profile`)
+ * and kept across a reset. No React
  * import.
  */
 
@@ -30,7 +31,9 @@ import { createStore } from "zustand/vanilla";
 import {
   AGENT_PROFILE_AGENT_LABELS,
   AGENT_PROFILE_AGENTS,
+  AGENT_PROFILE_KINDS,
   isAgentProfileAgentId,
+  isProfileItemKind,
   type AgentProfileAgentId,
   type AgentProfileAgentSummary,
   type AgentProfileOverviewResponse,
@@ -38,6 +41,7 @@ import {
   type CopyProfileItemRequest,
   type ProfileConflictPolicy,
   type ProfileItem,
+  type ProfileItemKind,
   type ProfileMutationResponse,
   type SetProfileItemEnabledRequest,
   type TrustProfileItemRequest
@@ -591,7 +595,7 @@ export function trustAgentProfileItem(
 }
 
 // ---------------------------------------------------------------------------
-// The last picked agent (a device preference)
+// The last picked agent and each agent's last tab (device preferences)
 // ---------------------------------------------------------------------------
 
 const AGENT_PROFILE_STORAGE_KEY = "orquester:agent-profile";
@@ -599,6 +603,8 @@ const AGENT_PROFILE_PREFS_VERSION = 1;
 
 interface AgentProfilePrefs {
   agent: AgentProfileAgentId | null;
+  /** The kind tab last shown per agent — only kinds that agent has. */
+  tabs: Partial<Record<AgentProfileAgentId, ProfileItemKind>>;
 }
 
 /** The browser storage methods used by device preferences. */
@@ -607,41 +613,51 @@ interface AgentProfileStorage {
   setItem(key: string, value: string): void;
 }
 
-/** Any stored string → valid prefs, field by field; anything unparsable is the defaults. */
-export function parseAgentProfilePrefs(raw: string | null | undefined): AgentProfilePrefs {
-  if (typeof raw !== "string" || raw.length === 0) return { agent: null };
-  let parsed: unknown;
+function asRecord(value: unknown): Record<string, unknown> | null {
+  return typeof value === "object" && value !== null && !Array.isArray(value) ? (value as Record<string, unknown>) : null;
+}
+
+function parseJsonRecord(raw: string | null | undefined): Record<string, unknown> | null {
+  if (typeof raw !== "string" || raw.length === 0) return null;
   try {
-    parsed = JSON.parse(raw);
+    return asRecord(JSON.parse(raw));
   } catch {
-    return { agent: null };
+    return null;
   }
-  if (typeof parsed !== "object" || parsed === null || Array.isArray(parsed)) return { agent: null };
-  const agent = (parsed as Record<string, unknown>).agent;
-  return { agent: isAgentProfileAgentId(agent) ? agent : null };
+}
+
+/**
+ * Any stored string → valid prefs, field by field; anything unusable is the
+ * default. A tab is kept only for a known agent that has that kind.
+ */
+export function parseAgentProfilePrefs(raw: string | null | undefined): AgentProfilePrefs {
+  const parsed = parseJsonRecord(raw);
+  if (parsed === null) return { agent: null, tabs: {} };
+  const agent = parsed.agent;
+  const tabs: AgentProfilePrefs["tabs"] = {};
+  const storedTabs = asRecord(parsed.tabs);
+  if (storedTabs !== null) {
+    for (const id of AGENT_PROFILE_AGENTS) {
+      const kind = storedTabs[id];
+      if (isProfileItemKind(kind) && AGENT_PROFILE_KINDS[id].includes(kind)) tabs[id] = kind;
+    }
+  }
+  return { agent: isAgentProfileAgentId(agent) ? agent : null, tabs };
 }
 
 /**
  * The prefs to store, over whatever `previous` held: fields another bundle
- * wrote are kept (AGENTS.md: preserve unknown persisted fields).
+ * wrote are kept, and so are its tabs for agents this one does not know
+ * (AGENTS.md: preserve unknown persisted fields).
  */
 export function serializeAgentProfilePrefs(prefs: AgentProfilePrefs, previous?: string | null): string {
-  let base: Record<string, unknown> = {};
-  if (typeof previous === "string") {
-    try {
-      const parsed: unknown = JSON.parse(previous);
-      if (typeof parsed === "object" && parsed !== null && !Array.isArray(parsed)) {
-        base = parsed as Record<string, unknown>;
-      }
-    } catch {
-      /* unreadable: start over */
-    }
-  }
-  return JSON.stringify({ ...base, v: AGENT_PROFILE_PREFS_VERSION, agent: prefs.agent });
+  const base = parseJsonRecord(previous) ?? {};
+  const tabs = { ...(asRecord(base.tabs) ?? {}), ...prefs.tabs };
+  return JSON.stringify({ ...base, v: AGENT_PROFILE_PREFS_VERSION, agent: prefs.agent, tabs });
 }
 
 /** Read on first use, so importing this module never touches storage. */
-let lastAgent: AgentProfileAgentId | null | undefined;
+let prefsCache: AgentProfilePrefs | undefined;
 
 function storage(): AgentProfileStorage | null {
   try {
@@ -651,30 +667,50 @@ function storage(): AgentProfileStorage | null {
   }
 }
 
-/** The agent last picked in the panel on this device, or `null`. */
-export function lastAgentProfileAgent(): AgentProfileAgentId | null {
-  if (lastAgent === undefined) {
+function prefs(): AgentProfilePrefs {
+  if (prefsCache === undefined) {
     try {
-      lastAgent = parseAgentProfilePrefs(storage()?.getItem(AGENT_PROFILE_STORAGE_KEY)).agent;
+      prefsCache = parseAgentProfilePrefs(storage()?.getItem(AGENT_PROFILE_STORAGE_KEY));
     } catch {
-      lastAgent = null;
+      prefsCache = { agent: null, tabs: {} };
     }
   }
-  return lastAgent;
+  return prefsCache;
 }
 
-/** Remember a pick (memory at once, storage best-effort). */
-export function rememberAgentProfileAgent(agent: AgentProfileAgentId): void {
-  if (lastAgentProfileAgent() === agent) return;
-  lastAgent = agent;
+/** Keep `next`: in memory at once, in storage best-effort. */
+function writePrefs(next: AgentProfilePrefs): void {
+  prefsCache = next;
   try {
     const store = storage();
     if (store === null) return;
-    store.setItem(
-      AGENT_PROFILE_STORAGE_KEY,
-      serializeAgentProfilePrefs({ agent }, store.getItem(AGENT_PROFILE_STORAGE_KEY))
-    );
+    store.setItem(AGENT_PROFILE_STORAGE_KEY, serializeAgentProfilePrefs(next, store.getItem(AGENT_PROFILE_STORAGE_KEY)));
   } catch {
     /* quota / availability: it stays in memory */
   }
+}
+
+/** The agent last picked in the panel on this device, or `null`. */
+export function lastAgentProfileAgent(): AgentProfileAgentId | null {
+  return prefs().agent;
+}
+
+/** Remember a pick. */
+export function rememberAgentProfileAgent(agent: AgentProfileAgentId): void {
+  const current = prefs();
+  if (current.agent === agent) return;
+  writePrefs({ ...current, agent });
+}
+
+/** The kind tab last shown for `agent` on this device, or `null`. */
+export function lastAgentProfileTab(agent: AgentProfileAgentId): ProfileItemKind | null {
+  return prefs().tabs[agent] ?? null;
+}
+
+/** Remember the tab shown for `agent`; a kind that agent does not have is not kept. */
+export function rememberAgentProfileTab(agent: AgentProfileAgentId, kind: ProfileItemKind): void {
+  if (!AGENT_PROFILE_KINDS[agent].includes(kind)) return;
+  const current = prefs();
+  if (current.tabs[agent] === kind) return;
+  writePrefs({ ...current, tabs: { ...current.tabs, [agent]: kind } });
 }

@@ -1,6 +1,7 @@
 /**
- * The Agent profile panel's pure rules: the kind chips and their counts, the
- * search, the grouping in `AGENT_PROFILE_KINDS` order, which state the list
+ * The Agent profile panel's pure rules: the kind tabs and their counts, which
+ * tab is shown, the search (across every kind), what "+ Add" lists first, the
+ * grouping in `AGENT_PROFILE_KINDS` order, which state the list
  * shows instead of rows, what a row's switch says and why it may be disabled,
  * where an item can be copied to, and the instructions card's line. No React,
  * no store — `list.logic.test.ts` owns them.
@@ -13,6 +14,7 @@ import {
   PROFILE_COPYABLE_KINDS,
   PROFILE_ITEM_KIND_LABELS,
   PROFILE_ITEM_KINDS,
+  isProfileItemKind,
   type AgentProfileAgentId,
   type AgentProfileAgentSummary,
   type AgentProfileSnapshot,
@@ -23,10 +25,8 @@ import {
 
 import { formatAgo } from "../../../lib/workflows/format";
 
-export type ProfileKindFilter = "all" | ProfileItemKind;
-
-/** The chips' short labels ("MCP" rather than "MCP servers"). */
-const PROFILE_KIND_CHIP_LABELS: Record<ProfileItemKind, string> = {
+/** The tabs' short labels ("MCP" rather than "MCP servers"). */
+const PROFILE_KIND_TAB_LABELS: Record<ProfileItemKind, string> = {
   mcp: "MCP",
   skill: "Skills",
   plugin: "Plugins",
@@ -35,8 +35,8 @@ const PROFILE_KIND_CHIP_LABELS: Record<ProfileItemKind, string> = {
   command: "Commands"
 };
 
-export interface ProfileKindChip {
-  id: ProfileKindFilter;
+export interface ProfileKindTab {
+  id: ProfileItemKind;
   label: string;
   count: number;
 }
@@ -48,22 +48,45 @@ function profileKindCounts(items: readonly ProfileItem[]): Partial<Record<Profil
   return counts;
 }
 
-/** "All", then the kinds this agent has, in `AGENT_PROFILE_KINDS` order — each with its count. */
-export function profileKindChips(agent: AgentProfileAgentId, items: readonly ProfileItem[]): ProfileKindChip[] {
+/**
+ * One tab per kind this agent has, in `AGENT_PROFILE_KINDS` order — each with
+ * its count, zero included — then a tab for any other kind that has items (a
+ * kind the agent should not have: another daemon version), so every item has
+ * a tab to show it under.
+ */
+export function profileKindTabs(agent: AgentProfileAgentId, items: readonly ProfileItem[]): ProfileKindTab[] {
   const counts = profileKindCounts(items);
-  return [
-    { id: "all", label: "All", count: items.length },
-    ...AGENT_PROFILE_KINDS[agent].map((kind) => ({
-      id: kind,
-      label: PROFILE_KIND_CHIP_LABELS[kind],
-      count: counts[kind] ?? 0
-    }))
-  ];
+  const own = AGENT_PROFILE_KINDS[agent];
+  const kinds = [...own, ...PROFILE_ITEM_KINDS.filter((kind) => !own.includes(kind) && (counts[kind] ?? 0) > 0)];
+  return kinds.map((kind) => ({ id: kind, label: PROFILE_KIND_TAB_LABELS[kind], count: counts[kind] ?? 0 }));
 }
 
-/** A kind filter that means something for `agent`; anything else is "all". */
-export function effectiveKindFilter(agent: AgentProfileAgentId, kind: ProfileKindFilter): ProfileKindFilter {
-  return kind === "all" || AGENT_PROFILE_KINDS[agent].includes(kind) ? kind : "all";
+/**
+ * The tab shown: the remembered one when it is among `tabs` (a stored value
+ * may come from another app version, or be junk), else the first tab — the
+ * agent's first kind.
+ */
+export function effectiveKindTab(tabs: readonly ProfileKindTab[], remembered: unknown): ProfileItemKind {
+  const found = isProfileItemKind(remembered) ? tabs.find((tab) => tab.id === remembered) : undefined;
+  return found?.id ?? tabs[0]?.id ?? PROFILE_ITEM_KINDS[0];
+}
+
+/** The search is on: it looks across every kind, whatever the tab. */
+export function isProfileSearchActive(query: string): boolean {
+  return query.trim().length > 0;
+}
+
+/** The kind an item id names (`<kind>:<name>`, hooks `hook:<event>:<hash>`), or `null`. */
+export function profileItemKindOfId(id: string): ProfileItemKind | null {
+  const colon = id.indexOf(":");
+  if (colon <= 0) return null;
+  const prefix = id.slice(0, colon);
+  return isProfileItemKind(prefix) ? prefix : null;
+}
+
+/** "+ Add"'s kinds: the shown tab's kind first when it can be created, then the rest in their order. */
+export function addMenuKinds(creatable: readonly ProfileItemKind[], active: ProfileItemKind): ProfileItemKind[] {
+  return creatable.includes(active) ? [active, ...creatable.filter((kind) => kind !== active)] : [...creatable];
 }
 
 /** Every whitespace-separated word of `query` appears in the item's name, description, source or meta line. */
@@ -193,13 +216,13 @@ function metaPart(key: string, value: string, kind: ProfileItemKind, name: strin
   }
 }
 
+/** The tab's items; while searching, the matches of every kind instead. */
 export function filterProfileItems(
   items: readonly ProfileItem[],
-  filter: { kind: ProfileKindFilter; query: string }
+  filter: { kind: ProfileItemKind; query: string }
 ): ProfileItem[] {
-  return items.filter(
-    (item) => (filter.kind === "all" || item.kind === filter.kind) && matchesProfileQuery(item, filter.query)
-  );
+  if (isProfileSearchActive(filter.query)) return items.filter((item) => matchesProfileQuery(item, filter.query));
+  return items.filter((item) => item.kind === filter.kind);
 }
 
 export interface ProfileItemGroup {
@@ -277,9 +300,7 @@ export type AgentProfileEmptyState =
   | { kind: "loading" }
   | { kind: "not-installed"; agent: AgentProfileAgentId }
   | { kind: "error"; message: string }
-  /** The agent has nothing of any kind. */
-  | { kind: "none" }
-  /** A kind chip with nothing under it: "No MCP servers yet." */
+  /** A tab with nothing under it: "No MCP servers yet." */
   | { kind: "empty-kind"; itemKind: ProfileItemKind }
   | { kind: "no-matches"; query: string };
 
@@ -290,9 +311,10 @@ export function agentProfileEmptyState(input: {
   snapshot: AgentProfileSnapshot | null;
   error: string | null;
   notInstalled: boolean;
-  kind: ProfileKindFilter;
+  /** The tab shown. */
+  kind: ProfileItemKind;
   query: string;
-  /** How many rows the filter and the search leave. */
+  /** How many rows the tab or the search leaves. */
   shown: number;
 }): AgentProfileEmptyState | null {
   if (input.notInstalled) return { kind: "not-installed", agent: input.agent };
@@ -303,8 +325,7 @@ export function agentProfileEmptyState(input: {
   if (input.shown > 0) return null;
   const query = input.query.trim();
   if (query.length > 0) return { kind: "no-matches", query };
-  if (input.kind !== "all") return { kind: "empty-kind", itemKind: input.kind };
-  return { kind: "none" };
+  return { kind: "empty-kind", itemKind: input.kind };
 }
 
 /** "No MCP servers yet." */
