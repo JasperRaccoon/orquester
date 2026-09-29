@@ -12,6 +12,8 @@ import { ArrowDown, ArrowUp, ChevronDown, ChevronRight, ExternalLink, Plus, Tras
 import {
   isValidTimeZone,
   UNSET_SUBWORKFLOW_ID,
+  WORKFLOW_RULE_GUIDE,
+  WORKFLOW_RULE_OPERATOR_GUIDE,
   type RuleOperator,
   type WorkflowRule
 } from "@orquester/api";
@@ -20,6 +22,7 @@ import { NOTE_COLORS } from "@orquester/config";
 import { cn } from "../../../lib/cn";
 import { isUnaryOperator, nodeSummary, RULE_OPERATOR_LABELS, ruleText } from "../../../lib/workflows/catalog-ui";
 import { formatMinutes } from "../../../lib/workflows/durations";
+import { blockGuideSection, guideItemText } from "../../../lib/workflows/guide-text";
 import {
   caseLabelNote,
   caseOutputName,
@@ -51,6 +54,7 @@ import {
   TimeInput,
   ViewButton
 } from "../ui/controls";
+import { GuideItems, GuideText } from "../ui/GuideText";
 import { timeZones } from "../WorkflowSettingsModal";
 import {
   ConfigField,
@@ -88,42 +92,34 @@ const OPERATOR_GROUPS: { label: string; ops: RuleOperator[] }[] = [
   { label: "Value", ops: ["isEmpty", "isNotEmpty", "exists", "isTrue", "isFalse"] }
 ];
 
-/** How rules compare (packages/api rules.ts), for the Conditions / Cases help tip. */
-const RULES_HELP = (
-  <>
-    <p>
-      <span className="font-medium text-neutral-100">Value</span> is usually one {"{{ … }}"}; it keeps its type, so a list or a number is
-      compared as one. <span className="font-medium text-neutral-100">Compared with</span> is read as text.
-    </p>
-    <p>
-      <span className="font-medium text-neutral-100">equals</span>: the same text (case matters); numbers compare as numbers, so 1 equals 1.0;
-      true and false match the words.
-    </p>
-    <p>
-      <span className="font-medium text-neutral-100">contains</span>: part of the text — or, for a list, one of its items.{" "}
-      <span className="font-medium text-neutral-100">starts / ends with</span>: case matters.
-    </p>
-    <p>
-      <span className="font-medium text-neutral-100">matches regex</span>: a regular expression like ^v\d+, or /pattern/i for flags. Patterns
-      that could run forever, like (a+)+, are refused and don't match.
-    </p>
-    <p>
-      <span className="font-medium text-neutral-100">Number checks</span> need a number on both sides; otherwise the rule doesn't hold and the run
-      notes a warning.
-    </p>
-    <p>
-      <span className="font-medium text-neutral-100">is empty</span>: missing, blank text, an empty list or object.{" "}
-      <span className="font-medium text-neutral-100">exists</span>: there is a value at all, even an empty one.{" "}
-      <span className="font-medium text-neutral-100">is true / is false</span>: true or false, or that word in any case.
-    </p>
-  </>
+/** The rule sides as the form names them (the shared guide calls them `left` / `right`). */
+const RULE_SIDE_LABELS: Partial<Record<string, string>> = { left: "Value", right: "Compared with" };
+
+/** A rule-guide or operator term as the form shows it: a side's label, an operator's label. */
+function ruleTermLabel(term: string): React.ReactNode {
+  const side = RULE_SIDE_LABELS[term];
+  if (side !== undefined) return side;
+  return term in RULE_OPERATOR_LABELS ? RULE_OPERATOR_LABELS[term as RuleOperator] : term;
+}
+
+/** How rules compare, for the Conditions / Cases help tip: the shared guide's rules, then each operator by group. */
+export const RulesGuide: React.FC = () => (
+  <div className="space-y-2.5">
+    <GuideItems items={WORKFLOW_RULE_GUIDE} termLabel={ruleTermLabel} />
+    {OPERATOR_GROUPS.map((group) => (
+      <section key={group.label} className="space-y-1">
+        <h4 className="text-[10.5px] font-semibold uppercase tracking-wide text-neutral-500">{group.label} checks</h4>
+        <GuideItems items={group.ops.map((op) => ({ term: op, text: WORKFLOW_RULE_OPERATOR_GUIDE[op] }))} termLabel={ruleTermLabel} />
+      </section>
+    ))}
+  </div>
 );
 
 const RulesHelp: React.FC = () => (
   <span className="flex items-center gap-1 text-[11px] text-neutral-500">
     How rules compare
     <HelpTip label="how rules compare" align="end">
-      {RULES_HELP}
+      <RulesGuide />
     </HelpTip>
   </span>
 );
@@ -553,6 +549,13 @@ export const SwitchSettings: React.FC = () => {
   );
 };
 
+const MERGE_JOINING = blockGuideSection("merge", "Joining")?.items ?? [];
+/** What each Merge mode does (the shared guide's Joining facts). */
+const MERGE_GUIDE = {
+  all: guideItemText(MERGE_JOINING, "all") ?? "",
+  first: guideItemText(MERGE_JOINING, "first") ?? ""
+};
+
 export const MergeSettings: React.FC = () => {
   const { node, workflow } = useInspector();
   const setConfig = useConfigSetter<{ mode: "all" | "first" }>();
@@ -572,12 +575,12 @@ export const MergeSettings: React.FC = () => {
             {
               value: "all",
               label: "Wait for every branch",
-              description: "Runs once every branch wired into it has finished. A branch the run skipped (an If that went the other way) isn't waited for."
+              description: <GuideText text={MERGE_GUIDE.all} />
             },
             {
               value: "first",
               label: "Go on with the first branch",
-              description: "Runs as soon as one branch arrives. Branches that finish later still run, but this block doesn't run again."
+              description: <GuideText text={MERGE_GUIDE.first} />
             }
           ]}
         />
@@ -600,6 +603,13 @@ export const MergeSettings: React.FC = () => {
 };
 
 type StopConfig = { as: "success" | "failure"; message?: string; value?: string };
+
+const STOP_ENDING = blockGuideSection("stop", "Ending")?.items ?? [];
+/** What a Stop's final output and message are (the shared guide's Ending facts). */
+const STOP_GUIDE = {
+  value: guideItemText(STOP_ENDING, "value") ?? "",
+  message: guideItemText(STOP_ENDING, "message") ?? ""
+};
 
 export const StopSettings: React.FC = () => {
   const { node, scope } = useInspector();
@@ -630,7 +640,7 @@ export const StopSettings: React.FC = () => {
           />
         </Field>
       </FieldAnchor>
-      <ConfigField path="config.message" label="Message" optional hint="Shown in the run history and in the notification.">
+      <ConfigField path="config.message" label="Message" optional hint={<GuideText text={STOP_GUIDE.message} />}>
         <TemplateEditor
           value={config.message ?? ""}
           onChange={(next) => setConfig({ message: next || undefined }, "message")}
@@ -646,8 +656,10 @@ export const StopSettings: React.FC = () => {
         optional
         help={
           <>
-            <p>If this is exactly one {"{{ … }}"}, the value keeps its type — a number stays a number, a list stays a list. Anything else becomes text.</p>
-            <p>It is the run's final output: what a Run workflow block that started this run gets as its output.</p>
+            <p>
+              <GuideText text={STOP_GUIDE.value} />
+            </p>
+            <p>It is what a Run workflow block that started this run gets as its output.</p>
           </>
         }
         hint="Left empty, this block's input is the final output."
@@ -750,6 +762,9 @@ export const WaitSettings: React.FC = () => {
   );
 };
 
+/** What a Run workflow block starts and gets back (the shared guide's Child run facts). */
+const CHILD_RUN = blockGuideSection("workflow", "Child run")?.items ?? [];
+
 export const SubWorkflowSettings: React.FC = () => {
   const { node, workflow, scope } = useInspector();
   const setConfig = useConfigSetter<{ workflowId: string; input?: string }>();
@@ -781,8 +796,8 @@ export const SubWorkflowSettings: React.FC = () => {
         label="Workflow"
         help={
           <>
-            <p>It runs to the end as its own run, linked to this one; its final output becomes this block's output. If it fails, this block fails.</p>
-            <p>It runs even while that workflow is turned off — its own triggers don't matter — but not while it has errors.</p>
+            <p>It runs to the end as its own run, linked to this one. It runs even while that workflow is turned off — its own triggers don&apos;t matter.</p>
+            <GuideItems items={CHILD_RUN.filter((item) => item.term !== "input")} />
           </>
         }
         hint={target?.description?.trim() || "It runs to the end; its final output becomes this block's output."}
@@ -821,7 +836,11 @@ export const SubWorkflowSettings: React.FC = () => {
         path="config.input"
         label="Its input"
         optional
-        help={<p>If this is exactly one {"{{ … }}"}, the value keeps its type — an object stays an object. Anything else becomes text.</p>}
+        help={
+          <p>
+            <GuideText text={guideItemText(CHILD_RUN, "input") ?? ""} />
+          </p>
+        }
         hint="Left empty, this block's input is passed on."
       >
         <TemplateEditor

@@ -12,6 +12,9 @@ import { KeyRound, Maximize2 } from "lucide-react";
 
 import {
   hasTemplate,
+  WORKFLOW_CODE_ARGUMENT_NAMES,
+  WORKFLOW_CODE_ARGUMENTS,
+  WORKFLOW_CODE_SIGNATURE,
   WORKFLOW_LIMITS,
   type CodeBlockConfig,
   type HttpBlockConfig,
@@ -22,6 +25,7 @@ import { HTTP_METHODS } from "@orquester/config";
 import { cn } from "../../../lib/cn";
 import { nodeSummary } from "../../../lib/workflows/catalog-ui";
 import { formatMinutes, formatSeconds } from "../../../lib/workflows/durations";
+import { blockGuideSection, blockGuideSections, guideItemText } from "../../../lib/workflows/guide-text";
 import {
   codeLimitsSummary,
   ENV_NAME_PATTERN,
@@ -68,6 +72,7 @@ import {
   ViewButton,
   type KeyValueRow
 } from "../ui/controls";
+import { GuideItems, GuideSections, GuideText } from "../ui/GuideText";
 import {
   ConfigField,
   fieldMessages,
@@ -219,20 +224,29 @@ const CodeBox: React.FC<{
 };
 
 
-/** What the default export is called with (sandbox/code-host.mjs). */
-const ARGUMENTS: [string, React.ReactNode][] = [
-  ["input", "the output of the block wired into this one (several: an object by block name)"],
-  ["nodes", <>every earlier block, by name: <code className="font-mono">nodes.Fetch.output</code>, <code className="font-mono">.status</code></>],
-  ["trigger", "what started the run (the manual input, the git event…)"],
-  ["run", "id, startedAt, workflowId, workflowName, attempt"],
-  ["project", "path, name, workspace, branch"],
-  ["secrets", <>the workflow's secrets: <code className="font-mono">secrets.API_TOKEN</code></>],
-  ["log(…)", "writes a line to this block's log"],
-  ["stop(reason?)", "ends the whole run here, as a success"],
-  ["require(name)", "loads an npm package installed in the project"]
-];
-
 const CODE_EXAMPLE = "export default async function ({ input, nodes, log }) {\n  log(\"got\", input);\n  return { count: input.items.length };\n}";
+
+const HELP_BOX = "rounded-lg border border-neutral-800 bg-neutral-950/40 px-3 py-2.5 text-[11px] leading-4 text-neutral-400";
+
+/** What a Code block's default export is called with: the signature, each argument (the shared guide) and an example. */
+export const CodeArgumentsHelp: React.FC = () => (
+  <div className={HELP_BOX}>
+    <CopyChip text={WORKFLOW_CODE_SIGNATURE} label="Copy the function signature" className="text-[11px]" />
+    <GuideItems
+      className="mt-2.5"
+      items={WORKFLOW_CODE_ARGUMENT_NAMES.map((name) => ({ term: name, text: WORKFLOW_CODE_ARGUMENTS[name] }))}
+    />
+    <p className="mt-2.5 text-neutral-500">For example:</p>
+    <pre className="mt-1 overflow-x-auto whitespace-pre font-mono text-[11px] leading-4 text-neutral-300">{CODE_EXAMPLE}</pre>
+  </div>
+);
+
+/** How a Code block runs, what its result becomes and its limits (the shared guide, minus the arguments). */
+export const CodeRuntimeHelp: React.FC = () => (
+  <div className={HELP_BOX}>
+    <GuideSections sections={blockGuideSections("code", "Runtime", "Result", "Limits")} />
+  </div>
+);
 
 /** The timeout's default note: the block-wide timeout when that is what applies, else the type's default. */
 function timeoutDefaultNote(source: "config" | "node" | "default", nodeMinutes: number | undefined, fallback: string): React.ReactNode {
@@ -267,18 +281,10 @@ export const CodeSettings: React.FC = () => {
           />
         </ConfigField>
         <Disclosure label="What the function receives">
-          <div className="rounded-lg border border-neutral-800 bg-neutral-950/40 px-3 py-2.5">
-            <dl className="grid grid-cols-[auto_minmax(0,1fr)] gap-x-3 gap-y-1 text-[11px] leading-4">
-              {ARGUMENTS.map(([name, text]) => (
-                <React.Fragment key={name}>
-                  <dt className="font-mono text-neutral-300">{name}</dt>
-                  <dd className="text-neutral-500">{text}</dd>
-                </React.Fragment>
-              ))}
-            </dl>
-            <p className="mt-2.5 text-[11px] leading-4 text-neutral-500">For example:</p>
-            <pre className="mt-1 overflow-x-auto whitespace-pre font-mono text-[11px] leading-4 text-neutral-300">{CODE_EXAMPLE}</pre>
-          </div>
+          <CodeArgumentsHelp />
+        </Disclosure>
+        <Disclosure label="How it runs, its result and limits">
+          <CodeRuntimeHelp />
         </Disclosure>
       </InspectorSection>
       <InspectorSection title="Limits" anchors={["config.memoryMb", "config.timeoutMinutes"]} summary={codeLimitsSummary(config, node.timeoutMinutes)}>
@@ -353,6 +359,9 @@ const SecretValue: React.FC<{ field: string; value: string; onChange: (value: st
     <SecretPicker onPick={(reference) => onChange(value ? `${value}${reference}` : reference)} />
   </FieldAnchor>
 );
+
+/** The Commands help: how the script runs and what it outputs (the shared guide). */
+const SHELL_HELP = blockGuideSections("shell", "Script", "Result");
 
 const SHELL_TEMPLATE_ERROR = 'Scripts never contain {{ … }}. Put the value in a variable under Environment and read it as "$NAME" instead.';
 
@@ -472,6 +481,7 @@ export const ShellSettings: React.FC = () => {
             error={script.error ?? (templated ? SHELL_TEMPLATE_ERROR : null)}
             warning={script.warning}
             hint="Runs in the project folder. Exit code 0 means success. Output: stdout, stderr, exitCode."
+            help={<GuideSections sections={SHELL_HELP} />}
           >
             <CodeBox
               filename="script.sh"
@@ -540,6 +550,7 @@ export const ShellSettings: React.FC = () => {
           path="config.timeoutMinutes"
           label="Timeout"
           hint="The block fails if the script runs longer"
+          help={<GuideSections sections={blockGuideSections("shell", "Limits")} />}
           defaultNote={timeoutDefaultNote(effective.source, node.timeoutMinutes, formatMinutes(WORKFLOW_LIMITS.processTimeoutMinutes.default))}
         >
           <DurationInput
@@ -634,10 +645,17 @@ const RequestRows: React.FC<{
   );
 };
 
+/** The HTTP guide's `body` fact (the Request section), for the JSON body's help. */
+const HTTP_BODY_GUIDE = guideItemText(blockGuideSection("http", "Request")?.items ?? [], "body");
+
 const JSON_BODY_HELP = (
   <>
-    <p>The JSON to send. Put a value in as {"{{ … | json }}"} (no quotes around it): the filter writes it as JSON, so text with quotes or line breaks can't break the body.</p>
-    <p>A body that is exactly one {"{{ … }}"} sends that value as JSON: a text that already is JSON is sent as it is, any other value is encoded.</p>
+    <p>Put a value in as {"{{ … | json }}"} (no quotes around it): the filter writes it as JSON, so text with quotes or line breaks can't break the body.</p>
+    {HTTP_BODY_GUIDE !== undefined ? (
+      <p>
+        <GuideText text={HTTP_BODY_GUIDE} />
+      </p>
+    ) : null}
     <p>If the filled-in text isn't valid JSON, the block fails without sending.</p>
   </>
 );
@@ -707,6 +725,7 @@ export const HttpSettings: React.FC = () => {
           path="config.url"
           label="URL"
           hint="Starts with http:// or https://. {{ … }} and secrets work anywhere in it."
+          help={<GuideItems items={(blockGuideSection("http", "Request")?.items ?? []).filter((item) => item.term !== "body")} />}
           aside={<SecretPicker onPick={(reference) => setConfig({ url: `${config.url}${reference}` }, "url")} />}
         >
           <div className="flex items-start gap-1.5">
@@ -836,6 +855,7 @@ export const HttpSettings: React.FC = () => {
             error={statuses.error}
             warning={statuses.warning}
             hint="Any other status fails the block; its failure output still gets the response."
+            help={<GuideSections sections={blockGuideSections("http", "Response")} />}
           >
             <Segmented
               label="Success statuses"
@@ -870,6 +890,7 @@ export const HttpSettings: React.FC = () => {
           path="config.timeoutSeconds"
           label="Timeout"
           hint="The block fails if the answer takes longer"
+          help={<GuideSections sections={blockGuideSections("http", "Limits")} />}
           defaultNote={
             effectiveTimeout.source === "node" && node.timeoutMinutes !== undefined
               ? `${formatSeconds(effectiveTimeout.seconds)} (the block timeout set under Run behaviour)`

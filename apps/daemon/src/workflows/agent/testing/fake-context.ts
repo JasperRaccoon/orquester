@@ -206,7 +206,8 @@ export function createFakeContext(opts: FakeContextOptions): FakeContext {
       nodes,
       trigger: opts.trigger ?? { kind: "manual", input: null },
       run: { id: opts.runId ?? "run-1", startedAt: "2026-09-28T12:00:00.000Z", workflowId: opts.workflow.id, workflowName: opts.workflow.name, attempt: 1 },
-      project: { path: project.path, name: project.name, workspace: project.workspace, branch: "main" }
+      project: { path: project.path, name: project.name, workspace: project.workspace, branch: "main" },
+      workflow: { id: opts.workflow.id, name: opts.workflow.name }
     }),
     secrets: opts.secrets ?? {},
     ...(opts.resumeFrom ? { resumeFrom: structuredClone(opts.resumeFrom) } : {}),

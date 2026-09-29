@@ -17,15 +17,26 @@ import assert from "node:assert/strict";
 import { createElement as h } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import type { Workflow, WorkflowNode, WorkflowProblem } from "@orquester/api";
+import {
+  WORKFLOW_BLOCK_GUIDES,
+  WORKFLOW_RULE_GUIDE,
+  WORKFLOW_RULE_OPERATOR_GUIDE,
+  type Workflow,
+  type WorkflowNode,
+  type WorkflowProblem
+} from "@orquester/api";
+import { RULE_OPERATORS } from "@orquester/config";
 
+import { RULE_OPERATOR_LABELS } from "../../../lib/workflows/catalog-ui";
+import { plainGuideText } from "../../../lib/workflows/guide-text";
 import { resetWorkflows, summaryFromRecord, workflowsStore } from "../../../lib/workflows/store";
-import { edge, node, workflow } from "../../../lib/workflows/testing";
+import { edge, markupText, node, workflow } from "../../../lib/workflows/testing";
 import { useAppStore } from "../../../store/app";
 import {
   IfSettings,
   MergeSettings,
   NoteSettings,
+  RulesGuide,
   StopSettings,
   SubWorkflowSettings,
   SwitchSettings,
@@ -72,8 +83,30 @@ function render(
 const has = (html: string, text: string, why?: string): void => assert.ok(html.includes(text), why ?? `markup has ${JSON.stringify(text)}`);
 const lacks = (html: string, text: string, why?: string): void => assert.ok(!html.includes(text), why ?? `markup lacks ${JSON.stringify(text)}`);
 const count = (html: string, text: string): number => html.split(text).length - 1;
+/** The markup reads a shared-guide text (its `backtick` spans rendered as code). */
+const reads = (html: string, guideText: string, why?: string): void => {
+  const want = plainGuideText(guideText).replace(/\s+/g, " ");
+  assert.ok(markupText(html).includes(want), why ?? `markup reads ${JSON.stringify(want)}`);
+};
+/** The guide's fact `term` in a block type's section. */
+const fact = (type: keyof typeof WORKFLOW_BLOCK_GUIDES, title: string, term: string): string =>
+  WORKFLOW_BLOCK_GUIDES[type].find((section) => section.title === title)!.items.find((item) => item.term === term)!.text;
 
 try {
+  // --- How rules compare (the If / Switch help tip) --------------------------
+  {
+    const html = renderToStaticMarkup(h(RulesGuide));
+    for (const item of WORKFLOW_RULE_GUIDE) reads(html, item.text);
+    for (const op of RULE_OPERATORS) {
+      reads(html, WORKFLOW_RULE_OPERATOR_GUIDE[op], `the ${op} operator is explained`);
+      has(html, `>${RULE_OPERATOR_LABELS[op]}<`, `${op} goes by the label the Check menu shows`);
+    }
+    has(html, ">Value<", "left is named as the form names it");
+    has(html, ">Compared with<");
+    has(html, "<code", "code spans render as <code>");
+    lacks(html, "`", "no raw backticks");
+  }
+
   // --- If ----------------------------------------------------------------------
   {
     const html = render(IfSettings, node("n1", "if", { rules: [{ left: "{{ input.status }}", op: "equals", right: "done" }] }));
@@ -160,7 +193,8 @@ try {
     );
     const html = render(MergeSettings, merge, { workflow: wf });
     has(html, "Wait for every branch");
-    has(html, "isn&#x27;t waited for");
+    reads(html, fact("merge", "Joining", "all"), "each mode says what the shared guide says");
+    reads(html, fact("merge", "Joining", "first"));
     has(html, "Go on with the first branch");
     has(html, "{ &quot;Fetch&quot;: …, &quot;Review&quot;: … }");
     has(html, "{{ nodes.Join.output.Fetch }}");
@@ -180,6 +214,7 @@ try {
     has(html, 'data-wf-field="config.value"');
     has(html, "there is no block named");
     has(html, 'aria-label="About Final output"');
+    reads(html, fact("stop", "Ending", "message"), "the message hint is the shared guide's");
     has(html, "Left empty, this block&#x27;s input is the final output.");
   }
 

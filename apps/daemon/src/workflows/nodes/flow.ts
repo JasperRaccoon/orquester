@@ -10,7 +10,7 @@ import { sharedRegexMatcher } from "./regex-worker.ts";
 const defaultMatcher: RuleMatcher = (job) => sharedRegexMatcher().match(job);
 
 function ruleContext<T extends WorkflowNodeType>(ctx: NodeExecutionContext<T>): ExpressionContext {
-  return { ...ctx.expressionContext(), secrets: ctx.secrets, workflow: { id: ctx.workflow.id, name: ctx.workflow.name } };
+  return { ...ctx.expressionContext(), secrets: ctx.secrets };
 }
 
 /** A trigger's output is the event that fired the run (§6). */

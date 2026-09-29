@@ -15,7 +15,14 @@
 import React, { useMemo, useRef, useState } from "react";
 import { Braces, Maximize2 } from "lucide-react";
 
-import { isPromptVariableName, upstreamOf, WORKFLOW_LIMITS, type AgentBlockConfig, type AgentChainEntry } from "@orquester/api";
+import {
+  isPromptVariableName,
+  upstreamOf,
+  WORKFLOW_LIMITS,
+  WORKFLOW_SECRETS_GUIDE,
+  type AgentBlockConfig,
+  type AgentChainEntry
+} from "@orquester/api";
 
 import { cn } from "../../../lib/cn";
 import { useProviderSnapshots } from "../../../lib/agent-chat/hooks";
@@ -23,14 +30,19 @@ import { providerForRefId } from "../../../lib/agent-chat/providers";
 import { useSavedPrompts } from "../../../lib/saved-prompts/hooks";
 import { defaultAgentLabel, defaultModelLabel } from "../../../lib/workflows/catalog-ui";
 import { formatMinutes } from "../../../lib/workflows/durations";
+import { guideItemText } from "../../../lib/workflows/guide-text";
 import { useAppStore } from "../../../store/app";
 import { Modal, ModalCloseButton } from "../../ui/modal";
 import { FullScreenEditor } from "../phone/FullScreenEditor";
 import { usePhoneLayout } from "../phone/phone-context";
 import { Callout, DurationInput, Field, FOCUS_RING, RadioCards, Segmented, SelectInput, SmallButton, ToggleRow, useReadOnly, ViewButton } from "../ui/controls";
+import { GuideText } from "../ui/GuideText";
 import { ChainEditor } from "./ChainEditor";
 import { ConfigField, FieldAnchor, InspectorSection, useConfigSetter, useFieldMessages, useInspector } from "./inspector-context";
 import { TemplateEditor, type TemplateEditorHandle } from "./TemplateEditor";
+
+/** What a secret in an agent prompt costs (the shared guide). */
+const PROMPT_SECRET_GUIDE = guideItemText(WORKFLOW_SECRETS_GUIDE, "agent prompts");
 
 const PromptEditorModal: React.FC<{
   open: boolean;
@@ -271,6 +283,11 @@ const PromptSection: React.FC<{ config: AgentBlockConfig }> = ({ config }) => {
                 <p>
                   <code>{"{branch}"}</code>, <code>{"{project}"}</code> and the other saved-prompt variables are filled in when the block starts.
                 </p>
+                {PROMPT_SECRET_GUIDE !== undefined ? (
+                  <p>
+                    <GuideText text={PROMPT_SECRET_GUIDE} />
+                  </p>
+                ) : null}
               </>
             }
             aside={

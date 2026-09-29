@@ -8,6 +8,7 @@ import { z } from "zod";
 import { WORKFLOW_NODE_TYPES, WORKFLOW_SECRET_MAX_VALUE_BYTES, WORKFLOW_SECRET_NAME_PATTERN } from "@orquester/config";
 import {
   applyWorkflowPatch,
+  EXPRESSION_PREVIEW_LIMITS,
   isRunActive,
   WORKFLOW_LIMITS,
   WORKFLOW_NODE_NAME_PATTERN,
@@ -21,12 +22,14 @@ import {
   type ListWorkflowRunsResponse,
   type ListWorkflowSecretsResponse,
   type ListWorkflowsResponse,
+  type PreviewWorkflowExpressionResponse,
   type RunWorkflowResponse,
   type ValidateWorkflowResponse,
   type Workflow,
   type WorkflowBlockRun,
   type WorkflowBlockTypeInfo,
   type WorkflowBlockTypesResponse,
+  type WorkflowExpressionShape,
   type WorkflowNode,
   type WorkflowPatchOp,
   type WorkflowProblem,
@@ -615,8 +618,8 @@ function blockTypeView(t: WorkflowBlockTypeInfo, withSchema: boolean): Record<st
 const listBlockTypes = defineTool({
   name: "list_workflow_block_types",
   title: "List workflow block types",
-  description: "Read this before authoring a workflow: every block type (config JSON schema, example, output shape, output handles), the {{ }} expression guide and an authoring guide with a worked example (the Jira fixer). Pass `type` for one block's full schema when the list omits schemas (configSchemasOmitted).",
-  input: { type: nodeTypeSchema.optional().describe("Only this block type, with its whole config schema.") },
+  description: "Read this before authoring a workflow: every block type (config JSON schema, example, output shape, output handles), the {{ }} expression guide and an authoring guide with a worked example (the Jira fixer). Pass `type` for that block's full contract: its whole config schema (even when the list omits schemas: configSchemasOmitted) and its guide sections (arguments, result, limits…).",
+  input: { type: nodeTypeSchema.optional().describe("Only this block type, with its full contract: the whole config schema and its guide sections.") },
   annotations: READ_ONLY,
   async run(args, { api }) {
     const body = expectWorkflowOk<WorkflowBlockTypesResponse>(await api.request("GET", workflowRoutes.blockTypes));
@@ -624,7 +627,10 @@ const listBlockTypes = defineTool({
     if (args.type !== undefined) {
       const one = types.find((t) => t.type === args.type);
       if (!one) throw new ToolError("NOT_FOUND", `The daemon lists no block type "${args.type}".`);
-      return { types: [blockTypeView(one, true)], expressionGuide: body.expressionGuide };
+      // Its contract (arguments, result, limits…) too: the full listing carries every contract in the
+      // authoring guide already. An older daemon sends none.
+      const guide = Array.isArray(one.guide) && one.guide.length > 0 ? { guide: one.guide } : {};
+      return { types: [{ ...blockTypeView(one, true), ...guide }], expressionGuide: body.expressionGuide };
     }
     const result: Record<string, unknown> = { types: types.map((t) => blockTypeView(t, true)), expressionGuide: body.expressionGuide, authoringGuide: WORKFLOW_AUTHORING_GUIDE };
     // Over budget: drop config schemas, largest first — the examples and the guides stay.
@@ -946,6 +952,80 @@ const cancelRun = defineTool({
   }
 });
 
+/** An outline shape cut to its type (and a list's length): what is left when the keys do not fit. */
+function bareShape(shape: WorkflowExpressionShape | undefined): WorkflowExpressionShape | undefined {
+  if (!shape) return shape;
+  return { type: shape.type, ...(shape.length !== undefined ? { length: shape.length } : {}), ...(shape.note ? { note: shape.note } : {}) };
+}
+
+const PREVIEW_TRUNCATION_NOTE = "Results listed in truncatedFields were cut to fit (they end in \"… [truncated]\"); preview fewer templates, or a narrower path, to see more.";
+
+const previewExpression = defineTool({
+  name: "preview_expression",
+  title: "Preview a {{ }} template",
+  description: "Render {{ … }} templates against a workflow's recorded data without running anything: returns each rendered text (or raw value), the warnings a run would record (a path that read nothing, a filter that failed) and parse errors. `node` is the block the template belongs to — it decides `input` and hides that block and its downstream. Data: a past run (runId; default the latest run that reached `node`) and/or pinned outputs (usePinned). `available` outlines what the context holds (input, trigger, every readable block's output keys, secret names) for discovering paths. Secret values never appear: {{ secrets.X }} renders as «secret:X».",
+  input: {
+    workflowId: workflowIdArg,
+    template: z.string().max(EXPRESSION_PREVIEW_LIMITS.maxTemplateLength).optional().describe("One template, e.g. \"{{ nodes.Claude.output.text }}\" or \"Fix {{ input.key }}: {{ input.summary | json }}\". Or pass templates."),
+    templates: z.array(z.string().max(EXPRESSION_PREVIEW_LIMITS.maxTemplateLength)).min(1).max(EXPRESSION_PREVIEW_LIMITS.maxTemplates).optional().describe(`Several templates at once (at most ${EXPRESSION_PREVIEW_LIMITS.maxTemplates}), rendered against the same data.`),
+    node: z.string().min(1).optional().describe("The block (id or name) whose field holds the template: its point of view decides `input` (one upstream output as is; several as {<BlockName>: output}). Omit and `input` reads nothing."),
+    runId: z.string().min(1).optional().describe("Read this run's recorded outputs (list_workflow_runs). Default: the latest run that reached `node`, else the latest run."),
+    usePinned: z.boolean().default(false).describe("Pinned outputs (update_workflow set_pinned) replace recorded ones, as a test run uses them. Works with no run on record."),
+    mode: z.enum(["text", "value"]).default("text").describe("\"text\" (default): as a text field (prompt, command, HTTP body) renders it. \"value\": a template that is one lone {{ … }} keeps its raw value — a number stays a number — as If/Switch rule sides, Stop values and sub-workflow input read it.")
+  },
+  annotations: READ_ONLY,
+  async run(args, { api }) {
+    if ((args.template === undefined) === (args.templates === undefined)) {
+      throw new ToolError("INVALID_ARGUMENT", "Pass template (one text) or templates (a list), not both and not neither.");
+    }
+    const templates = args.templates ?? [args.template!];
+    const body = {
+      templates,
+      mode: args.mode,
+      usePinned: args.usePinned,
+      ...(args.node !== undefined ? { node: args.node } : {}),
+      ...(args.runId !== undefined ? { runId: args.runId } : {})
+    };
+    const res = await api.request("POST", workflowRoutes.expressionPreview(args.workflowId), { body });
+    const preview = expectWorkflowOk<PreviewWorkflowExpressionResponse>(res);
+    const results = (preview.results ?? []).map((r, i) => ({ template: clipText(templates[i] ?? "", 300), ...r }));
+    const head: Record<string, unknown> = { workflowId: args.workflowId, node: preview.node?.name ?? null, source: preview.source };
+    let available: Record<string, unknown> = { ...preview.available };
+    const frame = (v: unknown, extra: Record<string, unknown> = {}) => ({ ...head, results: v, available, notes: preview.notes, ...extra });
+    const budget = WORKFLOW_RESULT_BUDGET;
+    // Too big: the outline goes down to types first (the results are what was asked for).
+    if (resultBytes(frame(results)) > budget) {
+      const nodes = preview.available?.nodes ?? {};
+      available = {
+        ...available,
+        ...(preview.available?.input ? { input: bareShape(preview.available.input) } : {}),
+        ...(preview.available?.trigger ? { trigger: bareShape(preview.available.trigger) } : {}),
+        nodes: Object.fromEntries(Object.entries(nodes).map(([name, n]) => [name, { status: n.status, ...(n.output ? { output: bareShape(n.output) } : {}), ...(n.error ? { error: clipText(n.error, 120) } : {}) }])),
+        keysOmitted: true
+      };
+    }
+    const flags = { truncatedFields: [], truncationNote: PREVIEW_TRUNCATION_NOTE };
+    const fitted = fitLongStrings(results, "results", budget, (v) => frame(v, flags));
+    let shown = fitted.value as Record<string, unknown>[];
+    // Still too big (a value of many small parts): values become the head of their JSON text.
+    if (resultBytes(frame(shown, flags)) > budget) {
+      const room = Math.max(0, budget - resultBytes(frame(shown.map(({ value: _value, ...rest }) => rest), flags)));
+      const share = Math.floor(room / Math.max(1, shown.length)) - 64;
+      shown = shown.map((r) => {
+        if (r.value === undefined) return r;
+        const { value, ...rest } = r;
+        return { ...rest, valueJson: fitJsonBytes(JSON.stringify(value) ?? "", Math.max(0, share)).text, truncated: true };
+      });
+    }
+    const out: Record<string, unknown> = frame(shown);
+    if (fitted.cut.length > 0) {
+      out.truncatedFields = fitted.cut.slice(0, 50).map((p) => clipText(p, 120));
+      out.truncationNote = PREVIEW_TRUNCATION_NOTE;
+    }
+    return out;
+  }
+});
+
 const listSecrets = defineTool({
   name: "list_workflow_secrets",
   title: "List workflow secret names",
@@ -981,5 +1061,5 @@ const setSecret = defineTool({
 
 export const workflowTools: ToolDef[] = [
   listBlockTypes, listWorkflows, getWorkflow, createWorkflow, updateWorkflow, validateWorkflowTool, deleteWorkflow,
-  runWorkflow, listRuns, getRun, cancelRun, listSecrets, setSecret
+  previewExpression, runWorkflow, listRuns, getRun, cancelRun, listSecrets, setSecret
 ];

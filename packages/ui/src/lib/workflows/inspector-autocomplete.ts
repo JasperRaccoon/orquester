@@ -15,6 +15,9 @@ import {
   isTriggerType,
   PROMPT_VARIABLES,
   upstreamOf,
+  WORKFLOW_EXPRESSION_FILTER_GUIDE,
+  WORKFLOW_EXPRESSION_ROOT_GUIDE,
+  type ExpressionRoot,
   type Workflow,
   type WorkflowNodeType
 } from "@orquester/api";
@@ -23,8 +26,10 @@ export interface CompletionOption {
   label: string;
   /** What is inserted (defaults to the label). */
   apply?: string;
-  /** Shown beside the label. */
+  /** Shown beside the label: a short hint. */
   detail?: string;
+  /** The longer explanation shown beside the list for the selected option (the shared guide's text, `backticks` marking code). */
+  info?: string;
   /** CodeMirror's icon kind. */
   type: "variable" | "property" | "function" | "keyword" | "constant";
 }
@@ -69,9 +74,19 @@ const NESTED_FIELDS: Record<string, readonly string[]> = {
   error: ["kind", "message"]
 };
 
-const ROOTS: { label: string; detail: string }[] = [
-  { label: "nodes", detail: "upstream blocks" },
-  { label: "input", detail: "the incoming output" },
+/** The shared guide's text for a `{{ … }}` path (`nodes.<Name>.status`…), by its path. */
+function pathInfo(path: string): string | undefined {
+  return WORKFLOW_EXPRESSION_ROOT_GUIDE.find((row) => row.path === path)?.text;
+}
+
+/** The shared guide's text for a root (its first row: `nodes` → `nodes.<Name>.output`). */
+function rootInfo(root: ExpressionRoot): string | undefined {
+  return WORKFLOW_EXPRESSION_ROOT_GUIDE.find((row) => row.root === root)?.text;
+}
+
+const ROOTS: { label: ExpressionRoot; detail: string }[] = [
+  { label: "nodes", detail: "earlier blocks, by name" },
+  { label: "input", detail: "the wired-in block's output" },
   { label: "trigger", detail: "what started the run" },
   { label: "run", detail: "id, startedAt, attempt…" },
   { label: "project", detail: "path, name, branch…" },
@@ -79,13 +94,15 @@ const ROOTS: { label: string; detail: string }[] = [
   { label: "workflow", detail: "id, name" }
 ];
 
+const SECRET_INFO = pathInfo("secrets.<NAME>");
+
 const RUN_FIELDS = ["id", "startedAt", "workflowId", "workflowName", "attempt"];
 const PROJECT_FIELDS = ["path", "name", "workspace", "branch"];
 const WORKFLOW_FIELDS = ["id", "name"];
 const NODE_FIELDS = [
-  { label: "output", detail: "its result" },
-  { label: "status", detail: "succeeded, failed…" },
-  { label: "error", detail: "{ kind, message }" }
+  { label: "output", detail: "its result", info: pathInfo("nodes.<Name>.output") },
+  { label: "status", detail: "succeeded, failed…", info: pathInfo("nodes.<Name>.status") },
+  { label: "error", detail: "{ kind, message }", info: pathInfo("nodes.<Name>.error") }
 ];
 
 const FILTER_APPLY: Partial<Record<string, string>> = { default: 'default("")', lines: "lines(5)" };
@@ -122,13 +139,23 @@ function openExpressionAt(text: string, pos: number): number {
   return open;
 }
 
-function prop(label: string, detail?: string): CompletionOption {
-  return detail ? { label, detail, type: "property" } : { label, type: "property" };
+function prop(label: string, detail?: string, info?: string): CompletionOption {
+  const option: CompletionOption = { label, type: "property" };
+  if (detail) option.detail = detail;
+  if (info) option.info = info;
+  return option;
 }
 
 /** Options for the path segment after `parents` (dotted, bracket-free). */
 function pathOptions(parents: string[], scope: CompletionScope): CompletionOption[] {
-  if (parents.length === 0) return ROOTS.map((root) => ({ label: root.label, detail: root.detail, type: "variable" }));
+  if (parents.length === 0) {
+    return ROOTS.map((root) => {
+      const option: CompletionOption = { label: root.label, detail: root.detail, type: "variable" };
+      const info = rootInfo(root.label);
+      if (info) option.info = info;
+      return option;
+    });
+  }
   const [root, ...rest] = parents;
   switch (root) {
     case "nodes": {
@@ -136,7 +163,7 @@ function pathOptions(parents: string[], scope: CompletionScope): CompletionOptio
         return scope.upstream.map((node) => ({ label: node.name, detail: node.type, type: "variable" }));
       }
       const node = scope.upstream.find((candidate) => candidate.name === rest[0]);
-      if (rest.length === 1) return NODE_FIELDS.map((field) => prop(field.label, field.detail));
+      if (rest.length === 1) return NODE_FIELDS.map((field) => prop(field.label, field.detail, field.info));
       if (rest[1] === "error" && rest.length === 2) return NESTED_FIELDS.error!.map((field) => prop(field));
       if (rest[1] !== "output" || !node) return [];
       if (rest.length === 2) return fieldsOf(node.type).map((field) => prop(field));
@@ -156,7 +183,12 @@ function pathOptions(parents: string[], scope: CompletionScope): CompletionOptio
     case "workflow":
       return rest.length === 0 ? WORKFLOW_FIELDS.map((field) => prop(field)) : [];
     case "secrets":
-      return rest.length === 0 ? scope.secretNames.map((name) => ({ label: name, detail: "secret", type: "constant" })) : [];
+      if (rest.length > 0) return [];
+      return scope.secretNames.map((name) => {
+        const option: CompletionOption = { label: name, detail: "secret", type: "constant" };
+        if (SECRET_INFO) option.info = SECRET_INFO;
+        return option;
+      });
     default:
       return [];
   }
@@ -186,6 +218,8 @@ export function templateCompletions(text: string, pos: number, scope: Completion
           const apply = FILTER_APPLY[name];
           const option: CompletionOption = { label: name, detail: FILTER_DETAIL[name] ?? "", type: "function" };
           if (apply) option.apply = apply;
+          const guide = WORKFLOW_EXPRESSION_FILTER_GUIDE[name];
+          option.info = `\`${guide.usage}\` — ${guide.text}`;
           return option;
         }),
         partial

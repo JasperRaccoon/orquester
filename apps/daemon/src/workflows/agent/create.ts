@@ -26,7 +26,7 @@ import {
   type DaemonApi
 } from "../../chat-client/index.ts";
 import type { NodeExecutionContext } from "../contracts.ts";
-import { createRedactor, secretPlaceholder, type SecretRedactor } from "../sandbox/redact.ts";
+import { createRedactor, redactContextValue, secretPlaceholder } from "../sandbox/redact.ts";
 import type { AgentCandidate, CandidateCheck } from "./failover.ts";
 
 export interface CatalogLabels {
@@ -97,22 +97,6 @@ export const MAX_TITLE_CHARS = 300;
 const TITLE_UNPRINTABLE = /[\p{Cc}\p{Cf}]/gu;
 
 /**
- * Every secret value in a context value replaced by its placeholder — in strings and in object keys,
- * since `{{ trigger }}` renders keys too. Only plain objects and arrays are walked, as the renderer
- * reads only those.
- */
-function redactTitleContext(value: unknown, redactor: SecretRedactor, depth = 0): unknown {
-  if (typeof value === "string") return redactor.text(value);
-  if (value === null || typeof value !== "object" || depth > 256) return value;
-  if (Array.isArray(value)) return value.map((item) => redactTitleContext(item, redactor, depth + 1));
-  const proto = Object.getPrototypeOf(value) as unknown;
-  if (proto !== Object.prototype && proto !== null) return value;
-  const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
-  for (const [key, item] of Object.entries(value)) out[redactor.text(key)] = redactTitleContext(item, redactor, depth + 1);
-  return out;
-}
-
-/**
  * A new chat's configured title with its `{{…}}` rendered against the run, like the prompt's — but
  * a chat title is shown on the tab and kept with the session, so no secret value ever reaches it.
  * The run context is redacted BEFORE rendering (a value the renderer JSON-encodes or transforms —
@@ -134,7 +118,7 @@ export function renderSessionTitle(
     let rendered = configured;
     if (configured.includes("{{")) {
       const placeholders = Object.fromEntries(Object.keys(ctx.secrets).map((name) => [name, secretPlaceholder(name)]));
-      const context = redactTitleContext(ctx.expressionContext(), redactor) as ReturnType<NodeExecutionContext["expressionContext"]>;
+      const context = redactContextValue(ctx.expressionContext(), redactor) as ReturnType<NodeExecutionContext["expressionContext"]>;
       rendered = renderTemplate(configured, { ...context, secrets: placeholders }).text;
     }
     const flat = redactor.text(rendered).replace(TITLE_UNPRINTABLE, " ").replace(/\s+/g, " ").trim();

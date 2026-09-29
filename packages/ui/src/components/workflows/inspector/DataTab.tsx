@@ -11,10 +11,18 @@
 import React, { useMemo, useState } from "react";
 import { ExternalLink, FlaskConical, Loader2, Pencil, Pin, PinOff } from "lucide-react";
 
-import { isTriggerType, WORKFLOW_BLOCK_CATALOG, type RunWorkflowResponse, type WorkflowRunSummary } from "@orquester/api";
+import {
+  isTriggerType,
+  WORKFLOW_BLOCK_CATALOG,
+  WORKFLOW_EXPRESSION_ROOT_GUIDE,
+  type RunWorkflowResponse,
+  type WorkflowGuideItem,
+  type WorkflowRunSummary
+} from "@orquester/api";
 
 import { useApi } from "../../../context/orquester-context";
 import { formatAgo } from "../../../lib/workflows/format";
+import { blockOutputGuide } from "../../../lib/workflows/guide-text";
 import { useWorkflowRun, useWorkflowRuns } from "../../../lib/workflows/hooks";
 import {
   blockInputOf,
@@ -33,6 +41,7 @@ import { usePhoneLayout } from "../phone/phone-context";
 import { JsonTree } from "../runs/JsonTree";
 import { StatusGlyph, useNow } from "../runs/shared";
 import { Callout, CopyChip, Disclosure, HelpTip, Pill, Section, SmallButton, TextArea } from "../ui/controls";
+import { GuideItems, GuideSections, GuideText } from "../ui/GuideText";
 import { fieldMessages, useInspector } from "./inspector-context";
 
 export interface DataTabViewProps {
@@ -57,15 +66,26 @@ function withArticle(title: string, capital = false): string {
   return `${capital ? article[0]!.toUpperCase() + article.slice(1) : article} ${title}`;
 }
 
+/** The shared guide's `nodes.<Name>.…` paths, with this block's name in them. */
+function nodePathGuide(name: string): WorkflowGuideItem[] {
+  return WORKFLOW_EXPRESSION_ROOT_GUIDE.filter((row) => row.root === "nodes").map((row) => ({
+    term: row.path.replace("<Name>", () => name),
+    text: row.text
+  }));
+}
+
 /** How later blocks read this block's output, and what it holds. */
 const UseItsData: React.FC = () => {
   const { node } = useInspector();
   const entry = WORKFLOW_BLOCK_CATALOG[node.type];
   const reference = outputReference(node.name);
+  const outputGuide = blockOutputGuide(node.type);
   if (node.type === "stop") {
     return (
       <Section title="Use this block's data">
-        <p className={MUTED}>{entry.output} Nothing runs after it.</p>
+        <p className={MUTED}>
+          <GuideText text={entry.output} /> Nothing runs after it.
+        </p>
       </Section>
     );
   }
@@ -80,10 +100,9 @@ const UseItsData: React.FC = () => {
             condition — to insert data from earlier blocks. Only blocks that finished before the one reading them are there.
           </p>
           <p>
-            Add a path for one field: <code className="font-mono">{`{{ nodes.${node.name}.output.text }}`}</code>. Also there:{" "}
-            <code className="font-mono">{`nodes.${node.name}.status`}</code> and, when it failed,{" "}
-            <code className="font-mono">{`nodes.${node.name}.error`}</code>.
+            Add a path for one field: <code className="font-mono">{`{{ nodes.${node.name}.output.text }}`}</code>.
           </p>
+          <GuideItems items={nodePathGuide(node.name)} />
           <p>Renaming the block updates every reference to it.</p>
         </HelpTip>
       }
@@ -102,8 +121,17 @@ const UseItsData: React.FC = () => {
         </div>
       )}
       <div className="space-y-0.5">
-        <div className="text-xs font-medium text-neutral-400">What it outputs</div>
-        <p className="break-words text-[12px] leading-5 text-neutral-300">{entry.output}</p>
+        <div className="flex items-center gap-1.5">
+          <span className="text-xs font-medium text-neutral-400">What it outputs</span>
+          {outputGuide.length > 0 ? (
+            <HelpTip label="what it outputs">
+              <GuideSections sections={outputGuide} />
+            </HelpTip>
+          ) : null}
+        </div>
+        <p className="break-words text-[12px] leading-5 text-neutral-300">
+          <GuideText text={entry.output} />
+        </p>
       </div>
     </Section>
   );

@@ -19,14 +19,25 @@ import assert from "node:assert/strict";
 import { createElement as h, type ReactElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import type { Workflow, WorkflowBlockRun, WorkflowNode, WorkflowProblem, WorkflowRun, WorkflowRunSummary } from "@orquester/api";
+import {
+  WORKFLOW_BLOCK_CATALOG,
+  type Workflow,
+  type WorkflowBlockRun,
+  type WorkflowNode,
+  type WorkflowNodeType,
+  type WorkflowProblem,
+  type WorkflowRun,
+  type WorkflowRunSummary
+} from "@orquester/api";
 
 import { OrquesterProvider } from "../../../context/orquester-context";
 import type { ApiClient } from "../../../lib/api-client";
 import type { WorkflowEditor } from "../../../lib/workflows/editor-store";
 import type { WorkflowRunEntry } from "../../../lib/workflows/store";
-import { T0, edge, node, workflow } from "../../../lib/workflows/testing";
+import { BLOCK_OUTPUT_GUIDE_TITLES, blockOutputGuide, plainGuideText } from "../../../lib/workflows/guide-text";
+import { T0, edge, markupText, node, workflow } from "../../../lib/workflows/testing";
 import { ReadOnlyFieldset, Section } from "../ui/controls";
+import { BlockGuide } from "../ui/GuideText";
 import { CommonSettings } from "./CommonSettings";
 import { DataTabView, type DataTabViewProps } from "./DataTab";
 import { Inspector, ProblemBar, type InspectorProps } from "./Inspector";
@@ -232,6 +243,8 @@ function data(target: WorkflowNode, props: Partial<DataTabViewProps>, extra: Par
   assert.ok(html.includes("Use this block&#x27;s data"));
   assert.ok(html.includes("{{ nodes.Fetch.output }}"), "the reference is a copyable chip");
   assert.ok(html.includes("What it outputs") && html.includes("{ status, headers, body }"), "the catalogue's output description shows before any run");
+  assert.ok(html.includes('aria-label="About what it outputs"'), "the shared guide's Response facts are behind a help tip");
+  assert.ok(!html.includes("`"), "the catalogue's code marks render as code, not backticks");
   assert.ok(html.includes("No run yet"));
   assert.ok(html.includes("Write sample output"), "a pin can be written without a run");
   assert.ok(html.includes("Runs only this block, for real") && html.includes("their pinned outputs where they have one"));
@@ -385,4 +398,24 @@ const frame = (props: Partial<InspectorProps>, wf: Workflow): string =>
   assert.ok(html.includes("This block is disabled") && html.includes(">Enable<"), "a disabled block says so at the top of Settings");
   assert.match(html, /title="1 error"/, "the Settings tab carries an error pill");
   assert.match(html, /title="1 warning"/, "and a separate warning pill");
+}
+
+{
+  // The header's help tip: the catalogue entry, then the shared guide's sections on what the block outputs.
+  for (const type of Object.keys(WORKFLOW_BLOCK_CATALOG) as WorkflowNodeType[]) {
+    const html = renderToStaticMarkup(h(BlockGuide, { type }));
+    const text = markupText(html);
+    const entry = WORKFLOW_BLOCK_CATALOG[type];
+    assert.ok(text.includes(plainGuideText(entry.description).replace(/\s+/g, " ")), `${type}: its description`);
+    if (type !== "note") assert.ok(text.includes(plainGuideText(entry.output).replace(/\s+/g, " ")), `${type}: what it outputs`);
+    const sections = blockOutputGuide(type);
+    assert.equal(sections.length, BLOCK_OUTPUT_GUIDE_TITLES[type]?.length ?? 0, `${type}: every output section is shown`);
+    for (const section of sections) {
+      assert.ok(html.includes(`>${section.title}</h4>`), `${type}: the ${section.title} section`);
+      for (const item of section.items) {
+        assert.ok(text.includes(plainGuideText(item.text).replace(/\s+/g, " ")), `${type} ${section.title}: ${item.term ?? item.text.slice(0, 30)}`);
+      }
+    }
+    assert.ok(!html.includes("`"), `${type}: no raw backticks`);
+  }
 }

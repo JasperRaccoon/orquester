@@ -16,12 +16,21 @@ import assert from "node:assert/strict";
 import { createElement as h } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
-import type { Workflow, WorkflowNode, WorkflowProblem } from "@orquester/api";
+import {
+  WORKFLOW_BLOCK_GUIDES,
+  WORKFLOW_CODE_ARGUMENT_NAMES,
+  WORKFLOW_CODE_ARGUMENTS,
+  WORKFLOW_CODE_SIGNATURE,
+  type Workflow,
+  type WorkflowNode,
+  type WorkflowProblem
+} from "@orquester/api";
 
-import { node, workflow } from "../../../lib/workflows/testing";
+import { plainGuideText } from "../../../lib/workflows/guide-text";
+import { markupText, node, workflow } from "../../../lib/workflows/testing";
 import { ReadOnlyFieldset } from "../ui/controls";
 import { InspectorContext, type InspectorContextValue, type InspectorReveal } from "./inspector-context";
-import { CodeSettings, HttpSettings, ShellSettings } from "./ProcessSettings";
+import { CodeArgumentsHelp, CodeRuntimeHelp, CodeSettings, HttpSettings, ShellSettings } from "./ProcessSettings";
 
 // Static rendering cannot run CodeMirror's or the modal's layout effects.
 const consoleError = console.error;
@@ -60,6 +69,9 @@ function render(
 
 const has = (html: string, text: string, why?: string): void => assert.ok(html.includes(text), why ?? `markup has ${JSON.stringify(text)}`);
 const lacks = (html: string, text: string, why?: string): void => assert.ok(!html.includes(text), why ?? `markup lacks ${JSON.stringify(text)}`);
+/** The markup reads a shared-guide text (its `backtick` spans rendered as code). */
+const reads = (html: string, guideText: string, why?: string): void =>
+  assert.ok(markupText(html).includes(plainGuideText(guideText).replace(/\s+/g, " ")), why ?? `markup reads ${JSON.stringify(guideText)}`);
 
 try {
   // --- Code ------------------------------------------------------------------
@@ -68,7 +80,8 @@ try {
     has(html, 'data-wf-field="config.source"');
     has(html, "Its default export runs; what it returns is this block&#x27;s output.");
     has(html, "What the function receives");
-    lacks(html, "require(name)", "the argument list starts folded away");
+    has(html, "How it runs, its result and limits");
+    assert.ok(!markupText(html).includes(plainGuideText(WORKFLOW_CODE_ARGUMENTS.require)), "the argument list starts folded away");
     has(html, "Default limits (4 GB, 30 min)", "collapsed Limits says the defaults");
     lacks(html, 'data-wf-field="config.memoryMb"', "collapsed Limits renders no fields");
   }
@@ -100,12 +113,36 @@ try {
     has(render(CodeSettings, legacy, { reveal: { field: "config.timeoutMinutes", nonce: 1 } }), "45 min (the block timeout set under Run behaviour)");
   }
 
+  {
+    // The folded Code help is the shared guide: every argument, in order, with its text, and the signature.
+    const html = renderToStaticMarkup(h(CodeArgumentsHelp));
+    const text = markupText(html);
+    has(text, WORKFLOW_CODE_SIGNATURE);
+    let from = 0;
+    for (const name of WORKFLOW_CODE_ARGUMENT_NAMES) {
+      has(html, `>${name}</div>`, `the ${name} argument is listed`);
+      const at = text.indexOf(plainGuideText(WORKFLOW_CODE_ARGUMENTS[name]), from);
+      assert.ok(at >= from, `${name} is explained, in the guide's order`);
+      from = at;
+    }
+    has(html, "<code", "code spans render as <code>");
+    lacks(html, "`", "no raw backticks");
+
+    const runtime = renderToStaticMarkup(h(CodeRuntimeHelp));
+    for (const section of WORKFLOW_BLOCK_GUIDES.code.filter((entry) => entry.title !== "Arguments")) {
+      has(runtime, `>${section.title}</h4>`);
+      for (const item of section.items) reads(runtime, item.text, `Code ${section.title}: ${item.term ?? item.text.slice(0, 30)}`);
+    }
+    lacks(runtime, "`");
+  }
+
   // --- Shell -----------------------------------------------------------------
   {
     const html = render(ShellSettings, node("n1", "shell", { script: "echo hello" }));
     has(html, 'aria-label="Shell"');
     has(html, ">Shell</span>", "the shell switch has a visible label");
     has(html, "Runs in the project folder. Exit code 0 means success.");
+    has(html, 'aria-label="About Commands"', "the script's help tip holds the shared guide");
     has(html, "isn&#x27;t allowed inside the script itself");
     has(html, "Default timeout (30 min)");
     lacks(html, "Add as environment variables");
@@ -180,6 +217,7 @@ try {
     assert.match(html, /Query parameters<\/span>(?:(?!<\/button>).)*· none/s, "an empty row list is folded with its count");
     has(html, "Not sent with GET", "Body is folded for GET, saying why");
     has(html, "Any 2xx · follows redirects · 5 min (default) timeout");
+    has(html, 'aria-label="About URL"', "the URL's help tip holds the shared guide's request facts");
   }
   {
     // A problem on one header opens Headers and shows under that row; the header count is in its label while folded.
@@ -202,6 +240,7 @@ try {
     has(html, "Not valid JSON:");
     has(html, "Sent as application/json.");
     has(html, "Write values as {{ … | json }}.");
+    has(html, 'aria-label="About JSON"');
   }
   {
     // A body on a GET, revealed: the ignored-body warning.

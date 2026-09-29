@@ -21,8 +21,10 @@ import {
   outputHandles,
   validateCron,
   nextRuns,
+  parseExpressionPreviewRequest,
   validateWorkflow,
   WORKFLOW_BLOCK_CATALOG,
+  WORKFLOW_BLOCK_GUIDES,
   WORKFLOW_EXPRESSION_GUIDE,
   workflowRoutes,
   type AgentChainEntry,
@@ -35,6 +37,7 @@ import {
   type ListWorkflowSecretsResponse,
   type ListWorkflowsResponse,
   type PatchWorkflowRequest,
+  type PreviewWorkflowExpressionResponse,
   type ReplaceWorkflowRequest,
   type RunWorkflowRequest,
   type RunWorkflowResponse,
@@ -43,6 +46,7 @@ import {
   type Workflow,
   type WorkflowBlockTypeInfo,
   type WorkflowBlockTypesResponse,
+  type WorkflowNode,
   type WorkflowNodeType,
   type WorkflowSummary,
   type WorkflowWriteResponse
@@ -69,9 +73,11 @@ import {
 import type { ZodTypeAny } from "zod";
 import { zodToJsonSchema } from "zod-to-json-schema";
 import type { ProjectOps, WorkflowEngine } from "./contracts.ts";
-import { WorkflowEngineError } from "./run-context.ts";
+import { previewExpressions, type ExpressionPreviewRun } from "./expression-preview.ts";
+import { isFinishedBlockStatus, WorkflowEngineError } from "./run-context.ts";
 import {
   engineUnavailable,
+  excerpt,
   invalidRequest,
   nodeNotFound,
   runNotFound,
@@ -122,6 +128,8 @@ const LOG_WINDOW_DEFAULT = 256 * 1024;
 const LOG_WINDOW_MAX = 4 * 1024 * 1024;
 const SCHEDULE_PREVIEW_DEFAULT = 5;
 const SCHEDULE_PREVIEW_MAX = 20;
+/** How many recent runs the expression preview searches for one that reached its block. */
+const PREVIEW_RUN_SEARCH = 20;
 /** How long deleting a workflow waits for its cancelled runs to end. */
 const CANCEL_WAIT_MS = 10_000;
 
@@ -157,7 +165,8 @@ function workflowBlockTypes(): WorkflowBlockTypesResponse {
       handles: outputHandles({ id: "example", type, config: entry.example }),
       configSchema: zodToJsonSchema(CONFIG_SCHEMAS[type], { $refStrategy: "none" }),
       example: entry.example,
-      output: entry.output
+      output: entry.output,
+      guide: WORKFLOW_BLOCK_GUIDES[type]
     };
   });
   blockTypesCache = { types, expressionGuide: WORKFLOW_EXPRESSION_GUIDE };
@@ -477,6 +486,93 @@ export function registerWorkflowRoutes(app: FastifyInstance, deps: WorkflowRoute
     guarded(async (request, reply) => {
       await catalogReady();
       return reply.code(201).send(await service.duplicate(request.params.id));
+    })
+  );
+
+  // ---- Expression preview (read-only) -----------------------------------------------------------
+
+  /** A run with a reader of its blocks' whole outputs: the engine's while attached, else the run store's. */
+  const loadPreviewRun = async (runId: string): Promise<Omit<ExpressionPreviewRun, "how"> | null> => {
+    const engine = deps.engine();
+    if (engine !== null) {
+      const run = await engine.getRun(runId);
+      if (!run) return null;
+      return { run, output: async (nodeId) => (await engine.nodeOutput(runId, nodeId)).output };
+    }
+    const persisted = await runStore.load(runId);
+    if (!persisted) return null;
+    return {
+      run: persistedRunToWire(persisted),
+      output: async (nodeId) => {
+        const block = persisted.blocks[nodeId];
+        if (block?.outputFile !== undefined) {
+          try {
+            return await runStore.readOutputFile(block.outputFile);
+          } catch {
+            // The file is gone or unreadable: the inline preview is all there is.
+          }
+        }
+        return block?.output;
+      }
+    };
+  };
+
+  /** The requested run, else the latest that reached `node`, else the latest (a skipped fire holds nothing). */
+  const previewSource = async (workflow: Workflow, node: WorkflowNode | null, runId: string | undefined): Promise<ExpressionPreviewRun | null> => {
+    if (runId !== undefined) {
+      const loaded = await loadPreviewRun(runId);
+      if (!loaded) throw runNotFound(runId);
+      if (loaded.run.workflowId !== workflow.id) {
+        throw new WorkflowError(404, "RUN_NOT_FOUND", `Run ${excerpt(runId)} is not a run of this workflow.`);
+      }
+      return { ...loaded, how: "requested" };
+    }
+    const engine = deps.engine();
+    const opts = { limit: PREVIEW_RUN_SEARCH };
+    const listing = engine !== null ? await engine.listRuns(workflow.id, opts) : await runStore.listForWorkflow(workflow.id, opts);
+    // The fallback: the newest run with a finished block (a queued run holds no data yet), else the newest.
+    let newest: Omit<ExpressionPreviewRun, "how"> | null = null;
+    let withData: Omit<ExpressionPreviewRun, "how"> | null = null;
+    for (const summary of listing.runs) {
+      if (summary.status === "skipped") continue;
+      const loaded = await loadPreviewRun(summary.id).catch(() => null);
+      if (!loaded) continue;
+      newest ??= loaded;
+      const hasData = Object.values(loaded.run.blocks).some((block) => isFinishedBlockStatus(block.status));
+      if (hasData) withData ??= loaded;
+      if (node === null) {
+        if (hasData) break;
+        continue;
+      }
+      const block = loaded.run.blocks[node.id];
+      if (block && block.status !== "pending" && block.status !== "queued" && block.status !== "skipped") {
+        return { ...loaded, how: "reached-node" };
+      }
+    }
+    const chosen = withData ?? newest;
+    if (!chosen) return null;
+    const note =
+      newest && chosen !== newest
+        ? `The newest run (${newest.run.id}, ${newest.run.status}) has no finished block yet: run ${chosen.run.id} was used.`
+        : undefined;
+    return { ...chosen, how: "latest", ...(note ? { note } : {}) };
+  };
+
+  app.post(
+    "/api/workflows/:id/expression-preview",
+    writeRoute,
+    guarded(async (request): Promise<PreviewWorkflowExpressionResponse> => {
+      const parsed = parseExpressionPreviewRequest(request.body);
+      if (!parsed.ok) throw invalidRequest(parsed.error);
+      const workflow = service.require(request.params.id);
+      const ref = parsed.request.node;
+      let node: WorkflowNode | null = null;
+      if (ref !== undefined) {
+        node = workflow.nodes.find((candidate) => candidate.id === ref) ?? workflow.nodes.find((candidate) => candidate.name === ref) ?? null;
+        if (node === null) throw new WorkflowError(404, "NODE_NOT_FOUND", `The workflow has no block with id or name ${excerpt(ref)}.`);
+      }
+      const source = await previewSource(workflow, node, parsed.request.runId);
+      return previewExpressions({ workflow, request: parsed.request, node, source, secrets: secrets.resolve(workflow.id), now: new Date() });
     })
   );
 

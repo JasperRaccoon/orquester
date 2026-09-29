@@ -136,3 +136,19 @@ export function createRedactor(secrets: Readonly<Record<string, string>>): Secre
     }
   };
 }
+
+/**
+ * Every secret value in a context value replaced by its placeholder — in strings and in object keys,
+ * since `{{ trigger }}` renders keys too. Only plain objects and arrays are walked, as the renderer
+ * reads only those.
+ */
+export function redactContextValue(value: unknown, redactor: SecretRedactor, depth = 0): unknown {
+  if (typeof value === "string") return redactor.text(value);
+  if (value === null || typeof value !== "object" || depth > 256) return value;
+  if (Array.isArray(value)) return value.map((item) => redactContextValue(item, redactor, depth + 1));
+  const proto = Object.getPrototypeOf(value) as unknown;
+  if (proto !== Object.prototype && proto !== null) return value;
+  const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const [key, item] of Object.entries(value)) out[redactor.text(key)] = redactContextValue(item, redactor, depth + 1);
+  return out;
+}

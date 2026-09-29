@@ -83,6 +83,19 @@ test("list_workflow_block_types filters the requested block type", async (t) => 
   const one = await call(api, "list_workflow_block_types", { type: "agent" });
   assert.deepEqual((one.types as { type: string }[]).map((row) => row.type), ["agent"]);
   assert.equal(one.authoringGuide, undefined);
+  assert.ok(!("guide" in (one.types as Result[])[0]!), "an older daemon sends no guide: none is invented");
+});
+
+test("list_workflow_block_types returns a type's guide sections only when that type is asked for", async (t) => {
+  const api = await sandbox(t);
+  const guide = [{ title: "Arguments", items: [{ term: "input", text: "The upstream output." }] }];
+  api.on("GET", "/api/workflows/block-types", { status: 200, body: { types: [
+    { type: "code", handles: ["success", "error"], configSchema: { type: "object" }, example: { source: "return 1" }, guide }
+  ], expressionGuide: "guide" } });
+  const one = await call(api, "list_workflow_block_types", { type: "code" });
+  assert.deepEqual((one.types as Result[])[0]!.guide, guide);
+  const all = await call(api, "list_workflow_block_types", {});
+  assert.ok(!("guide" in (all.types as Result[])[0]!));
 });
 
 test("list_workflow_block_types omits the largest schemas and identifies them", async (t) => {
@@ -385,4 +398,60 @@ test("wide definitions retain every block identity in an outline and allow full 
   }
   const one = await call(api, "get_workflow", { workflowId: "wf-1", node: "Block7" });
   assert.equal((one.node as { config: { source: string } }).config.source, `${"padding ".repeat(100)}\nreturn 7;`);
+});
+
+test("preview_expression sends one request per call and names the templates it rendered", async (t) => {
+  const api = await sandbox(t);
+  const answer = {
+    results: [{ text: "3", bytes: 1, warnings: [], errors: [] }, { missing: true, bytes: 0, warnings: ["{{ input.x }} is empty: nothing at input.x"], errors: [] }],
+    node: { id: "b", name: "Finish", type: "code" },
+    source: { run: "reached-node", runId: "run-1", runStatus: "succeeded", runTest: false, runQueuedAt: stamp, pinned: [] },
+    available: { nodes: { Work: { status: "succeeded", output: { type: "object", keys: { score: "number" } } } }, run: {}, project: {}, workflow: { id: "wf-1", name: "Demo" }, secrets: ["TOKEN"] },
+    notes: []
+  };
+  api.on("POST", "/api/workflows/wf-1/expression-preview", { status: 200, body: answer });
+  const result = await call(api, "preview_expression", { workflowId: "wf-1", node: "Finish", templates: ["{{ nodes.Work.output.score }}", "{{ input.x }}"], mode: "value", usePinned: true, runId: "run-1" });
+  assert.deepEqual(api.calls.at(-1), { method: "POST", path: "/api/workflows/wf-1/expression-preview", body: { templates: ["{{ nodes.Work.output.score }}", "{{ input.x }}"], mode: "value", usePinned: true, node: "Finish", runId: "run-1" } });
+  assert.equal(result.node, "Finish");
+  assert.deepEqual((result.results as Result[]).map((r) => r.template), ["{{ nodes.Work.output.score }}", "{{ input.x }}"]);
+  assert.equal((result.results as Result[])[1]!.missing, true);
+  assert.deepEqual(result.available, answer.available);
+
+  await call(api, "preview_expression", { workflowId: "wf-1", template: "{{ trigger }}" });
+  assert.deepEqual(api.calls.at(-1)!.body, { templates: ["{{ trigger }}"], mode: "text", usePinned: false });
+  await rejects(call(api, "preview_expression", { workflowId: "wf-1" }), "INVALID_ARGUMENT", /template/);
+  await rejects(call(api, "preview_expression", { workflowId: "wf-1", template: "a", templates: ["b"] }), "INVALID_ARGUMENT");
+  await rejects(call(api, "preview_expression", { workflowId: "wf-1", templates: Array.from({ length: 21 }, () => "x") }), "INVALID_ARGUMENT");
+  api.on("POST", "/api/workflows/wf-1/expression-preview", failure(404, "NODE_NOT_FOUND", "No block Nobody."));
+  await rejects(call(api, "preview_expression", { workflowId: "wf-1", template: "x", node: "Nobody" }), "NODE_NOT_FOUND", /get_workflow lists/);
+  api.on("POST", "/api/workflows/wf-1/expression-preview", failure(404, "RUN_NOT_FOUND", "No run."));
+  await rejects(call(api, "preview_expression", { workflowId: "wf-1", template: "x", runId: "gone" }), "RUN_NOT_FOUND", /list_workflow_runs/);
+});
+
+test("preview_expression fits large renders, values and outlines under the result cap", async (t) => {
+  const api = await sandbox(t);
+  const big = "x".repeat(200 * 1024);
+  const wide = Object.fromEntries(Array.from({ length: 5000 }, (_, i) => [`k${i}`, i]));
+  const keys = Object.fromEntries(Array.from({ length: 40 }, (_, i) => [`key${i}`, "string"]));
+  api.on("POST", "/api/workflows/wf-1/expression-preview", { status: 200, body: {
+    results: [
+      { text: big, bytes: big.length, warnings: [], errors: [] },
+      { value: wide, valueType: "object", bytes: JSON.stringify(wide).length, warnings: [], errors: [] },
+      { text: "short", bytes: 5, warnings: [], errors: [] }
+    ],
+    node: null,
+    source: { run: "latest", runId: "run-1", pinned: [] },
+    available: { nodes: Object.fromEntries(Array.from({ length: 200 }, (_, i) => [`Block${i}`, { status: "succeeded", output: { type: "object", keys } }])), run: {}, project: {}, workflow: { id: "wf-1", name: "Demo" }, secrets: [] },
+    notes: []
+  } });
+  const result = await call(api, "preview_expression", { workflowId: "wf-1", templates: ["{{ a }}", "{{ b }}", "{{ c }}"] });
+  const [text, value, short] = result.results as Result[];
+  assert.match(text!.text as string, /\[truncated\]$/);
+  assert.equal(value!.value, undefined);
+  assert.equal(value!.truncated, true);
+  assert.ok((value!.valueJson as string).startsWith("{\"k0\":0"));
+  assert.equal(short!.text, "short");
+  assert.equal((result.available as Result).keysOmitted, true);
+  assert.deepEqual(((result.available as Result).nodes as Record<string, Result>).Block0, { status: "succeeded", output: { type: "object" } });
+  assert.ok(Array.isArray(result.truncatedFields));
 });

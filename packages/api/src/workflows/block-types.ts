@@ -1,7 +1,8 @@
-// Automated workflows — the block catalogue: titles, descriptions, output shapes, default configs,
-// default names and the expression guide (spec §4). Served to the editor palette and to the MCP's
-// `list_workflow_block_types`.
+// Automated workflows — the block catalogue: titles, descriptions, output shapes, default configs
+// and default names (spec §4). Served to the editor palette and to the MCP's
+// `list_workflow_block_types`; each type's runtime contract is in guide.ts (`WORKFLOW_BLOCK_GUIDES`).
 
+import { WORKFLOW_CODE_SIGNATURE } from "./guide.ts";
 import {
   WORKFLOW_NODE_CATEGORY,
   type WorkflowNodeCategory,
@@ -26,9 +27,10 @@ export interface WorkflowBlockCatalogEntry {
  */
 export const UNSET_SUBWORKFLOW_ID = "unset";
 
-const CODE_EXAMPLE = `// input: the previous block's output; nodes.<Name>.output: any upstream block's output.
-// secrets.<NAME>: workflow secrets. stop(reason): end the run as "stopped". log(...): to the block log.
-export default async function ({ input, nodes, trigger, secrets, log, stop }) {
+const CODE_EXAMPLE = `// input: the previous block's output; nodes.<Name>.output: any earlier block's output. trigger, run,
+// project: the run's context. secrets.<NAME>: workflow secrets. log(...): the block log.
+// stop(reason): end the run as "stopped". require(name): a package installed in the project.
+${WORKFLOW_CODE_SIGNATURE} {
   const response = await fetch("https://api.example.com/items", {
     headers: { Authorization: \`Bearer \${secrets.API_TOKEN}\` }
   });
@@ -39,7 +41,7 @@ export default async function ({ input, nodes, trigger, secrets, log, stop }) {
 }
 `;
 
-const DEFAULT_CODE = `export default async function ({ input, nodes, trigger, secrets, log, stop }) {
+const DEFAULT_CODE = `${WORKFLOW_CODE_SIGNATURE} {
   // Return any JSON value: it becomes this block's output.
   return { ok: true };
 }
@@ -80,7 +82,7 @@ export const WORKFLOW_BLOCK_CATALOG: Record<WorkflowNodeType, WorkflowBlockCatal
       "Runs a coding agent (Claude, Codex, Grok, OpenCode…) in the project with a prompt, fully autonomous. Picks the account by usage and fails over across accounts and agents on usage limits.",
     category: WORKFLOW_NODE_CATEGORY.agent,
     output:
-      "{ text, sessionId, agent, model, accountId, durationMs, hops } — `text` is the agent's final message (ask for JSON in the prompt to get structured data).",
+      "{ text, sessionId, agent, model, accountId, durationMs, hops } — `text` is the agent's final message, always a string: ask for JSON in the prompt and parse it in a Code block.",
     example: {
       prompt: { kind: "text", text: "Fix the failing tests in {project} on {branch}. Reply with a one-line summary." },
       session: { kind: "new", title: "Nightly test fix" },
@@ -98,9 +100,9 @@ export const WORKFLOW_BLOCK_CATALOG: Record<WorkflowNodeType, WorkflowBlockCatal
     type: "code",
     title: "Code",
     description:
-      "Runs JavaScript (an ES module's default export) in a sandboxed Node process. `fetch` is global; `require` resolves the project's packages.",
+      "Runs JavaScript (an ES module's default export) in its own Node process in the project directory. `fetch` is global; the `require` argument loads the project's packages.",
     category: WORKFLOW_NODE_CATEGORY.code,
-    output: "The function's return value (JSON). A throw fails the block; stop(reason) ends the run as stopped.",
+    output: "The function's return value, as JSON (`undefined` → `null`). A throw fails the block; stop(reason) ends the run as stopped.",
     example: { source: CODE_EXAMPLE, timeoutMinutes: 10 }
   },
   shell: {
@@ -277,64 +279,3 @@ export function defaultNodeName(type: WorkflowNodeType, existingNames: Iterable<
     if (!taken.has(candidate)) return candidate;
   }
 }
-
-/** The `{{ … }}` / `{variable}` guide, markdown (the editor's help and the MCP's block-types answer). */
-export const WORKFLOW_EXPRESSION_GUIDE = `# Expressions
-
-Any text field can read the run's data with \`{{ path | filter }}\`.
-
-## Paths
-
-A path starts at a root and walks \`.name\`, \`[0]\` (a list item) or \`["key with spaces"]\`:
-
-| Root | What it holds |
-|---|---|
-| \`nodes.<Name>.output\` | a block's output (blocks are named by their unique name, e.g. \`nodes.FetchTickets.output.tickets\`) |
-| \`nodes.<Name>.status\` | \`succeeded\`, \`failed\`, \`skipped\`, … |
-| \`nodes.<Name>.error\` | \`{ kind, message }\` of a failed block |
-| \`input\` | the output of the block feeding this one (with several live inputs, \`{ [name]: output }\`) |
-| \`trigger\` | what started the run (schedule time, git event, manual input as \`trigger.input\`) |
-| \`run\` | \`{ id, startedAt, workflowId, workflowName, attempt }\` |
-| \`project\` | \`{ path, name, workspace, branch }\` |
-| \`secrets.<NAME>\` | a workflow secret (redacted everywhere it is stored) |
-
-A value that is not text is inserted as pretty JSON. A path that reads nothing inserts nothing and
-the block records a warning. Only a field that is exactly one \`{{ … }}\` (a rule's left side, a
-Stop value, a sub-workflow input) keeps the raw value — a number stays a number.
-
-## Filters
-
-| Filter | Result |
-|---|---|
-| \`json\` | pretty JSON (text is quoted — use it to embed a value in a JSON body) |
-| \`compact\` | one-line JSON |
-| \`default("x")\` | \`x\` when the value is missing, null or empty |
-| \`trim\` | text without surrounding whitespace |
-| \`lines(n)\` | the first n lines |
-| \`first\` / \`last\` | the first / last item of a list (or character of a text) |
-| \`length\` | the number of items, characters or keys |
-| \`upper\` / \`lower\` | upper / lower case |
-
-Filters chain left to right: \`{{ nodes.Review.output.text | lines(5) | trim }}\`.
-Write \`\\{{\` for a literal \`{{\`.
-
-## Prompt variables
-
-Agent prompts also take the saved-prompt variables, in single braces, rendered when the block runs:
-\`{project}\`, \`{workspace}\`, \`{projectPath}\`, \`{branch}\`, \`{changedFiles}\`, \`{diff}\`, \`{date}\`,
-\`{time}\` (in the workflow's time zone), \`{agent}\`, \`{model}\`. \`{{ … }}\` renders first, and text
-it inserts is never read as a variable. \`{{name}}\` with a variable's name is the literal \`{name}\`.
-
-## Shell blocks
-
-A shell script never contains \`{{ … }}\`: map values to environment variables in the block's
-\`env\` list (\`TICKETS = {{ nodes.Fetch.output.tickets | compact }}\`) and read \`"$TICKETS"\` in the
-script. Text from a git event (branch names, PR titles) is attacker-controlled — it must never
-become script text.
-
-## Secrets
-
-\`{{ secrets.NAME }}\` works in HTTP fields, shell env values and code (\`secrets.NAME\`). In an agent
-prompt it is allowed but the value lands in the agent's transcript. Values are replaced by
-\`«secret:NAME»\` in every stored output, log and event.
-`;

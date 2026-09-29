@@ -33,6 +33,7 @@ import CodeMirror, {
 import { isPromptVariableName } from "@orquester/api";
 
 import { cn } from "../../../lib/cn";
+import { splitGuideText } from "../../../lib/workflows/guide-text";
 import { templateCompletions, type CompletionScope } from "../../../lib/workflows/inspector-autocomplete";
 import { useFieldControl, useReadOnly } from "../ui/controls";
 
@@ -101,6 +102,21 @@ function tokenPlugin(promptVariables: boolean) {
   );
 }
 
+/** A completion's info panel: the shared guide's text, its `backtick` spans as code. */
+function completionInfo(text: string): () => Node {
+  return () => {
+    const root = document.createElement("div");
+    for (const span of splitGuideText(text)) {
+      if (span.code) {
+        const code = document.createElement("code");
+        code.textContent = span.text;
+        root.appendChild(code);
+      } else root.appendChild(document.createTextNode(span.text));
+    }
+    return root;
+  };
+}
+
 /** The slice of CodeMirror's CompletionContext the source reads. */
 interface CompletionContextLike {
   state: EditorState;
@@ -142,7 +158,19 @@ const THEME = EditorView.theme({
   },
   ".cm-completionDetail": { color: "rgb(var(--n-500))", fontStyle: "normal", marginLeft: "8px", fontSize: "11px" },
   ".cm-completionMatchedText": { textDecoration: "none", color: "rgb(var(--n-50))", fontWeight: "600" },
-  ".cm-completionIcon": { opacity: "0.6", width: "1.1em" }
+  ".cm-completionIcon": { opacity: "0.6", width: "1.1em" },
+  ".cm-tooltip.cm-completionInfo": {
+    maxWidth: "280px",
+    padding: "8px 10px",
+    fontSize: "12px",
+    lineHeight: "18px",
+    color: "rgb(var(--n-300))"
+  },
+  ".cm-completionInfo code": {
+    fontFamily: "ui-monospace, SFMono-Regular, Menlo, Consolas, monospace",
+    fontSize: "11.5px",
+    color: "rgb(var(--n-100))"
+  }
 });
 
 const MONO = EditorView.theme({
@@ -207,7 +235,8 @@ export const TemplateEditor = React.forwardRef<TemplateEditorHandle, TemplateEdi
           label: option.label,
           type: option.type,
           ...(option.apply !== undefined ? { apply: option.apply } : {}),
-          ...(option.detail !== undefined ? { detail: option.detail } : {})
+          ...(option.detail !== undefined ? { detail: option.detail } : {}),
+          ...(option.info !== undefined ? { info: completionInfo(option.info) } : {})
         })),
         validFor: /^[A-Za-z0-9_]*$/
       };

@@ -1,5 +1,6 @@
 export * from "./types.ts";
 export * from "./expressions.ts";
+export * from "./expression-preview.ts";
 export * from "./rules.ts";
 export * from "./graph.ts";
 export * from "./fields.ts";
@@ -10,5 +11,6 @@ export * from "./layout.ts";
 export * from "./schedule.ts";
 export * from "./triggers-text.ts";
 export * from "./block-types.ts";
+export * from "./guide.ts";
 export * from "./templates.ts";
 export * from "./outline.ts";

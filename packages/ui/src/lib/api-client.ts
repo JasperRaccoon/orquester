@@ -122,6 +122,8 @@ import type {
   ListWorkflowSecretsResponse,
   ListWorkflowsResponse,
   PatchWorkflowRequest,
+  PreviewWorkflowExpressionRequest,
+  PreviewWorkflowExpressionResponse,
   ReplaceWorkflowRequest,
   RunWorkflowRequest,
   RunWorkflowResponse,
@@ -896,6 +898,15 @@ export class ApiClient {
   /** "Who would run now?" for an agent block's chain. */
   previewWorkflowAccount(req: AccountPreviewRequest, signal?: AbortSignal): Promise<AccountPreviewResponse> {
     return this.workflowSend("POST", workflowRoutes.accountPreview, { body: req, signal });
+  }
+
+  /** Render `{{ … }}` templates against a past run's (or pinned) data; read-only, secret values never returned. */
+  previewWorkflowExpression(
+    id: string,
+    req: PreviewWorkflowExpressionRequest,
+    signal?: AbortSignal
+  ): Promise<PreviewWorkflowExpressionResponse> {
+    return this.workflowSend("POST", workflowRoutes.expressionPreview(id), { body: req, signal });
   }
 
   previewWorkflowSchedule(

@@ -546,7 +546,8 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
         workflowName: a.run.workflowName,
         attempt
       },
-      project: projectView
+      project: projectView,
+      workflow: { id: a.def.id, name: a.def.name }
     };
   };
 
@@ -604,8 +605,7 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     const branch = await currentBranch(project.path);
     const exprContext = (): ExpressionContext & ReturnType<NodeExecutionContext["expressionContext"]> => ({
       ...baseContext(a, node.id, attempt, branch),
-      secrets: a.secrets,
-      workflow: { id: a.def.id, name: a.def.name }
+      secrets: a.secrets
     });
     const nodeLog: WorkflowLogger = {
       debug: (msg, meta) => logger.debug(msg, { runId: a.run.id, nodeId: node.id, ...meta }),

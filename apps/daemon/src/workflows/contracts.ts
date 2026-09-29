@@ -260,13 +260,17 @@ export interface NodeExecutionContext<T extends WorkflowNodeType = WorkflowNodeT
   render(template: string): { text: string; warnings: string[] };
   /** Render a template whose whole body is one `{{ … }}` to its raw VALUE; else to text. */
   renderValue(template: string): { value: unknown; warnings: string[] };
-  /** The run context an expression reads (for code blocks: input, nodes, trigger, run, project). */
+  /**
+   * The run context an expression reads, every root but `secrets` (those are {@link secrets}); a
+   * Code block's arguments read input, nodes, trigger, run and project from it.
+   */
   expressionContext(): {
     input: unknown;
     nodes: Record<string, { output: unknown; status: string; error?: WorkflowBlockError }>;
     trigger: unknown;
     run: { id: string; startedAt: string; workflowId: string; workflowName: string; attempt: number };
     project: { path: string; name: string; workspace: string; branch?: string };
+    workflow: { id: string; name: string };
   };
   /** Resolved secret values (name -> value); never persist these. */
   secrets: Record<string, string>;

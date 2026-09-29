@@ -29,6 +29,8 @@ import type {
   WorkflowSettings
 } from "@orquester/config";
 
+import type { WorkflowGuideSection } from "./guide.ts";
+
 export type {
   AccountPolicy,
   AgentBlockConfig,
@@ -543,6 +545,7 @@ export const workflowRoutes = {
   run: (id: string): string => `/api/workflows/${encodeURIComponent(id)}/run`,
   testNode: (id: string, nodeId: string): string =>
     `/api/workflows/${encodeURIComponent(id)}/nodes/${encodeURIComponent(nodeId)}/test`,
+  expressionPreview: (id: string): string => `/api/workflows/${encodeURIComponent(id)}/expression-preview`,
   runs: (id: string): string => `/api/workflows/${encodeURIComponent(id)}/runs`,
   runDetail: (runId: string): string => `/api/workflow-runs/${encodeURIComponent(runId)}`,
   runCancel: (runId: string): string => `/api/workflow-runs/${encodeURIComponent(runId)}/cancel`,
@@ -683,6 +686,93 @@ export interface SchedulePreviewResponse {
   next: string[];
 }
 
+/** POST /api/workflows/:id/expression-preview — render `{{ … }}` templates against recorded data, read-only. */
+export interface PreviewWorkflowExpressionRequest {
+  /** 1 to `EXPRESSION_PREVIEW_LIMITS.maxTemplates` templates, each at most `MAX_TEMPLATE_LENGTH` characters. */
+  templates: string[];
+  /** The block (id or name) whose point of view to take: it decides `input`, and hides itself and its downstream. */
+  node?: string;
+  /** The run whose recorded outputs to read; default the latest run that reached `node`, else the latest run. */
+  runId?: string;
+  /** Pinned outputs replace recorded ones (as a test run uses them). */
+  usePinned?: boolean;
+  /** "text" (default): as a text field renders. "value": a lone `{{ … }}` keeps its raw value (rule sides, Stop values, sub-workflow input). */
+  mode?: "text" | "value";
+}
+
+/** One template's preview; secret values never appear (they read as `«secret:NAME»`). */
+export interface WorkflowExpressionPreviewResult {
+  /** Text mode: the rendered text. */
+  text?: string;
+  /** Value mode: the raw value (a template that is not one lone `{{ … }}` renders to text); absent when it read nothing (`missing`) or was cut (`valueJson`). */
+  value?: unknown;
+  /** Value mode: the value's JSON type ("string", "number", "object", "array", "boolean", "null"). */
+  valueType?: string;
+  /** Value mode: the lone expression read nothing. */
+  missing?: boolean;
+  /** Value mode, cut: the head of the value's JSON text. */
+  valueJson?: string;
+  /** `text` / `valueJson` was cut to fit. `bytes`: the whole size in UTF-8 bytes — a lower bound when the render itself stopped at the cap. */
+  truncated?: boolean;
+  bytes: number;
+  /** What a run would record as the block's warnings (paths that read nothing, filters that failed); at most 50. */
+  warnings: string[];
+  /** Warnings past the 50 listed. */
+  warningsOmitted?: number;
+  /** Parse errors (a broken `{{ … }}` renders as written), deduplicated; at most 50. */
+  errors: string[];
+  /** Parse errors past the 50 listed. */
+  errorsOmitted?: number;
+}
+
+/** A value's shape: its JSON type, plus an object's keys (each key's type) or a list's length and first item's keys. */
+export interface WorkflowExpressionShape {
+  type: string;
+  /** Object: key → type ("string", "number", "object", "array (3)"…). */
+  keys?: Record<string, string>;
+  keysOmitted?: number;
+  /** Array. */
+  length?: number;
+  /** Array whose first item is an object: that item's keys. */
+  itemKeys?: Record<string, string>;
+  /** Why the shape is not given (a large output not read by any template here). */
+  note?: string;
+}
+
+/** What the context held: the roots a template may read and the shape of each. */
+export interface WorkflowExpressionContextOutline {
+  /** Absent when the block receives nothing. */
+  input?: WorkflowExpressionShape;
+  trigger?: WorkflowExpressionShape;
+  /** Every block a template here can read, by name. */
+  nodes: Record<string, { status: string; output?: WorkflowExpressionShape; error?: string }>;
+  run: Record<string, unknown>;
+  project: Record<string, unknown>;
+  workflow: { id: string; name: string };
+  /** Secret names (`{{ secrets.NAME }}`); values are never shown. */
+  secrets: string[];
+}
+
+export interface PreviewWorkflowExpressionResponse {
+  results: WorkflowExpressionPreviewResult[];
+  /** The block whose point of view was taken; null when none was named. */
+  node: { id: string; name: string; type: WorkflowNodeType } | null;
+  /** Where the data came from. */
+  source: {
+    /** "requested": `runId`; "reached-node": the latest run that reached the block; "latest": the latest run; "none": no run. */
+    run: "requested" | "reached-node" | "latest" | "none";
+    runId: string | null;
+    runStatus?: WorkflowRunStatus;
+    runTest?: boolean;
+    runQueuedAt?: string;
+    /** Names of the blocks whose pinned outputs were used. */
+    pinned: string[];
+  };
+  available: WorkflowExpressionContextOutline;
+  /** What the preview does not reproduce (e.g. an agent prompt's `{variables}`, `project.branch`). */
+  notes: string[];
+}
+
 /** GET /api/workflows/block-types */
 export interface WorkflowBlockTypeInfo {
   type: WorkflowNodeType;
@@ -696,6 +786,8 @@ export interface WorkflowBlockTypeInfo {
   example: unknown;
   /** Shape of `output`, in words. */
   output: string;
+  /** The type's full contract (arguments, result, limits…); absent from older daemons. */
+  guide?: readonly WorkflowGuideSection[];
 }
 export interface WorkflowBlockTypesResponse {
   types: WorkflowBlockTypeInfo[];

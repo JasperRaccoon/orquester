@@ -59,6 +59,7 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   create_workflow: { required: ["name", "project", "nodes"], annotations: WRITE },
   update_workflow: { required: ["workflowId", "revision", "ops"], annotations: WRITE },
   validate_workflow: { required: ["workflow"], annotations: READ },
+  preview_expression: { required: ["workflowId"], annotations: READ },
   delete_workflow: { required: ["workflowId", "confirm"], annotations: DESTROY },
   run_workflow: { required: ["workflowId"], annotations: WRITE },
   list_workflow_runs: { required: ["workflowId"], annotations: READ },

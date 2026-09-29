@@ -39,7 +39,7 @@ export const EXPRESSION_FILTERS = [
 export type ExpressionFilterName = (typeof EXPRESSION_FILTERS)[number];
 
 /** A template longer than this (UTF-16 units) is not parsed: it renders as written, with an error. */
-const MAX_TEMPLATE_LENGTH = 1024 * 1024;
+export const MAX_TEMPLATE_LENGTH = 1024 * 1024;
 /** Segments after the root. */
 const MAX_EXPRESSION_PATH_DEPTH = 32;
 const MAX_EXPRESSION_FILTERS = 16;
@@ -658,11 +658,27 @@ export function evaluateExpression(expr: TemplateExpression, ctx: ExpressionCont
 export interface RenderOptions {
   /** Applied to every inserted value (e.g. `escapePromptVariables` before the `{variables}` pass). */
   escapeValue?: (text: string) => string;
+  /**
+   * Stop once the text is this many UTF-16 units long: it is cut there, `truncated` is set, and no
+   * expression after the cut is evaluated (nor warns). Unlimited when absent.
+   */
+  maxLength?: number;
 }
 
 export interface RenderResult {
   text: string;
   warnings: string[];
+  /** Set when `maxLength` cut the text. */
+  truncated?: boolean;
+}
+
+/** `text` cut to `max` UTF-16 units, never leaving half a surrogate pair. */
+function cutText(text: string, max: number): string {
+  let end = Math.max(0, Math.floor(max));
+  if (end >= text.length) return text;
+  const last = text.charCodeAt(end - 1);
+  if (end > 0 && last >= 0xd800 && last <= 0xdbff) end -= 1;
+  return text.slice(0, end);
 }
 
 function parseErrorWarning(error: TemplateParseError): string {
@@ -674,16 +690,18 @@ export function renderTemplate(src: string, ctx: ExpressionContext, opts: Render
   if (typeof src !== "string") return { text: "", warnings: [] };
   const parsed = parseTemplate(src);
   const warnings = parsed.errors.map(parseErrorWarning);
+  const max = opts.maxLength;
   let text = "";
   for (const segment of parsed.segments) {
     if (segment.kind === "text") {
       text += segment.text;
-      continue;
+    } else {
+      const result = evaluateExpression(segment, ctx);
+      warnings.push(...result.warnings);
+      const inserted = expressionValueToText(result.value);
+      text += opts.escapeValue ? opts.escapeValue(inserted) : inserted;
     }
-    const result = evaluateExpression(segment, ctx);
-    warnings.push(...result.warnings);
-    const inserted = expressionValueToText(result.value);
-    text += opts.escapeValue ? opts.escapeValue(inserted) : inserted;
+    if (max !== undefined && text.length > max) return { text: cutText(text, max), warnings, truncated: true };
   }
   return { text, warnings };
 }
@@ -709,14 +727,18 @@ export function singleExpression(src: string): TemplateExpression | null {
  * allowed) yields the raw value — a number stays a number, an object an object, a missing path
  * `undefined` — anything else renders to text.
  */
-export function renderTemplateValue(src: string, ctx: ExpressionContext): { value: unknown; warnings: string[] } {
+export function renderTemplateValue(
+  src: string,
+  ctx: ExpressionContext,
+  opts: Pick<RenderOptions, "maxLength"> = {}
+): { value: unknown; warnings: string[]; truncated?: boolean } {
   const single = typeof src === "string" ? singleExpression(src) : null;
   if (single !== null) {
     const result = evaluateExpression(single, ctx);
     return { value: result.value, warnings: result.warnings };
   }
-  const rendered = renderTemplate(src, ctx);
-  return { value: rendered.text, warnings: rendered.warnings };
+  const rendered = renderTemplate(src, ctx, opts);
+  return { value: rendered.text, warnings: rendered.warnings, ...(rendered.truncated ? { truncated: true } : {}) };
 }
 
 // ---------------------------------------------------------------------------

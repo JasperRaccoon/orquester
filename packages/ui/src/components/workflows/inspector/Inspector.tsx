@@ -42,6 +42,7 @@ import {
   SmallButton,
   type ProblemCounts
 } from "../ui/controls";
+import { BlockGuide } from "../ui/GuideText";
 import { AgentSettings } from "./AgentSettings";
 import { CommonSettings } from "./CommonSettings";
 import { DataTab } from "./DataTab";
@@ -552,13 +553,7 @@ export const Inspector: React.FC<InspectorProps> = ({
               {summary ? ` · ${summary}` : null}
             </p>
             <HelpTip label={`the ${entry.title} block`} align="end" className="mt-px">
-              <p>{entry.description}</p>
-              {node.type !== "note" ? (
-                <p>
-                  <span className="font-medium text-neutral-100">What it outputs: </span>
-                  {entry.output}
-                </p>
-              ) : null}
+              <BlockGuide type={node.type} />
               {referable ? (
                 <div className="space-y-1">
                   <p>Blocks after it read its output as</p>

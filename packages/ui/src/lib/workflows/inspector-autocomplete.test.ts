@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
+import { EXPRESSION_FILTERS, WORKFLOW_EXPRESSION_FILTER_GUIDE, WORKFLOW_EXPRESSION_ROOT_GUIDE } from "@orquester/api";
+
 import { completionScopeFor, templateCompletions, type CompletionScope } from "./inspector-autocomplete.ts";
 import { edge, node, workflow } from "./testing.ts";
 
@@ -64,5 +66,28 @@ describe("templateCompletions", () => {
     assert.deepEqual(answer?.options.map((o) => [o.label, o.apply]), [["branch", "branch}"]]);
     assert.equal(labels("On {br", scope()), null);
     assert.ok(labels("On {", prompt)?.includes("diff"));
+  });
+
+  it("explains roots, block fields, secrets and filters with the shared guide's text", () => {
+    const guide = (path: string) => WORKFLOW_EXPRESSION_ROOT_GUIDE.find((row) => row.path === path)?.text;
+    const roots = templateCompletions("{{ ", 3, scope())!.options;
+    for (const option of roots) {
+      assert.ok(option.detail, `${option.label} keeps its one-line hint`);
+      assert.equal(option.info, WORKFLOW_EXPRESSION_ROOT_GUIDE.find((row) => row.root === option.label)?.text, `${option.label} info`);
+    }
+    assert.equal(roots.find((option) => option.label === "nodes")?.info, guide("nodes.<Name>.output"));
+
+    const fields = templateCompletions("{{ nodes.Review.", 16, scope())!.options;
+    for (const field of ["output", "status", "error"]) {
+      assert.equal(fields.find((option) => option.label === field)?.info, guide(`nodes.<Name>.${field}`));
+    }
+    assert.equal(templateCompletions("{{ secrets.", 11, scope())!.options[0]?.info, guide("secrets.<NAME>"));
+
+    const filters = templateCompletions("{{ input | ", 11, scope())!.options;
+    assert.deepEqual(filters.map((option) => option.label), [...EXPRESSION_FILTERS]);
+    for (const option of filters) {
+      const entry = WORKFLOW_EXPRESSION_FILTER_GUIDE[option.label as keyof typeof WORKFLOW_EXPRESSION_FILTER_GUIDE];
+      assert.ok(option.info?.includes(entry.text), `${option.label} info is the guide's`);
+    }
   });
 });

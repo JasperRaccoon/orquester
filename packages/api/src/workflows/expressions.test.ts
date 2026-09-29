@@ -304,3 +304,23 @@ describe("rewriteNodeReferences", () => {
     assert.equal(rewriteNodeReferences("{{ nodes.Old }}", "Old", "Old"), "{{ nodes.Old }}");
   });
 });
+
+describe("renderTemplate maxLength", () => {
+  it("stops appending past the budget, cuts there and evaluates nothing after", () => {
+    const context = ctx();
+    const big = "{{ nodes | json }}".repeat(1000);
+    const whole = renderTemplate(big, context);
+    const capped = renderTemplate(big + "{{ input.nope }}", context, { maxLength: 500 });
+    assert.equal(capped.truncated, true);
+    assert.equal(capped.text, whole.text.slice(0, 500));
+    assert.ok(!capped.warnings.some((w) => w.includes("input.nope")), "nothing after the cut is evaluated");
+    assert.deepEqual(renderTemplate("a{{ input.a }}", context, { maxLength: 10 }), { text: "a1", warnings: [] });
+    assert.equal(renderTemplate("😀😀", context, { maxLength: 3 }).text, "😀", "never half a surrogate pair");
+  });
+
+  it("applies to renderTemplateValue's text, never to a lone expression's value", () => {
+    const context = ctx();
+    assert.deepEqual(renderTemplateValue("{{ input.list }}", context, { maxLength: 1 }), { value: [1, 2, 3], warnings: [] });
+    assert.deepEqual(renderTemplateValue("x{{ input.list | compact }}", context, { maxLength: 3 }), { value: "x[1", warnings: [], truncated: true });
+  });
+});

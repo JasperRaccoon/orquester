@@ -13,7 +13,7 @@ import {
   type WorkflowWriteResponse
 } from "@orquester/api";
 import type { PersistedRun, WorkflowEngine } from "./contracts.ts";
-import { FileRunStore } from "./run-store.ts";
+import { FileRunStore, persistedRunToWire } from "./run-store.ts";
 import { deleteWorkflowCascade, registerWorkflowRoutes, type WorkflowRouteDeps } from "./routes.ts";
 import { WorkflowEngineError } from "./run-context.ts";
 import { WorkflowSecretsService } from "./secrets.ts";
@@ -528,4 +528,335 @@ test("the delete cascade keeps a run record whose temp project it could not dele
       assert.ok(h.runStore.workflowIds().includes(workflow.id), "the sweeper still finds it");
     }
   }
+});
+
+// ---- Expression preview ----------------------------------------------------------------------------
+
+const SECRET = "SuperSecret1";
+
+/** Start → Claude, Start → Count; Claude + Count → Join → Final; one finished run of it on record. */
+async function previewHarness(): Promise<{ h: Harness; workflow: Workflow; preview: (body: Record<string, unknown>, id?: string) => Promise<{ status: number; body: any; raw: string }> }> {
+  const h = await harness();
+  await h.secrets.set("API_TOKEN", SECRET);
+  const workflow = await createWorkflow(h, {
+    nodes: [
+      { id: "t", type: "trigger.manual", name: "Start" },
+      { id: "a", type: "code", name: "Claude" },
+      { id: "b", type: "code", name: "Count" },
+      { id: "m", type: "merge", name: "Join" },
+      { id: "f", type: "code", name: "Final" }
+    ],
+    edges: [
+      { source: "t", target: "a" },
+      { source: "t", target: "b" },
+      { source: "a", target: "m" },
+      { source: "b", target: "m" },
+      { source: "m", target: "f" }
+    ]
+  });
+  const block = (nodeId: string, name: string, type: string, output: unknown) =>
+    ({ nodeId, name, type, status: "succeeded", attempt: 1, output }) as PersistedRun["blocks"][string];
+  await h.runStore.create(
+    persistedRun(workflow, "run-1", {
+      triggerPayload: { kind: "manual", input: { n: 5 } },
+      blocks: {
+        t: block("t", "Start", "trigger.manual", { kind: "manual", input: { n: 5 } }),
+        a: block("a", "Claude", "code", { text: `Hello token=${SECRET} end`, score: 3 }),
+        b: block("b", "Count", "code", 42),
+        m: block("m", "Join", "merge", { Claude: { score: 3 }, Count: 42 }),
+        f: block("f", "Final", "code", "done")
+      }
+    })
+  );
+  const preview = async (body: Record<string, unknown>, id = workflow.id) => {
+    const response = await h.app.inject({ method: "POST", url: workflowRoutes.expressionPreview(id), payload: body });
+    return { status: response.statusCode, body: response.json(), raw: response.body };
+  };
+  return { h, workflow, preview };
+}
+
+test("expression preview: paths resolve against the latest run, a missing path warns, filters chain", async () => {
+  const { preview } = await previewHarness();
+  const res = await preview({
+    node: "Final",
+    templates: [
+      "Score: {{ nodes.Claude.output.score }}",
+      "{{ nodes.Claude.output.nope }}",
+      "{{ trigger.input.n | json }}/{{ nodes.Gone | default(\"none\") | upper }}",
+      "{{ nodes.Claude.output.score | lines(1) | trim }}",
+      "{{ nodes.Claude. }}"
+    ]
+  });
+  assert.equal(res.status, 200, res.raw);
+  const [ok, missing, chained, _trimmed, broken] = res.body.results;
+  assert.deepEqual(ok, { text: "Score: 3", bytes: 8, warnings: [], errors: [] });
+  assert.equal(missing.text, "");
+  assert.deepEqual(missing.warnings, ["{{ nodes.Claude.output.nope }} is empty: nothing at nodes.Claude.output.nope"]);
+  assert.equal(chained.text, "5/NONE");
+  assert.equal(broken.errors.length, 1);
+  assert.equal(broken.text, "{{ nodes.Claude. }}");
+  assert.deepEqual(broken.warnings, [], "a parse error is in errors, not repeated in warnings");
+  assert.deepEqual(res.body.source, { run: "reached-node", runId: "run-1", runStatus: "succeeded", runTest: false, runQueuedAt: "2026-09-28T10:00:00.000Z", pinned: [] });
+  assert.deepEqual(res.body.node, { id: "f", name: "Final", type: "code" });
+  const available = res.body.available;
+  assert.deepEqual(Object.keys(available.nodes).sort(), ["Claude", "Count", "Join", "Start"], "Final itself is not readable from its own point of view");
+  assert.deepEqual(available.nodes.Claude, { status: "succeeded", output: { type: "object", keys: { text: "string", score: "number" } } });
+  assert.deepEqual(available.nodes.Count.output, { type: "number" });
+  assert.deepEqual(available.input, { type: "object", keys: { Claude: "object (1 keys)", Count: "number" } });
+  assert.deepEqual(available.secrets, ["API_TOKEN"]);
+  assert.equal(available.project.name, "app");
+  assert.equal(available.project.workspace, "ws");
+});
+
+test("expression preview: secrets render as placeholders and a secret inside an output is redacted", async () => {
+  const { preview } = await previewHarness();
+  for (const mode of ["text", "value"]) {
+    const res = await preview({
+      node: "Join",
+      mode,
+      templates: [
+        "{{ secrets.API_TOKEN }}",
+        "{{ nodes.Claude.output.text }}",
+        "{{ nodes.Claude.output | json }}",
+        "{{ nodes.Claude.output.text | upper }}",
+        "{{ nodes.Claude.output }}",
+        `literal ${SECRET}`
+      ]
+    });
+    assert.equal(res.status, 200, res.raw);
+    assert.ok(!res.raw.includes(SECRET), `${mode}: the secret value never leaves`);
+    assert.ok(!res.raw.includes(SECRET.toUpperCase()), `${mode}: a transformed secret value never leaves either`);
+    const [secret, text] = res.body.results;
+    if (mode === "text") {
+      assert.equal(secret.text, "«secret:API_TOKEN»");
+      assert.equal(text.text, "Hello token=«secret:API_TOKEN» end");
+    } else {
+      assert.equal(secret.value, "«secret:API_TOKEN»");
+      assert.deepEqual(res.body.results[4].value, { text: "Hello token=«secret:API_TOKEN» end", score: 3 });
+    }
+    assert.ok(res.body.notes.some((note: string) => note.includes("«secret:NAME»")));
+  }
+});
+
+test("expression preview: the block's point of view decides input; several inputs are keyed by name", async () => {
+  const { preview } = await previewHarness();
+  const fromClaude = await preview({ node: "a", templates: ["{{ input.input.n }}", "{{ nodes.Final.output }}", "{{ nodes.Claude.output }}"] });
+  assert.equal(fromClaude.body.results[0].text, "5");
+  assert.equal(fromClaude.body.results[1].text, "");
+  assert.match(fromClaude.body.results[1].warnings[0], /Final runs after Claude/);
+  assert.match(fromClaude.body.results[2].warnings[0], /Claude itself/);
+  const fromJoin = await preview({ node: "Join", mode: "value", templates: ["{{ input }}", "{{ input.Count }}"] });
+  assert.deepEqual(fromJoin.body.results[0].value, { Claude: { text: "Hello token=«secret:API_TOKEN» end", score: 3 }, Count: 42 });
+  assert.equal(fromJoin.body.results[1].value, 42);
+  const fromFinal = await preview({ node: "Final", templates: ["{{ input.Count }}"] });
+  assert.equal(fromFinal.body.results[0].text, "42");
+  const none = await preview({ templates: ["{{ input }}"] });
+  assert.equal(none.body.node, null);
+  assert.ok(none.body.notes.some((note: string) => note.includes("pass node")));
+});
+
+test("expression preview: value mode keeps a number a number and says when nothing was read", async () => {
+  const { preview } = await previewHarness();
+  const res = await preview({ node: "Final", mode: "value", templates: ["{{ nodes.Count.output }}", " {{ nodes.Count.nope }} ", "n={{ nodes.Count.output }}", "{{ nodes.Join.output.Count | json }}"] });
+  const [number, missing, text, json] = res.body.results;
+  assert.deepEqual(number, { value: 42, valueType: "number", bytes: 2, warnings: [], errors: [] });
+  assert.equal(missing.missing, true);
+  assert.equal(missing.value, undefined);
+  assert.equal(missing.warnings.length, 1);
+  assert.deepEqual([text.value, text.valueType], ["n=42", "string"]);
+  assert.deepEqual([json.value, json.valueType], ["42", "string"]);
+});
+
+test("expression preview: pinned outputs replace recorded ones; with no run they are the only data", async () => {
+  const { h, workflow, preview } = await previewHarness();
+  await h.service.patch(workflow.id, { revision: workflow.revision, ops: [{ op: "set_pinned", node: "Count", output: 7 }, { op: "set_pinned", node: "Final", output: "pinned-final" }] });
+  const res = await preview({ node: "Join", usePinned: true, templates: ["{{ nodes.Count.output }}", "{{ input.Count }}", "{{ nodes.Claude.output.score }}"] });
+  assert.deepEqual(res.body.results.map((r: { text: string }) => r.text), ["7", "7", "3"]);
+  assert.deepEqual(res.body.source.pinned, ["Count"], "Final is downstream of Join: its pin is never read");
+  const recorded = await preview({ node: "Join", templates: ["{{ nodes.Count.output }}"] });
+  assert.equal(recorded.body.results[0].text, "42");
+
+  const bare = await h.app.inject({ method: "POST", url: workflowRoutes.create, payload: createBody({ name: "Bare" }) });
+  const bareId = (bare.json() as WorkflowWriteResponse).workflow;
+  await h.service.patch(bareId.id, { revision: bareId.revision, ops: [{ op: "set_pinned", node: "Run", output: { ok: true } }] });
+  const none = await preview({ templates: ["{{ nodes.Run.output.ok }}"] }, bareId.id);
+  assert.equal(none.body.source.run, "none");
+  assert.equal(none.body.results[0].text, "");
+  const pinnedOnly = await preview({ usePinned: true, templates: ["{{ nodes.Run.output.ok }}|{{ trigger.kind }}"] }, bareId.id);
+  assert.equal(pinnedOnly.body.results[0].text, "true|manual");
+  assert.deepEqual(pinnedOnly.body.source, { run: "none", runId: null, pinned: ["Run"] });
+});
+
+test("expression preview: the default run is the latest that reached the block; big outputs are read whole", async () => {
+  const { h, workflow, preview } = await previewHarness();
+  const whole = { text: "w".repeat(80 * 1024), tail: "end" };
+  const outputFile = await h.runStore.writeOutputFile("run-2", "a", 1, whole);
+  await h.runStore.create(
+    persistedRun(workflow, "run-2", {
+      queuedAt: "2026-09-28T11:00:00.000Z",
+      status: "failed",
+      blocks: {
+        t: { nodeId: "t", name: "Start", type: "trigger.manual", status: "succeeded", attempt: 1, output: { kind: "manual", input: null } },
+        a: { nodeId: "a", name: "Claude", type: "code", status: "succeeded", attempt: 1, output: "preview…", outputTruncated: true, outputFile },
+        b: { nodeId: "b", name: "Count", type: "code", status: "failed", attempt: 1, error: { kind: "exit_code", message: "exit 1" } },
+        m: { nodeId: "m", name: "Join", type: "merge", status: "running", attempt: 1 },
+        f: { nodeId: "f", name: "Final", type: "code", status: "pending", attempt: 0 }
+      }
+    })
+  );
+  await h.runStore.create(persistedRun(workflow, "run-3", { queuedAt: "2026-09-28T12:00:00.000Z", status: "skipped", blocks: {} }));
+  const final = await preview({ node: "Final", templates: ["{{ nodes.Count.output }}"] });
+  assert.equal(final.body.source.runId, "run-1");
+  assert.equal(final.body.source.run, "reached-node");
+  const claude = await preview({ node: "Join", templates: ["{{ nodes.Claude.output.tail }}", "{{ nodes.Count.status }}: {{ nodes.Count.error.message }}"] });
+  assert.equal(claude.body.source.runId, "run-2");
+  assert.deepEqual(claude.body.results.map((r: { text: string }) => r.text), ["end", "failed: exit 1"]);
+  assert.equal(claude.body.available.nodes.Count.error, "exit_code: exit 1");
+  const unread = await preview({ node: "Count", templates: ["{{ trigger.kind }}"] });
+  assert.equal(unread.body.available.nodes.Claude.output.type, "unknown", "a large output no template reads is not loaded");
+  const requested = await preview({ node: "Final", runId: "run-2", templates: ["{{ nodes.Claude.output.tail }}"] });
+  assert.equal(requested.body.source.run, "requested");
+  assert.equal(requested.body.results[0].text, "end");
+  const big = await preview({ templates: ["{{ nodes.Claude.output | json }}"], runId: "run-2" });
+  assert.equal(big.body.results[0].truncated, undefined);
+  const huge = await preview({ templates: ["{{ nodes.Claude.output | json }}{{ nodes.Claude.output | json }}{{ nodes.Claude.output | json }}{{ nodes.Claude.output | json }}"], runId: "run-2" });
+  assert.equal(huge.body.results[0].truncated, true);
+  assert.ok(huge.body.results[0].bytes >= 256 * 1024, "a render stopped at the cap reports at least the cap");
+});
+
+test("expression preview: refusals use the workflow error codes", async () => {
+  const { h, workflow, preview } = await previewHarness();
+  const other = await createWorkflow(h, { name: "Other" });
+  await h.runStore.create(persistedRun(other, "run-other"));
+  const cases: [Record<string, unknown>, string, number, string?][] = [
+    [{ templates: ["x"] }, "WORKFLOW_NOT_FOUND", 404, "nope"],
+    [{ templates: ["x"], node: "Nobody" }, "NODE_NOT_FOUND", 404],
+    [{ templates: ["x"], runId: "nope" }, "RUN_NOT_FOUND", 404],
+    [{ templates: ["x"], runId: "run-other" }, "RUN_NOT_FOUND", 404],
+    [{ templates: [] }, "INVALID_REQUEST", 400],
+    [{ templates: ["x"], mode: "raw" }, "INVALID_REQUEST", 400]
+  ];
+  for (const [body, code, status, id] of cases) {
+    const res = await preview(body, id ?? workflow.id);
+    assert.equal(res.status, status, JSON.stringify(body));
+    assert.equal(res.body.error.code, code, JSON.stringify(body));
+  }
+});
+
+test("expression preview: with the engine attached, runs and whole outputs are read through it", async () => {
+  const { h, preview } = await previewHarness();
+  const engine = fakeEngine(() => h);
+  engine.getRun = async (runId) => {
+    const run = await h.runStore.load(runId);
+    return run ? persistedRunToWire(run) : null;
+  };
+  engine.nodeOutput = async (_runId, nodeId) => ({ found: true, output: nodeId === "a" ? { score: 99 } : null });
+  h.setEngine(engine);
+  const res = await preview({ node: "Final", templates: ["{{ nodes.Count.output }} {{ nodes.Claude.output.score }}"] });
+  assert.equal(res.body.source.runId, "run-1");
+  // Only a block the run kept a preview of is read whole: here none is, so the record is read as is.
+  assert.equal(res.body.results[0].text, "42 3");
+});
+
+test("expression preview: a block name containing a secret value stays readable (only values are redacted)", async () => {
+  const h = await harness();
+  await h.secrets.set("DEPLOY_WORD", "deploy");
+  await h.secrets.set("PATH_WORD", "path");
+  const workflow = await createWorkflow(h, {
+    nodes: [
+      { id: "t", type: "trigger.manual", name: "Start" },
+      { id: "d", type: "code", name: "deployStaging" },
+      { id: "c", type: "code", name: "Count" },
+      { id: "m", type: "merge", name: "Join" }
+    ],
+    edges: [{ source: "t", target: "d" }, { source: "t", target: "c" }, { source: "d", target: "m" }, { source: "c", target: "m" }]
+  });
+  const block = (nodeId: string, name: string, type: string, output: unknown) =>
+    ({ nodeId, name, type, status: "succeeded", attempt: 1, output }) as PersistedRun["blocks"][string];
+  await h.runStore.create(
+    persistedRun(workflow, "run-1", {
+      blocks: {
+        t: block("t", "Start", "trigger.manual", { kind: "manual", input: null }),
+        d: block("d", "deployStaging", "code", { url: "https://x/deploy/1", ok: true }),
+        c: block("c", "Count", "code", 1)
+      }
+    })
+  );
+  const res = await h.app.inject({
+    method: "POST",
+    url: workflowRoutes.expressionPreview(workflow.id),
+    payload: { node: "Join", mode: "value", templates: ["{{ nodes.deployStaging.output.ok }}", "{{ input.deployStaging.ok }}", "{{ nodes.deployStaging.output.url }}", "{{ project.path }}"] }
+  });
+  assert.equal(res.statusCode, 200, res.body);
+  const body = res.json();
+  assert.deepEqual(body.results.map((r: { value: unknown }) => r.value), [true, true, "https://x/«secret:DEPLOY_WORD»/1", "/w/ws/app"]);
+  assert.ok(body.available.nodes.deployStaging, "the outline lists the block by its name");
+  assert.deepEqual(Object.keys(body.available.input.keys).sort(), ["Count", "deployStaging"]);
+});
+
+test("expression preview: a starting block of a workflow with no trigger reads the run's input (engine computeForced)", async () => {
+  const h = await harness();
+  const workflow = await createWorkflow(h, {
+    nodes: [{ id: "a", type: "code", name: "First" }, { id: "b", type: "code", name: "Second" }],
+    edges: [{ source: "a", target: "b" }]
+  });
+  const preview = async (body: Record<string, unknown>) =>
+    (await h.app.inject({ method: "POST", url: workflowRoutes.expressionPreview(workflow.id), payload: body })).json();
+  const none = await preview({ node: "First", mode: "value", templates: ["{{ input }}"] });
+  assert.equal(none.results[0].value, null, "no run: a test run's manual input, null");
+  assert.ok(none.notes.some((note: string) => note.includes("starts a workflow with no trigger")));
+  await h.runStore.create(
+    persistedRun(workflow, "run-1", {
+      triggerPayload: { kind: "manual", input: { n: 9 } },
+      blocks: { a: { nodeId: "a", name: "First", type: "code", status: "succeeded", attempt: 1, output: { doubled: 18 } } }
+    })
+  );
+  const first = await preview({ node: "First", templates: ["{{ input.n }}"] });
+  assert.equal(first.results[0].text, "9");
+  assert.ok(!first.notes.some((note: string) => note.includes("received no input")));
+  const second = await preview({ node: "Second", templates: ["{{ input.doubled }}", "{{ input.n }}"] });
+  assert.deepEqual(second.results.map((r: { text: string }) => r.text), ["18", ""]);
+
+  // With a trigger, a block nothing is wired into receives nothing — and says so.
+  const triggered = await createWorkflow(h, { name: "Triggered", nodes: [{ id: "t", type: "trigger.manual", name: "Start" }, { id: "a", type: "code", name: "Loose" }], edges: [] });
+  await h.runStore.create(persistedRun(triggered, "run-t", { triggerPayload: { kind: "manual", input: { n: 9 } } }));
+  const loose = (await h.app.inject({ method: "POST", url: workflowRoutes.expressionPreview(triggered.id), payload: { node: "Loose", templates: ["{{ input.n }}"] } })).json();
+  assert.equal(loose.results[0].text, "");
+  assert.ok(loose.notes.some((note: string) => note.includes("received no input")));
+});
+
+test("expression preview: rendering stops at the byte cap and parse errors are deduplicated and capped", async () => {
+  const { preview } = await previewHarness();
+  const template = "{{ nodes | json }}".repeat(50_000);
+  const res = await preview({ node: "Final", templates: [template], mode: "text" });
+  assert.equal(res.status, 200);
+  const [result] = res.body.results;
+  assert.equal(result.truncated, true);
+  assert.ok(Buffer.byteLength(result.text, "utf8") <= 256 * 1024);
+  const valued = await preview({ node: "Final", templates: [`x${template}`], mode: "value" });
+  assert.equal(valued.body.results[0].truncated, true);
+  assert.equal(valued.body.results[0].value, undefined);
+
+  const broken = Array.from({ length: 100 }, (_, i) => `{{ bad${i} }}`).join(" ") + " {{ bad0 }}".repeat(5);
+  const errors = (await preview({ templates: [broken] })).body.results[0];
+  assert.equal(errors.errors.length, 50);
+  assert.equal(errors.errorsOmitted, 50);
+  assert.equal(new Set(errors.errors).size, 50);
+  assert.deepEqual(errors.warnings, []);
+});
+
+test("expression preview: without a block, a queued newest run gives way to the newest with finished blocks", async () => {
+  const { h, workflow, preview } = await previewHarness();
+  await h.runStore.create(
+    persistedRun(workflow, "run-queued", {
+      queuedAt: "2026-09-28T12:00:00.000Z",
+      status: "queued",
+      blocks: { t: { nodeId: "t", name: "Start", type: "trigger.manual", status: "pending", attempt: 0 } }
+    })
+  );
+  const res = await preview({ templates: ["{{ nodes.Count.output }}"] });
+  assert.equal(res.body.source.runId, "run-1");
+  assert.equal(res.body.source.run, "latest");
+  assert.equal(res.body.results[0].text, "42");
+  assert.ok(res.body.notes.some((note: string) => note.includes("run-queued") && note.includes("run-1")), JSON.stringify(res.body.notes));
 });
