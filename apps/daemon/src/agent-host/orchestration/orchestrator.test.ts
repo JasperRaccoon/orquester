@@ -1752,6 +1752,145 @@ describe("orchestrator — moving a running command to the background (Ctrl+B)",
   });
 });
 
+describe("orchestrator — stopping one background task (/task/stop)", () => {
+  const WF = "wvg2ao9ra";
+  let taskRows = 0;
+  /** Push one task row into the thread the way ingestion would. */
+  async function taskRow(
+    host: TestHost,
+    threadId: string,
+    activityKind: "task.started" | "task.progress" | "task.completed",
+    payload: Record<string, unknown>
+  ): Promise<void> {
+    taskRows += 1;
+    const at = host.clock.nowIso();
+    await host.orchestrator.ingestionSink(threadId, [
+      {
+        eventId: `task-row-${taskRows}`,
+        threadId,
+        type: "thread.activity-appended",
+        payload: {
+          activity: {
+            kind: "activity",
+            id: `task-row-${taskRows}`,
+            tone: "info",
+            activityKind,
+            summary: activityKind,
+            payload,
+            turnId: null,
+            createdAt: at,
+            updatedAt: at
+          }
+        },
+        occurredAt: at,
+        commandId: null,
+        causationEventId: null,
+        metadata: {}
+      }
+    ]);
+  }
+  /** A thread with a live session running a Claude workflow run and one background shell. */
+  async function withWorkflow(capabilities: { supportsTaskStop?: boolean } = { supportsTaskStop: true }) {
+    const claude = createScriptedAdapter({ id: "claude", capabilities });
+    const host = createTestHost({ adapters: { claude } });
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "run the audit" });
+    await host.settle();
+    await taskRow(host, threadId, "task.started", {
+      taskId: WF, taskType: "local_workflow", agentKind: "background", workflowName: "audit", description: "Audit"
+    });
+    await taskRow(host, threadId, "task.progress", {
+      taskId: `${WF}:wf:1`, taskType: "workflow_agent", parentAgentId: WF, agentKind: "agent", status: "running"
+    });
+    await taskRow(host, threadId, "task.started", {
+      taskId: "sh-1", taskType: "local_bash", agentKind: "background", description: "pnpm dev"
+    });
+    return { host, threadId, finish: () => host.stop() };
+  }
+  const rejected = (pattern: RegExp) => (error: unknown) =>
+    isAgentChatCommandError(error) && error.code === "COMMAND_REJECTED" && pattern.test(error.message);
+
+  it("hands a live workflow run's id to the adapter and records the request", async () => {
+    const { host, threadId, finish } = await withWorkflow();
+    const commandId = cmd();
+    const receipt = await host.orchestrator.command(threadId, "task/stop", { commandId, taskId: WF });
+    await host.settle();
+    assert.ok(receipt.seq > 0);
+    assert.deepEqual(
+      host.adapter.calls.filter((call) => call.kind === "stopTask").map((call) => call.detail),
+      [{ taskId: WF }]
+    );
+    const requested = activityEvents(host, threadId).find((row) => row.activityKind === "task-stop.requested");
+    assert.equal(requested?.id, `task-stop:${commandId}`);
+    assert.deepEqual(requested?.payload, { targetTaskId: WF });
+    assert.equal(requested?.summary, "Stopping Audit");
+
+    // The same commandId is a receipt, never a second stop.
+    const again = await host.orchestrator.command(threadId, "task/stop", { commandId, taskId: WF });
+    await host.settle();
+    assert.equal(again.seq, receipt.seq);
+    assert.equal(host.adapter.calls.filter((call) => call.kind === "stopTask").length, 1);
+    await finish();
+  });
+
+  it("stops a background shell the same way", async () => {
+    const { host, threadId, finish } = await withWorkflow();
+    await host.orchestrator.command(threadId, "task/stop", { commandId: cmd(), taskId: "sh-1" });
+    await host.settle();
+    assert.deepEqual(host.adapter.calls.find((call) => call.kind === "stopTask")?.detail, { taskId: "sh-1" });
+    await finish();
+  });
+
+  it("refuses a workflow member, an unknown task and a settled one — and never reaches the adapter", async () => {
+    const { host, threadId, finish } = await withWorkflow();
+    await assert.rejects(
+      host.orchestrator.command(threadId, "task/stop", { commandId: cmd(), taskId: `${WF}:wf:1` }),
+      rejected(/Stop the whole workflow/)
+    );
+    await assert.rejects(
+      host.orchestrator.command(threadId, "task/stop", { commandId: cmd(), taskId: "nope" }),
+      rejected(/no such task/)
+    );
+    await taskRow(host, threadId, "task.completed", { taskId: "sh-1", agentKind: "background", status: "stopped" });
+    await assert.rejects(
+      host.orchestrator.command(threadId, "task/stop", { commandId: cmd(), taskId: "sh-1" }),
+      rejected(/no longer running/)
+    );
+    await assert.rejects(
+      host.orchestrator.command(threadId, "task/stop", { commandId: cmd() }),
+      (error: unknown) => isAgentChatCommandError(error) && error.code === "INVALID_COMMAND"
+    );
+    assert.equal(host.adapter.calls.some((call) => call.kind === "stopTask"), false);
+    assert.equal(
+      activityEvents(host, threadId).some((row) => row.activityKind === "task-stop.requested"),
+      false
+    );
+    await finish();
+  });
+
+  it("is refused where the provider cannot stop a single task", async () => {
+    const { host, threadId, finish } = await withWorkflow({});
+    await assert.rejects(
+      host.orchestrator.command(threadId, "task/stop", { commandId: cmd(), taskId: WF }),
+      rejected(/cannot stop a single background task/)
+    );
+    assert.equal(host.adapter.calls.some((call) => call.kind === "stopTask"), false);
+    await finish();
+  });
+
+  it("a provider that fails the stop lands a failure row", async () => {
+    const { host, threadId, finish } = await withWorkflow();
+    host.adapter.failNext("failStopTask", new Error("control request timed out"));
+    await host.orchestrator.command(threadId, "task/stop", { commandId: cmd(), taskId: WF });
+    await host.settle();
+    const failed = activityEvents(host, threadId).find((row) => row.activityKind === "provider.task.stop.failed");
+    assert.ok(failed, "the failure is a timeline row");
+    assert.equal(failed.tone, "error");
+    assert.match(String((failed.payload as { detail?: unknown }).detail), /timed out/);
+    await finish();
+  });
+});
+
 describe("orchestrator — answering a question (§6.2)", () => {
   it("answers a message-mode (Codex async) question as a steered message, never over RPC", async () => {
     const host = createTestHost();

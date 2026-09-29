@@ -9,13 +9,25 @@
  * folded summary, the section caption and the footer cannot drift apart.
  */
 
-import type { RuntimeSubagent } from "@orquester/api/agent-chat";
-import { isActiveSubagentStatus } from "../../../lib/agent-chat/roster.logic";
+import type { AgentPanelWorkflowGroup, RuntimeSubagent } from "@orquester/api/agent-chat";
+import {
+  isActiveSubagentStatus,
+  isTerminalSubagentStatus
+} from "../../../lib/agent-chat/roster.logic";
 
 type MaybeKind = { kind?: RuntimeSubagent["kind"] };
 
+/** A row's identity and parent, where a caller has them: what tells a workflow's container. */
+type MaybeLineage = { id?: string; parentAgentId?: string | null };
+
 export interface RosterKindCounts {
-  /** Subagents and workflow rows — everything that is not a shell, a loop or a goal. */
+  /**
+   * Subagents, workflow members and a workflow with no member rows yet —
+   * everything that is not a shell, a loop or a goal. A workflow coordinator
+   * WITH members is their container, not an agent: it reports running for the
+   * whole run, so counting it read one more agent working than there was
+   * (the panel model's rule, `deriveAgentPanelModel`).
+   */
   agents: number;
   /** Background commands (`agentKind: "background"`, not a loop or a goal). */
   shells: number;
@@ -30,10 +42,15 @@ export interface RosterKindCounts {
 }
 
 export function rosterKindCounts(
-  rows: readonly (Pick<RuntimeSubagent, "agentKind" | "status"> & MaybeKind)[]
+  rows: readonly (Pick<RuntimeSubagent, "agentKind" | "status"> & MaybeKind & MaybeLineage)[]
 ): RosterKindCounts {
   const counts: RosterKindCounts = { agents: 0, shells: 0, loops: 0, goals: 0, liveAgents: 0, liveShells: 0 };
+  const parents = new Set<string>();
   for (const row of rows) {
+    if (row.parentAgentId) parents.add(row.parentAgentId);
+  }
+  for (const row of rows) {
+    if (row.kind === "workflow" && row.id !== undefined && parents.has(row.id)) continue;
     const live = isActiveSubagentStatus(row.status);
     if (row.kind === "loop") {
       counts.loops += 1;
@@ -76,6 +93,33 @@ export function rosterCountLabels(counts: RosterKindCounts): {
     running: counts.liveShells > 0 ? `${counts.liveShells} running` : null,
     drivers: drivers.length > 0 ? drivers.join(" · ") : null
   };
+}
+
+/** What a workflow group's header says of its run. */
+export interface WorkflowGroupSummary {
+  /** Member rows: the agents of the run. Zero until the first one is reported. */
+  agents: number;
+  settled: number;
+  failed: number;
+  /**
+   * The members' tokens, or the coordinator's own while it has none: its
+   * usage aggregates the whole run, so adding it to theirs counted every
+   * token twice. *T3: `AgentsPanel.tsx:466-471`.*
+   */
+  totalTokens: number;
+}
+
+export function workflowGroupSummary(group: AgentPanelWorkflowGroup): WorkflowGroupSummary {
+  const members = [...group.phases.flatMap((phase) => phase.members), ...group.unphasedMembers];
+  let settled = 0;
+  let failed = 0;
+  let totalTokens = members.length === 0 ? (group.workflow.usage?.totalTokens ?? 0) : 0;
+  for (const member of members) {
+    if (isTerminalSubagentStatus(member.status)) settled += 1;
+    if (member.status === "failed") failed += 1;
+    totalTokens += member.usage?.totalTokens ?? 0;
+  }
+  return { agents: members.length, settled, failed, totalTokens };
 }
 
 export function collapsedRosterLabel(counts: RosterKindCounts): string {

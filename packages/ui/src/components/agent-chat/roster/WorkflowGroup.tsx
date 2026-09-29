@@ -14,19 +14,29 @@
  * scrolling the member list: one segment per phase, chevron-separated, each
  * carrying one dot per member.
  *
- * Deliberately **not** ported: T3's read-only workflow-script viewer
+ * Not ported as such: T3's read-only workflow-script viewer
  * (`AgentsPanel.tsx:263-306`), which fetches the script through an
- * orchestration RPC. We have no such route, and the spec does not name one.
+ * orchestration RPC. Here the script is the coordinator's launch prompt, so
+ * the workflow's name opens the coordinator's drill-in, which heads with it.
+ *
+ * Phase indices are compared, never counted from: Claude numbers them from 1,
+ * older and synthetic payloads from 0.
+ *
+ * A live run carries its own Stop where the provider can stop one task
+ * (`/task/stop`, `taskStopControl`): it stops the RUN — the provider runs a
+ * workflow as one task — and leaves the turn and every other task running.
+ * Its agents have none: they cannot be stopped one by one.
  */
 
 import React from "react";
 import { Check, ChevronDown, ChevronRight } from "lucide-react";
 import type { AgentPanelWorkflowGroup, RuntimeSubagent } from "@orquester/api/agent-chat";
 import { cn } from "../../../lib/cn";
-import { ChatIconButton, StatusDot } from "../primitives";
-import { elapsedBetween } from "../primitives/elapsed";
+import type { TaskStopControl } from "../../../lib/agent-chat/roster.logic";
+import { ChatIconButton, ElapsedTicker, StatusDot } from "../primitives";
 import { formatSubagentTokenCount } from "./format";
-import { isFinishedRow, rosterStatusVisual } from "./roster-rows";
+import { isFinishedRow, rosterRowTicks, rosterStatusVisual } from "./roster-rows";
+import { workflowGroupSummary } from "./roster-summary";
 import { AgentRosterRow } from "./AgentRosterRow";
 
 type Phase = AgentPanelWorkflowGroup["phases"][number];
@@ -35,8 +45,44 @@ function workflowIsLive(group: AgentPanelWorkflowGroup): boolean {
   return !isFinishedRow(group.workflow);
 }
 
-function workflowMembers(group: AgentPanelWorkflowGroup): RuntimeSubagent[] {
-  return [...group.phases.flatMap((phase) => phase.members), ...group.unphasedMembers];
+function workflowLabel(workflow: RuntimeSubagent): string {
+  return workflow.workflowName ?? workflow.title;
+}
+
+/** The run's own Stop: offered while the provider can stop it, pending until it settles. */
+export interface WorkflowStop {
+  control: Exclude<TaskStopControl, "hidden">;
+  onStop: () => void;
+}
+
+function WorkflowStopButton({
+  label,
+  stop,
+  className
+}: {
+  label: string;
+  stop: WorkflowStop;
+  className?: string;
+}): React.ReactElement {
+  const stopping = stop.control === "stopping";
+  return (
+    <button
+      type="button"
+      disabled={stopping}
+      onClick={stop.onStop}
+      data-task-stop="true"
+      title={stopping ? `Stopping ${label}` : `Stop ${label} and all of its agents`}
+      className={cn(
+        "ac-press inline-flex h-5 shrink-0 items-center rounded px-1.5 font-mono text-[10px] font-medium normal-case tracking-normal",
+        "text-neutral-400 hover:bg-neutral-800 hover:text-neutral-100",
+        "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
+        "disabled:pointer-events-none disabled:opacity-50",
+        className
+      )}
+    >
+      {stopping ? "Stopping…" : "Stop"}
+    </button>
+  );
 }
 
 function PhaseRail({ group }: { group: AgentPanelWorkflowGroup }): React.ReactElement | null {
@@ -167,30 +213,54 @@ function ExpandedWorkflow({
   group,
   activeAgentId,
   onOpenAgent,
-  onCollapse
+  onCollapse,
+  stop
 }: {
   group: AgentPanelWorkflowGroup;
   activeAgentId: string | null;
   onOpenAgent: (agentId: string) => void;
   onCollapse: () => void;
+  stop: WorkflowStop | null;
 }): React.ReactElement {
-  const members = workflowMembers(group);
-  const settled = members.filter((member) => isFinishedRow(member)).length;
+  const summary = workflowGroupSummary(group);
+  const workflowActive = group.workflow.id === activeAgentId;
   return (
     <section className="rounded-lg border border-neutral-800 bg-neutral-900/40 p-1.5">
       <div className="flex items-center gap-2 px-1.5 pt-0.5 text-[10px] font-medium uppercase tracking-wider text-neutral-500">
         <StatusDot tone={rosterStatusVisual(group.workflow.status).tone} size="xs" />
-        <span className="min-w-0 truncate">
-          {group.workflow.workflowName ?? group.workflow.title}
-        </span>
-        <span className="ml-auto font-mono normal-case text-neutral-500">
-          {settled}/{members.length} settled
-        </span>
+        {/* The coordinator's drill-in: the script it runs, as its prompt. */}
+        <button
+          type="button"
+          onClick={() => onOpenAgent(group.workflow.id)}
+          title="Open the workflow and its script"
+          data-agent-id={group.workflow.id}
+          className={cn(
+            "ac-press min-w-0 truncate rounded-sm text-left uppercase tracking-wider",
+            "hover:text-neutral-200 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
+            workflowActive && "text-neutral-200"
+          )}
+        >
+          {workflowLabel(group.workflow)}
+        </button>
+        {/* Nothing to settle until the first member is reported: "0/0
+            settled" said the run had none. */}
+        {summary.agents > 0 ? (
+          <span className="ml-auto font-mono normal-case text-neutral-500">
+            {summary.settled}/{summary.agents} settled
+          </span>
+        ) : null}
+        {stop ? (
+          <WorkflowStopButton
+            label={workflowLabel(group.workflow)}
+            stop={stop}
+            className={cn(summary.agents === 0 && "ml-auto")}
+          />
+        ) : null}
         <ChatIconButton
           size="micro"
           label="Collapse workflow"
           onClick={onCollapse}
-          className="-mr-0.5"
+          className={cn("-mr-0.5", summary.agents === 0 && !stop && "ml-auto")}
         >
           <ChevronDown size={12} aria-hidden />
         </ChatIconButton>
@@ -213,7 +283,9 @@ function ExpandedWorkflow({
           onOpen={onOpenAgent}
         />
       ))}
-      {group.phases.length === 0 && group.unphasedMembers.length === 0 ? (
+      {/* No member reported yet — before the run's first progress snapshot,
+          or a CLI that sends none: the coordinator stands for the run. */}
+      {summary.agents === 0 ? (
         <AgentRosterRow
           agent={group.workflow}
           active={group.workflow.id === activeAgentId}
@@ -226,50 +298,51 @@ function ExpandedWorkflow({
 
 function CollapsedWorkflow({
   group,
-  onExpand
+  onExpand,
+  stop
 }: {
   group: AgentPanelWorkflowGroup;
   onExpand: () => void;
+  stop: WorkflowStop | null;
 }): React.ReactElement {
-  const members = workflowMembers(group);
-  const failed = members.filter((member) => member.status === "failed").length;
-  // The coordinator's usage may already aggregate its members', so count it
-  // only when there are no member rows to sum. *T3: `AgentsPanel.tsx:466-471`.*
-  const totalTokens = members.reduce(
-    (sum, member) => sum + (member.usage?.totalTokens ?? 0),
-    members.length === 0 ? (group.workflow.usage?.totalTokens ?? 0) : 0
-  );
-  const elapsed =
-    group.workflow.startedAt && group.workflow.completedAt
-      ? elapsedBetween(group.workflow.startedAt, group.workflow.completedAt)
-      : null;
+  const { agents, failed, totalTokens } = workflowGroupSummary(group);
+  const { workflow } = group;
   return (
-    <section>
+    <section className="flex items-center gap-1">
       <button
         type="button"
         onClick={onExpand}
         aria-expanded={false}
         className={cn(
-          "ac-press flex w-full items-center gap-2 rounded-md px-1.5 py-1 text-left",
+          "ac-press flex min-w-0 flex-1 items-center gap-2 rounded-md px-1.5 py-1 text-left",
           "hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1",
           "focus-visible:ring-inset focus-visible:ring-neutral-500"
         )}
       >
         <StatusDot
-          tone={rosterStatusVisual(failed > 0 ? "failed" : group.workflow.status).tone}
+          tone={rosterStatusVisual(failed > 0 ? "failed" : workflow.status).tone}
           size="xs"
         />
-        <span className="min-w-0 truncate text-sm text-neutral-200">
-          {group.workflow.workflowName ?? group.workflow.title}
-        </span>
+        <span className="min-w-0 truncate text-sm text-neutral-200">{workflowLabel(workflow)}</span>
         <span className="ml-auto flex shrink-0 items-center gap-1.5 font-mono text-[11px] text-neutral-500">
-          {failed > 0 ? <span className="text-danger-300">{failed} failed</span> : null}
-          <span>{members.length} agents</span>
-          <span className="ac-tabular">· {formatSubagentTokenCount(totalTokens)} tok</span>
-          {elapsed ? <span className="ac-tabular">· {elapsed}</span> : null}
+          {failed > 0 ? <span className="text-danger-300">{failed} failed ·</span> : null}
+          {agents > 0 ? <span>{agents} {agents === 1 ? "agent" : "agents"} ·</span> : null}
+          <span className="ac-tabular">{formatSubagentTokenCount(totalTokens)} tok</span>
+          {workflow.startedAt ? (
+            <span className="ac-tabular">
+              ·{" "}
+              <ElapsedTicker
+                startedAt={workflow.startedAt}
+                endedAt={workflow.completedAt}
+                live={rosterRowTicks(workflow.status)}
+              />
+            </span>
+          ) : null}
           <ChevronRight size={12} aria-hidden />
         </span>
       </button>
+      {/* Beside the expand button, never inside it: a button in a button. */}
+      {stop ? <WorkflowStopButton label={workflowLabel(workflow)} stop={stop} /> : null}
     </section>
   );
 }
@@ -278,23 +351,37 @@ export interface WorkflowGroupProps {
   group: AgentPanelWorkflowGroup;
   activeAgentId?: string | null;
   onOpenAgent: (agentId: string) => void;
+  /**
+   * The run's Stop (`taskStopControl` of the coordinator): `"hidden"` — or
+   * absent — shows none. `onStopTask` gets the coordinator's id.
+   */
+  stopControl?: TaskStopControl;
+  onStopTask?: (taskId: string) => void;
 }
 
 /** A workflow's open state is presentation state, not a status derivative. */
 export function WorkflowGroup({
   group,
   activeAgentId = null,
-  onOpenAgent
+  onOpenAgent,
+  stopControl = "hidden",
+  onStopTask
 }: WorkflowGroupProps): React.ReactElement {
   const [open, setOpen] = React.useState(() => workflowIsLive(group));
+  const workflowId = group.workflow.id;
+  const stop: WorkflowStop | null =
+    stopControl === "hidden" || onStopTask === undefined
+      ? null
+      : { control: stopControl, onStop: () => onStopTask(workflowId) };
   return open ? (
     <ExpandedWorkflow
       group={group}
       activeAgentId={activeAgentId}
       onOpenAgent={onOpenAgent}
       onCollapse={() => setOpen(false)}
+      stop={stop}
     />
   ) : (
-    <CollapsedWorkflow group={group} onExpand={() => setOpen(true)} />
+    <CollapsedWorkflow group={group} onExpand={() => setOpen(true)} stop={stop} />
   );
 }

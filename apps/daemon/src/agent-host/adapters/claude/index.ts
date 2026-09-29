@@ -453,6 +453,14 @@ export async function createClaudeAdapterWith(
       return session.backgroundTasks(toolUseId);
     },
 
+    async stopTask(threadId, taskId) {
+      const session = sessions.get(threadId);
+      if (session === undefined) {
+        throw new Error(`No live Claude session for thread ${threadId}.`);
+      }
+      await session.stopTask(taskId);
+    },
+
     async readThread(threadId) {
       const session = sessions.get(threadId);
       if (session === undefined) {

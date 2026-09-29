@@ -201,6 +201,9 @@ class ScriptedQuery {
         self.calls.push({ op: "interrupt" });
         return self.interruptReceipt;
       },
+      async stopTask(taskId: string) {
+        self.calls.push({ op: "stopTask", arg: taskId });
+      },
       async setModel(model?: string) {
         self.calls.push({ op: "setModel", arg: model });
       },
@@ -330,6 +333,8 @@ interface Harness {
   advance: (ms: number) => void;
   /** Every `logger.debug` message, in order. */
   debugLines: string[];
+  /** Every `logger.warn` message, in order. */
+  warnLines: string[];
 }
 
 interface HarnessOptions {
@@ -356,6 +361,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   const firstPeer = createDeferred<ScriptedQuery>();
   const queryOptions: ClaudeQueryOptions[] = [];
   const debugLines: string[] = [];
+  const warnLines: string[] = [];
   const listeners: Array<() => void> = [];
 
   let nowMs = Date.parse("2026-09-21T00:00:00.000Z");
@@ -370,7 +376,9 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
         debugLines.push(message);
       },
       info() {},
-      warn() {},
+      warn(message) {
+        warnLines.push(message);
+      },
       error() {}
     },
     clock: { now: () => new Date(nowMs), nowIso: () => new Date(nowMs).toISOString() },
@@ -493,7 +501,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     waitFor,
     drain,
     advance,
-    debugLines
+    debugLines,
+    warnLines
   };
 }
 
@@ -1057,6 +1066,40 @@ describe("claude adapter — approvals", () => {
     await harness.adapter.interruptTurn(START.threadId, "some-other-turn");
     assert.equal(peer.calls.slice(callsBefore).some((call) => call.op === "interrupt"), false);
     assert.equal(harness.adapter.hasSession(START.threadId), true);
+  });
+});
+
+describe("claude adapter — stopping one task", () => {
+  it("sends the stop_task control for that task alone, and the session lives on", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "go",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    const callsBefore = peer.calls.length;
+    await harness.adapter.stopTask!(START.threadId, "wvg2ao9ra");
+    assert.deepEqual(
+      peer.calls.slice(callsBefore).map((call) => [call.op, call.arg]),
+      [["stopTask", "wvg2ao9ra"]],
+      "no interrupt, no close: the turn and the other tasks keep running"
+    );
+    assert.equal(harness.adapter.hasSession(START.threadId), true);
+  });
+
+  it("rejects without a live session, and never asks for the per-task stop affordance", async () => {
+    const harness = await makeHarness();
+    await assert.rejects(harness.adapter.stopTask!(START.threadId, "wvg2ao9ra"), /No live Claude session/);
+    await harness.adapter.startSession(START);
+    assert.equal(
+      (harness.queryOptions[0] as { perTaskStopAffordance?: unknown } | undefined)?.perTaskStopAffordance,
+      undefined,
+      "the session-scoped Stop keeps killing the whole fleet"
+    );
   });
 });
 
@@ -3176,5 +3219,220 @@ describe("claude adapter — goals (goals §6.1)", () => {
       assert.equal(restored.payload.change, "restored");
       assert.equal(restored.payload.goal?.objective, "ship the release");
     });
+  });
+});
+
+describe("claude adapter — workflow agents' transcripts", () => {
+  const WF_TASK = "wtask0001";
+  const WF_TOOL_USE = "toolu_wf_launch";
+  const MEMBER = `${WF_TASK}:wf:1`;
+
+  function workflowSnapshot(state: string, extra: Record<string, unknown> = {}): SDKMessage {
+    return {
+      type: "system",
+      subtype: "task_progress",
+      task_id: WF_TASK,
+      tool_use_id: WF_TOOL_USE,
+      description: "Read: read:a",
+      summary: "One agent",
+      last_tool_name: "read:a",
+      usage: { total_tokens: 10, tool_uses: 0, duration_ms: 5 },
+      workflow_progress: [
+        { type: "workflow_phase", index: 1, title: "Read" },
+        {
+          type: "workflow_agent",
+          index: 1,
+          label: "read:a",
+          phaseIndex: 1,
+          phaseTitle: "Read",
+          agentId: "a1b2c3",
+          state,
+          startedAt: 1,
+          attempt: 1,
+          ...extra
+        }
+      ],
+      session_id: "sess-1",
+      uuid: `u-progress-${state}`
+    } as unknown as SDKMessage;
+  }
+
+  const row = (record: Record<string, unknown>): string =>
+    `${JSON.stringify({ isSidechain: true, agentId: "a1b2c3", sessionId: "sess-1", ...record })}\n`;
+
+  it("tails an agent's transcript into its member's drill-in, drained before the row that ends it", async () => {
+    const configDir = await mkdtemp(nodePath.join(tmpdir(), "orq-workflow-"));
+    try {
+      const transcriptDir = nodePath.join(configDir, "projects", "-work-project", "sess-1", "subagents", "workflows", "wf_test");
+      await mkdir(transcriptDir, { recursive: true });
+      const transcript = nodePath.join(transcriptDir, "agent-a1b2c3.jsonl");
+
+      const harness = await makeHarness();
+      await harness.adapter.startSession({ ...START, home: { kind: "account", accountId: "acc-1", path: configDir } });
+      const peer = harness.peers[0]!;
+      await harness.adapter.sendTurn({
+        threadId: START.threadId,
+        input: "run the workflow",
+        attachments: [],
+        interactionMode: "default"
+      });
+      await peer.nextTurn();
+
+      peer.emit({
+        type: "system",
+        subtype: "task_started",
+        task_id: WF_TASK,
+        tool_use_id: WF_TOOL_USE,
+        description: "One agent",
+        task_type: "local_workflow",
+        workflow_name: "one-agent",
+        prompt: "export const meta = { name: 'one-agent', description: 'One agent' }",
+        session_id: "sess-1",
+        uuid: "u-wf-start"
+      } as unknown as SDKMessage);
+      peer.emit({
+        type: "user",
+        message: {
+          role: "user",
+          content: [{ type: "tool_result", tool_use_id: WF_TOOL_USE, content: "Workflow launched in background." }]
+        },
+        tool_use_result: {
+          status: "async_launched",
+          taskId: WF_TASK,
+          taskType: "local_workflow",
+          workflowName: "one-agent",
+          runId: "wf_test",
+          transcriptDir
+        },
+        parent_tool_use_id: null,
+        session_id: "sess-1",
+        uuid: "u-wf-result"
+      } as unknown as SDKMessage);
+      const coordinator = await harness.waitFor("task.started");
+      assert.equal(coordinator.payload.taskId, WF_TASK);
+      peer.emit(workflowSnapshot("progress"));
+      const member = await harness.waitFor("task.started", harness.events.indexOf(coordinator) + 1);
+      assert.equal(member.payload.taskId, MEMBER);
+
+      // The agent calls a tool: only its transcript says so.
+      await writeFile(
+        transcript,
+        row({ type: "user", uuid: "r0", message: { role: "user", content: "[Workflow harness — computed task] The computed task text follows:\n  read a" } }) +
+          row({ type: "attachment", uuid: "r1", attachment: { type: "date" } }) +
+          row({ type: "assistant", uuid: "r2", message: { id: "m1", role: "assistant", content: [{ type: "tool_use", id: "toolu_read", name: "Read", input: { file_path: "a.txt" } }] } }),
+        "utf8"
+      );
+      let seen = harness.events.length;
+      await waitForFileIO();
+      harness.advance(750);
+      const call = await harness.waitFor("item.started", seen);
+      assert.equal(call.agentId, MEMBER);
+      assert.equal(call.itemId, "toolu_read");
+
+      // The parent's turn ends while the call is open: the run is background
+      // work, and its call is still the agent's to finish.
+      seen = harness.events.length;
+      peer.emit(successResult());
+      await harness.waitFor("turn.completed", seen);
+      assert.deepEqual(
+        harness.events.slice(seen).filter((event) => event.type === "item.completed" && event.itemId === "toolu_read"),
+        [],
+        "a parent turn end must not settle a workflow agent's call"
+      );
+
+      await appendFile(
+        transcript,
+        row({ type: "user", uuid: "r3", message: { role: "user", content: [{ type: "tool_result", tool_use_id: "toolu_read", content: "alpha" }] } }),
+        "utf8"
+      );
+      seen = harness.events.length;
+      await waitForFileIO();
+      harness.advance(750);
+      const result = await harness.waitFor("item.completed", seen);
+      assert.equal(result.itemId, "toolu_read");
+      assert.equal(result.payload.status, "completed");
+
+      // Its answer lands after the last poll and before the snapshot that
+      // ends it: the drain puts it first.
+      await appendFile(
+        transcript,
+        row({ type: "assistant", uuid: "r4", message: { id: "m2", role: "assistant", content: [{ type: "text", text: "alpha" }] } }),
+        "utf8"
+      );
+      seen = harness.events.length;
+      peer.emit(workflowSnapshot("done", { resultPreview: "alpha", tokens: 10, toolCalls: 1 }));
+      const done = await harness.waitFor("task.completed", seen);
+      assert.equal(done.payload.taskId, MEMBER);
+      const tail = harness.events.slice(seen);
+      const answer = tail.findIndex(
+        (event) => event.type === "content.delta" && event.agentId === MEMBER && event.payload.delta === "alpha"
+      );
+      assert.ok(answer !== -1, `expected the drained answer, saw ${tail.map((event) => event.type).join(", ")}`);
+      assert.ok(answer < tail.indexOf(done));
+
+      // A settled agent's transcript is not polled any more.
+      await appendFile(transcript, row({ type: "assistant", uuid: "r4b", message: { id: "m2b", role: "assistant", content: [{ type: "text", text: "after" }] } }), "utf8");
+      seen = harness.events.length;
+      await waitForFileIO();
+      harness.advance(750);
+      await harness.drain();
+      assert.deepEqual(harness.events.slice(seen), []);
+
+      peer.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: WF_TASK,
+        tool_use_id: WF_TOOL_USE,
+        status: "completed",
+        output_file: "",
+        summary: 'Dynamic workflow "One agent" completed',
+        session_id: "sess-1",
+        uuid: "u-wf-note"
+      } as unknown as SDKMessage);
+      await harness.waitFor("task.completed", harness.events.indexOf(done) + 1);
+
+      // The run is over: its transcripts are not read any more.
+      await appendFile(transcript, row({ type: "assistant", uuid: "r5", message: { id: "m3", role: "assistant", content: [{ type: "text", text: "late" }] } }), "utf8");
+      const after = harness.events.length;
+      await waitForFileIO();
+      harness.advance(750);
+      await harness.drain();
+      assert.deepEqual(harness.events.slice(after), []);
+    } finally {
+      await rm(configDir, { recursive: true, force: true });
+    }
+  });
+
+  it("never tails a path outside the account's projects directory", async () => {
+    const outside = await mkdtemp(nodePath.join(tmpdir(), "orq-workflow-outside-"));
+    try {
+      await writeFile(
+        nodePath.join(outside, "agent-a1b2c3.jsonl"),
+        row({ type: "assistant", uuid: "x1", message: { id: "m1", role: "assistant", content: [{ type: "tool_use", id: "toolu_x", name: "Read", input: {} }] } }),
+        "utf8"
+      );
+      const harness = await makeHarness();
+      await harness.adapter.startSession(START);
+      const peer = harness.peers[0]!;
+      await harness.adapter.sendTurn({ threadId: START.threadId, input: "go", attachments: [], interactionMode: "default" });
+      await peer.nextTurn();
+      peer.emit({
+        type: "user",
+        message: { role: "user", content: [{ type: "tool_result", tool_use_id: WF_TOOL_USE, content: "Workflow launched" }] },
+        tool_use_result: { status: "async_launched", taskId: WF_TASK, taskType: "local_workflow", transcriptDir: outside },
+        parent_tool_use_id: null,
+        session_id: "sess-1",
+        uuid: "u-outside"
+      } as unknown as SDKMessage);
+      peer.emit(workflowSnapshot("progress"));
+      await harness.waitFor("task.started");
+      await harness.drain();
+      assert.ok(
+        harness.warnLines.some((line) => line.includes("not tailing a workflow transcript outside")),
+        harness.warnLines.join(" | ")
+      );
+    } finally {
+      await rm(outside, { recursive: true, force: true });
+    }
   });
 });

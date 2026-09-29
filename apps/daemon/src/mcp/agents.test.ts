@@ -12,7 +12,7 @@ const registry = { shells: [], ides: [], fileExplorers: [], browsers: [], agents
 ] };
 const providers = { hostInstanceId: "h1", providers: [
   { id: "claude", refIds: ["claude"], installed: true, version: "2.1.280", status: "ready", auth: { status: "authenticated", label: "system" }, checkedAt: stamp(0), slashCommands: [], skills: [],
-    capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "slash-command", command: "/compact" }, supportsBackgroundTasks: true },
+    capabilities: { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "slash-command", command: "/compact" }, supportsBackgroundTasks: true, supportsTaskStop: true },
     models: [
       { slug: "default", name: "Default · Opus", isDefault: true, capabilities: { optionDescriptors: [{ id: "effort", label: "Effort", type: "select", options: [{ id: "medium", label: "Medium", isDefault: true }, { id: "high", label: "High" }] }, { id: "thinking", label: "Thinking", type: "boolean" }] } },
       { slug: "haiku", name: "Haiku", capabilities: { optionDescriptors: [] } },
@@ -43,7 +43,7 @@ test("loadAgents lists only chat-capable entries with models, options, accounts 
   assert.deepEqual(claude.models[0].options[0], { id: "effort", label: "Effort", type: "select", values: [{ id: "medium", label: "Medium", isDefault: true }, { id: "high", label: "High" }] });
   assert.deepEqual(claude.models[0].options[1], { id: "thinking", label: "Thinking", type: "boolean" });
   assert.equal(claude.effortOptionId, "effort");
-  assert.deepEqual(claude.supports, { planMode: true, rollback: true, compaction: true, backgroundTasks: true, goals: null, contextWindow: true });
+  assert.deepEqual(claude.supports, { planMode: true, rollback: true, compaction: true, backgroundTasks: true, taskStop: true, goals: null, contextWindow: true });
   assert.deepEqual(claude.accounts, [{ id: "system", label: "System", email: null, plan: null, needsReauth: false, isDefault: false }, { id: "acc-1", label: "jasperclaude", email: null, plan: "max", needsReauth: false, isDefault: true }]);
   assert.equal(claude.defaultAccountId, "acc-1");
   const grok = agents[2];
@@ -105,7 +105,7 @@ test("supports.goals projects the provider's goal capability into the MCP catalo
   const codexCaps = { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" }, promptlessTurnContinuation: true };
   const codex = { id: "codex", refIds: ["codex"], installed: true, version: "0.130.0", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [], models: [], capabilities: { ...codexCaps, goals: codexGoals } };
   const daemon = api().on("GET", "/api/agent/providers", { status: 200, body: { ...providers, providers: [...providers.providers, codex] } });
-  assert.deepEqual(findAgent(await loadAgents(daemon), "codex").supports, { planMode: true, rollback: true, compaction: true, backgroundTasks: false, goals: codexGoals, contextWindow: true });
+  assert.deepEqual(findAgent(await loadAgents(daemon), "codex").supports, { planMode: true, rollback: true, compaction: true, backgroundTasks: false, taskStop: false, goals: codexGoals, contextWindow: true });
 });
 
 test("an empty model never wins: an empty current or input model resolves like an omitted one, and its options are validated", async () => {
@@ -149,10 +149,10 @@ test("a degraded provider row (an older host's) is normalised field by field, ne
   const agents = await loadAgents(degraded);
   const claude = findAgent(agents, "claude");
   assert.deepEqual([claude.models, claude.auth, claude.installed, claude.status], [[], { status: "unknown" }, true, "ready"]);
-  assert.deepEqual(claude.supports, { planMode: false, rollback: false, compaction: false, backgroundTasks: false, goals: null, contextWindow: false });
+  assert.deepEqual(claude.supports, { planMode: false, rollback: false, compaction: false, backgroundTasks: false, taskStop: false, goals: null, contextWindow: false });
   const grok = findAgent(agents, "grok");
   assert.deepEqual([grok.auth, grok.installed, grok.status, grok.message, grok.version], [{ status: "unknown" }, false, "unknown", undefined, null]);
-  assert.deepEqual(grok.supports, { planMode: false, rollback: false, compaction: false, backgroundTasks: false, goals: null, contextWindow: false }, "a flag counts only when it is really true");
+  assert.deepEqual(grok.supports, { planMode: false, rollback: false, compaction: false, backgroundTasks: false, taskStop: false, goals: null, contextWindow: false }, "a flag counts only when it is really true");
   assert.deepEqual(grok.models.map((m) => [m.slug, m.options]), [
     ["grok-4.6", [{ id: "fast", label: "Fast", type: "boolean" }, { id: "tier", label: "Tier", type: "select", values: [{ id: "flex", label: "Flex" }] }]],
     ["grok-mini", []]

@@ -13,11 +13,12 @@ afterEach(async () => { await page.dispose(); });
 import assert from "node:assert/strict";
 import { after, afterEach, beforeEach, describe, it, mock } from "node:test";
 
-import type {
-  AgentChatCommandName,
-  AgentChatStreamFrame,
-  AttachmentRef,
-  Turn
+import {
+  foldSubagentActivities,
+  type AgentChatCommandName,
+  type AgentChatStreamFrame,
+  type AttachmentRef,
+  type Turn
 } from "@orquester/api/agent-chat";
 
 let registerComposerHandle: typeof import("../../components/agent-chat/composer/composer-bridge")["registerComposerHandle"];
@@ -30,7 +31,7 @@ let updateThreadDraft: typeof import("./store")["updateThreadDraft"];
 import type { AgentChatTransport } from "./transport";
 let AgentChatCommandError: typeof import("./transport")["AgentChatCommandError"];
 import type { AgentChatTimelineRow } from "./contracts";
-import { activity, ev, foldTurn, head, message, resetBuilders, snapshot, stamp } from "./test-helpers";
+import { activity, CLAUDE_WORKFLOW_ID, claudeWorkflow, ev, foldTurn, head, message, resetBuilders, snapshot, stamp } from "./test-helpers";
 
 interface Posted {
   /** `"account"` is the daemon-owned §3.4 route, not a §6.2 command name. */
@@ -1276,5 +1277,51 @@ describe("a send outlives its store generation", () => {
     } finally {
       composer.unregister();
     }
+  });
+});
+
+describe("stopping one task (/task/stop)", () => {
+  /** A thread whose roster holds one live Claude workflow run. */
+  async function withLiveWorkflow() {
+    const harness = await store();
+    const items = [activity("task.started", claudeWorkflow.coordinator())];
+    harness.fake.push({ kind: "snapshot", thread: snapshot({ seq: 1, items, roster: foldSubagentActivities(items) }) });
+    return harness;
+  }
+  const settledFrame = (seq: number, activityKind: string, payload: unknown): AgentChatStreamFrame => ({
+    kind: "event",
+    seq,
+    event: ev("thread.activity-appended", { activity: activity(activityKind, payload, { createdAt: stamp(seq) }) }, { seq })
+  });
+
+  it("posts the task's id and holds its Stop pending until the row settles", async () => {
+    const { api, fake, state } = await withLiveWorkflow();
+    await api.getState().actions.stopTask({ taskId: CLAUDE_WORKFLOW_ID });
+    const posted = fake.posted.at(-1);
+    assert.equal(posted?.name, "task/stop");
+    assert.equal(posted?.body.taskId, CLAUDE_WORKFLOW_ID);
+    assert.equal(typeof posted?.body.commandId, "string");
+    assert.deepEqual(state().stoppingTaskIds, [CLAUDE_WORKFLOW_ID], "an accepted stop is not yet a stopped task");
+
+    fake.push(settledFrame(2, "task.progress", claudeWorkflow.coordinator({ status: "running", summary: "still going" })));
+    assert.deepEqual(state().stoppingTaskIds, [CLAUDE_WORKFLOW_ID]);
+    fake.push(settledFrame(3, "task.completed", claudeWorkflow.coordinator({ status: "stopped" })));
+    assert.deepEqual(state().stoppingTaskIds, [], "the row settled");
+  });
+
+  it("lets the Stop go at once when the host refuses it, and says why on the banner", async () => {
+    const { api, fake, state } = await withLiveWorkflow();
+    const reason = "A workflow's agents cannot be stopped one by one. Stop the whole workflow instead.";
+    fake.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", reason), 1);
+    await assert.rejects(() => api.getState().actions.stopTask({ taskId: CLAUDE_WORKFLOW_ID }));
+    assert.deepEqual(state().stoppingTaskIds, []);
+    assert.equal(state().slice.errorBanner, reason);
+  });
+
+  it("offers the Stop again when the provider failed it", async () => {
+    const { api, fake, state } = await withLiveWorkflow();
+    await api.getState().actions.stopTask({ taskId: CLAUDE_WORKFLOW_ID });
+    fake.push(settledFrame(2, "provider.task.stop.failed", { targetTaskId: CLAUDE_WORKFLOW_ID, detail: "timed out" }));
+    assert.deepEqual(state().stoppingTaskIds, []);
   });
 });

@@ -20,9 +20,11 @@
  *   down every other thread's session.
  */
 
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import * as nodePath from "node:path";
 import { StringDecoder } from "node:string_decoder";
+
+import { NdjsonLineReader } from "./ndjson.ts";
 
 /** At most this many bytes leave the file per read. */
 export const TAIL_MAX_READ_BYTES = 64 * 1024;
@@ -137,4 +139,107 @@ export function resolveTildePath(input: string, home: string): string {
     return nodePath.join(home, input.slice(2));
   }
   return input;
+}
+
+/** At most this many bytes leave a JSONL transcript per read. */
+export const JSONL_TAIL_MAX_READ_BYTES = 256 * 1024;
+
+export interface JsonlFileTailRead {
+  /** The complete lines appended since the last read, parsed; a malformed line is skipped. */
+  records: unknown[];
+  /** True once the file is unreadable for any reason but "not written yet". */
+  done: boolean;
+}
+
+/**
+ * An incremental tail of a JSONL file a provider appends to — a Claude
+ * workflow agent's transcript (spec §4.5). Unlike {@link FileTail} it has no
+ * total cap: the reader turns records into items, not text, so the log grows
+ * by what the agent did, and a transcript's bulk (the CLI's own context
+ * attachments) is parsed and dropped. A partial last line waits for its
+ * newline; a single line past `NDJSON_MAX_LINE_BYTES` is abandoned.
+ *
+ * A missing file is not an error: the CLI creates it on the agent's first
+ * write, which can come after the agent is named. Never throws.
+ */
+export class JsonlFileTail {
+  readonly path: string;
+
+  private offset = 0;
+  private reader = new NdjsonLineReader();
+  private done = false;
+  /** The read under way: one at a time, so two can never share an offset. */
+  private inFlight: Promise<JsonlFileTailRead> | undefined;
+
+  constructor(options: FileTailOptions) {
+    this.path = options.path;
+  }
+
+  get finished(): boolean {
+    return this.done;
+  }
+
+  /** Bytes taken out of the file so far. */
+  get bytesRead(): number {
+    return this.offset;
+  }
+
+  /**
+   * One bounded read. A caller that gave up on a slow read and asks again
+   * gets THAT read's answer, so its records are never lost.
+   */
+  read(): Promise<JsonlFileTailRead> {
+    this.inFlight ??= this.readOnce().finally(() => {
+      this.inFlight = undefined;
+    });
+    return this.inFlight;
+  }
+
+  private async readOnce(): Promise<JsonlFileTailRead> {
+    if (this.done) {
+      return { records: [], done: true };
+    }
+    let handle: fs.FileHandle | undefined;
+    try {
+      // Never through a link: the file is the CLI's own, in its own tree.
+      handle = await fs.open(this.path, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+      const stat = await handle.stat();
+      if (stat.size < this.offset) {
+        // Replaced under us: the caller skips records it already has.
+        this.offset = 0;
+        this.reader = new NdjsonLineReader();
+      }
+      const available = stat.size - this.offset;
+      if (available <= 0) {
+        return { records: [], done: false };
+      }
+      const length = Math.min(available, JSONL_TAIL_MAX_READ_BYTES);
+      const buffer = Buffer.allocUnsafe(length);
+      const { bytesRead } = await handle.read(buffer, 0, length, this.offset);
+      this.offset += bytesRead;
+      const records: unknown[] = [];
+      for (const line of this.reader.push(buffer.subarray(0, bytesRead))) {
+        if (line.trim().length === 0) {
+          continue;
+        }
+        try {
+          records.push(JSON.parse(line));
+        } catch {
+          // A torn or foreign line: the rest of the file is still good.
+        }
+      }
+      return { records, done: false };
+    } catch (error) {
+      const code = (error as { code?: unknown } | null)?.code;
+      if (code === "ENOENT") {
+        return { records: [], done: false };
+      }
+      this.done = true;
+      return { records: [], done: true };
+    } finally {
+      await handle?.close().catch(() => {
+        // The read already produced its answer; a failing close is noise.
+      });
+    }
+  }
 }

@@ -341,6 +341,20 @@ const interruptSession = defineTool({
   }
 });
 
+const stopTask = defineTool({
+  name: "stop_task",
+  title: "Stop one background task",
+  description: "Stop ONE live background task of a chat — a workflow run, a subagent or a background shell — by its id in get_session's subagents; the turn and every other task keep running (interrupt_session with no turn running stops them all). A workflow's agents cannot be stopped one by one: pass the workflow's own id (kind \"workflow\"). Only where the agent's supports.taskStop is true (Claude); a task that already finished is refused.",
+  input: { sessionId: sessionIdField, taskId: z.string().min(1).describe("The task's id: a subagents[].id from get_session.") },
+  // Not idempotent: a retry after the task has stopped is refused as no longer running.
+  annotations: MUTATING,
+  async run(args, { api }) {
+    await requireChatSession(api, args.sessionId);
+    const { seq } = await sendCommand(api, args.sessionId, "task/stop", { taskId: args.taskId });
+    return { seq, session: await chatDetail(api, args.sessionId) };
+  }
+});
+
 const stopSession = defineTool({
   name: "stop_session",
   title: "Stop the agent process",
@@ -545,4 +559,4 @@ const compactSession = defineTool({
   }
 });
 
-export const sessionTools: ToolDef[] = [listSessionsTool, getSession, getTurnDiff, createSession, updateSession, interruptSession, stopSession, closeSession, revertSession, compactSession];
+export const sessionTools: ToolDef[] = [listSessionsTool, getSession, getTurnDiff, createSession, updateSession, interruptSession, stopTask, stopSession, closeSession, revertSession, compactSession];

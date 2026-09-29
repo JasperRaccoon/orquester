@@ -100,6 +100,8 @@ export function classifyToolItemType(
   if (
     normalized.includes("agent") ||
     normalized === "task" ||
+    // It launches a fleet of them: its run is the roster's workflow group.
+    normalized === "workflow" ||
     normalized.includes("subagent") ||
     normalized.includes("sub-agent")
   ) {
@@ -231,6 +233,13 @@ export function summarizeToolRequest(toolName: string, input: Record<string, unk
     return `${toolName}: ${commandValue.trim().slice(0, SUMMARY_MAX_CHARS)}`;
   }
 
+  if (toolName === "Workflow") {
+    const label = workflowCallLabel(input);
+    if (label !== undefined) {
+      return label;
+    }
+  }
+
   if (classifyToolItemType(toolName) === "collab_agent_tool_call") {
     const description = typeof input.description === "string" ? input.description.trim() : "";
     const prompt = typeof input.prompt === "string" ? input.prompt.trim() : "";
@@ -245,6 +254,28 @@ export function summarizeToolRequest(toolName: string, input: Record<string, unk
     return `${toolName}: ${serialized}`;
   }
   return `${toolName}: ${serialized.slice(0, SUMMARY_MAX_CHARS - 3)}...`;
+}
+
+/**
+ * A `Workflow` call in one line: `meta.name: meta.description` out of an
+ * inline script, else the saved workflow's name or the script file it runs.
+ * `meta` must be a pure literal (the tool rejects anything else), so a
+ * string-literal match reads it without evaluating the script.
+ */
+function workflowCallLabel(input: Record<string, unknown>): string | undefined {
+  const script = typeof input.script === "string" ? input.script : "";
+  const metaField = (field: string): string | undefined => {
+    const match = new RegExp(`\\b${field}\\s*:\\s*(['"\`])((?:\\\\.|(?!\\1)[^\\\\])*)\\1`).exec(script);
+    const value = match?.[2]?.replace(/\\(.)/g, "$1").trim();
+    return value !== undefined && value.length > 0 ? value : undefined;
+  };
+  const name = metaField("name") ?? trimmedString(input.name);
+  const description = metaField("description");
+  const label =
+    name !== undefined && description !== undefined
+      ? `${name}: ${description}`
+      : (name ?? description ?? trimmedString(input.scriptPath));
+  return label?.slice(0, SUMMARY_MAX_CHARS);
 }
 
 /**

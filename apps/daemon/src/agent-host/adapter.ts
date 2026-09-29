@@ -268,6 +268,15 @@ export interface AgentAdapter {
    */
   backgroundTasks?(threadId: string, toolUseId?: string): Promise<boolean>;
   /**
+   * Stop ONE live background task by the id its roster row carries — a
+   * workflow run, a subagent, a background shell — leaving the turn and every
+   * other task running. Present only when `capabilities.supportsTaskStop`; the
+   * host refuses the `/task/stop` command otherwise, and checks that the roster
+   * lists the task live before calling. Resolving means the provider accepted
+   * the stop; the task's own `task.completed` (`stopped`) closes its row.
+   */
+  stopTask?(threadId: string, taskId: string): Promise<void>;
+  /**
    * Run a host-parsed `/goal …` (goals §4.6, §5.1). Present exactly when
    * `capabilities.goals?.command === "host"`. The goal itself moves only
    * through this adapter's `thread.goal.updated` events, never through the

@@ -38,6 +38,11 @@ export interface AgentPrompt {
   readonly truncated: boolean;
   /** Ingestion cut it at rest: only its start was ever kept ({@link PROMPT_CUT_AT_REST_NOTE}). */
   readonly cutAtRest: boolean;
+  /**
+   * A workflow coordinator's launch: its "prompt" is the script it runs
+   * (Claude's `Workflow` tool), which reads as code, not as a message.
+   */
+  readonly script?: true;
 }
 
 /**
@@ -101,7 +106,8 @@ function launchPromptMessage(launch: ThreadActivityItem, agentId: string): Threa
     promptByMessage.set(message, {
       itemId: launch.id,
       truncated: payload?.truncated === true,
-      cutAtRest: payload?.promptTruncated === true
+      cutAtRest: payload?.promptTruncated === true,
+      ...(payload?.taskType === "local_workflow" ? { script: true as const } : {})
     });
   }
   messageByLaunch.set(launch, { agentId, message });

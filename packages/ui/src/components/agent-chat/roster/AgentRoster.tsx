@@ -37,6 +37,9 @@ import {
 } from "./roster-summary";
 import { AgentRosterRow, BackgroundShellRow, RosterMainRow } from "./AgentRosterRow";
 import { WorkflowGroup } from "./WorkflowGroup";
+import { taskStopControl } from "../../../lib/agent-chat/roster.logic";
+
+const NO_TASK_IDS: readonly string[] = [];
 
 /** Matches the row's `duration-300` opacity transition. */
 export const ROSTER_FADE_MS = 300;
@@ -131,7 +134,10 @@ export function AgentRoster({
   main = null,
   activeAgentId = null,
   collapsed = false,
-  onCollapsedChange
+  onCollapsedChange,
+  canStopTasks = false,
+  stoppingTaskIds = NO_TASK_IDS,
+  onStopTask
 }: AgentRosterProps): React.ReactElement | null {
   const phase = useFinishedRowsPhase(main?.turnActive ?? false);
   // Without a `main` row there is no turn signal, so there is nothing to fade
@@ -194,6 +200,8 @@ export function AgentRoster({
             group={group}
             activeAgentId={activeAgentId}
             onOpenAgent={onOpenAgent}
+            stopControl={taskStopControl(agents, group.workflow.id, { canStopTasks, stoppingTaskIds })}
+            onStopTask={onStopTask}
           />
         ))}
 

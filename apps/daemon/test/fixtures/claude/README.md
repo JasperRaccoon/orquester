@@ -111,6 +111,9 @@ excerpts from the permission and question captures that do not need full raw rep
 | 14a | `14a-accept-edits-edit.ndjson` | `permissionMode:"acceptEdits"` | a `Write` plus a mutating `Bash` under accept-edits: **zero** `canUseTool` calls. |
 | 15 | `15-rate-limits-and-usage.ndjson` | `model:"haiku"` | the `rate_limit_event` the CLI emits unprompted, plus the two read-only usage APIs mid-session. No quota was deliberately consumed. |
 | 16 | `16-errors.ndjson` | phase A `model:"claude-does-not-exist-9"`; phase B `model:"sonnet"` | an unknown model (a `result` that says `subtype:"success"` while `is_error:true`), and two failing tools (`Bash` exiting 1, `Read` on a missing file). |
+| 17 | `17-workflow.ndjson` (+ `17-workflow.disk/`) | **CLI 2.1.285**, captured 2026-09-30, no `model` (the account default), `perTaskStopAffordance: true` — see observation **24** | a `Workflow` run to its end: the tool's `async_launched` result, `task_started` with `task_type:"local_workflow"`, `task_progress` frames carrying the undeclared `workflow_progress` snapshot (2 phases, 3 agents), `task_updated` + `task_notification`, and the follow-up turn the notification wakes. |
+| 18 | `18-workflow-stop.ndjson` (+ `18-workflow-stop.disk/`) | as 17; the harness calls `query.stopTask(<workflow task id>)` once a snapshot shows an agent started | a run stopped mid-flight: the `stopTask` receipt, then `task_updated {status:"killed"}` and `task_notification {status:"stopped"}` with no `usage`. |
+| 19 | `19-workflow-tools.ndjson` (+ `19-workflow-tools.disk/`) | as 17 | one workflow agent that calls `Read`: its call and result exist only in its transcript file, never on stdout. |
 
 ## What the capture contains, in aggregate
 
@@ -1034,6 +1037,47 @@ the goal is judged again only when a later turn (a task-notification turn, typic
 nothing in the background. The adapter reports `phase: "waiting-background"` meanwhile. An
 evaluator error, a timeout and the per-turn block cap all end the turn silently too, the goal
 still active; an interrupt leaves it active and unevaluated.
+
+### 24. `Workflow`: one background task on the wire, the agents only on disk
+
+Fixtures 17–19 were captured later than the rest, on **CLI 2.1.285** with the same SDK 0.3.278 and
+Node v20.20.2, in a throwaway git sandbox holding only `a.txt`; the harness was the one described
+above plus `perTaskStopAffordance: true`, and each prompt asked the model to call `Workflow` once
+with a given script. Each `*.disk/<sessionId>/` directory holds what the CLI wrote beside the
+session's transcript, redacted by the same rules: the persisted script
+(`workflows/scripts/<name>-<runId>.js`), the final run snapshot (`workflows/<runId>.json`) and the
+run's transcript directory (`subagents/workflows/<runId>/`: `journal.jsonl`,
+`agent-<agentId>.meta.json`, and `agent-<agentId>.jsonl` **cut to its `user`/`assistant` records**
+— the CLI's context attachments, which carry the account's e-mail, organisation id and whole system
+prompt, were dropped).
+
+**a. The tool answers at once.** Its `tool_use_result` is `{status:"async_launched", taskId,
+taskType:"local_workflow", workflowName, runId, summary, transcriptDir, scriptPath}`; `taskId` is the
+run's SDK task, `runId` (`wf_…`) names its directories and is reused by `resumeFromRunId`.
+
+**b. The run is ONE task.** `task_started` carries `workflow_name` (`meta.name`), `description`
+(`meta.description`) and the whole script as `prompt`. Its `task_progress.description` is
+`"<phase>: <label>"` of whichever agent moved last and `last_tool_name` is that agent's **label**, not
+a tool; `usage` sums the run.
+
+**c. `workflow_progress` is the only per-agent data on the wire**, and `sdk.d.ts` does not declare
+it. It is a full snapshot — `{type:"workflow_phase", index, title}` per phase and
+`{type:"workflow_agent", index, label, phaseIndex, phaseTitle, agentId, model, state, queuedAt,
+startedAt, attempt, promptPreview, tokens, toolCalls, durationMs, resultPreview, lastToolName, …}`
+per agent slot, indices **1-based** — sent only when something other than a counter changed or
+every 10 s; frames that only move a counter leave it out (fixture 19's middle frame). `state` is
+`start` (queued until `startedAt`), `progress`, `done` or `error`. `agentId` is per attempt; the
+slot `index` is what survives a retry.
+
+**d. The agents' conversation never reaches stdout.** No frame carries a workflow agent's
+`assistant`/`user` message (fixture 19's `Read` is absent from the stream). It is in
+`<transcriptDir>/agent-<agentId>.jsonl`: ordinary sidechain rows (`isSidechain`, `agentId`) whose
+first `user` row is the computed task behind a `[Workflow harness — computed task]` preamble, lines
+indented two spaces.
+
+**e. A stop.** `stopTask` resolves in ~25 ms; `task_updated {patch:{status:"killed"}}` and
+`task_notification {status:"stopped", summary:<description>}` follow in the same millisecond, with
+no final snapshot and no `usage`. The run snapshot is still written, `status:"killed"`.
 
 ## Re-capturing
 

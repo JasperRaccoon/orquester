@@ -40,7 +40,11 @@ import {
   type RowGlyphName
 } from "../row-chrome";
 import { COMPACTING_LABEL } from "../row-format";
-import { deriveAgentSpawnSummary } from "../../../../lib/agent-chat/roster.logic";
+import {
+  deriveAgentSpawnSummary,
+  isTerminalSubagentStatus,
+  resolveSpawnRowAgents
+} from "../../../../lib/agent-chat/roster.logic";
 import { TimelineRowTimestamp } from "../timestamp";
 import { ChatMarkdown } from "../markdown/ChatMarkdown";
 import { InlineDiff, looksLikeUnifiedDiff } from "./InlineDiff";
@@ -778,27 +782,22 @@ const AgentSpawnRow = React.memo(function AgentSpawnRow({
   const spawn = entry.agentSpawn;
   const expanded = ctx.isAgentRowExpanded(entry.id);
 
-  const { agents, coordinatorStatus, agentCount } = React.useMemo(() => {
-    if (!spawn) return { agents: [] as RuntimeSubagent[], coordinatorStatus: undefined, agentCount: 0 };
-    const memberIds = new Set(spawn.agentTaskIds);
-    const coordinator =
-      spawn.workflowId === null
-        ? undefined
-        : ctx.roster.find((agent) => agent.id === spawn.workflowId);
-    const members = ctx.roster.filter(
-      (agent) => memberIds.has(agent.id) || (coordinator !== undefined && agent.parentAgentId === coordinator.id)
-    );
-    return {
-      agents: members,
-      coordinatorStatus: coordinator?.status,
-      agentCount: Math.max(members.length, Math.max(memberIds.size - (spawn.workflowId ? 1 : 0), 0))
-    };
-  }, [ctx.roster, spawn]);
+  const { agents, coordinator, agentCount } = React.useMemo(
+    () =>
+      spawn
+        ? resolveSpawnRowAgents(ctx.roster, spawn)
+        : { agents: [] as RuntimeSubagent[], coordinator: null, agentCount: 0 },
+    [ctx.roster, spawn]
+  );
 
   if (!spawn) return null;
 
+  const coordinatorStatus = coordinator?.status;
   const summary = deriveAgentSpawnSummary({ agents, agentCount, coordinatorStatus });
-  const workflowName = agents.find((agent) => agent.workflowName !== null)?.workflowName ?? null;
+  // The coordinator names the run; a member's copy is a fallback for a
+  // coordinator the roster no longer holds.
+  const workflowName =
+    coordinator?.workflowName ?? agents.find((agent) => agent.workflowName !== null)?.workflowName ?? null;
   const lead = workflowName ? `${summary.lead} · ${workflowName}` : summary.lead;
   // A batch none of whose members the roster still holds — its 100-row cap
   // evicts the oldest settled agents first, so an old fleet batch loses them
@@ -839,6 +838,19 @@ const AgentSpawnRow = React.memo(function AgentSpawnRow({
       </button>
       {expanded ? (
         <div className="ms-7 mt-0.5 flex flex-col">
+          {coordinator !== null ? (
+            // The run itself: its drill-in heads with the workflow's script.
+            <button
+              type="button"
+              onClick={() => ctx.onOpenAgent(coordinator.id)}
+              className="flex min-w-0 items-center gap-2 rounded-md px-1 py-0.5 text-left text-xs transition-colors hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
+            >
+              <span className="min-w-0 flex-1 truncate text-neutral-400">
+                Workflow · {coordinator.workflowName ?? coordinator.title}
+              </span>
+              <span className="shrink-0 text-neutral-500">{MEMBER_STATUS_LABEL[coordinator.status]}</span>
+            </button>
+          ) : null}
           {agents.map((agent) => (
             <button
               key={agent.id}
@@ -858,7 +870,11 @@ const AgentSpawnRow = React.memo(function AgentSpawnRow({
               </span>
             </>
           ) : agents.length === 0 ? (
-            <span className="px-1 py-0.5 text-xs italic text-neutral-600">No agent rows reported</span>
+            <span className="px-1 py-0.5 text-xs italic text-neutral-600">
+              {coordinator !== null && !isTerminalSubagentStatus(coordinator.status)
+                ? "No agents reported yet"
+                : "No agent rows reported"}
+            </span>
           ) : null}
         </div>
       ) : null}

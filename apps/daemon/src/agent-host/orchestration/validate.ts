@@ -277,6 +277,14 @@ export function parseTargetTurnCount(value: unknown): number {
   return value;
 }
 
+/** `/task/stop`'s `taskId`: the id of a roster row, never empty. */
+export function parseTaskId(value: unknown): string {
+  if (typeof value !== "string" || value.trim().length === 0) {
+    throw invalidCommand("taskId is required.");
+  }
+  return value.trim();
+}
+
 export function parseOptionalTurnId(value: unknown): string | undefined {
   if (value === undefined || value === null) {
     return undefined;

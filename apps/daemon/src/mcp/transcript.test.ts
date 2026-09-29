@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildPlanImplementationPrompt, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, slimActivityPayload, type ThreadActivityItem, type ThreadItem, type Turn } from "@orquester/api/agent-chat";
-import { activity, head, message, snapshot, stamp, turn } from "./fixtures.ts";
+import { activity, head, message, rosterAgent, snapshot, stamp, turn, WF, workflowRoster } from "./fixtures.ts";
 import { cutTail, transcriptEntries, type TranscriptEntry, type TranscriptResult } from "./transcript.ts";
 
 const ALL = new Set(["reasoning", "tools", "activity"] as const);
@@ -984,4 +984,67 @@ test("a read with older pages merged under the window counts the copies over all
   const merged = { ...window, items: [prompt, open, tool, answer, copy] };
   const r = transcriptEntries(merged, { turns: 5, include: ALL, maxChars: 100_000, windowItems: window.items });
   assert.deepEqual(r.entries.map((e) => [e.kind, e.text]), [["user", "go"], ["assistant", OPENING], ["tool", undefined], ["assistant", ANSWER]]);
+});
+
+// ---- Claude workflow runs: a coordinator and its members. ----
+
+/** A workflow run's rows in one turn: the coordinator's launch, each member's launch and end, and member-owned work. */
+function workflowTurn(): ThreadItem[] {
+  const task = (kind: string, taskId: string, over: Record<string, unknown> = {}) => activity(kind, { taskId, agentKind: "agent", status: kind === "task.completed" ? "completed" : "running", ...over }, { turnId: "t1" });
+  return [
+    message("user", "Audit the frame pipeline.", { turnId: "t1" }),
+    task("task.started", WF, { taskType: "local_workflow", workflowName: "frame-audit", description: "Audit the frame pipeline" }),
+    task("task.started", `${WF}:wf:1`, { title: "analyze:fframes", parentAgentId: WF }),
+    task("task.started", `${WF}:wf:2`, { title: "analyze:audio", parentAgentId: WF }),
+    activity("tool.completed", { itemType: "command_execution", toolUseId: "tu-a", title: "Read capture.wav", status: "failed", detail: "timeout" }, { turnId: "t1", tone: "tool", agentId: `${WF}:wf:2` }),
+    message("assistant", "The capture did not load.", { turnId: "t1", agentId: `${WF}:wf:2` }),
+    task("task.completed", `${WF}:wf:2`, { status: "failed" }),
+    activity("tool.completed", { itemType: "command_execution", toolUseId: "tu-f", title: "Read decoder.ts", status: "completed" }, { turnId: "t1", tone: "tool", agentId: `${WF}:wf:1` }),
+    task("task.completed", `${WF}:wf:1`),
+    message("assistant", "The run is underway.", { turnId: "t1" })
+  ];
+}
+
+test("a workflow run is one anchor in the parent view, its coordinator's; the roster lists the members under it with their phase", () => {
+  const r = transcriptEntries(snapshot({ items: workflowTurn(), roster: workflowRoster() }), { turns: 1, include: ALL, maxChars: 100_000 });
+  const anchors = r.entries.filter((e) => e.kind === "subagent");
+  assert.equal(anchors.length, 1, "the members' launches and ends fold into the run's anchor");
+  assert.deepEqual(anchors[0]!.subagent, {
+    id: WF, title: "Audit the frame pipeline", status: "running", workflowName: "frame-audit",
+    workflow: { agents: 3, statuses: { completed: 1, failed: 1, running: 1 }, phases: [{ index: 1, title: "Analyze", state: "done", agents: 2, settled: 2 }, { index: 2, title: "Synthesize", state: "running", agents: 1, settled: 0 }] }
+  });
+  assert.ok(!r.entries.some((e) => e.agentId), "member-owned rows stay out of the parent view");
+  assert.deepEqual(r.subagents.map((s) => [s.id, s.parentAgentId, s.phaseIndex, s.attempt]), [
+    ["task-early", undefined, undefined, undefined], [WF, undefined, undefined, undefined],
+    [`${WF}:wf:1`, WF, 1, 2], [`${WF}:wf:2`, WF, 1, undefined], [`${WF}:wf:3`, WF, 2, undefined], ["task-late", undefined, undefined, undefined]
+  ]);
+});
+
+test("a member's id drills into that member's own rows, \":wf:\" and all", () => {
+  const sub = transcriptEntries(snapshot({ items: workflowTurn(), roster: workflowRoster() }), { turns: 1, agentId: `${WF}:wf:2`, include: ALL, maxChars: 100_000 });
+  assert.deepEqual(sub.entries.map((e) => [e.kind, e.agentId, e.text ?? e.tool?.title]), [["tool", `${WF}:wf:2`, "Read capture.wav"], ["assistant", `${WF}:wf:2`, "The capture did not load."]]);
+});
+
+test("members whose roster rows aged out still fold into their coordinator's anchor, by the id before their slot", () => {
+  const r = transcriptEntries(snapshot({ items: workflowTurn(), roster: [] }), { turns: 1, include: ALL, maxChars: 100_000 });
+  assert.deepEqual(r.entries.filter((e) => e.kind === "subagent").map((e) => e.subagent!.id), [WF]);
+});
+
+test("a 100-agent workflow over the budget sheds its members, never its coordinator or the direct subagents", () => {
+  const members = Array.from({ length: 100 }, (_, i) => rosterAgent(`${WF}:wf:${i + 1}`, {
+    kind: "workflow_agent", parentAgentId: WF, agentIndex: i + 1, phaseIndex: 1, title: `analyze:${i + 1}: ${"compare the frame timestamps ".repeat(3)}`, status: i < 90 ? "completed" : "running", firstSeenAt: stamp(20 + i)
+  }));
+  const coordinator = rosterAgent(WF, { kind: "workflow", agentKind: "background", title: "Audit", status: "running", workflowName: "frame-audit", phases: [{ index: 1, title: "Analyze" }], firstSeenAt: stamp(10) });
+  const direct = [rosterAgent("task-a", { title: "Old survey", status: "completed", firstSeenAt: stamp(1) }), rosterAgent("task-b", { title: "Live check", status: "running", firstSeenAt: stamp(200) })];
+  const r = transcriptEntries(snapshot({ items: oneTurn(), roster: [direct[0]!, coordinator, ...members, direct[1]!] }), { turns: 5, include: ALL, maxChars: 4_000 });
+  assert.ok(budgetSize(r) <= room(r, 4_000), `${budgetSize(r)} bytes`);
+  assert.equal(r.subagentsTruncated, true);
+  const kept = r.subagents.map((s) => s.id);
+  assert.ok(["task-a", WF, "task-b"].every((id) => kept.includes(id)), kept.join(", "));
+  assert.equal(r.subagents.find((s) => s.id === WF)!.workflow!.agents, 100);
+  // Settled members went first, oldest first: every live member is left, with the newest settled ones the room allows.
+  const keptMembers = r.subagents.filter((s) => s.parentAgentId === WF);
+  assert.ok(keptMembers.length < 100, `${keptMembers.length} members kept`);
+  assert.equal(keptMembers.filter((s) => s.status === "running").length, 10, "every live member kept");
+  assert.deepEqual(keptMembers.map((s) => s.id), members.slice(100 - keptMembers.length).map((m) => m.id));
 });

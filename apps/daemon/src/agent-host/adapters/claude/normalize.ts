@@ -37,6 +37,8 @@ import type {
   RuntimeTaskStatus,
   RuntimeTurnState,
   TaskAgentLinkage,
+  TaskRunHandles,
+  TaskWorkflowPhase,
   UserInputQuestion
 } from "@orquester/api/agent-chat";
 import { isUnfinishedGoal } from "@orquester/api/agent-chat";
@@ -59,6 +61,17 @@ import {
   tryParseJsonRecord
 } from "./classify.ts";
 import type { ClaudeTurnBoundary } from "./cursor.ts";
+import {
+  WORKFLOW_MEMBER_TASK_TYPE,
+  WORKFLOW_TASK_TYPE,
+  isTerminalTaskStatus,
+  parseWorkflowLaunch,
+  parseWorkflowProgress,
+  workflowAgentFingerprint,
+  workflowAgentStatus,
+  workflowMemberTaskId,
+  type WorkflowAgentEntry
+} from "./workflow.ts";
 import {
   ClaudeGoalTracker,
   GOAL_COMMAND_NAME,
@@ -170,6 +183,33 @@ interface TaskAgentState {
   suppressed?: boolean;
   /** Set while this shell's `command_execution` item is open. */
   shellItemOpen?: boolean;
+  /** A workflow coordinator's phases, from its latest `workflow_progress` snapshot. */
+  phases?: TaskWorkflowPhase[];
+  /** A workflow coordinator's run handles, from its `Workflow` tool's result. */
+  runHandles?: TaskRunHandles;
+}
+
+/** One agent slot of a workflow run, as its member rows last described it. */
+interface WorkflowMemberState {
+  taskId: string;
+  entry: WorkflowAgentEntry;
+  fingerprint: string;
+  status: RuntimeTaskStatus;
+  /** The attempt whose `task.started` went out. */
+  startedAttempt: number | undefined;
+  /** Terminal row written for the current attempt. */
+  settled: boolean;
+  /** Transcript records already projected, by uuid — a re-read never repeats one. */
+  projected: Set<string>;
+}
+
+/** A workflow run's members, keyed by slot index. */
+interface WorkflowRunState {
+  members: Map<number, WorkflowMemberState>;
+  /** The run has ended: a late snapshot must not reopen its members. */
+  settled: boolean;
+  /** Attempt ids whose transcript was handed to the session to tail. */
+  tailed: Set<string>;
 }
 
 /** The `TaskCreate`/`TaskUpdate` step list — NOT `TodoWrite` on this CLI. */
@@ -247,6 +287,13 @@ export interface NormalizerOptions {
    */
   onBackgroundShell?: (change: BackgroundShellChange) => void;
   /**
+   * Called when a workflow agent's transcript file becomes known, so the
+   * session can tail it into {@link ClaudeNormalizer.workflowAgentRecords}, and
+   * when a run is over. The CLI never forwards a workflow agent's
+   * conversation on stdout; the file is the only place it is (fixture 17).
+   */
+  onWorkflowAgent?: (change: WorkflowAgentChange) => void;
+  /**
    * The goal the host's fold holds when this session starts (goals §5.3): the
    * tracker is seeded from it, so a provider repeating it is no news (§6).
    */
@@ -269,6 +316,19 @@ export interface NormalizerOptions {
    */
   onGoalProgressDeferred?: (dueAtMs: number) => void;
 }
+
+/** What {@link NormalizerOptions.onWorkflowAgent} reports. */
+export type WorkflowAgentChange =
+  | {
+      kind: "tail";
+      coordinatorTaskId: string;
+      memberTaskId: string;
+      /** The attempt's transcript: `<transcriptDir>/agent-<agentId>.jsonl`. */
+      transcriptPath: string;
+    }
+  /** One member settled: its transcripts were read up and need no more polls. */
+  | { kind: "untail"; coordinatorTaskId: string; memberTaskId: string }
+  | { kind: "stop"; coordinatorTaskId: string };
 
 /** What {@link NormalizerOptions.onBackgroundShell} reports. */
 export type BackgroundShellChange =
@@ -458,6 +518,8 @@ export class ClaudeNormalizer {
   private readonly taskAgents = new Map<string, TaskAgentState>();
   private readonly liveTaskIds = new Set<string>();
   private readonly pendingTaskModels = new Map<string, string>();
+  /** Workflow runs by coordinator task id. */
+  private readonly workflowRuns = new Map<string, WorkflowRunState>();
   private readonly stepList = new Map<string, StepListEntry>();
 
   lastKnownContextWindow: number | undefined;
@@ -1102,6 +1164,10 @@ export class ClaudeNormalizer {
       events.push(this.forcedToolCompletion(tool, "failed", raw));
       this.inFlightTools.delete(index);
     }
+    // A workflow's agents die with it — theirs first, as on its real end.
+    for (const coordinatorTaskId of [...this.workflowRuns.keys()]) {
+      events.push(...this.settleWorkflowMembers(coordinatorTaskId, "stopped", raw));
+    }
     for (const taskId of [...this.liveTaskIds]) {
       this.liveTaskIds.delete(taskId);
       const agent = this.taskAgents.get(taskId);
@@ -1156,6 +1222,12 @@ export class ClaudeNormalizer {
    * end; one nested in a background agent works on with it.
    */
   private outlivesParentTurn(tool: ToolInFlight): boolean {
+    // A workflow agent's call (read from its transcript) belongs to the run,
+    // which runs in the background whatever the parent's turns do.
+    const member = tool.agentId !== undefined ? this.workflowMemberOf(tool.agentId) : undefined;
+    if (member !== undefined) {
+      return !member.run.settled;
+    }
     let owner = tool.agentId;
     for (let depth = 0; owner !== undefined && depth < MAX_OWNER_DEPTH; depth += 1) {
       const agent = this.taskAgents.get(owner);
@@ -1878,7 +1950,29 @@ export class ClaudeNormalizer {
     if (this.turnState) {
       this.turnState.items.push(message.message);
     }
+    events.push(...this.toolResultEvents(message, nestedOwner));
+    // Read off the result itself, not the call: a `Workflow` call this
+    // adapter never saw stream still launched its run.
+    const launched = readToolUseResult(message);
+    if (launched?.taskType === WORKFLOW_TASK_TYPE) {
+      events.push(...this.noteWorkflowLaunch(launched));
+    }
+    return events;
+  }
 
+  /**
+   * A `user` frame's `tool_result` blocks, each completing the call it
+   * answers. `workflowAgent` marks a record read from a workflow agent's
+   * transcript: its background shells are not the session's to tail, and its
+   * step list is not the parent's plan.
+   */
+  private toolResultEvents(
+    message: Extract<SDKMessage, { type: "user" }>,
+    nestedOwner: string | undefined,
+    options?: { workflowAgent?: boolean }
+  ): RuntimeEvent[] {
+    const events: RuntimeEvent[] = [];
+    const workflowAgent = options?.workflowAgent === true;
     // `content` is sometimes a plain string, not a block array — post
     // compaction, i.e. on a long thread, i.e. exactly where it hurts
     // (fixtures README observation 7).
@@ -1903,7 +1997,9 @@ export class ClaudeNormalizer {
       // the CLI writes the command's output to. It is the only frame that
       // carries that path while the command is still running, so the tail
       // starts from here (§4.5). The normaliser never opens the file itself.
-      this.noteBackgroundShellLaunch(text);
+      if (!workflowAgent) {
+        this.noteBackgroundShellLaunch(text);
+      }
 
       const found = this.inFlightEntry(toolUseId);
       if (!found) {
@@ -2004,7 +2100,11 @@ export class ClaudeNormalizer {
         }
       });
 
-      if (!isError && this.applyStepListToolResult(tool, readToolUseResult(message))) {
+      if (
+        !isError &&
+        !workflowAgent &&
+        this.applyStepListToolResult(tool, readToolUseResult(message))
+      ) {
         const plan = this.planStepsFromStepList();
         if (plan.length > 0) {
           events.push({
@@ -2721,7 +2821,12 @@ export class ClaudeNormalizer {
         ? undefined
         : (verbatimPrompt(message.prompt) ?? verbatimPrompt(launchInput?.prompt));
 
+    // A `Workflow` call's result can beat its run's start edge: what it
+    // already said about the run is kept.
+    const known = this.taskAgents.get(message.task_id);
     this.taskAgents.set(message.task_id, {
+      ...(known?.runHandles !== undefined ? { runHandles: known.runHandles } : {}),
+      ...(known?.phases !== undefined ? { phases: known.phases } : {}),
       taskId: message.task_id,
       ...(message.tool_use_id !== undefined ? { toolUseId: message.tool_use_id } : {}),
       ...(message.description !== undefined
@@ -2923,6 +3028,16 @@ export class ClaudeNormalizer {
     // value. Only the main agent's own frames move the meter (§7.6).
     const events: RuntimeEvent[] = [];
     const usage = normalizeTaskUsage(message.usage);
+    const snapshot = parseWorkflowProgress(message);
+    if (snapshot !== undefined) {
+      this.noteWorkflowPhases(message.task_id, snapshot.phases, message.summary);
+    }
+    // A workflow's frame speaks for the agent that moved last: `description`
+    // is "<phase>: <label>" and `last_tool_name` is that LABEL, never a tool
+    // (fixture 17). So the run's activity line is the description, and the
+    // tool belongs on the member's own row.
+    const workflow =
+      snapshot !== undefined || this.taskAgents.get(message.task_id)?.taskType === WORKFLOW_TASK_TYPE;
     const linkage = this.taskLinkageFor(message.task_id);
     events.push({
       ...this.base({
@@ -2934,14 +3049,371 @@ export class ClaudeNormalizer {
       payload: {
         taskId: message.task_id,
         description: message.description,
-        ...(message.summary !== undefined ? { summary: message.summary } : {}),
+        ...(workflow
+          ? { summary: message.description }
+          : message.summary !== undefined
+            ? { summary: message.summary }
+            : {}),
         ...(usage !== undefined ? { usage } : {}),
-        ...(message.last_tool_name !== undefined ? { lastToolName: message.last_tool_name } : {}),
+        ...(!workflow && message.last_tool_name !== undefined
+          ? { lastToolName: message.last_tool_name }
+          : {}),
         ...linkage,
         ...(message.subagent_type !== undefined ? { role: message.subagent_type } : {})
       }
     });
+    if (snapshot !== undefined) {
+      events.push(...this.workflowMemberEvents(message.task_id, snapshot.agents, raw));
+    }
     events.push(...this.flushPendingNested());
+    return events;
+  }
+
+  // -------------------------------------------------------------------------
+  // Workflows (§4.2 task linkage, §7.6)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Keep a coordinator's phases for its linkage. A snapshot for a run this
+   * session never saw start (an adopted run after a resume) still names a
+   * workflow, so the coordinator is remembered as one.
+   */
+  private noteWorkflowPhases(
+    taskId: string,
+    phases: TaskWorkflowPhase[],
+    summary: string | undefined
+  ): void {
+    let agent = this.taskAgents.get(taskId);
+    if (agent === undefined) {
+      agent = {
+        taskId,
+        taskType: WORKFLOW_TASK_TYPE,
+        ...(trimmedString(summary) !== undefined ? { description: trimmedString(summary) } : {})
+      };
+      this.taskAgents.set(taskId, agent);
+    }
+    if (phases.length > 0) {
+      agent.phases = phases;
+    }
+  }
+
+  /** A member row's run and slot, or `undefined` for any other id. */
+  private workflowMemberOf(
+    taskId: string
+  ): { run: WorkflowRunState; member: WorkflowMemberState; coordinatorTaskId: string } | undefined {
+    const slot = taskId.lastIndexOf(":wf:");
+    if (slot === -1) {
+      return undefined;
+    }
+    const coordinatorTaskId = taskId.slice(0, slot);
+    const run = this.workflowRuns.get(coordinatorTaskId);
+    const member = run?.members.get(Number(taskId.slice(slot + 4)));
+    return run !== undefined && member !== undefined ? { run, member, coordinatorTaskId } : undefined;
+  }
+
+  private workflowRun(coordinatorTaskId: string): WorkflowRunState {
+    let run = this.workflowRuns.get(coordinatorTaskId);
+    if (run === undefined) {
+      run = { members: new Map(), tailed: new Set(), settled: false };
+      this.workflowRuns.set(coordinatorTaskId, run);
+    }
+    return run;
+  }
+
+  /** The linkage every row of one member repeats (§4.2). */
+  private workflowMemberLinkage(
+    coordinatorTaskId: string,
+    entry: WorkflowAgentEntry
+  ): TaskAgentLinkage {
+    // No `workflowName`: the client reads that as "this row IS a workflow".
+    return {
+      taskType: WORKFLOW_MEMBER_TASK_TYPE,
+      title: entry.label,
+      parentAgentId: coordinatorTaskId,
+      agentIndex: entry.index,
+      ...(entry.phaseIndex !== undefined ? { phaseIndex: entry.phaseIndex } : {}),
+      ...(entry.phaseTitle !== undefined ? { phaseTitle: entry.phaseTitle } : {}),
+      ...(entry.attempt !== undefined ? { attempt: entry.attempt } : {}),
+      ...(entry.model !== undefined ? { model: entry.model } : {}),
+      // Roster rows, never the parent's timeline: the coordinator's spawn row
+      // already stands for the whole run there.
+      timelineBypass: true
+    };
+  }
+
+  /**
+   * One snapshot's member rows. Each slot gets a `task.started` for every
+   * attempt (its prompt heads that attempt in the drill-in), then a
+   * `task.progress` carrying its state whenever something about it changed,
+   * and one `task.completed` once the attempt is over. Unchanged slots write
+   * nothing.
+   */
+  private workflowMemberEvents(
+    coordinatorTaskId: string,
+    entries: readonly WorkflowAgentEntry[],
+    raw: RuntimeEventRaw
+  ): RuntimeEvent[] {
+    const run = this.workflowRun(coordinatorTaskId);
+    if (run.settled) {
+      return [];
+    }
+    const events: RuntimeEvent[] = [];
+    for (const entry of entries) {
+      const fingerprint = workflowAgentFingerprint(entry);
+      const status = workflowAgentStatus(entry);
+      let member = run.members.get(entry.index);
+      if (member === undefined) {
+        member = {
+          taskId: workflowMemberTaskId(coordinatorTaskId, entry.index),
+          entry,
+          fingerprint: "",
+          status,
+          startedAttempt: undefined,
+          settled: false,
+          projected: new Set()
+        };
+        run.members.set(entry.index, member);
+      } else if (member.fingerprint === fingerprint) {
+        continue;
+      }
+      member.entry = entry;
+      member.fingerprint = fingerprint;
+      member.status = status;
+
+      const linkage = this.workflowMemberLinkage(coordinatorTaskId, entry);
+      const base = this.base({ turnId: this.activeTurnId, raw });
+      const attempt = entry.attempt ?? 1;
+      // A new attempt — or a slot running again after it settled, from a CLI
+      // that did not count the attempt — is a new launch.
+      if (
+        member.startedAttempt === undefined ||
+        attempt > member.startedAttempt ||
+        (member.settled && !isTerminalTaskStatus(status))
+      ) {
+        member.startedAttempt = attempt;
+        member.settled = false;
+        // Its tail stopped when it settled: an attempt's file is read again
+        // (records already projected are skipped).
+        if (entry.agentId !== undefined) {
+          run.tailed.delete(entry.agentId);
+        }
+        events.push({
+          ...base,
+          type: "task.started",
+          payload: {
+            taskId: member.taskId,
+            description: entry.label,
+            ...(entry.promptPreview !== undefined ? { prompt: entry.promptPreview } : {}),
+            ...linkage
+          }
+        });
+      }
+      this.tailWorkflowAgent(coordinatorTaskId, member);
+
+      const usage =
+        entry.tokens !== undefined
+          ? {
+              totalTokens: entry.tokens,
+              ...(entry.toolCalls !== undefined ? { toolUses: entry.toolCalls } : {}),
+              ...(entry.durationMs !== undefined ? { durationMs: entry.durationMs } : {})
+            }
+          : undefined;
+      if (isTerminalTaskStatus(status)) {
+        if (member.settled) {
+          continue;
+        }
+        member.settled = true;
+        // The session read its transcript up before this frame: it is done.
+        this.options.onWorkflowAgent?.({
+          kind: "untail",
+          coordinatorTaskId,
+          memberTaskId: member.taskId
+        });
+        events.push(...this.closeInFlightToolsOf(member.taskId, raw));
+        const summary = status === "completed" ? entry.resultPreview : entry.error;
+        events.push({
+          ...base,
+          type: "task.completed",
+          payload: {
+            taskId: member.taskId,
+            status: status === "completed" ? "completed" : status === "failed" ? "failed" : "stopped",
+            ...(summary !== undefined ? { summary } : {}),
+            ...(usage !== undefined ? { usage } : {}),
+            ...linkage
+          }
+        });
+        continue;
+      }
+      events.push({
+        ...base,
+        type: "task.progress",
+        payload: {
+          taskId: member.taskId,
+          description: entry.label,
+          ...(entry.lastToolSummary !== undefined ? { summary: entry.lastToolSummary } : {}),
+          ...(entry.lastToolName !== undefined ? { lastToolName: entry.lastToolName } : {}),
+          ...(usage !== undefined ? { usage } : {}),
+          status,
+          ...(entry.error !== undefined ? { error: entry.error } : {}),
+          ...linkage
+        }
+      });
+    }
+    return events;
+  }
+
+  /**
+   * Hand an attempt's transcript to the session once both halves are known:
+   * the attempt's id (a snapshot) and the run's directory (the tool's
+   * result). Either may arrive first.
+   */
+  private tailWorkflowAgent(coordinatorTaskId: string, member: WorkflowMemberState): void {
+    const agentId = member.entry.agentId;
+    const transcriptDir = this.taskAgents.get(coordinatorTaskId)?.runHandles?.transcriptDir;
+    if (agentId === undefined || transcriptDir === undefined) {
+      return;
+    }
+    const run = this.workflowRun(coordinatorTaskId);
+    if (run.tailed.has(agentId)) {
+      return;
+    }
+    run.tailed.add(agentId);
+    this.options.onWorkflowAgent?.({
+      kind: "tail",
+      coordinatorTaskId,
+      memberTaskId: member.taskId,
+      transcriptPath: `${transcriptDir.replace(/\/+$/, "")}/agent-${agentId}.jsonl`
+    });
+  }
+
+  /**
+   * The run is over: every member still open ends with it, ahead of the
+   * coordinator's own row, so no member reads as working — nor counts as
+   * live work — after its run. The roster cascades the same way
+   * (`rosterFromEngine`), but the liveness registry reads rows, not the
+   * roster.
+   */
+  private settleWorkflowMembers(
+    coordinatorTaskId: string,
+    outcome: "completed" | "stopped",
+    raw: RuntimeEventRaw
+  ): RuntimeEvent[] {
+    const run = this.workflowRuns.get(coordinatorTaskId);
+    if (run === undefined) {
+      return [];
+    }
+    run.settled = true;
+    const events: RuntimeEvent[] = [];
+    for (const member of run.members.values()) {
+      // Its transcript is not read any more (the tail stops below).
+      member.projected.clear();
+      if (member.settled) {
+        continue;
+      }
+      member.settled = true;
+      events.push(...this.closeInFlightToolsOf(member.taskId, raw));
+      events.push({
+        ...this.base({ turnId: this.activeTurnId, raw }),
+        type: "task.completed",
+        payload: {
+          taskId: member.taskId,
+          status: outcome,
+          ...this.workflowMemberLinkage(coordinatorTaskId, member.entry)
+        }
+      });
+    }
+    this.options.onWorkflowAgent?.({ kind: "stop", coordinatorTaskId });
+    return events;
+  }
+
+  /**
+   * The `Workflow` tool's result names the run's task and where the CLI
+   * writes it. The handles ride every later coordinator row; a coordinator
+   * already on the roster gets them on a `task.updated` of their own.
+   */
+  private noteWorkflowLaunch(result: Record<string, unknown> | undefined): RuntimeEvent[] {
+    const launch = parseWorkflowLaunch(result);
+    if (launch === undefined || Object.keys(launch.runHandles).length === 0) {
+      return [];
+    }
+    let agent = this.taskAgents.get(launch.taskId);
+    if (agent === undefined) {
+      agent = { taskId: launch.taskId, taskType: WORKFLOW_TASK_TYPE };
+      this.taskAgents.set(launch.taskId, agent);
+    }
+    agent.runHandles = { ...agent.runHandles, ...launch.runHandles };
+    const run = this.workflowRuns.get(launch.taskId);
+    if (run !== undefined) {
+      for (const member of run.members.values()) {
+        this.tailWorkflowAgent(launch.taskId, member);
+      }
+    }
+    if (agent.surfaced !== true) {
+      return [];
+    }
+    const linkage = this.taskLinkageFor(launch.taskId);
+    return [
+      {
+        ...this.base({
+          turnId: this.activeTurnId,
+          ...(linkage.agentId !== undefined ? { agentId: linkage.agentId } : {})
+        }),
+        type: "task.updated",
+        payload: { taskId: launch.taskId, ...linkage }
+      }
+    ];
+  }
+
+  /**
+   * A workflow agent's transcript records, as the session read them from
+   * its attempt's file: its calls, their results, its prose and its
+   * thinking, every one owned by the member's row — the same items a
+   * subagent's forwarded frames make (`nestedAssistantEvents`). Its first
+   * `user` record is the prompt (`task.started` carries it) and attachments
+   * are the CLI's context, so neither is an item. A record already
+   * projected is skipped, so a re-read never repeats one.
+   */
+  workflowAgentRecords(memberTaskId: string, records: readonly unknown[]): RuntimeEvent[] {
+    const found = this.workflowMemberOf(memberTaskId);
+    if (found === undefined) {
+      return [];
+    }
+    const { member, coordinatorTaskId } = found;
+    const parentToolUseId = this.taskAgents.get(coordinatorTaskId)?.toolUseId ?? coordinatorTaskId;
+    const events: RuntimeEvent[] = [];
+    for (const value of records) {
+      if (value === null || typeof value !== "object") continue;
+      const record = value as { type?: unknown; uuid?: unknown; message?: unknown; isMeta?: unknown };
+      if ((record.type !== "assistant" && record.type !== "user") || record.isMeta === true) continue;
+      if (typeof record.uuid === "string") {
+        if (member.projected.has(record.uuid)) continue;
+        member.projected.add(record.uuid);
+      }
+      const frame = {
+        type: record.type,
+        message: record.message,
+        parent_tool_use_id: parentToolUseId,
+        uuid: typeof record.uuid === "string" ? record.uuid : this.ids.uuid(),
+        session_id: this.providerSessionId ?? ""
+      };
+      if (record.type === "assistant") {
+        events.push(
+          ...this.nestedAssistantEvents(
+            frame as unknown as Extract<SDKMessage, { type: "assistant" }>,
+            parentToolUseId,
+            memberTaskId
+          )
+        );
+      } else {
+        events.push(
+          ...this.toolResultEvents(
+            frame as unknown as Extract<SDKMessage, { type: "user" }>,
+            memberTaskId,
+            { workflowAgent: true }
+          )
+        );
+      }
+    }
     return events;
   }
 
@@ -2973,6 +3445,13 @@ export class ClaudeNormalizer {
         this.options.onLiveTasksChanged?.(this.liveTaskIds);
       }
       events.push(...this.closeInFlightToolsOf(message.task_id, raw));
+      events.push(
+        ...this.settleWorkflowMembers(
+          message.task_id,
+          status === "completed" ? "completed" : "stopped",
+          raw
+        )
+      );
     }
     const endedAt =
       typeof patch.end_time === "number" && Number.isFinite(patch.end_time)
@@ -3025,7 +3504,14 @@ export class ClaudeNormalizer {
     }
     // Same rule as `task_progress`: a task's own total is never the thread's
     // context size.
-    const events: RuntimeEvent[] = [...this.closeInFlightToolsOf(message.task_id, raw)];
+    const events: RuntimeEvent[] = [
+      ...this.closeInFlightToolsOf(message.task_id, raw),
+      ...this.settleWorkflowMembers(
+        message.task_id,
+        message.status === "completed" ? "completed" : "stopped",
+        raw
+      )
+    ];
     const exitCode = parseBackgroundShellExitCode(message.summary);
     if (agent !== undefined) {
       // The item settles BEFORE the task row: ingestion flushes the item's
@@ -3159,6 +3645,8 @@ export class ClaudeNormalizer {
       ...(agent.effort !== undefined ? { effort: agent.effort } : {}),
       ...(agent.toolUseId !== undefined ? { toolUseId: agent.toolUseId } : {}),
       ...(agent.workflowName !== undefined ? { workflowName: agent.workflowName } : {}),
+      ...(agent.phases !== undefined ? { phases: agent.phases } : {}),
+      ...(agent.runHandles !== undefined ? { runHandles: agent.runHandles } : {}),
       ...(agent.outputFile !== undefined ? { outputFile: agent.outputFile } : {})
     };
   }

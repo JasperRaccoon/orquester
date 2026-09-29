@@ -13,7 +13,7 @@ import { beforeEach,describe,it } from "node:test";
 import type { ThreadItem,ThreadMessageItem } from "@orquester/api/agent-chat";
 
 import { agentPromptOf,drillInWindow } from "./agent-prompt.logic";
-import { activity,message,resetBuilders,stamp } from "./test-helpers";
+import { activity,CLAUDE_WORKFLOW_ID,claudeWorkflow,message,resetBuilders,stamp } from "./test-helpers";
 
 beforeEach(() => {
   resetBuilders();
@@ -151,5 +151,30 @@ describe("drillInWindow: latest launch", () => {
 
   it("no launch in the window: none", () => {
     assert.equal(drillInWindow([message("user", "hi", { id: "u" })], "a1").latestLaunchAt, null);
+  });
+});
+
+describe("a Claude workflow's launches", () => {
+  it("heads the coordinator's drill-in with its script, marked as one", () => {
+    const script = "export default async function run(ctx) {\n  await ctx.phase('Gather');\n}";
+    const items: ThreadItem[] = [
+      activity("task.started", claudeWorkflow.coordinator({ prompt: script }), { id: "wf-start", tone: "info", createdAt: stamp(1) })
+    ];
+    const [prompt] = prompts(drillInWindow(items, CLAUDE_WORKFLOW_ID).items);
+    assert.ok(prompt);
+    assert.equal(prompt.text, script, "verbatim, newlines and all");
+    assert.deepEqual(agentPromptOf(prompt), { itemId: "wf-start", truncated: false, cutAtRest: false, script: true });
+  });
+
+  it("heads a member's drill-in with its attempt's prompt, keyed by its slot id", () => {
+    const slot = `${CLAUDE_WORKFLOW_ID}:wf:2`;
+    const items: ThreadItem[] = [
+      activity("task.started", claudeWorkflow.member(2, { prompt: "Analyze codecs." }), { id: "m-1", tone: "info", createdAt: stamp(1) }),
+      activity("task.started", claudeWorkflow.member(2, { attempt: 2, prompt: "Analyze codecs, again." }), { id: "m-2", tone: "info", createdAt: stamp(2) }),
+      message("assistant", "Reading.", { id: "said", agentId: slot, createdAt: stamp(3) })
+    ];
+    const drill = drillInWindow(items, slot).items;
+    assert.deepEqual(drill.map((item) => item.id), ["agent-prompt:m-1", "agent-prompt:m-2", "said"]);
+    assert.deepEqual(agentPromptOf(prompts(drill)[1]!), { itemId: "m-2", truncated: false, cutAtRest: false });
   });
 });

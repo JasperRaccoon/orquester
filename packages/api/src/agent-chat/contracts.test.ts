@@ -15,6 +15,8 @@ test("route builders produce the §6 paths and encode their segments", () => {
   assert.equal(agentChatRoutes.hostStop, "/api/agent-host/stop");
 
   assert.equal(agentChatCommandPath("s1", "session/stop"), "/api/sessions/s1/session/stop");
+  assert.equal(agentChatCommandPath("s1", "task/stop"), "/api/sessions/s1/task/stop");
+  assert.equal(agentChatCommandPath("s1", "background"), "/api/sessions/s1/background");
 });
 
 test("isThreadItemOutputWindow accepts one window of a join, and never the whole join a host that ignores the query answers", () => {

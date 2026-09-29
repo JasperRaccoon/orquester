@@ -414,7 +414,7 @@ const readTranscript = defineTool({
     sessionId: sessionIdField,
     turns: z.number().int().min(1).max(200).default(3).describe("How many turns to include: the latest ones, or those just before beforeTurn."),
     beforeTurn: z.number().int().min(2).optional().describe("Read the turns just before this turn number (2 to turnCount + 1) instead of the latest; turns older than the live window are read from the host's history index. To page back, pass the last result's olderTurns + 1. Turns that could not be read whole are named in unavailableTurns."),
-    agentId: z.string().min(1).optional().describe("A subagent id from get_session.subagents to read its own timeline."),
+    agentId: z.string().min(1).optional().describe("A subagent id from get_session.subagents to read its own timeline; a workflow agent's id is <coordinator>:wf:<slot>."),
     include: z.array(z.enum(["reasoning", "tools", "activity"])).default(["tools", "activity"]).describe("Extra row kinds; reasoning is opt-in."),
     maxChars: z.number().int().min(2_000).max(MAX_TRANSCRIPT_CHARS).default(40_000).describe("Size budget for the result, in UTF-8 bytes (max 55000; every tool result is capped at 60000 bytes). Over it, the transcript sheds reasoning, then tool detail, then its oldest rows, and cuts the latest reply last; the subagent list keeps at least a quarter when it needs it, plus whatever the transcript leaves unused.")
   },

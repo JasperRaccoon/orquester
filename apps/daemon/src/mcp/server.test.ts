@@ -28,6 +28,8 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   update_session: { required: ["sessionId"], annotations: WRITE_IDEMPOTENT },
   // A retry is not a no-op: once the turn has stopped, a second interrupt goes on to stop the background work.
   interrupt_session: { required: ["sessionId"], annotations: WRITE },
+  // A retry is refused once the task has stopped.
+  stop_task: { required: ["sessionId", "taskId"], annotations: WRITE },
   stop_session: { required: ["sessionId"], annotations: WRITE_IDEMPOTENT },
   close_session: { required: ["sessionId"], annotations: DESTROY },
   revert_session: { required: ["sessionId", "keepTurns"], annotations: DESTROY },

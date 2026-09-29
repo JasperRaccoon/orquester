@@ -179,3 +179,46 @@ export function historyPage(overrides: Partial<ThreadHistoryPage> = {}): ThreadH
     ...overrides
   };
 }
+
+/** A Claude `Workflow` run's coordinator id, as the adapter reports it. */
+export const CLAUDE_WORKFLOW_ID = "wvg2ao9ra";
+
+/**
+ * A Claude `Workflow` run's task payloads, in the adapter's shape: the
+ * coordinator (`local_workflow`, 1-based phases, the script as its prompt)
+ * and one member per agent slot, `<coordinator>:wf:<n>` (1-based), naming the
+ * coordinator its parent, with an explicit status on every progress row.
+ */
+export const claudeWorkflow = {
+  coordinator(extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      taskId: CLAUDE_WORKFLOW_ID,
+      agentKind: "agent",
+      taskType: "local_workflow",
+      workflowName: "jasper-understand-research",
+      title: "Understand the research",
+      phases: [
+        { index: 1, title: "Gather" },
+        { index: 2, title: "Combine" }
+      ],
+      runHandles: { runId: "run-1", scriptPath: "/tmp/wf.js", transcriptDir: "/tmp/wf" },
+      ...extra
+    };
+  },
+  member(n: number, extra: Record<string, unknown> = {}): Record<string, unknown> {
+    return {
+      taskId: `${CLAUDE_WORKFLOW_ID}:wf:${n}`,
+      agentKind: "agent",
+      taskType: "workflow_agent",
+      parentAgentId: CLAUDE_WORKFLOW_ID,
+      agentIndex: n,
+      phaseIndex: n < 3 ? 1 : 2,
+      phaseTitle: n < 3 ? "Gather" : "Combine",
+      attempt: 1,
+      title: n === 1 ? "analyze:fframes" : n === 2 ? "analyze:codecs" : "combine",
+      model: "claude-opus-5-5",
+      timelineBypass: true,
+      ...extra
+    };
+  }
+};

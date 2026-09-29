@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { z } from "zod";
 import { agentChatRoutes,encodeHistoryCursor,type ThreadItem,type ThreadSnapshotPayload,type Turn } from "@orquester/api/agent-chat";
 import { busEvent,FakeDaemonApi } from "../testing.ts";
-import { activity,chatSummary,head,message,shellSummary,snapshot,stamp,turn } from "../fixtures.ts";
+import { activity,chatSummary,head,message,shellSummary,snapshot,stamp,turn,WF,workflowRoster } from "../fixtures.ts";
 import type { ToolContext } from "../tool.ts";
 import { messageTools } from "./messages.ts";
 
@@ -565,6 +565,15 @@ test("read_transcript: a subagent of an older turn is known by the rows a page b
   assert.deepEqual((r.entries as { text: string }[]).map((e) => e.text), ["the old agent's own words"]);
   // Unknown anywhere, it is still refused.
   await assert.rejects(tool("read_transcript").run(readArgs({ turns: 5, agentId: "task-none" }), h.ctx), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
+});
+
+test("read_transcript: a workflow member's id, \":wf:\" and all, drills into its own rows and is validated like any other", async (t) => {
+  const member = `${WF}:wf:2`;
+  const snap = snapshot({ roster: workflowRoster(), items: [message("user", "audit", { turnId: "t1" }), message("assistant", "The capture did not load.", { turnId: "t1", agentId: member }), message("assistant", "Underway.", { turnId: "t1" })] });
+  const h = await harness([chatSummary()], snap); t.after(h.close);
+  const r = await tool("read_transcript").run(readArgs({ agentId: member }), h.ctx);
+  assert.deepEqual((r.entries as { text: string; agentId: string }[]).map((e) => [e.agentId, e.text]), [[member, "The capture did not load."]]);
+  await assert.rejects(tool("read_transcript").run(readArgs({ agentId: `${WF}:wf:9` }), h.ctx), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
 });
 
 // ---------------------------------------------------------------------------

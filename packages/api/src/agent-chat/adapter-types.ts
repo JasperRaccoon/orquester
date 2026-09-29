@@ -379,6 +379,15 @@ export interface AdapterCapabilities {
    */
   supportsBackgroundTasks?: boolean;
   /**
+   * The provider can stop ONE live background task — a workflow run, a
+   * subagent, a background shell — and leave the rest running (the
+   * `/task/stop` command; Claude's `stop_task` control). Absent means no: the
+   * roster then offers no per-task Stop, and the liveness banner's Stop — the
+   * whole fleet — is the only one. A host that predates the command never
+   * reports it, so a client never offers what that host would 404.
+   */
+  supportsTaskStop?: boolean;
+  /**
    * The provider's goal surface (goals §4.5). Absent means none: no chip, no
    * tab marker, no goal state (OpenCode).
    */

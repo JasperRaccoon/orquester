@@ -9,7 +9,7 @@ interface AgentModelOptionView { id: string; label: string; type: "select" | "bo
 interface AgentModelView { slug: string; name: string; shortName?: string; isDefault: boolean; isLegacy?: boolean; options: AgentModelOptionView[] }
 interface AgentAccountView { id: string; label: string; email: string | null; plan: string | null; needsReauth: boolean; isDefault: boolean }
 /** What an agent supports, as list_agents and get_session both report it (`supportsFrom`). */
-export interface AgentSupports { planMode: boolean; rollback: boolean; compaction: boolean; backgroundTasks: boolean; goals: AdapterGoalSupport | null }
+export interface AgentSupports { planMode: boolean; rollback: boolean; compaction: boolean; backgroundTasks: boolean; taskStop: boolean; goals: AdapterGoalSupport | null }
 /** `enabled` is the registry's: false when the agent's CLI was not found on this host. */
 export interface AgentView { id: string; name: string; adapter: AgentAdapterId; enabled: boolean; installed: boolean; version: string | null; status: string; message?: string; auth: { status: string; label?: string; email?: string };
   models: AgentModelView[]; effortOptionId: string; runtimeModes: readonly RuntimeMode[]; defaultRuntimeMode: RuntimeMode; supports: AgentSupports & { contextWindow: boolean }; accounts: AgentAccountView[]; defaultAccountId: string }
@@ -21,7 +21,7 @@ export interface AgentView { id: string; name: string; adapter: AgentAdapterId; 
  * (`parseGoalSupport`): a block that does not read is `null`, as every flag here reads false.
  */
 export function supportsFrom(caps: AdapterCapabilities | undefined): AgentSupports {
-  return { planMode: caps?.showPlanModeToggle === true, rollback: caps?.supportsConversationRollback === true, compaction: isRecord(caps?.compaction), backgroundTasks: caps?.supportsBackgroundTasks === true, goals: parseGoalSupport(caps?.goals) };
+  return { planMode: caps?.showPlanModeToggle === true, rollback: caps?.supportsConversationRollback === true, compaction: isRecord(caps?.compaction), backgroundTasks: caps?.supportsBackgroundTasks === true, taskStop: caps?.supportsTaskStop === true, goals: parseGoalSupport(caps?.goals) };
 }
 
 type Raw = Record<string, unknown>;
