@@ -3,8 +3,7 @@ import assert from "node:assert/strict";
 import {
   parseAgentAccounts,
   createDefaultAgentAccounts,
-  agentAccountsFile,
-  agentAccountHome
+  agentAccountsFile
 } from "./index.ts";
 
 test("createDefaultAgentAccounts is empty with null defaults", () => {
@@ -28,7 +27,6 @@ test("parseAgentAccounts rejects an unknown agent", () => {
   assert.throws(() => parseAgentAccounts({ accounts: [{ id: "x", agent: "gemini", label: "g", createdAt: "t", importedAt: "t" }] }));
 });
 
-test("path helpers compose under the daemon dir", () => {
+test("the account index stays at its persisted daemon path", () => {
   assert.equal(agentAccountsFile("/base"), "/base/daemon/agent-accounts.json");
-  assert.equal(agentAccountHome("/base", "codex", "id9"), "/base/daemon/agent-accounts/codex/id9/home");
 });

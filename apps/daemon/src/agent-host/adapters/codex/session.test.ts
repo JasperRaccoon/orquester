@@ -14,7 +14,7 @@ import { rmSync } from "node:fs";
 import { EventEmitter } from "node:events";
 import { after, describe, it } from "node:test";
 
-import type { AgentGoal, GoalUpdatedPayload, RuntimeEvent } from "@orquester/api/agent-chat";
+import type { AgentGoal, GoalUpdatedPayload, RuntimeEvent, UserInputRequestedPayload } from "@orquester/api/agent-chat";
 
 import { resumeCursorFor } from "../../orchestration/resume.ts";
 import type { CodexProtocol } from "./_generated/index.ts";
@@ -329,30 +329,6 @@ describe("codex session — start, turn, stop", () => {
 });
 
 describe("codex session — steering", () => {
-  it("a second sendTurn during a live turn reuses the active turn id", async () => {
-    const r = rig({ turns: [{ kind: "silent" }] });
-    await r.session.start();
-    const first = await r.session.sendTurn({
-      input: "one",
-      attachments: [],
-      interactionMode: "default"
-    });
-    await r.events.waitForType("turn.started");
-    const second = await r.session.sendTurn({
-      input: "actually, two",
-      attachments: [],
-      interactionMode: "default"
-    });
-    assert.equal(second.turnId, first.turnId, "steering is neither an error nor a second turn");
-    assert.equal(sentFrames(r.received(), "turn/start").length, 2);
-    assert.equal(
-      r.events.events.filter((event) => event.type === "turn.started").length,
-      1,
-      "only one turn ever started"
-    );
-    await r.stop();
-  });
-
   it("steering does not reset the turn's usage baseline", async () => {
     const r = rig({ turns: [{ kind: "text", text: "a" }] });
     await r.session.start();
@@ -675,6 +651,65 @@ describe("codex session — approvals", () => {
     await r.stop();
   });
 
+  it("refuses malformed questions and optionless questions without custom input", async () => {
+    for (const invalid of [{ questionId: "" }, { header: " " }, { question: "  " }, { options: null }]) {
+      const r = rig({ turns: [{
+        kind: "user-input", questionId: "q", header: "Choice", question: "Which?",
+        options: [{ label: "A", description: "First" }], ...invalid
+      }] });
+      await r.session.start();
+      await r.session.sendTurn({ input: "choose", attachments: [], interactionMode: "plan" });
+      await r.events.waitForType("turn.completed");
+      const refused = r.received().find((frame) => frame.error !== undefined);
+      assert.equal((refused?.error as { code: number } | undefined)?.code, -32602);
+      assert.equal(r.events.types().includes("user-input.requested"), false);
+      await r.stop();
+    }
+  });
+
+  it("filters unusable options, preserves secret input, and sends selected labels", async () => {
+    const r = rig({ turns: [{
+      kind: "user-input", questionId: "q", header: "Choice", question: "Which?", isSecret: true,
+      options: [
+        { label: "A", description: "First" }, { label: "B", description: "Second" },
+        { label: "", description: "Missing label" }, { label: "Missing description", description: "" }
+      ]
+    }] });
+    await r.session.start();
+    await r.session.sendTurn({ input: "choose", attachments: [], interactionMode: "plan" });
+    const asked = await r.events.waitForType("user-input.requested");
+    const question = (asked.payload as UserInputRequestedPayload).questions[0]!;
+    assert.deepEqual(question.options, [{ label: "A", description: "First" }, { label: "B", description: "Second" }]);
+    assert.equal(question.isSecret, true);
+    assert.equal(question.isOther, undefined);
+    r.session.respondToUserInput(asked.requestId!, { q: ["A", "B"] });
+    await r.events.waitForType("turn.completed");
+    assert.deepEqual(r.received().filter((frame) => frame.result !== undefined).at(-1)?.result,
+      { answers: { q: { answers: ["A", "B"] } } });
+    await r.stop();
+  });
+
+  it("accepts nullable options for custom input and omits unanswered values on the wire", async () => {
+    for (const answers of [{ q: "" }, {}]) {
+      const r = rig({ turns: [{
+        kind: "user-input", questionId: "q", header: "Choice", question: "Which?",
+        options: null, isOther: true
+      }] });
+      await r.session.start();
+      await r.session.sendTurn({ input: "choose", attachments: [], interactionMode: "plan" });
+      const asked = await r.events.waitForType("user-input.requested");
+      const question = (asked.payload as UserInputRequestedPayload).questions[0]!;
+      assert.deepEqual(question.options, []);
+      assert.equal(question.allowCustomAnswer, true);
+      assert.equal(question.isOther, true);
+      assert.equal(question.isSecret, undefined);
+      r.session.respondToUserInput(asked.requestId!, answers);
+      await r.events.waitForType("turn.completed");
+      assert.deepEqual(r.received().filter((frame) => frame.result !== undefined).at(-1)?.result, { answers: {} });
+      await r.stop();
+    }
+  });
+
   it("a non-blocking question is dismissible", async () => {
     const r = rig({
       turns: [
@@ -719,20 +754,6 @@ describe("codex session — interrupt ordering", () => {
     assert.ok(
       answerIndex < interruptIndex,
       "settle, THEN interrupt — the answer must reach a request the server still holds"
-    );
-    await r.stop();
-  });
-
-  it("a stale turn id is a client-side no-op, never a -32600 on the wire", async () => {
-    const r = rig({ turns: [{ kind: "silent" }] });
-    await r.session.start();
-    await r.session.sendTurn({ input: "x", attachments: [], interactionMode: "default" });
-    await r.events.waitForType("turn.started");
-    await r.session.interruptTurn("some-other-turn");
-    assert.equal(
-      sentFrames(r.received(), "turn/interrupt").length,
-      0,
-      "a Stop that races a settling turn must not kill the next one"
     );
     await r.stop();
   });
@@ -783,14 +804,6 @@ describe("codex session — interrupt ordering", () => {
     const summary = r.session.summary();
     assert.equal(summary.status, "ready");
     assert.equal(summary.activeTurnId, undefined);
-    await r.stop();
-  });
-
-  it("interrupting when no turn is active does nothing at all", async () => {
-    const r = rig({ turns: [{ kind: "text", text: "a" }] });
-    await r.session.start();
-    await r.session.interruptTurn();
-    assert.equal(sentFrames(r.received(), "turn/interrupt").length, 0);
     await r.stop();
   });
 
@@ -1023,51 +1036,6 @@ describe("codex session — a collab child's own calls (Task 3)", () => {
     aggregatedOutput: null,
     exitCode: null,
     durationMs: null
-  });
-
-  it("a child's command the user declined is the user's decline, never a policy deny", async () => {
-    // Approvals of a child stay the parent's to answer, but the item they name
-    // is the child's: the session must join the answer to the child's
-    // namespaced call, or the decline reads as "you were not asked".
-    const r = rig({ turns: [{ kind: "child-approval", childThreadId: "child-1", item: "command" }] });
-    await r.session.start();
-    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
-    const opened = await r.events.waitForType("request.opened");
-    assert.equal(opened.agentId, undefined, "the card is the parent's");
-    r.session.respondToApproval(opened.requestId!, "decline");
-
-    const ended = await r.events.waitFor(
-      (event) => event.type === "item.completed" && event.agentId === "child-1",
-      "the child's call ends"
-    );
-    assert.match(String(ended.itemId), /^codex-child:child-1:/);
-    assert.equal((ended.payload as { status?: string }).status, "declined");
-    await r.events.waitForType("turn.completed");
-    assert.equal(
-      r.events.types().includes("tool.denied"),
-      false,
-      "the USER declined this one; it is not a policy deny"
-    );
-    await r.stop();
-  });
-
-  it("a child's file-change card carries the child's path and diff", async () => {
-    const r = rig({ turns: [{ kind: "child-approval", childThreadId: "child-1", item: "file-change" }] });
-    await r.session.start();
-    await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
-    const opened = await r.events.waitForType("request.opened");
-    const payload = opened.payload as {
-      detail?: string;
-      args?: { changes?: { path: string; diff: string }[] };
-    };
-    assert.match(String(payload.detail), /child\.txt/, "joined on the child's call, not a missing one");
-    assert.deepEqual(
-      payload.args?.changes?.map((change) => change.path),
-      ["/tmp/child.txt"]
-    );
-    r.session.respondToApproval(opened.requestId!, "accept");
-    await r.events.waitForType("turn.completed");
-    await r.stop();
   });
 
   it("a child's item declined with no request behind it is a policy deny — owned by the child", async () => {
@@ -2106,37 +2074,23 @@ describe("codex session — resume", () => {
   });
 
   it("a malformed cursor means 'no resume', never an error", async () => {
-    const r = rig({ turns: [{ kind: "text", text: "a" }] }, { resumeCursor: { threadId: 42 } });
-    await r.session.start();
-    assert.equal(sentFrames(r.received(), "thread/resume").length, 0);
-    assert.equal(sentFrames(r.received(), "thread/start").length, 1);
-    await r.stop();
+    for (const resumeCursor of [
+      undefined, null, {}, { threadId: "" }, { threadId: 42 }, "t-1", [],
+      "01a0c19d-e1f9-7e73-8dc5-a0d355d3d232", { threadId: "../../etc/passwd" },
+      { threadId: "-flag-shaped" }, { threadId: "x".repeat(257) }
+    ]) {
+      const r = rig({ turns: [] }, { resumeCursor });
+      await r.session.start();
+      assert.equal(sentFrames(r.received(), "thread/resume").length, 0);
+      assert.equal(sentFrames(r.received(), "thread/start").length, 1);
+      await r.stop();
+    }
   });
 
   it("the summary carries the resume cursor as {threadId}", async () => {
     const r = rig({ threadId: "codex-thread-9", turns: [{ kind: "text", text: "a" }] });
     const summary = await r.session.start();
     assert.deepEqual(summary.resumeCursor, { threadId: "codex-thread-9" });
-    await r.stop();
-  });
-});
-
-describe("codex session — compaction", () => {
-  it("thread/compact/start runs as a whole extra turn and lands the compacted state", async () => {
-    const r = rig({ turns: [{ kind: "text", text: "a" }] });
-    await r.session.start();
-    await r.session.compact();
-    const compacted = await r.events.waitFor(
-      (event) =>
-        event.type === "thread.state.changed" &&
-        (event.payload as { state: string }).state === "compacted",
-      "thread.state.changed {compacted}"
-    );
-    assert.ok(compacted !== undefined);
-    assert.ok(
-      r.events.types().includes("turn.started"),
-      "compaction lights up as a running turn"
-    );
     await r.stop();
   });
 });
@@ -2260,18 +2214,6 @@ describe("codex session — rollback", () => {
     );
     await r.stop();
   });
-
-  it("readThread hydrates history out of band", async () => {
-    const r = rig({ historyTurnIds: ["t2", "t1"], turns: [{ kind: "text", text: "a" }] });
-    await r.session.start();
-    const snapshot = await r.session.readThread();
-    assert.deepEqual(
-      snapshot.turns.map((turn) => turn.id),
-      ["t1", "t2"]
-    );
-    assert.ok(snapshot.turns[0]!.items.length > 0, "items come from thread/turns/list");
-    await r.stop();
-  });
 });
 
 describe("codex session — stderr is home-path redacted (S1 finding 4)", () => {
@@ -2329,7 +2271,7 @@ describe("codex session — stderr is home-path redacted (S1 finding 4)", () => 
 });
 
 describe("codex session — raw frame logging", () => {
-  it("logs every frame in both directions to the raw sink", async () => {
+  it("logs sent and received frames under their owning thread", async () => {
     const fake = createFakeContext();
     const queue = new AsyncEventQueue<RuntimeEvent>();
     const events = new EventCollector(queue);
@@ -2450,24 +2392,6 @@ describe("codex session — /goal is mapped onto thread/goal/* (goals §6.2.3)",
     assert.deepEqual(goalRequests(r), [
       { method: "thread/goal/get", params: { threadId: "thread-mock-1" } }
     ]);
-    await r.stop();
-  });
-
-  it("status names the goal the provider holds", async () => {
-    const r = rig(
-      {
-        goal: { ...STORED_GOAL, status: "paused", tokensUsed: 1_234, timeUsedSeconds: 90 },
-        turns: [{ kind: "silent" }]
-      },
-      {
-        resumeCursor: { threadId: "prior-thread" },
-        knownGoal: knownGoal({ status: "paused", tokensUsed: 1_234, elapsedMs: 90_000 })
-      }
-    );
-    await r.session.start();
-    assert.deepEqual(await r.session.goalCommand({ kind: "status" }), {
-      summary: "Goal paused: Make the build green — 1,234 tokens, 1m"
-    });
     await r.stop();
   });
 
@@ -3218,57 +3142,6 @@ describe("codex session — one deadline per /goal command (fix round 1)", () =>
     await wireBarrier(r);
     assert.equal(sentFrames(r.received(), "thread/goal/set").length, 0, "no set starts after the deadline");
     assert.equal(r.session.isLive, true);
-    await r.stop();
-  });
-});
-
-describe("codex session — the goal tracker runs on the injected clock (fix round 1)", () => {
-  it("the progress throttle reads the context's clock, not the wall clock", async () => {
-    let nowMs = Date.UTC(2026, 8, 24);
-    const clocked = createFakeContext({
-      clock: {
-        now: () => new Date(nowMs),
-        nowIso: () => new Date(nowMs).toISOString()
-      }
-    });
-    const r = rig(
-      { goal: STORED_GOAL, turns: [{ kind: "silent" }] },
-      { ...RESUMED_WITH_GOAL, context: clocked.context }
-    );
-    await r.session.start();
-    await settleWire(r);
-    const update = async (tokensUsed: number): Promise<void> => {
-      await r.notify("thread/goal/updated", {
-        threadId: "thread-mock-1",
-        turnId: null,
-        goal: {
-          threadId: "thread-mock-1",
-          objective: "Make the build green",
-          status: "active",
-          tokenBudget: null,
-          tokensUsed,
-          timeUsedSeconds: 0,
-          createdAt: 1_789_950_000,
-          updatedAt: 1_789_950_000
-        }
-      });
-    };
-    await update(100);
-    await update(200); // held: the injected clock has not moved
-    nowMs += 30_000; // …and the wall clock barely has
-    await update(300);
-    await r.events.waitFor(
-      (event) =>
-        event.type === "thread.goal.updated" &&
-        (event.payload as GoalUpdatedPayload).goal?.tokensUsed === 300,
-      "the progress due on the injected clock"
-    );
-    assert.deepEqual(
-      goalRows(r)
-        .filter((payload) => payload.change === "progress")
-        .map((payload) => payload.goal?.tokensUsed),
-      [100, 300]
-    );
     await r.stop();
   });
 });

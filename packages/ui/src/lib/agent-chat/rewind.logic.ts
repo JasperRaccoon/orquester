@@ -73,7 +73,7 @@ export function rewindTargetPreview(text: string, maxChars = 90): string {
 }
 
 /** Two Escapes within this window make one double press — the CLI's own feel. */
-export const ESCAPE_SEQUENCE_WINDOW_MS = 600;
+const ESCAPE_SEQUENCE_WINDOW_MS = 600;
 
 export interface EscapeSequence {
   /** Record a press; `true` when it completes a double press. */
@@ -86,11 +86,11 @@ export interface EscapeSequence {
  * of the previous one completes the sequence and clears it, so a third press
  * starts over rather than firing again.
  */
-export function createEscapeSequence(windowMs = ESCAPE_SEQUENCE_WINDOW_MS): EscapeSequence {
+export function createEscapeSequence(): EscapeSequence {
   let lastAt: number | null = null;
   return {
     press(nowMs) {
-      const second = lastAt !== null && nowMs >= lastAt && nowMs - lastAt <= windowMs;
+      const second = lastAt !== null && nowMs >= lastAt && nowMs - lastAt <= ESCAPE_SEQUENCE_WINDOW_MS;
       lastAt = second ? null : nowMs;
       return second;
     },

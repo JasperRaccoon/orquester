@@ -20,7 +20,7 @@ export const EDITOR_PHONE_QUERY = "(max-width: 767px), ((pointer: coarse) and (m
 export type EditorVariant = "desktop" | "phone";
 
 /** Key | value side by side from this editor width (px) up; stacked below. */
-export const EDITOR_WIDE_PX = 520;
+const EDITOR_WIDE_PX = 520;
 
 export function isWide(width: number): boolean {
   return width >= EDITOR_WIDE_PX;

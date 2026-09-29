@@ -93,14 +93,9 @@ export class RecordingSink {
   }
 }
 
-/** Records what ingestion fed it; the real registry is W1's. */
+/** Minimal registry for tests that do not observe background work. */
 export class RecordingLiveness implements LivenessRegistry {
-  readonly observed: RuntimeEvent[] = [];
-  readonly cleared: string[] = [];
-
-  observe(event: RuntimeEvent): void {
-    this.observed.push(event);
-  }
+  observe(_event: RuntimeEvent): void {}
 
   liveness(): BackgroundLiveness | null {
     return null;
@@ -110,9 +105,7 @@ export class RecordingLiveness implements LivenessRegistry {
     return 0;
   }
 
-  clear(threadId: string): void {
-    this.cleared.push(threadId);
-  }
+  clear(_threadId: string): void {}
 }
 
 let eventCounter = 0;

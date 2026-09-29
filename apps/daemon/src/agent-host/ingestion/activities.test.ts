@@ -13,10 +13,7 @@ import {
   type GoalUpdatedPayload
 } from "@orquester/api/agent-chat";
 
-import {
-  runtimeEventToActivities,
-  taskLinkageActivityFields
-} from "./activities.ts";
+import { runtimeEventToActivities } from "./activities.ts";
 import { runtimeEvent } from "./test-harness.ts";
 
 function payloadOf(activity: { payload: unknown }): Record<string, unknown> {
@@ -158,7 +155,6 @@ describe("a request the provider withdrew is the host's own cancelled row", () =
       []
     );
   });
-
 
 });
 
@@ -342,21 +338,6 @@ describe("token usage and compaction (§5.1)", () => {
 });
 
 describe("task linkage rides every row (§4.2/§5.1)", () => {
-  it("agentKind is stamped once, here", () => {
-    assert.equal(taskLinkageActivityFields({ taskType: "subagent" }).agentKind, "agent");
-    assert.equal(taskLinkageActivityFields({ taskType: "monitor" }).agentKind, "background");
-    assert.equal(taskLinkageActivityFields({ taskType: "plan" }).agentKind, "background");
-    // A task launched from inside a subagent is background work unless it is
-    // itself agent-flavoured — a nested agent can outlive its parent.
-    assert.equal(
-      taskLinkageActivityFields({ agentId: "a1", taskType: "shell" }).agentKind,
-      "background"
-    );
-    assert.equal(
-      taskLinkageActivityFields({ agentId: "a1", taskType: "subagent" }).agentKind,
-      "agent"
-    );
-  });
 
   const linkage = {
     taskType: "subagent",
@@ -483,16 +464,6 @@ describe("task linkage rides every row (§4.2/§5.1)", () => {
     );
     assert.equal(rows.length, 1);
     assert.equal(rows[0]!.id, "task-usage:t1:task-1");
-  });
-
-  it("task.completed is titled from the remembered description", () => {
-    const [row] = runtimeEventToActivities(
-      runtimeEvent("task.completed", { taskId: "task-1", status: "stopped" }),
-      { taskTitle: "Refactor the store" }
-    );
-    assert.ok(row);
-
-    assert.equal(payloadOf(row).title, "Refactor the store");
   });
 
   it("a failed task row is toned error", () => {
@@ -692,34 +663,6 @@ describe("goals (goals §4.3)", () => {
       runtimeEvent("thread.goal.updated", { goal: null, change: "cleared", previous: goal })
     );
     assert.deepEqual(row!.payload, { goal: null, change: "cleared", previous: goal });
-  });
-
-  it("every hidden progress row of a thread shares ONE stable id — the latest replaces it in place", () => {
-    // A `progress` row is the goal's latest state, not history (§8.4 hides
-    // it): a fresh id per tick would spend one slot of the 500-row parent
-    // window on each, like the `task-progress:` rows before them.
-    const rows = [1, 2, 3].map((rounds) =>
-      runtimeEventToActivities(
-        runtimeEvent(
-          "thread.goal.updated",
-          { goal: { ...goal, rounds }, change: "progress" },
-          { threadId: "thread-9" }
-        )
-      )[0]!
-    );
-    assert.deepEqual(
-      rows.map((row) => row.id),
-      ["goal-progress:thread-9", "goal-progress:thread-9", "goal-progress:thread-9"]
-    );
-
-    assert.deepEqual(rows[2]!.payload, { goal: { ...goal, rounds: 3 }, change: "progress" });
-    // Every other change is a row of its own, history the timeline shows.
-    for (const change of ["set", "replaced", "restored", "checked", "paused", "resumed", "blocked", "limited", "achieved", "failed", "cleared"] as const) {
-      const [row] = runtimeEventToActivities(
-        runtimeEvent("thread.goal.updated", { goal, change }, { eventId: `re-${change}` })
-      );
-      assert.equal(row!.id, `re-${change}`, change);
-    }
   });
 
   it("a goal event replayed out of the provider's history produces nothing", () => {

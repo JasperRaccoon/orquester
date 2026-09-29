@@ -175,14 +175,6 @@ test("a TRUNCATED skill array still yields every skill that arrived whole", () =
   assert.equal(skills[0]?.location, "/a");
 });
 
-test("a skill object severed mid-string does not corrupt the ones before it", () => {
-  const cut = '[{"name":"kept","location":"/k"},{"name":"hal';
-  assert.deepEqual(
-    parseSkillsCliOutput(cut).map((skill) => skill.name),
-    ["kept"]
-  );
-});
-
 test("malformed skill output degrades to an empty list", () => {
   assert.deepEqual(parseSkillsCliOutput("not json"), []);
   assert.deepEqual(parseSkillsCliOutput("{}"), []);

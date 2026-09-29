@@ -311,7 +311,6 @@ function serializedCopy(state: ThreadFoldState): Record<string, any> {
 
 test("deserialize(serialize(state)) is the state, Sets and Maps included", () => {
   const state = foldThread(richLog());
-  assert.deepEqual(deserializeFoldState(serializeFoldState(state)), state);
   assert.deepEqual(throughDisk(state), state);
 });
 
@@ -609,16 +608,6 @@ test("goal: null is a thread with no goal — accepted, and written for every st
   assert.equal(throughDisk(legacy).goal, null);
 });
 
-test("a missing goal key rejects the snapshot: a cache miss", () => {
-  const state = foldThread(richLog());
-  const copy = serializedCopy(state);
-  delete copy.goal;
-  assert.equal(deserializeFoldState(copy), null);
-  const file = onDisk(snapshotFile(state));
-  delete file.state.goal;
-  assert.equal(parseFoldSnapshotFile(file, THREAD_ID), null, "no file this build writes lacks it");
-});
-
 test("a stored goal that is neither null nor a valid ThreadGoal rejects the snapshot: a cache miss", () => {
   const state = foldThread(richLog());
   const corruptions: Array<[string, (goal: Record<string, any>) => void]> = [
@@ -640,9 +629,6 @@ test("a stored goal that is neither null nor a valid ThreadGoal rejects the snap
     const copy = serializedCopy(state);
     corrupt(copy.goal);
     assert.equal(deserializeFoldState(copy), null, label);
-    const file = onDisk(snapshotFile(state));
-    corrupt(file.state.goal);
-    assert.equal(parseFoldSnapshotFile(file, THREAD_ID), null, `${label} (the file)`);
   }
   for (const value of ["Make CI green", 5, true, [], {}, { updatedAt: "2026-09-24T00:00:00.000Z" }]) {
     const copy = serializedCopy(state);

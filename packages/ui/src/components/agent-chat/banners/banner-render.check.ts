@@ -51,6 +51,7 @@ try {
     pendingCount: 1, isResponding: false, onRespond: noop
   }));
   assert.ok(warned.includes(`aria-description="${warning}"`));
+  assert.match(warned, />Run</, "the provider's option label is visible");
 
   // The dock owns whether a native callback request can be dismissed.
   const dockProps = {

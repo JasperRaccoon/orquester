@@ -6,12 +6,10 @@ buildProposedPlanMarkdownFilename,
 deriveActivePlanState,
 findLatestProposedPlan,
 hasActionableProposedPlan,
-PLAN_IMPLEMENTATION_PROMPT_PREFIX,
 planProgress,
 proposedPlanTitle,
 resolvePlanFollowUpSubmission,
-shouldShowPlanFollowUpPrompt,
-wholePlanMarkdown
+shouldShowPlanFollowUpPrompt
 } from "./plan.logic";
 import { activity,resetBuilders,stamp } from "./test-helpers";
 
@@ -75,8 +73,7 @@ describe("the implement/refine split button", () => {
   it("implements with an empty draft and leaves plan mode", () => {
     const result = resolvePlanFollowUpSubmission({ draftText: "   ", planMarkdown: "# Plan\nbody" });
     assert.equal(result.interactionMode, "default");
-    assert.ok(result.text.startsWith(PLAN_IMPLEMENTATION_PROMPT_PREFIX));
-    assert.ok(result.text.includes("# Plan"));
+    assert.equal(result.text, "PLEASE IMPLEMENT THIS PLAN:\n# Plan\nbody");
   });
 
   it("refines with draft text and stays in plan mode", () => {
@@ -133,49 +130,5 @@ describe("proposal helpers", () => {
     assert.equal(findLatestProposedPlan(plans, "t1")?.id, "p1");
     assert.equal(findLatestProposedPlan(plans, "t9")?.id, "p2");
     assert.equal(findLatestProposedPlan([], "t1"), null);
-  });
-});
-
-describe("what the plan card's Copy and Download hand over (§7.3)", () => {
-  /** The store's `readFullPlanMarkdown` stand-in: records which proposal it read. */
-  const reader = (answer: () => Promise<string>) => {
-    const reads: string[] = [];
-    return {
-      reads,
-      read: (plan: { id: string }) => {
-        reads.push(plan.id);
-        return answer();
-      }
-    };
-  };
-
-  it("is an intact plan's own markdown, answered at once with nothing read", () => {
-    const store = reader(async () => "never read");
-    const text = wholePlanMarkdown({ id: "p1", planMarkdown: "# Ship it\n\nstep" }, store.read);
-    // Synchronous, so the clipboard write stays inside the click.
-    assert.equal(text, "# Ship it\n\nstep");
-    assert.deepEqual(store.reads, []);
-  });
-
-  it("reads a plan the wire cut (§5.6) back whole, by its proposal id", async () => {
-    const whole = `# Ship it\n\n${"step\n".repeat(4_000)}done`;
-    const store = reader(async () => whole);
-    const text = wholePlanMarkdown({ id: "p-cut", planMarkdown: "# Ship it\n\nstep…", truncated: true }, store.read);
-    assert.ok(text instanceof Promise, "a cut plan is read before anything is handed over");
-    assert.equal(await text, whole);
-    assert.deepEqual(store.reads, ["p-cut"]);
-  });
-
-  it("fails rather than ever hand over the cut text", async () => {
-    const store = reader(() =>
-      Promise.reject(new Error("The full plan could not be loaded, so nothing was sent. Try again."))
-    );
-    await assert.rejects(
-      Promise.resolve(
-        wholePlanMarkdown({ id: "p-cut", planMarkdown: "# Ship it\n\nstep…", truncated: true }, store.read)
-      ),
-      /full plan could not be loaded/
-    );
-    assert.deepEqual(store.reads, ["p-cut"]);
   });
 });

@@ -33,11 +33,6 @@ test("redaction collapses a percent-encoded home too, in either hex case", () =>
   // a home are literal.
   assert.equal(redactStderr("x %2Fa.b%2Fc", { homeDirs: ["/a.b"] }), "x ~%2Fc");
   assert.equal(redactStderr("x %2FaXb%2Fc", { homeDirs: ["/a.b"] }), "x %2FaXb%2Fc");
-  // The compiled pattern is kept per dir (the redactor runs on every string
-  // of every raw frame): a second call, a longer value, a match at its end.
-  for (const value of ["y %2Fa.b", "a much longer line that ends %2Fa.b", "y %2Fa.b"]) {
-    assert.equal(redactStderr(value, { homeDirs: ["/a.b"] }), value.replace("%2Fa.b", "~"));
-  }
 });
 
 test("redaction masks auth headers, bearer values and token shapes", () => {

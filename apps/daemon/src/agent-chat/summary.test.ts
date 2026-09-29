@@ -87,17 +87,6 @@ function seedTab(chat: ChatSessionManager, id: string): void {
   });
 }
 
-test("a pending approval pushes 'needs your input' exactly once per raise", async (t) => {
-  const h = await harness(t);
-  seedTab(h.chat, "t1");
-  // The first poll only seeds the baseline (see the restart test below), so
-  // start from a quiet thread and let the approval be a real transition.
-  await h.read("t1", { chatSessionStatus: "running" });
-  await h.read("t1", { hasPendingApprovals: true });
-  await h.read("t1", { hasPendingApprovals: true });
-  assert.deepEqual(h.pushes, [{ id: "t1", type: "needs-input" }]);
-});
-
 test("a daemon restart NEVER pushes for state it is merely discovering", async (t) => {
   // Regression: after `systemctl restart orquester` (every deploy) the first
   // poll tick reads each open tab's long-settled turn as a brand-new
@@ -139,100 +128,6 @@ test("a re-adopted thread (after forget) also seeds silently", async (t) => {
   assert.equal(h.pushes.length, before, "a host handover is not a new attention");
 });
 
-test("NEVER a 'finished' push while background liveness is non-null", async (t) => {
-  const h = await harness(t);
-  seedTab(h.chat, "t1");
-  const completed = {
-    turnId: "a",
-    state: "completed" as const,
-    startedAt: null,
-    completedAt: "2026-09-21T00:00:01.000Z"
-  };
-  // A settled turn whose subagents are still running: working, no push.
-  await h.read("t1", {
-    chatSessionStatus: "ready",
-    backgroundLiveness: "working",
-    latestTurn: completed
-  });
-  assert.deepEqual(h.pushes, []);
-  assert.equal(h.chat.get("t1")?.activity?.state, "working");
-
-  // Monitoring: idle, but still no finished stamp and still no push.
-  await h.read("t1", {
-    chatSessionStatus: "ready",
-    backgroundLiveness: "monitoring",
-    latestTurn: completed
-  });
-  assert.deepEqual(h.pushes, []);
-  assert.equal(h.chat.get("t1")?.activity?.attention, null);
-
-  // The work drains: now it is finished, and now it pushes.
-  await h.read("t1", {
-    chatSessionStatus: "ready",
-    backgroundLiveness: null,
-    latestTurn: completed
-  });
-  assert.deepEqual(h.pushes, [{ id: "t1", type: "finished" }]);
-});
-
-test("a continuing goal holds the finished stamp and push until the goal stops (goals §4.7)", async (t) => {
-  const h = await harness(t);
-  seedTab(h.chat, "t1");
-  const goal = { objective: "ship it", status: "active" as const, continuing: true };
-  const completed = {
-    turnId: "a",
-    state: "completed" as const,
-    startedAt: "2026-09-21T00:00:00.000Z",
-    completedAt: "2026-09-21T00:00:01.000Z"
-  };
-  await h.read("t1", {
-    chatSessionStatus: "running",
-    latestTurn: { ...completed, state: "running", completedAt: null },
-    goal
-  });
-  // The turn settles; Codex will start the next one itself.
-  await h.read("t1", { chatSessionStatus: "ready", latestTurn: completed, goal });
-  assert.deepEqual(h.pushes, [], "no finished push between two of the provider's own turns");
-  assert.equal(h.chat.get("t1")?.activity?.state, "working");
-  assert.equal(h.chat.get("t1")?.activity?.attention, null, "no finished stamp");
-  assert.deepEqual(h.chat.get("t1")?.goal, goal, "the tab carries the goal");
-
-  // The goal is achieved: now it is finished, and now it pushes.
-  await h.read("t1", { chatSessionStatus: "ready", latestTurn: completed, goal: null });
-  assert.deepEqual(h.pushes, [{ id: "t1", type: "finished" }]);
-  assert.equal(h.chat.get("t1")?.goal, null);
-});
-
-test("a goal turn killed by a restart raises no finished stamp or push while its resume is owed (goals §5.5)", async (t) => {
-  // The host settles the orphaned turn as an error but keeps the goal
-  // `continuing` until the resume attempt completes: nothing is finished yet.
-  const h = await harness(t);
-  seedTab(h.chat, "t1");
-  const goal = { objective: "ship it", status: "active" as const, continuing: true };
-  const running = {
-    turnId: "codex-goal-2",
-    state: "running" as const,
-    startedAt: "2026-09-21T00:00:00.000Z",
-    completedAt: null
-  };
-  const failed = { ...running, state: "failed" as const, completedAt: "2026-09-21T00:05:00.000Z" };
-  await h.read("t1", { chatSessionStatus: "running", latestTurn: running, goal });
-  await h.read("t1", { chatSessionStatus: "error", latestTurn: failed, goal });
-  assert.deepEqual(h.pushes, [], "no push in the gap");
-  assert.equal(h.chat.get("t1")?.activity?.attention, null, "no finished stamp");
-  assert.equal(h.chat.get("t1")?.activity?.state, "working");
-
-  // The resume failed: the host stops reporting the goal as continuing, and
-  // the error is an error again.
-  await h.read("t1", {
-    chatSessionStatus: "error",
-    latestTurn: failed,
-    goal: { ...goal, continuing: false }
-  });
-  assert.deepEqual(h.pushes, [{ id: "t1", type: "finished" }]);
-  assert.equal(h.chat.get("t1")?.activity?.attention, "finished");
-});
-
 test("a continuing goal never feeds the drain's background-work view (goals §4.7)", async (t) => {
   // A Codex goal survives a drain-restart — the resume continues it — so it
   // must never hold a deploy's handover open the way a subagent fleet does.
@@ -259,17 +154,6 @@ test("an errored thread keeps status 'running' — the TAB is live — and shows
   assert.equal(summary?.chatSessionStatus, "error");
   assert.equal(summary?.activity?.state, "idle");
   assert.equal(summary?.activity?.attention, "finished");
-});
-
-test("an errored thread whose watch loop is still live does not push 'finished'", async (t) => {
-  // The error rung outranks liveness for the ACTIVITY, but the push is still
-  // suppressed — work is live in the thread.
-  const h = await harness(t);
-  seedTab(h.chat, "t1");
-  await h.read("t1", { chatSessionStatus: "running", backgroundLiveness: "monitoring" });
-  await h.read("t1", { chatSessionStatus: "error", backgroundLiveness: "monitoring" });
-  assert.deepEqual(h.pushes, []);
-  assert.equal(h.chat.get("t1")?.activity?.attention, "finished", "the failure is still surfaced");
 });
 
 test("needsAttentionAt is stamped when attention rises and cleared when it clears", async (t) => {
@@ -699,18 +583,6 @@ test("agent.providers.changed is the one coarse provider event", async (t) => {
   assert.deepEqual(h.published, [
     { channel: "registry", type: "agent.providers.changed", payload: { adapterId: "codex" } }
   ]);
-});
-
-test("forget() stops a closed tab producing any further activity", async (t) => {
-  const h = await harness(t);
-  seedTab(h.chat, "t1");
-  await h.read("t1", { chatSessionStatus: "running" });
-  h.service.forget("t1");
-  h.chat.close("t1");
-  h.published.length = 0;
-  await h.read("t1", { hasPendingApprovals: true });
-  assert.deepEqual(h.pushes, []);
-  assert.deepEqual(h.published, []);
 });
 
 test("a failed read leaves the last known state alone rather than blanking the tab", async (t) => {

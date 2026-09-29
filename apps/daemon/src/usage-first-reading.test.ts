@@ -3,7 +3,8 @@ import test from "node:test";
 
 import { UsageService } from "./usage.ts";
 
-test("whenFirstReading waits for the first reading after start, and is bounded", async () => {
+test("whenFirstReading waits for the first reading after start, and is bounded", async (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
   let release!: () => void;
   const gate = new Promise<void>((resolve) => (release = resolve));
   const service = new UsageService({
@@ -15,10 +16,10 @@ test("whenFirstReading waits for the first reading after start, and is bounded",
     getPrefs: async () => ({ enabled: true, agents: {}, chip: "busiest" }),
     now: () => 0
   });
-  // Not started: the bound answers. (Its timer is unref'd, so the test keeps the loop alive.)
-  const keepAlive = setInterval(() => undefined, 1_000);
-  await service.whenFirstReading(5);
-  clearInterval(keepAlive);
+  const bounded = service.whenFirstReading(5);
+  t.mock.timers.tick(5);
+  await bounded;
+  t.after(() => service.stop());
   service.start();
   let done = false;
   const waiting = service.whenFirstReading(60_000).then(() => (done = true));

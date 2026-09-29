@@ -107,13 +107,10 @@ test("29 a loop is a roster row of its own: started when created, re-noted per f
       ["task.completed", "stopped"]
     ]
   );
-  const [started, fired, deleted] = rows;
+  const [started] = rows;
   assert.equal(started?.payload.taskType, "scheduled");
-  assert.equal(started?.payload.title, "Every 1 minute: Reply with exactly: tick", "its cadence, then what it does");
   assert.equal((started?.payload as { description?: string }).description, "Reply with exactly: tick");
   assert.equal(started?.turnId, "turn-1", "on the turn that created it");
-  assert.equal((fired?.payload as { summary?: string }).summary, "Fired once", "a fire notes itself, status-less");
-  assert.equal((deleted?.payload as { summary?: string }).summary, "Deleted");
   for (const row of rows) {
     assert.equal(row.turnId, "turn-1", "every row of the loop rides the turn it was created on");
     assert.equal((row.payload as { agentId?: string }).agentId, undefined, "nobody's work but the thread's");

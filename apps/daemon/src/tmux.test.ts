@@ -17,7 +17,7 @@ test("sessionEnvBase replaces nologin shell for child PTYs", () => {
   }
 });
 
-test("sessionEnvBase preserves an executable interactive shell", () => {
+test("sessionEnvBase preserves an executable interactive shell", (t) => {
   const candidate = ["/bin/sh", "/usr/bin/sh"].find((path) => {
     try {
       accessSync(path, process.platform === "win32" ? constants.F_OK : constants.X_OK);
@@ -26,9 +26,7 @@ test("sessionEnvBase preserves an executable interactive shell", () => {
       return false;
     }
   });
-  if (!candidate) {
-    return;
-  }
+  if (!candidate) return t.skip("no executable shell available");
 
   const originalShell = process.env.SHELL;
   try {

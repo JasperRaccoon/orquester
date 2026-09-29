@@ -307,15 +307,13 @@ describe("events", () => {
     assert.equal(state().summaries.size, 0);
   });
 
-  it("upserts are idempotent and report what the tabs mirror", () => {
+  it("repeated events neither duplicate rows nor resurrect deleted workflows", () => {
     const row = summary({ id: "a", name: "Nightly" });
-    const effect = applyWorkflowsEvent(event("workflow.upserted", { workflow: row }));
-    assert.equal(effect?.kind, "upserted");
-    const first = state().summaries;
+    applyWorkflowsEvent(event("workflow.upserted", { workflow: row }));
     applyWorkflowsEvent(event("workflow.upserted", { workflow: row }));
     assert.equal(state().summaries.get("a")?.name, "Nightly");
-    assert.equal(state().summaries.size, first.size);
-    assert.deepEqual(applyWorkflowsEvent(event("workflow.deleted", { id: "a" })), { kind: "deleted", id: "a" });
+    assert.equal(state().summaries.size, 1);
+    applyWorkflowsEvent(event("workflow.deleted", { id: "a" }));
     applyWorkflowsEvent(event("workflow.upserted", { workflow: row }));
     assert.equal(state().summaries.has("a"), false, "a tombstoned id is never re-added");
   });

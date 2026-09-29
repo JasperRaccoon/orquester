@@ -4,11 +4,8 @@ import { describe, it } from "node:test";
 import { type ThreadActivityItem } from "@orquester/api/agent-chat";
 
 import {
-  dropStaleContextWindowActivities,
-  dropSupersededToolUpdatedActivities,
   projectSnapshotActivities,
-  slimActivityEvent,
-  stableToolCallId
+  slimActivityEvent
 } from "./coalesce.ts";
 
 function activity(
@@ -32,14 +29,17 @@ function activity(
 
 describe("stable nested tool-call identity", () => {
   it("reads a nested data.toolUseId too", () => {
-    assert.equal(stableToolCallId(activity("a", "tool.updated", { data: { toolUseId: "n1" } })), "n1");
-    assert.equal(stableToolCallId(activity("a", "tool.updated", { toolUseId: "   " })), null);
+    const rows = projectSnapshotActivities([
+      activity("update", "tool.updated", { data: { toolUseId: "n1" } }),
+      activity("complete", "tool.completed", { data: { toolUseId: "n1" } })
+    ]);
+    assert.deepEqual(rows.map((row) => row.id), ["complete"]);
   });
 });
 
-describe("dropSupersededToolUpdatedActivities (§5.6 snapshot drop)", () => {
+describe("snapshot tool updates (§5.6)", () => {
   it("drops an update a LATER completion in the same turn supersedes", () => {
-    const kept = dropSupersededToolUpdatedActivities([
+    const kept = projectSnapshotActivities([
       activity("u1", "tool.updated", { toolUseId: "c1" }),
       activity("d1", "tool.completed", { toolUseId: "c1" }),
       activity("u2", "tool.updated", { toolUseId: "c1" })
@@ -52,7 +52,7 @@ describe("dropSupersededToolUpdatedActivities (§5.6 snapshot drop)", () => {
   });
 
   it("does not drop across turns", () => {
-    const kept = dropSupersededToolUpdatedActivities([
+    const kept = projectSnapshotActivities([
       activity("u1", "tool.updated", { toolUseId: "c1" }, "turn-1"),
       activity("d1", "tool.completed", { toolUseId: "c1" }, "turn-2")
     ]);
@@ -71,7 +71,7 @@ describe("dropSupersededToolUpdatedActivities (§5.6 snapshot drop)", () => {
       detail: "pnpm test"
     });
     assert.deepEqual(
-      dropSupersededToolUpdatedActivities([update, completion]).map((row) => row.id),
+      projectSnapshotActivities([update, completion]).map((row) => row.id),
       ["d1"]
     );
   });
@@ -130,9 +130,9 @@ describe("the §5.6 read projection is the single choke point (R5 #1)", () => {
 
 });
 
-describe("dropStaleContextWindowActivities (§5.6 snapshot drop)", () => {
+describe("snapshot context usage (§5.6)", () => {
   it("keeps only the newest resolvable row per turn", () => {
-    const kept = dropStaleContextWindowActivities([
+    const kept = projectSnapshotActivities([
       activity("c1", "context-window.updated", { usedTokens: 10 }, "turn-1"),
       activity("c2", "context-window.updated", { usedTokens: 20 }, "turn-1"),
       activity("c3", "context-window.updated", { usedTokens: 30 }, "turn-2"),
@@ -145,7 +145,7 @@ describe("dropStaleContextWindowActivities (§5.6 snapshot drop)", () => {
   });
 
   it("a malformed row passes through and never shadows a valid earlier one", () => {
-    const kept = dropStaleContextWindowActivities([
+    const kept = projectSnapshotActivities([
       activity("c1", "context-window.updated", { usedTokens: 10 }),
       activity("c2", "context-window.updated", { usedTokens: "nope" })
     ]);

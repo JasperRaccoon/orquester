@@ -153,7 +153,7 @@ export function skillsForSkillMenu(skills: readonly Skill[]): Skill[] {
  * deduped the same way: one row, which takes the host-native path rather than
  * being typed into the draft.
  */
-export function providerCommandsForSlashMenu(
+function providerCommandsForSlashMenu(
   commands: readonly SlashCommand[],
   visibleSkills: readonly Skill[],
   hostCommandNames: readonly string[] = []

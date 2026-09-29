@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import {
   detectComposerTrigger,
   extendReplacementRangeForTrailingSpace,
-  isTriggerAtPromptStart,
   replaceTextRange
 } from "./composer-trigger.ts";
 
@@ -67,25 +66,12 @@ test("a caret before the trigger character sees no trigger", () => {
   assert.equal(detectComposerTrigger("@src", 0), null);
 });
 
-test("the position gate keys on offset 0, not on the line", () => {
-  const first = detectComposerTrigger("/pl", 3);
-  const second = detectComposerTrigger("hi\n/pl", 6);
-  assert.ok(first && second);
-  assert.equal(isTriggerAtPromptStart(first), true);
-  // A line start that is not the message start: provider commands get filtered.
-  assert.equal(isTriggerAtPromptStart(second), false);
-});
-
 test("replaceTextRange splices and reports the caret after the replacement", () => {
-  assert.deepEqual(replaceTextRange("a @sr b", 2, 5, "@src/index.ts "), {
-    text: "a @src/index.ts  b",
+  const text = "a @sr b";
+  const replacement = "@src/index.ts ";
+  const end = extendReplacementRangeForTrailingSpace(text, 5, replacement);
+  assert.deepEqual(replaceTextRange(text, 2, end, replacement), {
+    text: "a @src/index.ts b",
     cursor: 16
   });
-});
-
-test("a trailing space in the replacement swallows one space already there", () => {
-  assert.equal(extendReplacementRangeForTrailingSpace("/pl rest", 3, "/plan "), 4);
-  assert.equal(extendReplacementRangeForTrailingSpace("/pl", 3, "/plan "), 3);
-  // No trailing space in the replacement: never extend.
-  assert.equal(extendReplacementRangeForTrailingSpace("/pl rest", 3, "/plan"), 3);
 });

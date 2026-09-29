@@ -26,11 +26,6 @@ test("a sparse update replaces only the windows it names", () => {
   );
 });
 
-test("an empty update is a no-op, not a reset", () => {
-  const previous = [win({ id: "a" })];
-  assert.deepEqual(mergeProviderUsageWindows(previous, []), previous);
-});
-
 test("a window the daemon's own poll already covers is dropped, not printed twice", () => {
   const rows = providerWindowsToNormalized("claude", [win({ id: "session" }), win({ id: "other" })], [
     "session",

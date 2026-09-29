@@ -630,7 +630,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     createGrokSource({
       grokHome: grokCliHome,
       authFile: home ? join(home, "auth.json") : undefined,
-      managedGrokAuthFiles: () => [],
       now: () => Date.now(),
       logger: console
     });

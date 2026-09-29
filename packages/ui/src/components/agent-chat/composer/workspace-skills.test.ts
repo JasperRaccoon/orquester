@@ -9,7 +9,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { Skill } from "@orquester/api/agent-chat";
 
-import { timelineSkillNames, workspaceSkills } from "./composer-menu.ts";
+import { workspaceSkills } from "./composer-menu.ts";
 
 const skill = (name: string): Skill => ({ name, path: `/skills/${name}/SKILL.md`, enabled: true });
 
@@ -34,14 +34,5 @@ describe("workspaceSkills", () => {
 
   it("no snapshot, no skills", () => {
     assert.deepEqual(workspaceSkills(null, "/w/p"), []);
-  });
-});
-
-describe("timelineSkillNames", () => {
-  it("names each skill once", () => {
-    assert.deepEqual(
-      timelineSkillNames({ skills: [skill("review"), skill("review"), skill("deploy")] }, null),
-      ["review", "deploy"]
-    );
   });
 });

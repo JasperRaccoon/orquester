@@ -48,7 +48,6 @@ import {
   statSync,
   writeFileSync
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   AGENT_PROFILE_AGENT_LABELS,
@@ -83,7 +82,7 @@ export type ProfileConverter = (
   to: AgentProfileAgentId
 ) => ProfileConversion;
 
-export interface ProfileConverterOptions {
+interface ProfileConverterOptions {
   /**
    * Where converted skill copies are written (`convert-*` directories). The
    * daemon passes `agentProfileImportsDir(appdir)`; defaults to the OS temp dir.
@@ -92,7 +91,7 @@ export interface ProfileConverterOptions {
 }
 
 /** The prefix of every directory the converter creates under its temp root. */
-export const CONVERT_DIR_PREFIX = "convert-";
+const CONVERT_DIR_PREFIX = "convert-";
 
 /** Frontmatter keys every skill keeps whatever the target's field list says. */
 const SKILL_KEYS_ALWAYS_KEPT = new Set(["name", "description", "metadata"]);
@@ -104,7 +103,7 @@ function canonicalKey(key: string): string {
   return key.toLowerCase().replaceAll("_", "-");
 }
 
-export interface MappedFrontmatter {
+interface MappedFrontmatter {
   frontmatter: Record<string, unknown>;
   /** Keys left out because `to` does not use them, in their original spelling and order. */
   dropped: string[];
@@ -319,7 +318,7 @@ function positiveNumber(value: unknown): number | null {
  *   with a note otherwise (`enabled_tools`, `disabled_tools`, `required` are
  *   Codex-only). Only keys are ever named in a note, never values.
  */
-export function mapMcpAdvanced(
+function mapMcpAdvanced(
   advanced: Record<string, unknown> | undefined,
   to: AgentProfileAgentId
 ): { advanced: Record<string, unknown>; notes: string[] } {
@@ -402,13 +401,3 @@ export function createProfileConverter(options: ProfileConverterOptions): Profil
     }
   };
 }
-
-/** Default temp root when none is configured: the OS temp dir. */
-export const DEFAULT_CONVERT_TEMP_ROOT = join(tmpdir(), "orquester-agent-profile-convert");
-
-/**
- * {@link createProfileConverter} with its copies under the OS temp dir. The
- * daemon should prefer `createProfileConverter({tempRoot: agentProfileImportsDir(appdir)})`
- * so `ProfileImportStore` sweeps what a crash leaks.
- */
-export const convertPortableItem: ProfileConverter = createProfileConverter({ tempRoot: DEFAULT_CONVERT_TEMP_ROOT });

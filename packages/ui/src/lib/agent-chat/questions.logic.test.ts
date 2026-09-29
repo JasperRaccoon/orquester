@@ -120,6 +120,7 @@ describe("displaced custom answers", () => {
 
   it("typing clears the selection", () => {
     const next = setPendingUserInputCustomAnswer({ selectedOptionValues: ["Alpha"] }, "typed");
+    assert.equal(next.customAnswer, "typed");
     assert.equal(next.selectedOptionValues, undefined);
   });
 });

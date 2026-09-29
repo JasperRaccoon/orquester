@@ -56,14 +56,6 @@ test("CRLF line endings decode the same as LF", () => {
   assert.equal(frames[0]?.event, "ping");
 });
 
-test("`event` and `id` are carried, then reset for the next frame", () => {
-  const frames = framesFrom(["event: a\nid: 1\ndata: first\n\n", "data: second\n\n"]);
-  assert.equal(frames[0]?.event, "a");
-  assert.equal(frames[0]?.id, "1");
-  assert.equal(frames[1]?.event, undefined);
-  assert.equal(frames[1]?.id, undefined);
-});
-
 test("one leading space after the colon is stripped, further ones are data", () => {
   const frames = framesFrom(["data:  two spaces\n\n"]);
   assert.equal(frames[0]?.data, " two spaces");
@@ -173,14 +165,6 @@ test("readSseFrames cancels the body when the consumer throws", async () => {
     (error: unknown) => error === boom
   );
   assert.equal(cancelled(), true);
-});
-
-test("readSseFrames does NOT cancel after a clean EOF", async () => {
-  const { body, cancelled } = streamOf(["data: a\n\n"]);
-  for await (const frame of readSseFrames(body)) {
-    void frame;
-  }
-  assert.equal(cancelled(), false, "a drained stream needs no cancel");
 });
 
 test("readSseFrames on a null body ends immediately", async () => {

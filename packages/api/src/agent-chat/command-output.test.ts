@@ -120,21 +120,12 @@ test("options.detail is the detail the caller kept: none reads as an empty one",
   assert.equal(commandDisplayDetail({ detail: "ignored" }, { detail: "kept" }), "kept");
 });
 
-test("the output survives the wire projection every read path applies", () => {
-  const grok = slimActivityPayload(command({
-    title: "Execute `echo hi`",
-    detail: "echo hi",
-    data: { kind: "execute", command: "echo hi", rawOutput: { stdout: "hi\n", output_for_prompt: "exit: 0\nhi\n" } }
+test("Codex aggregated output remains readable after wire projection", () => {
+  const payload = slimActivityPayload(command({
+    title: "Bash",
+    data: { item: { command: "pnpm test", aggregatedOutput: "\n> pnpm test\n2 passed\n" } }
   }));
-  assert.equal(commandDisplayDetail(grok), "hi");
-  const acp = slimActivityPayload(command({
-    detail: "echo hi",
-    data: { kind: "execute", command: "echo hi", content: [{ type: "content", content: { type: "text", text: "hi from ACP" } }] }
-  }));
-  assert.equal(commandDisplayDetail(acp), "hi from ACP");
-  // Codex's aggregated output reaches the wire as its first meaningful line.
-  const codex = slimActivityPayload(command({ title: "Bash", data: { item: { command: "pnpm test", aggregatedOutput: "\n> pnpm test\n2 passed\n" } } }));
-  assert.equal(commandDisplayDetail(codex), "> pnpm test");
+  assert.equal(commandDisplayDetail(payload), "> pnpm test");
 });
 
 // commandOutputText: the WHOLE output (the MCP's read_tool_output), read from the places the preview reads, in its order.

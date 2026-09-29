@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -8,17 +9,6 @@ import type { ActivityCause } from "./ansi-activity.ts";
 import type { RegistryService } from "./registry.ts";
 import { LocalSessionManager } from "./sessions.ts";
 
-async function waitFor<T>(poll: () => T | undefined | false, timeoutMs = 2000): Promise<T> {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const value = poll();
-    if (value) {
-      return value;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 25));
-  }
-  throw new Error(`timed out after ${timeoutMs}ms`);
-}
 
 test("LocalSessionManager tracks bell activity and clears attention on input", async () => {
   const root = await mkdtemp(join(tmpdir(), "orquester-session-activity-"));
@@ -43,12 +33,10 @@ test("LocalSessionManager tracks bell activity and clears attention on input", a
   mgr.lifecycle.on("activity", (event) => activityEvents.push(event));
 
   try {
+    const output = once(mgr.lifecycle, "output", { signal: AbortSignal.timeout(10_000) });
     const session = await mgr.create({ kind: "shell", refId: "sh", projectPath: root, cwd: root });
-
-    const activity = await waitFor(() => {
-      const snapshot = mgr.activity(session.id);
-      return snapshot?.attention ? snapshot : false;
-    });
+    await output;
+    const activity = mgr.activity(session.id)!;
 
     assert.equal(activity.attention, "bell");
     assert.equal(activity.state, "working");
@@ -93,12 +81,10 @@ test("LocalSessionManager raises finished attention when the command exits", asy
   mgr.lifecycle.on("activity", (e: { cause: ActivityCause }) => order.push(`activity:${e.cause}`));
 
   try {
+    const exited = once(mgr.lifecycle, "exited", { signal: AbortSignal.timeout(10_000) });
     const session = await mgr.create({ kind: "shell", refId: "sh", projectPath: root, cwd: root });
-
-    const activity = await waitFor(() => {
-      const snapshot = mgr.activity(session.id);
-      return snapshot?.attention === "finished" ? snapshot : false;
-    });
+    await exited;
+    const activity = mgr.activity(session.id)!;
     assert.equal(activity.state, "idle");
     assert.equal(typeof activity.needsAttentionAt, "string");
     assert.equal(mgr.get(session.id)?.status, "exited");

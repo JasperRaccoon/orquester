@@ -102,7 +102,7 @@ export const McpEditor: React.FC<{ detail?: McpDetail; onReload?: () => void }> 
   );
 };
 
-export interface McpFormViewProps {
+interface McpFormViewProps {
   mode: "create" | "edit";
   form: McpForm;
   onChange: (patch: Partial<McpForm>) => void;
@@ -111,18 +111,15 @@ export interface McpFormViewProps {
   showErrors: boolean;
   /** The daemon refused the name. */
   nameError?: string;
-  /** Checks: draw the Advanced disclosure open. */
-  advancedOpen?: boolean;
 }
 
-export const McpFormView: React.FC<McpFormViewProps> = ({
+const McpFormView: React.FC<McpFormViewProps> = ({
   mode,
   form,
   onChange,
   validation,
   showErrors,
-  nameError,
-  advancedOpen
+  nameError
 }) => {
   const { agent } = useEditorEnv();
   const touch = useTouch();
@@ -132,7 +129,7 @@ export const McpFormView: React.FC<McpFormViewProps> = ({
   const nameMessage = nameError ?? shown(errors.name, form.name);
   const transports = mcpTransports(agent);
   const advancedFields = mcpAdvancedFields(agent);
-  const [advanced, setAdvanced] = useState(() => advancedOpen ?? hasAdvancedValues(agent, form));
+  const [advanced, setAdvanced] = useState(() => hasAdvancedValues(agent, form));
 
   const onCommandPaste = (event: React.ClipboardEvent<HTMLInputElement>) => {
     const parsed = parsePastedCommandLine(event.clipboardData.getData("text"));
@@ -356,7 +353,7 @@ const SECRET_COPY: Record<SecretRowsKind, { heading: string; add: string; keyLab
  * "••• set" and offers Replace (an empty input for the new value) and Remove.
  * Side by side when the editor is wide, stacked when narrow.
  */
-export const SecretRowsEditor: React.FC<{
+const SecretRowsEditor: React.FC<{
   kind: SecretRowsKind;
   idPrefix: string;
   rows: SecretRow[];

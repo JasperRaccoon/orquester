@@ -43,8 +43,3 @@ export function revealSecrets(text: string, secrets: Readonly<Record<string, str
   if (!text || !text.includes(OPEN)) return text;
   return text.replace(MARKER, (_whole, name: string) => (Object.prototype.hasOwnProperty.call(secrets, name) ? secrets[name]! : ""));
 }
-
-/** Does `text` still hold a secret's value (a value the markers would hide)? */
-export function holdsSecret(text: string, secrets: Readonly<Record<string, string>>): boolean {
-  return createRedactor(secrets).matches(text).length > 0;
-}

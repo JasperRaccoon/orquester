@@ -292,7 +292,6 @@ describe("claude subscription windows", () => {
     assert.equal(isRateLimitClearing({ status: "allowed_warning" }), true);
     assert.equal(isRateLimitClearing({ status: "rejected" }), false);
   });
-
 });
 
 describe("claude context usage — the authoritative /context accounting", () => {

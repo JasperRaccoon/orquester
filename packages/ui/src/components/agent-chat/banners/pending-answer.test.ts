@@ -8,7 +8,6 @@ import {
   carryDisplacedCustomAnswerIntoPrompt,
   derivePendingUserInputProgress,
   questionAttachmentKey,
-  questionOptionValue,
   questionShortcutOption,
   resolvePendingUserInputAnswer,
   setPendingUserInputCustomAnswer,
@@ -31,12 +30,11 @@ function question(overrides: Partial<UserInputQuestion> = {}): UserInputQuestion
 }
 
 test("an option with no value answers with its label", () => {
-  assert.equal(questionOptionValue({ label: "main", description: "" }), "main");
-  assert.equal(questionOptionValue({ label: "develop", description: "", value: "dev" }), "dev");
   assert.equal(
     resolvePendingUserInputAnswer(question(), { selectedOptionValues: ["main"] }),
     "main"
   );
+  assert.equal(resolvePendingUserInputAnswer(question(), { selectedOptionValues: ["dev"] }), "dev");
 });
 
 test("a custom answer beats a selected option", () => {
@@ -110,27 +108,24 @@ test("displaced text lands after whatever was already in the draft", () => {
 test("toggling clears the custom answer; multi-select toggles in place", () => {
   const multi = question({ multiSelect: true });
   const first = togglePendingUserInputOptionSelection(multi, { customAnswer: "typed" }, "main");
-  assert.deepEqual(first, { customAnswer: "", selectedOptionValues: ["main"] });
+  assert.deepEqual(resolvePendingUserInputAnswer(multi, first), ["main"]);
   const second = togglePendingUserInputOptionSelection(multi, first, "dev");
-  assert.deepEqual(second.selectedOptionValues, ["main", "dev"]);
+  assert.deepEqual(resolvePendingUserInputAnswer(multi, second), ["main", "dev"]);
   const third = togglePendingUserInputOptionSelection(multi, second, "main");
-  assert.deepEqual(third.selectedOptionValues, ["dev"]);
+  assert.deepEqual(resolvePendingUserInputAnswer(multi, third), ["dev"]);
 });
 
-test("single-select replaces the selection rather than adding to it", () => {
+test("a new single-select choice becomes the submitted answer", () => {
   const single = question();
   const first = togglePendingUserInputOptionSelection(single, undefined, "main");
   const second = togglePendingUserInputOptionSelection(single, first, "dev");
-  assert.deepEqual(second.selectedOptionValues, ["dev"]);
+  assert.equal(resolvePendingUserInputAnswer(single, second), "dev");
 });
 
-test("typing clears a selection only once there is text to prefer", () => {
+test("custom text overrides a choice while empty text preserves it", () => {
   const withSelection: PendingAnswerDraft = { selectedOptionValues: ["main"] };
-  assert.deepEqual(setPendingUserInputCustomAnswer(withSelection, "x"), { customAnswer: "x" });
-  assert.deepEqual(setPendingUserInputCustomAnswer(withSelection, ""), {
-    customAnswer: "",
-    selectedOptionValues: ["main"]
-  });
+  assert.equal(resolvePendingUserInputAnswer(question(), setPendingUserInputCustomAnswer(withSelection, "x")), "x");
+  assert.equal(resolvePendingUserInputAnswer(question(), setPendingUserInputCustomAnswer(withSelection, "")), "main");
 });
 
 test("the answers map is null until every question resolves", () => {

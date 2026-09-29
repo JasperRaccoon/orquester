@@ -2,10 +2,8 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFile, spawn } from "node:child_process";
 import { once } from "node:events";
-import { readFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setTimeout as setTimeoutPromise } from "node:timers/promises";
 import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { withDeadline } from "./agent-host/support/deadline.ts";
@@ -340,10 +338,8 @@ test("kill() refuses with a discriminating code and only kills our own subtree",
     return;
   }
   const status = service();
-  assert.deepEqual(
-    { ...(await status.kill(0)) },
-    { ok: false, code: "INVALID_PID", error: "Invalid pid." }
-  );
+  const invalid = await status.kill(0);
+  assert.equal(invalid.ok === false && invalid.code, "INVALID_PID");
   assert.equal((await status.kill(Number.NaN)).ok, false);
   const self = await status.kill(process.pid);
   assert.equal(self.ok, false);
@@ -374,25 +370,30 @@ test("kill() refuses with a discriminating code and only kills our own subtree",
   // A child of this test process IS in the tree (process.pid is a root). The
   // backgrounded sleep is the interesting one: killing the shell orphans it, so
   // it only dies if the whole subtree was signalled before any parent exited.
-  const victim = spawn("sh", ["-c", "sleep 30 & sleep 30"], { stdio: "ignore" });
-  const exited = new Promise<void>((resolve) => victim.on("exit", () => resolve()));
-  await setTimeoutPromise(300);
-  assert.ok(victim.pid);
-  const { stdout: childPids } = await exec("pgrep", ["-P", String(victim.pid)]);
-  const subtree = childPids.trim().split("\n").map(Number);
-  assert.equal(subtree.length, 2, "the shell should have both sleeps as children");
-
-  const result = await status.kill(victim.pid);
-  assert.equal(result.ok, true);
-  // `killed` counts signals actually sent: the shell usually exits on its own
-  // once its foreground child dies, so only the two sleeps are guaranteed.
-  assert.ok(result.ok === true && result.killed >= 2, "the victim subtree should be signalled");
-  await exited;
-  await setTimeoutPromise(200);
-  for (const pid of [victim.pid, ...subtree]) {
-    const { stdout } = await exec("sh", ["-c", `kill -0 ${pid} 2>/dev/null && echo alive || echo gone`]);
-    assert.equal(stdout.trim(), "gone", `pid ${pid} survived the subtree kill`);
+  const victim = spawn("sh", ["-c", 'sleep 30 & a=$!; sleep 30 & b=$!; printf "%s %s\\n" "$a" "$b"; wait'], {
+    stdio: ["ignore", "pipe", "ignore"]
+  });
+  const exited = once(victim, "exit");
+  const gone = once(victim.stdout, "close").then(() => undefined);
+  const [announced] = await once(victim.stdout, "data");
+  const subtree = String(announced).trim().split(/\s+/).map(Number);
+  try {
+    assert.ok(victim.pid);
+    assert.equal(subtree.length, 2, "the shell announced both children after spawning them");
+    assert.ok(subtree.every((pid) => Number.isInteger(pid) && pid > 1));
+    const result = await status.kill(victim.pid);
+    assert.equal(result.ok, true);
+    assert.ok(result.ok === true && result.killed >= 2, "the victim subtree should be signalled");
+    await exited;
+    // Both sleeps inherit stdout: closure proves no descendant still holds it.
+    await allGone(gone, "the entire selected subtree exiting");
+  } finally {
+    for (const pid of [victim.pid, ...subtree]) {
+      if (!pid) continue;
+      try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ }
+    }
   }
+
 });
 
 test("a process carrying the agent host's launch marker is managed even as an orphan: listed, labelled, killable", async () => {

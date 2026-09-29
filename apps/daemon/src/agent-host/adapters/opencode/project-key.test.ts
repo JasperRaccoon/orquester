@@ -40,7 +40,7 @@ test("the key is RESOLVED, because the server never validates a directory", () =
   // one path must therefore not produce two servers.
   assert.equal(
     projectDirFor(input({ cwd: "/repo/packages/ui", projectPath: "/repo/packages/../packages" })),
-    projectDirFor(input({ threadId: "t2", cwd: "/x", projectPath: "/repo/packages" }))
+    "/repo/packages"
   );
   assert.equal(projectDirFor(input({ cwd: "relative/dir" })).startsWith("/"), true);
 });

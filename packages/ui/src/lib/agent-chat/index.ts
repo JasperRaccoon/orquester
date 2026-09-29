@@ -64,7 +64,6 @@ export {
 
 export {
   ThreadRetentionCache,
-  THREAD_SNAPSHOT_CACHE_MAX,
   type RetainedThread
 } from "./retention";
 

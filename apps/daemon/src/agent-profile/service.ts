@@ -782,7 +782,7 @@ export function instructionsPathFor(agent: AgentProfileAgentId, homes: AgentHome
  * shows, independent of the order the adapter listed items and file errors in
  * and of object key order. `readAt` is excluded.
  */
-export function snapshotRevision(installed: boolean, version: string | undefined, raw: AdapterSnapshot): string {
+function snapshotRevision(installed: boolean, version: string | undefined, raw: AdapterSnapshot): string {
   const items = [...raw.items].sort((a, b) => compare(a.id, b.id));
   const fileErrors = [...raw.fileErrors].sort((a, b) => compare(a.path, b.path) || compare(a.message, b.message));
   return contentHash({ installed, version: version ?? null, instructions: raw.instructions, items, fileErrors });

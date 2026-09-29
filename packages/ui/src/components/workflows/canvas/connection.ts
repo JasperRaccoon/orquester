@@ -31,10 +31,6 @@ export function connectionRefusal(workflow: Pick<Workflow, "nodes" | "edges">, r
   return null;
 }
 
-export function isValidWorkflowConnection(workflow: Pick<Workflow, "nodes" | "edges">, request: ConnectionRequest): boolean {
-  return connectionRefusal(workflow, request) === null;
-}
-
 /** `workflow` with the edge added, or the same object when it is refused. */
 export function connectBlocks<W extends Pick<Workflow, "nodes" | "edges">>(
   workflow: W,

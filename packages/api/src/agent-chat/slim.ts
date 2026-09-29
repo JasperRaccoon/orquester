@@ -125,7 +125,7 @@ function asTrimmedString(value: unknown): string | null {
  *
  * *T3: `ActivityPayloadProjection.ts:164-188`.*
  */
-export function summarizeToolTextOutput(value: string): string | null {
+function summarizeToolTextOutput(value: string): string | null {
   let meaningfulLineCount = 0;
   let offset = 0;
 

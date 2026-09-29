@@ -5,10 +5,8 @@
  * and its hint pinned at the bottom.
  *
  * Presentational — `AgentProfilePanel` owns the store, the editor bridge and
- * the confirms — so a static render check draws every state from plain
- * props. The layout follows the PANEL's own width (`useElementWidth`), never
- * the viewport's: the dock spans 260–560 px on any screen. A check passes
- * `width` to draw a given one.
+ * the confirms. The layout follows the panel's own width (`useElementWidth`),
+ * never the viewport's: the dock spans 260–560 px on any screen.
  */
 
 import React from "react";
@@ -62,10 +60,8 @@ export interface ProfileItemActions {
   cancelConfirm: () => void;
 }
 
-export interface AgentProfilePanelViewProps {
+interface AgentProfilePanelViewProps {
   variant: "docked" | "sheet";
-  /** The panel's width (px) to lay out for; measured when omitted. */
-  width?: number | null;
   agent: AgentProfileAgentId;
   agents: readonly AgentProfileAgentOption[];
   onAgentChange: (agent: AgentProfileAgentId) => void;
@@ -107,8 +103,7 @@ export const AgentProfilePanelView: React.FC<AgentProfilePanelViewProps> = (prop
   // Only the picker's layout is kept, so a dock drag re-renders the panel
   // when it crosses the breakpoint, never on every pixel.
   const [rootRef, measuredLayout] = useElementWidth<HTMLDivElement, "segmented" | "dropdown">(agentPickerLayout);
-  const pickerLayout =
-    props.width !== undefined ? agentPickerLayout(props.width) : (measuredLayout ?? agentPickerLayout(null));
+  const pickerLayout = measuredLayout ?? agentPickerLayout(null);
   const label = AGENT_PROFILE_AGENT_LABELS[props.agent];
   const { snapshot, empty } = props;
   const notInstalled = empty?.kind === "not-installed";

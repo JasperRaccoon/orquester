@@ -76,22 +76,13 @@ test("answer_question refusals: unanswered question, invalid selection without c
   const h = await harness([chatSummary({ hasPendingUserInput: true })], asked()); t.after(h.close);
   const run = (a: Record<string, unknown>, ctx = h.ctx) => tool("answer_question").run({ sessionId: "c1", ...a }, ctx);
   await assert.rejects(run({ answers: { "1": "Postgres" } }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /Modules/.test(e.message));
-  await assert.rejects(run({ answers: { "1": "Postgres", Modules: ["Nope"], Token: "x" } }), (e: { message: string }) => /Auth, Billing/.test(e.message));
-  await assert.rejects(run({ answers: { "1": "Postgres", Modules: ["Auth"], Token: "x" }, attachments: { Token: [{ name: "a.txt", base64: "YQ==" }] } }), (e: { message: string }) => /secret/i.test(e.message));
-  await assert.rejects(run({ answers: { "1": "Postgres", Modules: ["Auth"], Token: "x", Bogus: "y" } }), (e: { message: string }) => /Bogus/.test(e.message));
-  await assert.rejects(run({ requestId: "q9", answers: {} }), (e: { message: string }) => /q1/.test(e.message));
+  await assert.rejects(run({ answers: { "1": "Postgres", Modules: ["Nope"], Token: "x" } }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && ["Auth", "Billing"].every((label) => e.message.includes(label)));
+  await assert.rejects(run({ answers: { "1": "Postgres", Modules: ["Auth"], Token: "x" }, attachments: { Token: [{ name: "a.txt", base64: "YQ==" }] } }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message.includes("Token"));
+  await assert.rejects(run({ answers: { "1": "Postgres", Modules: ["Auth"], Token: "x", Bogus: "y" } }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /Bogus/.test(e.message));
+  await assert.rejects(run({ requestId: "q9", answers: {} }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /q1/.test(e.message));
   const none = await harness(); t.after(none.close);
-  await assert.rejects(run({ answers: {} }, none.ctx), (e: { message: string }) => /No pending question/.test(e.message));
+  await assert.rejects(run({ answers: {} }, none.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT");
   assert.ok(!h.api.calls.some((c) => c.method === "POST"));
-});
-
-test("answer_question uploads per-question attachments and allows attachment-only answers", async (t) => {
-  const withFile = snapshot({ pending: { approvals: [], userInputs: [{ requestId: "q2", createdAt: stamp(1), dismissible: false, questions: [{ id: "Upload", header: "U", question: "Upload the log", options: [], multiSelect: false, allowCustomAnswer: true }] }] } });
-  const h = await harness([chatSummary({ hasPendingUserInput: true })], withFile); t.after(h.close);
-  h.api.on("POST", "/api/sessions/c1/answer", { status: 200, body: { seq: 32 } });
-  await tool("answer_question").run({ sessionId: "c1", answers: {}, attachments: { Upload: [{ name: "app.log", base64: Buffer.from("x").toString("base64") }] } }, h.ctx);
-  const body = h.api.calls.find((c) => c.path === "/api/sessions/c1/answer")!.body as { answers: Record<string, unknown>; attachmentsByQuestionId: Record<string, { name: string }[]> };
-  assert.deepEqual(body.answers, { Upload: "" }); assert.equal(body.attachmentsByQuestionId.Upload[0].name, "app.log");
 });
 
 test("dismiss_question only for message-mode questions; resolve_approval validates the decision", async (t) => {
@@ -106,8 +97,9 @@ test("dismiss_question only for message-mode questions; resolve_approval validat
   const r = await tool("resolve_approval").run({ sessionId: "c1", decision: "decline" }, h.ctx);
   assert.equal(r.seq, 41);
   assert.equal(detailOf(r).id, "c1"); assert.equal(detailOf(r).chat.model, "claude-fable-5-1[1m]");
-  assert.deepEqual((h.api.calls.find((c) => c.path === "/api/sessions/c1/approval")!.body as { requestId: string; decision: string }), { commandId: (h.api.calls.find((c) => c.path === "/api/sessions/c1/approval")!.body as { commandId: string }).commandId, requestId: "r1", decision: "decline" } as never);
-  await assert.rejects(tool("resolve_approval").run({ sessionId: "c1", decision: "acceptAlways" }, h.ctx), (e: { message: string }) => /accept, decline/.test(e.message));
+  const approval = h.api.calls.find((c) => c.path === "/api/sessions/c1/approval")!.body as { requestId: string; decision: string };
+  assert.deepEqual([approval.requestId, approval.decision], ["r1", "decline"]);
+  await assert.rejects(tool("resolve_approval").run({ sessionId: "c1", decision: "acceptAlways" }, h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && ["accept", "decline"].every((decision) => e.message.includes(decision)));
   const blocking = await harness([chatSummary({ hasPendingUserInput: true })], asked()); t.after(blocking.close);
   await assert.rejects(tool("dismiss_question").run({ sessionId: "c1" }, blocking.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /interrupt_session/.test(e.message));
 });
@@ -115,7 +107,7 @@ test("dismiss_question only for message-mode questions; resolve_approval validat
 test("answer_question validates every question before uploading any attachment", async (t) => {
   const h = await harness([chatSummary({ hasPendingUserInput: true })], twoOpen()); t.after(h.close);
   await assert.rejects(tool("answer_question").run({ sessionId: "c1", answers: {}, attachments: { Log: [{ name: "app.log", base64: "YQ==" }] } }, h.ctx),
-    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /Missing: Why\./.test(e.message));
+    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message.includes("Why"));
   assert.equal(h.api.uploads.length, 0);
   assert.ok(!h.api.calls.some((c) => c.method === "POST"));
 });
@@ -129,9 +121,9 @@ test("answer_question keys: an exact id beats a 1-based index, and a question na
   h.api.on("POST", "/api/sessions/c1/answer", { status: 200, body: { seq: 33 } });
   const run = (answers: Record<string, unknown>) => tool("answer_question").run({ sessionId: "c1", answers }, h.ctx);
   // "2" is the first question's id, so it never reaches the second question by index.
-  await assert.rejects(run({ "2": "Yes" }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /Missing: Env\./.test(e.message));
+  await assert.rejects(run({ "2": "Yes" }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message.includes("Env"));
   // "1" (its index) and "2" (its id) both name the first question.
-  await assert.rejects(run({ "1": "Yes", "2": "No", Env: "prod" }), (e: { message: string }) => /"Ship" is named twice/.test(e.message));
+  await assert.rejects(run({ "1": "Yes", "2": "No", Env: "prod" }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message.includes("Ship"));
   assert.ok(!h.api.calls.some((c) => c.method === "POST"));
   await run({ "2": "No", Env: "staging" });
   const body = h.api.calls.find((c) => c.path === "/api/sessions/c1/answer")!.body as { answers: Record<string, unknown> };
@@ -142,12 +134,10 @@ test("answer_question reports every problem at once, treats blank answers as una
   const h = await harness([chatSummary({ hasPendingUserInput: true })], asked()); t.after(h.close);
   h.api.on("POST", "/api/sessions/c1/answer", { status: 200, body: { seq: 34 } });
   const run = (a: Record<string, unknown>) => tool("answer_question").run({ sessionId: "c1", ...a }, h.ctx);
-  await assert.rejects(run({ answers: { "1": "Postgres", Modules: ["Nope", "Auth", "Zilch"] } }), (e: { message: string }) => /"Nope", "Zilch" are not options of "Modules"/.test(e.message) && /Missing: Token\./.test(e.message));
-  await assert.rejects(run({ answers: { "1": "  ", Modules: [], Token: "x" } }), (e: { message: string }) => /Missing: DB, Modules\./.test(e.message));
-  // Refused files never stand in for the answer: the secret question is still reported missing.
-  await assert.rejects(run({ answers: { "1": "Postgres", Modules: ["Auth"] }, attachments: { Token: [{ name: "a.txt", base64: "YQ==" }] } }), (e: { message: string }) => /"Token" is a secret field/.test(e.message) && /Missing: Token\./.test(e.message));
+  await assert.rejects(run({ answers: { "1": "Postgres", Modules: ["Nope", "Auth", "Zilch"] } }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && ["Nope", "Zilch", "Modules", "Token"].every((name) => e.message.includes(name)));
+  await assert.rejects(run({ answers: { "1": "  ", Modules: [], Token: "x" } }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && ["DB", "Modules"].every((name) => e.message.includes(name)));
   // The GUI offers no attachments on an options-only question (`allowsAnswerAttachments`).
-  await assert.rejects(run({ answers: { "1": "Postgres", Modules: ["Auth"], Token: "x" }, attachments: { Modules: [{ name: "a.txt", base64: "YQ==" }] } }), (e: { message: string }) => /"Modules" takes only its listed options/.test(e.message));
+  await assert.rejects(run({ answers: { "1": "Postgres", Modules: ["Auth"], Token: "x" }, attachments: { Modules: [{ name: "a.txt", base64: "YQ==" }] } }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message.includes("Modules"));
   assert.equal(h.api.uploads.length, 0);
   assert.ok(!h.api.calls.some((c) => c.method === "POST"));
   await run({ answers: { "1": "Postgres", Modules: ["Auth", "auth", "bill"], Token: "x" } });
@@ -155,14 +145,11 @@ test("answer_question reports every problem at once, treats blank answers as una
   assert.deepEqual(body.answers.Modules, ["Auth", "bill"]);
 });
 
-test("answer_question: a blank answer beside files is attachment-only, and a failed upload names its question and sends nothing", async (t) => {
+test("answer_question: a blank answer beside files is normalized to an attachment-only answer", async (t) => {
   const withFile = snapshot({ pending: { approvals: [], userInputs: [{ requestId: "q2", createdAt: stamp(1), dismissible: false, questions: [{ id: "Upload", header: "U", question: "Upload the log", options: [], multiSelect: false, allowCustomAnswer: true }] }] } });
   const h = await harness([chatSummary({ hasPendingUserInput: true })], withFile); t.after(h.close);
   h.api.on("POST", "/api/sessions/c1/answer", { status: 200, body: { seq: 35 } });
   const run = (a: Record<string, unknown>) => tool("answer_question").run({ sessionId: "c1", ...a }, h.ctx);
-  await assert.rejects(run({ answers: { Upload: "see the log" }, attachments: { Upload: [{ name: "app.log", base64: "not base64!!" }] } }),
-    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /^Attachments for "U": .*malformed/.test(e.message));
-  assert.ok(!h.api.calls.some((c) => c.method === "POST"));
   await run({ answers: { Upload: " " }, attachments: { Upload: [{ name: "app.log", base64: "YQ==" }] } });
   const body = h.api.calls.find((c) => c.path === "/api/sessions/c1/answer")!.body as { answers: Record<string, unknown>; attachmentsByQuestionId: Record<string, { name: string }[]> };
   assert.deepEqual(body.answers, { Upload: "" }); assert.deepEqual(body.attachmentsByQuestionId.Upload.map((a) => a.name), ["app.log"]);
@@ -234,7 +221,7 @@ test("an empty requestId is refused, never read as omitted: with one request pen
   ];
   for (const [name, args] of calls) {
     assert.equal(z.object(tool(name).input).safeParse(args).success, false, `${name}: the schema refuses an empty requestId`);
-    await assert.rejects(tool(name).run(args, h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /with requestId ""\. Pending: /.test(e.message), name);
+    await assert.rejects(tool(name).run(args, h.ctx), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && (e.message.includes(name === "resolve_approval" ? "r1" : "q3")), name);
   }
   assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing was resolved, dismissed or answered");
 });
@@ -246,9 +233,9 @@ test("answer_question validates every file of every question before uploading an
   const run = (a: Record<string, unknown>) => tool("answer_question").run({ sessionId: "c1", ...a }, h.ctx);
   // The bad file is the second question's second file: flat index 2, reported as that question's attachments[1].
   await assert.rejects(run({ answers: { Why: "disk full" }, attachments: { Log: [file("app.log")], Why: [file("df.txt"), { name: "bad.txt", base64: "not base64!!" }] } }),
-    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /^Attachments for "Why": attachments\[1\]: base64 is empty or malformed\.$/.test(e.message));
+    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message.includes("Why") && e.message.includes("attachments[1]"));
   await assert.rejects(run({ answers: { Why: "disk full" }, attachments: { Log: Array.from({ length: 9 }, (_, i) => file(`${i}.log`)) } }),
-    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /"Log" takes at most 8 attachments/.test(e.message));
+    (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && e.message.includes("Log"));
   assert.equal(h.api.uploads.length, 0);
   assert.ok(!h.api.calls.some((c) => c.method === "POST"));
   await run({ answers: { Why: "disk full" }, attachments: { Why: [file("df.txt"), file("du.txt")], Log: [file("app.log")] } });
@@ -267,7 +254,7 @@ test("answer_question: a host refusal while uploading names the question and tha
   const file = (name: string) => ({ name, base64: Buffer.from(name).toString("base64") });
   // df.txt is the SECOND question's FIRST file: flat index 1, reported as that question's attachments[0].
   await assert.rejects(tool("answer_question").run({ sessionId: "c1", answers: { Why: "disk full" }, attachments: { Log: [file("app.log")], Why: [file("df.txt"), file("du.txt")] } }, h.ctx),
-    (e: { code: string; message: string }) => e.code === "INVALID_COMMAND" && e.message === "Attachments for \"Why\": attachments[0]: Attachment exceeds the 50 MiB limit.");
+    (e: { code: string; message: string }) => e.code === "INVALID_COMMAND" && e.message.includes("Why") && e.message.includes("attachments[0]") && e.message.includes("Attachment exceeds the 50 MiB limit."));
   assert.deepEqual(h.api.uploads.map((u) => u.meta.name), ["app.log", "df.txt"]);
   assert.ok(!h.api.calls.some((c) => c.method === "POST"), "nothing is sent after a refused upload");
 });

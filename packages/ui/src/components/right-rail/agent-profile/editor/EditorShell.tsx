@@ -5,9 +5,6 @@
  * said above it. On a phone the header and the bar are the sheet's sticky
  * ends and the body scrolls between them; on desktop the same inside the
  * dialog. Measures its own width for the forms below (`EditorWideContext`).
- *
- * Presentational: it takes the primary action as data, so a static render
- * check draws every state from plain props.
  */
 
 import React, { useRef } from "react";
@@ -19,12 +16,11 @@ import {
   EditorWideContext,
   isWide,
   useEditorEnv,
-  useElementWidth,
-  useInitialWidth
+  useElementWidth
 } from "./env";
-import { agentLabel } from "./layout.logic";
+import { agentLabel, assumedWidth } from "./layout.logic";
 
-export interface EditorPrimaryAction {
+interface EditorPrimaryAction {
   label: string;
   /** While the request is in flight: a spinner and this label ("Saving…"). */
   busyLabel?: string;
@@ -37,11 +33,11 @@ export interface EditorPrimaryAction {
 }
 
 /** Ctrl/Cmd+Enter, the editors' Save — not an IME's Enter, not a held repeat. */
-export function isSaveChord(event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "repeat" | "isComposing">): boolean {
+function isSaveChord(event: Pick<KeyboardEvent, "key" | "metaKey" | "ctrlKey" | "repeat" | "isComposing">): boolean {
   return event.key === "Enter" && (event.metaKey || event.ctrlKey) && !event.repeat && !event.isComposing;
 }
 
-export interface EditorShellProps {
+interface EditorShellProps {
   title: string;
   /** Under the title; defaults to the agent's name. */
   subtitle?: string;
@@ -73,7 +69,7 @@ export const EditorShell: React.FC<EditorShellProps> = ({
   const env = useEditorEnv();
   const phone = env.variant === "phone";
   const rootRef = useRef<HTMLDivElement | null>(null);
-  const width = useElementWidth(rootRef, useInitialWidth());
+  const width = useElementWidth(rootRef, assumedWidth(env.variant));
   const sub = subtitle ?? agentLabel(env.agent);
   const canSubmit = primary !== null && !primary.disabled && !primary.busy && env.connected;
 

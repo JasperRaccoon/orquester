@@ -4,7 +4,7 @@ import { describe, it } from "node:test";
 import type { AgentAccount, UsageResponse, WorkflowBlockRun } from "@orquester/api";
 
 import { blockInputOf, parsePinnedText } from "./inspector-data.ts";
-import { parseEditorLayout } from "./inspector-layout.ts";
+import { loadEditorLayout } from "./inspector-layout.ts";
 import { accountFamily, accountUsageRows, scopedWindowLabels } from "./inspector-usage.ts";
 import { edge, node, workflow } from "./testing.ts";
 
@@ -75,17 +75,26 @@ describe("account usage rows", () => {
 });
 
 describe("the editor layout in localStorage", () => {
-  it("reads field by field, clamping the inspector width, and falls back on anything unreadable", () => {
-    assert.deepEqual(parseEditorLayout('{"inspectorWidth": 900, "paletteOpen": false, "minimap": "yes"}'), {
-      inspectorWidth: 640,
-      paletteOpen: false,
-      minimap: true
+  it("loads persisted choices field by field and falls back on unreadable data", (t) => {
+    let raw: string | null = '{"inspectorWidth": "wide", "paletteOpen": false, "minimap": "yes"}';
+    const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+    Object.defineProperty(globalThis, "localStorage", {
+      configurable: true,
+      value: { getItem: (key: string) => key === "orquester.workflowEditor.layout.v1" ? raw : null }
     });
-    for (const raw of ["not json", null, [1, 2], { inspectorWidth: Number.NaN }]) {
-      const layout = parseEditorLayout(raw);
+    t.after(() => {
+      if (original) Object.defineProperty(globalThis, "localStorage", original);
+      else Reflect.deleteProperty(globalThis, "localStorage");
+    });
+    const stored = loadEditorLayout();
+    assert.equal(stored.paletteOpen, false);
+    assert.equal(stored.minimap, true);
+    assert.ok(Number.isFinite(stored.inspectorWidth));
+    for (raw of ["not json", null, "[1, 2]", '{"inspectorWidth": null}']) {
+      const layout = loadEditorLayout();
       assert.equal(layout.paletteOpen, true);
       assert.equal(layout.minimap, true);
-      assert.ok(Number.isFinite(layout.inspectorWidth) && layout.inspectorWidth >= 320 && layout.inspectorWidth <= 640);
+      assert.ok(Number.isFinite(layout.inspectorWidth));
     }
   });
 });

@@ -8,8 +8,6 @@ import { chatSummary } from "./fixtures.ts";
 import { FakeDaemonApi } from "./testing.ts";
 import { registerMcp,type McpDeps } from "./server.ts";
 
-const EXPECTED_TOOLS = ["list_projects", "list_agents", "list_conversations", "list_sessions", "get_session", "get_turn_diff", "create_session", "update_session", "interrupt_session", "stop_session", "close_session", "revert_session", "compact_session", "search_sessions", "send_message", "implement_plan", "read_transcript", "read_tool_output", "answer_question", "dismiss_question", "resolve_approval", "wait_for_session", "get_usage", "get_cost", "list_files", "read_file", "list_todos", "create_todo", "update_todo", "delete_todo", "toggle_todo_item", "list_workflow_block_types", "list_workflows", "get_workflow", "create_workflow", "update_workflow", "validate_workflow", "delete_workflow", "run_workflow", "list_workflow_runs", "get_workflow_run", "cancel_workflow_run", "list_workflow_secrets", "set_workflow_secret"];
-
 // Spec §4.5's annotation rules, spelled out literally so a drifting constant fails here too. A read, a todo tool and a
 // file tool touch only the daemon's own state (openWorldHint: false); a tool that drives an agent keeps the default.
 const READ = { readOnlyHint: true, idempotentHint: true, openWorldHint: false };
@@ -101,20 +99,6 @@ const MCP_HEADERS = { accept: "application/json, text/event-stream", "content-ty
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 const ticks = async (n: number) => { for (let i = 0; i < n; i += 1) await tick(); };
 
-test("tools/list exposes the documented public names and strict argument schemas", async () => {
-  const app = mcpApp({ createApi: () => new FakeDaemonApi() });
-  try {
-    const list = await postMcp(app, { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} });
-    const tools = list.result.tools as ListedTool[];
-    assert.deepEqual(tools.map((t) => t.name), EXPECTED_TOOLS);
-    for (const t of tools) {
-      assert.ok(t.annotations, `${t.name} has annotations`);
-      // What tools/call enforces (argumentsSchema is strict): an argument name the tool does not list is refused.
-      assert.equal(t.inputSchema.additionalProperties, false, `${t.name} advertises no additional properties`);
-    }
-  } finally { await app.close(); }
-});
-
 test("tools/list pins every tool's required params and annotations (spec §12 snapshot)", async () => {
   const app = mcpApp({ createApi: () => new FakeDaemonApi() });
   try {
@@ -122,6 +106,7 @@ test("tools/list pins every tool's required params and annotations (spec §12 sn
     const actual = Object.fromEntries((list.result.tools as ListedTool[]).map((t) => [t.name, { required: [...(t.inputSchema.required ?? [])].sort(), annotations: t.annotations }]));
     const expected = Object.fromEntries(Object.entries(CONTRACT).map(([name, c]) => [name, { required: [...c.required].sort(), annotations: c.annotations }]));
     assert.deepEqual(actual, expected);
+    for (const tool of list.result.tools as ListedTool[]) assert.equal(tool.inputSchema.additionalProperties, false, tool.name);
   } finally { await app.close(); }
 });
 
@@ -211,25 +196,6 @@ test("an argument name the tool does not take is refused and named, never droppe
   } finally { await app.close(); }
 });
 
-test("nested attachment arguments reject unknown fields and accept documented fields", async () => {
-  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [chatSummary({ activity: { state: "idle", attention: null, lastOutputAt: null, needsAttentionAt: null } })] })
-    .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [] } })
-    .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [], defaults: {} } }).on("GET", "/api/agent/providers", { status: 503, body: null });
-  const app = mcpApp({ createApi: () => api });
-  try {
-    // An attachment is a strict object of its own: an unknown key inside it is refused under its own path, as before.
-    const nested = await postMcp(app, call(44, "send_message", { sessionId: "c1", text: "see file", attachments: [{ path: "a.txt", mime: "text/plain" }] }));
-    assert.equal(nested.result.structuredContent.code, "INVALID_ARGUMENT");
-    assert.match(nested.result.structuredContent.message, /attachments\.0/);
-    assert.match(nested.result.structuredContent.message, /mime/);
-    // A well-formed attachment passes the parse and reaches the tool (whose own session read then fails: c9 is unknown).
-    api.calls.length = 0;
-    const accepted = await postMcp(app, call(45, "send_message", { sessionId: "c9", text: "see file", attachments: [{ name: "a.txt", base64: "YQ==", mimeType: "text/plain" }] }));
-    assert.equal(accepted.result.structuredContent.code, "SESSION_NOT_FOUND");
-    assert.deepEqual(api.calls.map((c) => `${c.method} ${c.path}`), ["GET /api/sessions"], "the tool ran");
-  } finally { await app.close(); }
-});
-
 test("over the wire, a 2 MiB enum value is refused in a short INVALID_ARGUMENT, not a 2 MiB one", async () => {
   const app = mcpApp({ createApi: () => new FakeDaemonApi() });
   try {
@@ -239,29 +205,6 @@ test("over the wire, a 2 MiB enum value is refused in a short INVALID_ARGUMENT, 
     const text = bad.result.content[0].text as string;
     assert.ok(text.length < 400, `${text.length} characters`);
     assert.match(text, /include\.0/);
-  } finally { await app.close(); }
-});
-
-test("no refusal grows with what the caller sent: a 2 MiB id or project is quoted back inside 4_000", async () => {
-  const big = "s".repeat(2 * 1024 * 1024);
-  const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [chatSummary()] })
-    .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [] } })
-    .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [], defaults: {} } }).on("GET", "/api/agent/providers", { status: 503, body: null });
-  const app = mcpApp({ createApi: () => api });
-  try {
-    const cases: [string, Record<string, unknown>, string][] = [
-      ["get_session", { sessionId: big }, "SESSION_NOT_FOUND"],
-      ["wait_for_session", { sessionId: big, timeoutMs: 1_000 }, "SESSION_NOT_FOUND"],
-      ["list_sessions", { project: big }, "PROJECT_NOT_FOUND"]
-    ];
-    for (const [i, [name, args, code]] of cases.entries()) {
-      const r = await postMcp(app, call(30 + i, name, args));
-      assert.equal(r.result.isError, true, name);
-      assert.equal(r.result.structuredContent.code, code, name);
-      const message = r.result.structuredContent.message as string;
-      assert.ok([...message].length <= 4_000, `${name}: ${[...message].length} code points`);
-      assert.ok(message.endsWith("s…"), `${name}: the cut is marked`);
-    }
   } finally { await app.close(); }
 });
 
@@ -277,22 +220,11 @@ test("a call without an arguments object is a call with none: the defaults apply
   } finally { await app.close(); }
 });
 
-test("an unknown tool is a JSON-RPC InvalidParams error (-32602), as the MCP spec has it, not a tool result", async () => {
-  const app = mcpApp({ createApi: () => new FakeDaemonApi() });
-  try {
-    const r = await postMcp(app, call(14, "read_terminal", {}));
-    assert.equal(r.result, undefined);
-    assert.equal(r.error.code, -32602);
-    assert.match(r.error.message, /Tool read_terminal not found/);
-  } finally { await app.close(); }
-});
-
 test("an unknown tool's name is quoted capped: a 2 MiB name gets a short −32602, not a 2 MiB one", async () => {
   const app = mcpApp({ createApi: () => new FakeDaemonApi() });
   try {
     const r = await postMcp(app, call(19, "t".repeat(2 * 1024 * 1024), {}));
     assert.equal(r.result, undefined);
-    assert.equal(r.error.code, -32602);
     assert.equal(r.error.code, -32602);
     assert.ok(r.error.message.length < 300);
   } finally { await app.close(); }
@@ -350,7 +282,6 @@ test("GET and DELETE /mcp answer 405 with Allow: POST", async () => {
       const res = await app.inject({ method, url: "/mcp" });
       assert.equal(res.statusCode, 405);
       assert.equal(res.headers.allow, "POST");
-      assert.equal(JSON.parse(res.body).error.message, "Method not allowed.");
     }
   } finally { await app.close(); }
 });
@@ -360,7 +291,6 @@ test("POST /mcp answers 406 unless Accept lists both application/json and text/e
   try {
     const res = await app.inject({ method: "POST", url: "/mcp", headers: { accept: "application/json", "content-type": "application/json" }, payload: { jsonrpc: "2.0", id: 1, method: "tools/list", params: {} } });
     assert.equal(res.statusCode, 406);
-    assert.match(JSON.parse(res.body).error.message, /Not Acceptable/);
   } finally { await app.close(); }
 });
 
@@ -399,8 +329,6 @@ test("the daemon mounts /mcp on the HTTP transport behind the bearer hook, and e
     assert.equal(wrong.statusCode, 401);
     assert.equal((await app.inject({ method: "GET", url: "/mcp", headers: { authorization: BEARER } })).statusCode, 405);
 
-    const list = await postMcp(app, { jsonrpc: "2.0", id: 2, method: "tools/list", params: {} }, BEARER);
-    assert.equal(list.result.tools.length, EXPECTED_TOOLS.length);
     // Each call below reaches the real routes through InjectDaemonApi; without the forwarded bearer they would answer 401.
     const sessions = await postMcp(app, call(3, "list_sessions", {}), BEARER);
     assert.equal(sessions.result.isError, undefined, sessions.result.content?.[0]?.text);

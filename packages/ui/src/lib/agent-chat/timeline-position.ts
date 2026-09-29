@@ -137,14 +137,11 @@ export function parseTimelinePositions(
  */
 export class TimelinePositionStore {
   private readonly entries: Map<string, RememberedTimelinePosition>;
-  private readonly persist: (serialized: string) => void;
 
   constructor(options?: {
     initial?: Map<string, RememberedTimelinePosition>;
-    persist?: (serialized: string) => void;
   }) {
     this.entries = options?.initial ?? new Map();
-    this.persist = options?.persist ?? writeTimelinePositions;
   }
 
   read(threadKey: string): RememberedTimelinePosition | undefined {
@@ -161,21 +158,13 @@ export class TimelinePositionStore {
       }
       this.entries.delete(oldest);
     }
-    this.persist(JSON.stringify([...this.entries.entries()]));
+    writeTimelinePositions(JSON.stringify([...this.entries.entries()]));
   }
 
   forget(threadKey: string): void {
     if (this.entries.delete(threadKey)) {
-      this.persist(JSON.stringify([...this.entries.entries()]));
+      writeTimelinePositions(JSON.stringify([...this.entries.entries()]));
     }
-  }
-
-  get size(): number {
-    return this.entries.size;
-  }
-
-  keys(): string[] {
-    return [...this.entries.keys()];
   }
 }
 

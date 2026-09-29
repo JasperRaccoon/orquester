@@ -8,7 +8,6 @@ import test from "node:test";
 
 import {
   attachmentFileExtension,
-  attachmentFileNameCandidates,
   createAttachmentId,
   parseAttachmentFileExtension,
   parseAttachmentIdFromRelativePath,
@@ -51,14 +50,6 @@ test(".part is reserved, so a stored archive.part becomes .bin", () => {
   assert.equal(attachmentFileExtension("shot.PNG"), ".png");
   assert.equal(attachmentFileExtension("no-extension"), ".bin");
   assert.equal(attachmentFileExtension("weird.reallylongextension"), ".bin");
-});
-
-test("the file name candidates follow the id's own extension when it has one", () => {
-  assert.deepEqual(attachmentFileNameCandidates(`t1-${UUID}-png`), [`t1-${UUID}-png.png`]);
-  const legacy = attachmentFileNameCandidates(`t1-${UUID}`);
-  assert.ok(legacy.length > 1, "an id with no extension suffix probes the known ones");
-  assert.ok(legacy.every((name) => name.startsWith(`t1-${UUID}.`)));
-  assert.deepEqual(attachmentFileNameCandidates("../escape"), []);
 });
 
 test("an id is recovered from a stored file name", () => {

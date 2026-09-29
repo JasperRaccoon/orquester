@@ -1885,7 +1885,7 @@ export class CodexNormaliser {
  * answer is prose in a follow-up turn, not a keyed reply), and an option is a
  * bare string with no description of its own.
  */
-export function toAsyncUserInputQuestions(
+function toAsyncUserInputQuestions(
   questions: readonly CodexProtocol.v2.AsyncUserInputQuestion[] | null
 ): UserInputQuestion[] {
   if (questions === null) {
@@ -2078,7 +2078,7 @@ function truncate(value: string): string {
  * `codexErrorInfo` alone — never the message. A connection failure the
  * server stamped 401 is a refused login too.
  */
-export function failureReasonOf(
+function failureReasonOf(
   info: CodexProtocol.v2.CodexErrorInfo | null
 ): RuntimeFailureReason | undefined {
   if (info === null) {

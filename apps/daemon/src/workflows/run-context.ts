@@ -47,7 +47,7 @@ export class EngineStoppedError extends Error {
 // Limits
 // ---------------------------------------------------------------------------
 
-export interface EngineLimits {
+interface EngineLimits {
   maxConcurrentRuns: number;
   maxConcurrentAgentBlocks: number;
   maxConcurrentProcesses: number;

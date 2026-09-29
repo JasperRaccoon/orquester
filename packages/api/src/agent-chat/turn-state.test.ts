@@ -7,10 +7,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import type { Turn } from "./thread.ts";
-import {
-  applySessionStatusToTurn,
-  deriveLatestTurn
-} from "./turn-state.ts";
+import { applySessionStatusToTurn } from "./turn-state.ts";
 
 function turn(overrides: Partial<Turn> = {}): Turn {
   return {
@@ -42,18 +39,4 @@ test("a pending turn (no turn id yet) settles too", () => {
     "2026-01-01T00:00:09.000Z"
   );
   assert.equal(settled.state, "failed");
-});
-
-test("deriveLatestTurn reads the last row, or null", () => {
-  assert.equal(deriveLatestTurn([]), null);
-  const latest = deriveLatestTurn([
-    turn({ turnId: "old", state: "completed", completedAt: "a" }),
-    turn({ turnId: "new", state: "running" })
-  ]);
-  assert.deepEqual(latest, {
-    turnId: "new",
-    state: "running",
-    startedAt: "2026-01-01T00:00:01.000Z",
-    completedAt: null
-  });
 });

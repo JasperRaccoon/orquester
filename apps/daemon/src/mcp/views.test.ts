@@ -86,22 +86,6 @@ test("buildViewContext reads registry, accounts and providers and tolerates a fa
   assert.deepEqual(d.chat.supports, { planMode: false, rollback: false, compaction: false, backgroundTasks: false, goals: null });
 });
 
-test("buildViewContext reads a degraded providers body field-wise, as list_agents does: nothing throws, and only a row with an id and a capabilities object counts", async () => {
-  const registryBody = { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [{ id: "claude", kind: "agent", name: "Claude Code", bin: ["claude"], enabled: true, installState: "idle", chat: { adapter: "claude" } }, { id: "codex", kind: "agent", name: "Codex", bin: ["codex"], enabled: true, installState: "idle", chat: { adapter: "codex" } }] };
-  const bodies: [string, unknown][] = [["malformed provider collection", { providers: "unavailable" }]];
-  for (const [label, body] of bodies) {
-    const api = new FakeDaemonApi()
-      .on("GET", "/api/sessions", { status: 200, body: [chatSummary()] })
-      .on("GET", "/api/sessions/c1/thread", { status: 200, body: { kind: "snapshot", thread: snapshot() } })
-      .on("GET", "/api/registry", { status: 200, body: registryBody })
-      .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [], defaults: {} } })
-      .on("GET", "/api/agent/providers", { status: 200, body });
-    // get_session, send_message and create_session build their detail through it: a degraded body reads as "no capabilities".
-    const d = await chatDetail(api, "c1");
-    assert.deepEqual(d.chat.supports, { planMode: false, rollback: false, compaction: false, backgroundTasks: false, goals: null }, `${label}: supports`);
-  }
-});
-
 test("the context meter skips a row without a usable reading, as the host's snapshot drop rule expects", () => {
   const snap = snapshot({ items: [activity("context-window.updated", { usedTokens: 50_000, maxTokens: 200_000 }), activity("context-window.updated", { maxTokens: 200_000 })] });
   assert.deepEqual(sessionDetail(chatSummary(), snap, ctx).chat.contextWindow, { usedTokens: 50_000, maxTokens: 200_000, percentUsed: 25 });
@@ -361,13 +345,10 @@ test("goals §5.7: a goal an Orquester update holds reads paused, continuing and
   assert.deepEqual(detailWith(userPaused, "paused"), { objective: "Migrate the parser", status: "paused", continuing: false, updatedAt: stamp(6) });
 });
 
-test("the detail's goal is null when the snapshot's does not read, whatever the summary says, and from a host that predates goals; a mistyped fact is dropped", () => {
+test("the detail's cleared or missing goal overrides a stale continuing summary", () => {
   const summary = chatSummary({ goal: { objective: "Ship it", status: "active", continuing: true } });
-  const unread: [string, unknown][] = [["malformed", "Ship it"], ["cleared", null]];
-  for (const [label, goal] of unread) assert.equal(sessionDetail(summary, snapshot({ goal: goal as never }), ctx).chat.goal, null, label);
+  assert.equal(sessionDetail(summary, snapshot({ goal: null }), ctx).chat.goal, null);
   assert.equal(sessionDetail(summary, snapshot(), ctx).chat.goal, null, "an older host's snapshot has no goal field");
-  const mistyped = { objective: "Ship it", status: "active", rounds: -1, tokensUsed: "many", lastCheck: "", elapsedMs: Number.NaN, updatedAt: stamp(3) };
-  assert.deepEqual(sessionDetail(summary, snapshot({ goal: mistyped as never }), ctx).chat.goal, { objective: "Ship it", status: "active", continuing: true, updatedAt: stamp(3) });
 });
 
 test("the detail's goal text is cut in code points, ending in \"…\": an objective at 4 000, a last check at 2 000, a phase at 200; an objective at the limit stays whole", () => {

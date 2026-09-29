@@ -41,17 +41,10 @@ test("visits are monotonic: an older stamp never moves the mark back", () => {
   assert.deepEqual(markThreadRead({ a: T0 }, "a", T1), { a: T1 });
 });
 
-test("an unparseable visit stamp is ignored without changing the stored data", () => {
-  const visits = { a: T0 };
-  assert.deepEqual(markThreadRead(visits, "a", "nope"), visits);
-  assert.deepEqual(markThreadRead(visits, "a", T0), visits);
-});
-
-test("mark-unread stamps one millisecond before the completion", () => {
-  const visits = markThreadUnread({ a: T1 }, "a", T1);
-  assert.equal(visits.a, "2026-09-21T10:04:59.999Z");
-  // …which is exactly what makes it unread again.
+test("mark-unread makes the completed turn unread without changing another thread", () => {
+  const visits = markThreadUnread({ a: T1, b: T0 }, "a", T1);
   assert.equal(hasUnseenCompletion(T1, visits.a), true);
+  assert.equal(visits.b, T0);
 });
 
 test("mark-unread is a no-op without a completed turn, and is idempotent", () => {

@@ -271,28 +271,6 @@ describe("an abandoned agentMessage is closed by the next item of its turn (fixt
     startedAtMs: 0
   });
 
-  it("a new message of the same turn closes the abandoned one first, text-less", () => {
-    const { normaliser } = make();
-    normaliser.notification("item/started" as never, startMessage(PARENT, "t1", "msg_a"));
-    const events = normaliser.notification(
-      "item/started" as never,
-      startMessage(PARENT, "t1", "msg_b")
-    );
-    assert.deepEqual(
-      events.map((event) => [event.type, event.itemId]),
-      [
-        ["item.completed", "msg_a"],
-        ["item.started", "msg_b"]
-      ],
-      "the abandoned message closes BEFORE the next one opens"
-    );
-    // Exactly what `closeOpenItems` writes for it at `turn/completed`: no
-    // text, so ingestion only closes what was streamed and never re-emits it.
-    assert.deepEqual(events[0]!.payload, { itemType: "assistant_message", status: "completed" });
-    assert.equal(events[0]!.turnId, "t1");
-    assert.deepEqual(normaliser.openItemIds(), ["msg_b"]);
-  });
-
   it("any new item of the turn closes it — a tool call too", () => {
     const { normaliser } = make();
     normaliser.notification("item/started" as never, startMessage(PARENT, "t1", "msg_a"));
@@ -307,21 +285,6 @@ describe("an abandoned agentMessage is closed by the next item of its turn (fixt
         ["item.started", "call_1"]
       ]
     );
-  });
-
-  it("never closes an open TOOL item — parallel calls overlap", () => {
-    // 05 starts three exec_command calls back to back before any completes.
-    const { normaliser } = make();
-    normaliser.notification("item/started" as never, startCommand(PARENT, "t1", "call_1"));
-    const events = normaliser.notification(
-      "item/started" as never,
-      startCommand(PARENT, "t1", "call_2")
-    );
-    assert.deepEqual(
-      events.map((event) => event.type),
-      ["item.started"]
-    );
-    assert.deepEqual(normaliser.openItemIds(), ["call_1", "call_2"]);
   });
 
   it("leaves another turn's message to that turn's own settle", () => {

@@ -21,11 +21,11 @@ import { basename, join } from "node:path";
 import { SKILL_FILE, isValidCommandName, isValidSkillName, parseMarkdownDocument } from "../infra/index.ts";
 
 /** Directory levels below the scan root a skill or `commands` folder may sit at. */
-export const SCAN_MAX_DEPTH = 6;
+const SCAN_MAX_DEPTH = 6;
 /** Largest `SKILL.md` or command file read. */
-export const SCAN_MAX_FILE_BYTES = 1024 * 1024;
+const SCAN_MAX_FILE_BYTES = 1024 * 1024;
 /** Most candidates one scan offers. */
-export const SCAN_MAX_CANDIDATES = 500;
+const SCAN_MAX_CANDIDATES = 500;
 /** Most "skipped symlink" notes listed one by one. */
 const MAX_SYMLINK_NOTES = 10;
 
@@ -42,7 +42,7 @@ export interface ScannedImportCandidate {
   path: string;
 }
 
-export interface ImportScan {
+interface ImportScan {
   candidates: ScannedImportCandidate[];
   notes: string[];
 }

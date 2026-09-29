@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { holdsSecret, protectSecrets, revealSecrets } from "./secret-text.ts";
+import { protectSecrets, revealSecrets } from "./secret-text.ts";
 
 const SECRETS = { API_TOKEN: "abcd-1234-efgh", TOKEN: "abcd", SHORT: "xy" };
 
@@ -8,7 +8,6 @@ test("protectSecrets hides every value (longest first, ≥ 4 chars); revealSecre
   const text = "token=abcd-1234-efgh; prefix abcd; short xy; again abcd-1234-efgh";
   const kept = protectSecrets(text, SECRETS);
   assert.equal(kept, "token=\uE000API_TOKEN\uE001; prefix \uE000TOKEN\uE001; short xy; again \uE000API_TOKEN\uE001");
-  assert.equal(holdsSecret(kept, SECRETS), false);
   assert.equal(revealSecrets(kept, SECRETS), text);
 });
 

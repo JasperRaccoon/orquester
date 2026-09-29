@@ -23,7 +23,7 @@ import {
   type AgentProfileNotice
 } from "./store";
 
-export interface AgentProfileView {
+interface AgentProfileView {
   entry: AgentProfileEntry;
   /** The overview's agents (installed, version, counts), or `null` before it loaded. */
   overview: readonly AgentProfileAgentSummary[] | null;

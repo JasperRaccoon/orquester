@@ -98,10 +98,8 @@ import type { AccountHome, ProviderUsageWindow } from "@orquester/api/agent-chat
  * Re-exported so existing imports from this module keep working.
  */
 import {
-  isPlanImplementationMessage,
-  PLAN_IMPLEMENTATION_PROMPT_PREFIX
+  isPlanImplementationMessage
 } from "@orquester/api/agent-chat";
-export { PLAN_IMPLEMENTATION_PROMPT_PREFIX };
 
 import { stat } from "node:fs/promises";
 
@@ -194,8 +192,7 @@ import {
   blockedProviderCommandMessage,
   COMPACT_COMMAND_TEXT,
   isHostNativeCompact,
-  parseHostGoalCommand,
-  providerInputFor
+  parseHostGoalCommand
 } from "./slash.ts";
 import { createTurnWatchdog, stalledTurnMessage, type TurnWatchdog } from "./turn-watchdog.ts";
 import { checkMinimumVersion } from "./version-gate.ts";
@@ -2142,7 +2139,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     try {
       const result = await adapter.sendTurn({
         threadId: runtime.id,
-        input: providerInputFor(turn.input),
+        input: turn.input,
         // Each carries the STAT'd size; the adapter names in an
         // `Attached files:` block whatever it does not ingest natively (§4.1).
         attachments,
@@ -5997,7 +5994,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // §3.4's bounded grace window. A `/turn` commits its message and its
     // pending turn row BEFORE the effect runs, so a host that dies in that
     // window leaves a `pending` turn with an idle head: not "orphaned" by the
-    // filter above, but `deriveLatestTurn` reports it forever and the status
+    // filter above, but the latest-turn summary reports it forever and the status
     // line shows the thread working with nothing behind it. Its settle is the
     // reconcile's first row when it writes one, and ends this orphan's running
     // turn with the pending one.
@@ -6734,7 +6731,7 @@ function isLiveOrphan(head: ThreadHead): boolean {
  * then reads settled, and without this the next host left the turn
  * interrupted and the marker on the head for good (final review A r1, I1).
  * The marked turn must still be the thread's LATEST turn (positional, as
- * `deriveLatestTurn` reads it — a newer turn, even one only requested, means
+ * the latest-turn summary reads it — a newer turn, even one only requested, means
  * the user moved on) and settled `interrupted`: a turn that ended on its own
  * between the mark and the teardown is not continued. And the marker must be
  * STAMPED (`markedAt`, on every marker this code writes): an older host could
@@ -7516,7 +7513,7 @@ function stampHistoryTimes<TEvent extends { createdAt?: string }>(
   });
 }
 
-export function serializedSize(value: object): number {
+function serializedSize(value: object): number {
   const cached = sizeCache.get(value);
   if (cached !== undefined) {
     return cached;

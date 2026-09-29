@@ -1,25 +1,13 @@
-/**
- * The app store's two hooks into the agent-profile store: `/events` messages
- * of the `agent-profile` channel reach it, and a sign-out or a connection
- * switch empties it (another daemon's profiles must never show).
- *
- * The routing runs for real — `applyEvent` on the actual app store, with a
- * fake client bound through a load. The resets are pinned in the source, as
- * `lib/saved-prompts/app-wiring.test.ts` does: driving `signOut` /
- * `selectConnection` under node would build a real `ApiClient`. What the
- * reset itself does is `store.test.ts`'s.
- */
+/** App-store channel routing; store.test.ts owns cache/reset behavior. */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
+
 import { describe, it } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { AGENT_PROFILE_CHANNEL, type AgentProfileAgentId, type AgentProfileSnapshot } from "@orquester/api";
 
 import { useAppStore } from "../../store/app.ts";
-import { agentProfileEntry, loadAgentProfile, resetAgentProfile, type AgentProfileApi } from "./store.ts";
+import { agentProfileStore, loadAgentProfile, resetAgentProfile, type AgentProfileApi } from "./store.ts";
 
 const settle = () => new Promise<void>((resolve) => setImmediate(resolve));
 
@@ -71,7 +59,7 @@ describe("the app store routes agent-profile events", () => {
     await settle();
     await settle();
     assert.deepEqual(api.gets, ["claude", "claude"]);
-    assert.equal(agentProfileEntry("claude").snapshot?.revision, "r2");
+    assert.equal(agentProfileStore.getState().agents.claude.snapshot?.revision, "r2");
   });
 
   it("the same message on another channel does not", async () => {
@@ -83,38 +71,4 @@ describe("the app store routes agent-profile events", () => {
     assert.deepEqual(api.gets, ["claude"]);
   });
 
-  it("a malformed payload is ignored without a throw", () => {
-    resetAgentProfile();
-    assert.doesNotThrow(() => {
-      useAppStore.getState().applyEvent(event(AGENT_PROFILE_CHANNEL, "agentProfile.changed", null));
-      useAppStore.getState().applyEvent(event(AGENT_PROFILE_CHANNEL, "agentProfile.changed", 7));
-    });
-  });
-});
-
-describe("a sign-out and a connection switch reset the agent profiles", () => {
-  const here = dirname(fileURLToPath(import.meta.url));
-  // Comments stripped, so a commented-out call never passes for a live one.
-  const source = readFileSync(join(here, "..", "..", "store", "app.ts"), "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .replace(/(^|[^:\\])\/\/.*$/gm, "$1");
-
-  /** The body of the store method `name` (its implementation, not its type), up to the next method. */
-  function methodBody(name: string): string {
-    const store = source.indexOf("create<AppState>(");
-    assert.ok(store >= 0, "app.ts still creates its store with create<AppState>(");
-    const start = source.indexOf(`\n  ${name}: `, store);
-    assert.ok(start >= 0, `app.ts still has ${name}`);
-    const next = source.slice(start + 1).search(/\n {2}[A-Za-z]\w*: /);
-    return next < 0 ? source.slice(start) : source.slice(start, start + 1 + next);
-  }
-
-  for (const name of ["signOut", "selectConnection"]) {
-    it(`${name} resets them before it switches the client`, () => {
-      const body = methodBody(name);
-      const reset = body.indexOf("resetAgentProfile();");
-      assert.ok(reset >= 0, `${name} calls resetAgentProfile()`);
-      assert.ok(reset < body.indexOf("set({"), "before the new client is installed");
-    });
-  }
 });

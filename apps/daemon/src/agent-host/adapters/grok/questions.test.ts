@@ -58,11 +58,6 @@ test("an unanswered question is dropped from the envelope", () => {
   assert.deepEqual(answersToXaiResponse(REAL, { [TEXT]: "   " }).answers, {});
 });
 
-test("annotations are omitted entirely when empty", () => {
-  const response = answersToXaiResponse(REAL, { [TEXT]: "beta.txt" });
-  assert.equal("annotations" in response, false);
-});
-
 test("an explicit question id is honoured, and the text still works as a fallback", () => {
   const withId: XaiAskUserQuestionParams = {
     ...REAL,

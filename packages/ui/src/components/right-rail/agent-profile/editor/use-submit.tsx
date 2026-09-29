@@ -17,15 +17,15 @@ import { useEditorEnv } from "./env";
 import { profileError, profileErrorPlacement, type ProfileErrorInfo, type ProfileErrorPlacement } from "./errors";
 import { Banner, SmallButton } from "./fields";
 
-export type MutationSend = (onConflict?: ProfileConflictPolicy) => Promise<ProfileMutationResponse>;
+type MutationSend = (onConflict?: ProfileConflictPolicy) => Promise<ProfileMutationResponse>;
 
-export interface SubmitState {
+interface SubmitState {
   busy: boolean;
   error: ProfileErrorInfo | null;
   placement: ProfileErrorPlacement | null;
 }
 
-export interface ProfileSubmit extends SubmitState {
+interface ProfileSubmit extends SubmitState {
   run(send: MutationSend, onConflict?: ProfileConflictPolicy): Promise<void>;
   /** The Replace / Keep both answer to an `ITEM_EXISTS`. */
   resolveConflict(policy: Exclude<ProfileConflictPolicy, "fail">): void;
@@ -96,7 +96,7 @@ export function useProfileSubmit(): ProfileSubmit {
 }
 
 /** The panel's notice for a save refused after its editor closed. */
-export function closedSaveFailure(info: ProfileErrorInfo): string {
+function closedSaveFailure(info: ProfileErrorInfo): string {
   return `Your change was not saved: ${info.message}`;
 }
 

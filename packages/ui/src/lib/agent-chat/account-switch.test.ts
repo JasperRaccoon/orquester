@@ -16,7 +16,6 @@ chatAccountLabel,
 chatAccountSelectionId,
 chatAccountSwitchRefusal,
 chatAccountSwitchSupported,
-GOAL_HELD_SWITCH_REFUSAL,
 isGoalContinuing,
 type ChatAccountSwitchState
 } from "./account-switch.ts";
@@ -231,11 +230,6 @@ describe("a continuing goal closes the gate (goals §5.5)", () => {
       goalHeldForUpdate: isGoalHeldForUpdate({ goal: goal("paused"), goalHeldForHandover: true })
     };
     assert.equal(canSwitchChatAccount(held), false, "the switch stays refused while the goal is held");
-    assert.equal(
-      chatAccountSwitchRefusal(held),
-      GOAL_HELD_SWITCH_REFUSAL,
-      "in the host's own words — the hold's, not a pause the goal has had"
-    );
   });
 
   it("goals §5.7: held without a continuing verdict still closes the chip, as the host refuses it", () => {
@@ -253,7 +247,6 @@ describe("a continuing goal closes the gate (goals §5.5)", () => {
     };
     assert.equal(held.goalContinuing, false);
     assert.equal(canSwitchChatAccount(held), false);
-    assert.equal(chatAccountSwitchRefusal(held), GOAL_HELD_SWITCH_REFUSAL);
   });
 
   it("goals §5.7: the head's hold mark continues nothing the provider would not set going again", () => {

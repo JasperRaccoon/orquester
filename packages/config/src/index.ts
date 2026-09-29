@@ -558,9 +558,6 @@ export function agentAccountsFile(baseDir: string): string {
 export function agentAccountsDir(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "agent-accounts");
 }
-export function agentAccountHome(baseDir: string, agent: string, id: string): string {
-  return joinPath(agentAccountsDir(baseDir), agent, id, "home");
-}
 
 export const appConfigSchema = z.object({
   version: z.literal(1).default(1),

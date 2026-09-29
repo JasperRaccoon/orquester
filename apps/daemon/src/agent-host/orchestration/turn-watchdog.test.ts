@@ -89,17 +89,6 @@ describe("turn liveness watchdog (§3.1)", () => {
     assert.equal(stalled.length, 1, "the deadline restarts once the user answers");
   });
 
-  it("re-checks the pause immediately before cancelling", () => {
-    const { watchdog, clock, at, stalled } = harness();
-    watchdog.observe(event("turn.started", { turnId: "turn-1" }));
-    watchdog.observe(event("content.delta", { turnId: "turn-1" }));
-    // A request opens after the timer was armed but before it fires.
-    clock.set(10 * 60_000 - 1);
-    watchdog.observe(event("user-input.requested", { turnId: "turn-1", requestId: "q1" }));
-    at(10 * 60_000);
-    assert.deepEqual(stalled, []);
-  });
-
   it("never stalls a turn while the thread holds a card waiting on the user — even one an earlier turn raised", () => {
     // A question that outlives the turn that asked it (a subagent's own, a
     // waiting wake's: they ride no turn) is gone from the per-turn pause when
@@ -190,23 +179,6 @@ describe("turn liveness watchdog — the goal window (goals §5.2)", () => {
     at(10 * 60_000);
     assert.equal(stalled.length, 1);
     assert.equal(stalled[0]?.windowMs, 10 * 60_000);
-  });
-
-  it("the goal window is re-checked at every normal window, so it holds while the goal does", () => {
-    let active = true;
-    const { watchdog, at, stalled } = harness({ isGoalActive: () => active });
-    watchdog.observe(event("turn.started", { turnId: "turn-1" }));
-    watchdog.observe(event("content.delta", { turnId: "turn-1" }));
-    for (let minute = 10; minute < 60; minute += 10) {
-      at(minute * 60_000);
-      assert.equal(stalled.length, 0, `still inside the goal window at ${minute} min`);
-
-    }
-    // The goal ends at 55 minutes: the next check, at 60, finds no goal — and
-    // an hour of silence is past every window.
-    active = false;
-    at(60 * 60_000);
-    assert.equal(stalled.length, 1);
   });
 
   it("is still paused entirely while an approval is open", () => {

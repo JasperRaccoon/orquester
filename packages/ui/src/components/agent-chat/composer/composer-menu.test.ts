@@ -10,7 +10,6 @@ import {
   isProviderSkillUserInvocable,
   menuItemAction,
   menuItemReplacement,
-  providerCommandsForSlashMenu,
   searchSlashMenuItems,
   skillsForSlashMenu,
   slashMenuItemsForPromptPosition,
@@ -55,12 +54,6 @@ test("the slash-menu skill setting is honoured; the $ menu ignores it", () => {
 
 test("a skill that is also advertised as a command is listed once, as the skill", () => {
   const visible = [skill("review")];
-  const kept = providerCommandsForSlashMenu([command("review"), command("init")], visible);
-  assert.deepEqual(
-    kept.map((entry) => entry.name),
-    ["init"]
-  );
-
   const items = buildSlashMenuItems({
     ...BASE,
     slashCommands: [command("review")],
@@ -89,24 +82,25 @@ test("away from offset 0 provider commands are dropped; host commands and skills
 });
 
 test("/plan and /default appear only where the plan toggle is shown", () => {
-  const withPlan = buildSlashMenuItems(BASE).filter((item) => item.type === "host-command");
-  assert.deepEqual(
-    withPlan.map((item) => (item.type === "host-command" ? item.command : "")),
-    ["model", "effort", "plan", "default"]
-  );
-  const withoutPlan = buildSlashMenuItems({ ...BASE, showPlanModeToggle: false });
-  assert.equal(
-    withoutPlan.some((item) => item.type === "host-command" && item.command === "plan"),
-    false
-  );
+  for (const showPlanModeToggle of [false, true]) {
+    const items = buildSlashMenuItems({ ...BASE, showPlanModeToggle });
+    for (const command of ["plan", "default"] as const) {
+      assert.equal(
+        items.some((item) => item.type === "host-command" && item.command === command),
+        showPlanModeToggle
+      );
+    }
+  }
 });
 
 test("/effort appears only when the selected model has a reasoning descriptor", () => {
-  const items = buildSlashMenuItems({ ...BASE, hasEffortOption: false });
-  assert.equal(
-    items.some((item) => item.type === "host-command" && item.command === "effort"),
-    false
-  );
+  for (const hasEffortOption of [false, true]) {
+    const items = buildSlashMenuItems({ ...BASE, hasEffortOption });
+    assert.equal(
+      items.some((item) => item.type === "host-command" && item.command === "effort"),
+      hasEffortOption
+    );
+  }
 });
 
 test("/compact is hidden until its full precondition list holds", () => {
@@ -182,12 +176,6 @@ test("ties break host commands, then provider commands, then skills", () => {
   );
 });
 
-test("a leading slash in the query is stripped before ranking", () => {
-  const items = buildSlashMenuItems({ ...BASE, query: "/mod" });
-  assert.equal(items[0]?.type, "host-command");
-  assert.equal(items[0]?.type === "host-command" && items[0].command, "model");
-});
-
 test("insertion: provider commands and skills insert text, host commands insert nothing", () => {
   assert.equal(
     menuItemReplacement({
@@ -240,15 +228,6 @@ test("R2-2: a synthesised provider /effort never duplicates the host row", () =>
   );
   assert.equal(effortRows.length, 1);
   assert.equal(effortRows[0]?.type, "host-command");
-});
-
-test("R2-2: the host dedupe is by name, case- and whitespace-insensitively", () => {
-  assert.deepEqual(
-    providerCommandsForSlashMenu([command(" Effort "), command("init")], [], ["effort"]).map(
-      (entry) => entry.name
-    ),
-    ["init"]
-  );
 });
 
 test("R2-5: Grok's /always-approve is refused with a pointer at the mode chip", () => {

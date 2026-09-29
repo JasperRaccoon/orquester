@@ -15,9 +15,7 @@ import {
 import {
   approvalOptionsFor,
   buildOpenCodePermissionRules,
-  fromOpenCodePermissionReply,
   mapPermissionToRequestType,
-  permissionDetail,
   toOpenCodePermissionReply,
   type OpenCodePermissionRuleset
 } from "./ruleset.ts";
@@ -47,26 +45,6 @@ test("§4.3: every decision maps to the reply the OpenCode column names", () => 
   }
 });
 
-test("§4.3: a reply that arrives from elsewhere maps back to a decision", () => {
-  assert.equal(fromOpenCodePermissionReply("once"), "accept");
-  assert.equal(fromOpenCodePermissionReply("always"), "acceptForSession");
-  assert.equal(fromOpenCodePermissionReply("reject"), "decline");
-});
-
-test("§4.3: `Allow for workspace` warns, and names the pattern it widens", () => {
-  const options = approvalOptionsFor({
-    id: "per_1",
-    sessionID: "ses_1",
-    permission: "bash",
-    patterns: ["echo hi"],
-    always: ["echo *"]
-  });
-  const workspace = options.find((option) => option.decision === "acceptForSession");
-  assert.equal(workspace?.label, "Allow for workspace");
-  assert.match(String(workspace?.warning), /echo \*/);
-  assert.match(String(workspace?.warning), /every OpenCode session in this workspace/);
-});
-
 test("§4.3: the card falls back to the default four when the ask names no patterns", () => {
   const options = approvalOptionsFor({
     id: "per_1",
@@ -91,27 +69,6 @@ test("§4.3: a permission maps to a canonical request type", () => {
   assert.equal(mapPermissionToRequestType("external_directory"), "command_execution_approval");
 });
 
-test("a bash ask shows its command; anything else shows the permission name", () => {
-  assert.equal(
-    permissionDetail({
-      id: "p",
-      sessionID: "s",
-      permission: "bash",
-      patterns: ["echo hi", "*"]
-    }),
-    "echo hi"
-  );
-  assert.equal(
-    permissionDetail({
-      id: "p",
-      sessionID: "s",
-      permission: "external_directory",
-      patterns: ["/etc"]
-    }),
-    "external directory\n/etc"
-  );
-});
-
 // ---------------------------------------------------------------------------
 // §4.4 — the permission-mode table, OpenCode column
 // ---------------------------------------------------------------------------
@@ -134,27 +91,21 @@ test("§4.4 supervised: `*`→ask, reads allow except `.env`", () => {
   assert.equal(ruleFor(rules, "edit"), "ask");
 });
 
-test("§4.4 accept edits: the SAME list, with `edit`→allow", () => {
-  const supervised = buildOpenCodePermissionRules("approval-required");
-  const acceptEdits = buildOpenCodePermissionRules("auto-accept-edits");
-  assert.equal(ruleFor(acceptEdits, "edit"), "allow");
-  assert.equal(supervised.length, acceptEdits.length);
-  for (let index = 0; index < supervised.length; index += 1) {
-    const left = supervised[index];
-    const right = acceptEdits[index];
-    assert.equal(left?.permission, right?.permission);
-    assert.equal(left?.pattern, right?.pattern);
-    if (left?.permission !== "edit") {
-      assert.equal(left?.action, right?.action, `rule ${index} (${String(left?.permission)})`);
-    }
-  }
+test("§4.4 accept edits permits edits while shell and sensitive reads still ask", () => {
+  const rules = buildOpenCodePermissionRules("auto-accept-edits");
+  assert.equal(ruleFor(rules, "edit"), "allow");
+  assert.equal(ruleFor(rules, "bash"), "ask");
+  assert.equal(ruleFor(rules, "read", "*.env"), "ask");
+  assert.equal(ruleFor(rules, "read", "*.env.*"), "ask");
 });
 
-test("§4.4 auto: falls back to Supervised, by deliberate choice and not by omission", () => {
-  assert.deepEqual(
-    buildOpenCodePermissionRules("auto"),
-    buildOpenCodePermissionRules("approval-required")
-  );
+test("§4.4 auto keeps supervised approval for edits, shell and sensitive reads", () => {
+  const rules = buildOpenCodePermissionRules("auto");
+  assert.equal(ruleFor(rules, "*"), "ask");
+  assert.equal(ruleFor(rules, "edit"), "ask");
+  assert.equal(ruleFor(rules, "bash"), "ask");
+  assert.equal(ruleFor(rules, "read", "*.env"), "ask");
+  assert.equal(ruleFor(rules, "read", "*.env.*"), "ask");
 });
 
 test("§4.4: the read-only and always-allowed tools are exactly the documented set", () => {

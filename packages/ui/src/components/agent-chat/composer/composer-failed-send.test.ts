@@ -17,10 +17,9 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import type { AttachmentRef, ComposerContextRecord } from "@orquester/api/agent-chat";
 
 import { registerComposerHandle } from "./composer-bridge";
-import { loadComposerDraft } from "./composer-draft";
 import { restoreFailedSendDraft } from "./composer-failed-send";
 import type { StagedAttachment } from "./ComposerAttachments";
-import { attachmentCountBlockSend, type FailedSendRestore } from "./composer-submission";
+import type { FailedSendRestore } from "./composer-submission";
 
 const DRAFTS_KEY = "orquester:agent-chat-drafts";
 
@@ -214,25 +213,6 @@ describe("a send that did not go out comes back to the thread it was sent from",
     } finally {
       unregister();
     }
-  });
-
-  it("over a persisted draft already holding eight: all sixteen are written, the next mount loads all sixteen, and the send is held", () => {
-    // Eight went out with the message, eight were staged while it was in
-    // flight; nothing of either may be dropped on the way back.
-    const eight = (prefix: string): AttachmentRef[] =>
-      Array.from({ length: 8 }, (_, index) => ({ ...REPORT, id: `${prefix}${index}`, name: `${prefix}${index}.pdf` }));
-    backing = { [DRAFTS_KEY]: JSON.stringify({ A: { text: "typed since", attachments: eight("m"), context: [] } }) };
-    const full: FailedSendRestore<StagedAttachment> = {
-      outcome: { kind: "failed", text: "the message", notice: "Could not send the message." },
-      sent: eight("s").map((ref) => chip(ref, "application/pdf"))
-    };
-
-    assert.equal(restoreFailedSendDraft({ sentFrom: "A", liveThread: null, restore: full, restoreLive }), "persisted");
-    const stored = persisted().A as { text: string; attachments: AttachmentRef[]; context: [] };
-    assert.equal(stored.attachments.length, 16);
-    const loaded = loadComposerDraft(stored);
-    assert.equal(loaded.attachments.length, 16, "no file is dropped on the next mount");
-    assert.ok(attachmentCountBlockSend(loaded.attachments), "the restored draft cannot send over eight files");
   });
 
   it("a send that gives nothing back writes no draft: a refusal, a failed Implement", () => {

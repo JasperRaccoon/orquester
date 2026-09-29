@@ -124,7 +124,7 @@ test("the join never overwrites a value the row already has", () => {
 });
 
 test("the join is keyed on toolCallId only — never on a label match", () => {
-  const a = entry({ id: "a", toolCallId: "c1", detail: "mine" });
+  const a = entry({ id: "a", toolCallId: "c1", label: "Read file", detail: "mine" });
   const b = entry({ id: "b", toolCallId: "c2", label: "Read file" });
   const unkeyed = entry({ id: "u", label: "Read file" });
   const [, joinedB, joinedUnkeyed] = joinLifecycleDetails([a, b, unkeyed]);

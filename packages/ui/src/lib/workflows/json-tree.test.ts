@@ -1,18 +1,15 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { jsonChildPath, jsonChildren, jsonCopyText, jsonExpression } from "./json-tree.ts";
+import { jsonChildren, jsonCopyText } from "./json-tree.ts";
 
 describe("json tree helpers", () => {
-  it("builds `{{…}}` paths: dots for identifiers, brackets for the rest", () => {
-    assert.equal(jsonChildPath("input", "a key"), 'input["a key"]');
-    assert.equal(jsonChildPath("input", 'q"x'), 'input["q\\"x"]');
-    assert.equal(jsonChildPath("nodes.Review.output", "items"), "nodes.Review.output.items");
-    assert.equal(jsonChildPath("nodes.Review.output.items", 0), "nodes.Review.output.items[0]");
-    assert.equal(jsonChildPath("", "items"), "items");
-    assert.equal(jsonChildPath("", 2), "[2]");
-    assert.equal(jsonExpression("nodes.A.output"), "{{nodes.A.output}}");
-    assert.equal(jsonExpression(""), "");
+  it("escapes quoted keys and keeps root paths usable", () => {
+    assert.deepEqual(jsonChildren({ 'q"x': 1 }, "input"), [
+      { key: 'q"x', path: 'input["q\\"x"]', value: 1 }
+    ]);
+    assert.deepEqual(jsonChildren({ items: 2 }, ""), [{ key: "items", path: "items", value: 2 }]);
+    assert.deepEqual(jsonChildren([3], ""), [{ key: 0, path: "[0]", value: 3 }]);
   });
 
   it("pages children with their paths", () => {

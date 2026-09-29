@@ -114,7 +114,7 @@ const asStringArray = (value: unknown): string[] =>
  * does not, so `cancelled`/`interrupted` map to `failed` — a stopped tool is
  * still a call that did not deliver.*
  */
-export function toolLifecycleStatusFromPayload(
+function toolLifecycleStatusFromPayload(
   payload: Record<string, unknown> | null
 ): WorkLogToolLifecycleStatus | undefined {
   switch (payload?.status) {
@@ -748,7 +748,7 @@ function isPlanBoundaryToolActivity(activity: ThreadActivityItem): boolean {
 export { compactionMarkerState, isCompactionActivity };
 
 /** Before/after token counts, carried on the event and formatted client-side (§7.3). */
-export function compactionTokens(activity: ThreadActivityItem): {
+function compactionTokens(activity: ThreadActivityItem): {
   beforeTokens?: number;
   afterTokens?: number;
 } {

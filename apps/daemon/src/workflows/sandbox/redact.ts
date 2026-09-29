@@ -5,10 +5,7 @@
 // run events. Values only — object keys are left as written. Longest values first, so a secret that
 // contains another is replaced whole.
 //
-// Logs are redacted as they are tailed, in chunks, and a secret can be split across two chunks (or
-// across a window a client asked for): `redactChunk` / `createChunkRedactor` hold back the last
-// `maxSecretLength - 1` characters of a chunk until the next one decides them, which is exactly
-// enough — any occurrence starting before that tail fits inside what has been read.
+// Growing log files use byte-aware windows in log-reader.ts.
 
 import type { Redactor } from "../contracts.ts";
 
@@ -22,8 +19,6 @@ export interface SecretMatch {
 }
 
 export interface SecretRedactor extends Redactor {
-  /** The longest redacted value, in UTF-16 code units (0 with nothing to redact). */
-  readonly maxSecretLength: number;
   /** The longest redacted value, in UTF-8 bytes (0 with nothing to redact). */
   readonly maxSecretBytes: number;
   /** Every occurrence in `text`, left to right, non-overlapping, the longest value at a position. */
@@ -33,8 +28,6 @@ export interface SecretRedactor extends Redactor {
    * valid UTF-8 and whose offsets must never drift through a decode/encode round trip.
    */
   byteMatches(bytes: Uint8Array): SecretMatch[];
-  /** A streaming redactor over this one (see {@link createChunkRedactor}). */
-  stream(): ChunkRedactor;
 }
 
 export function secretPlaceholder(name: string): string {
@@ -67,7 +60,6 @@ export function createRedactor(secrets: Readonly<Record<string, string>>): Secre
   }
   const values = [...byValue.keys()].sort((a, b) => b.length - a.length || (a < b ? -1 : a > b ? 1 : 0));
   const pattern = values.length > 0 ? new RegExp(values.map(escapeRegExp).join("|"), "g") : null;
-  const maxSecretLength = values.length > 0 ? values[0]!.length : 0;
   const maxSecretBytes = values.reduce((max, value) => Math.max(max, Buffer.byteLength(value, "utf8")), 0);
   const encoded = values.map((value) => ({ bytes: Buffer.from(value, "utf8"), name: byValue.get(value)! }));
 
@@ -135,90 +127,13 @@ export function createRedactor(secrets: Readonly<Record<string, string>>): Secre
   };
 
   const redactor: SecretRedactor = {
-    maxSecretLength,
     maxSecretBytes,
     matches,
     byteMatches,
     text,
     value<T>(value: T): T {
       return pattern === null ? value : (deep(value, 0) as T);
-    },
-    stream: () => createChunkRedactor(redactor)
+    }
   };
   return redactor;
-}
-
-/** Replace the matches that end at or before `end` in `text.slice(0, end)`. */
-function redactPrefix(text: string, end: number, found: readonly SecretMatch[]): string {
-  let out = "";
-  let at = 0;
-  for (const match of found) {
-    if (match.end > end) {
-      break;
-    }
-    out += text.slice(at, match.start) + secretPlaceholder(match.name);
-    at = match.end;
-  }
-  return out + text.slice(at, end);
-}
-
-/**
- * One step of streaming redaction. `carry` is what the previous step held back; the result's
- * `text` is safe to emit and its `carry` must be handed to the next step. With `final`, everything
- * is emitted (end of stream).
- */
-function redactChunk(
-  redactor: SecretRedactor,
-  carry: string,
-  chunk: string,
-  final = false
-): { text: string; carry: string } {
-  const combined = carry + chunk;
-  if (redactor.maxSecretLength === 0) {
-    return { text: combined, carry: "" };
-  }
-  if (final) {
-    return { text: redactor.text(combined), carry: "" };
-  }
-  let cut = combined.length - (redactor.maxSecretLength - 1);
-  if (cut <= 0) {
-    return { text: "", carry: combined };
-  }
-  const found = redactor.matches(combined);
-  // A match that starts before the cut is complete (the longest secret fits in what was read),
-  // so it is emitted whole rather than split.
-  for (const match of found) {
-    if (match.start < cut && match.end > cut) {
-      cut = match.end;
-    }
-  }
-  // Never split a surrogate pair.
-  const last = combined.charCodeAt(cut - 1);
-  if (cut < combined.length && last >= 0xd800 && last <= 0xdbff) {
-    cut -= 1;
-  }
-  return { text: redactPrefix(combined, cut, found), carry: combined.slice(cut) };
-}
-
-export interface ChunkRedactor {
-  /** Redacts what can be decided; holds back a possible secret prefix. */
-  push(chunk: string): string;
-  /** Emits (redacted) whatever is held back. */
-  flush(): string;
-}
-
-export function createChunkRedactor(redactor: SecretRedactor): ChunkRedactor {
-  let carry = "";
-  return {
-    push(chunk: string): string {
-      const step = redactChunk(redactor, carry, chunk);
-      carry = step.carry;
-      return step.text;
-    },
-    flush(): string {
-      const step = redactChunk(redactor, carry, "", true);
-      carry = "";
-      return step.text;
-    }
-  };
 }

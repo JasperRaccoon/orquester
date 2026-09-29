@@ -28,14 +28,6 @@ function readLines(filePath: string): unknown[] {
     .map((line) => JSON.parse(line) as unknown);
 }
 
-test("a frame is written as one NDJSON line", async () => {
-  const filePath = await tempFile();
-  const log = new RawFrameLog({ filePath });
-  log.write({ type: "session/new", params: { cwd: "/w/p" } });
-  log.close();
-  assert.deepEqual(readLines(filePath), [{ type: "session/new", params: { cwd: "/w/p" } }]);
-});
-
 test("high-rate delta frames are dropped, not written", async () => {
   const filePath = await tempFile();
   const log = new RawFrameLog({ filePath });

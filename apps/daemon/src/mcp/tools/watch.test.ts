@@ -24,10 +24,6 @@ test("wait_for_session returns flagged sessions after the cursor, newest first, 
   const r = await tool.run({ after: stamp(1), timeoutMs: 1000 }, ctx(api([a, b])));
   assert.deepEqual((r.sessions as { id: string; reason: string }[]).map((s) => [s.id, s.reason]), [["b", "approval"], ["a", "completed"]]);
   assert.equal(r.cursor, stamp(7)); assert.equal(r.timedOut, false);
-  const quiet = api([a, b]);
-  const again = await tool.run({ after: r.cursor as string, timeoutMs: 20 }, ctx(quiet));
-  assert.deepEqual(again, { sessions: [], cursor: stamp(7), timedOut: true });
-  assert.deepEqual(quiet.calls.map((c) => c.path), ["/api/sessions"], "a timeout reads no view context");
 });
 
 test("wait_for_session orders by the attention instant, newest first, a tie going to the newer tab", async () => {

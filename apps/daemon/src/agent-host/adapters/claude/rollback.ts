@@ -110,7 +110,7 @@ export function groupClaudeHistoryTurns(
   return turns;
 }
 
-export function conversationIndexForUuid(
+function conversationIndexForUuid(
   messages: readonly ClaudeHistoryMessage[],
   uuid: string
 ): number {

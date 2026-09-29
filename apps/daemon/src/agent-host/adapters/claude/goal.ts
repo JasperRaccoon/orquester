@@ -501,7 +501,6 @@ export interface ClaudeGoalTrackerOptions {
   clock: Clock;
   /** The fold's goal when the session starts (goals §5.3). */
   knownGoal?: AgentGoal | null;
-  throttleMs?: number;
 }
 
 /**
@@ -512,7 +511,6 @@ export interface ClaudeGoalTrackerOptions {
  */
 export class ClaudeGoalTracker {
   private readonly clock: Clock;
-  private readonly throttleMs: number;
   private current: AgentGoal | null;
   private emitted: AgentGoal | null;
   private lastProgressAtMs: number | undefined;
@@ -520,7 +518,6 @@ export class ClaudeGoalTracker {
 
   constructor(options: ClaudeGoalTrackerOptions) {
     this.clock = options.clock;
-    this.throttleMs = options.throttleMs ?? GOAL_PROGRESS_THROTTLE_MS;
     // Through the parser: the fold's goal carries an `updatedAt` that is not
     // provider state, and nothing from another process reaches typed code raw.
     const known = parseAgentGoal(options.knownGoal ?? null);
@@ -563,7 +560,7 @@ export class ClaudeGoalTracker {
       return { kind: "unchanged" };
     }
     if (change === "progress" && options?.immediate !== true && this.lastProgressAtMs !== undefined) {
-      const dueAtMs = this.lastProgressAtMs + this.throttleMs;
+      const dueAtMs = this.lastProgressAtMs + GOAL_PROGRESS_THROTTLE_MS;
       if (this.clock.now().getTime() < dueAtMs) {
         this.progressDueAtMs = dueAtMs;
         return { kind: "deferred", dueAtMs };

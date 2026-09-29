@@ -4,7 +4,6 @@ import {
   imageOrdinal,
   imagePlaceholder,
   removeImagePlaceholder,
-  revokeImagePreviews,
   withoutPreviews
 } from "./composer-images.ts";
 
@@ -29,13 +28,6 @@ describe("image placeholders", () => {
     );
     assert.equal(removeImagePlaceholder("[Image #1]", 1), "");
     assert.equal(removeImagePlaceholder("no images here", 1), "no images here");
-  });
-
-  it("revokes every preview URL a chip set holds, and only those", (t) => {
-    const revoked: string[] = [];
-    t.mock.method(URL, "revokeObjectURL", (url: string) => revoked.push(url));
-    revokeImagePreviews([{ previewUrl: "blob:a" }, {}, { previewUrl: "blob:b" }]);
-    assert.deepEqual(revoked, ["blob:a", "blob:b"]);
   });
 
   it("hands chips back without their revoked preview URLs, and the rest untouched", () => {

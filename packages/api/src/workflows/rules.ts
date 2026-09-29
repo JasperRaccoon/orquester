@@ -218,7 +218,7 @@ export interface RuleMatchJob {
   text: string;
 }
 
-function prepareMatch(operands: RuleOperands): { job: RuleMatchJob; regex: RegExp } | null {
+function prepareMatch(operands: RuleOperands): RuleMatchJob | null {
   const compiled = compileRulePattern(operands.right);
   if ("error" in compiled) {
     operands.warnings.push(`Rule "matches": the pattern is refused — ${compiled.error}`);
@@ -229,10 +229,10 @@ function prepareMatch(operands: RuleOperands): { job: RuleMatchJob; regex: RegEx
     operands.warnings.push(`Rule "matches": only the first ${RULE_MATCH_MAX_INPUT / 1024} KB of the value were searched`);
     text = text.slice(0, RULE_MATCH_MAX_INPUT);
   }
-  return { job: { source: compiled.regex.source, flags: compiled.regex.flags, text }, regex: compiled.regex };
+  return { source: compiled.regex.source, flags: compiled.regex.flags, text };
 }
 
-/** Every operator but `matches` (decided by the caller, sync or async). */
+/** Every operator but `matches`, which is delegated to the matcher. */
 function decideRule(rule: WorkflowRule, operands: RuleOperands, ctx: ExpressionContext): boolean {
   const { left, right, warnings } = operands;
   const numeric = (compare: (a: number, b: number) => boolean): boolean => {
@@ -259,7 +259,7 @@ function decideRule(rule: WorkflowRule, operands: RuleOperands, ctx: ExpressionC
     case "endsWith":
       return ruleText(left).endsWith(right);
     case "matches":
-      // Decided by the caller (evaluateRule / evaluateRuleAsync).
+      // Decided by evaluateRuleAsync.
       return false;
     case "gt":
       return numeric((a, b) => a > b);
@@ -287,31 +287,17 @@ function decideRule(rule: WorkflowRule, operands: RuleOperands, ctx: ExpressionC
   }
 }
 
-/**
- * Evaluate one rule. Never throws. `matches` runs IN THIS THREAD behind the pattern guard — fine for
- * a preview; the daemon evaluates rules with {@link evaluateRuleAsync} and a matcher that runs the
- * regular expression in a worker with a hard timeout, because no guard catches every slow pattern.
- */
-export function evaluateRule(rule: WorkflowRule, ctx: ExpressionContext): RuleEvaluation {
-  const operands = ruleOperands(rule, ctx);
-  if (rule.op === "matches") {
-    const prepared = prepareMatch(operands);
-    return { result: prepared !== null && prepared.regex.test(prepared.job.text), warnings: operands.warnings };
-  }
-  return { result: decideRule(rule, operands, ctx), warnings: operands.warnings };
-}
-
 /** Runs a `matches` search somewhere safe: its answer, or a warning (a timeout) that reads as false. */
 export type RuleMatcher = (job: RuleMatchJob) => Promise<{ result: boolean; warning?: string }>;
 
-/** {@link evaluateRule} with `matches` handed to `matcher`. Never rejects. */
+/** Evaluate a rule; regular expressions run through the caller’s isolated matcher. Never rejects. */
 export async function evaluateRuleAsync(rule: WorkflowRule, ctx: ExpressionContext, matcher: RuleMatcher): Promise<RuleEvaluation> {
   const operands = ruleOperands(rule, ctx);
   if (rule.op !== "matches") return { result: decideRule(rule, operands, ctx), warnings: operands.warnings };
   const prepared = prepareMatch(operands);
   if (prepared === null) return { result: false, warnings: operands.warnings };
   try {
-    const answer = await matcher(prepared.job);
+    const answer = await matcher(prepared);
     if (answer.warning !== undefined) operands.warnings.push(answer.warning);
     return { result: answer.result, warnings: operands.warnings };
   } catch (error) {
@@ -320,48 +306,12 @@ export async function evaluateRuleAsync(rule: WorkflowRule, ctx: ExpressionConte
   }
 }
 
-/** `all`: every rule holds (an empty list holds); `any`: at least one does. Every rule is evaluated. */
-export function evaluateRules(
-  combine: "all" | "any",
-  rules: readonly WorkflowRule[],
-  ctx: ExpressionContext
-): RuleEvaluation {
-  const warnings: string[] = [];
-  let all = true;
-  let any = false;
-  for (const rule of rules) {
-    const evaluated = evaluateRule(rule, ctx);
-    warnings.push(...evaluated.warnings);
-    all &&= evaluated.result;
-    any ||= evaluated.result;
-  }
-  return { result: combine === "all" ? all : any, warnings };
-}
-
 export interface SwitchConfigLike {
   cases: readonly { label?: string; combine: "all" | "any"; rules: readonly WorkflowRule[] }[];
   fallback: boolean;
 }
 
-/**
- * The first case whose rules hold wins: `case:<index>`. No match: `default` when the switch has a
- * fallback output, else `null` (every outgoing edge is dead).
- */
-export function evaluateSwitch(
-  config: SwitchConfigLike,
-  ctx: ExpressionContext
-): { handle: string | null; warnings: string[] } {
-  const warnings: string[] = [];
-  for (let index = 0; index < config.cases.length; index += 1) {
-    const current = config.cases[index]!;
-    const evaluated = evaluateRules(current.combine, current.rules, ctx);
-    warnings.push(...evaluated.warnings);
-    if (evaluated.result) return { handle: `case:${index}`, warnings };
-  }
-  return { handle: config.fallback ? "default" : null, warnings };
-}
-
-/** {@link evaluateRules} with `matches` handed to `matcher`. */
+/** Combine every rule with all/any; keep every warning, even after the result is decided. */
 export async function evaluateRulesAsync(
   combine: "all" | "any",
   rules: readonly WorkflowRule[],
@@ -380,7 +330,7 @@ export async function evaluateRulesAsync(
   return { result: combine === "all" ? all : any, warnings };
 }
 
-/** {@link evaluateSwitch} with `matches` handed to `matcher`. */
+/** The first matching case wins; no match takes the default handle, or no handle without fallback. */
 export async function evaluateSwitchAsync(
   config: SwitchConfigLike,
   ctx: ExpressionContext,

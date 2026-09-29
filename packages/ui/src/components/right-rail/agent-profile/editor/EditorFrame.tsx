@@ -34,7 +34,7 @@ import { pushBackClose } from "../../../workflows/phone/back-close";
 import { useVisualViewportBox } from "../../../workflows/phone/use-visual-viewport";
 import type { EditorVariant } from "./layout.logic";
 
-export interface EditorFrameProps {
+interface EditorFrameProps {
   open: boolean;
   variant: EditorVariant;
   /** The dialog's accessible name. */
@@ -175,7 +175,7 @@ const FrameBody: React.FC<EditorFrameProps> = ({
 };
 
 /** What had focus before the editor opened, to give it back: an element, never `<body>`. */
-export function focusOpener(doc: Pick<Document, "activeElement" | "body">): HTMLElement | null {
+function focusOpener(doc: Pick<Document, "activeElement" | "body">): HTMLElement | null {
   const active = doc.activeElement;
   return active !== null && active !== doc.body && typeof (active as HTMLElement).focus === "function"
     ? (active as HTMLElement)
@@ -183,14 +183,14 @@ export function focusOpener(doc: Pick<Document, "activeElement" | "body">): HTML
 }
 
 /** The dialog takes focus when nothing inside it has it (no field autofocused). */
-export function needsInitialFocus(
+function needsInitialFocus(
   dialog: Pick<HTMLElement, "contains"> | null,
   active: Element | null
 ): boolean {
   return dialog !== null && (active === null || !dialog.contains(active));
 }
 
-export const DiscardConfirm: React.FC<{ onKeepEditing: () => void; onDiscard: () => void; touch: boolean }> = ({
+const DiscardConfirm: React.FC<{ onKeepEditing: () => void; onDiscard: () => void; touch: boolean }> = ({
   onKeepEditing,
   onDiscard,
   touch

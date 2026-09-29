@@ -13,7 +13,7 @@ export {
   type WorkflowCanvasHandle,
   type WorkflowCanvasProps
 } from "./canvas/WorkflowCanvas";
-export { connectionRefusal, isValidWorkflowConnection } from "./canvas/connection";
+export { connectionRefusal } from "./canvas/connection";
 export type { AddMenuRequest } from "./canvas/canvas-context";
 export { RunsModeFallback } from "./RunsModeFallback";
 export { WorkflowRunsMode, renderWorkflowRunsMode } from "./RunsMode";

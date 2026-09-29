@@ -20,7 +20,7 @@ import { isMissing } from "./tree.ts";
 
 export const SKILL_FILE = "SKILL.md";
 /** Most other files `readSkillFiles` lists. */
-export const SKILL_FILES_MAX = 500;
+const SKILL_FILES_MAX = 500;
 /** Directories `readSkillFiles` never descends into. */
 const SKILL_FILES_SKIP_DIRS = new Set(["node_modules", ".git"]);
 

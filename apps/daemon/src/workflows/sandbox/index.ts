@@ -15,11 +15,9 @@ export {
   type SandboxEnvInput
 } from "./env.ts";
 export {
-  createChunkRedactor,
   createRedactor,
   MIN_REDACTED_SECRET_LENGTH,
   secretPlaceholder,
-  type ChunkRedactor,
   type SecretMatch,
   type SecretRedactor
 } from "./redact.ts";

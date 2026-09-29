@@ -26,7 +26,7 @@ export interface RepoResolverDeps {
 }
 
 /** `<workspacesDir>/<ws>/<project>` → `<ws>`; null for any other shape. */
-export function workspaceOfProject(workspacesDir: string, projectPath: string): string | null {
+function workspaceOfProject(workspacesDir: string, projectPath: string): string | null {
   const rel = relative(workspacesDir, projectPath);
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) return null;
   const parts = rel.split(sep).filter((part) => part.length > 0);

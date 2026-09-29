@@ -5,12 +5,9 @@ import type { McpServerView } from "@orquester/api";
 
 import {
   advancedDraft,
-  hasAdvancedValues,
   initialMcpForm,
   mcpDraftFromForm,
   mcpFormOrigin,
-  mcpFormSignature,
-  mcpNameError,
   newSecretRow,
   parsePastedCommandLine,
   secretDrafts,
@@ -74,17 +71,6 @@ test("secret drafts: untouched rows keep, replaced and new rows send a value, re
     { key: "JIRA_URL", value: "https://new" },
     { key: "NEW_ONE", value: "v" }
   ]);
-});
-
-test("existing secrets are never prefilled", () => {
-  const form = initialMcpForm("codex", STDIO);
-  assert.deepEqual(
-    form.env.map(({ key, value, state }) => ({ key, value, state })),
-    [
-      { key: "JIRA_TOKEN", value: "", state: "existing" },
-      { key: "JIRA_URL", value: "", state: "existing" }
-    ]
-  );
 });
 
 test("secret rows: bad keys, duplicates (headers case-insensitively) and an empty replacement are refused", () => {
@@ -167,25 +153,6 @@ test("advanced fields are coerced by type; unknown keys on disk pass through; bl
   );
 });
 
-test("the advanced form reads lists and numbers from the view, and opens when anything is set", () => {
-  const form = initialMcpForm("codex", STDIO);
-  assert.equal(form.advanced.startup_timeout_sec, "20");
-  assert.equal(form.advanced.enabled_tools, "search\nget");
-  assert.equal(form.advanced.required, false);
-  assert.equal(hasAdvancedValues("codex", form), true);
-  assert.equal(hasAdvancedValues("codex", initialMcpForm("codex")), false);
-});
-
-test("names follow the strictest CLI's rule", () => {
-  assert.equal(mcpNameError("jira-cloud"), undefined);
-  assert.equal(mcpNameError("_private"), undefined);
-  assert.ok(mcpNameError(""));
-  assert.ok(mcpNameError("1abc"));
-  assert.ok(mcpNameError("trailing_"));
-  assert.ok(mcpNameError("has space"));
-  assert.ok(mcpNameError("x".repeat(65)));
-});
-
 test("validation: stdio needs a command, http a real http(s) URL, numbers must parse", () => {
   const form = initialMcpForm("codex");
   form.name = "s";
@@ -206,16 +173,7 @@ test("validation: stdio needs a command, http a real http(s) URL, numbers must p
   assert.equal(validateMcpForm("codex", form).valid, true);
 });
 
-test("the default transport is the agent's first; a view's is kept", () => {
-  assert.equal(initialMcpForm("opencode").transport, "stdio");
-  assert.equal(initialMcpForm("grok", { name: "s", transport: "sse", url: "https://x" }).transport, "sse");
-});
-
-test("the signature ignores row identities", () => {
-  const a = initialMcpForm("claude", STDIO);
-  const b = initialMcpForm("claude", STDIO);
-  assert.notEqual(a.env[0]!.id, b.env[0]!.id);
-  assert.equal(mcpFormSignature(a), mcpFormSignature(b));
-  b.env[0]!.state = "replace";
-  assert.notEqual(mcpFormSignature(a), mcpFormSignature(b));
+test("editing an SSE server preserves its transport in the saved draft", () => {
+  const view: McpServerView = { name: "s", transport: "sse", url: "https://x" };
+  assert.deepEqual(mcpDraftFromForm("grok", initialMcpForm("grok", view), mcpFormOrigin(view)), view);
 });

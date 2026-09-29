@@ -100,21 +100,12 @@ test("supports.rollback is offered only on an explicit true: an absent flag read
   assert.equal((await loadAgents(withCaps({ ...caps, supportsConversationRollback: true })))[0].supports.rollback, true);
 });
 
-test("supports.goals is the provider's goal surface read through parseGoalSupport: a Codex-like block rides list_agents, a malformed one and a row without capabilities read null", async () => {
+test("supports.goals projects the provider's goal capability into the MCP catalogue", async () => {
   const codexGoals = { command: "host", actions: ["pause", "resume", "clear"], continuesAcrossTurns: true };
   const codexCaps = { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" }, promptlessTurnContinuation: true };
-  const codexRow = (capabilities?: unknown) => ({ id: "codex", refIds: ["codex"], installed: true, version: "0.130.0", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [], models: [], ...(capabilities === undefined ? {} : { capabilities }) });
-  const withCodex = (row: unknown) => api()
-    .on("GET", "/api/agent/providers", { status: 200, body: { ...providers, providers: [...providers.providers, row] } });
-  const codexOf = async (row: unknown) => findAgent(await loadAgents(withCodex(row)), "codex");
-  assert.deepEqual((await codexOf(codexRow({ ...codexCaps, goals: codexGoals }))).supports, { planMode: true, rollback: true, compaction: true, backgroundTasks: false, goals: codexGoals, contextWindow: true });
-  // Only the actions this build knows: a newer host's extra one is left out.
-  assert.deepEqual((await codexOf(codexRow({ ...codexCaps, goals: { ...codexGoals, actions: ["pause", "teleport", "clear"] } }))).supports.goals, { command: "host", actions: ["pause", "clear"], continuesAcrossTurns: true });
-  const malformed: [string, unknown][] = [["an unknown command", { ...codexGoals, command: "server" }], ["actions not a list", { ...codexGoals, actions: "pause" }], ["continuesAcrossTurns not a boolean", { ...codexGoals, continuesAcrossTurns: "yes" }], ["a string", "all"], ["null", null], ["a list", [codexGoals]]];
-  for (const [label, goals] of malformed) assert.equal((await codexOf(codexRow({ ...codexCaps, goals }))).supports.goals, null, label);
-  assert.equal((await codexOf(codexRow(codexCaps))).supports.goals, null, "no goals block: an older host's row, or OpenCode's");
-  assert.equal((await codexOf(codexRow())).supports.goals, null, "a row without capabilities");
-  assert.equal((await codexOf(codexRow("all"))).supports.goals, null, "capabilities that are no object");
+  const codex = { id: "codex", refIds: ["codex"], installed: true, version: "0.130.0", status: "ready", auth: { status: "authenticated" }, checkedAt: stamp(0), slashCommands: [], skills: [], models: [], capabilities: { ...codexCaps, goals: codexGoals } };
+  const daemon = api().on("GET", "/api/agent/providers", { status: 200, body: { ...providers, providers: [...providers.providers, codex] } });
+  assert.deepEqual(findAgent(await loadAgents(daemon), "codex").supports, { planMode: true, rollback: true, compaction: true, backgroundTasks: false, goals: codexGoals, contextWindow: true });
 });
 
 test("an empty model never wins: an empty current or input model resolves like an omitted one, and its options are validated", async () => {

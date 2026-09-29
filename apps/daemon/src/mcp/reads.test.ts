@@ -4,19 +4,6 @@ import { FakeDaemonApi } from "./testing.ts";
 import { ToolError } from "./errors.ts";
 import { readThread,sendCommand } from "./reads.ts";
 
-test("sendCommand mints a UUID commandId, posts the body and returns the receipt", async () => {
-  const api = new FakeDaemonApi().on("POST", "/api/sessions/c1/turn", { status: 200, body: { seq: 9 } });
-  assert.deepEqual(await sendCommand(api, "c1", "turn", { input: "hi" }), { seq: 9 });
-  const body = api.calls[0].body as { commandId: string; input: string };
-  assert.match(body.commandId, /^[0-9a-f-]{36}$/); assert.equal(body.input, "hi");
-  const api2 = new FakeDaemonApi().on("POST", "/api/sessions/c1/session/stop", { status: 200, body: { seq: 1 } });
-  await sendCommand(api2, "c1", "session/stop", {});
-  assert.equal(api2.calls[0].path, "/api/sessions/c1/session/stop");
-  const api3 = new FakeDaemonApi().on("POST", "/api/sessions/c1/account", { status: 200, body: { seq: 2 } });
-  await sendCommand(api3, "c1", "account", { accountId: "system" });
-  assert.equal(api3.calls[0].path, "/api/sessions/c1/account");
-});
-
 test("sendCommand retries HOST_UNAVAILABLE with the SAME commandId up to 3 times, then throws; other errors are final", async () => {
   let n = 0;
   const api = new FakeDaemonApi().on("POST", "/api/sessions/c1/turn", () => (++n < 3

@@ -20,17 +20,6 @@ test("activity sorts first, then severity, then notices", () => {
   );
 });
 
-test("equal priorities keep the caller's order", () => {
-  const sorted = sortBannerStack([
-    { id: "first", variant: "error" },
-    { id: "second", variant: "warning" }
-  ]);
-  assert.deepEqual(
-    sorted.map((entry) => entry.id),
-    ["first", "second"]
-  );
-});
-
 test("the default four split into Approve/Decline primary and the rest overflow", () => {
   const { primary, overflow } = splitApprovalOptions();
   assert.deepEqual(
@@ -49,29 +38,14 @@ test("an empty advertised list falls back to the default four", () => {
   assert.deepEqual(overflow.map((option) => option.decision), ["cancel", "acceptForSession"]);
 });
 
-test("advertised options keep the provider's own wording and warnings", () => {
+test("advertised approval decisions keep their grouping when reordered", () => {
   const { primary, overflow } = splitApprovalOptions([
-    { decision: "accept", label: "Yes, run it", warning: "This may be a prompt injection" },
-    { decision: "acceptAlways", label: "Always" }
-  ]);
-  assert.equal(primary[0]?.label, "Yes, run it");
-  assert.equal(primary[0]?.warning, "This may be a prompt injection");
-  assert.deepEqual(
-    overflow.map((option) => option.decision),
-    ["acceptAlways"]
-  );
-});
-
-test("the split is on the decision, not on the position", () => {
-  const { primary } = splitApprovalOptions([
-    { decision: "cancel", label: "Cancel" },
-    { decision: "accept", label: "Approve" },
+    { decision: "acceptAlways", label: "Always" },
+    { decision: "accept", label: "Run" },
     { decision: "decline", label: "Decline" }
   ]);
-  assert.deepEqual(
-    primary.map((option) => option.decision),
-    ["accept", "decline"]
-  );
+  assert.deepEqual(primary.map((option) => option.decision), ["accept", "decline"]);
+  assert.deepEqual(overflow.map((option) => option.decision), ["acceptAlways"]);
 });
 
 test("the liveness banner is hidden while a turn is working", () => {

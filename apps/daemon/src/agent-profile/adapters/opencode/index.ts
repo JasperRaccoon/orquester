@@ -106,7 +106,7 @@ const AGENT = "opencode";
 const LABEL = "OpenCode";
 
 /** Told after every mutation that changes what OpenCode loads. */
-export const OPENCODE_RECYCLE_NOTE = "OpenCode servers restart when idle to pick this up.";
+const OPENCODE_RECYCLE_NOTE = "OpenCode servers restart when idle to pick this up.";
 
 /** Orquester's own status plugin (`agent-hooks.ts` rewrites it): listed, never touched. */
 export const ORQUESTER_PLUGIN_REL = "plugin/orquester-status.js";

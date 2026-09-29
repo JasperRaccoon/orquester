@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { AccountCooldown } from "@orquester/config";
 import { WorkflowStateStore } from "../state-store.ts";
-import { cooldownUntil, createCooldownStore } from "./cooldowns.ts";
+import { buildCooldown, createCooldownStore } from "./cooldowns.ts";
 
 const NOW = new Date("2026-09-28T12:00:00.000Z");
 const HOUR = 3_600_000;
@@ -39,21 +39,21 @@ test("the cooldown store keys <family>:<accountId>, serves only active ones and 
 
 test("cooldownUntil: resetsAt, else the burnt window's reset, else an hour; auth always an hour", () => {
   const base = { now: NOW, reason: "usage_limit" as const };
-  assert.equal(cooldownUntil({ ...base, resetsAt: at(3 * HOUR), usageResetAt: at(DAY) }).toISOString(), at(3 * HOUR));
-  assert.equal(cooldownUntil({ ...base, resetsAt: at(-HOUR), usageResetAt: at(DAY) }).toISOString(), at(DAY), "a past resetsAt");
-  assert.equal(cooldownUntil({ ...base, resetsAt: at(9 * DAY), usageResetAt: at(DAY) }).toISOString(), at(DAY), "beyond 8 days");
-  assert.equal(cooldownUntil({ ...base, resetsAt: "garbage", usageResetAt: at(8 * DAY) }).toISOString(), at(8 * DAY), "8 days is allowed");
-  assert.equal(cooldownUntil({ ...base, usageResetAt: at(9 * DAY) }).toISOString(), at(HOUR));
-  assert.equal(cooldownUntil(base).toISOString(), at(HOUR));
-  assert.equal(cooldownUntil({ now: NOW, reason: "auth", resetsAt: at(3 * HOUR) }).toISOString(), at(HOUR));
+  assert.equal(buildCooldown({ ...base, resetsAt: at(3 * HOUR), usageResetAt: at(DAY) }).until, at(3 * HOUR));
+  assert.equal(buildCooldown({ ...base, resetsAt: at(-HOUR), usageResetAt: at(DAY) }).until, at(DAY), "a past resetsAt");
+  assert.equal(buildCooldown({ ...base, resetsAt: at(9 * DAY), usageResetAt: at(DAY) }).until, at(DAY), "beyond 8 days");
+  assert.equal(buildCooldown({ ...base, resetsAt: "garbage", usageResetAt: at(8 * DAY) }).until, at(8 * DAY), "8 days is allowed");
+  assert.equal(buildCooldown({ ...base, usageResetAt: at(9 * DAY) }).until, at(HOUR));
+  assert.equal(buildCooldown(base).until, at(HOUR));
+  assert.equal(buildCooldown({ now: NOW, reason: "auth", resetsAt: at(3 * HOUR) }).until, at(HOUR));
 });
 
 test("cooldownUntil: a limit with no known reset escalates per strike (1 h, 2 h, 4 h at most); a known reset never does", () => {
   const base = { now: NOW, reason: "usage_limit" as const };
-  assert.equal(cooldownUntil({ ...base, strikes: 0 }).toISOString(), at(HOUR));
-  assert.equal(cooldownUntil({ ...base, strikes: 1 }).toISOString(), at(2 * HOUR));
-  assert.equal(cooldownUntil({ ...base, strikes: 2 }).toISOString(), at(4 * HOUR));
-  assert.equal(cooldownUntil({ ...base, strikes: 9 }).toISOString(), at(4 * HOUR));
-  assert.equal(cooldownUntil({ ...base, strikes: 5, resetsAt: at(30 * 60_000) }).toISOString(), at(30 * 60_000));
-  assert.equal(cooldownUntil({ now: NOW, reason: "auth", strikes: 5 }).toISOString(), at(HOUR), "auth stays an hour");
+  assert.equal(buildCooldown({ ...base, strikes: 0 }).until, at(HOUR));
+  assert.equal(buildCooldown({ ...base, strikes: 1 }).until, at(2 * HOUR));
+  assert.equal(buildCooldown({ ...base, strikes: 2 }).until, at(4 * HOUR));
+  assert.equal(buildCooldown({ ...base, strikes: 9 }).until, at(4 * HOUR));
+  assert.equal(buildCooldown({ ...base, strikes: 5, resetsAt: at(30 * 60_000) }).until, at(30 * 60_000));
+  assert.equal(buildCooldown({ now: NOW, reason: "auth", strikes: 5 }).until, at(HOUR), "auth stays an hour");
 });

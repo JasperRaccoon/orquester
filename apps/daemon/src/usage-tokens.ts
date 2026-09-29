@@ -5,7 +5,7 @@ import type { UsageTokenRow, UsageTokensResponse } from "@orquester/api";
 // USD per 1,000,000 tokens. Update when models ship. Subscription users don't
 // pay per token — this is an "API-equivalent" estimate, labeled as such.
 // cacheWrite5m/1h: prompt-cache writes bill 1.25x/2x input depending on TTL.
-export const MODEL_PRICING: Record<
+const MODEL_PRICING: Record<
   string,
   { input: number; output: number; cacheRead?: number; cacheWrite5m?: number; cacheWrite1h?: number }
 > = {
@@ -25,7 +25,7 @@ export const MODEL_PRICING: Record<
 // never equal the bare pricing keys. Resolve a raw id to a known key by exact
 // match, then by longest matching prefix (which also absorbs a trailing
 // `-YYYYMMDD` release-date suffix). Genuinely unknown models resolve to null.
-export function resolveModelKey(model: string): string | null {
+function resolveModelKey(model: string): string | null {
   if (MODEL_PRICING[model]) return model;
   let best: string | null = null;
   for (const key of Object.keys(MODEL_PRICING)) {
@@ -52,15 +52,6 @@ export function estimateCostParts(
   };
 }
 
-export function estimateCostUsd(
-  _agent: string,
-  model: string,
-  tok: { input: number; output: number; cacheRead: number; cacheWrite: number; cacheWrite1h: number }
-): number | null {
-  const parts = estimateCostParts(model, tok);
-  return parts ? parts.input + parts.output + parts.cache : null;
-}
-
 interface RawRow {
   agent: string;
   model: string;
@@ -76,7 +67,7 @@ interface RawRow {
   dedupId?: string;
 }
 
-export function aggregateRows(raw: RawRow[]): UsageTokenRow[] {
+function aggregateRows(raw: RawRow[]): UsageTokenRow[] {
   const byKey = new Map<string, UsageTokenRow>();
   for (const r of raw) {
     const key = `${r.agent}|${r.model}|${r.day}`;

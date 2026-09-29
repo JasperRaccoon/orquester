@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { beforeEach,describe,it } from "node:test";
 
-
 import {
 clipGoalText,
 goalSummaryMarker,
@@ -41,14 +40,6 @@ describe("goalSummaryMarker — the tab marker, off `SessionSummary.goal` (goals
 });
 
 describe("final wave (5): an objective in an accessible name is capped at 200 characters", () => {
-  it("clips with an ellipsis inside the cap, and leaves a short text alone", () => {
-    assert.equal(clipGoalText("Ship it"), "Ship it");
-    const exact = "x".repeat(200);
-    assert.equal(clipGoalText(exact), exact, "exactly at the cap is not cut");
-    const cut = clipGoalText("y".repeat(4000));
-    assert.equal(cut.length, 200);
-    assert.ok(cut.endsWith("…"));
-  });
 
   it("never splits a surrogate pair", () => {
     const text = `${"a".repeat(198)}😀tail`;

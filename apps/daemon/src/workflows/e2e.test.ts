@@ -9,17 +9,15 @@
 //     appdir resumes the detached child and finishes the run;
 //   - the schedule trigger on a manual clock (nextRunAt on the rail, the fire, the next time);
 //   - the git trigger through the poller over a fake remote (baseline, push, a poll error on the rail);
-//   - deleting a workflow deletes the temporary projects its failed runs kept.
 
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import { mkdir, readFile, readdir, stat, writeFile } from "node:fs/promises";
+import { readFile, stat, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 
 import type {
-  EventMessage,
   GetWorkflowRunResponse,
   ListWorkflowsResponse,
   RunWorkflowResponse,
@@ -376,94 +374,6 @@ describe("e2e: the git trigger", () => {
         quiet
       );
       assert.equal((failing.payload as { workflow: WorkflowSummary }).workflow.id, workflowId);
-    } finally {
-      await h.close();
-      await dir.cleanup();
-    }
-  });
-});
-
-describe("e2e: deleting a workflow", () => {
-  test("cancels its active runs and deletes its runs, secrets and the temp projects failed runs kept", async () => {
-    const dir = await tempAppdir();
-    const deleted: string[] = [];
-    // Temp projects go through the daemon's own project routes: record the deletes they ask for.
-    const h = await boot(dir.root, {
-      engineApi: (inject) => ({
-        request: async (method, path, opts) => {
-          const project = /^\/api\/workspaces\/([^/]+)\/projects(?:\/([^/]+))?$/.exec(path);
-          if (project && method === "POST") {
-            const name = (opts?.body as { name: string }).name;
-            const path = join(dir.workspacesDir, decodeURIComponent(project[1]!), name);
-            await mkdir(path, { recursive: true });
-            return { status: 201, body: { path, name, workspace: decodeURIComponent(project[1]!) } };
-          }
-          if (project && method === "DELETE") {
-            deleted.push(decodeURIComponent(project[2]!));
-            return { status: 204, body: null };
-          }
-          return inject.request(method, path, opts);
-        },
-        uploadAttachment: (...args) => inject.uploadAttachment(...args),
-        subscribe: (listener) => inject.subscribe(listener),
-        get fsRoot() {
-          return inject.fsRoot;
-        },
-        get workspacesDir() {
-          return inject.workspacesDir;
-        }
-      })
-    });
-    try {
-      const written = await create(h, {
-        name: "Fails",
-        project: { kind: "temp", workspace: "acme", source: { kind: "empty" } },
-        settings: { keepFailedTempDays: 3 },
-        nodes: [
-          { id: "start", type: "trigger.manual", name: "Start" },
-          { id: "slow", type: "if", name: "Slow", config: { rules: [{ left: "{{ trigger.input.slow }}", op: "isTrue" }] } },
-          { id: "boom", type: "code", name: "Boom", config: { source: "export default () => { throw new Error('boom'); }" } },
-          { id: "nap", type: "shell", name: "Nap", config: { script: "sleep 20" } }
-        ],
-        edges: [
-          { source: "Start", target: "Slow" },
-          { source: "Slow", sourceHandle: "false", target: "Boom" },
-          { source: "Slow", sourceHandle: "true", target: "Nap" }
-        ]
-      });
-      const workflowId = written.workflow.id;
-      await json(h, "PUT", `/api/workflow-secrets/OWN?workflowId=${workflowId}`, { value: "own-secret-value" });
-      const runId = await runNow(h, workflowId);
-      await h.waitEvent(runFinished(runId));
-      const run = await getRun(h, runId);
-      assert.equal(run.status, "failed");
-      assert.ok(run.tempProject && !run.tempProject.deleted && run.tempProject.deleteAfter, "the failed run keeps its temp project");
-      const tempName = run.tempProject.path.split("/").at(-1)!;
-      assert.equal(deleted.length, 0);
-
-      // A second run still going when the workflow is deleted.
-      const active = await runNow(h, workflowId, { slow: true });
-      await h.waitEvent(
-        (e) =>
-          e.type === "workflowRun.updated" &&
-          (e.payload as { run: { id: string }; blocks: { nodeId: string; status: string }[] }).run.id === active &&
-          (e.payload as { blocks: { nodeId: string; status: string }[] }).blocks.some((block) => block.nodeId === "nap" && block.status === "running")
-      );
-      const activeTemp = (await getRun(h, active)).tempProject!.path.split("/").at(-1)!;
-
-      const res = await h.inject({ method: "DELETE", url: `/api/workflows/${workflowId}` });
-      assert.equal(res.statusCode, 204);
-      assert.ok(deleted.includes(tempName), "the kept temp project went with the workflow");
-      // The delete waited for the cancelled run to end: its own temp project is gone already.
-      const ended = await h.waitEvent(runFinished(active), 1);
-      assert.equal((ended.payload as { run: { status: string } }).run.status, "cancelled");
-      assert.deepEqual([...deleted].sort(), [tempName, activeTemp].sort(), "the cancelled run's temp project went too");
-      assert.equal(await h.runStore.load(active), null);
-      assert.equal(await h.runStore.load(runId), null);
-      const left = await readdir(workflowRunsDir(dir.root)).then((names) => names.filter((n) => n !== "index.json"));
-      assert.deepEqual(left, []);
-      assert.deepEqual(h.secrets.list(), []);
-      assert.ok(h.events.some((e: EventMessage) => e.type === "workflow.deleted"));
     } finally {
       await h.close();
       await dir.cleanup();

@@ -11,34 +11,27 @@
  * the same deterministic clock and id generator.
  */
 
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import * as nodePath from "node:path";
 import { fileURLToPath } from "node:url";
 
-import type { RuntimeEvent, UserInputQuestion } from "@orquester/api/agent-chat";
+import type { RuntimeEvent } from "@orquester/api/agent-chat";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import type { Clock, IdGen } from "../../adapter.ts";
 import { classifyRequestType, summarizeToolRequest, trimmedString } from "./classify.ts";
 import { claudeCanUseToolRoute, claudeRequestKey } from "./decisions.ts";
 import { ClaudeNormalizer, extractExitPlanModePlan } from "./normalize.ts";
-import { parseAskUserQuestionInput } from "./questions.ts";
 
-export const CLAUDE_FIXTURES_DIR = nodePath.resolve(
+const CLAUDE_FIXTURES_DIR = nodePath.resolve(
   nodePath.dirname(fileURLToPath(import.meta.url)),
   "../../../../test/fixtures/claude"
 );
 
-export interface FixtureLine {
+interface FixtureLine {
   t: number;
   kind: "sdk-message" | "input" | "canUseTool" | "canUseToolResult" | "control" | "note";
   data: unknown;
-}
-
-export function listClaudeFixtures(): string[] {
-  return readdirSync(CLAUDE_FIXTURES_DIR)
-    .filter((name) => name.endsWith(".ndjson"))
-    .sort();
 }
 
 export function readClaudeFixture(name: string): FixtureLine[] {
@@ -67,26 +60,15 @@ export function countingIds(): IdGen {
   };
 }
 
-export interface ReplayResult {
+interface ReplayResult {
   events: RuntimeEvent[];
-  /** Every `type` / `type:subtype` the capture contained. */
-  observed: string[];
   normalizer: ClaudeNormalizer;
-}
-
-function sdkMessageTag(message: unknown): string {
-  if (message === null || typeof message !== "object") {
-    return "<non-object>";
-  }
-  const record = message as { type?: unknown; subtype?: unknown };
-  const type = typeof record.type === "string" ? record.type : "<untyped>";
-  return typeof record.subtype === "string" ? `${type}/${record.subtype}` : type;
 }
 
 /**
  * Replay one capture. `input` lines open a turn (the harness stamps the turn
  * id as the message uuid, exactly as `sendTurn` does), `canUseTool` lines open
- * an approval or a question, and `canUseToolResult` lines resolve it.
+ * an approval or a proposed plan, and `canUseToolResult` lines resolve it.
  */
 export function replayClaudeFixture(name: string): ReplayResult {
   const lines = readClaudeFixture(name);
@@ -96,9 +78,8 @@ export function replayClaudeFixture(name: string): ReplayResult {
     ids: countingIds()
   });
   const events: RuntimeEvent[] = [];
-  const observed: string[] = [];
   let pendingRequest:
-    | { requestId: string; kind: "approval" | "question"; toolName: string; toolUseId?: string }
+    | { requestId: string; toolName: string; toolUseId?: string }
     | undefined;
   let requestSeq = 0;
 
@@ -111,7 +92,6 @@ export function replayClaudeFixture(name: string): ReplayResult {
         break;
       }
       case "sdk-message": {
-        observed.push(sdkMessageTag(line.data));
         events.push(...normalizer.handleMessage(line.data as SDKMessage));
         break;
       }
@@ -135,24 +115,6 @@ export function replayClaudeFixture(name: string): ReplayResult {
         );
         const toolUseId = trimmedString(data.options?.toolUseID);
         const route = claudeCanUseToolRoute(toolName);
-        if (route === "user-input") {
-          const questions: UserInputQuestion[] = parseAskUserQuestionInput(toolInput).questions;
-          events.push(
-            normalizer.userInputRequested({
-              requestId,
-              questions,
-              toolInput,
-              ...(toolUseId !== undefined ? { toolUseId } : {})
-            })
-          );
-          pendingRequest = {
-            requestId,
-            kind: "question",
-            toolName,
-            ...(toolUseId !== undefined ? { toolUseId } : {})
-          };
-          break;
-        }
         if (route === "proposed-plan") {
           const plan = extractExitPlanModePlan(toolInput);
           if (plan) {
@@ -182,7 +144,6 @@ export function replayClaudeFixture(name: string): ReplayResult {
         );
         pendingRequest = {
           requestId,
-          kind: "approval",
           toolName,
           ...(toolUseId !== undefined ? { toolUseId } : {})
         };
@@ -192,44 +153,26 @@ export function replayClaudeFixture(name: string): ReplayResult {
         if (!pendingRequest) {
           break;
         }
-        const data = line.data as { result?: { behavior?: unknown; updatedInput?: unknown } };
-        if (pendingRequest.kind === "question") {
-          const answers =
-            data.result?.updatedInput !== null &&
-            typeof data.result?.updatedInput === "object" &&
-            (data.result.updatedInput as { answers?: unknown }).answers !== undefined
-              ? ((data.result.updatedInput as { answers: Record<string, unknown> }).answers)
-              : {};
-          events.push(
-            normalizer.userInputResolved({
-              requestId: pendingRequest.requestId,
-              answers,
-              ...(pendingRequest.toolUseId !== undefined
-                ? { toolUseId: pendingRequest.toolUseId }
-                : {})
-            })
-          );
-        } else {
-          const behavior = data.result?.behavior;
-          const decision =
-            behavior === "allow"
-              ? ((data.result as { updatedPermissions?: unknown }).updatedPermissions !== undefined
-                  ? ("acceptForSession" as const)
-                  : ("accept" as const))
-              : ((data.result as { message?: unknown }).message === "User cancelled tool execution."
-                  ? ("cancel" as const)
-                  : ("decline" as const));
-          events.push(
-            normalizer.requestResolved({
-              requestId: pendingRequest.requestId,
-              requestType: classifyRequestType(pendingRequest.toolName),
-              decision,
-              ...(pendingRequest.toolUseId !== undefined
-                ? { toolUseId: pendingRequest.toolUseId }
-                : {})
-            })
-          );
-        }
+        const data = line.data as { result?: { behavior?: unknown } };
+        const behavior = data.result?.behavior;
+        const decision =
+          behavior === "allow"
+            ? ((data.result as { updatedPermissions?: unknown }).updatedPermissions !== undefined
+                ? ("acceptForSession" as const)
+                : ("accept" as const))
+            : ((data.result as { message?: unknown }).message === "User cancelled tool execution."
+                ? ("cancel" as const)
+                : ("decline" as const));
+        events.push(
+          normalizer.requestResolved({
+            requestId: pendingRequest.requestId,
+            requestType: classifyRequestType(pendingRequest.toolName),
+            decision,
+            ...(pendingRequest.toolUseId !== undefined
+              ? { toolUseId: pendingRequest.toolUseId }
+              : {})
+          })
+        );
         pendingRequest = undefined;
         break;
       }
@@ -239,7 +182,7 @@ export function replayClaudeFixture(name: string): ReplayResult {
     }
   }
 
-  return { events, observed, normalizer };
+  return { events, normalizer };
 }
 
 export function eventTypes(events: readonly RuntimeEvent[]): string[] {

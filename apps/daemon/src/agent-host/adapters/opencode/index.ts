@@ -162,8 +162,6 @@ class OpenCodeAdapterImpl implements AgentAdapter {
   private readonly recyclePending = new Set<string>();
   /** Projects with a re-check scheduled, so a burst of events costs one check. */
   private readonly recycleScheduled = new Set<string>();
-  /** Every re-check and the server stop it started, until done (`recycleSettled`). */
-  private readonly recycleWork = new Set<Promise<void>>();
   /**
    * Per thread: client operations running outside the prompt lock (`readThread`,
    * and the start that brings a recycled thread back) — work a recycle must not
@@ -310,13 +308,6 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     return { recycled, deferred };
   }
 
-  /** Every scheduled recycle re-check, and the stop it started, settled. The test drain. */
-  async recycleSettled(): Promise<void> {
-    while (this.recycleWork.size > 0) {
-      await Promise.all([...this.recycleWork]);
-    }
-  }
-
   /**
    * Recycle this project's server if nothing runs on it — synchronously, so no
    * turn can be admitted between the check and the let-go. The stop it starts,
@@ -371,7 +362,7 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       return;
     }
     this.recycleScheduled.add(projectDir);
-    const work = new Promise<void>((resolve) => setImmediate(resolve))
+    void new Promise<void>((resolve) => setImmediate(resolve))
       .then(async () => {
         this.recycleScheduled.delete(projectDir);
         if (this.stopped || !this.recyclePending.has(projectDir)) {
@@ -393,10 +384,6 @@ class OpenCodeAdapterImpl implements AgentAdapter {
           error: error instanceof Error ? error.message : String(error)
         });
       });
-    this.recycleWork.add(work);
-    void work.then(() => {
-      this.recycleWork.delete(work);
-    });
   }
 
   // -- binary --------------------------------------------------------------
@@ -1011,8 +998,6 @@ export const createOpenCodeAdapter: AdapterFactory = async (
   const adapter = new OpenCodeAdapterImpl(context);
   return await Promise.resolve(adapter);
 };
-
-export { OpenCodeAdapterImpl };
 
 /** §3.2 layer one — the pending seed the snapshot registry reads at construction. */
 export { pendingSnapshot as pendingOpenCodeSnapshot } from "./snapshot.ts";

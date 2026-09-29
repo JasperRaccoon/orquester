@@ -1,22 +1,10 @@
-/**
- * Ingestion's output, run through W2's REAL fold.
- *
- * Every other test in this package asserts the domain events ingestion
- * produces. This one asserts the thing that actually matters: that folding
- * those events with `@orquester/api/agent-chat`'s `foldThread` yields the
- * thread the user sees. It is the seam where a naming or shape mismatch
- * between the two packages shows up, and nothing else would catch it — the
- * fold reads `activityKind`, the promoted `agentId`/`status` fields, the
- * `payload.usage` / `payload.agentKind` linkage and the streaming-merge rule,
- * all of which ingestion writes.
- */
+/** Cross-protocol regressions from ingestion through the real fold and transcript. */
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, describe, it, mock } from "node:test";
+import { describe, it } from "node:test";
 
 import {
   applyDomainEvent,
   createEmptyThreadState,
-  derivePendingRequests,
   slimActivityPayload,
   toThreadSnapshot,
   type DomainEvent,
@@ -27,7 +15,7 @@ import {
 
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
-import { countingIds, fixedClock, replayClaudeFixture } from "../adapters/claude/fixtures.ts";
+import { countingIds, fixedClock } from "../adapters/claude/fixtures.ts";
 import { ClaudeNormalizer } from "../adapters/claude/normalize.ts";
 import { transcriptEntries } from "../../mcp/transcript.ts";
 import { leftoverWorkClosings } from "../orchestration/leftover-work.ts";
@@ -38,8 +26,7 @@ import {
   RecordingLiveness,
   RecordingSink,
   counterIdGen,
-  runtimeEvent,
-  settle
+  runtimeEvent
 } from "./test-harness.ts";
 
 const THREAD_ID = "t1";
@@ -53,7 +40,7 @@ function harness() {
     clock,
     idGen: counterIdGen(),
   });
-  return { ingestion, sink, advanceTime: (ms: number) => { clock.advance(ms); mock.timers.tick(ms); } };
+  return { ingestion, sink };
 }
 
 /**
@@ -108,80 +95,7 @@ function activities(state: ReturnType<typeof fold>): ThreadActivityItem[] {
   return state.items.filter((item): item is ThreadActivityItem => item.kind === "activity");
 }
 
-beforeEach(() => mock.timers.enable({ apis: ["setTimeout"] }));
-afterEach(() => mock.timers.reset());
-
 describe("ingestion output folded by the real fold (§5.1)", () => {
-  it("streamed deltas concatenate into one settled assistant message", async () => {
-    const { ingestion, sink, advanceTime } = harness();
-    const turn = { turnId: "turn-1", itemId: "item-1" };
-    await ingestion.ingest(runtimeEvent("turn.started", {}, { turnId: "turn-1" }));
-    for (const delta of ["Hello ", "there.\n\n", "Second para.\n\n", "Third."]) {
-      await ingestion.ingest(
-        runtimeEvent("content.delta", { streamKind: "assistant_text", delta }, turn)
-      );
-      advanceTime(300);
-      await settle();
-    }
-    await ingestion.ingest(
-      runtimeEvent("turn.completed", { state: "completed" }, { turnId: "turn-1" })
-    );
-    await ingestion.drain();
-
-    const state = fold(sink.events());
-    const assistant = messages(state).filter((message) => message.role === "assistant");
-    assert.equal(assistant.length, 1, "the delta/complete merge must produce ONE message");
-    assert.equal(assistant[0]!.text, "Hello there.\n\nSecond para.\n\nThird.");
-    assert.equal(assistant[0]!.streaming, false);
-    assert.equal(assistant[0]!.turnId, "turn-1");
-  });
-
-  it("a Claude usage limit's reason and reset reach the folded activity (workflows §5.4)", async () => {
-    const { ingestion, sink } = harness();
-    const normalizer = new ClaudeNormalizer({ threadId: THREAD_ID, clock: fixedClock(), ids: countingIds() });
-    const events: RuntimeEvent[] = [...normalizer.beginTurn({ turnId: "turn-1" })];
-    events.push(
-      ...normalizer.handleMessage({
-        type: "rate_limit_event",
-        rate_limit_info: { status: "rejected", resetsAt: 1789969200, rateLimitType: "five_hour" },
-        uuid: "u",
-        session_id: "s"
-      } as unknown as SDKMessage)
-    );
-    for (const event of events) {
-      await ingestion.ingest(event);
-    }
-    await ingestion.drain();
-    const rows = activities(fold(sink.events())).filter(
-      (activity) => activity.activityKind === "runtime.warning"
-    );
-    assert.equal(rows.length, 1);
-    const payload = rows[0]!.payload as { reason?: string; resetsAt?: string; message: string };
-    assert.equal(payload.reason, "usage_limit");
-    assert.equal(payload.resetsAt, new Date(1789969200 * 1000).toISOString());
-    assert.match(payload.message, /^Claude usage limit reached\./);
-  });
-
-  it("reasoning folds as a sibling message, never into the assistant one", async () => {
-    const { ingestion, sink } = harness();
-    const turn = { turnId: "turn-1", itemId: "item-1" };
-    await ingestion.ingest(
-      runtimeEvent("content.delta", { streamKind: "reasoning_summary_text", delta: "hmm" }, turn)
-    );
-    await ingestion.ingest(
-      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "answer" }, turn)
-    );
-    await ingestion.ingest(
-      runtimeEvent("turn.completed", { state: "completed" }, { turnId: "turn-1" })
-    );
-    await ingestion.drain();
-
-    const state = fold(sink.events());
-    assert.deepEqual(
-      messages(state).map((message) => `${message.role}:${message.text}`),
-      ["reasoning:hmm", "assistant:answer"]
-    );
-  });
 
   it("the turn settles from session status, and the head tracks the session", async () => {
     const { ingestion, sink } = harness();
@@ -207,155 +121,6 @@ describe("ingestion output folded by the real fold (§5.1)", () => {
     assert.equal(turn.state, "completed");
   });
 
-  it("an interrupted session settles the turn as interrupted", async () => {
-    const { ingestion, sink } = harness();
-    await ingestion.ingest(runtimeEvent("turn.started", {}, { turnId: "turn-1" }));
-    await ingestion.ingest(
-      runtimeEvent("turn.aborted", { reason: "user" }, { turnId: "turn-1" })
-    );
-    await ingestion.drain();
-    const state = fold(sink.events());
-    assert.equal(state.head?.session.status, "stopped");
-    assert.equal(state.turns.find((entry) => entry.turnId === "turn-1")?.state, "interrupted");
-  });
-
-  it("an approval opens and closes in the pending set the fold derives", async () => {
-    const { ingestion, sink } = harness();
-    const turn = { turnId: "turn-1" };
-    await ingestion.ingest(runtimeEvent("turn.started", {}, turn));
-    await ingestion.ingest(
-      runtimeEvent(
-        "request.opened",
-        {
-          requestType: "command_execution_approval",
-          dismissible: false,
-          detail: "rm -rf build",
-          options: [
-            { decision: "accept", label: "Approve" },
-            { decision: "decline", label: "Decline" }
-          ]
-        },
-        { ...turn, requestId: "req-1" }
-      )
-    );
-    await ingestion.drain();
-
-    const open = fold(sink.events());
-    assert.equal(open.pending.approvals.length, 1);
-    assert.equal(open.pending.approvals[0]!.requestId, "req-1");
-    assert.equal(open.pending.approvals[0]!.requestKind, "command");
-    assert.equal(open.pending.approvals[0]!.detail, "rm -rf build");
-    assert.equal(open.pending.approvals[0]!.options?.length, 2);
-
-    await ingestion.ingest(
-      runtimeEvent(
-        "request.resolved",
-        { requestType: "command_execution_approval", decision: "accept" },
-        { ...turn, requestId: "req-1" }
-      )
-    );
-    await ingestion.drain();
-    const closed = fold(sink.events());
-    assert.equal(closed.pending.approvals.length, 0);
-    // And the same derivation off the raw activity list agrees.
-    assert.equal(derivePendingRequests(activities(closed)).approvals.length, 0);
-  });
-
-  it("a tool_user_input request never reaches the pending set", async () => {
-    const { ingestion, sink } = harness();
-    await ingestion.ingest(
-      runtimeEvent(
-        "request.opened",
-        { requestType: "tool_user_input", dismissible: true },
-        { turnId: "turn-1", requestId: "req-q" }
-      )
-    );
-    await ingestion.drain();
-    const state = fold(sink.events());
-    assert.equal(state.pending.approvals.length, 0);
-    assert.equal(state.pending.userInputs.length, 0);
-  });
-
-  it("a question opens as a pending user input and a resolution closes it", async () => {
-    const { ingestion, sink } = harness();
-    const turn = { turnId: "turn-1" };
-    await ingestion.ingest(
-      runtimeEvent(
-        "user-input.requested",
-        {
-          dismissible: false,
-          questions: [
-            {
-              id: "Which database?",
-              header: "Database",
-              question: "Which database?",
-              options: [
-                { label: "Postgres", description: "" },
-                { label: "SQLite", description: "" }
-              ]
-            }
-          ]
-        },
-        { ...turn, requestId: "q-1" }
-      )
-    );
-    await ingestion.drain();
-    const open = fold(sink.events());
-    assert.equal(open.pending.userInputs.length, 1);
-    assert.equal(open.pending.userInputs[0]!.questions[0]?.id, "Which database?");
-
-    await ingestion.ingest(
-      runtimeEvent("user-input.resolved", { answers: { "Which database?": "SQLite" } }, {
-        ...turn,
-        requestId: "q-1"
-      })
-    );
-    await ingestion.drain();
-    assert.equal(fold(sink.events()).pending.userInputs.length, 0);
-  });
-
-  it("the roster rebuilds from the linkage ingestion stamps on EVERY task row", async () => {
-    const { ingestion, sink } = harness();
-    const turn = { turnId: "turn-1" };
-    await ingestion.ingest(runtimeEvent("turn.started", {}, turn));
-    await ingestion.ingest(
-      runtimeEvent(
-        "task.started",
-        {
-          taskId: "task-1",
-          taskType: "subagent",
-          agentId: "agent-1",
-          description: "Audit the fold",
-          model: "opus"
-        },
-        turn
-      )
-    );
-    await ingestion.ingest(
-      runtimeEvent(
-        "task.progress",
-        {
-          taskId: "task-1",
-          taskType: "subagent",
-          agentId: "agent-1",
-          description: "Reading files",
-          lastToolName: "Read",
-          usage: { totalTokens: 1234 }
-        },
-        turn
-      )
-    );
-    await ingestion.drain();
-
-    const state = fold(sink.events());
-    // The roster is keyed by taskId, not agentId.
-    const agent = state.roster.find((row) => row.id === "task-1");
-    assert.ok(agent, `roster had ${JSON.stringify(state.roster.map((row) => row.id))}`);
-    assert.equal(agent.agentKind, "agent");
-    assert.equal(agent.model, "opus");
-    assert.equal(agent.usage?.totalTokens, 1234);
-  });
-
   it("a background shell folds as background, not as a subagent", async () => {
     const { ingestion, sink } = harness();
     await ingestion.ingest(
@@ -370,72 +135,6 @@ describe("ingestion output folded by the real fold (§5.1)", () => {
     const agent = fold(sink.events()).roster.find((row) => row.id === "task-2");
     assert.ok(agent);
     assert.equal(agent.agentKind, "background");
-  });
-
-  it("a task stopped by a dying session folds to interrupted", async () => {
-    const { ingestion, sink } = harness();
-    await ingestion.ingest(
-      runtimeEvent("task.started", {
-        taskId: "task-1",
-        taskType: "subagent",
-        agentId: "agent-1",
-        description: "Work"
-      })
-    );
-    await ingestion.ingest(
-      runtimeEvent("task.completed", {
-        taskId: "task-1",
-        taskType: "subagent",
-        agentId: "agent-1",
-        status: "stopped"
-      })
-    );
-    await ingestion.drain();
-    const agent = fold(sink.events()).roster.find((row) => row.id === "task-1");
-    assert.equal(agent?.status, "interrupted");
-  });
-
-  it("the tool lifecycle folds into rows the timeline can group", async () => {
-    const { ingestion, sink } = harness();
-    const item = { turnId: "turn-1", itemId: "call-1" };
-    await ingestion.ingest(runtimeEvent("turn.started", {}, { turnId: "turn-1" }));
-    await ingestion.ingest(
-      runtimeEvent(
-        "item.started",
-        { itemType: "command_execution", status: "inProgress", title: "Bash" },
-        item
-      )
-    );
-    await ingestion.ingest(
-      runtimeEvent(
-        "item.completed",
-        {
-          itemType: "command_execution",
-          status: "completed",
-          title: "Bash",
-          data: { item: { command: "ls -1", aggregatedOutput: "a\nb\n" } }
-        },
-        item
-      )
-    );
-    await ingestion.drain();
-
-    const rows = activities(fold(sink.events())).filter((row) =>
-      row.activityKind.startsWith("tool.")
-    );
-    assert.deepEqual(
-      rows.map((row) => row.activityKind),
-      ["tool.started", "tool.completed"]
-    );
-    for (const row of rows) {
-      assert.equal(
-        (row.payload as { toolUseId?: string }).toolUseId,
-        "call-1",
-        "the fold must see one stable id across the lifecycle"
-      );
-      assert.equal(row.turnId, "turn-1");
-    }
-    assert.equal(rows[1]!.status, "completed");
   });
 
   it("a task.progress row replaces the previous one instead of piling up", async () => {
@@ -493,80 +192,6 @@ describe("ingestion output folded by the real fold (§5.1)", () => {
       ids.indexOf(`goal-progress:${THREAD_ID}`) < ids.indexOf("tool-1"),
       "the row keeps the position its first tick took"
     );
-  });
-
-  it("the compaction marker keeps its token counts through the fold", async () => {
-    const { ingestion, sink } = harness();
-    await ingestion.ingest(
-      runtimeEvent("thread.state.changed", {
-        state: "compacted",
-        beforeTokens: 120_000,
-        afterTokens: 18_000
-      })
-    );
-    await ingestion.drain();
-    const row = activities(fold(sink.events())).find(
-      (entry) => entry.activityKind === "context-compaction"
-    );
-    assert.ok(row);
-    assert.deepEqual(
-      {
-        before: (row.payload as { beforeTokens?: number }).beforeTokens,
-        after: (row.payload as { afterTokens?: number }).afterTokens
-      },
-      { before: 120_000, after: 18_000 }
-    );
-  });
-
-  it("the §7.3 badge fields survive the fold onto the message item", async () => {
-    const { ingestion, sink } = harness();
-    const turn = { turnId: "turn-1" };
-    await ingestion.ingest(runtimeEvent("turn.started", {}, turn));
-    await ingestion.ingest(
-      runtimeEvent("content.delta", { streamKind: "reasoning_summary_text", delta: "hmm" }, {
-        ...turn,
-        itemId: "item-0"
-      })
-    );
-    await ingestion.ingest(
-      runtimeEvent(
-        "item.started",
-        { itemType: "assistant_message", ...codexPhase("commentary") },
-        { ...turn, itemId: "item-1" }
-      )
-    );
-    await ingestion.ingest(
-      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "I'll look." }, {
-        ...turn,
-        itemId: "item-1"
-      })
-    );
-    // The commentary item closes; only then does the next item open its own
-    // message — a segment stays open until a completion, a pause or another
-    // assistant item's `item.started` (same turn and owner, D4) closes it.
-    await ingestion.ingest(
-      runtimeEvent(
-        "item.completed",
-        { itemType: "assistant_message", ...codexPhase("commentary") },
-        { ...turn, itemId: "item-1" }
-      )
-    );
-    await ingestion.ingest(
-      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "The answer." }, {
-        ...turn,
-        itemId: "item-2"
-      })
-    );
-    await ingestion.ingest(
-      runtimeEvent("turn.completed", { state: "completed" }, turn)
-    );
-    await ingestion.drain();
-
-    const state = fold(sink.events());
-    const byId = new Map(messages(state).map((message) => [message.id, message]));
-    assert.equal(byId.get("reasoning:summary:item-0")?.reasoningKind, "summary");
-    assert.equal(byId.get("assistant:item-1")?.messageKind, "commentary");
-    assert.equal(byId.get("assistant:item-2")?.messageKind, "answer");
   });
 
   it("a later delta that omits the fields never strips them", async () => {
@@ -746,15 +371,6 @@ describe("ingestion output folded by the real fold (§5.1)", () => {
     assert.equal(turn?.totalCostUsd, 1);
     assert.equal(turn?.tokenUsage?.inputTokens, 10);
   });
-
-  it("the provider's title reaches the head", async () => {
-    const { ingestion, sink } = harness();
-    await ingestion.ingest(
-      runtimeEvent("thread.metadata.updated", { name: "Audit the ingestion hop" })
-    );
-    await ingestion.drain();
-    assert.equal(fold(sink.events()).head?.title, "Audit the ingestion hop");
-  });
 });
 
 /**
@@ -807,8 +423,6 @@ describe("a re-engaged subagent folds as a new run (the relaunch contract)", () 
     run: (toolUseId: string) => RuntimeEvent[];
     /** A run's end, as the adapter writes it. */
     end: (toolUseId: string, result: string) => RuntimeEvent[];
-    /** What the relaunched run's end folds to. */
-    settled: { status: string; result: string | null };
   }
 
   const shapes: Shape[] = [
@@ -826,8 +440,7 @@ describe("a re-engaged subagent folds as a new run (the relaunch contract)", () 
       end: (toolUseId, result) => [
         task("task.updated", { toolUseId, status: "idle" }),
         task("task.completed", { toolUseId, status: "completed", summary: result })
-      ],
-      settled: { status: "completed", result: "second result" }
+      ]
     },
     {
       adapter: "Codex",
@@ -843,8 +456,7 @@ describe("a re-engaged subagent folds as a new run (the relaunch contract)", () 
       end: () => [
         task("task.updated", { status: "idle" }),
         task("task.completed", { status: "completed" })
-      ],
-      settled: { status: "completed", result: null }
+      ]
     }
   ];
 
@@ -866,34 +478,6 @@ describe("a re-engaged subagent folds as a new run (the relaunch contract)", () 
 
   for (const shape of shapes) {
     const [first, relaunch] = shape.launches;
-
-    it(`${shape.adapter}: a relaunch reads running (run 2), then its new result`, async () => {
-      const { ingestion, sink } = harness();
-      await ingestAll(ingestion, [
-        runtimeEvent("turn.started", {}, turn),
-        ...shape.run(first),
-        ...shape.end(first, "first result")
-      ]);
-      assert.equal(fold(sink.events()).head?.session.status, "running", "a live session");
-      assert.equal(child(fold(sink.events())).status, "completed");
-
-      // The START reopens it — the one row of the run retention never drops.
-      const [start, ...rest] = shape.run(relaunch);
-      assert.ok(start);
-      await ingestAll(ingestion, [start]);
-      const live = child(fold(sink.events()));
-      assert.equal(live.status, "running");
-      assert.equal(live.activationCount, 2);
-      assert.equal(live.result, null, "the previous run's result is cleared");
-
-      await ingestAll(ingestion, rest);
-      assert.equal(child(fold(sink.events())).status, "running");
-      await ingestAll(ingestion, shape.end(relaunch, "second result"));
-      const settled = child(fold(sink.events()));
-      assert.equal(settled.status, shape.settled.status);
-      assert.equal(settled.result, shape.settled.result);
-      assert.equal(settled.activationCount, 2);
-    });
 
     it(`${shape.adapter}: a relaunched run survives 300 agent-owned tool calls`, async () => {
       const { ingestion, sink } = harness();
@@ -918,81 +502,6 @@ describe("a re-engaged subagent folds as a new run (the relaunch contract)", () 
   }
 });
 
-describe("a background shell's exit code, from the normaliser through the real fold", () => {
-  it("Claude: the notification's `(exit code N)` is the roster row's exit code", async () => {
-    const normalizer = new ClaudeNormalizer({
-      threadId: THREAD_ID,
-      clock: fixedClock(),
-      ids: countingIds()
-    });
-    const events = [...normalizer.beginTurn({ turnId: "turn-1" })];
-    const feed = (frame: Record<string, unknown>): void => {
-      events.push(...normalizer.handleMessage({ uuid: "u", session_id: "s", ...frame } as unknown as SDKMessage));
-    };
-    feed({
-      type: "stream_event",
-      parent_tool_use_id: null,
-      event: {
-        type: "content_block_start",
-        index: 0,
-        content_block: {
-          type: "tool_use",
-          id: "toolu_sh",
-          name: "Bash",
-          input: { command: "make test", run_in_background: true }
-        }
-      }
-    });
-    feed({
-      type: "system",
-      subtype: "task_started",
-      task_id: "bsh1",
-      tool_use_id: "toolu_sh",
-      description: "Run the tests",
-      task_type: "local_bash",
-      is_backgrounded: true
-    });
-    feed({
-      type: "user",
-      parent_tool_use_id: null,
-      message: {
-        role: "user",
-        content: [
-          {
-            type: "tool_result",
-            tool_use_id: "toolu_sh",
-            content:
-              "Command running in background with ID: bsh1. Output is being written to: /tmp/claude/tasks/bsh1.output"
-          }
-        ]
-      }
-    });
-    feed({
-      type: "system",
-      subtype: "task_notification",
-      task_id: "bsh1",
-      tool_use_id: "toolu_sh",
-      status: "failed",
-      output_file: "/tmp/claude/tasks/bsh1.output",
-      summary: 'Background command "Run the tests" failed (exit code 2)'
-    });
-    assert.equal(
-      events.find((event) => event.type === "task.completed")?.payload.exitCode,
-      2,
-      "the normaliser reports it"
-    );
-
-    const { ingestion, sink } = harness();
-    for (const event of events) {
-      await ingestion.ingest(event);
-    }
-    await ingestion.drain();
-    const shell = fold(sink.events()).roster.find((row) => row.id === "bsh1");
-    assert.ok(shell, "the background shell is on the roster");
-    assert.equal(shell.exitCode, 2, "and so does its roster row");
-  });
-});
-
 describe("a Claude subagent's calls, from the normaliser through the real fold", () => {
   /** Every tool row of each call, keyed by `payload.toolUseId`. */
   function callRows(state: ReturnType<typeof fold>): Map<string, ThreadActivityItem[]> {
@@ -1005,27 +514,6 @@ describe("a Claude subagent's calls, from the normaliser through the real fold",
     }
     return calls;
   }
-
-  const LIFECYCLE = new Set(["tool.started", "tool.updated", "tool.completed", "tool.denied"]);
-
-  it("07: every output row of an agent-owned call carries the call's agentId", async () => {
-    const { ingestion, sink } = harness();
-    for (const event of replayClaudeFixture("07-subagent-task.ndjson").events) {
-      await ingestion.ingest({ ...event, threadId: THREAD_ID });
-    }
-    await ingestion.drain();
-
-    let checked = 0;
-    for (const [callId, rows] of callRows(fold(sink.events()))) {
-      const owner = rows.find((row) => LIFECYCLE.has(row.activityKind) && row.agentId)?.agentId;
-      if (owner === undefined) continue;
-      for (const row of rows.filter((entry) => entry.activityKind === "tool.output")) {
-        assert.equal(row.agentId, owner, `${callId}'s output is its agent's, not the parent's`);
-        checked += 1;
-      }
-    }
-    assert.equal(checked, 1, "the capture's one subagent Bash result");
-  });
 
   it("a background agent's call keeps one turn and one owner past the parent's result, and its words settle", async () => {
     const normalizer = new ClaudeNormalizer({

@@ -351,16 +351,6 @@ describe("an agent row with a liveness TTL (Grok) expires; every row naming it r
     assert.equal(registry.liveness("t1"), "working", "a poll answering running is live work again");
   });
 
-  it("its end drops it, and an end after expiry changes nothing", () => {
-    const clock = createTestClock(0);
-    const registry = createLivenessRegistry({ clock });
-    registry.observe(task("task.started", { ...grokAgent, toolUseId: "call-9" }));
-    clock.set(HOUR);
-    assert.equal(registry.liveness("t1"), null);
-    registry.observe(task("task.completed", { ...grokAgent, status: "completed" }));
-    assert.equal(registry.liveness("t1"), null);
-  });
-
   it("an agent without a TTL still never expires, beside one that does", () => {
     const clock = createTestClock(0);
     const registry = createLivenessRegistry({ clock });

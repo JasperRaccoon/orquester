@@ -45,7 +45,7 @@ export const THREAD_SNAPSHOT_IDLE_TTL_MS = 5 * 60_000;
  * is not small, and a long session can touch far more tabs than a person ever
  * navigates back to — the oldest retention is evicted first.
  */
-export const THREAD_SNAPSHOT_CACHE_MAX = 24;
+const THREAD_SNAPSHOT_CACHE_MAX = 24;
 
 /** The retained value: whatever the store folds, plus the cursor it folded to. */
 export interface RetainedThread<TState> {

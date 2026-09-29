@@ -29,7 +29,7 @@ function optionTitle(option: AgentProfileAgentOption): string {
   return option.version ? `${option.label} ${option.version}` : option.label;
 }
 
-export interface AgentPickerProps {
+interface AgentPickerProps {
   agents: readonly AgentProfileAgentOption[];
   value: AgentProfileAgentId;
   onChange: (agent: AgentProfileAgentId) => void;

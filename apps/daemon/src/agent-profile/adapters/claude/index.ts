@@ -182,7 +182,7 @@ interface LoadedState {
   fileErrors: ProfileFileError[];
 }
 
-export interface ClaudeProfileAdapterDeps {
+interface ClaudeProfileAdapterDeps {
   backups: ProfileBackups;
   stash: ProfileStash;
   runCli?: typeof runAgentCliOrThrow;

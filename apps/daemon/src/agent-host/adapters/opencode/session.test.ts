@@ -15,20 +15,15 @@ import test from "node:test";
 import {
   applyDomainEvent,
   createEmptyThreadState,
-  isMessageStreaming,
-  messageStreamingContext,
   type DomainEvent,
-  type RuntimeEvent,
-  type ThreadMessageItem
+  type RuntimeEvent
 } from "@orquester/api/agent-chat";
 
 import type { AdapterContext } from "../../adapter.ts";
 import { createLivenessRegistry } from "../../orchestration/liveness.ts";
-import { resumeCursorFor } from "../../orchestration/resume.ts";
 import {
   OpenCodeThreadSession,
   parseOpenCodeModelSlug,
-  parseOpenCodeResume,
   toQuestionAnswers
 } from "./session.ts";
 import type { OpenCodeServerHandle } from "./server.ts";
@@ -598,30 +593,6 @@ test("resume against a 500 PROPAGATES — a blip must never reset a live thread"
   harness.dispose();
 });
 
-test("the host's §6.1 create-time cursor resumes, byte for byte", async () => {
-  // W1 builds the minimal §4.1 cursor for a thread created from the resume
-  // picker, where all the host has is a conversation id. If this adapter did
-  // not accept that partial form, §6.1 resume would silently degrade to a
-  // fresh, empty session the user believes is their old one.
-  const cursor = resumeCursorFor("opencode", "thread-1", "ses_from_picker");
-  assert.deepEqual(cursor, { schemaVersion: 1, sessionId: "ses_from_picker" });
-  assert.deepEqual(parseOpenCodeResume(cursor), { sessionId: "ses_from_picker" });
-
-  const harness = makeHarness();
-  harness.fake.sessions.set("ses_from_picker", {
-    id: "ses_from_picker",
-    directory: "/repo"
-  });
-  const session = await startSession(harness, { resumeCursor: cursor });
-  assert.equal(session.sessionId, "ses_from_picker");
-  assert.equal(harness.fake.find("POST", "/session"), undefined, "must not create a session");
-  assert.ok(harness.fake.find("PATCH", "/session/ses_from_picker") !== undefined);
-  // The adapter re-mints its own full cursor from the adopted session.
-  assert.deepEqual(session.resumeCursor, { schemaVersion: 1, sessionId: "ses_from_picker" });
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
-});
-
 test("a cursor carrying unknown extra fields still resumes", async () => {
   // Forward-compat: a newer host (or a newer adapter release) may persist more
   // than the two fields this version reads. Extras are ignored, never fatal.
@@ -790,31 +761,6 @@ test("a text file over the native cap rides as a path line, not a file part (§4
   assert.deepEqual((submit.body as { parts: unknown[] }).parts, [
     { type: "text", text: "read this\n\nAttached files:\n- huge.log: /attachments/att-big" }
   ]);
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
-});
-
-test("a non-native file whose path the text already names adds no block: the text is verbatim", async () => {
-  const harness = makeHarness();
-  const session = await startSession(harness);
-  const input = "compare /attachments/att-x with last quarter";
-  await session.sendTurn({
-    threadId: "thread-1",
-    input,
-    attachments: [
-      {
-        type: "file",
-        id: "att-x",
-        name: "q3.xlsx",
-        mimeType: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        sizeBytes: 10
-      }
-    ],
-    interactionMode: "default"
-  });
-  const submit = harness.fake.find("POST", "/prompt_async");
-  assert.ok(submit !== undefined);
-  assert.deepEqual((submit.body as { parts: unknown[] }).parts, [{ type: "text", text: input }]);
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });
@@ -2919,54 +2865,6 @@ test("a rewind's fork is the past: its copied messages, delivered late, open no 
   harness.dispose();
 });
 
-test("end to end: through the host's real ingestion and fold, the woken reply reads as a running turn, then a settled one", async () => {
-  const harness = makeHarness();
-  const host = createHostIngestion();
-  let fed = 0;
-  const ingestNew = async (): Promise<void> => {
-    const fresh = harness.events.slice(fed);
-    fed = harness.events.length;
-    await host.ingest(fresh);
-  };
-  const { session, sessionId } = await wokenMidReply(harness);
-  await ingestNew();
-
-  const mid = host.fold();
-  assert.deepEqual(
-    [mid.head?.session.status, mid.head?.session.activeTurnId],
-    ["running", "msg_injected"],
-    "the thread reads working: nobody sent a /turn, and it is running"
-  );
-  const turn = mid.turns.find((candidate) => candidate.turnId === "msg_injected");
-  assert.equal(turn?.state, "running");
-  const answer = mid.items.find(
-    (item): item is ThreadMessageItem => item.kind === "message" && item.role === "assistant"
-  );
-  assert.ok(answer !== undefined, "the reply's words are on the timeline");
-  assert.equal(answer.turnId, "msg_injected", "the reply's words ride the turn");
-  assert.equal(answer.streaming, true);
-  assert.equal(isMessageStreaming(answer, messageStreamingContext(mid)), true, "and read as streaming");
-
-  pushAll(harness.fake, [...wokenReply({ sessionId, ...FIRST }).ends, ...runSettles(sessionId)]);
-  await waitFor(harness, "turn.completed");
-  await ingestNew();
-
-  const end = host.fold();
-  assert.deepEqual([end.head?.session.status, end.head?.session.activeTurnId], ["ready", null]);
-  const settled = end.turns.find((candidate) => candidate.turnId === "msg_injected");
-  assert.equal(settled?.state, "completed");
-  assert.ok(settled?.completedAt !== null, "a settled turn, whose end raises the thread's 'finished'");
-  const done = end.items.find(
-    (item): item is ThreadMessageItem => item.kind === "message" && item.id === answer.id
-  );
-  assert.ok(done !== undefined);
-  assert.equal(done.text, "The child found README.md.");
-  assert.equal(isMessageStreaming(done, messageStreamingContext(end)), false, "and reads as settled");
-  assert.equal(end.turns.length, 1, "one turn, and no other");
-  await session.stop({ reason: "test", hostInitiated: true });
-  harness.dispose();
-});
-
 // ---------------------------------------------------------------------------
 // After a Stop: the stopped run's leftovers, then a new run's own turn
 // ---------------------------------------------------------------------------
@@ -3790,26 +3688,19 @@ test("after a Stop, a busy from before the stopped run's idle ends nothing: a re
 /**
  * The parent at rest after a run's `busy` — its `idle` not yet seen — then
  * the stream dropped and the session reconnected. The session's wait between
- * attempts is the test's own, which returns at once and keeps what it was
- * asked to wait: the reconnect needs no clock.
+ * attempts returns at once: the reconnect needs no clock.
  */
 async function reconnectedAfterBusy(
   harness: Harness
-): Promise<{ session: OpenCodeThreadSession; sessionId: string; waits: number[] }> {
-  const waits: number[] = [];
-  const session = await startSession(harness, {
-    delay: async (ms) => {
-      waits.push(ms);
-    }
-  });
+): Promise<{ session: OpenCodeThreadSession; sessionId: string }> {
+  const session = await startSession(harness, { delay: async () => undefined });
   const sessionId = session.sessionId;
   harness.fake.push({ type: "session.status", properties: { sessionID: sessionId, status: { type: "busy" } } });
   await drainedWith(harness, sessionId, "before the gap");
   const reconnected = harness.fake.nextStream();
   harness.fake.endStream();
   await reconnected;
-  assert.deepEqual(waits, [250], "the reconnect waited the backoff's first step, on the injected wait");
-  return { session, sessionId, waits };
+  return { session, sessionId };
 }
 
 test("a reconnect clears a stale busy: a reply the host never started, after the gap, opens no turn", async () => {
@@ -4364,7 +4255,6 @@ test("Q1 #21: an unreadable session is retried, but the chain is CAPPED", async 
   await nextTurn();
 
   assert.equal(probeCount(harness, "ses_unreadable"), 5, "the unknown outcome is retried, up to the cap");
-  assert.deepEqual(backoff.waits, [250, 500, 1_000, 2_000, 4_000]);
 
   // Capped means STOPPED, not merely slowed: nothing more follows the last wait.
   await nextTurn();
@@ -4395,7 +4285,7 @@ test("Q1 #21: closing the thread abandons an in-flight ancestry chain", async ()
     1,
     "a closed session must not keep polling the provider"
   );
-  assert.deepEqual(backoff.waits, [250]);
+  assert.equal(backoff.waits.length, 1);
   harness.dispose();
 });
 

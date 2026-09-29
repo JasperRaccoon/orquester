@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, test } from "node:test";
 
-import type { WorkflowRunSummary } from "@orquester/api";
+import type { RunWorkflowResponse, WorkflowRunSummary } from "@orquester/api";
 
 
 import { controlledExecutor, edge, flush, node, workflow } from "./testing/fakes.ts";
@@ -227,7 +227,7 @@ describe("engine: the graph walk", () => {
   test("an agent waiting for a usage reset (kind agent, phase waiting-reset) reads waiting and resumes as such", async () => {
     const agent = controlledExecutor("agent");
     const wf = workflow("w1", [T(), node("A", "agent", { prompt: { kind: "text", text: "go" } })], [edge("T", "A")]);
-    const h = createHarness({ workflows: [wf], executors: { agent }, limits: { maxConcurrentAgentBlocks: 1 } });
+    const h = createHarness({ workflows: [wf], executors: { agent } });
     const { runId } = await h.engine.run("w1", {});
     await flush();
     const waitingOn = {
@@ -384,7 +384,7 @@ describe("engine: the graph walk", () => {
 
 describe("engine: limits, outputs and redaction", () => {
   test("a big output goes to a file with an inline preview; downstream and nodeOutput read it whole", async () => {
-    const big = "x".repeat(5000);
+    const big = "x".repeat(100_000);
     let downstream: unknown;
     const code = scripted("code", {
       A: () => ({ status: "succeeded", output: { big } }),
@@ -394,11 +394,11 @@ describe("engine: limits, outputs and redaction", () => {
       }
     });
     const wf = workflow("w1", [T(), node("A", "code"), node("B", "code")], [edge("T", "A"), edge("A", "B")]);
-    const h = createHarness({ workflows: [wf], executors: { code }, limits: { inlineOutputPreviewBytes: 1024 } });
+    const h = createHarness({ workflows: [wf], executors: { code } });
     const { run, runId } = await runToEnd(h, "w1");
     assert.equal(run.blocks.A!.outputTruncated, true);
     assert.equal(typeof run.blocks.A!.output, "string");
-    assert.ok((run.blocks.A!.output as string).length < 1100);
+    assert.ok(Buffer.byteLength(run.blocks.A!.output as string) <= 64 * 1024);
     assert.equal((run.blocks.A! as { outputFile?: string }).outputFile, undefined, "the file path never crosses the wire");
     assert.deepEqual(downstream, { big });
     assert.deepEqual(await h.engine.nodeOutput(runId, "A"), { found: true, output: { big } });
@@ -408,9 +408,9 @@ describe("engine: limits, outputs and redaction", () => {
   });
 
   test("an output over the hard cap fails the block with limit_exceeded", async () => {
-    const code = scripted("code", { A: () => ({ status: "succeeded", output: "y".repeat(3000) }) });
+    const code = scripted("code", { A: () => ({ status: "succeeded", output: "y".repeat(16 * 1024 * 1024) }) });
     const wf = workflow("w1", [T(), node("A", "code")], [edge("T", "A")]);
-    const h = createHarness({ workflows: [wf], executors: { code }, limits: { maxOutputBytes: 2048 } });
+    const h = createHarness({ workflows: [wf], executors: { code } });
     const { run, result } = await runToEnd(h, "w1");
     assert.equal(run.blocks.A!.error?.kind, "limit_exceeded");
     assert.equal(result.status, "failed");
@@ -495,11 +495,11 @@ describe("engine: cancel and run timeout", () => {
   test("a block that ignores its abort cannot hold a cancelled run forever", async () => {
     const stubborn = { type: "code" as const, execute: () => new Promise<never>(() => undefined) };
     const wf = workflow("w1", [T(), node("A", "code")], [edge("T", "A")]);
-    const h = createHarness({ workflows: [wf], executors: { code: stubborn }, limits: { endingGraceMs: 5_000 } });
+    const h = createHarness({ workflows: [wf], executors: { code: stubborn } });
     const { runId } = await h.engine.run("w1", {});
     await flush();
     await h.engine.cancel(runId!);
-    await h.clock.advance(5_000);
+    await h.clock.advance(30_000);
     const result = await h.engine.waitForRun(runId!);
     assert.equal(result.status, "cancelled");
     assert.equal((await h.engine.getRun(runId!))!.blocks.A!.status, "cancelled");
@@ -575,34 +575,33 @@ describe("engine: overlap and global caps", () => {
 
   test("the global run cap queues runs beyond it, FIFO", async () => {
     const code = controlledExecutor("code");
-    const h = createHarness({
-      workflows: [slowWorkflow("a", "skip"), slowWorkflow("b", "skip"), slowWorkflow("c", "skip")],
-      executors: { code },
-      limits: { maxConcurrentRuns: 2 }
-    });
-    const a = await h.engine.run("a", {});
-    const b = await h.engine.run("b", {});
-    const c = await h.engine.run("c", {});
+    const ids = ["a", "b", "c", "d", "e", "f"];
+    const h = createHarness({ workflows: ids.map((id) => slowWorkflow(id, "skip")), executors: { code } });
+    const started: RunWorkflowResponse[] = [];
+    for (const id of ids) started.push(await h.engine.run(id, {}));
     await flush();
-    assert.equal(code.calls.length, 2);
-    const waiting = (await h.runStore.load(c.runId!))!;
-    assert.equal(waiting.status, "queued");
-    assert.equal(waiting.queuedFor, "capacity");
+    assert.equal(code.calls.length, 4);
+    for (const index of [4, 5]) {
+      const waiting = (await h.runStore.load(started[index]!.runId!))!;
+      assert.equal(waiting.status, "queued");
+      assert.equal(waiting.queuedFor, "capacity");
+    }
     code.calls[0]!.resolve({ status: "succeeded", output: 1 });
-    await h.engine.waitForRun(a.runId!);
+    await h.engine.waitForRun(started[0]!.runId!);
     await flush();
-    assert.equal(code.calls.length, 3);
-    assert.equal(code.calls[2]!.ctx.runId, c.runId);
-    void b;
+    assert.equal(code.calls.length, 5);
+    assert.equal(code.calls[4]!.ctx.runId, started[4]!.runId);
+    assert.equal((await h.runStore.load(started[5]!.runId!))!.status, "queued");
   });
 
   test("a queued run can be cancelled before it starts", async () => {
     const code = controlledExecutor("code");
-    const h = createHarness({ workflows: [slowWorkflow("a", "skip"), slowWorkflow("b", "skip")], executors: { code }, limits: { maxConcurrentRuns: 1 } });
-    await h.engine.run("a", {});
-    const b = await h.engine.run("b", {});
-    assert.equal(await h.engine.cancel(b.runId!), true);
-    const result = await h.engine.waitForRun(b.runId!);
+    const ids = ["a", "b", "c", "d", "queued"];
+    const h = createHarness({ workflows: ids.map((id) => slowWorkflow(id, "skip")), executors: { code } });
+    for (const id of ids.slice(0, 4)) await h.engine.run(id, {});
+    const queued = await h.engine.run("queued", {});
+    assert.equal(await h.engine.cancel(queued.runId!), true);
+    const result = await h.engine.waitForRun(queued.runId!);
     assert.equal(result.status, "cancelled");
     assert.equal(result.startedAt, undefined);
   });
@@ -610,49 +609,42 @@ describe("engine: overlap and global caps", () => {
   test("agent blocks and sandbox processes wait behind their global caps", async () => {
     const agent = controlledExecutor("agent");
     const code = controlledExecutor("code");
-    const agentConfig = { prompt: { kind: "text", text: "go" } };
-    const wf = workflow(
-      "w1",
-      [T(), node("A1", "agent", agentConfig), node("A2", "agent", agentConfig), node("C1", "code"), node("C2", "code")],
-      [edge("T", "A1"), edge("T", "A2"), edge("T", "C1"), edge("T", "C2")]
-    );
-    const h = createHarness({ workflows: [wf], executors: { agent, code }, limits: { maxConcurrentAgentBlocks: 1, maxConcurrentProcesses: 1 } });
+    const agents = Array.from({ length: 5 }, (_, i) => node(`A${i}`, "agent", { prompt: { kind: "text", text: "go" } }));
+    const processes = Array.from({ length: 9 }, (_, i) => node(`C${i}`, "code"));
+    const blocks = [...agents, ...processes];
+    const h = createHarness({ workflows: [workflow("w1", [T(), ...blocks], blocks.map((block) => edge("T", block.id)))], executors: { agent, code } });
     const { runId } = await h.engine.run("w1", {});
     await flush();
-    assert.equal(agent.calls.length, 1);
-    assert.equal(code.calls.length, 1);
-    let run = (await h.engine.getRun(runId!))!;
-    assert.equal(run.blocks.A2!.status, "queued");
-    assert.equal(run.blocks.C2!.status, "queued");
+    assert.equal(agent.calls.length, 4);
+    assert.equal(code.calls.length, 8);
+    const run = (await h.engine.getRun(runId!))!;
+    assert.equal(run.blocks.A4!.status, "queued");
+    assert.equal(run.blocks.C8!.status, "queued");
     agent.calls[0]!.resolve({ status: "succeeded", output: 1 });
     code.calls[0]!.resolve({ status: "succeeded", output: 1 });
     await flush();
-    assert.equal(agent.calls.length, 2);
-    assert.equal(code.calls.length, 2);
-    agent.calls[1]!.resolve({ status: "succeeded", output: 1 });
-    code.calls[1]!.resolve({ status: "succeeded", output: 1 });
-    run = (await h.engine.getRun(runId!))!;
+    assert.equal(agent.calls.length, 5);
+    assert.equal(code.calls.length, 9);
+    for (const call of [...agent.calls, ...code.calls]) call.resolve({ status: "succeeded", output: 1 });
     assert.equal((await h.engine.waitForRun(runId!)).status, "succeeded");
   });
 
   test("an agent block's timer wait releases its slot; waking takes it back", async () => {
     const agent = controlledExecutor("agent");
-    const agentConfig = { prompt: { kind: "text", text: "go" } };
-    const wf = workflow("w1", [T(), node("A1", "agent", agentConfig), node("A2", "agent", agentConfig)], [edge("T", "A1"), edge("T", "A2")]);
-    const h = createHarness({ workflows: [wf], executors: { agent }, limits: { maxConcurrentAgentBlocks: 1 } });
+    const blocks = Array.from({ length: 5 }, (_, i) => node(`A${i}`, "agent", { prompt: { kind: "text", text: "go" } }));
+    const h = createHarness({ workflows: [workflow("w1", [T(), ...blocks], blocks.map((block) => edge("T", block.id)))], executors: { agent } });
     const { runId } = await h.engine.run("w1", {});
     await flush();
-    assert.equal(agent.calls.length, 1);
+    assert.equal(agent.calls.length, 4);
     await agent.calls[0]!.ctx.setWaitingOn({ kind: "timer", until: "2026-09-28T12:00:00.000Z", purpose: "wait-for-reset" });
     await flush();
-    assert.equal(agent.calls.length, 2, "the other agent block got the slot");
-    assert.equal((await h.engine.getRun(runId!))!.blocks[agent.calls[0]!.ctx.node.id]!.status, "waiting");
+    assert.equal(agent.calls.length, 5, "the queued agent block got the released slot");
+    assert.equal((await h.engine.getRun(runId!))!.blocks.A0!.status, "waiting");
     const retaking = agent.calls[0]!.ctx.setWaitingOn(undefined);
-    await flush();
-    agent.calls[1]!.resolve({ status: "succeeded", output: 1 });
+    agent.calls[4]!.resolve({ status: "succeeded", output: 1 });
     await retaking;
-    assert.equal((await h.engine.getRun(runId!))!.blocks[agent.calls[0]!.ctx.node.id]!.status, "running");
-    agent.calls[0]!.resolve({ status: "succeeded", output: 1 });
+    assert.equal((await h.engine.getRun(runId!))!.blocks.A0!.status, "running");
+    for (const call of agent.calls.slice(0, 4)) call.resolve({ status: "succeeded", output: 1 });
     assert.equal((await h.engine.waitForRun(runId!)).status, "succeeded");
   });
 });
@@ -894,16 +886,17 @@ describe("engine: sub-workflows", () => {
   });
 
   test("the depth limit and cycles are refused at run time", async () => {
-    const chain = [
-      workflow("a", [T(), node("S", "workflow", { workflowId: "b" })], [edge("T", "S")]),
-      workflow("b", [T(), node("S", "workflow", { workflowId: "c" })], [edge("T", "S")]),
-      workflow("c", [T(), node("X", "code")], [edge("T", "X")])
-    ];
-    const h = createHarness({ workflows: chain, executors: { code: scripted("code") }, limits: { maxSubWorkflowDepth: 1 } });
-    let { run } = await runToEnd(h, "a");
+    const chain = Array.from({ length: 7 }, (_, i) => workflow(
+      `w${i}`,
+      [T(), i < 6 ? node("S", "workflow", { workflowId: `w${i + 1}` }) : node("X", "code")],
+      [edge("T", i < 6 ? "S" : "X")]
+    ));
+    const h = createHarness({ workflows: chain, executors: { code: scripted("code") } });
+    let { run } = await runToEnd(h, "w0");
     assert.equal(run.status, "failed");
-    const bRun = (await h.engine.getRun(run.blocks.S!.childRunId!))!;
-    assert.equal(bRun.blocks.S!.error?.kind, "limit_exceeded");
+    let deepest = run;
+    for (let i = 0; i < 5; i += 1) deepest = (await h.engine.getRun(deepest.blocks.S!.childRunId!))!;
+    assert.equal(deepest.blocks.S!.error?.kind, "limit_exceeded");
 
     const cycle = [
       workflow("x", [T(), node("S", "workflow", { workflowId: "y" })], [edge("T", "S")]),
@@ -930,9 +923,13 @@ describe("engine: sub-workflows", () => {
   });
 
   test("child runs bypass the global run cap (no deadlock)", async () => {
-    const parent = workflow("p", [T(), node("S", "workflow", { workflowId: "c" })], [edge("T", "S")]);
-    const h = createHarness({ workflows: [parent, child("c")], executors: { code: scripted("code") }, limits: { maxConcurrentRuns: 1 } });
-    const { result } = await runToEnd(h, "p");
+    const chain = Array.from({ length: 5 }, (_, i) => workflow(
+      `w${i}`,
+      [T(), i < 4 ? node("S", "workflow", { workflowId: `w${i + 1}` }) : node("X", "code")],
+      [edge("T", i < 4 ? "S" : "X")]
+    ));
+    const h = createHarness({ workflows: chain, executors: { code: scripted("code") } });
+    const { result } = await runToEnd(h, "w0");
     assert.equal(result.status, "succeeded");
   });
 });

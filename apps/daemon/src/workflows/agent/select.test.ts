@@ -4,8 +4,6 @@ import type { AgentAccount, AgentAccountsResponse, AgentUsage, UsageAccount, Usa
 import type { AccountCooldown, AccountPolicy, AgentChainEntry } from "@orquester/config";
 import {
   burntWindowResetAt,
-  rankChainEntry,
-  sameFamilyAlternatives,
   selectAccount,
   type SelectAccountInput
 } from "./select.ts";
@@ -111,15 +109,11 @@ test("soonest-reset without a threshold takes the earliest weekly reset", () => 
 test("soonest-reset on the session window: unknown resets go last", () => {
   const decision = selectAccount(input({ chain: [entry("claude", "m", { strategy: "soonest-reset", soonestResetWindow: "session" })] }));
   assert.equal(decision.chosen?.accountLabel, "jasperclaude", "session resets in 2h, before jasperinuwu's 4h; the others have no session window");
-  const ranked = rankChainEntry(input({ chain: [entry("claude", "m", { strategy: "soonest-reset", soonestResetWindow: "session" })] }), 0).ranked;
-  assert.deepEqual(ranked.map((c) => c.label), ["jasperclaude", "jasperinuwu", "arakuma.panama", "therealeduard465"]);
 });
 
 test("least-used (max) picks jasperinuwu", () => {
   const decision = selectAccount(input({ chain: [entry("claude", "m", { strategy: "least-used", maxWeeklyPct: 85 })] }));
   assert.equal(decision.chosen?.accountLabel, "jasperinuwu");
-  const ranked = rankChainEntry(input({ chain: [entry("claude", "m", { strategy: "least-used" })] }), 0).ranked;
-  assert.deepEqual(ranked.map((c) => c.label), ["jasperinuwu", "arakuma.panama", "jasperclaude", "therealeduard465"]);
 });
 
 test("least-used ties break on the soonest weekly reset, then the label", () => {
@@ -132,11 +126,9 @@ test("least-used ties break on the soonest weekly reset, then the label", () => 
       ])
     ]
   };
-  const ranked = rankChainEntry(
-    input({ usage, accounts: accountsOf(account("claude", "y", "alpha"), account("claude", "z", "beta"), account("claude", "x", "zeta")), chain: [entry("claude", "m", { leastUsedMetric: "weekly" })] }),
-    0
-  ).ranked;
-  assert.deepEqual(ranked.map((c) => c.label), ["zeta", "alpha", "beta"]);
+  const selection = input({ usage, accounts: accountsOf(account("claude", "y", "alpha"), account("claude", "z", "beta"), account("claude", "x", "zeta")), chain: [entry("claude", "m", { leastUsedMetric: "weekly" })] });
+  assert.equal(selectAccount(selection).chosen?.accountId, "x");
+  assert.equal(selectAccount({ ...selection, exclude: new Set(["claude:x"]) }).chosen?.accountId, "y");
 });
 
 test("fixed order [therealeduard465, jasperclaude] under 85% weekly picks jasperclaude — by label or by id", () => {
@@ -205,11 +197,7 @@ test("unknown usage is tried after every known account — or dropped with unkno
     ]
   };
   const accounts = accountsOf(account("claude", "missing"), account("claude", "off"), account("claude", "old"), account("claude", "known"));
-  const ranked = rankChainEntry(input({ usage, accounts, chain: [entry("claude", "m")] }), 0).ranked;
-  assert.deepEqual(
-    ranked.map((c) => [c.accountId, c.usage]),
-    [["known", "known"], ["missing", "unknown"], ["off", "unknown"], ["old", "unknown"]]
-  );
+  assert.equal(selectAccount(input({ usage, accounts, chain: [entry("claude", "m")] })).chosen?.accountId, "known");
 
   // The known one is over the threshold: an unknown one still runs rather than nothing.
   const blocked = selectAccount(input({ usage, accounts, chain: [entry("claude", "m", { maxWeeklyPct: 50 })] }));
@@ -334,11 +322,8 @@ test("system: the family's system row, or its head row when it has no managed ac
   // Grok with no managed accounts: the head row is the system login's reading; no 5h window, so a
   // session threshold is vacuous rather than unknown.
   const grokHead: AgentUsage = { id: "grok", available: true, stale: false, session: null, weekly: { percent: 30, resetsAt: at(2 * DAY) }, asOf: fresh };
-  const solo = rankChainEntry(
-    input({ usage: { agents: [grokHead] }, accounts: accountsOf(), chain: [entry("grok", "grok-build", { includeSystem: true, maxSessionPct: 10 })] }),
-    0
-  ).ranked;
-  assert.deepEqual(solo.map((c) => [c.accountId, c.usage, c.label]), [["system", "known", "System"]]);
+  const solo = selectAccount(input({ usage: { agents: [grokHead] }, accounts: accountsOf(), chain: [entry("grok", "grok-build", { includeSystem: true, maxSessionPct: 10, unknownUsage: "exclude" })] }));
+  assert.equal(solo.chosen?.accountId, "system");
 
   // With managed accounts the system row is `.system`; hidden (undefined) → unknown, tried last.
   const managedUsage = agentRow("claude", claudeUsage.accounts!, {
@@ -346,26 +331,12 @@ test("system: the family's system row, or its head row when it has no managed ac
   });
   const withSystem = selectAccount(input({ usage: { agents: [managedUsage] }, chain: [entry("claude", "m", { includeSystem: true })] }));
   assert.equal(withSystem.chosen?.accountId, "system");
-  const hidden = rankChainEntry(input({ chain: [entry("claude", "m", { includeSystem: true })] }), 0).ranked;
-  assert.equal(hidden.at(-1)?.accountId, "system");
-  assert.equal(hidden.at(-1)?.usage, "unknown");
+  const hidden = selectAccount(input({ chain: [entry("claude", "m", { accounts: ["system"], unknownUsage: "exclude" })] }));
+  assert.equal(hidden.chosen, null);
+  assert.equal(hidden.skipped[0]?.why, "unknownUsage");
   // Naming "system" in the allow-list includes it without includeSystem.
   const named = selectAccount(input({ usage: { agents: [managedUsage] }, chain: [entry("claude", "m", { strategy: "fixed", accounts: ["system", "jasperclaude"] })] }));
   assert.equal(named.chosen?.accountId, "system");
-});
-
-test("sameFamilyAlternatives: the next eligible account of the same chain entry, never another entry", () => {
-  const usage: UsageResponse = { agents: [claudeUsage, agentRow("codex", [row("c1", "c1", { weekly: [5, DAY] })])] };
-  const accounts = accountsOf(...claudeAccounts, account("codex", "c1"));
-  const chain = [entry("claude", "m", { strategy: "soonest-reset", maxWeeklyPct: 85 }), entry("codex", "gpt-5.5")];
-  const next = sameFamilyAlternatives(input({ usage, accounts, chain, exclude: new Set(["claude:a-jasperclaude"]) }), 0);
-  assert.equal(next.chosen?.accountLabel, "arakuma.panama");
-  const none = sameFamilyAlternatives(
-    input({ usage, accounts, chain, fromChainIndex: 0, exclude: new Set(["claude:a-jasperclaude", "claude:a-arakuma", "claude:a-jasperinuwu"]) }),
-    0
-  );
-  assert.equal(none.chosen, null);
-  assert.equal(none.earliestResetAt, at(DAY + 2 * HOUR), "therealeduard465's weekly reset");
 });
 
 test("chosen carries the entry's model options", () => {

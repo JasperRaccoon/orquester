@@ -17,7 +17,7 @@ import { type ProfileBackups, readTextIfExists, writeProfileFileVerified } from 
 import { isRecord, parseJsonText } from "./settings.ts";
 
 /** The lock settings Claude's own writers are compatible with (see the module header). */
-export const CLAUDE_JSON_LOCK_OPTIONS: LockOptions = {
+const CLAUDE_JSON_LOCK_OPTIONS: LockOptions = {
   realpath: false,
   retries: { retries: 20, minTimeout: 50, maxTimeout: 500 },
   stale: 10_000
@@ -50,12 +50,12 @@ export function mcpServersOf(doc: ClaudeJsonDoc): Record<string, unknown> {
  * The document, or `null` when the file does not exist. Throws an `Error`
  * when it does not parse (the caller turns that into a `fileErrors` entry).
  */
-export async function readClaudeJson(path: string): Promise<ClaudeJsonDoc | null> {
+async function readClaudeJson(path: string): Promise<ClaudeJsonDoc | null> {
   const text = await readTextIfExists(path);
   return text === null ? null : parseClaudeJson(text);
 }
 
-export interface ClaudeJsonUpdateOptions {
+interface ClaudeJsonUpdateOptions {
   backups: ProfileBackups;
   agent: string;
   /** Test seam: extra `proper-lockfile` options (a custom `fs`, shorter retries). */

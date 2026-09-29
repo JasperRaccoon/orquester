@@ -39,11 +39,6 @@ describe("attachment path lines (§4.1, §4.5)", () => {
     assert.equal(appendAttachmentPathLines(text, []), text);
   });
 
-  it("never prefixes or wraps: a leading slash command stays first (§4.6.9)", () => {
-    const out = appendAttachmentPathLines("/review", [{ name: "a.pdf", path: "/a/a.pdf" }]);
-    assert.ok(out.startsWith("/review\n\n"));
-  });
-
   it("collapses a run of control characters in a name to one space, so a name cannot forge a line of the turn", () => {
     assert.equal(
       appendAttachmentPathLines("", [{ name: "bad\nname.txt", path: "/a/b.txt" }]),
@@ -92,13 +87,11 @@ describe("attachment path lines (§4.1, §4.5)", () => {
 });
 
 describe("stripping the block from a replayed native history", () => {
-  it("removes one trailing block in the helper's own shape and nothing else", () => {
-    const text = "look at these";
-    const sent = appendAttachmentPathLines(text, [
-      { name: "q3.xlsx", path: "/a/q3.xlsx" },
-      { name: "b c.txt", path: "/a/b c.txt" }
-    ]);
-    assert.equal(stripAttachmentPathLines(sent), text);
+  it("removes a literal persisted trailing attachment block", () => {
+    assert.equal(
+      stripAttachmentPathLines("look at these\n\nAttached files:\n- q3.xlsx: /a/q3.xlsx\n- b c.txt: /a/b c.txt"),
+      "look at these"
+    );
   });
 
   it("keeps a block that is the whole message: a replay has no attachment chips to show instead", () => {
@@ -155,14 +148,11 @@ describe("stripping the block from a replayed native history", () => {
 });
 
 describe("recognising a block-only text (`isAttachmentPathBlock`)", () => {
-  it("is true for exactly the block `appendAttachmentPathLines` writes onto empty prose", () => {
+  it("recognises persisted attachment-only blocks", () => {
     assert.equal(isAttachmentPathBlock("Attached files:\n- q3.xlsx: /a/q3.xlsx"), true);
     assert.equal(
       isAttachmentPathBlock(
-        appendAttachmentPathLines("", [
-          { name: "q3.xlsx", path: "/a/q3.xlsx" },
-          { name: "b c.txt", path: "/a/b c.txt" }
-        ])
+        "Attached files:\n- q3.xlsx: /a/q3.xlsx\n- b c.txt: /a/b c.txt"
       ),
       true
     );

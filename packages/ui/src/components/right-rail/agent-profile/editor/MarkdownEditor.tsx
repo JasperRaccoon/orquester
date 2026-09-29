@@ -40,12 +40,9 @@ import { SubmitStatus, useProfileSubmit } from "./use-submit";
 type MarkdownDetail = Extract<ProfileItemDetail, { kind: "skill" | "command" }>;
 
 /** "+ Add" → Skill or Command: the source switcher over the four sources. */
-export const MarkdownCreateEditor: React.FC<{ kind: MarkdownKind; initialSource?: MarkdownSource }> = ({
-  kind,
-  initialSource = "write"
-}) => {
+export const MarkdownCreateEditor: React.FC<{ kind: MarkdownKind }> = ({ kind }) => {
   const { agent } = useEditorEnv();
-  const [source, setSource] = useState<MarkdownSource>(initialSource);
+  const [source, setSource] = useState<MarkdownSource>("write");
   const model = useMemo(() => markdownEditorModel(agent, kind), [agent, kind]);
   // The written draft outlives a look at another source, and so does the
   // unsaved-changes guard over it: the other sources report it with their own.
@@ -65,7 +62,7 @@ export const MarkdownCreateEditor: React.FC<{ kind: MarkdownKind; initialSource?
   }
 };
 
-export const SourceSwitcher: React.FC<{ value: MarkdownSource; onChange: (source: MarkdownSource) => void }> = ({
+const SourceSwitcher: React.FC<{ value: MarkdownSource; onChange: (source: MarkdownSource) => void }> = ({
   value,
   onChange
 }) => (
@@ -158,7 +155,7 @@ const WriteSource: React.FC<{
   );
 };
 
-export interface MarkdownWriteViewProps {
+interface MarkdownWriteViewProps {
   kind: MarkdownKind;
   mode: "create" | "edit";
   model: MarkdownEditorModel;
@@ -170,11 +167,9 @@ export interface MarkdownWriteViewProps {
   /** A skill's other files (read-only). */
   files?: string[];
   onSave?: () => void;
-  /** Checks: draw "More fields" open. */
-  moreOpen?: boolean;
 }
 
-export const MarkdownWriteView: React.FC<MarkdownWriteViewProps> = ({
+const MarkdownWriteView: React.FC<MarkdownWriteViewProps> = ({
   kind,
   mode,
   model,
@@ -184,8 +179,7 @@ export const MarkdownWriteView: React.FC<MarkdownWriteViewProps> = ({
   showErrors,
   nameError,
   files,
-  onSave,
-  moreOpen
+  onSave
 }) => {
   const ids = useId();
   const touch = useTouch();
@@ -196,7 +190,6 @@ export const MarkdownWriteView: React.FC<MarkdownWriteViewProps> = ({
   const more = model.fields.filter((spec) => !spec.required);
   const [open, setOpen] = useState(
     () =>
-      moreOpen ??
       more.some((spec) => {
         const value = form.values[spec.key];
         return spec.type === "boolean" ? spec.key in model.original : typeof value === "string" && value.trim() !== "";

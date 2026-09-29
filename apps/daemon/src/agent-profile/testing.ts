@@ -9,7 +9,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type {
   AgentProfileAgentId,
-  MarketplacePluginEntry,
   ProfileConflictPolicy,
   ProfileInstructionsInfo,
   ProfileItem,
@@ -197,11 +196,6 @@ export class FakeProfileAdapter implements ProfileAdapter {
     if (revision !== this.info().revision) throw profileErrors.conflict();
     this.instructionsText = text;
     return { itemIds: [], notes: [] };
-  }
-
-  async listMarketplacePlugins(marketplace: string): Promise<MarketplacePluginEntry[]> {
-    await this.enter("listMarketplacePlugins");
-    return [{ name: `${marketplace}-plugin`, installed: false }];
   }
 
   async exportItem(id: string): Promise<PortableItem> {

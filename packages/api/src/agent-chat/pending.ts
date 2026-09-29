@@ -42,7 +42,7 @@ export const REQUEST_ACTIVITY_KINDS: ReadonlySet<string> = new Set([
  *
  * *T3: `pendingRequests.ts:48-65` (`requestKindFromRequestType`).*
  */
-export function requestKindFromRequestType(requestType: unknown): ProviderRequestKind | null {
+function requestKindFromRequestType(requestType: unknown): ProviderRequestKind | null {
   switch (requestType) {
     case "command_execution_approval":
     case "exec_command_approval":
@@ -139,7 +139,7 @@ function isApprovalOption(value: unknown): value is ApprovalOption {
  *
  * *T3: `pendingRequests.ts:67-87` (`parseQuestions`).*
  */
-export function parseQuestions(value: unknown): UserInputQuestion[] {
+function parseQuestions(value: unknown): UserInputQuestion[] {
   if (!Array.isArray(value)) {
     return [];
   }

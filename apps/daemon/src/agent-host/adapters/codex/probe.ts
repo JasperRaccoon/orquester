@@ -38,7 +38,7 @@ import { usageWindowsFromRateLimits } from "./usage.ts";
  *
  * `/compact` is the host-synthesised entry of §4.6.3 (compaction is a host
  * route), `/feedback` is Codex's own. `/effort` is NOT here — it is
- * client-only (see {@link codexSlashCommands}).
+ * client-only.
  *
  * *T3: `apps/server/src/provider/Layers/CodexProvider.ts:680-687` — the whole
  * Codex command catalog is these two hard-coded rows.*
@@ -47,22 +47,6 @@ const CODEX_SLASH_COMMANDS: readonly SlashCommand[] = [
   { name: "compact", description: "Summarise the conversation to free context" },
   { name: "feedback", description: "Send feedback about Codex to OpenAI" }
 ] as const;
-
-/**
- * The catalogue this adapter publishes (§4.6.3).
- *
- * **`/effort` is deliberately NOT here.** It is a CLIENT-ONLY affordance
- * (§4.6.5(a)): selecting it writes the `effort` option of the current
- * `ModelSelection` and inserts nothing into the draft. Synthesising a
- * *provider* `/effort` row put two entries in the menu, and picking the
- * provider one inserted the literal text `/effort ` and forwarded it to a CLI
- * that does not implement the command (R2 finding 2; fix-wave arbitration).
- * `/compact` is the only host entry that belongs in a provider catalog.
- */
-export function codexSlashCommands(models: readonly ProviderModel[]): SlashCommand[] {
-  void models;
-  return [...CODEX_SLASH_COMMANDS];
-}
 
 /**
  * The menu's empty state when the catalogue is what it is. Orquester treats
@@ -178,7 +162,7 @@ export async function probeCodex(input: CodexProbeInput): Promise<ProviderSnapsh
   ]);
 
   const belowMinimum = !meetsMinimumVersion(version, MINIMUM_CODEX_VERSION);
-  const slashCommands = codexSlashCommands(models);
+  const slashCommands = [...CODEX_SLASH_COMMANDS];
 
   return {
     id: "codex",

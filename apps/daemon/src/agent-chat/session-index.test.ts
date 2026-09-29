@@ -175,7 +175,7 @@ test("concurrent writes retain the latest complete session index", async () => {
   try {
     await h.manager.reattach();
     for (let round = 0; round < 40; round++) {
-      h.chat.clear();
+      for (const session of h.chat.list()) h.chat.close(session.id);
       if (round % 2 === 0) {
         for (let i = 0; i < 12; i++) h.chat.adopt([chatRecord(`long-${round}-${i}`, i)]);
       } else {

@@ -16,7 +16,7 @@ import {
   type ClaudeUsageRecord,
   type ClaudeUsageStateStore
 } from "./usage-sources.ts";
-import { UsageStateFile, parseUsageRecord } from "./usage-state.ts";
+import { UsageStateFile } from "./usage-state.ts";
 
 const NOW = Date.parse("2026-09-28T14:00:00Z");
 const MIN = 60_000;
@@ -221,7 +221,6 @@ test("UsageStateFile round-trips, drops what does not parse and moves a corrupt 
   await corrupt.load();
   assert.equal(corrupt.get("good"), undefined);
   assert.equal((await readdir(join(dir, "daemon"))).some((name) => name.startsWith("usage-state.json.corrupt-")), true);
-  assert.equal(parseUsageRecord(null), undefined);
 });
 
 test("a thread's live windows become the account's session and weekly readings", () => {

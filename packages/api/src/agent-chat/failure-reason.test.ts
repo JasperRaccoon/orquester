@@ -102,7 +102,7 @@ test("legacy: a parked-turn warning's reset comes from its rate_limit_info detai
       detail: { status: "rejected", resetsAt: 1789969200, rateLimitType: "five_hour" }
     })
   );
-  assert.equal(failure?.resetsAt, new Date(1789969200 * 1000).toISOString());
+  assert.equal(failure?.resetsAt, "2026-09-21T05:40:00.000Z");
   assert.equal(failure?.legacy, true);
 });
 

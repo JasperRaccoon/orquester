@@ -15,7 +15,7 @@ import { type ProfileItemKind, isProfileItemKind } from "@orquester/api";
  * past what a per-item conflict check or a handful of hooks per event can
  * collide on, and short enough to read in a URL.
  */
-export const PROFILE_HASH_LENGTH = 16;
+const PROFILE_HASH_LENGTH = 16;
 
 /**
  * `JSON.stringify` with every object's keys sorted, recursively — the same
@@ -107,7 +107,7 @@ export function hookItemId(event: string, hook: HookIdentity): string {
 
 /**
  * Splits an id at its first `:` into a known kind and a non-empty name; `null`
- * for anything else. A hook's name is `<event>:<hash>` (see {@link parseHookItemId}).
+ * for anything else. A hook's name is `<event>:<hash>`.
  */
 export function parseItemId(id: string): { kind: ProfileItemKind; name: string } | null {
   const colon = id.indexOf(":");
@@ -119,21 +119,4 @@ export function parseItemId(id: string): { kind: ProfileItemKind; name: string }
     return null;
   }
   return { kind, name: id.slice(colon + 1) };
-}
-
-/** A hook id's event and hash; `null` when `id` is not a well-formed hook id. */
-export function parseHookItemId(id: string): { event: string; hash: string } | null {
-  const parsed = parseItemId(id);
-  if (parsed?.kind !== "hook") {
-    return null;
-  }
-  const colon = parsed.name.lastIndexOf(":");
-  if (colon <= 0) {
-    return null;
-  }
-  const hash = parsed.name.slice(colon + 1);
-  if (!/^[0-9a-f]+$/.test(hash) || hash.length !== PROFILE_HASH_LENGTH) {
-    return null;
-  }
-  return { event: parsed.name.slice(0, colon), hash };
 }

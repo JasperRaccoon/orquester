@@ -111,7 +111,7 @@ export const OUTBOX_QUEUE_ABSENCE_MAX_MS = 10 * 60_000;
  * handful at a time; the bound only stops a tab that never reopens a thread
  * from carrying its queue forever.
  */
-export const MAX_OUTBOX_ENTRIES = 100;
+const MAX_OUTBOX_ENTRIES = 100;
 
 /** A `/turn` body minus its `commandId`, as the thread store posted it. */
 export interface OutboxTurn {
@@ -344,16 +344,6 @@ function decodeDocument(raw: string | null): OutboxDocument {
     entries.push(entry);
   }
   return { entries, shown: parseShown(decoded.shown) };
-}
-
-/**
- * The outbox's entries as stored. Raw `JSON.parse` output never reaches typed
- * code: a value that is not a v1 outbox is empty, and each entry is read on
- * its own — one it cannot read is dropped, and so is a second entry under an
- * id an earlier one already holds.
- */
-export function parseComposerOutbox(raw: string | null): OutboxEntry[] {
-  return decodeDocument(raw).entries;
 }
 
 // ---------------------------------------------------------------------------

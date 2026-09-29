@@ -5,8 +5,7 @@
  * ## Ids and revisions — `hash.ts`
  * - `itemId(kind, name)` → `"mcp:jira"`; `parseItemId(id)` → `{kind, name} | null`.
  * - `hookItemId(event, {matcher?, ...handler})` → `"hook:<event>:<16 hex>"` —
- *   pass the same normalized handler shape for one agent every time;
- *   `parseHookItemId(id)` → `{event, hash} | null`.
+ *   pass the same normalized handler shape for one agent every time.
  * - `contentHash(value)` → 16 hex of sha256 (strings/bytes hashed raw, other
  *   values via `stableStringify`, so key order never moves it). Use it for
  *   `ProfileItem.revision` (hash the item's content AND its on/off state) and
@@ -46,8 +45,7 @@
  *   `STASH_CONFLICT` when the path is taken again).
  * - `stashFragment(agent, kind, id, name, data, meta?)` keeps a hook entry's
  *   JSON (remove it from its settings file afterwards); `get()` then
- *   `remove()` after writing it back (or `takeFragment()` when the write-back
- *   cannot fail).
+ *   `remove()` after writing it back.
  * - `list(agent)` → entries (`payloadPath` to read a stashed file for the
  *   snapshot), tolerant of broken ones; `get()`, `remove()` (delete for good).
  * - Stashing an id twice is a 409 `PROFILE_CONFLICT`: `remove()` first to replace.
@@ -110,18 +108,15 @@ export {
   writeProfileFileVerified
 } from "./fs-write.ts";
 export {
-  PROFILE_HASH_LENGTH,
   type HookIdentity,
   contentHash,
   hookItemId,
   itemId,
-  parseHookItemId,
   parseItemId,
   stableStringify
 } from "./hash.ts";
 export {
   SKILL_FILE,
-  SKILL_FILES_MAX,
   type MarkdownWriteOptions,
   type ScannedCommand,
   type ScannedSkill,
@@ -146,8 +141,7 @@ export {
   type StashEntry,
   type StashManifest,
   type StashOriginal,
-  ProfileStash,
-  encodeStashId
+  ProfileStash
 } from "./stash.ts";
 export { type CopyResult, type PathKind, copyTree, pathKind } from "./tree.ts";
 export { SecretDigester } from "./secret-digest.ts";

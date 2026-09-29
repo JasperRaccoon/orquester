@@ -5,7 +5,7 @@ export { createScheduler } from "./scheduler.ts";
 export type { Scheduler, SchedulerDeps, ScheduleTriggerState } from "./scheduler.ts";
 export { createGitPoller } from "./git-poller.ts";
 export type { GitPoller, GitPollerDeps, GitRemoteReader, GitTriggerState } from "./git-poller.ts";
-export { createRepoResolver, workspaceOfProject } from "./repo-resolve.ts";
+export { createRepoResolver } from "./repo-resolve.ts";
 export type { RepoResolverDeps, ResolvedRepo, ResolveRepo } from "./repo-resolve.ts";
 export { matchesAnyGlob, matchesGlob } from "./glob.ts";
 export { systemTriggerClock } from "./clock.ts";

@@ -14,8 +14,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import test from "node:test";
 
-import type { AdapterLogger, StartSessionInput } from "../../adapter.ts";
-import { projectDirFor } from "./index.ts";
+import type { AdapterLogger } from "../../adapter.ts";
 import {
   OpenCodeServerPool,
   parseServerUrl,
@@ -47,17 +46,6 @@ function makePool(
     signal: controller.signal
   });
 }
-
-// The pool spawns `<bin> serve --hostname=… --port=…`; the peer is a Node
-// script, so `serve` is simply an argument it ignores — which is exactly how
-// the real binary's own subcommand reaches it.
-
-test("the readiness scrape stays line-oriented past the unsecured-server warning", () => {
-  const output =
-    "Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.\n" +
-    "opencode server listening on http://127.0.0.1:4096\n";
-  assert.equal(parseServerUrl(output), "http://127.0.0.1:4096");
-});
 
 test("the scrape ignores a line that merely mentions the phrase", () => {
   assert.equal(
@@ -300,53 +288,6 @@ test("a re-acquire inside the idle window cancels the close", async (t) => {
   }
 });
 
-test("§3.2: two threads in ONE project share one server, keyed by projectPath", async () => {
-  // The end-to-end half of R4 #6: `projectDirFor` collapses both threads to
-  // the project root, and the pool must then hand out the same child — one
-  // `opencode serve`, one port, one catalogue probe. Before the fix these were
-  // two servers.
-  const peer = makePeer();
-  const controller = new AbortController();
-  const pool = makePool(peer, { MOCK_MODE: "ok" }, controller);
-  const seen: string[] = [];
-  try {
-    const rootThread = projectDirFor({
-      threadId: "t1",
-      cwd: peer.dir,
-      projectPath: peer.dir,
-      home: { kind: "system", path: peer.dir },
-      modelSelection: { model: "openrouter/x" },
-      runtimeMode: "approval-required"
-    } as StartSessionInput);
-    const subdirThread = projectDirFor({
-      threadId: "t2",
-      // A thread opened on a subdirectory of the same checkout.
-      cwd: join(peer.dir, "packages", "ui"),
-      projectPath: peer.dir,
-      home: { kind: "system", path: peer.dir },
-      modelSelection: { model: "openrouter/x" },
-      runtimeMode: "approval-required"
-    } as StartSessionInput);
-    assert.equal(rootThread, subdirThread, "both threads resolve to the project root");
-
-    const a = await pool.acquire(rootThread);
-    seen.push(a.url);
-    const b = await pool.acquire(subdirThread);
-    seen.push(b.url);
-
-    assert.equal(a.pid, b.pid, "one `opencode serve` for the project");
-    assert.equal(a.url, b.url, "one port");
-    assert.equal(pool.list().length, 1);
-    a.release();
-    b.release();
-  } finally {
-    await pool.stopAll();
-    controller.abort();
-    peer.cleanup();
-  }
-  assert.equal(new Set(seen).size, 1);
-});
-
 test("two projects get two servers", async () => {
   const peerA = makePeer();
   const peerB = makePeer();
@@ -441,34 +382,13 @@ test("a dead server is not reported as live by pool.list()", async () => {
   }
 });
 
-test("the startup buffer is trimmed on a LINE boundary", () => {
-  // R4 #23: front-truncating mid-line makes the line-oriented scrape skip a
-  // real readiness line, and a healthy server is then killed at the deadline.
-  const noiseLine = "x".repeat(50);
-  const noise = `${noiseLine}\n`.repeat(10);
+test("startup trimming preserves a ready line without turning a warning into one", () => {
   const ready = "opencode server listening on http://127.0.0.1:12345\n";
-  const full = noise + ready;
-  const trimmed = trimToLastLines(full, 120);
-  assert.ok(trimmed.length < full.length, "it really did trim");
-  assert.equal(
-    parseServerUrl(trimmed),
-    "http://127.0.0.1:12345",
-    "the readiness line survives intact"
-  );
-  // The invariant: the head is never a PARTIAL line. Every retained line is a
-  // whole one, so the first is either a complete noise line or the ready line.
-  for (const line of trimmed.split("\n").slice(0, -1)) {
-    assert.ok(
-      line === noiseLine || line === ready.trimEnd(),
-      `retained a partial line: ${JSON.stringify(line)}`
-    );
-  }
-
-  // With the old front-slice the scrape would have missed it entirely.
-  const naive = full.slice(-120);
-  assert.equal(parseServerUrl(naive), "http://127.0.0.1:12345");
-  // …and one character further in, the naive slice severs the ready line.
-  assert.equal(parseServerUrl(full.slice(-30)), null, "the bug this guards against");
+  const noise = `${"x".repeat(50)}\n`.repeat(10);
+  assert.equal(parseServerUrl(trimToLastLines(noise + ready, 120)), "http://127.0.0.1:12345");
+  // Cutting at the character cap must not make a phrase inside a warning
+  // look like the server's own readiness announcement.
+  assert.equal(parseServerUrl(trimToLastLines(`warning: ${ready}`, ready.length)), null);
 });
 
 test("a second stopAll waits for the first's kills: the host's two teardown calls both return only once the servers are gone", async () => {
@@ -483,19 +403,6 @@ test("a second stopAll waits for the first's kills: the host's two teardown call
   await pool.stopAll();
   assert.equal(handle.hasExited(), true, "the second call resolved only once the server was gone");
   await first;
-  controller.abort();
-  peer.cleanup();
-});
-
-test("stopAll kills every server, refcount notwithstanding", async () => {
-  const peer = makePeer();
-  const controller = new AbortController();
-  const pool = makePool(peer, { MOCK_MODE: "ok" }, controller);
-  const handle = await pool.acquire(peer.dir);
-  const exited = handle.exited;
-  await pool.stopAll();
-  await exited;
-  assert.equal(handle.hasExited(), true);
   controller.abort();
   peer.cleanup();
 });

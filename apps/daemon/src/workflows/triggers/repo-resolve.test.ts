@@ -6,7 +6,7 @@ after(() => mock.restoreAll());
 import type { LsRemoteResult } from "../git-remote/index.ts";
 import { ManualClock } from "../testing/manual-trigger-clock.ts";
 import { createGitPoller } from "./git-poller.ts";
-import { createRepoResolver, workspaceOfProject } from "./repo-resolve.ts";
+import { createRepoResolver } from "./repo-resolve.ts";
 import { advance, fakeHost, memoryState, node, recordingLogger, workflow } from "./test-support.ts";
 
 const WS = "/app/workspaces";
@@ -28,12 +28,11 @@ function resolver(remotes: Record<string, string | null>, accounts: Record<strin
   return { resolve, calls };
 }
 
-test("workspaceOfProject takes exactly <workspacesDir>/<ws>/<project>", () => {
-  assert.equal(workspaceOfProject(WS, `${WS}/team/app`), "team");
-  assert.equal(workspaceOfProject(WS, `${WS}/team`), null);
-  assert.equal(workspaceOfProject(WS, `${WS}/team/app/sub`), null);
-  assert.equal(workspaceOfProject(WS, "/elsewhere/team/app"), null);
-  assert.equal(workspaceOfProject(WS, `${WS}/../x/y`), null);
+test("project repositories reject paths outside the workspace project layout", async () => {
+  const resolve = createRepoResolver({ workspacesDir: WS, git: { remoteUrl: async () => "https://github.com/o/r" }, readWorkspaceMeta: async () => ({ gitAccountId: "team-account" }) });
+  for (const projectPath of [`${WS}/team`, `${WS}/team/app/sub`, "/elsewhere/team/app", `${WS}/../x/y`]) {
+    assert.equal(await resolve(workflow("wf", [], { project: { kind: "existing", projectPath } }), { kind: "project" }), null, projectPath);
+  }
 });
 
 test("repo kind url: as given, with its account or none", async () => {

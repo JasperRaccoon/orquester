@@ -126,7 +126,7 @@ export interface OpenCodeResumeCursor {
   sessionId: string;
 }
 
-export function parseOpenCodeResume(raw: unknown): { sessionId: string } | undefined {
+function parseOpenCodeResume(raw: unknown): { sessionId: string } | undefined {
   if (!isRecord(raw)) {
     return undefined;
   }

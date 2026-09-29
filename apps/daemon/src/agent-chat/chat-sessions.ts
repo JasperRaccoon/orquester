@@ -319,11 +319,6 @@ export class ChatSessionManager {
       });
     }
   }
-
-  /** Test/teardown helper: forget everything without emitting deletes upstream. */
-  clear(): void {
-    this.sessions.clear();
-  }
 }
 
 /** Only the derived §6.4 fields are compared — never `activity`, which is derived from them. */

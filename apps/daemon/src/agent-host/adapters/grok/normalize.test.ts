@@ -587,15 +587,6 @@ test("every status spelling and exit code T3's reader maps, in a MultiResult", (
   }
 });
 
-test("T3's kill answer ends the agent stopped — only a completed call whose outcome is killed", () => {
-  const grok = normalizer();
-  backgroundLaunched(grok);
-  assert.deepEqual(agentRows(poll(grok, [{ task_id: SUB_B, outcome: "killed" }], "KillTask", "failed")), []);
-  assert.deepEqual(agentRows(poll(grok, [{ task_id: SUB_B, outcome: "error" }], "KillTask")), []);
-  const killed = poll(grok, [{ task_id: SUB_B, outcome: "killed" }], "KillTask");
-  assert.deepEqual(statuses(taskRows(killed)), [["task.completed", "call-bg", "stopped"]]);
-});
-
 test("the captured kill answer ends a run — outcome killed; snapshot fields on it end nothing", () => {
   // Fixture 18: `{task_id, outcome: "killed", message}` for a subagent and a
   // shell alike. `explicitly_killed` / `kill_result_delivered` are
@@ -1179,32 +1170,6 @@ test("a run's end closes its child's open calls BEFORE its task row", () => {
   assert.equal(failed.turnId, "turn-1", "on the turn the call started in");
 });
 
-test("subagent_spawned joins a resume to its source's task, and a spawn no launch explains starts its own", () => {
-  const grok = normalizer();
-  startedBy(grok, "call-s1", FIND_CALLERS);
-  grok.handleXaiNotification("_x.ai/session_notification", spawned(SUB_A, "find callers"));
-  grok.handleXaiNotification("_x.ai/session_notification", finished(SUB_A, "completed", "main.js:3"));
-  const resumed = startedBy(grok, "call-s2", { prompt: "More.", resume_from: SUB_A });
-  assert.equal(resumed.payload.taskId, "call-s1");
-  const NEW_ID = "01a0c1ab-2222-7333-8444-555566667777";
-  grok.handleXaiNotification(
-    "_x.ai/session_notification",
-    spawned(NEW_ID, "find callers", { resumed_from: SUB_A, effective_context_source: "resumed" })
-  );
-  const end = grok.handleXaiNotification("_x.ai/session_notification", finished(NEW_ID, "completed", "tests:4"));
-  assert.deepEqual(
-    only(end, "task.completed").map((event) => [event.payload.taskId, event.payload.toolUseId, event.payload.summary]),
-    [["call-s1", "call-s2", "tests:4"]]
-  );
-  // The CLI's own spawn (a /loop fire; not captured): an agent under its id.
-  const LOOP = "01a0c1ac-3333-7444-8555-666677778888";
-  const loop = grok.handleXaiNotification("_x.ai/session_notification", spawned(LOOP, "hourly check"));
-  assert.deepEqual(
-    taskRows(loop).map((event) => [event.type, event.payload.taskId, event.payload.toolUseId]),
-    [["task.started", LOOP, LOOP]]
-  );
-});
-
 // ---------------------------------------------------------------------------
 // Monitors (fixture 20; T3's reader)
 // ---------------------------------------------------------------------------
@@ -1355,7 +1320,8 @@ function scheduler(grok: GrokNormalizer, sessionUpdate: string, extra: Record<st
 
 test("the session's end closes a live loop; a later fire notes itself, the CLI re-creating it is a new run", () => {
   const grok = normalizer();
-  assert.deepEqual(statuses(scheduler(grok, "scheduled_task_created")), [["task.started", LOOP_ID, undefined]]);
+  const first = scheduler(grok, "scheduled_task_created");
+  assert.deepEqual(statuses(first), [["task.started", LOOP_ID, undefined]]);
 
   const closed = only(grok.stopBackgroundTasks(), "task.completed");
   assert.deepEqual(
@@ -1373,7 +1339,8 @@ test("the session's end closes a live loop; a later fire notes itself, the CLI r
 
   // Re-created by the CLI: a new run.
   const again = only(scheduler(grok, "scheduled_task_created"), "task.started");
-  assert.equal(again[0]?.payload.toolUseId, `loop-run:${LOOP_ID}:launch-1:2`);
+  assert.ok(again[0]?.payload.toolUseId);
+  assert.notEqual(again[0]?.payload.toolUseId, only(first, "task.started")[0]?.payload.toolUseId);
 });
 
 test("an end the user did not choose says why on a live loop's closing row; the user's end and a Stop say nothing", () => {

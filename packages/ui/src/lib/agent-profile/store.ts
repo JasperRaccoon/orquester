@@ -46,12 +46,7 @@ import {
 import { agentProfileErrorCode, agentProfileErrorStatus, agentProfileErrorText } from "./errors";
 import { sanitizeAgentProfileSnapshot, sanitizeMutationResponse, sanitizeOverview } from "./sanitize";
 
-export {
-  sanitizeAgentProfileSnapshot,
-  sanitizeOverview,
-  sanitizeProfileItem,
-  sanitizeMutationResponse
-} from "./sanitize";
+export { sanitizeAgentProfileSnapshot, sanitizeMutationResponse } from "./sanitize";
 
 /** The routes this store calls — `ApiClient` satisfies it; tests pass a fake. */
 export interface AgentProfileApi {
@@ -73,7 +68,7 @@ export interface AgentProfileApi {
   ): Promise<ProfileMutationResponse>;
 }
 
-export type AgentProfileLoadStatus = "idle" | "loading" | "ready" | "error";
+type AgentProfileLoadStatus = "idle" | "loading" | "ready" | "error";
 
 /** One agent's snapshot and its load. */
 export interface AgentProfileEntry {
@@ -89,7 +84,7 @@ export interface AgentProfileEntry {
   refreshing: boolean;
 }
 
-export interface AgentProfileOverviewEntry {
+interface AgentProfileOverviewEntry {
   agents: readonly AgentProfileAgentSummary[] | null;
   status: AgentProfileLoadStatus;
   error: string | null;
@@ -102,7 +97,7 @@ export interface AgentProfileNotice {
   text: string;
 }
 
-export interface AgentProfileState {
+interface AgentProfileState {
   agents: Readonly<Record<AgentProfileAgentId, AgentProfileEntry>>;
   overview: AgentProfileOverviewEntry;
   notice: AgentProfileNotice | null;
@@ -111,7 +106,7 @@ export interface AgentProfileState {
 }
 
 /** What a mutation came to. `code` is the daemon's (`ITEM_EXISTS` asks the caller to decide). */
-export type AgentProfileMutationResult =
+type AgentProfileMutationResult =
   | { ok: true; snapshot: AgentProfileSnapshot | null; itemIds: string[]; notes: string[] }
   | { ok: false; error: string; code: string | null; status: number | null };
 
@@ -138,7 +133,7 @@ function initialState(): AgentProfileState {
 export const agentProfileStore = createStore<AgentProfileState>(() => initialState());
 
 /** Said after a 409 `PROFILE_CONFLICT`: the list was refetched. */
-export const PROFILE_CONFLICT_NOTICE = "It changed on disk; the list was refreshed.";
+const PROFILE_CONFLICT_NOTICE = "It changed on disk; the list was refreshed.";
 
 export function agentProfileItemKey(agent: AgentProfileAgentId, id: string): string {
   return `${agent}\n${id}`;
@@ -168,7 +163,7 @@ function getState(): AgentProfileState {
   return agentProfileStore.getState();
 }
 
-export function agentProfileEntry(agent: AgentProfileAgentId): AgentProfileEntry {
+function agentProfileEntry(agent: AgentProfileAgentId): AgentProfileEntry {
   return getState().agents[agent] ?? EMPTY_AGENT_PROFILE_ENTRY;
 }
 
@@ -599,15 +594,15 @@ export function trustAgentProfileItem(
 // The last picked agent (a device preference)
 // ---------------------------------------------------------------------------
 
-export const AGENT_PROFILE_STORAGE_KEY = "orquester:agent-profile";
-export const AGENT_PROFILE_PREFS_VERSION = 1;
+const AGENT_PROFILE_STORAGE_KEY = "orquester:agent-profile";
+const AGENT_PROFILE_PREFS_VERSION = 1;
 
-export interface AgentProfilePrefs {
+interface AgentProfilePrefs {
   agent: AgentProfileAgentId | null;
 }
 
-/** The two `Storage` methods this module uses (a test passes its own). */
-export interface AgentProfileStorage {
+/** The browser storage methods used by device preferences. */
+interface AgentProfileStorage {
   getItem(key: string): string | null;
   setItem(key: string, value: string): void;
 }
@@ -645,13 +640,10 @@ export function serializeAgentProfilePrefs(prefs: AgentProfilePrefs, previous?: 
   return JSON.stringify({ ...base, v: AGENT_PROFILE_PREFS_VERSION, agent: prefs.agent });
 }
 
-/** Test seam: `undefined` = the real `localStorage`. */
-let storageOverride: AgentProfileStorage | null | undefined;
 /** Read on first use, so importing this module never touches storage. */
 let lastAgent: AgentProfileAgentId | null | undefined;
 
 function storage(): AgentProfileStorage | null {
-  if (storageOverride !== undefined) return storageOverride;
   try {
     return typeof localStorage === "undefined" ? null : localStorage;
   } catch {
@@ -685,10 +677,4 @@ export function rememberAgentProfileAgent(agent: AgentProfileAgentId): void {
   } catch {
     /* quota / availability: it stays in memory */
   }
-}
-
-/** Test seam: swap the storage (`null` = none) and forget the remembered pick. */
-export function __setAgentProfileStorageForTests(next: AgentProfileStorage | null | undefined): void {
-  storageOverride = next;
-  lastAgent = undefined;
 }

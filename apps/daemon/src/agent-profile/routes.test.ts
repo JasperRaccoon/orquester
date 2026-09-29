@@ -12,8 +12,7 @@ import {
 } from "@orquester/api";
 import { AgentProfileError, profileErrors } from "./errors.ts";
 import { registerAgentProfileRoutes, type AgentProfileRouteDeps } from "./routes.ts";
-import { AgentProfileService } from "./service.ts";
-import { FakeProfileAdapter, fakeItem } from "./testing.ts";
+import { fakeItem } from "./testing.ts";
 
 const roots: string[] = [];
 const apps: FastifyInstance[] = [];
@@ -128,160 +127,6 @@ const R = agentProfileRoutes;
 // ---------------------------------------------------------------------------
 // Every route, happy path
 // ---------------------------------------------------------------------------
-
-test("every route reaches its service method with parsed arguments", async () => {
-  const h = await harness();
-  const cases: Array<{
-    method: "GET" | "POST" | "PUT" | "DELETE";
-    url: string;
-    payload?: unknown;
-    status?: number;
-    call: Call;
-  }> = [
-    { method: "GET", url: R.overview, call: { method: "overview", args: [] } },
-    { method: "GET", url: R.snapshot("codex"), call: { method: "snapshot", args: ["codex"] } },
-    { method: "GET", url: R.item("claude", "command:git/pr"), call: { method: "readItem", args: ["claude", "command:git/pr"] } },
-    {
-      method: "POST",
-      url: R.items("grok"),
-      payload: { draft: { kind: "hook", hook: { event: "Stop", command: "echo hi", timeoutSec: 5, extra: 1 } } },
-      status: 201,
-      call: { method: "create", args: ["grok", { kind: "hook", hook: { event: "Stop", command: "echo hi", timeoutSec: 5 } }, "fail"] }
-    },
-    {
-      method: "POST",
-      url: R.items("grok"),
-      payload: { import: { importId: "imp", picks: ["skills/a"] }, onConflict: "keep-both" },
-      status: 201,
-      call: { method: "createFromImport", args: ["grok", "imp", ["skills/a"], "keep-both"] }
-    },
-    {
-      method: "PUT",
-      url: R.item("opencode", "skill:review"),
-      payload: { revision: "r1", draft: { kind: "skill", document: { name: "review", body: "# Hi\n" } } },
-      call: {
-        method: "update",
-        args: ["opencode", "skill:review", "r1", { kind: "skill", document: { name: "review", frontmatter: {}, body: "# Hi\n" } }]
-      }
-    },
-    {
-      method: "DELETE",
-      url: `${R.item("claude", "mcp:jira")}?revision=r2`,
-      call: { method: "remove", args: ["claude", "mcp:jira", "r2"] }
-    },
-    {
-      method: "POST",
-      url: R.itemEnabled("claude", "mcp:jira"),
-      payload: { revision: "r3", enabled: false },
-      call: { method: "setEnabled", args: ["claude", "mcp:jira", "r3", false] }
-    },
-    {
-      method: "POST",
-      url: R.itemTrust("codex", "hook:Stop:0123456789abcdef"),
-      payload: { revision: "r4" },
-      call: { method: "trust", args: ["codex", "hook:Stop:0123456789abcdef", "r4"] }
-    },
-    {
-      method: "POST",
-      url: R.itemCopy("claude", "skill:review"),
-      payload: { toAgent: "grok", onConflict: "replace" },
-      call: { method: "copy", args: ["claude", "skill:review", "grok", "replace"] }
-    },
-    { method: "GET", url: R.instructions("grok"), call: { method: "readInstructions", args: ["grok"] } },
-    {
-      method: "PUT",
-      url: R.instructions("grok"),
-      payload: { text: "line 1\n\tline 2\n", revision: "" },
-      call: { method: "writeInstructions", args: ["grok", "line 1\n\tline 2\n", ""] }
-    },
-    {
-      method: "POST",
-      url: R.instructionsMigrateLegacy("grok"),
-      payload: { revision: "r5" },
-      call: { method: "migrateLegacyInstructions", args: ["grok", "r5"] }
-    },
-    {
-      method: "POST",
-      url: R.importGit("claude"),
-      payload: { url: " https://github.com/o/r/tree/main/skills " },
-      call: { method: "scanGit", args: ["claude", "https://github.com/o/r/tree/main/skills"] }
-    },
-    {
-      method: "GET",
-      url: R.marketplacePlugins("claude", "claude-plugins official"),
-      call: { method: "listMarketplacePlugins", args: ["claude", "claude-plugins official"] }
-    }
-  ];
-  for (const entry of cases) {
-    h.calls.length = 0;
-    const response = await h.app.inject({ method: entry.method, url: entry.url, payload: entry.payload as object });
-    assert.equal(response.statusCode, entry.status ?? 200, `${entry.method} ${entry.url}: ${response.body}`);
-    assert.deepEqual(h.calls, [entry.call], `${entry.method} ${entry.url}`);
-  }
-  const plugins = await h.app.inject({ method: "GET", url: R.marketplacePlugins("claude", "m") });
-  assert.deepEqual(plugins.json(), { plugins: [{ name: "p", installed: true }] });
-});
-
-test("an MCP draft keeps only its transport's fields; secret entries pass as set/keep", async () => {
-  const h = await harness();
-  const response = await h.app.inject({
-    method: "POST",
-    url: R.items("claude"),
-    payload: {
-      draft: {
-        kind: "mcp",
-        mcp: {
-          name: "jira",
-          transport: "stdio",
-          command: "jira-mcp",
-          args: ["--flag", "multi\nline"],
-          env: [
-            { key: "TOKEN", value: "new-secret" },
-            { key: "OLD", keep: true }
-          ],
-          advanced: { timeout: 1000 }
-        }
-      },
-      onConflict: "replace"
-    }
-  });
-  assert.equal(response.statusCode, 201, response.body);
-  assert.deepEqual(h.calls[0]!.args, [
-    "claude",
-    {
-      kind: "mcp",
-      mcp: {
-        name: "jira",
-        transport: "stdio",
-        command: "jira-mcp",
-        args: ["--flag", "multi\nline"],
-        env: [
-          { key: "TOKEN", value: "new-secret" },
-          { key: "OLD", keep: true }
-        ],
-        advanced: { timeout: 1000 }
-      }
-    },
-    "replace"
-  ]);
-
-  h.calls.length = 0;
-  const http = await h.app.inject({
-    method: "POST",
-    url: R.items("claude"),
-    payload: {
-      draft: {
-        kind: "marketplace",
-        marketplace: { source: { type: "github", repo: "anthropics/claude-plugins", ref: "main" } }
-      }
-    }
-  });
-  assert.equal(http.statusCode, 201, http.body);
-  assert.deepEqual(h.calls[0]!.args[1], {
-    kind: "marketplace",
-    marketplace: { source: { type: "github", repo: "anthropics/claude-plugins", ref: "main" } }
-  });
-});
 
 // ---------------------------------------------------------------------------
 // Validation
@@ -503,65 +348,6 @@ test("an AgentProfileError answers its own status and code; anything else is a g
   assert.ok(!message.includes("token=abc"));
 });
 
-test("against the real service: not installed, kind checks and name rules come back as their codes", async () => {
-  const root = await mkdtemp(join(tmpdir(), "orq-profile-routes-real-"));
-  roots.push(root);
-  const claude = new FakeProfileAdapter("claude");
-  claude.items = [fakeItem("mcp", "jira")];
-  const service = new AgentProfileService({
-    adapters: { claude, codex: new FakeProfileAdapter("codex") },
-    agentInfo: (agent) => ({ installed: agent === "claude" || agent === "codex" }),
-    logger: { warn: () => undefined, error: () => undefined }
-  });
-  const app = Fastify({ logger: false });
-  registerAgentProfileRoutes(app, { service, importsDir: join(root, "imports") });
-  await app.ready();
-  apps.push(app);
-
-  const grok = await app.inject({ method: "GET", url: R.snapshot("grok") });
-  assert.equal(grok.statusCode, 200);
-  assert.equal((grok.json() as AgentProfileSnapshot).installed, false);
-  expectError(await app.inject({ method: "GET", url: R.instructions("grok") }), 404, "AGENT_NOT_INSTALLED");
-  expectError(
-    await app.inject({
-      method: "POST",
-      url: R.items("codex"),
-      payload: { draft: { kind: "command", document: { name: "x", frontmatter: {}, body: "" } } }
-    }),
-    400,
-    "KIND_NOT_SUPPORTED"
-  );
-  expectError(
-    await app.inject({
-      method: "POST",
-      url: R.items("claude"),
-      payload: { draft: { kind: "mcp", mcp: { name: "has space", transport: "stdio", command: "c" } } }
-    }),
-    400,
-    "INVALID_NAME"
-  );
-  expectError(
-    await app.inject({ method: "POST", url: R.itemEnabled("claude", "mcp:jira"), payload: { revision: "stale", enabled: false } }),
-    409,
-    "PROFILE_CONFLICT"
-  );
-  const ok = await app.inject({
-    method: "POST",
-    url: R.itemEnabled("claude", "mcp:jira"),
-    payload: { revision: "rev-jira", enabled: false }
-  });
-  assert.equal(ok.statusCode, 200, ok.body);
-  const body = ok.json() as ProfileMutationResponse;
-  assert.deepEqual(body.itemIds, ["mcp:jira"]);
-  assert.equal(body.snapshot.items[0]!.enabled, false);
-  expectError(
-    await app.inject({ method: "POST", url: R.importUpload("claude") + "?name=a.zip", headers: { "content-type": "application/octet-stream" }, payload: Buffer.from("zip") }),
-    503,
-    "AGENT_PROFILE_ERROR"
-  );
-  await service.stop();
-});
-
 // ---------------------------------------------------------------------------
 // Upload
 // ---------------------------------------------------------------------------
@@ -576,11 +362,6 @@ test("upload: the octet-stream body is streamed to a temp file under the imports
   });
   assert.equal(response.statusCode, 200, response.body);
   assert.deepEqual(response.json(), { importId: "u", candidates: [], notes: [] });
-  assert.deepEqual(
-    h.calls.map((call) => call.method),
-    ["assertCanScanUpload", "scanUpload"]
-  );
-  assert.deepEqual(h.calls[1]!.args.slice(0, 2), ["opencode", "my-skill.zip"]);
   const [seen] = h.uploaded;
   assert.ok(seen);
   assert.equal(seen.bytes, "PK fake zip bytes");

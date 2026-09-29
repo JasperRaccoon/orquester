@@ -258,14 +258,12 @@ describe("engine: resume after a restart", () => {
   });
 
   test("queued runs start after a restart; a run whose definition cannot be read is marked interrupted", async () => {
-    const env = restartable([
-      workflow("a", [T(), node("A", "code")], [edge("T", "A")]),
-      workflow("b", [T(), node("A", "code")], [edge("T", "A")])
-    ]);
+    const env = restartable(["a", "b", "c", "d", "queued"].map((id) => workflow(id, [T(), node("A", "code")], [edge("T", "A")])));
     const blocker = controlledExecutor("code");
-    const first = createHarness({ ...env.shared, executors: { code: blocker }, limits: { maxConcurrentRuns: 1 } });
+    const first = createHarness({ ...env.shared, executors: { code: blocker } });
     const a = await first.engine.run("a", {});
-    const b = await first.engine.run("b", {});
+    for (const id of ["b", "c", "d"]) await first.engine.run(id, {});
+    const b = await first.engine.run("queued", {});
     await flush();
     assert.equal((await env.shared.runStore.load(b.runId!))!.status, "queued");
     await first.engine.stop();
@@ -273,7 +271,7 @@ describe("engine: resume after a restart", () => {
     await env.shared.runStore.create({ ...(await env.shared.runStore.load(b.runId!))!, id: "broken", definition: null as never });
 
     const code = scripted("code");
-    const second = createHarness({ ...env.shared, executors: { code }, limits: { maxConcurrentRuns: 1 } });
+    const second = createHarness({ ...env.shared, executors: { code } });
     await second.engine.resume();
     await flush();
     const resultA = await second.engine.waitForRun(a.runId!);

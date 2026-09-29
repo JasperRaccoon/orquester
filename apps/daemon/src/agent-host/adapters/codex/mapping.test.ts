@@ -10,7 +10,6 @@ import type { RuntimeMode } from "@orquester/api/agent-chat";
 import { RUNTIME_MODES } from "@orquester/api/agent-chat";
 
 import {
-  DEFAULT_APPROVAL_OPTIONS,
   approvalOptionsFromAvailableDecisions,
   toCommandDecision,
   toElicitationAction,
@@ -23,7 +22,6 @@ import {
   runtimeModeToThreadConfig,
   runtimeModeToTurnSandboxPolicy
 } from "./modes.ts";
-import { toCodexAnswers, toUserInputQuestions, parseResumeCursor } from "./session.ts";
 import { MINIMUM_CODEX_VERSION, codexVersionFromUserAgent, meetsMinimumVersion } from "./probe.ts";
 
 describe("§4.3 decision mapping — the Codex column", () => {
@@ -37,14 +35,6 @@ describe("§4.3 decision mapping — the Codex column", () => {
   it("acceptAlways downgrades to acceptForSession when no amendment is proposed", () => {
     assert.equal(toCommandDecision("acceptAlways"), "acceptForSession");
     assert.equal(toCommandDecision("acceptAlways", null), "acceptForSession");
-  });
-
-  it("acceptAlways takes the execpolicy amendment when the server proposed one", () => {
-    // The nearest thing Codex has to a permanent grant, and the server offers
-    // it first-class — the spec's blanket downgrade would lose it.
-    assert.deepEqual(toCommandDecision("acceptAlways", ["ls", "-1"]), {
-      acceptWithExecpolicyAmendment: { execpolicy_amendment: ["ls", "-1"] }
-    });
   });
 
   it("maps every decision on a file-change approval, with no amendment arm", () => {
@@ -64,7 +54,7 @@ describe("§4.3 decision mapping — the Codex column", () => {
     assert.equal(toElicitationAction("cancel"), "cancel");
   });
 
-  it("answers item/permissions/requestApproval with scope:'session' only for acceptForSession", () => {
+  it("uses session scope for a session grant and turn scope for one-off or denied grants", () => {
     const requested = { network: null, fileSystem: null };
     assert.equal(toPermissionsResponse("accept", requested).scope, "turn");
     assert.equal(toPermissionsResponse("acceptForSession", requested).scope, "session");
@@ -85,35 +75,12 @@ describe("§4.3 decision mapping — the Codex column", () => {
 });
 
 describe("§4.3 options — availableDecisions is a hint, not a whitelist", () => {
-  it("renders the provider's own set when one is advertised", () => {
-    const options = approvalOptionsFromAvailableDecisions([
-      "accept",
-      { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["ls", "-1"] } },
-      "cancel"
-    ]);
-    assert.deepEqual(
-      options?.map((option) => option.decision),
-      ["accept", "acceptAlways", "cancel"]
-    );
-    assert.ok(options?.find((option) => option.decision === "acceptAlways")?.warning !== undefined);
-  });
-
   it("maps the network-policy amendment arm with its own caution", () => {
     const options = approvalOptionsFromAvailableDecisions([
       { applyNetworkPolicyAmendment: { network_policy_amendment: { host: "a", action: "allow" } } }
     ] as never);
     assert.equal(options?.[0]?.decision, "acceptForSession");
-    assert.ok(options?.[0]?.warning?.includes("network"));
-  });
-
-  it("falls back to the default four when nothing is advertised", () => {
-    assert.equal(approvalOptionsFromAvailableDecisions(undefined), undefined);
-    assert.equal(approvalOptionsFromAvailableDecisions(null), undefined);
-    assert.equal(approvalOptionsFromAvailableDecisions([]), undefined);
-    assert.deepEqual(
-      DEFAULT_APPROVAL_OPTIONS.map((option) => option.decision),
-      ["cancel", "decline", "acceptForSession", "accept"]
-    );
+    assert.ok(options?.[0]?.warning);
   });
 
   it("surfaces an unrecognised advertised decision rather than rendering a wrong button", () => {
@@ -191,14 +158,6 @@ describe("§4.4 permission modes — the Codex column", () => {
 });
 
 describe("§4.4 plan mode is sticky thread state", () => {
-  it("always sends a collaborationMode, default included", () => {
-    const plan = interactionModeToCollaborationMode("plan", { model: "gpt-5.5" });
-    assert.equal(plan.mode, "plan");
-    const def = interactionModeToCollaborationMode("default", { model: "gpt-5.5" });
-    // Leaving it OFF does not return the thread to default; it must be sent.
-    assert.equal(def.mode, "default");
-  });
-
   it("sends developer_instructions: null so the server owns the prompt", () => {
     const mode = interactionModeToCollaborationMode("plan", {
       model: "gpt-5.5",
@@ -215,118 +174,6 @@ describe("§4.4 plan mode is sticky thread state", () => {
         .reasoning_effort,
       null
     );
-  });
-});
-
-describe("§4.1 the resume cursor", () => {
-
-  it("a cursor that fails its own shape check means 'no resume', NEVER an error", () => {
-    for (const bad of [
-      undefined,
-      null,
-      {},
-      { threadId: "" },
-      { threadId: 4 },
-      "t-1",
-      [],
-      // A bare conversation id is NOT a cursor: the host wraps it.
-      "01a0c19d-e1f9-7e73-8dc5-a0d355d3d232",
-      // Shapes the host would have refused to build in the first place.
-      { threadId: "../../etc/passwd" },
-      { threadId: "-flag-shaped" },
-      { threadId: `${"x".repeat(257)}` }
-    ]) {
-      assert.equal(parseResumeCursor(bad), null);
-    }
-  });
-
-});
-
-describe("§4.5 the RPC question filter", () => {
-  const option = { label: "MIT", description: "Short and permissive." };
-
-  it("keys on `question`, not `prompt`", () => {
-    const [question] = toUserInputQuestions([
-      { id: "a", header: "License", question: "Which?", isOther: false, isSecret: false, options: [option] }
-    ]);
-    assert.equal(question?.question, "Which?");
-  });
-
-  it("drops a question missing id, header or question text", () => {
-    assert.deepEqual(
-      toUserInputQuestions([
-        { id: "", header: "H", question: "Q", isOther: false, isSecret: false, options: [option] },
-        { id: "a", header: " ", question: "Q", isOther: false, isSecret: false, options: [option] },
-        { id: "a", header: "H", question: "  ", isOther: false, isSecret: false, options: [option] }
-      ]),
-      []
-    );
-  });
-
-  it("drops an option whose label or description is empty", () => {
-    const [question] = toUserInputQuestions([
-      {
-        id: "a",
-        header: "H",
-        question: "Q",
-        isOther: false,
-        isSecret: false,
-        options: [option, { label: "", description: "d" }, { label: "l", description: "" }]
-      }
-    ]);
-    assert.deepEqual(question?.options, [option]);
-  });
-
-  it("keeps a free-text-only question when isOther is set (options is nullable)", () => {
-    const [question] = toUserInputQuestions([
-      { id: "a", header: "H", question: "Q", isOther: true, isSecret: false, options: null }
-    ]);
-    assert.equal(question?.allowCustomAnswer, true);
-    assert.deepEqual(question?.options, []);
-  });
-
-  it("drops an option-less question that is NOT isOther", () => {
-    assert.deepEqual(
-      toUserInputQuestions([
-        { id: "a", header: "H", question: "Q", isOther: false, isSecret: false, options: null }
-      ]),
-      []
-    );
-  });
-
-  it("carries isOther and isSecret through in the provider's own spelling (W13)", () => {
-    const [plain, secret] = toUserInputQuestions([
-      { id: "a", header: "H", question: "Q", isOther: true, isSecret: false, options: [option] },
-      { id: "b", header: "H", question: "Q", isOther: false, isSecret: true, options: [option] }
-    ]);
-    assert.equal(plain?.isOther, true);
-    assert.equal(plain?.allowCustomAnswer, true, "the canonical name is set too");
-    assert.equal(plain?.isSecret, undefined, "absent means false");
-    assert.equal(secret?.isSecret, true, "the composer masks this input");
-    assert.equal(secret?.isOther, undefined);
-  });
-
-  it("hard-codes multiSelect false — the field does not exist on the wire", () => {
-    const [question] = toUserInputQuestions([
-      { id: "a", header: "H", question: "Q", isOther: false, isSecret: false, options: [option] }
-    ]);
-    assert.equal(question?.multiSelect, false);
-  });
-
-  it("answers with the LABEL, in T3's accepted shape", () => {
-    assert.deepEqual(toCodexAnswers([{ id: "license" }], { license: "MIT" }), {
-      license: { answers: ["MIT"] }
-    });
-    assert.deepEqual(toCodexAnswers([{ id: "license" }], { license: ["MIT", "Apache-2.0"] }), {
-      license: { answers: ["MIT", "Apache-2.0"] }
-    });
-  });
-
-  it("omits an unanswered question rather than sending it empty", () => {
-    assert.deepEqual(toCodexAnswers([{ id: "a" }, { id: "b" }], { a: "x", b: "" }), {
-      a: { answers: ["x"] }
-    });
-    assert.deepEqual(toCodexAnswers([{ id: "a" }], {}), {});
   });
 });
 

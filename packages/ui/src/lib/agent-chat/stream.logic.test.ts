@@ -13,11 +13,6 @@ describe("NdjsonLineBuffer", () => {
     assert.deepEqual(buffer.push('":2}\n'), ['{"b":2}']);
   });
 
-  it("handles a chunk boundary inside a line and several lines at once", () => {
-    const buffer = new NdjsonLineBuffer();
-    assert.deepEqual(buffer.push("a"), []);
-    assert.deepEqual(buffer.push("b\nc\nd"), ["ab", "c"]);
-  });
 });
 
 describe("parseStreamLine", () => {
@@ -29,17 +24,6 @@ describe("parseStreamLine", () => {
   it("skips blank lines", () => {
     assert.deepEqual(parseStreamLine(""), { kind: "blank" });
     assert.deepEqual(parseStreamLine("   "), { kind: "blank" });
-  });
-
-  it("decodes the three frame kinds", () => {
-    const snapshot = parseStreamLine(JSON.stringify({ kind: "snapshot", thread: { seq: 3, items: [] } }));
-    assert.equal(snapshot.kind, "frame");
-    const event = parseStreamLine(
-      JSON.stringify({ kind: "event", seq: 4, event: { type: "thread.created", seq: 4 } })
-    );
-    assert.equal(event.kind, "frame");
-    const sync = parseStreamLine(JSON.stringify({ kind: "synchronized", hostInstanceId: "h1" }));
-    assert.equal(sync.kind, "frame");
   });
 
   it("rejects malformed JSON and structurally wrong frames without throwing", () => {

@@ -8,7 +8,7 @@ import {
   parseTurnInput,
   requireCommandId
 } from "./validate.ts";
-import { isHostNativeCompact, isSlashInvocation, providerInputFor } from "./slash.ts";
+import { isHostNativeCompact } from "./slash.ts";
 import { checkMinimumVersion } from "./version-gate.ts";
 import { isUsableConversationId, resumeCursorFor } from "./resume.ts";
 
@@ -110,12 +110,6 @@ describe("host-native slash commands (§4.6.5, §4.6.9)", () => {
       }),
       false
     );
-  });
-
-  it("never rewrites a turn that starts with a slash", () => {
-    assert.equal(isSlashInvocation("/review src"), true);
-    assert.equal(isSlashInvocation("not /review"), false);
-    assert.equal(providerInputFor("/review src"), "/review src");
   });
 });
 

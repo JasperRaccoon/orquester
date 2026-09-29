@@ -150,7 +150,7 @@ export {
 const AGENT = "codex";
 const LABEL = "Codex";
 
-export interface CodexProfileAdapterDeps {
+interface CodexProfileAdapterDeps {
   backups: ProfileBackups;
   stash: ProfileStash;
   /** Unused by Codex (every write goes through the app-server); kept so the four adapters share one shape. */

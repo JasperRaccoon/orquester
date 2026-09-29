@@ -19,7 +19,7 @@
  *   the adapter computes on/off from `config.toml` itself.
  */
 
-export interface InspectMcpServer {
+interface InspectMcpServer {
   name: string;
   transport?: string;
   sourceType: string;
@@ -27,7 +27,7 @@ export interface InspectMcpServer {
   pluginName?: string;
 }
 
-export interface InspectSkill {
+interface InspectSkill {
   name: string;
   description?: string;
   sourceType: string;
@@ -35,7 +35,7 @@ export interface InspectSkill {
   pluginName?: string;
 }
 
-export interface InspectPlugin {
+interface InspectPlugin {
   name: string;
   scope?: string;
   path?: string;
