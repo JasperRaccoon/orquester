@@ -54,7 +54,7 @@ export const RailSearchInput: React.FC<{
         aria-label="Clear search"
         title="Clear search"
         onClick={() => onChange("")}
-        className="absolute right-1.5 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+        className="absolute right-1.5 top-1/2 inline-flex h-6 w-6 -translate-y-1/2 items-center justify-center rounded text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
       >
         <X size={13} />
       </button>
