@@ -22,18 +22,20 @@ import {
   AGENT_PROFILE_CREATABLE_KINDS,
   type AgentProfileAgentId,
   type AgentProfileSnapshot,
-  type ProfileItem
+  type ProfileItem,
+  type ProfileItemKind
 } from "@orquester/api";
 
 import { AgentProfilePanelView, type AgentProfilePanelViewProps, type ProfileItemActions } from "./AgentProfilePanelView";
+import { kindTabKeyTarget } from "./KindTabs";
 import {
   agentProfileAgentOptions,
   agentProfileEmptyState,
   copyTargets,
+  effectiveKindTab,
   filterProfileItems,
   groupProfileItems,
-  profileKindChips,
-  type ProfileKindFilter
+  profileKindTabs
 } from "./list.logic";
 import { ProfileItemRow, type ProfileItemRowProps } from "./ProfileItemRow";
 
@@ -167,15 +169,17 @@ function viewProps(
     status?: "idle" | "loading" | "ready" | "error";
     error?: string | null;
     notInstalled?: boolean;
-    kind?: ProfileKindFilter;
+    /** The tab as the container picks it from this remembered value: the agent's first by default. */
+    remembered?: unknown;
     query?: string;
   } & Partial<AgentProfilePanelViewProps> = {}
 ): AgentProfilePanelViewProps {
   const agent = options.agent ?? "claude";
   const snap = options.snap === undefined ? snapshot(agent) : options.snap;
-  const kind = options.kind ?? "all";
   const query = options.query ?? "";
   const items = snap?.items ?? [];
+  const tabs = profileKindTabs(agent, items);
+  const kind: ProfileItemKind = options.kind ?? effectiveKindTab(tabs, options.remembered);
   const filtered = filterProfileItems(items, { kind, query });
   const installed = (target: AgentProfileAgentId) => OVERVIEW.find((entry) => entry.agent === target)?.installed ?? null;
   return {
@@ -188,7 +192,7 @@ function viewProps(
     onQueryChange: NOOP,
     kind,
     onKindChange: NOOP,
-    chips: profileKindChips(agent, items),
+    tabs,
     snapshot: snap,
     groups: groupProfileItems(agent, filtered),
     empty: agentProfileEmptyState({
@@ -220,6 +224,25 @@ function viewProps(
 
 const view = (props: AgentProfilePanelViewProps): string => render(createElement(AgentProfilePanelView, props));
 
+/** The panel drawn on each of the agent's tabs in turn — every row, each under its own tab. */
+function everyTab(options: Parameters<typeof viewProps>[0] = {}): string {
+  return viewProps(options)
+    .tabs.map((tab) => view(viewProps({ ...options, kind: tab.id })))
+    .join("\n");
+}
+
+/** The tablist, from its opening tag to its closing one. */
+const tablistOf = (html: string): string => html.match(/<div role="tablist"[\s\S]*?<\/button><\/div>/)?.[0] ?? "";
+
+/** Each tab's opening tag and content, keyed by kind. */
+function tabsOf(html: string): Map<string, string> {
+  const tabs = new Map<string, string>();
+  for (const match of tablistOf(html).matchAll(/<button[^>]*data-kind-tab="(\w+)"[\s\S]*?<\/button>/g)) {
+    tabs.set(match[1]!, match[0]);
+  }
+  return tabs;
+}
+
 /** The row element listing `id`, up to the next row (or the end). */
 function rowOf(html: string, id: string): string {
   const start = html.indexOf(`data-profile-item="${id}"`);
@@ -249,26 +272,66 @@ const switchOf = (row: string): string => row.match(/<button[^>]*role="switch"[^
   // The SVG artwork is stubbed under node; its slot is not.
   assert.equal((segments.match(/<span aria-hidden="true" class="flex h-3\.5 w-3\.5/g) ?? []).length, 4, "an icon per agent");
 
-  // Search and the chips.
-  assert.ok(html.includes('aria-label="Search Claude&#x27;s profile"'));
-  const chips = html.match(/<div role="group" aria-label="Filter by kind"[\s\S]*?<\/div>/)?.[0] ?? "";
-  assert.ok(/overflow-x-auto/.test(chips) && /flex-nowrap/.test(chips), "one scrolling row that never wraps");
-  assert.ok(chips.includes("mask-image"), "with its edge fades");
-  assert.ok(/aria-pressed="true"[^>]*>[\s\S]*?All[\s\S]*?>9</.test(chips), "All is pressed, with the total");
-  assert.ok(/MCP<span[^>]*>2</.test(chips) && /Hooks<span[^>]*>3</.test(chips), "each kind with its count");
-  assert.ok(/Marketplaces<span[^>]*>0</.test(chips), "an empty kind keeps its chip");
-
-  // The instructions card.
+  // The instructions card, pinned above the search and the tabs (outside the scrolling list).
   assert.ok(html.includes('data-profile-instructions=""'), "the instructions card");
   assert.ok(html.includes("CLAUDE.md") && html.includes("42 lines · edited 2h ago"), "file, lines, edited ago");
+  const cardAt = html.indexOf("data-profile-instructions");
+  const searchAt = html.indexOf('aria-label="Search Claude&#x27;s profile"');
+  const tablistAt = html.indexOf('role="tablist"');
+  const listAt = html.indexOf('role="tabpanel"');
+  assert.ok(cardAt > 0 && cardAt < searchAt && searchAt < tablistAt && tablistAt < listAt, "card, search, tabs, then the list");
 
-  // Groups in kind order.
-  const order = ["MCP servers", "Skills", "Plugins", "Hooks", "Commands"].map((label) => html.indexOf(`aria-label="${label}"`));
-  assert.ok(order.every((at, index) => at > 0 && (index === 0 || at > order[index - 1]!)), "sections in AGENT_PROFILE_KINDS order");
-  assert.ok(!html.includes('aria-label="Marketplaces"'), "no section for an empty kind");
+  // The tabs: one per kind, no All, wrapping — never a scroll row, never a fade.
+  const tablist = tablistOf(html);
+  assert.ok(/<div role="tablist" aria-label="Kinds" aria-orientation="horizontal"/.test(tablist), "a named tablist");
+  assert.ok(/class="flex flex-wrap transition-opacity gap-1(\.5)?[ "]/.test(tablist), "it wraps onto more lines");
+  assert.ok(!/overflow-x-auto|flex-nowrap|mask-image/.test(html), "no scroll row, no edge fades");
+  const tabs = tabsOf(html);
+  assert.deepEqual([...tabs.keys()], ["mcp", "skill", "plugin", "marketplace", "hook", "command"], "the agent's kinds, in order");
+  assert.ok(!/>All</.test(tablist), "no All tab");
+  for (const [kind, tab] of tabs) {
+    assert.ok(/role="tab"/.test(tab) && /\bwhitespace-nowrap\b/.test(tab) && !/\btruncate\b/.test(tab), `${kind}: a whole tab`);
+    assert.ok(/<svg[^>]*class="lucide lucide-[\w-]+ shrink-0/.test(tab), `${kind}: its icon`);
+    assert.ok(/data-kind-count=""[^>]*class="[^"]*rounded-full/.test(tab), `${kind}: its count as a badge`);
+  }
+  for (const [kind, icon] of [["mcp", "server"], ["skill", "sparkles"], ["plugin", "puzzle"], ["marketplace", "store"], ["hook", "webhook"], ["command", "square-slash"]]) {
+    assert.ok(tabs.get(kind)!.includes(`lucide-${icon} `), `${kind}: the ${icon} icon`);
+  }
+  // The shown tab: selected, the one tab stop, filled.
+  const mcp = tabs.get("mcp")!;
+  const labelledBy = html.match(/role="tabpanel" aria-labelledby="([^"]+)"/)?.[1] ?? "";
+  assert.ok(/aria-selected="true"/.test(mcp) && /tabindex="0"/.test(mcp), "MCP, the agent's first kind, is the tab shown");
+  assert.ok(/\bbg-neutral-100 text-neutral-900\b/.test(mcp), "filled");
+  assert.ok(mcp.includes(`id="${labelledBy}"`), "and it labels the list");
+  const panelId = html.match(/<div id="([^"]+)" tabindex="-1" role="tabpanel"/)?.[1] ?? "";
+  assert.ok(panelId.length > 0 && mcp.includes(`aria-controls="${panelId}"`), "which it controls");
+  for (const kind of ["skill", "plugin", "marketplace", "hook", "command"]) {
+    const tab = tabs.get(kind)!;
+    assert.ok(/aria-selected="false"/.test(tab) && /tabindex="-1"/.test(tab), `${kind}: not selected, no tab stop`);
+    assert.ok(!/bg-neutral-100 text-neutral-900/.test(tab) && /\bborder\b/.test(tab), `${kind}: an outlined pill`);
+    assert.ok(/hover:border-neutral-700/.test(tab), `${kind}: with a hover`);
+    assert.ok(/focus-visible:ring-2/.test(tab), `${kind}: and a focus ring`);
+  }
+  assert.ok(/MCP<span data-kind-count=""[^>]*bg-neutral-900 text-neutral-100[^>]*><span class="sr-only">, <\/span>2</.test(mcp), "MCP 2, the badge contrasting");
+  assert.ok(/Hooks<span data-kind-count=""[^>]*bg-neutral-800 text-neutral-400[^>]*><span class="sr-only">, <\/span>3</.test(tabs.get("hook")!), "Hooks 3, muted");
+  // A 0-count kind keeps its tab, muted.
+  const marketplace = tabs.get("marketplace")!;
+  assert.ok(/Marketplaces<span[^>]*text-neutral-600[^>]*><span class="sr-only">, <\/span>0</.test(marketplace), "Marketplaces 0");
+  assert.ok(/text-neutral-500 hover:/.test(marketplace) && /lucide-store shrink-0 text-neutral-600/.test(marketplace), "reads muted");
+  assert.ok(/\bh-8\b/.test(mcp), "a comfortable 32 px in the dock");
+
+  // The list: only the shown tab's rows, no section label over them.
+  assert.ok(html.includes(`data-profile-item="${USER.id}"`) && html.includes(`data-profile-item="${OFF.id}"`), "MCP's rows");
+  for (const other of [STASHED, LOCKED, INHERITED, CACHE]) assert.ok(!html.includes(`data-profile-item="${other.id}"`), `not ${other.id}`);
+  assert.ok(!/uppercase tracking-wider[^>]*>MCP servers/.test(html), "the tab names the list: no section label");
+  assert.ok(!html.includes("Searching all kinds") && !html.includes("data-searching"), "not searching");
+
+  // Every row, each under its own tab.
+  const rows = everyTab();
+  for (const entry of ITEMS) rowOf(rows, entry.id);
 
   // A user row: name, meta and description, no badge, on, full menu.
-  const user = rowOf(html, USER.id);
+  const user = rowOf(rows, USER.id);
   assert.ok(user.includes('title="jira-cloud"') && /\btruncate\b/.test(user), "the name truncates with its tooltip");
   assert.ok(user.includes("stdio · Jira issues, sprints and boards") && user.includes("line-clamp-1"), "one clamped line");
   assert.ok(!user.includes("rounded-md border border-neutral-700/80 px-1.5"), "no badge for the user's own");
@@ -277,13 +340,13 @@ const switchOf = (row: string): string => row.match(/<button[^>]*role="switch"[^
   assert.ok(user.includes("More actions for jira-cloud"), "its menu");
 
   // Off, and off by stash: dimmed, and turning on.
-  const off = rowOf(html, OFF.id);
+  const off = rowOf(rows, OFF.id);
   assert.ok(/opacity-55/.test(off) && off.includes("(off)"), "an off row is dimmed and says so");
   assert.ok(/aria-checked="false" aria-label="Turn on serena"/.test(off));
-  assert.ok(switchOf(rowOf(html, STASHED.id)).includes("set aside by Orquester"), "a stashed row's switch says where it went");
+  assert.ok(switchOf(rowOf(rows, STASHED.id)).includes("set aside by Orquester"), "a stashed row's switch says where it went");
 
   // Locked: a lock, the switch disabled with its reason, no menu but its place held.
-  const locked = rowOf(html, LOCKED.id);
+  const locked = rowOf(rows, LOCKED.id);
   assert.ok(locked.includes("(locked)") && locked.includes('title="Locked — Orquester manages this"'), "a lock with its reason");
   assert.ok(/disabled=""/.test(switchOf(locked)), "the switch is disabled");
   assert.ok(/<span class="inline-flex shrink-0" title="Locked — Orquester manages this">/.test(locked), "its tooltip on the wrapper");
@@ -291,22 +354,22 @@ const switchOf = (row: string): string => row.match(/<button[^>]*role="switch"[^
   assert.ok(locked.includes("More actions for agent-hook.sh"), "a path to copy still gives it a menu");
 
   // Inherited: badge, disabled switch saying where to manage it, and the affordance.
-  const inherited = rowOf(html, INHERITED.id);
+  const inherited = rowOf(rows, INHERITED.id);
   assert.ok(inherited.includes(">From Claude</span>"), "the source badge");
   assert.ok(inherited.includes('title="Manage in Claude"') && /disabled=""/.test(switchOf(inherited)));
   assert.ok(/<button[^>]*>Manage in Claude<svg/.test(inherited), "a Manage in Claude button");
 
   // Plugin-provided with nothing to offer: its menu's place held.
-  const plugin = rowOf(html, PLUGIN_HOOK.id);
+  const plugin = rowOf(rows, PLUGIN_HOOK.id);
   assert.ok(plugin.includes('title="Managed by plugin superpowers"'));
   assert.ok(!plugin.includes("More actions") && /<span aria-hidden="true" class="shrink-0 w-7"><\/span>/.test(plugin), "the menu's place held");
   assert.ok(/shrink-\[100\]/.test(plugin), "the badge shrinks first");
 
   // Warnings: amber chips, a Trust action where there is one.
-  const untrusted = rowOf(html, UNTRUSTED.id);
+  const untrusted = rowOf(rows, UNTRUSTED.id);
   assert.ok(untrusted.includes("Not trusted by Codex") && /text-warn/.test(untrusted), "an amber warning chip");
   assert.ok(/<button[^>]*title="Trust lint-on-edit as it is now"[^>]*>[\s\S]*?Trust<\/button>/.test(untrusted), "with Trust");
-  const cache = rowOf(html, CACHE.id);
+  const cache = rowOf(rows, CACHE.id);
   assert.ok(cache.includes("Plugin cache missing") && !cache.includes(">Trust<"), "a warning without an action has no button");
 
   // The footer.
@@ -325,8 +388,73 @@ const switchOf = (row: string): string => row.match(/<button[^>]*role="switch"[^
   assert.ok(/<span class="sr-only">Agent: <\/span><span class="min-w-0 flex-1 truncate">Claude<\/span>/.test(narrow), "naming the agent");
   const opencode = view(viewProps({ agent: "opencode", snap: snapshot("opencode", { items: [] }) }));
   assert.ok(opencode.includes("OpenCode servers restart when idle"), "OpenCode's hint");
-  const chips = opencode.match(/aria-label="Filter by kind"[\s\S]*?<\/div>/)?.[0] ?? "";
-  assert.ok(!chips.includes("Hooks") && !chips.includes("Marketplaces"), "only OpenCode's kinds");
+  assert.deepEqual([...tabsOf(opencode).keys()], ["mcp", "skill", "plugin", "command"], "only OpenCode's kinds");
+}
+
+// ---------------------------------------------------------------------------
+// The kind tabs: wrapping at every width, search across kinds, the remembered
+// tab, a 0-count kind, the keyboard
+// ---------------------------------------------------------------------------
+
+{
+  // The narrowest dock (260 px) and the phones (360/390 px) wrap the tabs; none is ever cut off.
+  for (const [variant, width] of [["docked", 260], ["docked", 320], ["docked", 560], ["sheet", 352], ["sheet", 382]] as const) {
+    const html = view(viewProps({ variant, width }));
+    const tablist = tablistOf(html);
+    assert.ok(/class="flex flex-wrap transition-opacity gap-1(\.5)?[ "]/.test(tablist), `${variant} ${width}: the tabs wrap`);
+    assert.ok(!/overflow-x-auto|flex-nowrap|mask-image|\btruncate\b/.test(tablist), `${variant} ${width}: nothing scrolls or clips`);
+    assert.equal(tabsOf(html).size, 6, `${variant} ${width}: all six tabs`);
+    for (const [kind, tab] of tabsOf(html)) {
+      assert.ok(/\bshrink-0\b/.test(tab) && /\bwhitespace-nowrap\b/.test(tab), `${variant} ${width}: ${kind} keeps its size`);
+      assert.ok(new RegExp(`\\b${variant === "sheet" ? "h-10" : "h-8"}\\b`).test(tab), `${variant} ${width}: ${kind}'s target`);
+    }
+  }
+  // The widest tab fits the narrowest dock: "Marketplaces" with its icon and a
+  // two-digit badge is about 150 px at 12 px (DejaVu Sans, the widest system
+  // font), and the 260 px dock leaves 236 px inside its padding.
+  const narrow = view(viewProps({ width: 260 }));
+  assert.ok(narrow.includes('data-agent-picker="dropdown"') && narrow.indexOf("data-profile-instructions") < narrow.indexOf('role="tablist"'), "260 px: the card still above the tabs");
+
+  // Searching: every kind's matches, grouped under their labels; the tabs step back and say so.
+  const searching = view(viewProps({ query: "e", remembered: "skill" }));
+  const tabs = tabsOf(searching);
+  assert.ok(/data-searching=""[^>]*class="[^"]*opacity-60/.test(tablistOf(searching)), "the tabs are dimmed");
+  assert.ok(/aria-selected="true"/.test(tabs.get("skill")!) && !/bg-neutral-100 text-neutral-900/.test(tablistOf(searching)), "the tab stays selected, unfilled");
+  assert.ok(searching.includes("Searching all kinds — clear the search to return to Skills"), "and a line says the search looks past it");
+  assert.ok(!searching.includes('role="tabpanel"') && searching.includes('aria-label="Search results in Claude&#x27;s profile"'), "the list is the results, not a tab");
+  const sections = ["MCP servers", "Skills", "Plugins", "Hooks", "Commands"].map((label) => searching.indexOf(`<section aria-label="${label}"`));
+  assert.ok(sections.every((at, index) => at > 0 && (index === 0 || at > sections[index - 1]!)), "matches of every kind, in kind order");
+  assert.ok(/uppercase tracking-wider[^>]*>MCP servers<span[^>]*>2<\/span>/.test(searching), "each under its section label, counted");
+  assert.ok(searching.includes("data-profile-instructions"), "the instructions card stays");
+  const narrowed = view(viewProps({ query: "lint", remembered: "skill" }));
+  assert.ok(narrowed.includes(`data-profile-item="${UNTRUSTED.id}"`) && !narrowed.includes(`data-profile-item="${INHERITED.id}"`), "a hook found from the Skills tab");
+  const cleared = view(viewProps({ query: "  ", remembered: "skill" }));
+  assert.ok(cleared.includes('role="tabpanel"') && !cleared.includes("Searching all kinds"), "a blank search is back on the tab");
+  assert.ok(cleared.includes(`data-profile-item="${INHERITED.id}"`) && !cleared.includes(`data-profile-item="${USER.id}"`), "the Skills tab's rows");
+
+  // The remembered tab: shown when the agent has the kind, else the agent's first.
+  const hooks = view(viewProps({ remembered: "hook" }));
+  assert.ok(/aria-selected="true"[^>]*tabindex="0"[^>]*data-kind-tab="hook"[^>]*bg-neutral-100 text-neutral-900/.test(hooks), "the Hooks tab, remembered, is shown filled");
+  for (const entry of [LOCKED, PLUGIN_HOOK, UNTRUSTED]) assert.ok(hooks.includes(`data-profile-item="${entry.id}"`), `${entry.id} under Hooks`);
+  assert.ok(!hooks.includes(`data-profile-item="${USER.id}"`), "not MCP's");
+  const opencode = view(viewProps({ agent: "opencode", snap: snapshot("opencode", { items: [INHERITED] }), remembered: "hook" }));
+  assert.ok(/aria-selected="true"[^>]*data-kind-tab="mcp"/.test(opencode), "a kind OpenCode lacks falls back to its first tab");
+  assert.ok(opencode.includes("No MCP servers yet."), "and that tab's empty state");
+
+  // A 0-count kind, shown: its empty state with its Add, the card and the tabs still there.
+  const marketplaces = view(viewProps({ remembered: "marketplace" }));
+  assert.ok(/aria-selected="true"[^>]*data-kind-tab="marketplace"/.test(marketplaces), "the empty tab can be shown");
+  assert.ok(/Marketplaces<span data-kind-count=""[^>]*bg-neutral-900 text-neutral-100[^>]*><span class="sr-only">, <\/span>0</.test(marketplaces), "filled, counting 0");
+  assert.ok(marketplaces.includes("No marketplaces yet.") && /Add marketplace<\/button>/.test(marketplaces), "its own empty state and Add");
+  assert.ok(marketplaces.includes("data-profile-instructions") && tabsOf(marketplaces).size === 6, "the card and every tab stay");
+
+  // The keyboard: ←/→ wrap, Home/End jump; nothing else (Escape included) is the tabs'.
+  assert.equal(kindTabKeyTarget("ArrowRight", 5, 6), 0);
+  assert.equal(kindTabKeyTarget("ArrowLeft", 0, 6), 5);
+  assert.equal(kindTabKeyTarget("ArrowRight", 2, 6), 3);
+  assert.equal(kindTabKeyTarget("Home", 4, 6), 0);
+  assert.equal(kindTabKeyTarget("End", 1, 6), 5);
+  for (const key of ["Escape", "Enter", " ", "ArrowUp", "ArrowDown", "Tab", "a"]) assert.equal(kindTabKeyTarget(key, 2, 6), null, key);
 }
 
 // ---------------------------------------------------------------------------
@@ -337,7 +465,7 @@ const switchOf = (row: string): string => row.match(/<button[^>]*role="switch"[^
   const loading = view(viewProps({ snap: null, status: "loading" }));
   assert.ok(loading.includes('aria-label="Loading the profile"') && loading.includes("animate-pulse"), "a loading skeleton");
   assert.ok(loading.includes('aria-busy="true"'), "the list is busy");
-  assert.ok(!loading.includes("Filter by kind") && !loading.includes("data-profile-instructions"), "no filters without a snapshot");
+  assert.ok(!loading.includes('role="tablist"') && !loading.includes("data-profile-instructions"), "no tabs without a snapshot");
   assert.ok(/<button class="[^"]*\bw-full\b[^"]*" type="button" disabled="">[\s\S]{0,600}?Add<\/button>/.test(loading), "Add waits for the snapshot");
 
   const notInstalled = view(viewProps({ agent: "grok", snap: null, status: "error", notInstalled: true }));
@@ -349,13 +477,14 @@ const switchOf = (row: string): string => row.match(/<button[^>]*role="switch"[^
 
   const emptyKind = view(viewProps({ snap: snapshot("claude", { items: [] }), kind: "mcp" }));
   assert.ok(emptyKind.includes("No MCP servers yet.") && /Add MCP server<\/button>/.test(emptyKind), "an empty kind offers its Add");
-  assert.ok(!emptyKind.includes("data-profile-instructions"), "the instructions card stays out of a filtered list");
+  assert.ok(emptyKind.includes("data-profile-instructions"), "the instructions card stays on every tab");
 
   const codexCommands = view(viewProps({ agent: "codex", snap: snapshot("codex", { items: [] }), kind: "command" }));
   assert.ok(codexCommands.includes("No commands yet.") && !codexCommands.includes("Add command"), "Codex cannot create commands");
 
   const none = view(viewProps({ snap: snapshot("claude", { items: [] }) }));
-  assert.ok(none.includes("Claude has no MCP servers, skills or plugins yet.") && none.includes("data-profile-instructions"));
+  assert.ok(none.includes("No MCP servers yet.") && none.includes("data-profile-instructions"), "nothing at all: the first tab's empty state");
+  assert.ok([...tabsOf(none).values()].every((tab) => /<span class="sr-only">, <\/span>0<\/span>/.test(tab)), "every tab counting 0");
 
   const noMatches = view(viewProps({ query: "zzz" }));
   assert.ok(noMatches.includes("Nothing matches “zzz”"));
@@ -412,13 +541,13 @@ const switchOf = (row: string): string => row.match(/<button[^>]*role="switch"[^
   assert.ok(html.includes('data-agent-picker="segmented"'), "a 360 px phone fits the segments");
   const segments = html.match(/<div role="group" aria-label="Agent"[\s\S]*?<\/div>/)?.[0] ?? "";
   assert.ok((segments.match(/<button[^>]*class="[^"]*\bh-10\b/g) ?? []).length === 4, "segments 40 px tall");
-  const chips = html.match(/<div role="group" aria-label="Filter by kind"[\s\S]*?<\/div>/)?.[0] ?? "";
-  assert.ok((chips.match(/<button[^>]*class="[^"]*\bh-10\b/g) ?? []).length === 7, "every chip a 40 px target");
-  const user = rowOf(html, USER.id);
+  assert.ok([...tabsOf(html).values()].filter((tab) => /class="[^"]*\bh-10\b/.test(tab)).length === 6, "every tab a 40 px target");
+  const rows = everyTab({ variant: "sheet", width: 352 });
+  const user = rowOf(rows, USER.id);
   assert.ok(/\bh-10\b/.test(switchOf(user)) && /\bw-12\b/.test(switchOf(user)), "the switch's target is 40 px");
   assert.ok(/<span title="More actions" class="[^"]*\bh-10 w-10\b/.test(user), "so is the menu's");
-  assert.ok(/<button[^>]*class="[^"]*\bmin-h-10\b[^"]*"[^>]*>Manage in Claude/.test(rowOf(html, INHERITED.id)), "and Manage in");
-  const trust = rowOf(html, UNTRUSTED.id).match(/<button[^>]*title="Trust lint-on-edit as it is now"[^>]*>/)?.[0] ?? "";
+  assert.ok(/<button[^>]*class="[^"]*\bmin-h-10\b[^"]*"[^>]*>Manage in Claude/.test(rowOf(rows, INHERITED.id)), "and Manage in");
+  const trust = rowOf(rows, UNTRUSTED.id).match(/<button[^>]*title="Trust lint-on-edit as it is now"[^>]*>/)?.[0] ?? "";
   assert.ok(/\bh-10\b/.test(trust), "and Trust");
   assert.ok(/min-h-14/.test(html.match(/data-profile-instructions[^>]*class="[^"]*"/)?.[0] ?? ""), "the instructions card");
   assert.ok(/inline-flex w-full items-center justify-center gap-2 rounded-md bg-neutral-200 px-3 text-sm font-medium text-neutral-900 transition-colors hover:bg-neutral-50 h-10/.test(html), "and + Add");
@@ -473,7 +602,7 @@ const switchOf = (row: string): string => row.match(/<button[^>]*role="switch"[^
     warnings: [{ code: "config-toml-hook", message: "Defined in config.toml: change it in that file.", action: "open-file" }]
   });
   for (const variant of ["docked", "sheet"] as const) {
-    const html = view(viewProps({ variant, snap: snapshot("claude", { items: [claudeMcp, claudeHook, unreadable, noPath] }) }));
+    const html = everyTab({ variant, snap: snapshot("claude", { items: [claudeMcp, claudeHook, unreadable, noPath] }) });
 
     const mcp = rowOf(html, claudeMcp.id);
     assert.ok(mcp.includes("http · https://mcp.context7.com/mcp"), `${variant}: the transport and the target as the second line`);
@@ -507,7 +636,10 @@ const switchOf = (row: string): string => row.match(/<button[^>]*role="switch"[^
     viewProps({ snap: null, status: "error", error: "offline" }),
     viewProps({ snap: snapshot("claude", { items: [] }), kind: "mcp" }),
     viewProps({ variant: "sheet", confirming: { itemId: OFF.id, kind: "delete" } }),
-    viewProps({ width: 280 })
+    viewProps({ width: 280 }),
+    viewProps({ query: "e" }),
+    viewProps({ variant: "sheet", width: 352, remembered: "hook" }),
+    viewProps({ width: 260, remembered: "marketplace" })
   ];
   for (const props of states) {
     const html = view(props);
@@ -582,7 +714,8 @@ const switchOf = (row: string): string => row.match(/<button[^>]*role="switch"[^
     items: [orquesterHook, inherited],
     instructions: { ...snapshot("opencode").instructions, warnings: [grokMd] }
   });
-  const narrow = view(viewProps({ agent: "opencode", snap, width: 260 }));
+  const narrow = everyTab({ agent: "opencode", snap, width: 260 });
+  assert.deepEqual([...tabsOf(narrow).keys()], ["mcp", "skill", "plugin", "command", "hook"], "a hook OpenCode should not have gets a tab after its kinds");
 
   assert.ok(narrow.includes('placeholder="Search profile…"'), "a search placeholder the 260 px dock holds");
   assert.ok(narrow.includes('aria-label="Search OpenCode&#x27;s profile"'), "its name still says whose");
@@ -614,7 +747,7 @@ const switchOf = (row: string): string => row.match(/<button[^>]*role="switch"[^
   assert.ok(/<div class="flex min-w-0 items-center gap-1\.5 overflow-hidden">/.test(hook), "the name line clips its badge");
 
   // The sheet: the Manage-in footer tucks under the 40 px targets above it.
-  const sheet = view(viewProps({ agent: "opencode", snap, variant: "sheet", width: 352 }));
+  const sheet = everyTab({ agent: "opencode", snap, variant: "sheet", width: 352 });
   assert.ok(/<div class="flex flex-wrap items-center gap-1\.5 px-3 -mt-2 pb-1">/.test(rowOf(sheet, inherited.id)), "no gap under the row");
 }
 

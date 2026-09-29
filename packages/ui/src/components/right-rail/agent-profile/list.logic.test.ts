@@ -4,24 +4,27 @@ import { describe, it } from "node:test";
 import type { AgentProfileSnapshot, ProfileItem } from "@orquester/api";
 
 import {
+  addMenuKinds,
   AGENT_PICKER_SEGMENTED_MIN_WIDTH,
   agentPickerLayout,
   agentProfileAgentOptions,
   agentProfileEmptyState,
   copyTargets,
-  effectiveKindFilter,
+  effectiveKindTab,
   emptyKindTitle,
   fileNameOf,
   filterProfileItems,
   groupProfileItems,
   instructionsLine,
   isAgentNotInstalled,
+  isProfileSearchActive,
   manageInAgent,
   matchesProfileQuery,
-  profileKindChips,
   profileItemDisplayName,
+  profileItemKindOfId,
   profileItemMetaParts,
   profileItemSecondLine,
+  profileKindTabs,
   switchDisabledReason,
   switchLabel,
   switchTitle
@@ -65,12 +68,11 @@ function snapshot(overrides: Partial<AgentProfileSnapshot> = {}): AgentProfileSn
   };
 }
 
-describe("kind chips", () => {
-  it("All then the agent's own kinds in AGENT_PROFILE_KINDS order, each counted — zero included", () => {
+describe("kind tabs", () => {
+  it("the agent's own kinds in AGENT_PROFILE_KINDS order, each counted — zero included, no All", () => {
     assert.deepEqual(
-      profileKindChips("claude", ITEMS).map((chip) => [chip.id, chip.label, chip.count]),
+      profileKindTabs("claude", ITEMS).map((tab) => [tab.id, tab.label, tab.count]),
       [
-        ["all", "All", 6],
         ["mcp", "MCP", 2],
         ["skill", "Skills", 1],
         ["plugin", "Plugins", 1],
@@ -83,11 +85,56 @@ describe("kind chips", () => {
 
   it("only the kinds that agent has: OpenCode has no marketplaces or hooks", () => {
     assert.deepEqual(
-      profileKindChips("opencode", []).map((chip) => chip.id),
-      ["all", "mcp", "skill", "plugin", "command"]
+      profileKindTabs("opencode", []).map((tab) => tab.id),
+      ["mcp", "skill", "plugin", "command"]
     );
-    assert.equal(effectiveKindFilter("opencode", "hook"), "all", "a filter the agent lacks falls back to All");
-    assert.equal(effectiveKindFilter("opencode", "skill"), "skill");
+  });
+
+  it("a kind the agent should not have (another daemon version) gets a tab while it has items, after the rest", () => {
+    assert.deepEqual(
+      profileKindTabs("opencode", [item({ id: "hook:x", kind: "hook" }), item({ id: "mcp:a" })]).map((tab) => [tab.id, tab.count]),
+      [
+        ["mcp", 1],
+        ["skill", 0],
+        ["plugin", 0],
+        ["command", 0],
+        ["hook", 1]
+      ]
+    );
+  });
+
+  it("shows the remembered tab when it is one of the agent's, else the agent's first", () => {
+    const opencode = profileKindTabs("opencode", []);
+    assert.equal(effectiveKindTab(opencode, "skill"), "skill");
+    assert.equal(effectiveKindTab(profileKindTabs("claude", []), "command"), "command");
+    assert.equal(effectiveKindTab(opencode, "hook"), "mcp", "a kind the agent lacks falls back to its first");
+    assert.equal(
+      effectiveKindTab(profileKindTabs("opencode", [item({ id: "hook:x", kind: "hook" })]), "hook"),
+      "hook",
+      "unless it has items to show under it"
+    );
+    for (const junk of [null, undefined, "all", "MCP", "", 3, {}, ["skill"]]) {
+      assert.equal(effectiveKindTab(profileKindTabs("codex", ITEMS), junk), "mcp", String(junk));
+    }
+  });
+
+  it("reads a saved item's kind off its id", () => {
+    assert.equal(profileItemKindOfId("mcp:jira-cloud"), "mcp");
+    assert.equal(profileItemKindOfId("hook:PreToolUse:0123456789abcdef"), "hook");
+    assert.equal(profileItemKindOfId("plugin:superpowers@claude-plugins-official"), "plugin");
+    for (const id of ["", "mcp", ":mcp", "agent:x", "instructions"]) assert.equal(profileItemKindOfId(id), null, id);
+  });
+
+  it("+ Add lists the shown tab's kind first, and still every creatable kind", () => {
+    assert.deepEqual(addMenuKinds(["mcp", "skill", "plugin", "marketplace", "hook"], "hook"), [
+      "hook",
+      "mcp",
+      "skill",
+      "plugin",
+      "marketplace"
+    ]);
+    assert.deepEqual(addMenuKinds(["mcp", "skill"], "mcp"), ["mcp", "skill"]);
+    assert.deepEqual(addMenuKinds(["mcp", "skill"], "command"), ["mcp", "skill"], "a tab that cannot be created keeps the order");
   });
 });
 
@@ -100,13 +147,18 @@ describe("filtering and grouping", () => {
     assert.ok(matchesProfileQuery(ITEMS[0]!, "   "), "blank matches all");
   });
 
-  it("filters by kind and query together", () => {
+  it("shows the tab's kind; a search looks across every kind, whatever the tab", () => {
     assert.deepEqual(
       filterProfileItems(ITEMS, { kind: "mcp", query: "" }).map((entry) => entry.id),
       ["mcp:jira", "mcp:Atlas"]
     );
-    assert.deepEqual(filterProfileItems(ITEMS, { kind: "all", query: "review" }).map((entry) => entry.id), ["skill:review"]);
-    assert.deepEqual(filterProfileItems(ITEMS, { kind: "skill", query: "jira" }), []);
+    assert.deepEqual(filterProfileItems(ITEMS, { kind: "hook", query: "   " }).map((entry) => entry.id), [
+      "hook:PreToolUse:abc"
+    ], "a blank search is no search");
+    assert.deepEqual(filterProfileItems(ITEMS, { kind: "mcp", query: "review" }).map((entry) => entry.id), ["skill:review"]);
+    assert.deepEqual(filterProfileItems(ITEMS, { kind: "skill", query: "jira" }).map((entry) => entry.id), ["mcp:jira"]);
+    assert.deepEqual(filterProfileItems(ITEMS, { kind: "skill", query: "zzz" }), []);
+    assert.ok(isProfileSearchActive(" a ") && !isProfileSearchActive("  ") && !isProfileSearchActive(""));
   });
 
   it("groups in the agent's kind order, each sorted by name, empty kinds left out", () => {
@@ -136,7 +188,7 @@ describe("what the list shows", () => {
     snapshot: snapshot(),
     error: null,
     notInstalled: false,
-    kind: "all" as const,
+    kind: "skill" as const,
     query: "",
     shown: 3
   };
@@ -158,10 +210,14 @@ describe("what the list shows", () => {
     });
   });
 
-  it("no matches, an empty kind, or nothing at all", () => {
+  it("no matches while searching, else the empty tab's own state", () => {
     assert.deepEqual(agentProfileEmptyState({ ...base, shown: 0, query: " jira " }), { kind: "no-matches", query: "jira" });
     assert.deepEqual(agentProfileEmptyState({ ...base, shown: 0, kind: "mcp" }), { kind: "empty-kind", itemKind: "mcp" });
-    assert.deepEqual(agentProfileEmptyState({ ...base, shown: 0 }), { kind: "none" });
+    assert.deepEqual(
+      agentProfileEmptyState({ ...base, shown: 0, snapshot: snapshot({ items: [] }) }),
+      { kind: "empty-kind", itemKind: "skill" },
+      "an agent with nothing at all shows the tab's empty state"
+    );
   });
 
   it("titles an empty kind in words", () => {
