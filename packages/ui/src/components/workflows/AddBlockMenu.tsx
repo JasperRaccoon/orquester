@@ -6,10 +6,11 @@
  */
 
 import React, { useEffect, useMemo, useRef, useState } from "react";
-import { Search } from "lucide-react";
+import { Bot, Search } from "lucide-react";
 
 import { WORKFLOW_BLOCK_CATALOG, type WorkflowNodeType } from "@orquester/api";
 
+import { getRegistryIcon } from "../../icons";
 import { cn } from "../../lib/cn";
 import { accentClass, BLOCK_ICONS, filterPalette } from "../../lib/workflows/catalog-ui";
 import { Popover } from "./ui/Popover";
@@ -25,22 +26,40 @@ export interface AddBlockMenuProps {
   onClose: () => void;
 }
 
-export const BlockTile: React.FC<{ type: WorkflowNodeType; size?: "sm" | "md" }> = ({ type, size = "md" }) => {
+/**
+ * A block's glyph at a lucide `size`: an agent block configured with a known
+ * agent shows that agent's logo (on a neutral colour, so a monochrome logo
+ * does not take the accent), anything else its type's icon in the accent.
+ * Logos fill their box edge to edge where lucide icons keep a margin, so they
+ * are drawn a little smaller to read the same size; a non-square logo is
+ * centred by its viewBox.
+ */
+export function blockGlyph(type: WorkflowNodeType, agent: string | undefined, size: number): React.ReactNode {
+  if (type === "agent" && agent) {
+    const logo = getRegistryIcon("agent", agent, Math.round(size * 0.87));
+    // The registry falls back to the generic Bot for an agent it has no artwork for; keep the block's own then.
+    if (React.isValidElement(logo) && logo.type !== Bot) {
+      return <span className="flex items-center justify-center text-neutral-100">{logo}</span>;
+    }
+  }
   const Icon = BLOCK_ICONS[type];
-  return (
-    <span
-      aria-hidden
-      className={cn(
-        "flex shrink-0 items-center justify-center rounded-lg",
-        "bg-[rgb(var(--wf-accent)/0.13)] text-[rgb(var(--wf-accent))] ring-1 ring-inset ring-[rgb(var(--wf-accent)/0.22)]",
-        accentClass(type),
-        size === "sm" ? "h-7 w-7" : "h-8 w-8"
-      )}
-    >
-      <Icon size={size === "sm" ? 14 : 15} strokeWidth={1.9} />
-    </span>
-  );
-};
+  return <Icon size={size} strokeWidth={1.9} />;
+}
+
+/** A block's tile; pass `agent` (`blockAgent(node)`) for a configured block, leave it out for a catalogue entry. */
+export const BlockTile: React.FC<{ type: WorkflowNodeType; agent?: string; size?: "sm" | "md" }> = ({ type, agent, size = "md" }) => (
+  <span
+    aria-hidden
+    className={cn(
+      "flex shrink-0 items-center justify-center rounded-lg",
+      "bg-[rgb(var(--wf-accent)/0.13)] text-[rgb(var(--wf-accent))] ring-1 ring-inset ring-[rgb(var(--wf-accent)/0.22)]",
+      accentClass(type),
+      size === "sm" ? "h-7 w-7" : "h-8 w-8"
+    )}
+  >
+    {blockGlyph(type, agent, size === "sm" ? 14 : 15)}
+  </span>
+);
 
 export const AddBlockMenu: React.FC<AddBlockMenuProps> = ({ open, point, allowTriggers, context, onPick, onClose }) => {
   const [query, setQuery] = useState("");

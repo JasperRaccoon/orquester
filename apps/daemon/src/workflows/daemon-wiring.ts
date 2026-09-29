@@ -45,7 +45,7 @@ import type { FileRunStore } from "./run-store.ts";
 import type { WorkflowSecretsService } from "./secrets.ts";
 import type { WorkflowService } from "./service.ts";
 import type { WorkflowStateStore } from "./state-store.ts";
-import { buildWorkflowSummary, type TriggerState } from "./summary.ts";
+import { buildWorkflowSummary, summaryErrorsOf, type TriggerState } from "./summary.ts";
 import { systemTriggerClock } from "./triggers/clock.ts";
 import { createGitPoller, type GitPoller, type GitRemoteReader } from "./triggers/git-poller.ts";
 import { createRepoResolver } from "./triggers/repo-resolve.ts";
@@ -146,21 +146,33 @@ export function createWorkflowDaemon(deps: WorkflowDaemonDeps): WorkflowDaemon {
     buildWorkflowSummary(workflow, { runStore, triggerState, validation: service.validationOptions(workflow.id) });
 
   // ---- The trigger-state watcher -------------------------------------------------------------
-  /** workflowId → the (nodeId, nextRunAt, lastError) fingerprint last published. */
+  // It also re-judges each definition against the validation context as it stands — the agent
+  // catalogue above all, which moves without an edit (a provider probed, a CLI updated): a row whose
+  // errors changed goes out again, so the rail's problem chip follows the catalogue. Reading the
+  // context is what refreshes a stale catalogue reading (`current()`), so this also keeps it fresh.
+  /** workflowId → the (nodeId, nextRunAt, lastError) + errors fingerprint last published. */
   const published = new Map<string, string>();
+  const errorsPrint = (errors: Pick<WorkflowSummary, "errorCount" | "errors">): unknown[] => [
+    errors.errorCount,
+    ...(errors.errors ?? []).map((problem) => [problem.code, problem.nodeId ?? null, problem.field ?? null, problem.message])
+  ];
   const fingerprintOf = (workflow: Workflow, live: boolean): string =>
-    JSON.stringify(
-      workflow.nodes
+    JSON.stringify([
+      ...workflow.nodes
         .filter((node) => isTriggerType(node.type))
         .map((node) => {
           const current = live ? triggerState(workflow.id, node.id) : undefined;
           return [node.id, current?.nextRunAt ?? null, current?.lastError ?? null];
-        })
-    );
+        }),
+      errorsPrint(summaryErrorsOf(workflow, service.validationOptions(workflow.id)))
+    ]);
   const noteSummary = (summary: WorkflowSummary): void => {
     published.set(
       summary.id,
-      JSON.stringify(summary.triggers.map((trigger) => [trigger.nodeId, trigger.nextRunAt ?? null, trigger.lastError ?? null]))
+      JSON.stringify([
+        ...summary.triggers.map((trigger) => [trigger.nodeId, trigger.nextRunAt ?? null, trigger.lastError ?? null]),
+        errorsPrint(summary)
+      ])
     );
   };
   const publish = (type: WorkflowsEventType, payload: unknown): void => {
@@ -265,6 +277,17 @@ export function createWorkflowDaemon(deps: WorkflowDaemonDeps): WorkflowDaemon {
         });
       };
       unsubscribeDefinitions = [service.onChanged(settled), service.onDeleted((id) => void published.delete(id))];
+      // The agent catalogue moves with the registry (an install, an update) and the provider
+      // snapshots (a probe): read it again at once, then re-judge the rows — the rail's problem
+      // chips follow without waiting out the refresh window.
+      const offCatalog = api.subscribe?.((event) => {
+        if (event.channel !== "registry" || (event.type !== "agent.providers.changed" && event.type !== "registry.changed")) return;
+        validationCatalog.expire();
+        void validationCatalog.ready().then(() => {
+          if (!stopped) checkTriggerState();
+        });
+      });
+      if (offCatalog) unsubscribeDefinitions.push(offCatalog);
       checkTriggerState();
       watcherStopped = false;
       armWatcher();

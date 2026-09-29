@@ -85,8 +85,8 @@ export const WORKFLOW_BLOCK_CATALOG: Record<WorkflowNodeType, WorkflowBlockCatal
       prompt: { kind: "text", text: "Fix the failing tests in {project} on {branch}. Reply with a one-line summary." },
       session: { kind: "new", title: "Nightly test fix" },
       chain: [
-        { agent: "claude", model: "opus", accounts: { strategy: "least-used", maxWeeklyPct: 85 } },
-        { agent: "codex", model: "gpt-5.5", accounts: { strategy: "soonest-reset" } }
+        { agent: "claude", model: "default", accounts: { strategy: "least-used", maxWeeklyPct: 85 } },
+        { agent: "codex", model: "gpt-6-astra", accounts: { strategy: "soonest-reset" } }
       ],
       autonomyNote: true,
       whenOnlyWatchLoopsRemain: "finish",
@@ -209,7 +209,8 @@ export function defaultNodeConfig<T extends WorkflowNodeType>(type: T): Workflow
       chain: [
         {
           agent: "claude",
-          model: "opus",
+          // Claude's catalogue always lists `default` (probed or not); `opus` is only a fallback slug.
+          model: "default",
           accounts: {
             strategy: "least-used",
             includeSystem: false,

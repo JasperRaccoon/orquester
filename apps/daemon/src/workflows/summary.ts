@@ -5,11 +5,12 @@
 
 import { basename } from "node:path";
 import {
-  hasWorkflowErrors,
   isTriggerType,
   repoDisplayName,
   triggerSummaryText,
   validateWorkflow,
+  workflowAgentCatalogKey,
+  workflowSummaryErrors,
   type ValidateWorkflowOptions,
   type Workflow,
   type WorkflowSummary,
@@ -29,20 +30,21 @@ export interface WorkflowSummaryDeps {
   triggerState?: (workflowId: string, nodeId: string) => TriggerState | undefined;
   /** How a project-repo trigger names the project; derived from the definition when absent. */
   projectName?: string;
-  /** Validation context (secret names, saved prompt ids, workflow ids) for `errorCount`. */
+  /** Validation context (secret names, saved prompt ids, workflow ids, agent catalogue) for the errors. */
   validation?: ValidateWorkflowOptions;
   /** "Today" for the next-run text. */
   now?: Date;
 }
 
 /**
- * `errorCount` validates the whole workflow; the rail lists every workflow on each `GET` and on
- * every event, so the count is cached per definition object (a write replaces it) and per
- * validation context (a new secret or saved prompt can change it without an edit).
+ * The error fields validate the whole workflow; the rail lists every workflow on each `GET` and on
+ * every event, so they are cached per definition object (a write replaces it) and per validation
+ * context (a new secret, saved prompt or agent catalogue can change them without an edit).
  */
-const errorCounts = new WeakMap<Workflow, { key: string; count: number }>();
+type SummaryErrors = Pick<WorkflowSummary, "errorCount" | "errors" | "errorsOmitted">;
+const errorCache = new WeakMap<Workflow, { key: string; value: SummaryErrors }>();
 
-function validationKey(workflow: Workflow, options: ValidateWorkflowOptions): string {
+export function validationKey(workflow: Workflow, options: ValidateWorkflowOptions): string {
   const list = (values: readonly string[] | undefined): string => (values === undefined ? "-" : [...values].sort().join("\u0000"));
   return [
     workflow.id,
@@ -51,18 +53,19 @@ function validationKey(workflow: Workflow, options: ValidateWorkflowOptions): st
     list(options.secretNames),
     list(options.savedPromptIds),
     list(options.knownWorkflowIds),
-    options.strictScheduleIntervals === true ? "strict" : "-"
+    options.strictScheduleIntervals === true ? "strict" : "-",
+    workflowAgentCatalogKey(options.catalog)
   ].join("\u0001");
 }
 
-function errorCountOf(workflow: Workflow, options: ValidateWorkflowOptions): number {
+/** A workflow's errors as its rail row carries them: the count, the first few, how many are left out. */
+export function summaryErrorsOf(workflow: Workflow, options: ValidateWorkflowOptions): SummaryErrors {
   const key = validationKey(workflow, options);
-  const cached = errorCounts.get(workflow);
-  if (cached && cached.key === key) return cached.count;
-  const problems = validateWorkflow(workflow, options).problems;
-  const count = hasWorkflowErrors(problems) ? problems.filter((problem) => problem.severity === "error").length : 0;
-  errorCounts.set(workflow, { key, count });
-  return count;
+  const cached = errorCache.get(workflow);
+  if (cached && cached.key === key) return cached.value;
+  const value = workflowSummaryErrors(validateWorkflow(workflow, options).problems);
+  errorCache.set(workflow, { key, value });
+  return value;
 }
 
 /** The project a workflow's triggers name: an existing project's directory name, a temp clone's repo. */
@@ -102,12 +105,16 @@ export function buildWorkflowSummary(workflow: Workflow, deps: WorkflowSummaryDe
     project: workflow.project,
     triggers,
     nodeCount: workflow.nodes.length,
-    errorCount: errorCountOf(workflow, deps.validation ?? {}),
+    errorCount: 0,
     activeRuns: deps.runStore.activeForWorkflow(workflow.id),
     createdAt: workflow.createdAt,
     updatedAt: workflow.updatedAt
   };
   if (workflow.description !== undefined) summary.description = workflow.description;
+  const errors = summaryErrorsOf(workflow, deps.validation ?? {});
+  summary.errorCount = errors.errorCount;
+  if (errors.errors !== undefined) summary.errors = errors.errors.map((problem) => ({ ...problem }));
+  if (errors.errorsOmitted !== undefined) summary.errorsOmitted = errors.errorsOmitted;
   const notify = workflow.settings?.notify;
   if (notify) summary.notify = { onFailure: notify.onFailure !== false, onSuccess: notify.onSuccess === true };
   const lastRun = deps.runStore.latestForWorkflow(workflow.id);

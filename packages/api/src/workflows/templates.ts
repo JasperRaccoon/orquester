@@ -1,6 +1,11 @@
 // Automated workflows — starter templates (spec §7.1's empty state): the owner's own examples.
 // `buildTemplate` answers a `CreateWorkflowRequest` the rail POSTs as is; every template is created
 // DISABLED, so nothing runs before the user has read it.
+//
+// The chains name models by slug, and validation matches slugs exactly against the host's live
+// catalogue. A static slug can go stale (Claude's catalogue lists `opus[1m]`, not `opus`), so the
+// Claude blocks name `default` — the slug Claude's catalogue always lists, probed or not — and a
+// client with the live catalogue re-resolves each entry when it instantiates a template.
 
 import type { CreateWorkflowRequest } from "./types.ts";
 
@@ -191,7 +196,7 @@ export function buildTemplate(id: WorkflowTemplateId, opts: BuildTemplateOptions
             config: {
               prompt: { kind: "text", text: NIGHTLY_PROMPT },
               session: { kind: "new", title: "Nightly task" },
-              chain: [{ agent: "claude", model: "opus", accounts: { strategy: "least-used" } }]
+              chain: [{ agent: "claude", model: "default", accounts: { strategy: "least-used" } }]
             }
           }
         ],
@@ -218,7 +223,7 @@ export function buildTemplate(id: WorkflowTemplateId, opts: BuildTemplateOptions
             config: {
               prompt: { kind: "text", text: JIRA_FIX_PROMPT },
               session: { kind: "new", title: "Jira fixes" },
-              chain: [{ agent: "claude", model: "opus", accounts: { strategy: "least-used" } }]
+              chain: [{ agent: "claude", model: "default", accounts: { strategy: "least-used" } }]
             }
           },
           { type: "code", name: "MarkDone", config: { source: JIRA_DONE_SOURCE, timeoutMinutes: 5 } },
@@ -265,7 +270,7 @@ export function buildTemplate(id: WorkflowTemplateId, opts: BuildTemplateOptions
             config: {
               prompt: { kind: "text", text: RELEASE_PROMPT },
               session: { kind: "new", title: "Release review" },
-              chain: [{ agent: "codex", model: "gpt-5.5", accounts: { strategy: "soonest-reset" } }]
+              chain: [{ agent: "codex", model: "gpt-6-astra", accounts: { strategy: "soonest-reset" } }]
             }
           }
         ],

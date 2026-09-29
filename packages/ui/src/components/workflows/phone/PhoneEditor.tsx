@@ -398,6 +398,7 @@ export const PhoneEditor: React.FC<PhoneEditorProps> = (props) => {
               workflow={draft}
               selectedIds={[inspectorNode.id]}
               problems={state.problems}
+              summaryContext={props.summaryContext}
               readOnly={readOnly}
               projectPath={props.workflowProject}
               secretNames={props.secretNames}

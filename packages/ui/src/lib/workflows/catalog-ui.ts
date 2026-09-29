@@ -88,6 +88,16 @@ export const BLOCK_ICONS: Record<WorkflowNodeType, LucideIcon> = {
   note: StickyNote
 };
 
+/**
+ * The agent an agent block runs first (its chain's head), whose logo stands in
+ * for the generic icon wherever a configured block is drawn; undefined for
+ * other types and for an agent block with nothing chosen yet.
+ */
+export function blockAgent(node: WorkflowNode): string | undefined {
+  if (node.type !== "agent") return undefined;
+  return node.config.chain?.[0]?.agent || undefined;
+}
+
 export function blockTitle(type: WorkflowNodeType): string {
   return WORKFLOW_BLOCK_CATALOG[type]?.title ?? type;
 }

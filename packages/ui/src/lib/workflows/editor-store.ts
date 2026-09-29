@@ -35,6 +35,7 @@ import {
   type ReplaceWorkflowRequest,
   type Workflow,
   type WorkflowPatchOp,
+  type WorkflowAgentCatalog,
   type WorkflowProblem,
   type WorkflowWriteResponse
 } from "@orquester/api";
@@ -97,6 +98,13 @@ export interface ValidationContext {
   secretNames?: readonly string[];
   savedPromptIds?: readonly string[];
   knownWorkflowIds?: readonly string[];
+  /**
+   * The host's agent catalogue (`workflowAgentCatalogFromSnapshots` over the registry and the
+   * provider snapshots) — the daemon's own rule, so the editor flags the chain entries the daemon
+   * does. Absent until the registry is known: then no chain is checked. A provider still being
+   * probed lists no models, so its entries are only warned about.
+   */
+  catalog?: WorkflowAgentCatalog;
 }
 
 const EMPTY_SELECTION: EditorSelection = { nodeIds: [], edgeIds: [] };
@@ -423,7 +431,8 @@ export class WorkflowEditor {
     const { problems } = validateWorkflow(draft, {
       ...(this.validation.secretNames ? { secretNames: this.validation.secretNames } : {}),
       ...(this.validation.savedPromptIds ? { savedPromptIds: this.validation.savedPromptIds } : {}),
-      ...(this.validation.knownWorkflowIds ? { knownWorkflowIds: this.validation.knownWorkflowIds } : {})
+      ...(this.validation.knownWorkflowIds ? { knownWorkflowIds: this.validation.knownWorkflowIds } : {}),
+      ...(this.validation.catalog ? { catalog: this.validation.catalog } : {})
     });
     this.set({ problems });
   }

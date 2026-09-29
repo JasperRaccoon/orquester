@@ -10,6 +10,11 @@ import type { WorkflowNode } from "./types.ts";
 export type TemplateFieldRole =
   /** An agent's prompt: secrets and untrusted trigger text land in the transcript. */
   | "prompt"
+  /**
+   * A new chat's title: shown on the tab, never sent to the agent as input, and rendered with
+   * every secret as its `«secret:NAME»` placeholder.
+   */
+  | "title"
   /** A value rendered to text or to a raw value. */
   | "value";
 
@@ -32,7 +37,7 @@ function candidatePaths(node: WorkflowNode): { path: Path; role: TemplateFieldRo
       const config = node.config;
       if (config.prompt.kind === "text") add("prompt", "prompt", "text");
       else add("prompt", "prompt", "append");
-      if (config.session.kind === "new") add("prompt", "session", "title");
+      if (config.session.kind === "new") add("title", "session", "title");
       break;
     }
     case "shell":

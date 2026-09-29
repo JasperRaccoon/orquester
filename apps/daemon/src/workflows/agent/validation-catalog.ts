@@ -7,25 +7,23 @@
 // cached: `current()` answers the last reading (and refreshes it in the background once stale),
 // and a write route awaits `ready()` first — a bounded refresh — so a save is judged against a
 // catalogue no older than `ttlMs`. Without a reading (no API attached yet, the registry unreadable)
-// nothing is checked: an unknown catalogue never refuses a definition.
+// nothing is checked: an unknown catalogue never refuses a definition. A failed read is not retried
+// for `ttlMs` either (the last reading, if any, stays), so a broken registry costs one read per
+// window, not one per request; a registry or provider change (`expire`) asks again at once.
 
-import type { WorkflowAgentCatalog } from "@orquester/api";
+import { toWorkflowAgentCatalog, type WorkflowAgentCatalog } from "@orquester/api";
 import { loadAgents, type AgentView, type DaemonApi } from "../../chat-client/index.ts";
 
 export const VALIDATION_CATALOG_TTL_MS = 30_000;
 export const VALIDATION_CATALOG_WAIT_MS = 3_000;
 
 /**
- * The catalogue as validation reads it. A provider's models count as LOADED only once it has been
- * probed (a pending snapshot — status `unknown` — carries a fallback list, not the provider's own).
+ * The catalogue as validation reads it — `toWorkflowAgentCatalog`, the rule the editor applies to
+ * the same registry and snapshots: a provider's models count as LOADED only while it is `ready`
+ * (a pending or failed probe may carry a bundled fallback list, not the provider's own).
  */
 export function toValidationCatalog(agents: readonly AgentView[]): WorkflowAgentCatalog {
-  return {
-    agents: agents.map((agent) => {
-      const loaded = agent.models.length > 0 && agent.status !== "unknown";
-      return { id: agent.id, enabled: agent.enabled, models: loaded ? agent.models.map((model) => model.slug) : null };
-    })
-  };
+  return toWorkflowAgentCatalog(agents);
 }
 
 export interface ValidationCatalog {
@@ -33,8 +31,14 @@ export interface ValidationCatalog {
   current(): WorkflowAgentCatalog | undefined;
   /** Refresh when stale, waiting at most `waitMs`; never rejects. */
   ready(waitMs?: number): Promise<void>;
-  /** Drop the reading (a registry or provider change). */
+  /** Drop the reading. */
   invalidate(): void;
+  /**
+   * The host's catalogue changed (a registry entry, a provider snapshot): the next `current()` /
+   * `ready()` reads again — even inside a failed read's backoff — while the last reading still
+   * answers until then, so nothing flips to "unchecked" in between.
+   */
+  expire(): void;
 }
 
 export function createValidationCatalog(opts: {
@@ -47,6 +51,8 @@ export function createValidationCatalog(opts: {
   const ttl = opts.ttlMs ?? VALIDATION_CATALOG_TTL_MS;
   let value: WorkflowAgentCatalog | undefined;
   let readAt = Number.NEGATIVE_INFINITY;
+  /** After a failed read: no new read before this. */
+  let retryAt = Number.NEGATIVE_INFINITY;
   let inFlight: Promise<void> | null = null;
   let generation = 0;
 
@@ -60,8 +66,10 @@ export function createValidationCatalog(opts: {
         if (mine !== generation) return;
         value = toValidationCatalog(agents);
         readAt = now();
+        retryAt = Number.NEGATIVE_INFINITY;
       })
       .catch((error: unknown) => {
+        if (mine === generation) retryAt = now() + ttl;
         opts.logger?.debug("workflow validation catalogue read failed", { error: error instanceof Error ? error.message : String(error) });
       })
       .finally(() => {
@@ -69,7 +77,10 @@ export function createValidationCatalog(opts: {
       });
     return inFlight;
   };
-  const stale = (): boolean => now() - readAt >= ttl;
+  const stale = (): boolean => {
+    const at = now();
+    return at - readAt >= ttl && at >= retryAt;
+  };
 
   return {
     current() {
@@ -92,6 +103,14 @@ export function createValidationCatalog(opts: {
       generation += 1;
       value = undefined;
       readAt = Number.NEGATIVE_INFINITY;
+      retryAt = Number.NEGATIVE_INFINITY;
+      inFlight = null;
+    },
+    expire() {
+      // A read already in flight may predate the change: its answer is dropped, a new read starts.
+      generation += 1;
+      readAt = Number.NEGATIVE_INFINITY;
+      retryAt = Number.NEGATIVE_INFINITY;
       inFlight = null;
     }
   };

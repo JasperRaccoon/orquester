@@ -411,6 +411,9 @@ export function isRunActive(status: WorkflowRunStatus): boolean {
 // List rows (the rail)
 // ---------------------------------------------------------------------------
 
+/** At most this many errors ride a `WorkflowSummary` (the rest are counted in `errorsOmitted`). */
+export const WORKFLOW_SUMMARY_MAX_ERRORS = 5;
+
 export interface WorkflowSummary {
   id: string;
   name: string;
@@ -421,6 +424,13 @@ export interface WorkflowSummary {
   triggers: WorkflowTriggerSummary[];
   nodeCount: number;
   errorCount: number;
+  /**
+   * The first errors (at most `WORKFLOW_SUMMARY_MAX_ERRORS`), so the rail can say what they are.
+   * Optional: an older daemon omits it (the rail then shows the count alone). Absent with no errors.
+   */
+  errors?: WorkflowProblem[];
+  /** How many errors `errors` leaves out; absent when none are. */
+  errorsOmitted?: number;
   lastRun?: WorkflowRunSummary;
   activeRuns: WorkflowRunSummary[];
   /** `settings.notify`, so open clients honour it for in-app notices. Optional: an older daemon omits it. */

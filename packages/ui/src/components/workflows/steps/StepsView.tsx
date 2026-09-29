@@ -250,7 +250,7 @@ const StepCard: React.FC<{
         <span aria-hidden className="absolute bottom-3 left-[5px] top-3 w-[3px] rounded-full bg-[rgb(var(--wf-accent))]" />
         <div className="flex items-start gap-3 py-3 pl-4 pr-1.5">
           <div className="pt-0.5">
-            <BlockTile type={row.type} />
+            <BlockTile type={row.type} agent={row.agent} />
           </div>
           <div className="min-w-0 flex-1 pt-px">
             <div className="flex min-w-0 items-center gap-1.5">

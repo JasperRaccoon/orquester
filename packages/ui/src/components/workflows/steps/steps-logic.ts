@@ -26,6 +26,7 @@ import {
   type WorkflowProblem
 } from "@orquester/api";
 
+import { blockAgent } from "../../../lib/workflows/catalog-ui";
 import { duplicateWorkflowNodes } from "../../../lib/workflows/clipboard";
 import { displayOutline } from "../../../lib/workflows/outline-display";
 import { connectBlocks, connectionRefusal } from "../canvas/connection";
@@ -61,6 +62,8 @@ export interface StepRow {
   parentId: string | null;
   name: string;
   type: WorkflowNodeType;
+  /** An agent block's first agent (its tile shows that agent's logo). */
+  agent?: string;
   summary: string;
   disabled: boolean;
   unreachable: boolean;
@@ -140,6 +143,7 @@ export function deriveSteps(
       parentId: item.parentId ?? null,
       name: node.name,
       type: node.type,
+      agent: blockAgent(node),
       summary: item.kind === "node" ? summaryOf(node) : "",
       disabled: node.disabled === true,
       unreachable: item.unreachable === true,
@@ -244,6 +248,8 @@ export interface ConnectCandidate {
   nodeId: string;
   name: string;
   type: WorkflowNodeType;
+  /** An agent block's first agent. */
+  agent?: string;
   /** Why it cannot be connected, or null. */
   refusal: string | null;
 }
@@ -257,6 +263,7 @@ export function connectCandidates(workflow: Graph, from: OutputRef): ConnectCand
       nodeId: node.id,
       name: node.name,
       type: node.type,
+      agent: blockAgent(node),
       refusal: connectionRefusal(workflow, { source: from.nodeId, sourceHandle: from.handle, target: node.id })
     }))
     .sort(
@@ -274,6 +281,8 @@ export function connectStep<W extends Graph>(workflow: W, from: OutputRef, targe
 export interface MoveCandidate extends OutputRef {
   name: string;
   type: WorkflowNodeType;
+  /** An agent block's first agent. */
+  agent?: string;
   label: string;
   tone: OutputTone;
   /** The output it hangs from now. */
@@ -303,6 +312,7 @@ export function moveCandidates(workflow: Graph, nodeId: string, current: OutputR
         handle,
         name: source.name,
         type: source.type,
+        agent: blockAgent(source),
         label: workflowHandleLabel(source, handle),
         tone: outputTone(handle),
         current: isCurrent,

@@ -11,6 +11,7 @@ import { ArrowRightLeft, Cable, Copy, Pencil, Power, Settings2, Trash2 } from "l
 import { acceptsInput, outputHandles, WORKFLOW_NODE_NAME_PATTERN, workflowHandleLabel, type Workflow, type WorkflowNode } from "@orquester/api";
 
 import { cn } from "../../../lib/cn";
+import { blockAgent } from "../../../lib/workflows/catalog-ui";
 import { BlockTile } from "../AddBlockMenu";
 import { ActionSheet, WorkflowSheet } from "../phone/WorkflowSheet";
 import { connectCandidates, moveCandidates, outputTone, type OutputRef } from "./steps-logic";
@@ -39,7 +40,7 @@ export const StepMenuSheet: React.FC<{
       onClose={onClose}
       label={`${node.name} — actions`}
       title={node.name}
-      leading={<BlockTile type={node.type} />}
+      leading={<BlockTile type={node.type} agent={blockAgent(node)} />}
       actions={[
         { id: "settings", label: "Settings", icon: <Settings2 size={18} />, onSelect: on.onOpenSettings },
         { id: "rename", label: "Rename", icon: <Pencil size={18} />, disabled: readOnly, onSelect: on.onRename },
@@ -236,7 +237,7 @@ export const ConnectSheet: React.FC<{
           candidates.map((candidate) => (
             <PickRow key={candidate.nodeId} disabled={candidate.refusal !== null} onClick={() => onPick(candidate.nodeId)}>
               <span className={cn(candidate.refusal !== null && "opacity-40")}>
-                <BlockTile type={candidate.type} />
+                <BlockTile type={candidate.type} agent={candidate.agent} />
               </span>
               <span className="min-w-0 flex-1">
                 <span className={cn("block truncate text-[15px] font-medium", candidate.refusal ? "text-neutral-500" : "text-neutral-100")}>
@@ -264,11 +265,11 @@ export const MoveSheet: React.FC<{
   const node = nodeId ? workflow.nodes.find((candidate) => candidate.id === nodeId) : undefined;
   if (!node) return null;
   // Grouped by block.
-  const groups: { nodeId: string; name: string; type: WorkflowNode["type"]; outputs: typeof candidates }[] = [];
+  const groups: { nodeId: string; name: string; type: WorkflowNode["type"]; agent?: string; outputs: typeof candidates }[] = [];
   for (const candidate of candidates) {
     const last = groups[groups.length - 1];
     if (last && last.nodeId === candidate.nodeId) last.outputs.push(candidate);
-    else groups.push({ nodeId: candidate.nodeId, name: candidate.name, type: candidate.type, outputs: [candidate] });
+    else groups.push({ nodeId: candidate.nodeId, name: candidate.name, type: candidate.type, agent: candidate.agent, outputs: [candidate] });
   }
   return (
     <WorkflowSheet open={open} onClose={onClose} label="Move to another output" title="Move to…" subtitle={`Where ${node.name} hangs from`} size="full" level={1}>
@@ -278,7 +279,7 @@ export const MoveSheet: React.FC<{
           return (
             <div key={group.nodeId} className={cn("rounded-2xl px-1 py-1", blocked && "opacity-45")}>
               <div className="flex items-center gap-2.5 px-2 pb-1 pt-1.5">
-                <BlockTile type={group.type} size="sm" />
+                <BlockTile type={group.type} agent={group.agent} size="sm" />
                 <span className="min-w-0 flex-1 truncate text-[13.5px] font-semibold text-neutral-200">{group.name}</span>
               </div>
               <div className="flex flex-wrap gap-1.5 pb-1 pl-[46px] pr-2">

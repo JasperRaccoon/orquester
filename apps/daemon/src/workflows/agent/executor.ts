@@ -64,7 +64,7 @@ import type {
   WorkflowLogger
 } from "../contracts.ts";
 import { parseBaseline, takeBaseline, type AgentBaseline } from "./classify.ts";
-import { AgentCatalog, buildCreateBody, createSession, findOwnedSession, sessionTitle } from "./create.ts";
+import { AgentCatalog, buildCreateBody, createSession, findOwnedSession, renderSessionTitle, sessionTitle } from "./create.ts";
 import {
   candidateKey,
   coolDown,
@@ -477,7 +477,7 @@ class AgentBlockRun {
     if (!c || this.st.pendingInput === undefined) return this.fail("internal", "The agent block lost its next candidate.");
     const owner: WorkflowSessionOwner = { kind: "workflow", workflowId: this.ctx.workflow.id, runId: this.ctx.runId, nodeId: this.ctx.node.id };
     const since = this.st.creatingSince ?? this.st.startedAt;
-    const title = sessionTitle(this.ctx.workflow.name, this.ctx.node.name, this.config.session.kind === "new" ? this.config.session.title : undefined);
+    const title = sessionTitle(this.ctx.workflow.name, this.ctx.node.name, this.config.session.kind === "new" ? renderSessionTitle(this.config.session.title, this.ctx) : undefined);
     const body = buildCreateBody({ candidate: c, projectPath: this.ctx.project.path, title, owner });
     let summary: SessionSummary | null = null;
     while (!summary) {

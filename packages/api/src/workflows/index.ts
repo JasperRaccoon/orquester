@@ -4,6 +4,7 @@ export * from "./rules.ts";
 export * from "./graph.ts";
 export * from "./fields.ts";
 export * from "./validate.ts";
+export * from "./agent-catalog.ts";
 export * from "./patch.ts";
 export * from "./layout.ts";
 export * from "./schedule.ts";

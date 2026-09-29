@@ -16,6 +16,9 @@ import {
   retainWorkflowEditor,
   type WorkflowEditorApi
 } from "./editor-store.ts";
+import type { ProviderSnapshot } from "@orquester/api/agent-chat";
+
+import { editorAgentCatalog } from "./chain-models.ts";
 import { edge, node, workflow } from "./testing.ts";
 import { applyWorkflowsEvent, resetWorkflows, summaryFromRecord } from "./store.ts";
 
@@ -322,6 +325,69 @@ describe("editor-store: history, enabling, validation", () => {
     }));
     timers.advance(600);
     assert.ok(editor.state.problems.some((problem) => problem.code === "unknown_reference" && problem.nodeId === "a"));
+  });
+});
+
+/** A provider row as the client holds it — only what the catalogue reads is meaningful. */
+function providerSnapshot(id: string, status: ProviderSnapshot["status"], slugs: string[]): ProviderSnapshot {
+  return {
+    id,
+    refIds: [id],
+    installed: true,
+    version: null,
+    status,
+    auth: { status: "authenticated" },
+    checkedAt: "2026-09-29T00:00:00.000Z",
+    models: slugs.map((slug) => ({ slug, name: slug, capabilities: null })),
+    slashCommands: [],
+    skills: []
+  } as unknown as ProviderSnapshot;
+}
+
+describe("editor-store: the agent catalogue", () => {
+  const opusChain = [{ agent: "claude", model: "opus", accounts: { strategy: "least-used" } }];
+  const nightly = () =>
+    workflow(
+      [node("t", "trigger.manual", {}, { name: "Start" }), node("a", "agent", { prompt: { kind: "text", text: "Tidy" }, chain: opusChain }, { name: "NightlyTask" })],
+      [edge("t", "a")]
+    );
+
+  it("marks a model the live catalogue does not list, as the daemon does — and follows the catalogue", async () => {
+    const { timers, editor } = await setup(nightly());
+    editor.validateNow();
+    assert.equal(editor.state.problems.filter((problem) => problem.code === "unknown_model").length, 0, "no catalogue, no check");
+
+    const live = editorAgentCatalog(
+      [{ id: "claude", enabled: true, chat: { adapter: "claude" } }],
+      [providerSnapshot("claude", "ready", ["default", "opus[1m]", "sonnet"])]
+    );
+    assert.ok(live);
+    editor.setValidationContext({ catalog: live });
+    timers.advance(600);
+    const models = editor.state.problems.filter((problem) => problem.code === "unknown_model");
+    assert.deepEqual(models.map((problem) => [problem.severity, problem.nodeId, problem.field]), [["error", "a", "config.chain.0.model"]]);
+    assert.match(models[0]!.message, /NightlyTask: claude has no model "opus"/);
+
+    // The provider is re-probed and lists it: the error goes.
+    editor.setValidationContext({
+      catalog: editorAgentCatalog([{ id: "claude", enabled: true, chat: { adapter: "claude" } }], [providerSnapshot("claude", "ready", ["default", "opus"])])!
+    });
+    timers.advance(600);
+    assert.equal(editor.state.problems.filter((problem) => problem.code === "unknown_model").length, 0);
+  });
+
+  it("a catalogue not loaded yet raises no false errors", async () => {
+    const { timers, editor } = await setup(nightly());
+    // No registry read yet: no catalogue at all.
+    assert.equal(editorAgentCatalog([], []), undefined);
+    // The registry, but the provider still being probed (or not listed yet): a warning only.
+    for (const providers of [[], [providerSnapshot("claude", "unknown", ["default", "sonnet"])]]) {
+      editor.setValidationContext({ catalog: editorAgentCatalog([{ id: "claude", enabled: true, chat: { adapter: "claude" } }], providers)! });
+      timers.advance(600);
+      const models = editor.state.problems.filter((problem) => problem.code === "unknown_model");
+      assert.deepEqual(models.map((problem) => problem.severity), ["warning"]);
+      assert.equal(editor.state.problems.some((problem) => problem.severity === "error"), false);
+    }
   });
 });
 

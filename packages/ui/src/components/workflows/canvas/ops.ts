@@ -6,7 +6,6 @@
 
 import {
   acceptsInput,
-  defaultNodeConfig,
   defaultNodeName,
   outputHandles,
   type Workflow,
@@ -14,6 +13,8 @@ import {
   type WorkflowNode,
   type WorkflowNodeType
 } from "@orquester/api";
+
+import { liveDefaultNodeConfig } from "../../../lib/workflows/chain-models";
 
 import { connectBlocks } from "./connection";
 
@@ -41,7 +42,7 @@ export function newBlock(
     type,
     name: defaultNodeName(type, existing.map((node) => node.name)),
     position: { x: snapToGrid(position.x), y: snapToGrid(position.y) },
-    config: defaultNodeConfig(type)
+    config: liveDefaultNodeConfig(type)
   } as WorkflowNode;
 }
 

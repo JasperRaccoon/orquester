@@ -5,7 +5,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem, ThreadSnapshotPayload, Turn } from "@orquester/api/agent-chat";
 import { activityLine, failureAfterBaseline, isNewTurn, itemsAfterBaseline, takeBaseline, type AgentBaseline } from "./classify.ts";
-import { buildCreateBody } from "./create.ts";
+import { buildCreateBody, MAX_TITLE_CHARS, renderSessionTitle, sessionTitle } from "./create.ts";
 import { finalText, parentAssistantText } from "./executor.ts";
 import { excludedKeys, resetWaitUntil, emptyMemory } from "./failover.ts";
 import { clipUtf8, clipUtf8Tail } from "./prompt.ts";
@@ -138,4 +138,90 @@ test("the activity line reads tool calls and assistant text, never a provider's 
   assert.equal(activityLine(snap([msg("m1", "Looking at the tests\nmore"), stderr], [turn("t1", "running")])), "Looking at the tests");
   assert.equal(activityLine(snap([stderr, error], [turn("t1", "running")])), "Working", "only noise: the turn's state");
   assert.equal(activityLine(snap([stderr], [turn("t1", "completed")])), undefined);
+});
+
+test("a chat title renders its {{…}} like the prompt, but never a secret's value", () => {
+  const ctx = {
+    expressionContext: () => ({
+      input: null,
+      nodes: { Plan: { output: { text: "Ship\n  the fix" }, status: "succeeded" } },
+      trigger: { kind: "manual", input: { ticket: "ABC-1" } },
+      run: { id: "r1", startedAt: T(0), workflowId: "w1", workflowName: "Nightly", attempt: 1 },
+      project: { path: "/w/ws/app", name: "app", workspace: "ws", branch: "main" }
+    }),
+    secrets: { TOKEN: "s3cr3t-value", PIN: "12" }
+  } as unknown as Parameters<typeof renderSessionTitle>[1];
+  assert.equal(renderSessionTitle("Fix {{ trigger.input.ticket }} on {{ project.branch }}", ctx), "Fix ABC-1 on main");
+  assert.equal(renderSessionTitle("{{ nodes.Plan.output.text }}", ctx), "Ship the fix", "whitespace runs become one space");
+  // A secret reference renders as its placeholder, even one too short for the redactor.
+  assert.equal(renderSessionTitle("key {{ secrets.TOKEN }} / {{ secrets.PIN }}", ctx), "key «secret:TOKEN» / «secret:PIN»");
+  // A value that carries a secret in from elsewhere is redacted.
+  const leaky = { ...ctx, expressionContext: () => ({ ...ctx.expressionContext(), trigger: { kind: "manual", input: "s3cr3t-value" } }) } as typeof ctx;
+  assert.equal(renderSessionTitle("got {{ trigger.input }}", leaky), "got «secret:TOKEN»");
+  // Plain text passes through; nothing set, blank, or a render that throws → the default.
+  assert.equal(renderSessionTitle("Nightly review", ctx), "Nightly review");
+  assert.equal(renderSessionTitle(undefined, ctx), undefined);
+  assert.equal(renderSessionTitle("   ", ctx), undefined);
+  const broken = { ...ctx, expressionContext: () => { throw new Error("boom"); } } as typeof ctx;
+  assert.equal(renderSessionTitle("{{ trigger.input }}", broken), undefined);
+  assert.equal(sessionTitle("Nightly", "Build", renderSessionTitle("{{ trigger.input.missing }}", ctx)), "Nightly · Build", "an empty render falls back");
+  assert.equal(sessionTitle("W", "B", "x".repeat(400)).length, MAX_TITLE_CHARS);
+  assert.equal(sessionTitle("W", "B", `${"x".repeat(MAX_TITLE_CHARS - 2)}😀😀`), `${"x".repeat(MAX_TITLE_CHARS - 2)}…`, "a cut never splits a pair");
+});
+
+test("a chat title never shows a secret the render escaped, transformed or nested", () => {
+  const PW = 'p@ss"w\\rd';
+  const PEM = "-----BEGIN KEY-----\nabcd\nefgh\n-----END KEY-----";
+  const base = {
+    input: null,
+    run: { id: "r1", startedAt: T(0), workflowId: "w1", workflowName: "Nightly", attempt: 1 },
+    project: { path: "/w/ws/app", name: "app", workspace: "ws" }
+  };
+  const ctx = {
+    expressionContext: () => ({
+      ...base,
+      trigger: { pw: PW, key: PEM, [PW]: "as a key" },
+      nodes: { Fetch: { output: { deep: { list: [{ token: PW }, `x${PEM}y`] } }, status: "succeeded" } }
+    }),
+    secrets: { PW, PEM }
+  } as unknown as Parameters<typeof renderSessionTitle>[1];
+  const leaks = (title: string | undefined): boolean =>
+    title === undefined || [PW, PEM, JSON.stringify(PW).slice(1, -1), JSON.stringify(PEM).slice(1, -1), "p@ss", "abcd"].some((part) => title.includes(part));
+  for (const template of [
+    "{{ trigger }}",
+    "{{ trigger.pw | json }}",
+    "{{ trigger.key | json }}",
+    "{{ trigger.key }}",
+    "{{ trigger.pw | upper }}",
+    "{{ trigger | compact }}",
+    "{{ nodes.Fetch.output }}",
+    "{{ nodes.Fetch.output.deep.list | json }}",
+    "{{ nodes }}"
+  ]) {
+    const title = renderSessionTitle(template, ctx);
+    assert.ok(!leaks(title), `${template} → ${title}`);
+    assert.match(title!, /«secret:(PW|PEM)»/i, template);
+  }
+  assert.equal(renderSessionTitle("{{ trigger.pw | json }}", ctx), '"«secret:PW»"');
+  assert.equal(renderSessionTitle("{{ trigger.key }}", ctx), "«secret:PEM»", "a multi-line key is one placeholder");
+  assert.equal(renderSessionTitle("{{ trigger.pw | upper }}", ctx), "«SECRET:PW»");
+  // Text the flattening turns into a secret is redacted too.
+  const spaced = { expressionContext: () => ({ ...base, trigger: "open\tsesame", nodes: {} }), secrets: { WORD: "open sesame" } } as unknown as typeof ctx;
+  assert.equal(renderSessionTitle("{{ trigger }}", spaced), "«secret:WORD»");
+});
+
+test("a chat title drops control and format characters", () => {
+  const ctx = {
+    expressionContext: () => ({
+      input: null,
+      nodes: {},
+      trigger: "a\u001b[31mred\u0007b\u009b2Jc\u202Eevil\u200Bd\u2066e\uFEFFf\r\ng",
+      run: { id: "r1", startedAt: T(0), workflowId: "w1", workflowName: "Nightly", attempt: 1 },
+      project: { path: "/w/ws/app", name: "app", workspace: "ws" }
+    }),
+    secrets: {}
+  } as unknown as Parameters<typeof renderSessionTitle>[1];
+  assert.equal(renderSessionTitle("{{ trigger }}", ctx), "a [31mred b 2Jc evil d e f g");
+  assert.equal(renderSessionTitle("\u202E\u200B\u0007", ctx), undefined, "nothing printable left → the default");
+  assert.equal(sessionTitle("Nightly", "Build", renderSessionTitle("\u001b\u009b", ctx)), "Nightly · Build");
 });

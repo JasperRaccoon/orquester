@@ -12,7 +12,7 @@
 // `owner`: a session this block's owner names, created at or after the create began and not one the
 // block already knows, IS the one the lost response would have named.
 
-import type { CreateSessionRequest, SessionSummary, WorkflowSessionOwner } from "@orquester/api";
+import { renderTemplate, type CreateSessionRequest, type SessionSummary, type WorkflowSessionOwner } from "@orquester/api";
 import type { CreateAgentChatSessionFields } from "@orquester/api/agent-chat";
 import {
   expectOk,
@@ -25,6 +25,8 @@ import {
   type AgentView,
   type DaemonApi
 } from "../../chat-client/index.ts";
+import type { NodeExecutionContext } from "../contracts.ts";
+import { createRedactor, secretPlaceholder, type SecretRedactor } from "../sandbox/redact.ts";
 import type { AgentCandidate, CandidateCheck } from "./failover.ts";
 
 export interface CatalogLabels {
@@ -91,9 +93,68 @@ export class AgentCatalog {
 
 export const MAX_TITLE_CHARS = 300;
 
+/** Control and format characters (ESC, BEL, C1 CSI, bidi overrides, zero-width…): never in a tab label. */
+const TITLE_UNPRINTABLE = /[\p{Cc}\p{Cf}]/gu;
+
+/**
+ * Every secret value in a context value replaced by its placeholder — in strings and in object keys,
+ * since `{{ trigger }}` renders keys too. Only plain objects and arrays are walked, as the renderer
+ * reads only those.
+ */
+function redactTitleContext(value: unknown, redactor: SecretRedactor, depth = 0): unknown {
+  if (typeof value === "string") return redactor.text(value);
+  if (value === null || typeof value !== "object" || depth > 256) return value;
+  if (Array.isArray(value)) return value.map((item) => redactTitleContext(item, redactor, depth + 1));
+  const proto = Object.getPrototypeOf(value) as unknown;
+  if (proto !== Object.prototype && proto !== null) return value;
+  const out: Record<string, unknown> = Object.create(null) as Record<string, unknown>;
+  for (const [key, item] of Object.entries(value)) out[redactor.text(key)] = redactTitleContext(item, redactor, depth + 1);
+  return out;
+}
+
+/**
+ * A new chat's configured title with its `{{…}}` rendered against the run, like the prompt's — but
+ * a chat title is shown on the tab and kept with the session, so no secret value ever reaches it.
+ * The run context is redacted BEFORE rendering (a value the renderer JSON-encodes or transforms —
+ * `{{ trigger }}`, `| json`, `| upper` — escapes a quote, a backslash or a newline in it, so a pass
+ * over the text alone would no longer find it), `{{ secrets.X }}` renders as `«secret:X»` (the
+ * redactor's placeholder), and the rendered text is redacted once more for a secret the render put
+ * together. Control and format characters become spaces and whitespace runs (a multi-line output)
+ * one space — redacted again after, for a secret the flattening spelled. Undefined when nothing is
+ * configured, nothing is left, or the render throws: the caller falls back to the default title
+ * rather than failing the block over a label.
+ */
+export function renderSessionTitle(
+  configured: string | undefined,
+  ctx: Pick<NodeExecutionContext, "expressionContext" | "secrets">
+): string | undefined {
+  if (configured === undefined || !configured.trim()) return undefined;
+  try {
+    const redactor = createRedactor(ctx.secrets);
+    let rendered = configured;
+    if (configured.includes("{{")) {
+      const placeholders = Object.fromEntries(Object.keys(ctx.secrets).map((name) => [name, secretPlaceholder(name)]));
+      const context = redactTitleContext(ctx.expressionContext(), redactor) as ReturnType<NodeExecutionContext["expressionContext"]>;
+      rendered = renderTemplate(configured, { ...context, secrets: placeholders }).text;
+    }
+    const flat = redactor.text(rendered).replace(TITLE_UNPRINTABLE, " ").replace(/\s+/g, " ").trim();
+    // Flattening can itself spell a secret ("a\nb" becomes "a b"): redact what is shown, too.
+    const title = redactor.text(flat);
+    return title || undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+/** The title a new chat is created with: the configured one, else "<Workflow> · <Block>", at most {@link MAX_TITLE_CHARS}. */
 export function sessionTitle(workflowName: string, blockName: string, configured?: string): string {
   const title = configured?.trim() ? configured.trim() : `${workflowName} · ${blockName}`;
-  return title.length > MAX_TITLE_CHARS ? `${title.slice(0, MAX_TITLE_CHARS - 1)}…` : title;
+  if (title.length <= MAX_TITLE_CHARS) return title;
+  let cut = MAX_TITLE_CHARS - 1;
+  // Never split a surrogate pair.
+  const last = title.charCodeAt(cut - 1);
+  if (last >= 0xd800 && last <= 0xdbff) cut -= 1;
+  return `${title.slice(0, cut)}…`;
 }
 
 /** The `POST /api/sessions` body (§5.1 step 2). */

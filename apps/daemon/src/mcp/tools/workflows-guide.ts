@@ -31,7 +31,7 @@ export const JIRA_FIXER_EXAMPLE = {
           kind: "text",
           text: "Fix these Jira tickets in {project} on {branch}, one commit per ticket (\"KEY: …\"). Do not push.\n{{ nodes.FetchTickets.output.tickets | json }}\nReply with ONLY this JSON: {\"fixed\": [\"KEY-1\"]}"
         },
-        chain: [{ agent: "claude", model: "opus" }]
+        chain: [{ agent: "claude", model: "default" }]
       }
     },
     {

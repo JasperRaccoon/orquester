@@ -28,9 +28,10 @@ import {
 import { acceptsInput, isTriggerType, outputHandles, workflowHandleLabel } from "@orquester/api";
 
 import { cn } from "../../../lib/cn";
-import { accentClass, BLOCK_ICONS } from "../../../lib/workflows/catalog-ui";
+import { accentClass, blockAgent } from "../../../lib/workflows/catalog-ui";
 import { formatDuration } from "../../../lib/workflows/format";
 import type { OverlayNodeState } from "../../../lib/workflows/overlay";
+import { blockGlyph } from "../AddBlockMenu";
 import { HANDLE_HIT, useCanvasActions, type BlockNodeData } from "./canvas-context";
 
 export type BlockFlowNode = Node<BlockNodeData, "block">;
@@ -166,7 +167,6 @@ function OverlayLine({ overlay }: { overlay: OverlayNodeState }): React.ReactEle
 
 function BlockNodeView({ id, data, selected }: NodeProps<BlockFlowNode>): React.ReactElement {
   const { node, summary, problems, overlay, runView, connected, pinned, hint, connectRole = null, triggerError = null } = data;
-  const Icon = BLOCK_ICONS[node.type];
   const trigger = isTriggerType(node.type);
   const handles = outputHandles(node);
   const labelled = handles.length > 1;
@@ -215,7 +215,7 @@ function BlockNodeView({ id, data, selected }: NodeProps<BlockFlowNode>): React.
             "bg-[rgb(var(--wf-accent)/0.13)] text-[rgb(var(--wf-accent))] ring-1 ring-inset ring-[rgb(var(--wf-accent)/0.22)]"
           )}
         >
-          <Icon size={17} strokeWidth={1.9} />
+          {blockGlyph(node.type, blockAgent(node), 17)}
         </span>
         <div className="min-w-0 flex-1">
           <div className="flex items-center gap-1.5">

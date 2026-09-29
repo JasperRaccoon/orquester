@@ -233,6 +233,56 @@ describe("sanitising", () => {
   });
 });
 
+describe("sanitising a row's errors", () => {
+  const base = { id: "a", name: "A" };
+  const opus = { severity: "error", code: "unknown_model", message: 'NightlyTask: claude has no model "opus"', nodeId: "n1", field: "config.chain.0.model" };
+
+  it("keeps the listed errors and what they leave out", () => {
+    const row = sanitizeWorkflowSummary({ ...base, errorCount: 7, errors: [opus], errorsOmitted: 6 });
+    assert.equal(row?.errorCount, 7);
+    assert.deepEqual(row?.errors, [opus]);
+    assert.equal(row?.errorsOmitted, 6);
+  });
+
+  it("an older daemon's row (the count alone) has no list", () => {
+    const row = sanitizeWorkflowSummary({ ...base, errorCount: 1 });
+    assert.equal(row?.errorCount, 1);
+    assert.equal(row && "errors" in row, false);
+    assert.equal(row && "errorsOmitted" in row, false);
+  });
+
+  it("repairs a malformed list entry by entry, and never counts fewer errors than it lists", () => {
+    const row = sanitizeWorkflowSummary({
+      ...base,
+      errorCount: "two",
+      errors: [
+        opus,
+        { severity: "error", message: "" },
+        { severity: "fatal", code: "x", message: "m" },
+        { severity: "warning", code: "w", message: "only a warning" },
+        { severity: "error", code: 5, message: "Second", nodeId: 9, field: "" },
+        "text",
+        null
+      ],
+      errorsOmitted: -2
+    });
+    assert.equal(row?.errorCount, 2);
+    assert.deepEqual(row?.errors, [opus, { severity: "error", code: "", message: "Second" }]);
+    assert.equal(row && "errorsOmitted" in row, false);
+    for (const errors of ["x", { 0: opus }, 42, null]) {
+      const bad = sanitizeWorkflowSummary({ ...base, errorCount: 1, errors });
+      assert.equal(bad && "errors" in bad, false);
+      assert.equal(bad?.errorCount, 1);
+    }
+  });
+
+  it("caps the list", () => {
+    const row = sanitizeWorkflowSummary({ ...base, errorCount: 9, errors: Array.from({ length: 9 }, (_, i) => ({ ...opus, message: `m${i}` })) });
+    assert.equal(row?.errors?.length, 5);
+    assert.equal(row?.errorCount, 9);
+  });
+});
+
 describe("the list load", () => {
   it("loads once, shares a request in flight, and refreshes when stale", async () => {
     const api = new FakeApi();
@@ -551,6 +601,27 @@ describe("mutations", () => {
     const deleted = await deleteWorkflow(api, "w-new");
     assert.equal(deleted.ok, true);
     assert.equal(state().summaries.has("w-new"), false);
+  });
+
+  it("a write's own row lists the errors its answer carries", async () => {
+    const api = new FakeApi();
+    api.createWorkflow = async (req: CreateWorkflowRequest): Promise<WorkflowWriteResponse> => {
+      const created = record({ id: "w-new", name: req.name, project: req.project });
+      return {
+        workflow: created,
+        problems: [
+          { severity: "warning", code: "w", message: "a warning" },
+          { severity: "error", code: "unknown_model", message: 'A: claude has no model "opus"', nodeId: "a", field: "config.chain.0.model" }
+        ]
+      };
+    };
+    await createWorkflow(api, { name: "Fresh", project: { kind: "existing", projectPath: "/w/acme/app" } });
+    const row = state().summaries.get("w-new");
+    assert.equal(row?.errorCount, 1);
+    assert.deepEqual(row?.errors, [
+      { severity: "error", code: "unknown_model", message: 'A: claude has no model "opus"', nodeId: "a", field: "config.chain.0.model" }
+    ]);
+    assert.equal(row && "errorsOmitted" in row, false);
   });
 
   it("a reset drops answers still in flight", async () => {

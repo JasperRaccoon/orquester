@@ -47,7 +47,7 @@ import {
   type WorkflowTriggerSummary,
   type WorkflowWriteResponse
 } from "@orquester/api";
-import { isTriggerType } from "@orquester/api";
+import { isTriggerType, workflowSummaryErrors } from "@orquester/api";
 
 import {
   isRecord,
@@ -58,6 +58,7 @@ import {
   sanitizeSecretList,
   sanitizeSummaryList,
   sanitizeWorkflowRecord,
+  sanitizeWorkflowProblem,
   sanitizeWorkflowRun,
   sanitizeWorkflowSummary
 } from "./sanitize";
@@ -818,7 +819,7 @@ export function summaryFromRecord(workflow: Workflow, problems: readonly Workflo
     project: workflow.project,
     triggers,
     nodeCount: workflow.nodes.length,
-    errorCount: problems.filter((problem) => problem.severity === "error").length,
+    ...workflowSummaryErrors(problems),
     ...(held?.lastRun ? { lastRun: held.lastRun } : {}),
     activeRuns: held?.activeRuns ?? [],
     createdAt: workflow.createdAt,
@@ -838,9 +839,7 @@ function applyWriteAnswer(answer: unknown): { workflow: Workflow; problems: Work
   const workflow = sanitizeWorkflowRecord(answer.workflow);
   if (workflow === null) return null;
   const problems = Array.isArray(answer.problems)
-    ? (answer.problems.filter(
-        (problem) => isRecord(problem) && typeof problem.severity === "string" && typeof problem.message === "string"
-      ) as WorkflowProblem[])
+    ? answer.problems.map(sanitizeWorkflowProblem).filter((problem): problem is WorkflowProblem => problem !== null)
     : [];
   if (!tombstones.has(workflow.id)) upsertSummaryLocal(summaryFromRecord(workflow, problems));
   return { workflow, problems };

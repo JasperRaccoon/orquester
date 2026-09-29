@@ -94,6 +94,16 @@ test("a saved prompt + append renders {{…}} first, escaped for the {variables}
   assert.equal(sc.host.turnLog[0]!.input, "Fix app on main: leak {diff} and {branch}\n\nAlso run {project}.", "values inserted by {{…}} are never rendered as variables");
 });
 
+test("a new chat's title renders {{…}} (secrets stay hidden) and falls back to workflow · block", async () => {
+  const sc = new Scenario({ accounts: CLAUDE });
+  const titled = testWorkflow([agentNode("n1", { session: { kind: "new", title: "Fix {{ trigger.title }} with {{ secrets.TOKEN }}" } }, "Builder")]);
+  const first = outputOf((await sc.run(titled, "n1", { trigger: { title: "ABC-1" }, secrets: { TOKEN: "s3cr3t-value" } })).result);
+  assert.equal(sc.host.session(first.sessionId).title, "Fix ABC-1 with «secret:TOKEN»");
+  const blank = testWorkflow([agentNode("n2", { session: { kind: "new", title: "{{ trigger.nothing }}" } }, "Checker")]);
+  const second = outputOf((await sc.run(blank, "n2")).result);
+  assert.equal(sc.host.session(second.sessionId).title, `${blank.name} · Checker`);
+});
+
 test("a failed variable read fails the block naming it, and no session is created", async () => {
   const sc = new Scenario({ accounts: CLAUDE, prompts: fakePrompts({ failVariable: "diff" }) });
   const wf = testWorkflow([agentNode("n1", { prompt: { kind: "text", text: "Review {diff}" } })]);

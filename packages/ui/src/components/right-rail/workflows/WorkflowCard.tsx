@@ -11,6 +11,7 @@
 
 import React from "react";
 import {
+  AlertCircle,
   AlertTriangle,
   ChevronDown,
   Clock,
@@ -45,6 +46,7 @@ import type { WorkflowRunsList } from "../../../lib/workflows/store";
 import { AdaptiveMenu } from "../../ui/adaptive-menu";
 import { Button } from "../../ui/button";
 import { DropdownItem, DropdownSeparator } from "../../ui/dropdown";
+import { Popover } from "../../workflows/ui/Popover";
 import { RailChip, RailSwitch, railCardClass } from "../primitives";
 
 export interface WorkflowCardProps {
@@ -260,12 +262,13 @@ export const WorkflowCard: React.FC<WorkflowCardProps> = (props) => {
             )}
             {!workflow.enabled ? <RailChip className="ml-auto text-neutral-400">Off</RailChip> : null}
             {workflow.errorCount > 0 ? (
-              <RailChip
-                title="Fix these in the editor before enabling it"
-                className={cn("border-danger-900/60 text-danger", workflow.enabled && "ml-auto")}
-              >
-                {workflow.errorCount === 1 ? "1 problem" : `${workflow.errorCount} problems`}
-              </RailChip>
+              <ProblemsChip
+                workflow={workflow}
+                sheet={sheet}
+                editDisabledReason={props.editDisabledReason}
+                onEdit={props.onEdit}
+                className={cn(workflow.enabled && "ml-auto")}
+              />
             ) : null}
           </div>
         )}
@@ -346,6 +349,154 @@ export const WorkflowCard: React.FC<WorkflowCardProps> = (props) => {
         />
       ) : null}
     </article>
+  );
+};
+
+/** "1 problem" / "N problems". */
+export function problemCountText(count: number): string {
+  return count === 1 ? "1 problem" : `${count} problems`;
+}
+
+/**
+ * What the problems chip says on hover (its `title`) and to a screen reader:
+ * each known problem on its own line, then what is left out — or, from a
+ * daemon that sends the count alone, the count.
+ */
+export function problemsHoverText(workflow: Pick<WorkflowSummary, "errorCount" | "errors" | "errorsOmitted">): string {
+  const errors = workflow.errors ?? [];
+  if (errors.length === 0) return `${problemCountText(workflow.errorCount)} — open the editor to see and fix them before enabling it.`;
+  const more = Math.max(workflow.errorsOmitted ?? 0, workflow.errorCount - errors.length);
+  return [...errors.map((problem) => problem.message), ...(more > 0 ? [`+${more} more`] : [])].join("\n");
+}
+
+/**
+ * Whether closing the problems popover gives focus back to its chip: yes when
+ * it was dismissed (Esc, the chip, a press outside) and focus went down with
+ * the panel (`focusLost`: nothing, or the page body, holds it now) — not when
+ * "Open the editor" closed it (the editor takes over), nor when a press
+ * outside already put focus somewhere else.
+ */
+export function returnFocusToProblemsChip(reason: "dismiss" | "edit", focusLost: boolean): boolean {
+  return reason === "dismiss" && focusLost;
+}
+
+/**
+ * The problems chip: hover shows what they are (`title`); a click, tap or
+ * Enter opens a small popover listing each one, with the way into the editor.
+ * Opening moves focus into it ("Open the editor", else the list); Esc closes
+ * it (the Popover's own), and focus comes back to the chip.
+ */
+const ProblemsChip: React.FC<{
+  workflow: WorkflowSummary;
+  sheet: boolean;
+  editDisabledReason: string | null;
+  onEdit: () => void;
+  className?: string;
+}> = ({ workflow, sheet, editDisabledReason, onEdit, className }) => {
+  const [open, setOpen] = React.useState(false);
+  const chipRef = React.useRef<HTMLButtonElement | null>(null);
+  const editRef = React.useRef<HTMLButtonElement | null>(null);
+  const listRef = React.useRef<HTMLDivElement | null>(null);
+  const closeReason = React.useRef<"dismiss" | "edit">("dismiss");
+  const wasOpen = React.useRef(false);
+  const close = React.useCallback((reason: "dismiss" | "edit") => {
+    closeReason.current = reason;
+    setOpen(false);
+  }, []);
+  React.useEffect(() => {
+    if (open) {
+      wasOpen.current = true;
+      // The panel is placed (and made visible) in a frame of its own; focus once it shows.
+      const frame = requestAnimationFrame(() => {
+        const target = editRef.current && !editRef.current.disabled ? editRef.current : listRef.current;
+        target?.focus();
+      });
+      return () => cancelAnimationFrame(frame);
+    }
+    if (!wasOpen.current) return;
+    wasOpen.current = false;
+    const active = document.activeElement;
+    if (returnFocusToProblemsChip(closeReason.current, active === null || active === document.body)) chipRef.current?.focus();
+    closeReason.current = "dismiss";
+    return undefined;
+  }, [open]);
+  const errors = workflow.errors ?? [];
+  const more = Math.max(workflow.errorsOmitted ?? 0, workflow.errorCount - errors.length);
+  const count = problemCountText(workflow.errorCount);
+  return (
+    <>
+      <button
+        ref={chipRef}
+        type="button"
+        aria-haspopup="dialog"
+        aria-expanded={open}
+        aria-label={`${count} in ${workflow.name} — show them`}
+        title={problemsHoverText(workflow)}
+        onClick={() => (open ? close("dismiss") : setOpen(true))}
+        className={cn(
+          "inline-flex max-w-full items-center gap-1 truncate rounded-md border border-danger-900/60 px-1.5 py-px text-[11px] leading-4 text-danger",
+          "transition-colors hover:bg-danger-soft/30",
+          FOCUS_RING,
+          sheet && "min-h-10 px-2.5",
+          className
+        )}
+      >
+        <AlertCircle size={11} aria-hidden className="shrink-0" />
+        {count}
+      </button>
+      <Popover
+        open={open}
+        anchor={{ element: chipRef.current }}
+        onClose={() => close("dismiss")}
+        ignoreOutside={(target) => chipRef.current?.contains(target) ?? false}
+        align="end"
+        ariaLabel={`Problems in ${workflow.name}`}
+        className="w-[300px] max-w-[calc(100vw-16px)]"
+      >
+        <div className="border-b border-neutral-800 px-3 py-2">
+          <div className="text-[13px] font-medium text-neutral-100">{count}</div>
+          <p className="text-[11px] leading-4 text-neutral-500">Fix them in the editor to enable this workflow.</p>
+        </div>
+        <div ref={listRef} tabIndex={-1} className="min-h-0 flex-1 overflow-y-auto p-2 focus:outline-none">
+          {errors.length === 0 ? (
+            <p className="px-1 py-1 text-[12px] leading-[18px] text-neutral-400">
+              The editor lists {workflow.errorCount === 1 ? "it" : "them"} and marks each block in red.
+            </p>
+          ) : (
+            <ul className="space-y-1">
+              {errors.map((problem, index) => (
+                <li
+                  key={`${problem.code}:${problem.nodeId ?? ""}:${problem.field ?? ""}:${index}`}
+                  className="flex items-start gap-2 rounded-lg bg-danger-soft/25 px-2.5 py-1.5 text-[12px] leading-[18px] text-danger"
+                >
+                  <AlertCircle size={13} aria-hidden className="mt-[3px] shrink-0" />
+                  <span className="min-w-0 break-words">{problem.message}</span>
+                </li>
+              ))}
+              {more > 0 ? <li className="px-2.5 text-[11px] text-neutral-500">+{more} more in the editor</li> : null}
+            </ul>
+          )}
+        </div>
+        <div className="border-t border-neutral-800 p-2">
+          <Button
+            ref={editRef}
+            type="button"
+            size="sm"
+            variant="outline"
+            disabled={editDisabledReason !== null}
+            title={editDisabledReason ?? "Open the editor"}
+            onClick={() => {
+              close("edit");
+              onEdit();
+            }}
+            className={cn("w-full", sheet ? "h-10" : "h-7")}
+          >
+            <Pencil size={12} aria-hidden />
+            Open the editor
+          </Button>
+        </div>
+      </Popover>
+    </>
   );
 };
 

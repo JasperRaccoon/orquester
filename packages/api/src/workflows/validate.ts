@@ -23,14 +23,17 @@ import {
   isTriggerType,
   WORKFLOW_LIMITS,
   WORKFLOW_NODE_NAME_PATTERN,
+  WORKFLOW_SUMMARY_MAX_ERRORS,
   type Workflow,
-  type WorkflowProblem
+  type WorkflowProblem,
+  type WorkflowSummary
 } from "./types.ts";
 
 /**
  * The host's agent catalogue, for the agent blocks' chains: every chat agent the registry knows and
- * the model slugs its provider lists. Given only by the daemon (the editor and the MCP read the
- * daemon's verdict), and only when the registry could be read.
+ * the model slugs its provider lists. The daemon builds it from its registry and provider snapshots,
+ * the editor from the same two as its client holds them — both through `toWorkflowAgentCatalog`
+ * (agent-catalog.ts), so they judge a chain alike. Given only once the registry could be read.
  */
 export interface WorkflowAgentCatalog {
   agents: ReadonlyArray<{
@@ -76,6 +79,27 @@ export interface ValidateWorkflowResult {
 /** True when any problem is an error (enabling is refused). */
 export function hasWorkflowErrors(problems: readonly WorkflowProblem[]): boolean {
   return problems.some((problem) => problem.severity === "error");
+}
+
+/**
+ * A `WorkflowSummary`'s error fields from a validation: the count, the first errors (each copied
+ * field-wise), and how many of them are left out. `errors` / `errorsOmitted` are absent when empty.
+ * One derivation for the daemon's rows and a client's own row from a write answer.
+ */
+export function workflowSummaryErrors(
+  problems: readonly WorkflowProblem[]
+): Pick<WorkflowSummary, "errorCount" | "errors" | "errorsOmitted"> {
+  const errors = problems.filter((problem) => problem.severity === "error");
+  if (errors.length === 0) return { errorCount: 0 };
+  const shown = errors.slice(0, WORKFLOW_SUMMARY_MAX_ERRORS).map((problem) => {
+    const copy: WorkflowProblem = { severity: "error", code: problem.code, message: problem.message };
+    if (problem.nodeId !== undefined) copy.nodeId = problem.nodeId;
+    if (problem.edgeId !== undefined) copy.edgeId = problem.edgeId;
+    if (problem.field !== undefined) copy.field = problem.field;
+    return copy;
+  });
+  const omitted = errors.length - shown.length;
+  return { errorCount: errors.length, errors: shown, ...(omitted > 0 ? { errorsOmitted: omitted } : {}) };
 }
 
 /** UTF-8 byte length without allocating. */
@@ -394,6 +418,7 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
         push({ severity: "error", code: "template_syntax", message: `${node.name}: ${error.message}`, nodeId: node.id, field: field.field });
       }
       let secretWarned = false;
+      const titleSecrets = new Set<string>();
       let untrustedWarned = false;
       for (const ref of templateReferences(field.value)) {
         if (ref.root === "nodes") {
@@ -453,6 +478,16 @@ export function validateWorkflow(input: unknown, opts: ValidateWorkflowOptions =
               severity: "warning",
               code: "secret_in_prompt",
               message: `${node.name}: this secret will be written to the agent's transcript`,
+              nodeId: node.id,
+              field: field.field
+            });
+          } else if (field.role === "title" && !titleSecrets.has(name)) {
+            // Nothing leaks — the daemon renders the placeholder — but the title will not show the value.
+            titleSecrets.add(name);
+            push({
+              severity: "info",
+              code: "secret_in_title",
+              message: `${node.name}: the chat title shows this secret as «secret:${name}», never its value`,
               nodeId: node.id,
               field: field.field
             });

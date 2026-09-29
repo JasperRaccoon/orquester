@@ -3,7 +3,7 @@ import { describe, it } from "node:test";
 
 import { testEdge, testNode, testWorkflow, T0 } from "./testing.ts";
 import type { WorkflowProblem } from "./types.ts";
-import { hasWorkflowErrors, validateWorkflow, type ValidateWorkflowOptions } from "./validate.ts";
+import { hasWorkflowErrors, validateWorkflow, workflowSummaryErrors, type ValidateWorkflowOptions } from "./validate.ts";
 
 function codes(problems: WorkflowProblem[]): string[] {
   return problems.map((problem) => problem.code);
@@ -269,6 +269,23 @@ describe("templates", () => {
     assert.equal(only(problemsOf(wf), "unknown_secret").length, 0, "without the names, nothing is unknown");
   });
 
+  it("a secret in a chat title is a note, not a transcript warning", () => {
+    const wf = testWorkflow(
+      [manual(), agent("Ag", "Go", { session: { kind: "new", title: "{{ secrets.TOKEN }} {{ secrets.KEY }} {{ secrets.TOKEN }}" } })],
+      [testEdge("t", "Ag")]
+    );
+    const problems = problemsOf(wf, { secretNames: ["TOKEN", "KEY"] });
+    assert.equal(only(problems, "secret_in_prompt").length, 0, "a title is never sent to the agent");
+    assert.deepEqual(
+      only(problems, "secret_in_title").map((problem) => [problem.severity, problem.field, problem.message]),
+      [
+        ["info", "config.session.title", "Ag: the chat title shows this secret as «secret:TOKEN», never its value"],
+        ["info", "config.session.title", "Ag: the chat title shows this secret as «secret:KEY», never its value"]
+      ],
+      "once per secret"
+    );
+  });
+
   it("untrusted git text in a prompt warns", () => {
     const pr = testNode("git", "trigger.git", { event: { kind: "pull_request", actions: ["opened"] } }, { name: "PR" });
     const tag = testNode("tag", "trigger.git", { event: { kind: "tag", pattern: "v*" } }, { name: "Tag" });
@@ -291,6 +308,8 @@ describe("templates", () => {
     }
     const http = testNode("h", "http", { url: "https://x.test", body: { kind: "json", value: "{{ trigger.pr.body | json }}" } }, { name: "H" });
     assert.equal(only(problemsOf(testWorkflow([pr, http], [testEdge("git", "h")])), "untrusted_prompt_input").length, 0, "data, not a prompt");
+    const titled = agent("Ag", "Review the PR", { session: { kind: "new", title: "PR: {{ trigger.pr.title }}" } });
+    assert.equal(only(problemsOf(testWorkflow([pr, titled], [testEdge("git", "Ag")])), "untrusted_prompt_input").length, 0, "a chat title is not a prompt");
   });
 });
 
@@ -337,6 +356,24 @@ describe("blocks", () => {
     const models = only(problems, "unknown_model");
     assert.deepEqual(models.map((p) => [p.severity, p.field]), [["error", "config.chain.2.model"], ["warning", "config.chain.3.model"]]);
     assert.equal(only(problemsOf(wf), "unknown_agent").length + only(problemsOf(wf), "unknown_model").length, 0, "no catalogue, no check");
+  });
+
+  it("agent: model slugs match exactly — a catalogue shaped like a live Claude one has no bare `opus`", () => {
+    const catalog = {
+      agents: [{ id: "claude", enabled: true, models: ["default", "opus[1m]", "claude-fable-5[1m]", "sonnet", "haiku"] }]
+    };
+    const chainOf = (model: string) => [{ agent: "claude", model, accounts: {} }];
+    const opus = testWorkflow([manual(), agent("NightlyTask", "x", { chain: chainOf("opus") })], [testEdge("t", "NightlyTask")]);
+    const models = only(problemsOf(opus, { catalog }), "unknown_model");
+    assert.deepEqual(models.map((p) => [p.severity, p.field]), [["error", "config.chain.0.model"]]);
+    assert.match(models[0]!.message, /NightlyTask: claude has no model "opus" \(it has default, opus\[1m\]/);
+    for (const model of ["default", "opus[1m]", "sonnet"]) {
+      const wf = testWorkflow([manual(), agent("A", "x", { chain: chainOf(model) })], [testEdge("t", "A")]);
+      assert.deepEqual(only(problemsOf(wf, { catalog }), "unknown_model"), [], model);
+    }
+    // No alias or case folding.
+    const upper = testWorkflow([manual(), agent("A", "x", { chain: chainOf("Opus[1m]") })], [testEdge("t", "A")]);
+    assert.equal(only(problemsOf(upper, { catalog }), "unknown_model")[0]?.severity, "error");
   });
 
   it("agent: continue must name an upstream agent", () => {
@@ -457,5 +494,36 @@ describe("the whole graph", () => {
     assert.deepEqual(result.problems, []);
     assert.equal(result.workflow?.settings.overlap, "skip");
     assert.deepEqual(result.workflow?.edges, []);
+  });
+});
+
+describe("workflowSummaryErrors", () => {
+  const problem = (severity: WorkflowProblem["severity"], n: number): WorkflowProblem => ({
+    severity,
+    code: `c${n}`,
+    message: `m${n}`,
+    nodeId: `n${n}`,
+    field: "config.x"
+  });
+
+  it("is a zero count with no list when there are no errors", () => {
+    assert.deepEqual(workflowSummaryErrors([]), { errorCount: 0 });
+    assert.deepEqual(workflowSummaryErrors([problem("warning", 1), problem("info", 2)]), { errorCount: 0 });
+  });
+
+  it("lists the errors only, field-wise, and counts what it leaves out", () => {
+    const extra = { ...problem("error", 0), stray: true } as WorkflowProblem;
+    const some = workflowSummaryErrors([problem("warning", 9), extra, problem("error", 1)]);
+    assert.deepEqual(some, {
+      errorCount: 2,
+      errors: [
+        { severity: "error", code: "c0", message: "m0", nodeId: "n0", field: "config.x" },
+        { severity: "error", code: "c1", message: "m1", nodeId: "n1", field: "config.x" }
+      ]
+    });
+    const many = workflowSummaryErrors(Array.from({ length: 8 }, (_, i) => problem("error", i)));
+    assert.equal(many.errorCount, 8);
+    assert.deepEqual(many.errors?.map((p) => p.code), ["c0", "c1", "c2", "c3", "c4"]);
+    assert.equal(many.errorsOmitted, 3);
   });
 });

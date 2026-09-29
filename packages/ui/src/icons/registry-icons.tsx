@@ -110,13 +110,15 @@ export function getRegistryIcon(
   refId?: string,
   size: number | string = 14
 ): React.ReactNode {
+  // Own keys only: a refId comes off the wire (a workflow's chain, a registry
+  // entry), and `constructor` / `__proto__` must not resolve to Object's own.
   if (refId) {
-    const Comp = specific[refId];
+    const Comp = Object.hasOwn(specific, refId) ? specific[refId] : undefined;
     if (Comp) {
       return React.createElement(Comp, { width: size, height: size });
     }
   }
-  const Gen = generic[kind];
+  const Gen = Object.hasOwn(generic, kind) ? generic[kind] : undefined;
   if (Gen) {
     return React.createElement(Gen, { size });
   }

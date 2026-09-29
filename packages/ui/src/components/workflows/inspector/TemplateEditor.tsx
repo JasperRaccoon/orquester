@@ -10,9 +10,15 @@
  * `templateCompletions`, handed to the basic setup's `autocompletion()` as
  * language data — no direct `@codemirror/autocomplete` import. Single-line
  * fields refuse newlines.
+ *
+ * Inside a `Field` its editable content takes the Field's id, label
+ * (`aria-labelledby`) and message ids (`useFieldControl`); inside a read-only
+ * form (`useReadOnly`) it can't be edited. Its ref's `insertData()` types `{{  }}` at the caret
+ * as the user would, which opens the completion list — so "what can I put
+ * here" needs no knowledge of the `{{` trigger.
  */
 
-import React, { useMemo, useRef } from "react";
+import React, { useImperativeHandle, useMemo, useRef } from "react";
 import CodeMirror, {
   Decoration,
   EditorState,
@@ -28,6 +34,7 @@ import { isPromptVariableName } from "@orquester/api";
 
 import { cn } from "../../../lib/cn";
 import { templateCompletions, type CompletionScope } from "../../../lib/workflows/inspector-autocomplete";
+import { useFieldControl, useReadOnly } from "../ui/controls";
 
 export interface TemplateEditorProps {
   value: string;
@@ -44,6 +51,15 @@ export interface TemplateEditorProps {
   className?: string;
   onBlur?: () => void;
   autoFocus?: boolean;
+  /** The editable content's id; defaults to the enclosing Field's (its label points here). */
+  id?: string;
+}
+
+/** What a TemplateEditor's ref can do. */
+export interface TemplateEditorHandle {
+  /** Type `{{  }}` at the caret (replacing a selection) and open the completion list inside it. */
+  insertData: () => void;
+  focus: () => void;
 }
 
 const EXPR = Decoration.mark({ class: "cm-wf-expr" });
@@ -141,7 +157,7 @@ const SINGLE_LINE = [
   EditorView.theme({ ".cm-content": { padding: "5px 0" }, ".cm-line": { lineHeight: "20px" } })
 ];
 
-export const TemplateEditor: React.FC<TemplateEditorProps> = ({
+export const TemplateEditor = React.forwardRef<TemplateEditorHandle, TemplateEditorProps>(function TemplateEditor({
   value,
   onChange,
   scope,
@@ -154,10 +170,31 @@ export const TemplateEditor: React.FC<TemplateEditorProps> = ({
   monospace,
   className,
   onBlur,
-  autoFocus
-}) => {
+  autoFocus,
+  id
+}, ref) {
   const scopeRef = useRef(scope);
   scopeRef.current = scope;
+  const viewRef = useRef<EditorView | null>(null);
+  const control = useFieldControl(id);
+  // Inside a read-only form: a disabled fieldset doesn't reach a contenteditable, so say it here.
+  const readOnly = useReadOnly();
+
+  useImperativeHandle(
+    ref,
+    () => ({
+      insertData: () => {
+        const view = viewRef.current;
+        if (!view || readOnly) return;
+        view.focus();
+        const { from, to } = view.state.selection.main;
+        // "input.type" is what makes CodeMirror's completion start, as if typed.
+        view.dispatch({ changes: { from, to, insert: "{{  }}" }, selection: { anchor: from + 3 }, userEvent: "input.type", scrollIntoView: true });
+      },
+      focus: () => viewRef.current?.focus()
+    }),
+    [readOnly]
+  );
 
   const extensions = useMemo(() => {
     const source = (context: CompletionContextLike) => {
@@ -179,14 +216,21 @@ export const TemplateEditor: React.FC<TemplateEditorProps> = ({
       THEME,
       ...(monospace ? [MONO] : []),
       ...(multiline ? [EditorView.lineWrapping] : SINGLE_LINE),
+      ...(readOnly ? [EditorState.readOnly.of(true), EditorView.editable.of(false)] : []),
       tokenPlugin(scope.promptVariables),
       EditorState.languageData.of(() => [{ autocomplete: source }]),
-      EditorView.contentAttributes.of({ "aria-label": ariaLabel }),
+      EditorView.contentAttributes.of({
+        // Inside a Field its visible label names the editor; `ariaLabel` otherwise.
+        ...(control.labelledBy ? { "aria-labelledby": control.labelledBy } : { "aria-label": ariaLabel }),
+        ...(control.id ? { id: control.id } : {}),
+        ...(control.describedBy ? { "aria-describedby": control.describedBy } : {}),
+        ...(invalid ? { "aria-invalid": "true" } : {})
+      }),
       ...(placeholder ? [placeholderExtension(placeholder)] : [])
     ];
     // The scope rides a ref: a new upstream list must not rebuild the editor.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [multiline, monospace, scope.promptVariables, ariaLabel, placeholder]);
+  }, [multiline, monospace, scope.promptVariables, ariaLabel, placeholder, control.id, control.describedBy, control.labelledBy, invalid, readOnly]);
 
   return (
     <div
@@ -205,6 +249,9 @@ export const TemplateEditor: React.FC<TemplateEditorProps> = ({
         onChange={onChange}
         onBlur={onBlur}
         autoFocus={autoFocus}
+        onCreateEditor={(view) => {
+          viewRef.current = view;
+        }}
         theme="none"
         extensions={extensions}
         minHeight={multiline ? `${minHeight}px` : undefined}
@@ -230,4 +277,4 @@ export const TemplateEditor: React.FC<TemplateEditorProps> = ({
       />
     </div>
   );
-};
+});

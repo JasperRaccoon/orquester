@@ -46,6 +46,7 @@ import {
   serializeWorkflowSelection,
   WORKFLOW_CLIPBOARD_MIME
 } from "../../lib/workflows/clipboard";
+import { editorAgentCatalog } from "../../lib/workflows/chain-models";
 import type { EditorSelection } from "../../lib/workflows/editor-store";
 import { useWorkflowSecrets, useWorkflowsState } from "../../lib/workflows/hooks";
 import {
@@ -229,16 +230,21 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
   const secretNames = useMemo(() => [...new Set(secrets.secrets.map((secret) => secret.name))].sort(), [secrets.secrets]);
   const savedPrompts = useSavedPrompts(workflowProject);
 
+  const registryAgents = useAppStore((s) => s.registry.agents);
+  const providers = useProviderSnapshots();
+  // The agent catalogue the daemon judges chains by, from the same registry and snapshots: so a
+  // model the host does not list is marked here too (and re-marked as the catalogue moves).
+  const agentCatalog = useMemo(() => editorAgentCatalog(registryAgents, providers), [registryAgents, providers]);
+
   useEffect(() => {
     editor.setValidationContext({
       ...(secrets.status === "loaded" ? { secretNames } : {}),
       ...(savedPrompts.status === "loaded" ? { savedPromptIds: savedPrompts.prompts.map((prompt) => prompt.id) } : {}),
-      ...(workflows.load.status === "loaded" ? { knownWorkflowIds: [...workflows.summaries.keys()] } : {})
+      ...(workflows.load.status === "loaded" ? { knownWorkflowIds: [...workflows.summaries.keys()] } : {}),
+      ...(agentCatalog ? { catalog: agentCatalog } : {})
     });
-  }, [editor, secrets.status, secretNames, savedPrompts.status, savedPrompts.prompts, workflows.load.status, workflows.summaries]);
+  }, [editor, secrets.status, secretNames, savedPrompts.status, savedPrompts.prompts, workflows.load.status, workflows.summaries, agentCatalog]);
 
-  const registryAgents = useAppStore((s) => s.registry.agents);
-  const providers = useProviderSnapshots();
   const summaryContext = useMemo<NodeSummaryContext>(() => {
     const projectName = workflowProject.replace(/\/+$/, "").split("/").pop() || undefined;
     return {
@@ -863,6 +869,7 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
                 workflow={draft}
                 selectedIds={selection.nodeIds}
                 problems={state.problems}
+                summaryContext={summaryContext}
                 readOnly={readOnly}
                 projectPath={workflowProject}
                 secretNames={secretNames}

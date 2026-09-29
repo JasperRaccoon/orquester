@@ -12,6 +12,7 @@
  */
 
 import { WORKFLOW_NODE_TYPES, workflowProjectSchema, workflowRecordSchema } from "@orquester/config";
+import { WORKFLOW_SUMMARY_MAX_ERRORS } from "@orquester/api";
 import type {
   AccountSelectionDecision,
   AgentHop,
@@ -20,6 +21,8 @@ import type {
   WorkflowBlockRun,
   WorkflowBlockStatus,
   WorkflowNodeType,
+  WorkflowProblem,
+  WorkflowProblemSeverity,
   WorkflowProject,
   WorkflowRun,
   WorkflowRunProgress,
@@ -166,6 +169,25 @@ function list<T>(value: unknown, read: (entry: unknown) => T | null): T[] {
   return out;
 }
 
+const PROBLEM_SEVERITIES: ReadonlySet<string> = new Set<WorkflowProblemSeverity>(["error", "warning", "info"]);
+
+/** One validation problem; `null` without a known severity or a message. */
+export function sanitizeWorkflowProblem(value: unknown): WorkflowProblem | null {
+  if (!isRecord(value) || typeof value.severity !== "string" || !PROBLEM_SEVERITIES.has(value.severity)) return null;
+  const message = nonEmpty(value.message);
+  if (message === undefined) return null;
+  const problem: WorkflowProblem = {
+    severity: value.severity as WorkflowProblemSeverity,
+    code: str(value.code) ?? "",
+    message
+  };
+  for (const key of ["nodeId", "edgeId", "field"] as const) {
+    const field = nonEmpty(value[key]);
+    if (field !== undefined) problem[key] = field;
+  }
+  return problem;
+}
+
 /** One rail row; `null` without an id or a name. */
 export function sanitizeWorkflowSummary(value: unknown): WorkflowSummary | null {
   if (!isRecord(value)) return null;
@@ -188,6 +210,16 @@ export function sanitizeWorkflowSummary(value: unknown): WorkflowSummary | null 
   };
   const description = str(value.description);
   if (description !== undefined) summary.description = description;
+  // What the errors are (an older daemon sends the count alone): errors only, at most the cap.
+  const errors = list(value.errors, sanitizeWorkflowProblem)
+    .filter((problem) => problem.severity === "error")
+    .slice(0, WORKFLOW_SUMMARY_MAX_ERRORS);
+  if (errors.length > 0) {
+    summary.errors = errors;
+    summary.errorCount = Math.max(summary.errorCount, errors.length);
+    const omitted = Math.floor(finite(value.errorsOmitted) ?? 0);
+    if (omitted > 0) summary.errorsOmitted = omitted;
+  }
   const lastRun = sanitizeRunSummary(value.lastRun);
   if (lastRun !== null && lastRun.workflowId === id) summary.lastRun = lastRun;
   if (isRecord(value.notify)) {
