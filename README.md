@@ -72,7 +72,7 @@ Coding agents are long-running, chatty processes that want your attention at unp
 - Web Push (VAPID) when an agent needs input or finishes — debounced, per-session, with a test button.
 
 ### 🔌 MCP server built in
-The daemon exposes a Streamable-HTTP **MCP endpoint** (`POST /mcp`, on the authenticated remote transport) so *other* agents can drive your agent chat sessions the way you do in the GUI: open, resume and configure Claude Code, Codex, OpenCode and Grok sessions, send messages with attachments and get the reply back, answer questions and approvals, read transcripts and diffs, wait for a session to need attention, and check usage and cost — plus shared todos and sandboxed file reads. Setup and the tool reference: [`docs/orquester-mcp.md`](docs/orquester-mcp.md).
+The daemon exposes a Streamable-HTTP **MCP endpoint** (`POST /mcp`, on the authenticated remote transport) so *other* agents can drive your agent chat sessions the way you do in the GUI: open, resume and configure Claude Code, Codex, OpenCode and Grok sessions, send messages with attachments and get the reply back, answer questions and approvals, read transcripts and diffs, wait for a session to need attention, and check usage and cost — plus shared todos, sandboxed file reads, automated workflows and each agent CLI's global profile (MCP servers, skills, plugins, hooks, commands, instruction file). Setup and the tool reference: [`docs/orquester-mcp.md`](docs/orquester-mcp.md).
 
 ---
 

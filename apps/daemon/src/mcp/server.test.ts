@@ -8,7 +8,7 @@ import { chatSummary } from "./fixtures.ts";
 import { FakeDaemonApi } from "./testing.ts";
 import { registerMcp,type McpDeps } from "./server.ts";
 
-const EXPECTED_TOOLS = ["list_projects", "list_agents", "list_conversations", "list_sessions", "get_session", "get_turn_diff", "create_session", "update_session", "interrupt_session", "stop_session", "close_session", "revert_session", "compact_session", "search_sessions", "send_message", "implement_plan", "read_transcript", "read_tool_output", "answer_question", "dismiss_question", "resolve_approval", "wait_for_session", "get_usage", "get_cost", "list_files", "read_file", "list_todos", "create_todo", "update_todo", "delete_todo", "toggle_todo_item", "list_workflow_block_types", "list_workflows", "get_workflow", "create_workflow", "update_workflow", "validate_workflow", "delete_workflow", "run_workflow", "list_workflow_runs", "get_workflow_run", "cancel_workflow_run", "list_workflow_secrets", "set_workflow_secret"];
+const EXPECTED_TOOLS = ["list_projects", "list_agents", "list_conversations", "list_sessions", "get_session", "get_turn_diff", "create_session", "update_session", "interrupt_session", "stop_session", "close_session", "revert_session", "compact_session", "search_sessions", "send_message", "implement_plan", "read_transcript", "read_tool_output", "answer_question", "dismiss_question", "resolve_approval", "wait_for_session", "get_usage", "get_cost", "list_files", "read_file", "list_todos", "create_todo", "update_todo", "delete_todo", "toggle_todo_item", "list_workflow_block_types", "list_workflows", "get_workflow", "create_workflow", "update_workflow", "validate_workflow", "delete_workflow", "run_workflow", "list_workflow_runs", "get_workflow_run", "cancel_workflow_run", "list_workflow_secrets", "set_workflow_secret", "list_agent_profiles", "get_agent_profile", "get_agent_profile_item", "create_agent_profile_item", "update_agent_profile_item", "set_agent_profile_item_enabled", "delete_agent_profile_item", "copy_agent_profile_item", "trust_agent_profile_hook", "get_agent_instructions", "write_agent_instructions", "import_agent_profile_items", "list_marketplace_plugins"];
 
 // Spec §4.5's annotation rules, spelled out literally so a drifting constant fails here too. A read, a todo tool and a
 // file tool touch only the daemon's own state (openWorldHint: false); a tool that drives an agent keeps the default.
@@ -67,7 +67,22 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   get_workflow_run: { required: ["runId"], annotations: READ },
   cancel_workflow_run: { required: ["runId"], annotations: WRITE_IDEMPOTENT },
   list_workflow_secrets: { required: [], annotations: READ },
-  set_workflow_secret: { required: ["name", "value"], annotations: WRITE_IDEMPOTENT }
+  set_workflow_secret: { required: ["name", "value"], annotations: WRITE_IDEMPOTENT },
+  // Agent profiles (docs/orquester-mcp.md §13): the writes change the agent CLIs' own files, so none claims a closed world.
+  list_agent_profiles: { required: [], annotations: READ },
+  get_agent_profile: { required: ["agent"], annotations: READ },
+  get_agent_profile_item: { required: ["agent", "id"], annotations: READ },
+  create_agent_profile_item: { required: ["agent"], annotations: WRITE },
+  update_agent_profile_item: { required: ["agent", "id"], annotations: WRITE },
+  set_agent_profile_item_enabled: { required: ["agent", "id", "enabled"], annotations: WRITE_IDEMPOTENT },
+  delete_agent_profile_item: { required: ["agent", "id", "confirm"], annotations: DESTROY },
+  copy_agent_profile_item: { required: ["agent", "id", "toAgent"], annotations: WRITE },
+  trust_agent_profile_hook: { required: ["agent", "id"], annotations: WRITE_IDEMPOTENT },
+  get_agent_instructions: { required: ["agent"], annotations: READ },
+  // Replaces the whole file: destructive, and the same text twice is the same file.
+  write_agent_instructions: { required: ["agent", "text"], annotations: DESTROY },
+  import_agent_profile_items: { required: ["agent"], annotations: WRITE },
+  list_marketplace_plugins: { required: ["agent", "marketplace"], annotations: READ }
 };
 
 type ListedTool = { name: string; title?: string; description: string; annotations?: object; inputSchema: { properties?: Record<string, { description?: string }>; required?: string[]; additionalProperties?: unknown } };
