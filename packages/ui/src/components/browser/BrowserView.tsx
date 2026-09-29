@@ -27,9 +27,7 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
   const hiddenInputRef = useRef<HTMLInputElement>(null);
   const [state, setState] = useState<BrowserStateMessage | null>(null);
   const [urlDraft, setUrlDraft] = useState(browser.url === "about:blank" ? "" : browser.url);
-  const [urlFocused, setUrlFocused] = useState(false);
-  // Live focus mirror read inside onState (which closes over stale urlFocused
-  // because the subscribe effect deliberately doesn't re-run on focus changes).
+  // Read focus in the stream callback without resubscribing on focus changes.
   const urlFocusedRef = useRef(false);
   // Monotonic frame counters for latest-frame-wins: async JPEG decodes can
   // finish out of order, so an older frame must never paint over a newer one.
@@ -116,8 +114,6 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
       onEnd: () => {}
     });
     return () => handle.close();
-    // urlFocused deliberately omitted: resubscribing on focus would flash the stream.
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [channel, browser.id, active, devtoolsFullscreen]);
 
   // Client coords → server-viewport CSS pixels through letterbox scale + zoom.
@@ -356,8 +352,8 @@ export const BrowserView: React.FC<{ browser: BrowserSummary; active: boolean }>
           <input
             value={urlDraft}
             onChange={(e) => setUrlDraft(e.target.value)}
-            onFocus={() => { urlFocusedRef.current = true; setUrlFocused(true); loadSuggestions(); }}
-            onBlur={() => { urlFocusedRef.current = false; setUrlFocused(false); }}
+            onFocus={() => { urlFocusedRef.current = true; loadSuggestions(); }}
+            onBlur={() => { urlFocusedRef.current = false; }}
             list={`browser-suggestions-${browser.id}`}
             placeholder="Enter URL (e.g. localhost:5173)"
             spellCheck={false} autoCapitalize="off" autoCorrect="off"

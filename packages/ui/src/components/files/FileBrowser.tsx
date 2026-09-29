@@ -19,7 +19,6 @@ import type { FsEntry } from "@orquester/api";
 import { cn } from "../../lib/cn";
 import {
   AdaptiveMenu,
-  Button,
   ConfirmDialog,
   ContextMenu,
   DropdownItem,

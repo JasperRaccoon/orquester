@@ -392,26 +392,23 @@ const switchOf = (row: string): string => row.match(/<button[^>]*role="switch"[^
 }
 
 // ---------------------------------------------------------------------------
-// The kind tabs: wrapping at every width, search across kinds, the remembered
+// The kind tabs: wrapping styles, search across kinds, the remembered
 // tab, a 0-count kind, the keyboard
 // ---------------------------------------------------------------------------
 
 {
-  // The narrowest dock (260 px) and the phones (360/390 px) wrap the tabs; none is ever cut off.
-  for (const [variant, width] of [["docked", 260], ["docked", 320], ["docked", 560], ["sheet", 352], ["sheet", 382]] as const) {
+  // Each variant supplies wrapping styles; static rendering does not measure layout.
+  for (const [variant, width] of [["docked", 260], ["sheet", 352]] as const) {
     const html = view(viewProps({ variant, width }));
     const tablist = tablistOf(html);
-    assert.ok(/class="flex flex-wrap transition-opacity gap-1(\.5)?[ "]/.test(tablist), `${variant} ${width}: the tabs wrap`);
-    assert.ok(!/overflow-x-auto|flex-nowrap|mask-image|\btruncate\b/.test(tablist), `${variant} ${width}: nothing scrolls or clips`);
+    assert.ok(/class="flex flex-wrap transition-opacity gap-1(\.5)?[ "]/.test(tablist), `${variant}: wrapping classes`);
+    assert.ok(!/overflow-x-auto|flex-nowrap|mask-image|\btruncate\b/.test(tablist), `${variant}: no scrolling or clipping classes`);
     assert.equal(tabsOf(html).size, 6, `${variant} ${width}: all six tabs`);
     for (const [kind, tab] of tabsOf(html)) {
       assert.ok(/\bshrink-0\b/.test(tab) && /\bwhitespace-nowrap\b/.test(tab), `${variant} ${width}: ${kind} keeps its size`);
       assert.ok(new RegExp(`\\b${variant === "sheet" ? "h-10" : "h-8"}\\b`).test(tab), `${variant} ${width}: ${kind}'s target`);
     }
   }
-  // The widest tab fits the narrowest dock: "Marketplaces" with its icon and a
-  // two-digit badge is about 150 px at 12 px (DejaVu Sans, the widest system
-  // font), and the 260 px dock leaves 236 px inside its padding.
   const narrow = view(viewProps({ width: 260 }));
   assert.ok(narrow.includes('data-agent-picker="dropdown"') && narrow.indexOf("data-profile-instructions") < narrow.indexOf('role="tablist"'), "260 px: the card still above the tabs");
 

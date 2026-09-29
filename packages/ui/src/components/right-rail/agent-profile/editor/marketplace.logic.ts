@@ -78,7 +78,3 @@ export function marketplaceDraftFromForm(form: MarketplaceForm): MarketplaceDraf
   if (form.name.trim() !== "") draft.name = form.name.trim();
   return draft;
 }
-
-export function marketplaceFormSignature(form: MarketplaceForm): string {
-  return JSON.stringify(form);
-}

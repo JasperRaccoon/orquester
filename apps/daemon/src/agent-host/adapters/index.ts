@@ -18,7 +18,7 @@ import {
 } from "./opencode/index.ts";
 import { createGrokAdapter, pendingGrokSnapshot } from "./grok/index.ts";
 
-export const ADAPTER_FACTORIES: Readonly<Record<AgentAdapterId, AdapterFactory>> = {
+const ADAPTER_FACTORIES: Readonly<Record<AgentAdapterId, AdapterFactory>> = {
   claude: createClaudeAdapter,
   codex: createCodexAdapter,
   opencode: createOpenCodeAdapter,

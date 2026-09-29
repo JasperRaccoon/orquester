@@ -50,7 +50,7 @@ export const ROLLBACK_COMPACTED =
   "This conversation was compacted after that turn, so Claude no longer holds the messages the rewind would restore. Start a new thread instead.";
 export const ROLLBACK_SESSION_UNAVAILABLE = "Claude session id is unavailable.";
 
-export function isClaudeConversationMessage(message: ClaudeHistoryMessage): boolean {
+function isClaudeConversationMessage(message: ClaudeHistoryMessage): boolean {
   return message.type === "user" || message.type === "assistant";
 }
 
@@ -178,7 +178,7 @@ export function remapClaudeForkTurnBoundaries(
   return remapped.some((id) => id === null) ? undefined : remapped;
 }
 
-export interface RollbackPlan {
+interface RollbackPlan {
   /** Number of turns kept. */
   retainedCount: number;
   /** The boundaries kept, before any fork remap. */
@@ -243,7 +243,7 @@ export function planClaudeRollback(input: {
 }
 
 /** A turn boundary the native history can place. */
-export interface PlacedClaudeTurnBoundary {
+interface PlacedClaudeTurnBoundary {
   turnId: string;
   uuid: string;
   /** Index of `uuid` in the raw history. */
@@ -305,7 +305,7 @@ export function mergeClaudeTurnBoundaries(
   return placed.sort((a, b) => a.index - b.index);
 }
 
-export interface ClaudeRollbackByIdPlan {
+interface ClaudeRollbackByIdPlan {
   /** Every boundary the history could place, in transcript order. */
   boundaries: PlacedClaudeTurnBoundary[];
   /** The boundaries kept: every one before the cut. Remapped onto the fork. */

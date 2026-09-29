@@ -19,7 +19,7 @@ import type { Clock, IdGen } from "./runtime-seams.ts";
 
 type PayloadOf<TType extends DomainEventType> = Extract<DomainEvent, { type: TType }>["payload"];
 
-export interface EventBuilderOptions {
+interface EventBuilderOptions {
   commandId?: string | null;
   causationEventId?: string | null;
   metadata?: DomainEventMetadata;
@@ -48,21 +48,6 @@ export function createEventBuilder(input: { clock: Clock; ids: IdGen }) {
 }
 
 export type BuildEvent = ReturnType<typeof createEventBuilder>;
-
-/**
- * The five `provider.*.failed` activity kinds (§6.2): a provider-side failure is
- * never an HTTP error — it lands in the timeline as a row with tone `error`.
- *
- * *T3: `ProviderCommandReactor.ts:268-304` (`appendProviderFailureActivity`).*
- */
-export type ProviderFailureKind =
-  | "provider.turn.start.failed"
-  | "provider.turn.interrupt.failed"
-  | "provider.approval.respond.failed"
-  | "provider.user-input.respond.failed"
-  | "provider.session.stop.failed"
-  | "checkpoint.revert.failed"
-  | "runtime.error";
 
 export function makeActivity(input: {
   id: string;

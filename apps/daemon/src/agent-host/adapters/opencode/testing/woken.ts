@@ -79,7 +79,7 @@ export function injectedAnswer(input: {
 }
 
 /** One reply of a woken run, in three stretches a test can feed apart. */
-export interface WokenReply {
+interface WokenReply {
   /** The run's `busy`, then the reply's assistant message — the frame that names the prompt. */
   begins: OpenCodeRawEvent[];
   /** Its step starting and its text part opening and streaming. */

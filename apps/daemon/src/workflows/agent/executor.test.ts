@@ -1,19 +1,11 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { AgentChainEntry } from "@orquester/api";
-import { AUTONOMOUS_ANSWER, AUTONOMY_NOTE, CONTINUE_AFTER_SWITCH } from "./prompt.ts";
+import { AUTONOMOUS_ANSWER, AUTONOMY_NOTE } from "./prompt.ts";
 import type { AgentBlockOutput } from "./executor.ts";
-import { byAccount } from "./testing/fake-chat-host.ts";
 import { account, agentNode, fakePrompts, testWorkflow } from "./testing/fake-context.ts";
 import { Scenario } from "./testing/scenario.ts";
 
 const CLAUDE = [account("claude", "a1", "alpha"), account("claude", "a2", "beta"), account("claude", "a3", "gamma")];
-const CODEX = [account("codex", "c1", "cx-one"), account("codex", "c2", "cx-two")];
-const FIXED = { strategy: "fixed", includeSystem: false, soonestResetWindow: "weekly", leastUsedMetric: "max", unknownUsage: "last" } as const;
-
-function chain(...entries: [string, string, string[]?][]): AgentChainEntry[] {
-  return entries.map(([agent, model, accounts]) => ({ agent, model, accounts: { ...FIXED, ...(accounts ? { accounts } : {}) } }));
-}
 
 function outputOf(result: Awaited<ReturnType<Scenario["run"]>>["result"]): AgentBlockOutput {
   assert.equal(result.status, "succeeded", JSON.stringify(result));

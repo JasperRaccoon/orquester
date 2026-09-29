@@ -8,7 +8,7 @@
  * fallback — an unexpected shape must degrade a field, never throw.
  */
 
-import type { XaiToolMeta, XaiUpdateMeta } from "./acp/_generated/xai.ts";
+import type { XaiToolMeta } from "./acp/_generated/xai.ts";
 
 function record(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)
@@ -55,12 +55,6 @@ export function xaiToolMeta(meta: unknown): XaiToolMeta | undefined {
     read_only: block["read_only"] === true,
     ...(record(block["input"]) === undefined ? {} : { input: record(block["input"]) })
   };
-}
-
-/** The `_meta` carried on `session/update` and `_x.ai/session_notification`. */
-export function xaiUpdateMeta(meta: unknown): XaiUpdateMeta | undefined {
-  const block = record(meta);
-  return block === undefined ? undefined : (block as XaiUpdateMeta);
 }
 
 /** `true` on every frame replayed by `session/load` (observation 10). */

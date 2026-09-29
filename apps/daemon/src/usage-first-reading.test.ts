@@ -12,8 +12,7 @@ test("whenFirstReading waits for the first reading after start, and is bounded",
       return { id: "claude", available: true, stale: false, session: { percent: 7 }, weekly: null };
     },
     readCodex: async () => null,
-    getPrefs: async () => ({ enabled: true, agents: {}, chip: "busiest" }),
-    now: () => 0
+    getPrefs: async () => ({ enabled: true, agents: {}, chip: "busiest" })
   });
   // Not started: the bound answers. (Its timer is unref'd, so the test keeps the loop alive.)
   const keepAlive = setInterval(() => undefined, 1_000);

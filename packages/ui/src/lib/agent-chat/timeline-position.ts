@@ -213,20 +213,6 @@ export function timelinePositionStore(): TimelinePositionStore {
 // Disclosure helpers
 // ---------------------------------------------------------------------------
 
-type DisclosureListKey = Exclude<keyof DisclosureState, "toolOutputOffsets">;
-
-export function toggleDisclosure(
-  state: DisclosureState,
-  key: DisclosureListKey,
-  id: string
-): DisclosureState {
-  const current = state[key];
-  const next = current.includes(id)
-    ? current.filter((entry) => entry !== id)
-    : [...current, id];
-  return { ...state, [key]: next };
-}
-
 export function setToolOutputOffset(
   state: DisclosureState,
   rowId: string,
@@ -250,31 +236,4 @@ export function disclosureSets(state: DisclosureState): {
     expandedAgentIds: new Set(state.expandedAgentIds),
     expandedReasoningIds: new Set(state.expandedReasoningIds)
   };
-}
-
-// ---------------------------------------------------------------------------
-// Live-follow (§7.3)
-// ---------------------------------------------------------------------------
-
-/**
- * Follow re-arms only inside a **40 px band** at the bottom of the content,
- * measured as `contentLength - scroll - scrollLength`. A "near end" heuristic
- * that fires within half a viewport re-arms follow while the user is reading
- * history and yanks them back on the next chunk.
- *
- * *T3: `MessagesTimeline.logic.ts:149-172`.*
- */
-export const TIMELINE_FOLLOW_REARM_THRESHOLD_PX = 40;
-
-export function resolveTimelineIsAtEnd(state: {
-  contentLength?: number;
-  scroll?: number;
-  scrollLength?: number;
-  isAtEnd?: boolean;
-}): boolean | undefined {
-  const { contentLength, scroll, scrollLength } = state;
-  if (contentLength === undefined || scroll === undefined || scrollLength === undefined) {
-    return state.isAtEnd;
-  }
-  return contentLength - scroll - scrollLength <= TIMELINE_FOLLOW_REARM_THRESHOLD_PX;
 }

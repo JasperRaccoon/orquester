@@ -157,19 +157,3 @@ export function resumeCursorFor(input: {
   }
   return input.lastSeq > 0 ? input.lastSeq : undefined;
 }
-
-/**
- * Whether a frame must be applied.
- *
- * Events at or below the cursor are dropped, which is what makes the
- * overlapping snapshot / replay / live windows safe (§6.6). A `snapshot`
- * always applies — it **replaces** loaded history rather than merging into it,
- * because a turn reverted while this client was disconnected has no event left
- * to remove it.
- */
-export function shouldApplyFrame(frame: AgentChatStreamFrame, lastSeq: number): boolean {
-  if (frame.kind !== "event") {
-    return true;
-  }
-  return frame.seq > lastSeq;
-}

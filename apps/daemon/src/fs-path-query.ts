@@ -19,13 +19,10 @@
  * encoder). Callers treat `undefined` as "path required" (400).
  */
 
-/** Query parameter name carrying the base64url-encoded path. */
-export const FS_PATH_PARAM = "p";
-
 const BASE64URL = /^[A-Za-z0-9_-]+$/;
 
 /** Strict base64url → UTF-8 decode, or `undefined` for anything malformed. */
-export function decodeFsPathParam(value: string): string | undefined {
+function decodeFsPathParam(value: string): string | undefined {
   if (!value || !BASE64URL.test(value)) {
     return undefined;
   }

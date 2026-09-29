@@ -36,7 +36,7 @@ const GOAL_LABEL_CHARS = 200;
 const GOAL_OBJECTIVE_CHARS = 4_000;
 const GOAL_CHECK_CHARS = 2_000;
 
-export type SessionReason = ChatActivityRung | "new" | "exited";
+type SessionReason = ChatActivityRung | "new" | "exited";
 /**
  * The provider's goal, where `reason` alone cannot tell "finished" from a goal that stopped short: every settled turn
  * reads "completed", whether the goal is paused, blocked or limited. `continuing` is the host's word (goals §4.7):
@@ -44,21 +44,21 @@ export type SessionReason = ChatActivityRung | "new" | "exited";
  * `heldForUpdate` (goals §5.7): an Orquester update paused the goal between two of its turns, and the agent host sets it
  * going again by itself once it has restarted — `paused` and still continuing, the GUI's "paused for update".
  */
-export interface GoalView { objective: string; status: AgentGoalStatus; continuing: boolean; heldForUpdate?: true }
+interface GoalView { objective: string; status: AgentGoalStatus; continuing: boolean; heldForUpdate?: true }
 /**
  * The fold's goal — an unfinished one, and a finished one where the provider's last update still carries it (Codex and
  * Grok report a met goal as `complete`) — with every fact the GUI's chip shows, each only when the provider reported it.
  */
-export interface GoalDetailView extends GoalView { phase?: string; rounds?: number; lastCheck?: string; tokensUsed?: number; tokenBudget?: number | null; elapsedMs?: number; setAt?: string; updatedAt: string }
+interface GoalDetailView extends GoalView { phase?: string; rounds?: number; lastCheck?: string; tokensUsed?: number; tokenBudget?: number | null; elapsedMs?: number; setAt?: string; updatedAt: string }
 export interface SessionView { id: string; kind: "chat" | "terminal"; agent: string; adapter?: AgentAdapterId; title: string; project: ProjectRef; cwd: string; createdAt: string; order: number;
   status: "working" | "waiting" | "idle"; attention: "needs-input" | "finished" | "bell" | null; needsAttentionAt: string | null; reason: SessionReason | null;
   chat?: { sessionStatus: ThreadSessionStatus; accountId: string; latestTurn: LatestTurnSummary | null; pending: { approvals: boolean; questions: boolean }; planReady: boolean; backgroundLiveness: "working" | "monitoring" | null; goal: GoalView | null };
   terminal?: { status: "running" | "exited"; exitCode?: number; legacyAgent?: boolean } }
-export interface PendingApprovalView { requestId: string; kind: ProviderRequestKind; createdAt: string; detail?: string; appName?: string; tool?: { name: string; input: unknown }; decisions: { decision: ApprovalDecision; label: string; warning?: string }[] }
+interface PendingApprovalView { requestId: string; kind: ProviderRequestKind; createdAt: string; detail?: string; appName?: string; tool?: { name: string; input: unknown }; decisions: { decision: ApprovalDecision; label: string; warning?: string }[] }
 export interface PendingQuestionView { requestId: string; createdAt: string; turnId?: string; responseMode: "blocking" | "message"; dismissible: boolean;
   questions: { index: number; id: string; header: string; question: string; options: { label: string; description: string; value?: string }[]; multiSelect: boolean; allowCustomAnswer: boolean; isSecret?: boolean; isOther?: boolean }[] }
-export interface SubagentView { id: string; kind: string; agentKind: "agent" | "background"; title: string | null; status: string; model?: string; effort?: string; progress?: string; lastToolName?: string; startedAt: string | null; completedAt: string | null; error?: string }
-export interface PlanView { planId: string; markdown: string; truncated: boolean; actionable: boolean }
+interface SubagentView { id: string; kind: string; agentKind: "agent" | "background"; title: string | null; status: string; model?: string; effort?: string; progress?: string; lastToolName?: string; startedAt: string | null; completedAt: string | null; error?: string }
+interface PlanView { planId: string; markdown: string; truncated: boolean; actionable: boolean }
 export interface SessionDetail extends SessionView { chat: Omit<NonNullable<SessionView["chat"]>, "goal"> & { goal: GoalDetailView | null; model: string; options: Record<string, string | boolean>; runtimeMode: RuntimeMode; home: AccountHomeKind; accountLabel?: string; activeTurnId: string | null; turnCount: number; lastError?: string; continueAfterRestart: boolean;
     contextWindow?: { usedTokens: number; maxTokens?: number; percentUsed?: number; compactsAutomatically?: boolean }; supports: AgentSupports };
   pending: { approvals: PendingApprovalView[]; questions: PendingQuestionView[] }; plan?: PlanView; subagents: SubagentView[]; subagentsTruncated?: true; lastReply?: { turnId: string; text: string; truncated: boolean; completedAt: string | null } }

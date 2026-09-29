@@ -162,7 +162,7 @@ export type MockTurnScript =
  * without `threadId`, which the mock stamps. Unset counters start at 0, and
  * `createdAt`/`updatedAt` at 1 789 950 000 (unix seconds).
  */
-export interface MockGoal {
+interface MockGoal {
   objective: string;
   /** The app-server's spelling: `active`, `paused`, `blocked`, `usageLimited`, `budgetLimited`, `complete`. */
   status: string;
@@ -295,7 +295,7 @@ export interface MockReceived {
   error?: unknown;
 }
 
-export function readReceived(logPath: string): MockReceived[] {
+function readReceived(logPath: string): MockReceived[] {
   let text: string;
   try {
     text = readFileSync(logPath, "utf8");

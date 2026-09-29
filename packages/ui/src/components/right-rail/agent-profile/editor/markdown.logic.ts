@@ -233,10 +233,6 @@ export function validateMarkdownForm(kind: MarkdownKind, model: MarkdownEditorMo
   return { valid, errors };
 }
 
-export function markdownFormSignature(form: MarkdownForm): string {
-  return JSON.stringify(form);
-}
-
 export const SKILL_BODY_PLACEHOLDER =
   "# What this skill does\n\nStep-by-step instructions the agent follows when the skill applies.";
 export const COMMAND_BODY_PLACEHOLDER = "Review the staged changes for bugs. Focus on $ARGUMENTS.";

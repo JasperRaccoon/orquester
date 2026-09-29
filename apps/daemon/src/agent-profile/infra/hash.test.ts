@@ -6,7 +6,6 @@ import {
   contentHash,
   hookItemId,
   itemId,
-  parseHookItemId,
   parseItemId,
   stableStringify
 } from "./hash.ts";
@@ -60,15 +59,4 @@ test("hookItemId hashes the normalized {matcher, handler} and ignores key order"
   const bare = hookItemId("Stop", { command: "x" });
   assert.equal(hookItemId("Stop", { matcher: "", command: "x" }), bare);
   assert.equal(hookItemId("Stop", { matcher: null, command: "x", timeoutSec: undefined }), bare);
-});
-
-test("parseHookItemId splits event and hash", () => {
-  const id = hookItemId("PreToolUse", { matcher: "Bash", command: "x" });
-  const parsed = parseHookItemId(id);
-  assert.equal(parsed?.event, "PreToolUse");
-  assert.equal(parsed?.hash, id.slice(-16));
-  assert.equal(parseHookItemId("hook:PreToolUse"), null);
-  assert.equal(parseHookItemId("hook:PreToolUse:xyz"), null);
-  assert.equal(parseHookItemId("mcp:PreToolUse:0123456789abcdef"), null);
-  assert.deepEqual(parseHookItemId("hook:Stop:0123456789abcdef"), { event: "Stop", hash: "0123456789abcdef" });
 });

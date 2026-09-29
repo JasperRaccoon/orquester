@@ -124,11 +124,8 @@ export async function searchProjectFiles(
     }
   }
 
-  // Regex search runs ONLY through ripgrep's non-backtracking engine. The pure-Node
-  // fallback below builds a JS RegExp, which backtracks catastrophically on inputs
-  // like (a|aa)+ and cannot be time-bounded in-process (a single RegExp.exec blocks
-  // the event loop). A shape-based blocklist cannot catch every such pattern, so when
-  // rg is unavailable we refuse regex mode rather than risk stalling the daemon.
+  // Regex requires ripgrep's non-backtracking engine. A JavaScript RegExp can
+  // block the event loop indefinitely, so the Node fallback supports only literals.
   if (options.regex) {
     throw new FsSearchError(
       400,
@@ -138,7 +135,7 @@ export async function searchProjectFiles(
     );
   }
 
-  return await searchWithNode(fsRoot, rootPath, {
+  return await searchWithNode(rootPath, {
     matcher: createMatcher(options.query, Boolean(options.caseSensitive), Boolean(options.wholeWord)),
     maxResults,
     globs,
@@ -188,7 +185,7 @@ interface NodeSearchOpts {
  * clamp, `limitHit`) is consumed in a fixed path order, so two identical searches that
  * truncate at the same boundary always return the same files — no completion-order race.
  */
-async function searchWithNode(_fsRoot: string, root: string, opts: NodeSearchOpts): Promise<FsSearchResponse> {
+async function searchWithNode(root: string, opts: NodeSearchOpts): Promise<FsSearchResponse> {
   const results: FsSearchFileResult[] = [];
   let totalMatches = 0;
   let limitHit = false;

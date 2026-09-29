@@ -510,6 +510,7 @@ test("against the real service: not installed, kind checks and name rules come b
   claude.items = [fakeItem("mcp", "jira")];
   const service = new AgentProfileService({
     adapters: { claude, codex: new FakeProfileAdapter("codex") },
+    converter: (item) => ({ item, notes: [] }),
     agentInfo: (agent) => ({ installed: agent === "claude" || agent === "codex" }),
     logger: { warn: () => undefined, error: () => undefined }
   });

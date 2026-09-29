@@ -56,8 +56,6 @@ export interface ChatBannerDockExtraProps {
   uploadAttachment?: AgentChatActions["uploadAttachment"];
   /** The general notice stack. Sorted activity-first, then by severity. */
   notices?: readonly DockNotice[];
-  /** Retained for API compatibility; the card opens its own field (R8-B2). */
-  onRequestCustomAnswerFocus?: () => void;
   /** `false` while this tab is open but not visible — gates the digit keys. */
   active?: boolean;
   /**

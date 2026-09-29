@@ -24,8 +24,7 @@ import { createLivenessRegistry } from "../liveness.ts";
 import {
   createOrchestrator,
   type HostThreadStore,
-  type Orchestrator,
-  type OrchestratorOptions
+  type Orchestrator
 } from "../orchestrator.ts";
 import {
   createFakeCheckpointService,

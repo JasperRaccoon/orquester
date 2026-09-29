@@ -24,7 +24,7 @@ import * as nodePath from "node:path";
 
 import type { Skill } from "@orquester/api/agent-chat";
 
-export type ClaudeSkillScope = "user" | "project";
+type ClaudeSkillScope = "user" | "project";
 
 /** Bounded so a pathological skills dir cannot stall a `sendTurn` rescan. */
 const MAX_SKILL_DIRS_PER_ROOT = 500;
@@ -140,7 +140,7 @@ export function parseSkillFrontmatter(contents: string): SkillFrontmatter {
  * user and project one. Absent on almost every machine, which is why a missing
  * file is the normal case rather than an error.
  */
-export function claudeManagedSettingsPath(platform: NodeJS.Platform): string | undefined {
+function claudeManagedSettingsPath(platform: NodeJS.Platform): string | undefined {
   if (platform === "darwin") {
     return "/Library/Application Support/ClaudeCode/managed-settings.json";
   }
@@ -188,7 +188,7 @@ export function skillOverrideSettingsPaths(input: {
  */
 const SKILL_OVERRIDE_VALUES = new Set(["on", "name-only", "user-invocable-only", "off"]);
 
-export interface SkillOverride {
+interface SkillOverride {
   enabled: boolean;
   userInvocationOnly: boolean;
 }
@@ -295,7 +295,7 @@ async function readFileOrUndefined(path: string): Promise<string | undefined> {
  * boundary Claude Code walks up to for project settings. `undefined` outside a
  * repository.
  */
-export async function findRepositoryRoot(cwd: string): Promise<string | undefined> {
+async function findRepositoryRoot(cwd: string): Promise<string | undefined> {
   let current = nodePath.resolve(cwd);
   for (;;) {
     try {
@@ -340,7 +340,7 @@ async function readSkillOverrides(input: {
   return merged;
 }
 
-export interface DiscoverClaudeSkillsInput {
+interface DiscoverClaudeSkillsInput {
   /** The absolute `CLAUDE_CONFIG_DIR` the spawned CLI will see. */
   configDir: string;
   cwd?: string;

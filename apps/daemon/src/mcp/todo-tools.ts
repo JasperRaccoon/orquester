@@ -17,12 +17,12 @@ export type TodoProjection = {
 
 export type TodoSelector = { workspace: string; project?: string };
 
-export type TodoToolsDeps = {
+type TodoToolsDeps = {
   todos: TodoListManager;
   workspacesDir: string;
 };
 
-export type TodoToggleResult = { id: string; item: string; checked: boolean; body: string };
+type TodoToggleResult = { id: string; item: string; checked: boolean; body: string };
 
 type ResolvedScope = {
   scope: TodoScope;
@@ -38,7 +38,6 @@ type TaskLine = {
   index: number;
   lineIndex: number;
   prefix: string;
-  mark: string;
   afterMark: string;
   suffix: string;
   item: string;
@@ -83,10 +82,6 @@ function splitBodyLines(body: string): BodyLine[] {
   return lines;
 }
 
-function joinBodyLines(lines: BodyLine[]): string {
-  return lines.map((line) => `${line.text}${line.newline}`).join("");
-}
-
 function taskLines(lines: BodyLine[]): TaskLine[] {
   const tasks: TaskLine[] = [];
   for (const [lineIndex, line] of lines.entries()) {
@@ -97,7 +92,6 @@ function taskLines(lines: BodyLine[]): TaskLine[] {
       index: tasks.length + 1,
       lineIndex,
       prefix,
-      mark,
       afterMark,
       suffix,
       item: suffix.trim(),
@@ -191,7 +185,7 @@ export class TodoTools {
       return { id: todo.id, item: task.item, checked: task.checked, body: todo.body };
     }
     lines[task.lineIndex].text = `${task.prefix}${nextChecked ? "x" : " "}${task.afterMark}${task.suffix}`;
-    const body = joinBodyLines(lines);
+    const body = lines.map((line) => `${line.text}${line.newline}`).join("");
     const updated = await this.update(id, { body });
     return { id: updated.id, item: task.item, checked: nextChecked, body: updated.body };
   }

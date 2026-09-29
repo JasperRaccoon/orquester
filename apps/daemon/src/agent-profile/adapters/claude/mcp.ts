@@ -83,14 +83,12 @@ export function mcpTarget(def: Record<string, unknown>): string | undefined {
   return typeof def.url === "string" ? def.url : undefined;
 }
 
-export { SecretDigester } from "../../infra/secret-digest.ts";
-
 /**
  * Resolves draft entries against the values on disk: `{key, value}` sets,
  * `{key, keep: true}` keeps the current value (400 when there is none), and a
  * key the draft leaves out is removed. The error never names a value.
  */
-export function resolveSecretEntries(
+function resolveSecretEntries(
   drafts: readonly SecretEntryDraft[] | undefined,
   existing: Record<string, string>,
   field: "env" | "headers"
@@ -139,7 +137,7 @@ const OWNED_FIELDS = ["type", "command", "args", "env", "cwd", "url", "headers",
  * real values. `existing` (an edit) keeps its unknown keys and, when the
  * transport did not change, its own `type` spelling (`streamable-http`).
  */
-export function buildMcpDefinition(
+function buildMcpDefinition(
   draft: {
     transport: McpTransport;
     command?: string;

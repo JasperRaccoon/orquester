@@ -3,39 +3,32 @@ import assert from "node:assert/strict";
 import { tmpdir } from "node:os";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { estimateCostUsd, resolveModelKey, aggregateRows, UsageTokensScanner } from "./usage-tokens.ts";
+import { aggregateRows, UsageTokensScanner } from "./usage-tokens.ts";
 
-test("estimateCostUsd multiplies by the per-million price table", () => {
-  // claude-opus-4-8: input 5, output 25, cacheRead 0.5, cacheWrite5m 6.25 per 1M
-  const cost = estimateCostUsd("claude", "claude-opus-4-8", { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 });
-  assert.equal(cost, 30);
-});
+for (const [model, cost, breakdown] of [
+  ["claude-opus-4-8", 30, { input: 5, output: 25, cache: 0 }],
+  ["claude-fable-5", 60, { input: 10, output: 50, cache: 0 }],
+  ["gpt-5.6-sol", 35, { input: 5, output: 30, cache: 0 }],
+  ["claude-opus-4-8-20260115", 30, { input: 5, output: 25, cache: 0 }],
+  ["gpt-5.4-codex-preview", 11.25, { input: 1.25, output: 10, cache: 0 }],
+  ["made-up-model", null, null]
+] as const) {
+  test(`aggregateRows prices ${model}`, () => {
+    const [row] = aggregateRows([
+      { agent: "agent", model, day: "2026-07-07", input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }
+    ]);
+    assert.equal(row.costUsd, cost);
+    assert.deepEqual(row.costBreakdown, breakdown);
+  });
+}
 
 test("1h-TTL cache writes bill at 2x input, 5m at 1.25x", () => {
   // 1M total writes, 400k of them 1h: 600k*6.25 + 400k*10 = 3.75 + 4.00
-  const cost = estimateCostUsd("claude", "claude-opus-4-8", { input: 0, output: 0, cacheRead: 0, cacheWrite: 1_000_000, cacheWrite1h: 400_000 });
-  assert.equal(cost, 7.75);
-});
-
-test("fable and gpt-5.6-sol are priced", () => {
-  assert.equal(estimateCostUsd("claude", "claude-fable-5", { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }), 60);
-  assert.equal(estimateCostUsd("codex", "gpt-5.6-sol", { input: 1_000_000, output: 1_000_000, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }), 35);
-});
-
-test("unknown model yields null cost", () => {
-  assert.equal(estimateCostUsd("claude", "made-up-model", { input: 1, output: 1, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 }), null);
-});
-
-test("versioned model ids resolve to the bare pricing key (F1)", () => {
-  // Transcripts record e.g. "claude-opus-4-8-20260115"; a trailing -YYYYMMDD
-  // suffix (or any longer variant) must match the bare key.
-  assert.equal(resolveModelKey("claude-opus-4-8-20260115"), "claude-opus-4-8");
-  assert.equal(resolveModelKey("gpt-5.4-codex-preview"), "gpt-5.4-codex");
-  assert.equal(resolveModelKey("claude-opus-4-8"), "claude-opus-4-8");
-  assert.equal(resolveModelKey("mystery-model"), null);
-  // A versioned id must yield a real cost, not null.
-  const cost = estimateCostUsd("claude", "claude-opus-4-8-20260115", { input: 1_000_000, output: 0, cacheRead: 0, cacheWrite: 0, cacheWrite1h: 0 });
-  assert.equal(cost, 5);
+  const [row] = aggregateRows([
+    { agent: "claude", model: "claude-opus-4-8", day: "2026-07-07", input: 0, output: 0, cacheRead: 0, cacheWrite: 1_000_000, cacheWrite1h: 400_000 }
+  ]);
+  assert.equal(row.costUsd, 7.75);
+  assert.deepEqual(row.costBreakdown, { input: 0, output: 0, cache: 7.75 });
 });
 
 test("aggregateRows groups by agent/model/day and sums tokens", () => {
@@ -75,31 +68,6 @@ test("scanCodex reads the real event_msg/token_count/info shape and sums per-tur
   assert.equal(codex.reduce((a, r) => a + r.inputTokens, 0), 145);
   assert.equal(codex.reduce((a, r) => a + r.outputTokens, 0), 30);
   assert.equal(codex.reduce((a, r) => a + r.cacheReadTokens, 0), 5);
-});
-
-test("scanClaude also walks managed-account homes", async () => {
-  delete process.env.CLAUDE_CONFIG_DIR;
-  const host = await mkdtemp(join(tmpdir(), "orq-utok-host-")); // empty ~/.claude
-  const acctHome = await mkdtemp(join(tmpdir(), "orq-acct-home-"));
-  const pdir = join(acctHome, "projects", "p");
-  await mkdir(pdir, { recursive: true });
-  await writeFile(
-    join(pdir, "t.jsonl"),
-    JSON.stringify({ timestamp: "2026-07-07T00:00:00Z", message: { model: "claude-opus-4-8", usage: { input_tokens: 7, output_tokens: 3 } } }),
-    "utf8"
-  );
-  const scanner = new UsageTokensScanner({
-    userhome: host,
-    cacheFile: join(host, "c.json"),
-    now: T0,
-    accountHomes: () => [{ agent: "claude", home: acctHome }]
-  });
-  await scanner.init();
-  const snap = await scanner.snapshot(true);
-  const row = snap.rows.find((r) => r.agent === "claude");
-  assert.ok(row);
-  assert.equal(row?.inputTokens, 7);
-  assert.equal(row?.outputTokens, 3);
 });
 
 test("scanClaude reads the 1h cache-write split and skips zero-usage rows", async () => {
@@ -283,16 +251,9 @@ test("an unterminated tail line is counted once, then not double-counted when co
   assert.equal((await scanner.snapshot(true)).rows.find((r) => r.agent === "claude")?.inputTokens, 15);
 });
 
-test("managed-account home transcripts are counted under the bare agent, alongside the system home", async () => {
+test("managed-account home transcripts are counted with and without a system home", async () => {
   delete process.env.CLAUDE_CONFIG_DIR;
   const home = await mkdtemp(join(tmpdir(), "orq-utok-acct-"));
-  const sysPdir = join(home, ".claude", "projects", "p");
-  await mkdir(sysPdir, { recursive: true });
-  await writeFile(
-    join(sysPdir, "t.jsonl"),
-    JSON.stringify({ timestamp: "2026-07-07T00:00:00Z", requestId: "rs", message: { id: "ms", model: "claude-opus-4-8", usage: { input_tokens: 4, output_tokens: 1 } } }),
-    "utf8"
-  );
   const acctHome = join(home, "agent-accounts", "claude", "a1", "home");
   const acctPdir = join(acctHome, "projects", "p");
   await mkdir(acctPdir, { recursive: true });
@@ -308,7 +269,20 @@ test("managed-account home transcripts are counted under the bare agent, alongsi
     accountHomes: () => [{ agent: "claude", home: acctHome }]
   });
   await scanner.init();
+  const managed = await scanner.snapshot(true);
+  assert.deepEqual(managed.rows.map((r) => r.agent), ["claude"]);
+  assert.equal(managed.rows[0].inputTokens, 9);
+  assert.equal(managed.rows[0].outputTokens, 2);
+
+  const sysPdir = join(home, ".claude", "projects", "p");
+  await mkdir(sysPdir, { recursive: true });
+  await writeFile(
+    join(sysPdir, "t.jsonl"),
+    JSON.stringify({ timestamp: "2026-07-07T00:00:00Z", requestId: "rs", message: { id: "ms", model: "claude-opus-4-8", usage: { input_tokens: 4, output_tokens: 1 } } }),
+    "utf8"
+  );
   const snap = await scanner.snapshot(true);
   assert.deepEqual([...new Set(snap.rows.map((r) => r.agent))], ["claude"]);
   assert.equal(snap.rows.reduce((a, r) => a + r.inputTokens, 0), 13);
+  assert.equal(snap.rows.reduce((a, r) => a + r.outputTokens, 0), 3);
 });

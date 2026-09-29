@@ -9,9 +9,9 @@
 
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { promisify } from "node:util";
 
 const run = promisify(execFile);
@@ -26,8 +26,6 @@ const IDENTITY = {
 export interface TempRepo {
   /** The work tree. */
   dir: string;
-  /** A throwaway HOME, so no global gitconfig can reach these repos. */
-  home: string;
   /**
    * What the service is handed: PATH and HOME only. No identity — a capture
    * must supply its own, and must not depend on the user's git config.
@@ -45,11 +43,11 @@ export interface TempRepo {
   cleanup(): Promise<void>;
 }
 
-export async function createTempRepo(options: { init?: boolean } = {}): Promise<TempRepo> {
+export async function createTempRepo(): Promise<TempRepo> {
   const root = await mkdtemp(join(tmpdir(), "orq-ckpt-"));
   const dir = join(root, "work");
   const home = join(root, "home");
-  await run("mkdir", ["-p", dir, home]);
+  await Promise.all([mkdir(dir), mkdir(home)]);
 
   const gitEnv: Record<string, string> = {
     PATH: process.env.PATH ?? "/usr/bin:/bin",
@@ -59,7 +57,6 @@ export async function createTempRepo(options: { init?: boolean } = {}): Promise<
 
   const repo: TempRepo = {
     dir,
-    home,
     gitEnv,
     git: async (...args: string[]) => {
       const { stdout } = await run("git", args, {
@@ -101,8 +98,7 @@ export async function createTempRepo(options: { init?: boolean } = {}): Promise<
     },
     write: async (relativePath: string, contents: string) => {
       const target = join(dir, relativePath);
-      const parent = target.slice(0, target.lastIndexOf("/"));
-      await run("mkdir", ["-p", parent]);
+      await mkdir(dirname(target), { recursive: true });
       await writeFile(target, contents, "utf8");
     },
     cleanup: async () => {
@@ -110,14 +106,12 @@ export async function createTempRepo(options: { init?: boolean } = {}): Promise<
     }
   };
 
-  if (options.init !== false) {
-    await repo.git("init", "-q", "-b", "main", ".");
-  }
+  await repo.git("init", "-q", "-b", "main", ".");
   return repo;
 }
 
 /** Everything a capture must leave byte-identical. */
-export interface UserGitState {
+interface UserGitState {
   indexSha: string;
   head: string;
   branches: string;

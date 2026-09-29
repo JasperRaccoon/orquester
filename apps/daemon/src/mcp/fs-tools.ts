@@ -18,7 +18,7 @@ export type ListFilesResult = {
   truncated: boolean;
 };
 
-export type ReadFileWindowResult = {
+type ReadFileWindowResult = {
   path: string;
   text: string;
   size: number;
@@ -27,10 +27,6 @@ export type ReadFileWindowResult = {
   /** The bytes `text` covers, from `offset`: the next window starts at `offset + consumed`. */
   consumed: number;
 };
-
-function safeSandboxError(): FsSandboxError {
-  return new FsSandboxError("Path is not allowed (outside the sandbox).");
-}
 
 function codeOf(error: unknown): unknown {
   return typeof error === "object" && error !== null && "code" in error
@@ -158,7 +154,7 @@ export class FsTools {
       return await assertInsideFsRoot(this.opts.fsRoot, target);
     } catch (error) {
       if (error instanceof FsSandboxError) {
-        throw safeSandboxError();
+        throw new FsSandboxError("Path is not allowed (outside the sandbox).");
       }
       throw error;
     }

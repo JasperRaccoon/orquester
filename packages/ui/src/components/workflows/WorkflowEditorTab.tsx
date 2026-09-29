@@ -8,11 +8,6 @@
  * is the focused tab — keyboard shortcuts only then. `runId` opens the Runs
  * mode on that run.
  *
- * **Runs mode is a slot.** `renderRunsMode(ctx)` — or, for MainView, which
- * passes no such prop, a renderer registered once with
- * `registerWorkflowRunsMode` — draws it; without either, `RunsModeFallback`
- * (a runs list and the run's overlay on a read-only canvas).
- *
  * The root is a keyboard surface: the chat's chords stand down inside it, and
  * every popover and modal here holds an open layer.
  */
@@ -27,7 +22,6 @@ import {
   isRunActive,
   outputHandles,
   placeNewNodes,
-  type Workflow,
   type WorkflowNodeType
 } from "@orquester/api";
 
@@ -71,39 +65,9 @@ import { Inspector } from "./inspector/Inspector";
 import { PhoneEditor } from "./phone/PhoneEditor";
 import { PhoneLayoutContext, useIsPhoneLayout } from "./phone/phone-context";
 import { RunNowPopover, type RunNowResult } from "./RunNowPopover";
-import { RunsModeFallback } from "./RunsModeFallback";
+import { WorkflowRunsMode } from "./RunsMode";
 import { useWorkflowEditor } from "./use-workflow-editor";
 import { WorkflowSettingsModal } from "./WorkflowSettingsModal";
-
-// ---------------------------------------------------------------------------
-// The Runs-mode slot
-// ---------------------------------------------------------------------------
-
-export interface WorkflowRunsModeContext {
-  workflowId: string;
-  /** The editor's draft (null while loading). */
-  workflow: Workflow | null;
-  /** The run to show (null: the renderer picks, e.g. the newest). */
-  runId: string | null;
-  selectRun: (runId: string | null) => void;
-  /** Back to the editor, optionally selecting a block. */
-  openEditor: (nodeId?: string) => void;
-  /** The project the tab is open in. */
-  projectPath: string;
-  active: boolean;
-  show: boolean;
-  /** Block summaries in the editor's words (agent / model labels). */
-  summaryContext: NodeSummaryContext;
-}
-
-export type WorkflowRunsModeRenderer = (context: WorkflowRunsModeContext) => React.ReactNode;
-
-let registeredRunsMode: WorkflowRunsModeRenderer | null = null;
-
-/** Plug the run view into every editor tab (MainView passes no `renderRunsMode`). `null` unplugs it. */
-export function registerWorkflowRunsMode(renderer: WorkflowRunsModeRenderer | null): void {
-  registeredRunsMode = renderer;
-}
 
 // ---------------------------------------------------------------------------
 // Props
@@ -121,8 +85,6 @@ export interface WorkflowEditorTabProps {
   active: boolean;
   /** Visible (the active tab, or any grid cell). */
   show: boolean;
-  /** Draws Runs mode; else the registered renderer, else the built-in list + overlay. */
-  renderRunsMode?: WorkflowRunsModeRenderer;
 }
 
 // ---------------------------------------------------------------------------
@@ -158,7 +120,7 @@ export const WorkflowEditorTab: React.FC<WorkflowEditorTabProps> = (props) => (
   </ReactFlowProvider>
 );
 
-const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId = null, projectPath, active, show, renderRunsMode }) => {
+const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId = null, projectPath, active, show }) => {
   const api = useApi();
   const flow = useReactFlow();
   const { editor, state } = useWorkflowEditor(workflowId);
@@ -556,22 +518,6 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
     [selectRun]
   );
 
-  const runsContext: WorkflowRunsModeContext = {
-    workflowId,
-    workflow: draft,
-    runId: selectedRunId,
-    selectRun,
-    openEditor: (nodeId) => {
-      setMode("editor");
-      if (nodeId) editor.select({ nodeIds: [nodeId], edgeIds: [] });
-    },
-    projectPath,
-    active,
-    show,
-    summaryContext
-  };
-  const runsRenderer = renderRunsMode ?? registeredRunsMode;
-
   const selection = state.selection;
   const emptyHint = draft !== null && draft.nodes.filter((node) => node.type !== "note").length <= 1 && draft.edges.length === 0;
   const fromNode = addMenu?.from ? draft?.nodes.find((node) => node.id === addMenu.from!.nodeId) : undefined;
@@ -646,10 +592,18 @@ const EditorTab: React.FC<WorkflowEditorTabProps> = ({ workflowId, title, runId 
     </>
   );
 
-  const runsContent = runsRenderer ? (
-    runsRenderer(runsContext)
-  ) : (
-    <RunsModeFallback workflowId={workflowId} runId={selectedRunId} onSelectRun={selectRun} summaryContext={summaryContext} show={show} />
+  const runsContent = (
+    <WorkflowRunsMode
+      workflowId={workflowId}
+      runId={selectedRunId}
+      selectRun={selectRun}
+      openEditor={(nodeId) => {
+        setMode("editor");
+        if (nodeId) editor.select({ nodeIds: [nodeId], edgeIds: [] });
+      }}
+      show={show}
+      summaryContext={summaryContext}
+    />
   );
 
   const overlays = (

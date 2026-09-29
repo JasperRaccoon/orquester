@@ -51,7 +51,7 @@ const CREATED: DomainEvent = {
   }
 };
 
-export interface HostIngestion {
+interface HostIngestion {
   /**
    * Ingest `events` in order, as the session emits them, then move the
    * ingestion clock past the §5.6 buffer's 250 ms flush and wait for what it

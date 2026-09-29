@@ -125,7 +125,7 @@ function parseGrokResumeCursor(value: unknown): GrokResumeCursor | null {
     : null;
 }
 
-export interface GrokSessionOptions {
+interface GrokSessionOptions {
   threadId: string;
   cwd: string;
   home: AccountHome;
@@ -169,7 +169,7 @@ export interface GrokSessionOptions {
 }
 
 /** Why a session ended without the user: what the closing row of work left running names. */
-export type GrokSessionEndCause = "restart" | "host";
+type GrokSessionEndCause = "restart" | "host";
 
 /**
  * The line a live `/loop`'s closing row says when an end the user did not
@@ -449,10 +449,6 @@ export class GrokSession {
 
   get version(): string | null {
     return this.agentVersion;
-  }
-
-  get reportedContextWindow(): number | undefined {
-    return this.contextWindow;
   }
 
   get slashCommands(): ReadonlyArray<{ name: string; description?: string; input?: { hint: string } }> {
@@ -967,7 +963,7 @@ export class GrokSession {
       )
     );
     this.normalizer.clearPlanFallback();
-    return await Promise.resolve({ outcome: "abandoned", feedback: XAI_EXIT_PLAN_FEEDBACK });
+    return { outcome: "abandoned", feedback: XAI_EXIT_PLAN_FEEDBACK };
   }
 
   // ----------------------------------------------------------------- turns

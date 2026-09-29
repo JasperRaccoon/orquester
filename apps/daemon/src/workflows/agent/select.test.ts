@@ -5,7 +5,6 @@ import type { AccountCooldown, AccountPolicy, AgentChainEntry } from "@orquester
 import {
   burntWindowResetAt,
   rankChainEntry,
-  sameFamilyAlternatives,
   selectAccount,
   type SelectAccountInput
 } from "./select.ts";
@@ -286,8 +285,6 @@ test("cross-family fallback: claude (all burnt or cooling) → codex (reauth, bu
     ["codex", "c2", "needsReauth"]
   ]);
 
-  // fromChainIndex starts later in the chain; onlyChainIndex never falls through.
-  assert.equal(selectAccount(input({ usage, accounts, chain, fromChainIndex: 2 })).chosen?.chainIndex, 2);
   assert.equal(selectAccount(input({ usage, accounts, chain, onlyChainIndex: 1 })).chosen, null);
 });
 
@@ -354,15 +351,14 @@ test("system: the family's system row, or its head row when it has no managed ac
   assert.equal(named.chosen?.accountId, "system");
 });
 
-test("sameFamilyAlternatives: the next eligible account of the same chain entry, never another entry", () => {
+test("onlyChainIndex: the next eligible account of the same chain entry, never another entry", () => {
   const usage: UsageResponse = { agents: [claudeUsage, agentRow("codex", [row("c1", "c1", { weekly: [5, DAY] })])] };
   const accounts = accountsOf(...claudeAccounts, account("codex", "c1"));
   const chain = [entry("claude", "m", { strategy: "soonest-reset", maxWeeklyPct: 85 }), entry("codex", "gpt-5.5")];
-  const next = sameFamilyAlternatives(input({ usage, accounts, chain, exclude: new Set(["claude:a-jasperclaude"]) }), 0);
+  const next = selectAccount(input({ usage, accounts, chain, onlyChainIndex: 0, exclude: new Set(["claude:a-jasperclaude"]) }));
   assert.equal(next.chosen?.accountLabel, "arakuma.panama");
-  const none = sameFamilyAlternatives(
-    input({ usage, accounts, chain, fromChainIndex: 0, exclude: new Set(["claude:a-jasperclaude", "claude:a-arakuma", "claude:a-jasperinuwu"]) }),
-    0
+  const none = selectAccount(
+    input({ usage, accounts, chain, onlyChainIndex: 0, exclude: new Set(["claude:a-jasperclaude", "claude:a-arakuma", "claude:a-jasperinuwu"]) })
   );
   assert.equal(none.chosen, null);
   assert.equal(none.earliestResetAt, at(DAY + 2 * HOUR), "therealeduard465's weekly reset");

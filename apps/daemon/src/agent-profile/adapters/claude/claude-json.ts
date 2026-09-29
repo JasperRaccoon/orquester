@@ -46,15 +46,6 @@ export function mcpServersOf(doc: ClaudeJsonDoc): Record<string, unknown> {
   return servers;
 }
 
-/**
- * The document, or `null` when the file does not exist. Throws an `Error`
- * when it does not parse (the caller turns that into a `fileErrors` entry).
- */
-export async function readClaudeJson(path: string): Promise<ClaudeJsonDoc | null> {
-  const text = await readTextIfExists(path);
-  return text === null ? null : parseClaudeJson(text);
-}
-
 export interface ClaudeJsonUpdateOptions {
   backups: ProfileBackups;
   agent: string;

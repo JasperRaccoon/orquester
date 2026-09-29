@@ -49,7 +49,7 @@ function finitePositiveInteger(value: unknown): number | undefined {
     : undefined;
 }
 
-export function claudeUsageInputTokens(usage: Record<string, unknown>): number {
+function claudeUsageInputTokens(usage: Record<string, unknown>): number {
   return (
     (finiteNonNegativeInteger(usage.input_tokens) ?? 0) +
     (finiteNonNegativeInteger(usage.cache_creation_input_tokens) ?? 0) +
@@ -57,11 +57,11 @@ export function claudeUsageInputTokens(usage: Record<string, unknown>): number {
   );
 }
 
-export function claudeUsageOutputTokens(usage: Record<string, unknown>): number {
+function claudeUsageOutputTokens(usage: Record<string, unknown>): number {
   return finiteNonNegativeInteger(usage.output_tokens) ?? 0;
 }
 
-export function lastClaudeUsageIteration(
+function lastClaudeUsageIteration(
   value: Record<string, unknown>
 ): Record<string, unknown> | undefined {
   const iterations = Array.isArray(value.iterations) ? value.iterations : [];
@@ -97,7 +97,7 @@ export interface ClaudeTokenUsageSnapshot extends ThreadTokenUsage {
   lastUsedTokens?: number;
 }
 
-export function makeTokenUsageSnapshot(input: {
+function makeTokenUsageSnapshot(input: {
   activeTokens: number;
   contextWindow?: number;
   totalProcessedTokens?: number;

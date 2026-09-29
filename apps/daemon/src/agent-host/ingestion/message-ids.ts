@@ -20,8 +20,8 @@ import type { RuntimeContentStreamKind, RuntimeEvent } from "@orquester/api/agen
  */
 export type MessageStreamRole = "assistant" | "reasoning";
 
-export const ASSISTANT_MESSAGE_ID_PREFIX = "assistant:";
-export const REASONING_MESSAGE_ID_PREFIX = "reasoning:";
+const ASSISTANT_MESSAGE_ID_PREFIX = "assistant:";
+const REASONING_MESSAGE_ID_PREFIX = "reasoning:";
 
 export function messageStreamRoleOf(messageId: string): MessageStreamRole {
   return messageId.startsWith(REASONING_MESSAGE_ID_PREFIX) ? "reasoning" : "assistant";
@@ -93,14 +93,9 @@ export function reasoningSegmentBaseKeyFromEvent(
   return `${stream}:${segmentBaseKeyFromEvent(event)}`;
 }
 
-/** The proposal buffer's identity, stable for a turn (§5.1 plan-text buffer). */
-export function proposedPlanIdForTurn(threadId: string, turnId: string): string {
-  return `plan:${threadId}:turn:${turnId}`;
-}
-
 export function proposedPlanIdFromEvent(event: RuntimeEvent, threadId: string): string {
   if (event.turnId !== undefined) {
-    return proposedPlanIdForTurn(threadId, String(event.turnId));
+    return `plan:${threadId}:turn:${String(event.turnId)}`;
   }
   if (event.itemId !== undefined) {
     return `plan:${threadId}:item:${event.itemId}`;
@@ -134,7 +129,7 @@ export function proposedPlanActivityId(planId: string): string {
   return `proposed-plan:${planId}`;
 }
 
-export const USER_MESSAGE_ID_PREFIX = "user:";
+const USER_MESSAGE_ID_PREFIX = "user:";
 
 /**
  * A REPLAYED user prompt's message id (E6). The live path never mints one —

@@ -167,13 +167,13 @@ const REASONING_EFFORT_RE = /^[a-z0-9][a-z0-9._-]{0,31}$/i;
  */
 export const GROK_EFFORT_OPTION_ID = "reasoningEffort";
 
-export interface GrokModelRequest {
+interface GrokModelRequest {
   modelId: string;
   /** Omitted entirely when there is no valid preference — see below. */
   meta?: { reasoningEffort: string };
 }
 
-export interface GrokModelState {
+interface GrokModelState {
   currentModelId?: string;
   currentReasoningEffort?: string;
 }

@@ -1,72 +1,26 @@
-/**
- * chat-client — driving chat sessions from inside the daemon, the way the Orquester MCP does
- * (workflows spec §2 "Driving agents").
- *
- * The workflow engine and the MCP share ONE set of helpers, all over `DaemonApi`: every call runs a
- * daemon route in-process (`app.inject`), so every gate the GUI has — the family gate, the
- * tab-then-thread order, `HOST_UNAVAILABLE` — applies by construction, and nothing here touches a
- * service directly (the MCP invariant, kept for the engine as well).
- *
- * The helpers still live beside the MCP tools that grew them (`mcp/reads.ts`, `mcp/wait.ts`,
- * `mcp/views.ts`, `mcp/agents.ts`); this module RE-EXPORTS the very same functions — never
- * wrappers — so both callers use the same behavior.
- * Import from here outside `mcp/`.
- *
- * Errors are the MCP's `ToolError {code, message}`: a daemon code passed through (`INVALID_OWNER`,
- * `HOST_UNAVAILABLE`, `COMMAND_REJECTED`, …) or `SESSION_NOT_FOUND` / `NOT_A_CHAT_SESSION`.
- */
+/** Shared DaemonApi helpers for workflows and MCP, preserving the daemon route gates. */
 
 import type { FastifyInstance } from "fastify";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { AgentChatService } from "../agent-chat/service.ts";
 import { InjectDaemonApi, type LivePath } from "../mcp/daemon-api.ts";
 
-// --- the seam ---------------------------------------------------------------
-export { InjectDaemonApi } from "../mcp/daemon-api.ts";
-export type { DaemonApi, DaemonMethod, DaemonResponse } from "../mcp/daemon-api.ts";
-
-// --- errors -----------------------------------------------------------------
-export { ToolError, daemonError, expectOk } from "../mcp/errors.ts";
-
-// --- reads and commands -----------------------------------------------------
-export {
-  findSession,
-  listSessions,
-  mintCommandId,
-  readThread,
-  requireChatSession,
-  sendCommand
-} from "../mcp/reads.ts";
-
-// --- waits (Broadcaster-driven, never sleeps) -------------------------------
-export { turnBaseline, turnOutcome, waitForTurn } from "../mcp/wait.ts";
-export type { TurnBaseline, TurnOutcome, WatchScope } from "../mcp/wait.ts";
-
-// --- what a turn said -------------------------------------------------------
+export type { DaemonApi } from "../mcp/daemon-api.ts";
+export { ToolError, expectOk } from "../mcp/errors.ts";
+export { listSessions, readThread, sendCommand } from "../mcp/reads.ts";
+export { turnBaseline } from "../mcp/wait.ts";
+export type { TurnBaseline } from "../mcp/wait.ts";
 export { assistantTextForTurn } from "../mcp/views.ts";
-
-// --- agents, models, accounts ------------------------------------------------
 export {
   findAgent,
-  findModel,
   loadAgents,
   resolveModelSelection,
   validateAccountId
 } from "../mcp/agents.ts";
-export type {
-  AgentAccountView,
-  AgentModelOptionView,
-  AgentModelView,
-  AgentSupports,
-  AgentView,
-  ResolvedSelection
-} from "../mcp/agents.ts";
-
-// --- the activity ladder a summary resolves to -------------------------------
+export type { AgentView } from "../mcp/agents.ts";
 export { resolveChatActivity } from "../agent-chat/activity-ladder.ts";
-export type { ChatActivityResolution, ChatActivityRung } from "../agent-chat/activity-ladder.ts";
 
-export interface InternalDaemonApiOptions {
+interface InternalDaemonApiOptions {
   /**
    * Bind to the ALWAYS-ON unix-socket app (`createServer(..., {authRequired: false, mode:
    * "local"})`). Never the HTTP app: it is hot-reloadable (a daemon config change rebuilds it), so

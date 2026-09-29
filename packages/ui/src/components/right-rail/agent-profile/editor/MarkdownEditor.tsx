@@ -26,7 +26,6 @@ import {
   markdownDraftFromForm,
   markdownEditorModel,
   markdownFormFromDocument,
-  markdownFormSignature,
   markdownNameHint,
   SKILL_BODY_PLACEHOLDER,
   validateMarkdownForm,
@@ -51,7 +50,7 @@ export const MarkdownCreateEditor: React.FC<{ kind: MarkdownKind; initialSource?
   // unsaved-changes guard over it: the other sources report it with their own.
   const [initialForm] = useState<MarkdownForm>(() => initialMarkdownForm(model));
   const [form, setForm] = useState<MarkdownForm>(initialForm);
-  const written = markdownFormSignature(form) !== markdownFormSignature(initialForm);
+  const written = JSON.stringify(form) !== JSON.stringify(initialForm);
   const toolbar = <SourceSwitcher value={source} onChange={setSource} />;
   switch (source) {
     case "git":
@@ -102,12 +101,12 @@ const WriteSource: React.FC<{
   const { agent, api } = useEditorEnv();
   // A new item compares with the empty form (a draft kept across a source switch is still unsaved).
   const [initialSignature] = useState(() =>
-    markdownFormSignature(detail ? form : initialMarkdownForm(model))
+    JSON.stringify(detail ? form : initialMarkdownForm(model))
   );
   const [showErrors, setShowErrors] = useState(false);
   const submit = useProfileSubmit();
   const validation = validateMarkdownForm(kind, model, form);
-  useReportDirty(markdownFormSignature(form) !== initialSignature);
+  useReportDirty(JSON.stringify(form) !== initialSignature);
 
   const change = useCallback(
     (patch: Partial<MarkdownForm>) => {

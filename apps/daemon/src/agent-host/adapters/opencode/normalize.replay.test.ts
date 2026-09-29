@@ -279,13 +279,6 @@ function eventsOfType<T extends RuntimeEvent["type"]>(
   );
 }
 
-function firstOfType<T extends RuntimeEvent["type"]>(
-  events: readonly RuntimeEvent[],
-  type: T
-): Extract<RuntimeEvent, { type: T }> | undefined {
-  return eventsOfType(events, type)[0];
-}
-
 /**
  * Run runtime events through the host's REAL ingestion and fold what it writes
  * with the real thread fold: the log's events, and the roster the user reads.
@@ -335,19 +328,6 @@ async function throughHost(
     state = applyDomainEvent(state, stamped);
   }
   return { log, roster: state.roster };
-}
-
-function sseTypes(name: string): Set<string> {
-  const types = new Set<string>();
-  for (const record of readFixture(name)) {
-    if (record.kind === "sse") {
-      const raw = asRawEvent(record.data);
-      if (raw !== null) {
-        types.add(raw.type);
-      }
-    }
-  }
-  return types;
 }
 
 // ---------------------------------------------------------------------------

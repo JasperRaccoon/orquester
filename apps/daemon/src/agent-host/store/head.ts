@@ -15,9 +15,8 @@
 import type { DomainEvent, ThreadHead } from "@orquester/api/agent-chat";
 
 /**
- * Advance the head by one event. Returns `head` unchanged (same reference)
- * when the event is one of the arms that projects nothing onto it, apart from
- * the `seq`/`updatedAt` stamp every event carries.
+ * Advance the head by one event, stamping `seq` and `updatedAt` even when the
+ * event changes no other head fields. Returns null until a thread is created.
  */
 export function applyEventToHead(head: ThreadHead | null, event: DomainEvent): ThreadHead | null {
   const next = projectHead(head, event);

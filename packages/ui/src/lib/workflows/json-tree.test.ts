@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { jsonChildPath, jsonChildren, jsonCopyText, jsonExpression } from "./json-tree.ts";
+import { jsonChildPath, jsonChildren, jsonCopyText } from "./json-tree.ts";
 
 describe("json tree helpers", () => {
   it("builds `{{…}}` paths: dots for identifiers, brackets for the rest", () => {
@@ -11,8 +11,6 @@ describe("json tree helpers", () => {
     assert.equal(jsonChildPath("nodes.Review.output.items", 0), "nodes.Review.output.items[0]");
     assert.equal(jsonChildPath("", "items"), "items");
     assert.equal(jsonChildPath("", 2), "[2]");
-    assert.equal(jsonExpression("nodes.A.output"), "{{nodes.A.output}}");
-    assert.equal(jsonExpression(""), "");
   });
 
   it("pages children with their paths", () => {

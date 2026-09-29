@@ -153,7 +153,7 @@ export class ProfileImportStore implements ProfileImports {
   constructor(options: ProfileImportStoreOptions) {
     this.dir = options.dir;
     this.existing = options.existing;
-    this.clone = options.clone ?? ((url, ref, dest, o) => gitClone(url, ref, dest, o));
+    this.clone = options.clone ?? gitClone;
     this.now = options.now ?? (() => new Date());
     this.ttlMs = options.ttlMs ?? IMPORT_TTL_MS;
     this.limits = { ...DEFAULT_IMPORT_LIMITS, ...options.limits };

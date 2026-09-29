@@ -104,7 +104,7 @@ async function probeFreePort(host: string): Promise<number> {
   });
 }
 
-export interface OpenCodeHealth {
+interface OpenCodeHealth {
   healthy: boolean;
   version: string;
 }
@@ -123,7 +123,7 @@ export interface OpenCodeServerHandle {
   release(): void;
 }
 
-export interface OpenCodeServerPoolOptions {
+interface OpenCodeServerPoolOptions {
   logger: AdapterLogger;
   /** Absolute path to the resolved `opencode` binary. */
   resolveBin: () => Promise<string>;

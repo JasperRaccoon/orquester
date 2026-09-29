@@ -85,7 +85,7 @@ const CODEX_COMMAND_CATALOG_NOTE = "Codex reports no commands";
  */
 export const MINIMUM_CODEX_VERSION = "0.154.0";
 
-export interface CodexProbeInput {
+interface CodexProbeInput {
   peer: CodexPeer;
   /** The `initialize` response, already obtained by the handshake. */
   initialize: CodexProtocol.InitializeResponse;

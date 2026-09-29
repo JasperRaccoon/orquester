@@ -213,7 +213,7 @@ interface ThreadState {
     { toolUseId: string; streamKind: string; turnId: string | null; agentId?: string }
   >;
   outbox: AppendableDomainEvent[];
-  pendingUpdates: AppendableDomainEvent[];
+  pendingUpdates: Extract<AppendableDomainEvent, { type: "thread.activity-appended" }>[];
   coalesceTimer: ReturnType<typeof setTimeout> | null;
   chain: Promise<void>;
 }
@@ -236,10 +236,6 @@ function defaultIdGen(): IdGen {
     messageId: (prefix: string) => mint(prefix),
     uuid: () => mint("")
   };
-}
-
-function messageRoleOf(messageId: string): ThreadMessageRole {
-  return messageStreamRoleOf(messageId) === "reasoning" ? "reasoning" : "assistant";
 }
 
 /**
@@ -528,7 +524,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     if (!hasRenderableText(flush.text)) {
       return;
     }
-    const role = messageRoleOf(flush.key);
+    const role = messageStreamRoleOf(flush.key);
     const turnId = state.messageTurn.get(flush.key) ?? null;
     const agentId = state.messageAgent.get(flush.key);
     state.projected.add(flush.key);
@@ -631,7 +627,9 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     return state.chain;
   }
 
-  function isToolUpdatedEvent(event: AppendableDomainEvent): boolean {
+  function isToolUpdatedEvent(
+    event: AppendableDomainEvent
+  ): event is Extract<AppendableDomainEvent, { type: "thread.activity-appended" }> {
     return (
       event.type === "thread.activity-appended" &&
       event.payload.activity.activityKind === "tool.updated"
@@ -644,13 +642,9 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     }
     const pending = state.pendingUpdates;
     state.pendingUpdates = [];
-    const activities = pending.map(
-      (event) =>
-        (event as Extract<AppendableDomainEvent, { type: "thread.activity-appended" }>).payload
-          .activity
-    );
+    const activities = pending.map((event) => event.payload.activity);
     const kept = new Set(coalesceToolUpdates(activities).map((activity) => activity.id));
-    return pending.filter((event, index) => kept.has(activities[index]!.id));
+    return pending.filter((event) => kept.has(event.payload.activity.id));
   }
 
   function cancelCoalesceWindow(state: ThreadState): void {
@@ -703,7 +697,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
    * `finalizeMessage` on purpose — see `turnDeliveredMessageIds`.
    */
   function noteDelivered(state: ThreadState, turnId: string | null, messageId: string): void {
-    if (turnId === null || messageRoleOf(messageId) !== "assistant") {
+    if (turnId === null || messageStreamRoleOf(messageId) !== "assistant") {
       return;
     }
     const delivered = state.turnDeliveredMessageIds.get(turnId) ?? new Set<string>();
@@ -811,7 +805,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
   ): void {
     const buffered = state.messages.take(messageId);
     const openedAt = state.messages.openedAt(messageId, input.occurredAt);
-    const role = messageRoleOf(messageId);
+    const role = messageStreamRoleOf(messageId);
     const agentId = state.messageAgent.get(messageId);
     const owner = agentId !== undefined ? { agentId } : {};
     const text =

@@ -160,7 +160,7 @@ export const IDLE_MS = 3000;
  * at its own (slower, coarser) cadence than it paints bytes. Upstream widens
  * 2s → 3s; this keeps the fork's 3s base and the same 1.5× ratio.
  */
-export const TITLE_DRIVEN_IDLE_MS = 4500;
+const TITLE_DRIVEN_IDLE_MS = 4500;
 
 /**
  * Output arriving within this window of local input is treated as the echo of

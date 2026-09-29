@@ -1206,7 +1206,7 @@ test("a fully consumed upload preserves the host answer and all body bytes", asy
   }
 });
 
-test("an over-cap chat upload answers 413 UPLOAD_TOO_LARGE through the MCP seam too, and ends its owned stream", async (t) => {
+test("an over-cap chat upload answers 413 UPLOAD_TOO_LARGE through the MCP seam too, and ends its owned stream", async () => {
   const f = await makeFixture(CLAUDE, { env: {} });
   const app = Fastify();
   try {

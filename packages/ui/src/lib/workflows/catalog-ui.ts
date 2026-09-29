@@ -88,10 +88,6 @@ export const BLOCK_ICONS: Record<WorkflowNodeType, LucideIcon> = {
   note: StickyNote
 };
 
-export function blockTitle(type: WorkflowNodeType): string {
-  return WORKFLOW_BLOCK_CATALOG[type]?.title ?? type;
-}
-
 // ---------------------------------------------------------------------------
 // The palette
 // ---------------------------------------------------------------------------

@@ -438,7 +438,7 @@ describe("codex replay — 05 an abandoned agentMessage (fixtures README obs. 22
 });
 
 describe("codex replay — 08 compaction", () => {
-  const { events, notifications } = replay("08-compaction.ndjson");
+  const { events } = replay("08-compaction.ndjson");
 
   it("synthesises thread.state.changed {state:'compacted'} from the item", () => {
     const compacted = events.find(

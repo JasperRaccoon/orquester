@@ -52,10 +52,10 @@ import { xaiMethodSpellings } from "./_generated/xai.ts";
 /** Which way a frame travelled. Stamped onto the raw log (§3.1). */
 export type AcpFrameDirection = "send" | "recv";
 
-export type AcpRequestHandler = (params: unknown, context: AcpRequestContext) => Promise<unknown>;
-export type AcpNotificationHandler = (params: unknown) => void;
+type AcpRequestHandler = (params: unknown, context: AcpRequestContext) => Promise<unknown>;
+type AcpNotificationHandler = (params: unknown) => void;
 
-export interface AcpRequestContext {
+interface AcpRequestContext {
   /** The method name as it arrived — which spelling, for the raw log. */
   readonly method: string;
   /** The JSON-RPC id, echoed verbatim on the reply. */
@@ -102,7 +102,7 @@ interface JsonRpcFrame {
   error?: unknown;
 }
 
-export interface AcpRequestOptions {
+interface AcpRequestOptions {
   timeoutMs?: number;
   signal?: AbortSignal;
 }

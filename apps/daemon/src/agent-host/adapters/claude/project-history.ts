@@ -112,7 +112,7 @@ function contentBlocks(content: unknown): Array<Record<string, unknown>> {
  * marker a compaction leaves behind in native history (the boundary message
  * is not a conversation row and `groupClaudeHistoryTurns` drops it).
  */
-export function compactSummaryText(item: unknown): string | undefined {
+function compactSummaryText(item: unknown): string | undefined {
   if (item === null || typeof item !== "object") {
     return undefined;
   }

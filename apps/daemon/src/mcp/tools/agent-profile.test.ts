@@ -374,21 +374,37 @@ test("get_agent_profile_item: an MCP server shows its secret KEYS only — even 
 test("get_agent_profile_item: credentials written into a server or marketplace URL are shown as ***", async () => {
   assert.equal(redactUrlCredentials(`https://user:${SECRETS[4]}@git.example/r.git`), "https://***@git.example/r.git");
   assert.equal(redactUrlCredentials(`https://${SECRETS[4]}@git.example/r.git`), "https://***@git.example/r.git");
+  assert.equal(redactUrlCredentials(`https://user:prefix@${SECRETS[4]}@git.example/r.git`), "https://***@git.example/r.git");
   assert.equal(redactUrlCredentials("https://git.example/a@b"), "https://git.example/a@b", "an @ in the path is no credential");
+  assert.equal(redactUrlCredentials(`https://user:${SECRETS[4]}@git.example:8443/a@b?tag=@next#@end`), "https://***@git.example:8443/a@b?tag=@next#@end");
   assert.equal(redactUrlCredentials("git@github.com:o/r.git"), "git@github.com:o/r.git");
   const api = seeded();
-  api.add("claude", "mcp", "remote");
-  api.mcps.set("claude/mcp:remote", { name: "remote", transport: "http", url: `https://bot:${SECRETS[4]}@mcp.example/x`, env: {}, headers: { Authorization: SECRETS[3]! } });
-  const mcp = (await call(api, "get_agent_profile_item", { agent: "claude", id: "mcp:remote" })).mcp as Record<string, unknown>;
+  const url = `https://bot:prefix@${SECRETS[4]}${"x".repeat(300)}@mcp.example/x`;
+  // Codex descriptions, OpenCode URLs and Claude targets all carry the server URL in summaries.
+  api.add("claude", "mcp", "remote", { description: url, meta: { url, target: url } });
+  api.mcps.set("claude/mcp:remote", { name: "remote", transport: "http", url, env: {}, headers: { Authorization: SECRETS[3]! } });
+  const remote = await call(api, "get_agent_profile_item", { agent: "claude", id: "mcp:remote" });
+  const mcp = remote.mcp as Record<string, unknown>;
   assert.equal(mcp.url, "https://***@mcp.example/x");
   assert.deepEqual(mcp.headers, [{ key: "Authorization", set: true }]);
+  const item = remote.item as Record<string, unknown>;
+  assert.equal(item.description, "https://***@mcp.example/x", "redact before truncating a long userinfo");
+  assert.deepEqual(item.meta, { url: "https://***@mcp.example/x", target: "https://***@mcp.example/x" });
+  const listed = await call(api, "get_agent_profile", { agent: "claude", query: "remote" });
+  assert.deepEqual((listed.items as Record<string, unknown>[])[0]!.meta, item.meta);
+  assertNoSecrets(JSON.stringify(listed), "the profile list");
   // An update that does not name url keeps the real one daemon-side.
   await call(api, "update_agent_profile_item", { agent: "claude", id: "mcp:remote", mcp: { headers: { "X-Extra": "1" } } });
-  assert.equal(api.mcps.get("claude/mcp:remote")!.url, `https://bot:${SECRETS[4]}@mcp.example/x`);
-  api.add("claude", "marketplace", "private");
+  assert.equal(api.mcps.get("claude/mcp:remote")!.url, url);
+  api.add("claude", "marketplace", "private", {
+    description: `https://x:${SECRETS[4]}@git.example/m.git`,
+    meta: { source: `https://x:${SECRETS[4]}@git.example/m.git` }
+  });
   api.on("GET", "/api/agent-profile/claude/items/marketplace%3Aprivate", { status: 200, body: { kind: "marketplace", item: api.find("claude", "marketplace:private"), marketplace: { name: "private", source: { type: "git", url: `https://x:${SECRETS[4]}@git.example/m.git`, ref: "main" } } } });
   const market = await call(api, "get_agent_profile_item", { agent: "claude", id: "marketplace:private" });
   assert.deepEqual((market.marketplace as { source: unknown }).source, { type: "git", url: "https://***@git.example/m.git", ref: "main" });
+  assert.equal((market.item as Record<string, unknown>).description, "https://***@git.example/m.git");
+  assert.deepEqual((market.item as Record<string, unknown>).meta, { source: "https://***@git.example/m.git" });
 });
 
 test("get_agent_profile_item: a skill's frontmatter, body and files; a body too big is cut and flagged", async () => {
@@ -512,6 +528,19 @@ test("update_agent_profile_item: a stale revision answers PROFILE_CONFLICT with 
   });
   const gone = await rejects(call(api, "update_agent_profile_item", { agent: "claude", id: "skill:handoff", skill: { body: "x" } }), "PROFILE_CONFLICT", /no longer exists/);
   assert.deepEqual(gone.detail, { itemGone: true });
+});
+
+test("update_agent_profile_item: a failed conflict snapshot reread preserves the original refusal", async () => {
+  const api = seeded();
+  const original = { code: "PROFILE_CONFLICT", message: "It changed on disk.", detail: { revision: "r-new" } };
+  api.on("PUT", "/api/agent-profile/claude/items/mcp%3Ajira", { status: 409, body: { error: original } });
+  api.on("GET", "/api/agent-profile/claude", err(503, "HOST_UNAVAILABLE", "The daemon is restarting."));
+  const conflict = await rejects(call(api, "update_agent_profile_item", {
+    agent: "claude", id: "mcp:jira", revision: "stale", mcp: { args: ["changed.js"] }
+  }), "PROFILE_CONFLICT");
+  assert.equal(conflict.message, original.message);
+  assert.deepEqual(conflict.detail, original.detail);
+  assert.ok(api.find("claude", "mcp:jira"), "a failed read does not mean the item was deleted");
 });
 
 test("update_agent_profile_item (skill, hook): the body is kept when omitted, frontmatter keys pass through, null clears a hook field", async () => {

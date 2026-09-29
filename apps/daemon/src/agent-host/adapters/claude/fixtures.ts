@@ -24,7 +24,7 @@ import { claudeCanUseToolRoute, claudeRequestKey } from "./decisions.ts";
 import { ClaudeNormalizer, extractExitPlanModePlan } from "./normalize.ts";
 import { parseAskUserQuestionInput } from "./questions.ts";
 
-export const CLAUDE_FIXTURES_DIR = nodePath.resolve(
+const CLAUDE_FIXTURES_DIR = nodePath.resolve(
   nodePath.dirname(fileURLToPath(import.meta.url)),
   "../../../../test/fixtures/claude"
 );
@@ -67,7 +67,7 @@ export function countingIds(): IdGen {
   };
 }
 
-export interface ReplayResult {
+interface ReplayResult {
   events: RuntimeEvent[];
   /** Every `type` / `type:subtype` the capture contained. */
   observed: string[];

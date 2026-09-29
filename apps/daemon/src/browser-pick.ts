@@ -3,13 +3,13 @@ import type { BrowserPickPayload, BrowserPickTarget } from "@orquester/api";
 // Hard budgets — the page is hostile; everything it reports gets re-clamped
 // here regardless of what the in-page script promised. (Pattern from Orca's
 // clampGrabPayload: guest-side budget + independent daemon-side re-validation.)
-export const HTML_SNIPPET_MAX = 4096;
-export const TEXT_SNIPPET_MAX = 400;
-export const SELECTOR_MAX = 512;
-export const ELEMENT_PATH_MAX = 512;
-export const ATTR_VALUE_MAX = 256;
-export const MAX_CLASSES = 24;
-export const MAX_REACT_COMPONENTS = 8;
+const HTML_SNIPPET_MAX = 4096;
+const TEXT_SNIPPET_MAX = 400;
+const SELECTOR_MAX = 512;
+const ELEMENT_PATH_MAX = 512;
+const ATTR_VALUE_MAX = 256;
+const MAX_CLASSES = 24;
+const MAX_REACT_COMPONENTS = 8;
 export const SCREENSHOT_MAX_BYTES = 2 * 1024 * 1024;
 
 const ATTR_ALLOW = new Set([

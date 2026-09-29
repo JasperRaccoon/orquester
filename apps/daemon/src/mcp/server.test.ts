@@ -124,7 +124,7 @@ test("tools/list exposes the documented public names and strict argument schemas
     assert.deepEqual(tools.map((t) => t.name), EXPECTED_TOOLS);
     for (const t of tools) {
       assert.ok(t.annotations, `${t.name} has annotations`);
-      // What tools/call enforces (argumentsSchema is strict): an argument name the tool does not list is refused.
+      // tools/call rejects argument names the tool does not list.
       assert.equal(t.inputSchema.additionalProperties, false, `${t.name} advertises no additional properties`);
     }
   } finally { await app.close(); }

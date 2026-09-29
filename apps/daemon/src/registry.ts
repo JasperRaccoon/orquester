@@ -156,12 +156,6 @@ const DEFAULT_IDES: RegistryDef[] = materialize(REGISTRY.ides as readonly Regist
 const DEFAULT_FILE_EXPLORERS: RegistryDef[] = materialize(REGISTRY.fileExplorers as readonly RegistryEntryDef[]);
 const DEFAULT_BROWSERS: RegistryDef[] = materialize(REGISTRY.browsers as readonly RegistryEntryDef[]);
 
-/** The platform's generic "open this" command. */
-function osOpenerForKind(kind: RegistryKind): string[] {
-  if (kind === "file-explorer" || kind === "browser") return osOpener();
-  return [];
-}
-
 /**
  * Owns the catalog of launchable shells, agents, IDEs, file explorers and
  * browsers. Resolves each entry's binary against PATH (and common install
@@ -455,7 +449,7 @@ function mergeEnv(...parts: Array<Record<string, string> | undefined>): Record<s
 
 function publicEntry(entry: RegistryEntry): RegistryEntry {
   const { env: _env, ...rest } = entry;
-  return { ...rest };
+  return rest;
 }
 
 export function parseEnvFile(raw: string): Record<string, string> {

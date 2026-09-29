@@ -1,7 +1,5 @@
 /**
- * The editor tab's Runs mode (workflows spec §7.3, §7.4) — the renderer
- * registered with `registerWorkflowRunsMode`, composed from the run view's
- * components:
+ * The editor tab's Runs mode (workflows spec §7.3, §7.4):
  *
  * - **Desktop:** the runs list (live, filterable, paged) on the left; the
  *   selected run's header (status, trigger, timing, Cancel / Retry / Retry
@@ -24,6 +22,7 @@ import { isRunActive } from "@orquester/api";
 
 import { useApi } from "../../context/orquester-context";
 import { cn } from "../../lib/cn";
+import type { NodeSummaryContext } from "../../lib/workflows/catalog-ui";
 import { formatAgo } from "../../lib/workflows/format";
 import { useWorkflowRun } from "../../lib/workflows/hooks";
 import { deriveRunOverlay } from "../../lib/workflows/overlay";
@@ -42,19 +41,24 @@ import { StatusGlyph, useNow, type WorkflowRunsApi } from "./runs/shared";
 import { useRunActions } from "./runs/use-run-actions";
 import { useRunHistory } from "./runs/use-run-history";
 import { useRunOnScreen } from "./runs/use-run-on-screen";
-import type { WorkflowRunsModeContext } from "./WorkflowEditorTab";
 
-export function renderWorkflowRunsMode(context: WorkflowRunsModeContext): React.ReactNode {
-  return <WorkflowRunsMode {...context} />;
+interface WorkflowRunsModeProps {
+  workflowId: string;
+  /** Null selects the newest live run, or the newest finished run. */
+  runId: string | null;
+  selectRun: (runId: string | null) => void;
+  openEditor: (nodeId?: string) => void;
+  show: boolean;
+  summaryContext: NodeSummaryContext;
 }
 
-export const WorkflowRunsMode: React.FC<WorkflowRunsModeContext> = (context) => {
+export const WorkflowRunsMode: React.FC<WorkflowRunsModeProps> = (context) => {
   const phone = usePhoneLayout();
   return phone ? <PhoneRuns {...context} /> : <DesktopRuns {...context} />;
 };
 
 /** Everything both layouts read: the history, the run, its timeline, the selected block. */
-function useRunsView(context: WorkflowRunsModeContext) {
+function useRunsView(context: WorkflowRunsModeProps) {
   const api = useApi() as unknown as WorkflowRunsApi;
   const history = useRunHistory(api, context.workflowId);
   const runId = pickRunId(context.runId, history.runs);
@@ -88,7 +92,7 @@ function useRunsView(context: WorkflowRunsModeContext) {
 // Desktop
 // ---------------------------------------------------------------------------
 
-const DesktopRuns: React.FC<WorkflowRunsModeContext> = (context) => {
+const DesktopRuns: React.FC<WorkflowRunsModeProps> = (context) => {
   const view = useRunsView(context);
   const { history, entry, runId, now, definition, overlay, blockId, actions } = view;
 
@@ -218,7 +222,7 @@ const NoRun: React.FC<{ loading: boolean; hasRuns: boolean; onEditor: () => void
 // Phone
 // ---------------------------------------------------------------------------
 
-const PhoneRuns: React.FC<WorkflowRunsModeContext> = (context) => {
+const PhoneRuns: React.FC<WorkflowRunsModeProps> = (context) => {
   const view = useRunsView(context);
   const { history, entry, runId, now, definition, overlay, actions } = view;
   const [pane, setPane] = useState<PhoneRunPane>("timeline");

@@ -30,11 +30,11 @@ function retryAfterMs(res: Response, floorMs: number): number {
 }
 
 /** Anthropic's usage endpoint answers ~1 request per 5 minutes per account (429, `retry-after: 300`). */
-export const CLAUDE_USAGE_MIN_INTERVAL_MS = 5 * 60_000;
+const CLAUDE_USAGE_MIN_INTERVAL_MS = 5 * 60_000;
 /** A live reading (off a model response) this recent makes a poll pointless. */
-export const CLAUDE_LIVE_FRESH_MS = 5 * 60_000;
+const CLAUDE_LIVE_FRESH_MS = 5 * 60_000;
 /** A reading older than this is served greyed. */
-export const CLAUDE_USAGE_STALE_AFTER_MS = 15 * 60_000;
+const CLAUDE_USAGE_STALE_AFTER_MS = 15 * 60_000;
 /** A `Retry-After` longer than this is not believed. */
 const CLAUDE_MAX_RETRY_AFTER_MS = 24 * 60 * 60_000;
 
@@ -108,7 +108,6 @@ export function createClaudeSource(opts: {
   const doFetch = fetch;
   const claudeHome = opts.claudeHome || process.env.CLAUDE_CONFIG_DIR || join(opts.userhome, ".claude");
   const credsFile = join(claudeHome, ".credentials.json");
-  const minIntervalMs = CLAUDE_USAGE_MIN_INTERVAL_MS;
   let record: ClaudeUsageRecord = opts.state?.store.get(opts.state.key) ?? {
     lastGood: null,
     lastFetchAt: 0,
@@ -160,7 +159,7 @@ export function createClaudeSource(opts: {
     // A stamp in the future (the clock moved back) is not believed.
     const sinceFetch = now - record.lastFetchAt;
     const sinceLive = now - record.liveAt;
-    if (sinceFetch >= 0 && sinceFetch < minIntervalMs) return serve();
+    if (sinceFetch >= 0 && sinceFetch < CLAUDE_USAGE_MIN_INTERVAL_MS) return serve();
     if (record.lastGood && sinceLive >= 0 && sinceLive < CLAUDE_LIVE_FRESH_MS) return serve();
     if (now < record.retryAt && record.retryAt - now <= CLAUDE_MAX_RETRY_AFTER_MS) return serve();
     if (expired) return serve();
@@ -179,7 +178,7 @@ export function createClaudeSource(opts: {
       });
       if (res.status === 429) {
         // Floor at the endpoint's own window, persisted: a restart must not re-ask.
-        const wait = Math.min(retryAfterMs(res, minIntervalMs), CLAUDE_MAX_RETRY_AFTER_MS);
+        const wait = Math.min(retryAfterMs(res, CLAUDE_USAGE_MIN_INTERVAL_MS), CLAUDE_MAX_RETRY_AFTER_MS);
         save({ ...record, retryAt: now + wait, failed: true });
         opts.logger?.warn?.("usage: claude usage endpoint rate-limited (429); backing off");
         return serve();
@@ -218,8 +217,6 @@ export function createClaudeSource(opts: {
         stale: false,
         session,
         weekly,
-        // Model-scoped weeklies ride only the endpoint: kept from its last reading.
-        ...(good?.scopedWindows ? { scopedWindows: good.scopedWindows } : {}),
         asOf: new Date(reading.observedAt).toISOString()
       },
       liveAt: reading.observedAt,
@@ -417,7 +414,7 @@ export function createGrokSource(opts: {
 async function rolloutsNewestFirst(sessionsDir: string): Promise<string[]> {
   let entries: string[];
   try {
-    entries = await readdir(sessionsDir, { recursive: true } as { recursive: true });
+    entries = await readdir(sessionsDir, { recursive: true });
   } catch {
     return []; // no sessions dir yet
   }

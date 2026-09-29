@@ -314,7 +314,7 @@ describe("engine fixes: registration and block ids", () => {
     const gate = deferred();
     const create = h.runStore.create.bind(h.runStore);
     let seenDuringCreate: string[] | null = null;
-    h.runStore.create = async (run) => {
+    h.runStore.create = async () => {
       seenDuringCreate = h.engine.activeRunIds();
       await gate.promise;
       throw new Error("disk full");

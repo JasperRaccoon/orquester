@@ -40,7 +40,7 @@ import {
   type RowGlyphName
 } from "../row-chrome";
 import { COMPACTING_LABEL } from "../row-format";
-import { deriveAgentSpawnSummary } from "../../roster/spawn-summary";
+import { deriveAgentSpawnSummary } from "../../../../lib/agent-chat/roster.logic";
 import { TimelineRowTimestamp } from "../timestamp";
 import { ChatMarkdown } from "../markdown/ChatMarkdown";
 import { InlineDiff, looksLikeUnifiedDiff } from "./InlineDiff";

@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { beforeEach,describe,it } from "node:test";
 
 import {
-buildProposedPlanMarkdownFilename,
 deriveActivePlanState,
 findLatestProposedPlan,
 hasActionableProposedPlan,
@@ -124,8 +123,6 @@ describe("proposal helpers", () => {
   it("reads the title from the first heading", () => {
     assert.equal(proposedPlanTitle("# Ship it\nbody"), "Ship it");
     assert.equal(proposedPlanTitle("no heading"), null);
-    assert.equal(buildProposedPlanMarkdownFilename("# Ship it!"), "ship-it.md");
-    assert.equal(buildProposedPlanMarkdownFilename("no heading"), "plan.md");
   });
 
   it("picks the current turn's proposal, else the newest of any turn", () => {

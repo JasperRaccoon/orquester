@@ -758,9 +758,6 @@ const failedWith = (text: string | null): ComposerSendOutcome => ({
   notice: "Could not send the message."
 });
 
-/** What `submit` leaves behind before the send goes out: nothing, tray included. */
-const EMPTIED: { text: string; attachments: StagedAttachment[] } = { text: "", attachments: [] };
-
 test("what was typed or staged while it was in flight stays, behind it, and no chip is doubled", () => {
   const report = fileChip("report");
   // A browser pick is keyed by its ref, so delivering it again stages the same key.

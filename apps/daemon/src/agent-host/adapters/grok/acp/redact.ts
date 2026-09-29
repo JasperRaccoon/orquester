@@ -37,7 +37,7 @@ const MAX_DEPTH = 24;
 /** Arrays longer than this keep their head; the rest becomes one marker. */
 const MAX_ARRAY_ITEMS = 256;
 
-export interface RedactAcpOptions {
+interface RedactAcpOptions {
   /** Absolute home dirs collapsed to `~`. Longest first is handled inside. */
   homeDirs?: readonly string[];
 }

@@ -31,10 +31,6 @@ export async function readThread(api: DaemonApi, sessionId: string): Promise<Thr
   return body.thread;
 }
 
-export function mintCommandId(): string {
-  return randomUUID();
-}
-
 const defaultRetryDelay = (attempt: number): number => Math.min(4_000, 250 * 2 ** attempt);
 const RETRIES = 3;
 
@@ -49,7 +45,7 @@ const RETRIES = 3;
 export async function sendCommand(api: DaemonApi, sessionId: string, name: AgentChatCommandName | "account", body: Record<string, unknown>, opts?: { retryDelayMs?: (attempt: number) => number; commandId?: string }): Promise<{ seq: number }> {
   const path = name === "account" ? agentChatRoutes.account(sessionId) : agentChatCommandPath(sessionId, name);
   const delay = opts?.retryDelayMs ?? defaultRetryDelay;
-  const payload = { ...body, commandId: opts?.commandId ?? mintCommandId() };
+  const payload = { ...body, commandId: opts?.commandId ?? randomUUID() };
   // Every attempt returns or throws by the last one, so the loop needs no exit and nothing follows it.
   for (let attempt = 0; ; attempt += 1) {
     // Wait only between attempts: never before the first, never after the last.

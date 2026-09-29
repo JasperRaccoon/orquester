@@ -42,18 +42,6 @@ import { ACTIVE_SUBAGENT_STATUSES, ROSTER_LIMIT, TERMINAL_SUBAGENT_STATUSES } fr
 const RECENT_ACTIVITY_LIMIT = 6;
 const SUMMARY_CHAR_LIMIT = 180;
 
-/**
- * True when this activity's payload does NOT belong on the roster as an agent.
- * Classification happens exactly once, host-side at ingestion
- * (`classifyTaskAgentKind` → the persisted `agentKind` stamp); this only reads
- * it. Rows without a stamp are background by definition.
- *
- * *T3: `state/subagentRuntime.ts:110-112`.*
- */
-export function isBackgroundTaskActivity(payload: Record<string, unknown>): boolean {
-  return payload.agentKind !== "agent";
-}
-
 function isTerminal(status: RuntimeSubagentStatus): boolean {
   return TERMINAL_SUBAGENT_STATUSES.has(status);
 }

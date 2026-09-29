@@ -2,7 +2,7 @@ import { EventEmitter } from "node:events";
 import type { AgentUsage, UsageResponse } from "@orquester/api";
 import { usageAgentEnabled, type UsagePrefs } from "@orquester/config";
 
-export interface UsageServiceDeps {
+interface UsageServiceDeps {
   /** Returns the Claude agent (possibly stale) or null when not logged in. */
   fetchClaude: () => Promise<AgentUsage | null>;
   /** Returns the Codex agent or null when not logged in / API-key mode. */
@@ -10,7 +10,6 @@ export interface UsageServiceDeps {
   /** Returns the Grok agent or null when no xai/grok credential exists. */
   readGrok?: () => Promise<AgentUsage | null>;
   getPrefs: () => Promise<UsagePrefs>;
-  now: () => number;
 }
 
 const DEFAULT_PREFS: UsagePrefs = {

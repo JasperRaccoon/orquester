@@ -98,7 +98,7 @@ export interface Waker {
   dispose(): void;
 }
 
-export function createWaker(api: DaemonApi, sessionId: string, clock: Clock, signal: AbortSignal): Waker {
+function createWaker(api: DaemonApi, sessionId: string, clock: Clock, signal: AbortSignal): Waker {
   let dirty = false;
   let wake: (() => void) | null = null;
   const fire = (): void => {
@@ -170,7 +170,7 @@ export async function observe(api: DaemonApi, sessionId: string, logger?: Workfl
  * background liveness, no continuing goal — the conditions the host's `identitySwitchRefusal` reads,
  * as far as the summary and the thread show them.
  */
-export function isIdle(obs: Observation): boolean {
+function isIdle(obs: Observation): boolean {
   const s = obs.summary;
   const snap = obs.snapshot;
   if (!s || !snap) return false;

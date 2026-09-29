@@ -20,7 +20,6 @@ export class TodoError extends Error {
 export class TodoListManager {
   private readonly todos = new Map<string, TodoRecord>();
   readonly lifecycle = new EventEmitter();
-  private loaded = false;
 
   constructor(
     private readonly indexPath: string,
@@ -39,7 +38,6 @@ export class TodoListManager {
         this.logger.warn(`Failed to read todos index: ${String(error)}`);
       }
     }
-    this.loaded = true;
   }
 
   private async persist(): Promise<void> {

@@ -1,8 +1,8 @@
 import type { AgentAccount, AgentUsage, UsageAccount, UsageResponse, UsageWindow } from "@orquester/api";
 
-export interface UsageWindowView { id: string; label: string; percentUsed: number; resetsAt?: string; resetsIn?: string }
-export interface UsageAccountView { id: string; label: string; plan?: string; available: boolean; stale: boolean; asOf?: string; ageMinutes?: number; needsReauth?: boolean; email?: string; windows: UsageWindowView[] }
-export interface UsageAgentView { id: string; name: string; available: boolean; stale: boolean; asOf?: string; ageMinutes?: number; plan?: string; windows?: UsageWindowView[]; accounts: UsageAccountView[]; system?: UsageAccountView; aggregate?: { strategy: string; accountCount: number; staleAccountCount?: number } }
+interface UsageWindowView { id: string; label: string; percentUsed: number; resetsAt?: string; resetsIn?: string }
+interface UsageAccountView { id: string; label: string; plan?: string; available: boolean; stale: boolean; asOf?: string; ageMinutes?: number; needsReauth?: boolean; email?: string; windows: UsageWindowView[] }
+interface UsageAgentView { id: string; name: string; available: boolean; stale: boolean; asOf?: string; ageMinutes?: number; plan?: string; windows?: UsageWindowView[]; accounts: UsageAccountView[]; system?: UsageAccountView; aggregate?: { strategy: string; accountCount: number; staleAccountCount?: number } }
 
 const AGENT_NAMES: Record<string, string> = { claude: "Claude Code", codex: "Codex", grok: "Grok Build" };
 

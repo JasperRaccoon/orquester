@@ -61,7 +61,7 @@ const METHOD_NOT_FOUND_CODE = -32601;
 const METHOD_NOT_FOUND_MESSAGE = "methodNotFound";
 
 /** A JSON-RPC error object as this server spells it — no `jsonrpc`, no `data` guarantee. */
-export interface CodexRpcErrorShape {
+interface CodexRpcErrorShape {
   code: number;
   message: string;
   data?: unknown;
@@ -174,7 +174,7 @@ export interface CodexServerRequest<TMethod extends ServerRequestMethod = Server
   params: ServerRequestParamsByMethod[TMethod];
 }
 
-export interface CodexPeerHandlers {
+interface CodexPeerHandlers {
   /**
    * Answer one server→client request. Resolving sends `{id, result}`; throwing
    * a {@link CodexRequestRefusal} sends that error, throwing a
@@ -202,7 +202,7 @@ export interface CodexPeerHandlers {
   onMalformedLine(line: string, error: unknown): void;
 }
 
-export interface CodexPeerOptions {
+interface CodexPeerOptions {
   stdin: Writable;
   stdout: NodeJS.ReadableStream;
   handlers: CodexPeerHandlers;
@@ -238,7 +238,7 @@ export class CodexPeer {
 
   constructor(private readonly options: CodexPeerOptions) {
     options.stdout.on("data", (chunk: Buffer | string) => {
-      for (const line of this.reader.push(typeof chunk === "string" ? chunk : chunk)) {
+      for (const line of this.reader.push(chunk)) {
         this.handleLine(line);
       }
     });

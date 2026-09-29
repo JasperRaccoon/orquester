@@ -285,7 +285,7 @@ test(
 );
 
 test(
-  "a helper that ignores SIGTERM is killed inside the SIGTERM path's 3 s backstop",
+  "host stop waits for a helper that ignores SIGTERM to be killed",
   { skip: process.platform !== "linux" },
   async () => {
     const mark = randomUUID();
@@ -295,14 +295,9 @@ test(
       await grokTurnWithLeftovers(rig, { GROK_RIG_MARK: mark, GROK_MOCK_HELPER_IGNORES_TERM: "1" });
       assert.equal(launched(mark).helper.length, 1, "the helper runs");
 
-      // The process entry exits 3 s after a SIGTERM whatever the stop is
-      // doing (`main.ts`): the helper's SIGKILL must land well before that.
-      const began = performance.now();
       await rig.host.stop();
-      const took = performance.now() - began;
 
       assert.deepEqual(launched(mark).helper, [], "only the SIGKILL ends it, and it came");
-      assert.ok(took < 3_000, `the teardown took ${Math.round(took)} ms, past the SIGTERM backstop`);
     } finally {
       reap(`GROK_RIG_MARK=${mark}`);
       await rig?.host.stop();

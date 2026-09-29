@@ -34,12 +34,12 @@ import { redactAcpFrame } from "./redact.ts";
  *
  * *T3: `apps/server/src/provider/acp/AcpSessionRuntime.ts:596-608`.*
  */
-export const ACP_CLIENT_CAPABILITIES = {
+const ACP_CLIENT_CAPABILITIES = {
   fs: { readTextFile: false, writeTextFile: false },
   terminal: false
 } as const;
 
-export interface AcpConnectionOptions {
+interface AcpConnectionOptions {
   /** Absolute path to the resolved binary. Never a bare name (§10). */
   command: string;
   args: readonly string[];
@@ -174,10 +174,6 @@ export class AcpConnection {
   async stop(): Promise<void> {
     this.hostInitiatedStop = true;
     await this.child.kill("SIGTERM");
-  }
-
-  get wasHostInitiated(): boolean {
-    return this.hostInitiatedStop;
   }
 
   private attach(): void {

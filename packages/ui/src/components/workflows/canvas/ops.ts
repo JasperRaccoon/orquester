@@ -10,7 +10,6 @@ import {
   defaultNodeName,
   outputHandles,
   type Workflow,
-  type WorkflowEdge,
   type WorkflowNode,
   type WorkflowNodeType
 } from "@orquester/api";
@@ -121,14 +120,4 @@ export function updateNode<W extends Graph>(workflow: W, nodeId: string, update:
     return next;
   });
   return changed ? { ...workflow, nodes } : workflow;
-}
-
-/** Edges whose source handle no longer exists (a switch case removed) go with it. */
-export function pruneDanglingEdges<W extends Graph>(workflow: W): W {
-  const byId = new Map(workflow.nodes.map((node) => [node.id, node]));
-  const edges = workflow.edges.filter((edge: WorkflowEdge) => {
-    const source = byId.get(edge.source);
-    return source !== undefined && byId.has(edge.target) && outputHandles(source).includes(edge.sourceHandle);
-  });
-  return edges.length === workflow.edges.length ? workflow : { ...workflow, edges };
 }

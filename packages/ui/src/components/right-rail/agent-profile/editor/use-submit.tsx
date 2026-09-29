@@ -65,7 +65,7 @@ export function useProfileSubmit(): ProfileSubmit {
         const info = profileError(error);
         if (!alive.current) {
           // Closed while it was in flight: the editor that would show why is gone.
-          setAgentProfileNotice({ tone: "error", text: closedSaveFailure(info) });
+          setAgentProfileNotice({ tone: "error", text: `Your change was not saved: ${info.message}` });
           return;
         }
         setState({ busy: false, error: info, placement: profileErrorPlacement(info) });
@@ -93,11 +93,6 @@ export function useProfileSubmit(): ProfileSubmit {
     clear,
     nameError: state.placement === "name" ? state.error?.message : undefined
   };
-}
-
-/** The panel's notice for a save refused after its editor closed. */
-export function closedSaveFailure(info: ProfileErrorInfo): string {
-  return `Your change was not saved: ${info.message}`;
 }
 
 /**

@@ -12,8 +12,7 @@ function make(over: Partial<UsagePrefs> = {}, c: AgentUsage | null = claude) {
   const svc = new UsageService({
     fetchClaude: async () => c,
     readCodex: async () => codex,
-    getPrefs: async () => ({ ...allOn, ...over }),
-    now: () => 1_000
+    getPrefs: async () => ({ ...allOn, ...over })
   });
   svc.events.on("changed", (u) => changed.push(u));
   return { svc, changed };

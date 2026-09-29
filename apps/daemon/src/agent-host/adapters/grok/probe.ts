@@ -45,7 +45,7 @@ import {
 import { modelStateOf } from "./xai-meta.ts";
 
 /** Provider commands the host removes from the catalog (§4.6.2). */
-export const FILTERED_SLASH_COMMANDS: ReadonlySet<string> = new Set([
+const FILTERED_SLASH_COMMANDS: ReadonlySet<string> = new Set([
   // Permission mode is a host chip; a provider-side change desynchronises it,
   // and `/always-approve off` is additionally a no-op on this CLI.
   "always-approve",
@@ -83,7 +83,7 @@ export const FALLBACK_GROK_MODELS: readonly ProviderModel[] = [
   { slug: "grok-4.5", name: "Grok 4.5", capabilities: null }
 ];
 
-export interface ProbeResult {
+interface ProbeResult {
   installed: boolean;
   version: string | null;
   status: "ready" | "degraded" | "error" | "unknown";
@@ -102,7 +102,7 @@ export interface ProbeResult {
   unavailable: { models: boolean; skills: boolean; slashCommands: boolean };
 }
 
-export interface ProbeDeps {
+interface ProbeDeps {
   /** Absolute path of the resolved `grok` binary, or null when not installed. */
   command: string | null;
   env: Record<string, string>;
@@ -121,7 +121,7 @@ interface CommandOutput {
 }
 
 /** Run a short-lived child and collect its output under a deadline. */
-export async function runCommand(
+async function runCommand(
   command: string,
   args: readonly string[],
   env: Record<string, string>,
@@ -180,7 +180,7 @@ export async function runCommand(
  * login line, `null` when it printed neither — and `null` must NOT read as
  * "not logged in", because the command exits 0 regardless.
  */
-export function parseGrokModelsOutput(output: string): {
+function parseGrokModelsOutput(output: string): {
   authenticated: boolean | null;
   models: ProviderModel[];
 } {
@@ -216,7 +216,7 @@ export function parseGrokModelsOutput(output: string): {
   return { authenticated, models };
 }
 
-export function displayNameFromSlug(slug: string): string {
+function displayNameFromSlug(slug: string): string {
   return slug
     .split(/[-_]/)
     .map((part) => (part.toLowerCase() === "grok" ? "Grok" : part))
@@ -228,7 +228,7 @@ export function displayNameFromSlug(slug: string): string {
 // ---------------------------------------------------------------------------
 
 /** `_meta.modelState` → the model catalog, with its effort descriptor. */
-export function modelsFromInitialize(initialize: InitializeResponse): ProviderModel[] {
+function modelsFromInitialize(initialize: InitializeResponse): ProviderModel[] {
   const state = modelStateOf(initialize._meta);
   if (state === null || typeof state !== "object") {
     return [];
@@ -268,7 +268,7 @@ export function modelsFromInitialize(initialize: InitializeResponse): ProviderMo
  * `_meta.reasoningEfforts[]` → the `reasoningEffort` select descriptor. Both
  * `default` and `isDefault` spellings are accepted; 1.0.34 uses `default`.
  */
-export function effortDescriptors(meta: unknown): ProviderOptionDescriptor | null {
+function effortDescriptors(meta: unknown): ProviderOptionDescriptor | null {
   if (meta === null || typeof meta !== "object") {
     return null;
   }
@@ -321,7 +321,7 @@ export function effortDescriptors(meta: unknown): ProviderOptionDescriptor | nul
 }
 
 /** `_meta.availableCommands` → the machine-level catalog, filtered (§4.6.2). */
-export function slashCommandsFromInitialize(initialize: InitializeResponse): SlashCommand[] {
+function slashCommandsFromInitialize(initialize: InitializeResponse): SlashCommand[] {
   const meta = initialize._meta as Record<string, unknown> | undefined | null;
   const entries = meta?.["availableCommands"];
   const byName = new Map<string, SlashCommand>([[COMPACT_SLASH_COMMAND.name, COMPACT_SLASH_COMMAND]]);
@@ -362,7 +362,7 @@ export function slashCommandsFromInitialize(initialize: InitializeResponse): Sla
  * are **kept but marked disabled**, so a picker filtering on `enabled` hides
  * them while other surfaces can still see that they exist.
  */
-export function parseGrokInspectSkills(stdout: string): Skill[] | null {
+function parseGrokInspectSkills(stdout: string): Skill[] | null {
   let parsed: unknown;
   try {
     parsed = JSON.parse(stdout);

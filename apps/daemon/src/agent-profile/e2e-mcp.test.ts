@@ -27,7 +27,7 @@ import { FakeProfileAdapter } from "./testing.ts";
 
 type Result = Record<string, unknown>;
 
-const SECRETS = ["e2e-SECRET-token-0001", "e2e-SECRET-email-0002", "e2e-SECRET-rotated-0003", "e2e-SECRET-git-0004"];
+const SECRETS = ["e2e-SECRET-token-0001", "e2e-SECRET-email-0002", "e2e-SECRET-rotated-0003", "e2e-SECRET-git-0004", "e2e-SECRET-url-0005"];
 
 let root: string;
 let config: string;
@@ -196,6 +196,31 @@ describe("e2e: the MCP agent-profile tools against the real routes and the OpenC
     assert.equal(deleted.deleted, true);
     assert.ok(!(await readFile(config, "utf8")).includes("JIRA_API_TOKEN"));
     await rejects(call("get_agent_profile_item", { agent: "opencode", id: "mcp:jira" }), "ITEM_NOT_FOUND", /get_agent_profile/);
+  });
+
+  test("an HTTP MCP server keeps raw URL credentials on disk and redacts them in every tool response", async () => {
+    const id = "mcp:remote-credentials";
+    const url = `https://user:first@${SECRETS[4]}@mcp.example/x?view=1`;
+    const redacted = "https://***@mcp.example/x?view=1";
+    const firstAnswer = answers.length;
+    const created = await call("create_agent_profile_item", {
+      agent: "opencode", mcp: { name: "remote-credentials", transport: "http", url }
+    });
+    assert.ok((await readFile(config, "utf8")).includes(JSON.stringify(url)), "creation preserves the original URL bytes");
+
+    const detail = await call("get_agent_profile_item", { agent: "opencode", id });
+    assert.equal((detail.mcp as Result).url, redacted, "the editable detail hides the complete userinfo");
+    const listed = await call("get_agent_profile", { agent: "opencode", kind: "mcp", query: "remote-credentials" });
+    const updated = await call("update_agent_profile_item", { agent: "opencode", id, mcp: { advanced: { timeout: 2500 } } });
+    assert.ok((await readFile(config, "utf8")).includes(JSON.stringify(url)), "an update without url preserves its original bytes");
+
+    for (const [operation, result] of [["create", created], ["get", detail], ["list", listed], ["update", updated]] as const) {
+      const item = (result.item ?? (result.items as Result[]).find((entry) => entry.id === id)) as { meta?: { url?: string } } | undefined;
+      assert.equal(item?.meta?.url, redacted, `${operation}: summary metadata hides the complete userinfo`);
+    }
+    for (const [i, body] of answers.slice(firstAnswer).entries()) {
+      for (const secret of SECRETS) assert.ok(!body.includes(secret), `URL action ${i} returned secret credentials`);
+    }
   });
 
   test("a skill: created, read, edited with its body kept, renamed; the daemon's own refusals pass through", async () => {

@@ -487,7 +487,7 @@ export function configWriteErrorCode(error: CodexRpcError): string | null {
 }
 
 /** A config key path segment: bare when it can be, else a TOML basic string. */
-export function keySegment(segment: string): string {
+function keySegment(segment: string): string {
   return /^[A-Za-z0-9_-]+$/.test(segment)
     ? segment
     : `"${segment.replaceAll("\\", "\\\\").replaceAll('"', '\\"')}"`;

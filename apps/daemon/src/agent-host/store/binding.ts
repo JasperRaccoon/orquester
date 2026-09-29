@@ -8,16 +8,9 @@
  * field-wise upsert whose `undefined` means "unchanged" and whose `null` means
  * "cleared").
  *
- * **Why a second file rather than a field on the head.** The head's `session`
- * block is a projection of `thread.session-set`, and a `session-set` names the
- * whole block: one that omitted `resumeCursor` — a turn settling to `ready`, a
- * stop — replaced the block wholesale and the head lost its cursor. After the
- * next drain-restart the orchestrator started a FRESH provider session and the
- * conversation's context was gone (2026-09-22, thread c8979f6a). The fold now
- * carries the cursor forward, but an event-sourced field can always be replaced
- * by the next event that names it, so that is a belt, not a fix. Nothing
- * replaces this file whole: {@link mergeSessionBinding} is the only writer and
- * it merges field by field.
+ * The binding keeps resume identity outside the head's event-sourced session
+ * projection. {@link mergeSessionBinding} merges fields individually, so a
+ * status change that omits the cursor cannot erase the provider conversation.
  *
  * Rollback boundary (§8): a missing or undecodable `binding.json` means "use
  * the head's cursor". An older host that never writes one still reads a head

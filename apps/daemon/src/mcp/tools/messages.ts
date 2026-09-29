@@ -443,4 +443,4 @@ const readTranscript = defineTool({
   }
 });
 
-export const messageTools: ToolDef[] = [sendMessage, implementPlan, readTranscript] as ToolDef[];
+export const messageTools: ToolDef[] = [sendMessage, implementPlan, readTranscript];

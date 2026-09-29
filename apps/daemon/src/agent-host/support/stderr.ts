@@ -47,11 +47,6 @@ export function stripAnsi(value: string): string {
 // ---------------------------------------------------------------------------
 
 /**
- * A credential header's value is the REST OF THE LINE, not one token: masking
- * only the first word left `Authorization: [redacted] <the actual token>`.
- * `m` keeps it from eating the next line of a multi-line tail.
- */
-/**
  * A device-pairing URL is a bearer credential: anyone who opens it completes
  * the sign-in. §4.5 Grok names it explicitly in the stderr rule ("home dir,
  * **pairing URLs**, `Bearer`, `x-api-key`, …"), and it is the one path no
@@ -62,6 +57,7 @@ export function stripAnsi(value: string): string {
  * *T3: `apps/server/src/provider/acp/AcpStderr.ts:7` (`PAIRING_URL_PATTERN`).*
  */
 const PAIRING_URL_RE = /https?:\/\/[^\s]*\/pair#[^\s]*/gi;
+/** Mask the whole header value, including spaces, without consuming the next line. */
 const AUTH_HEADER_RE = /\b(authorization|x-api-key|proxy-authorization)\b(\s*[:=]\s*)\S.*$/gim;
 const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi;
 /**
@@ -154,9 +150,6 @@ export function redactStderr(value: string, options: RedactOptions = {}): string
   out = out.replace(AUTH_HEADER_RE, (_m, key: string, sep: string) => `${key}${sep}[redacted]`);
   out = out.replace(BEARER_RE, "Bearer [redacted]");
   out = out.replace(TOKEN_SHAPE_RE, "[redacted]");
-  // §4.5 Grok names it explicitly: a pairing URL is a bearer credential, and
-  // the one it prints on stderr is the whole handshake.
-
   // Exact host-injected secrets last, so a value that also matched a shape
   // pattern is already gone and this only catches what the shapes cannot see.
   const literals = [...(options.literals ?? [])]

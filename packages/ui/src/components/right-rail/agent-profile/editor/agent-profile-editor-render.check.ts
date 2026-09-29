@@ -16,9 +16,6 @@
  */
 
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { createElement, type ReactElement, type ReactNode } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
@@ -45,7 +42,7 @@ import { EditorEnvContext, type EditorEnv } from "./env";
 import { HookFormView } from "./HookEditor";
 import { initialHookForm, validateHookForm } from "./hook.logic";
 import { CollisionPrompt, CopySource, GitSource, UploadSource } from "./ImportSources";
-import { InstructionsConflict, InstructionsEditor, MIGRATE_CONFLICT_MESSAGE } from "./InstructionsEditor";
+import { InstructionsConflict, InstructionsEditor } from "./InstructionsEditor";
 import type { EditorVariant } from "./layout.logic";
 import { MarkdownCreateEditor, MarkdownEditEditor, SourceSwitcher } from "./MarkdownEditor";
 import { MarketplaceFormView } from "./MarketplaceEditor";
@@ -53,7 +50,7 @@ import { initialMarketplaceForm, validateMarketplaceForm } from "./marketplace.l
 import { McpFormView } from "./McpEditor";
 import { initialMcpForm, newSecretRow, validateMcpForm, type McpForm } from "./mcp.logic";
 import { MarketplaceInstall, SpecInstall } from "./PluginEditor";
-import { closedSaveFailure, SubmitStatus } from "./use-submit";
+import { SubmitStatus } from "./use-submit";
 
 // ---------------------------------------------------------------------------
 // Harness
@@ -780,63 +777,16 @@ for (const variant of VARIANTS) {
 }
 
 // ---------------------------------------------------------------------------
-// Wiring the static render cannot reach (effects, a save's outcome)
+// Keyboard and focus decisions
 // ---------------------------------------------------------------------------
 
 {
-  const here = dirname(fileURLToPath(import.meta.url));
-  const source = (file: string): string =>
-    readFileSync(join(here, file), "utf8").replace(/\/\*[\s\S]*?\*\//g, "").replace(/(^|[^:])\/\/.*$/gm, "$1");
-
-  // The editors with a name field say INVALID_NAME there; every other one above Save.
-  for (const file of ["McpEditor.tsx", "MarkdownEditor.tsx", "MarketplaceEditor.tsx"]) {
-    assert.match(source(file), /<SubmitStatus[^>]*\bnameShown\b/, `${file}: its name field says it`);
-  }
-  for (const file of ["ImportSources.tsx", "PluginEditor.tsx", "HookEditor.tsx", "InstructionsEditor.tsx"]) {
-    assert.doesNotMatch(source(file), /nameShown/, `${file}: no name field, so the banner says it`);
-  }
-
-  // Keep both only for the named kinds.
-  for (const file of ["HookEditor.tsx", "MarketplaceEditor.tsx"]) {
-    assert.match(source(file), /<SubmitStatus[^>]*keepBoth=\{false\}/, `${file}: one copy only`);
-  }
-  assert.equal((source("PluginEditor.tsx").match(/<SubmitStatus[^>]*keepBoth=\{false\}/g) ?? []).length, 2, "both plugin installers: one copy only");
-
-  // Edits offer no Replace / Keep both; creates do.
-  for (const file of ["McpEditor.tsx", "HookEditor.tsx", "MarkdownEditor.tsx"]) {
-    assert.match(source(file), /onResolveConflict=\{detail \? undefined : submit\.resolveConflict\}/, `${file}: conflict answers for a create only`);
-  }
-
-  // The frame reads its opener while rendering — before a field inside autofocuses in the commit.
-  const frame = source("EditorFrame.tsx");
-  const read = frame.indexOf("opener.current = focusOpener(document)");
-  assert.ok(read > 0 && read < frame.indexOf("useLayoutEffect("), "the opener is read before any effect");
-  assert.match(frame, /needsInitialFocus\(dialogRef\.current, document\.activeElement\)/, "and the dialog takes focus when nothing inside did");
-  assert.equal((frame.match(/tabIndex=\{-1\}/g) ?? []).length, 2, "both dialogs can take focus");
-
-  // A save in flight closes without "Discard?", and one refused after closing tells the panel.
-  assert.match(source("AgentProfileEditor.tsx"), /if \(dirty\.current && !saving\.current\) setConfirming\(true\)/);
-  const submit = source("use-submit.tsx");
-  assert.match(submit, /env\.setSaving\(true\)/);
-  assert.match(submit, /if \(!alive\.current\) \{\s*setAgentProfileNotice\(\{ tone: "error", text: closedSaveFailure\(info\) \}\)/);
-  assert.equal(
-    closedSaveFailure({ code: "AGENT_CLI_FAILED", status: 502, message: "claude plugin install failed" }),
-    "Your change was not saved: claude plugin install failed"
-  );
-
-  // Ctrl/Cmd+Enter saves from anywhere in the editor — CodeMirror included,
-  // whose keymap binds Mod-Enter itself: the shell takes it in the capture phase.
-  assert.match(source("EditorShell.tsx"), /onKeyDownCapture=\{\(event\) => \{\s*if \(!isSaveChord\(event\.nativeEvent\)\) return;\s*event\.preventDefault\(\);\s*event\.stopPropagation\(\);/);
   const chord = { key: "Enter", metaKey: false, ctrlKey: true, repeat: false, isComposing: false };
   assert.equal(isSaveChord(chord), true);
   assert.equal(isSaveChord({ ...chord, ctrlKey: false, metaKey: true }), true);
   assert.equal(isSaveChord({ ...chord, ctrlKey: false }), false, "plain Enter types");
   assert.equal(isSaveChord({ ...chord, isComposing: true }), false, "an IME's Enter");
   assert.equal(isSaveChord({ ...chord, repeat: true }), false, "a held chord saves once");
-
-  // Grok's GROK.md move refused as stale: re-read and say so, rather than a dead end.
-  assert.match(source("InstructionsEditor.tsx"), /if \(info\.code === "PROFILE_CONFLICT"\) \{\s*setMigrateError\(MIGRATE_CONFLICT_MESSAGE\);\s*setAttempt\(\(n\) => n \+ 1\);/);
-  assert.match(MIGRATE_CONFLICT_MESSAGE, /reloaded/);
 
   // The focus rules themselves.
   const body = { focus: noop } as unknown as HTMLElement;

@@ -4,9 +4,8 @@
  * Ported from T3 Code (MIT): `apps/server/src/ws.ts:2150-2300`
  * (`subscribeThread`: attach the live tail **before** reading, snapshot-or-
  * replay decided server-side, the `synchronized` marker offered into the same
- * buffer), `apps/server/src/orchestration/LiveStreamBudget.ts` (sizes measured
- * once via a `WeakMap` because events are shared across subscriptions; overflow
- * closes the stream with "resume from the last received sequence") and
+ * buffer), `apps/server/src/orchestration/LiveStreamBudget.ts` (overflow closes
+ * the stream with "resume from the last received sequence") and
  * `apps/server/src/orchestration/ThreadLiveEventCoalescer.ts:18-19,56-94,189-193`
  * (the 50 ms window, the 512-row pending cap, latest-per-stable-id, and a
  * non-update frame flushing the run immediately).

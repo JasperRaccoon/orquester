@@ -64,35 +64,33 @@ export function parseKnownHostsDocument(text: string): string[] {
   return [...out];
 }
 
-/** Append the lines that are not already present, verbatim. Returns how many. */
-async function appendMissing(path: string, lines: string[]): Promise<number> {
+/** Append the lines that are not already present, verbatim. */
+async function appendMissing(path: string, lines: string[]): Promise<void> {
   const existing = await readFile(path, "utf8").catch(() => "");
   const present = new Set(existing.split("\n"));
   const missing = lines.filter((line) => !present.has(line));
   if (missing.length > 0) {
     await appendFile(path, missing.map((line) => `${line}\n`).join(""));
   }
-  return missing.length;
 }
 
 /**
  * Best-effort refresh of the Cloud pins from Atlassian's published list, so a
  * host-key rotation lands here without a daemon release. Only ever *adds* lines
  * (never removes), and only over a CA-validated TLS connection to bitbucket.org.
- * Any failure (offline host, HTML change, timeout) is a no-op. Returns the
- * number of lines added.
+ * The caller ignores failures (offline host, HTML change, timeout).
  */
-export async function refreshKnownHosts(keysDir: string, timeoutMs = 5000): Promise<number> {
+async function refreshKnownHosts(keysDir: string): Promise<void> {
   const response = await fetch(KNOWN_HOSTS_SOURCE_URL, {
     headers: { Accept: "text/plain", "User-Agent": "orquester" },
-    signal: AbortSignal.timeout(timeoutMs)
+    signal: AbortSignal.timeout(5000)
   });
   if (!response.ok) {
-    return 0;
+    return;
   }
   const lines = parseKnownHostsDocument(await response.text());
   if (lines.length === 0) {
-    return 0;
+    return;
   }
   return appendMissing(join(keysDir, "known_hosts"), lines);
 }

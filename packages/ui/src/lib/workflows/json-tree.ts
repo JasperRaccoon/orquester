@@ -156,8 +156,3 @@ export function clipString(text: string, max = JSON_STRING_CLIP): { text: string
   if (text.length <= max) return { text, clipped: false };
   return { text: text.slice(0, max), clipped: true };
 }
-
-/** The `{{…}}` expression for a copied path: `{{nodes.Review.output.items[0]}}`. */
-export function jsonExpression(path: string): string {
-  return path ? `{{${path}}}` : "";
-}

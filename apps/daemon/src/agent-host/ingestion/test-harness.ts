@@ -28,10 +28,6 @@ export class FakeClock implements Clock {
   advance(ms: number): void {
     this.#ms += ms;
   }
-
-  get ms(): number {
-    return this.#ms;
-  }
 }
 
 export function counterIdGen(prefix = "e"): IdGen {

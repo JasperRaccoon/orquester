@@ -89,32 +89,6 @@ import type {
  */
 export const FOLD_SNAPSHOT_VERSION = 5;
 
-// 2: batch retention (design `2026-09-23-fold-performance-design.md`) — the
-// window now grows past each limit by its slack before a trim, so a state
-// folded by version 1 holds a different window than version 2 folds to from
-// the same log; and the state carries `evicted`.
-// 3: the parent window keeps the legacy compaction marker, `thread.state.changed
-// {state: "compacted"}`, whatever its age, as it keeps `context-compaction`
-// (`isCompactionActivity`). Version 2 read it as an ordinary parent row: a
-// state it folded may have evicted the marker for good, and trimmed at other
-// steps, the marker having counted toward the parent's trigger.
-// 4: taken twice, by two builds for two different fold changes, so neither
-// build's version-4 state.json is this build's — (a) the trim keeps the
-// opening row of running work (`open-work.ts`) — a tool call no row has
-// closed, a background task with no `task.completed` — for the 16 most
-// recently active among those each window's cut would drop, and under the
-// ceiling across agents the 64 most recently active among the openings that
-// survived their own window (`OPEN_WORK_RETENTION_LIMIT`); version 3 dropped
-// it like any row, so a state it folded may lack the opening row of a call
-// still running, and holds other rows at the steps where the kept row now
-// leaves less to drop; (b) the fold derives the thread's `goal` from its
-// `goal.updated` rows (goals §4.4) — a field a version-3 state never carries,
-// whatever its log holds.
-// 5: the merge of both 4s (2026-09-27). A goal build's version-4 file carries
-// `goal` but was trimmed without (a), and would parse here as current; an
-// open-work build's carries no `goal` key (which `isStoredGoal` refuses
-// anyway). Both are refolded once.
-
 /**
  * {@link ThreadFoldState} as JSON: without `activities` (rebuilt from
  * `items`), with the tombstone set and its stamps as arrays.

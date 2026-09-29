@@ -1,11 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import {
-  failureReasonOfActivity,
-  latestFailureReason
-} from "./failure-reason.ts";
-import type { ThreadActivityItem, ThreadMessageItem } from "./thread.ts";
+import { failureReasonOfActivity } from "./failure-reason.ts";
+import type { ThreadActivityItem } from "./thread.ts";
 
 let ids = 0;
 function activity(
@@ -123,49 +120,4 @@ test("the summary stands in for a payload with no message", () => {
     activity("runtime.warning", { reason: "usage_limit" }, { summary: "Grok usage limit reached." })
   );
   assert.equal(failure?.message, "Grok usage limit reached.");
-});
-
-test("latestFailureReason: the newest failure, messages skipped", () => {
-  const message: ThreadMessageItem = {
-    kind: "message",
-    id: "m1",
-    role: "assistant",
-    text: "Claude usage limit reached.",
-    turnId: "turn-1",
-    streaming: false,
-    createdAt: "2026-09-28T11:00:00.000Z",
-    updatedAt: "2026-09-28T11:00:00.000Z"
-  } as ThreadMessageItem;
-  const first = activity("runtime.error", { message: "a", reason: "auth" });
-  const second = activity("runtime.warning", { message: "b", reason: "usage_limit" });
-  const other = activity("runtime.error", { message: "boom", class: "provider_error" });
-  assert.equal(latestFailureReason([first, second, other, message])?.message, "b");
-  assert.equal(latestFailureReason([message, other]), null);
-  assert.equal(latestFailureReason([]), null);
-});
-
-test("latestFailureReason: a baseline by time or by item id", () => {
-  const before = activity(
-    "runtime.error",
-    { message: "old", reason: "usage_limit" },
-    { createdAt: "2026-09-28T09:00:00.000Z" }
-  );
-  const baseline = activity("tool.completed", {}, { createdAt: "2026-09-28T09:30:00.000Z" });
-  const after = activity(
-    "runtime.error",
-    { message: "new", reason: "auth" },
-    { createdAt: "2026-09-28T10:00:00.000Z" }
-  );
-  assert.equal(latestFailureReason([before], { afterCreatedAt: "2026-09-28T09:30:00Z" }), null);
-  assert.equal(
-    latestFailureReason([before, baseline, after], { afterCreatedAt: "2026-09-28T09:30:00Z" })?.message,
-    "new"
-  );
-  assert.equal(latestFailureReason([before, baseline], { afterItemId: baseline.id }), null);
-  assert.equal(
-    latestFailureReason([before, baseline, after], { afterItemId: baseline.id })?.message,
-    "new"
-  );
-  // An id the list no longer holds cuts nothing.
-  assert.equal(latestFailureReason([before], { afterItemId: "gone" })?.message, "old");
 });

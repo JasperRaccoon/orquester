@@ -1,10 +1,4 @@
-export {
-  WorkflowEditorTab,
-  registerWorkflowRunsMode,
-  type WorkflowEditorTabProps,
-  type WorkflowRunsModeContext,
-  type WorkflowRunsModeRenderer
-} from "./WorkflowEditorTab";
+export { WorkflowEditorTab, type WorkflowEditorTabProps } from "./WorkflowEditorTab";
 export { WorkflowsHost } from "./WorkflowsHost";
 export {
   WorkflowCanvas,
@@ -13,10 +7,9 @@ export {
   type WorkflowCanvasHandle,
   type WorkflowCanvasProps
 } from "./canvas/WorkflowCanvas";
-export { connectionRefusal, isValidWorkflowConnection } from "./canvas/connection";
+export { connectionRefusal } from "./canvas/connection";
 export type { AddMenuRequest } from "./canvas/canvas-context";
-export { RunsModeFallback } from "./RunsModeFallback";
-export { WorkflowRunsMode, renderWorkflowRunsMode } from "./RunsMode";
+export { WorkflowRunsMode } from "./RunsMode";
 // The phone layout (workflows spec §7.4)
 export { StepsView, type StepsViewProps } from "./steps/StepsView";
 export {

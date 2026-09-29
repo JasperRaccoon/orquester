@@ -74,7 +74,7 @@ export interface WorkspaceSummary {
    */
   archivedProjectCount?: number;
   /**
-   * Git account this workspace is bound to, from workspaces.json (Phase 4).
+   * Git account this workspace is bound to, from workspaces.json.
    * `null`/absent = no binding (default git identity). The UI resolves the id
    * to a label from its accounts store; this contract carries only the id.
    */
@@ -131,7 +131,7 @@ export interface MarkRecentProjectRequest {
 
 export interface CreateWorkspaceRequest {
   name: string;
-  /** Optional git account to bind (Phase 4 wires the picker; undefined here). */
+  /** Optional git account to bind. */
   gitAccountId?: string;
 }
 
@@ -1737,27 +1737,6 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
     if (!response.ok) {
       throw new Error(`Orquester API request failed: ${response.status} ${response.statusText}`);
-    }
-
-    return response.json() as Promise<T>;
-  }
-
-  private async put<T>(path: string, body?: unknown): Promise<T> {
-    const response = await this.fetchImpl(`${this.baseUrl}${path}`, {
-      method: "PUT",
-      headers: {
-        ...this.authHeaders(),
-        ...(body === undefined ? {} : { "Content-Type": "application/json" })
-      },
-      body: body === undefined ? undefined : JSON.stringify(body)
-    });
-
-    if (!response.ok) {
-      throw new Error(`Orquester API request failed: ${response.status} ${response.statusText}`);
-    }
-
-    if (response.status === 204) {
-      return undefined as T;
     }
 
     return response.json() as Promise<T>;

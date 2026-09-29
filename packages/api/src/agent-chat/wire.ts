@@ -863,12 +863,6 @@ export type AgentChatEventType =
   | "agentChat.pending"
   | "agent.providers.changed";
 
-export const AGENT_CHAT_EVENT_TYPES = [
-  "agentChat.turn",
-  "agentChat.pending",
-  "agent.providers.changed"
-] as const satisfies readonly AgentChatEventType[];
-
 // ---------------------------------------------------------------------------
 // §6.4 / §7.1 — the seven derived `SessionSummary` fields
 // ---------------------------------------------------------------------------

@@ -26,7 +26,7 @@ import {
 } from "../../ingestion/test-harness.ts";
 import type { RuntimeEventDraft } from "./normalise.ts";
 
-export const FOLD_TESTING_THREAD_ID = "thread-1";
+const FOLD_TESTING_THREAD_ID = "thread-1";
 
 /**
  * Ingest `steps` in order, as the session emits them, and answer the log they

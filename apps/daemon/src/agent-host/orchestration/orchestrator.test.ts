@@ -2119,7 +2119,7 @@ describe("orchestrator — the ingestion hooks (§5.1, §5.4)", () => {
     await host.stop();
   });
 
-  it("a provider diff opens a placeholder only for the currently running turn", async (t) => {
+  it("a provider diff opens a placeholder only for the currently running turn", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
     await ingestDiff(host, "turn-1");
@@ -2134,7 +2134,7 @@ describe("orchestrator — the ingestion hooks (§5.1, §5.4)", () => {
     ]);
     await host.stop();
   });
-  it("a provider diff uses the third turn ordinal when earlier turns have no checkpoints", async (t) => {
+  it("a provider diff uses the third turn ordinal when earlier turns have no checkpoints", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
     await seedTurn(host, "p-1");
@@ -2357,7 +2357,7 @@ describe("orchestrator — runtime events", () => {
 
 describe("fold-ops — the chunked fold (design 2026-09-23, invariant 7)", () => {
 
-  it("a long cold fold yields to the event loop and retains the final activity", async (t) => {
+  it("a long cold fold yields to the event loop and retains the final activity", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
     await bulkActivities(host, null, 600, threadId);
@@ -2739,7 +2739,7 @@ describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
   });
 
   it("walks one monster turn back in blocks of 400 — contiguous, lossless, no row twice", async (t) => {
-    const { index, host } = await indexedHost(t);
+    const { host } = await indexedHost(t);
     const threadId = await host.createThread();
     await seedTurn(host, "m-1", { settle: false });
     await bulkActivities(host, "m-1", 1_500, threadId);
@@ -2772,7 +2772,7 @@ describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
   });
 
   it("delivers a message streamed across a block boundary whole, on exactly one page", async (t) => {
-    const { index, host } = await indexedHost(t);
+    const { host } = await indexedHost(t);
     const threadId = await host.createThread();
     await seedTurn(host, "c-1", { settle: false });
     // 1 000 rows: the window keeps #500..#999, the first block is #100..#499,
@@ -2813,7 +2813,7 @@ describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
   });
 
   it("walks back across turn boundaries, and honours the `turns` soft cap", async (t) => {
-    const { index, host } = await indexedHost(t);
+    const { host } = await indexedHost(t);
     const threadId = await host.createThread();
     for (const turnId of ["t-1", "t-2", "t-3"]) {
       host.clock.advance(1_000);
@@ -2948,7 +2948,7 @@ describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
   });
 
   it("an empty page when nothing is older", async (t) => {
-    const { index, host } = await indexedHost(t);
+    const { host } = await indexedHost(t);
     const threadId = await host.createThread();
     await seedTurn(host, "o-1");
     await bulkActivities(host, "o-1", 3, threadId);

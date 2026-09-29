@@ -98,7 +98,7 @@ import { Mutex, backoffMs, deferred, delay, forEachLimited } from "./util.ts";
 // ---------------------------------------------------------------------------
 
 /** The cursor shape; a wrong version or empty id means "no resume", never an error. */
-export const OPENCODE_RESUME_VERSION = 1 as const;
+const OPENCODE_RESUME_VERSION = 1 as const;
 /** `POST /session/{id}/summarize` is bounded at ten minutes. */
 const COMPACTION_TIMEOUT_MS = 10 * 60_000;
 /** The event stream must connect within this window after the session opens. */
@@ -121,7 +121,7 @@ const ANCESTRY_ASKED_MAX_ATTEMPTS = 12;
 const NATIVE_IMAGE_MIMES = new Set(["image/png", "image/jpeg", "image/gif", "image/webp"]);
 const NATIVE_FILE_PART_MAX_BYTES = 20 * 1024 * 1024;
 
-export interface OpenCodeResumeCursor {
+interface OpenCodeResumeCursor {
   schemaVersion: typeof OPENCODE_RESUME_VERSION;
   sessionId: string;
 }
@@ -144,7 +144,7 @@ const MESSAGE_ID_ALPHABET = "0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmno
 let messageIdEpochMillis = -1;
 let messageIdCounter = 0;
 
-export function mintOpenCodeMessageId(nowMs = Date.now()): string {
+function mintOpenCodeMessageId(nowMs = Date.now()): string {
   if (nowMs !== messageIdEpochMillis) {
     messageIdEpochMillis = nowMs;
     messageIdCounter = 0;
@@ -160,7 +160,7 @@ export function mintOpenCodeMessageId(nowMs = Date.now()): string {
   return `msg_${encodedTime}${random}`;
 }
 
-export interface ParsedModelSlug {
+interface ParsedModelSlug {
   providerID: string;
   modelID: string;
 }
@@ -193,7 +193,7 @@ export function selectedOption(
  * The per-turn `system` addendum. `session.command` accepts none, so a native
  * slash command runs without it (§4.6.5) — that is a documented gap, not a bug.
  */
-export function buildRuntimeInstructions(model: string): string {
+function buildRuntimeInstructions(model: string): string {
   const single = model.replace(/\s+/g, " ").trim();
   const modelInfo = single.length > 0 && single !== "auto" ? `, as ${single}` : "";
   return `<runtime_info>In case you're asked: you are running inside Orquester's agent chat through the OpenCode harness${modelInfo}. No need to mention this otherwise. You can embed images in your response using Markdown with absolute file paths.</runtime_info>`;
@@ -203,7 +203,7 @@ export function buildRuntimeInstructions(model: string): string {
 // The session
 // ---------------------------------------------------------------------------
 
-export interface OpenCodeThreadSessionDeps {
+interface OpenCodeThreadSessionDeps {
   ctx: AdapterContext;
   emit: (event: RuntimeEvent) => void;
   /**
@@ -221,7 +221,7 @@ export interface OpenCodeThreadSessionDeps {
   delay?: (ms: number, signal: AbortSignal) => Promise<void>;
 }
 
-export interface StartOpenCodeSessionInput {
+interface StartOpenCodeSessionInput {
   threadId: string;
   cwd: string;
   title?: string;
@@ -2650,7 +2650,7 @@ export function toThreadSnapshot(
  * trailing slash or a `.` segment as a cwd change and needlessly forks the
  * session on every resume.
  */
-export function sameDirectory(left: string | undefined, right: string): boolean {
+function sameDirectory(left: string | undefined, right: string): boolean {
   if (left === undefined || left.length === 0) {
     return true;
   }

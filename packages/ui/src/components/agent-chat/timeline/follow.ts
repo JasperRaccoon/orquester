@@ -28,16 +28,6 @@ export interface TimelineScrollMetrics {
   scrollLength: number;
 }
 
-/** Distance from the bottom of the content, in px. Never negative. */
-function distanceFromEnd(metrics: TimelineScrollMetrics): number {
-  return Math.max(0, metrics.contentLength - metrics.scroll - metrics.scrollLength);
-}
-
-/** Whether the viewport currently sits inside the re-arm band. */
-function isWithinFollowBand(metrics: TimelineScrollMetrics): boolean {
-  return distanceFromEnd(metrics) <= TIMELINE_FOLLOW_REARM_THRESHOLD_PX;
-}
-
 /**
  * The follow flag after a user scroll.
  *
@@ -47,7 +37,10 @@ function isWithinFollowBand(metrics: TimelineScrollMetrics): boolean {
  * and the scroll position can never disagree.
  */
 export function nextFollowState(metrics: TimelineScrollMetrics): boolean {
-  return isWithinFollowBand(metrics);
+  return (
+    Math.max(0, metrics.contentLength - metrics.scroll - metrics.scrollLength) <=
+    TIMELINE_FOLLOW_REARM_THRESHOLD_PX
+  );
 }
 
 /**

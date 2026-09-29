@@ -40,9 +40,9 @@ import { discoverClaudeSkills } from "./skills.ts";
 import { usageResponseToLimits, type ClaudeScopedLimitNames } from "./usage.ts";
 
 /** Bedrock initialises far slower than first-party auth (T3's 25 s budget). */
-export const CLAUDE_PROBE_TIMEOUT_MS = 25_000;
+const CLAUDE_PROBE_TIMEOUT_MS = 25_000;
 /** The usage call took 8.9 s in the capture, even with the behaviour scan on. */
-export const CLAUDE_USAGE_PROBE_TIMEOUT_MS = 20_000;
+const CLAUDE_USAGE_PROBE_TIMEOUT_MS = 20_000;
 /** `binaryPath\0configDir\0cwd` for this long (§4.5). */
 export const CLAUDE_PROBE_CACHE_MS = 5 * 60_000;
 
@@ -88,7 +88,7 @@ function nonEmpty(value: unknown): string | undefined {
  * Case-insensitive dedupe, first wins, with a missing description or hint
  * filled in from the loser.
  */
-export function dedupeSlashCommands(commands: readonly SlashCommand[]): SlashCommand[] {
+function dedupeSlashCommands(commands: readonly SlashCommand[]): SlashCommand[] {
   const byName = new Map<string, SlashCommand>();
   for (const command of commands) {
     const name = nonEmpty(command.name);
@@ -114,7 +114,7 @@ export function dedupeSlashCommands(commands: readonly SlashCommand[]): SlashCom
   return [...byName.values()];
 }
 
-export function parseInitializationCommands(commands: unknown): SlashCommand[] {
+function parseInitializationCommands(commands: unknown): SlashCommand[] {
   if (!Array.isArray(commands)) {
     return [];
   }
@@ -140,7 +140,7 @@ export function parseInitializationCommands(commands: unknown): SlashCommand[] {
  * so it is synthesised for every provider that can serve it. It is prepended
  * and deduped, so a CLI that ever advertises its own `/compact` wins.
  */
-export function withSynthesisedCommands(commands: readonly SlashCommand[]): SlashCommand[] {
+function withSynthesisedCommands(commands: readonly SlashCommand[]): SlashCommand[] {
   return dedupeSlashCommands([
     ...commands,
     {
@@ -281,7 +281,7 @@ export async function probeClaudeVersion(input: {
   return parseClaudeVersion(out);
 }
 
-export interface BuildSnapshotInput {
+interface BuildSnapshotInput {
   checkedAt: string;
   binaryPath: string | null;
   version: string | null;

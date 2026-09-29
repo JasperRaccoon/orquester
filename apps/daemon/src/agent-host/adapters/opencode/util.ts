@@ -1,35 +1,21 @@
-/**
- * Agent host — small promise utilities the OpenCode runtime needs.
- *
- * No dependency is added for these (COORDINATION §1.5) and none of them starts
- * a timer that the event loop is free to skip when the host is draining: every
- * `delay` takes the host's abort signal.
- */
+/** Promise utilities for the OpenCode runtime. */
 
-export interface Deferred<T> {
+interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T | PromiseLike<T>) => void;
   reject: (error: unknown) => void;
-  settled: () => boolean;
 }
 
 export function deferred<T = void>(): Deferred<T> {
   let resolve!: (value: T | PromiseLike<T>) => void;
   let reject!: (error: unknown) => void;
-  let done = false;
   const promise = new Promise<T>((res, rej) => {
-    resolve = (value) => {
-      done = true;
-      res(value);
-    };
-    reject = (error) => {
-      done = true;
-      rej(error);
-    };
+    resolve = res;
+    reject = rej;
   });
   // A deferred nobody awaits must not crash the host.
   promise.catch(() => undefined);
-  return { promise, resolve, reject, settled: () => done };
+  return { promise, resolve, reject };
 }
 
 /** One-permit semaphore, FIFO. The prompt path takes it; so do compact and rollback. */

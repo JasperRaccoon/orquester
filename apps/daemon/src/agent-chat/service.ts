@@ -47,7 +47,6 @@ import {
   AgentHostSupervisor,
   buildAgentHostEnv,
   legacyGoalTurnOf,
-  type DirectHostHandle,
   type LegacyGoalTurn,
   type ProbeOutcome,
   type SupervisorTmux
@@ -186,14 +185,12 @@ export class AgentChatService {
   private readonly supervisor: AgentHostSupervisor;
   private readonly summary: AgentChatSummaryService;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
-  private directHandle: DirectHostHandle | null = null;
-  private readonly socketPath: string;
 
   constructor(private readonly opts: AgentChatServiceOptions) {
-    this.socketPath = agentHostSocketPath(opts.baseDir, opts.platform);
+    const socketPath = agentHostSocketPath(opts.baseDir, opts.platform);
     this.chat = new ChatSessionManager({ requestPersist: () => this.requestPersist() });
     this.client = new AgentHostClient({
-      socketPath: this.socketPath,
+      socketPath,
       token: () => this.supervisor.currentToken()
     });
     this.supervisor = new AgentHostSupervisor({
@@ -206,7 +203,7 @@ export class AgentChatService {
         home: opts.env.HOME ?? homedir(),
         npmConfigPrefix: opts.env.NPM_CONFIG_PREFIX,
         appdir: opts.baseDir,
-        socketPath: this.socketPath
+        socketPath
       }),
       nodeBin: process.execPath,
       // The daemon's own commit, read at boot; a surviving host reporting a
@@ -231,23 +228,15 @@ export class AgentChatService {
           const child = spawn(bin, args, { cwd: opts.cwd, detached: false, stdio: "ignore", env });
           child.on("error", (error) => opts.logger?.error?.("agent host spawnDirect failed", error));
           let alive = true;
-          const handle: DirectHostHandle = {
-            kill: () => child.kill(),
-            pid: child.pid,
-            // The supervisor waits for the PROCESS to exit before it replaces a
-            // stopped host; without tmux this is the only signal it has.
-            isAlive: () => alive
-          };
-          // Clear the handle when the child dies, or `protectedPids()` keeps
-          // returning a pid the OS may recycle onto an unrelated process — and
-          // `POST /api/system/processes/kill` would then refuse a legitimate
-          // target for no visible reason.
           child.on("exit", () => {
             alive = false;
-            if (this.directHandle === handle) this.directHandle = null;
           });
-          this.directHandle = handle;
-          return handle;
+          return {
+            kill: () => child.kill(),
+            pid: child.pid,
+            // The supervisor waits for the process to exit before replacing a stopped host.
+            isAlive: () => alive
+          };
         },
         now: Date.now,
         sleep: (ms) => new Promise((resolve) => setTimeout(resolve, ms)),
@@ -604,9 +593,7 @@ export class AgentChatService {
     // through the same rule the child itself will read.
     const homePath = launchEnv[ACCOUNT_HOME_ENV_VAR[adapter]];
 
-    // Reality findings: a fresh directory is untrusted for Claude, and Grok
-    // ships with approvals off and auto-update on. Best-effort and before the
-    // thread exists, so the very first turn already sees the prepared home.
+    // Prepare Claude trust before the thread exists so its first turn sees the project settings.
     await this.prepareHome(adapter, launchEnv, req.projectPath ?? "");
 
     const summary = this.chat.create({
@@ -634,12 +621,6 @@ export class AgentChatService {
       // pick from — and is never a refusal here.
       modelSelection: fields.modelSelection,
       runtimeMode: fields.runtimeMode,
-      // EXACTLY the env a terminal launch of this entry gets today (§3.1): the
-      // registry entry's own env — which is where the per-launcher env file
-      // `<appdir>/daemon/env/<id>.env` (opencode.env) has already been merged
-      // by RegistryService —
-      // under the `resolveExtraEnv` contributors, which win a collision exactly
-      // as the terminal wrapper script's `export` wins over `tmux -e`.
       launchEnv,
       ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
       ...(homePath ? { homePath } : {}),

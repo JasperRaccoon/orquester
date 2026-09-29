@@ -32,7 +32,7 @@ export interface AgentProfileAdapterFactoryContext {
  * takes it. `bin` is a getter: a CLI installed or moved from Settings → Agents
  * after boot is picked up by the adapter's next CLI call.
  */
-export function adapterContext(ctx: AgentProfileAdapterFactoryContext, agent: AgentProfileAgentId): ProfileAdapterContext {
+function adapterContext(ctx: AgentProfileAdapterFactoryContext, agent: AgentProfileAgentId): ProfileAdapterContext {
   return {
     homes: ctx.homes,
     appdir: ctx.appdir,

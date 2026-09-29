@@ -63,20 +63,6 @@ interface SqliteDriver {
   open(filePath: string): SqliteDatabase;
 }
 
-function wrapDatabase(db: BetterSqlite3.Database): SqliteDatabase {
-  return {
-    prepare: (source) => db.prepare(source),
-    exec: (source) => {
-      db.exec(source);
-    },
-    pragma: (source, options) => db.pragma(source, options),
-    transaction: <T>(fn: () => T) => db.transaction(fn),
-    close: () => {
-      db.close();
-    }
-  };
-}
-
 interface DriverResolution {
   driver: SqliteDriver | null;
   error: string | null;
@@ -95,7 +81,7 @@ function resolveDefaultDriver(): DriverResolution {
     // healthy file because it could not open it.
     new Database(":memory:").close();
     return {
-      driver: { open: (filePath) => wrapDatabase(new Database(filePath)) },
+      driver: { open: (filePath) => new Database(filePath) },
       error: null
     };
   } catch (error) {

@@ -121,7 +121,6 @@ for (const from of AGENT_PROFILE_AGENTS) {
       if (from === to) {
         assert.equal(result.item, item, "identity");
         assert.deepEqual(result.notes, []);
-        assert.equal(result.tempDir, undefined);
         return;
       }
       assert.equal(result.item.kind, "skill");
@@ -129,8 +128,6 @@ for (const from of AGENT_PROFILE_AGENTS) {
       assert.equal(result.item.name, "alpha");
       assert.equal(await readFile(join(dir, "SKILL.md"), "utf8"), before, "the source is never modified");
       // Every pair here drops at least x-custom, so a copy is made under the temp root.
-      assert.ok(result.tempDir !== undefined, "a temp copy");
-      assert.equal(result.item.dir, result.tempDir);
       assert.ok(result.item.dir.startsWith(`${tempRoot}/convert-`), result.item.dir);
       assert.equal((await stat(join(result.item.dir, "scripts", "run.sh"))).mode & 0o777, 0o755, "other files copied, modes kept");
 
@@ -171,7 +168,6 @@ for (const from of AGENT_PROFILE_AGENTS) {
         assert.equal(result.item.kind, "skill");
         if (result.item.kind !== "skill") return;
         assert.equal(result.item.name, "git-pr");
-        assert.equal(result.tempDir, result.item.dir);
         assert.ok(result.item.dir.startsWith(`${tempRoot}/convert-`));
         assert.ok(result.notes.includes(CODEX_COMMAND_NOTE));
         const document = parseMarkdownDocument(await readFile(join(result.item.dir, "SKILL.md"), "utf8"));
@@ -182,7 +178,6 @@ for (const from of AGENT_PROFILE_AGENTS) {
       }
       assert.equal(result.item.kind, "command");
       if (result.item.kind !== "command") return;
-      assert.equal(result.tempDir, undefined);
       assert.equal(result.item.name, to === "grok" ? "git-pr" : "git/pr");
       assert.equal(result.notes.some((note) => note.includes("flat")), to === "grok");
       assert.equal(result.item.body, item.body);
@@ -263,8 +258,8 @@ test("skill: Claude when_to_use becomes Grok when-to-use in place, and back", as
   const dir = await makeSkill(root, "a", { name: "alpha", description: "A", when_to_use: "Sometimes", model: "opus" });
   const toGrok = convert({ kind: "skill", name: "alpha", dir }, "claude", "grok");
   assert.deepEqual(toGrok.notes, []);
-  assert.ok(toGrok.tempDir !== undefined, "renaming a key needs a copy");
   assert.ok(toGrok.item.kind === "skill");
+  assert.notEqual(toGrok.item.dir, dir, "renaming a key needs a copy");
   const grokDoc = parseMarkdownDocument(await readFile(join(toGrok.item.dir, "SKILL.md"), "utf8"));
   assert.deepEqual(Object.keys(grokDoc.frontmatter), ["name", "description", "when-to-use", "model"]);
   assert.equal(grokDoc.frontmatter["when-to-use"], "Sometimes");
@@ -280,7 +275,6 @@ test("skill: nothing to change keeps the source directory and makes no temp dir"
   const dir = await makeSkill(root, "plain", { name: "plain", description: "Plain" });
   const result = convert({ kind: "skill", name: "plain", dir }, "claude", "codex");
   assert.equal(result.item.kind === "skill" && result.item.dir, dir);
-  assert.equal(result.tempDir, undefined);
   assert.deepEqual(result.notes, []);
   await assert.rejects(readdir(tempRoot), { code: "ENOENT" });
 });
@@ -289,7 +283,8 @@ test("skill: a missing or different frontmatter name is set to the item's name",
   const { root, convert } = await scratch(t);
   const missing = await makeSkill(root, "m", { description: "No name" });
   const r1 = convert({ kind: "skill", name: "m", dir: missing }, "claude", "opencode");
-  assert.ok(r1.item.kind === "skill" && r1.tempDir !== undefined);
+  assert.ok(r1.item.kind === "skill");
+  assert.notEqual(r1.item.dir, missing);
   const doc1 = parseMarkdownDocument(await readFile(join(r1.item.dir, "SKILL.md"), "utf8"));
   assert.deepEqual(Object.keys(doc1.frontmatter), ["name", "description"]);
   assert.equal(doc1.frontmatter.name, "m");
@@ -327,7 +322,8 @@ test("skill: the source directory may itself be a symlink", async (t) => {
   const link = join(root, "link");
   await symlink(dir, link);
   const result = convert({ kind: "skill", name: "real", dir: link }, "claude", "codex");
-  assert.ok(result.item.kind === "skill" && result.tempDir !== undefined);
+  assert.ok(result.item.kind === "skill");
+  assert.notEqual(result.item.dir, link);
   assert.ok((await lstat(join(result.item.dir, "scripts", "run.sh"))).isFile());
 });
 

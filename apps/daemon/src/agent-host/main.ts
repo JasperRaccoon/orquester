@@ -90,7 +90,7 @@ const TEARDOWN_CONSUME_MS = 1_000;
 // ---------------------------------------------------------------------------
 
 /** `--appdir <dir>` / `--appdir=<dir>`, the same spelling `cli.ts` accepts. */
-export function parseHostArgs(args: readonly string[]): { appdir?: string } {
+function parseHostArgs(args: readonly string[]): { appdir?: string } {
   const eq = args.find((arg) => arg.startsWith("--appdir="));
   if (eq) {
     return { appdir: eq.slice("--appdir=".length) };
@@ -223,7 +223,7 @@ export interface AgentHost {
   stop(): Promise<void>;
 }
 
-export interface StartAgentHostOptions {
+interface StartAgentHostOptions {
   appdir?: string;
   env?: NodeJS.ProcessEnv;
   logger?: AdapterLogger;
@@ -734,13 +734,8 @@ export async function startAgentHost(
       logger.warn("agent-host: the boot sweep failed", error);
     });
     host.openGate();
-    // §3.2 layer three, AFTER the gate and never awaited: the registry forces
-    // one probe of every provider itself, so a fresh host converges on real
-    // catalogues in seconds instead of waiting out the 5-minute interval or a
-    // client subscribing. Readiness has already been announced above — a probe
-    // must never be able to delay it.
-    // *T3: `makeManagedServerProvider.ts:280-284` — the forced refresh is
-    // forked by the provider at construction, not awaited by its builder.*
+    // Probe providers without a correlated cache after readiness, without
+    // awaiting them: a slow CLI must not delay the command gate.
     snapshots.startBootRefresh();
     // C: the index file opens on the NEXT turn of the loop, so the health
     // answer the gate just released goes out first; then the catch-up, never

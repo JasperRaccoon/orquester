@@ -662,7 +662,7 @@ test("approvals and questions keep their kinds (different UI, different push cop
   );
 });
 
-test("a malformed pending row is dropped rather than published", async (t) => {
+test("pending rows are validated and duplicate request IDs keep the last row", async (t) => {
   const h = await harness(t);
   seedTab(h.chat, "t1");
   await h.read("t1", { pendingRequests: "nope" });
@@ -672,6 +672,7 @@ test("a malformed pending row is dropped rather than published", async (t) => {
     { requestId: "r1", kind: "elsewhere", title: "x" },
     { requestId: "r2", kind: "approval", title: 7 },
     null,
+    { requestId: "r3", kind: "approval", title: "replaced" },
     { requestId: "r3", kind: "question", title: "ok" }
   ]);
   assert.deepEqual(h.published.filter((event) => event.type === "agentChat.pending").map((event) => event.payload), [

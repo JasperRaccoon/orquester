@@ -192,7 +192,7 @@ export function planMarkdownFromToolCall(
 // The mode machine
 // ---------------------------------------------------------------------------
 
-export interface PlanToolCallView {
+interface PlanToolCallView {
   readonly title?: string;
   readonly status?: string;
   readonly rawInput?: unknown;

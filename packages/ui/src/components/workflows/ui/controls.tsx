@@ -381,26 +381,3 @@ export const KeyValueTable: React.FC<{
     </SmallButton>
   </div>
 );
-
-/** A short status pill (validation counts, run states). */
-export const Pill: React.FC<{
-  tone?: "neutral" | "danger" | "warn" | "ok" | "info";
-  children: React.ReactNode;
-  className?: string;
-  title?: string;
-}> = ({ tone = "neutral", children, className, title }) => (
-  <span
-    title={title}
-    className={cn(
-      "inline-flex items-center gap-1 rounded-full px-1.5 py-px text-[10.5px] font-medium leading-4",
-      tone === "neutral" && "bg-neutral-800 text-neutral-300",
-      tone === "danger" && "bg-danger-soft/60 text-danger",
-      tone === "warn" && "bg-warn-soft/50 text-warn",
-      tone === "ok" && "bg-ok-soft/50 text-ok",
-      tone === "info" && "bg-info-soft/50 text-info",
-      className
-    )}
-  >
-    {children}
-  </span>
-);

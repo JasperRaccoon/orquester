@@ -1,5 +1,5 @@
 import { REGISTRY, type RegistryEntryDef } from "@orquester/registry";
-import type { AgentConversationSummary, RegistryEntry, SessionKind, SessionSummary } from "@orquester/api";
+import type { AgentConversationSummary, RegistryEntry, SessionSummary } from "@orquester/api";
 
 import { DEFAULT_THREAD_TITLE } from "./agent-chat/title.logic";
 
@@ -46,40 +46,15 @@ export function isAgentLikeSession(session: Pick<SessionSummary, "kind">): boole
   return session.kind === "agent" || session.kind === "agent-chat";
 }
 
-/** A session rendered by xterm: it has a PTY, cols/rows, and a key bar. */
-export function isPtySession(session: Pick<SessionSummary, "kind">): boolean {
-  return session.kind === "shell" || session.kind === "agent";
-}
-
-/** The tag a legacy agent terminal carries in the tab strip / switcher (§5.2). */
-export const LEGACY_TERMINAL_TAG = "legacy terminal";
-
 /**
- * The chat adapter that drives a registry agent id, or `null` when the catalog
- * lists the entry without one (`deepseek` is detect-only). Read from the static
- * catalog rather than from `RegistryResponse`, which carries no `chat` field —
- * the runtime entry adds availability, never capability.
+ * Chat capability comes from the static catalog; the runtime registry only
+ * adds availability and does not carry adapter information.
  */
-export function chatAdapterFor(agentRefId: string): "claude" | "codex" | "opencode" | "grok" | null {
+export function canOpenChat(agentRefId: string): boolean {
   // `REGISTRY` is a literal-typed constant, so the union member for a row
   // without `chat` has no such property at all; widen to the declared shape.
   const agents: readonly RegistryEntryDef[] = REGISTRY.agents;
-  return agents.find((a) => a.id === agentRefId)?.chat?.adapter ?? null;
-}
-
-/** Whether "+ → this agent" may open a chat tab at all (§5.3). */
-export function canOpenChat(agentRefId: string): boolean {
-  return chatAdapterFor(agentRefId) !== null;
-}
-
-/**
- * The session kind an agent row launches as. Agent tabs are chat only
- * (§1 decision table: *replace*, do not coexist), so an entry with an adapter
- * becomes `agent-chat`; one without has no launch path left at all and the
- * caller must not offer it.
- */
-export function launchKindForAgent(agentRefId: string): SessionKind | null {
-  return canOpenChat(agentRefId) ? "agent-chat" : null;
+  return agents.find((a) => a.id === agentRefId)?.chat?.adapter != null;
 }
 
 /**

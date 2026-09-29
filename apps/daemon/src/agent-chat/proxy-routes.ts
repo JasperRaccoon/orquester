@@ -85,12 +85,8 @@ export interface AgentChatRouteDeps {
 }
 
 /** The §6.2 envelope, built in one place so no route invents a shape. */
-export function chatError(
-  code: AgentChatErrorCode,
-  message: string,
-  detail?: unknown
-): AgentChatErrorEnvelope {
-  return detail === undefined ? { error: { code, message } } : { error: { code, message, detail } };
+function chatError(code: AgentChatErrorCode, message: string): AgentChatErrorEnvelope {
+  return { error: { code, message } };
 }
 
 const HOST_UNAVAILABLE = chatError(
@@ -114,11 +110,6 @@ const CHAT_ERROR_STATUS: Record<AgentChatErrorCode, number> = {
   ITEM_NOT_FOUND: 404,
   PROMPT_NOT_FOUND: 404
 };
-
-/** The §6.2 status for a code, so the account route answers like a command. */
-function statusForChatError(code: AgentChatErrorCode): number {
-  return CHAT_ERROR_STATUS[code];
-}
 
 /**
  * Map a `ChatSessionError`/host envelope code onto the closed §6.2 list. A
@@ -153,10 +144,8 @@ function pattern(path: string): string {
 const TURN_DIFF_PATTERN = agentChatRoutes.turnDiff(":id", 0).replace(/\/0\/diff$/, "/:turnCount/diff");
 
 /**
- * Register every §6.2/§6.3 route. `mode` exists only so the host-stop route
- * can be named in logs; both transports get the identical surface, because a
- * chat command is not a change of daemon security posture (unlike
- * `PUT /api/config/daemon`).
+ * Register every §6.2/§6.3 route on both transports. Chat commands do not
+ * change daemon security settings, unlike `PUT /api/config/daemon`.
  */
 export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRouteDeps): void {
   // --- §6.2 commands -------------------------------------------------------
@@ -204,7 +193,7 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
       } catch (error) {
         const code = accountSwitchErrorCode(error);
         return reply
-          .code(statusForChatError(code))
+          .code(CHAT_ERROR_STATUS[code])
           .send(
             chatError(
               code,

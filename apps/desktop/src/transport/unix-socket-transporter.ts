@@ -14,7 +14,7 @@ import {
  * ArrayBuffers but not Blobs, so a File is read into memory first (the desktop
  * pays ~2× the file size across the two processes; the web client streams it).
  */
-export type DesktopBridgeBody = string | ArrayBuffer;
+type DesktopBridgeBody = string | ArrayBuffer;
 
 /** Materialize a transport-level binary body into the one shape the bridge can clone. */
 export async function binaryBodyToArrayBuffer(body: BinaryBody): Promise<ArrayBuffer> {
@@ -28,7 +28,7 @@ export async function binaryBodyToArrayBuffer(body: BinaryBody): Promise<ArrayBu
 }
 
 /** Shape exchanged with the Electron main process over IPC for unary requests. */
-export interface DesktopBridgeRequest {
+interface DesktopBridgeRequest {
   method: string;
   path: string;
   headers?: Record<string, string>;
@@ -38,7 +38,7 @@ export interface DesktopBridgeRequest {
   requestId?: string;
 }
 
-export interface DesktopBridgeResponse {
+interface DesktopBridgeResponse {
   status: number;
   ok: boolean;
   headers: Record<string, string>;
@@ -46,7 +46,7 @@ export interface DesktopBridgeResponse {
 }
 
 /** Binary response shape (file preview) — raw bytes instead of a decoded body. */
-export interface DesktopBridgeBytesResponse {
+interface DesktopBridgeBytesResponse {
   status: number;
   ok: boolean;
   headers: Record<string, string>;
@@ -54,7 +54,7 @@ export interface DesktopBridgeBytesResponse {
 }
 
 /** Shape exchanged with the main process for a remote (TCP) unary request. */
-export interface DesktopBridgeHttpRequest {
+interface DesktopBridgeHttpRequest {
   url: string;
   method?: string;
   headers?: Record<string, string>;

@@ -20,14 +20,14 @@ import {
 } from "../agent-host/host-protocol.ts";
 
 /** Bounded request/response calls never hang a route. Streams opt out. */
-export const HOST_REQUEST_TIMEOUT_MS = 20_000;
+const HOST_REQUEST_TIMEOUT_MS = 20_000;
 
 /**
  * Ceiling on a buffered (`json()`) host response. Generous — a whole thread
  * snapshot is a legitimate multi-megabyte read — but finite, because the body
  * is concatenated in daemon memory and nothing else bounds it.
  */
-export const HOST_RESPONSE_LIMIT_BYTES = 64 * 1024 * 1024;
+const HOST_RESPONSE_LIMIT_BYTES = 64 * 1024 * 1024;
 
 /**
  * The host is not answering: no socket, connection refused, or the request
@@ -71,10 +71,6 @@ export interface AgentHostClientOptions {
 
 export class AgentHostClient {
   constructor(private readonly opts: AgentHostClientOptions) {}
-
-  get socketPath(): string {
-    return this.opts.socketPath;
-  }
 
   /**
    * Open a request and resolve once the response headers are in. The caller

@@ -5,7 +5,6 @@ import type { WorkLogEntry } from "./contracts";
 import {
 isStreamedOutputEntry,
 liveWorkEntryLabel,
-nestRowsUnderParentCall,
 showDestructiveRowStyle,
 singleToolCallLabel,
 toolGroupAction,
@@ -13,9 +12,7 @@ withoutJoinedOutput,
 workEntryDisplayIndicatesToolFailure,
 workEntryDisplayLabel,
 workEntryIndicatesToolFailure,
-workEntryIsActiveTurnActivity,
-workEntryIsProviderDenial,
-workEntrySeverity
+workEntryIsActiveTurnActivity
 } from "./presentation.logic";
 
 const entry = (overrides: Partial<WorkLogEntry> = {}): WorkLogEntry => ({
@@ -51,17 +48,6 @@ describe("toolGroupAction", () => {
       toolGroupAction(entry({ sourceActivityKind: "approval.resolved", tone: "info" })),
       "update"
     );
-  });
-});
-
-describe("CLI-side denials", () => {
-  it("reads a tool_use_error result as a denial even with no approval request", () => {
-    assert.equal(
-      workEntryIsProviderDenial(entry({ detail: "<tool_use_error>not allowed</tool_use_error>" })),
-      true
-    );
-    assert.equal(workEntryIsProviderDenial(entry({ toolLifecycleStatus: "declined" })), true);
-    assert.equal(workEntryIsProviderDenial(entry({ detail: "fine" })), false);
   });
 });
 
@@ -129,7 +115,6 @@ describe("the output heuristic never judges a call still in progress", () => {
   it("an in-progress call is not failed by its output, however it reads", () => {
     assert.equal(workEntryDisplayIndicatesToolFailure(running), false);
     assert.equal(workEntryIndicatesToolFailure(running), false);
-    assert.equal(workEntrySeverity(running), "none");
     assert.equal(showDestructiveRowStyle(running), false);
   });
 
@@ -170,22 +155,5 @@ describe("R7-6 — arms absorbed from the deleted second resolver", () => {
       workEntryIsActiveTurnActivity(entry({ toolLifecycleStatus: "completed" })),
       false
     );
-  });
-});
-
-describe("R7-10 — parentToolUseId has a reader", () => {
-  it("nests a consequence row under the call it happened inside", () => {
-    const call = entry({ id: "c1", toolCallId: "tu1", command: "pnpm test" });
-    const hook = entry({ id: "h1", parentToolUseId: "tu1", label: "PostToolUse" });
-    const sibling = entry({ id: "s1", command: "ls" });
-    const nested = nestRowsUnderParentCall([call, hook, sibling]);
-    assert.deepEqual(nested.map((node) => node.entry.id), ["c1", "s1"]);
-    assert.deepEqual(nested[0]?.children.map((child) => child.id), ["h1"]);
-  });
-
-  it("leaves a row whose parent is not in this run at the top level", () => {
-    const orphan = entry({ id: "o1", parentToolUseId: "elsewhere" });
-    const nested = nestRowsUnderParentCall([orphan]);
-    assert.deepEqual(nested.map((node) => node.entry.id), ["o1"]);
   });
 });

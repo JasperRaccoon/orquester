@@ -1699,7 +1699,10 @@ test("at the host's teardown a helper that ignores SIGTERM is killed after a 1 s
     const schedule = globalThis.setTimeout;
     t.mock.method(globalThis, "setTimeout", ((...args: Parameters<typeof setTimeout>) => {
       const timer = schedule(...args);
-      if (termAt !== undefined) offer({ delay: Number(args[1] ?? 0) });
+      const delay = Number(args[1] ?? 0);
+      // ACP's unrelated 2 s stdout-close watchdog can arrive after SIGTERM.
+      // Advancing it here would move the sweep's clock before its grace starts.
+      if (termAt !== undefined && delay <= 1_000) offer({ delay });
       return timer;
     }) as typeof setTimeout);
 

@@ -5,7 +5,8 @@ import { isAbsolute, join, relative, sep } from "node:path";
 import { after, test } from "node:test";
 import { workflowRecordSchema } from "@orquester/config";
 import type { PersistedRun } from "./contracts.ts";
-import { FileRunStore, persistedRunToWire, runSummaryOf } from "./run-store.ts";
+import { FileRunStore, persistedRunToWire } from "./run-store.ts";
+import { toRunSummary } from "./run-context.ts";
 
 const roots: string[] = [];
 after(async () => {
@@ -214,7 +215,7 @@ test("deleteForWorkflow removes every run of that workflow only", async () => {
   assert.equal(store.summaryOf("run-a"), undefined);
 });
 
-test("runSummaryOf / persistedRunToWire: bookkeeping stripped, outputs cut to the preview", () => {
+test("toRunSummary / persistedRunToWire: bookkeeping stripped, outputs cut to the preview", () => {
   const big = "é".repeat(40_000);
   const persisted = run("run-w", {
     status: "failed",
@@ -234,7 +235,7 @@ test("runSummaryOf / persistedRunToWire: bookkeeping stripped, outputs cut to th
       }
     }
   });
-  const summary = runSummaryOf(persisted);
+  const summary = toRunSummary(persisted);
   assert.equal(summary.status, "failed");
   assert.equal(summary.error, "boom");
   assert.equal(summary.retryOf, "run-v");

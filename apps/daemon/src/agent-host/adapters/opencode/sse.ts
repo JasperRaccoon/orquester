@@ -9,7 +9,7 @@
  */
 
 /** One decoded SSE frame. `event` is absent on OpenCode's stream. */
-export interface SseFrame {
+interface SseFrame {
   event?: string;
   data: string;
   id?: string;

@@ -16,7 +16,7 @@ import type { Options as ClaudeQueryOptions, Query, SDKUserMessage } from "@anth
 
 import { spawnProviderChild } from "../../support/spawn.ts";
 
-export type ClaudeQueryFactory = (params: {
+type ClaudeQueryFactory = (params: {
   prompt: string | AsyncIterable<SDKUserMessage>;
   options?: ClaudeQueryOptions;
 }) => Query;

@@ -42,12 +42,14 @@ describe("dropSupersededToolUpdatedActivities (§5.6 snapshot drop)", () => {
     const kept = dropSupersededToolUpdatedActivities([
       activity("u1", "tool.updated", { toolUseId: "c1" }),
       activity("d1", "tool.completed", { toolUseId: "c1" }),
-      activity("u2", "tool.updated", { toolUseId: "c1" })
+      activity("u2", "tool.updated", { toolUseId: "c1" }),
+      activity("d2", "tool.completed", { toolUseId: "c1" }),
+      activity("u3", "tool.updated", { toolUseId: "c1" })
     ]);
-    // u2 belongs to a later call reusing the id and is still in flight.
+    // u3 belongs to a later call reusing the id and is still in flight.
     assert.deepEqual(
       kept.map((row) => row.id),
-      ["d1", "u2"]
+      ["d1", "d2", "u3"]
     );
   });
 

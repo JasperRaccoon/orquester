@@ -127,7 +127,7 @@ import {
   replaceHandler,
   serializeHookFile
 } from "./hooks.ts";
-import { SecretDigester } from "../claude/mcp.ts";
+import { SecretDigester } from "../../infra/secret-digest.ts";
 import { type GrokInspect, parseGrokInspect } from "./inspect.ts";
 import { type TomlEdit, type TomlTable, editToml, getTomlPath, isTable, parseToml } from "./toml-patch.ts";
 
@@ -240,7 +240,7 @@ function message(error: unknown): string {
  * A parser's complaint without the text it quotes: TOML and JSON errors
  * echo the offending line, which can hold a secret (an MCP env value).
  */
-export function safeParseError(kind: "TOML" | "JSON", error: unknown): string {
+function safeParseError(kind: "TOML" | "JSON", error: unknown): string {
   const text = message(error);
   const at = /\((\d+), (\d+)\)/.exec(text) ?? /line (\d+) column (\d+)/i.exec(text);
   if (at !== null) {

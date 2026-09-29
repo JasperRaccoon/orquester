@@ -15,7 +15,7 @@
 
 import type { UserInputQuestion, UserInputQuestionOption } from "@orquester/api/agent-chat";
 
-export interface AskUserQuestionParse {
+interface AskUserQuestionParse {
   questions: UserInputQuestion[];
   /**
    * Two questions with identical text are indistinguishable by the answer key,

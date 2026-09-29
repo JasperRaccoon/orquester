@@ -48,7 +48,7 @@ import {
 import { MINIMUM_OPENCODE_VERSION, tooOldMessage } from "./semver.ts";
 
 /** Registry ids this adapter serves. */
-export const OPENCODE_REF_IDS: readonly string[] = ["opencode"];
+const OPENCODE_REF_IDS: readonly string[] = ["opencode"];
 
 /**
  * §4.1 says OpenCode reports no context window; on 1.18.5 it reports both
@@ -76,7 +76,7 @@ export const OPENCODE_CAPABILITIES: AdapterCapabilities = {
  * advertised the command on a not-installed or too-old snapshot, which carries
  * no models and therefore no descriptor at all.
  */
-export const SYNTHESISED_COMMANDS: readonly SlashCommand[] = [
+const SYNTHESISED_COMMANDS: readonly SlashCommand[] = [
   { name: "compact", description: "Compact this conversation's context" }
 ];
 
@@ -168,7 +168,7 @@ function titleCaseSlug(value: string): string {
 }
 
 /** *T3: `OpenCodeProvider.ts:155-168`.* */
-export function inferDefaultVariant(
+function inferDefaultVariant(
   providerID: string,
   variants: readonly string[]
 ): string | undefined {
@@ -184,7 +184,7 @@ export function inferDefaultVariant(
   return undefined;
 }
 
-export function primaryAgents(agents: readonly OpenCodeAgentRow[]): OpenCodeAgentRow[] {
+function primaryAgents(agents: readonly OpenCodeAgentRow[]): OpenCodeAgentRow[] {
   return agents.filter(
     (agent) => agent.hidden !== true && (agent.mode === "primary" || agent.mode === "all")
   );
@@ -200,7 +200,7 @@ function inferDefaultAgent(agents: readonly OpenCodeAgentRow[]): string | undefi
  * `reasoningEffort`/`thinking` field is ever sent** (§4.5). A second select
  * exposes the primary `agent` list.
  */
-export function openCodeCapabilitiesForModel(input: {
+function openCodeCapabilitiesForModel(input: {
   providerID: string;
   model: OpenCodeModelRow;
   agents: readonly OpenCodeAgentRow[];
@@ -255,7 +255,7 @@ export function openCodeCapabilitiesForModel(input: {
 }
 
 /** Providers not in `connected` are skipped: they cannot serve a turn. */
-export function flattenOpenCodeModels(inventory: OpenCodeInventory): ProviderModel[] {
+function flattenOpenCodeModels(inventory: OpenCodeInventory): ProviderModel[] {
   const connected = new Set(inventory.providers.connected);
   const defaults = inventory.providers.default ?? {};
   const models: ProviderModel[] = [];
@@ -313,7 +313,7 @@ export function toSlashCommands(rows: readonly OpenCodeCommandRow[]): SlashComma
   return commands;
 }
 
-export function toSkills(rows: readonly OpenCodeSkillRow[]): Skill[] {
+function toSkills(rows: readonly OpenCodeSkillRow[]): Skill[] {
   const skills: Skill[] = [];
   for (const row of rows) {
     const name = row.name?.trim();
@@ -341,7 +341,7 @@ export function inferAuth(inventory: OpenCodeInventory): ProviderAuth {
     : { status: "unknown", type: "opencode" };
 }
 
-export function describeInventory(inventory: OpenCodeInventory): string {
+function describeInventory(inventory: OpenCodeInventory): string {
   const count = inventory.providers.connected.length;
   return count > 0
     ? `${count} upstream provider${count === 1 ? "" : "s"} connected through OpenCode.`

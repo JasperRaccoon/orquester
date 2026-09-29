@@ -2,19 +2,19 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { buildAgentLaunchEnv } from "./index.ts";
 
-// These exercise the real launch seam (buildAgentLaunchEnv IS the body of the
-// session manager's resolveExtraEnv), so dropping the timeout contributor from
-// the daemon's composition fails them.
 test("a claude launch under a managed account carries the timeout env and keeps the account", () => {
-  const merged = buildAgentLaunchEnv("claude", 30, { env: { CLAUDE_CONFIG_DIR: "/from-account" }, accountId: "acct-1" });
+  const merged = buildAgentLaunchEnv("claude", 30, {
+    env: { CLAUDE_CONFIG_DIR: "/from-account", API_TIMEOUT_MS: "1" },
+    unset: ["ANTHROPIC_API_KEY"],
+    accountId: "acct-1"
+  });
   assert.ok(merged);
   assert.equal(merged.env.API_TIMEOUT_MS, "1800000");
   assert.equal(merged.env.CLAUDE_STREAM_IDLE_TIMEOUT_MS, "1800000");
   assert.equal(merged.env.CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS, "1800000");
-  // The timeout keys collide with nothing: the account's home is untouched...
   assert.equal(merged.env.CLAUDE_CONFIG_DIR, "/from-account");
-  // ...and the managed account still supplies the effective accountId.
   assert.equal(merged.accountId, "acct-1");
+  assert.deepEqual(merged.unset, ["ANTHROPIC_API_KEY"]);
 });
 
 test("plain claude (no managed account) still carries the timeout env", () => {

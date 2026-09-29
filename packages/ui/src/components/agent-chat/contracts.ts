@@ -2,12 +2,7 @@ import type React from "react";
 /**
  * Agent chat — component prop contracts (spec §7.1, §7.3–§7.6).
  *
- * Types only. Each component ships as a placeholder next to this file;
- * packages W12–W15 and D replace the bodies, never these props.
- *
- * Ownership: `timeline/**` → W12, `{composer,banners}/**` → W13,
- * `{roster,status}/**` → W14, `AgentChatView.tsx` → W15,
- * `primitives/**` → D.
+ * Shared props for the thread view and its child components.
  */
 
 import type {
@@ -86,16 +81,12 @@ export interface ChatTimelineProps {
   /**
    * A turn is running or a revert is in flight: the rewind button is shown
    * but disabled ("Available when the agent is idle"). Absent means idle.
-   *
-   * *Added with the rewind surfaces; additive to the foundation's contract.*
    */
   revertBusy?: boolean | undefined;
   /**
    * How many turns the thread has started (`startedTurns(turns).length`), so
    * a row can say how many turns its rewind removes. Absent means 0, which
    * makes every rewind read as removing one turn — the floor.
-   *
-   * *Added with the rewind surfaces; additive to the foundation's contract.*
    */
   startedTurnCount?: number | undefined;
   /** Open a turn's unified diff (`GET …/turns/:n/diff`). */
@@ -138,8 +129,6 @@ export interface ChatTimelineProps {
    * drill-in projected itself (`useAgentChatDrillIn`) — the timeline renders
    * them as they are, as it renders the thread's. Its presence also forces
    * {@link readOnly}, because a child view dispatches no commands.
-   *
-   * *Added by W12; additive to the foundation's contract.*
    */
   agentId?: string | undefined;
   /** Read-only: every mutating affordance is withheld, nothing is disabled-looking. */
@@ -149,15 +138,11 @@ export interface ChatTimelineProps {
    * `retentionDropped`). Read by a drill-in's empty copy alone: an agent's
    * rows may be said to have LEFT the window only when the window dropped
    * some (`timeline/empty-notice.ts`). Absent means no.
-   *
-   * *Added with the drill-in fixes (2026-09-27).*
    */
   retentionDropped?: boolean | undefined;
   /**
    * The roster the spawn row resolves against **at render time** — a persisted
    * member count goes stale the moment a member finishes (§7.6).
-   *
-   * *Added by W12; additive to the foundation's contract.*
    */
   roster?: readonly RuntimeSubagent[] | undefined;
   /**
@@ -166,23 +151,17 @@ export interface ChatTimelineProps {
    * ones first (`drillInAgentRow`). Read instead of looking the row up in
    * `roster`: its kind decides the shell pane and the empty copy. Absent: the
    * roster's.
-   *
-   * *Added with the UI fix wave (2026-09-27).*
    */
   drilledAgent?: RuntimeSubagent | null | undefined;
   /**
    * `drilledAgent` is the row the drill-in last saw, not the roster's: its
    * kind holds, its status is not current — the empty copy reads it as not
    * live, as the timeline's rows do.
-   *
-   * *Added with the UI fix wave (2026-09-27).*
    */
   drilledAgentRemembered?: boolean | undefined;
   /**
    * The drill-in is a background shell's: its row says so, or, with no row at
    * all, its items (`isBackgroundShellItems`). Absent: the drilled row's kind.
-   *
-   * *Added with the UI fix wave (2026-09-27).*
    */
   backgroundShell?: boolean | undefined;
   /** The project directory, so changed-file paths render workspace-relative. */
@@ -194,8 +173,6 @@ export interface ChatTimelineProps {
    * (`timelineSkillNames`: every skill in the thread's cwd's overlay, else in
    * the machine-level catalogue — wider than the `$` menu, which offers only
    * the enabled, user-invocable ones); empty means no chips.
-   *
-   * *Added by W12; additive to the foundation's contract.*
    */
   skills?: readonly string[] | undefined;
   /**
@@ -204,8 +181,6 @@ export interface ChatTimelineProps {
    * (§7.2); a drill-in's, from the view's per-agent memory
    * (`roster/drill-in-memory.ts`), never that LRU. An absent or at-end
    * position opens at the end.
-   *
-   * *Added by W12; additive to the foundation's contract.*
    */
   scroll?: TimelineScrollPosition | null | undefined;
   /**
@@ -225,8 +200,6 @@ export interface ChatTimelineProps {
    * 2026-09-23 §C "History page"): a "Load older turns" row sits above the
    * first row. Never offered on a read-only surface or the drill-in. Absent
    * means no.
-   *
-   * *Added with the thread index; additive to the foundation's contract.*
    */
   historyHasOlder?: boolean | undefined;
   /** A page is loading: the row spins and cannot be pressed again. */
@@ -244,8 +217,6 @@ export interface ChatTimelineProps {
    * timeline scrolls it to the top of the viewport once it is rendered and
    * visible, disarms follow, and hands the nonce back through
    * {@link onRevealHandled}.
-   *
-   * *Added with the thread index; additive to the foundation's contract.*
    */
   revealRequest?: { rowId: string; nonce: number } | null | undefined;
   onRevealHandled?: ((nonce: number) => void) | undefined;
@@ -286,8 +257,6 @@ export interface ChatComposerProps {
    * an Orquester update, which the user's `/goal pause` takes back (goals
    * §5.7), else a continuing goal, which only a pause ends (§5.5). Absent ⇒
    * the chip's own "available when idle".
-   *
-   * *Added with agent goals; additive to the contract.*
    */
   accountSwitchRefusal?: string | null | undefined;
   /** A turn is live: Enter steers, Escape interrupts, the primary action is Stop. */
@@ -328,9 +297,6 @@ export interface ChatComposerProps {
    * lives above the composer in the shell's overlay stack — so the count has
    * to come back out. Fires on mount and on every change; a composer that
    * never mounts simply never publishes, and the shell's own default is 0.
-   *
-   * *Added by W15 for the R7-2 residual; additive to the foundation's
-   * contract.*
    */
   onDraftAttachmentCountChange?: ((count: number) => void) | undefined;
 }
@@ -374,9 +340,7 @@ export interface ChatBannerDockProps {
  * state here, in the same three-line shape a subagent row uses. `turnActive`
  * is also what drives the fade: finished rows disappear when the turn ends.
  *
- * **Added by W14** (additively; every field optional at the call site through
- * `main` itself being optional). Without it the roster simply renders no main
- * row and settled rows never fade.
+ * Without it the roster renders no main row and settled rows never fade.
  */
 export interface AgentRosterMainRow {
   /** Defaults to "main". The thread title is the tab's job, not the roster's. */
@@ -434,8 +398,6 @@ export interface AgentDrillInProps {
    * The thread's roster, forwarded to the timeline so a spawn row *inside* a
    * child (an agent that spawned its own) resolves its members at render time
    * instead of reading "Status unavailable".
-   *
-   * *Added by W14; additive to the foundation's contract.*
    */
   roster?: readonly RuntimeSubagent[] | undefined;
   /** Forwarded so changed-file paths render workspace-relative. */
@@ -450,16 +412,12 @@ export interface AgentDrillInProps {
    * The parent view's click-through to the file browser: navigation, not a
    * command, so a file a child's words link to, a changed-file line and a
    * diff heading open it as they do in the thread. Absent means inert.
-   *
-   * *Added with the drill-in fixes (2026-09-27).*
    */
   onOpenFile?: ((path: string) => void) | undefined;
   /**
    * Switch the drill-in to another agent: a spawn row inside a child — an
    * agent that launched its own — lists its members, and opening one is
    * navigation, as the roster's rows are. Absent means inert.
-   *
-   * *Added with the drill-in fixes (2026-09-27).*
    */
   onOpenAgent?: ((agentId: string) => void) | undefined;
   /**
@@ -468,8 +426,6 @@ export interface AgentDrillInProps {
    * Stop, compact — and those commands report a failure only here, so a
    * drill-in that hid it hid the failure until Back. Dismissing it is a UI
    * action, not a command. Absent means no banner.
-   *
-   * *Added with the drill-in fixes (2026-09-27).*
    */
   errorBanner?: string | null | undefined;
   onDismissErrorBanner?: (() => void) | undefined;
@@ -478,8 +434,6 @@ export interface AgentDrillInProps {
    * drill-in opens from it — its disclosures, and a reading position left
    * mid-list, with follow off. The host keys the component by `agentId`, so
    * every agent opens from its own entry. Absent: at the end, following.
-   *
-   * *Added with the drill-in fixes (2026-09-27).*
    */
   remembered?: DrillInMemoryEntry | null | undefined;
   /** Every change of the agent's disclosures, follow or reading position: the host's memory. */
@@ -488,8 +442,6 @@ export interface AgentDrillInProps {
    * The thread's skill names, so a `$mention` in the child's rows — its
    * launch prompt above all — re-chips as it does in the thread
    * (`ChatTimelineProps.skills`). Absent means no chips.
-   *
-   * *Added with the drill-in fixes (2026-09-27).*
    */
   skills?: readonly string[] | undefined;
 }
@@ -522,7 +474,7 @@ export interface ChatStatusLineProps {
    * without the label it degrades to a generic line although the model is
    * right there on the thread head.
    *
-   * *Added by W14 and W15 for R8 m3; T3 passes `modelDisplayName`,
+   * *T3 passes `modelDisplayName`,
    * `ContextWindowMeter.tsx:136-138`.*
    */
   modelLabel?: string | null;
@@ -530,8 +482,6 @@ export interface ChatStatusLineProps {
    * The thread's goal, as the fold holds it (goals §8.2). The chip shows
    * exactly an unfinished one, in a stable slot before the plan chip; absent
    * or `null` ⇒ no chip.
-   *
-   * *Added with agent goals; additive to the contract.*
    */
   goal?: AgentGoal | null;
   /**
@@ -540,8 +490,6 @@ export interface ChatStatusLineProps {
    * head. The chip then reads `paused for update` in the in-motion tone, not
    * a user's pause in the warn tone, and its popover says it resumes by
    * itself. Absent reads as no.
-   *
-   * *Added with the deploy hold; additive to the contract.*
    */
   goalHeldForUpdate?: boolean;
   /** The chip's actions, already gated by the §8.2 matrix (`goalActions`). */

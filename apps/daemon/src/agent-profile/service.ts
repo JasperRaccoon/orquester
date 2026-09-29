@@ -72,13 +72,9 @@ import type {
   ProfileAdapter
 } from "./adapters/types.ts";
 import { AgentProfileError, profileErrors } from "./errors.ts";
+import type { ProfileConverter } from "./convert.ts";
+import type { ProfileImports } from "./import.ts";
 import { assertCommandName, assertMcpServerName, assertSkillName, contentHash, parseItemId } from "./infra/index.ts";
-import {
-  identityConverter,
-  importsUnavailable,
-  type ProfileConverter,
-  type ProfileImports
-} from "./seams.ts";
 
 /** What the registry knows about an agent's CLI. */
 export interface AgentInstallInfo {
@@ -111,8 +107,7 @@ export interface AgentProfileServiceOptions {
   agentInfo: (agent: AgentProfileAgentId) => AgentInstallInfo;
   /** For the instruction file path a not-installed agent's empty snapshot names. */
   homes?: AgentHomes;
-  /** The cross-agent converter; absent → {@link identityConverter}. */
-  converter?: ProfileConverter;
+  converter: ProfileConverter;
   /** The import scanner; absent → every import answers 503. */
   imports?: ProfileImports;
   /**
@@ -148,7 +143,7 @@ const DEFAULT_DEBOUNCE_MS = 500;
 const defaultWatch: ProfileWatchFn = (path, onChange, onError) => {
   const watcher = fsWatch(path, { persistent: false }, () => onChange());
   watcher.on("error", onError);
-  return { close: () => watcher.close() };
+  return watcher;
 };
 
 const noop = (): void => undefined;
@@ -179,7 +174,7 @@ export class AgentProfileService {
   constructor(private readonly options: AgentProfileServiceOptions) {
     this.adapters = options.adapters;
     this.agentInfo = options.agentInfo;
-    this.converter = options.converter ?? identityConverter;
+    this.converter = options.converter;
     this.logger = options.logger ?? console;
     this.now = options.now ?? (() => new Date());
     this.watchFn = options.watch ?? defaultWatch;
@@ -297,7 +292,6 @@ export class AgentProfileService {
     draft: ProfileItemDraft,
     onConflict: ProfileConflictPolicy = "fail"
   ): Promise<ProfileMutationResponse> {
-    assertAgent(agent);
     this.installedAdapter(agent);
     assertCanCreate(agent, draft.kind);
     assertDraftValid(agent, draft);
@@ -315,7 +309,6 @@ export class AgentProfileService {
     picks: string[],
     onConflict: ProfileConflictPolicy = "fail"
   ): Promise<ProfileMutationResponse> {
-    assertAgent(agent);
     this.installedAdapter(agent);
     const imports = this.requireImports();
     const taken = await imports.take(agent, importId, picks);
@@ -350,7 +343,6 @@ export class AgentProfileService {
     revision: string,
     draft: ProfileItemDraft
   ): Promise<ProfileMutationResponse> {
-    assertAgent(agent);
     this.installedAdapter(agent);
     if (!AGENT_PROFILE_KINDS[agent].includes(draft.kind)) {
       throw profileErrors.kindNotSupported(AGENT_PROFILE_AGENT_LABELS[agent], draft.kind);
@@ -452,14 +444,12 @@ export class AgentProfileService {
   // -------------------------------------------------------------------------
 
   async scanGit(agent: AgentProfileAgentId, url: string): Promise<ProfileImportScanResponse> {
-    assertAgent(agent);
     this.installedAdapter(agent);
     return this.requireImports().scanGit(agent, url);
   }
 
   /** `filePath` stays the caller's: see {@link ProfileImports.scanUpload}. */
   async scanUpload(agent: AgentProfileAgentId, name: string, filePath: string): Promise<ProfileImportScanResponse> {
-    assertAgent(agent);
     this.installedAdapter(agent);
     return this.requireImports().scanUpload(agent, name, filePath);
   }
@@ -470,7 +460,6 @@ export class AgentProfileService {
    * BEFORE reading the body, so a refused upload is never streamed to disk.
    */
   assertCanScanUpload(agent: AgentProfileAgentId): void {
-    assertAgent(agent);
     this.installedAdapter(agent);
     this.requireImports();
   }
@@ -480,7 +469,9 @@ export class AgentProfileService {
   // -------------------------------------------------------------------------
 
   private requireImports(): ProfileImports {
-    if (!this.options.imports) throw importsUnavailable();
+    if (!this.options.imports) {
+      throw new AgentProfileError(503, "AGENT_PROFILE_ERROR", "Imports are not available yet.");
+    }
     return this.options.imports;
   }
 
@@ -764,7 +755,7 @@ export function publishAgentProfileEvents(
 }
 
 /** The global instruction file each agent loads (spec §3). */
-export function instructionsPathFor(agent: AgentProfileAgentId, homes: AgentHomes): string {
+function instructionsPathFor(agent: AgentProfileAgentId, homes: AgentHomes): string {
   switch (agent) {
     case "claude":
       return join(homes.claudeDir, "CLAUDE.md");

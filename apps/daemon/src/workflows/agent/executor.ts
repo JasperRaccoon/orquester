@@ -254,7 +254,7 @@ function initialState(ctx: NodeExecutionContext<"agent">, now: Date): AgentBlock
 }
 
 /** The persisted state of a `WaitingOn`, or null when it is not one this version wrote. */
-export function parseState(waitingOn: WaitingOn): AgentBlockState | null {
+function parseState(waitingOn: WaitingOn): AgentBlockState | null {
   if (waitingOn.kind !== "agent") return null;
   const raw = waitingOn.state as Partial<AgentBlockState> | undefined;
   if (!raw || raw.v !== 1 || !AGENT_PHASES.includes(raw.phase as AgentPhase)) return null;

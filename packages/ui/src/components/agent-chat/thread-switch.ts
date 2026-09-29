@@ -37,21 +37,19 @@ export function resolveThreadSwitchTimeline<TRow>(input: {
   held: HeldTimeline<TRow> | null;
 }): ThreadSwitchTimeline<TRow> {
   const { sessionId, rows, loading, held } = input;
-  // 1. Anything to show for the named thread wins outright.
+  // Anything to show for the named thread wins outright.
   if (rows.length > 0) {
     return { rows, paintOnly: false, displaySessionId: sessionId };
   }
-  // 2. Nothing yet but we painted this SAME thread before — a reconnect
-  //    re-snapshot, not a switch. Keep its own rows; this is not paint-only,
-  //    so its callbacks stay live: the user is still on that thread.
-  if (loading && held && held.sessionId === sessionId && held.rows.length > 0) {
-    return { rows: held.rows, paintOnly: false, displaySessionId: sessionId };
+  // Reuse the last visible rows while loading; rows from another thread stay inert.
+  if (loading && held && held.rows.length > 0) {
+    return {
+      rows: held.rows,
+      paintOnly: held.sessionId !== sessionId,
+      displaySessionId: held.sessionId
+    };
   }
-  // 3. Nothing yet and the last paint was another thread: hold it, inert.
-  if (loading && held && held.sessionId !== sessionId && held.rows.length > 0) {
-    return { rows: held.rows, paintOnly: true, displaySessionId: held.sessionId };
-  }
-  // 4. Genuinely empty — an empty thread renders its own empty state.
+  // An empty thread renders its own empty state.
   return { rows, paintOnly: false, displaySessionId: sessionId };
 }
 

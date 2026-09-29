@@ -221,21 +221,6 @@ export class ProfileStash {
     return target;
   }
 
-  /**
-   * Turns a `fragment` entry back on: answers its data and deletes the entry.
-   * Throws `ITEM_NOT_FOUND` for no such fragment entry. The entry is gone once
-   * this returns — when putting the data back can fail, read it with
-   * {@link get} instead and {@link remove} the entry after the write.
-   */
-  async takeFragment(agent: string, kind: ProfileItemKind, id: string): Promise<unknown> {
-    const entry = await this.get(agent, kind, id);
-    if (entry === null || entry.original.type !== "fragment") {
-      throw profileErrors.notFound(id);
-    }
-    await rm(entry.dir, { recursive: true, force: true });
-    return entry.original.data;
-  }
-
   /** Deletes an entry for good (delete of an item that is off). Answers whether one was there. */
   async remove(agent: string, kind: ProfileItemKind, id: string): Promise<boolean> {
     const dir = this.entryDir(agent, kind, id);

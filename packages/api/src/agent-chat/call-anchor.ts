@@ -1,38 +1,12 @@
 /**
- * Agent chat — whether a tool call is anyone's to show: one rule for every
- * reader of a call's rows.
+ * A tool call is visible only if a row names a turn, has an agent owner, or
+ * closes the call. Legacy logs can retain unanchored start/update rows after
+ * a rewind or session stop; showing or closing those would resurrect work
+ * from a removed turn.
  *
- * The Claude normaliser writes every row of a parent call on a turn: a woken
- * parent's first message is held and replayed into the next turn to open
- * (`preTurnStream`), and a call the tail of a message streams after its turn
- * ended rides that message's turn (`streamMessageTurnId`). A log written
- * before 2026-09-28 is different: such a tail's call (an interrupted
- * message's) — and, before the hold, every woken call — sent its start and
- * any early input update with no turn and no owner, and the next turn to open
- * adopted the call with one update on it (the since-removed
- * `adoptedToolEvent`). A rewind of that turn removes that row with the rest,
- * its completion too, and keeps the turnless ones (`reduceReverted` drops a
- * removed turn's rows, never a turnless row): those are then all there is of
- * the call, open, and it ran in a turn that no longer exists. So is such a
- * call no turn ever adopted, its session stopped first.
- *
- * A row of a call ({@link CALL_ROW_KINDS}) ANCHORS it ({@link anchorsCall})
- * when it names a turn, when an agent owns it (a non-blank `agentId` on the
- * row or on its payload, {@link isAgentOwnedActivity}), or when it closes the
- * call. A call no row anchors is shown by no one, and nothing writes one row
- * that would anchor it:
- *
- * - the GUI's timeline shows it no row — its start is not the call's row
- *   (`startIsCallRow`, packages/ui `entries.logic.ts`), and an update still in
- *   progress is a neutral row a group hides;
- * - the MCP's transcript builds it no entry (`anchoredCalls` in
- *   `apps/daemon/src/mcp/transcript.ts`);
- * - a host's first load writes it no closer
- *   (`apps/daemon/src/agent-host/orchestration/leftover-work.ts`): a closer
- *   would anchor it, and the call would come back as a failed row in both
- *   views — after any host start, a deploy's included.
- *
- * Pure, no Node APIs: `@orquester/api` is shared with the browser.
+ * Shared by the GUI timeline, MCP transcript, and host orphan reconciliation.
+ * Reconciliation must not add a closer to an unanchored call: that closer
+ * would make the call visible again.
  */
 
 import { isAgentOwnedActivity } from "./compaction.ts";

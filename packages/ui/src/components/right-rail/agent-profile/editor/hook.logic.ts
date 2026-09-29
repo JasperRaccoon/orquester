@@ -76,8 +76,4 @@ export function validateHookForm(agent: AgentProfileAgentId, form: HookForm, ori
   return { valid: Object.keys(errors).length === 0, errors };
 }
 
-export function hookFormSignature(form: HookForm): string {
-  return JSON.stringify(form);
-}
-
 export const HOOK_MATCHER_PLACEHOLDER = "Bash or Edit|Write";

@@ -188,32 +188,6 @@ export function workEntryIsWarning(entry: WorkLogEntry): boolean {
   return entry.sourceActivityKind === "runtime.warning";
 }
 
-/** The three-way severity the row chrome branches on (§7.3). */
-export type WorkEntrySeverity = "none" | "warning" | "failure" | "severe";
-
-export function workEntrySeverity(entry: WorkLogEntry): WorkEntrySeverity {
-  if (workEntrySignalsSevereFailure(entry)) {
-    return "severe";
-  }
-  if (workEntryIsWarning(entry)) {
-    return "warning";
-  }
-  return workEntryIndicatesToolFailure(entry) ? "failure" : "none";
-}
-
-/**
- * A tool result that is a CLI-side denial reads as a denial even though no
- * `request.*` event exists for it — Claude Code gates some calls itself and
- * answers with a `<tool_use_error>` nobody authorised (SEAMS §2).
- */
-export function workEntryIsProviderDenial(entry: WorkLogEntry): boolean {
-  if (entry.toolLifecycleStatus === "declined") {
-    return true;
-  }
-  const detail = entry.detail ?? "";
-  return /<tool_use_error>/i.test(detail) || /\bpermission (?:denied|to use)\b/i.test(detail);
-}
-
 // ---------------------------------------------------------------------------
 // Grouping buckets (§7.3 `summarizeToolGroup`)
 // ---------------------------------------------------------------------------
@@ -647,39 +621,6 @@ export function workEntryIconName(entry: WorkLogEntry): WorkEntryIconName {
 }
 
 /**
- * Everything a row needs to paint itself, resolved from the normalised record
- * in one place. This is the whole "presentation resolver" §7.2 asks for.
- */
-export interface WorkEntryPresentation {
-  icon: WorkEntryIconName;
-  label: string;
-  severity: WorkEntrySeverity;
-  action: ToolGroupAction;
-  isToolLike: boolean;
-  isDenial: boolean;
-  /** Present tense while the row is the live one. */
-  live: boolean;
-}
-
-export function resolveWorkEntryPresentation(
-  entry: WorkLogEntry,
-  options?: { live?: boolean; workspaceRoot?: string }
-): WorkEntryPresentation {
-  const live = options?.live ?? false;
-  return {
-    icon: workEntryIconName(entry),
-    label: live
-      ? liveWorkEntryLabel(entry, true, options?.workspaceRoot)
-      : workEntryDisplayLabel(entry, options?.workspaceRoot),
-    severity: workEntrySeverity(entry),
-    action: toolGroupAction(entry),
-    isToolLike: workLogEntryIsToolLike(entry),
-    isDenial: workEntryIsProviderDenial(entry),
-    live
-  };
-}
-
-/**
  * A row that reads as *still happening* in the active run — what the activity
  * group picks its live row with.
  *
@@ -708,35 +649,6 @@ export function showDestructiveRowStyle(entry: WorkLogEntry): boolean {
     return false;
   }
   return workEntrySignalsSevereFailure(entry) || !workLogEntryIsToolLike(entry);
-}
-
-/**
- * Group a collapsed run's rows under the tool call each one happened inside.
- *
- * A hook run and a CLI-side denial carry `parentToolUseId` (§5.1) and read as
- * consequences of a call, not as siblings of it; a row without one, or whose
- * parent is not in this run, stays at the top level in its original position.
- *
- * *Added in the fix wave (R7-10) so the promoted field has a reader.*
- */
-export function nestRowsUnderParentCall<T extends Pick<WorkLogEntry, "toolCallId" | "parentToolUseId">>(
-  entries: readonly T[]
-): Array<{ entry: T; children: T[] }> {
-  const byCallId = new Map<string, { entry: T; children: T[] }>();
-  const top: Array<{ entry: T; children: T[] }> = [];
-  for (const entry of entries) {
-    const node = { entry, children: [] as T[] };
-    const parent = entry.parentToolUseId ? byCallId.get(entry.parentToolUseId) : undefined;
-    if (parent) {
-      parent.children.push(entry);
-      continue;
-    }
-    top.push(node);
-    if (entry.toolCallId) {
-      byCallId.set(entry.toolCallId, node);
-    }
-  }
-  return top;
 }
 
 /** Rows hidden from a collapsed group. *T3: `MessagesTimeline.logic.ts:101-113`.* */

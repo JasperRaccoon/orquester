@@ -159,7 +159,7 @@ function applyEdit(doc: TomlTable, edit: TomlEdit): void {
 // ---------------------------------------------------------------------------
 
 /** A key segment as TOML writes it: bare when it can be, else a basic string. */
-export function renderTomlKey(segment: string): string {
+function renderTomlKey(segment: string): string {
   return /^[A-Za-z0-9_-]+$/.test(segment) ? segment : JSON.stringify(segment);
 }
 

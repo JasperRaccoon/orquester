@@ -28,7 +28,7 @@ import {
  * effort are deliberately left out**: they change per turn, while this prompt
  * is fixed for the life of the session (§4.5).
  */
-export const CLAUDE_RUNTIME_INSTRUCTIONS = [
+const CLAUDE_RUNTIME_INSTRUCTIONS = [
   "You are running inside Orquester's agent chat, not a terminal.",
   "Your output is rendered as structured chat rows: messages, reasoning, tool calls,",
   "command output, diffs and subagent activity. There is no TUI and no alternate screen.",
@@ -41,7 +41,7 @@ export const CLAUDE_RUNTIME_INSTRUCTIONS = [
  * §4.4, Claude's column. `approval-required` is deliberately **absent**: the
  * mode is left undefined so gating is entirely `canUseTool`.
  */
-export const RUNTIME_MODE_TO_PERMISSION_MODE: Readonly<
+const RUNTIME_MODE_TO_PERMISSION_MODE: Readonly<
   Record<RuntimeMode, "acceptEdits" | "auto" | "bypassPermissions" | undefined>
 > = {
   "approval-required": undefined,
@@ -50,7 +50,7 @@ export const RUNTIME_MODE_TO_PERMISSION_MODE: Readonly<
   "full-access": "bypassPermissions"
 };
 
-export interface BuildClaudeQueryOptionsInput {
+interface BuildClaudeQueryOptionsInput {
   cwd: string;
   /** The registry-resolved `claude`, never the SDK's bundled copy (§10). */
   executablePath: string;
@@ -78,7 +78,7 @@ export interface BuildClaudeQueryOptionsInput {
   sessionId?: string;
 }
 
-export interface BuiltClaudeQueryOptions {
+interface BuiltClaudeQueryOptions {
   options: ClaudeQueryOptions;
   /**
    * The session's base permission mode, restored after a plan turn: the

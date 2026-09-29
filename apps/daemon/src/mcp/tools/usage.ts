@@ -3,6 +3,7 @@ import type { AgentAccountsResponse, UsageResponse, UsageTokensResponse } from "
 import { expectOk } from "../errors.ts";
 import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
 import { usageView } from "../usage-view.ts";
+import { resultBytes } from "../result.ts";
 
 /**
  * get_cost's own budget, counted as ok() counts (UTF-8 bytes of the JSON, result.ts) and 10 000 under its 60 000-byte
@@ -10,8 +11,6 @@ import { usageView } from "../usage-view.ts";
  * which would keep only the head of the text. The head itself (≤ 90 byDay rows, a few KB) is never shed.
  */
 const MAX_COST_RESULT_BYTES = 50_000;
-
-const jsonByteSize = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
 
 const round4 = (usd: number): number => Math.round(usd * 10_000) / 10_000;
 
@@ -48,13 +47,13 @@ const getCost = defineTool({
     const rows = inWindow.map((r) => ({ agent: r.agent, model: r.model, day: r.day, inputTokens: r.inputTokens, outputTokens: r.outputTokens, cacheReadTokens: r.cacheReadTokens, cacheWriteTokens: r.cacheWriteTokens, costUsd: typeof r.costUsd === "number" ? round4(r.costUsd) : null }));
     const head = { asOf: res.asOf, days: args.days, totalUsd, byDay };
     const whole = { ...head, rows };
-    if (jsonByteSize(whole) <= MAX_COST_RESULT_BYTES) return whole;
+    if (resultBytes(whole) <= MAX_COST_RESULT_BYTES) return whole;
     // Over budget: drop whole days of rows, oldest first, until the rest fits. Each row is measured once, with the
     // comma that joins it; only the frame around the rows is re-measured, as rowsDropped's digits move.
-    const rowBytes = rows.map((row) => jsonByteSize(row) + 1);
+    const rowBytes = rows.map((row) => resultBytes(row) + 1);
     let rowsBytes = rowBytes.reduce((sum, n) => sum + n, 0) - 1; // n rows are joined by n - 1 commas
     let kept = rows.length;
-    const frame = () => jsonByteSize({ ...head, rows: [], truncated: true, rowsDropped: rows.length - kept });
+    const frame = () => resultBytes({ ...head, rows: [], truncated: true, rowsDropped: rows.length - kept });
     do {
       const oldest = rows[kept - 1]!.day;
       while (kept > 0 && rows[kept - 1]!.day === oldest) rowsBytes -= rowBytes[--kept]!;
@@ -63,4 +62,4 @@ const getCost = defineTool({
   }
 });
 
-export const usageTools: ToolDef[] = [getUsage, getCost] as ToolDef[];
+export const usageTools: ToolDef[] = [getUsage, getCost];

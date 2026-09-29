@@ -9,10 +9,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import type { DomainEvent, RuntimeEvent, ThreadActivityItem } from "@orquester/api/agent-chat";
+import {
+  PLAN_IMPLEMENTATION_PROMPT_PREFIX,
+  type DomainEvent,
+  type RuntimeEvent,
+  type ThreadActivityItem
+} from "@orquester/api/agent-chat";
 
-import { createTestHost, createScriptedAdapter, type TestHost } from "./testing/index.ts";
-import { PLAN_IMPLEMENTATION_PROMPT_PREFIX } from "./orchestrator.ts";
+import { createTestHost, type TestHost } from "./testing/index.ts";
 
 let seq = 0;
 const cmd = (): string => `fw-${(seq += 1)}`;

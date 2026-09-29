@@ -73,7 +73,7 @@ async function main(): Promise<void> {
       messageId: (prefix) => `${prefix}-${randomUUID()}`,
       uuid: () => randomUUID()
     },
-    resolveAttachmentPath: async () => await Promise.resolve(cwd),
+    resolveAttachmentPath: async () => cwd,
     attachmentsDir: () => cwd,
     // The raw frames are exactly what `raw.ndjson` would hold; printing them
     // here would defeat the point of the redactor, so only the method shows.
@@ -94,7 +94,7 @@ async function main(): Promise<void> {
         sessionId: "smoke",
         launchId: randomUUID()
       }),
-    resolveBin: async () => await Promise.resolve(binary),
+    resolveBin: async () => binary,
     sessionPath: () => process.env["PATH"] ?? "",
     tmpDir: () => SCRATCH,
     signal: controller.signal

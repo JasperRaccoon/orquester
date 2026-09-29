@@ -22,14 +22,6 @@ import { openWorkflowRunInEditor } from "./open-run";
 
 const toastsOf = (state: WorkflowNotificationsState): WorkflowNotificationsState["toasts"] => state.toasts;
 
-export function useWorkflowNotifications(): WorkflowNotificationsState {
-  return useSyncExternalStore(
-    workflowNotificationsStore.subscribe,
-    workflowNotificationsStore.getState,
-    workflowNotificationsStore.getState
-  );
-}
-
 interface WorkflowRunToastCardProps {
   notice: WorkflowRunNotice;
   /** Toasts behind this one. */

@@ -2,7 +2,7 @@
  * Agent chat — the client-side barrel (spec §6.3 client side, §7.2–§7.7).
  *
  * Every chat surface imports from here. The split behind it:
- * - `contracts` — F's types (additive-only);
+ * - `contracts` — shared view models;
  * - `hooks` — the only React module;
  * - `*.logic.ts` — pure, React-free, each with a `*.test.ts` beside it;
  * - `transport` / `store` / `providers` — the stream, the per-thread slice and
@@ -28,7 +28,6 @@ export {
   parseStreamLine,
   reconnectDelayMs,
   resumeCursorFor,
-  shouldApplyFrame,
   RECONNECT_BASE_MS,
   RECONNECT_MAX_MS,
   STREAM_STALL_TIMEOUT_MS,
@@ -87,7 +86,6 @@ export * from "./entries.logic";
 export * from "./presentation.logic";
 export * from "./rows.logic";
 export * from "./queue.logic";
-export * from "./questions.logic";
 export * from "./composer.logic";
 export * from "./plan.logic";
 export * from "./status.logic";

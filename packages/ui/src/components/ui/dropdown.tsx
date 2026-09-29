@@ -314,7 +314,7 @@ export const Dropdown: React.FC<DropdownProps> = ({
             }}
             className={cn(
               // z-[120] so the panel sits above Modal (z-[100]) / BottomSheet
-              // (z-[110]) when composed inside one — matches ContextMenu/Tooltip.
+              // (z-[110]) when composed inside one — matches ContextMenu.
               "z-[120] overflow-y-auto rounded-md border border-neutral-800",
               "bg-neutral-900 p-1 shadow-xl shadow-black/40 app-no-drag",
               focusOnOpen && "focus:outline-none",

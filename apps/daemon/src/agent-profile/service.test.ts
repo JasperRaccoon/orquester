@@ -13,7 +13,7 @@ import {
 import type { ProfileAdapter } from "./adapters/types.ts";
 import { AgentProfileError, profileErrors } from "./errors.ts";
 import { resolveAgentHomes } from "./homes.ts";
-import type { ProfileImports } from "./seams.ts";
+import type { ProfileImports } from "./import.ts";
 import {
   AgentProfileService,
   publishAgentProfileEvents,
@@ -45,6 +45,7 @@ function harness(overrides: Partial<AgentProfileServiceOptions> = {}): Harness {
   const warnings: string[] = [];
   const service = new AgentProfileService({
     adapters,
+    converter: (item) => ({ item, notes: [] }),
     agentInfo: (agent) => (installed.has(agent) ? { installed: true, version: `${agent} 1.0` } : { installed: false }),
     homes: resolveAgentHomes({}, "/home/daemon"),
     logger: { warn: (message) => warnings.push(message), error: (message) => warnings.push(message) },
@@ -112,7 +113,12 @@ test("snapshot: a not-installed agent (or one with no adapter) answers an empty 
   });
   assert.deepEqual(h.adapters.grok.calls, [], "the adapter of a missing CLI is never asked");
 
-  const partial = new AgentProfileService({ adapters: {}, agentInfo: () => ({ installed: true }), logger: quiet });
+  const partial = new AgentProfileService({
+    adapters: {},
+    converter: (item) => ({ item, notes: [] }),
+    agentInfo: () => ({ installed: true }),
+    logger: quiet
+  });
   const claude = await partial.snapshot("claude");
   assert.equal(claude.installed, false);
   assert.equal(claude.instructions.path, "");
@@ -401,6 +407,7 @@ test("a mutation that fails after writing part of its work still announces the c
     scanUpload: async () => assert.fail("not scanned"),
     take: async (_agent, _importId, picks) => ({
       items: picks.map((name) => ({ kind: "command" as const, name, frontmatter: {}, body: "" })),
+      notes: [],
       release: async () => undefined
     })
   };
@@ -464,31 +471,23 @@ test("copy: refused onto the same agent, for non-copyable kinds, and where the t
   await rejectsWith(h.service.copy("claude", "command:deploy", "claude"), 400, "INVALID_REQUEST");
   await rejectsWith(h.service.copy("claude", "hook:Stop:abc", "grok"), 400, "KIND_NOT_SUPPORTED");
   assert.deepEqual(h.adapters.claude.calls, [], "refused before any export");
-  // Without a converter, a command stays a command, which Codex cannot create.
+  // A converter must produce a kind that the target can create.
   await rejectsWith(h.service.copy("claude", "command:deploy", "codex"), 400, "KIND_NOT_SUPPORTED");
   assert.deepEqual(h.adapters.codex.calls, []);
 });
 
-test("copy without a converter: an MCP server loses the source's advanced extras (named in a note) and keeps its secrets", async () => {
+test("copy: MCP secrets reach the target adapter but never the response", async () => {
   const h = harness();
   h.adapters.codex.items = [fakeItem("mcp", "jira")];
   h.adapters.codex.exportMcp = {
     name: "jira",
     transport: "stdio",
     command: "jira-mcp",
-    env: { JIRA_TOKEN: "s3cret-value" },
-    advanced: { tool_timeout_sec: 30, enabled_tools: ["a"] }
+    env: { JIRA_TOKEN: "s3cret-value" }
   };
   const response = await h.service.copy("codex", "mcp:jira", "opencode");
-  assert.deepEqual(response.notes, ["Dropped Codex-only settings: enabled_tools, tool_timeout_sec.", "imported jira"]);
-  assert.deepEqual(h.adapters.opencode.imported, [
-    { kind: "mcp", server: { name: "jira", transport: "stdio", command: "jira-mcp", env: { JIRA_TOKEN: "s3cret-value" } } }
-  ]);
-  assert.ok(!JSON.stringify(response).includes("s3cret-value"), "the secret never reaches the response");
-
-  h.adapters.claude.items = [fakeItem("mcp", "remote")];
-  h.adapters.claude.exportMcp = { name: "remote", transport: "sse", url: "https://x" };
-  await rejectsWith(h.service.copy("claude", "mcp:remote", "codex"), 400, "INVALID_ITEM");
+  assert.deepEqual(h.adapters.opencode.imported, [{ kind: "mcp", server: h.adapters.codex.exportMcp }]);
+  assert.ok(!JSON.stringify(response).includes("s3cret-value"));
 });
 
 test("copy with a converter: its item is imported, its notes come first, and its own temp dir is removed too", async () => {
@@ -541,6 +540,7 @@ test("imports: take → importItem for each pick in the agent's queue → releas
       if (importId === "gone") throw profileErrors.importNotFound(importId);
       return {
         items: picks.map((name) => ({ kind: "command" as const, name, frontmatter: {}, body: "" })),
+        notes: [],
         release: async () => {
           released.push(importId);
         }
@@ -754,6 +754,7 @@ test("the default watcher: a real fs.watch on the nearest existing directory ann
   const resolvedOnce = new Promise<void>((resolve) => (armed = resolve));
   const service = new AgentProfileService({
     adapters: { claude: adapter as ProfileAdapter },
+    converter: (item) => ({ item, notes: [] }),
     agentInfo: () => ({ installed: true }),
     logger: quiet,
     debounceMs: 0,

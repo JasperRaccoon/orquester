@@ -39,10 +39,6 @@ export class PromptQueue implements AsyncIterable<SDKUserMessage> {
     this.waiter = undefined;
   }
 
-  get pending(): number {
-    return this.items.length;
-  }
-
   async *[Symbol.asyncIterator](): AsyncGenerator<SDKUserMessage> {
     for (;;) {
       const next = this.items.shift();

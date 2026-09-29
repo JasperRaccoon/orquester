@@ -11,7 +11,7 @@
  * adapter can emit a `runtime.warning` about it.
  */
 
-export interface EventQueueOptions {
+interface EventQueueOptions {
   /** Past this many buffered events the OLDEST are dropped. */
   maxBuffered?: number;
   onDrop?: (dropped: number) => void;

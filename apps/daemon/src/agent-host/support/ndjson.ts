@@ -10,27 +10,18 @@
 const BOM = "﻿";
 
 /**
- * Splits a byte stream into lines, carrying the remainder between chunks.
- *
- * Three things a naive `split("\n")` gets wrong and this does not: a chunk
- * boundary mid-line (the remainder is carried), `\r\n` (the `\r` is stripped,
- * and a `\r` that ends a chunk is held back so a split CRLF is never reported
- * as a blank line), and a leading BOM (stripped once, at the very start).
- */
-/**
  * A single line longer than this is abandoned rather than buffered. A child
  * that writes megabytes with no newline would otherwise grow the buffer
  * without limit (R4 #17); the reader resyncs at the next newline.
  */
 export const NDJSON_MAX_LINE_BYTES = 8 * 1024 * 1024;
 
+/** Carries partial lines and UTF-8 across chunks, strips CRLF and a leading BOM. */
 export class NdjsonLineReader {
   private buffer = "";
   private atStart = true;
   private decoder = new TextDecoder("utf-8");
   private skipping = false;
-  /** Lines abandoned for exceeding {@link NDJSON_MAX_LINE_BYTES}. */
-  overlongCount = 0;
 
   /** Feed a chunk; returns the complete lines it produced, in order. */
   push(chunk: Uint8Array | string): string[] {
@@ -72,10 +63,7 @@ export class NdjsonLineReader {
 
     if (this.buffer.length > NDJSON_MAX_LINE_BYTES) {
       this.buffer = "";
-      if (!this.skipping) {
-        this.skipping = true;
-        this.overlongCount += 1;
-      }
+      this.skipping = true;
     }
 
     // A trailing lone "\r" may be the first half of a CRLF split across
@@ -106,7 +94,6 @@ export function parseNdjsonLine(line: string): unknown {
   }
   return JSON.parse(trimmed) as unknown;
 }
-
 
 /**
  * The minimum a sink must offer. A Node `Writable` satisfies it structurally;

@@ -143,9 +143,8 @@ test("fragments round trip through the manifest", async (t) => {
   await assert.rejects(stash.stashFragment("claude", "hook", id, "again", data), { code: "PROFILE_CONFLICT" });
   await assert.rejects(stash.restorePath("claude", "hook", id), { code: "ITEM_NOT_FOUND" }, "not a path entry");
 
-  assert.deepEqual(await stash.takeFragment("claude", "hook", id), data);
+  assert.equal(await stash.remove("claude", "hook", id), true);
   assert.equal(await stash.get("claude", "hook", id), null);
-  await assert.rejects(stash.takeFragment("claude", "hook", id), { code: "ITEM_NOT_FOUND" });
 });
 
 test("list is sorted, per agent, and skips broken entries with a warning", async (t) => {

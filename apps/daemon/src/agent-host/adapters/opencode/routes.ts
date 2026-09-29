@@ -38,7 +38,6 @@ export const openCodeRoutes = {
   abort: (id: string) => `/session/${id}/abort`,
   summarize: (id: string) => `/session/${id}/summarize`,
   fork: (id: string) => `/session/${id}/fork`,
-  todo: (id: string) => `/session/${id}/todo`,
   permissionReply: (requestId: string) => `/permission/${requestId}/reply`,
   questionReply: (requestId: string) => `/question/${requestId}/reply`,
   /** The route T3 never calls; §6.2's `/dismiss` uses it. */
@@ -49,12 +48,12 @@ export const openCodeRoutes = {
 // Request bodies
 // ---------------------------------------------------------------------------
 
-export interface OpenCodeTextPartInput {
+interface OpenCodeTextPartInput {
   type: "text";
   text: string;
 }
 
-export interface OpenCodeFilePartInput {
+interface OpenCodeFilePartInput {
   type: "file";
   mime: string;
   filename: string;

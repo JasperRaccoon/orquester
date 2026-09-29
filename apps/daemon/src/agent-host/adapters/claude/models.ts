@@ -1,38 +1,8 @@
 /**
- * Claude adapter — the model catalogue and its option descriptors (spec §4.1,
- * §4.5 "Models", §3.2 "minimum CLI version").
- *
- * **differs from T3 and from spec §4.5.** T3 ships a bundled
- * `model-manifest.json` with a remote refresh and per-model
- * `minVersion`/`maxVersionExclusive` ranges, and §4.5 repeats that ("Models
- * are a manifest, not a call"). The real CLI answers `supportedModels()` — and
- * `initializationResult().models` — for free from the same never-yielding
- * probe that already reads the account and the command list
- * (fixtures/claude README observation 15), and it answers with **per-model**
- * capability flags a static manifest cannot keep current:
- * `supportedEffortLevels` (which includes `xhigh` and `max`, so the effort
- * descriptor must not hard-code low/medium/high), `supportsFastMode` and
- * `supportsAdaptiveThinking`. Reading the installed CLI also makes the
- * per-model version gate inherent: a CLI that does not support a model does
- * not list it.
- *
- * A small static fallback remains for the case where the probe itself failed,
- * so the composer can still offer the aliases every recent CLI accepts.
- *
- * **Two consequences of that swap, stated here so they are not re-derived.**
- *
- * 1. §4.1's *"gates each catalogue model on a `minVersion`/`maxVersionExclusive`
- *    range … and explains the gap rather than hiding the model"* no longer has
- *    a per-model half: an unsupported model is simply absent from
- *    `supportedModels()`, so there is nothing to explain a gap about. The
- *    "explain the gap" requirement therefore applies only to the **whole-CLI**
- *    gate, which {@link claudeVersionGateMessage} satisfies by naming the
- *    version needed and how to install it.
- * 2. T3's `ultracode` was an *effort choice* in its bundled manifest
- *    (`effortMap` → `effort: "xhigh"` **plus** `settings.ultracode: true`). The
- *    CLI's own `supportedEffortLevels` never contains it, so it is offered here
- *    as a separate boolean descriptor gated on `xhigh` support — the SDK still
- *    accepts the setting and it would otherwise be unreachable.
+ * Model catalog and option descriptors from the installed CLI's free
+ * `supportedModels()` probe (fixtures/claude README observation 15).
+ * The CLI supplies model availability and capabilities; static aliases are
+ * used when no live catalog is available. The version gate applies to the CLI.
  */
 
 import type {
@@ -54,9 +24,6 @@ import type {
  * rather than started.
  */
 export const MINIMUM_CLAUDE_CLI_VERSION = "2.1.121";
-
-/** The CLI version the committed fixtures were captured from (§9 provenance). */
-export const VALIDATED_CLAUDE_CLI_VERSION = "2.1.210";
 
 /** `claude --version` prints `2.1.210 (Claude Code)`. */
 export function parseClaudeVersion(output: string): string | null {
@@ -103,7 +70,7 @@ export function claudeVersionGateMessage(version: string | null): string {
 // ---------------------------------------------------------------------------
 
 /** The SDK's `ModelInfo`, read structurally so an added field cannot break it. */
-export interface ClaudeModelInfo {
+interface ClaudeModelInfo {
   value?: unknown;
   resolvedModel?: unknown;
   displayName?: unknown;
@@ -182,7 +149,7 @@ function optionDescriptorsFor(info: ClaudeModelInfo): ProviderOptionDescriptor[]
   return descriptors;
 }
 
-export function toProviderModel(info: ClaudeModelInfo): ProviderModel | undefined {
+function toProviderModel(info: ClaudeModelInfo): ProviderModel | undefined {
   const slug = typeof info.value === "string" ? info.value.trim() : "";
   if (slug.length === 0) {
     return undefined;
@@ -225,11 +192,8 @@ export function toProviderModels(models: unknown): ProviderModel[] {
 }
 
 /**
- * "Default (recommended)" says nothing about WHICH model that is, and the
- * owner read it as Fable when the CLI resolves it to Opus. The row keeps the
- * CLI's slug (`default`, so the launch still tracks the CLI's own choice) but
- * reads as `Default · Opus (1M context)` — the name of the sibling the
- * `resolvedModel` points at, or the resolved id itself when no sibling lists it.
+ * Keep the CLI's `default` slug while naming the model it resolves to.
+ * Prefer a sibling's display name, falling back to the resolved id.
  */
 function nameDefaultAfterItsModel(model: ProviderModel, all: readonly ProviderModel[]): ProviderModel {
   if (model.slug !== "default" || !model.subProvider) return model;
@@ -244,28 +208,13 @@ function nameDefaultAfterItsModel(model: ProviderModel, all: readonly ProviderMo
 }
 
 /**
- * The **bundled fallback catalog**: the model families every recent Claude CLI
- * accepts, used when there is no live list — either the probe failed outright,
- * or it has not run yet (the pending snapshot of §3.2 layer one,
- * `adapters/pending.ts`).
+ * Fallback aliases used before the probe or when it returns no models.
+ * The live catalog replaces these and supplies the capability descriptors.
  *
  * Ported from T3 Code (MIT): `apps/server/src/provider/model-manifest.json`
- * (`providers.claudeAgent.models`) via
- * `apps/server/src/provider/Layers/ClaudeProvider.ts:595-640`, where
- * `makePendingClaudeProvider` seeds `BUNDLED_CLAUDE_MODEL_CATALOG` so a
- * never-probed provider is still launchable. Only the **family aliases** are
- * carried over, not T3's dated slugs (`claude-opus-4-8`, …): a dated slug goes
- * stale against the installed binary within weeks, while `opus`/`sonnet` are
- * the spellings the CLI has always resolved for itself.
- *
- * It is a fallback and nothing else. **The live probe replaces it wholesale**
- * — `buildClaudeSnapshot` uses it only when `toProviderModels()` came back
- * empty — so a model family this list has not heard of is never hidden by it,
- * and the per-model capability flags (`supportedEffortLevels`, fast mode,
- * adaptive thinking) that only the CLI can answer stay `null` here rather than
- * being guessed. `resolveEffortLevel`/`resolveBooleanOption` already pass a
- * user's option through unvalidated for a model with no descriptors, so a
- * launch off this list keeps every option the CLI would accept.
+ * (`providers.claudeAgent.models`) and
+ * `apps/server/src/provider/Layers/ClaudeProvider.ts:595-640`.
+ * Keep family aliases rather than dated model IDs so the CLI resolves them.
  */
 export const FALLBACK_CLAUDE_MODELS: readonly ProviderModel[] = [
   { slug: "default", name: "Default (recommended)", isDefault: true, capabilities: null },
@@ -279,7 +228,7 @@ export const FALLBACK_CLAUDE_MODELS: readonly ProviderModel[] = [
 // Selection
 // ---------------------------------------------------------------------------
 
-export function selectionOptionValue(
+function selectionOptionValue(
   selection: ModelSelection | undefined,
   id: string
 ): ProviderOptionSelectionValue | undefined {
@@ -294,7 +243,7 @@ export function selectionStringOption(
   return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
 }
 
-export function selectionBooleanOption(
+function selectionBooleanOption(
   selection: ModelSelection | undefined,
   id: string
 ): boolean | undefined {

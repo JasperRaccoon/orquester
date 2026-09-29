@@ -94,8 +94,6 @@ import {
 import { createSlotPool, type SlotPool } from "./scheduler-queue.ts";
 import { createRedactor, type SecretRedactor } from "./sandbox/redact.ts";
 
-export { WorkflowEngineError } from "./run-context.ts";
-
 /** The services an executor gets, minus what the engine provides itself. */
 export type EngineServiceDeps = Omit<EngineServices, "runChild" | "awaitRun" | "clock" | "mintId" | "logger" | "store">;
 

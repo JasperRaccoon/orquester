@@ -40,13 +40,8 @@ const SERVER_VERSION = "2.0.0";
  */
 const SERVER_INSTRUCTIONS = `Orquester MCP drives Orquester's agent chat sessions (Claude Code, Codex, OpenCode, Grok) exactly like the chat GUI. A session is a tab: a chat with an agent, or a terminal (listed and closable only). Addressing: sessions by sessionId (list_sessions); projects by absolute path or "workspace/project" (list_projects). Call list_agents for the valid models, options (effort…), permission modes and accounts before create_session or update_session. create_session opens a chat tab, or resumes a conversation from list_conversations; send_message talks to it — wait:true (default) returns the reply or the question/approval it stopped on; while a turn runs, a message steers it. get_session shows status (status/attention/reason), pending questions and approvals with their ids and options, the proposed plan, subagents and the context meter; read_transcript shows what was said and done (agentId drills into a subagent), read_tool_output a tool row's whole output (its outputItemId); search_sessions finds words across every chat. answer_question / resolve_approval / dismiss_question act on pending requests; implement_plan is the GUI's Implement button. update_session changes model, effort/options, permission mode, account or title. wait_for_session blocks until a session needs you — pass its cursor back as \`after\`; never poll in a loop. Attachments are inline ({path} in the sandbox or {name, base64}). get_usage percentages are % USED. Automated workflows: list_workflow_block_types first, then create_workflow; edit with update_workflow ops (revision from get_workflow); run_workflow, get_workflow_run. Agent profiles (each CLI's global MCP servers, skills, plugins, hooks, commands, CLAUDE.md/AGENTS.md): list_agent_profiles, get_agent_profile first; MCP secret values are write-only. Errors carry a code (SESSION_BUSY, PENDING_REQUEST, INVALID_ARGUMENT…) and a message naming the fix.`;
 
-/**
- * Every tool, in tools/list order (spec §7.10: 31, plus the 13 automated-workflow tools of the workflows spec §8.3, plus
- * the 13 agent-profile tools of docs/orquester-mcp.md §13): 57.
- */
-function allTools(): ToolDef[] {
-  return [...catalogTools, ...sessionTools, ...searchTools, ...messageTools, ...outputTools, ...requestTools, ...watchTools, ...usageTools, ...fileTools, ...todoTools, ...workflowTools, ...agentProfileTools];
-}
+/** Every tool, in tools/list order. */
+const ALL_TOOLS: ToolDef[] = [...catalogTools, ...sessionTools, ...searchTools, ...messageTools, ...outputTools, ...requestTools, ...watchTools, ...usageTools, ...fileTools, ...todoTools, ...workflowTools, ...agentProfileTools];
 
 /** How many refused fields an INVALID_ARGUMENT names before "…". */
 const MAX_NAMED_ISSUES = 5;
@@ -70,21 +65,10 @@ function argumentProblems(toolName: string, error: z.ZodError): string {
 }
 
 /**
- * A tool's arguments as tools/call parses them: the tool's own schema, STRICT. zod's default strips a key the schema
- * does not name, so a misspelled optional argument (`planmode` for `planMode`) was dropped and silently took its
- * default; strict, it is refused, and argumentProblems names it. tools/list already promised as much: the SDK's
- * converter advertises `additionalProperties: false` on every tool. Only the top level changes — a nested object keeps
- * its own mode (an attachment is strict already).
- */
-function argumentsSchema(tool: ToolDef): z.ZodTypeAny {
-  return z.object(tool.input).strict();
-}
-
-/**
  * A per-request McpServer with every tool bound to the caller's DaemonApi. The registrations are what `tools/list`
  * serves; `tools/call` is our own handler, installed over the SDK's through its public `server.setRequestHandler`: the
  * SDK answers an argument the schema refuses with its own text, outside spec §4.5's envelope. Ours parses the
- * arguments ONCE with `argumentsSchema` (defaults applied; an unknown key refused; no `arguments` at all is `{}`),
+ * arguments once (defaults applied; an unknown key refused; no `arguments` at all is `{}`),
  * answers a refusal as INVALID_ARGUMENT naming the fields, and turns anything `run` throws into a coded isError result.
  * An unknown tool is deliberately the JSON-RPC InvalidParams error (−32602), as the MCP spec has it: SDK 1.29's own
  * handler raises the same error but catches it into an `isError` tool result. What else that handler checks is skipped
@@ -102,8 +86,9 @@ function buildServer(deps: McpDeps, authorization: string | undefined, signal: A
     }
   };
   const tools = new Map<string, { tool: ToolDef; schema: z.ZodTypeAny }>();
-  for (const tool of allTools()) {
-    tools.set(tool.name, { tool, schema: argumentsSchema(tool) });
+  for (const tool of ALL_TOOLS) {
+    // Match tools/list's additionalProperties:false; reject misspelled keys instead of silently taking defaults.
+    tools.set(tool.name, { tool, schema: z.object(tool.input).strict() });
     // Never invoked — the tools/call handler below replaces the SDK's — but it would answer the same way.
     server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.input, annotations: tool.annotations }, (args: Record<string, unknown>) => call(tool, args));
   }

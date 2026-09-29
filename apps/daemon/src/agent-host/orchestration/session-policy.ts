@@ -41,7 +41,7 @@ export interface BoundSessionShape {
   session: ProviderSession;
 }
 
-export interface RestartDecision {
+interface RestartDecision {
   restart: boolean;
   /** Every trigger that fired, for the log and for the tests. */
   reasons: string[];

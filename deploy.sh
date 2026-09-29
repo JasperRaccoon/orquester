@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
 # Orquester VPS lifecycle tool: deploy, provision, verify, rollback, logs,
 # rotate-password. Targets: deploy/targets.conf (gitignored — copy
-# deploy/targets.conf.example). Design:
-# docs/superpowers/specs/2026-07-25-deploy-sh-lifecycle-tool-design.md
+# deploy/targets.conf.example).
 # -E: without errtrace bash does not inherit the ERR trap into functions, and
 # everything below runs inside main()/cmd_* — the trap would be dead code.
 set -Eeuo pipefail

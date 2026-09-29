@@ -207,4 +207,4 @@ const resolveApproval = defineTool({
   }
 });
 
-export const requestTools: ToolDef[] = [answerQuestion, dismissQuestion, resolveApproval] as ToolDef[];
+export const requestTools: ToolDef[] = [answerQuestion, dismissQuestion, resolveApproval];

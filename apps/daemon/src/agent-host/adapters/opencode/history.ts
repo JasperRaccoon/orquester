@@ -58,7 +58,7 @@ const UNAVAILABLE_USAGE: TurnTokenUsage = {
   hasSubagents: false
 };
 
-export interface ProjectHistoryContext {
+interface ProjectHistoryContext {
   eventId: () => string;
   /** Fallback stamp for an item whose own `time` the provider did not record. */
   nowIso: () => string;

@@ -34,7 +34,7 @@ import { isToolLifecycleItemType, type RuntimeEvent } from "@orquester/api/agent
 import { TURN_LIVENESS_WINDOWS } from "../support/deadline.ts";
 import type { Clock } from "./runtime-seams.ts";
 
-export interface TurnWatchdogOptions {
+interface TurnWatchdogOptions {
   threadId: string;
   clock: Clock;
   /**

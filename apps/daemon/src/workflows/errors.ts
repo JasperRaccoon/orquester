@@ -35,10 +35,6 @@ export class WorkflowError extends Error {
   }
 }
 
-export function isWorkflowError(error: unknown): error is WorkflowError {
-  return error instanceof WorkflowError;
-}
-
 /** A user-supplied string quoted in an error message, bounded. */
 export function excerpt(value: string, max = 120): string {
   return value.length > max ? `${value.slice(0, max)}…` : value;

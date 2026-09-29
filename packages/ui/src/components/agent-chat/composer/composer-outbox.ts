@@ -589,5 +589,5 @@ export function adoptOutboxLeftovers(sessionId: string): OutboxEntry[] {
   if (!document.entries.some(isLeftover)) return [];
   const adopted = document.entries.map((entry) => (isLeftover(entry) ? { ...entry, pageId } : entry));
   writeDocument({ ...document, entries: adopted });
-  return adopted.filter((entry, index) => isLeftover(document.entries[index]!));
+  return adopted.filter((_entry, index) => isLeftover(document.entries[index]!));
 }

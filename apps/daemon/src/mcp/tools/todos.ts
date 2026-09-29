@@ -141,4 +141,4 @@ const toggleTodoItem = defineTool({
   }
 });
 
-export const todoTools: ToolDef[] = [listTodos, createTodo, updateTodo, deleteTodo, toggleTodoItem] as ToolDef[];
+export const todoTools: ToolDef[] = [listTodos, createTodo, updateTodo, deleteTodo, toggleTodoItem];

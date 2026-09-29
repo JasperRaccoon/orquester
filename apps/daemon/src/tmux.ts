@@ -14,7 +14,7 @@ export const TMUX_SESSION_PREFIX = "orq-";
  * `"orqsvc-".startsWith("orq-") === false` (char 3 is `s`, not `-`), service
  * sessions are invisible to `listSessions()` and thus immune.
  */
-export const SERVICE_SESSION_PREFIX = "orqsvc-";
+const SERVICE_SESSION_PREFIX = "orqsvc-";
 
 /** Derive the tmux session name from a session id. */
 export function tmuxName(id: string): string {
@@ -155,7 +155,7 @@ function usableShell(path: string | undefined): path is string {
  * nologin makes the session exit immediately. Keep the account locked down while
  * advertising a real shell inside Orquester-managed PTYs.
  */
-export function sessionShell(): string | undefined {
+function sessionShell(): string | undefined {
   if (usableShell(process.env.SHELL)) {
     return process.env.SHELL;
   }

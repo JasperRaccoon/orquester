@@ -74,7 +74,7 @@ test("serializes concurrent git mutations in the same repository", async () => {
   const calls: string[] = [];
   const commands = [deferred(), deferred()];
   const git = new GitService({
-    runner: async (_file, args, options) => {
+    runner: async (_file, _args, options) => {
       calls.push(options.cwd);
       return commands[calls.length - 1].promise;
     }

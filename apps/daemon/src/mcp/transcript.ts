@@ -1,7 +1,7 @@
 import { ACTIVE_SUBAGENT_STATUSES, anchorsCall, CALL_ROW_KINDS, commandDisplayDetail, compactionMarkerState, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isAgentOwnedActivity, isCompactionActivity, isHiddenGoalChange, isPlanImplementationMessage, parseGoalUpdatedPayload, reEmittedAssistantCopies, repairsReEmittedAssistantCopies, startedTurns, type RuntimeSubagent, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
-import { capText } from "./result.ts";
+import { capText, clipText, resultBytes } from "./result.ts";
 
-export type TranscriptInclude = "reasoning" | "tools" | "activity";
+type TranscriptInclude = "reasoning" | "tools" | "activity";
 export interface TranscriptEntry { turn: number | null; turnId: string | null; kind: "user" | "assistant" | "reasoning" | "tool" | "approval" | "question" | "subagent" | "plan" | "changes" | "compaction" | "error" | "warning" | "info"; createdAt: string; agentId?: string; text?: string;
   /**
    * On an assistant row only: the provider marked it narration between tool calls (Codex's commentary), never the
@@ -19,7 +19,7 @@ export interface TranscriptEntry { turn: number | null; turnId: string | null; k
   outputItemId?: string;
   requestId?: string; requestKind?: string; decision?: string;
   questions?: string[]; answered?: boolean; subagent?: { id: string; title: string | null; status: string }; actionable?: boolean; files?: { path: string; additions: number; deletions: number }[]; state?: string; beforeTokens?: number; afterTokens?: number }
-export interface TranscriptOptions {
+interface TranscriptOptions {
   /** How many turns the read covers, and `beforeTurn` which ones: the range `transcriptRange` names. */
   turns: number; beforeTurn?: number; agentId?: string; include: ReadonlySet<TranscriptInclude>;
   /**
@@ -105,9 +105,7 @@ type P = Record<string, unknown>;
 const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
 const nonBlank = (v: unknown): string | undefined => (typeof v === "string" && v.trim() ? v : undefined);
 const asRecord = (v: unknown): P | undefined => (typeof v === "object" && v !== null && !Array.isArray(v) ? (v as P) : undefined);
-/** `text` cut to at most `max` code points, the last of them a "…" when anything was cut. */
-const capped = (text: string, max: number): string => (capText(text, max).truncated ? `${capText(text, max - 1).text}…` : text);
-const subagentTitle = (title: string | null | undefined): string | null => (title == null ? null : capped(title, SUBAGENT_TEXT_CHARS));
+const subagentTitle = (title: string | null | undefined): string | null => (title == null ? null : clipText(title, SUBAGENT_TEXT_CHARS));
 /**
  * Label plus detail, as the GUI's row shows them; runtime.error and runtime.warning keep their text in
  * `message`. A warning is labelled with its own message cut short, so then the message alone says it.
@@ -137,9 +135,6 @@ export function proposedPlan(items: readonly ThreadItem[]): { item: ThreadActivi
   }
   return null;
 }
-
-/** A value's size as the budget counts it: its JSON in UTF-8 bytes, the unit of ok()'s cap (result.ts). */
-const jsonByteSize = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
 
 /** One code point's size inside a JSON string, escaped as JSON.stringify escapes it, in UTF-8 bytes. */
 function codePointBytes(cp: number): number {
@@ -220,11 +215,11 @@ function cutRow(entry: TranscriptEntry, need: number): { row: TranscriptEntry; s
     } });
   };
   const list = <T>(items: readonly T[], marker: (from: number) => T, set: (kept: T[]) => void): void => {
-    const sizes = items.map((item) => jsonByteSize(item) + 1);
+    const sizes = items.map((item) => resultBytes(item) + 1);
     const bytes = contentBytes(sizes.reduce((sum, n) => sum + n, 0), items.length);
     parts.push({ bytes, cut: (want) => {
       // The longest head that, with the marker for the rest, saves at least `want`; else the marker alone.
-      const markerBytes = (from: number): number => jsonByteSize(marker(from));
+      const markerBytes = (from: number): number => resultBytes(marker(from));
       let keep = 0;
       let head = 0;
       while (keep < items.length - 1 && head + sizes[keep]! + markerBytes(keep + 1) <= bytes - want) head += sizes[keep++]!;
@@ -300,7 +295,7 @@ const LIVE: ReadonlySet<string> = ACTIVE_SUBAGENT_STATUSES;
 
 /** A row with the bytes it adds to its JSON array — its own JSON plus the comma joining it — measured once. */
 export interface Sized<T> { row: T; bytes: number }
-export const sized = <T>(rows: readonly T[]): Sized<T>[] => rows.map((row) => ({ row, bytes: jsonByteSize(row) + 1 }));
+export const sized = <T>(rows: readonly T[]): Sized<T>[] => rows.map((row) => ({ row, bytes: resultBytes(row) + 1 }));
 /** A list's JSON inside the result, brackets excluded: every row's bytes but the last comma. */
 const contentBytes = (sum: number, count: number): number => (count > 0 ? sum - 1 : 0);
 
@@ -344,7 +339,7 @@ function fitEntries(entries: readonly Sized<TranscriptEntry>[], allowance: numbe
     const r = rows[i]!;
     const detail = r.row.tool?.detail;
     if (gone.has(i) || detail === undefined) continue;
-    const kept = capped(detail, SHED_DETAIL_CHARS);
+    const kept = clipText(detail, SHED_DETAIL_CHARS);
     if (kept === detail) continue;
     const saved = jsonTextBytes(detail) - jsonTextBytes(kept);
     rows[i] = { row: { ...r.row, tool: { ...r.row.tool!, detail: kept } }, bytes: r.bytes - saved };
@@ -667,7 +662,7 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
   // maxChars comes back whole: nothing shed, no flags, and so no hint — but for the sentence about unavailable turns,
   // whose field it must leave room for. Only a shed one keeps TRANSCRIPT_HINT_BYTES free, plus that sentence and the
   // space the caller joins the two with.
-  const frame = (covered: [number, number] | null, olderTurns: number, truncated: boolean, subagentsTruncated: boolean): number => jsonByteSize(shaped([], [], covered, olderTurns, truncated, subagentsTruncated));
+  const frame = (covered: [number, number] | null, olderTurns: number, truncated: boolean, subagentsTruncated: boolean): number => resultBytes(shaped([], [], covered, olderTurns, truncated, subagentsTruncated));
   const said = unavailable ? jsonTextBytes(unavailable.hint) : 0;
   const budget = opts.maxChars - TRANSCRIPT_HINT_BYTES - (unavailable ? said + 1 : 0);
   const sizedEntries = sized(entries);

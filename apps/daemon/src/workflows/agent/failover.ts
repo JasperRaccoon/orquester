@@ -148,7 +148,7 @@ export async function coolDown(
 }
 
 /** The selection input over the live readers. */
-export function selectionInput(deps: FailoverDeps, chain: AgentChainEntry[], memory: FailoverMemory): SelectAccountInput {
+function selectionInput(deps: FailoverDeps, chain: AgentChainEntry[], memory: FailoverMemory): SelectAccountInput {
   const now = deps.clock.now();
   return {
     chain,

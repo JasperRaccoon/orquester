@@ -145,7 +145,7 @@ import { CodexUsageTracker } from "./usage.ts";
  * `orchestration/resume.ts` returns exactly this shape, so §6.1 resume needs no
  * widening here, only the guarantee (and the test) that it round-trips.
  */
-export interface CodexResumeCursor {
+interface CodexResumeCursor {
   threadId: string;
 }
 

@@ -157,7 +157,7 @@ export function parseResponseCompletedUsage(value: unknown): XaiUsage | undefine
  * sources: it is the only one carrying both the usage block and the resulting
  * context size, so it beats the `prompt_complete` notification that races it.
  */
-export interface PromptResultUsage {
+interface PromptResultUsage {
   /** Context size AFTER the turn. Absent when the provider reported 0. */
   readonly contextTokens?: number;
   readonly usage?: XaiUsage;

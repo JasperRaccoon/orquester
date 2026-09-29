@@ -28,17 +28,11 @@ const IMAGE_PREVIEW_EXTENSIONS = new Set([
  * T3's substring ladder lands `TaskCreate` on `file_change` because the name
  * contains "create", which would badge a to-do row as an edit.
  */
-export const CLAUDE_STEP_LIST_TOOLS: ReadonlySet<string> = new Set([
+const CLAUDE_STEP_LIST_TOOLS: ReadonlySet<string> = new Set([
   "TaskCreate",
   "TaskUpdate",
   "TaskList"
 ]);
-
-/** The subagent-spawning tool. `Agent` on this CLI, `Task` on older ones. */
-export function isSubagentTool(toolName: string): boolean {
-  const normalized = toolName.trim().toLowerCase();
-  return normalized === "agent" || normalized === "task";
-}
 
 export function isStepListTool(toolName: string): boolean {
   return CLAUDE_STEP_LIST_TOOLS.has(toolName.trim());
@@ -52,7 +46,7 @@ export function isTodoTool(toolName: string): boolean {
   return toolName.toLowerCase().includes("todowrite");
 }
 
-export function readToolImagePath(
+function readToolImagePath(
   toolName: string,
   input: Record<string, unknown>
 ): string | undefined {
@@ -142,7 +136,7 @@ export function classifyToolItemType(
   return "dynamic_tool_call";
 }
 
-export function isReadOnlyToolName(toolName: string): boolean {
+function isReadOnlyToolName(toolName: string): boolean {
   const normalized = toolName.toLowerCase();
   return (
     normalized === "read" ||
@@ -275,11 +269,6 @@ export function cliDenialReason(text: string): string {
   return (close >= 0 ? withoutOpen.slice(0, close) : withoutOpen).trim();
 }
 
-/** Stable fingerprint of a parsed tool input, to suppress duplicate updates. */
-export function toolInputFingerprint(input: Record<string, unknown>): string | undefined {
-  return safeJson(input);
-}
-
 export function tryParseJsonRecord(value: string): Record<string, unknown> | undefined {
   if (value.trim().length === 0) {
     return undefined;
@@ -306,12 +295,6 @@ export function nonNegativeInt(value: unknown): number | undefined {
   return typeof value === "number" && Number.isFinite(value) && value >= 0
     ? Math.floor(value)
     : undefined;
-}
-
-/** Only http/https survive; anything else (`javascript:`, `file:`, …) is dropped. */
-export function sanitizeSessionUrl(value: unknown): string | undefined {
-  const trimmed = trimmedString(value);
-  return trimmed !== undefined && /^https?:\/\//i.test(trimmed) ? trimmed : undefined;
 }
 
 /**

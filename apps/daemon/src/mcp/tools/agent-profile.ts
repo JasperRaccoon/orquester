@@ -146,9 +146,9 @@ type ProfileClient = ReturnType<typeof profileClient>;
 // ---------------------------------------------------------------------------
 
 /** One item as every result shows it: what it is, where it comes from, what may be done to it, and its revision. */
-export function itemView(item: ProfileItem): Record<string, unknown> {
+function itemView(item: ProfileItem): Record<string, unknown> {
   const view: Record<string, unknown> = { id: item.id, kind: item.kind, name: item.name };
-  if (item.description) view.description = clipText(item.description, MAX_ROW_TEXT);
+  if (item.description) view.description = clipText(redactUrlCredentials(item.description), MAX_ROW_TEXT);
   view.enabled = item.enabled;
   if (item.stashed) view.stashed = true;
   view.source = item.source?.label;
@@ -163,7 +163,7 @@ export function itemView(item: ProfileItem): Record<string, unknown> {
     view.warnings = item.warnings.map((w) => ({ code: w.code, message: clipText(String(w.message ?? ""), MAX_ROW_TEXT), ...(w.action ? { action: w.action } : {}) }));
   }
   if (isRecord(item.meta) && Object.keys(item.meta).length > 0) {
-    view.meta = Object.fromEntries(Object.entries(item.meta).map(([k, v]) => [k, clipText(String(v), 200)]));
+    view.meta = Object.fromEntries(Object.entries(item.meta).map(([k, v]) => [k, clipText(redactUrlCredentials(String(v)), 200)]));
   }
   view.revision = item.revision;
   return view;
@@ -186,7 +186,7 @@ function secretKeys(entries: readonly SecretEntryView[] | undefined): { key: str
 
 /** A URL as a result shows it: credentials written into it (`https://user:token@host`) replaced by `***`. */
 export function redactUrlCredentials(url: string): string {
-  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#@\s]+@/i, "$1***@");
+  return url.replace(/^([a-z][a-z0-9+.-]*:\/\/)[^/?#\s]+@/i, "$1***@");
 }
 
 function mcpView(mcp: McpServerView): Record<string, unknown> {
@@ -268,7 +268,9 @@ async function withItemConflict<T>(client: ProfileClient, agent: Agent, id: stri
     let current: ProfileItem | undefined;
     try {
       current = (await client.snapshot(agent)).items.find((item) => item.id === id);
-    } catch { /* the conflict is the answer either way */ }
+    } catch {
+      throw error;
+    }
     if (!current) {
       throw new ToolError("PROFILE_CONFLICT", `${error.message} The item "${clipText(id, MAX_ECHO_CHARS)}" no longer exists under that id: get_agent_profile lists the current items.`, { itemGone: true });
     }
@@ -437,7 +439,7 @@ function mergeRecord(current: Record<string, unknown> | undefined, patch: Record
 }
 
 /** The whole draft an MCP update sends: the current definition with the patch applied (secrets by key only). */
-export function mcpUpdateDraft(current: McpServerView, patch: McpUpdate): McpServerDraft {
+function mcpUpdateDraft(current: McpServerView, patch: McpUpdate): McpServerDraft {
   const transport = patch.transport ?? current.transport;
   refuseOtherTransport(patch, transport, "mcp");
   const family = (t: McpTransport) => (t === "stdio" ? "stdio" : "remote");
@@ -885,4 +887,4 @@ export const agentProfileTools: ToolDef[] = [
   listAgentProfiles, getAgentProfile, getAgentProfileItem, createAgentProfileItem, updateAgentProfileItem,
   setAgentProfileItemEnabled, deleteAgentProfileItem, copyAgentProfileItem, trustAgentProfileHook,
   getAgentInstructions, writeAgentInstructions, importAgentProfileItems, listMarketplacePlugins
-] as ToolDef[];
+];

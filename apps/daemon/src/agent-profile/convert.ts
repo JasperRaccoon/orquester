@@ -23,10 +23,9 @@
  * A skill whose `SKILL.md` has to change (and a command that becomes a Codex
  * skill) is written into a NEW directory, `<tempRoot>/convert-<random>`: the
  * input item's `dir` belongs to its source (an agent home or an import) and is
- * never modified. The result then carries `tempDir` (equal to the returned
- * `item.dir`), and the CALLER removes it (`rm -rf`) once the item has been
- * imported, whether that succeeded or not. When `tempDir` is absent the
- * returned item is the input's own `dir` and there is nothing to remove.
+ * never modified. The caller removes a newly created `item.dir` after the
+ * import, whether it succeeded or not. When no conversion is needed, the
+ * input item is returned unchanged.
  * A leaked `convert-*` directory under the imports dir is swept by
  * `ProfileImportStore` once it is older than the import TTL.
  *
@@ -48,7 +47,6 @@ import {
   statSync,
   writeFileSync
 } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   AGENT_PROFILE_AGENT_LABELS,
@@ -68,15 +66,13 @@ import {
   serializeMarkdownDocument
 } from "./infra/index.ts";
 
-/** What a conversion answers. `tempDir`: see "Temp directory ownership" in the module header. */
+/** The converted item and notes about fields changed or dropped. */
 export interface ProfileConversion {
   item: PortableItem;
   notes: string[];
-  /** A directory the converter created (the returned skill's `dir`); the caller removes it. */
-  tempDir?: string;
 }
 
-/** The seam the service calls: `(item, from, to) => {item, notes}` (plus `tempDir`, see above). */
+/** Converts an exported item for another agent without mutating the source. */
 export type ProfileConverter = (
   item: PortableItem,
   from: AgentProfileAgentId,
@@ -86,13 +82,13 @@ export type ProfileConverter = (
 export interface ProfileConverterOptions {
   /**
    * Where converted skill copies are written (`convert-*` directories). The
-   * daemon passes `agentProfileImportsDir(appdir)`; defaults to the OS temp dir.
+   * daemon passes `agentProfileImportsDir(appdir)`.
    */
   tempRoot: string;
 }
 
 /** The prefix of every directory the converter creates under its temp root. */
-export const CONVERT_DIR_PREFIX = "convert-";
+const CONVERT_DIR_PREFIX = "convert-";
 
 /** Frontmatter keys every skill keeps whatever the target's field list says. */
 const SKILL_KEYS_ALWAYS_KEPT = new Set(["name", "description", "metadata"]);
@@ -276,7 +272,7 @@ function convertSkill(
     return { item, notes };
   }
   const dir = writeSkillCopy(tempRoot, serializeMarkdownDocument(frontmatter, document.body), item.dir);
-  return { item: { kind: "skill", name: item.name, dir }, notes, tempDir: dir };
+  return { item: { kind: "skill", name: item.name, dir }, notes };
 }
 
 function convertCommand(
@@ -291,8 +287,7 @@ function convertCommand(
     const dir = writeSkillCopy(tempRoot, serializeMarkdownDocument(skill.frontmatter, item.body));
     return {
       item: { kind: "skill", name: skill.skillName, dir },
-      notes: [CODEX_COMMAND_NOTE, ...droppedKeysNote(skill.dropped, to)],
-      tempDir: dir
+      notes: [CODEX_COMMAND_NOTE, ...droppedKeysNote(skill.dropped, to)]
     };
   }
   const notes: string[] = [];
@@ -402,13 +397,3 @@ export function createProfileConverter(options: ProfileConverterOptions): Profil
     }
   };
 }
-
-/** Default temp root when none is configured: the OS temp dir. */
-export const DEFAULT_CONVERT_TEMP_ROOT = join(tmpdir(), "orquester-agent-profile-convert");
-
-/**
- * {@link createProfileConverter} with its copies under the OS temp dir. The
- * daemon should prefer `createProfileConverter({tempRoot: agentProfileImportsDir(appdir)})`
- * so `ProfileImportStore` sweeps what a crash leaks.
- */
-export const convertPortableItem: ProfileConverter = createProfileConverter({ tempRoot: DEFAULT_CONVERT_TEMP_ROOT });

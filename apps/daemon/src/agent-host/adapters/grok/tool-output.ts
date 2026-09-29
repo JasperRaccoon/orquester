@@ -189,7 +189,7 @@ export interface ToolCallSnapshot {
   readonly rawOutput?: unknown;
 }
 
-export interface CoalesceDecision {
+interface CoalesceDecision {
   readonly emit: boolean;
   readonly skipped: number;
 }

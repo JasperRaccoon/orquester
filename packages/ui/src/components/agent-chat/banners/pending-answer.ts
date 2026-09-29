@@ -23,25 +23,8 @@
 
 import type { UserInputQuestion, UserInputQuestionOption } from "@orquester/api/agent-chat";
 
-/**
- * Optional per-option flags some providers send that the shared contract does
- * not name yet. Read structurally so the card lights up the moment the
- * adapter starts stamping them, and behaves exactly as before until then.
- */
-export interface QuestionOptionFlags {
-  /** "Other…": picking it means the answer is the typed text, not this label. */
-  isOther?: boolean;
-}
-
-export interface QuestionFlags {
-  /** The answer is a credential: masked in the field, never echoed anywhere. */
-  isSecret?: boolean;
-  /** The provider is blocked on this one; it cannot be dismissed. */
-  isBlocking?: boolean;
-}
-
-export type QuestionOption = UserInputQuestionOption & QuestionOptionFlags;
-export type Question = UserInputQuestion & QuestionFlags;
+/** Some providers mark an option as "Other…" without a shared option field. */
+type QuestionOption = UserInputQuestionOption & { isOther?: boolean };
 
 /** An option carries no `value` on some providers — the label IS the value. */
 export function questionOptionValue(option: UserInputQuestionOption): string {
@@ -53,7 +36,7 @@ export function isOtherOption(option: UserInputQuestionOption): boolean {
 }
 
 export function isSecretQuestion(question: UserInputQuestion): boolean {
-  return (question as Question).isSecret === true;
+  return question.isSecret === true;
 }
 
 export function allowsCustomAnswer(question: UserInputQuestion): boolean {

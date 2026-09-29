@@ -15,10 +15,9 @@ import {
   sessionEnvCommand,
   sessionPath,
   tmuxAvailable,
-  tmuxName,
   tmuxVersionOk
 } from "./tmux";
-import { ActivityTracker, type ActivityCause } from "./ansi-activity.ts";
+import { ActivityTracker } from "./ansi-activity.ts";
 import { classifyAgentEvent } from "./agent-status.ts";
 
 /**

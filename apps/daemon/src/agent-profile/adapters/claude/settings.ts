@@ -34,7 +34,7 @@ export function isRecord(value: unknown): value is Record<string, unknown> {
  * and settings.json and `~/.claude.json` hold secrets (`env`, MCP env and
  * headers): only the position may reach a `fileErrors` entry or an error.
  */
-export function safeJsonError(error: unknown): string {
+function safeJsonError(error: unknown): string {
   if (!(error instanceof SyntaxError)) {
     return error instanceof Error ? error.message : String(error);
   }
