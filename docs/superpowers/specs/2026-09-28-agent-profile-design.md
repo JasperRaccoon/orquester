@@ -298,9 +298,11 @@ Top to bottom:
 1. **Agent picker** — a segmented control (icon + name) of the four agents; not-installed agents
    disabled. Defaults to the visible chat tab's agent (`providerForRefId` on the tab's `refId`),
    else the last picked.
-2. **Search** and a single horizontally scrolling row of **kind chips with counts** (All · MCP ·
-   Skills · Plugins · Hooks · Commands · Marketplaces — only the kinds that agent
-   has).
+2. **Search** and **kind tabs** (revised 2026-09-29 by the owner): wrapping pills — never a
+   scrolling row — each an icon, a label and a count (MCP · Skills · Plugins · Marketplaces ·
+   Hooks · Commands, only that agent's kinds). Single-select, no "All": one kind at a time, the
+   tab last used per agent remembered. A non-empty search overrides the tab and lists matches
+   across every kind, grouped. The Instructions card stays pinned above the tabs.
 3. **Instructions card** — "CLAUDE.md · 42 lines · edited 2h ago", opening the instructions editor;
    its warning (override file, dead `GROK.md`) as a chip.
 4. **Grouped list** — a section label per kind; each row: name, one-line description, source badge,
