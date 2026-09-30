@@ -85,9 +85,20 @@ import type {
   UsageWindow,
   WorkspaceSummary
 } from "@orquester/api";
-import { BROWSER_FRAME_TYPE_JPEG, MAX_INITIAL_COMMAND, SYSTEM_ACCOUNT_ID } from "@orquester/api";
+import {
+  BROWSER_FRAME_TYPE_JPEG,
+  DESKTOP_CHANNEL,
+  DESKTOP_WS_PREFIXES,
+  MAX_INITIAL_COMMAND,
+  SYSTEM_ACCOUNT_ID
+} from "@orquester/api";
 import { isBinOnPath, RegistryService } from "./registry";
 import { BrowserError, BrowserManager } from "./browsers";
+import { DesktopAudioHub } from "./desktops/audio.ts";
+import { DesktopHostProbe, resolveTool } from "./desktops/host-status.ts";
+import { registerDesktopHttpRoutes } from "./desktops/http-routes.ts";
+import { DesktopManager } from "./desktops/manager.ts";
+import { registerDesktopWsRoutes } from "./desktops/ws-routes.ts";
 import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
 import { AgentHooks } from "./agent-hooks";
@@ -178,6 +189,8 @@ import {
   browserProfilesDir,
   browsersIndexPath,
   createDefaultAppConfig,
+  desktopsIndexPath,
+  desktopsRuntimeDir,
   createDefaultClientConfig,
   createDefaultDaemonConfig,
   createDefaultRemotesConfig,
@@ -248,6 +261,10 @@ interface ResolvedPaths {
   browsersIndexFile: string;
   /** <appdir>/daemon/browser-profiles — per-project Chromium user-data dirs (0700). */
   browserProfilesDir: string;
+  /** <appdir>/daemon/desktops.json — the desktop-tab index. */
+  desktopsIndexFile: string;
+  /** <appdir>/daemon/desktops — per-desktop runtime dirs: sockets, cookies, logs (0700). */
+  desktopsRuntimeDir: string;
   /** <appdir>/daemon/todos.json — the managed to-do list index. */
   todosIndexFile: string;
   /** <appdir>/daemon/recent-projects.json — the shared recent-projects list. */
@@ -391,6 +408,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     sessionsIndexFile: sessionsIndexPath(paths.baseDir),
     browsersIndexFile: browsersIndexPath(paths.baseDir),
     browserProfilesDir: browserProfilesDir(paths.baseDir),
+    desktopsIndexFile: desktopsIndexPath(paths.baseDir),
+    desktopsRuntimeDir: desktopsRuntimeDir(paths.baseDir),
     todosIndexFile: todosIndexPath(paths.baseDir),
     recentProjectsFile: recentProjectsPath(paths.baseDir),
     savedPromptsFile: savedPromptsPath(paths.baseDir),
@@ -994,6 +1013,28 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   browsers.lifecycle.on("updated", (b) => broadcaster.publish("browser", "browser.updated", b));
   browsers.lifecycle.on("closed", (p) => broadcaster.publish("browser", "browser.closed", p));
 
+  // Desktop tabs (desktop spec §5): virtual X displays in tmux service sessions
+  // on the sessions' tmux server, so they outlive the daemon like terminals do.
+  // Reattached after `sessions.reattach()` (above); best-effort like it.
+  const desktopHost = new DesktopHostProbe();
+  const desktopAudio = new DesktopAudioHub({
+    ffmpegPath: resolveTool("ffmpeg"),
+    log: (message, error) => console.warn(message, error ?? "")
+  });
+  const desktops = new DesktopManager({
+    baseDir: paths.baseDir,
+    indexFile: resolved.desktopsIndexFile,
+    tmux,
+    hostStatus: () => desktopHost.status(),
+    audio: desktopAudio
+  });
+  await desktops.load();
+  desktops.on("created", (d) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.created", d));
+  desktops.on("updated", (d) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.updated", d));
+  desktops.on("closed", (p) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.closed", p));
+  desktops.on("windows", (p) => broadcaster.publish(DESKTOP_CHANNEL, "desktop.windows", p));
+  await desktops.reattach().catch((error) => console.error("Desktop reattach failed", error));
+
   // Dev-server URL suggestions: fed from every session's PTY output.
   const urlWatcher = new UrlWatcher();
   sessions.lifecycle.on("output", ({ id, data }: { id: string; data: string }) => {
@@ -1009,6 +1050,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   grokDeviceLink.events.on("changed", (status) => broadcaster.publish("agent-accounts", "grok-link.changed", status));
   const services: Services = {
     registry, sessions, grokDeviceLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
+    desktops, desktopAudio,
     agentProfile,
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
     workflowProjects: workflowDaemon.runtime.projects,
@@ -1138,6 +1180,10 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // running so in-flight turns survive the deploy (chat spec §3.1).
     await agentChat.stop();
     await browsers.shutdown();
+    // Desktops keep running in tmux; only their watchers, window trackers and
+    // audio encoders (daemon children) stop.
+    await desktops.shutdown();
+    desktopAudio.shutdown();
     await stopHttp();
     const unixClosed = unixServer.close();
     unixServer.server.closeAllConnections?.();
@@ -1219,6 +1265,10 @@ interface Services {
   broadcaster: Broadcaster;
   agentAccounts: AgentAccountsService;
   browsers: BrowserManager;
+  /** Desktop tabs (desktop spec §5). */
+  desktops: DesktopManager;
+  /** Per-desktop Opus encoders behind /ws-desktop-audio. */
+  desktopAudio: DesktopAudioHub;
   urlWatcher: UrlWatcher;
   /**
    * The agent-chat half: the supervised agent host, the chat tab records and
@@ -1872,6 +1922,8 @@ export function createServer(
       sessions.closeByProjectPrefix(target);
       // Cascade-close this project's browser tabs (kills its Chromium too).
       await services.browsers.closeForProject(target);
+      // And its desktops (their hosts and apps); they match either spelling.
+      await services.desktops.closeForProject(safe);
       await rm(safe, { recursive: true, force: true });
       // Only now that the directory is gone: cascade-delete this project's
       // to-do lists (match `target`, the raw-join path used as the list refKey
@@ -1913,6 +1965,8 @@ export function createServer(
       // join), not `safe`: stored projectPaths use the raw join form, so matching
       // the realpath would miss every session under a symlinked workspace root.
       sessions.closeByProjectPrefix(target);
+      // Every desktop of every project in it (prefix match).
+      await services.desktops.closeForProject(safe);
       // Drop the git includeIf binding BEFORE removing the tree: unbindWorkspace
       // realpaths the dir to rebuild the same matcher bindWorkspace used, so it
       // must run while the dir still exists (on macOS the literal /tmp path and
@@ -2667,6 +2721,8 @@ export function createServer(
         // and the raw resolved form — sessions store the raw client-join path.
         sessions.closeByProjectPrefix(safe);
         sessions.closeByProjectPrefix(resolve(path));
+        // Desktops rooted in the deleted tree too.
+        await services.desktops.closeForProject(safe);
         await rm(safe, { recursive: true, force: false });
         return { ok: true };
       } catch (error) {
@@ -3380,6 +3436,11 @@ export function createServer(
     }
   );
 
+  // Desktop tabs (desktop spec §7.1) — CRUD, apps and window actions; the view
+  // and sound ride /ws-desktop and /ws-desktop-audio. Launch bodies may carry
+  // credentials in `env`: the request logger above logs only method + URL.
+  registerDesktopHttpRoutes(app, { desktops: services.desktops, fsRoot: () => resolved.fsRoot });
+
   // Embedded-DevTools frontend assets — reverse-proxied from the tab's own
   // Chromium, which serves a prebuilt, version-matched DevTools bundle at
   // /devtools/*. Remote-only (HTTP transport); never on the unix socket.
@@ -4078,6 +4139,19 @@ export function createServer(
     });
   });
 
+  // Desktop RFB relay and Opus audio (desktop spec §7.2), in their own child
+  // context like /ws-browser; `?token=` is checked after the upgrade (1008).
+  void app.register(async (instance) => {
+    await registerDesktopWsRoutes(instance, {
+      authorize: (token) =>
+        !options.authRequired ||
+        authorizeCredential(token, config.transports.http.username, config.transports.http.passwordHash),
+      vncSocketPath: (id) => services.desktops.vncSocketPath(id),
+      audioSource: (id) => services.desktops.audioSource(id),
+      audio: services.desktopAudio
+    });
+  });
+
   // Embedded-DevTools CDP WebSocket — remote-only (HTTP transport). The real
   // DevTools frontend speaks raw CDP to the tab's page target through this
   // authenticated pipe (?token= because browsers can't set WS headers). Routed
@@ -4229,7 +4303,8 @@ export function createServer(
         url.startsWith("/events") ||
         url.startsWith("/mcp") ||
         url.startsWith("/devtools-frontend") ||
-        url.startsWith("/ws-devtools");
+        url.startsWith("/ws-devtools") ||
+        DESKTOP_WS_PREFIXES.some((prefix) => url.startsWith(prefix));
       if (request.method !== "GET" || isApi) {
         return reply.code(404).send({ code: "NOT_FOUND", message: "Route not found." });
       }
@@ -4859,6 +4934,8 @@ async function prepareDirs(resolved: ResolvedPaths): Promise<void> {
   await mkdir(resolved.workspacesDir, { recursive: true });
   await mkdir(resolved.keysDir, { recursive: true, mode: 0o700 });
   await mkdir(resolved.browserProfilesDir, { recursive: true, mode: 0o700 });
+  await mkdir(resolved.desktopsRuntimeDir, { recursive: true, mode: 0o700 });
+  await chmod(resolved.desktopsRuntimeDir, 0o700);
 }
 
 function sanitizeDaemonConfig(config: DaemonConfig): DaemonConfig {

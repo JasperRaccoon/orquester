@@ -37,7 +37,9 @@ orquester.example.com {
         # must allow blob:. The HTML preview renders from a blob: iframe and the
         # DevTools panel from a same-origin iframe, so frame-src allows 'self' blob:
         # (frame-ancestors 'none' still forbids the app itself from being framed).
-        Content-Security-Policy "default-src 'self'; connect-src 'self' wss:; img-src 'self' data: blob: https://avatars.githubusercontent.com; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self'; worker-src 'self' blob:; manifest-src 'self'; frame-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
+        # 'wasm-unsafe-eval' lets the Desktop tab's Opus audio decoder fallback
+        # compile its WebAssembly; it allows WebAssembly only, not JS eval.
+        Content-Security-Policy "default-src 'self'; connect-src 'self' wss:; img-src 'self' data: blob: https://avatars.githubusercontent.com; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; script-src 'self' 'wasm-unsafe-eval'; worker-src 'self' blob:; manifest-src 'self'; frame-src 'self' blob:; frame-ancestors 'none'; base-uri 'self'; form-action 'self'"
         -Server
     }
 }

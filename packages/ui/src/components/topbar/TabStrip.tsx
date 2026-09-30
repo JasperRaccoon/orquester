@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Dot, FolderTree, GitBranch, Globe, ListTodo, Pencil, Trash2, Workflow, X } from "lucide-react";
+import { Dot, FolderTree, GitBranch, Globe, ListTodo, Monitor, Pencil, Trash2, Workflow, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { shortAccountLabel } from "../../lib/account-label";
 import { getRegistryIcon } from "../../icons";
@@ -8,6 +8,7 @@ import { ContextMenu, type ContextMenuItem } from "../ui/context-menu";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { isLegacyAgentTerminal } from "../../lib/session-kind";
 import { WorkflowChip } from "../workflows/WorkflowChip";
+import { desktopTabTitle } from "../../lib/desktop-state";
 import {
   isSessionTab,
   tabSession,
@@ -163,7 +164,9 @@ export const TabStrip: React.FC = () => {
           ? tab.session.title
           : tab.type === "browser"
             ? tab.browser.title || "Browser"
-            : tab.title;
+            : tab.type === "desktop"
+              ? desktopTabTitle(tab.desktop)
+              : tab.title;
         const icon = session ? (
           getRegistryIcon(session.kind, session.refId, 13)
         ) : tab.type === "git" ? (
@@ -174,6 +177,8 @@ export const TabStrip: React.FC = () => {
           <Workflow size={13} />
         ) : tab.type === "browser" ? (
           <Globe size={13} />
+        ) : tab.type === "desktop" ? (
+          <Monitor size={13} />
         ) : (
           <FolderTree size={13} />
         );

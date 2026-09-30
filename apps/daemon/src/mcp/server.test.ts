@@ -83,7 +83,17 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   // Replaces the whole file: destructive, and the same text twice is the same file.
   write_agent_instructions: { required: ["agent", "text"], annotations: DESTROY },
   import_agent_profile_items: { required: ["agent"], annotations: WRITE },
-  list_marketplace_plugins: { required: ["agent", "marketplace"], annotations: READ }
+  list_marketplace_plugins: { required: ["agent", "marketplace"], annotations: READ },
+  // Desktops (desktop tab spec §7.4): launching an app runs anything, so no write claims a closed world.
+  desktops_list: { required: [], annotations: READ },
+  desktop_host_status: { required: [], annotations: READ },
+  desktop_open: { required: ["projectPath"], annotations: WRITE },
+  desktop_launch_app: { required: ["desktopId", "command"], annotations: WRITE },
+  desktop_windows: { required: ["desktopId"], annotations: READ },
+  desktop_window_action: { required: ["desktopId", "windowId", "action"], annotations: WRITE },
+  desktop_app_log: { required: ["desktopId", "appId"], annotations: READ },
+  desktop_stop_app: { required: ["desktopId", "appId"], annotations: DESTROY },
+  desktop_close: { required: ["desktopId"], annotations: DESTROY }
 };
 
 type ListedTool = { name: string; title?: string; description: string; annotations?: object; inputSchema: { properties?: Record<string, { description?: string }>; required?: string[]; additionalProperties?: unknown } };

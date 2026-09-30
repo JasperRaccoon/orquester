@@ -11,6 +11,7 @@ import type { TodoTools } from "./todo-tools.ts";
 import type { ToolContext, ToolDef } from "./tool.ts";
 import { agentProfileTools } from "./tools/agent-profile.ts";
 import { catalogTools } from "./tools/catalog.ts";
+import { desktopTools } from "./tools/desktops.ts";
 import { fileTools } from "./tools/files.ts";
 import { messageTools } from "./tools/messages.ts";
 import { outputTools } from "./tools/output.ts";
@@ -38,10 +39,10 @@ const SERVER_VERSION = "2.0.0";
  * ≤ 2 KB: Claude Code truncates server instructions around there (and surfaces them only with tool
  * search on), so every load-bearing rule is also in the description of the tool it governs.
  */
-const SERVER_INSTRUCTIONS = `Orquester MCP drives Orquester's agent chat sessions (Claude Code, Codex, OpenCode, Grok) exactly like the chat GUI. A session is a tab: a chat with an agent, or a terminal (listed and closable only). Addressing: sessions by sessionId (list_sessions); projects by absolute path or "workspace/project" (list_projects). Call list_agents for the valid models, options (effort…), permission modes and accounts before create_session or update_session. create_session opens a chat tab, or resumes a conversation from list_conversations; send_message talks to it — wait:true (default) returns the reply or the question/approval it stopped on; while a turn runs, a message steers it. get_session shows status (status/attention/reason), pending questions and approvals with their ids and options, the proposed plan, subagents and the context meter; read_transcript shows what was said and done (agentId drills into a subagent), read_tool_output a tool row's whole output (its outputItemId); search_sessions finds words across every chat. answer_question / resolve_approval / dismiss_question act on pending requests; implement_plan is the GUI's Implement button. update_session changes model, effort/options, permission mode, account or title. wait_for_session blocks until a session needs you — pass its cursor back as \`after\`; never poll in a loop. Attachments are inline ({path} in the sandbox or {name, base64}). get_usage percentages are % USED. Automated workflows: list_workflow_block_types first, then create_workflow; edit with update_workflow ops (revision from get_workflow); preview_expression checks a {{ }} template against a past run's or pinned data without running; run_workflow, get_workflow_run. Agent profiles (each CLI's global MCP servers, skills, plugins, hooks, commands, CLAUDE.md/AGENTS.md): list_agent_profiles, get_agent_profile first; MCP secret values are write-only. Errors carry a code (SESSION_BUSY, PENDING_REQUEST, INVALID_ARGUMENT…) and a message naming the fix.`;
+const SERVER_INSTRUCTIONS = `Orquester MCP drives Orquester's agent chat sessions (Claude Code, Codex, OpenCode, Grok) like the chat GUI. A session is a tab: a chat with an agent, or a terminal (listed and closable only). Addressing: sessions by sessionId (list_sessions); projects by absolute path or "workspace/project" (list_projects). Call list_agents for the valid models, options (effort…), permission modes and accounts before create_session or update_session. create_session opens a chat tab, or resumes a conversation from list_conversations; send_message talks to it — wait:true (default) returns the reply or the question/approval it stopped on; while a turn runs, a message steers it. get_session shows status (status/attention/reason), pending questions and approvals with their ids and options, the proposed plan, subagents and the context meter; read_transcript shows what was said and done (agentId drills into a subagent), read_tool_output a tool row's whole output (its outputItemId); search_sessions finds words across every chat. answer_question / resolve_approval / dismiss_question act on pending requests; implement_plan is the GUI's Implement button. update_session changes model, effort/options, permission mode, account or title. wait_for_session blocks until a session needs you — pass its cursor back as \`after\`; never poll in a loop. Attachments are inline ({path} in the sandbox or {name, base64}). get_usage percentages are % USED. Automated workflows: list_workflow_block_types first, then create_workflow; edit with update_workflow ops (revision from get_workflow); preview_expression checks a {{ }} template against a past run's or pinned data without running; run_workflow, get_workflow_run. Agent profiles (each CLI's global MCP servers, skills, plugins, hooks, commands, instruction file): list_agent_profiles, get_agent_profile first; MCP secret values are write-only. GUI desktops: desktop_host_status first. Errors carry a code (SESSION_BUSY, PENDING_REQUEST, INVALID_ARGUMENT…) and a message naming the fix.`;
 
 /** Every tool, in tools/list order. */
-const ALL_TOOLS: ToolDef[] = [...catalogTools, ...sessionTools, ...searchTools, ...messageTools, ...outputTools, ...requestTools, ...watchTools, ...usageTools, ...fileTools, ...todoTools, ...workflowTools, ...agentProfileTools];
+const ALL_TOOLS: ToolDef[] = [...catalogTools, ...sessionTools, ...searchTools, ...messageTools, ...outputTools, ...requestTools, ...watchTools, ...usageTools, ...fileTools, ...todoTools, ...workflowTools, ...agentProfileTools, ...desktopTools];
 
 /** How many refused fields an INVALID_ARGUMENT names before "…". */
 const MAX_NAMED_ISSUES = 5;
@@ -88,9 +89,12 @@ function buildServer(deps: McpDeps, authorization: string | undefined, signal: A
   const tools = new Map<string, { tool: ToolDef; schema: z.ZodTypeAny }>();
   for (const tool of ALL_TOOLS) {
     // Match tools/list's additionalProperties:false; reject misspelled keys instead of silently taking defaults.
-    tools.set(tool.name, { tool, schema: z.object(tool.input).strict() });
+    const schema = z.object(tool.input).strict();
+    tools.set(tool.name, { tool, schema });
+    // The SDK lists an empty shape as a bare `{type: "object"}`; the strict object keeps additionalProperties:false.
+    const inputSchema = Object.keys(tool.input).length > 0 ? tool.input : schema;
     // Never invoked — the tools/call handler below replaces the SDK's — but it would answer the same way.
-    server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema: tool.input, annotations: tool.annotations }, (args: Record<string, unknown>) => call(tool, args));
+    server.registerTool(tool.name, { title: tool.title, description: tool.description, inputSchema, annotations: tool.annotations }, (args: Record<string, unknown>) => call(tool, args));
   }
   server.server.setRequestHandler(CallToolRequestSchema, async (request) => {
     const entry = tools.get(request.params.name);

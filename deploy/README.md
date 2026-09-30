@@ -43,4 +43,18 @@ The daemon detects it through the registry probe; no config needed. Profiles
 If Chromium can't sandbox on the host, the daemon retries with --no-sandbox
 and the UI shows a shield warning on the tab.
 
+### Desktop tabs — host packages and CSP
+
+Desktop tabs (Linux GUI apps on a virtual display, with audio) need
+`tigervnc-standalone-server openbox pulseaudio pulseaudio-utils dbus-x11
+libgl1-mesa-dri ffmpeg` on the daemon host and a tmux ≥ 3.2. `remote-provision.sh`
+installs them; on an existing VPS, install them with `apt-get` (idempotent). Without
+PulseAudio or ffmpeg, desktops still run, without sound. `GET /api/desktops/host`
+(and the MCP's `desktop_host_status`) reports what is missing.
+
+The audio decoder's WebAssembly fallback needs `'wasm-unsafe-eval'` in the `@app`
+block's `script-src` (it allows compiling WebAssembly only, not JS `eval`). The
+template `Caddyfile` has it; when deploying, make the same change in the live
+`/etc/caddy/Caddyfile` and `systemctl reload caddy`.
+
 Never commit the real `daemon.env`.

@@ -1,10 +1,11 @@
 import React, { useState } from "react";
-import { ChevronDown, Circle, FolderTree, GitBranch, Globe, ListTodo, Pencil, Trash2, Workflow, X } from "lucide-react";
+import { ChevronDown, Circle, FolderTree, GitBranch, Globe, ListTodo, Monitor, Pencil, Trash2, Workflow, X } from "lucide-react";
 import { BottomSheet, ConfirmDialog, DropdownEmpty } from "../ui";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { cn } from "../../lib/cn";
 import { getRegistryIcon } from "../../icons";
 import { WorkflowChip } from "../workflows/WorkflowChip";
+import { desktopTabTitle } from "../../lib/desktop-state";
 import {
   isSessionTab,
   tabSession,
@@ -19,7 +20,11 @@ const tabLabel = (tab: ProjectTab): string => {
   if (isSessionTab(tab)) {
     return tab.session.title;
   }
-  return tab.type === "browser" ? tab.browser.title || "Browser" : tab.title;
+  return tab.type === "browser"
+    ? tab.browser.title || "Browser"
+    : tab.type === "desktop"
+      ? desktopTabTitle(tab.desktop)
+      : tab.title;
 };
 const tabIcon = (tab: ProjectTab, size = 16) => {
   const session = tabSession(tab);
@@ -33,6 +38,8 @@ const tabIcon = (tab: ProjectTab, size = 16) => {
     <Workflow size={size} />
   ) : tab.type === "browser" ? (
     <Globe size={size} />
+  ) : tab.type === "desktop" ? (
+    <Monitor size={size} />
   ) : (
     <FolderTree size={size} />
   );

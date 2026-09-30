@@ -18,7 +18,9 @@ chat; wait until a session needs attention; and read quota and estimated cost. T
 and sandboxed file reads are there too. That is **31 tools** (§6) — plus **13 automated-workflow
 tools** that build, edit, run and inspect the daemon's n8n-like workflows (§12), and **13
 agent-profile tools** that manage each agent CLI's own global MCP servers, skills, plugins,
-marketplaces, hooks, commands and instruction file (§13): 57 in all.
+marketplaces, hooks, commands and instruction file (§13), and **9 desktop tools** that open
+desktop tabs — Linux GUI apps on a virtual display on the daemon's host — launch apps in them and
+manage their windows (§14): 66 in all.
 
 Apart from the todo and file tools, which use the daemon's todo store and its sandboxed file
 reader directly, the tools are a thin in-process client of the daemon's own REST API: every call
@@ -1162,6 +1164,11 @@ see §12.
 `copy_agent_profile_item`, `trust_agent_profile_hook`, `get_agent_instructions`,
 `write_agent_instructions`, `import_agent_profile_items` and `list_marketplace_plugins` — see §13.
 
+### Desktops
+
+`desktops_list`, `desktop_host_status`, `desktop_open`, `desktop_launch_app`, `desktop_windows`,
+`desktop_window_action`, `desktop_app_log`, `desktop_stop_app` and `desktop_close` — see §14.
+
 ---
 
 ## 7. Workflows
@@ -1944,10 +1951,64 @@ get_agent_profile_item { "agent": "opencode", "id": "mcp:jira" }
              "env": [ { "key": "JIRA_API_TOKEN", "set": true } ] }, "secretsNote": "…" }
 ```
 
+## 14. Desktops
+
+A **desktop** is a tab that runs Linux GUI apps on the daemon's host: a virtual X display
+(TigerVNC's `Xvnc`, the Openbox window manager, PulseAudio and a D-Bus session bus) that the user
+sees and controls live in the tab, with sound. Several apps can share one desktop — one display,
+one audio output — and the tab's window bar switches between their windows. Desktops live in their
+own tmux session, so they survive daemon restarts. These 9 tools are clients of the daemon's
+`/api/desktops*` routes, the tab's own: a desktop an agent opens appears as a tab in every client,
+and one the user opens is listed here.
+
+### Tools
+
+| Tool | Input | Returns | Annotations |
+|---|---|---|---|
+| `desktops_list` | `projectPath?` (omit for every project) | `{desktops: [Desktop]}` | read-only |
+| `desktop_host_status` | — | `{available, audioAvailable, tools: [{name, path, required}], ffmpegPulse, ffmpegOpus, renderNode, tmuxUsable, warnings, installHint}` | read-only |
+| `desktop_open` | `projectPath`, `title?`, `size? {width, height}`, `renderThreads?`, `command?`, `cwd?`, `env?` | `{desktop: Desktop}` | write |
+| `desktop_launch_app` | `desktopId`, `command`, `cwd?`, `env?` | `{app: App}` | write |
+| `desktop_windows` | `desktopId` | `{desktopId, status, windows: [Window], activeWindowId, apps: [{id, command, status}]}` | read-only |
+| `desktop_window_action` | `desktopId`, `windowId`, `action` (`activate` \| `maximize` \| `close`) | `{done: true, desktopId, windowId, action}` | write |
+| `desktop_app_log` | `desktopId`, `appId` | `{desktopId, appId, text, truncated?}` | read-only |
+| `desktop_stop_app` | `desktopId`, `appId`, `force? = false` | `{stopped: true, desktopId, appId, force}` | destructive |
+| `desktop_close` | `desktopId` | `{closed: true, desktopId}` | destructive |
+
+- **Desktop** is `{id, projectPath, title, order, createdAt, display, size, renderThreads, status:
+  "starting" | "running" | "stopped" | "error", error?, audio: "available" | "unavailable", apps:
+  [App], windows: [Window], activeWindowId}`; **App** is `{id, desktopId, command, cwd, env, status:
+  "starting" | "running" | "exited", exitCode, startedAt, exitedAt}`; **Window** is `{id, title,
+  appId, wmClass, maximized}` — `id` is the X window id in `0x…` hex, and `appId` is null for a
+  window no launched app owns.
+- **Check `desktop_host_status` first.** Desktops need `Xvnc`, `openbox`, `dbus-daemon` and a tmux
+  ≥ 3.2; sound needs PulseAudio and an ffmpeg with `pulse` input and `libopus`. Without the
+  required tools `desktop_open` answers `DESKTOP_UNAVAILABLE` and its message carries the host's
+  `apt-get install` line; installing is for the host's owner.
+- **`projectPath`** is an absolute path or `"workspace/project"`, as every tool's project (§5).
+- **`command`** is one shell line (at most 4 096 characters), run as `sh -c 'exec <command>'` under
+  `nice -n 10` with `DISPLAY`, `PULSE_SERVER` and the desktop's bus in its environment; `cwd` is
+  absolute or relative to the project (default: the project); `env` names match
+  `[A-Za-z_][A-Za-z0-9_]*` and apply last, over the desktop's own wiring. `desktop_open`'s
+  `command`, `cwd` and `env` launch a first app once the display is up; `cwd` or `env` without
+  `command` is `INVALID_ARGUMENT`.
+- **`size`** is 320×240 to 7680×4320 (default 1280×800); **`renderThreads`** is the software-OpenGL
+  (llvmpipe) thread count per app, `LP_NUM_THREADS` (default 4).
+- **`desktop_window_action`**: `activate` raises and focuses; `maximize` toggles; `close` asks the
+  app to close (`_NET_CLOSE_WINDOW`), so it may prompt to save instead. `desktop_stop_app` sends
+  SIGTERM to the app's process group, then SIGKILL after 5 s (at once with `force`).
+  `desktop_close` stops every app and removes the tab everywhere — unsaved work is lost.
+- **`desktop_app_log`** returns the app's recent stdout and stderr (the daemon keeps the last
+  64 KiB); a log too long for one result keeps its tail, `truncated: true`.
+- **Errors**: the daemon's codes pass through (`DESKTOP_UNAVAILABLE`, a 404 `NOT_FOUND` for an
+  unknown desktop, app or window, a 403 `FORBIDDEN` for a `cwd` outside the sandbox), with a hint
+  naming the tool that lists the ids.
+
 ---
 
 *Design reference: `docs/superpowers/specs/2026-09-22-orquester-mcp-v2-design.md`.
 Implementation: `apps/daemon/src/mcp/` — `server.ts` (the mount and the tool list), `daemon-api.ts`
 (the in-process client), `views.ts`, `transcript.ts`, `wait.ts`, `attachments.ts` and `tools/`
 (`tools/workflows.ts` for §12; its design: `docs/superpowers/specs/2026-09-28-automated-workflows-design.md` §8;
-`tools/agent-profile.ts` for §13, over the routes of `docs/superpowers/specs/2026-09-28-agent-profile-design.md` §8).*
+`tools/agent-profile.ts` for §13, over the routes of `docs/superpowers/specs/2026-09-28-agent-profile-design.md` §8;
+`tools/desktops.ts` for §14, over the routes of `docs/superpowers/specs/2026-09-30-desktop-tab-design.md` §7).*

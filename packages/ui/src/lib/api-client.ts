@@ -92,7 +92,16 @@ import {
 } from "./agent-chat/transport";
 import { fsPathQuery } from "./fs-path-query";
 import { buildQueryString } from "./transporter";
-import { agentProfileRoutes, workflowRoutes } from "@orquester/api";
+import { agentProfileRoutes, desktopRoutes, workflowRoutes } from "@orquester/api";
+import type {
+  CreateDesktopRequest,
+  DesktopAppSummary,
+  DesktopHostStatus,
+  DesktopSuggestionsResponse,
+  DesktopSummary,
+  DesktopWindowAction,
+  LaunchAppRequest
+} from "@orquester/api";
 import type {
   AgentProfileAgentId,
   AgentProfileOverviewResponse,
@@ -1320,6 +1329,76 @@ export class ApiClient {
   /** Undefined on transports without browser streaming (desktop unix socket). */
   browserChannel(): WsBrowserChannel | undefined {
     return this.transporter.browserChannel?.();
+  }
+
+  // Desktops (virtual X displays streamed over RFB + Opus)
+
+  desktopHostStatus(signal?: AbortSignal): Promise<DesktopHostStatus> {
+    return this.send("GET", desktopRoutes.host, { signal });
+  }
+
+  listDesktops(projectPath?: string, signal?: AbortSignal): Promise<DesktopSummary[]> {
+    return this.send("GET", desktopRoutes.list, {
+      query: projectPath ? { projectPath } : undefined,
+      signal
+    });
+  }
+
+  desktopSuggestions(projectPath: string, signal?: AbortSignal): Promise<DesktopSuggestionsResponse> {
+    return this.send("GET", desktopRoutes.suggestions, { query: { projectPath }, signal });
+  }
+
+  createDesktop(body: CreateDesktopRequest): Promise<DesktopSummary> {
+    return this.send("POST", desktopRoutes.create, { body });
+  }
+
+  stopDesktop(id: string): Promise<DesktopSummary> {
+    return this.send("POST", desktopRoutes.stop(id));
+  }
+
+  restartDesktop(id: string): Promise<DesktopSummary> {
+    return this.send("POST", desktopRoutes.restart(id));
+  }
+
+  closeDesktop(id: string): Promise<void> {
+    return this.send("DELETE", desktopRoutes.desktop(id));
+  }
+
+  launchDesktopApp(id: string, body: LaunchAppRequest): Promise<DesktopAppSummary> {
+    return this.send("POST", desktopRoutes.apps(id), { body });
+  }
+
+  stopDesktopApp(id: string, appId: string, force = false): Promise<void> {
+    return this.send("DELETE", desktopRoutes.app(id, appId), { query: force ? { force: "1" } : undefined });
+  }
+
+  /** The app's log tail. The daemon serves text/plain, so this reads bytes rather than JSON. */
+  async desktopAppLog(id: string, appId: string, signal?: AbortSignal): Promise<string> {
+    const path = desktopRoutes.appLog(id, appId);
+    if (!this.transporter.requestBytes) throw new Error("Logs are not supported on this connection.");
+    const response = await this.transporter.requestBytes({ method: "GET", path, signal });
+    if (!response.ok) {
+      throw new ApiError(response.status, "GET", path, response.headers, undefined);
+    }
+    return new TextDecoder().decode(response.data);
+  }
+
+  desktopWindowAction(id: string, windowId: string, action: DesktopWindowAction): Promise<void> {
+    return this.send("POST", desktopRoutes.windowAction(id, windowId, action));
+  }
+
+  /**
+   * Authenticated ws(s):// URL for a desktop socket path (`desktopRoutes.vncSocket(id)` /
+   * `audioSocket(id)`), or null on transports without WebSockets (the desktop unix
+   * socket — same availability as browser tabs). The bearer rides as ?token=.
+   */
+  desktopSocketUrl(path: string): string | null {
+    if (this.transportKind !== "http") {
+      return null;
+    }
+    const base = this.connection.endpoint.replace(/\/$/, "").replace(/^http/, "ws");
+    const token = this.connection.password ? `?token=${encodeURIComponent(this.connection.password)}` : "";
+    return `${base}${path}${token}`;
   }
 
   // System status (host observability). No push events exist for any of these —

@@ -41,6 +41,9 @@ log "2/7 packages: apt deps, Node 20, pnpm, Caddy"
 apt-get update -qq
 apt-get install -y git openssh-client tmux ufw python3 make g++ curl \
   ca-certificates p7zip-full ripgrep gnupg
+# Desktop tabs: virtual X display, window manager, audio and its Opus encoder.
+apt-get install -y tigervnc-standalone-server openbox pulseaudio \
+  pulseaudio-utils dbus-x11 libgl1-mesa-dri ffmpeg
 need_node=1
 if command -v node >/dev/null 2>&1; then
   major="$(node -p 'process.versions.node.split(".")[0]')"

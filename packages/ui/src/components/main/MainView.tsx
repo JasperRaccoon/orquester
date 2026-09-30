@@ -1,5 +1,5 @@
 import React from "react";
-import { FolderTree, GitBranch, Globe, ListTodo, Workflow, X } from "lucide-react";
+import { FolderTree, GitBranch, Globe, ListTodo, Monitor, Workflow, X } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { EmptyState } from "./EmptyState";
 import { ProjectOverview } from "./ProjectOverview";
@@ -10,6 +10,8 @@ import { GitView } from "../git";
 import { TodoView } from "../todo";
 import { WorkflowEditorTab } from "../workflows/WorkflowEditorTab";
 import { BrowserView } from "../browser";
+import { DesktopView } from "../desktop/DesktopView";
+import { desktopTabTitle } from "../../lib/desktop-state";
 import { getRegistryIcon } from "../../icons";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { ResizeHandle } from "../ui";
@@ -42,6 +44,8 @@ function cellIcon(tab: ProjectTab): React.ReactNode {
     <Workflow size={13} />
   ) : tab.type === "browser" ? (
     <Globe size={13} />
+  ) : tab.type === "desktop" ? (
+    <Monitor size={13} />
   ) : (
     <FolderTree size={13} />
   );
@@ -51,7 +55,11 @@ function cellTitle(tab: ProjectTab): string {
   if (isSessionTab(tab)) {
     return tab.session.title;
   }
-  return tab.type === "browser" ? tab.browser.title || "Browser" : tab.title;
+  return tab.type === "browser"
+    ? tab.browser.title || "Browser"
+    : tab.type === "desktop"
+      ? desktopTabTitle(tab.desktop)
+      : tab.title;
 }
 
 /** Grid columns for a tab count: 1→1, 2-4→2, 5-9→3, 10+→4 (capped). */
@@ -92,6 +100,7 @@ export const MainView: React.FC = () => {
   const gridRef = React.useRef<HTMLDivElement | null>(null);
   const activateTab = useAppStore((s) => s.activateTab);
   const requestCloseTab = useAppStore((s) => s.requestCloseTab);
+  const openLaunchDialog = useAppStore((s) => s.openLaunchDialog);
 
   // Grid is a desktop-only layout; a persisted "grid" falls back to tab view on
   // narrow viewports (the toggle isn't shown there either). A workspace context
@@ -351,6 +360,15 @@ export const MainView: React.FC = () => {
                   <FileBrowser rootPath={ctx.kind === "project" ? ctx.project.path : ""} active={show} />
                 ) : tab.type === "browser" ? (
                   <BrowserView browser={tab.browser} active={active} />
+                ) : tab.type === "desktop" ? (
+                  <DesktopView
+                    desktop={tab.desktop}
+                    active={active}
+                    onLaunchApp={() =>
+                      openLaunchDialog({ projectPath: tab.desktop.projectPath, targetDesktopId: tab.desktop.id })
+                    }
+                    onCloseTab={() => void requestCloseTab(tab.id)}
+                  />
                 ) : tab.type === "workflow" ? (
                   <WorkflowEditorTab
                     workflowId={tab.workflowId}

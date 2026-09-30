@@ -11,6 +11,7 @@ import { GlobalShortcutListener } from "../attention";
 import { MobileSectionNav, RightRailEditorHost, RightRailFrame, useMobileSection } from "../right-rail";
 import { WorkflowsHost } from "../workflows/WorkflowsHost";
 import { CloseSessionConfirm } from "./CloseSessionConfirm";
+import { LaunchAppDialog } from "../desktop/LaunchAppDialog";
 
 /**
  * Primary layout: full-height sidebar on the left, and a main column whose top
@@ -43,6 +44,7 @@ export const AppShell: React.FC = () => (
     <SettingsModal />
     <AuthModal />
     <CloseSessionConfirm />
+    <LaunchAppDialog />
     <ToastStack />
     <CommandPalette />
     <GlobalShortcutListener />

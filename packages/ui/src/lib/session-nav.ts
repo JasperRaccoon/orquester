@@ -18,7 +18,7 @@ import type { ProjectSummary, WorkspaceSummary } from "../types";
  * it) — and that theft is harmless here: a chat tab's composer has no chord on
  * it.
  */
-export const SHORTCUT_BAIL_SELECTOR = ".xterm, [data-browser-view]";
+export const SHORTCUT_BAIL_SELECTOR = ".xterm, [data-browser-view], [data-desktop-view]";
 
 /**
  * True when `target` sits inside a surface that owns its own key handling.

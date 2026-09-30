@@ -68,6 +68,7 @@ async function harness(options: { unreadableLibrary?: boolean } = {}): Promise<{
     git: new GitService(),
     sessions: { closeByProjectPrefix: () => {} },
     browsers: { closeForProject: async () => {} },
+    desktops: { closeForProject: async () => {} },
     todos: {
       deleteByProjectPath: async (path: string) => void todoCascades.push(`deleteByProjectPath ${path}`),
       deleteByWorkspace: async (_name: string, path: string) => void todoCascades.push(`deleteByWorkspace ${path}`)

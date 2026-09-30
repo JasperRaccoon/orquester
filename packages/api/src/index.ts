@@ -21,11 +21,22 @@ export type RuntimeMode = "desktop-local" | "desktop-remote" | "web-remote";
  * `@orquester/api/agent-chat` gives you T3's spelling of both it and
  * everything else.
  */
+import type {
+  CreateDesktopRequest,
+  DesktopAppSummary,
+  DesktopHostStatus,
+  DesktopSuggestionsResponse,
+  DesktopSummary,
+  DesktopWindowAction,
+  LaunchAppRequest
+} from "./desktops.ts";
+import { desktopRoutes } from "./desktops.ts";
 export * from "./agent-chat/index.ts";
 export * from "./saved-prompts.ts";
 export * from "./agent-profile.ts";
 export * from "./prompt-variables.ts";
 export * from "./workflows/index.ts";
+export * from "./desktops.ts";
 
 export type {
   AgentChatBackgroundLiveness,
@@ -1544,6 +1555,16 @@ export interface SystemPortsResponse {
 }
 
 export interface OrquesterApi {
+  desktopHostStatus(): Promise<DesktopHostStatus>;
+  listDesktops(projectPath: string): Promise<DesktopSummary[]>;
+  desktopSuggestions(projectPath: string): Promise<DesktopSuggestionsResponse>;
+  createDesktop(request: CreateDesktopRequest): Promise<DesktopSummary>;
+  stopDesktop(id: string): Promise<DesktopSummary>;
+  restartDesktop(id: string): Promise<DesktopSummary>;
+  closeDesktop(id: string): Promise<void>;
+  launchDesktopApp(id: string, request: LaunchAppRequest): Promise<DesktopAppSummary>;
+  stopDesktopApp(id: string, appId: string, force?: boolean): Promise<void>;
+  desktopWindowAction(id: string, windowId: string, action: DesktopWindowAction): Promise<void>;
   health(): Promise<HealthResponse>;
   info(): Promise<ServerInfoResponse>;
   daemonConfig(): Promise<DaemonConfig>;
@@ -1572,6 +1593,46 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
   health(): Promise<HealthResponse> {
     return this.get("/health");
+  }
+
+  desktopHostStatus(): Promise<DesktopHostStatus> {
+    return this.get(desktopRoutes.host);
+  }
+
+  listDesktops(projectPath: string): Promise<DesktopSummary[]> {
+    return this.get(`${desktopRoutes.list}?projectPath=${encodeURIComponent(projectPath)}`);
+  }
+
+  desktopSuggestions(projectPath: string): Promise<DesktopSuggestionsResponse> {
+    return this.get(`${desktopRoutes.suggestions}?projectPath=${encodeURIComponent(projectPath)}`);
+  }
+
+  createDesktop(request: CreateDesktopRequest): Promise<DesktopSummary> {
+    return this.post(desktopRoutes.create, request);
+  }
+
+  stopDesktop(id: string): Promise<DesktopSummary> {
+    return this.post(desktopRoutes.stop(id));
+  }
+
+  restartDesktop(id: string): Promise<DesktopSummary> {
+    return this.post(desktopRoutes.restart(id));
+  }
+
+  closeDesktop(id: string): Promise<void> {
+    return this.delete(desktopRoutes.desktop(id));
+  }
+
+  launchDesktopApp(id: string, request: LaunchAppRequest): Promise<DesktopAppSummary> {
+    return this.post(desktopRoutes.apps(id), request);
+  }
+
+  stopDesktopApp(id: string, appId: string, force = false): Promise<void> {
+    return this.delete(`${desktopRoutes.app(id, appId)}${force ? "?force=1" : ""}`);
+  }
+
+  desktopWindowAction(id: string, windowId: string, action: DesktopWindowAction): Promise<void> {
+    return this.post(desktopRoutes.windowAction(id, windowId, action));
   }
 
   info(): Promise<ServerInfoResponse> {
@@ -1688,6 +1749,10 @@ export class HttpOrquesterApiClient implements OrquesterApi {
 
     if (!response.ok) {
       throw new Error(`Orquester API request failed: ${response.status} ${response.statusText}`);
+    }
+
+    if (response.status === 204) {
+      return undefined as T;
     }
 
     return response.json() as Promise<T>;

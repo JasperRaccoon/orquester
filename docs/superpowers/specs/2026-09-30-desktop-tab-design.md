@@ -210,10 +210,13 @@ Each desktop is a tmux service session `orqsvc-desktop-<id>` on the daemon's exi
 3. Starts `dbus-daemon --session --address=unix:path=<dir>/bus --nofork --nopidfile`.
 4. If audio is available, starts `pulseaudio -n -F <dir>/default.pa --daemonize=no
    --exit-idle-time=-1 --use-pid-file=no --system=no`, with `PULSE_RUNTIME_PATH`,
-   `PULSE_STATE_PATH` and `PULSE_COOKIE` under `<dir>`.
+   `PULSE_STATE_PATH` under `<dir>`.
    - `default.pa` loads `module-native-protocol-unix socket=<dir>/pulse/native`, then
      `module-null-sink sink_name=orq`, then sets `orq` as the default sink.
-   - Access is guarded by the per-desktop cookie and the 0700 directory.
+   - The socket uses `auth-anonymous=1`; the 0700 directory is the access control. A cookie would
+     add nothing, since only same-uid processes can reach the directory and they could read a
+     cookie too. (The X display differs: its abstract-namespace socket bypasses file modes, so it
+     needs the cookie.)
 5. Starts `Xvnc -displayfd 3 -auth <dir>/Xauthority -rfbunixpath <dir>/vnc.sock
    -rfbunixmode 0600 -rfbport -1 -SecurityTypes None -AlwaysShared -nolisten tcp
    -geometry <w>x<h> -depth 24`.
@@ -249,7 +252,7 @@ NUL, and limits the command to 4096 characters.
 
 - `Xauthority`, `vnc.sock`, `pulse/native`, `bus`;
 - `run/`, the desktop's `XDG_RUNTIME_DIR`, 0700;
-- `default.pa`, `client.conf` (`autospawn = no`), the pulse cookie;
+- `default.pa`, `client.conf` (`autospawn = no`);
 - `ready`, `host.exit`, `host.log`;
 - `apps/<appId>.{pgid,exit,log}`.
 
@@ -263,8 +266,9 @@ dir (`orqd-<uid>-<id>`) for the sockets and records the choice in the desktop re
 - **Create** (`POST /api/desktops`):
   1. Validate paths.
   2. Write the record with `status: "starting"`.
-  3. Create the directory, the Xauthority cookie (32 random bytes, written with `xauth` or directly
-     in `.Xauthority` format) and the pulse cookie.
+  3. Create the directory and the Xauthority file: one FamilyWild entry with an empty display
+     number (so it matches whatever `-displayfd` picks) and a 16-byte MIT-MAGIC-COOKIE-1, written
+     directly in Xauthority format at 0600.
   4. Start the service session.
   5. Wait for `<dir>/ready` via `fs.watch`, with a 15 s timeout.
   6. Record `display`, connect the window tracker, then mark the desktop `running` and emit
@@ -310,7 +314,7 @@ Built by `host-env.ts`:
    same secret scrubbing as sessions.
 2. Add the desktop wiring:
    - `DISPLAY=:<n>`, `XAUTHORITY=<dir>/Xauthority`;
-   - `PULSE_SERVER=unix:<dir>/pulse/native`, `PULSE_COOKIE`, `PULSE_CLIENTCONFIG=<dir>/client.conf`;
+   - `PULSE_SERVER=unix:<dir>/pulse/native`, `PULSE_CLIENTCONFIG=<dir>/client.conf`;
    - `DBUS_SESSION_BUS_ADDRESS=unix:path=<dir>/bus`;
    - `XDG_RUNTIME_DIR=<dir>/run`.
 3. Software GL: when no `/dev/dri/renderD*` exists, `LIBGL_ALWAYS_SOFTWARE=1`. Always
@@ -345,11 +349,11 @@ Status is never trusted from disk.
 - **X display:** a random MIT-MAGIC-COOKIE-1 per desktop (`-auth`). The spike showed an
   unauthenticated client could connect otherwise, and Linux X servers also listen on an
   abstract-namespace socket that file permissions cannot protect.
-- **Audio:** a per-desktop cookie and a 0700 socket directory. Apps get only their own desktop's
+- **Audio:** a per-desktop server whose socket sits in the 0700 desktop directory. Apps get only their own desktop's
   `PULSE_SERVER`, so one desktop's sound never plays in another desktop's tab.
 - **Paths:** `projectPath` and every `cwd` pass through `assertInsideFsRoot(fsRoot, path)`, and the
   returned realpath is what gets stored.
-- **Secrets:** the cookie files never leave the daemon host and never appear in API responses or
+- **Secrets:** the X cookie file never leaves the daemon host and never appear in API responses or
   logs.
 - **Unix-socket transport:** desktop routes are served on both transports like the browser routes,
   but viewing needs WebSockets, so the desktop Electron client's local Unix-socket transport cannot

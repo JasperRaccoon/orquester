@@ -14,7 +14,17 @@ export const TMUX_SESSION_PREFIX = "orq-";
  * `"orqsvc-".startsWith("orq-") === false` (char 3 is `s`, not `-`), service
  * sessions are invisible to `listSessions()` and thus immune.
  */
+/** tmux's stderr when no server listens on the socket (not an error for a listing). */
+const TMUX_NO_SERVER = /no server running|error connecting to .*\((No such file or directory|Connection refused)\)/i;
+
 const SERVICE_SESSION_PREFIX = "orqsvc-";
+
+/** Throws unless `name` is inside the service namespace (see SERVICE_SESSION_PREFIX). */
+function assertServiceName(name: string): void {
+  if (!name.startsWith(SERVICE_SESSION_PREFIX)) {
+    throw new Error(`service session name must start with "${SERVICE_SESSION_PREFIX}" (got "${name}")`);
+  }
+}
 
 /** Derive the tmux session name from a session id. */
 export function tmuxName(id: string): string {
@@ -491,12 +501,10 @@ export class Tmux {
     env: Record<string, string>;
     bin: string;
     args: string[];
+    /** Name of the first window (`-n`; also turns off tmux's automatic rename for it). */
+    windowName?: string;
   }): Promise<void> {
-    if (!opts.name.startsWith(SERVICE_SESSION_PREFIX)) {
-      throw new Error(
-        `service session name must start with "${SERVICE_SESSION_PREFIX}" (got "${opts.name}")`
-      );
-    }
+    assertServiceName(opts.name);
     const envArgs = Object.entries(opts.env)
       .filter(([, value]) => !value.includes("\n"))
       .flatMap(([key, value]) => ["-e", `${key}=${value}`]);
@@ -506,6 +514,7 @@ export class Tmux {
         "-d",
         "-s",
         opts.name,
+        ...(opts.windowName ? ["-n", opts.windowName] : []),
         "-c",
         opts.cwd,
         ...envArgs,
@@ -520,6 +529,93 @@ export class Tmux {
     if (result.code !== 0) {
       throw new Error(`tmux new-session (service) failed (${result.code}): ${result.stderr.trim()}`);
     }
+  }
+
+  /**
+   * Names of the live service sessions whose names start with `prefix`, which
+   * must itself be inside the `orqsvc-` namespace (e.g. `orqsvc-desktop-`), so
+   * a caller reaping what this returns can never reach a user session.
+   */
+  async listServiceSessions(prefix: string): Promise<string[]> {
+    assertServiceName(prefix);
+    const result = await this.run(["list-sessions", "-F", "#{session_name}"]);
+    if (result.code !== 0) {
+      // No server running → no sessions. Any other failure throws: a caller that
+      // reaps on "absent" must never read a broken tmux as an empty one.
+      if (TMUX_NO_SERVER.test(result.stderr)) return [];
+      throw new Error(`tmux list-sessions failed (${result.code}): ${result.stderr.trim()}`);
+    }
+    return result.stdout
+      .split("\n")
+      .map((line) => line.trim())
+      .filter((name) => name.startsWith(prefix));
+  }
+
+  /**
+   * Open a detached window `name` running `bin args...` in an existing service
+   * session. Same construction as newServiceSession (argv, never a shell string;
+   * the session PATH on the client), and the same `orqsvc-` guard on `session`.
+   * `-n` turns off automatic renaming, so the name stays the caller's key.
+   */
+  async newServiceWindow(opts: {
+    session: string;
+    name: string;
+    cwd: string;
+    env: Record<string, string>;
+    bin: string;
+    args: string[];
+  }): Promise<void> {
+    assertServiceName(opts.session);
+    const envArgs = Object.entries(opts.env)
+      .filter(([, value]) => !value.includes("\n"))
+      .flatMap(([key, value]) => ["-e", `${key}=${value}`]);
+    const result = await this.run(
+      [
+        "new-window",
+        "-d",
+        "-t",
+        `=${opts.session}:`,
+        "-n",
+        opts.name,
+        "-c",
+        opts.cwd,
+        ...envArgs,
+        "--",
+        opts.bin,
+        ...opts.args
+      ],
+      { PATH: sessionPath() }
+    );
+    if (result.code !== 0) {
+      throw new Error(`tmux new-window (service) failed (${result.code}): ${result.stderr.trim()}`);
+    }
+  }
+
+  /**
+   * Every window of a service session: its name and its (active) pane's pid.
+   * Empty when the session does not exist.
+   */
+  /** Windows of a service session; [] when the session (or server) is gone, throws on any other failure. */
+  async listServiceWindows(session: string): Promise<Array<{ name: string; panePid: number }>> {
+    assertServiceName(session);
+    // Pid first: a window name may contain spaces (and tmux rewrites a tab in
+    // -F output), so the name is everything after the first space.
+    const result = await this.run(["list-windows", "-t", `=${session}`, "-F", "#{pane_pid} #{window_name}"]);
+    if (result.code !== 0) {
+      if (TMUX_NO_SERVER.test(result.stderr) || /can't find session/i.test(result.stderr)) return [];
+      throw new Error(`tmux list-windows failed (${result.code}): ${result.stderr.trim()}`);
+    }
+    const windows: Array<{ name: string; panePid: number }> = [];
+    for (const line of result.stdout.split("\n")) {
+      const space = line.indexOf(" ");
+      if (space <= 0) continue;
+      const panePid = Number(line.slice(0, space));
+      // pid > 1: a garbled line must never make init look like a pane.
+      if (Number.isInteger(panePid) && panePid > 1) {
+        windows.push({ name: line.slice(space + 1), panePid });
+      }
+    }
+    return windows;
   }
 
   /** True if a live service session with this exact name exists on this server. */

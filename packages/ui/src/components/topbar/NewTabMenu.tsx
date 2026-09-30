@@ -2,12 +2,14 @@ import React from "react";
 import {
   ChevronDown,
   ChevronRight,
+  Copy,
   FolderTree,
   GitBranch,
   Globe,
   History,
   ListTodo,
   LoaderCircle,
+  Monitor,
   Plus,
   SlidersHorizontal
 } from "lucide-react";
@@ -42,6 +44,7 @@ import {
 } from "../../lib/chat-prefs";
 import { useProviderSnapshot } from "../../lib/agent-chat/hooks";
 import { launchModelList, resolveLaunchModel } from "../../lib/launch-models";
+import { copyText } from "../../lib/clipboard";
 
 /** Past conversations listed inline per agent before the "…and N more" cutoff. */
 const MAX_INLINE_CONVERSATIONS = 10;
@@ -433,6 +436,75 @@ const AgentRow: React.FC<{ agent: RegistryEntry; projectPath?: string }> = ({
 };
 
 /**
+ * The desktop entries (spec §10.2): "New desktop…" and one "Open app in" row
+ * per running desktop of the project, each opening the launch dialog. Offered
+ * only over HTTP (desktops stream over WebSockets) on a host that has the
+ * prerequisites; otherwise a hint says which of the two is missing.
+ */
+const DesktopEntries: React.FC<{ projectPath: string }> = ({ projectPath }) => {
+  const api = useAppStore((s) => s.api);
+  const host = useAppStore((s) => s.desktopHost);
+  const desktops = useAppStore((s) => s.desktops);
+  const openLaunchDialog = useAppStore((s) => s.openLaunchDialog);
+  const [copied, setCopied] = React.useState(false);
+
+  if (!api || api.desktopSocketUrl("/") === null) {
+    return <DropdownEmpty>Desktops need a remote (HTTP) connection</DropdownEmpty>;
+  }
+  if (!host?.available) {
+    const hint = host?.installHint ?? null;
+    return (
+      <DropdownEmpty>
+        <span className="block">Desktop — {host ? "missing host tools" : "not available on this daemon"}</span>
+        {hint ? (
+          <span className="mt-1 flex items-start gap-1 not-italic">
+            <code className="min-w-0 flex-1 break-all rounded bg-neutral-950 px-1 py-0.5 font-mono text-[11px] text-neutral-400">
+              {hint}
+            </code>
+            <button
+              type="button"
+              aria-label="Copy install command"
+              title={copied ? "Copied" : "Copy install command"}
+              onClick={(event) => {
+                event.stopPropagation();
+                void copyText(hint).then(() => setCopied(true));
+              }}
+              className="flex h-5 w-5 shrink-0 items-center justify-center rounded text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+            >
+              <Copy size={11} />
+            </button>
+          </span>
+        ) : null}
+      </DropdownEmpty>
+    );
+  }
+  const running = desktops
+    .filter((d) => d.projectPath === projectPath && d.status === "running")
+    .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt));
+  return (
+    <>
+      <DropdownItem
+        icon={<Monitor size={14} />}
+        onClick={() => openLaunchDialog({ projectPath, targetDesktopId: null })}
+      >
+        New desktop…
+      </DropdownItem>
+      {running.map((desktop) => (
+        <DropdownItem
+          key={desktop.id}
+          icon={<Plus size={12} />}
+          className="pl-4 text-[13px]"
+          title={`Open app in desktop “${desktop.title || "Desktop"}”`}
+          onClick={() => openLaunchDialog({ projectPath, targetDesktopId: desktop.id })}
+        >
+          Open app in {desktop.title || "Desktop"}
+        </DropdownItem>
+      ))}
+    </>
+  );
+};
+
+/**
  * The "+" new-tab button. In a project it lists detected shells and INSTALLED
  * agents (manage installs in Settings → Agents / Harnesses) plus built-in tools
  * and to-do lists; in a workspace context it offers only to-do lists. Choosing
@@ -443,6 +515,7 @@ export const NewTabMenu: React.FC = () => {
   const openFileBrowser = useAppStore((s) => s.openFileBrowser);
   const openGit = useAppStore((s) => s.openGit);
   const openBrowser = useAppStore((s) => s.openBrowser);
+  const loadDesktopHost = useAppStore((s) => s.loadDesktopHost);
   const api = useAppStore((s) => s.api);
   const ctx = useCurrentContext();
   const todos = useAppStore((s) => s.todos);
@@ -464,7 +537,9 @@ export const NewTabMenu: React.FC = () => {
   const browserHostReady = registry.browsers.some((b) => b.enabled && CHROMIUM_FAMILY_IDS.has(b.id));
 
   const trigger = (
-    <IconButton label="New tab" className="app-no-drag">
+    // Opening the menu refreshes the desktop prerequisites: an install done
+    // since connect shows up without a reconnect.
+    <IconButton label="New tab" className="app-no-drag" onClick={() => void loadDesktopHost()}>
       <Plus size={16} />
     </IconButton>
   );
@@ -525,6 +600,7 @@ export const NewTabMenu: React.FC = () => {
       ) : (
         <DropdownEmpty>Browser — install chromium on the host</DropdownEmpty>
       )}
+      {ctx?.kind === "project" ? <DesktopEntries projectPath={ctx.project.path} /> : null}
       <DropdownItem
         icon={<ListTodo size={14} />}
         onClick={() => ctx && void createTodo("project", ctx.key, "to-dos")}

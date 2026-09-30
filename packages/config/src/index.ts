@@ -51,6 +51,7 @@ export function expandVars(value: string, vars: ConfigVars): string {
 //   <appdir>/                 (~/.orquester by default, or e.g. ./.stage)
 //     app/     app.json, remotes.json, logs/<yyyy-mm-dd>.log
 //     daemon/  daemon.json, daemon.sock, sessions.json, todos.json, saved-prompts.json,
+//              desktops.json, desktops/<id>/ (per-desktop runtime dir, 0700),
 //              logs/<yyyy-mm-dd>.log
 //
 // Workspaces live wherever daemon.json `workspacesDir` points (default
@@ -122,6 +123,19 @@ export function browsersIndexPath(baseDir: string): string {
 
 export function browserProfilesDir(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "browser-profiles");
+}
+
+export function desktopsIndexPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "desktops.json");
+}
+
+/** Parent of every desktop's runtime dir (sockets, cookies, logs); mode 0700. */
+export function desktopsRuntimeDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "desktops");
+}
+
+export function desktopRuntimeDir(baseDir: string, desktopId: string): string {
+  return joinPath(desktopsRuntimeDir(baseDir), desktopId);
 }
 
 export function todosIndexPath(baseDir: string): string {
@@ -1142,6 +1156,194 @@ export function parseBrowsersFile(value: unknown): BrowsersFile {
 
 export function createDefaultBrowsersFile(): BrowsersFile {
   return { version: 1, browsers: [] };
+}
+
+/** Desktop display size bounds (Xvnc geometry). */
+export const DESKTOP_MIN_WIDTH = 320;
+export const DESKTOP_MAX_WIDTH = 7680;
+export const DESKTOP_MIN_HEIGHT = 240;
+export const DESKTOP_MAX_HEIGHT = 4320;
+export const DESKTOP_DEFAULT_SIZE = { width: 1280, height: 800 } as const;
+export const DESKTOP_DEFAULT_RENDER_THREADS = 4;
+/** Exited apps kept per desktop; recent launches kept per project. */
+export const DESKTOP_MAX_EXITED_APPS = 20;
+export const DESKTOP_MAX_RECENT_LAUNCHES = 20;
+
+function clampInt(value: number, min: number, max: number): number {
+  return Math.min(max, Math.max(min, Math.round(value)));
+}
+
+export const desktopSizeSchema = z
+  .object({ width: z.number(), height: z.number() })
+  .transform((size) => ({
+    width: clampInt(size.width, DESKTOP_MIN_WIDTH, DESKTOP_MAX_WIDTH),
+    height: clampInt(size.height, DESKTOP_MIN_HEIGHT, DESKTOP_MAX_HEIGHT)
+  }));
+
+/**
+ * One app launched into a desktop. `status` and `pgid` are hints for boot
+ * reconciliation only — the live state comes from tmux and the exit files.
+ */
+export const desktopAppRecordSchema = z
+  .object({
+    id: z.string().min(1),
+    desktopId: z.string().min(1),
+    /** Shell command line, run as `sh -c 'exec <command>'`. */
+    command: z.string(),
+    cwd: z.string(),
+    /** User-entered variables only (not the desktop wiring). */
+    env: z.record(z.string()).default({}),
+    status: z.enum(["starting", "running", "exited"]).catch("exited"),
+    exitCode: z.number().int().nullable().default(null),
+    pgid: z.number().int().nullable().default(null),
+    startedAt: z.string(),
+    exitedAt: z.string().nullable().default(null)
+  })
+  .passthrough();
+
+export type DesktopAppRecord = z.infer<typeof desktopAppRecordSchema>;
+
+export const desktopRecordSchema = z
+  .object({
+    id: z.string().min(1),
+    /** The project path as the client spells it (the UI's project key, like sessions and browsers). */
+    projectPath: z.string().min(1),
+    /** Its realpath inside the fs root: cascades and recent launches match on this. */
+    projectRealPath: z.string().nullable().default(null),
+    title: z.string().default("Desktop"),
+    order: z.number().default(0),
+    createdAt: z.string(),
+    display: z.number().int().nullable().default(null),
+    size: desktopSizeSchema.default({ ...DESKTOP_DEFAULT_SIZE }),
+    renderThreads: z.number().int().min(1).default(DESKTOP_DEFAULT_RENDER_THREADS),
+    /** Set only when sockets live in the short tmp fallback dir (path length). */
+    socketDir: z.string().nullable().default(null),
+    /** The host was started with PulseAudio (decided at create time). */
+    audio: z.boolean().optional(),
+    apps: z.array(z.unknown()).catch([]).default([])
+  })
+  .passthrough()
+  // Entry-wise tolerant apps: one entry this build cannot read (another version's
+  // shape) must not wipe the list — it is kept verbatim in `rejectedApps` and
+  // written back by serializeDesktopsFile.
+  .transform((record) => {
+    const apps: DesktopAppRecord[] = [];
+    const previous = (record as { rejectedApps?: unknown }).rejectedApps;
+    const rejectedApps: unknown[] = Array.isArray(previous) ? [...previous] : [];
+    for (const entry of record.apps) {
+      const parsed = desktopAppRecordSchema.safeParse(entry);
+      if (parsed.success) apps.push(parsed.data);
+      else rejectedApps.push(entry);
+    }
+    return { ...record, apps, rejectedApps };
+  });
+
+export const recentLaunchSchema = z
+  .object({
+    command: z.string(),
+    cwd: z.string(),
+    env: z.record(z.string()).default({}),
+    lastUsedAt: z.string()
+  })
+  .passthrough();
+
+export type DesktopRecord = z.infer<typeof desktopRecordSchema>;
+export type RecentLaunchRecord = z.infer<typeof recentLaunchSchema>;
+
+/**
+ * A read `desktops.json`, plus everything this build cannot use kept VERBATIM
+ * so every rewrite puts it back unchanged (the saved-prompts pattern).
+ */
+export interface DesktopsFile {
+  version: 1;
+  desktops: DesktopRecord[];
+  /** projectPath → launches, newest first. */
+  recent: Record<string, RecentLaunchRecord[]>;
+  /** projectPath → launch entries this build cannot read, kept verbatim and written back. */
+  recentRejected?: Record<string, unknown[]>;
+  /** `desktops` entries that failed the schema or duplicated an id, as found. */
+  rejected: unknown[];
+  /** Every top-level key but `version`, `desktops` and `recent`, as found. */
+  extra: Record<string, unknown>;
+}
+
+export function createDefaultDesktopsFile(): DesktopsFile {
+  return { version: 1, desktops: [], recent: {}, recentRejected: {}, rejected: [], extra: {} };
+}
+
+/**
+ * Entry-wise tolerant. The OUTER shape still throws (a `version` other than 1
+ * included): the daemon reads a throw as "not mine to rewrite" and quarantines
+ * the file instead of writing an empty list over it.
+ */
+export function parseDesktopsFile(raw: unknown): DesktopsFile {
+  const outer = z
+    .object({
+      version: z.literal(1).default(1),
+      desktops: z.array(z.unknown()).default([]),
+      recent: z.record(z.unknown()).catch({}).default({})
+    })
+    .safeParse(raw);
+  if (!outer.success) {
+    const issue = outer.error.issues[0];
+    const where = issue && issue.path.length > 0 ? issue.path.join(".") : "the file";
+    throw new Error(`Not a version-1 desktops file (${where}: ${issue?.message ?? "invalid"})`);
+  }
+  const desktops: DesktopRecord[] = [];
+  const rejected: unknown[] = [];
+  const ids = new Set<string>();
+  for (const entry of outer.data.desktops) {
+    const parsed = desktopRecordSchema.safeParse(entry);
+    if (parsed.success && !ids.has(parsed.data.id)) {
+      ids.add(parsed.data.id);
+      desktops.push(parsed.data);
+    } else {
+      rejected.push(entry);
+    }
+  }
+  // `recent` is a convenience list: a `recent` that is not an object at all is
+  // dropped (.catch above), but unreadable entries inside it are kept verbatim.
+  const recent: Record<string, RecentLaunchRecord[]> = {};
+  const recentRejected: Record<string, unknown[]> = {};
+  for (const [projectPath, list] of Object.entries(outer.data.recent)) {
+    if (!Array.isArray(list)) {
+      recentRejected[projectPath] = [list];
+      continue;
+    }
+    const launches: RecentLaunchRecord[] = [];
+    for (const item of list) {
+      const parsed = recentLaunchSchema.safeParse(item);
+      if (parsed.success) launches.push(parsed.data);
+      else (recentRejected[projectPath] ??= []).push(item);
+    }
+    if (launches.length > 0) recent[projectPath] = launches.slice(0, DESKTOP_MAX_RECENT_LAUNCHES);
+  }
+  const extra = Object.fromEntries(
+    Object.entries(raw as Record<string, unknown>).filter(
+      ([key]) => key !== "version" && key !== "desktops" && key !== "recent"
+    )
+  );
+  return { version: 1, desktops, recent, recentRejected, rejected, extra };
+}
+
+/** The on-disk JSON for a DesktopsFile: live records first, then rejected ones. */
+export function serializeDesktopsFile(file: DesktopsFile): Record<string, unknown> {
+  const recent: Record<string, unknown[]> = { ...file.recent };
+  for (const [projectPath, entries] of Object.entries(file.recentRejected ?? {})) {
+    recent[projectPath] = [...(recent[projectPath] ?? []), ...entries];
+  }
+  return {
+    ...file.extra,
+    version: 1,
+    desktops: [
+      ...file.desktops.map(({ rejectedApps, ...record }) => ({
+        ...record,
+        apps: [...record.apps, ...(rejectedApps ?? [])]
+      })),
+      ...file.rejected
+    ],
+    recent
+  };
 }
 
 export function createDefaultSessionsConfig(): SessionsConfig {

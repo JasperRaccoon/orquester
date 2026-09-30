@@ -10,6 +10,16 @@ import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/s
 import { applyAgentProfileEvent, resetAgentProfile } from "../lib/agent-profile/store";
 import { applyWorkflowsEvent, resetWorkflows, workflowsStore } from "../lib/workflows/store";
 import { observeWorkflowRunEvent, resetWorkflowNotifications } from "../lib/workflows/notifications";
+import { clearDesktopPrefs } from "../lib/desktop-prefs";
+import {
+  applyDesktopWindows,
+  parseDesktopList,
+  parseDesktopSummary,
+  parseDesktopWindowsPayload,
+  runningDesktopApps,
+  upsertDesktopApp,
+  upsertDesktopIn
+} from "../lib/desktop-state";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
 import {
   buildCredential,
@@ -105,7 +115,12 @@ import type {
   AgentConversationSummary,
   BrowserSummary,
   CreateAgentChatSessionFields,
+  CreateDesktopRequest,
+  DesktopAppSummary,
+  DesktopHostStatus,
+  DesktopSummary,
   GrokDeviceLinkStatus,
+  LaunchAppRequest,
   ProviderUsageWindow,
   ProviderUsageLimitsUpdate,
   RecentProjectSummary,
@@ -118,7 +133,7 @@ import type {
   UsageResponse,
   UsageTokensResponse
 } from "@orquester/api";
-import { AGENT_PROFILE_CHANNEL, SAVED_PROMPTS_CHANNEL, WORKFLOWS_CHANNEL } from "@orquester/api";
+import { AGENT_PROFILE_CHANNEL, DESKTOP_CHANNEL, SAVED_PROMPTS_CHANNEL, WORKFLOWS_CHANNEL } from "@orquester/api";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -511,7 +526,14 @@ export type ProjectTab =
   | { id: string; type: "git"; title: string }
   | { id: string; type: "todo"; todoId: string; title: string }
   | { id: string; type: "workflow"; workflowId: string; title: string; runId?: string | null }
-  | { id: string; type: "browser"; browser: BrowserSummary };
+  | { id: string; type: "browser"; browser: BrowserSummary }
+  | { id: string; type: "desktop"; desktop: DesktopSummary };
+
+/** Where the launch dialog opens: a project, and a running desktop or "New desktop" (null). */
+export interface LaunchDialogTarget {
+  projectPath: string;
+  targetDesktopId: string | null;
+}
 
 /** The two arms that carry a daemon session. */
 export type SessionProjectTab = Extract<ProjectTab, { type: "session" } | { type: "agent-chat" }>;
@@ -725,6 +747,15 @@ export interface AppState {
   sessions: SessionSummary[];
   /** All server-side browser tabs; a project's browsers are its tabs (after sessions). */
   browsers: BrowserSummary[];
+  /** All server-side desktops; a project's desktops are its tabs (after browsers). */
+  desktops: DesktopSummary[];
+  /**
+   * The daemon's desktop prerequisites, or null before the first fetch, on a
+   * daemon without desktops (404) and after a failed fetch.
+   */
+  desktopHost: DesktopHostStatus | null;
+  /** The open launch dialog (spec §10.2), or null. */
+  launchDialog: LaunchDialogTarget | null;
   /** Client-derived working/idle + attention per session id (drives the status dot). */
   activityById: Record<string, SessionActivity>;
   /**
@@ -979,8 +1010,25 @@ export interface AppState {
     opts?: { runId?: string | null; title?: string }
   ) => void;
   openBrowser: (url?: string) => Promise<void>;
+  /** Refetch the daemon's desktop prerequisites (on connect and when the "+" menu opens). */
+  loadDesktopHost: () => Promise<void>;
+  upsertDesktop: (desktop: DesktopSummary) => void;
+  /** Drop a desktop (and its tab and viewer prefs); the daemon side is not touched. */
+  removeDesktop: (id: string) => void;
+  openLaunchDialog: (target: LaunchDialogTarget) => void;
+  closeLaunchDialog: () => void;
+  /**
+   * `POST /api/desktops` (with its first app), then open its tab. Rejects with
+   * the daemon's error so the launch dialog can show it.
+   */
+  createDesktopWithApp: (request: CreateDesktopRequest) => Promise<DesktopSummary>;
+  /** `POST /api/desktops/:id/apps`, then focus that desktop's tab. Rejects like above. */
+  launchIntoDesktop: (desktopId: string, request: LaunchAppRequest) => Promise<DesktopAppSummary>;
   closeTab: (id: string) => Promise<void>;
-  /** Guarded close: opens a confirm for live sessions (returns true), else closes now. */
+  /**
+   * Guarded close: opens a confirm for live sessions (when enabled) and for
+   * desktops with running apps (always) and returns true; else closes now.
+   */
   requestCloseTab: (id: string) => boolean;
   confirmCloseTab: () => void;
   cancelCloseTab: () => void;
@@ -1092,6 +1140,9 @@ export const useAppStore = create<AppState>((set, get) => ({
   agentConversationsByProject: {},
   sessions: [],
   browsers: [],
+  desktops: [],
+  desktopHost: null,
+  launchDialog: null,
   activityById: {},
   resumeError: null,
   agentAuthError: null,
@@ -1290,6 +1341,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       get().loadSessions(),
       // Browser tabs are optional (older daemons return 404) — tolerate absence.
       active.listBrowsers().then((browsers) => set({ browsers })).catch(() => set({ browsers: [] })),
+      // Desktops too (older daemons 404): tolerated the same way.
+      active
+        .listDesktops()
+        .then((desktops) => set({ desktops: parseDesktopList(desktops) }))
+        .catch(() => set({ desktops: [] })),
+      get().loadDesktopHost(),
       get().loadRegistry(),
       get().loadUsage(),
       get().loadAgentAccounts(),
@@ -1692,6 +1749,9 @@ export const useAppStore = create<AppState>((set, get) => ({
       ...withoutWorkflowTabs(get()),
       sessions: [],
       browsers: [],
+      desktops: [],
+      desktopHost: null,
+      launchDialog: null,
       accounts: []
     });
     await get().connect();
@@ -2056,6 +2116,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       const fallback = firstTabId(
         state.sessions,
         state.browsers,
+        state.desktops,
         state.fileTabsByProject,
         state.gitTabsByProject,
         state.todoTabsByContext,
@@ -2556,8 +2617,83 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  loadDesktopHost: async () => {
+    const api = get().api;
+    // Desktops stream over WebSockets; a transport without them has no use for the status.
+    if (!api || api.desktopSocketUrl("/") === null) {
+      set({ desktopHost: null });
+      return;
+    }
+    try {
+      const host = await api.desktopHostStatus();
+      if (get().api === api) set({ desktopHost: host });
+    } catch {
+      // Older daemons 404; any failure reads as "no desktops here".
+      if (get().api === api) set({ desktopHost: null });
+    }
+  },
+
+  upsertDesktop: (desktop) => set((state) => ({ desktops: upsertDesktopIn(state.desktops, desktop) })),
+
+  removeDesktop: (id) => {
+    clearDesktopPrefs(id);
+    set((state) => removeDesktopState(state, id));
+  },
+
+  openLaunchDialog: (target) => set({ launchDialog: target }),
+
+  closeLaunchDialog: () => set({ launchDialog: null }),
+
+  createDesktopWithApp: async (request) => {
+    const api = get().api;
+    if (!api) throw new Error("Not connected");
+    const desktop = await api.createDesktop(request);
+    set((state) => ({
+      desktops: upsertDesktopIn(state.desktops, desktop),
+      activeTabByProject: { ...state.activeTabByProject, [desktop.projectPath]: desktop.id }
+    }));
+    return desktop;
+  },
+
+  launchIntoDesktop: async (desktopId, request) => {
+    const api = get().api;
+    if (!api) throw new Error("Not connected");
+    const app = await api.launchDesktopApp(desktopId, request);
+    set((state) => {
+      const desktop = state.desktops.find((d) => d.id === desktopId);
+      return {
+        // The app's `desktop.updated` follows; recording it now keeps the
+        // close confirm accurate in between.
+        desktops: upsertDesktopApp(state.desktops, desktopId, app),
+        activeTabByProject: desktop
+          ? { ...state.activeTabByProject, [desktop.projectPath]: desktopId }
+          : state.activeTabByProject
+      };
+    });
+    return app;
+  },
+
   closeTab: async (id) => {
     const api = get().api;
+    if (get().desktops.some((d) => d.id === id)) {
+      // Unlike a browser, the tab stays until the daemon has stopped the
+      // desktop: a failed stop must not hide apps that are still running.
+      try {
+        await api?.closeDesktop(id);
+      } catch (error) {
+        if (!(error instanceof ApiError && error.status === 404)) {
+          get().setNotice({
+            title: "Desktop",
+            message: `Could not stop the desktop: ${
+              error instanceof ApiError ? (error.serverMessage ?? error.message) : String(error)
+            }`
+          });
+          return;
+        }
+      }
+      get().removeDesktop(id);
+      return;
+    }
     const session = get().sessions.find((s) => s.id === id);
     const isSession = Boolean(session);
     const isBrowser = !isSession && get().browsers.some((b) => b.id === id);
@@ -2590,6 +2726,17 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   requestCloseTab: (id) => {
     const state = get();
+    const desktop = state.desktops.find((d) => d.id === id);
+    if (desktop) {
+      // Closing terminates its apps, so running ones are always confirmed
+      // (spec §10.6), whatever `confirmCloseSession` says; an idle desktop just closes.
+      if (runningDesktopApps(desktop).length > 0) {
+        set({ pendingCloseTabId: id });
+        return true;
+      }
+      void state.closeTab(id);
+      return false;
+    }
     const isSession = state.sessions.some((s) => s.id === id);
     // Only live sessions are worth confirming — closing one kills the process.
     if (isSession && state.appConfig.confirmCloseSession) {
@@ -3011,6 +3158,20 @@ export const useAppStore = create<AppState>((set, get) => ({
       }
       return;
     }
+    if (event.channel === DESKTOP_CHANNEL) {
+      // Shape-checked before it reaches state; a malformed payload is ignored.
+      if (event.type === "desktop.created" || event.type === "desktop.updated") {
+        const desktop = parseDesktopSummary(event.payload);
+        if (desktop) get().upsertDesktop(desktop);
+      } else if (event.type === "desktop.closed") {
+        const id = (event.payload as { id?: unknown } | null)?.id;
+        if (typeof id === "string") get().removeDesktop(id);
+      } else if (event.type === "desktop.windows") {
+        const payload = parseDesktopWindowsPayload(event.payload);
+        if (payload) set((state) => ({ desktops: applyDesktopWindows(state.desktops, payload) }));
+      }
+      return;
+    }
     if (event.channel === WORKFLOWS_CHANNEL) {
       // The rail's workflows live in their own module store (idempotent,
       // sanitised); this store mirrors only what its editor tabs show — a
@@ -3133,12 +3294,13 @@ setProviderSideEffects({
 });
 
 /**
- * First remaining tab id for a context (session, then browser, then file, then
- * git, then to-do, then workflow — `useProjectTabs`' order).
+ * First remaining tab id for a context (session, then browser, then desktop,
+ * then file, then git, then to-do, then workflow — `useProjectTabs`' order).
  */
 function firstTabId(
   sessions: SessionSummary[],
   browsers: BrowserSummary[],
+  desktops: DesktopSummary[],
   fileTabs: Record<string, FileTab[]>,
   gitTabs: Record<string, GitTab[]>,
   todoTabs: Record<string, TodoTab[]>,
@@ -3148,6 +3310,7 @@ function firstTabId(
   return (
     sessions.find((s) => s.projectPath === path)?.id ??
     browsers.find((b) => b.projectPath === path)?.id ??
+    desktops.find((d) => d.projectPath === path)?.id ??
     fileTabs[path]?.[0]?.id ??
     gitTabs[path]?.[0]?.id ??
     todoTabs[path]?.[0]?.id ??
@@ -3161,6 +3324,7 @@ function reassignActive(
   removedId: string,
   sessions: SessionSummary[],
   browsers: BrowserSummary[],
+  desktops: DesktopSummary[],
   fileTabs: Record<string, FileTab[]>,
   gitTabs: Record<string, GitTab[]>,
   todoTabs: Record<string, TodoTab[]>,
@@ -3169,7 +3333,7 @@ function reassignActive(
   const next = { ...activeTabByProject };
   for (const [path, activeId] of Object.entries(next)) {
     if (activeId === removedId) {
-      next[path] = firstTabId(sessions, browsers, fileTabs, gitTabs, todoTabs, workflowTabs, path);
+      next[path] = firstTabId(sessions, browsers, desktops, fileTabs, gitTabs, todoTabs, workflowTabs, path);
     }
   }
   return next;
@@ -3185,6 +3349,7 @@ function removeSession(state: AppState, id: string): Partial<AppState> {
       id,
       sessions,
       state.browsers,
+      state.desktops,
       state.fileTabsByProject,
       state.gitTabsByProject,
       state.todoTabsByContext,
@@ -3203,6 +3368,31 @@ function removeBrowser(state: AppState, id: string): Partial<AppState> {
       id,
       state.sessions,
       browsers,
+      state.desktops,
+      state.fileTabsByProject,
+      state.gitTabsByProject,
+      state.todoTabsByContext,
+      state.workflowTabsByProject
+    )
+  };
+}
+
+/**
+ * Drop a desktop by id, reassigning the active tab if it was active and
+ * dismissing a close confirm that was waiting on it.
+ */
+function removeDesktopState(state: AppState, id: string): Partial<AppState> {
+  const desktops = state.desktops.filter((d) => d.id !== id);
+  return {
+    desktops,
+    pendingCloseTabId: state.pendingCloseTabId === id ? null : state.pendingCloseTabId,
+    launchDialog: state.launchDialog?.targetDesktopId === id ? { ...state.launchDialog, targetDesktopId: null } : state.launchDialog,
+    activeTabByProject: reassignActive(
+      state.activeTabByProject,
+      id,
+      state.sessions,
+      state.browsers,
+      desktops,
       state.fileTabsByProject,
       state.gitTabsByProject,
       state.todoTabsByContext,
@@ -3239,6 +3429,7 @@ function removeLocalTab(state: AppState, id: string): Partial<AppState> {
       id,
       state.sessions,
       state.browsers,
+      state.desktops,
       fileTabsByProject,
       gitTabsByProject,
       todoTabsByContext,
@@ -3425,6 +3616,7 @@ export function useCurrentContext(): TabContext | null {
 export function useProjectTabs(): ProjectTab[] {
   const sessions = useAppStore((s) => s.sessions);
   const browsers = useAppStore((s) => s.browsers);
+  const desktops = useAppStore((s) => s.desktops);
   const fileTabsByProject = useAppStore((s) => s.fileTabsByProject);
   const gitTabsByProject = useAppStore((s) => s.gitTabsByProject);
   const todoTabsByContext = useAppStore((s) => s.todoTabsByContext);
@@ -3471,6 +3663,11 @@ export function useProjectTabs(): ProjectTab[] {
       .slice()
       .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt))
       .map<ProjectTab>((browser) => ({ id: browser.id, type: "browser", browser }));
+    const desktopTabs = desktops
+      .filter((d) => d.projectPath === key)
+      .slice()
+      .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt))
+      .map<ProjectTab>((desktop) => ({ id: desktop.id, type: "desktop", desktop }));
     const workflowTabs = (workflowTabsByProject[key] ?? []).map<ProjectTab>((t) => ({
       id: t.id,
       type: "workflow",
@@ -3478,8 +3675,8 @@ export function useProjectTabs(): ProjectTab[] {
       title: t.title,
       runId: t.runId ?? null
     }));
-    return [...sessionTabs, ...browserTabs, ...fileTabs, ...gitTabs, ...todoTabs, ...workflowTabs];
-  }, [sessions, browsers, fileTabsByProject, gitTabsByProject, todoTabsByContext, workflowTabsByProject, project, workspace]);
+    return [...sessionTabs, ...browserTabs, ...desktopTabs, ...fileTabs, ...gitTabs, ...todoTabs, ...workflowTabs];
+  }, [sessions, browsers, desktops, fileTabsByProject, gitTabsByProject, todoTabsByContext, workflowTabsByProject, project, workspace]);
 }
 
 export function useActiveTabId(): string | null {
