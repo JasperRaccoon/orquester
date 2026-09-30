@@ -2,11 +2,16 @@ import React from "react";
 import Markdown, { type Components } from "react-markdown";
 import remarkGfm from "remark-gfm";
 
+import { useApi } from "../../../../context/orquester-context";
+import { useObjectUrl } from "../../../../hooks";
 import { cn } from "../../../../lib/cn";
+import { detectFileKind } from "../../../../lib/file-kind";
 import { useAppStore } from "../../../../store/app";
+import { useTimelineRowContext } from "../context";
 import { CodeBlock } from "./CodeBlock";
 import { extractFenceLanguage } from "./highlight-core";
 import { createIncrementalMarkdownPlugin } from "./incremental";
+import { resolveMarkdownImageSource } from "./local-image";
 
 /**
  * Assistant markdown (spec §7.3).
@@ -136,6 +141,31 @@ function MarkdownLink({
   );
 }
 
+const IMAGE_CLASS = "my-[0.65rem] max-h-64 max-w-full rounded-md border border-neutral-800";
+
+function MissingImage({ label }: { label: string }): React.ReactElement {
+  return <span className="text-xs text-neutral-500">Image unavailable: {label}</span>;
+}
+
+/** A file on the daemon's host, read through the file API (`local-image.ts`). */
+function LocalMarkdownImage({ path, alt }: { path: string; alt: string }): React.ReactElement {
+  const api = useApi();
+  const fetchBytes = React.useCallback((p: string, signal?: AbortSignal) => api.readFileBytes(p, signal), [api]);
+  const { kind, mime } = detectFileKind(path);
+  const { url, error } = useObjectUrl(fetchBytes, path, mime, kind === "image");
+  if (kind !== "image" || error) return <MissingImage label={alt || path} />;
+  if (!url) return <span className="text-xs text-neutral-600">Loading image…</span>;
+  return <img src={url} alt={alt} title={path} className={IMAGE_CLASS} />;
+}
+
+function MarkdownImage({ src, alt }: { src?: string | undefined; alt?: string | undefined }): React.ReactElement {
+  const { workspaceRoot } = useTimelineRowContext();
+  const source = resolveMarkdownImageSource(src ?? "", workspaceRoot);
+  if (source.kind === "local") return <LocalMarkdownImage path={source.path} alt={alt ?? ""} />;
+  if (source.kind === "unresolved") return <MissingImage label={alt || source.src} />;
+  return <img src={source.src} alt={alt ?? ""} className={IMAGE_CLASS} />;
+}
+
 /** Module constant: its identity never changes, so neither does the processor. */
 const COMPONENTS: Components = {
   p: ({ children }) => <p className={BLOCK_SPACING}>{children}</p>,
@@ -170,13 +200,7 @@ const COMPONENTS: Components = {
   pre: ({ children }) => <>{children}</>,
   code: MarkdownCode,
   a: MarkdownLink,
-  img: ({ src, alt }) => (
-    <img
-      src={typeof src === "string" ? src : undefined}
-      alt={alt ?? ""}
-      className="my-[0.65rem] max-h-64 max-w-full rounded-md border border-neutral-800"
-    />
-  ),
+  img: ({ src, alt }) => <MarkdownImage src={typeof src === "string" ? src : undefined} alt={alt} />,
   table: ({ children }) => (
     <div className={cn(BLOCK_SPACING, "ac-scroll-thin overflow-x-auto")}>
       <table className="w-full border-collapse text-xs">{children}</table>
