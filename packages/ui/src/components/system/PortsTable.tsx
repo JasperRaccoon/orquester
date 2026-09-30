@@ -36,14 +36,14 @@ export const PortsTable: React.FC<{ snapshot: SystemPortsResponse }> = ({ snapsh
 
   if (snapshot.ports.length === 0) {
     return (
-      <p className="rounded-lg border border-dashed border-neutral-800 px-3 py-4 text-center text-xs text-neutral-500">
+      <p className="rounded-xl border border-dashed border-neutral-800 px-3 py-6 text-center text-xs text-neutral-500">
         Nothing in this daemon&rsquo;s process tree is listening on a TCP port.
       </p>
     );
   }
 
   return (
-    <div className="overflow-x-auto rounded-lg border border-neutral-800">
+    <div className="overflow-x-auto rounded-xl border border-neutral-800 bg-neutral-900/40">
       <table className="min-w-[30rem] w-full text-left">
         <thead>
           <tr className="border-b border-neutral-800 bg-neutral-900/60 text-[10px] font-medium uppercase tracking-wider text-neutral-500">
@@ -59,7 +59,7 @@ export const PortsTable: React.FC<{ snapshot: SystemPortsResponse }> = ({ snapsh
             const key = `${entry.address}:${entry.port}:${entry.pid}`;
             const target = `${entry.address}:${entry.port}`;
             return (
-              <tr key={key} className="border-b border-neutral-900 last:border-b-0 hover:bg-neutral-800/40">
+              <tr key={key} className="border-b border-neutral-800/60 last:border-b-0 hover:bg-neutral-800/40">
                 <td className="px-2 py-1.5 text-xs tabular-nums text-neutral-100">{entry.port}</td>
                 <td className="px-2 py-1.5 text-xs tabular-nums text-neutral-400">{entry.address}</td>
                 <td className="max-w-[12rem] truncate px-2 py-1.5 text-xs text-neutral-300" title={entry.processName}>

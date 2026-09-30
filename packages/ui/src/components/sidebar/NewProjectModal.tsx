@@ -212,7 +212,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
   const setNotice = useAppStore((s) => s.setNotice);
   const listRepos = useAppStore((s) => s.listRepos);
   const listOwners = useAppStore((s) => s.listOwners);
-  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
+  const openSettings = useAppStore((s) => s.openSettings);
   const api = useAppStore((s) => s.api);
 
   // Resolve the workspace's linked account (the only one repo features use).
@@ -766,7 +766,7 @@ export const NewProjectModal: React.FC<NewProjectModalProps> = ({ open, onClose 
                 {account.provider === "github" ? "GitHub" : "Bitbucket"} token to browse and create
                 repositories.
               </p>
-              <Button size="sm" variant="outline" className="shrink-0" onClick={() => { close(); setSettingsOpen(true); }}>
+              <Button size="sm" variant="outline" className="shrink-0" onClick={() => { close(); openSettings("git-hosting"); }}>
                 <Settings2 size={13} /> Enable repo access
               </Button>
             </div>

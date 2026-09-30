@@ -6,12 +6,15 @@
  * plain `http://` (a LAN IP), that API is absent, so fall back to the legacy
  * hidden-<textarea> + execCommand path. Both run from a user gesture (a menu-item
  * tap), which iOS Safari / Android Chrome require.
+ *
+ * Resolves to whether the copy went through, so a caller can avoid claiming
+ * "Copied" when it did not; it never rejects.
  */
-export async function copyText(text: string): Promise<void> {
+export async function copyText(text: string): Promise<boolean> {
   try {
     if (navigator.clipboard?.writeText) {
       await navigator.clipboard.writeText(text);
-      return;
+      return true;
     }
   } catch {
     /* permission denied / blocked — fall through to the legacy path */
@@ -24,9 +27,11 @@ export async function copyText(text: string): Promise<void> {
     document.body.appendChild(ta);
     ta.focus();
     ta.select();
-    document.execCommand("copy");
+    const ok = document.execCommand("copy");
     document.body.removeChild(ta);
+    return ok;
   } catch {
     /* clipboard unavailable — give up silently */
+    return false;
   }
 }

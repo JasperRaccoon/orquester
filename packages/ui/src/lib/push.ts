@@ -4,7 +4,7 @@ import type { ApiClient } from "./api-client";
  * Browser-side Web Push helpers for the web runtime only. These touch the
  * Service Worker / Push / Notification APIs, which exist only in a secure
  * browser context — never in the Electron renderer's preload world — so callers
- * must gate every use behind {@link pushSupported} (the SettingsModal already
+ * must gate every use behind {@link pushSupported} (Settings → General
  * renders the toggle only for `runtime === "web" && pushSupported()`).
  *
  * The subscription itself is the single global notification preference: if a

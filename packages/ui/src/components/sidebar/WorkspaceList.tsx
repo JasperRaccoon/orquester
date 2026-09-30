@@ -39,7 +39,7 @@ export const WorkspaceList: React.FC = () => {
   const createWorkspace = useAppStore((s) => s.createWorkspace);
   const deleteWorkspace = useAppStore((s) => s.deleteWorkspace);
   const setWorkspaceArchived = useAppStore((s) => s.setWorkspaceArchived);
-  const setSettingsOpen = useAppStore((s) => s.setSettingsOpen);
+  const openSettings = useAppStore((s) => s.openSettings);
 
   // Archived workspaces live only in the sidebar footer panel.
   const visibleWorkspaces = workspaces.filter((w) => !w.isArchived);
@@ -256,7 +256,7 @@ export const WorkspaceList: React.FC = () => {
                   icon={<Plus size={14} />}
                   onClick={() => {
                     close();
-                    setSettingsOpen(true);
+                    openSettings("git-hosting");
                   }}
                 >
                   Add account…

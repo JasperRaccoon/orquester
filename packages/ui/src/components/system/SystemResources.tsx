@@ -15,8 +15,9 @@ export const ResourceRow: React.FC<{
   label: string;
   percent: number | null;
   detail: React.ReactNode;
-}> = ({ icon, label, percent, detail }) => (
-  <div className="rounded-md bg-neutral-950/40 px-2.5 py-2">
+  className?: string;
+}> = ({ icon, label, percent, detail, className }) => (
+  <div className={cn("rounded-md bg-neutral-950/40 px-2.5 py-2", className)}>
     <div className="flex items-baseline justify-between gap-3">
       <span className="flex min-w-0 items-baseline gap-1.5 truncate text-xs text-neutral-300">
         <span className="shrink-0 self-center text-neutral-500">{icon}</span>
@@ -46,23 +47,34 @@ export const ResourceRow: React.FC<{
 
 /**
  * CPU / memory / workspaces-disk readings. Shared by the top-bar chip popover
- * and Settings → System so both always tell the same story.
+ * and Settings → Host status so both always tell the same story. `stack` (the
+ * default) is the narrow popover column; `grid` lays the three out side by side
+ * as tiles once the settings page is wide enough, and stacks them again on a
+ * phone.
  */
-export const SystemResourcePanel: React.FC<{ resources: SystemResourcesResponse }> = ({ resources }) => {
+export const SystemResourcePanel: React.FC<{
+  resources: SystemResourcesResponse;
+  layout?: "stack" | "grid";
+}> = ({ resources, layout = "stack" }) => {
   const { cpu, memory, workspacesDisk: disk } = resources;
   const memUsed = Math.max(0, memory.totalBytes - memory.availableBytes);
   const diskUsed =
     disk.totalBytes == null || disk.freeBytes == null ? null : Math.max(0, disk.totalBytes - disk.freeBytes);
 
+  const grid = layout === "grid";
+  const tile = grid ? "rounded-xl border border-neutral-800 bg-neutral-900/40 px-3.5 py-3" : undefined;
+
   return (
-    <div className="space-y-2">
+    <div className={grid ? "grid gap-2 sm:grid-cols-3" : "space-y-2"}>
       <ResourceRow
+        className={tile}
         icon={<Cpu size={13} />}
         label="CPU"
         percent={cpu.percent}
         detail={`${cpu.cores} logical core${cpu.cores === 1 ? "" : "s"}`}
       />
       <ResourceRow
+        className={tile}
         icon={<MemoryStick size={13} />}
         label="Memory"
         percent={memory.totalBytes > 0 ? memory.usedPercent : null}
@@ -73,6 +85,7 @@ export const SystemResourcePanel: React.FC<{ resources: SystemResourcesResponse 
         }
       />
       <ResourceRow
+        className={tile}
         icon={<HardDrive size={13} />}
         label="Workspaces disk"
         percent={disk.usedPercent}
@@ -82,7 +95,10 @@ export const SystemResourcePanel: React.FC<{ resources: SystemResourcesResponse 
             : `${formatBytes(diskUsed)} used · ${formatBytes(disk.freeBytes)} free of ${formatBytes(disk.totalBytes)}`
         }
       />
-      <p className="truncate px-0.5 text-[10px] text-neutral-600" title={disk.path}>
+      <p
+        className={cn("truncate px-0.5 text-[10px] text-neutral-600", grid && "font-mono sm:col-span-3")}
+        title={disk.path}
+      >
         {disk.path}
       </p>
     </div>
@@ -91,7 +107,7 @@ export const SystemResourcePanel: React.FC<{ resources: SystemResourcesResponse 
 
 /** The one "this host can't report it" line, worded the same everywhere. */
 export const SystemUnsupported: React.FC<{ what: string }> = ({ what }) => (
-  <p className="rounded-md border border-dashed border-neutral-800 px-3 py-3 text-xs text-neutral-500">
+  <p className="rounded-xl border border-dashed border-neutral-800 px-3 py-4 text-xs text-neutral-500">
     {what} is not available on this host — the daemon reads it from <code className="text-neutral-400">/proc</code>,
     which only Linux provides.
   </p>

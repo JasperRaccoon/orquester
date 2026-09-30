@@ -153,7 +153,7 @@ export const ProcessTreeView: React.FC<{
   };
 
   if (roots.length === 0) {
-    return <p className="px-1 py-3 text-xs text-neutral-500">No processes reported.</p>;
+    return <p className="rounded-xl border border-dashed border-neutral-800 px-3 py-6 text-center text-xs text-neutral-500">No processes reported.</p>;
   }
 
   return (
@@ -161,7 +161,7 @@ export const ProcessTreeView: React.FC<{
       {error && (
         <p className="rounded-md border border-danger-900/60 bg-danger-soft/30 px-2.5 py-2 text-[11px] text-danger-300">{error}</p>
       )}
-      <div className="overflow-x-auto rounded-lg border border-neutral-800">
+      <div className="overflow-x-auto rounded-xl border border-neutral-800 bg-neutral-900/40">
         <div className="min-w-[32rem]">
           <div className="flex items-center gap-2 border-b border-neutral-800 bg-neutral-900/60 py-1.5 pr-1 text-[10px] font-medium uppercase tracking-wider text-neutral-500">
             <span className="min-w-0 flex-1 pl-1">Process · {total}</span>

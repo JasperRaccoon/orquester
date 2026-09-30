@@ -12,7 +12,7 @@ import { useSystemPollEnabled, useSystemResources } from "./use-system-status";
  * on, with the full resource breakdown in a popover.
  *
  * Hidden entirely below `sm` — the mobile drawer stays mounted off-canvas, so
- * showing it there would poll while invisible, and Settings → System is the
+ * showing it there would poll while invisible, and Settings → Host status is the
  * phone-side surface for this. Hidden too when the host can't report
  * (`supported: false`, i.e. anything but Linux) or when nothing has been read
  * yet, following the UsageWidget convention of staying out of the chrome
@@ -58,7 +58,7 @@ export const SystemStatusChip: React.FC = () => {
         <p className="px-0.5 text-[10px] font-medium uppercase tracking-wider text-neutral-500">Host resources</p>
         <SystemResourcePanel resources={data} />
         <p className="px-0.5 text-[10px] text-neutral-600">
-          Processes and listening ports live in Settings → System.
+          Processes and listening ports live in Settings → Host status.
         </p>
       </div>
     </AdaptiveMenu>

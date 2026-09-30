@@ -125,7 +125,9 @@ export const OrquesterApp: React.FC<OrquesterAppProps> = ({
       <OrquesterProvider
         runtime={runtime}
         api={api}
-        useTitlebar={titlebar}
+        // Only the desktop shell has native window controls to replace; a web
+        // client that stored the flag on must not render dead buttons.
+        useTitlebar={runtime === "desktop" && titlebar}
         windowControls={windowControls}
       >
         <AppWrapper>

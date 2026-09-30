@@ -51,7 +51,7 @@ export function isTerminalSubagentStatus(status: RuntimeSubagentStatus): boolean
  * is not a state a shell can be in — it either runs or it does not. The one
  * summary a stopped shell shows is the adapter's own, marked
  * `leftRunning` (Grok's "Left running when the agent host stopped — stop it
- * from Settings → System."): never the provider's.
+ * from Settings → Host status."): never the provider's.
  */
 export function backgroundShellActivityText(
   shell: Pick<RuntimeSubagent, "status" | "progress" | "exitCode"> & {

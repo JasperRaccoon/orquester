@@ -1623,7 +1623,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
-  setSettingsOpen: (open) => set({ settingsOpen: open }),
+  // A plain open drops any earlier deep link, so it lands on the last page.
+  setSettingsOpen: (open) => set(open ? { settingsOpen: true, settingsSection: null } : { settingsOpen: false }),
 
 
   setSidebarDrawer: (open) => set({ sidebarDrawerOpen: open }),

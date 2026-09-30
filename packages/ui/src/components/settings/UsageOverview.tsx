@@ -1,5 +1,5 @@
 import React from "react";
-import { Loader2, RefreshCw } from "lucide-react";
+import { Gauge, Loader2, RefreshCw } from "lucide-react";
 import type { AgentUsage, ProviderUsageWindow, UsageAccount } from "@orquester/api";
 import { usageAgentEnabled } from "@orquester/config";
 import { cn } from "../../lib/cn";
@@ -8,6 +8,8 @@ import type { UsageResetFormat } from "../../lib/usage-display";
 import { getRegistryIcon } from "../../icons";
 import { useUsageNow, useUsageResetFormat } from "../../hooks";
 import { useAppStore } from "../../store/app";
+import { Button } from "../ui";
+import { Badge, EmptyState, SettingsCard } from "./primitives";
 import {
   STALE_MIN,
   barClass,
@@ -26,11 +28,8 @@ import {
 /** Stable empty slice, so an agent with no live windows never churns props. */
 const NO_PROVIDER_WINDOWS: readonly ProviderUsageWindow[] = [];
 
-const RESET_OPTIONS: { value: UsageResetFormat; label: string }[] = [
-  { value: "relative", label: "Countdown" },
-  { value: "absolute", label: "Clock" },
-  { value: "both", label: "Both" }
-];
+/** Same surface as `SettingsCard`, so the quota cards sit in the page's family. */
+const CARD = "overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900/40";
 
 /** One labelled window: percent, bar, absolute numbers when the source has them. */
 const WindowRow: React.FC<{
@@ -43,11 +42,14 @@ const WindowRow: React.FC<{
   const capacity = formatUsageCapacity(window);
   const reset = formatReset(window.resetsAt, resetFormat, now);
   return (
-    <div className="rounded-md bg-neutral-950/40 px-2.5 py-2">
+    <div>
       <div className="flex items-baseline justify-between gap-3">
-        <span className="min-w-0 truncate text-xs text-neutral-300">{window.longLabel}</span>
+        <span className="min-w-0 truncate text-xs text-neutral-400">{window.longLabel}</span>
         <span
-          className={cn("shrink-0 text-sm font-medium tabular-nums", muted ? "text-neutral-500" : "text-neutral-100")}
+          className={cn(
+            "shrink-0 text-sm font-semibold tabular-nums",
+            muted ? "text-neutral-500" : "text-neutral-100"
+          )}
         >
           {Math.round(pct)}%
         </span>
@@ -62,7 +64,7 @@ const WindowRow: React.FC<{
           them today) must not leave an empty ~22px row under the bar. The
           spacer keeps the reset time right-aligned when only it is present. */}
       {(capacity || reset) && (
-        <div className="mt-1.5 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 text-[11px] text-neutral-500">
+        <div className="mt-1 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 text-[11px] text-neutral-500">
           {capacity ? <span className="tabular-nums text-neutral-400">{capacity}</span> : <span />}
           {reset && <span className="tabular-nums">{reset}</span>}
         </div>
@@ -81,19 +83,20 @@ const AccountBlock: React.FC<{
   const windows = normalizeUsageWindows(agentId, account);
   const muted = account.stale || windows.length === 0;
   return (
-    <div className="space-y-1.5">
-      <div className="flex items-baseline justify-between gap-2 px-0.5">
-        <p className="min-w-0 truncate text-xs font-medium text-neutral-300">
+    <div className="space-y-2.5 px-4 py-3">
+      <div className="flex items-center justify-between gap-2">
+        <p className="min-w-0 truncate text-xs font-medium text-neutral-200">
           {shortAccountLabel(account.label) || account.id}
         </p>
-        {account.plan && <span className="shrink-0 text-[10px] text-neutral-500">{account.plan}</span>}
+        <div className="flex shrink-0 items-center gap-1">
+          {account.stale && windows.length > 0 && <Badge tone="warn">Stale</Badge>}
+          {account.plan && <Badge>{account.plan}</Badge>}
+        </div>
       </div>
       {windows.length > 0 ? (
-        windows.map((w) => (
-          <WindowRow key={w.id} window={w} resetFormat={resetFormat} now={now} muted={muted} />
-        ))
+        windows.map((w) => <WindowRow key={w.id} window={w} resetFormat={resetFormat} now={now} muted={muted} />)
       ) : (
-        <p className="rounded-md bg-neutral-950/40 px-2.5 py-2 text-[11px] text-neutral-600">No reading yet.</p>
+        <p className="text-[11px] text-neutral-500">No reading yet.</p>
       )}
     </div>
   );
@@ -126,29 +129,41 @@ const AgentCard: React.FC<{
   const muted = !hasData || isOld || agent.stale;
 
   return (
-    <article className="overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900/50">
-      <div className="flex items-center gap-2.5 px-3 pb-2 pt-3">
-        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-neutral-800 text-neutral-300">
+    <article className={CARD}>
+      <header className="flex items-center gap-3 px-4 py-3">
+        <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-neutral-800/80 text-neutral-300">
           {getRegistryIcon("agent", agent.id, 18)}
         </span>
         <div className="min-w-0 flex-1">
-          <p className="truncate text-sm text-neutral-100">{labelForAgent(agent.id)}</p>
+          <div className="flex min-w-0 items-center gap-1.5">
+            <p className="truncate text-sm font-medium text-neutral-100">{labelForAgent(agent.id)}</p>
+            {agent.plan && <Badge>{agent.plan}</Badge>}
+          </div>
           <p className="truncate text-[11px] text-neutral-500">
             {!hasData
               ? "Signed in — usage updating…"
-              : [agent.plan, agent.asOf ? `updated ${formatAgo(agent.asOf, now)}` : null].filter(Boolean).join(" · ")}
+              : agent.asOf
+                ? `Updated ${formatAgo(agent.asOf, now)}`
+                : null}
           </p>
         </div>
-        {hidden && (
-          <span
-            className="shrink-0 rounded bg-neutral-800 px-1.5 py-0.5 text-[10px] text-neutral-400"
-            title="Turned off below, so it stays out of the top-bar chip and panel."
-          >
-            Hidden
-          </span>
-        )}
-      </div>
-      <div className="space-y-2.5 px-2.5 pb-2.5">
+        <div className="flex shrink-0 items-center gap-1">
+          {hasData && (isOld || agent.stale) && (
+            <Badge
+              tone="warn"
+              title={
+                agent.stale
+                  ? "The token or log behind this reading has expired; showing the last-known numbers."
+                  : `No fresh reading for over ${STALE_MIN} minutes; showing the last-known numbers.`
+              }
+            >
+              Stale
+            </Badge>
+          )}
+          {hidden && <Badge title="Turned off below, so it stays out of the top-bar chip and panel.">Hidden</Badge>}
+        </div>
+      </header>
+      <div className="divide-y divide-neutral-800/60 border-t border-neutral-800/80">
         {accounts.length > 0 || agent.system ? (
           <>
             {accounts.map((a) => (
@@ -168,18 +183,22 @@ const AgentCard: React.FC<{
             {/* A pooling agent still gets its live provider windows: they are
                 per credential, not per account, so they sit below the blocks
                 rather than inside one. */}
-            {providerWindows.map((w) => (
-              <WindowRow key={w.id} window={w} resetFormat={resetFormat} now={now} muted={muted} />
-            ))}
+            {providerWindows.length > 0 && (
+              <div className="space-y-3 px-4 py-3">
+                {providerWindows.map((w) => (
+                  <WindowRow key={w.id} window={w} resetFormat={resetFormat} now={now} muted={muted} />
+                ))}
+              </div>
+            )}
           </>
         ) : ownWindows.length > 0 ? (
-          ownWindows.map((w) => (
-            <WindowRow key={w.id} window={w} resetFormat={resetFormat} now={now} muted={muted} />
-          ))
+          <div className="space-y-3 px-4 py-3">
+            {ownWindows.map((w) => (
+              <WindowRow key={w.id} window={w} resetFormat={resetFormat} now={now} muted={muted} />
+            ))}
+          </div>
         ) : (
-          <p className="rounded-md bg-neutral-950/40 px-2.5 py-3 text-center text-[11px] text-neutral-600">
-            No quota windows reported yet.
-          </p>
+          <p className="px-4 py-4 text-center text-[11px] text-neutral-500">No quota windows reported yet.</p>
         )}
       </div>
     </article>
@@ -187,14 +206,17 @@ const AgentCard: React.FC<{
 };
 
 const MissingCard: React.FC<{ id: string }> = ({ id }) => (
-  <article className="rounded-xl border border-dashed border-neutral-800 bg-neutral-900/30 px-3 py-3">
-    <div className="flex items-center gap-2.5">
+  <article className="rounded-xl border border-dashed border-neutral-800 px-4 py-3">
+    <div className="flex items-start gap-3">
       <span className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg bg-neutral-800/60 text-neutral-500">
         {getRegistryIcon("agent", id, 18)}
       </span>
-      <div className="min-w-0">
-        <p className="truncate text-sm text-neutral-400">{labelForAgent(id)}</p>
-        <p className="text-[11px] leading-snug text-neutral-600">Not logged in — {usageLoginHint(id)}</p>
+      <div className="min-w-0 flex-1">
+        <div className="flex min-w-0 items-center gap-1.5">
+          <p className="truncate text-sm font-medium text-neutral-400">{labelForAgent(id)}</p>
+          <Badge>Not logged in</Badge>
+        </div>
+        <p className="mt-0.5 text-[11px] leading-snug text-neutral-500">To see its quota, {usageLoginHint(id)}.</p>
       </div>
     </div>
   </article>
@@ -208,97 +230,81 @@ const MissingCard: React.FC<{ id: string }> = ({ id }) => (
  * Unlike the top-bar panel this shows every reporting agent, marking the ones
  * switched off below as "Hidden" rather than dropping them — the toggles sit
  * right underneath, so a card vanishing on toggle reads as data loss.
+ *
+ * The refresh control and reset-time format live in the page header
+ * (`UsageSettings`), which owns the refresh state and passes it down so the
+ * empty state can say "reading…" instead of "no reading".
  */
-export const UsageOverview: React.FC = () => {
+export const UsageOverview: React.FC<{
+  refreshing: boolean;
+  onRefresh: () => void;
+}> = ({ refreshing, onRefresh }) => {
   const usage = useAppStore((s) => s.usage);
   const prefs = useAppStore((s) => s.appConfig.usage);
   const providerRateLimits = useAppStore((s) => s.providerRateLimits);
-  const loadUsage = useAppStore((s) => s.loadUsage);
-  const [resetFormat, setResetFormat] = useUsageResetFormat();
+  // Shared, persisted display format — the header's picker writes the same store.
+  const [resetFormat] = useUsageResetFormat();
   const now = useUsageNow();
-  const [refreshing, setRefreshing] = React.useState(false);
-
-  const refresh = async () => {
-    setRefreshing(true);
-    try {
-      await loadUsage(true);
-    } finally {
-      setRefreshing(false);
-    }
-  };
 
   const agents = (usage?.agents ?? []).filter((a) => a.available);
   const missing = missingUsageAgents(prefs, (usage?.agents ?? []).map((a) => a.id));
 
-  return (
-    <section className="space-y-2.5">
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="min-w-0">
-          <p className="text-sm text-neutral-200">Quota overview</p>
-          <p className="text-xs text-neutral-500">Read from the active daemon; credentials never leave it.</p>
-        </div>
-        <div className="flex shrink-0 items-center gap-2">
-          <div className="inline-flex rounded-md bg-neutral-800/60 p-0.5 text-xs">
-            {RESET_OPTIONS.map((o) => (
-              <button
-                key={o.value}
-                type="button"
-                onClick={() => setResetFormat(o.value)}
-                title={`Show reset times as a ${o.label.toLowerCase()}`}
-                className={cn(
-                  "rounded px-2 py-1 transition-colors",
-                  resetFormat === o.value ? "bg-neutral-700 text-neutral-100" : "text-neutral-400 hover:text-neutral-200"
-                )}
-              >
-                {o.label}
-              </button>
-            ))}
-          </div>
-          <button
-            type="button"
-            disabled={refreshing}
-            onClick={() => void refresh()}
-            aria-label="Refresh usage"
-            className="rounded-md p-1.5 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200 disabled:opacity-50"
-          >
-            {refreshing ? <Loader2 size={14} className="animate-spin" /> : <RefreshCw size={14} />}
-          </button>
-        </div>
-      </div>
+  if (!usage) {
+    /* No snapshot at all: never loaded, the read failed, or the daemon is
+       older than this client. Deliberately NOT the per-agent "Not logged
+       in" cards — that claim would be fabricated from an absent reading. */
+    return (
+      <SettingsCard>
+        {refreshing ? (
+          <EmptyState
+            icon={<Loader2 size={18} className="animate-spin" />}
+            title="Reading usage from the daemon…"
+          />
+        ) : (
+          <EmptyState
+            icon={<Gauge size={18} />}
+            title="No usage reading from this daemon yet"
+            description="Refresh to retry — an older daemon may not report usage at all."
+            action={
+              <Button size="sm" variant="outline" onClick={onRefresh}>
+                <RefreshCw size={13} /> Refresh
+              </Button>
+            }
+          />
+        )}
+      </SettingsCard>
+    );
+  }
 
-      {!usage ? (
-        /* No snapshot at all: never loaded, the read failed, or the daemon is
-           older than this client. Deliberately NOT the per-agent "Not logged
-           in" cards — that claim would be fabricated from an absent reading. */
-        <p className="rounded-lg border border-neutral-800 px-3 py-4 text-sm text-neutral-500">
-          {refreshing
-            ? "Reading usage from the daemon…"
-            : "No usage reading from this daemon yet. Refresh to retry — an older daemon may not report usage at all."}
-        </p>
-      ) : agents.length === 0 && missing.length === 0 ? (
-        <p className="rounded-lg border border-neutral-800 px-3 py-4 text-sm text-neutral-500">
-          No agent is reporting usage yet.
-        </p>
-      ) : (
-        <div className="columns-1 gap-2.5 sm:columns-2">
-          {agents.map((a) => (
-            <div key={a.id} className="mb-2.5 break-inside-avoid">
-              <AgentCard
-                agent={a}
-                hidden={!usageAgentEnabled(prefs, a.id)}
-                resetFormat={resetFormat}
-                now={now}
-                liveWindows={providerRateLimits[a.id] ?? NO_PROVIDER_WINDOWS}
-              />
-            </div>
-          ))}
-          {missing.map((id) => (
-            <div key={id} className="mb-2.5 break-inside-avoid">
-              <MissingCard id={id} />
-            </div>
-          ))}
+  if (agents.length === 0 && missing.length === 0) {
+    return (
+      <SettingsCard>
+        <EmptyState
+          icon={<Gauge size={18} />}
+          title="No agent is reporting usage yet"
+        />
+      </SettingsCard>
+    );
+  }
+
+  return (
+    <div className="columns-1 gap-3 sm:columns-2">
+      {agents.map((a) => (
+        <div key={a.id} className="mb-3 break-inside-avoid">
+          <AgentCard
+            agent={a}
+            hidden={!usageAgentEnabled(prefs, a.id)}
+            resetFormat={resetFormat}
+            now={now}
+            liveWindows={providerRateLimits[a.id] ?? NO_PROVIDER_WINDOWS}
+          />
         </div>
-      )}
-    </section>
+      ))}
+      {missing.map((id) => (
+        <div key={id} className="mb-3 break-inside-avoid">
+          <MissingCard id={id} />
+        </div>
+      ))}
+    </div>
   );
 };

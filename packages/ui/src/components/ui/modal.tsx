@@ -12,6 +12,14 @@ export interface ModalProps {
 }
 
 /**
+ * Open modals in the order they opened. Every modal listens for Escape on
+ * `document`, and a listener cannot stop another one on the same node, so a
+ * dialog opened from inside another (a confirm inside Settings) would close
+ * both on one keypress; only the topmost acts on it.
+ */
+const escapeStack: object[] = [];
+
+/**
  * Centered modal dialog rendered in a portal; closes on backdrop click / Escape.
  * An open layer while it is up (`useOpenLayer`), so the app-level key handlers
  * that run before its `document` listener leave its Escape to it.
@@ -47,11 +55,24 @@ export const Modal: React.FC<ModalProps> = ({ open, onClose, children, className
       }, 0);
     };
   }, [open]);
+  const escapeToken = useRef({});
+  // Keyed on `open` alone: `onClose` is usually a fresh closure each render,
+  // and re-registering on every parent render would reorder the stack.
+  useEffect(() => {
+    if (!open) return undefined;
+    const token = escapeToken.current;
+    escapeStack.push(token);
+    return () => {
+      const at = escapeStack.lastIndexOf(token);
+      if (at >= 0) escapeStack.splice(at, 1);
+    };
+  }, [open]);
   useEffect(() => {
     if (!open) {
       return;
     }
-    const onKey = (e: KeyboardEvent) => e.key === "Escape" && onClose();
+    const onKey = (e: KeyboardEvent) =>
+      e.key === "Escape" && escapeStack[escapeStack.length - 1] === escapeToken.current && onClose();
     document.addEventListener("keydown", onKey);
     return () => document.removeEventListener("keydown", onKey);
   }, [open, onClose]);
