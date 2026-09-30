@@ -38,7 +38,6 @@ export {
   applyFrame,
   createReducerState,
   emptySlice,
-  foldStateFromSnapshot,
   latestTurnSettled,
   needsResync,
   patchSlice,
@@ -53,8 +52,6 @@ export {
   peekThreadStore,
   releaseThreadStore,
   retainThreadStore,
-  THREAD_SNAPSHOT_IDLE_TTL_MS,
-  THREAD_STORE_DISPOSE_GRACE_MS,
   updateThreadDraft,
   type AgentChatThreadState,
   type ThreadStore,
@@ -67,7 +64,6 @@ export {
 } from "./retention";
 
 export {
-  authErrorNotice,
   loadProviders,
   notifyProvidersChanged,
   providerForRefId,
@@ -77,7 +73,6 @@ export {
   type ProvidersState,
   type ProvidersStore,
   type ProviderSideEffects,
-  type ProviderAuthNotice,
   type ProviderNoticeTone
 } from "./providers";
 

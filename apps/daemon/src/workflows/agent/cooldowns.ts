@@ -11,11 +11,11 @@ import type { WorkflowStateStore } from "../state-store.ts";
 import { cooldownKey } from "./families.ts";
 
 /** A provider reset further out than this is not believed (a misparsed or epoch-shifted stamp). */
-export const MAX_COOLDOWN_MS = 8 * 24 * 60 * 60_000;
+const MAX_COOLDOWN_MS = 8 * 24 * 60 * 60_000;
 /** No reset known, or an auth failure: try again in an hour. */
-export const DEFAULT_COOLDOWN_MS = 60 * 60_000;
+const DEFAULT_COOLDOWN_MS = 60 * 60_000;
 /** A limit with no known reset that repeats on the same account doubles its cooldown, up to this. */
-export const MAX_ESCALATED_COOLDOWN_MS = 4 * 60 * 60_000;
+const MAX_ESCALATED_COOLDOWN_MS = 4 * 60 * 60_000;
 
 function isActive(cooldown: AccountCooldown, nowMs: number): boolean {
   const until = Date.parse(cooldown.until);

@@ -39,8 +39,6 @@ export interface ScannedSkill {
   isSymlink: boolean;
   /** Why the skill could not be read: a broken symlink, an unreadable or unparseable `SKILL.md`. */
   error?: string;
-  /** The `source` tag the scan was given. */
-  source?: string;
 }
 
 export interface ScannedCommand {
@@ -102,21 +100,18 @@ async function readDocument(
  * `SKILL.md`, symlinked ones followed (and marked). A broken symlink is listed
  * with an `error` so it can still be seen and deleted; a directory without
  * `SKILL.md` is not a skill and is left out. Hidden entries (`.system`, …) are
- * skipped unless `includeHidden`. A missing root answers `[]`.
+ * skipped. A missing root answers `[]`.
  */
-export async function scanSkills(
-  root: string,
-  options: { source?: string; includeHidden?: boolean } = {}
-): Promise<ScannedSkill[]> {
+export async function scanSkills(root: string): Promise<ScannedSkill[]> {
   const skills: ScannedSkill[] = [];
   for (const dirent of await entries(root)) {
-    if (dirent.name.startsWith(".") && !options.includeHidden) {
+    if (dirent.name.startsWith(".")) {
       continue;
     }
     const dir = join(root, dirent.name);
     const skillFile = join(dir, SKILL_FILE);
     const isSymlink = dirent.isSymbolicLink();
-    const base = { name: dirent.name, dir, skillFile, isSymlink, ...(options.source !== undefined ? { source: options.source } : {}) };
+    const base = { name: dirent.name, dir, skillFile, isSymlink };
     if (isSymlink) {
       const target = await follow(dir);
       if (target === null) {

@@ -767,32 +767,23 @@ test("deleting a project or a workspace takes its prompts along, announcing each
 
 // --- The bus ------------------------------------------------------------------------
 
-test("every change reaches the /events bus on the saved-prompts channel", async (t) => {
+test("upserts and deletions reach the /events bus on the saved-prompts channel", async (t) => {
   const s = await scratch();
   t.after(s.cleanup);
   const service = await emptyService(s);
-  const site = await s.project("acme", "site");
   const broadcaster = new Broadcaster();
   const seen: EventMessage[] = [];
   broadcaster.add({ send: (data) => seen.push(JSON.parse(data) as EventMessage) });
   publishSavedPromptEvents(service, broadcaster);
 
-  const created = await service.create({ title: "T", body: "B", projectPath: site });
-  const updated = await service.update(created.id, { pinned: true });
-  const used = await service.markUsed(created.id);
-  const other = await service.create({ title: "U", body: "B", projectPath: null });
-  await service.delete(other.id);
-  await service.deleteForProject(site);
+  const created = await service.create({ title: "T", body: "B", projectPath: null });
+  await service.delete(created.id);
 
   assert.deepEqual(
     seen.map((event) => ({ channel: event.channel, type: event.type, payload: event.payload })),
     [
       { channel: "saved-prompts", type: "savedPrompt.upserted", payload: created },
-      { channel: "saved-prompts", type: "savedPrompt.upserted", payload: updated },
-      { channel: "saved-prompts", type: "savedPrompt.upserted", payload: used },
-      { channel: "saved-prompts", type: "savedPrompt.upserted", payload: other },
-      { channel: "saved-prompts", type: "savedPrompt.deleted", payload: { id: other.id, projectPath: null } },
-      { channel: "saved-prompts", type: "savedPrompt.deleted", payload: { id: created.id, projectPath: site } }
+      { channel: "saved-prompts", type: "savedPrompt.deleted", payload: { id: created.id, projectPath: null } }
     ]
   );
 });

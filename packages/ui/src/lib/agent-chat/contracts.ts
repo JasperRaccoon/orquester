@@ -608,8 +608,6 @@ export interface AgentChatActions {
   }): Promise<void>;
   /** `/dismiss`. Offered only when the request carries `dismissible`. */
   dismissQuestion(input: { requestId: string }): Promise<void>;
-  /** `/revert`. Conversation only — files are never restored (§5.5). */
-  revert(input: { targetTurnCount: number }): Promise<void>;
   /**
    * "Rewind to here" / the Esc-Esc picker, end to end: `/revert` to
    * `targetTurnCount`, wait for the host to truncate the thread (or to land a

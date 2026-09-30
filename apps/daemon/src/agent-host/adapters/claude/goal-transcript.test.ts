@@ -15,11 +15,7 @@ import * as nodePath from "node:path";
 import { after, before, describe, it } from "node:test";
 
 import type { ClaudeGoalStatusRow } from "./goal.ts";
-import {
-  ClaudeGoalTranscript,
-  claudeProjectDirName,
-  locateClaudeTranscript
-} from "./goal-transcript.ts";
+import { ClaudeGoalTranscript } from "./goal-transcript.ts";
 
 const SESSION = "08f59265-4b3e-4a3f-9864-7f582e330b2e";
 
@@ -77,29 +73,16 @@ describe("claude goal transcript — locating the file", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  it("names the project dir the way the CLI does", () => {
-    assert.equal(
-      claudeProjectDirName("/var/lib/orquester/workspaces/jaspersito/MatsSmile"),
-      "-var-lib-orquester-workspaces-jaspersito-MatsSmile"
-    );
-    assert.equal(claudeProjectDirName("/srv/VAS SAAS/app.v2"), "-srv-VAS-SAAS-app-v2");
-  });
-
   it("finds a transcript under the exact dir, and nothing that is not there", async () => {
     const configDir = nodePath.join(root, "exact");
     const dir = nodePath.join(configDir, "projects", "-work-project");
     await mkdir(dir, { recursive: true });
-    await writeFile(nodePath.join(dir, `${SESSION}.jsonl`), userRow("hi"));
+    await writeFile(nodePath.join(dir, `${SESSION}.jsonl`), goalRow({ met: true, condition: "ship it" }));
+    const transcript = new ClaudeGoalTranscript({ configDir, cwd: "/work/project" });
+    assert.deepEqual((await readAll(transcript, SESSION))?.map((row) => row.condition), ["ship it"]);
+    assert.equal(await readAll(transcript, "other"), undefined);
     assert.equal(
-      await locateClaudeTranscript({ configDir, cwd: "/work/project", sessionId: SESSION }),
-      nodePath.join(dir, `${SESSION}.jsonl`)
-    );
-    assert.equal(
-      await locateClaudeTranscript({ configDir, cwd: "/work/project", sessionId: "other" }),
-      undefined
-    );
-    assert.equal(
-      await locateClaudeTranscript({ configDir: nodePath.join(root, "none"), cwd: "/x", sessionId: SESSION }),
+      await readAll(new ClaudeGoalTranscript({ configDir: nodePath.join(root, "none"), cwd: "/x" }), SESSION),
       undefined
     );
   });
@@ -107,14 +90,14 @@ describe("claude goal transcript — locating the file", () => {
   it("finds a long project path's dir by its prefix (its hash is the CLI's own)", async () => {
     const configDir = nodePath.join(root, "long");
     const cwd = `/work/${"deep/".repeat(60)}project`;
-    const name = claudeProjectDirName(cwd);
+    const name = `-work-${"deep-".repeat(60)}project`;
     assert.ok(name.length > 200, "a name past the SDK's limit");
     const dir = nodePath.join(configDir, "projects", `${name.slice(0, 200)}-1x2y3z`);
     await mkdir(dir, { recursive: true });
-    await writeFile(nodePath.join(dir, `${SESSION}.jsonl`), userRow("hi"));
-    assert.equal(
-      await locateClaudeTranscript({ configDir, cwd, sessionId: SESSION }),
-      nodePath.join(dir, `${SESSION}.jsonl`)
+    await writeFile(nodePath.join(dir, `${SESSION}.jsonl`), goalRow({ met: true, condition: "long path" }));
+    assert.deepEqual(
+      (await readAll(new ClaudeGoalTranscript({ configDir, cwd }), SESSION))?.map((row) => row.condition),
+      ["long path"]
     );
   });
 
@@ -124,12 +107,12 @@ describe("claude goal transcript — locating the file", () => {
     const linkedProject = nodePath.join(root, "linked-project");
     await mkdir(realProject, { recursive: true });
     await symlink(realProject, linkedProject);
-    const dir = nodePath.join(configDir, "projects", claudeProjectDirName(realProject));
+    const dir = nodePath.join(configDir, "projects", `-${realProject.slice(1).replaceAll("/", "-")}`);
     await mkdir(dir, { recursive: true });
-    await writeFile(nodePath.join(dir, `${SESSION}.jsonl`), userRow("hi"));
-    assert.equal(
-      await locateClaudeTranscript({ configDir, cwd: linkedProject, sessionId: SESSION }),
-      nodePath.join(dir, `${SESSION}.jsonl`)
+    await writeFile(nodePath.join(dir, `${SESSION}.jsonl`), goalRow({ met: true, condition: "real path" }));
+    assert.deepEqual(
+      (await readAll(new ClaudeGoalTranscript({ configDir, cwd: linkedProject }), SESSION))?.map((row) => row.condition),
+      ["real path"]
     );
   });
 });
@@ -331,25 +314,6 @@ describe("claude goal transcript — reading goal_status rows", () => {
     );
   });
 
-  it("commits every chunk: a delta bigger than one read is walked in pieces, each one kept", async () => {
-    let content = "";
-    for (let index = 0; index < 12; index += 1) {
-      content += userRow("x".repeat(180_000)) + goalRow({ met: false, condition: "a", reason: `check ${index}` });
-    }
-    const { transcript } = await fixture(content);
-    const first = await transcript.readNew(SESSION);
-    assert.ok(first !== undefined && first.more, "one read's worth, and more to come");
-    assert.deepEqual(first.rows.map((row) => row.reason), ["check 0", "check 1", "check 2", "check 3", "check 4"]);
-    const second = await transcript.readNew(SESSION);
-    assert.deepEqual(second?.rows.map((row) => row.reason), ["check 5", "check 6", "check 7", "check 8", "check 9"]);
-    const rest = await readAll(transcript, SESSION);
-    assert.deepEqual(
-      [...first.rows, ...(second?.rows ?? []), ...(rest ?? [])].map((row) => row.reason),
-      Array.from({ length: 12 }, (_, index) => `check ${index}`),
-      "every row exactly once"
-    );
-  });
-
   it("a chunk that is abandoned loses nothing an earlier chunk committed", async () => {
     let content = "";
     for (let index = 0; index < 14; index += 1) {
@@ -361,21 +325,11 @@ describe("claude goal transcript — reading goal_status rows", () => {
     const stuck = transcript.readNew(SESSION);
     transcript.abandonPending();
     await stuck;
-    const again = await transcript.readNew(SESSION);
+    const again = await readAll(transcript, SESSION);
     assert.deepEqual(
-      again?.rows.map((row) => row.reason),
-      ["check 5", "check 6", "check 7", "check 8", "check 9"],
-      "the abandoned chunk is read again, from where the first one ended"
+      [...first.rows, ...(again ?? [])].map((row) => row.reason),
+      Array.from({ length: 14 }, (_, index) => `check ${index}`),
+      "the abandoned chunk is read again without losing or duplicating rows"
     );
-    assert.deepEqual(first.rows.map((row) => row.reason), ["check 0", "check 1", "check 2", "check 3", "check 4"]);
-  });
-
-  it("says there is no more once only a line still being written is left", async () => {
-    const complete = goalRow({ met: false, sentinel: true, condition: "a" });
-    const { transcript } = await fixture(complete + goalRow({ met: true, condition: "a" }).slice(0, 30));
-    assert.deepEqual(await transcript.readNew(SESSION), {
-      rows: [{ met: false, sentinel: true, failed: false, condition: "a" }],
-      more: false
-    });
   });
 });

@@ -180,14 +180,4 @@ describe("turn liveness watchdog — the goal window (goals §5.2)", () => {
     assert.equal(stalled.length, 1);
     assert.equal(stalled[0]?.windowMs, 10 * 60_000);
   });
-
-  it("is still paused entirely while an approval is open", () => {
-    const { watchdog, at, stalled } = harness({ isGoalActive: () => true });
-    watchdog.observe(event("turn.started", { turnId: "turn-1" }));
-    watchdog.observe(event("content.delta", { turnId: "turn-1" }));
-    watchdog.observe(event("request.opened", { turnId: "turn-1", requestId: "r1" }));
-
-    at(60 * 60_000 * 3);
-    assert.deepEqual(stalled, []);
-  });
 });

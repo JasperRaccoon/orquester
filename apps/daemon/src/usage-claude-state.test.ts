@@ -192,7 +192,7 @@ test("UsageStateFile round-trips, drops what does not parse and moves a corrupt 
   };
   written.set("claude:/a", record);
   await written.flush();
-  assert.equal((await readFile(file, "utf8")).includes('"version":1'), true);
+  assert.equal(JSON.parse(await readFile(file, "utf8")).version, 1);
 
   const read = new UsageStateFile(file);
   await read.load();

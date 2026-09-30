@@ -66,7 +66,7 @@ export interface WorkflowProgress { agents: number; statuses: Record<string, num
  * A subagent in the transcript's roster and on its anchor. A workflow member names its coordinator (`parentAgentId`),
  * its phase and, once retried, its attempt; a coordinator its workflow and the run's progress (`WorkflowProgress`).
  */
-export interface RosterRow { id: string; title: string | null; status: string; parentAgentId?: string; phaseIndex?: number; attempt?: number; workflowName?: string; workflow?: WorkflowProgress }
+interface RosterRow { id: string; title: string | null; status: string; parentAgentId?: string; phaseIndex?: number; attempt?: number; workflowName?: string; workflow?: WorkflowProgress }
 
 /**
  * The room a shed result leaves under `maxChars` for the caller's `hint` field — key, quotes and comma included. A

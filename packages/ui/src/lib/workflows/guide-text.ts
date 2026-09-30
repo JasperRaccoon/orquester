@@ -38,20 +38,13 @@ export function splitGuideText(text: string): GuideSpan[] {
   }
 }
 
-/** The guide text without its code marks, as it reads on screen. */
-export function plainGuideText(text: string): string {
-  return splitGuideText(text)
-    .map((span) => span.text)
-    .join("");
-}
-
 /** The text of the guide item called `term`, if the list has one. */
 export function guideItemText(items: readonly WorkflowGuideItem[], term: string): string | undefined {
   return items.find((item) => item.term === term)?.text;
 }
 
 /** The sections of a block type's guide that say what it outputs (its input, result, response…). */
-export const BLOCK_OUTPUT_GUIDE_TITLES: Partial<Record<WorkflowNodeType, readonly string[]>> = {
+const BLOCK_OUTPUT_GUIDE_TITLES: Partial<Record<WorkflowNodeType, readonly string[]>> = {
   "trigger.manual": ["Input"],
   agent: ["Output"],
   code: ["Result"],

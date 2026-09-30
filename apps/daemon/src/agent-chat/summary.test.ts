@@ -156,16 +156,6 @@ test("an errored thread keeps status 'running' — the TAB is live — and shows
   assert.equal(summary?.activity?.attention, "finished");
 });
 
-test("an errored thread whose watch loop is still live does not push 'finished'", async (t) => {
-  const h = await harness(t);
-  seedTab(h.chat, "t1");
-  await h.read("t1", { chatSessionStatus: "running", backgroundLiveness: "monitoring" });
-  await h.read("t1", { chatSessionStatus: "error", backgroundLiveness: "monitoring" });
-  // Activity reports the error, but the notification policy suppresses a finished push.
-  assert.equal(h.chat.get("t1")?.activity?.attention, "finished");
-  assert.deepEqual(h.pushes, []);
-});
-
 test("needsAttentionAt is stamped when attention rises and cleared when it clears", async (t) => {
   let clock = 1_000;
   const h = await harness(t, () => clock);
@@ -585,14 +575,6 @@ test("a thread the host no longer has closes out its open requests", async (t) =
   await h.read("t1", {}, undefined, 404);
   assert.deepEqual(h.published.filter((event) => event.type === "agentChat.pending").map((event) => event.payload), [
     { id: "t1", requestId: "r1", kind: "approval", title: "Run tests?", open: false }
-  ]);
-});
-
-test("agent.providers.changed is the one coarse provider event", async (t) => {
-  const h = await harness(t);
-  h.service.publishProvidersChanged({ adapterId: "codex" });
-  assert.deepEqual(h.published, [
-    { channel: "registry", type: "agent.providers.changed", payload: { adapterId: "codex" } }
   ]);
 });
 

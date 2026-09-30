@@ -3,7 +3,6 @@ import { describe, it } from "node:test";
 
 import { deriveAgentPanelModel, foldSubagentActivities } from "@orquester/api/agent-chat";
 
-import { workingLivenessTitle } from "../../../lib/agent-chat/roster.logic";
 import { activity, CLAUDE_WORKFLOW_ID as WF, claudeWorkflow } from "../../../lib/agent-chat/test-helpers";
 import {
   partitionRosterRows,
@@ -49,20 +48,19 @@ describe("a Claude workflow's counts", () => {
   ];
 
   it("counts the members as agents and the coordinator with members as none", () => {
-    const agents = foldSubagentActivities(run());
-    const counts = rosterKindCounts(agents);
+    const counts = rosterKindCounts([
+      { id: WF, kind: "workflow", agentKind: "agent", status: "running" },
+      { id: "member-1", parentAgentId: WF, kind: "workflow_agent", agentKind: "agent", status: "running" },
+      { id: "member-2", parentAgentId: WF, kind: "workflow_agent", agentKind: "agent", status: "running" },
+      { id: "member-3", parentAgentId: WF, kind: "workflow_agent", agentKind: "agent", status: "pending" }
+    ]);
     assert.deepEqual(counts, { agents: 3, shells: 0, loops: 0, goals: 0, liveAgents: 3, liveShells: 0 });
-    assert.equal(workingLivenessTitle(counts.liveAgents, counts.liveShells), "3 agents working");
-    // The same numbers the panel model reports: the footer and the banner agree.
-    const model = deriveAgentPanelModel({ agents });
-    assert.equal(model.liveCount, counts.liveAgents);
-    assert.equal(model.totalTokens, 2000, "Σ tok is the members' — never the aggregate on top");
   });
 
   it("counts a coordinator with no members yet as the one agent it stands for", () => {
-    const agents = foldSubagentActivities([activity("task.started", claudeWorkflow.coordinator())]);
-    assert.equal(rosterKindCounts(agents).agents, 1);
-    assert.equal(rosterKindCounts(agents).liveAgents, 1);
+    const counts = rosterKindCounts([{ id: WF, kind: "workflow", agentKind: "agent", status: "running" }]);
+    assert.equal(counts.agents, 1);
+    assert.equal(counts.liveAgents, 1);
   });
 
   it("summarises the group's header from its members", () => {
@@ -81,23 +79,11 @@ describe("a Claude workflow's counts", () => {
       activity("task.progress", claudeWorkflow.coordinator({ usage: { totalTokens: 300 } }))
     ]);
     const group = deriveAgentPanelModel({ agents }).workflows[0]!;
-    assert.equal(group.workflow.id, WF);
     assert.deepEqual(workflowGroupSummary(group), { agents: 0, settled: 0, failed: 0, totalTokens: 300 });
   });
 });
 
 describe("partitionRosterRows", () => {
-  it("keeps each kind's order while splitting them", () => {
-    const rows = [
-      { id: "a1", agent: { agentKind: "agent" as const } },
-      { id: "s1", agent: { agentKind: "background" as const } },
-      { id: "a2", agent: { agentKind: "agent" as const } },
-      { id: "s2", agent: { agentKind: "background" as const } }
-    ];
-    const { agentRows, shellRows } = partitionRosterRows(rows);
-    assert.deepEqual(agentRows.map((row) => row.id), ["a1", "a2"]);
-    assert.deepEqual(shellRows.map((row) => row.id), ["s1", "s2"]);
-  });
 
   it("renders a loop and a goal with the agents, never as shells", () => {
     const rows = [

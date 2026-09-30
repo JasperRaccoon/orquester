@@ -60,7 +60,7 @@ result is written back across the same pieces: same count, same order, every lin
 object. A piece boundary that fell inside a redacted span moves to the span's start, so the piece
 the span ends in carries the replacement, and a piece wholly inside a span is left `""` — the shape
 the CLI gives every block's first `input_json_delta`. A per-line pass cannot see a path the CLI
-split as `"/var/l"` + `"ib/orquester/tm"`: until 2026-09-27 the streamed tool inputs of eight files
+split as `"/var/l"` + `"ib/orquester/tm"`: until 2026-09-27 the streamed tool inputs of eight original capture files
 (`02`, `06`, `07`, `08`, `09`, `14a`, `14b`, `16`) still spelled the home — `09`'s the managed
 account's, its uuid included — while each block's complete `assistant` frame held `~`. That day's
 rewrite changed only those pieces (50 lines); every other line of every file is byte-identical.
@@ -93,7 +93,7 @@ plus `CLAUDE_CODE_AUTO_CONNECT_IDE=0`, `CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL=1`,
 > run on a capture. Hook coverage was obtained instead from a project-level `.claude/settings.json`
 > in the sandbox; see observation **9**.
 
-The 13 retained replay fixtures are listed below. The protocol observations also preserve
+The 15 retained replay fixtures are listed below. The protocol observations also preserve
 excerpts from the permission and question captures that do not need full raw replay files.
 
 | # | File | `Options` beyond the common set | Demonstrates |
@@ -108,11 +108,10 @@ excerpts from the permission and question captures that do not need full raw rep
 | 11 | `11-resume-and-fork.ndjson` | `model:"sonnet"`; then `resume`; then `forkSession()` and `resume`+`resumeSessionAt`+`forkSession:true` | three query lifetimes in one file: two turns, a resume by session id in a **new** `query()`, and the rollback path (both the standalone `forkSession()` helper and the `query()` option form). |
 | 12 | `12-compact.ndjson` | `model:"sonnet"`, 3 turns | `/compact` sent as an ordinary streamed turn: `system/compact_boundary` with `compact_metadata`, and the odd `result` shape a compaction turn produces. |
 | 13 | `13-probe-never-yielding.ndjson` | `persistSession:false`, `abortController`, `settings:{disableAllHooks:true}`, `allowedTools:[]`, `mcpServers:{}`, `strictMcpConfig:true`, `stderr:()=>{}` — **no `includePartialMessages`, no `canUseTool`**, and a prompt generator that never yields | the capability probe. `initializationResult`, `supportedCommands` (43), `supportedModels` (5), `supportedAgents` (5), `mcpServerStatus`, the usage API and `getContextUsage`. **No API call is made, so this one is free to re-capture.** |
-| 14a | `14a-accept-edits-edit.ndjson` | `permissionMode:"acceptEdits"` | a `Write` plus a mutating `Bash` under accept-edits: **zero** `canUseTool` calls. |
 | 15 | `15-rate-limits-and-usage.ndjson` | `model:"haiku"` | the `rate_limit_event` the CLI emits unprompted, plus the two read-only usage APIs mid-session. No quota was deliberately consumed. |
 | 16 | `16-errors.ndjson` | phase A `model:"claude-does-not-exist-9"`; phase B `model:"sonnet"` | an unknown model (a `result` that says `subtype:"success"` while `is_error:true`), and two failing tools (`Bash` exiting 1, `Read` on a missing file). |
 | 17 | `17-workflow.ndjson` (+ `17-workflow.disk/`) | **CLI 2.1.285**, captured 2026-09-30, no `model` (the account default), `perTaskStopAffordance: true` — see observation **24** | a `Workflow` run to its end: the tool's `async_launched` result, `task_started` with `task_type:"local_workflow"`, `task_progress` frames carrying the undeclared `workflow_progress` snapshot (2 phases, 3 agents), `task_updated` + `task_notification`, and the follow-up turn the notification wakes. |
-| 18 | `18-workflow-stop.ndjson` (+ `18-workflow-stop.disk/`) | as 17; the harness calls `query.stopTask(<workflow task id>)` once a snapshot shows an agent started | a run stopped mid-flight: the `stopTask` receipt, then `task_updated {status:"killed"}` and `task_notification {status:"stopped"}` with no `usage`. |
+| 18 | `18-workflow-stop.ndjson` | as 17; the harness calls `query.stopTask(<workflow task id>)` once a snapshot shows an agent started | a run stopped mid-flight: the `stopTask` receipt, then `task_updated {status:"killed"}` and `task_notification {status:"stopped"}` with no `usage`. |
 | 19 | `19-workflow-tools.ndjson` (+ `19-workflow-tools.disk/`) | as 17 | one workflow agent that calls `Read`: its call and result exist only in its transcript file, never on stdout. |
 
 ## What the capture contains, in aggregate
@@ -172,7 +171,7 @@ the approval card count is not the tool count.
 ### 2. `acceptEdits` and `bypassPermissions` both silence `canUseTool` completely — including for Bash
 
 Spec §4.4 maps Accept-edits to `permissionMode: acceptEdits` and expects only *edits* to be
-auto-accepted. In this CLI, `14a-accept-edits-edit.ndjson` runs **both** a `Write` **and**
+auto-accepted. In the original capture 14a (raw file pruned after its replay test was removed), the CLI ran **both** a `Write` **and**
 `Bash {"command":"rm -f scratch-tmp.txt"}` — the exact command that prompts in `default` mode —
 and records `{"note":"finished","canUseToolCalls":0,"mode":"acceptEdits"}`.
 The full-access capture (14b) is the same: `canUseToolCalls: 0`.
@@ -1043,13 +1042,14 @@ still active; an interrupt leaves it active and unevaluated.
 Fixtures 17–19 were captured later than the rest, on **CLI 2.1.285** with the same SDK 0.3.278 and
 Node v20.20.2, in a throwaway git sandbox holding only `a.txt`; the harness was the one described
 above plus `perTaskStopAffordance: true`, and each prompt asked the model to call `Workflow` once
-with a given script. Each `*.disk/<sessionId>/` directory holds what the CLI wrote beside the
-session's transcript, redacted by the same rules: the persisted script
-(`workflows/scripts/<name>-<runId>.js`), the final run snapshot (`workflows/<runId>.json`) and the
-run's transcript directory (`subagents/workflows/<runId>/`: `journal.jsonl`,
-`agent-<agentId>.meta.json`, and `agent-<agentId>.jsonl` **cut to its `user`/`assistant` records**
-— the CLI's context attachments, which carry the account's e-mail, organisation id and whole system
-prompt, were dropped).
+with a given script. The CLI also wrote a persisted script, final run snapshot, journal, agent
+metadata and transcripts beside each session. The retained, redacted disk fixtures are the
+fixture-17 journal and three agent transcripts used by the abandoned-run reader, and the
+fixture-19 final snapshot and agent transcript used by resumed projection. The agent transcripts
+were **cut to their `user`/`assistant` records**; the CLI's context attachments, which carry the
+account's e-mail, organisation id and whole system prompt, were dropped. Unread scripts, metadata,
+snapshots and the fixture-18 disk directory were removed; the corresponding wire observations
+remain in the NDJSON captures and this provenance record.
 
 **a. The tool answers at once.** Its `tool_use_result` is `{status:"async_launched", taskId,
 taskType:"local_workflow", workflowName, runId, summary, transcriptDir, scriptPath}`; `taskId` is the

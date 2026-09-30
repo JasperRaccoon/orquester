@@ -25,12 +25,10 @@ test("schema accepts the two shapes and rejects mixed or empty ones", () => {
   assert.ok(!attachmentInputSchema.safeParse({ path: "/x", base64: "YQ==" }).success);
 });
 
-test("uploads a sandbox file and an inline base64 file with the right meta, returning the host's refs in order", async (t) => {
+test("uploads a sandbox file and literal base64 bytes with the right metadata in order", async (t) => {
   const s = await sandbox(); t.after(() => rm(s.root, { recursive: true, force: true }));
-  const refs = await uploadInlineAttachments(s.api, "c1", [{ path: join(s.ws, "acme", "api", "shot.png") }, { name: "notes.txt", base64: Buffer.from("hello").toString("base64") }]);
-  assert.equal(refs.length, 2);
-  assert.deepEqual(s.api.uploads.map((u) => [u.sessionId, u.meta, u.bytes.toString("latin1").length]), [["c1", { name: "shot.png", type: "image/png" }, 4], ["c1", { name: "notes.txt", type: "text/plain" }, 5]]);
-  assert.equal(refs[0].type, "image"); assert.equal(refs[1].type, "file"); assert.equal(refs[1].name, "notes.txt");
+  await uploadInlineAttachments(s.api, "c1", [{ path: join(s.ws, "acme", "api", "shot.png") }, { name: "notes.txt", base64: "aGVsbG8=" }]);
+  assert.deepEqual(s.api.uploads.map((u) => [u.sessionId, u.meta, u.bytes]), [["c1", { name: "shot.png", type: "image/png" }, Buffer.from([0x89, 0x50, 0x4e, 0x47])], ["c1", { name: "notes.txt", type: "text/plain" }, Buffer.from("hello")]]);
 });
 
 test("refuses more than 8, a path outside the sandbox (incl. a symlink escape), a missing file, bad base64, and oversize", async (t) => {
@@ -55,8 +53,7 @@ test("attachment extensions cannot supply inherited object properties as MIME ty
 test("a relative path resolves against the sandbox root, as read_file's does", async (t) => {
   const s = await sandbox(); t.after(() => rm(s.root, { recursive: true, force: true }));
   await assert.rejects(uploadInlineAttachments(s.api, "c1", [{ path: join("..", "secret.txt") }]), (e: { code: string }) => e.code === "PATH_NOT_ALLOWED");
-  const refs = await uploadInlineAttachments(s.api, "c1", [{ path: join("acme", "api", "shot.png") }]);
-  assert.equal(refs[0].type, "image");
+  await uploadInlineAttachments(s.api, "c1", [{ path: join("acme", "api", "shot.png") }]);
   assert.deepEqual(s.api.uploads.map((u) => [u.meta, u.bytes.length]), [[{ name: "shot.png", type: "image/png" }, 4]]);
 });
 

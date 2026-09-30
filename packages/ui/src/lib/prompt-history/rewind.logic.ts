@@ -99,7 +99,7 @@ const settledCompactionCache = new WeakMap<readonly ThreadItem[], string | null>
  * `thread.state.changed` of any state as a compaction divider. Memoised by
  * array identity, like `history.logic.ts` `hasSettledCompaction`.
  */
-export function latestSettledCompactionAt(items: readonly ThreadItem[]): string | null {
+function latestSettledCompactionAt(items: readonly ThreadItem[]): string | null {
   const cached = settledCompactionCache.get(items);
   if (cached !== undefined) return cached;
   let latest: string | null = null;
@@ -201,11 +201,11 @@ export function rewindBusyReason(input: RewindBusyInput & { isSending: boolean }
 // ---------------------------------------------------------------------------
 
 /** The fold no longer knows the turn: a rewind removed it. */
-export const PROMPT_GONE = "That prompt is no longer in this chat.";
+const PROMPT_GONE = "That prompt is no longer in this chat.";
 /** Known, but more than `revealTurn`'s page cap back, or older than anything the index can page in. */
-export const TURN_TOO_FAR_BACK = "That turn is too far back to bring into the chat from here.";
+const TURN_TOO_FAR_BACK = "That turn is too far back to bring into the chat from here.";
 /** A history page failed on the way. */
-export const TURN_LOAD_FAILED = "Couldn't load that part of the chat's history.";
+const TURN_LOAD_FAILED = "Couldn't load that part of the chat's history.";
 /** The thread's stream is not synchronized (yet, or any more). */
 export const CHAT_NOT_READY = "The chat isn't connected right now — try again in a moment.";
 
@@ -237,10 +237,10 @@ export function revealMissReason(input: {
 // Running one
 // ---------------------------------------------------------------------------
 
-export const REWIND_NOT_OFFERED = "This chat can't rewind to that prompt.";
-export const REWIND_WITHHELD = "This chat can no longer rewind to that prompt.";
+const REWIND_NOT_OFFERED = "This chat can't rewind to that prompt.";
+const REWIND_WITHHELD = "This chat can no longer rewind to that prompt.";
 /** The turn came on screen, but not the prompt's own row: no count the rows vouch for. */
-export const REWIND_NOT_RENDERED = "Couldn't find that prompt in the chat to rewind to it.";
+const REWIND_NOT_RENDERED = "Couldn't find that prompt in the chat to rewind to it.";
 
 export type RewindOutcome = { ok: true } | { ok: false; reason: string };
 

@@ -33,7 +33,6 @@ const PARENT_TURN = "parent-turn";
 const CHILD_TURN = "child-turn";
 /** The same raw id in BOTH threads: the collision the child's namespace prevents. */
 const CALL = "call_1";
-const CHILD_CALL = `codex-child:${CHILD}:${CALL}`;
 
 function make(): CodexNormaliser {
   return new CodexNormaliser({ usage: new CodexUsageTracker(), ownThreadId: () => PARENT });
@@ -178,6 +177,9 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
     launchChild(n);
 
     const started = itemStarted(n, CHILD, CHILD_TURN, commandItem(CALL, "inProgress", null));
+    const childCall = started.find((draft) => draft.type === "item.started")!.itemId;
+    assert.equal(typeof childCall, "string");
+    assert.notEqual(childCall, CALL, "the child cannot collide with the parent's raw item id");
     const chunks = [
       ...outputDelta(n, CHILD, CHILD_TURN, CALL, "ok 1\n"),
       ...outputDelta(n, CHILD, CHILD_TURN, CALL, "ok 2\n")
@@ -185,10 +187,10 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
     const completed = itemCompleted(n, CHILD, CHILD_TURN, commandItem(CALL, "completed", "ok 1\nok 2\n"));
 
     assert.deepEqual(callRows([...started, ...chunks, ...completed]), [
-      ["item.started", CHILD_CALL, CHILD, PARENT_TURN],
-      ["content.delta", CHILD_CALL, CHILD, PARENT_TURN],
-      ["content.delta", CHILD_CALL, CHILD, PARENT_TURN],
-      ["item.completed", CHILD_CALL, CHILD, PARENT_TURN]
+      ["item.started", childCall, CHILD, PARENT_TURN],
+      ["content.delta", childCall, CHILD, PARENT_TURN],
+      ["content.delta", childCall, CHILD, PARENT_TURN],
+      ["item.completed", childCall, CHILD, PARENT_TURN]
     ]);
     for (const draft of [...started, ...completed].filter((d) => d.type.startsWith("item."))) {
       assert.equal(payloadOf(draft).agentId, CHILD, `${draft.type}: the owner rides the payload too`);
@@ -204,23 +206,16 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
     for (const draft of [...started, ...chunks, ...completed].filter((d) => d.type !== "task.progress")) {
       assert.deepEqual(draft.providerRefs, { providerTurnId: CHILD_TURN, providerItemId: CALL });
     }
-    // The roster's tick stays: what the agent is doing, and its last tool —
-    // never in `description`, which ingestion makes the agent's title.
-    const ticks = [...started, ...completed].filter((draft) => draft.type === "task.progress");
-    assert.equal(ticks.length, 2);
-    for (const tick of ticks) {
-      assert.equal(tick.agentId, CHILD);
-      assert.equal(payloadOf(tick).lastToolName, "Shell");
-      assert.notEqual(payloadOf(tick).description, "pnpm test");
-    }
-    assert.equal(payloadOf(ticks[0]!).summary, "pnpm test");
   });
 
   it("the parent's own item under the same raw id stays the parent's: its id, no owner", () => {
     const n = make();
     turnStarted(n, PARENT, PARENT_TURN);
     launchChild(n);
-    itemStarted(n, CHILD, CHILD_TURN, commandItem(CALL, "inProgress", null));
+    const childStart = itemStarted(n, CHILD, CHILD_TURN, commandItem(CALL, "inProgress", null));
+    const childCall = childStart.find((draft) => draft.type === "item.started")!.itemId;
+    assert.equal(typeof childCall, "string");
+    assert.notEqual(childCall, CALL);
 
     const own = [
       ...itemStarted(n, PARENT, PARENT_TURN, commandItem(CALL, "inProgress", null)),
@@ -236,20 +231,23 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
       assert.equal("agentId" in payloadOf(draft), false);
     }
     // The parent's completion closed the parent's call, never the child's.
-    assert.deepEqual(n.openItemIds(), [CHILD_CALL]);
+    const childEnd = turnCompleted(n, CHILD, CHILD_TURN);
+    assert.deepEqual(childEnd.filter((draft) => draft.type === "item.completed").map((draft) => draft.itemId), [childCall]);
   });
 
   it("every row of a call rides the parent turn it started in; a call started between parent turns has none", () => {
     const n = make();
     turnStarted(n, PARENT, PARENT_TURN);
     launchChild(n);
-    itemStarted(n, CHILD, CHILD_TURN, commandItem("call_a", "inProgress", null));
+    const first = itemStarted(n, CHILD, CHILD_TURN, commandItem("call_a", "inProgress", null));
+    const firstId = first.find((draft) => draft.type === "item.started")!.itemId;
+    assert.equal(typeof firstId, "string");
 
     // The parent's turn settles while the child works on (§3.1: background
     // work outlives the turn): it closes the parent's calls, not the child's.
     const settled = turnCompleted(n, PARENT, PARENT_TURN);
     assert.equal(
-      settled.some((draft) => draft.itemId === `codex-child:${CHILD}:call_a`),
+      settled.some((draft) => draft.itemId === firstId),
       false,
       "a child's call is the child's to end"
     );
@@ -260,11 +258,14 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
       ...itemCompleted(n, CHILD, CHILD_TURN, commandItem("call_a", "completed", "late\n")),
       ...itemCompleted(n, CHILD, CHILD_TURN, commandItem("call_b", "completed", "b\n"))
     ];
+    const secondId = late.find((draft) => draft.type === "item.started")!.itemId;
+    assert.equal(typeof secondId, "string");
+    assert.notEqual(secondId, firstId);
     assert.deepEqual(callRows(late), [
-      ["content.delta", `codex-child:${CHILD}:call_a`, CHILD, PARENT_TURN],
-      ["item.started", `codex-child:${CHILD}:call_b`, CHILD, undefined],
-      ["item.completed", `codex-child:${CHILD}:call_a`, CHILD, PARENT_TURN],
-      ["item.completed", `codex-child:${CHILD}:call_b`, CHILD, undefined]
+      ["content.delta", firstId, CHILD, PARENT_TURN],
+      ["item.started", secondId, CHILD, undefined],
+      ["item.completed", firstId, CHILD, PARENT_TURN],
+      ["item.completed", secondId, CHILD, undefined]
     ]);
   });
 
@@ -272,7 +273,9 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
     const n = make();
     turnStarted(n, PARENT, PARENT_TURN);
     launchChild(n);
-    itemStarted(n, CHILD, CHILD_TURN, commandItem("call_a", "inProgress", null));
+    const first = itemStarted(n, CHILD, CHILD_TURN, commandItem("call_a", "inProgress", null));
+    const firstId = first.find((draft) => draft.type === "item.started")!.itemId;
+    assert.equal(typeof firstId, "string");
 
     // `turn/interrupt` abandons an in-progress item with no `item/completed`
     // of its own (fixtures README observation 5) — a child's as well.
@@ -280,7 +283,7 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
     assert.deepEqual(
       interrupted.map((draft) => [draft.type, draft.itemId, draft.agentId, draft.turnId]),
       [
-        ["item.completed", `codex-child:${CHILD}:call_a`, CHILD, PARENT_TURN],
+        ["item.completed", firstId, CHILD, PARENT_TURN],
         ["task.updated", undefined, CHILD, undefined]
       ]
     );
@@ -291,30 +294,33 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
     });
 
     turnStarted(n, CHILD, "child-turn-2");
-    itemStarted(n, CHILD, "child-turn-2", commandItem("call_b", "inProgress", null));
+    const second = itemStarted(n, CHILD, "child-turn-2", commandItem("call_b", "inProgress", null));
+    const secondId = second.find((draft) => draft.type === "item.started")!.itemId;
+    assert.equal(typeof secondId, "string");
     const closedThread: CodexProtocol.v2.ThreadClosedNotification = { threadId: CHILD };
     const closed = n.notification("thread/closed", closedThread);
     assert.deepEqual(
       closed.map((draft) => [draft.type, draft.itemId, draft.agentId]),
       [
-        ["item.completed", `codex-child:${CHILD}:call_b`, CHILD],
+        ["item.completed", secondId, CHILD],
         ["task.completed", undefined, CHILD]
       ]
     );
     assert.equal(payloadOf(closed[0]).status, "failed");
-    assert.deepEqual(n.openItemIds(), []);
   });
 
   it("a child's turn that COMPLETED closes a call it left open as completed, as the parent's rule does", () => {
     const n = make();
     turnStarted(n, PARENT, PARENT_TURN);
     launchChild(n);
-    itemStarted(n, CHILD, CHILD_TURN, commandItem("call_a", "inProgress", null));
+    const first = itemStarted(n, CHILD, CHILD_TURN, commandItem("call_a", "inProgress", null));
+    const firstId = first.find((draft) => draft.type === "item.started")!.itemId;
+    assert.equal(typeof firstId, "string");
     const settled = turnCompleted(n, CHILD, CHILD_TURN, "completed");
     assert.deepEqual(
       settled.map((draft) => [draft.type, draft.itemId, draft.agentId]),
       [
-        ["item.completed", `codex-child:${CHILD}:call_a`, CHILD],
+        ["item.completed", firstId, CHILD],
         ["task.updated", undefined, CHILD]
       ]
     );
@@ -326,9 +332,10 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
     const n = make();
     turnStarted(n, PARENT, PARENT_TURN);
     launchChild(n);
-    itemStarted(n, CHILD, CHILD_TURN, mcpItem("call_m", "inProgress"));
+    const started = itemStarted(n, CHILD, CHILD_TURN, mcpItem("call_m", "inProgress"));
+    const id = started.find((draft) => draft.type === "item.started")!.itemId;
+    assert.equal(typeof id, "string");
     const progress = mcpProgress(n, "call_m", "indexing 3/9");
-    const id = `codex-child:${CHILD}:call_m`;
     assert.deepEqual(callRows(progress), [["tool.progress", id, CHILD, PARENT_TURN]]);
     assert.deepEqual(payloadOf(progress[0]), {
       toolUseId: id,
@@ -367,7 +374,8 @@ describe("a collab child's calls are its own rows (Task 3)", () => {
     };
     const chunk = n.notification("item/fileChange/outputDelta", output);
 
-    const id = `codex-child:${CHILD}:call_f`;
+    const id = started.find((draft) => draft.type === "item.started")!.itemId;
+    assert.equal(typeof id, "string");
     assert.deepEqual(callRows([...started, ...update, ...chunk]), [
       ["item.started", id, CHILD, PARENT_TURN],
       ["item.updated", id, CHILD, PARENT_TURN],

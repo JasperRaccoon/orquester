@@ -31,7 +31,7 @@ import { WorkflowStateStore } from "../state-store.ts";
 import type { GitRemoteReader } from "../triggers/git-poller.ts";
 import { silentLogger } from "./fakes.ts";
 
-export const quietStoreLogger = { warn: () => undefined, error: () => undefined };
+const quietStoreLogger = { warn: () => undefined, error: () => undefined };
 
 /** A temp appdir: `<root>/daemon`, `<root>/workspaces/<ws>/<project>` for each project named. */
 export async function tempAppdir(projects: string[] = ["acme/app"]): Promise<{ root: string; workspacesDir: string; cleanup(): Promise<void> }> {

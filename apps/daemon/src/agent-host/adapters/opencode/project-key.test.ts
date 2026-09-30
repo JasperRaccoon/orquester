@@ -1,69 +1,9 @@
-/**
- * The pool key (spec §3.2 — "one `opencode serve` **per project**, shared by
- * its threads").
- *
- * R4 #6: the key was the thread's own `cwd`, so a thread at `/p` and a thread
- * at `/p/packages/ui` got two servers, two ports and two ~4.3 MB catalogue
- * probes, while the code comment claimed the opposite.
- *
- * `projectPath` is the host's field to add (the fix-wave arbitration assigns
- * it to W1). These tests pin the behaviour **before and after** it exists, so
- * the adapter is correct either way and needs no edit when the seam lands.
- */
+/** A shared OpenCode server cannot honor a thread-specific account home. */
 
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { StartSessionInput } from "../../adapter.ts";
-import { createOpenCodeAdapter, projectDirFor } from "./index.ts";
-
-function input(over: Partial<StartSessionInput> & Record<string, unknown>): StartSessionInput {
-  return {
-    threadId: "t",
-    cwd: "/repo",
-    home: { kind: "system", path: "/home/u" },
-    modelSelection: { model: "openrouter/x" },
-    runtimeMode: "approval-required",
-    ...over
-  } as StartSessionInput;
-}
-
-test("with no projectPath, the key falls back to the thread's cwd", () => {
-  // The pre-seam world: identical to the old behaviour, so nothing regresses
-  // while W1's field is still in flight.
-  assert.equal(projectDirFor(input({ cwd: "/repo" })), "/repo");
-});
-
-test("the key is RESOLVED, because the server never validates a directory", () => {
-  // Fixtures README observation 21: a directory that does not exist is not
-  // rejected — it silently serves a different instance scope. Two spellings of
-  // one path must therefore not produce two servers.
-  assert.equal(
-    projectDirFor(input({ cwd: "/repo/packages/ui", projectPath: "/repo/packages/../packages" })),
-    "/repo/packages"
-  );
-  assert.equal(projectDirFor(input({ cwd: "relative/dir" })).startsWith("/"), true);
-});
-
-test("a blank or non-string projectPath is ignored, not trusted", () => {
-  assert.equal(projectDirFor(input({ cwd: "/repo", projectPath: "   " })), "/repo");
-  assert.equal(projectDirFor(input({ cwd: "/repo", projectPath: "" })), "/repo");
-  // The type says `string | undefined`, but the value originates in persisted
-  // `meta.json` and crosses a JSON boundary, so the runtime guard stays and is
-  // tested past the type. Cast, rather than weaken the guard.
-  assert.equal(
-    projectDirFor(input({ cwd: "/repo", projectPath: 42 as unknown as string })),
-    "/repo"
-  );
-  assert.equal(
-    projectDirFor(input({ cwd: "/repo", projectPath: null as unknown as string })),
-    "/repo"
-  );
-});
-
-// ---------------------------------------------------------------------------
-// R4 #21 — the account home a shared server cannot honour
-// ---------------------------------------------------------------------------
+import { createOpenCodeAdapter } from "./index.ts";
 
 test("a non-system account home is REFUSED, never silently dropped", async () => {
   // The server is shared by a project's threads and `OPENCODE_DATA` belongs to

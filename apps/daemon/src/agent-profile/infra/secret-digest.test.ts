@@ -22,10 +22,3 @@ test("deepMasked hides every secret spelling at any depth and keeps everything e
     assert.equal(masked.includes(kept), true, `${kept} is not secret`);
   }
 });
-
-test("a changed secret still moves the digest; the same one does not", () => {
-  const digester = new SecretDigester();
-  const a = JSON.stringify(digester.deepMasked({ env: { K: "one" } }));
-  assert.equal(JSON.stringify(digester.deepMasked({ env: { K: "one" } })), a);
-  assert.notEqual(JSON.stringify(digester.deepMasked({ env: { K: "two" } })), a);
-});

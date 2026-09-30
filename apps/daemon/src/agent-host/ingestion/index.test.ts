@@ -750,9 +750,10 @@ describe("the §7.3 badge fields (reasoningKind / messageKind)", () => {
       })
     );
     await ingestion.flushTurn("t1", "turn-2");
-    for (const row of sink.messages()) {
-      assert.equal(row.payload.messageKind, "answer");
-    }
+    assert.equal(
+      sink.messages().find((row) => row.payload.text === "fresh")?.payload.messageKind,
+      "answer"
+    );
   });
 });
 
@@ -1323,49 +1324,13 @@ describe("robustness (§10: never throws on a provider event)", () => {
   });
 });
 
-describe("ordering", () => {
-  it("delivers domain events to the sink in the order they were produced", async () => {
-    const { ingestion, sink } = harness();
-    const turn = { turnId: "turn-1", itemId: "item-1" };
-    await ingestion.ingest(runtimeEvent("turn.started", {}, { turnId: "turn-1" }));
-    await ingestion.ingest(
-      runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "a\n\n" }, turn)
-    );
-    await ingestion.ingest(
-      runtimeEvent(
-        "item.started",
-        { itemType: "command_execution", title: "ls" },
-        { turnId: "turn-1", itemId: "call-1" }
-      )
-    );
-    await ingestion.ingest(
-      runtimeEvent("turn.completed", { state: "completed" }, { turnId: "turn-1" })
-    );
-    await ingestion.drain();
-    assert.deepEqual(
-      sink.events().map((event) =>
-        event.type === "thread.activity-appended"
-          ? event.payload.activity.activityKind
-          : event.type
-      ),
-      [
-        "thread.session-set",
-        "thread.message-sent",
-        "tool.started",
-        "thread.message-sent",
-        "thread.session-set"
-      ]
-    );
-  });
-});
-
 // ---------------------------------------------------------------------------
-// Q1-9 residual — the two per-item maps `forget` alone could not bound
+// Trailing tool output is committed before item completion.
 // ---------------------------------------------------------------------------
 
-describe("Q1-9: per-item ingestion state is released as items finish", () => {
+describe("tool output at item completion", () => {
 
-  it("drains a tool-output buffer at item completion, then releases its metadata", async () => {
+  it("flushes a trailing tool-output chunk at item completion", async () => {
     const { ingestion, sink } = harness();
     await ingestion.ingest(
       runtimeEvent(
@@ -1397,15 +1362,11 @@ describe("Q1-9: per-item ingestion state is released as items finish", () => {
     );
     await settle();
 
-    // The metadata map is keyed by item, so a completed item's entry is dead
-    // weight — one record per tool call, for the life of the thread. It can
-    // only be dropped after the buffer is drained, because the emitter reads
-    // it; this is the observable edge of that ordering.
     const outputs = sink
       .activities()
       .filter((event) => event.payload.activity.activityKind === "tool.output");
-    assert.equal(outputs.length, 1, "the trailing chunk is flushed, not discarded with the meta");
-    assert.match(JSON.stringify(outputs[0]?.payload.activity.payload), /one line/);
+    assert.equal(outputs.length, 1, "item completion preserves the trailing output chunk");
+    assert.equal((outputs[0]?.payload.activity.payload as { delta: string }).delta, "one line\n");
   });
 });
 

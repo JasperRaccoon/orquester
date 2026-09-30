@@ -58,7 +58,7 @@ export function newSecretRow(key = "", value = ""): SecretRow {
 /** A new row with nothing typed in it is not an entry (the empty row the "+ Add" button leaves). */
 const blankRow = (row: SecretRow): boolean => row.state === "new" && row.key.trim() === "" && row.value === "";
 
-export function secretDrafts(rows: readonly SecretRow[]): SecretEntryDraft[] {
+function secretDrafts(rows: readonly SecretRow[]): SecretEntryDraft[] {
   const out: SecretEntryDraft[] = [];
   for (const row of rows) {
     if (blankRow(row)) continue;
@@ -75,7 +75,7 @@ const HEADER_KEY = /^[!#$%&'*+.^_`|~0-9A-Za-z-]+$/;
 export type SecretRowsKind = "env" | "headers";
 
 /** The first problem with a row, by row id. */
-export function validateSecretRows(kind: SecretRowsKind, rows: readonly SecretRow[]): Record<string, string> {
+function validateSecretRows(kind: SecretRowsKind, rows: readonly SecretRow[]): Record<string, string> {
   const errors: Record<string, string> = {};
   const seen = new Set<string>();
   for (const row of rows) {
@@ -110,7 +110,7 @@ export function validateSecretRows(kind: SecretRowsKind, rows: readonly SecretRo
  * backslash-newline joins lines. An unterminated quote runs to the end. No
  * expansion of any kind happens — `$HOME` stays `$HOME`.
  */
-export function splitCommandLine(line: string): string[] {
+function splitCommandLine(line: string): string[] {
   const words: string[] = [];
   let word = "";
   let inWord = false;
@@ -290,7 +290,7 @@ function parseNumber(text: string): number | null {
  * as it is; each shown field coerced to its type — a blank one left out, a
  * switch sent when on or when it was on disk.
  */
-export function advancedDraft(
+function advancedDraft(
   agent: AgentProfileAgentId,
   values: Record<string, AdvancedValue>,
   origin: McpFormOrigin

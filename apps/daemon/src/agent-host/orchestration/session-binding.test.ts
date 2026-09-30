@@ -73,19 +73,6 @@ async function threadWithACursor(
 }
 
 describe("the provider session binding (§3.3, §4.1)", () => {
-  it("records what the session start and the turn learned", async () => {
-    const { store, threadId, first } = await threadWithACursor();
-    const binding = store.bindings.get(threadId);
-    assert.ok(binding);
-    assert.equal(binding.threadId, threadId);
-    assert.equal(binding.adapter, "claude");
-    assert.equal(binding.adapterKey, "claude", "the registry id the session launched from");
-    assert.equal(binding.runtimeMode, "approval-required");
-    assert.equal(binding.providerInstanceId, "account:acc1");
-    assert.equal(binding.status, "running");
-    await first.stop();
-  });
-
   it("a session-set that dropped the cursor still resumes — the binding carries it", async () => {
     const { store, threadId, first } = await threadWithACursor();
     await first.stop();

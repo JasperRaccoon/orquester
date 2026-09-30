@@ -57,7 +57,7 @@ function isRuntimeMode(value: unknown): value is AgentRuntimeMode {
 }
 
 /** Field-wise validation with a per-field fallback; never throws. */
-export function sanitizeChatPrefs(raw: unknown): ChatPrefs {
+function sanitizeChatPrefs(raw: unknown): ChatPrefs {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return DEFAULT_CHAT_PREFS;
   }

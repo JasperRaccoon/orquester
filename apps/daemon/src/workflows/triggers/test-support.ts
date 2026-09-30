@@ -100,11 +100,7 @@ export function memoryState(): WorkflowStateStore {
   return store;
 }
 
-export function recordingLogger(): WorkflowLogger & { lines: string[] } {
-  const lines: string[] = [];
-  const at = (level: string) => (msg: string, meta?: Record<string, unknown>) => void lines.push(`${level}: ${msg}${meta ? ` ${JSON.stringify(meta)}` : ""}`);
-  return { lines, debug: at("debug"), info: at("info"), warn: at("warn"), error: at("error") };
-}
+export const silentLogger: WorkflowLogger = { debug() {}, info() {}, warn() {}, error() {} };
 
 /**
  * Moves the manual clock forward by `ms`, one due timer at a time, waiting for the async work each

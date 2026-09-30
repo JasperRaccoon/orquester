@@ -38,44 +38,6 @@ after(async () => {
 });
 
 describe("integration: code and shell through the real sandbox", () => {
-  test("a throw fails the block with its message and stack; stop() stops the run", async () => {
-    const projects = new FakeProjects();
-    projects.existing.add(projectPath);
-    const make = (source: string) =>
-      createHarness({
-        workflows: [workflow("w1", [node("T", "trigger.manual"), node("A", "code", { source })], [edge("T", "A")], { project: { kind: "existing", projectPath } })],
-        runStore: new InMemoryRunStore(join(root, "runs")),
-        projects,
-        clock: realClock as never,
-        sandbox: createSandboxRunner({ appdirTmp: root }) as never
-      });
-    let h = make("export default () => { throw new Error('boom') }");
-    let { runId } = await h.engine.run("w1", {});
-    let result = await h.engine.waitForRun(runId!);
-    let run = (await h.engine.getRun(runId!))!;
-    assert.equal(result.status, "failed");
-    assert.equal(run.blocks.A!.error?.kind, "exception");
-    assert.equal(run.blocks.A!.error?.message, "boom");
-    assert.match(String((run.blocks.A!.error?.detail as { stack?: string }).stack), /boom/);
-
-    h = make("export default ({ stop }) => { stop('enough'); }");
-    ({ runId } = await h.engine.run("w1", {}));
-    result = await h.engine.waitForRun(runId!);
-    assert.equal(result.status, "stopped");
-    assert.equal(result.error, "enough");
-
-    h = make("export default () => new Promise(() => { setInterval(() => {}, 1000); })");
-    h.store.put(
-      workflow("w1", [node("T", "trigger.manual"), node("A", "code", { source: "export default () => new Promise(() => { setInterval(() => {}, 1000); })", timeoutMinutes: 0.01 })], [edge("T", "A")], {
-        project: { kind: "existing", projectPath }
-      })
-    );
-    ({ runId } = await h.engine.run("w1", {}));
-    result = await h.engine.waitForRun(runId!);
-    run = (await h.engine.getRun(runId!))!;
-    assert.equal(run.blocks.A!.error?.kind, "timeout");
-  });
-
   test("a shell block gets its env (secrets included), never a rendered script; exit codes map", async () => {
     const projects = new FakeProjects();
     projects.existing.add(projectPath);

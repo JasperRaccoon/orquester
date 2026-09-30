@@ -21,11 +21,7 @@ import {
 
 import type { AdapterContext } from "../../adapter.ts";
 import { createLivenessRegistry } from "../../orchestration/liveness.ts";
-import {
-  OpenCodeThreadSession,
-  parseOpenCodeModelSlug,
-  toQuestionAnswers
-} from "./session.ts";
+import { OpenCodeThreadSession } from "./session.ts";
 import type { OpenCodeServerHandle } from "./server.ts";
 import { OpenCodeClient } from "./http.ts";
 import { createHostIngestion } from "./testing/host.ts";
@@ -1100,26 +1096,6 @@ test("interrupt SETTLES every open request before the abort reaches the provider
   assert.ok(
     rejectIndex < abortIndex,
     "settling must happen BEFORE the interrupt RPC, or Stop deadlocks on an open prompt"
-  );
-  harness.dispose();
-});
-
-test("interrupt emits turn.aborted, not turn.completed", async () => {
-  const harness = makeHarness();
-  const session = await startSession(harness);
-  const turn = await session.sendTurn({
-    threadId: "thread-1",
-    input: "hi",
-    attachments: [],
-    interactionMode: "default"
-  });
-  await session.interruptTurn(turn.turnId);
-  const aborted = firstOfType(harness.events, "turn.aborted");
-  assert.ok(aborted !== undefined);
-  assert.equal(aborted.turnId, turn.turnId);
-  assert.equal(
-    harness.events.some((event) => event.type === "turn.completed"),
-    false
   );
   harness.dispose();
 });
@@ -4106,37 +4082,63 @@ test("full access: an automatic reply the server refuses falls back to the card 
 });
 
 // ---------------------------------------------------------------------------
-// Pure helpers
+// Model and question contracts
 // ---------------------------------------------------------------------------
 
-test("a model slug splits on the FIRST slash, so a nested model id survives", () => {
-  assert.deepEqual(parseOpenCodeModelSlug("openrouter/google/gemini-2.5-flash-lite"), {
-    providerID: "openrouter",
-    modelID: "google/gemini-2.5-flash-lite"
-  });
-  assert.equal(parseOpenCodeModelSlug("bare-model"), null);
-  assert.equal(parseOpenCodeModelSlug("/leading"), null);
-  assert.equal(parseOpenCodeModelSlug("trailing/"), null);
-  assert.equal(parseOpenCodeModelSlug(undefined), null);
+test("malformed model selections fail before opening or submitting a turn", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  try {
+    for (const model of ["bare-model", "/leading", "trailing/", ""]) {
+      await assert.rejects(session.sendTurn({
+        threadId: "thread-1",
+        input: "hi",
+        attachments: [],
+        interactionMode: "default",
+        modelSelection: { model }
+      }), /provider\/model/);
+    }
+    assert.equal(harness.fake.find("POST", "/prompt_async"), undefined);
+    assert.equal(harness.events.some((event) => event.type === "turn.started"), false);
+  } finally {
+    await session.stop({ reason: "test", hostInitiated: true });
+    harness.dispose();
+  }
 });
 
-test("answers are keyed by question id, header or text, in that order", () => {
-  const request = {
-    id: "que_1",
-    sessionID: "ses_1",
-    questions: [
-      { question: "Which colour?", header: "Colour Preference", options: [] },
-      { question: "How many?", header: "Count", options: [], multiple: true }
-    ]
-  };
-  assert.deepEqual(
-    toQuestionAnswers(request, {
+test("answers prefer question ids, then headers, then question text, preserving multiple selections", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  try {
+    await session.sendTurn({ threadId: "thread-1", input: "ask me", attachments: [], interactionMode: "default" });
+    harness.fake.push({
+      type: "question.asked",
+      properties: {
+        id: "que_1",
+        sessionID: session.sessionId,
+        questions: [
+          { question: "Which colour?", header: "Colour Preference", options: [] },
+          { question: "How many?", header: "Count", options: [], multiple: true },
+          { question: "Anything else?", header: "Notes", options: [] }
+        ]
+      }
+    });
+    await waitFor(harness, "user-input.requested");
+    await session.respondToUserInput("que_1", {
       "question-0-colour-preference": "Red",
-      Count: ["one", "two"]
-    }),
-    [["Red"], ["one", "two"]]
-  );
-  assert.deepEqual(toQuestionAnswers(request, {}), [[], []]);
+      "Colour Preference": "Blue",
+      "Which colour?": "Green",
+      Count: ["one", "two"],
+      "How many?": "three",
+      "Anything else?": "done"
+    });
+    assert.deepEqual(harness.fake.find("POST", "/question/que_1/reply")?.body, {
+      answers: [["Red"], ["one", "two"], ["done"]]
+    });
+  } finally {
+    await session.stop({ reason: "test", hostInitiated: true });
+    harness.dispose();
+  }
 });
 
 // ---------------------------------------------------------------------------

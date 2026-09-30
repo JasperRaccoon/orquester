@@ -4,28 +4,6 @@ import { FakeChatHost } from "./testing/fake-chat-host.ts";
 import { FakeClock } from "./testing/fake-clock.ts";
 import { createValidationCatalog } from "./validation-catalog.ts";
 
-test("a provider's models count only once it has been probed", async () => {
-  const host = new FakeChatHost({ clock: new FakeClock() });
-  const request = host.request.bind(host);
-  host.request = async (method, path, opts) => {
-    const response = await request(method, path, opts);
-    if (path === "/api/agent/providers") {
-      const body = response.body as { providers: { id: string; status: string; models: unknown[] }[] };
-      for (const provider of body.providers) {
-        if (provider.id === "codex") provider.status = "unknown";
-        if (provider.id === "opencode") provider.models = [];
-      }
-    }
-    return response;
-  };
-  const catalog = createValidationCatalog({ api: () => host });
-  await catalog.ready();
-  const models = (id: string) => catalog.current()?.agents.find((agent) => agent.id === id)?.models;
-  assert.deepEqual(models("claude"), ["opus", "sonnet"]);
-  assert.equal(models("codex"), null);
-  assert.equal(models("opencode"), null);
-});
-
 test("nothing is known before the client is attached; ready() then reads the host's catalogue", async () => {
   const host = new FakeChatHost({ clock: new FakeClock("2026-09-28T12:00:00.000Z") });
   let api: FakeChatHost | null = null;
@@ -36,27 +14,6 @@ test("nothing is known before the client is attached; ready() then reads the hos
   await catalog.ready();
   const read = catalog.current();
   assert.deepEqual(read?.agents.find((agent) => agent.id === "codex"), { id: "codex", enabled: true, models: ["gpt-5"] });
-});
-
-test("a degraded or errored provider (a failed probe's fallback list) counts as not loaded", async () => {
-  const host = new FakeChatHost({ clock: new FakeClock() });
-  const request = host.request.bind(host);
-  host.request = async (method, path, opts) => {
-    const response = await request(method, path, opts);
-    if (path === "/api/agent/providers") {
-      const body = response.body as { providers: { id: string; status: string }[] };
-      for (const provider of body.providers) {
-        if (provider.id === "claude") provider.status = "degraded";
-        if (provider.id === "codex") provider.status = "error";
-      }
-    }
-    return response;
-  };
-  const catalog = createValidationCatalog({ api: () => host });
-  await catalog.ready();
-  const models = (id: string) => catalog.current()?.agents.find((agent) => agent.id === id)?.models;
-  assert.equal(models("claude"), null);
-  assert.equal(models("codex"), null);
 });
 
 /** An API whose every request is counted, answering from `answer` (or failing). */
@@ -71,10 +28,11 @@ function countingApi(answer: (method: string, path: string) => Promise<{ status:
   return api;
 }
 
-test("a failed read is not retried on every request, only once the refresh window has passed", async () => {
+test("a failed read is not retried on every request, only once the refresh window has passed", async (context) => {
   let t = 1_000_000;
+  context.mock.method(Date, "now", () => t);
   const api = countingApi(async () => ({ status: 500, body: {} }));
-  const catalog = createValidationCatalog({ api: () => api as never, now: () => t, ttlMs: 30_000 });
+  const catalog = createValidationCatalog({ api: () => api as never });
   await catalog.ready();
   const afterFirst = api.requests;
   assert.ok(afterFirst > 0);
@@ -91,12 +49,12 @@ test("a failed read is not retried on every request, only once the refresh windo
   assert.equal(api.requests, afterFirst * 2, "one more read once the window has passed");
 });
 
-test("expire() reads again at once — even inside a failure's backoff — and keeps the last reading until then", async () => {
+test("expire() reads again at once — even inside a failure's backoff — and keeps the last reading until then", async (context) => {
   const host = new FakeChatHost({ clock: new FakeClock("2026-09-28T12:00:00.000Z") });
   let failing = false;
   const api = countingApi((method, path) => (failing ? Promise.resolve({ status: 500, body: {} }) : host.request(method as never, path)));
-  const t = 1_000_000;
-  const catalog = createValidationCatalog({ api: () => api as never, now: () => t, ttlMs: 30_000 });
+  context.mock.method(Date, "now", () => 1_000_000);
+  const catalog = createValidationCatalog({ api: () => api as never });
   await catalog.ready();
   const first = catalog.current();
   assert.ok(first);

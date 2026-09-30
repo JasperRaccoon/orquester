@@ -24,11 +24,11 @@ import { redactUrlUserinfo } from "../../workflows/git-remote/remote-url.ts";
 import { profileErrors } from "../errors.ts";
 
 /** Per-stream output cap. */
-export const CLI_OUTPUT_MAX_BYTES = 4 * 1024 * 1024;
+const CLI_OUTPUT_MAX_BYTES = 4 * 1024 * 1024;
 /** Grace between SIGTERM and SIGKILL after a deadline. */
-export const CLI_KILL_GRACE_MS = 2000;
+const CLI_KILL_GRACE_MS = 2000;
 /** Longest redacted detail an `AGENT_CLI_FAILED` carries. */
-export const CLI_ERROR_DETAIL_MAX = 2000;
+const CLI_ERROR_DETAIL_MAX = 2000;
 
 /** Inherited from the daemon when set: locale, temp dir, and what a CLI needs to reach the network. */
 const PASSTHROUGH_ENV = [

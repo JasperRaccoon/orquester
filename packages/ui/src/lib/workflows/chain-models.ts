@@ -43,7 +43,7 @@ export function editorAgentCatalog(
 }
 
 /** A slug's family: the slug without a trailing `[…]` variant ("opus[1m]" → "opus"). */
-export function modelFamily(slug: string): string {
+function modelFamily(slug: string): string {
   return slug.replace(/\[[^\]]*\]$/, "");
 }
 
@@ -54,7 +54,7 @@ export function modelFamily(slug: string): string {
  * Legacy models are passed over — a new chain should not start on one — so a
  * listed legacy slug gives way to the default. No models: unchanged.
  */
-export function resolveChainModel(model: string, models: readonly ProviderModel[]): string {
+function resolveChainModel(model: string, models: readonly ProviderModel[]): string {
   const current = models.filter((candidate) => candidate.isLegacy !== true);
   if (current.some((candidate) => candidate.slug === model)) return model;
   const family = modelFamily(model);
@@ -74,7 +74,7 @@ function loadedModels(providers: readonly ProviderSnapshot[], agent: string): re
 }
 
 /** Each entry of an agent chain with its model resolved (`resolveChainModel`); other fields kept. */
-export function resolveChainModels<T>(chain: readonly T[], providers: readonly ProviderSnapshot[]): T[] {
+function resolveChainModels<T>(chain: readonly T[], providers: readonly ProviderSnapshot[]): T[] {
   return chain.map((entry) => {
     if (!isRecord(entry) || typeof entry.agent !== "string" || typeof entry.model !== "string") return entry;
     const model = resolveChainModel(entry.model, loadedModels(providers, entry.agent));

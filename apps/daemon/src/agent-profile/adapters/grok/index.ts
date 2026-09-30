@@ -133,7 +133,7 @@ import { type TomlEdit, type TomlTable, editToml, getTomlPath, isTable, parseTom
 
 const AGENT = "grok";
 /** How long one `grok inspect --json` answer is reused (dropped after every write). */
-export const GROK_INSPECT_TTL_MS = 10_000;
+const GROK_INSPECT_TTL_MS = 10_000;
 const TIMEOUTS = {
   inspect: 30_000,
   list: 60_000,

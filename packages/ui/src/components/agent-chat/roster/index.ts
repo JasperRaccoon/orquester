@@ -17,7 +17,7 @@ export {
   type RosterKindCounts
 } from "./roster-summary";
 export type { AgentRosterRowProps, RosterMainRowProps } from "./AgentRosterRow";
-export { WorkflowGroup, type WorkflowGroupProps } from "./WorkflowGroup";
+export { WorkflowGroup } from "./WorkflowGroup";
 
 export {
   isActiveStatus,

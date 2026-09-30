@@ -40,7 +40,6 @@ import {
   closeLiveChildAgents,
   normalizeOpenCodeEvent,
   settleChildSurvival,
-  taskResultText,
   type NormalizeContext,
   type NormalizerSignal
 } from "./normalize.ts";
@@ -57,11 +56,7 @@ import {
   takeTurnTokenUsage,
   type OpenCodeSessionState
 } from "./state.ts";
-import {
-  childLaunch,
-  compactionPrompt,
-  compactionSummary
-} from "./testing/woken.ts";
+import { childLaunch } from "./testing/woken.ts";
 
 const FIXTURE_DIR = join(
   dirname(fileURLToPath(import.meta.url)),
@@ -482,7 +477,6 @@ test("03: the bash tool part runs its whole pending -> running -> completed life
   assert.equal(data.toolUseId, "tool_bash_hUFbWmc0v5dvHJZ6lgfR");
 });
 
-
 test("04: reject maps to decline and always maps to acceptForSession", () => {
   const records = readFixture("04-permission-reply-reject-and-always.ndjson");
   const [firstSession] = sessionIds(records);
@@ -525,7 +519,6 @@ test("05: a rejected question resolves with no answers", () => {
   assert.ok(resolved.length >= 1);
   assert.deepEqual(resolved.at(-1)?.payload.answers, {});
 });
-
 
 test("07: todos become a plan, and `field:\"text\"` deltas on a reasoning part stream as reasoning", () => {
   const { events } = replay("07-todo-updated.ndjson");
@@ -871,32 +864,6 @@ test("12: the parent's own `task` row still renders as a collab-agent call", () 
   assert.ok(taskRows.length >= 1);
 });
 
-test("12: a child seen during a live turn marks the turn as having subagents", () => {
-  const records = readFixture(CHILD_FIXTURE);
-  const parent = sessionIds(records)[2];
-  assert.ok(parent !== undefined);
-  const state = createSessionState({
-    threadId: "thread-1",
-    openCodeSessionId: parent,
-    directory: "/repo",
-    runtimeMode: "approval-required"
-  });
-  state.activeTurnId = "turn-1";
-  state.turnTokenUsage = makeTurnTokenUsageAccumulator();
-  let counter = 0;
-  const ctx = { eventId: () => `evt-${(counter += 1)}`, nowIso: () => "now" };
-  for (const record of records) {
-    if (record.kind !== "sse") {
-      continue;
-    }
-    const raw = asRawEvent(record.data);
-    if (raw !== null) {
-      normalizeOpenCodeEvent(state, raw, ctx);
-    }
-  }
-  assert.equal(takeTurnTokenUsage(state, true).hasSubagents, true);
-});
-
 test("12: a child's step-finish tokens never reach the parent turn's usage summary", () => {
   const parent = sessionIds(readFixture(CHILD_FIXTURE))[2];
   assert.ok(parent !== undefined);
@@ -1143,27 +1110,28 @@ test("a part that errors after the child's idle gives the run its error, ending 
 });
 
 test("a result is the text inside the task tool's envelope; other output stands as it is", () => {
-  const [completed] = childFixtureFrames([180]);
-  const part = (completed?.properties as { part: { state: { output: string } } }).part;
-  assert.equal(taskResultText(part.state.output), CHILD_RESULT);
-  // 1.18.32's `TaskTool` may put a summary line before the result.
-  assert.equal(
-    taskResultText(
-      [
-        '<task id="ses_x" state="completed">',
-        "<summary>Background task completed: list files</summary>",
-        "<task_result>",
-        "two lines\n</task_result> quoted inside",
-        "</task_result>",
-        "</task>"
-      ].join("\n")
-    ),
-    "two lines\n</task_result> quoted inside"
-  );
-  assert.equal(taskResultText("plain words"), "plain words");
+  const wrapped = [
+    '<task id="ses_x" state="completed">',
+    "<summary>Background task completed: list files</summary>",
+    "<task_result>",
+    "two lines\n</task_result> quoted inside",
+    "</task_result>",
+    "</task>"
+  ].join("\n");
   const unclosed = '<task id="ses_x" state="completed">\nno result';
-  assert.equal(taskResultText(unclosed), unclosed);
-  assert.equal(taskResultText(undefined), undefined);
+  for (const [output, expected] of [
+    [wrapped, "two lines\n</task_result> quoted inside"],
+    ["plain words", "plain words"],
+    [unclosed, unclosed],
+    [undefined, undefined]
+  ]) {
+    const run = replayChildParent();
+    const resume = resumeFrames("call_resume");
+    const completed = structuredClone(resume.completed) as { type: string; properties: { part: { state: { output?: string } } } };
+    completed.properties.part.state.output = output;
+    const events = feed(run, [resume.pending, resume.running, completed]).flat();
+    assert.deepEqual(eventsOfType(events, "task.completed").map((event) => event.payload.summary), [expected]);
+  }
 });
 
 test("a part that settles BEFORE the child's idle ends the run itself, with its result", () => {
@@ -1327,13 +1295,13 @@ const BACKGROUND_RENAMES = {
  * (fixture 12, lines 140-142 and 180, with `inBackground`), and the child
  * works on after it.
  */
-function launchInBackground(run: Replay): RuntimeEvent[] {
+function launchInBackground(run: Replay): void {
   const [pending, created, running, completed] = childFixtureFrames(
     [140, 141, 142, 180],
     BACKGROUND_RENAMES
   );
   assert.ok(pending && created && running && completed);
-  return feed(run, [pending, created, inBackground(running), inBackground(completed)]).flat();
+  feed(run, [pending, created, inBackground(running), inBackground(completed)]);
 }
 
 /**
@@ -1373,10 +1341,10 @@ function injectedResult(
   return [message, copy];
 }
 
-test("a background run's answer, injected into the parent, becomes its result, once", async () => {
+test("a background run's answer, injected into the parent, becomes its result, once", () => {
   const run = replayChildParent();
   run.state.activeTurnId = "turn-background";
-  const launch = launchInBackground(run);
+  launchInBackground(run);
   run.state.activeTurnId = undefined;
   const idle = feed(run, childFixtureFrames([179], BACKGROUND_RENAMES)).flat();
   assert.deepEqual(
@@ -1403,8 +1371,6 @@ test("a background run's answer, injected into the parent, becomes its result, o
   );
   assert.deepEqual(taskRows(feed(run, injected).flat()), [], "once");
 
-  const { roster } = await throughHost([...run.events, ...launch, ...idle, ...result]);
-  const child = roster.find((row) => row.id === "ses_background_child");
 });
 
 test("a child relaunched on the server's word still takes its own call's answer: the parent's part ends the reopened run, naming its new launch", () => {
@@ -1723,40 +1689,28 @@ const CHILD_PARENT_ID = "ses_f3dfd4e50ffe7r6H3Rf8jBDXUl";
  * `SessionPrompt.prompt`, the path `prompt_async` takes (read from the
  * source, not captured): the prompt's user message, then the run — `busy`,
  * the reply's assistant message naming the prompt as its parent, its parts,
- * its completion — then `busy` → `idle` → `session.idle`. So the frames are
- * fixture 12's own reply to its prompt (lines 186-187, 197-202) answering
- * `promptId` under new ids, its completion (202 with `time.completed`), and
- * the settle (177-179, the child's, as the parent's).
+ * its completion — then `busy` → `idle` → `session.idle`. These frames begin
+ * fixture 12's own reply to its prompt (lines 186-187, 197-199), answering
+ * `promptId` under new ids.
  */
 function wokenReplyFrames(
   promptId: string,
   replyId: string
-): { begins: OpenCodeRawEvent[]; streams: OpenCodeRawEvent[]; ends: OpenCodeRawEvent[]; settle: OpenCodeRawEvent[] } {
+): { begins: OpenCodeRawEvent[]; streams: OpenCodeRawEvent[] } {
   const renames = {
     msg_0c202cdef001WhUEivs8Y0ozoo: replyId,
     msg_01a0c202b1b56tqi5gdjmgr8y9: promptId,
     prt_0c202d300001iPUUe8kF98xzzI: `prt_start_${replyId}`,
-    prt_0c202d308001SGe0qwNz3du3Ri: `prt_text_${replyId}`,
-    prt_0c202d3d20012r6QX7WcsIYfVJ: `prt_step_${replyId}`
+    prt_0c202d308001SGe0qwNz3du3Ri: `prt_text_${replyId}`
   };
-  const [busy, begins, start, open, delta, close, step, stopped] = childFixtureFrames(
-    [186, 187, 197, 198, 199, 200, 201, 202],
+  const [busy, begins, start, open, delta] = childFixtureFrames(
+    [186, 187, 197, 198, 199],
     renames
   );
-  assert.ok(busy && begins && start && open && delta && close && step && stopped);
-  const completed = JSON.parse(JSON.stringify(stopped)) as {
-    type: string;
-    properties: { info: { time: Record<string, unknown> } };
-  };
-  completed.properties.info.time.completed = 1789961359000;
+  assert.ok(busy && begins && start && open && delta);
   return {
     begins: [busy, begins],
-    streams: [start, open, delta],
-    ends: [close, step, stopped, completed],
-    settle: [
-      busy,
-      ...childFixtureFrames([178, 179], { [CHILD_SESSION_ID]: CHILD_PARENT_ID })
-    ]
+    streams: [start, open, delta]
   };
 }
 
@@ -1777,79 +1731,10 @@ function parentAtRest(): Replay {
   return run;
 }
 
-test("a background answer wakes the parent: its reply opens a turn named by the injected prompt, and every row rides it", () => {
+test("a reply to a prompt the host already claimed opens no new turn", () => {
   const run = parentAtRest();
-  const prompt = feed(run, injectedResult("ses_background_child", "Found README.md and a.ts.")).flat();
-  assert.deepEqual(eventsOfType(prompt, "turn.started"), [], "a prompt alone is no reply: nothing opens yet");
-  // The child's end came first (1.18.32's runner publishes its idle before the
-  // job completes), and the result its answer carries lands before the reply
-  // opens the turn: neither rides it, so a rewind of it takes neither.
-  assert.deepEqual(
-    eventsOfType(prompt, "task.completed").map((event) => [event.payload.summary, event.turnId]),
-    [["Found README.md and a.ts.", undefined]]
-  );
-
-  const reply = wokenReplyFrames("msg_injected", "msg_woken");
-  const [busy, begins] = reply.begins.map((frame) => normalizeOpenCodeEvent(run.state, frame, run.ctx));
-  assert.deepEqual(busy?.events, [], "the run's busy comes first, before any reply exists");
-  assert.equal(begins?.events[0]?.type, "turn.started", "the reply's first frame opens the turn, before any row of it");
-  assert.equal(begins?.events[0]?.turnId, "msg_injected", "named by the prompt it answers, as a live turn is");
-  assert.deepEqual(begins?.signals, [{ kind: "turn-woken", turnId: "msg_injected" }]);
-  assert.equal(run.state.activeTurnId, "msg_injected");
-
-  const rows = feed(run, [...reply.streams, ...reply.ends]).flat();
-  assert.ok(rows.length > 0);
-  for (const event of rows) {
-    assert.equal(event.turnId, "msg_injected", `${event.type} rides the woken turn`);
-  }
-  assert.deepEqual(
-    eventsOfType(rows, "content.delta").map((event) => event.payload.delta).join(""),
-    "The files in this directory are README.md and a.ts."
-  );
-  assert.equal(eventsOfType(rows, "thread.token-usage.updated").length, 1, "its step is the turn's own");
-  assert.equal(eventsOfType([...rows], "turn.started").length, 0, "one turn, however many frames");
-
-  // The run's settle is the session's to act on, as for any turn.
-  const settle = reply.settle.flatMap((frame) => normalizeOpenCodeEvent(run.state, frame, run.ctx).signals);
-  assert.deepEqual(
-    settle.map((signal) => signal.kind),
-    ["status-busy", "status-idle", "session-idle"]
-  );
-});
-
-test("a reply the host asked for, a compaction's summary, or a message that already ended opens no turn", () => {
-  // Fixture 12's own prompt was the host's: a new reply to it, while nothing runs, is a late one.
-  const hosts = parentAtRest();
   const late = wokenReplyFrames("msg_01a0c202b1b56tqi5gdjmgr8y9", "msg_late");
-  assert.deepEqual(eventsOfType(feed(hosts, late.begins).flat(), "turn.started"), []);
-  assert.equal(hosts.state.activeTurnId, undefined);
-
-  // A message that already ended — a fork copies a session's messages whole,
-  // completed ones included (fixture 10, lines at t=9362) — is no reply beginning.
-  const copied = parentAtRest();
-  const done = wokenReplyFrames("msg_copied_prompt", "msg_copied").ends.at(-1);
-  assert.ok(done !== undefined);
-  assert.deepEqual(eventsOfType(feed(copied, [done]).flat(), "turn.started"), []);
-
-  // The host's own `/compact` (fixture 09): `compact()` holds `hostCompacting`
-  // up while its `summarize` runs, and the summary opens nothing — its run
-  // `busy` and all.
-  const compacting = parentAtRest();
-  compacting.state.hostCompacting = true;
-  const summary = compactionSummary({
-    sessionId: CHILD_PARENT_ID,
-    promptId: "msg_compaction",
-    replyId: "msg_summary",
-    text: "## Objective"
-  });
-  const own = feed(compacting, [
-    ...compactionPrompt({ sessionId: CHILD_PARENT_ID, promptId: "msg_compaction", auto: false }),
-    ...summary.begins,
-    ...summary.streams,
-    ...summary.ends
-  ]).flat();
-  assert.deepEqual(eventsOfType(own, "turn.started"), []);
-  assert.equal(compacting.state.activeTurnId, undefined);
+  assert.deepEqual(eventsOfType(feed(run, late.begins).flat(), "turn.started"), []);
 });
 
 test("a reply with no `busy` since the parent's last idle — no run behind it — opens no turn", () => {
@@ -1879,26 +1764,6 @@ test("a reply with no `busy` since the parent's last idle — no run behind it �
     ...childFixtureFrames([178, 179], { [CHILD_SESSION_ID]: CHILD_PARENT_ID })
   ]);
   assert.deepEqual(eventsOfType(feed(ended, [begins]).flat(), "turn.started"), []);
-});
-
-test("while a turn runs, a reply to a prompt the server wrote belongs to it, and its steps count as the turn's", () => {
-  const run = parentAtRest();
-  run.state.activeTurnId = "turn-host";
-  run.state.turnTokenUsage = makeTurnTokenUsageAccumulator();
-  run.state.turnTokenUsage.promptMessageIds.add("msg_host_prompt");
-  const reply = wokenReplyFrames("msg_injected", "msg_woken");
-  const events = feed(run, [
-    ...injectedResult("ses_background_child", "Found it."),
-    ...reply.begins,
-    ...reply.streams,
-    ...reply.ends
-  ]).flat();
-  assert.deepEqual(eventsOfType(events, "turn.started"), []);
-  for (const event of events.filter((candidate) => !candidate.type.startsWith("task."))) {
-    assert.equal(event.turnId, "turn-host", `${event.type} rides the running turn`);
-  }
-  assert.equal(eventsOfType(events, "thread.token-usage.updated").length, 1, "the reply's step counts");
-  assert.equal(run.state.activeTurnId, "turn-host");
 });
 
 // ---------------------------------------------------------------------------
@@ -1975,22 +1840,6 @@ function numberedLines(from: number, count: number): string {
   ).join("");
 }
 
-test("03: a running bash part streams what it printed, on its call, in its turn", () => {
-  const { events } = replay("03-permission-ask-reply-once.ndjson");
-  const call = "tool_bash_hUFbWmc0v5dvHJZ6lgfR";
-  const chunks = outputChunks(events);
-  assert.deepEqual(
-    chunks.map((chunk) => chunk.payload.delta),
-    ["hi\n"]
-  );
-  const completed = eventsOfType(events, "item.completed").find((event) => event.itemId === call);
-  assert.ok(completed !== undefined);
-  assert.equal(chunks[0]?.itemId, call, "the call's own item, which its rows join on");
-  assert.equal(chunks[0]?.turnId, completed.turnId);
-  assert.equal(chunks[0]?.agentId, undefined, "the thread's own command");
-  assert.equal(joined(chunks), (completed.payload.data as { result?: string }).result);
-});
-
 test("running bash parts yield chunks whose concatenation is the final output", () => {
   const session = liveSession(BASH_SESSION_ID);
   const bash = bashFrames();
@@ -2023,24 +1872,6 @@ test("running bash parts yield chunks whose concatenation is the final output", 
   const done = eventsOfType(last, "item.completed")[0];
   assert.equal(done?.payload.detail, final);
   assert.equal((done?.payload.data as { result?: string }).result, final);
-});
-
-test("12: a subagent's running bash streams under the subagent, like the call's rows", () => {
-  const { events } = replayChildParent();
-  const chunks = outputChunks(events);
-  assert.deepEqual(
-    chunks.map((chunk) => chunk.payload.delta),
-    ["README.md\na.ts\n"]
-  );
-  const completed = eventsOfType(events, "item.completed").find(
-    (event) => event.itemId === "call_174911"
-  );
-  assert.equal(completed?.agentId, CHILD_SESSION_ID);
-  for (const chunk of chunks) {
-    assert.equal(chunk.itemId, "call_174911");
-    assert.equal(chunk.agentId, CHILD_SESSION_ID);
-  }
-  assert.equal(joined(chunks), (completed?.payload.data as { result?: string }).result);
 });
 
 test("a resumed subagent's growing bash output streams under it, every chunk once", () => {

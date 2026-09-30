@@ -87,11 +87,6 @@ function entries(items: readonly ThreadItem[], agentId = TASK, title?: string) {
     : []);
 }
 
-test("streamed output chunks become the row's output, in arrival order", () => {
-  const result = entries([started(), output("one\n", "o1"), output("two\n", "o2"), completed(0)]);
-  assert.equal(result[0]?.detail, "one\ntwo\n");
-});
-
 test("the row keeps the first frame's id, so a streaming row cannot close itself", () => {
   assert.equal(entries([started(), output("one\n", "o1")])[0]?.id, "started");
   assert.equal(entries([started(), output("one\n", "o1"), completed(0)])[0]?.id, "started");

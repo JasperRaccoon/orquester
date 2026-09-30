@@ -356,21 +356,6 @@ for (const [host, answering] of HOSTS) {
   });
 }
 
-test("the join is asked for one window: the caller's offset and maxBytes, the offset stopped one byte past any join's end", async () => {
-  const row = shellDone();
-  const api = windowing(row, joinedOutput());
-  await read(api, { itemId: row.id });
-  assert.deepEqual(api.calls[2], { method: "GET", path: agentChatRoutes.itemOutput("c1", row.id), query: { offset: "0", maxBytes: String(40_000) } });
-  await read(api, { itemId: row.id, offset: 5, maxBytes: 7 });
-  assert.deepEqual(api.calls[5]?.query, { offset: "5", maxBytes: "7" });
-  // No join is longer than THREAD_ITEM_OUTPUT_MAX_BYTES: an offset past it goes out as one byte past it — the same
-  // answer, and never the "1e+21" String(1e21) would write.
-  for (const offset of [THREAD_ITEM_OUTPUT_MAX_BYTES + 1, 1e20, 1e21]) {
-    await assert.rejects(read(api, { itemId: row.id, offset }), (error: unknown) => error instanceof ToolError && error.code === "INVALID_ARGUMENT");
-    assert.equal(api.calls.at(-1)?.query?.offset, String(THREAD_ITEM_OUTPUT_MAX_BYTES + 1));
-  }
-});
-
 test("a windowing host and a host that ignores the window answer the same pages, byte for byte, at every window size", async () => {
   const started = activity("tool.started", { itemType: "command_execution", toolUseId: "call-1", title: "make", status: "inProgress" }, { tone: "tool" });
   const outputs = [

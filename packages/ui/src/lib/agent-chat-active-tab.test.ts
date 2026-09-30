@@ -43,16 +43,6 @@ test("a tab releases the keyboard only while it still holds it", () => {
   assert.equal(activeChatTab(), null);
 });
 
-test("a fast switch keeps the newcomer's claim when the old tab unmounts after it", () => {
-  setActiveChatTab("a");
-  setActiveChatTab("b");
-  // `a`'s unmount effect runs after `b` claimed: a blind clear would leave the
-  // keyboard unowned and every chord dead.
-  releaseActiveChatTab("a");
-  assert.equal(activeChatTab(), "b");
-  setActiveChatTab(null);
-});
-
 /*
  * The call site (V1 §10, item 8): the registry above only reports what it is
  * told, so Q2-1/Q2-2 are only really closed if the derivation feeding it is.

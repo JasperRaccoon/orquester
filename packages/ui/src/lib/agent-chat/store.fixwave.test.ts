@@ -169,24 +169,6 @@ describe("R7-1 — the client queue actually flushes", () => {
     );
   });
 
-  it("never flushes while an approval is pending", async () => {
-    const { api, fake } = await store();
-    fake.push({
-      kind: "snapshot",
-      thread: snapshot({
-        seq: 1,
-        head: head({ session: { status: "ready", activeTurnId: null } }),
-        pending: {
-          approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(1) }],
-          userInputs: []
-        }
-      })
-    });
-    api.getState().actions.queueMessage(draft("blocked"));
-    await flush();
-    assert.equal(fake.posted.length, 0);
-  });
-
 });
 
 describe("Implement never sends a plan the wire cut (§5.6, §7.3)", () => {

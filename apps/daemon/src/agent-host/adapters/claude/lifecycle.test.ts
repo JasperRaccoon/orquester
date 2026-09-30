@@ -35,7 +35,6 @@ import { AsyncEventQueue, createDeferred } from "./async-queue.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
 import { countingIds } from "./fixtures.ts";
 import { createClaudeAdapterWith } from "./index.ts";
-import { claudeIngestsAttachment } from "./session.ts";
 
 // Delay native filesystem operations for real transcript races; every operation
 // still uses the real file and returns its actual result.
@@ -333,8 +332,6 @@ interface Harness {
   advance: (ms: number) => void;
   /** Every `logger.debug` message, in order. */
   debugLines: string[];
-  /** Every `logger.warn` message, in order. */
-  warnLines: string[];
 }
 
 interface HarnessOptions {
@@ -361,7 +358,6 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
   const firstPeer = createDeferred<ScriptedQuery>();
   const queryOptions: ClaudeQueryOptions[] = [];
   const debugLines: string[] = [];
-  const warnLines: string[] = [];
   const listeners: Array<() => void> = [];
 
   let nowMs = Date.parse("2026-09-21T00:00:00.000Z");
@@ -376,9 +372,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
         debugLines.push(message);
       },
       info() {},
-      warn(message) {
-        warnLines.push(message);
-      },
+      warn() {},
       error() {}
     },
     clock: { now: () => new Date(nowMs), nowIso: () => new Date(nowMs).toISOString() },
@@ -501,8 +495,7 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
     waitFor,
     drain,
     advance,
-    debugLines,
-    warnLines
+    debugLines
   };
 }
 
@@ -891,21 +884,7 @@ describe("claude adapter — turns", () => {
 describe("claude adapter — attachment delivery (§4.1)", () => {
   const png = { type: "image" as const, id: "img-1", name: "shot.png", mimeType: "image/png", sizeBytes: 4 };
   const pdf = { type: "file" as const, id: "doc-1", name: "report.pdf", mimeType: "application/pdf", sizeBytes: 4 };
-
-  it("ingests inline only the images the API takes; everything else is a path line", () => {
-    assert.equal(claudeIngestsAttachment(png), true);
-    assert.equal(claudeIngestsAttachment(pdf), false);
-    assert.equal(
-      claudeIngestsAttachment({ type: "file", id: "t", name: "paste.txt", mimeType: "text/plain", sizeBytes: 1 }),
-      false
-    );
-    assert.equal(
-      claudeIngestsAttachment({ type: "image", id: "b", name: "x.bmp", mimeType: "image/bmp", sizeBytes: 1 }),
-      false,
-      "an image mime the API refuses is a path line, not a failed turn"
-    );
-    assert.equal(claudeIngestsAttachment({ type: "unknown", id: "u", name: "x" }), false);
-  });
+  const bmp = { type: "image" as const, id: "img-2", name: "diagram.bmp", mimeType: "image/bmp", sizeBytes: 4 };
 
   it("puts the image blocks first and the path block inside the LAST text block", async () => {
     const dir = await mkdtemp(nodePath.join(tmpdir(), "claude-attach-"));
@@ -920,7 +899,7 @@ describe("claude adapter — attachment delivery (§4.1)", () => {
       await harness.adapter.sendTurn({
         threadId: START.threadId,
         input: "/review src",
-        attachments: [png, pdf],
+        attachments: [png, pdf, bmp],
         interactionMode: "default"
       });
       if (peer.received.length === 0) {
@@ -935,7 +914,7 @@ describe("claude adapter — attachment delivery (§4.1)", () => {
       );
       assert.equal(
         content.at(-1)?.text,
-        `/review src\n\nAttached files:\n- report.pdf: ${nodePath.join(dir, pdf.id)}`
+        `/review src\n\nAttached files:\n- report.pdf: ${nodePath.join(dir, pdf.id)}\n- diagram.bmp: ${nodePath.join(dir, bmp.id)}`
       );
     } finally {
       await rm(dir, { recursive: true, force: true });
@@ -1091,15 +1070,9 @@ describe("claude adapter — stopping one task", () => {
     assert.equal(harness.adapter.hasSession(START.threadId), true);
   });
 
-  it("rejects without a live session, and never asks for the per-task stop affordance", async () => {
+  it("rejects stopping a task without a live session", async () => {
     const harness = await makeHarness();
     await assert.rejects(harness.adapter.stopTask!(START.threadId, "wvg2ao9ra"), /No live Claude session/);
-    await harness.adapter.startSession(START);
-    assert.equal(
-      (harness.queryOptions[0] as { perTaskStopAffordance?: unknown } | undefined)?.perTaskStopAffordance,
-      undefined,
-      "the session-scoped Stop keeps killing the whole fleet"
-    );
   });
 });
 
@@ -3408,7 +3381,7 @@ describe("claude adapter — workflow agents' transcripts", () => {
     try {
       await writeFile(
         nodePath.join(outside, "agent-a1b2c3.jsonl"),
-        row({ type: "assistant", uuid: "x1", message: { id: "m1", role: "assistant", content: [{ type: "tool_use", id: "toolu_x", name: "Read", input: {} }] } }),
+        row({ type: "assistant", uuid: "x1", message: { id: "m1", role: "assistant", content: [{ type: "tool_use", id: "toolu_outside", name: "Read", input: {} }] } }),
         "utf8"
       );
       const harness = await makeHarness();
@@ -3425,12 +3398,13 @@ describe("claude adapter — workflow agents' transcripts", () => {
         uuid: "u-outside"
       } as unknown as SDKMessage);
       peer.emit(workflowSnapshot("progress"));
-      await harness.waitFor("task.started");
+      const member = await harness.waitFor("task.started");
+      assert.equal(member.payload.taskId, MEMBER);
       await harness.drain();
-      assert.ok(
-        harness.warnLines.some((line) => line.includes("not tailing a workflow transcript outside")),
-        harness.warnLines.join(" | ")
-      );
+      await waitForFileIO();
+      harness.advance(750);
+      await harness.drain();
+      assert.equal(harness.events.some((event) => event.type === "item.started" && event.itemId === "toolu_outside"), false);
     } finally {
       await rm(outside, { recursive: true, force: true });
     }

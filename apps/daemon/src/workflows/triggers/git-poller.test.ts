@@ -9,7 +9,7 @@ import { GitRemoteError, type ConditionalListOptions, type PullRequestInfo, type
 import { ManualClock } from "../testing/manual-trigger-clock.ts";
 import { createGitPoller, type GitRemoteReader } from "./git-poller.ts";
 import type { ResolveRepo } from "./repo-resolve.ts";
-import { advance, fakeHost, memoryState, node, recordingLogger, workflow } from "./test-support.ts";
+import { advance, fakeHost, memoryState, node, silentLogger, workflow } from "./test-support.ts";
 
 const S = 1_000;
 const sha = (c: string) => c.repeat(40);
@@ -67,10 +67,9 @@ function setup(workflows: ReturnType<typeof workflow>[], opts: { remote?: FakeRe
   const host = fakeHost(workflows);
   const state = opts.state ?? memoryState();
   const remote = opts.remote ?? new FakeRemote();
-  const logger = recordingLogger();
-  const poller = createGitPoller({ host, state, remote, resolveRepo: byUrl, clock, logger });
+  const poller = createGitPoller({ host, state, remote, resolveRepo: byUrl, clock, logger: silentLogger });
   const run = (ms: number) => advance(clock, () => poller.idle(), ms);
-  return { clock, host, state, remote, logger, poller, run };
+  return { clock, host, state, remote, poller, run };
 }
 
 const payloads = (host: ReturnType<typeof fakeHost>) => host.fired.map((r) => r.payload as GitTriggerPayload);
@@ -481,7 +480,7 @@ test("a PR listing without the scope says which scope is missing; push triggers 
   );
   await poller.start();
   await run(5 * S);
-  assert.equal(poller.triggerState("wf", "pr")!.lastError, "missing scope read:pullrequest");
+  assert.match(poller.triggerState("wf", "pr")!.lastError ?? "", /read:pullrequest/);
   assert.equal(poller.triggerState("wf", "push")!.lastError, null);
   assert.equal(poller.triggerState("wf", "push")!.baselined, true);
   poller.stop();

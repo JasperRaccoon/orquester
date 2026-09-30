@@ -140,12 +140,12 @@ function strayOptions(
 }
 
 /** Card ids fitted to `length` entries: kept by position, new ones minted. */
-export function fitCardIds(ids: readonly number[], length: number, mint: () => number): number[] {
+function fitCardIds(ids: readonly number[], length: number, mint: () => number): number[] {
   return ids.length === length ? [...ids] : Array.from({ length }, (_, i) => ids[i] ?? mint());
 }
 
 /** `ids` with the one at `from` moved to `to` — the same splice the entries get. */
-export function movedCardIds(ids: readonly number[], from: number, to: number): number[] {
+function movedCardIds(ids: readonly number[], from: number, to: number): number[] {
   const next = [...ids];
   const [id] = next.splice(from, 1);
   next.splice(to, 0, id!);
@@ -503,7 +503,7 @@ function useDecisionNames(agents: readonly AgentChoice[], providers: readonly Pr
   );
 }
 
-export const DecisionView: React.FC<{
+const DecisionView: React.FC<{
   decision: AccountSelectionDecision;
   names: DecisionNames;
   now: number;

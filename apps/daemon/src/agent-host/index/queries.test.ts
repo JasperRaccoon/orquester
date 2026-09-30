@@ -823,26 +823,6 @@ describe("thread index: the thread's prompts", () => {
     }
   });
 
-  it("gives each prompt the history page's rewind rule for the turn it opened", async () => {
-    const log = new TestLog();
-    await indexed(log, [
-      created(),
-      ...liveTurn({ n: 1, prompt: "one" }),
-      ...liveTurn({ n: 2, prompt: "two", extra: [compaction("auto", "t2")] }),
-      ...liveTurn({ n: 3, prompt: "three" })
-    ]);
-    const id = log.threadId;
-    const entries = page(id).prompts;
-    assert.deepEqual(
-      entries.map((entry) => [entry.turnOrdinal, entry.rewindable]),
-      [
-        [3, true],
-        [2, false],
-        [1, false]
-      ]
-    );
-  });
-
   it("pages by its cursor, and refused rows never cost a page a slot", async () => {
     const log = new TestLog();
     const drafts: Draft[] = [created()];

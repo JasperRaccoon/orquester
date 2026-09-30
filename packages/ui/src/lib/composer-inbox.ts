@@ -120,22 +120,3 @@ export function composerTextForDelivery(delivery: ComposerDelivery): string {
   }
   return parts.join("\n\n");
 }
-
-/** Merge several deliveries into one, preserving order. */
-export function mergeComposerDeliveries(
-  deliveries: readonly ComposerDelivery[]
-): ComposerDelivery | null {
-  if (deliveries.length === 0) {
-    return null;
-  }
-  if (deliveries.length === 1) {
-    return deliveries[0];
-  }
-  return {
-    text: deliveries
-      .map((d) => d.text)
-      .filter((t) => t.length > 0)
-      .join("\n\n"),
-    attachments: deliveries.flatMap((d) => d.attachments)
-  };
-}

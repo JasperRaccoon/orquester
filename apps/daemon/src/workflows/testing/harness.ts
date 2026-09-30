@@ -22,7 +22,7 @@ export interface PublishedEvent {
   payload: unknown;
 }
 
-export const nullDaemonApi: DaemonApi = {
+const nullDaemonApi: DaemonApi = {
   request: async () => ({ status: 503, body: { code: "HOST_UNAVAILABLE", message: "no daemon in tests" } }),
   uploadAttachment: async () => ({ status: 503, value: null }),
   subscribe: () => () => undefined,

@@ -143,7 +143,7 @@ test("E9: the second probe is warm — the start cost is paid once per project",
     // A different spelling of the same project: it must ride the warm server,
     // not start a second one (R4 #6 — the probe keys the pool like a session),
     // which would wait on a readiness line nobody signals.
-    const warm = adapter.refreshSnapshot({ cwd: join(peer.dir, ".", "") });
+    const warm = adapter.refreshSnapshot({ cwd: `${peer.dir}/./` });
     const anotherStart = peers.bound(1).then((pid) => {
       peers.ready(pid);
       return "started another server" as const;

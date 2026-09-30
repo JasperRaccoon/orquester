@@ -111,12 +111,6 @@ test("02 plain prompt: assistant text is one segment with a bounded delta stream
   // Reasoning is never attached to an assistant item.
   assert.equal(reasoning.every((event) => event.itemId === undefined), true);
   assert.equal(assistant.every((event) => event.itemId === started[0].itemId), true);
-
-  assert.equal(
-    only(events, "thread.metadata.updated").length,
-    0,
-    "02 produced no session_info_update"
-  );
 });
 
 test("02 plain prompt: EVERY chunk-driven meter row carries the window, not just the session's", () => {

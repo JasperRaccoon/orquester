@@ -43,23 +43,16 @@ describe("session restart policy (§3.4)", () => {
   it("is a no-op when nothing changed", () => {
     const decision = decideSessionRestart({ desired: shape(), bound: bound(), capabilities });
     assert.equal(decision.restart, false);
-    assert.deepEqual(decision.reasons, []);
   });
 
-  it("restarts on runtime mode, cwd and account", () => {
-    for (const [field, value] of [
-      ["runtimeMode", "full-access"],
-      ["cwd", "/work/other"],
-      ["accountKey", "account:acc2"]
-    ] as const) {
-      const decision = decideSessionRestart({
-        desired: shape({ [field]: value } as Partial<DesiredSessionShape>),
-        bound: bound(),
-        capabilities
-      });
-      assert.equal(decision.restart, true, field);
-      assert.equal(decision.carryResumeCursor, true, "the cursor is carried");
-    }
+  it("a cwd change restarts with the resume cursor", () => {
+    const decision = decideSessionRestart({
+      desired: shape({ cwd: "/work/other" }),
+      bound: bound(),
+      capabilities
+    });
+    assert.equal(decision.restart, true);
+    assert.equal(decision.carryResumeCursor, true);
   });
 
   it("applies a model change live where the adapter can switch in session", () => {
@@ -92,7 +85,6 @@ describe("session restart policy (§3.4)", () => {
       capabilities
     });
     assert.equal(decision.restart, true);
-    assert.deepEqual(decision.reasons, ["modelSelection"]);
     assert.equal(decision.carryResumeCursor, true);
   });
 

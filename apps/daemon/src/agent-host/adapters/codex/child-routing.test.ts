@@ -183,7 +183,6 @@ describe("a collab child never hijacks the parent's turn", () => {
       "surfaced, never silently dropped (§10)"
     );
   });
-
 });
 
 describe("in-progress items are closed when a turn settles (R3 finding 1)", () => {
@@ -230,9 +229,12 @@ describe("in-progress items are closed when a turn settles (R3 finding 1)", () =
       threadId: PARENT,
       turn: turn("t1", "completed")
     });
-    assert.deepEqual(normaliser.openItemIds(), ["call_2"]);
+    const second = normaliser.notification("turn/completed" as never, {
+      threadId: PARENT,
+      turn: turn("t2", "completed")
+    });
+    assert.deepEqual(second.filter((event) => event.type === "item.completed").map((event) => event.itemId), ["call_2"]);
   });
-
 });
 
 describe("an abandoned agentMessage is closed by the next item of its turn (fixtures README obs. 22)", () => {
@@ -298,7 +300,6 @@ describe("an abandoned agentMessage is closed by the next item of its turn (fixt
       events.map((event) => event.type),
       ["item.started"]
     );
-    assert.deepEqual(normaliser.openItemIds(), ["msg_a", "msg_b"]);
   });
 
   it("a repeated item/started for the same message closes nothing", () => {
@@ -312,7 +313,6 @@ describe("an abandoned agentMessage is closed by the next item of its turn (fixt
       events.map((event) => event.type),
       ["item.started"]
     );
-    assert.deepEqual(normaliser.openItemIds(), ["msg_a"]);
   });
 
   it("a collab child's item never closes the parent's message", () => {
@@ -326,6 +326,5 @@ describe("an abandoned agentMessage is closed by the next item of its turn (fixt
       events.every((event) => event.type !== "item.completed"),
       "a child's traffic is task rows, never the parent's items"
     );
-    assert.deepEqual(normaliser.openItemIds(), ["msg_a"]);
   });
 });

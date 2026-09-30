@@ -289,7 +289,7 @@ function parseBody(text: string): unknown {
  * 12): `{name, data:{message}}` on session routes, `{_tag, requestID, message}`
  * on permission/question replies, and a flat string otherwise.
  */
-export function errorDetail(body: unknown): string | undefined {
+function errorDetail(body: unknown): string | undefined {
   if (typeof body === "string" && body.trim().length > 0) {
     return body.trim();
   }

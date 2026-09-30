@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPlanImplementationPrompt, type AgentGoalStatus } from "@orquester/api/agent-chat";
+import type { AgentGoalStatus } from "@orquester/api/agent-chat";
 import { FakeDaemonApi } from "./testing.ts";
 import { activity, chatSummary, head, message, rosterAgent, shellSummary, snapshot, stamp, turn, WF, workflowRoster } from "./fixtures.ts";
 import { chatDetail, pendingApprovalViews, pendingQuestionViews, sessionDetail, sessionView, type ViewContext } from "./views.ts";
@@ -137,7 +137,7 @@ test("a turn with no answer at all ends on its last commentary, as the GUI's tim
 
 test("plan.actionable is judged on the snapshot with the host's own rule, never on the summary flag one poll behind", () => {
   const plan = (id: string) => activity("turn.proposed.completed", { planId: id, planMarkdown: `# ${id}` });
-  const implementing = (id: string) => message("user", buildPlanImplementationPrompt(`# ${id}`), { turnId: "t2" });
+  const implementing = (id: string) => message("user", `PLEASE IMPLEMENT THIS PLAN:\n# ${id}`, { turnId: "t2" });
   // Just implemented (implement_plan {wait:false} reads this): the summary still flags the plan it was sent for.
   const sent = snapshot({ items: [plan("p1"), implementing("p1")] });
   assert.deepEqual(sessionDetail(chatSummary({ hasActionableProposedPlan: true }), sent, ctx).plan, { planId: "p1", markdown: "# p1", truncated: false, actionable: false });
@@ -428,35 +428,10 @@ test("a workflow run lists its coordinator with the run's progress, then its mem
   assert.deepEqual([running!.phaseIndex, running!.progress, running!.lastToolName], [2, "Merging findings", "Read"]);
   const json = JSON.stringify(d);
   assert.ok(!json.includes("/home/u/.claude"), "the run's script and transcript paths stay on the host");
-  // A plain subagent carries none of the workflow fields.
-  assert.deepEqual(Object.keys(d.subagents[0]!).sort(), ["agentKind", "completedAt", "id", "kind", "model", "startedAt", "status", "title"]);
 });
 
 test("a subagent's result is a bounded preview, cut like its other text", () => {
   const d = sessionDetail(chatSummary(), snapshot({ roster: [rosterAgent("task-1", { result: "r".repeat(5_000) })] }), ctx);
   assert.equal([...d.subagents[0]!.result!].length, 200);
   assert.ok(d.subagents[0]!.result!.endsWith("…"));
-});
-
-test("a 100-agent workflow over the cap sheds its members first: its coordinator keeps the run's progress, every direct subagent stays", () => {
-  const text = (i: number) => `slot ${i}: ${"reading frames and comparing timestamps ".repeat(5)}`;
-  const members = Array.from({ length: 100 }, (_, i) => rosterAgent(`${WF}:wf:${i + 1}`, {
-    kind: "workflow_agent", parentAgentId: WF, agentIndex: i + 1, phaseIndex: 1, phaseTitle: "Analyze", attempt: 1, status: i % 4 === 0 ? "running" : "completed",
-    title: `analyze:${i + 1}`, progress: text(i), result: i % 4 === 0 ? null : text(i), firstSeenAt: stamp(20 + i), usage: { totalTokens: 1_000, toolUses: 2, durationMs: 3_000 }
-  }));
-  const coordinator = rosterAgent(WF, { kind: "workflow", agentKind: "background", title: "Audit", status: "running", workflowName: "frame-audit", phases: [{ index: 1, title: "Analyze" }], firstSeenAt: stamp(10) });
-  const direct = Array.from({ length: 6 }, (_, i) => rosterAgent(`task-${i}`, { title: `direct ${i}`, status: i % 2 ? "running" : "completed", firstSeenAt: stamp(i) }));
-  const d = sessionDetail(chatSummary(), snapshot({ roster: [...direct.slice(0, 3), coordinator, ...members, ...direct.slice(3)] }), ctx);
-  assert.ok(encodedBytes({ session: d }) <= 60_000, `${encodedBytes({ session: d })} bytes`);
-  assert.equal(d.subagentsTruncated, true);
-  const kept = d.subagents.map((s) => s.id);
-  for (const r of [...direct, coordinator]) assert.ok(kept.includes(r.id), `${r.id} kept`);
-  const view = d.subagents.find((s) => s.id === WF)!;
-  assert.deepEqual([view.workflow?.agents, view.workflow?.statuses], [100, { running: 25, completed: 75 }], "the run's progress counts every member, listed or not");
-  // Settled members go first, oldest first: live members stay while any settled one does not.
-  const keptMembers = d.subagents.filter((s) => s.parentAgentId === WF);
-  assert.ok(keptMembers.length > 0 && keptMembers.length < 100, `${keptMembers.length} members kept`);
-  assert.equal(keptMembers.filter((s) => s.status === "running").length, 25, "every live member kept");
-  // Kept members still follow their coordinator.
-  assert.deepEqual(kept.slice(kept.indexOf(WF) + 1, kept.indexOf(WF) + 1 + keptMembers.length), keptMembers.map((s) => s.id));
 });

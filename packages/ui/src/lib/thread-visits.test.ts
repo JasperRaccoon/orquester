@@ -1,16 +1,25 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { hasUnseenCompletion, markThreadRead, markThreadUnread, sanitizeThreadVisits } from "./thread-visits.ts";
+import { hasUnseenCompletion, markThreadRead, markThreadUnread, loadThreadVisits } from "./thread-visits.ts";
 
 const T0 = "2026-09-21T10:00:00.000Z";
 const T1 = "2026-09-21T10:05:00.000Z";
 
 test("a junk blob loads as empty and bad entries are dropped", () => {
-  assert.deepEqual(sanitizeThreadVisits(null), {});
-  assert.deepEqual(sanitizeThreadVisits([1]), {});
-  assert.deepEqual(sanitizeThreadVisits("x"), {});
-  assert.deepEqual(sanitizeThreadVisits({ a: T0, b: 7, c: "yesterday", "": T0 }), { a: T0 });
+  const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  let value: unknown;
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: {
+    getItem: (key: string) => key === "orquester.thread-visits" ? JSON.stringify(value) : null
+  } });
+  try {
+    for (value of [null, [1], "x"]) assert.deepEqual(loadThreadVisits(), {});
+    value = { a: T0, b: 7, c: "yesterday", "": T0 };
+    assert.deepEqual(loadThreadVisits(), { a: T0 });
+  } finally {
+    if (original) Object.defineProperty(globalThis, "localStorage", original);
+    else Reflect.deleteProperty(globalThis, "localStorage");
+  }
 });
 
 test("reading a thread stamps the TURN'S COMPLETION, never the clock", () => {

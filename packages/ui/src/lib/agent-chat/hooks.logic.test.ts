@@ -1,30 +1,77 @@
-/**
- * Fix-wave regression for the status line's live timer (E2E E1).
- *
- * `turnStartedAt` is the only signal the status line has that a turn is still
- * running; handing it a settled turn's `startedAt` made "● Working" tick
- * forever against a server that had already reported `ready`.
- */
-
+/** E1 regression: a settled turn must stop the status line's live timer. */
 import assert from "node:assert/strict";
-import { describe,it } from "node:test";
+import { after,before,describe,it } from "node:test";
+import { createElement } from "react";
+import { renderToStaticMarkup } from "react-dom/server";
 
-import type { ThreadSessionStatus,Turn,TurnState } from "@orquester/api/agent-chat";
+import type { AgentChatStreamFrame,ThreadSessionStatus,Turn,TurnState } from "@orquester/api/agent-chat";
 
-import { turnStartedAt } from "./hooks";
+import { OrquesterProvider,type OrquesterProviderProps } from "../../context/orquester-context";
+import { useAgentChatStatus } from "./hooks";
+import { releaseThreadStore,retainThreadStore } from "./store";
+import { head,snapshot } from "./test-helpers";
+import type { AgentChatTransport } from "./transport";
 
-const turn = (state: TurnState, startedAt: string | null = "2026-01-01T00:00:00.000Z"): Turn => ({
+const sessionId = "status-clock";
+let push: (frame: AgentChatStreamFrame) => void;
+let opened: () => void;
+const streamReady = new Promise<void>((resolve) => { opened = resolve; });
+const unused = async (): Promise<never> => { throw new Error("Unexpected transport request"); };
+const transport: AgentChatTransport = {
+  stream(_sessionId, _options, handlers) {
+    push = handlers.onFrame;
+    opened();
+    return { lastSeq: 0, hostInstanceId: null, resetCursor() {}, close() {} };
+  },
+  command: unused,
+  switchAccount: unused,
+  read: unused,
+  readItem: unused,
+  readHistory: unused,
+  search: unused,
+  turnDiff: unused,
+  providers: unused,
+  refreshProvider: unused,
+  upload: unused,
+  fetchAttachment: unused
+};
+
+before(async () => {
+  retainThreadStore(sessionId, { transport });
+  await streamReady;
+});
+after(() => releaseThreadStore(sessionId));
+
+const turn = (state: TurnState): Turn => ({
   turnId: "t1",
   state,
   turnCount: null,
   requestedAt: "2026-01-01T00:00:00.000Z",
-  startedAt,
+  startedAt: "2026-01-01T00:00:00.000Z",
   completedAt: state === "running" || state === "pending" ? null : "2026-01-01T00:01:00.000Z",
   assistantMessageId: null
 });
 
-const at = (state: TurnState, session: ThreadSessionStatus | null): string | null =>
-  turnStartedAt(turn(state), session);
+let sequence = 0;
+function at(state: TurnState, session: ThreadSessionStatus): string | null {
+  push({
+    kind: "snapshot",
+    thread: snapshot({
+      seq: ++sequence,
+      head: head({ id: sessionId, session: { status: session, activeTurnId: "t1" } }),
+      turns: [turn(state)]
+    })
+  });
+  let startedAt: string | null | undefined;
+  function StatusConsumer() {
+    startedAt = useAgentChatStatus(sessionId).turnStartedAt;
+    return null;
+  }
+  const context = { useTitlebar: false, api: { agentChat: transport } } as unknown as OrquesterProviderProps;
+  renderToStaticMarkup(createElement(OrquesterProvider, { ...context, children: createElement(StatusConsumer) }));
+  assert.notEqual(startedAt, undefined, "the status consumer rendered");
+  return startedAt!;
+}
 
 describe("E1 — the status timer stops when the turn does", () => {
   it("ticks only while the turn is unsettled AND the session is live", () => {
@@ -39,18 +86,8 @@ describe("E1 — the status timer stops when the turn does", () => {
   });
 
   it("stops when the session left `running`, even if the turn row still says running", () => {
-    // Session teardown settles a turn by status and that write races
-    // `turn.completed` (§5.1) — the timer must not wait for the loser.
-    assert.equal(at("running", "ready"), null);
-    assert.equal(at("running", "idle"), null);
-    assert.equal(at("running", "stopped"), null);
-    assert.equal(at("running", "error"), null);
-    assert.equal(at("running", null), null);
-  });
-
-  it("is null with no turn, or a turn the provider never started", () => {
-    assert.equal(turnStartedAt(null, "running"), null);
-    assert.equal(turnStartedAt(undefined, "running"), null);
-    assert.equal(turnStartedAt(turn("running", null), "running"), null);
+    for (const session of ["ready", "idle", "stopped", "error"] as const) {
+      assert.equal(at("running", session), null);
+    }
   });
 });

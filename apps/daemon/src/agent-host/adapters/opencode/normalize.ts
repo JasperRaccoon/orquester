@@ -1741,7 +1741,7 @@ const BACKGROUND_SUMMARY = /^Background task (?:completed|failed): (?<descriptio
  * said, not how the tool wrapped it. An output of any other shape is the
  * result as it stands — never dropped.
  */
-export function taskResultText(output: string | undefined): string | undefined {
+function taskResultText(output: string | undefined): string | undefined {
   if (output === undefined) {
     return undefined;
   }

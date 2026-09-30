@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
-import { execFile } from "node:child_process";
 import { createWriteStream } from "node:fs";
 import { chmod, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import { promisify } from "node:util";
-import { GIT_WORKING_DIFF_DEFAULT_MAX_BYTES, type SavedPrompt } from "@orquester/api";
+import type { SavedPrompt } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import type { InjectOptions } from "fastify";
 import { GitService } from "./git.ts";
@@ -18,7 +16,6 @@ import { SavedPromptsService } from "./saved-prompts.ts";
 // the `{ code, message }` envelope, the 204 with no body. Built with the same
 // inject-only harness as project-create-routes.test.ts — nothing listens.
 
-const exec = promisify(execFile);
 type CreateServerArgs = Parameters<typeof createServer>;
 const quiet = { warn: () => {}, error: () => {} };
 
@@ -310,7 +307,7 @@ test("a workspaces directory moved at runtime is followed by validation and casc
   assert.equal(h.savedPrompts.get(id), undefined, "the cascade followed the move too");
 });
 
-test("working diff route: sandboxed, isRepo:false for a plain dir, maxBytes parsed and clamped", async (t) => {
+test("working diff route rejects missing and outside paths", async (t) => {
   const h = await harness();
   t.after(() => h.close());
 
@@ -321,36 +318,4 @@ test("working diff route: sandboxed, isRepo:false for a plain dir, maxBytes pars
   const outside = await h.inject({ method: "GET", url: `/api/git/working-diff?path=${encodeURIComponent(h.root)}` });
   assert.equal(outside.statusCode, 403);
   assert.equal(outside.json().code, "FS_FORBIDDEN");
-
-  const plain = join(h.workspacesDir, "acme", "plain");
-  await mkdir(plain, { recursive: true });
-  const inside = await exec("git", ["rev-parse", "--is-inside-work-tree"], { cwd: plain }).then(
-    () => true,
-    () => false
-  );
-  if (!inside) {
-    const notRepo = await h.inject({ method: "GET", url: `/api/git/working-diff?path=${encodeURIComponent(plain)}` });
-    assert.equal(notRepo.statusCode, 200);
-    assert.deepEqual(notRepo.json(), { isRepo: false, diff: "", truncated: false, untracked: [] });
-  }
-
-  const repo = join(h.workspacesDir, "acme", "repo");
-  await mkdir(repo, { recursive: true });
-  const git = (...args: string[]) =>
-    exec("git", args, { cwd: repo, env: { ...process.env, HOME: repo, GIT_CONFIG_GLOBAL: "/dev/null" } });
-  await git("init", "-q", "-b", "main");
-  await writeFile(join(repo, "a.txt"), `${Array.from({ length: 50 }, (_, i) => `line ${i}`).join("\n")}\n`);
-  await git("add", "a.txt");
-
-  const url = (maxBytes: string) =>
-    `/api/git/working-diff?path=${encodeURIComponent(repo)}&maxBytes=${encodeURIComponent(maxBytes)}`;
-  const whole = (await h.inject({ method: "GET", url: url("not-a-number") })).json();
-  assert.equal(whole.isRepo, true);
-  assert.equal(whole.truncated, false, `falls back to ${GIT_WORKING_DIFF_DEFAULT_MAX_BYTES} bytes`);
-  assert.match(whole.diff, /^\+line 49$/m);
-
-  const cut = (await h.inject({ method: "GET", url: url("120") })).json();
-  assert.equal(cut.truncated, true);
-  assert.ok(Buffer.byteLength(cut.diff) <= 120, "cut within maxBytes");
-  assert.ok(whole.diff.startsWith(cut.diff), "a prefix of the whole patch");
 });

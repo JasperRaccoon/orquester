@@ -96,7 +96,7 @@ export function rosterCountLabels(counts: RosterKindCounts): {
 }
 
 /** What a workflow group's header says of its run. */
-export interface WorkflowGroupSummary {
+interface WorkflowGroupSummary {
   /** Member rows: the agents of the run. Zero until the first one is reported. */
   agents: number;
   settled: number;

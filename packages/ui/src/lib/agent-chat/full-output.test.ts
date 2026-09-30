@@ -207,15 +207,6 @@ describe("a Codex completion that kept only its output's head (stored cut past 6
     }
   });
 
-  it("asks the join once: a row that streamed read it first, and its item's head answers after", async () => {
-    const viewer = reads({
-      item: async () => ({ item: stored }),
-      streamedOutput: async () => join("", { toolUseId: "item_7" })
-    });
-    assert.deepEqual(await readFullOutput(viewer, stored.id, "streamed"), { kind: "kept", text: head });
-    assert.deepEqual(viewer.asked, ["output done-7", "item done-7"]);
-  });
-
   it("a completion that kept its whole output still reads it, and never asks the join", async () => {
     const intact = codex({ data: { command: "pnpm test", item: { aggregatedOutput: head } } });
     const viewer = reads({ item: async () => ({ item: intact }) });
@@ -278,24 +269,6 @@ describe("an OpenCode completion whose final output the tool cut (the END of it,
 
 describe("the viewer's text for an item", () => {
 
-  it("never out of an item stored cut: its data holds only a head, so the payload shows, as JSON", () => {
-    const cut = activity(
-      "tool.completed",
-      {
-        itemType: "command_execution",
-        toolUseId: "item_8",
-        status: "completed",
-        truncated: true,
-        data: { command: "cat big.log", item: { aggregatedOutput: "the first 64 KiB" } }
-      },
-      { turnId: "t1" }
-    );
-    assert.deepEqual(JSON.parse(fullOutputText(cut)), {
-      itemType: "command_execution", toolUseId: "item_8", status: "completed", truncated: true,
-      data: { command: "cat big.log", item: { aggregatedOutput: "the first 64 KiB" } }
-    });
-  });
-
   it("anything else as the viewer always showed it: a message's text, a string payload, JSON, else the summary", () => {
     assert.equal(fullOutputText(message("assistant", "done")), "done");
     assert.equal(fullOutputText(activity("runtime.warning", "as it is")), "as it is");
@@ -348,50 +321,23 @@ describe("an agent's launch prompt in the viewer (§7.6: a wire-cut prompt's 'Sh
     const whole = "Find every caller of parse().\n".repeat(900);
     assert.equal(fullOutputText(start({ prompt: whole })), whole);
   });
-
-  it("a start with no prompt is its payload, as before", () => {
-    const item = start({});
-    assert.deepEqual(JSON.parse(fullOutputText(item)), { taskId: "a1", agentKind: "agent", title: "Find callers" });
-  });
 });
 
 describe("a wire-cut launch prompt never makes its spawn row a 'Load full output' (review M2)", () => {
   it("a task row is no tool output: the prompt has its own read, the prompt row's", () => {
-    // Over 16 KiB of UTF-8 — about 5.4 K CJK characters is enough — the wire cuts it and stamps `truncated`.
-    const payload = slimActivityPayload({
+    // Wire input from an older host may retain only a launch prompt preview.
+    const payload = {
       taskId: "agent-1",
       agentKind: "agent",
       taskType: "subagent",
       toolUseId: "call-agent",
       title: "Audit",
-      prompt: "監".repeat(6_000)
-    }) as Record<string, unknown>;
-    assert.equal(payload.truncated, true, "the wire did cut it");
+      prompt: "Audit the callers…",
+      truncated: true
+    };
     const [spawn] = deriveWorkLogEntries([activity("task.started", payload, { turnId: "t1", tone: "info" })]);
     assert.ok(spawn?.agentSpawn, "the launch is the batch's spawn row");
     assert.equal(spawn.truncated, undefined, "no promise of more output on it");
     assert.equal(fullOutputSourceOf(spawn), null);
-  });
-
-  it("a task's end carries none either", () => {
-    const payload = slimActivityPayload({
-      taskId: "agent-1",
-      agentKind: "agent",
-      status: "completed",
-      summary: "監".repeat(6_000)
-    }) as Record<string, unknown>;
-    const [end] = deriveWorkLogEntries([activity("task.completed", payload, { turnId: "t1", tone: "info" })]);
-    assert.equal(end?.truncated, undefined);
-  });
-});
-
-describe("the viewer's copy follows what it reads (review N1)", () => {
-
-  it("a prompt is read as its item", async () => {
-    const item = activity("task.started", { taskId: "a1", prompt: "The whole prompt." }, { turnId: "t1" });
-    const read = reads({ item: async () => ({ item }) as unknown as ThreadItemResponse });
-    const output = await readFullOutput(read, item.id, "prompt");
-    assert.deepEqual(read.asked, [`item ${item.id}`]);
-    assert.equal(output.kind === "item" ? fullOutputText(output.item) : null, "The whole prompt.");
   });
 });

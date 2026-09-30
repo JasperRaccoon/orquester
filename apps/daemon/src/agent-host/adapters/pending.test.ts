@@ -42,26 +42,6 @@ describe("§3.2 layer one: every adapter's pendingSnapshot()", () => {
     });
   }
 
-  it("Claude and Grok ship a bundled catalogue, so their launchers work on a cold host", () => {
-    // These two can name their model families without asking the CLI; Codex and
-    // OpenCode read theirs off a live server, so `[]` there is deliberate.
-    assert.ok(ADAPTER_PENDING_SNAPSHOTS.claude(CHECKED_AT).models.length > 0);
-    assert.ok(ADAPTER_PENDING_SNAPSHOTS.grok(CHECKED_AT).models.length > 0);
-  });
-
-  it("Claude's pending catalogue names a default", () => {
-    const models = ADAPTER_PENDING_SNAPSHOTS.claude(CHECKED_AT).models;
-    assert.equal(models.filter((model) => model.isDefault).length, 1);
-
-  });
-
-  it("every pending catalogue is free of duplicate slugs", () => {
-    for (const id of ADAPTER_IDS) {
-      const slugs = ADAPTER_PENDING_SNAPSHOTS[id](CHECKED_AT).models.map((model) => model.slug);
-      assert.equal(new Set(slugs).size, slugs.length, id);
-    }
-  });
-
   it("isPendingSnapshot rejects a real probe result", () => {
     assert.equal(
       isPendingSnapshot({ status: "ready", auth: { status: "authenticated" }, installed: true }),

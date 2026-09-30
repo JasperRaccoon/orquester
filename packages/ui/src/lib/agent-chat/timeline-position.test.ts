@@ -4,8 +4,6 @@ import { afterEach,beforeEach,describe,it } from "node:test";
 import { type RememberedTimelinePosition } from "./contracts";
 import {
 EMPTY_DISCLOSURE_STATE,
-parseDisclosureState,
-parseRememberedPosition,
 parseTimelinePositions,
 TimelinePositionStore
 } from "./timeline-position";
@@ -96,7 +94,7 @@ describe("persisted-state validation", () => {
   });
 
   it("repairs a row an older bundle wrote with missing fields", () => {
-    const parsed = parseRememberedPosition({ scrollOffset: "nope", interactionMode: "weird" });
+    const parsed = parseTimelinePositions(JSON.stringify([["legacy", { scrollOffset: "nope", interactionMode: "weird" }]])).get("legacy");
     assert.equal(parsed?.rowId, null);
     assert.equal(parsed?.scrollOffset, 0);
     assert.equal(parsed?.atEnd, true);
@@ -107,10 +105,9 @@ describe("persisted-state validation", () => {
   });
 
   it("drops non-string ids and non-numeric offsets from the disclosure set", () => {
-    const parsed = parseDisclosureState({
-      expandedTurnIds: ["t1", 7],
-      toolOutputOffsets: { a: 10, b: "nope" }
-    });
+    const parsed = parseTimelinePositions(JSON.stringify([["legacy", {
+      disclosures: { expandedTurnIds: ["t1", 7], toolOutputOffsets: { a: 10, b: "nope" } }
+    }]])).get("legacy")!.disclosures;
     assert.deepEqual(parsed.expandedTurnIds, ["t1"]);
     assert.deepEqual(parsed.toolOutputOffsets, { a: 10 });
   });

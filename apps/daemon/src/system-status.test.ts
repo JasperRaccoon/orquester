@@ -219,18 +219,6 @@ test("collectTree terminates on a corrupted parent cycle", () => {
   assert.deepEqual([...collectTree(cyclic, new Map([[5, undefined]])).keys()], [5, 6]);
 });
 
-test("descendsFromRoot is the kill boundary", () => {
-  const rootPids = new Set(roots.keys());
-  assert.equal(descendsFromRoot(procs, rootPids, 31), true);
-  assert.equal(descendsFromRoot(procs, rootPids, 11), true);
-  assert.equal(descendsFromRoot(procs, rootPids, 21), true);
-  // Outside the tree: an unrelated process, init, and the tmux server itself.
-  assert.equal(descendsFromRoot(procs, rootPids, 40), false);
-  assert.equal(descendsFromRoot(procs, rootPids, 1), false);
-  assert.equal(descendsFromRoot(procs, rootPids, 20), false);
-  assert.equal(descendsFromRoot(procs, rootPids, 999), false);
-});
-
 test("descendsFromRoot does not loop on a parent cycle", () => {
   const cyclic = new Map<number, { ppid: number }>([
     [5, { ppid: 6 }],

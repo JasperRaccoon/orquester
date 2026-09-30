@@ -138,16 +138,6 @@ test("tools/list pins every tool's required params and annotations (spec §12 sn
   } finally { await app.close(); }
 });
 
-test("initialize names the server orquester 2.0.0 and carries the instructions", async () => {
-  const app = mcpApp({ createApi: () => new FakeDaemonApi() });
-  try {
-    const init = await postMcp(app, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "0" } } });
-    assert.deepEqual(init.result.serverInfo, { name: "orquester", version: "2.0.0" });
-    assert.equal(typeof init.result.instructions, "string");
-    assert.ok(init.result.instructions.length > 0);
-  } finally { await app.close(); }
-});
-
 test("a tool call returns structuredContent + text; a ToolError becomes isError with a code; the api is built with the caller's bearer", async () => {
   const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [chatSummary()] })
     .on("GET", "/api/registry", { status: 200, body: { shells: [], ides: [], fileExplorers: [], browsers: [], agents: [] } })

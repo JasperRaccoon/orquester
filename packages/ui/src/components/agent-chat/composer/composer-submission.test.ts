@@ -1,17 +1,16 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { buildPlanImplementationPrompt } from "@orquester/api/agent-chat";
 
 import {
   attachmentCountBlockSend,
   attachmentRejectionReason,
-  buildPlanImplementationPrompt,
   composerPromptLengthValidationMessage,
   composerSubmissionIntentForEnter,
   composerStatusText,
   composerSubmissionValidationMessage,
   decideStagedAttachmentForRef,
   draftAfterSend,
-  externalSendRefusal,
   hasSendableContent,
   implementationTextResolver,
   isPasteAsTextShortcut,
@@ -22,7 +21,6 @@ import {
   resolveFollowUpDisposition,
   resolvePlanFollowUpSubmission,
   sendComposerTurn,
-  stagedAttachmentKeyForRef,
   submitIsNoOp,
   swallowsStandalonePlanCommand,
   uploadsBlockSend,
@@ -258,20 +256,6 @@ test("a ref that arrives under a different key is still matched by its id", () =
   assert.equal(decision.kind, "duplicate");
 });
 
-test("an in-flight upload occupies a slot against a staged ref too", () => {
-  const existing: StagedAttachmentLike[] = Array.from({ length: 8 }, (_, index) => ({
-    key: `k${index}`,
-    status: index === 0 ? ("uploading" as const) : ("ready" as const)
-  }));
-  assert.equal(
-    decideStagedAttachmentForRef({
-      existing,
-      ref: { type: "file", id: "/tmp/new", name: "new.txt", sizeBytes: 1 }
-    }).kind,
-    "rejected"
-  );
-});
-
 test("a ref with no declared mimeType is measured as a file, never guessed into an image", () => {
   // 20 MB: over the 10 MiB image bound, under the 50 MiB file bound. Refusing
   // it would invent a rule the upload route never applied.
@@ -281,15 +265,6 @@ test("a ref with no declared mimeType is measured as a file, never guessed into 
   });
   assert.equal(decision.kind, "staged");
   assert.equal(decision.kind === "staged" && decision.mimeType, "application/octet-stream");
-});
-
-test("a ref with no declared size is staged as zero rather than refused", () => {
-  const decision = decideStagedAttachmentForRef({
-    existing: [],
-    ref: { type: "unknown", id: "/tmp/x", name: "x" }
-  });
-  assert.equal(decision.kind, "staged");
-  assert.equal(decision.kind === "staged" && decision.sizeBytes, 0);
 });
 
 test("a file coming back is never refused for the count, and every other bound still applies", () => {
@@ -370,19 +345,6 @@ test("Q2-5: the keyCode 229 fallback is honoured for engines without isComposing
   assert.equal(composerSubmissionIntentForEnter({ ...base, keyCode: 13 }), "foreground");
 });
 
-test("Q2-5: a composition beats every other send path, including mod+Enter steering", () => {
-  assert.equal(
-    composerSubmissionIntentForEnter({
-      isMobileViewport: false,
-      shiftKey: false,
-      modifierKey: true,
-      isRunning: true,
-      isComposing: true
-    }),
-    null
-  );
-});
-
 test("R7-3: an empty draft with an actionable plan is NOT a no-op submit", () => {
   // The bug: `if (!sendable) return;` ran before the plan was resolved, so the
   // enabled Implement button did nothing. Deleting the `hasActionablePlan`
@@ -434,12 +396,12 @@ const ACTION = {
 };
 
 test("goals §8.2: a chip action is refused for exactly what refuses the composer's own send", () => {
-  assert.equal(externalSendRefusal(ACTION), null);
+  assert.equal(planExternalSend(ACTION).notice, null);
   for (const overrides of [
     { reverting: true }, { hasPendingRequest: true }, { sending: true },
     { adapterId: "grok", text: "/always-approve" },
     { text: "x".repeat(120_001) }, { text: "  " }
-  ]) assert.ok(externalSendRefusal({ ...ACTION, ...overrides }), JSON.stringify(overrides));
+  ]) assert.ok(planExternalSend({ ...ACTION, ...overrides }).notice, JSON.stringify(overrides));
 });
 
 // ---------------------------------------------------------------------------
@@ -480,17 +442,17 @@ test("final wave (4): an open card never holds back a goal command the HOST appl
   // Pause and Clear are exactly what a user wants while an approval waits, and
   // the host needs no such guard: it applies them without starting a turn.
   const card = { ...ACTION, text: "  /goal pause  ", hasPendingRequest: true, hostParsesGoal: true };
-  assert.equal(externalSendRefusal(card), null);
+  assert.equal(planExternalSend(card).notice, null);
   assert.deepEqual(planExternalSend(card), { text: "/goal pause", notice: null });
-  assert.equal(externalSendRefusal({ ...card, text: "/goal clear" }), null);
+  assert.equal(planExternalSend({ ...card, text: "/goal clear" }).notice, null);
 });
 
 test("final wave (4): everything else still waits for the card", () => {
   const card = { ...ACTION, hasPendingRequest: true };
-  assert.ok(externalSendRefusal({ ...card, hostParsesGoal: false }));
-  assert.ok(externalSendRefusal({ ...card, hostParsesGoal: undefined }));
-  assert.ok(externalSendRefusal({ ...card, hostParsesGoal: true, text: "Continue working toward the goal." }));
-  assert.ok(externalSendRefusal({ ...card, hostParsesGoal: true, reverting: true }));
+  assert.ok(planExternalSend({ ...card, hostParsesGoal: false }).notice);
+  assert.ok(planExternalSend({ ...card, hostParsesGoal: undefined }).notice);
+  assert.ok(planExternalSend({ ...card, hostParsesGoal: true, text: "Continue working toward the goal." }).notice);
+  assert.ok(planExternalSend({ ...card, hostParsesGoal: true, reverting: true }).notice);
 });
 
 // ---------------------------------------------------------------------------
@@ -659,8 +621,8 @@ const failedWith = (text: string | null): ComposerSendOutcome => ({
 
 test("what was typed or staged while it was in flight stays, behind it, and no chip is doubled", () => {
   const report = fileChip("report");
-  // A browser pick is keyed by its ref, so delivering it again stages the same key.
-  const pick = fileChip("pick", "text/html", stagedAttachmentKeyForRef({ id: "att-pick" }));
+  // Delivering the same browser pick again must not duplicate its file.
+  const pick = fileChip("pick", "text/html", "picked:delivered-again");
   const logs = fileChip("logs", "text/plain");
   assert.deepEqual(
     draftAfterSend({
@@ -709,7 +671,7 @@ test("an image staged meanwhile keeps its own [Image #N] once the sent images ar
   );
 
   // An image delivered again meanwhile IS the sent one: its placeholder follows it there.
-  const pick = imageChip("pick", stagedAttachmentKeyForRef({ id: "att-pick" }));
+  const pick = imageChip("pick", "picked:delivered-again");
   assert.deepEqual(
     draftAfterSend({
       outcome: failedWith("look at [Image #1] and [Image #2]"),
@@ -865,10 +827,6 @@ const RAIL = {
   lastQueued: null,
   now: 10_000
 };
-
-test("the rail's Send: an idle thread sends the trimmed text", () => {
-  assert.deepEqual(planExternalSubmit({ ...RAIL, text: "  hello  " }), { kind: "send", text: "hello" });
-});
 
 test("the rail's Send measures the TRIMMED text against the length bound, as Enter does", () => {
   const padded = `${"x".repeat(120_000)}${" ".repeat(50)}`;

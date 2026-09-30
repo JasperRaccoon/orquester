@@ -72,7 +72,7 @@ export class Scenario {
     nodeId: string,
     crashAt: NonNullable<FakeContextOptions["crashAt"]>,
     opts: { extra?: RunOptions; pickResume?: (persisted: (WaitingOn | undefined)[], crashedAt: WaitingOn | undefined) => WaitingOn | undefined } = {}
-  ): Promise<{ result: NodeResult; crashed: boolean; first: FakeContext; second?: FakeContext; resumedFrom?: WaitingOn }> {
+  ): Promise<{ result: NodeResult; crashed: boolean; first: FakeContext; second?: FakeContext }> {
     const first = this.context(workflow, nodeId, { ...opts.extra, crashAt });
     try {
       const result = await this.clock.drive(this.executor().execute(first.ctx));
@@ -82,7 +82,7 @@ export class Scenario {
       const resumeFrom = opts.pickResume ? opts.pickResume(first.persisted, error.waitingOn) : error.waitingOn;
       const second = this.context(workflow, nodeId, { ...opts.extra, ...(resumeFrom ? { resumeFrom } : {}) });
       const result = await this.clock.drive(this.executor().execute(second.ctx));
-      return { result, crashed: true, first, second, ...(resumeFrom ? { resumedFrom: resumeFrom } : {}) };
+      return { result, crashed: true, first, second };
     }
   }
 }

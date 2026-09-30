@@ -21,7 +21,7 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { Clock, IdGen } from "../../adapter.ts";
 import { classifyRequestType, summarizeToolRequest, trimmedString } from "./classify.ts";
 import { claudeCanUseToolRoute, claudeRequestKey } from "./decisions.ts";
-import { ClaudeNormalizer, extractExitPlanModePlan, type NormalizerOptions } from "./normalize.ts";
+import { ClaudeNormalizer, extractExitPlanModePlan } from "./normalize.ts";
 
 export const CLAUDE_FIXTURES_DIR = nodePath.resolve(
   nodePath.dirname(fileURLToPath(import.meta.url)),
@@ -70,16 +70,12 @@ interface ReplayResult {
  * id as the message uuid, exactly as `sendTurn` does), `canUseTool` lines open
  * an approval or a proposed plan, and `canUseToolResult` lines resolve it.
  */
-export function replayClaudeFixture(
-  name: string,
-  options?: Pick<NormalizerOptions, "onWorkflowAgent" | "onBackgroundShell">
-): ReplayResult {
+export function replayClaudeFixture(name: string): ReplayResult {
   const lines = readClaudeFixture(name);
   const normalizer = new ClaudeNormalizer({
     threadId: "thread-fixture",
     clock: fixedClock(),
-    ids: countingIds(),
-    ...options
+    ids: countingIds()
   });
   const events: RuntimeEvent[] = [];
   let pendingRequest:

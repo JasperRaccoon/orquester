@@ -50,7 +50,7 @@ function workflowLabel(workflow: RuntimeSubagent): string {
 }
 
 /** The run's own Stop: offered while the provider can stop it, pending until it settles. */
-export interface WorkflowStop {
+interface WorkflowStop {
   control: Exclude<TaskStopControl, "hidden">;
   onStop: () => void;
 }
@@ -70,7 +70,6 @@ function WorkflowStopButton({
       type="button"
       disabled={stopping}
       onClick={stop.onStop}
-      data-task-stop="true"
       title={stopping ? `Stopping ${label}` : `Stop ${label} and all of its agents`}
       className={cn(
         "ac-press inline-flex h-5 shrink-0 items-center rounded px-1.5 font-mono text-[10px] font-medium normal-case tracking-normal",
@@ -233,7 +232,6 @@ function ExpandedWorkflow({
           type="button"
           onClick={() => onOpenAgent(group.workflow.id)}
           title="Open the workflow and its script"
-          data-agent-id={group.workflow.id}
           className={cn(
             "ac-press min-w-0 truncate rounded-sm text-left uppercase tracking-wider",
             "hover:text-neutral-200 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
@@ -347,7 +345,7 @@ function CollapsedWorkflow({
   );
 }
 
-export interface WorkflowGroupProps {
+interface WorkflowGroupProps {
   group: AgentPanelWorkflowGroup;
   activeAgentId?: string | null;
   onOpenAgent: (agentId: string) => void;

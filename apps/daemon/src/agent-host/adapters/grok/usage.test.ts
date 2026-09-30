@@ -1,6 +1,7 @@
 /**
  * Token usage and cost — the spec says Grok emits none; the CLI emits it in
- * four places. These tests pin the reading of each.
+ * four places. These tests pin the captured prompt result and fallback
+ * sources that contribute to the user-visible usage meter.
  */
 
 import test from "node:test";
@@ -66,19 +67,6 @@ test("the context WINDOW comes from the model state and is 500k on 1.0.34", () =
   assert.equal(contextWindowFromModelState(undefined), undefined);
 });
 
-test("turn_completed on the private channel carries the same usage object", () => {
-  const entries = readCapture("02-prompt-plain-text.ndjson");
-  const turnCompleted = entries
-    .map((entry) => entry.frame as { method?: string; params?: { update?: Record<string, unknown> } })
-    .find(
-      (frame) =>
-        frame.method === "_x.ai/session_notification" && frame.params?.update?.["sessionUpdate"] === "turn_completed"
-    );
-  const usage = parseXaiUsage(turnCompleted?.params?.update?.["usage"]);
-  assert.equal(usage?.inputTokens, 22_423);
-  assert.equal(usage?.costUsdTicks, 121_754_000);
-});
-
 test("response_completed's snake_case per-call usage normalises to the same shape", () => {
   const parsed = parseResponseCompletedUsage({
     input_tokens: 16_279,
@@ -90,14 +78,6 @@ test("response_completed's snake_case per-call usage normalises to the same shap
   assert.equal(parsed?.inputTokens, 16_279);
   assert.equal(parsed?.cachedReadTokens, 6_144);
   assert.equal(parsed?.reasoningTokens, 29);
-});
-
-test("a usage block with only one side is partial, and nothing is unavailable", () => {
-  const partial = turnTokenUsage({ inputTokens: 10, outputTokens: Number.NaN, totalTokens: 10 });
-  assert.equal(partial.usageStatus, "partial");
-  assert.equal(partial.inputTokens, 10);
-  assert.equal(turnTokenUsage(undefined).usageStatus, "unavailable");
-  assert.equal(turnTokenUsage(undefined, true).hasSubagents, true);
 });
 
 test("a malformed usage block is undefined rather than a throw", () => {

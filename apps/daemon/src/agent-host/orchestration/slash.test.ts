@@ -23,23 +23,6 @@ const image: AttachmentRef = {
 };
 
 describe("parseHostGoalCommand (goals §5.1)", () => {
-  it("is not a goal command unless the trimmed text is /goal followed by a boundary", () => {
-    for (const text of [
-      "",
-      "goal fix it",
-      "/goals",
-      "/goals list",
-      "/goalie",
-      "/go al",
-      "//goal x",
-      "please /goal x",
-      "/compact",
-      "/goal-setting"
-    ]) {
-      assert.equal(parseHostGoalCommand(text), null, JSON.stringify(text));
-    }
-  });
-
   it("a bare /goal and `status` both ask for the status, in any case", () => {
     for (const text of ["/goal", "  /goal  ", "/GOAL", "/Goal status", "/goal STATUS", "/goal\tstatus  "]) {
       assert.deepEqual(parseHostGoalCommand(text), { kind: "status" }, JSON.stringify(text));

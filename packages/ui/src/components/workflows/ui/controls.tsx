@@ -225,7 +225,6 @@ export const HelpTip: React.FC<{
       >
         <Info size={12} aria-hidden />
       </ViewButton>
-      {/* Mounted only while open: the static render checks never run the popover's layout effect. */}
       {open ? (
         <Popover
           open

@@ -145,23 +145,23 @@ const SavedPromptBody: React.FC<{ body: string }> = ({ body }) => {
 // ---------------------------------------------------------------------------
 
 /** The prompt written here set to `text`. */
-export function withPromptText(config: AgentBlockConfig, text: string): AgentBlockConfig {
+function withPromptText(config: AgentBlockConfig, text: string): AgentBlockConfig {
   return { ...config, prompt: config.prompt.kind === "text" ? { ...config.prompt, text } : { kind: "text", text } };
 }
 
 /** A new chat titled `title` ("" = no title: the default). */
-export function withChatTitle(config: AgentBlockConfig, title: string): AgentBlockConfig {
+function withChatTitle(config: AgentBlockConfig, title: string): AgentBlockConfig {
   const { title: _old, ...rest } = config.session.kind === "new" ? config.session : { kind: "new" as const };
   return { ...config, session: title ? { ...rest, kind: "new", title } : { ...rest, kind: "new" } };
 }
 
 /** Continue the chat of the block named `fromNode`. */
-export function withContinueFrom(config: AgentBlockConfig, fromNode: string): AgentBlockConfig {
+function withContinueFrom(config: AgentBlockConfig, fromNode: string): AgentBlockConfig {
   return { ...config, session: config.session.kind === "continue" ? { ...config.session, fromNode } : { kind: "continue", fromNode } };
 }
 
 /** Wait for quota to refill, at most `maxWaitHours`. */
-export function withMaxWaitHours(config: AgentBlockConfig, maxWaitHours: number): AgentBlockConfig {
+function withMaxWaitHours(config: AgentBlockConfig, maxWaitHours: number): AgentBlockConfig {
   return {
     ...config,
     whenAllBurnt: config.whenAllBurnt.kind === "wait-for-reset" ? { ...config.whenAllBurnt, maxWaitHours } : { kind: "wait-for-reset", maxWaitHours }
@@ -172,7 +172,7 @@ export function withMaxWaitHours(config: AgentBlockConfig, maxWaitHours: number)
  * A saved prompt as the text it runs as — the daemon's `promptSource`: the body, then a blank line
  * and the addition when it has any text — so "Write it here" starts from what was being sent.
  */
-export function savedText(body: string, append: string | undefined): string {
+function savedText(body: string, append: string | undefined): string {
   return append?.trim() ? `${body}\n\n${append}` : body;
 }
 

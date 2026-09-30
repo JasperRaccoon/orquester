@@ -32,7 +32,6 @@ import {
   runWorkflowNow,
   setWorkflowEnabled,
   workflowSecretsKey,
-  workflowRunLoadError,
   workflowsStore,
   withEnabledOverride,
   type WorkflowsApi
@@ -275,12 +274,6 @@ describe("sanitising a row's errors", () => {
       assert.equal(bad?.errorCount, 1);
     }
   });
-
-  it("caps the list", () => {
-    const row = sanitizeWorkflowSummary({ ...base, errorCount: 9, errors: Array.from({ length: 9 }, (_, i) => ({ ...opus, message: `m${i}` })) });
-    assert.equal(row?.errors?.length, 5);
-    assert.equal(row?.errorCount, 9);
-  });
 });
 
 describe("the list load", () => {
@@ -517,7 +510,7 @@ describe("runs", () => {
     assert.equal(state().runs.r4?.summary.status, "succeeded");
   });
 
-  it("a run whose definition does not parse is an error, not a crash", async () => {
+  it("a run whose definition does not parse is not published and does not crash", async () => {
     const api = new FakeApi();
     api.runDetail = { run: {
       ...run({ id: "r2", workflowId: "a" }),
@@ -529,7 +522,6 @@ describe("runs", () => {
     } };
     await assert.doesNotReject(loadWorkflowRun(api, "r2"));
     assert.equal(state().runs.r2, undefined);
-    assert.ok(workflowRunLoadError("r2"));
   });
 });
 

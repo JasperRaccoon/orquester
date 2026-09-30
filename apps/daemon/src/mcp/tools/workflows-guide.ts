@@ -15,8 +15,8 @@ import {
 } from "@orquester/api";
 import { WORKFLOW_NODE_TYPES } from "@orquester/config";
 
-/** The worked example's create_workflow arguments (a Jira fixer): also exercised by the tests, so it stays valid. */
-export const JIRA_FIXER_EXAMPLE = {
+/** The worked example's create_workflow arguments (a Jira fixer). */
+const JIRA_FIXER_EXAMPLE = {
   name: "Jira fixer",
   description: "Every 15 minutes: new Jira tickets → Claude fixes them → the tickets move to Done.",
   project: { kind: "existing", project: "acme/api" },
@@ -66,7 +66,7 @@ export const JIRA_FIXER_EXAMPLE = {
 };
 
 /** The follow-up edit of the worked example: update_workflow ops (revision from the create's answer). */
-export const JIRA_FIXER_EDIT_OPS = [
+const JIRA_FIXER_EDIT_OPS = [
   {
     op: "add_node",
     node: {

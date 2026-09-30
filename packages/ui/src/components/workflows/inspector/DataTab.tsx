@@ -3,9 +3,6 @@
  * this one's output, what it received and produced in the workflow's latest
  * run, its pinned output (what a test of a later block gets instead of running
  * this one) and "Test block".
- *
- * `DataTab` reads the runs and the API; `DataTabView` is the tab itself, fed
- * the latest run, so it renders the same in a static check.
  */
 
 import React, { useMemo, useState } from "react";
@@ -15,7 +12,6 @@ import {
   isTriggerType,
   WORKFLOW_BLOCK_CATALOG,
   WORKFLOW_EXPRESSION_ROOT_GUIDE,
-  type RunWorkflowResponse,
   type WorkflowGuideItem,
   type WorkflowRunSummary
 } from "@orquester/api";
@@ -35,7 +31,6 @@ import {
   testStartedNote
 } from "../../../lib/workflows/inspector-data";
 import { blockStatusView, runStatusView } from "../../../lib/workflows/run-view";
-import type { WorkflowRunEntry } from "../../../lib/workflows/store";
 import { ConfirmDialog } from "../../ui/confirm-dialog";
 import { usePhoneLayout } from "../phone/phone-context";
 import { JsonTree } from "../runs/JsonTree";
@@ -43,20 +38,6 @@ import { StatusGlyph, useNow } from "../runs/shared";
 import { Callout, CopyChip, Disclosure, HelpTip, Pill, Section, SmallButton, TextArea } from "../ui/controls";
 import { GuideItems, GuideSections, GuideText } from "../ui/GuideText";
 import { fieldMessages, useInspector } from "./inspector-context";
-
-export interface DataTabViewProps {
-  /** The workflow's latest run, if any. */
-  latest: WorkflowRunSummary | undefined;
-  /** That run, as loaded so far. */
-  run: WorkflowRunEntry | null;
-  onOpenRun?: (runId: string) => void;
-  /** The block's whole output in a run (when the run kept only a preview). */
-  readWholeOutput: (runId: string) => Promise<unknown>;
-  /** Start "Test block" (after the draft is saved). */
-  startTest: () => Promise<RunWorkflowResponse>;
-  /** A fixed clock (static checks); live otherwise. */
-  now?: number;
-}
 
 const MUTED = "text-[12px] leading-5 text-neutral-500";
 
@@ -137,9 +118,13 @@ const UseItsData: React.FC = () => {
   );
 };
 
-export const DataTabView: React.FC<DataTabViewProps> = ({ latest, run, onOpenRun, readWholeOutput, startTest, now: fixedNow }) => {
+export const DataTab: React.FC<{ onOpenRun?: (runId: string) => void }> = ({ onOpenRun }) => {
+  const api = useApi();
   const { editor, workflow, node, readOnly, problems } = useInspector();
-  const now = useNow(false, fixedNow);
+  const runs = useWorkflowRuns(workflow.id);
+  const latest: WorkflowRunSummary | undefined = runs.runs[0];
+  const run = useWorkflowRun(latest?.id ?? null);
+  const now = useNow(false);
   const block = run?.blocks[node.id];
   const pinned = workflow.pinned?.[node.id];
   const hasPin = workflow.pinned !== undefined && node.id in workflow.pinned;
@@ -168,7 +153,7 @@ export const DataTabView: React.FC<DataTabViewProps> = ({ latest, run, onOpenRun
     setPinning(true);
     setPinError(null);
     try {
-      const whole = await pinnableOutputOf(block, () => readWholeOutput(latest.id));
+      const whole = await pinnableOutputOf(block, () => api.getWorkflowNodeOutput(latest.id, node.id));
       // Pinning null would remove the pin instead.
       if (!pinnableValue(whole)) setPinError("Its whole output is null: there is nothing to pin.");
       else pin(whole);
@@ -184,7 +169,7 @@ export const DataTabView: React.FC<DataTabViewProps> = ({ latest, run, onOpenRun
     setTestNote(null);
     try {
       await editor.flush();
-      const answer = await startTest();
+      const answer = await api.testWorkflowNode(workflow.id, node.id, { usePinned: true });
       setTestNote(testStartedNote(answer));
       if (answer.runId) onOpenRun?.(answer.runId);
     } catch (error) {
@@ -450,22 +435,5 @@ export const DataTabView: React.FC<DataTabViewProps> = ({ latest, run, onOpenRun
         </Section>
       ) : null}
     </>
-  );
-};
-
-export const DataTab: React.FC<{ onOpenRun?: (runId: string) => void }> = ({ onOpenRun }) => {
-  const api = useApi();
-  const { workflow, node } = useInspector();
-  const runs = useWorkflowRuns(workflow.id);
-  const latest: WorkflowRunSummary | undefined = runs.runs[0];
-  const run = useWorkflowRun(latest?.id ?? null);
-  return (
-    <DataTabView
-      latest={latest}
-      run={run}
-      onOpenRun={onOpenRun}
-      readWholeOutput={(runId) => api.getWorkflowNodeOutput(runId, node.id)}
-      startTest={() => api.testWorkflowNode(workflow.id, node.id, { usePinned: true })}
-    />
   );
 };

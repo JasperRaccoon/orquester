@@ -346,17 +346,12 @@ describe("provider snapshot registry (§3.2, §6.3)", () => {
   });
 
   it("ignores an unreadable cache rather than failing startup", async () => {
-    await withRegistry(async ({ stateDir }) => {
+    await withRegistry(async ({ registry, stateDir }) => {
       await writeFile(join(stateDir, "provider-snapshots.json"), "{not json");
-      const reloaded = createProviderSnapshotRegistry({
-        probes: [],
-        stateDir,
-        logger: createRecordingLogger(),
-        clock: createTestClock(0)
-      });
-      await reloaded.load();
-      assert.deepEqual(reloaded.all(), []);
-      reloaded.stop();
+      await registry.load();
+      assert.equal(registry.get("claude"), null);
+      await registry.refresh("claude");
+      assert.equal(registry.get("claude")?.version, "1.0.0");
     });
   });
 });
@@ -449,7 +444,7 @@ describe("§3.2 boot: pending seed, correlated cache, forced boot probe", () => 
 
   async function withSeeded<T>(
     run: (input: Harness) => Promise<T>,
-    options: { binPath?: string | null; stateDir?: string; pending?: boolean } = {}
+    options: { binPath?: string | null; stateDir?: string } = {}
   ): Promise<T> {
     const stateDir = options.stateDir ?? (await mkdtemp(join(tmpdir(), "provider-pending-")));
     const probe: Harness["probe"] = { calls: 0, next: snapshotFor("claude") };
@@ -457,7 +452,7 @@ describe("§3.2 boot: pending seed, correlated cache, forced boot probe", () => 
       probes: [
         {
           id: "claude",
-          ...(options.pending === false ? {} : { pending: pendingClaude }),
+          pending: pendingClaude,
           identity: () => ({
             binPath: options.binPath === undefined ? "/usr/bin/claude" : options.binPath
           }),
@@ -502,36 +497,29 @@ describe("§3.2 boot: pending seed, correlated cache, forced boot probe", () => 
     });
   });
 
-  it("layer 1: a pending seed is never written to the cache file", async () => {
-    await withSeeded(async ({ registry, stateDir }) => {
-      await registry.flush();
-      await assert.rejects(readFile(join(stateDir, "provider-snapshots.json"), "utf8"));
-    });
-  });
-
-  it("layer 2: a correlated cached snapshot overrides the pending seed", async () => {
+  it("a cache write for a probed provider excludes another provider's pending seed", async (t) => {
     const stateDir = await mkdtemp(join(tmpdir(), "provider-pending-"));
-    try {
-      await writeCache(stateDir, {
-        claude: {
-          identity: identityFor("claude", { binPath: "/usr/bin/claude" }),
-          snapshot: snapshotFor("claude", { version: "2.1.210" })
-        }
-      });
-      await withSeeded(
-        async ({ registry, probe }) => {
-          assert.equal(registry.get("claude")?.status, "unknown", "pending before load()");
-          await registry.load();
-          const hydrated = registry.get("claude")!;
-          assert.equal(hydrated.status, "ready", "on-disk state wins where present");
-          assert.equal(hydrated.version, "2.1.210");
-          assert.equal(probe.calls, 0, "hydration is a read");
-        },
-        { stateDir, binPath: "/usr/bin/claude" }
-      );
-    } finally {
-      await rm(stateDir, { recursive: true, force: true, maxRetries: 3 });
-    }
+    const registry = createProviderSnapshotRegistry({
+      probes: [
+        { id: "claude", pending: pendingClaude, refresh: async () => snapshotFor("claude") },
+        { id: "codex", refresh: async () => snapshotFor("codex") }
+      ],
+      stateDir,
+      logger: createRecordingLogger(),
+      clock: createTestClock(0)
+    });
+    t.after(async () => {
+      registry.stop();
+      await registry.flush();
+      await rm(stateDir, { recursive: true, force: true });
+    });
+
+    await registry.refresh("codex");
+    await registry.flush();
+
+    assert.equal(registry.get("claude")?.status, "unknown");
+    const cached = JSON.parse(await readFile(join(stateDir, "provider-snapshots.json"), "utf8")) as CacheFile;
+    assert.deepEqual(Object.keys(cached.providers), ["codex"]);
   });
 
   it("layer 2: an uncorrelated cached snapshot is discarded and the pending seed stands", async () => {

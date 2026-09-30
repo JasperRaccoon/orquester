@@ -4,16 +4,12 @@ import { test } from "node:test";
 import type { McpServerView } from "@orquester/api";
 
 import {
-  advancedDraft,
   initialMcpForm,
   mcpDraftFromForm,
   mcpFormOrigin,
   newSecretRow,
   parsePastedCommandLine,
-  secretDrafts,
-  splitCommandLine,
   validateMcpForm,
-  validateSecretRows,
   type SecretRow
 } from "./mcp.logic";
 
@@ -30,14 +26,16 @@ const STDIO: McpServerView = {
 };
 
 test("splitCommandLine splits like a shell: quotes, escapes, continuations, no expansion", () => {
-  assert.deepEqual(splitCommandLine("npx -y @scope/pkg"), ["npx", "-y", "@scope/pkg"]);
-  assert.deepEqual(splitCommandLine(`node "my server.js" --name 'a b' c\\ d`), ["node", "my server.js", "--name", "a b", "c d"]);
-  assert.deepEqual(splitCommandLine(`echo "say \\"hi\\"" '\\n'`), ["echo", 'say "hi"', "\\n"]);
-  assert.deepEqual(splitCommandLine("uvx \\\n  server   --port 3"), ["uvx", "server", "--port", "3"]);
-  assert.deepEqual(splitCommandLine(`a "" ''`), ["a", "", ""]);
-  assert.deepEqual(splitCommandLine("run $HOME/bin"), ["run", "$HOME/bin"]);
-  assert.deepEqual(splitCommandLine(`open "unterminated arg`), ["open", "unterminated arg"]);
-  assert.deepEqual(splitCommandLine("   "), []);
+  for (const [line, command, args] of [
+    ["npx -y @scope/pkg", "npx", ["-y", "@scope/pkg"]],
+    [`node "my server.js" --name 'a b' c\\ d`, "node", ["my server.js", "--name", "a b", "c d"]],
+    [`echo "say \\"hi\\"" '\\n'`, "echo", ['say "hi"', "\\n"]],
+    ["uvx \\\n  server   --port 3", "uvx", ["server", "--port", "3"]],
+    [`a "" ''`, "a", ["", ""]],
+    ["run $HOME/bin", "run", ["$HOME/bin"]]
+  ] as const) {
+    assert.deepEqual(parsePastedCommandLine(line), { command, args, env: [] });
+  }
 });
 
 test("a pasted command line becomes command + args, with leading assignments as env", () => {
@@ -66,7 +64,7 @@ test("secret drafts: untouched rows keep, replaced and new rows send a value, re
     { id: "c", key: " NEW_ONE ", value: "v", state: "new" },
     { id: "d", key: "", value: "", state: "new" }
   ];
-  assert.deepEqual(secretDrafts(rows), [
+  assert.deepEqual(mcpDraftFromForm("claude", { ...initialMcpForm("claude", STDIO), env: rows }, mcpFormOrigin(STDIO)).env, [
     { key: "JIRA_TOKEN", keep: true },
     { key: "JIRA_URL", value: "https://new" },
     { key: "NEW_ONE", value: "v" }
@@ -74,20 +72,20 @@ test("secret drafts: untouched rows keep, replaced and new rows send a value, re
 });
 
 test("secret rows: bad keys, duplicates (headers case-insensitively) and an empty replacement are refused", () => {
-  const env = validateSecretRows("env", [
+  const env = validateMcpForm("claude", { ...initialMcpForm("claude", STDIO), env: [
     { id: "1", key: "1BAD", value: "x", state: "new" },
     { id: "2", key: "OK", value: "x", state: "new" },
     { id: "3", key: "OK", value: "y", state: "new" },
     { id: "4", key: "", value: "orphan", state: "new" },
     { id: "5", key: "TOKEN", value: "", state: "replace" },
     { id: "6", key: "", value: "", state: "new" }
-  ]);
+  ] }).errors.env;
   assert.deepEqual(Object.keys(env).sort(), ["1", "3", "4", "5"]);
-  const headers = validateSecretRows("headers", [
+  const headers = validateMcpForm("claude", { ...initialMcpForm("claude"), name: "docs", transport: "http", url: "https://example.com/mcp", headers: [
     { id: "1", key: "Authorization", value: "", state: "existing" },
     { id: "2", key: "authorization", value: "x", state: "new" },
     { id: "3", key: "Bad Header", value: "x", state: "new" }
-  ]);
+  ] }).errors.headers;
   assert.deepEqual(Object.keys(headers).sort(), ["2", "3"]);
 });
 
@@ -134,7 +132,7 @@ test("advanced fields are coerced by type; unknown keys on disk pass through; bl
     bearer_token_env_var: " TOKEN_VAR ",
     required: true
   };
-  assert.deepEqual(advancedDraft("codex", values, origin), {
+  assert.deepEqual(mcpDraftFromForm("codex", { ...initialMcpForm("codex"), advanced: values }, origin).advanced, {
     experimental_x: "kept",
     startup_timeout_sec: 30,
     enabled_tools: ["search", "get", "list"],
@@ -142,13 +140,13 @@ test("advanced fields are coerced by type; unknown keys on disk pass through; bl
     required: true
   });
   // A switch off is sent only when the file had it.
-  assert.deepEqual(advancedDraft("codex", { ...values, required: false }, mcpFormOrigin()), {
+  assert.deepEqual(mcpDraftFromForm("codex", { ...initialMcpForm("codex"), advanced: { ...values, required: false } }, mcpFormOrigin()).advanced, {
     startup_timeout_sec: 30,
     enabled_tools: ["search", "get", "list"],
     bearer_token_env_var: "TOKEN_VAR"
   });
   assert.equal(
-    advancedDraft("codex", { required: false }, { name: "x", advanced: { required: true } }).required,
+    mcpDraftFromForm("codex", { ...initialMcpForm("codex"), advanced: { required: false } }, { name: "x", advanced: { required: true } }).advanced?.required,
     false
   );
 });

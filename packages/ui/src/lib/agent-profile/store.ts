@@ -630,7 +630,7 @@ function parseJsonRecord(raw: string | null | undefined): Record<string, unknown
  * Any stored string → valid prefs, field by field; anything unusable is the
  * default. A tab is kept only for a known agent that has that kind.
  */
-export function parseAgentProfilePrefs(raw: string | null | undefined): AgentProfilePrefs {
+function parseAgentProfilePrefs(raw: string | null | undefined): AgentProfilePrefs {
   const parsed = parseJsonRecord(raw);
   if (parsed === null) return { agent: null, tabs: {} };
   const agent = parsed.agent;
@@ -650,7 +650,7 @@ export function parseAgentProfilePrefs(raw: string | null | undefined): AgentPro
  * wrote are kept, and so are its tabs for agents this one does not know
  * (AGENTS.md: preserve unknown persisted fields).
  */
-export function serializeAgentProfilePrefs(prefs: AgentProfilePrefs, previous?: string | null): string {
+function serializeAgentProfilePrefs(prefs: AgentProfilePrefs, previous?: string | null): string {
   const base = parseJsonRecord(previous) ?? {};
   const tabs = { ...(asRecord(base.tabs) ?? {}), ...prefs.tabs };
   return JSON.stringify({ ...base, v: AGENT_PROFILE_PREFS_VERSION, agent: prefs.agent, tabs });

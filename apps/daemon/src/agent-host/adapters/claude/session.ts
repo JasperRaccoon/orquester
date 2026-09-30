@@ -211,7 +211,7 @@ const IMAGE_MIME_TYPES = new Set<string>(SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES);
  * writes, which the attachments-dir grant (`launch.ts`) lets it `Read` without
  * an approval prompt. Pure; judged on the ref alone.
  */
-export function claudeIngestsAttachment(
+function claudeIngestsAttachment(
   attachment: AttachmentRef
 ): attachment is Extract<AttachmentRef, { type: "image" }> {
   return attachment.type === "image" && IMAGE_MIME_TYPES.has(attachment.mimeType);
@@ -2147,7 +2147,12 @@ export class ClaudeSession {
         continue;
       }
       try {
-        turn.items.push(await readWorkflowHistoryRun({ sessionDir, toolUseId, launch }));
+        turn.items.push(await readWorkflowHistoryRun({
+          projectsDir: nodePath.join(claudeConfigDir(this.options.env), "projects"),
+          sessionDir,
+          toolUseId,
+          launch
+        }));
       } catch (error) {
         this.options.context.logger.warn(
           `claude: could not read workflow run ${launch.runId} for thread ${this.threadId}`,

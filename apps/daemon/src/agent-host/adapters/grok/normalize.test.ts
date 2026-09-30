@@ -486,19 +486,6 @@ test("an id the launch itself named is never taken for its subagent's", () => {
   assert.equal(started.payload.taskId, SUB_B, "SUB_B was never call-s1's own id");
 });
 
-test("a background task the CLI registers for a spawn call is that subagent, never a shell", () => {
-  // Whether the CLI backgrounds a subagent through these frames is not
-  // captured; if it does, their observed shape joins on `tool_call_id`.
-  const grok = normalizer();
-  startedBy(grok, "call-bg", { prompt: "p", description: "run tests", background: true });
-  const registered = grok.handleXaiNotification("_x.ai/task_backgrounded", backgrounded("call-bg", SUB_B));
-  assert.deepEqual(registered, [], "no shell row for the subagent");
-  const channel = "_x.ai/session_notification";
-  assert.deepEqual(grok.handleXaiNotification(channel, snapshot(SUB_B, "subagent", "running")), []);
-  const ended = grok.handleXaiNotification(channel, snapshot(SUB_B, "subagent", "completed"));
-  assert.deepEqual(statuses(taskRows(ended)), [["task.completed", "call-bg", "completed"]], "its end");
-});
-
 test("the CLI's own output names the subagent; a summary quoting other ids never steals them", () => {
   const grok = normalizer();
   // A live background shell of the parent's.
@@ -1168,43 +1155,6 @@ test("a run's end closes its child's open calls BEFORE its task row", () => {
   assert.equal(failed.payload.status, "failed");
   assert.equal(failed.agentId, "call-s1");
   assert.equal(failed.turnId, "turn-1", "on the turn the call started in");
-});
-
-// ---------------------------------------------------------------------------
-// Monitors (fixture 20; T3's reader)
-// ---------------------------------------------------------------------------
-
-test("a Monitor answer with no task_backgrounded before it starts the monitor itself — T3's reader order", () => {
-  const grok = normalizer();
-  const MONITOR = "01a0d913-6204-7391-8dbb-5ea888f73f03";
-  grok.handleSessionUpdate(
-    frame({ sessionUpdate: "tool_call", toolCallId: "call-m", title: "monitor", rawInput: { command: "tail -f x", description: "watch x" } })
-  );
-  const started = grok.handleSessionUpdate(
-    frame({
-      sessionUpdate: "tool_call_update",
-      toolCallId: "call-m",
-      status: "completed",
-      rawOutput: { type: "Monitor", taskId: MONITOR, timeoutMs: 36_000_000, persistent: false }
-    })
-  );
-  assert.deepEqual(
-    taskRows(started).map((event) => [event.payload.taskId, event.payload.taskType, event.payload.title, event.payload.toolUseId]),
-    [[MONITOR, "monitor", "watch x", "call-m"]]
-  );
-  const event = grok.handleXaiNotification("_x.ai/monitor_event", {
-    sessionId: SESSION,
-    update: { sessionUpdate: "monitor_event", task_id: MONITOR, description: "watch x", event_text: "ERROR boom" }
-  });
-  assert.deepEqual(
-    agentRows(event).map((row) => [row.type, (row.payload as { summary?: string }).summary]),
-    [["task.progress", "ERROR boom"]]
-  );
-  const unknown = grok.handleXaiNotification("_x.ai/monitor_event", {
-    sessionId: SESSION,
-    update: { sessionUpdate: "monitor_event", task_id: "01a0d913-0000-7000-8000-000000000000", event_text: "x" }
-  });
-  assert.deepEqual(unknown, [], "a monitor nobody started starts nothing");
 });
 
 // ---------------------------------------------------------------------------

@@ -173,7 +173,7 @@ function isSlugLine(line: string): boolean {
  * model whose `id` is `vendor/model` — also matches `SLUG_LINE_RE`, which
  * would flush an empty body and silently drop the model.
  */
-export function parseModelsCliOutput(stdout: string): ProviderListResponse {
+function parseModelsCliOutput(stdout: string): ProviderListResponse {
   const providers = new Map<string, OpenCodeProviderRow>();
   let currentSlug: string | null = null;
   let body: string[] = [];
@@ -222,7 +222,7 @@ export function parseModelsCliOutput(stdout: string): ProviderListResponse {
 }
 
 /** `opencode agent list` — a `name (mode)` header, then its permission JSON. */
-export function parseAgentListCliOutput(stdout: string): OpenCodeAgentRow[] {
+function parseAgentListCliOutput(stdout: string): OpenCodeAgentRow[] {
   const agents: OpenCodeAgentRow[] = [];
   let header: { name: string; mode: string } | null = null;
   let body: string[] = [];
@@ -308,7 +308,7 @@ function salvageJsonObjects(text: string): unknown[] {
 }
 
 /** `opencode debug skill` — one JSON array of `{name, description, location}`. */
-export function parseSkillsCliOutput(stdout: string): OpenCodeSkillRow[] {
+function parseSkillsCliOutput(stdout: string): OpenCodeSkillRow[] {
   const text = stdout.trim();
   if (text.length === 0) {
     return [];

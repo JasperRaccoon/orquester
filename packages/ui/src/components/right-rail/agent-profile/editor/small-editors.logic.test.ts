@@ -23,7 +23,6 @@ import { overwriteInstructions } from "./instructions.logic";
 import {
   initialMarketplaceForm,
   marketplaceDraftFromForm,
-  normalizeGithubRepo,
   validateMarketplaceForm
 } from "./marketplace.logic";
 import {
@@ -109,10 +108,7 @@ test("plugin: marketplaces from the snapshot, filtering, OpenCode specs", () => 
 });
 
 test("marketplace: GitHub repos (URLs normalised), git URLs, paths; ref only where it applies", () => {
-  assert.equal(normalizeGithubRepo("https://github.com/anthropics/claude-plugins.git"), "anthropics/claude-plugins");
-  assert.equal(normalizeGithubRepo("owner/repo"), "owner/repo");
-  assert.equal(normalizeGithubRepo("owner"), null);
-  const form = { ...initialMarketplaceForm(), repo: "github.com/acme/plugins", ref: " v2 ", name: " acme " };
+  const form = { ...initialMarketplaceForm(), repo: "https://github.com/acme/plugins.git", ref: " v2 ", name: " acme " };
   assert.equal(validateMarketplaceForm(form).valid, true);
   assert.deepEqual(marketplaceDraftFromForm(form), {
     name: "acme",
@@ -128,6 +124,8 @@ test("marketplace: GitHub repos (URLs normalised), git URLs, paths; ref only whe
   assert.ok(validateMarketplaceForm({ ...form, type: "path", path: "relative/dir" }).errors.source);
   assert.ok(validateMarketplaceForm({ ...form, name: "bad name" }).errors.name);
   assert.ok(validateMarketplaceForm(initialMarketplaceForm()).errors.source);
+  assert.ok(validateMarketplaceForm({ ...form, repo: "owner" }).errors.source);
+  assert.equal(validateMarketplaceForm({ ...form, repo: "owner/repo" }).valid, true);
 });
 
 const CANDIDATES: ProfileImportCandidate[] = [

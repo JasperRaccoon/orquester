@@ -49,7 +49,7 @@ const GOAL_STATUS_NEEDLE = Buffer.from('"goal_status"', "utf8");
 const NEWLINE = 0x0a;
 
 /** The CLI's name for a project's transcript dir: every UTF-16 unit outside [A-Za-z0-9] is `-`. */
-export function claudeProjectDirName(path: string): string {
+function claudeProjectDirName(path: string): string {
   return path.replace(/[^a-zA-Z0-9]/g, "-");
 }
 

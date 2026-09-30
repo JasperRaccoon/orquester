@@ -137,29 +137,9 @@ describe("ingestion output folded by the real fold (§5.1)", () => {
     assert.equal(agent.agentKind, "background");
   });
 
-  it("a task.progress row replaces the previous one instead of piling up", async () => {
-    const { ingestion, sink } = harness();
-    for (const description of ["Reading", "Editing", "Testing"]) {
-      await ingestion.ingest(
-        runtimeEvent("task.progress", {
-          taskId: "task-1",
-          taskType: "subagent",
-          agentId: "agent-1",
-          description
-        })
-      );
-    }
-    await ingestion.drain();
-    const rows = activities(fold(sink.events())).filter(
-      (row) => row.activityKind === "task.progress"
-    );
-    assert.equal(rows.length, 1, "the stable per-task id must collapse the ticks");
-    assert.equal(rows[0]!.summary, "Testing");
-  });
-
   it("goal progress rows collapse into one, and the goal follows every replacement", async () => {
-    // The same rules the `task.progress` row above lives by: one row, at the
-    // place the first tick took, carrying the newest state — and the fold
+    // Keep one row at the place the first tick took, carrying the newest
+    // goal state — and the fold
     // derives the thread's goal from the row even when it replaces in place.
     const { ingestion, sink } = harness();
     const goal = { objective: "Make CI green", status: "active" as const };

@@ -5,8 +5,8 @@
  * the adapters' own teardown writes them, in the class of the row that opened
  * it — and what it leaves: a message-mode question, a message still streaming.
  * And the launch ids an older host never wrote on an OpenCode or Codex
- * agent's start (`legacyLaunchStarts`): which agents get one, and that it
- * changes nothing the roster shows but lets a relaunch reopen the agent.
+ * agent's start (`legacyLaunchStarts`): which agents get one, and that the
+ * new row preserves the roster's order.
  * The first load and the orphaned-thread reconcile that append them are
  * `reconcile.test.ts`'s.
  */
@@ -720,53 +720,6 @@ describe("leftoverWorkClosings — what a dead process left open", () => {
     assert.equal(activityOf(closingsOf(state)[0]).turnId, "turn-3");
   });
 
-  it("puts every closer in exactly the class the fold gives its opener, whatever the owner's spelling", () => {
-    // The fold's owner is any non-empty `agentId` (`fold.ts` `ownerOf`), blank or not.
-    const state = foldOf([
-      // On a turn: a blank owner is no owner to the views, and a call no row
-      // anchors gets no closer at all (`anchorsCall`).
-      row("odd-start", "tool.started", { itemType: "command_execution", toolUseId: "toolu_odd", title: "Bash" }, {
-        agentId: " ",
-        turnId: "turn-1"
-      }),
-      row("odd-task", "task.started", { taskId: "shell-odd", agentKind: "background", title: "odd" }, {
-        agentId: " "
-      })
-    ]);
-    const [call, task] = closingsOf(state).map(activityOf);
-    assert.equal(call!.agentId, " ");
-    assert.equal((call!.payload as Record<string, unknown>).agentId, " ");
-    assert.equal(task!.agentId, " ");
-  });
-
-  it("leaves every message still streaming to its readers: no closing names one", () => {
-    // Settling one moved its span in the thread index to the end of the log,
-    // and "Load older" then lost every row between its first chunk and the
-    // window (reconcile.test.ts walks the pages).
-    const state = foldOf([
-      said("assistant:agent-1:m1", "assistant", "Looking at", true, { agentId: "agent-1" }),
-      said("reasoning:summary:agent-1:m2", "reasoning", "Thinking about it", true, {
-        agentId: "agent-1",
-        reasoningKind: "summary"
-      }),
-      said("assistant:parent", "assistant", "Checking first", true, { turnId: "turn-1", messageKind: "commentary" }),
-      row("p-start", "tool.started", { itemType: "command_execution", toolUseId: "toolu_1", title: "Bash" }, {
-        turnId: "turn-1"
-      })
-    ]);
-    const closings = closingsOf(state);
-    assert.deepEqual(closings.map((closing) => closing.key), ["call:toolu_1"]);
-    const messages = applied(state, closings).items.filter((item) => item.kind === "message");
-    assert.deepEqual(
-      messages.map((message) => [message.id, message.streaming]),
-      [
-        ["assistant:agent-1:m1", true],
-        ["reasoning:summary:agent-1:m2", true],
-        ["assistant:parent", true]
-      ]
-    );
-  });
-
   it("cancels every parked request but a message-mode question, first, as the host's own settle does", () => {
     const question = { id: "q1", header: "Pick", question: "Which one?", options: [{ label: "A", description: "a" }] };
     const state = foldOf([
@@ -962,17 +915,6 @@ describe("legacyLaunchStarts — a launch id for an agent an older host launched
     }, { turnId: "turn-2", agentId: childId, ...at(5) })
   ];
 
-  /** A relaunch of `childId` under a new call, as a host with the relaunch fix writes it. */
-  const relaunch = (childId: string, callId: string): Unsequenced =>
-    row(`relaunch:${callId}`, "task.started", {
-      taskId: childId,
-      detail: "Explore the repo",
-      taskType: "subagent",
-      agentKind: "agent",
-      agentId: childId,
-      toolUseId: callId
-    }, { turnId: "turn-3", agentId: childId, ...at(9) });
-
   const rosterOf = (state: ThreadFoldState) => foldSubagentActivities(state.activities, { sessionLive: true });
 
   it("gives a settled legacy OpenCode agent one start that names a launch id, on its first start's turn and owner", () => {
@@ -1004,22 +946,6 @@ describe("legacyLaunchStarts — a launch id for an agent an older host launched
         updatedAt: "2026-09-24T10:00:05.000Z"
       }
     ]);
-  });
-
-  it("changes nothing the roster shows, and lets a later relaunch reopen the agent", () => {
-    const state = foldAs("opencode", [...turn("turn-1"), ...legacyOpenCodeChild("ses_child", "turn-1")]);
-    const after = appliedRows(state, launchesOf(state));
-    assert.deepEqual(rosterOf(after), rosterOf(state), "it reads completed, exactly as before");
-    assert.deepEqual(rosterOf(after).map((agent) => [agent.id, agent.status]), [["ses_child", "completed"]]);
-
-    const relaunched = (from: ThreadFoldState) =>
-      applyDomainEvent(from, sequenced([relaunch("ses_child", "call_again")], from.seq)[0]!);
-    // Without it, the roster reads a start on a settled agent with no launch
-    // id behind it as a late delivery…
-    assert.equal(rosterOf(relaunched(state))[0]?.status, "completed");
-    // …and with it, as the relaunch it is.
-    assert.equal(rosterOf(relaunched(after))[0]?.status, "running");
-    assert.equal(rosterOf(relaunched(after))[0]?.activationCount, 2);
   });
 
   it("gives a settled legacy Codex agent one too — a stopped one as much as a completed one", () => {

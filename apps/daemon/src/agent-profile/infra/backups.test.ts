@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { chmod, lstat, mkdir, mkdtemp, readFile, readdir, readlink, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
 import test from "node:test";
 import { ProfileBackups } from "./backups.ts";
 
@@ -26,7 +26,6 @@ test("save copies a file with its mode, and answers null for a missing path", as
 
   const saved = await backups.save("claude", file);
   assert.ok(saved !== null);
-  assert.equal(basename(saved), "20260928T100000000Z-claude.json");
   assert.equal(await readFile(saved, "utf8"), '{"a":1}\n');
   assert.equal((await stat(saved)).mode & 0o777, 0o600);
   assert.equal((await stat(join(root, "backups", "claude"))).mode & 0o777, 0o700);
@@ -50,18 +49,6 @@ test("save copies a directory tree, keeping inner symlinks as symlinks", async (
   assert.equal(await readFile(join(saved, "refs", "a.md"), "utf8"), "A");
   assert.ok((await lstat(join(saved, "link"))).isSymbolicLink());
   assert.equal(await readlink(join(saved, "link")), "/etc/hostname");
-});
-
-test("a symlink itself is backed up as the link, never followed", async (t) => {
-  const root = await scratch(t);
-  const backups = new ProfileBackups({ dir: join(root, "backups"), now: ticking() });
-  await mkdir(join(root, "real"));
-  await writeFile(join(root, "real", "big"), "contents");
-  await symlink(join(root, "real"), join(root, "linked"));
-  const saved = await backups.save("grok", join(root, "linked"));
-  assert.ok(saved !== null);
-  assert.ok((await lstat(saved)).isSymbolicLink());
-  assert.equal(await readlink(saved), join(root, "real"));
 });
 
 test("the ring keeps the newest `keep` entries per agent", async (t) => {

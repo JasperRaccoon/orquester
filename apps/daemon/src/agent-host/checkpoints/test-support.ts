@@ -9,7 +9,7 @@
 
 import { execFile, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
@@ -37,8 +37,6 @@ export interface TempRepo {
   gitReadOnly(...args: string[]): Promise<string>;
   /** Run git with a stdin body (`update-ref --stdin`). */
   gitStdin(stdin: string, ...args: string[]): Promise<string>;
-  /** Entries directly inside the repository's git common dir. */
-  gitCommonDirEntries(): Promise<string[]>;
   write(relativePath: string, contents: string): Promise<void>;
   cleanup(): Promise<void>;
 }
@@ -88,13 +86,6 @@ export async function createTempRepo(): Promise<TempRepo> {
         throw new Error(`git ${args[0]} exited ${code}: ${Buffer.concat(errors).toString("utf8")}`);
       }
       return Buffer.concat(chunks).toString("utf8");
-    },
-    gitCommonDirEntries: async () => {
-      const { stdout } = await run("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], {
-        cwd: dir,
-        env: { ...gitEnv, ...IDENTITY }
-      });
-      return (await readdir(stdout.trim())).sort();
     },
     write: async (relativePath: string, contents: string) => {
       const target = join(dir, relativePath);

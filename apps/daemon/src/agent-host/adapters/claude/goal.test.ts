@@ -374,7 +374,7 @@ describe("claude goal — the tracker (goals §6 preamble)", () => {
       clock: movableClock(),
       knownGoal: { ...active(), updatedAt: "2026-09-24T00:00:00.000Z" } as AgentGoal
     });
-    assert.deepEqual(tracker.goal, active());
+    assert.deepEqual(tracker.apply("progress", active()), { kind: "unchanged" });
   });
 
   it("never throttles anything but progress, and a real change supersedes a deferred one", () => {
@@ -389,7 +389,6 @@ describe("claude goal — the tracker (goals §6 preamble)", () => {
       kind: "emit",
       payload: { goal: checked, change: "checked" }
     });
-    assert.equal(tracker.pendingProgressDueAtMs, undefined);
     assert.deepEqual(tracker.flushProgress(), { kind: "unchanged" });
   });
 
@@ -399,7 +398,6 @@ describe("claude goal — the tracker (goals §6 preamble)", () => {
     assert.equal(tracker.apply("progress", active({ rounds: 1 })).kind, "emit");
     assert.equal(tracker.apply("progress", active({ rounds: 2 })).kind, "deferred");
     assert.deepEqual(tracker.apply("progress", active({ rounds: 1 })), { kind: "unchanged" });
-    assert.equal(tracker.pendingProgressDueAtMs, undefined);
     assert.deepEqual(tracker.flushProgress(), { kind: "unchanged" });
   });
 });

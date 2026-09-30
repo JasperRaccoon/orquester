@@ -103,7 +103,7 @@ function ruleTermLabel(term: string): React.ReactNode {
 }
 
 /** How rules compare, for the Conditions / Cases help tip: the shared guide's rules, then each operator by group. */
-export const RulesGuide: React.FC = () => (
+const RulesGuide: React.FC = () => (
   <div className="space-y-2.5">
     <GuideItems items={WORKFLOW_RULE_GUIDE} termLabel={ruleTermLabel} />
     {OPERATOR_GROUPS.map((group) => (

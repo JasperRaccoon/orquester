@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { ManualClock } from "../testing/manual-trigger-clock.ts";
 import { createScheduler } from "./scheduler.ts";
 import { WorkflowStateStore } from "../state-store.ts";
-import { advance, fakeHost, memoryState, node, recordingLogger, workflow } from "./test-support.ts";
+import { advance, fakeHost, memoryState, node, silentLogger, workflow } from "./test-support.ts";
 
 const MIN = 60_000;
 const HOUR = 60 * MIN;
@@ -20,10 +20,9 @@ function setup(start: string, workflows = [workflow("wf", [schedule("s1", "*/15 
   const clock = new ManualClock(start);
   const host = fakeHost(workflows);
   const state = memoryState();
-  const logger = recordingLogger();
-  const scheduler = createScheduler({ host, state, clock, logger });
+  const scheduler = createScheduler({ host, state, clock, logger: silentLogger });
   const run = (ms: number) => advance(clock, () => scheduler.idle(), ms);
-  return { clock, host, state, logger, scheduler, run };
+  return { clock, host, state, scheduler, run };
 }
 
 test("a new trigger is scheduled from now and fires at its time, once, with the schedule payload", async () => {
@@ -63,7 +62,7 @@ test("the cursor is persisted before the fire", async (t) => {
   const host = fakeHost([workflow("wf", [schedule("s1", "*/15 * * * *", { kind: "minutes", every: 15 })])]);
   const seen: (string | null)[] = [];
   host.onFire = () => seen.push(JSON.parse(readFileSync(file, "utf8")).schedules["wf:s1"].nextRunAt);
-  const scheduler = createScheduler({ host, state, clock, logger: recordingLogger() });
+  const scheduler = createScheduler({ host, state, clock, logger: silentLogger });
   await scheduler.start();
   await advance(clock, () => scheduler.idle(), MIN);
   assert.deepEqual(seen, ["2026-09-28T10:30:00.000Z"]);
@@ -179,8 +178,7 @@ test("a failed cursor write skips that one run but never stops the timer", async
   t.after(() => rm(root, { recursive: true, force: true }));
   const file = join(root, "workflow-state.json");
   const state = new WorkflowStateStore({ path: file, logger: { warn() {}, error() {} } });
-  const logger = recordingLogger();
-  const scheduler = createScheduler({ host, state, clock, logger });
+  const scheduler = createScheduler({ host, state, clock, logger: silentLogger });
   const run = (ms: number) => advance(clock, () => scheduler.idle(), ms);
   await scheduler.start();
   await rm(file);
@@ -203,7 +201,7 @@ test("a failed write while reconciling still arms the timer", async (t) => {
   const file = join(root, "workflow-state.json");
   await mkdir(file);
   const state = new WorkflowStateStore({ path: file, logger: { warn() {}, error() {} } });
-  const scheduler = createScheduler({ host, state, clock, logger: recordingLogger() });
+  const scheduler = createScheduler({ host, state, clock, logger: silentLogger });
   await scheduler.start();
   await rm(file, { recursive: true });
   await advance(clock, () => scheduler.idle(), MIN);

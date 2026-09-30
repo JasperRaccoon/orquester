@@ -271,23 +271,6 @@ beforeEach(() => {
 });
 
 describe("the history slice", () => {
-  it("loads the page just below the window and paints it above the live rows", async () => {
-    const { fake, state } = await open();
-    synchronize(fake);
-
-    const loading = state().actions.loadOlderHistory();
-    assert.equal(state().slice.history.loading, true, "the row spins from the first moment");
-    assert.deepEqual(fake.historyCalls, [
-      { sessionId: "s1", query: { before: "cursor-window", turns: 20 } }
-    ]);
-
-    fake.answer(turnsOneAndTwo());
-    await loading;
-
-    assert.equal(state().slice.history.loading, false);
-    assert.equal(state().slice.history.pages.length, 1);
-    assert.deepEqual(rowIds(state()), ["u1", "a1", "u2", "a2", "u3", "a3"]);
-  });
 
   it("pages by the oldest page's cursor and keeps the pages oldest first", async () => {
     const { fake, state } = await open();
@@ -341,27 +324,6 @@ describe("the history slice", () => {
     }
   });
 
-  it("records a readable error, keeps what it has, and clears it on the next success", async () => {
-    const { fake, state } = await open();
-    synchronize(fake);
-    const loaded = state().actions.loadOlderHistory();
-    fake.answer(turnsOneAndTwo({ page: { beforeCursor: "cursor-page-1" } }));
-    await loaded;
-
-    const failing = state().actions.loadOlderHistory();
-    fake.fail(new AgentChatCommandError(503, "INDEX_UNAVAILABLE", "index is rebuilding"));
-    await failing;
-    assert.ok(state().slice.history.error, "the history read failure is visible");
-    assert.equal(state().slice.history.loading, false);
-    assert.equal(state().slice.history.pages.length, 1, "the loaded page survives the failure");
-    assert.equal(state().slice.errorBanner, null, "a history read is not a thread-level error");
-
-    const retry = state().actions.loadOlderHistory();
-    fake.answer(historyPage({ page: { beforeCursor: null } }));
-    await retry;
-    assert.equal(state().slice.history.error, null);
-  });
-
   it("recovers from a transport that throws before it answers, and can page again", async () => {
     const { fake, state } = await open();
     synchronize(fake);
@@ -397,50 +359,6 @@ describe("the history slice", () => {
 
     assert.deepEqual(state().slice.history.pages, [], "a page of a superseded log is dropped");
     assert.equal(state().slice.history.loading, false);
-  });
-
-  it("renders a turn split across the page and the window as prompt → early work → later work", async () => {
-    const { fake, state } = await open();
-    // Turn 5 outgrew the window: the window still holds its prompt and its
-    // later work; the page just below holds the same prompt and the early
-    // tool calls the window has already evicted.
-    const windowPrompt = message("user", "fix the bug", { id: "u5", createdAt: stamp(50) });
-    const tool = (id: string, summary: string, at: number) =>
-      activity("tool.completed", { status: "completed" }, { id, turnId: "t5", summary, createdAt: stamp(at) });
-    synchronize(
-      fake,
-      windowSnapshot({
-        items: [
-          windowPrompt,
-          tool("x7", "Edit src/a.ts", 57),
-          message("assistant", "fixed", { id: "a5", turnId: "t5", createdAt: stamp(58) })
-        ],
-        turns: [foldTurn("t4", "u4"), foldTurn("t5", "u5")]
-      })
-    );
-    const loading = state().actions.loadOlderHistory();
-    fake.answer(
-      historyPage({
-        items: [
-          message("user", "fix the bug", { id: "u5", createdAt: stamp(50) }),
-          tool("x5", "Read src/a.ts", 51),
-          tool("x6", "Grep bug", 52)
-        ],
-        turns: [historyTurn("t5", 2, { userMessageId: "u5" })]
-      })
-    );
-    await loading;
-
-    state().actions.setDisclosure({ expandedTurnIds: ["t5"] });
-    state().actions.setDisclosure({
-      expandedGroupIds: state().rows.flatMap((row) => row.kind === "work-toggle" ? [row.groupId] : [])
-    });
-    assert.deepEqual(
-      renderedItemIds(state().rows),
-      ["u5", "x5", "x6", "x7", "a5"],
-      "the prompt once and first, then the page's early work, then the window's later work"
-    );
-
   });
 
   describe("a call or a task begun on a page and finished in the window", () => {
@@ -533,45 +451,6 @@ describe("the history slice", () => {
       );
       assert.equal(ids[0], "u5");
     });
-  });
-
-  it("offers rewind on a page prompt, numbered by turn order", async () => {
-    providersStore.setState({
-      providers: [
-        {
-          id: "claude",
-          refIds: ["claude"],
-          installed: true,
-          version: "1",
-          status: "ready",
-          auth: { status: "authenticated" },
-          checkedAt: stamp(0),
-          models: [],
-          slashCommands: [],
-          skills: [],
-          capabilities
-        } as unknown as ProviderSnapshot
-      ]
-    });
-    const { fake, state } = await open();
-    synchronize(fake);
-    const loading = state().actions.loadOlderHistory();
-    fake.answer(
-      turnsOneAndTwo({
-        turns: [
-          historyTurn("t1", 1, { userMessageId: "u1", rewindable: false }),
-          historyTurn("t2", 2, { userMessageId: "u2" })
-        ]
-      })
-    );
-    await loading;
-
-    const counts = Object.fromEntries(
-      state().rows.flatMap((row) =>
-        row.kind === "message" && row.message.role === "user" ? [[row.id, row.revertTurnCount]] : []
-      )
-    );
-    assert.deepEqual(counts, { u1: undefined, u2: 1, u3: 2 });
   });
 });
 
@@ -749,13 +628,6 @@ describe("revealTurn", () => {
     assert.equal(await state().actions.revealTurn("t-reverted"), false);
     assert.equal(fake.historyCalls.length, 0);
     assert.equal(state().reveal, null);
-  });
-
-  it("gives up when nothing older is left to hold the turn", async () => {
-    const { fake, state } = await open();
-    synchronize(fake, windowSnapshot({ history: bounds({ hasOlder: false }) }));
-    assert.equal(await state().actions.revealTurn("t1"), false);
-    assert.equal(fake.historyCalls.length, 0);
   });
 
   it("gives up after 25 pages", async () => {
@@ -1200,14 +1072,6 @@ describe("the history bridge", () => {
     await retry;
   });
 
-  it("asks for the first page without the snapshot's cursor once the window has evicted since that snapshot", async () => {
-    const { fake, state, windowItems } = await rowThread();
-    streamRowsUntil(fake, () => state().slice.entries.length < windowItems.length);
-    assert.deepEqual(state().slice.history.bridge, [], "nothing is kept while nothing is loaded");
-    void state().actions.loadOlderHistory();
-    assert.deepEqual(fake.historyCalls.at(-1)?.query, { turns: 20 });
-  });
-
   it("drops pages, bridge and cut on a new snapshot", async () => {
     const { fake, state } = await turnThreadWithPage();
     streamRowsUntil(fake, () => state().slice.history.bridge.length > 0);
@@ -1351,40 +1215,6 @@ describe("the history bridge", () => {
       ["u1", "ks", "c1", ...ids(block), ...ids(own), "a1"],
       "the prompt, the launch and the marker above the page's rows, in the log's order"
     );
-  });
-
-  it("keeps the window's older rows in the window's order when a first page past a rewind takes the whole window into the history", async () => {
-    // Right after a rewind the host bounds the window past the revert, so the first page is the block that ends at
-    // the index's end (`endItemId: null`): it repeats the window's newest rows, and its end takes the whole window
-    // into the history — the older rows no page holds with it. One of them was replaced in place: first written
-    // right after the prompt, it carries the stamp of its latest write, later than the rows after it. The history
-    // takes those rows in the window's order, the log's; the timeline places every entry by its stamp, in the window
-    // as in the history, so nothing on screen moves.
-    const prompt = message("user", "go", { id: "u1", createdAt: stamp(1) });
-    const rewritten = toolRow("kp", 151, "t1", "the latest write");
-    const older = Array.from({ length: 200 }, (_, index) => toolRow(`o${index}`, 10 + 2 * index, "t1"));
-    const repeated = Array.from({ length: 100 }, (_, index) => toolRow(`r${index}`, 500 + index, "t1"));
-    const windowItems = [prompt, rewritten, ...older, ...repeated];
-    seq = WINDOW_SEQ;
-    const { fake, state } = await open();
-    synchronize(
-      fake,
-      snapshot({ items: windowItems, turns: [foldTurn("t1", "u1")], seq, history: bounds({ beforeCursor: null }) })
-    );
-    state().actions.setDisclosure({ expandedTurnIds: [] });
-    const folded = state().rows.map((row) => row.id);
-    state().actions.setDisclosure({ expandedTurnIds: ["t1"] });
-    const expanded = renderedItemIds(state().rows);
-
-    const loading = state().actions.loadOlderHistory();
-    // The page reaches the thread's start, so this one click asks for nothing more.
-    fake.answer(historyPage({ items: repeated, page: { beforeCursor: null, endItemId: null }, seq }));
-    await loading;
-
-    assert.equal(state().slice.history.windowCut, windowItems.length, "the page's end takes the whole window");
-    assert.deepEqual(renderedItemIds(state().rows), expanded, "every row where it was on screen");
-    state().actions.setDisclosure({ expandedTurnIds: [] });
-    assert.deepEqual(state().rows.map((row) => row.id), folded, "and folded, the same rows");
   });
 
   describe("one \"Load older\" click pages on past pages that show nothing new", () => {

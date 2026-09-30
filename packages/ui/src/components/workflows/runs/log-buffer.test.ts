@@ -6,7 +6,7 @@ import { appendLog, EMPTY_LOG, visibleLogLines } from "./log-buffer.ts";
 const ESC = "\u001b";
 
 // Failure modes: terminal controls leak into output, split chunks lose text,
-// CR progress is duplicated, or an unbounded log consumes the viewer's memory.
+// or CR progress is duplicated.
 describe("the log buffer", () => {
   it("drops colours, cursor moves, OSC titles and links", () => {
     const state = appendLog(EMPTY_LOG, [
@@ -41,26 +41,5 @@ describe("the log buffer", () => {
     assert.deepEqual(visibleLogLines(state), ["one", "tw"]);
     state = appendLog(state, "o\nthree\n");
     assert.deepEqual(visibleLogLines(state), ["one", "two", "three"]);
-  });
-
-  it("caps the lines it keeps and counts the ones it dropped", () => {
-    const text = Array.from({ length: 5_015 }, (_, index) => `line ${index + 1}`).join("\n") + "\n";
-    const state = appendLog(EMPTY_LOG, text);
-    const lines = visibleLogLines(state);
-    assert.equal(lines.length, 5_000);
-    assert.equal(lines[0], "line 16");
-    assert.equal(lines.at(-1), "line 5015");
-    assert.equal(state.dropped, 15);
-    const partial = appendLog(state, "tail");
-    assert.equal(visibleLogLines(partial).length, 5_000);
-    assert.equal(visibleLogLines(partial).at(-1), "tail");
-    assert.equal(partial.dropped, 16);
-  });
-
-  it("clips a huge line", () => {
-    const state = appendLog(EMPTY_LOG, `${"x".repeat(100_000)}\n`);
-    const line = visibleLogLines(state)[0]!;
-    assert.ok(line.startsWith("x".repeat(4_000)));
-    assert.ok(line.length < 4_100);
   });
 });

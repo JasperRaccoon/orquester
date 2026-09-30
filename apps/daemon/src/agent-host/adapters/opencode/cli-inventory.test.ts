@@ -15,12 +15,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import {
-  loadInventoryFromCli,
-  parseAgentListCliOutput,
-  parseModelsCliOutput,
-  parseSkillsCliOutput
-} from "./cli-inventory.ts";
+import { loadInventoryFromCli } from "./cli-inventory.ts";
 
 // ---------------------------------------------------------------------------
 // parseModelsCliOutput
@@ -44,8 +39,8 @@ openrouter/google/gemini-3.1-flash-lite
 }
 `;
 
-test("models --verbose yields providers, models and the connected list", () => {
-  const list = parseModelsCliOutput(MODELS_OUTPUT);
+test("models --verbose yields providers, models and the connected list", async (t) => {
+  const list = (await loadInventoryFromCli((await harness(t, "ok", { models: MODELS_OUTPUT })).input)).providers;
   assert.deepEqual(list.connected.sort(), ["opencode", "openrouter"]);
   const opencode = list.all.find((provider) => provider.id === "opencode");
   assert.equal(opencode?.models["big-pickle"]?.name, "Big Pickle");
@@ -58,7 +53,7 @@ test("models --verbose yields providers, models and the connected list", () => {
   );
 });
 
-test("a body line that looks like a slug does not flush the model", () => {
+test("a body line that looks like a slug does not flush the model", async (t) => {
   // T3 learned this the hard way: an OpenRouter model whose `id` is
   // `vendor/model` produces a body line with no interior whitespace that also
   // matches the slug pattern. Without the `{`-guard plus the "only outside a
@@ -70,12 +65,12 @@ test("a body line that looks like a slug does not flush the model", () => {
 "name": "Model X"
 }
 `;
-  const list = parseModelsCliOutput(output);
+  const list = (await loadInventoryFromCli((await harness(t, "ok", { models: output })).input)).providers;
   assert.deepEqual(list.connected, ["openrouter"]);
   assert.equal(list.all[0]?.models["vendor/model-x"]?.name, "Model X");
 });
 
-test("an unparseable body drops that one model, never the catalogue", () => {
+test("an unparseable body drops that one model, never the catalogue", async (t) => {
   const output = `good/one
 { "id": "one", "name": "One" }
 bad/two
@@ -83,14 +78,14 @@ bad/two
 good/three
 { "id": "three", "name": "Three" }
 `;
-  const list = parseModelsCliOutput(output);
+  const list = (await loadInventoryFromCli((await harness(t, "ok", { models: output })).input)).providers;
   assert.equal(list.all.find((p) => p.id === "good")?.models["one"]?.name, "One");
   assert.equal(list.all.find((p) => p.id === "good")?.models["three"]?.name, "Three");
   assert.equal(list.all.find((p) => p.id === "bad"), undefined);
 });
 
-test("empty output is an empty catalogue, not a throw", () => {
-  assert.deepEqual(parseModelsCliOutput(""), { all: [], connected: [] });
+test("empty output is an empty catalogue, not a throw", async (t) => {
+  assert.deepEqual((await loadInventoryFromCli((await harness(t, "ok", { models: "" })).input)).providers, { all: [], connected: [] });
 });
 
 // ---------------------------------------------------------------------------
@@ -107,8 +102,8 @@ title (primary)
   []
 `;
 
-test("agent list yields name, mode and the hidden flag the CLI omits", () => {
-  const agents = parseAgentListCliOutput(AGENTS_OUTPUT);
+test("agent list yields name, mode and the hidden flag the CLI omits", async (t) => {
+  const agents = (await loadInventoryFromCli((await harness(t, "ok", { agents: AGENTS_OUTPUT })).input)).agents;
   assert.deepEqual(
     agents.map((agent) => [agent.name, agent.mode, agent.hidden]),
     [
@@ -120,19 +115,18 @@ test("agent list yields name, mode and the hidden flag the CLI omits", () => {
   );
 });
 
-test("agent list tolerates an empty body and trailing whitespace", () => {
-  assert.deepEqual(
-    parseAgentListCliOutput("plan (primary)\n").map((agent) => agent.name),
-    ["plan"]
-  );
-  assert.deepEqual(parseAgentListCliOutput(""), []);
+test("agent list tolerates an empty body and trailing whitespace", async (t) => {
+  const h = await harness(t, "ok", { agents: "plan (primary)\n" });
+  assert.deepEqual((await loadInventoryFromCli(h.input)).agents.map((agent) => agent.name), ["plan"]);
+  await writeFile(join(h.input.cwd, "agents.json"), "");
+  assert.deepEqual((await loadInventoryFromCli(h.input)).agents, []);
 });
 
 // ---------------------------------------------------------------------------
 // parseSkillsCliOutput
 // ---------------------------------------------------------------------------
 
-test("debug skill yields name/description/location and drops the huge body", () => {
+test("debug skill yields name/description/location and drops the huge body", async (t) => {
   const output = JSON.stringify([
     {
       name: "customize-opencode",
@@ -143,7 +137,7 @@ test("debug skill yields name/description/location and drops the huge body", () 
     { name: "no-location" },
     { notASkill: true }
   ]);
-  const skills = parseSkillsCliOutput(output);
+  const skills = (await loadInventoryFromCli((await harness(t, "ok", { skills: output })).input)).skills;
   assert.equal(skills.length, 2);
   assert.equal(skills[0]?.name, "customize-opencode");
   assert.equal(skills[0]?.location, "<built-in>");
@@ -152,7 +146,7 @@ test("debug skill yields name/description/location and drops the huge body", () 
   assert.equal(skills[1]?.name, "no-location");
 });
 
-test("a TRUNCATED skill array still yields every skill that arrived whole", () => {
+test("a TRUNCATED skill array still yields every skill that arrived whole", async (t) => {
   // Measured on this host: `opencode debug skill` answers 265 625 bytes to a
   // file and 218 171 through a pipe, for the identical command — the
   // Bun-compiled binary truncates non-TTY stdout (§4.5's reason for
@@ -166,7 +160,7 @@ test("a TRUNCATED skill array still yields every skill that arrived whole", () =
   const cut = whole.slice(0, whole.length - 180);
   assert.throws(() => JSON.parse(cut), "the fixture really is truncated");
 
-  const skills = parseSkillsCliOutput(cut);
+  const skills = (await loadInventoryFromCli((await harness(t, "ok", { skills: cut })).input)).skills;
   assert.deepEqual(
     skills.map((skill) => skill.name),
     ["first", "second"],
@@ -175,17 +169,19 @@ test("a TRUNCATED skill array still yields every skill that arrived whole", () =
   assert.equal(skills[0]?.location, "/a");
 });
 
-test("malformed skill output degrades to an empty list", () => {
-  assert.deepEqual(parseSkillsCliOutput("not json"), []);
-  assert.deepEqual(parseSkillsCliOutput("{}"), []);
-  assert.deepEqual(parseSkillsCliOutput(""), []);
+test("malformed skill output degrades to an empty list", async (t) => {
+  const h = await harness(t);
+  for (const output of ["not json", "{}", ""]) {
+    await writeFile(join(h.input.cwd, "skills.json"), output);
+    assert.deepEqual((await loadInventoryFromCli(h.input)).skills, []);
+  }
 });
 
 // ---------------------------------------------------------------------------
 // loadInventoryFromCli
 // ---------------------------------------------------------------------------
 
-async function harness(t: test.TestContext, mode = "ok") {
+async function harness(t: test.TestContext, mode = "ok", output: { models?: string; agents?: string; skills?: string } = {}) {
   // The daemon supplies other active handles while its retry timer is unref'd.
   // Keep that lifecycle condition here without wall-clock sleeps or a server.
   const lifetime = new MessageChannel();
@@ -193,8 +189,9 @@ async function harness(t: test.TestContext, mode = "ok") {
   t.after(() => { lifetime.port1.close(); lifetime.port2.close(); });
   const dir = await mkdtemp(join(tmpdir(), "opencode-inventory-"));
   t.after(() => rm(dir, { recursive: true, force: true }));
-  await writeFile(join(dir, "models.json"), MODELS_OUTPUT);
-  await writeFile(join(dir, "agents.json"), AGENTS_OUTPUT);
+  await writeFile(join(dir, "models.json"), output.models ?? MODELS_OUTPUT);
+  await writeFile(join(dir, "agents.json"), output.agents ?? AGENTS_OUTPUT);
+  await writeFile(join(dir, "skills.json"), output.skills ?? "[]");
   const bin = join(dir, "opencode-fixture");
   await writeFile(bin, `#!${process.execPath}
 const fs = require("node:fs");
@@ -206,7 +203,7 @@ if (command === "models" && mode === "retry" && !fs.existsSync("first-attempt"))
   process.exit(1);
 }
 if (command !== "models" && mode === "optional-failure") process.exit(2);
-process.stdout.write(command === "models" ? fs.readFileSync("models.json") : command === "agent" ? fs.readFileSync("agents.json") : "[]");
+process.stdout.write(command === "models" ? fs.readFileSync("models.json") : command === "agent" ? fs.readFileSync("agents.json") : fs.readFileSync("skills.json"));
 `, { mode: 0o755 });
   const spawn = childProcess.spawn;
   let live = 0;

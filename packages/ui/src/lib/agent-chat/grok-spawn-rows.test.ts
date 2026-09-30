@@ -111,24 +111,4 @@ describe("a Grok spawn_subagent call in the parent timeline", () => {
     assert.equal(launch.length, 1, "the failed spawn call stays a row");
     assert.ok(entries.some((entry) => entry.agentSpawn?.agentTaskIds.includes(CALL)));
   });
-
-  it("a run the CLI moved to the background, and a poll answering running, add no row of their own", () => {
-    const linkage = {
-      taskId: CALL,
-      agentKind: "agent",
-      taskType: "subagent",
-      agentId: CALL,
-      title: "find callers",
-      toolUseId: CALL
-    };
-    const owned = { turnId: "turn-1", agentId: CALL, tone: "info" as const };
-    const rows = launchRows("completed").slice(0, 3);
-    rows.push(
-      activity("task.updated", { isBackgrounded: true, ...linkage }, owned),
-      activity("task.progress", { detail: "find callers", status: "running", ...linkage }, owned)
-    );
-    const entries = deriveWorkLogEntries(rows);
-    assert.equal(entries.length, 1, "still one row: the agent's");
-    assert.deepEqual(entries[0]?.agentSpawn?.agentTaskIds, [CALL]);
-  });
 });

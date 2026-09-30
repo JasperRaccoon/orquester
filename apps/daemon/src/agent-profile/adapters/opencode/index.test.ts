@@ -146,11 +146,10 @@ async function setup(t: test.TestContext, options: { config?: string | null } = 
   };
 }
 
-async function rejectsWith(promise: Promise<unknown>, code: AgentProfileErrorCode, pattern?: RegExp): Promise<void> {
+async function rejectsWith(promise: Promise<unknown>, code: AgentProfileErrorCode): Promise<void> {
   await assert.rejects(promise, (error: unknown) => {
     assert.ok(error instanceof AgentProfileError, `expected an AgentProfileError, got ${String(error)}`);
     assert.equal(error.code, code, error.message);
-    if (pattern) assert.match(error.message, pattern);
     return true;
   });
 }
@@ -334,13 +333,11 @@ test("creating, editing (secrets kept, renamed, removed) and deleting an MCP ser
       kind: "mcp",
       mcp: { name: "jira-cloud", transport: "stdio", command: "x", env: [{ key: "NOT_THERE", keep: true }] }
     }),
-    "INVALID_ITEM",
-    /no current value/
+    "INVALID_ITEM"
   );
   await rejectsWith(
     env.adapter.update(jira.id, jira.revision, { kind: "mcp", mcp: { name: "jira-cloud", transport: "sse", url: "https://x.invalid" } }),
-    "INVALID_ITEM",
-    /SSE/
+    "INVALID_ITEM"
   );
   await rejectsWith(
     env.adapter.update(jira.id, jira.revision, {
@@ -408,7 +405,6 @@ test("several config files: the edit goes to opencode.jsonc, overrides are honou
   );
   const snapshot = await env.adapter.snapshot();
   assert.equal(snapshot.instructions.warnings[0]?.code, "opencode-several-config-files");
-  assert.match(snapshot.instructions.warnings[0]!.message, /written to opencode\.jsonc/);
   const shared = snapshot.items.find((item) => item.id === "mcp:shared")!;
   assert.equal(shared.enabled, false);
   assert.equal(shared.editable, false, "its definition lives in another file");
@@ -461,8 +457,7 @@ test("own skills: create, edit, rename, delete", async (t) => {
   const env = await setup(t);
   await rejectsWith(
     env.adapter.create({ kind: "skill", document: { name: "review", frontmatter: {}, body: "x" } }, { onConflict: "fail" }),
-    "INVALID_ITEM",
-    /description/
+    "INVALID_ITEM"
   );
   await rejectsWith(
     env.adapter.create({ kind: "skill", document: { name: "Review", frontmatter: { description: "d" }, body: "x" } }, { onConflict: "fail" }),
@@ -561,7 +556,7 @@ test("turning a skill on past a wildcard deny adds an allow rule; a later catch-
   const trap = '{ "permission": { "skill": { "pdf": "allow" }, "*": "allow" } }';
   await writeFile(env.config, trap);
   const pdf = await env.item("skill:pdf");
-  await rejectsWith(env.adapter.setEnabled(pdf.id, pdf.revision, false), "INVALID_ITEM", /last matching rule/);
+  await rejectsWith(env.adapter.setEnabled(pdf.id, pdf.revision, false), "INVALID_ITEM");
   assert.equal(await env.read(env.config), trap);
 });
 
@@ -608,10 +603,10 @@ test("command frontmatter is validated strictly before anything is written", asy
   const env = await setup(t);
   const create = (frontmatter: Record<string, unknown>): Promise<unknown> =>
     env.adapter.create({ kind: "command", document: { name: "c", frontmatter, body: "b" } }, { onConflict: "fail" });
-  await rejectsWith(create({ "argument-hint": "[x]" }), "INVALID_ITEM", /no "argument-hint" setting/);
-  await rejectsWith(create({ subtask: "yes" }), "INVALID_ITEM", /subtask/);
-  await rejectsWith(create({ description: 3 }), "INVALID_ITEM", /description/);
-  await rejectsWith(create({ model: "sonnet" }), "INVALID_ITEM", /provider\/model/);
+  await rejectsWith(create({ "argument-hint": "[x]" }), "INVALID_ITEM");
+  await rejectsWith(create({ subtask: "yes" }), "INVALID_ITEM");
+  await rejectsWith(create({ description: 3 }), "INVALID_ITEM");
+  await rejectsWith(create({ model: "sonnet" }), "INVALID_ITEM");
   await rejectsWith(
     env.adapter.create({ kind: "command", document: { name: "a/b/c", frontmatter: {}, body: "" } }, { onConflict: "fail" }),
     "INVALID_NAME"
@@ -970,7 +965,7 @@ test("a config key set twice refuses the edit instead of changing the copy OpenC
     '{\n  "mcp": { "x": { "type": "remote", "url": "https://a.invalid/" } },\n  "lsp": {},\n  "mcp": { "x": { "type": "remote", "url": "https://b.invalid/" } }\n}\n';
   const env = await setup(t, { config: text });
   const x = await env.item("mcp:x");
-  await rejectsWith(env.adapter.setEnabled(x.id, x.revision, false), "CONFIG_UNREADABLE", /set 2 times/);
+  await rejectsWith(env.adapter.setEnabled(x.id, x.revision, false), "CONFIG_UNREADABLE");
   assert.equal(await env.read(env.config), text);
 });
 

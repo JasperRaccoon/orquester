@@ -4,10 +4,7 @@ import { beforeEach,describe,it } from "node:test";
 import {
 deriveActivePlanState,
 findLatestProposedPlan,
-hasActionableProposedPlan,
 planProgress,
-proposedPlanTitle,
-resolvePlanFollowUpSubmission,
 shouldShowPlanFollowUpPrompt,
 wholePlanMarkdown
 } from "./plan.logic";
@@ -69,19 +66,6 @@ describe("deriveActivePlanState", () => {
   });
 });
 
-describe("the implement/refine split button", () => {
-  it("implements with an empty draft and leaves plan mode", () => {
-    const result = resolvePlanFollowUpSubmission({ draftText: "   ", planMarkdown: "# Plan\nbody" });
-    assert.equal(result.interactionMode, "default");
-    assert.equal(result.text, "PLEASE IMPLEMENT THIS PLAN:\n# Plan\nbody");
-  });
-
-  it("refines with draft text and stays in plan mode", () => {
-    const result = resolvePlanFollowUpSubmission({ draftText: " tweak it ", planMarkdown: "# Plan" });
-    assert.deepEqual(result, { text: "tweak it", interactionMode: "plan" });
-  });
-});
-
 describe("shouldShowPlanFollowUpPrompt", () => {
   const base = {
     pendingUserInputCount: 0,
@@ -110,17 +94,6 @@ describe("proposal helpers", () => {
     planMarkdown: "# Ship it\n\n## Summary\n\nDo the thing",
     implementedAt: null,
     ...overrides
-  });
-
-  it("is actionable until a turn implements it", () => {
-    assert.equal(hasActionableProposedPlan(plan()), true);
-    assert.equal(hasActionableProposedPlan(plan({ implementedAt: stamp(2) })), false);
-    assert.equal(hasActionableProposedPlan(null), false);
-  });
-
-  it("reads the title from the first heading", () => {
-    assert.equal(proposedPlanTitle("# Ship it\nbody"), "Ship it");
-    assert.equal(proposedPlanTitle("no heading"), null);
   });
 
   it("picks the current turn's proposal, else the newest of any turn", () => {

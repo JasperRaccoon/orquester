@@ -1,1 +1,0 @@
-{"agentType":"workflow-subagent","description":"gather:beta","workflowPhase":"Gather","spawnDepth":1,"requestShape":"foreground","requestNonInteractive":true}

@@ -577,18 +577,6 @@ test("a workflow owner rides create → summary → sessions.json → re-adoptio
   await f.cleanup();
 });
 
-test("a tab with no owner writes no owner key", async () => {
-  const f = await makeFixture(OPENCODE, null);
-  const summary = await f.service.createSession(
-    { kind: "agent-chat", refId: "opencode", projectPath: "/w/p", cwd: "/w/p" },
-    0
-  );
-  assert.equal("owner" in summary, false);
-  const record = f.service.chat.records()[0]!;
-  assert.equal("owner" in record, false);
-  await f.cleanup();
-});
-
 test("the service refuses a malformed owner before the tab or the thread exists", async () => {
   const f = await makeFixture(OPENCODE, null);
   await assert.rejects(

@@ -104,7 +104,7 @@ function sanitizeGoalSupport(value: unknown): AdapterGoalSupport | undefined {
  * Field-wise rather than zod, matching `panel-sizes.ts`: zod lives in
  * `@orquester/config` and a provider row is a wire shape, not on-disk state.
  */
-export function sanitizeProviderSnapshot(value: unknown): ProviderSnapshot | null {
+function sanitizeProviderSnapshot(value: unknown): ProviderSnapshot | null {
   if (!isRecord(value) || typeof value.id !== "string" || value.id.length === 0) {
     return null;
   }
@@ -147,7 +147,7 @@ export function sanitizeProviderSnapshot(value: unknown): ProviderSnapshot | nul
 }
 
 /** Repair a whole catalog, dropping only the rows that cannot be repaired. */
-export function sanitizeProviderSnapshots(value: unknown): ProviderSnapshot[] {
+function sanitizeProviderSnapshots(value: unknown): ProviderSnapshot[] {
   return asArray<unknown>(value)
     .map(sanitizeProviderSnapshot)
     .filter((provider): provider is ProviderSnapshot => provider !== null);
@@ -193,7 +193,7 @@ export interface ProviderSideEffects {
  */
 export type ProviderNoticeTone = "sign-in" | "status";
 
-export interface ProviderAuthNotice {
+interface ProviderAuthNotice {
   message: string;
   tone: ProviderNoticeTone;
   /** Part of the dismissal key, so the same verdict never re-toasts. */
@@ -231,7 +231,7 @@ export function setProviderSideEffects(next: ProviderSideEffects): void {
  * `status: "degraded"` is not here at all (the Codex and OpenCode probes set it
  * for version advisories that have nothing to do with credentials).
  */
-export function authErrorNotice(provider: ProviderSnapshot): ProviderAuthNotice | null {
+function authErrorNotice(provider: ProviderSnapshot): ProviderAuthNotice | null {
   const label = provider.refIds[0] ?? provider.id;
   const key = { providerStatus: provider.status, authStatus: provider.auth.status } as const;
   if (provider.auth.status === "unauthenticated") {

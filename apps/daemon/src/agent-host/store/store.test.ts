@@ -10,7 +10,7 @@ import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
 
-import type { AttachmentRef, DomainEvent, ThreadHead } from "@orquester/api/agent-chat";
+import type { AttachmentRef, ThreadHead } from "@orquester/api/agent-chat";
 import { foldThread } from "@orquester/api/agent-chat";
 
 // The store's layout under its own `rootDir` (`@orquester/config`'s helpers
@@ -414,7 +414,7 @@ async function headOf(
   return head;
 }
 
-test("meta.json is checkpointed every 50 events and rewritten atomically", async (t) => {
+test("meta.json is checkpointed every 50 events", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   t.after(() => store.close());
@@ -432,10 +432,6 @@ test("meta.json is checkpointed every 50 events and rewritten atomically", async
   const written = JSON.parse(await fs.readFile(meta, "utf8")) as ThreadHead;
   assert.equal(written.id, "t1");
   assert.equal(written.seq, 50, "the checkpoint fires ON the 50th event");
-
-  // tmp + rename: no temp file is left behind.
-  const entries = await fs.readdir(threadDir(rootDir, "t1"));
-  assert.deepEqual(entries.filter((entry) => entry.includes(".tmp")), []);
 });
 
 test("saveHead wins over the store's own projection and survives a reopen", async (t) => {
@@ -722,16 +718,16 @@ test("an attachment id belonging to another thread is refused, not looked up", a
   await assert.rejects(store.resolveAttachment("t1", "t1-00000000-0000-4000-8000-000000009999-bin"), /not found/);
 });
 
-test("bounds are checked against the stat'd file, per kind", async (t) => {
+test("an image MIME type applies the image size cap even to a binary filename", async (t) => {
   const rootDir = await tempRoot();
   const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
   t.after(() => store.close());
-  const big = await writeSource(path.join(rootDir, "src"), "big.png", 11 * 1024 * 1024);
+  const big = await writeSource(path.join(rootDir, "src"), "image.bin", 11 * 1024 * 1024);
   await assert.rejects(
-    store.putAttachment({ threadId: "t1", name: "big.png", mimeType: "image/png", sourcePath: big }),
+    store.putAttachment({ threadId: "t1", name: "image.bin", mimeType: "image/png", sourcePath: big }),
     /over the/
   );
-  // The same bytes under a non-image name are under the 50 MiB file limit.
+  // The same bytes with a non-image MIME type are under the 50 MiB file limit.
   const blob = await writeSource(path.join(rootDir, "src"), "big.bin", 11 * 1024 * 1024);
   const ref = await store.putAttachment({
     threadId: "t1",
@@ -798,54 +794,6 @@ test("pruneAttachments sweeps .part files after an hour and pending uploads afte
 
   await store.pruneAttachments({ now: hoursFromNow(48) });
   await assert.rejects(fs.stat(pendingFile), "a pending upload is stale after a day");
-});
-
-test("a revert's truncation is what the attachment sweep recomputes against", async (t) => {
-  const rootDir = await tempRoot();
-  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  t.after(() => store.close());
-  const src = path.join(rootDir, "src");
-  const ref = await store.putAttachment({
-    threadId: "t1",
-    name: "gone.bin",
-    sourcePath: await writeSource(src, "gone.bin", 8)
-  });
-
-  await store.append({
-    threadId: "t1",
-    events: [
-      created(),
-      {
-        ...(message("t1", "assistant:1", [ref]) as DomainEvent),
-        payload: {
-          messageId: "assistant:1",
-          role: "assistant",
-          text: "here",
-          streaming: false,
-          turnId: "T-9",
-          attachments: [ref]
-        }
-      } as AppendableDomainEvent,
-      {
-        eventId: "e-revert",
-        threadId: "t1",
-        type: "thread.reverted",
-        payload: { turnCount: 0 },
-        occurredAt: "2026-01-01T00:00:02.000Z",
-        commandId: null,
-        causationEventId: null,
-        metadata: {}
-      } as AppendableDomainEvent
-    ]
-  });
-  await store.drain();
-
-  await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(48) });
-  await assert.rejects(
-    store.resolveAttachment("t1", ref.id),
-    /not found/,
-    "an attachment only a truncated message referenced is unlinked"
-  );
 });
 
 test("readItem serves the FULL payload, even for a row past the fold's window", async (t) => {

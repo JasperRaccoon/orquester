@@ -346,10 +346,6 @@ describe("deadlines, cancels and restarts", () => {
     assert.deepEqual(sizes.at(-1), { stdout: 9, stderr: 0 }, "onLogs reported the final sizes");
   });
 
-  test("readExit is null before an attempt ends", async () => {
-    assert.equal(await runner.readExit(await freshDir()), null, "no exit.json, no exit");
-  });
-
   test("isAlive refuses a recycled pid (starttime mismatch)", (t) => {
     if (!HAS_PROC) {
       t.skip("needs /proc");

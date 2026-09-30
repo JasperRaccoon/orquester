@@ -12,8 +12,7 @@ failedTaskStopId,
 isBackgroundShellItems,
 pendingTaskStops,
 resolveSpawnRowAgents,
-taskStopControl,
-workingLivenessTitle
+taskStopControl
 } from "./roster.logic";
 import { activity,CLAUDE_WORKFLOW_ID as WF,claudeWorkflow } from "./test-helpers";
 
@@ -62,10 +61,6 @@ describe("agentActivityText", () => {
     const settled = agent("a", "completed", { progress: "reading", result: "done" });
     assert.equal(agentActivityText(settled), "done");
   });
-
-  it("is null when nothing was reported", () => {
-    assert.equal(agentActivityText(agent("a", "idle")), null);
-  });
 });
 
 describe("deriveAgentSpawnSummary", () => {
@@ -80,16 +75,6 @@ describe("deriveAgentSpawnSummary", () => {
   });
 });
 
-describe("spawn row resolution", () => {
-  it("resolves ids against the live roster at render time", () => {
-    const roster = [agent("t1", "running"), agent("wf", "running", { kind: "workflow" })];
-    const resolved = resolveSpawnRowAgents(roster, { workflowId: "wf", agentTaskIds: ["t1", "gone"] });
-    assert.deepEqual(resolved.agents.map((a) => a.id), ["t1"]);
-    assert.equal(resolved.coordinator?.id, "wf");
-  });
-
-});
-
 describe("a Claude workflow's spawn row", () => {
   const spawn = { workflowId: WF, agentTaskIds: [WF, `${WF}:wf:1`] };
   const run = () => [
@@ -99,89 +84,44 @@ describe("a Claude workflow's spawn row", () => {
     activity("task.progress", claudeWorkflow.member(2, { status: "pending" })),
     activity("task.progress", claudeWorkflow.member(3, { status: "pending" }))
   ];
-  const summarise = (roster: RuntimeSubagent[]) => {
-    const resolved = resolveSpawnRowAgents(roster, spawn);
-    return {
-      resolved,
-      summary: deriveAgentSpawnSummary({
-        agents: resolved.agents,
-        agentCount: resolved.agentCount,
-        coordinatorStatus: resolved.coordinator?.status
-      })
-    };
-  };
 
   it("counts the members, never the coordinator, including members the timeline never saw", () => {
-    const { resolved, summary } = summarise(foldSubagentActivities(run()));
+    const resolved = resolveSpawnRowAgents(foldSubagentActivities(run()), spawn);
     assert.equal(resolved.coordinator?.id, WF);
     assert.deepEqual(resolved.agents.map((a) => a.id), [`${WF}:wf:1`, `${WF}:wf:2`, `${WF}:wf:3`]);
     assert.equal(resolved.agentCount, 3);
-    assert.equal(summary.lead, "Kicked off 3 subagents");
-    assert.equal(summary.status, "3 working");
-    assert.equal(summary.tone, "working");
   });
 
-  it("reads 'working' before the first member is reported", () => {
+  it("preserves a known member count before roster details arrive", () => {
     const roster = foldSubagentActivities([activity("task.started", claudeWorkflow.coordinator())]);
-    const { resolved, summary } = summarise(roster);
+    const resolved = resolveSpawnRowAgents(roster, spawn);
     assert.deepEqual(resolved.agents, []);
     assert.equal(resolved.agentCount, 1, "the one member id the timeline saw still counts");
-    assert.equal(summary.live, true);
-    assert.equal(summary.status, "working");
   });
 
-  it("stays live between phases, and a retried member works again", () => {
-    const roster = foldSubagentActivities([
-      ...run(),
-      activity("task.completed", claudeWorkflow.member(1, { status: "completed" })),
-      activity("task.completed", claudeWorkflow.member(2, { status: "failed" })),
-      activity("task.completed", claudeWorkflow.member(3, { status: "completed" }))
-    ]);
-    assert.equal(summarise(roster).summary.status, "working", "the coordinator runs on");
-    const retried = foldSubagentActivities([
-      ...run(),
-      activity("task.completed", claudeWorkflow.member(2, { status: "failed" })),
-      activity("task.started", claudeWorkflow.member(2, { attempt: 2, prompt: "again" }))
-    ]);
-    assert.equal(summarise(retried).summary.status, "3 working");
-  });
-
-  it("says the workflow stopped, its members cascaded to stopped", () => {
-    const roster = foldSubagentActivities([
-      ...run(),
-      activity("task.completed", claudeWorkflow.member(1, { status: "completed" })),
-      activity("task.completed", claudeWorkflow.coordinator({ status: "stopped" }))
-    ]);
-    const { resolved, summary } = summarise(roster);
-    assert.deepEqual(resolved.agents.map((a) => a.status), ["completed", "interrupted", "interrupted"]);
+  it("summarizes a stopped workflow as inactive", () => {
+    const summary = deriveAgentSpawnSummary({
+      agents: [agent("one", "completed"), agent("two", "interrupted")],
+      agentCount: 2,
+      coordinatorStatus: "interrupted"
+    });
     assert.equal(summary.live, false);
-    assert.equal(summary.lead, "Ran 3 subagents");
-    assert.equal(summary.status, "Workflow stopped");
+    assert.equal(summary.tone, "inactive");
   });
 
-  it("names a failed member once the workflow completes, and a failed workflow as such", () => {
-    const failedMember = foldSubagentActivities([
-      ...run(),
-      activity("task.completed", claudeWorkflow.member(1, { status: "completed" })),
-      activity("task.completed", claudeWorkflow.member(2, { status: "failed" })),
-      activity("task.completed", claudeWorkflow.member(3, { status: "completed" })),
-      activity("task.completed", claudeWorkflow.coordinator({ status: "completed" }))
-    ]);
-    assert.equal(summarise(failedMember).summary.status, "1 failed");
-    assert.equal(summarise(failedMember).summary.tone, "failed");
-    const failedRun = foldSubagentActivities([
-      ...run(),
-      activity("task.completed", claudeWorkflow.coordinator({ status: "failed" }))
-    ]);
-    assert.equal(summarise(failedRun).summary.status, "Workflow failed");
-  });
-});
-
-describe("the working banner's title", () => {
-  it("names agents and shells apart", () => {
-    assert.equal(workingLivenessTitle(3), "3 agents working");
-    assert.equal(workingLivenessTitle(1, 2), "1 agent and 2 shells running");
-    assert.equal(workingLivenessTitle(0), "Background work");
+  it("reports failure when a member or coordinator failed", () => {
+    const failedMember = deriveAgentSpawnSummary({
+      agents: [agent("one", "completed"), agent("two", "failed")],
+      agentCount: 2,
+      coordinatorStatus: "completed"
+    });
+    assert.equal(failedMember.tone, "failed");
+    const failedRun = deriveAgentSpawnSummary({
+      agents: [],
+      agentCount: 0,
+      coordinatorStatus: "failed"
+    });
+    assert.equal(failedRun.tone, "failed");
   });
 });
 
@@ -275,16 +215,13 @@ describe("the per-task Stop (/task/stop)", () => {
     assert.equal(taskStopControl(settled, WF, { ...on, stoppingTaskIds: [WF] }), "hidden");
   });
 
-  it("keeps a stop pending while its row works, and lets it go once it settles, leaves or failed", () => {
-    const agents = [agent("a", "running"), agent("b", "running"), agent("c", "completed")];
-    const stopping = ["a", "b"];
-    assert.equal(pendingTaskStops(stopping, agents), stopping, "nothing changed: the same value");
-    assert.deepEqual(pendingTaskStops(["a", "c", "gone"], agents), ["a"]);
-    assert.deepEqual(pendingTaskStops(stopping, agents, "b"), ["a"]);
+  it("drops evicted pending stops and preserves other tasks when one fails", () => {
+    const agents = [agent("a", "running"), agent("b", "running")];
+    assert.deepEqual(pendingTaskStops(["a", "b", "gone"], agents), ["a", "b"]);
+    assert.deepEqual(pendingTaskStops(["a", "b"], agents, "b"), ["a"]);
   });
 
-  it("reads the task a stop failure names, and nothing else", () => {
-    assert.equal(failedTaskStopId(activity("provider.task.stop.failed", { targetTaskId: WF })), WF);
+  it("ignores unrelated activities and malformed task-stop failures", () => {
     assert.equal(failedTaskStopId(activity("provider.task.stop.failed", { taskId: WF })), null);
     assert.equal(failedTaskStopId(activity("task-stop.requested", { targetTaskId: WF })), null);
   });

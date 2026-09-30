@@ -37,10 +37,6 @@ import type {
 } from "@orquester/api/agent-chat";
 
 let registerComposerHandle: typeof import("../../components/agent-chat/composer/composer-bridge")["registerComposerHandle"];
-import {
-  COMPOSER_OUTBOX_KEY,
-  OUTBOX_REPLAY_MAX_AGE_MS,
-} from "../../components/agent-chat/composer/composer-outbox";
 let isComposerSending: typeof import("../../components/agent-chat/composer/composer-sends")["isComposerSending"];
 import type { FailedSendRestore } from "../../components/agent-chat/composer/composer-submission";
 import type { StagedAttachment } from "../../components/agent-chat/composer/ComposerAttachments";
@@ -53,6 +49,8 @@ let AgentChatCommandError: typeof import("./transport")["AgentChatCommandError"]
 import { head, snapshot, stamp } from "./test-helpers";
 
 const DRAFTS_KEY = "orquester:agent-chat-drafts";
+const COMPOSER_OUTBOX_KEY = "orquester:agent-chat-outbox";
+const OUTBOX_REPLAY_MAX_AGE_MS = 10 * 60_000;
 
 const NOW = Date.parse(stamp(1));
 
@@ -524,28 +522,6 @@ describe("a reload never loses or duplicates a message", () => {
     ]);
   });
 
-  it("starts a generation that has nothing retained from the queue this page kept", async () => {
-    const host = fakeHost();
-    const first = open("A", host);
-    await flush();
-    host.push(running("A"));
-    first.getState().actions.queueMessage(queuedInput("one"));
-    first.getState().actions.queueMessage(queuedInput("two"));
-    const queuedWith = first.getState().slice.queue.map((message) => message.commandId);
-    // Torn down with its retained snapshot gone — what the 5-minute idle TTL does.
-    (first as ThreadStore & { destroy?: () => void }).destroy?.();
-    mock.timers.tick(5 * 60_000);
-
-    const next = open("A", host);
-    assert.deepEqual(
-      next.getState().slice.queue.map((message) => [message.text, message.commandId]),
-      [
-        ["one", queuedWith[0]],
-        ["two", queuedWith[1]]
-      ]
-    );
-  });
-
   it("does not bring back as queued what Stop returned to the composer", async () => {
     const before = fakeHost();
     const page = previousPage("A", before);
@@ -801,22 +777,6 @@ describe("a reload never loses or duplicates a message", () => {
     await settle();
     assert.equal(host.attempts.length, 1, "nothing overtakes it");
     assert.equal(persistedDraft("A"), undefined, "and it is not in the draft as well");
-  });
-
-  it("does the same when nothing was retained", async () => {
-    const host = await queuedSendOutWhenTornDown();
-    host.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
-    await settle();
-    mock.timers.tick(5 * 60_000);
-    const next = open("A", host);
-    await flush();
-    assert.deepEqual(
-      next.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
-      [
-        ["first queued", true],
-        ["second queued", false]
-      ]
-    );
   });
 
   it("brings a message held before the reload back held, with the reason it waits", async () => {

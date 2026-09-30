@@ -4,8 +4,7 @@
  * fate, with "Delete temp project now" — its error, and the run's actions:
  * Cancel run, Retry run, Retry from failed block, Open in canvas.
  *
- * Prop-driven: the actions arrive as a `RunActionsState` (`useRunActions`),
- * so a static render draws every state. Whether the run counts as viewed is
+ * The actions arrive as a `RunActionsState` (`useRunActions`). Whether the run counts as viewed is
  * the Runs mode's call (`useRunOnScreen`), not this component's: only a
  * finished run, shown, in a visible document.
  */

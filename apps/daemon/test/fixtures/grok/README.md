@@ -159,7 +159,7 @@ removed. Nothing else is altered.
    repeats 2–4 times per run; every *distinct* payload survives verbatim exactly once across the
    set. Without it files 01–14 were 3.3 MiB; with it they are 1.4 MiB. The 2026-09-25 files
    (15–23) add 1.9 MiB with it applied and the 2026-09-26 files (24–31) 1.8 MiB, so the set is
-   5.0 MiB of NDJSON (5.1 MiB on disk with `12-cli-text/` and this README).
+   5.0 MiB of NDJSON (plus the inspect JSON and this README).
 
 ## The files
 
@@ -185,7 +185,7 @@ mcpServers: []}` unless stated otherwise. `argv` below excludes the binary path.
 | `11-background-task.ndjson` | `agent --always-approve stdio` | `"Start \`sleep 25\` as a BACKGROUND shell command…"` then 20 s of watching | `rawOutput.type: "BackgroundTaskStarted"`, the `background_tasks` roster notification, and no task event in the 22 s watched — the `sleep 25` outlived the capture (observation 29). |
 | `13-errors-and-rpcs.ndjson` | `--permission-mode default --reasoning-effort low agent stdio` | 12 RPCs, no model calls | Error shapes for unknown methods, bad models, unknown sessions, plus `session/set_model`, `session/set_mode`, `session/list`, `session/close` and an unadvertised `authenticate`. |
 | `14-sigterm-mid-prompt.ndjson` | `--permission-mode default --reasoning-effort low agent stdio` | `"Count slowly from 1 to 30…"`, SIGTERM after the first `agent_message_chunk` | Process behaviour on SIGTERM and the fate of the in-flight RPC. |
-| `12-cli-text/` | — | `grok --version`, `grok models` (with and without a login), `grok inspect --json` | The snapshot inputs the provider probe parses. `grok-inspect.json` is redacted and its long host-specific arrays are truncated to three entries each. |
+| `12-cli-text/grok-inspect.json` | — | `grok inspect --json` | The profile parser's recorded input. The JSON is redacted and its long host-specific arrays are truncated to three entries each. The unconsumed `grok --version` and `grok models` text captures were removed; the version and login observations remain documented in the provenance table and observations 2 and 35. |
 | `15-subagent-foreground.ndjson` | (2026-09-25 argv) | one FOREGROUND `spawn_subagent` (`echo sub-ok`), then `DONE` | `subagent_spawned` / `subagent_progress` / `subagent_finished`, the child session's own frames under its own id, `SubagentCompleted` a millisecond after the end (observations 37, 38). |
 | `16-subagent-background-poll.ndjson` | (2026-09-25 argv) | a BACKGROUND spawn (`sleep 20 && echo bg-done`) polled at once; 20 s later a second prompt polls it again | The `Text` launch answer, a running and a finished `TaskOutput`, the child's own foreground command moved to the background, its `_x.ai/task_completed`, and the CLI waking the parent on its own (observations 37–40, 45). |
 | `17-subagent-resume-from.ndjson` | (2026-09-25 argv) | a foreground spawn, then a `resume_from` relaunch of it | The resume's NEW subagent id naming its source (`resumed_from`), the result blocks (observation 43). |

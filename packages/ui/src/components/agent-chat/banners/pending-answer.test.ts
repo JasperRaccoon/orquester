@@ -9,7 +9,6 @@ import {
   derivePendingUserInputProgress,
   questionAttachmentKey,
   questionShortcutOption,
-  resolvePendingUserInputAnswer,
   setPendingUserInputCustomAnswer,
   togglePendingUserInputOptionSelection,
   type PendingAnswerDraft,
@@ -29,43 +28,48 @@ function question(overrides: Partial<UserInputQuestion> = {}): UserInputQuestion
   };
 }
 
+// Observe the same submitted map the question card sends to the provider.
+function submittedAnswer(q: UserInputQuestion, draft: PendingAnswerDraft | undefined): string | string[] | null {
+  return buildPendingUserInputAnswers([q], { [q.id]: draft ?? {} })?.[q.id] ?? null;
+}
+
 test("an option with no value answers with its label", () => {
   assert.equal(
-    resolvePendingUserInputAnswer(question(), { selectedOptionValues: ["main"] }),
+    submittedAnswer(question(), { selectedOptionValues: ["main"] }),
     "main"
   );
-  assert.equal(resolvePendingUserInputAnswer(question(), { selectedOptionValues: ["dev"] }), "dev");
+  assert.equal(submittedAnswer(question(), { selectedOptionValues: ["dev"] }), "dev");
 });
 
 test("a custom answer beats a selected option", () => {
   const draft: PendingAnswerDraft = { selectedOptionValues: ["main"], customAnswer: "  feature/x " };
-  assert.equal(resolvePendingUserInputAnswer(question(), draft), "feature/x");
+  assert.equal(submittedAnswer(question(), draft), "feature/x");
 });
 
 test("a custom answer is refused when the question forbids one", () => {
   const q = question({ allowCustomAnswer: false });
-  assert.equal(resolvePendingUserInputAnswer(q, { customAnswer: "anything" }), null);
+  assert.equal(submittedAnswer(q, { customAnswer: "anything" }), null);
 });
 
 test("multi-select answers with an array and drops unknown values", () => {
   const q = question({ multiSelect: true });
   assert.deepEqual(
-    resolvePendingUserInputAnswer(q, { selectedOptionValues: ["main", "ghost", "dev"] }),
+    submittedAnswer(q, { selectedOptionValues: ["main", "ghost", "dev"] }),
     ["main", "dev"]
   );
 });
 
 test("an attachment alone satisfies a question", () => {
-  assert.equal(resolvePendingUserInputAnswer(question(), { attachmentCount: 1 }), "");
+  assert.equal(submittedAnswer(question(), { attachmentCount: 1 }), "");
   assert.equal(
-    resolvePendingUserInputAnswer(question({ multiSelect: true }), { attachmentCount: 2 }),
+    submittedAnswer(question({ multiSelect: true }), { attachmentCount: 2 }),
     ""
   );
 });
 
 test("an unfinished upload keeps the answer unresolved", () => {
   assert.equal(
-    resolvePendingUserInputAnswer(question(), {
+    submittedAnswer(question(), {
       selectedOptionValues: ["main"],
       attachmentsBlocked: true
     }),
@@ -88,9 +92,9 @@ test("an `isOther` option asks for text rather than answering with its label", (
   });
   // `isOther` re-enables the custom field even though allowCustomAnswer is false.
   assert.equal(allowsAnswerAttachments(q), true);
-  assert.equal(resolvePendingUserInputAnswer(q, { selectedOptionValues: ["Other…"] }), null);
+  assert.equal(submittedAnswer(q, { selectedOptionValues: ["Other…"] }), null);
   assert.equal(
-    resolvePendingUserInputAnswer(q, { selectedOptionValues: ["Other…"], customAnswer: "feature" }),
+    submittedAnswer(q, { selectedOptionValues: ["Other…"], customAnswer: "feature" }),
     "feature"
   );
 });
@@ -108,26 +112,26 @@ test("displaced text lands after whatever was already in the draft", () => {
 test("toggling clears the custom answer; multi-select toggles in place", () => {
   const multi = question({ multiSelect: true });
   const first = togglePendingUserInputOptionSelection(multi, { customAnswer: "typed" }, "main");
-  assert.deepEqual(resolvePendingUserInputAnswer(multi, first), ["main"]);
+  assert.deepEqual(submittedAnswer(multi, first), ["main"]);
   const second = togglePendingUserInputOptionSelection(multi, first, "dev");
-  assert.deepEqual(resolvePendingUserInputAnswer(multi, second), ["main", "dev"]);
+  assert.deepEqual(submittedAnswer(multi, second), ["main", "dev"]);
   const third = togglePendingUserInputOptionSelection(multi, second, "main");
-  assert.deepEqual(resolvePendingUserInputAnswer(multi, third), ["dev"]);
+  assert.deepEqual(submittedAnswer(multi, third), ["dev"]);
 });
 
 test("a new single-select choice becomes the submitted answer", () => {
   const single = question();
   const first = togglePendingUserInputOptionSelection(single, undefined, "main");
   const second = togglePendingUserInputOptionSelection(single, first, "dev");
-  assert.equal(resolvePendingUserInputAnswer(single, second), "dev");
+  assert.equal(submittedAnswer(single, second), "dev");
 });
 
 test("custom text overrides a choice while empty text preserves it", () => {
   const withSelection: PendingAnswerDraft = { selectedOptionValues: ["main"] };
   const typed = setPendingUserInputCustomAnswer(withSelection, "x");
-  assert.equal(resolvePendingUserInputAnswer(question(), typed), "x");
-  assert.equal(resolvePendingUserInputAnswer(question(), setPendingUserInputCustomAnswer(withSelection, "")), "main");
-  assert.equal(resolvePendingUserInputAnswer(question(), setPendingUserInputCustomAnswer(typed, "")), null,
+  assert.equal(submittedAnswer(question(), typed), "x");
+  assert.equal(submittedAnswer(question(), setPendingUserInputCustomAnswer(withSelection, "")), "main");
+  assert.equal(submittedAnswer(question(), setPendingUserInputCustomAnswer(typed, "")), null,
     "clearing custom text must not resurrect the previously selected option");
 });
 

@@ -57,7 +57,7 @@ export interface AgentChatReducerState {
   historyEpoch: number;
 }
 
-export const EMPTY_DISCLOSURES: DisclosureState = {
+const EMPTY_DISCLOSURES: DisclosureState = {
   expandedTurnIds: [],
   expandedGroupIds: [],
   expandedAgentIds: [],
@@ -147,7 +147,7 @@ const requestIdOf = (activity: ThreadActivityItem): string | null => {
  * §4.4): a snapshot from a host that predates goals has none, and one that
  * does not parse is none — either way `null` until the next goal row.
  */
-export function foldStateFromSnapshot(snapshot: ThreadSnapshotPayload): ThreadFoldState {
+function foldStateFromSnapshot(snapshot: ThreadSnapshotPayload): ThreadFoldState {
   const closedRequestIds = new Set<string>();
   const closedRequestAt = new Map<string, string>();
   // The activity subset, same objects and same order — W2's fold keeps it

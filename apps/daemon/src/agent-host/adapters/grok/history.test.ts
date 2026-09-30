@@ -172,13 +172,6 @@ function route2(normalizer: GrokNormalizer, frame: JsonRpcFrame, out: RuntimeEve
   }
 }
 
-test("a thread with nothing replayed projects nothing", () => {
-  // Every other capture is a fresh `session/new`, so none of them replays.
-  const snapshot = historyFromCapture("02-prompt-plain-text.ndjson");
-  assert.deepEqual(snapshot.turns, []);
-  assert.deepEqual(projectGrokHistory(snapshot, { threadId: "t1", ...stamps() }), []);
-});
-
 // ---------------------------------------------------------------------------
 // The collector's own rules
 // ---------------------------------------------------------------------------

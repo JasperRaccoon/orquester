@@ -118,7 +118,7 @@ describe("what the list shows", () => {
   it("shows the previous results while the next search runs", () => {
     const previous = response();
     const loading: ConversationSearchState = { status: "loading", query: "fo", previous };
-    assert.equal(shownSearchResponse(loading), previous);
+    assert.deepEqual(shownSearchResponse(loading), previous);
     assert.equal(notice(loading, 1), null);
     assert.equal(notice({ status: "loading", query: "fo", previous: null }), "loading");
   });

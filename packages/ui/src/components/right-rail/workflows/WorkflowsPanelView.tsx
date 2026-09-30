@@ -4,8 +4,7 @@
  * between, the panel's notice (a failure, or an overlap skip's "Run anyway")
  * above the foot, and Secrets pinned at the bottom.
  *
- * Presentational — `WorkflowsPanel` owns the store, the dialogs and the tabs —
- * so a static render check draws every state from plain props.
+ * `WorkflowsPanel` owns the store, the dialogs, the tabs and the shared clock.
  */
 
 import React from "react";

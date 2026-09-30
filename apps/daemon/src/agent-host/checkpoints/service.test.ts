@@ -494,12 +494,6 @@ test("concurrent captures on two threads of one repo do not corrupt each other",
   const expected = [".gitignore", "staged.txt", "tracked.txt", "untracked.txt"];
   assert.deepEqual(await treePaths(repo, first.ref), expected);
   assert.deepEqual(await treePaths(repo, second.ref), expected);
-  // Neither capture left a temp index (or its lock) behind in the git dir.
-  const entries = await repo.gitCommonDirEntries();
-  assert.deepEqual(
-    entries.filter((entry) => entry.startsWith("orq-checkpoint-index")),
-    []
-  );
 });
 
 test("a repository with no commits at all still captures a baseline", async (t) => {

@@ -63,7 +63,7 @@ export function canOpenChat(agentRefId: string): boolean {
  * own HOME instead of going through the launcher's `resumeArgs` (§5.3), so a
  * row is offered wherever the agent that wrote it has an adapter.
  */
-export function isChatResumableConversation(conversation: AgentConversationSummary): boolean {
+function isChatResumableConversation(conversation: AgentConversationSummary): boolean {
   return canOpenChat(conversation.agentRefId);
 }
 

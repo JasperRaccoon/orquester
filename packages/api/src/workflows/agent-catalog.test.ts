@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { providerModelsAreLive, toWorkflowAgentCatalog, workflowAgentCatalogFromSnapshots, workflowAgentCatalogKey } from "./agent-catalog.ts";
+import { toWorkflowAgentCatalog, workflowAgentCatalogFromSnapshots } from "./agent-catalog.ts";
 import { testEdge, testNode, testWorkflow } from "./testing.ts";
 import { validateWorkflow } from "./validate.ts";
 
@@ -37,9 +37,6 @@ describe("toWorkflowAgentCatalog", () => {
     for (const status of ["degraded", "error", "", "probing", null]) {
       assert.equal(toWorkflowAgentCatalog([{ id: "claude", enabled: true, status, models: fallback }]).agents[0]?.models, null, String(status));
     }
-    assert.equal(providerModelsAreLive("ready"), true);
-    assert.equal(providerModelsAreLive("degraded"), false);
-    assert.equal(providerModelsAreLive(undefined), false);
   });
 });
 
@@ -70,25 +67,6 @@ describe("workflowAgentCatalogFromSnapshots", () => {
       [{ id: "claude", refIds: ["claude", "claude-alt"], status: "ready", models: models("default") }]
     );
     assert.deepEqual(catalog.agents, [{ id: "claude-alt", enabled: true, models: ["default"] }]);
-  });
-});
-
-describe("workflowAgentCatalogKey", () => {
-  it("is stable across agent order and moves with models, loading and enabling", () => {
-    const a = toWorkflowAgentCatalog([
-      { id: "claude", enabled: true, status: "ready", models: models("default", "opus[1m]") },
-      { id: "codex", enabled: true, status: "ready", models: models("gpt-6") }
-    ]);
-    const b = { agents: [...a.agents].reverse() };
-    assert.equal(workflowAgentCatalogKey(a), workflowAgentCatalogKey(b));
-    assert.equal(workflowAgentCatalogKey(undefined), "-");
-    const variants = [
-      toWorkflowAgentCatalog([{ id: "claude", enabled: true, status: "ready", models: models("default") }]),
-      toWorkflowAgentCatalog([{ id: "claude", enabled: true, status: "unknown", models: models("default") }]),
-      toWorkflowAgentCatalog([{ id: "claude", enabled: false, status: "ready", models: models("default") }]),
-      toWorkflowAgentCatalog([{ id: "claude", enabled: true, status: "ready", models: models("default", "opus[1m]") }])
-    ];
-    assert.equal(new Set(variants.map(workflowAgentCatalogKey)).size, variants.length);
   });
 });
 

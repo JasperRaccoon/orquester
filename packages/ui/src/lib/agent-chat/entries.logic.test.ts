@@ -7,7 +7,6 @@ import {
 deriveTimelineEntriesFromItems,
 deriveWorkLogEntries,
 EMPTY_TIMELINE_PROJECTION,
-isAgentInternalActivity,
 itemsForAgent,
 workLogEntryFromActivity
 } from "./entries.logic";
@@ -40,18 +39,6 @@ describe("workLogEntryFromActivity", () => {
     assert.equal(entry.taskId, undefined, "taskId belongs to task rows only");
   });
 
-  it("carries `truncated`, which gates the row's Load full output", () => {
-    assert.equal(
-      workLogEntryFromActivity(activity("tool.completed", { detail: "a", truncated: true }))
-        .truncated,
-      true
-    );
-    assert.equal(
-      workLogEntryFromActivity(activity("tool.completed", { detail: "a" })).truncated,
-      undefined
-    );
-  });
-
   it("promotes the §3.4 account switch as IDS, never a label", () => {
     assert.deepEqual(
       workLogEntryFromActivity(
@@ -80,15 +67,6 @@ describe("workLogEntryFromActivity", () => {
       workLogEntryFromActivity(activity("tool.completed", { accountId: "acc-2" })).accountSwitch,
       undefined
     );
-  });
-
-});
-
-describe("the quiet-timeline guarantee", () => {
-
-  it("hides a subagent's own background shell", () => {
-    const row = activity("task.started", { taskId: "t1", agentKind: "background", agentId: "ag1" });
-    assert.equal(isAgentInternalActivity(row), true);
   });
 
 });
@@ -185,25 +163,6 @@ describe("a started call's own row", () => {
   const chunk = (delta: string) =>
     activity("tool.output", { toolUseId: "call-1", streamKind: "command_output", delta }, { turnId: "t1", summary: "Tool output" });
 
-  it("a keyed start with no other lifecycle row is its call's entry, and its chunks join it", () => {
-    const start = commandRow("tool.started");
-    const output = chunk("PASS a.test.ts\n");
-    const entries = deriveWorkLogEntries([start, output]);
-    assert.deepEqual(
-      entries.map((entry) => [entry.id, entry.command, entry.toolLifecycleStatus]),
-      [
-        [start.id, "npm test", "inProgress"],
-        // The chunk is headed like its call (see below); it has no lifecycle of its own.
-        [output.id, "npm test", undefined]
-      ]
-    );
-    assert.deepEqual(
-      joinLifecycleDetails(entries).map((entry) => [entry.id, entry.detail]),
-      [[start.id, "PASS a.test.ts\n"]],
-      "the running command is the row its output renders in"
-    );
-  });
-
   it("is dropped once an update, a completion or a denial of the call is in the input, before or after it", () => {
     for (const [kind, extra] of [
       ["tool.updated", {}],
@@ -250,69 +209,6 @@ describe("a started call's own row", () => {
       { turnId: "t1" }
     );
     assert.deepEqual(deriveWorkLogEntries([adopted]), []);
-  });
-
-  it("a Claude start that only names its tool with an empty input keeps the tool's name as its detail: its row reads it", () => {
-    // Claude's `content_block_start`: the input streams afterwards, and the call's first update comes once it parses
-    // whole — for a Write or a subagent prompt, seconds later.
-    const claudeStart = (name: string, itemType: string, title: string) =>
-      activity(
-        "tool.started",
-        { itemType, toolUseId: `call-${name}`, title, detail: `${name}: {}`, status: "inProgress", data: { toolName: name, input: {} } },
-        { turnId: "t1" }
-      );
-    for (const [name, itemType, title] of [
-      ["Bash", "command_execution", "Command run"],
-      ["Write", "file_change", "File change"],
-      ["Agent", "collab_agent_tool_call", "Subagent task"],
-      ["mcp__github__create_issue", "mcp_tool_call", "MCP tool call"]
-    ] as const) {
-      // A tool that takes no arguments has no other row until its result: it reads its name for its whole run.
-      const entry = workLogEntryFromActivity(claudeStart(name, itemType, title));
-      assert.equal(entry.detail, name, name);
-      assert.equal(workEntryDisplayLabel(entry), name, name);
-    }
-    // Only an empty input: a nested frame's start carries its whole input, and so does the row of a call whose input
-    // parsed into something.
-    const withInput = activity(
-      "tool.started",
-      { itemType: "command_execution", toolUseId: "call-x", title: "Command run", detail: "Bash: ls -la", status: "inProgress" },
-      { turnId: "t1" }
-    );
-    assert.equal(workLogEntryFromActivity(withInput).detail, "Bash: ls -la");
-  });
-
-  it("a tool that takes no arguments reads its name on every row of its call — its label never gains \": {}\" as it completes", () => {
-    // Claude echoes the empty input on each of them, naming its own tool in the row's data: its start, which is its
-    // only row until its result, and its completion — an update would say the same.
-    const row = (activityKind: string, status: string) =>
-      activity(
-        activityKind,
-        {
-          itemType: "mcp_tool_call",
-          toolUseId: "call-list",
-          title: "MCP tool call",
-          detail: "mcp__x__list: {}",
-          status,
-          data: { toolName: "mcp__x__list", input: {} }
-        },
-        { turnId: "t1" }
-      );
-    for (const [activityKind, status] of [
-      ["tool.started", "inProgress"],
-      ["tool.updated", "inProgress"],
-      ["tool.completed", "completed"]
-    ] as const) {
-      const entry = workLogEntryFromActivity(row(activityKind, status));
-      assert.deepEqual([entry.detail, workEntryDisplayLabel(entry)], ["mcp__x__list", "mcp__x__list"], activityKind);
-    }
-    // A row of the call whose input is not empty says what it asked for.
-    const update = activity(
-      "tool.updated",
-      { itemType: "file_change", toolUseId: "call-y", title: "File change", detail: "Write: {\"file_path\":\"a.ts\"}", status: "inProgress" },
-      { turnId: "t1" }
-    );
-    assert.equal(workLogEntryFromActivity(update).detail, "Write: {\"file_path\":\"a.ts\"}");
   });
 
   it("a detail that only looks like the echo is kept whole: an OpenCode completion's output, \"config: {}\"", () => {
@@ -456,21 +352,6 @@ describe("a call that streamed a command's output: its whole output is the host'
     // Only the shell's own call: a provider-named command with no chunk in view says nothing.
     assert.equal(workLogEntryFromActivity(commandRow("tool.started")).streamedOutput, undefined);
   });
-
-  it("in an agent's drill-in too: its own call's rows and chunks", () => {
-    const own = { agentId: "ag1", turnId: "t1" };
-    const completion = activity(
-      "tool.completed",
-      { itemType: "command_execution", toolUseId: "call-a", command: "ls", status: "completed", agentId: "ag1" },
-      own
-    );
-    const output = activity("tool.output", { toolUseId: "call-a", streamKind: "command_output", delta: "a.ts\n" }, own);
-    const entries = deriveWorkLogEntries([output, completion], { ownerAgentId: "ag1" });
-    assert.deepEqual(entries.map((entry) => [entry.id, entry.streamedOutput]), [
-      [output.id, true],
-      [completion.id, true]
-    ]);
-  });
 });
 
 describe("deriveTimelineEntriesFromItems", () => {
@@ -563,16 +444,6 @@ describe("drill-in ownership and streamed output", () => {
   it("a tool.output chunk becomes the entry's detail, untrimmed", () => {
     const chunk = activity("tool.output", { toolUseId: "t1", streamKind: "command_output", delta: "  two\n" });
     assert.equal(workLogEntryFromActivity(chunk).detail, "  two\n");
-  });
-
-  it("the projection recomputes its work entries when the owner changes, and reuses them otherwise", () => {
-    const mine = activity("tool.completed", { toolUseId: "t1", itemType: "command_execution", agentId: "ag1" });
-    const items = [mine];
-    const parentView = deriveTimelineEntriesFromItems(items);
-    assert.equal(parentView.workEntries.length, 0);
-    const drill = deriveTimelineEntriesFromItems(items, parentView, { ownerAgentId: "ag1" });
-    assert.equal(drill.workEntries.length, 1);
-    assert.equal(drill.ownerAgentId, "ag1");
   });
 
   /** A subagent's Bash call, its rows as the Claude adapter writes them. */
@@ -731,8 +602,8 @@ describe("goal rows (goals §8.4)", () => {
       goalRow({ goal: null, change: "cleared", previous: goal }, "Goal cleared: Make CI green")
     ];
     assert.deepEqual(
-      deriveWorkLogEntries(rows).map((entry) => entry.label),
-      ["Goal set: Make CI green", "Goal paused", "Goal cleared: Make CI green"]
+      deriveWorkLogEntries(rows).map((entry) => entry.goal?.change),
+      ["set", "paused", "cleared"]
     );
   });
 

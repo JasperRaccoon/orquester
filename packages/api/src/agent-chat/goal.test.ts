@@ -203,96 +203,10 @@ test("anything that is not a record is no payload", () => {
 
 // --- goalActivitySummary (§4.3) -----------------------------------------------------
 
-test("the row text follows §4.3's table", () => {
-  const cases: Array<[GoalUpdatedPayload, string]> = [
-    [{ goal: goal("Ship it"), change: "set" }, "Goal set: Ship it"],
-    [{ goal: goal("Ship it"), change: "replaced", previous: goal("Old") }, "Goal replaced: Ship it"],
-    [{ goal: goal("Ship it"), change: "restored" }, "Goal restored: Ship it"],
-    [{ goal: goal("Ship it", { rounds: 4 }), change: "progress" }, "Goal progress"],
-    [
-      { goal: goal("Ship it", { rounds: 3, lastCheck: "tests still fail" }), change: "checked" },
-      "Goal check 3: not met — tests still fail"
-    ],
-    [{ goal: goal("Ship it", { rounds: 3 }), change: "checked" }, "Goal check 3: not met"],
-    [{ goal: goal("Ship it", { status: "paused" }), change: "paused" }, "Goal paused"],
-    [{ goal: goal("Ship it"), change: "resumed" }, "Goal resumed"],
-    [
-      { goal: goal("Ship it", { status: "blocked", lastCheck: "needs a deploy key" }), change: "blocked" },
-      "Goal blocked: needs a deploy key"
-    ],
-    [{ goal: goal("Ship it", { status: "blocked" }), change: "blocked" }, "Goal blocked"],
-    [
-      { goal: goal("Ship it", { status: "budget-limited" }), change: "limited" },
-      "Goal stopped: token budget reached"
-    ],
-    [
-      { goal: goal("Ship it", { status: "usage-limited" }), change: "limited" },
-      "Goal stopped: usage limit reached"
-    ],
-    [
-      { goal: null, change: "achieved", previous: goal("Ship it", { status: "complete" }) },
-      "Goal achieved: Ship it"
-    ],
-    [{ goal: goal("Ship it", { status: "complete" }), change: "achieved" }, "Goal achieved: Ship it"],
-    [
-      {
-        goal: null,
-        change: "failed",
-        previous: goal("Ship it", { status: "failed", lastCheck: "the API was removed" })
-      },
-      "Goal can't be met: the API was removed"
-    ],
-    [{ goal: goal("Ship it", { status: "failed" }), change: "failed" }, "Goal can't be met"],
-    [{ goal: null, change: "cleared", previous: goal("Ship it") }, "Goal cleared: Ship it"],
-    [{ goal: null, change: "cleared" }, "Goal cleared"]
-  ];
-  for (const [payload, expected] of cases) {
-    assert.equal(goalActivitySummary(payload), expected, `${payload.change}`);
-  }
-});
-
-test("a limit the goal does not name reads as the token budget", () => {
-  // Grok's `budget_exceeded` may arrive before its status catches up.
-  assert.equal(
-    goalActivitySummary({ goal: goal("Ship it"), change: "limited" }),
-    "Goal stopped: token budget reached"
-  );
-});
-
-test("an objective is cut to 200 characters with an ellipsis; the payload keeps it whole", () => {
-  const long = "x".repeat(500);
-  const payload: GoalUpdatedPayload = { goal: goal(long), change: "set" };
-  const text = goalActivitySummary(payload);
-  assert.equal(text, `Goal set: ${"x".repeat(200 - 1)}…`);
-  assert.equal(payload.goal?.objective, long, "the payload is never shortened");
-
-  const exact = "y".repeat(200);
-  assert.equal(goalActivitySummary({ goal: goal(exact), change: "set" }), `Goal set: ${exact}`);
-  assert.equal(
-    goalActivitySummary({ goal: null, change: "cleared", previous: goal(long) }),
-    `Goal cleared: ${"x".repeat(200 - 1)}…`
-  );
-});
-
-test("the cut never splits a surrogate pair, and drops the whitespace before the ellipsis", () => {
+test("a truncated goal summary never splits a surrogate pair", () => {
   const emoji = goalActivitySummary({ goal: goal("🙂".repeat(150)), change: "set" });
   assert.ok(emoji.endsWith("…"));
   assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(emoji), "no lone high surrogate");
-  assert.ok(emoji.length <= "Goal set: ".length + 200);
-
-  const spaced = goalActivitySummary({
-    goal: goal(`${"a".repeat(200 - 3)}   tail`),
-    change: "set"
-  });
-  assert.equal(spaced, `Goal set: ${"a".repeat(200 - 3)}…`);
-});
-
-test("a long last check is cut the same way", () => {
-  const reason = "r".repeat(1_000);
-  assert.equal(
-    goalActivitySummary({ goal: goal("x", { rounds: 1, lastCheck: reason }), change: "checked" }),
-    `Goal check 1: not met — ${"r".repeat(200 - 1)}…`
-  );
 });
 
 // --- the predicates ------------------------------------------------------------

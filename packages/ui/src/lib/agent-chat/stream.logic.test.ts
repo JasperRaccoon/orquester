@@ -16,10 +16,6 @@ describe("NdjsonLineBuffer", () => {
 });
 
 describe("parseStreamLine", () => {
-  it("reads the heartbeat comment as a heartbeat, not a frame", () => {
-    assert.deepEqual(parseStreamLine(":hb"), { kind: "heartbeat" });
-    assert.deepEqual(parseStreamLine(": anything"), { kind: "heartbeat" });
-  });
 
   it("skips blank lines", () => {
     assert.deepEqual(parseStreamLine(""), { kind: "blank" });

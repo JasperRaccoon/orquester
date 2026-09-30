@@ -44,7 +44,7 @@ export interface WorkflowSummaryDeps {
 type SummaryErrors = Pick<WorkflowSummary, "errorCount" | "errors" | "errorsOmitted">;
 const errorCache = new WeakMap<Workflow, { key: string; value: SummaryErrors }>();
 
-export function validationKey(workflow: Workflow, options: ValidateWorkflowOptions): string {
+function validationKey(workflow: Workflow, options: ValidateWorkflowOptions): string {
   const list = (values: readonly string[] | undefined): string => (values === undefined ? "-" : [...values].sort().join("\u0000"));
   return [
     workflow.id,

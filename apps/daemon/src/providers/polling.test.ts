@@ -51,10 +51,9 @@ test("github: pulls map open/merged/closed, newest-updated first, with the ETag"
     { token: "ghp_test" },
     { owner: "octo-org", repo: "hello-world" }
   );
-  assert.equal(
-    seen[0].url,
-    "https://api.github.com/repos/octo-org/hello-world/pulls?state=all&sort=updated&direction=desc&per_page=50"
-  );
+  const request = new URL(seen[0].url);
+  assert.equal(request.origin + request.pathname, "https://api.github.com/repos/octo-org/hello-world/pulls");
+  assert.deepEqual(Object.fromEntries(request.searchParams), { state: "all", sort: "updated", direction: "desc", per_page: "50" });
   assert.equal(seen[0].headers.authorization, "Bearer ghp_test");
   assert.equal(seen[0].headers["if-none-match"], undefined);
   assert.ok(!page.notModified);
@@ -185,10 +184,11 @@ test("bitbucket cloud: pullrequests map OPEN/MERGED/DECLINED with the abbreviate
     { token: "ATATTfake", email: "me@example.invalid" },
     { owner: "acme", repo: "web-app" }
   );
-  assert.equal(
-    seen[0].url,
-    "https://api.bitbucket.org/2.0/repositories/acme/web-app/pullrequests?state=OPEN&state=MERGED&state=DECLINED&sort=-updated_on&pagelen=50"
-  );
+  const request = new URL(seen[0].url);
+  assert.equal(request.origin + request.pathname, "https://api.bitbucket.org/2.0/repositories/acme/web-app/pullrequests");
+  assert.deepEqual(request.searchParams.getAll("state").sort(), ["DECLINED", "MERGED", "OPEN"]);
+  assert.equal(request.searchParams.get("sort"), "-updated_on");
+  assert.equal(request.searchParams.get("pagelen"), "50");
   assert.equal(
     seen[0].headers.authorization,
     "Basic " + Buffer.from("me@example.invalid:ATATTfake").toString("base64")

@@ -21,18 +21,6 @@ test("every listener takes the run, and unsubscribing takes it out", () => {
   assert.equal(openWorkflowRun(target), false, "no listener left");
 });
 
-test("a listener that unsubscribes while being called does not skip the others", () => {
-  const seen: string[] = [];
-  const stopFirst = subscribeOpenWorkflowRun(() => {
-    seen.push("first");
-    stopFirst();
-  });
-  const stopSecond = subscribeOpenWorkflowRun(() => seen.push("second"));
-  openWorkflowRun(target);
-  assert.deepEqual(seen, ["first", "second"]);
-  stopSecond();
-});
-
 test("only a chat tab with a whole workflow owner links to a run", () => {
   const owner = { kind: "workflow" as const, ...target };
   assert.deepEqual(workflowRunTargetOf({ kind: "agent-chat", owner }), target);

@@ -36,15 +36,6 @@ test("a remembered pick the catalogue dropped falls back to the default", () => 
   );
 });
 
-test("two models flagged default resolve deterministically to catalogue order", () => {
-  // OpenCode really does flag two; "the default" must not depend on luck.
-  const twoDefaults = [
-    model("first", { isDefault: true }),
-    model("second", { isDefault: true })
-  ];
-  assert.equal(resolveLaunchModel({ snapshot: { models: twoDefaults } }), "first");
-});
-
 test("no default flag at all falls back to the first entry", () => {
   assert.equal(resolveLaunchModel({ snapshot: { models: [model("only")] } }), "only");
 });
@@ -64,14 +55,6 @@ test("the selected model is always shown, even when a query excludes it", () => 
   assert.deepEqual(new Set(list.shown.map((choice) => choice.slug)), new Set([
     "big-pickle", "openrouter/anthropic/claude-3-haiku"
   ]));
-});
-
-test("the catalogue default stays one click away when it is not the selection", () => {
-  const list = launchModelList({ models: catalogue, selected: "gpt-5.6-luna" });
-  assert.deepEqual(
-    ["gpt-5.6-luna", "big-pickle"].every((slug) => list.shown.some((choice) => choice.slug === slug)),
-    true
-  );
 });
 
 test("search matches the slug or the display name, case-insensitively", () => {

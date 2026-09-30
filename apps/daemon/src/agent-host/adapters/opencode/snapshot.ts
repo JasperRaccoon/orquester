@@ -293,7 +293,7 @@ function flattenOpenCodeModels(inventory: OpenCodeInventory): ProviderModel[] {
  * §4.6.7 removes the duplicate. `hints` was present on every row in 1.18.5 but
  * is guarded anyway: it is one optional field away from throwing.
  */
-export function toSlashCommands(rows: readonly OpenCodeCommandRow[]): SlashCommand[] {
+function toSlashCommands(rows: readonly OpenCodeCommandRow[]): SlashCommand[] {
   const commands: SlashCommand[] = [...SYNTHESISED_COMMANDS];
   const names = new Set(commands.map((command) => command.name));
   for (const row of rows) {
@@ -334,7 +334,7 @@ function toSkills(rows: readonly OpenCodeSkillRow[]): Skill[] {
   return skills.sort((left, right) => left.name.localeCompare(right.name));
 }
 
-export function inferAuth(inventory: OpenCodeInventory): ProviderAuth {
+function inferAuth(inventory: OpenCodeInventory): ProviderAuth {
   const count = inventory.providers.connected.length;
   return count > 0
     ? { status: "authenticated", type: "opencode", label: `${count} connected` }

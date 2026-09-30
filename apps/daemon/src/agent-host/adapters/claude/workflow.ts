@@ -54,7 +54,7 @@ export interface WorkflowAgentEntry {
   blocked?: boolean;
 }
 
-export interface WorkflowProgressSnapshot {
+interface WorkflowProgressSnapshot {
   phases: TaskWorkflowPhase[];
   agents: WorkflowAgentEntry[];
 }
@@ -203,7 +203,7 @@ export function workflowAgentFingerprint(entry: WorkflowAgentEntry): string {
 }
 
 /** The `Workflow` tool's immediate result: which task is the run, and where it writes. */
-export interface WorkflowLaunch {
+interface WorkflowLaunch {
   taskId: string;
   runHandles: TaskRunHandles;
 }

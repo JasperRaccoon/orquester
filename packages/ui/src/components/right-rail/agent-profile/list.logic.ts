@@ -90,7 +90,7 @@ export function addMenuKinds(creatable: readonly ProfileItemKind[], active: Prof
 }
 
 /** Every whitespace-separated word of `query` appears in the item's name, description, source or meta line. */
-export function matchesProfileQuery(item: ProfileItem, query: string): boolean {
+function matchesProfileQuery(item: ProfileItem, query: string): boolean {
   const words = query.trim().toLowerCase().split(/\s+/).filter((word) => word.length > 0);
   if (words.length === 0) return true;
   const haystack = [item.name, item.description ?? "", item.source.label, ...profileItemMetaParts(item)]

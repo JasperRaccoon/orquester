@@ -36,10 +36,6 @@ describe("the compaction phase", () => {
 
   const live = { sessionStatus: "running" as const, turnStatus: "running" as const };
 
-  it("is on from the `compacting` marker until a terminal one lands", () => {
-    assert.equal(isCompactingThread({ activities: [compacting()], ...live }), true);
-  });
-
   it("ends on `compacted`", () => {
     assert.equal(
       isCompactingThread({

@@ -317,7 +317,7 @@ interface BuildSnapshotInput {
  * stays (it repairs the same claim arriving from an older host), but the probe
  * no longer manufactures the claim in the first place.
  */
-export function buildClaudeAuth(probe: ClaudeProbeResult | undefined): ProviderAuth {
+function buildClaudeAuth(probe: ClaudeProbeResult | undefined): ProviderAuth {
   if (!probe) {
     return { status: "unknown" };
   }

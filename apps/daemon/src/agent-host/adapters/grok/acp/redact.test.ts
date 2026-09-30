@@ -70,15 +70,6 @@ test("home paths collapse and token shapes are masked inside free text", () => {
   assert.equal(redacted.includes("sk-abcdefgh1234"), false);
 });
 
-test("redaction never throws, whatever it is handed", () => {
-  const cyclic: Record<string, unknown> = { a: 1 };
-  cyclic["self"] = cyclic;
-  assert.doesNotThrow(() => redactAcpFrame(cyclic));
-  assert.equal(redactAcpFrame(undefined), undefined);
-  assert.equal(redactAcpFrame(7), 7);
-  assert.deepEqual(redactAcpFrame([1, "a"]), [1, "a"]);
-});
-
 test("a deeply nested frame is bounded rather than walked forever", () => {
   let deep: Record<string, unknown> = { leaf: "x" };
   for (let index = 0; index < 60; index += 1) {

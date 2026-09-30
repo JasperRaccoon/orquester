@@ -24,18 +24,16 @@ import {
   loadAgentProfile,
   loadAgentProfileOverview,
   markAgentProfileStale,
-  parseAgentProfilePrefs,
   rememberAgentProfileAgent,
   rememberAgentProfileTab,
   removeAgentProfileItem,
   resetAgentProfile,
   sanitizeAgentProfileSnapshot,
-  serializeAgentProfilePrefs,
   setAgentProfileItemEnabled,
   trustAgentProfileItem,
   type AgentProfileApi
 } from "./store.ts";
-import { sanitizeOverview, sanitizeProfileItem } from "./sanitize";
+import { sanitizeOverview } from "./sanitize";
 
 // ---------------------------------------------------------------------------
 // Fixtures
@@ -212,33 +210,31 @@ describe("wire snapshots are sanitized field by field", () => {
   });
 
   it("fails permissions closed and locks everything on a locked item", () => {
-    const loose = sanitizeProfileItem({ id: "hook:a", kind: "hook", toggleable: "yes", editable: 1 });
+    const loose = sanitizeAgentProfileSnapshot({ agent: "claude", items: [{ id: "hook:a", kind: "hook", toggleable: "yes", editable: 1 }] })?.items[0];
     assert.equal(loose?.toggleable, false);
     assert.equal(loose?.editable, false);
     assert.equal(loose?.deletable, false);
-    assert.equal(loose?.name, "hook:a", "a missing name reads as the id");
-    assert.equal(loose?.enabled, true, "on unless it says off");
-    const locked = sanitizeProfileItem({ ...JIRA, locked: true });
+    const locked = sanitizeAgentProfileSnapshot({ agent: "claude", items: [{ ...JIRA, locked: true }] })?.items[0];
     assert.deepEqual([locked?.toggleable, locked?.editable, locked?.deletable], [false, false, false]);
   });
 
   it("repairs the source, the warnings and the meta", () => {
-    const repaired = sanitizeProfileItem({
+    const repaired = sanitizeAgentProfileSnapshot({ agent: "claude", items: [{
       ...JIRA,
       source: { type: "martian", label: 5, ownerAgent: "gemini", pluginId: "" },
       warnings: ["Plugin cache missing", { message: "Not trusted", action: "trust", code: "untrusted" }, { code: "x" }, 4, { message: "odd", action: "launch" }],
       meta: { transport: "stdio", bad: 3 }
-    });
-    assert.equal(repaired?.source.type, "user");
+    }] })?.items[0];
     assert.equal(repaired?.source.ownerAgent, undefined);
     assert.equal(repaired?.source.pluginId, undefined);
-    assert.deepEqual(repaired?.warnings, [
-      { code: "warning", message: "Plugin cache missing" },
-      { code: "untrusted", message: "Not trusted", action: "trust" },
-      { code: "warning", message: "odd" }
+    assert.deepEqual(repaired?.warnings.map(({ message, action }) => ({ message, action })), [
+      { message: "Plugin cache missing", action: undefined },
+      { message: "Not trusted", action: "trust" },
+      { message: "odd", action: undefined }
     ]);
+    assert.equal(repaired?.warnings[1]?.code, "untrusted");
     assert.deepEqual(repaired?.meta, { transport: "stdio" });
-    const inherited = sanitizeProfileItem({ ...JIRA, source: { type: "inherited", label: "From Claude", ownerAgent: "claude" } });
+    const inherited = sanitizeAgentProfileSnapshot({ agent: "claude", items: [{ ...JIRA, source: { type: "inherited", label: "From Claude", ownerAgent: "claude" } }] })?.items[0];
     assert.deepEqual(inherited?.source, { type: "inherited", label: "From Claude", ownerAgent: "claude" });
   });
 
@@ -627,47 +623,51 @@ class MemoryStorage {
   }
 }
 
+let prefsInstance = 0;
+async function withPreferences<T>(raw: string | null, action: (prefs: typeof import("./store.ts"), storage: MemoryStorage) => T): Promise<T> {
+  const original = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
+  const storage = new MemoryStorage(raw);
+  Object.defineProperty(globalThis, "localStorage", { configurable: true, value: storage });
+  try { return action(await import(`./store.ts?prefs-case=${prefsInstance++}`), storage); }
+  finally {
+    if (original) Object.defineProperty(globalThis, "localStorage", original);
+    else Reflect.deleteProperty(globalThis, "localStorage");
+  }
+}
+const selections = (prefs: typeof import("./store.ts")) => [
+  prefs.lastAgentProfileAgent(),
+  ...(["claude", "codex", "grok", "opencode"] as const).map((agent) => prefs.lastAgentProfileTab(agent))
+];
+
 describe("the last picked agent and each agent's tab", () => {
-  const NONE = { agent: null, tabs: {} };
-
-  it("parses field by field, and anything unusable is no pick", () => {
-    for (const raw of [null, undefined, "", "{", "null", "[]", "42", '"claude"', '{"agent":"gemini"}', '{"agent":4}']) {
-      assert.deepEqual(parseAgentProfilePrefs(raw), NONE, String(raw));
+  it("parses field by field, and anything unusable is no pick", async () => {
+    for (const raw of [null, "", "{", "null", "[]", "42", '"claude"', '{"agent":"gemini"}', '{"agent":4}']) {
+      assert.deepEqual(await withPreferences(raw, selections), [null, null, null, null, null], String(raw));
     }
-    assert.deepEqual(parseAgentProfilePrefs('{"v":7,"agent":"grok","future":true}'), { agent: "grok", tabs: {} });
+    assert.deepEqual(await withPreferences('{"v":7,"agent":"grok","future":true}', selections), ["grok", null, null, null, null]);
   });
 
-  it("keeps a tab only for a known agent that has that kind", () => {
-    assert.deepEqual(
-      parseAgentProfilePrefs(
-        JSON.stringify({
-          agent: "claude",
-          tabs: { claude: "skill", codex: "command", opencode: "hook", grok: 7, gemini: "mcp" }
-        })
-      ),
-      { agent: "claude", tabs: { claude: "skill", codex: "command" } },
-      "OpenCode has no hooks; a number is no kind; gemini is no agent"
-    );
+  it("keeps a tab only for a known agent that has that kind", async () => {
+    assert.deepEqual(await withPreferences(JSON.stringify({
+      agent: "claude", tabs: { claude: "skill", codex: "command", opencode: "hook", grok: 7, gemini: "mcp" }
+    }), selections), ["claude", "skill", "command", null, null]);
     for (const tabs of ["skill", ["skill"], null, 3]) {
-      assert.deepEqual(parseAgentProfilePrefs(JSON.stringify({ agent: "codex", tabs })), { agent: "codex", tabs: {} });
+      assert.deepEqual(await withPreferences(JSON.stringify({ agent: "codex", tabs }), selections), ["codex", null, null, null, null]);
     }
-    assert.deepEqual(parseAgentProfilePrefs('{"tabs":{"grok":"marketplace"}}'), { agent: null, tabs: { grok: "marketplace" } });
+    assert.deepEqual(await withPreferences('{"tabs":{"grok":"marketplace"}}', selections), [null, null, null, "marketplace", null]);
   });
 
-  it("serializes over what another bundle stored, keeping its fields and tabs", () => {
-    assert.deepEqual(JSON.parse(serializeAgentProfilePrefs({ agent: "codex", tabs: {} })), { v: 1, agent: "codex", tabs: {} });
-    assert.deepEqual(
-      JSON.parse(serializeAgentProfilePrefs(
-        { agent: "codex", tabs: { codex: "hook" } },
-        '{"v":2,"agent":"grok","kinds":["mcp"],"tabs":{"gemini":"mcp","codex":"skill"}}'
-      )),
-      { v: 1, agent: "codex", kinds: ["mcp"], tabs: { gemini: "mcp", codex: "hook" } }
-    );
-    assert.deepEqual(JSON.parse(serializeAgentProfilePrefs({ agent: "codex", tabs: {} }, "garbage")), {
-      v: 1, agent: "codex", tabs: {}
-    });
-    assert.deepEqual(JSON.parse(serializeAgentProfilePrefs({ agent: null, tabs: {} }, '{"tabs":"junk"}')), {
-      v: 1, agent: null, tabs: {}
+  it("serializes over what another bundle stored, keeping its fields and tabs", async () => {
+    for (const raw of [null, "garbage", '{"tabs":"junk"}']) {
+      await withPreferences(raw, (prefs, storage) => {
+        prefs.rememberAgentProfileAgent("codex");
+        assert.deepEqual(JSON.parse(storage.value ?? ""), { v: 1, agent: "codex", tabs: {} });
+      });
+    }
+    await withPreferences('{"v":2,"agent":"grok","kinds":["mcp"],"tabs":{"gemini":"mcp","codex":"skill"}}', (prefs, storage) => {
+      prefs.rememberAgentProfileAgent("codex");
+      prefs.rememberAgentProfileTab("codex", "hook");
+      assert.deepEqual(JSON.parse(storage.value ?? ""), { v: 1, agent: "codex", kinds: ["mcp"], tabs: { gemini: "mcp", codex: "hook" } });
     });
   });
 

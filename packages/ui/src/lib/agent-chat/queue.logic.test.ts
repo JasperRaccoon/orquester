@@ -8,7 +8,6 @@ enqueue,
 holdAtFront,
 isQueuedMessageDue,
 latestCompletedToolActivityId,
-nextDueQueuedMessage,
 takeQueued,
 type QueueState
 } from "./queue.logic";
@@ -125,12 +124,6 @@ describe("isQueuedMessageDue", () => {
       isQueuedMessageDue({ message, phase: "running", latestToolActivityId: "a2" }),
       true
     );
-  });
-
-  it("only the head is offered to the next boundary", () => {
-    const { state } = queueOf("one", "two");
-    const due = nextDueQueuedMessage(state, { phase: "ready", latestToolActivityId: null });
-    assert.equal(due?.text, "one");
   });
 });
 

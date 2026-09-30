@@ -54,10 +54,6 @@ export class FileTail {
     this.path = options.path;
   }
 
-  get finished(): boolean {
-    return this.done;
-  }
-
   /** Bytes taken out of the file so far — a drain loop's "did that do anything?". */
   get bytesRead(): number {
     return this.consumed;
@@ -142,9 +138,9 @@ export function resolveTildePath(input: string, home: string): string {
 }
 
 /** At most this many bytes leave a JSONL transcript per read. */
-export const JSONL_TAIL_MAX_READ_BYTES = 256 * 1024;
+const JSONL_TAIL_MAX_READ_BYTES = 256 * 1024;
 
-export interface JsonlFileTailRead {
+interface JsonlFileTailRead {
   /** The complete lines appended since the last read, parsed; a malformed line is skipped. */
   records: unknown[];
   /** True once the file is unreadable for any reason but "not written yet". */
@@ -173,10 +169,6 @@ export class JsonlFileTail {
 
   constructor(options: FileTailOptions) {
     this.path = options.path;
-  }
-
-  get finished(): boolean {
-    return this.done;
   }
 
   /** Bytes taken out of the file so far. */

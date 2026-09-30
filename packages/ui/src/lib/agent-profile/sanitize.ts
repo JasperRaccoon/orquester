@@ -95,7 +95,7 @@ function sanitizeMeta(value: unknown): Record<string, string> | undefined {
 }
 
 /** One item from the wire, or `null` when it cannot be trusted (no id, an unknown kind). */
-export function sanitizeProfileItem(value: unknown): ProfileItem | null {
+function sanitizeProfileItem(value: unknown): ProfileItem | null {
   if (!isRecord(value)) return null;
   const id = nonEmpty(value.id);
   if (id === undefined || !isProfileItemKind(value.kind)) return null;

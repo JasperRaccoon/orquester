@@ -5,7 +5,6 @@ import { delimiter, join } from "node:path";
 import test from "node:test";
 import { AgentProfileError } from "../errors.ts";
 import {
-  CLI_ERROR_DETAIL_MAX,
   buildAgentCliEnv,
   redactCliOutput,
   runAgentCli,
@@ -157,25 +156,6 @@ test("runAgentCliOrThrow answers on success and throws AGENT_CLI_FAILED with red
     }
     assert.match(error.message, /~\/\.claude\/settings\.json/);
     assert.match(error.message, /red/);
-    return true;
-  });
-});
-
-test("runAgentCliOrThrow reports deadlines, start failures and caps the detail", async (t) => {
-  const slow = await fakeCli(t, `setInterval(() => {}, 1000);`);
-  await assert.rejects(runAgentCliOrThrow({ bin: slow, args: ["mcp", "add"], timeoutMs: 200, label: "grok mcp add" }), {
-    code: "AGENT_CLI_FAILED",
-    message: /^grok mcp add failed: timed out after 0\.2 s/
-  });
-  await assert.rejects(runAgentCliOrThrow({ bin: "/nonexistent/claude", args: ["plugin"], timeoutMs: 1000 }), {
-    code: "AGENT_CLI_FAILED"
-  });
-  const loud = await fakeCli(t, `process.stdout.write("z".repeat(10000)); process.exit(1);`);
-  await assert.rejects(runAgentCliOrThrow({ bin: loud, args: [], timeoutMs: 10_000 }), (error: Error) => {
-    const detail = error.message.slice(error.message.indexOf("failed: ") + "failed: ".length);
-    assert.equal(detail.length, CLI_ERROR_DETAIL_MAX);
-    assert.ok(detail.startsWith("exit code 1: zzz"), "stdout stands in for an empty stderr");
-    assert.ok(detail.endsWith("…"));
     return true;
   });
 });

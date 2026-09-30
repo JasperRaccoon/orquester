@@ -15,7 +15,7 @@
  * which may be gone (a thread moved to another account).
  */
 
-import { promises as fs } from "node:fs";
+import { constants as fsConstants, promises as fs } from "node:fs";
 import * as nodePath from "node:path";
 
 import type { RuntimeTaskStatus, TaskRunHandles, TaskWorkflowPhase } from "@orquester/api/agent-chat";
@@ -36,7 +36,7 @@ const MAX_AGENT_TRANSCRIPT_BYTES = 16 * 1024 * 1024;
 const MAX_RUN_TRANSCRIPT_BYTES = 64 * 1024 * 1024;
 
 /** One agent slot of a finished (or abandoned) run. */
-export interface WorkflowHistoryAgent {
+interface WorkflowHistoryAgent {
   index: number;
   label: string;
   status: RuntimeTaskStatus;
@@ -71,7 +71,7 @@ export interface WorkflowHistoryRun {
 }
 
 /** What the `Workflow` tool's result text says about its launch. */
-export interface WorkflowLaunchText {
+interface WorkflowLaunchText {
   taskId: string;
   runId: string;
   summary?: string;
@@ -83,7 +83,7 @@ export interface WorkflowLaunchText {
  * 17). The transcript keeps this text; `getSessionMessages` drops the
  * structured `toolUseResult`.
  */
-export function parseWorkflowLaunchText(text: string): WorkflowLaunchText | undefined {
+function parseWorkflowLaunchText(text: string): WorkflowLaunchText | undefined {
   if (!text.startsWith("Workflow launched")) {
     return undefined;
   }
@@ -98,13 +98,42 @@ export function parseWorkflowLaunchText(text: string): WorkflowLaunchText | unde
   return { taskId, runId, ...(summary !== undefined ? { summary } : {}) };
 }
 
-async function readBounded(path: string, maxBytes: number): Promise<string | undefined> {
+async function readBounded(path: string, maxBytes: number, sessionDir: string, projectsDir: string): Promise<string | undefined> {
   try {
-    const stat = await fs.stat(path);
-    if (!stat.isFile() || stat.size > maxBytes) {
+    const [projectsRoot, root, target] = await Promise.all([
+      fs.realpath(projectsDir), fs.realpath(sessionDir), fs.realpath(path)
+    ]);
+    const isContained = (parent: string, child: string): boolean => {
+      const relative = nodePath.relative(parent, child);
+      return relative !== ".." && !relative.startsWith(`..${nodePath.sep}`) && !nodePath.isAbsolute(relative);
+    };
+    if (!isContained(projectsRoot, root) || !isContained(root, target)) {
       return undefined;
     }
-    return await fs.readFile(path, "utf8");
+    // Read the verified target through one handle. O_NOFOLLOW rejects a final
+    // component swapped for a link between realpath and open where supported.
+    const noFollow = typeof fsConstants.O_NOFOLLOW === "number" ? fsConstants.O_NOFOLLOW : 0;
+    const handle = await fs.open(target, fsConstants.O_RDONLY | noFollow);
+    try {
+      const stat = await handle.stat();
+      if (!stat.isFile() || stat.size > maxBytes) {
+        return undefined;
+      }
+      // A transcript can grow after fstat. Read at most one byte past the cap
+      // from this handle so concurrent appends cannot allocate unbounded data.
+      const chunks: Buffer[] = [];
+      let length = 0;
+      while (length <= maxBytes) {
+        const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, maxBytes + 1 - length));
+        const { bytesRead } = await handle.read(chunk, 0, chunk.length, length);
+        if (bytesRead === 0) break;
+        chunks.push(chunk.subarray(0, bytesRead));
+        length += bytesRead;
+      }
+      return length > maxBytes ? undefined : Buffer.concat(chunks, length).toString("utf8");
+    } finally {
+      await handle.close();
+    }
   } catch {
     return undefined;
   }
@@ -180,11 +209,13 @@ function agentsFromJournal(journal: unknown[]): WorkflowAgentEntry[] {
 }
 
 /**
- * Read one run. `sessionDir` is `<projects>/<project>/<sessionId>`; nothing
- * outside it is opened. A run with neither a snapshot nor a journal yields
+ * Read one run. `sessionDir` is `<projects>/<project>/<sessionId>`; neither the
+ * session nor anything read beneath it may resolve outside `projectsDir`.
+ * A run with neither a snapshot nor a journal yields
  * only its coordinator.
  */
 export async function readWorkflowHistoryRun(input: {
+  projectsDir: string;
   sessionDir: string;
   toolUseId: string;
   launch: WorkflowLaunchText;
@@ -193,7 +224,9 @@ export async function readWorkflowHistoryRun(input: {
   const transcriptDir = nodePath.join(sessionDir, "subagents", "workflows", launch.runId);
   const snapshotText = await readBounded(
     nodePath.join(sessionDir, "workflows", `${launch.runId}.json`),
-    MAX_SNAPSHOT_BYTES
+    MAX_SNAPSHOT_BYTES,
+    sessionDir,
+    input.projectsDir
   );
   let snapshot: Record<string, unknown> | undefined;
   try {
@@ -211,7 +244,7 @@ export async function readWorkflowHistoryRun(input: {
   let entries = progress?.agents ?? [];
   let phases = progress?.phases ?? [];
   if (entries.length === 0) {
-    const journal = await readBounded(nodePath.join(transcriptDir, "journal.jsonl"), MAX_SNAPSHOT_BYTES);
+    const journal = await readBounded(nodePath.join(transcriptDir, "journal.jsonl"), MAX_SNAPSHOT_BYTES, sessionDir, input.projectsDir);
     entries = journal !== undefined ? agentsFromJournal(parseJsonLines(journal)) : [];
     const titles = new Map<number, string>();
     for (const entry of entries) {
@@ -230,7 +263,9 @@ export async function readWorkflowHistoryRun(input: {
     if (entry.agentId !== undefined && budget > 0) {
       const text = await readBounded(
         nodePath.join(transcriptDir, `agent-${entry.agentId}.jsonl`),
-        Math.min(MAX_AGENT_TRANSCRIPT_BYTES, budget)
+        Math.min(MAX_AGENT_TRANSCRIPT_BYTES, budget),
+        sessionDir,
+        input.projectsDir
       );
       if (text !== undefined) {
         budget -= Buffer.byteLength(text);
