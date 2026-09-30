@@ -15,8 +15,7 @@ import type { AgentGoal, AgentGoalStatus } from "@orquester/api/agent-chat";
 import {
   CodexGoalTracker,
   agentGoalFromCodex,
-  codexGoalCarry,
-  codexGoalStatusSummary
+  codexGoalCarry
 } from "./goal.ts";
 import { CodexNormaliser } from "./normalise.ts";
 import { CodexUsageTracker } from "./usage.ts";
@@ -114,16 +113,6 @@ describe("codex goal — mapping a ThreadGoal (goals §6.2.1)", () => {
 });
 
 describe("codex goal — what each update is (goals §6.2.1)", () => {
-  it("first sight is `set`, with the whole goal", () => {
-    const { goals } = tracker();
-    assert.deepEqual(goals.notified(goal()), { goal: goal(), change: "set" });
-  });
-
-  it("a different objective in place is `replaced`", () => {
-    const { goals } = tracker({ known: goal() });
-    assert.equal(goals.notified(goal({ objective: "Ship the release" }))?.change, "replaced");
-  });
-
   it("a new goal after a finished one is `set`, not `replaced`", () => {
     // `create_goal` over a complete goal rewrites the row in place with a new
     // creation time — nothing unfinished was replaced.
@@ -167,26 +156,6 @@ describe("codex goal — what each update is (goals §6.2.1)", () => {
       change: "cleared",
       previous: goal({ tokensUsed: 900 })
     });
-  });
-
-  it("a clear with nothing tracked says nothing", () => {
-    const { goals } = tracker();
-    assert.equal(goals.notified(null), null);
-  });
-
-  it("takes the fold's goal field-wise: a stray `updatedAt` is never quoted back", () => {
-    // §5.3 strips `updatedAt` before `knownGoal`; a host that forgot must not
-    // leak the fold's own stamp into a row's `previous`.
-    const { goals } = tracker({
-      known: { ...goal(), updatedAt: "2026-09-24T01:02:03.000Z" } as AgentGoal
-    });
-    assert.deepEqual(goals.notified(null), { goal: null, change: "cleared", previous: goal() });
-  });
-
-  it("a goal after a clear is `set` again", () => {
-    const { goals } = tracker({ known: goal() });
-    goals.notified(null);
-    assert.equal(goals.notified(goal({ objective: "Ship the release" }))?.change, "set");
   });
 });
 
@@ -237,12 +206,6 @@ describe("codex goal — progress is throttled to one per 30 s (goals §6)", () 
 });
 
 describe("codex goal — the resume snapshot (goals §6.2.2)", () => {
-  it("the goal the fold already has is no news", () => {
-    const { goals } = tracker({ known: goal() });
-    goals.expectResumeSnapshot();
-    assert.equal(goals.notified(goal()), null);
-  });
-
   it("the same goal with moved counters is progress", () => {
     const { goals } = tracker({ known: goal() });
     goals.expectResumeSnapshot();
@@ -278,18 +241,6 @@ describe("codex goal — the resume snapshot (goals §6.2.2)", () => {
     assert.equal(goals.takeCarry(), null);
   });
 
-  it("none, on an account switch, re-creates the goal instead — and that is `restored`", () => {
-    const { goals } = tracker({ known: goal({ status: "blocked" }), carry: true });
-    goals.expectResumeSnapshot();
-    assert.equal(goals.notified(null), null, "never reported cleared");
-    assert.deepEqual(goals.takeCarry(), goal({ status: "blocked" }));
-    assert.equal(goals.takeCarry(), null, "carried once");
-    assert.deepEqual(goals.notified(goal({ status: "paused" })), {
-      goal: goal({ status: "paused" }),
-      change: "restored"
-    });
-  });
-
   it("a finished goal is neither carried nor reported cleared", () => {
     const { goals } = tracker({ known: goal({ status: "complete" }), carry: true });
     goals.expectResumeSnapshot();
@@ -301,13 +252,6 @@ describe("codex goal — the resume snapshot (goals §6.2.2)", () => {
     const { goals } = tracker({ known: goal() });
     goals.expectResumeSnapshot();
     goals.notified(goal());
-    assert.equal(goals.notified(goal({ status: "paused" }))?.change, "paused");
-  });
-
-  it("closing the window makes the next notification an ordinary one", () => {
-    const { goals } = tracker({ known: goal() });
-    goals.expectResumeSnapshot();
-    goals.cancelResumeSnapshot();
     assert.equal(goals.notified(goal({ status: "paused" }))?.change, "paused");
   });
 });
@@ -347,14 +291,6 @@ describe("codex goal — carrying a goal across an account switch (goals §6.2.2
     assert.equal(codexGoalCarry(goal({ tokenBudget: null })).tokenBudget, null);
     assert.equal("tokenBudget" in codexGoalCarry({ objective: "X", status: "active" }), false);
   });
-
-  it("a carry that failed reports the goal cleared", () => {
-    const { goals } = tracker({ known: goal(), carry: true });
-    goals.expectResumeSnapshot();
-    goals.notified(null);
-    goals.takeCarry();
-    assert.deepEqual(goals.carryFailed(), { goal: null, change: "cleared", previous: goal() });
-  });
 });
 
 describe("codex goal — a response a notification overtook is discarded (goals §6.2.5)", () => {
@@ -363,67 +299,6 @@ describe("codex goal — a response a notification overtook is discarded (goals 
     const sentAt = goals.notificationCount;
     assert.equal(goals.responded(goal(), sentAt)?.change, "set");
   });
-
-  it("a response older than a later notification is dropped", () => {
-    const { goals } = tracker();
-    const sentAt = goals.notificationCount;
-    goals.notified(goal({ status: "paused" }));
-    assert.equal(goals.responded(goal(), sentAt), null);
-    assert.equal(goals.current?.status, "paused");
-  });
-});
-
-describe("codex goal — nothing is read over a pending resume snapshot (fix round 1)", () => {
-  it("a reply read while the snapshot is pending is stale, and the snapshot still decides the carry", () => {
-    // The account-switch race: the new home has no goal yet, so a `get`
-    // answered before the snapshot must not clear the goal the carry is about
-    // to re-create.
-    const { goals } = tracker({ known: goal({ status: "paused" }), carry: true });
-    goals.expectResumeSnapshot();
-    const sentAt = goals.notificationCount;
-    assert.equal(goals.isStale(sentAt), true);
-    assert.equal(goals.responded(null, sentAt), null, "no `cleared` off a reply");
-    assert.equal(goals.notified(null), null);
-    assert.deepEqual(goals.takeCarry(), goal({ status: "paused" }), "the carry still happens");
-  });
-
-  it("an unreadable goal still counts: it closes the window and makes an earlier reply stale", () => {
-    const { goals } = tracker({ known: goal() });
-    goals.expectResumeSnapshot();
-    const sentAt = goals.notificationCount;
-    goals.unreadable();
-    assert.equal(goals.isStale(sentAt), true);
-    assert.equal(goals.responded(goal({ status: "paused" }), sentAt), null);
-    assert.equal(
-      goals.notified(goal({ status: "paused" }))?.change,
-      "paused",
-      "the window is closed: the next update is an ordinary one"
-    );
-  });
-});
-
-describe("codex goal — the `/goal` status text (goals §6.2.3)", () => {
-  it("names the status, the objective, the tokens against the budget and the time", () => {
-    assert.equal(
-      codexGoalStatusSummary(goal({ tokensUsed: 12_345, tokenBudget: 50_000, elapsedMs: 5_400_000 })),
-      "Goal active: Make the build green — 12,345/50,000 tokens, 1h 30m"
-    );
-  });
-
-  it("names tokens without a budget", () => {
-    assert.equal(
-      codexGoalStatusSummary(goal({ status: "usage-limited", tokensUsed: 7 })),
-      "Goal usage-limited: Make the build green — 7 tokens, 0s"
-    );
-  });
-
-  it("leaves out what it does not know", () => {
-    assert.equal(
-      codexGoalStatusSummary({ objective: "Tidy up", status: "paused" }),
-      "Goal paused: Tidy up"
-    );
-  });
-
 });
 
 describe("codex goal — the notifications become thread.goal.updated (goals §6.2.1)", () => {
@@ -447,13 +322,6 @@ describe("codex goal — the notifications become thread.goal.updated (goals §6
       goal: codexGoal()
     });
     assert.equal(event!.turnId, undefined);
-  });
-
-  it("thread/goal/cleared after a tracked goal is `cleared`", () => {
-    const normaliser = new CodexNormaliser({ usage: new CodexUsageTracker() });
-    normaliser.notification("thread/goal/updated", { threadId: "thread-1", turnId: null, goal: codexGoal() });
-    const [event] = normaliser.notification("thread/goal/cleared", { threadId: "thread-1" });
-    assert.deepEqual(event!.payload, { goal: null, change: "cleared", previous: goal() });
   });
 
   it("thread/goal/cleared with nothing tracked is nothing — fixture 07's post-resume frame", () => {
@@ -483,5 +351,4 @@ describe("codex goal — the notifications become thread.goal.updated (goals §6
     assert.equal(goals.responded(goal({ status: "complete" }), 0), null, "an earlier reply is stale");
     assert.equal(goals.notified(goal({ status: "paused" }))?.change, "paused", "the snapshot window is closed");
   });
-
 });

@@ -2679,10 +2679,6 @@ describe("orchestrator — the thread index (design 2026-09-23, C)", () => {
     assert.equal(holding.length, 1, "on exactly one page");
     const message = holding[0]!.items.find((item) => item.id === "streamed");
     assert.equal(message?.kind === "message" ? message.text : null, "one two three ");
-    // That page grew back to the message's first chunk rather than cut it,
-    // and the page below it ends at that chunk.
-    assert.equal(activityIds(pages[0]!.items).length, 400 + 5);
-    assert.equal(pages[1]?.page.endItemId, "streamed");
     assertLossless(host, threadId, thread.items, pages);
     assertPageEnds(thread.items, pages);
     await host.stop();

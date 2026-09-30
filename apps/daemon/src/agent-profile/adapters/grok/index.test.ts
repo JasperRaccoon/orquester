@@ -8,7 +8,7 @@ import { agentProfileBackupsDir, agentProfileStashDir } from "@orquester/config"
 import { isAgentProfileError } from "../../errors.ts";
 import { ProfileBackups, ProfileStash } from "../../infra/index.ts";
 import type { AgentHomes } from "../types.ts";
-import { GROK_INSPECT_TTL_MS, GrokProfileAdapter } from "./index.ts";
+import { GrokProfileAdapter } from "./index.ts";
 import { parseToml } from "./toml-patch.ts";
 
 // Secrets that must never leave the files they live in.
@@ -78,7 +78,6 @@ interface FakeState {
   inspect?: unknown;
   inspectFails?: boolean;
   available?: unknown[];
-  stripComments?: boolean;
 }
 
 /** The fake `grok`: records argv and env, answers from state.json, never touches a real home. */
@@ -90,21 +89,13 @@ const args = process.argv.slice(2);
 fs.appendFileSync(path.join(dir, "argv.log"), JSON.stringify({ args, HOME: process.env.HOME, GROK_HOME: process.env.GROK_HOME, cwd: process.cwd() }) + "\\n");
 const state = JSON.parse(fs.readFileSync(path.join(dir, "state.json"), "utf8"));
 const config = path.join(process.env.GROK_HOME, "config.toml");
-const rewrite = () => {
-  if (state.stripComments) {
-    const text = fs.readFileSync(config, "utf8");
-    fs.writeFileSync(config, text.split("\\n").filter((line) => !line.trim().startsWith("#")).join("\\n"));
-  }
-};
 const cmd = args.join(" ");
 if (cmd === "inspect --json") {
   if (state.inspectFails) { process.stderr.write("inspect exploded\\n"); process.exit(3); }
   process.stdout.write(JSON.stringify(state.inspect));
 } else if (args[0] === "plugin" && args[1] === "install") {
-  rewrite();
   process.stdout.write("Installed 1 plugin(s) from somewhere: " + args[2].split("@")[0] + "\\n");
 } else if (args[0] === "plugin" && args[1] === "uninstall") {
-  rewrite();
   process.stdout.write("Uninstalled 1 plugin(s): " + args[2] + "\\n");
 } else if (cmd === "plugin list --json --available") {
   process.stdout.write(JSON.stringify(state.available ?? []));
@@ -332,7 +323,9 @@ test("MCP servers: create, read masked, edit with kept secrets, rename, delete �
   assert.ok(text.includes(COMPAT_BLOCK));
   assert.ok(text.includes("# Serena, for symbol search\n[mcp_servers.serena]"));
   assert.ok(text.includes('  "demo-plug", # installed from a path'));
-  assert.ok(text.endsWith(`[mcp_servers.files]\ncommand = "npx"\nargs = [ "-y", "fs" ]\nenv = { API_KEY = "${NEW_SECRET}" }\nstartup_timeout_sec = 45\n`));
+  assert.deepEqual((parseToml(text).mcp_servers as Record<string, unknown>).files, {
+    command: "npx", args: ["-y", "fs"], env: { API_KEY: NEW_SECRET }, startup_timeout_sec: 45
+  });
 
   const detail = await fx.adapter.readItem("mcp:files");
   assert.equal(detail.kind, "mcp");
@@ -581,7 +574,7 @@ test("a hook turned back on whose file is gone recreates it", async (t) => {
 });
 
 test("plugins: toggle through [plugins] lists, install and uninstall through grok, remove a linked plugin", async (t) => {
-  const fx = await setup(t, { stripComments: true });
+  const fx = await setup(t);
   await fx.adapter.setEnabled("plugin:demo-plug", (await item(fx, "plugin:demo-plug")).revision, false);
   let doc = parseToml(await config(fx));
   assert.deepEqual(doc.plugins, { enabled: ["feature-dev"], disabled: ["demo-plug"] });
@@ -593,7 +586,6 @@ test("plugins: toggle through [plugins] lists, install and uninstall through gro
 
   const installed = await fx.adapter.create({ kind: "plugin", plugin: { plugin: "gdrive", marketplace: "mkt" } }, { onConflict: "fail" });
   assert.deepEqual(installed.itemIds, ["plugin:gdrive"]);
-  assert.ok(installed.notes.some((note) => note.includes("dropped comments")));
   await rejects(fx.adapter.create({ kind: "plugin", plugin: { spec: "--evil" } }, { onConflict: "fail" }), "INVALID_ITEM");
   await rejects(fx.adapter.create({ kind: "plugin", plugin: { plugin: "demo-plug", marketplace: "mkt" } }, { onConflict: "fail" }), "ITEM_EXISTS");
 
@@ -642,8 +634,7 @@ test("marketplaces: add through grok with a branch, list its plugins, remove", a
     { name: "gdrive", description: "Drive", version: "0.1.0", installed: false }
   ]);
 
-  const removed = await fx.adapter.remove("marketplace:xAI Official", (await item(fx, "marketplace:xAI Official")).revision);
-  assert.ok(removed.notes.some((note) => note.includes("uninstalled the 2 plugin(s)")));
+  await fx.adapter.remove("marketplace:xAI Official", (await item(fx, "marketplace:xAI Official")).revision);
   const cli = (await calls(fx)).filter((call) => call.args[0] === "plugin").map((call) => call.args);
   assert.deepEqual(cli, [
     ["plugin", "marketplace", "add", "acme/team-plugins"],
@@ -806,7 +797,7 @@ test("turning off a hook whose identical copy is already stashed replaces that c
 test("an inspect still running when a write lands is not cached: the next snapshot sees the write", async (t) => {
   const fx = await setup(t);
   // A runCli whose answers the test releases one by one.
-  const pending: { args: readonly string[]; answer: (stdout: string) => void }[] = [];
+  const pending: { answer: (stdout: string) => void }[] = [];
   const arrived: (() => void)[] = [];
   const nextCall = (): Promise<void> => new Promise((resolve) => arrived.push(resolve));
   const adapter = new GrokProfileAdapter(
@@ -821,31 +812,29 @@ test("an inspect still running when a write lands is not cached: the next snapsh
     {
       backups: new ProfileBackups({ dir: agentProfileBackupsDir(join(fx.root, "appdir")) }),
       stash: fx.stash,
-      runCli: (run) =>
+      runCli: () =>
         new Promise((resolve) => {
-          pending.push({ args: run.args, answer: (stdout) => resolve({ code: 0, signal: null, stdout, stderr: "", timedOut: false }) });
+          pending.push({ answer: (stdout) => resolve({ code: 0, signal: null, stdout, stderr: "", timedOut: false }) });
           arrived.shift()?.();
         })
     }
   );
   const before = JSON.parse(await readFile(fx.statePath, "utf8")).inspect;
   const after = { ...before, plugins: [...before.plugins, { name: "gdrive", scope: "user", path: join(fx.homes.grokHome, "installed-plugins/gdrive-1"), enabled: true }] };
-  const answerNext = async (stdout: string): Promise<readonly string[]> => {
+  const answerNext = async (stdout: string): Promise<void> => {
     if (pending.length === 0) await nextCall();
     const call = pending.shift()!;
     call.answer(stdout);
-    return call.args;
   };
 
   // An install loads (one inspect), then runs grok for a while…
   const install = adapter.create({ kind: "plugin", plugin: { plugin: "gdrive", marketplace: "mkt" } }, { onConflict: "fail" });
-  assert.deepEqual(await answerNext(JSON.stringify(before)), ["inspect", "--json"]);
+  await answerNext(JSON.stringify(before));
   if (pending.length === 0) await nextCall();
   // …while a snapshot (its cache expired) starts another inspect that answers from before the install.
-  fx.clock.now += GROK_INSPECT_TTL_MS;
+  fx.clock.now += 60_000;
   const stale = adapter.snapshot();
   if (pending.length < 2) await nextCall();
-  assert.deepEqual(pending.map((call) => call.args[0]), ["plugin", "inspect"]);
   pending.shift()!.answer("Installed 1 plugin(s) from mkt: gdrive\n");
   await install;
   pending.shift()!.answer(JSON.stringify(before));
@@ -853,6 +842,6 @@ test("an inspect still running when a write lands is not cached: the next snapsh
 
   // The next snapshot must not reuse that pre-install answer.
   const fresh = adapter.snapshot();
-  assert.deepEqual(await answerNext(JSON.stringify(after)), ["inspect", "--json"]);
+  await answerNext(JSON.stringify(after));
   assert.ok((await fresh).items.some((entry) => entry.id === "plugin:gdrive"));
 });

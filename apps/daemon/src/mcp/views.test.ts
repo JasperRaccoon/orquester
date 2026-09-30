@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPlanImplementationPrompt, type AgentGoalStatus } from "@orquester/api/agent-chat";
+import type { AgentGoalStatus } from "@orquester/api/agent-chat";
 import { FakeDaemonApi } from "./testing.ts";
 import { activity, chatSummary, head, message, shellSummary, snapshot, stamp, turn } from "./fixtures.ts";
 import { chatDetail, pendingApprovalViews, pendingQuestionViews, sessionDetail, sessionView, type ViewContext } from "./views.ts";
@@ -137,7 +137,7 @@ test("a turn with no answer at all ends on its last commentary, as the GUI's tim
 
 test("plan.actionable is judged on the snapshot with the host's own rule, never on the summary flag one poll behind", () => {
   const plan = (id: string) => activity("turn.proposed.completed", { planId: id, planMarkdown: `# ${id}` });
-  const implementing = (id: string) => message("user", buildPlanImplementationPrompt(`# ${id}`), { turnId: "t2" });
+  const implementing = (id: string) => message("user", `PLEASE IMPLEMENT THIS PLAN:\n# ${id}`, { turnId: "t2" });
   // Just implemented (implement_plan {wait:false} reads this): the summary still flags the plan it was sent for.
   const sent = snapshot({ items: [plan("p1"), implementing("p1")] });
   assert.deepEqual(sessionDetail(chatSummary({ hasActionableProposedPlan: true }), sent, ctx).plan, { planId: "p1", markdown: "# p1", truncated: false, actionable: false });

@@ -7,17 +7,15 @@ import type { LsRemoteResult } from "../git-remote/index.ts";
 import { ManualClock } from "../testing/manual-trigger-clock.ts";
 import { createGitPoller } from "./git-poller.ts";
 import { createRepoResolver } from "./repo-resolve.ts";
-import { advance, fakeHost, memoryState, node, recordingLogger, workflow } from "./test-support.ts";
+import { advance, fakeHost, memoryState, node, silentLogger, workflow } from "./test-support.ts";
 
 const WS = "/app/workspaces";
 
 function resolver(remotes: Record<string, string | null>, accounts: Record<string, string | null>) {
-  const calls: string[] = [];
   const resolve = createRepoResolver({
     workspacesDir: WS,
     git: {
       async remoteUrl(cwd) {
-        calls.push(cwd);
         return remotes[cwd] ?? null;
       }
     },
@@ -25,7 +23,7 @@ function resolver(remotes: Record<string, string | null>, accounts: Record<strin
       return name in accounts ? { gitAccountId: accounts[name] } : null;
     }
   });
-  return { resolve, calls };
+  return { resolve };
 }
 
 test("project repositories reject paths outside the workspace project layout", async () => {
@@ -36,14 +34,13 @@ test("project repositories reject paths outside the workspace project layout", a
 });
 
 test("repo kind url: as given, with its account or none", async () => {
-  const { resolve, calls } = resolver({}, {});
+  const { resolve } = resolver({}, {});
   const wf = workflow("wf", []);
   assert.deepEqual(await resolve(wf, { kind: "url", url: " https://github.com/o/r " }), { url: "https://github.com/o/r", accountId: null });
   assert.deepEqual(await resolve(wf, { kind: "url", url: "git@github.com:o/r.git", accountId: "acc1" }), {
     url: "git@github.com:o/r.git",
     accountId: "acc1"
   });
-  assert.deepEqual(calls, []);
 });
 
 test("repo kind project: an existing project's origin + its workspace's account", async () => {
@@ -62,12 +59,11 @@ test("repo kind project: an existing project's origin + its workspace's account"
 });
 
 test("repo kind project on a temp workflow: its clone URL + that workspace's account; an empty temp project has none", async () => {
-  const { resolve, calls } = resolver({}, { team: "acc-team" });
+  const { resolve } = resolver({}, { team: "acc-team" });
   const clone = workflow("t", [], { project: { kind: "temp", workspace: "team", source: { kind: "clone", url: "https://bitbucket.org/o/r.git", ref: "main" } } });
   assert.deepEqual(await resolve(clone, { kind: "project" }), { url: "https://bitbucket.org/o/r.git", accountId: "acc-team" });
   const empty = workflow("e", [], { project: { kind: "temp", workspace: "team", source: { kind: "empty" } } });
   assert.equal(await resolve(empty, { kind: "project" }), null);
-  assert.deepEqual(calls, []);
 });
 
 test("a project whose origin appears later is picked up by the periodic re-resolve", async () => {
@@ -96,7 +92,7 @@ test("a project whose origin appears later is picked up by the periodic re-resol
     },
     resolveRepo: resolve,
     clock,
-    logger: recordingLogger()
+    logger: silentLogger
   });
   await poller.start();
   assert.ok(poller.triggerState("wf", "g")!.lastError);

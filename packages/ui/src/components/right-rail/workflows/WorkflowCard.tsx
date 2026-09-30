@@ -74,7 +74,7 @@ export interface WorkflowCardProps {
 const FOCUS_RING = "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500";
 
 /** The dot's paint per tone — the semantic tokens only, so every scheme reads native. */
-export const RUN_TONE_DOT: Record<RunTone, string> = {
+const RUN_TONE_DOT: Record<RunTone, string> = {
   ok: "bg-ok",
   danger: "bg-danger",
   warn: "bg-warn",
@@ -96,7 +96,7 @@ function TriggerIcon({ trigger }: { trigger: WorkflowTriggerSummary }): React.Re
 }
 
 /** A run's status: the dot, then its words. */
-export const RunStatusDot: React.FC<{ run: Pick<WorkflowRunSummary, "status">; className?: string }> = ({
+const RunStatusDot: React.FC<{ run: Pick<WorkflowRunSummary, "status">; className?: string }> = ({
   run,
   className
 }) => {
@@ -353,7 +353,7 @@ export const WorkflowCard: React.FC<WorkflowCardProps> = (props) => {
 };
 
 /** "1 problem" / "N problems". */
-export function problemCountText(count: number): string {
+function problemCountText(count: number): string {
   return count === 1 ? "1 problem" : `${count} problems`;
 }
 
@@ -362,22 +362,11 @@ export function problemCountText(count: number): string {
  * each known problem on its own line, then what is left out — or, from a
  * daemon that sends the count alone, the count.
  */
-export function problemsHoverText(workflow: Pick<WorkflowSummary, "errorCount" | "errors" | "errorsOmitted">): string {
+function problemsHoverText(workflow: Pick<WorkflowSummary, "errorCount" | "errors" | "errorsOmitted">): string {
   const errors = workflow.errors ?? [];
   if (errors.length === 0) return `${problemCountText(workflow.errorCount)} — open the editor to see and fix them before enabling it.`;
   const more = Math.max(workflow.errorsOmitted ?? 0, workflow.errorCount - errors.length);
   return [...errors.map((problem) => problem.message), ...(more > 0 ? [`+${more} more`] : [])].join("\n");
-}
-
-/**
- * Whether closing the problems popover gives focus back to its chip: yes when
- * it was dismissed (Esc, the chip, a press outside) and focus went down with
- * the panel (`focusLost`: nothing, or the page body, holds it now) — not when
- * "Open the editor" closed it (the editor takes over), nor when a press
- * outside already put focus somewhere else.
- */
-export function returnFocusToProblemsChip(reason: "dismiss" | "edit", focusLost: boolean): boolean {
-  return reason === "dismiss" && focusLost;
 }
 
 /**
@@ -416,7 +405,7 @@ const ProblemsChip: React.FC<{
     if (!wasOpen.current) return;
     wasOpen.current = false;
     const active = document.activeElement;
-    if (returnFocusToProblemsChip(closeReason.current, active === null || active === document.body)) chipRef.current?.focus();
+    if (closeReason.current === "dismiss" && (active === null || active === document.body)) chipRef.current?.focus();
     closeReason.current = "dismiss";
     return undefined;
   }, [open]);

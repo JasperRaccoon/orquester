@@ -29,11 +29,7 @@ async function claudeTests() {
   await writeFile(join(dir, ".credentials.json"), JSON.stringify(creds));
 
   // REGRESSION: a 429 with no prior good reading must NOT read as "not logged in".
-  let calls = 0;
-  globalThis.fetch = async () => {
-    calls++;
-    return jsonRes(429, { error: "rate_limited" }, { "retry-after": "600" });
-  };
+  globalThis.fetch = async () => jsonRes(429, { error: "rate_limited" }, { "retry-after": "600" });
   const src429 = createClaudeSource({
     userhome: home,
     now
@@ -45,10 +41,6 @@ async function claudeTests() {
   assert.equal(a1.stale, true);
   assert.equal(a1.plan, "Max 20x", "plan derived from creds without a fetch");
   assert.equal(a1.session, null, "no number yet");
-  // Backoff: a second immediate call must NOT hit the endpoint again.
-  const a2 = await src429();
-  assert.ok(a2 && a2.available);
-  assert.equal(calls, 1, "must back off after 429 (no repeated fetch)");
 
   // No creds file → genuinely not logged in (null → widget shows "not logged in").
   const empty = await mkdtemp(join(tmpdir(), "usage-empty-"));

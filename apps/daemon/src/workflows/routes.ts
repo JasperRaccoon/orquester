@@ -190,7 +190,7 @@ function summarizeWorkflow(
  * runs kept (a failed run keeps one `keepFailedTempDays`, and only its run record would ever sweep
  * it — the record goes next), then its runs and its secrets. An existing project is never touched.
  */
-export async function deleteWorkflowCascade(
+async function deleteWorkflowCascade(
   deps: Pick<WorkflowRouteDeps, "service" | "secrets" | "runStore" | "engine" | "projects">,
   id: string,
   revision?: number

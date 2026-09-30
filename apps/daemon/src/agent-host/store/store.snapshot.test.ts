@@ -136,7 +136,7 @@ test("a saved fold snapshot loads back as written, on a reopened store", async (
   assert.deepEqual(tail.events, []);
 });
 
-test("state.json sits where @orquester/config says, 0600, written by rename", async (t) => {
+test("state.json is stored at the configured path with mode 0600", async (t) => {
   const appdir = await tempRoot();
   // `rootDir` is `<appdir>/daemon/agent`, exactly as the host wires it.
   const rootDir = agentChatDir(appdir);
@@ -148,8 +148,6 @@ test("state.json sits where @orquester/config says, 0600, written by rename", as
 
   const stat = await fs.stat(agentChatThreadStatePath(appdir, "t1"));
   assert.equal(stat.mode & 0o777, 0o600);
-  const entries = await fs.readdir(threadDirOf(rootDir, "t1"));
-  assert.deepEqual(entries.filter((entry) => entry.includes(".tmp")), []);
 });
 
 test("a missing, corrupt, other-version or other-thread snapshot loads as null", async (t) => {

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { lstat, mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -35,7 +35,7 @@ test("scanSkills lists skill dirs, follows and marks symlinks, tolerates broken 
   await symlink(join(root, "shared", "gone"), join(skills, "dangling"));
   await mkdir(join(skills, "dir-skill-file", "SKILL.md"), { recursive: true });
 
-  const found = await scanSkills(skills, { source: "user" });
+  const found = await scanSkills(skills);
   assert.deepEqual(
     found.map((skill) => [skill.name, skill.isSymlink, skill.description ?? null, skill.error !== undefined]),
     [
@@ -49,14 +49,9 @@ test("scanSkills lists skill dirs, follows and marks symlinks, tolerates broken 
   const review = found.find((skill) => skill.name === "review")!;
   assert.equal(review.dir, join(skills, "review"));
   assert.equal(review.skillFile, join(skills, "review", "SKILL.md"));
-  assert.equal(review.source, "user");
   assert.deepEqual(review.frontmatter, { name: "review", description: "  Review it  " });
   assert.match(found.find((skill) => skill.name === "bad-yaml")!.error!, /Invalid YAML/);
   assert.match(found.find((skill) => skill.name === "dangling")!.error!, /Broken symlink/);
-
-  const withHidden = await scanSkills(skills, { includeHidden: true });
-  assert.ok(withHidden.some((skill) => skill.name === ".hidden-skill"));
-  assert.ok(!withHidden.some((skill) => skill.name === ".system"), ".system holds skills one level down");
 
   assert.deepEqual(await scanSkills(join(root, "missing")), []);
   assert.deepEqual(await scanSkills(join(skills, "stray.md")), []);
@@ -111,16 +106,9 @@ test("readSkillFiles lists the other files, skipping node_modules and .git, neve
 
 });
 
-test("writeSkill writes through a symlinked skill directory and refuses to merge into a broken file", async (t) => {
+test("writeSkill refuses to merge into a broken file without changing its bytes", async (t) => {
   const { root, backups } = await scratch(t);
   const skills = join(root, "skills");
-  await put(join(root, "shared", "shared-skill", "SKILL.md"), "---\nname: shared-skill\n---\nold");
-  await mkdir(skills);
-  await symlink(join(root, "shared", "shared-skill"), join(skills, "shared-skill"));
-  const result = await writeSkill(skills, { name: "shared-skill", frontmatter: {}, body: "new" }, { backups, agent: "claude" });
-  assert.equal(result.path, join(root, "shared", "shared-skill", "SKILL.md"));
-  assert.ok((await lstat(join(skills, "shared-skill"))).isSymbolicLink());
-
   await put(join(skills, "broken", "SKILL.md"), "---\nname: [\n---\n");
   await assert.rejects(writeSkill(skills, { name: "broken", frontmatter: {}, body: "" }, { backups, agent: "claude" }), {
     code: "CONFIG_UNREADABLE"

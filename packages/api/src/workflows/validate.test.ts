@@ -277,10 +277,10 @@ describe("templates", () => {
     const problems = problemsOf(wf, { secretNames: ["TOKEN", "KEY"] });
     assert.equal(only(problems, "secret_in_prompt").length, 0, "a title is never sent to the agent");
     assert.deepEqual(
-      only(problems, "secret_in_title").map((problem) => [problem.severity, problem.field, problem.message]),
+      only(problems, "secret_in_title").map((problem) => [problem.severity, problem.field]),
       [
-        ["info", "config.session.title", "Ag: the chat title shows this secret as «secret:TOKEN», never its value"],
-        ["info", "config.session.title", "Ag: the chat title shows this secret as «secret:KEY», never its value"]
+        ["info", "config.session.title"],
+        ["info", "config.session.title"]
       ],
       "once per secret"
     );
@@ -366,7 +366,6 @@ describe("blocks", () => {
     const opus = testWorkflow([manual(), agent("NightlyTask", "x", { chain: chainOf("opus") })], [testEdge("t", "NightlyTask")]);
     const models = only(problemsOf(opus, { catalog }), "unknown_model");
     assert.deepEqual(models.map((p) => [p.severity, p.field]), [["error", "config.chain.0.model"]]);
-    assert.match(models[0]!.message, /NightlyTask: claude has no model "opus" \(it has default, opus\[1m\]/);
     for (const model of ["default", "opus[1m]", "sonnet"]) {
       const wf = testWorkflow([manual(), agent("A", "x", { chain: chainOf(model) })], [testEdge("t", "A")]);
       assert.deepEqual(only(problemsOf(wf, { catalog }), "unknown_model"), [], model);

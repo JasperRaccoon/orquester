@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname,join } from "node:path";
 import { FsSandboxError } from "@orquester/config/fs";
 import { ToolError } from "./errors.ts";
-import { DEFAULT_READ_BYTES,FsTools } from "./fs-tools.ts";
+import { FsTools } from "./fs-tools.ts";
 
 async function makeRoot(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "orq-fs-tools-"));
@@ -101,18 +101,18 @@ test("listFiles caps entries and marks truncated after 500", async (t) => {
 
 test("readFileWindow reads the default window and supports byte-offset paging", async (t) => {
   const root = await makeRoot(t);
-  await write(root, "large.txt", `${"a".repeat(DEFAULT_READ_BYTES)}tail`);
+  await write(root, "large.txt", `${"a".repeat(65_536)}tail`);
   const tools = new FsTools({ fsRoot: root });
 
   const first = await tools.readFileWindow("large.txt");
-  const second = await tools.readFileWindow("large.txt", { offset: DEFAULT_READ_BYTES, maxBytes: 10 });
+  const second = await tools.readFileWindow("large.txt", { offset: 65_536, maxBytes: 10 });
 
-  assert.equal(first.text, "a".repeat(DEFAULT_READ_BYTES));
-  assert.equal(first.size, DEFAULT_READ_BYTES + 4);
+  assert.equal(first.text, "a".repeat(65_536));
+  assert.equal(first.size, 65_536 + 4);
   assert.equal(first.offset, 0);
   assert.equal(first.truncated, true);
   assert.equal(second.text, "tail");
-  assert.equal(second.offset, DEFAULT_READ_BYTES);
+  assert.equal(second.offset, 65_536);
   assert.equal(second.truncated, false);
 });
 

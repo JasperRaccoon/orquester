@@ -64,12 +64,9 @@ export function staticAccounts(host: Pick<FakeChatHost, "accounts" | "defaults">
 }
 
 /** A `PromptRenderer` over saved prompts in memory; `{project}` / `{branch}` render, `{diff}` can be made to fail. */
-export function fakePrompts(opts: { saved?: Record<string, { body: string; title: string }>; failVariable?: string; branch?: string } = {}): PromptRenderer & { rendered: string[] } {
-  const rendered: string[] = [];
+export function fakePrompts(opts: { saved?: Record<string, { body: string; title: string }>; failVariable?: string; branch?: string } = {}): PromptRenderer {
   return {
-    rendered,
     async render({ body, projectPath, agentLabel, modelLabel }) {
-      rendered.push(body);
       if (opts.failVariable && body.includes(`{${opts.failVariable}}`) && !body.includes(`{{${opts.failVariable}}}`)) {
         return { ok: false, reason: `{${opts.failVariable}}: the git read failed` };
       }
@@ -147,8 +144,6 @@ export interface FakeContext {
   ctx: NodeExecutionContext<"agent">;
   /** Every value persisted, in order (`undefined` = cleared). */
   persisted: (WaitingOn | undefined)[];
-  /** The latest persisted value. */
-  last(): WaitingOn | undefined;
   updates: Partial<WorkflowBlockRun>[];
   /** The merged live fields. */
   live(): Partial<WorkflowBlockRun>;
@@ -237,7 +232,6 @@ export function createFakeContext(opts: FakeContextOptions): FakeContext {
   return {
     ctx,
     persisted,
-    last: () => [...persisted].reverse().find((p) => p !== undefined),
     updates,
     live: () => Object.assign({}, ...updates) as Partial<WorkflowBlockRun>,
     abort: () => controller.abort()

@@ -87,8 +87,6 @@ export class FakeProfileAdapter implements ProfileAdapter {
   imported: PortableItem[] = [];
   /** The temp skill dirs `exportItem` created. */
   exportedDirs: string[] = [];
-  /** An MCP export's server (real secret values in a real adapter). */
-  exportMcp: Extract<PortableItem, { kind: "mcp" }>["server"] | undefined;
   private holds = new Map<string, Deferred<void>[]>();
   private failures = new Map<string, unknown>();
   private snapshotWaiters: Array<() => void> = [];
@@ -210,7 +208,7 @@ export class FakeProfileAdapter implements ProfileAdapter {
     }
     if (item.kind === "command") return { kind: "command", name: item.name, frontmatter: {}, body: "do it" };
     if (item.kind === "mcp") {
-      return { kind: "mcp", server: this.exportMcp ?? { name: item.name, transport: "stdio", command: "srv" } };
+      return { kind: "mcp", server: { name: item.name, transport: "stdio", command: "srv" } };
     }
     throw profileErrors.invalidItem(`${item.kind} is not portable`);
   }
@@ -222,7 +220,7 @@ export class FakeProfileAdapter implements ProfileAdapter {
     if (this.items.some((entry) => entry.id === id) && options.onConflict === "fail") throw profileErrors.exists(name);
     this.imported.push(item);
     this.items.push(fakeItem(item.kind, name));
-    return { itemIds: [id], notes: [`imported ${name}`] };
+    return { itemIds: [id], notes: [] };
   }
 
   watchPaths(): string[] {

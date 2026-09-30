@@ -4,9 +4,8 @@
  * reason; status filter chips over the loaded runs; "Load more" pages back
  * with the `before` cursor; a selected row.
  *
- * Presentational — the rows, the paging state and the clock arrive as props
- * (`useRunHistory` supplies the first three), so a static render draws every
- * state. On a phone (`variant="sheet"`) every row and chip is ≥ 40 px.
+ * The Runs mode supplies the rows, paging state and shared clock. On a phone
+ * (`variant="sheet"`) every row and chip is ≥ 40 px.
  */
 
 import React, { useMemo } from "react";

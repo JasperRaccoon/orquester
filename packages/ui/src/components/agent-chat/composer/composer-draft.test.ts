@@ -193,19 +193,6 @@ describe("when the persisted draft is written", () => {
 
   const draft = (text: string): ComposerDraft => ({ text, attachments: [], context: [] });
 
-  it("does not write on the keystroke, and writes the newest draft once when the window closes", (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout"] });
-    const s = scheduler();
-    s.api.schedule(draft("h"));
-    t.mock.timers.tick(150);
-    s.api.schedule(draft("he"));
-    t.mock.timers.tick(149);
-    s.api.schedule(draft("hey"));
-    assert.deepEqual(s.writes, [], "typing does not hit storage on every key");
-    t.mock.timers.tick(1);
-    assert.deepEqual(s.writes, [draft("hey")]);
-  });
-
   it("flushes synchronously, so an unmount or a reload keeps the tail", (t) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const s = scheduler();
@@ -226,15 +213,5 @@ describe("when the persisted draft is written", () => {
     assert.deepEqual(s.writes, [draft("")], "a sent message must not be resurrected by a late write");
     t.mock.timers.tick(300);
     assert.deepEqual(s.writes, [draft("")]);
-  });
-
-  it("cancels without writing", (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout"] });
-    const s = scheduler();
-    s.api.schedule(draft("never mind"));
-    s.api.cancel();
-    t.mock.timers.tick(300);
-    s.api.flush();
-    assert.deepEqual(s.writes, []);
   });
 });

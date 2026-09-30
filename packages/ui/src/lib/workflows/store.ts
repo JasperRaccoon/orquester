@@ -193,8 +193,6 @@ let listInFlight: Promise<void> | null = null;
 let listTouched: Set<string> | null = null;
 const runsInFlight = new Map<string, Promise<void>>();
 const runInFlight = new Map<string, Promise<void>>();
-/** A run that failed to load before anything about it was known. */
-const runLoadErrors = new Map<string, string>();
 const secretsInFlight = new Map<string, Promise<void>>();
 /** Deleted workflow ids. An id is never reused, so none of them may come back. */
 const tombstones = new Set<string>();
@@ -636,7 +634,6 @@ export function loadWorkflowRun(api: WorkflowsApi, runId: string, options?: { fo
       if (run === null) throw new Error("The daemon answered the run in an unexpected shape.");
       if (tombstones.has(run.workflowId)) return;
       const { definition: _d, triggerPayload: _t, blocks, takenEdges, deadEdges, finalOutput: _f, ...summaryFields } = run;
-      runLoadErrors.delete(runId);
       applyRunSummary(summaryFields);
       const state = getState();
       const entry = state.runs[runId];
@@ -663,8 +660,6 @@ export function loadWorkflowRun(api: WorkflowsApi, runId: string, options?: { fo
       const entry = state.runs[runId];
       if (entry !== undefined) {
         workflowsStore.setState({ runs: { ...state.runs, [runId]: { ...entry, error: message } } });
-      } else {
-        runLoadErrors.set(runId, message);
       }
     } finally {
       if (runInFlight.get(runId) === promise) runInFlight.delete(runId);
@@ -769,16 +764,10 @@ export function resetWorkflows(): void {
   listTouched = null;
   runsInFlight.clear();
   runInFlight.clear();
-  runLoadErrors.clear();
   secretsInFlight.clear();
   tombstones.clear();
   enabledTokens.clear();
   workflowsStore.setState(INITIAL, true);
-}
-
-/** Why `runId` could not be loaded, when nothing else about it is known. */
-export function workflowRunLoadError(runId: string): string | null {
-  return getState().runs[runId]?.error ?? runLoadErrors.get(runId) ?? null;
 }
 
 export function setWorkflowsNotice(notice: WorkflowsNotice): void {

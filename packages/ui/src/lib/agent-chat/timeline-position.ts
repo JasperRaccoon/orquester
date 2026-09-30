@@ -47,7 +47,7 @@ const asStringArray = (value: unknown): string[] =>
 const asFiniteNumber = (value: unknown, fallback: number): number =>
   typeof value === "number" && Number.isFinite(value) ? value : fallback;
 
-export function parseDisclosureState(value: unknown): DisclosureState {
+function parseDisclosureState(value: unknown): DisclosureState {
   if (typeof value !== "object" || value === null) {
     return EMPTY_DISCLOSURE_STATE;
   }
@@ -69,7 +69,7 @@ export function parseDisclosureState(value: unknown): DisclosureState {
   };
 }
 
-export function parseRememberedPosition(value: unknown): RememberedTimelinePosition | null {
+function parseRememberedPosition(value: unknown): RememberedTimelinePosition | null {
   if (typeof value !== "object" || value === null) {
     return null;
   }

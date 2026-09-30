@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import {
-  frontmatterDraft,
   initialMarkdownForm,
   markdownDraftFromForm,
   markdownEditorModel,
@@ -16,10 +15,10 @@ test("a new skill's switches start at the CLI's defaults and send nothing until 
   assert.equal(form.values["user-invocable"], true);
   assert.equal(form.values["disable-model-invocation"], false);
   form.values.description = "  Reviews a PR.  ";
-  assert.deepEqual(frontmatterDraft("skill", model, form), { name: "review-pr", description: "Reviews a PR." });
+  assert.deepEqual(markdownDraftFromForm("skill", model, form).frontmatter, { name: "review-pr", description: "Reviews a PR." });
   form.values["user-invocable"] = false;
   form.values["disable-model-invocation"] = true;
-  assert.deepEqual(frontmatterDraft("skill", model, form), {
+  assert.deepEqual(markdownDraftFromForm("skill", model, form).frontmatter, {
     name: "review-pr",
     description: "Reviews a PR.",
     "disable-model-invocation": true,
@@ -68,7 +67,7 @@ test("a command carries no frontmatter name and keeps a name key found on disk",
   assert.deepEqual(model.keptKeys, ["name"]);
   const form = markdownFormFromDocument(model, "git/review", document);
   form.values.subtask = true;
-  assert.deepEqual(frontmatterDraft("command", model, form), { description: "Review", subtask: true });
+  assert.deepEqual(markdownDraftFromForm("command", model, form).frontmatter, { description: "Review", subtask: true });
 });
 
 test("names: Grok's commands are flat files — a folder is refused before the daemon does", () => {

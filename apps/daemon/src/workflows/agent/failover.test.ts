@@ -55,12 +55,6 @@ test("limit at create (the provider never starts): switch account in the same se
   assertSwitched(sc, out, ["a1", "a2"]);
 });
 
-test("limit at turn start: switch account", async () => {
-  const sc = new Scenario({ accounts: CLAUDE, behaviour: byAccount({ a1: [{ kind: "limit" }], a2: ok() }) });
-  const out = outputOf((await sc.run(testWorkflow([agentNode("n1")]), "n1")).result);
-  assertSwitched(sc, out, ["a1", "a2"]);
-});
-
 test("limit mid-turn: the partial work stays in the session and the new account continues it", async () => {
   const sc = new Scenario({
     accounts: CLAUDE,

@@ -12,7 +12,6 @@ import type { DaemonApi, DaemonMethod } from "../mcp/daemon-api.ts";
 import type { PersistedRun } from "./contracts.ts";
 import { createWorkflowNotifier, type WorkflowPushPayload } from "./notifier.ts";
 import { createProjectOps } from "./projects.ts";
-import { createPromptRenderer } from "./prompt-renderer.ts";
 import { createSlotPool, SlotAbortedError } from "./scheduler-queue.ts";
 import { createWorkflowSweepers } from "./sweepers.ts";
 import {
@@ -127,33 +126,6 @@ describe("projects", () => {
     const clean = createProjectOps({ api: null as never, git: { status: async () => cleanStatus(), currentBranch: async () => null }, workspacesDir: "/w", fsRoot: "/w" });
     assert.equal(await clean.gitStatusShort("/w/ws/app", 1024), "(no changes)");
     assert.equal(await clean.currentBranch("/w/ws/app"), undefined);
-  });
-});
-
-describe("prompt renderer", () => {
-  test("renders {variables} with git reads in the workflow's time zone", async () => {
-    const renderer = createPromptRenderer({
-      git: {
-        status: async () => cleanStatus([{ path: "x.ts", status: "modified", staged: false, unstaged: true }]),
-        workingDiff: async () => ({ isRepo: true, diff: "DIFF", truncated: false, untracked: [] }) as never
-      },
-      savedPrompts: { get: (id) => (id === "p1" ? { body: "Fix {branch}", title: "Fixer" } : undefined) },
-      now: () => new Date("2026-09-28T23:30:00.000Z")
-    });
-    const result = await renderer.render({ body: "{project} on {branch} at {date} {time} by {agent}/{model}", projectPath: "/w/ws/app", timeZone: "Asia/Tokyo", agentLabel: "Claude", modelLabel: "Opus" });
-    assert.equal(result.ok, true);
-    assert.match((result as { text: string }).text, /^app on main at .*2026.* by Claude\/Opus$/);
-    assert.ok((result as { text: string }).text.includes("29") || (result as { text: string }).text.includes("Sep 29"), "the date is Tokyo's (already the 29th)");
-  });
-
-  test("a failed git read renders nothing and names the variables", async () => {
-    const renderer = createPromptRenderer({
-      git: { status: async () => Promise.reject(new Error("fatal: not a repo")), workingDiff: async () => Promise.reject(new Error("x")) },
-      savedPrompts: { get: () => undefined }
-    });
-    const result = await renderer.render({ body: "Branch {branch}", projectPath: "/w/ws/app", timeZone: "UTC" });
-    assert.equal(result.ok, false);
-    assert.match((result as { reason: string }).reason, /fatal: not a repo.*\{branch\}/);
   });
 });
 

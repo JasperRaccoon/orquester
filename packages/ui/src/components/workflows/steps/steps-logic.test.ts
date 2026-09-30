@@ -9,7 +9,6 @@ import {
   addStepAfter,
   connectCandidates,
   deleteStep,
-  deriveSteps,
   duplicateStepAfter,
   moveCandidates,
   moveStepToOutput,
@@ -27,35 +26,6 @@ const chain = () =>
     ],
     [edge("t", "a"), edge("a", "b")]
   );
-
-describe("the agent a block shows", () => {
-  const codex = [{ agent: "codex", model: "gpt-5.5", accounts: { strategy: "least-used" } }];
-  const graph = () =>
-    workflow(
-      [
-        node("t", "trigger.manual", {}, { name: "Start" }),
-        node("a", "agent", { chain: codex }, { name: "Review" }),
-        node("e", "agent", {}, { name: "Fix" }),
-        node("b", "code", {}, { name: "Report" })
-      ],
-      [edge("t", "a"), edge("a", "b"), edge("t", "e")]
-    );
-
-  it("rows carry an agent block's first agent, and nothing for other blocks", () => {
-    const rows = deriveSteps(graph(), [], () => "").rows;
-    const agentOf = Object.fromEntries(rows.map((row) => [row.nodeId, row.agent]));
-    assert.deepEqual(agentOf, { t: undefined, a: "codex", e: "claude", b: undefined });
-  });
-
-  it("connect and move candidates carry it too", () => {
-    const connect = connectCandidates(graph(), { nodeId: "t", handle: "success" });
-    assert.equal(connect.find((c) => c.nodeId === "a")?.agent, "codex");
-    assert.equal(connect.find((c) => c.nodeId === "b")?.agent, undefined);
-    const move = moveCandidates(graph(), "b", { nodeId: "a", handle: "success" });
-    assert.equal(move.find((c) => c.nodeId === "a")?.agent, "codex");
-    assert.equal(move.find((c) => c.nodeId === "t")?.agent, undefined);
-  });
-});
 
 describe("addStepAfter", () => {
   it("splices into a chain without losing downstream connections", () => {

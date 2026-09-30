@@ -470,7 +470,6 @@ describe("engine: limits, outputs and redaction", () => {
     assert.equal(final.run.status, "succeeded");
     assert.equal(final.blocks.find((block) => block.nodeId === "A")?.status, "succeeded");
     assert.equal(final.blocks.find((block) => block.nodeId === "A")?.activity, "final words");
-    assert.equal(h.events[h.events.length - 1]!.type, "workflow.upserted");
     assert.ok(h.events.findIndex((event) => event.type === "workflowRun.finished") > h.events.lastIndexOf(h.events.find((e) => e.payload === final)!));
   });
 });

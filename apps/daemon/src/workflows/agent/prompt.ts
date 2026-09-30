@@ -47,7 +47,7 @@ export function clipUtf8(text: string, maxBytes: number): { text: string; trunca
 }
 
 /** The longest SUFFIX of `text` within `maxBytes` UTF-8 bytes (the newest part of a transcript). */
-export function clipUtf8Tail(text: string, maxBytes: number): { text: string; truncated: boolean } {
+function clipUtf8Tail(text: string, maxBytes: number): { text: string; truncated: boolean } {
   if (Buffer.byteLength(text, "utf8") <= maxBytes) return { text, truncated: false };
   return { text: tailUtf8(text, maxBytes), truncated: true };
 }

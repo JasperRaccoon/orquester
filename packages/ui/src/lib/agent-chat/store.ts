@@ -187,7 +187,6 @@ import {
 } from "./transport";
 import {
   ThreadRetentionCache,
-  THREAD_SNAPSHOT_IDLE_TTL_MS,
   type RetainedThread
 } from "./retention";
 
@@ -1788,19 +1787,6 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         );
       },
 
-      async revert(input) {
-        // §7.5's ONE reason the composer goes inert: while this is in flight
-        // the host is rewriting the thread, and a turn sent into that race
-        // lands against history that is about to stop existing. Cleared in a
-        // `finally`, so a rejected revert never strands the composer (R8-M2).
-        update((state) => ({ ...state, reverting: true }));
-        try {
-          await command("revert", { targetTurnCount: input.targetTurnCount });
-        } finally {
-          update((state) => ({ ...state, reverting: false }));
-        }
-      },
-
       async rewindTo(input) {
         // One at a time. A second rewind racing the first would post a second
         // `/revert`, and the one truncation would then hand the same message
@@ -2594,10 +2580,7 @@ const registry = new Map<string, RegistryEntry>();
 // *T3: `packages/client-runtime/src/state/threads.ts:917-950` — the resume
 // family carries `setIdleTTL(THREAD_SNAPSHOT_IDLE_TTL_MS)`, the live state
 // family `setIdleTTL(0)`.*
-export const THREAD_STORE_DISPOSE_GRACE_MS = 2_000;
-
-/** The retained snapshot's idle TTL, re-exported for callers that report it. */
-export { THREAD_SNAPSHOT_IDLE_TTL_MS };
+const THREAD_STORE_DISPOSE_GRACE_MS = 2_000;
 
 function scheduleDispose(sessionId: string, entry: RegistryEntry): void {
   if (entry.disposeTimer !== null) {

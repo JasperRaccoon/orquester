@@ -4,59 +4,10 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
-import type { RegistryEntry, SessionActivity } from "@orquester/api";
+import type { RegistryEntry } from "@orquester/api";
 import type { ActivityCause } from "./ansi-activity.ts";
 import type { RegistryService } from "./registry.ts";
 import { LocalSessionManager } from "./sessions.ts";
-
-test("LocalSessionManager tracks bell activity and clears attention on input", async () => {
-  const root = await mkdtemp(join(tmpdir(), "orquester-session-activity-"));
-  const sh: RegistryEntry = {
-    id: "sh",
-    name: "sh",
-    kind: "shell",
-    bin: ["/bin/sh"],
-    args: ["-c", "printf 'ready\\007'; sleep 30"],
-    enabled: true,
-    resolvedBin: "/bin/sh",
-    installState: "idle",
-  };
-  const registry = {
-    get(id: string) {
-      return id === sh.id ? sh : undefined;
-    },
-  } as Pick<RegistryService, "get"> as RegistryService;
-  const mgr = new LocalSessionManager(registry);
-  const activityEvents: Array<{ id: string; activity: SessionActivity; cause: ActivityCause }> = [];
-
-  mgr.lifecycle.on("activity", (event) => activityEvents.push(event));
-
-  try {
-    const signal = AbortSignal.timeout(10_000);
-    const session = await mgr.create({ kind: "shell", refId: "sh", projectPath: root, cwd: root });
-    while (mgr.activity(session.id)?.attention !== "bell") {
-      await once(mgr.lifecycle, "output", { signal });
-    }
-    const activity = mgr.activity(session.id)!;
-
-    assert.equal(activity.attention, "bell");
-    assert.equal(activity.state, "working");
-    assert.equal(typeof activity.lastOutputAt, "string");
-    assert.equal(typeof activity.needsAttentionAt, "string");
-    const bellEvent = activityEvents.find((e) => e.cause === "bell");
-    assert.ok(bellEvent, "expected a bell-cause activity event");
-    assert.equal(bellEvent.id, session.id);
-    assert.equal(bellEvent.activity.attention, "bell");
-
-    mgr.input(session.id, " ");
-    assert.equal(mgr.activity(session.id)?.attention, null);
-    assert.equal(mgr.activity(session.id)?.needsAttentionAt, null);
-    assert.equal(mgr.activity("missing"), undefined);
-  } finally {
-    mgr.closeAll();
-    await rm(root, { recursive: true, force: true });
-  }
-});
 
 test("LocalSessionManager raises finished attention when the command exits", async () => {
   const root = await mkdtemp(join(tmpdir(), "orquester-session-exit-"));

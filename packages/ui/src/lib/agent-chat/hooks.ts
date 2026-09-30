@@ -222,7 +222,7 @@ export const useAgentChatStatus: UseAgentChatStatus = (sessionId) => {
  * `turn.completed` has not landed — which is exactly the race that left the
  * timer running.
  */
-export function turnStartedAt(
+function turnStartedAt(
   latestTurn: Turn | null | undefined,
   sessionStatus: ThreadSessionStatus | null
 ): string | null {

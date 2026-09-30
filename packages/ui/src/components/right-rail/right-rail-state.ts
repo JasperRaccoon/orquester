@@ -127,7 +127,7 @@ function sanitizeRightRailState(value: unknown): RightRailState {
 }
 
 /** The stored string → a valid state. Nothing stored, or anything unparsable, is the defaults. */
-export function parseRightRailState(raw: string | null | undefined): RightRailState {
+function parseRightRailState(raw: string | null | undefined): RightRailState {
   if (typeof raw !== "string" || raw.length === 0) {
     return RIGHT_RAIL_DEFAULT_STATE;
   }
@@ -140,7 +140,7 @@ export function parseRightRailState(raw: string | null | undefined): RightRailSt
   return sanitizeRightRailState(parsed);
 }
 
-export function serializeRightRailState(state: RightRailState): string {
+function serializeRightRailState(state: RightRailState): string {
   return JSON.stringify({
     v: RIGHT_RAIL_STATE_VERSION,
     open: state.open,
@@ -169,7 +169,7 @@ function defaultStorage(): RightRailStorage | null {
 }
 
 /** Load the persisted state; the defaults on any failure. */
-export function loadRightRailState(): RightRailState {
+function loadRightRailState(): RightRailState {
   try {
     return parseRightRailState(defaultStorage()?.getItem(RIGHT_RAIL_STORAGE_KEY));
   } catch {
@@ -178,7 +178,7 @@ export function loadRightRailState(): RightRailState {
 }
 
 /** Persist the state; a storage failure is non-fatal (it stays in memory). */
-export function saveRightRailState(state: RightRailState): void {
+function saveRightRailState(state: RightRailState): void {
   try {
     defaultStorage()?.setItem(RIGHT_RAIL_STORAGE_KEY, serializeRightRailState(state));
   } catch {

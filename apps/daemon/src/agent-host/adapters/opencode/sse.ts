@@ -20,7 +20,7 @@ interface SseFrame {
  * Carries a remainder across chunk boundaries and tolerates `\r\n`, a UTF-8
  * BOM and `:`-comment keep-alives.
  */
-export class SseParser {
+class SseParser {
   private remainder = "";
   private event: string | undefined;
   private id: string | undefined;

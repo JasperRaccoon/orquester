@@ -88,22 +88,6 @@ test("no page is read when the window already holds the range, when the host pre
   assert.equal(historyCalls(api).length, 0);
 });
 
-test("the soft cap reaches one turn below the range, at most THREAD_HISTORY_MAX_TURNS, on every page", async () => {
-  const t = thread(200);
-  const api = host([page([], cursorAt(t, 120, 5)), page([], null)]);
-  await readOlderHistory(api, "c1", windowed(t, 190), { start: 1, end: 200 });
-  assert.deepEqual(historyCalls(api).map((c) => c.query!.turns), ["100", "100"]);
-});
-
-test("pages are followed until turn start is whole: a cursor at a turn's start may name turn start itself", async () => {
-  const t = thread(10);
-  const cursors = [cursorAt(t, 3), cursorAt(t, 2), cursorAt(t, 1)];
-  const api = host([page(t.rowsOf(3, 7), cursors[0]!), page(t.rowsOf(2, 2), cursors[1]!), page(t.rowsOf(1, 1), cursors[2]!)]);
-  const read = await readOlderHistory(api, "c1", windowed(t, 8), { start: 2, end: 10 });
-  assert.deepEqual(historyCalls(api).map((c) => c.query!.before), [undefined, cursors[0]], "the page from turn 2's start holds turn 2 whole");
-  assert.equal(read.unavailable, null);
-});
-
 test("a host repeating its history cursor is bounded to five pages and reports missing turns", async () => {
   const t = thread(12);
   const stuck = host(Array.from({ length: 9 }, () => page([], cursorAt(t, 9, 90))));

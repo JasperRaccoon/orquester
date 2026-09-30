@@ -4,13 +4,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ThreadActivityItem, ThreadItem, ThreadMessageItem, ThreadSnapshotPayload, Turn } from "@orquester/api/agent-chat";
 import { activityLine, failureAfterBaseline, isNewTurn, itemsAfterBaseline, takeBaseline, type AgentBaseline } from "./classify.ts";
-import { MAX_TITLE_CHARS, renderSessionTitle, sessionTitle } from "./create.ts";
+import { renderSessionTitle } from "./create.ts";
 import type { AgentBlockOutput } from "./executor.ts";
 import { account, agentNode, testWorkflow } from "./testing/fake-context.ts";
 import { byAccount } from "./testing/fake-chat-host.ts";
 import { Scenario } from "./testing/scenario.ts";
 import { resetWaitUntil } from "./failover.ts";
-import { clipUtf8, clipUtf8Tail } from "./prompt.ts";
 
 const T = (s: number): string => new Date(Date.UTC(2026, 8, 28, 12, 0, s)).toISOString();
 
@@ -36,12 +35,6 @@ function snap(items: ThreadItem[], turns: Turn[]): ThreadSnapshotPayload {
   };
 }
 
-test("UTF-8 clipping never splits a code point; the tail keeps the newest part", () => {
-  assert.deepEqual(clipUtf8("héllo", 2), { text: "h", truncated: true });
-  assert.deepEqual(clipUtf8("abc", 3), { text: "abc", truncated: false });
-  assert.deepEqual(clipUtf8Tail("abc€", 3), { text: "€", truncated: true });
-});
-
 test("only failures after this block's baseline count", () => {
   const old = act("i1", "runtime.error", { message: "x", reason: "usage_limit" });
   const warning = act("i2", "runtime.warning", { message: "parked", reason: "usage_limit", resetsAt: "2026-09-28T15:00:00Z" }, { tone: "info" });
@@ -65,12 +58,13 @@ test("the baseline takes the thread's latest turn over a lagging summary", () =>
 });
 
 test("the output text is capped at 2 MiB", async () => {
-  const sc = new Scenario({ accounts: [account("claude", "a1")], behaviour: () => [{ kind: "say", text: "é".repeat(1_200_000) }] });
+  const sc = new Scenario({ accounts: [account("claude", "a1")], behaviour: () => [{ kind: "say", text: "x" + "é".repeat(1_200_000) }] });
   const { result } = await sc.run(testWorkflow([agentNode("n1")]), "n1");
   assert.equal(result.status, "succeeded");
   const out = (result as { output: AgentBlockOutput }).output;
   assert.equal(out.textTruncated, true);
-  assert.equal(Buffer.byteLength(out.text), 2 * 1024 * 1024);
+  assert.equal(Buffer.byteLength(out.text), 2 * 1024 * 1024 - 1);
+  assert.doesNotMatch(out.text, /�/);
 });
 
 test("the handoff reads the parent's words since the block began in the session", async () => {
@@ -132,9 +126,6 @@ test("a chat title renders its {{…}} like the prompt, but never a secret's val
   assert.equal(renderSessionTitle("   ", ctx), undefined);
   const broken = { ...ctx, expressionContext: () => { throw new Error("boom"); } } as typeof ctx;
   assert.equal(renderSessionTitle("{{ trigger.input }}", broken), undefined);
-  assert.equal(sessionTitle("Nightly", "Build", renderSessionTitle("{{ trigger.input.missing }}", ctx)), "Nightly · Build", "an empty render falls back");
-  assert.equal(sessionTitle("W", "B", "x".repeat(400)).length, MAX_TITLE_CHARS);
-  assert.equal(sessionTitle("W", "B", `${"x".repeat(MAX_TITLE_CHARS - 2)}😀😀`), `${"x".repeat(MAX_TITLE_CHARS - 2)}…`, "a cut never splits a pair");
 });
 
 test("a chat title never shows a secret the render escaped, transformed or nested", () => {
@@ -189,7 +180,9 @@ test("a chat title drops control and format characters", () => {
     }),
     secrets: {}
   } as unknown as Parameters<typeof renderSessionTitle>[1];
-  assert.equal(renderSessionTitle("{{ trigger }}", ctx), "a [31mred b 2Jc evil d e f g");
+  const title = renderSessionTitle("{{ trigger }}", ctx);
+  assert.ok(title);
+  assert.doesNotMatch(title, /[\p{Cc}\p{Cf}]/u);
+  assert.match(title, /red.*evil/);
   assert.equal(renderSessionTitle("\u202E\u200B\u0007", ctx), undefined, "nothing printable left → the default");
-  assert.equal(sessionTitle("Nightly", "Build", renderSessionTitle("\u001b\u009b", ctx)), "Nightly · Build");
 });

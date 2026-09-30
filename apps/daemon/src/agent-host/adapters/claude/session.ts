@@ -189,7 +189,7 @@ const IMAGE_MIME_TYPES = new Set<string>(SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES);
  * writes, which the attachments-dir grant (`launch.ts`) lets it `Read` without
  * an approval prompt. Pure; judged on the ref alone.
  */
-export function claudeIngestsAttachment(
+function claudeIngestsAttachment(
   attachment: AttachmentRef
 ): attachment is Extract<AttachmentRef, { type: "image" }> {
   return attachment.type === "image" && IMAGE_MIME_TYPES.has(attachment.mimeType);

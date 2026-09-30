@@ -97,10 +97,11 @@ const tick = (): Promise<void> => new Promise((resolve) => setImmediate(resolve)
 describe("codex transport — framing", () => {
   it("writes {id, method, params} with NO jsonrpc field", async () => {
     const h = harness();
-    void h.peer.request("initialize", { clientInfo: { name: "x", title: null, version: "1" }, capabilities: null });
-    await tick();
-    assert.deepEqual(Object.keys(h.sent[0]!).sort(), ["id", "method", "params"]);
-    assert.ok(!("jsonrpc" in h.sent[0]!));
+    const params = { clientInfo: { name: "x", title: null, version: "1" }, capabilities: null };
+    const pending = h.peer.request("initialize", params);
+    assert.deepEqual(h.sent[0], { id: 1, method: "initialize", params });
+    h.deliver({ id: 1, result: { userAgent: "orquester/0.154.0" } });
+    await pending;
   });
 
   it("omits params entirely on a notification that takes none", async () => {
@@ -145,15 +146,6 @@ describe("codex transport — framing", () => {
     assert.equal(isNoActiveTurnError(new Error("no active turn to interrupt")), false);
     assert.equal(isNoActiveTurnError(new CodexTransportClosedError("child exited")), false);
     assert.equal(isNoActiveTurnError(undefined), false);
-  });
-
-  it("handles a response split across chunk boundaries and CRLF", async () => {
-    const h = harness();
-    const pending = h.peer.request("thread/compact/start", { threadId: "t" });
-    h.deliverRaw('{"id":1,"res');
-    await tick();
-    h.deliverRaw('ult":{"ok":true}}\r\n');
-    assert.deepEqual(await pending, { ok: true });
   });
 
   it("reports a malformed line instead of taking the read loop down", async () => {

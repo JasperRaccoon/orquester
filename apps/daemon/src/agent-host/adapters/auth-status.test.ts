@@ -20,17 +20,38 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { buildClaudeAuth } from "./claude/probe.ts";
-import { toProviderAuth as codexAuth } from "./codex/probe.ts";
-import { inferAuth as openCodeAuth, type OpenCodeInventory } from "./opencode/snapshot.ts";
+import { buildClaudeSnapshot, type ClaudeProbeResult } from "./claude/probe.ts";
+import { probeCodex } from "./codex/probe.ts";
+import type { CodexPeer } from "./codex/protocol.ts";
+import { buildSnapshot } from "./opencode/snapshot.ts";
+
+const CHECKED_AT = "2026-09-21T10:00:00.000Z";
+const claudeSnapshot = (probe: ClaudeProbeResult | undefined) => buildClaudeSnapshot({
+  checkedAt: CHECKED_AT, binaryPath: "/bin/claude", version: "2.1.210", probe
+}).snapshot;
+
+async function codexSnapshot(account: unknown) {
+  // Raw RPC evidence only: authentication is computed by the real probe.
+  const peer = {
+    request: async (method: string) => {
+      if (method === "account/read" && account !== undefined) return account;
+      throw new Error("RPC unavailable");
+    }
+  } as unknown as CodexPeer;
+  return await probeCodex({
+    peer,
+    initialize: { userAgent: "codex/0.154.0", codexHome: "/account", platformFamily: "unix", platformOs: "linux" },
+    nowIso: CHECKED_AT
+  });
+}
 
 describe("claude — an init result that merely lacks account info is an AMBIGUITY", () => {
   it("is `unknown` when the probe itself failed", () => {
-    assert.equal(buildClaudeAuth(undefined).status, "unknown");
+    assert.equal(claudeSnapshot(undefined).auth.status, "unknown");
   });
 
   it("is `unknown` — never `unauthenticated` — when the init carried no account", () => {
-    const auth = buildClaudeAuth({ slashCommands: [], models: [] });
+    const { auth } = claudeSnapshot({ slashCommands: [], models: [] });
     assert.equal(
       auth.status,
       "unknown",
@@ -39,63 +60,61 @@ describe("claude — an init result that merely lacks account info is an AMBIGUI
   });
 
   it("keeps the api provider on the ambiguous verdict, for the card to label", () => {
-    const auth = buildClaudeAuth({ slashCommands: [], models: [], apiProvider: "bedrock" });
+    const { auth } = claudeSnapshot({ slashCommands: [], models: [], apiProvider: "bedrock" });
     assert.equal(auth.status, "unknown");
     assert.equal(auth.type, "bedrock");
   });
 
   it("is `authenticated` only once the init POSITIVELY yields credentials", () => {
-    const byEmail = buildClaudeAuth({ slashCommands: [], models: [], email: "a@b.c" });
+    const { auth: byEmail } = claudeSnapshot({ slashCommands: [], models: [], email: "a@b.c" });
     assert.equal(byEmail.status, "authenticated");
     assert.equal(byEmail.email, "a@b.c");
 
-    const byPlan = buildClaudeAuth({ slashCommands: [], models: [], subscriptionType: "max" });
+    const { auth: byPlan } = claudeSnapshot({ slashCommands: [], models: [], subscriptionType: "max" });
     assert.equal(byPlan.status, "authenticated");
     assert.equal(byPlan.label, "max");
   });
 });
 
 describe("codex — the credential answer is the proof", () => {
-  it("is `unknown` when `account/read` could not be read at all", () => {
-    assert.equal(codexAuth(undefined).status, "unknown");
+  it("is `unknown` when `account/read` could not be read at all", async () => {
+    assert.equal((await codexSnapshot(undefined)).auth.status, "unknown");
   });
 
-  it("is `unauthenticated` ONLY when the CLI says an OpenAI login is required", () => {
+  it("is `unauthenticated` ONLY when the CLI says an OpenAI login is required", async () => {
     assert.equal(
-      codexAuth({ account: null, requiresOpenaiAuth: true } as never).status,
+      (await codexSnapshot({ account: null, requiresOpenaiAuth: true })).auth.status,
       "unauthenticated"
     );
     assert.equal(
-      codexAuth({ account: null, requiresOpenaiAuth: false } as never).status,
+      (await codexSnapshot({ account: null, requiresOpenaiAuth: false })).auth.status,
       "unknown",
       "no account and no requirement is not a logged-out verdict"
     );
   });
 
-  it("is `authenticated` for every account shape it recognises", () => {
+  it("is `authenticated` for every account shape it recognises", async () => {
     assert.equal(
-      codexAuth({
+      (await codexSnapshot({
         account: { type: "chatgpt", planType: "pro", email: "a@b.c" },
         requiresOpenaiAuth: false
-      } as never).status,
+      })).auth.status,
       "authenticated"
     );
     assert.equal(
-      codexAuth({ account: { type: "apiKey" }, requiresOpenaiAuth: false } as never).status,
+      (await codexSnapshot({ account: { type: "apiKey" }, requiresOpenaiAuth: false })).auth.status,
       "authenticated"
     );
   });
 });
 
 describe("opencode — no connected provider is an ambiguity, not a verdict", () => {
-  const inventory = (connected: string[]): OpenCodeInventory =>
-    ({ providers: { connected }, commands: [], skills: [], agents: [] }) as unknown as OpenCodeInventory;
-
   it("is `unknown` with nothing connected — there is no `opencode auth list` to ask", () => {
-    assert.equal(openCodeAuth(inventory([])).status, "unknown");
-  });
-
-  it("is `authenticated` as soon as one upstream is connected", () => {
-    assert.equal(openCodeAuth(inventory(["anthropic"])).status, "authenticated");
+    const snapshot = buildSnapshot({
+      version: "1.18.31",
+      checkedAt: CHECKED_AT,
+      inventory: { providers: { all: [], connected: [], default: {} }, commands: [], skills: [], agents: [] }
+    });
+    assert.equal(snapshot.auth.status, "unknown");
   });
 });

@@ -1,22 +1,23 @@
-import { mkdir,mkdtemp } from "node:fs/promises";
+import { mkdir,mkdtemp,rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 import { TodoError,TodoListManager } from "../todos.ts";
 import { TodoTools } from "./todo-tools.ts";
 import { ToolError } from "./errors.ts";
 import { toSafeToolError } from "./result.ts";
 
-async function makeTools() {
+async function makeTools(t: TestContext) {
   const root = await mkdtemp(join(tmpdir(), "todo-tools-"));
+  t.after(() => rm(root, { recursive: true, force: true }));
   await mkdir(join(root, "w", "p"), { recursive: true });
   const todos = new TodoListManager(join(root, "todos.json"), { warn() {} });
   return { root, todos, tools: new TodoTools({ todos, workspacesDir: root }) };
 }
 
-test("workspace scope create/list stores by workspace name and omits refKey", async () => {
-  const { todos, tools } = await makeTools();
+test("workspace scope create/list stores by workspace name and omits refKey", async (t) => {
+  const { todos, tools } = await makeTools(t);
 
   const created = await tools.create({ workspace: "w" }, "Workspace tasks");
 
@@ -27,19 +28,8 @@ test("workspace scope create/list stores by workspace name and omits refKey", as
   assert.deepEqual(tools.list({ workspace: "w" }), [created]);
 });
 
-test("project scope create/list stores by joined project path and omits refKey", async () => {
-  const { root, todos, tools } = await makeTools();
-
-  const created = await tools.create({ workspace: "w", project: "p" }, "Project tasks");
-
-  assert.equal(created.scope, "project");
-  assert.equal("refKey" in created, false);
-  assert.deepEqual(todos.list("project", join(root, "w", "p")).map((t) => t.id), [created.id]);
-  assert.deepEqual(tools.list({ workspace: "w", project: "p" }), [created]);
-});
-
-test("invalid names and missing directories reject as PROJECT_NOT_FOUND before creating todos", async () => {
-  const { root, todos, tools } = await makeTools();
+test("invalid names and missing directories reject as PROJECT_NOT_FOUND before creating todos", async (t) => {
+  const { root, todos, tools } = await makeTools(t);
   await mkdir(join(root, "escape"), { recursive: true });
   const projectNotFound = (err: unknown) => err instanceof ToolError && err.code === "PROJECT_NOT_FOUND";
 
@@ -52,8 +42,8 @@ test("invalid names and missing directories reject as PROJECT_NOT_FOUND before c
   assert.equal(todos.list("project", join(root, "escape")).length, 0);
 });
 
-test("toggleItem by 1-based index flips and explicitly sets while preserving non-task lines", async () => {
-  const { tools } = await makeTools();
+test("toggleItem by 1-based index flips and explicitly sets while preserving non-task lines", async (t) => {
+  const { tools } = await makeTools(t);
   const todo = await tools.create({ workspace: "w" }, "Tasks");
   await tools.update(todo.id, {
     body: ["Intro", "- [ ] first task", "middle", "* [x] second task"].join("\n")
@@ -70,8 +60,8 @@ test("toggleItem by 1-based index flips and explicitly sets while preserving non
   assert.equal(setFalse.body, ["Intro", "- [x] first task", "middle", "* [ ] second task"].join("\n"));
 });
 
-test("toggleItem by text is exact after trim and case-insensitive", async () => {
-  const { tools } = await makeTools();
+test("toggleItem by text is exact after trim and case-insensitive", async (t) => {
+  const { tools } = await makeTools(t);
   const todo = await tools.create({ workspace: "w" }, "Tasks");
   await tools.update(todo.id, { body: "- [ ]   Write Tests  \n- [ ] write docs" });
 
@@ -82,8 +72,8 @@ test("toggleItem by text is exact after trim and case-insensitive", async () => 
   assert.equal(result.body, "- [x]   Write Tests  \n- [ ] write docs");
 });
 
-test("toggleItem explicit same-state set preserves the existing body", async () => {
-  const { tools } = await makeTools();
+test("toggleItem explicit same-state set preserves the existing body", async (t) => {
+  const { tools } = await makeTools(t);
   const todo = await tools.create({ workspace: "w" }, "Tasks");
   await tools.update(todo.id, { body: "- [X] Already done" });
 
@@ -93,8 +83,8 @@ test("toggleItem explicit same-state set preserves the existing body", async () 
   assert.equal(result.body, "- [X] Already done");
 });
 
-test("toggleItem errors are safe and actionable", async () => {
-  const { tools } = await makeTools();
+test("toggleItem errors are safe and actionable", async (t) => {
+  const { tools } = await makeTools(t);
   const empty = await tools.create({ workspace: "w" }, "Empty");
   await assert.rejects(() => tools.toggleItem(empty.id, 1), (err) => {
     assert.ok(err instanceof ToolError && err.code === "INVALID_ARGUMENT");
@@ -126,8 +116,8 @@ test("toggleItem errors are safe and actionable", async () => {
   await assert.rejects(() => tools.remove("missing"), missing);
 });
 
-test("a missing list's id is echoed capped and escaped: one short line whatever the caller sent", async () => {
-  const { tools } = await makeTools();
+test("a missing list's id is echoed capped and escaped: one short line whatever the caller sent", async (t) => {
+  const { tools } = await makeTools(t);
   const cases: [string, RegExp][] = [
     ["x".repeat(500), /"x{99}…"/],
     ["a\nb\"c", /"a\\nb\\"c"/]
@@ -142,8 +132,8 @@ test("a missing list's id is echoed capped and escaped: one short line whatever 
   await assert.rejects(() => refusing.remove("t1"), (err) => err === conflict);
 });
 
-test("a refusal quotes the caller's item capped and escaped, and a long list's items bounded, never the whole list", async () => {
-  const { tools } = await makeTools();
+test("a refusal quotes the caller's item capped and escaped, and a long list's items bounded, never the whole list", async (t) => {
+  const { tools } = await makeTools(t);
   const todo = await tools.create({ workspace: "w" }, "Tasks");
   await tools.update(todo.id, { body: "- [ ] Alpha\n- [ ] Beta" });
   const refusal = async (item: string | number, id = todo.id): Promise<string> => {
@@ -176,8 +166,8 @@ test("a refusal quotes the caller's item capped and escaped, and a long list's i
   assert.ok(outOfRange.length < 1_000, `${outOfRange.length} characters`);
 });
 
-test("the longest refusal there can be ends whole under the error cap, whatever the input: the quote escaped at its longest, 40 items at their cap", async () => {
-  const { tools } = await makeTools();
+test("the longest refusal there can be ends whole under the error cap, whatever the input: the quote escaped at its longest, 40 items at their cap", async (t) => {
+  const { tools } = await makeTools(t);
   const refusal = async (id: string, item: string): Promise<string> => {
     const err = await tools.toggleItem(id, item).then(() => assert.fail("toggleItem resolved"), (e: unknown) => e);
     assert.ok(err instanceof ToolError && err.code === "INVALID_ARGUMENT", String(err));

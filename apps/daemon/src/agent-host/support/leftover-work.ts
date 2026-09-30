@@ -38,10 +38,10 @@ import {
 } from "./leftover-processes.ts";
 
 /** The launches a thread remembers: the last few, newest last. */
-export const LEFTOVER_WORK_LAUNCHES = 8;
+const LEFTOVER_WORK_LAUNCHES = 8;
 
 /** The sessions one launch keeps: the newest, a bound on a runaway fleet of shells. */
-export const LEFTOVER_WORK_SESSIONS = 64;
+const LEFTOVER_WORK_SESSIONS = 64;
 
 const LEFTOVER_WORK_VERSION = 1;
 
@@ -83,7 +83,7 @@ function parseLaunch(value: unknown): LeftoverLaunch | null {
 }
 
 /** The launches a file holds, oldest first; nothing for a file this host did not write. */
-export function parseLeftoverWork(text: string | null): LeftoverLaunch[] {
+function parseLeftoverWork(text: string | null): LeftoverLaunch[] {
   if (text === null) {
     return [];
   }

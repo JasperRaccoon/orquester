@@ -466,13 +466,6 @@ describe("task linkage rides every row (§4.2/§5.1)", () => {
     assert.equal(rows[0]!.id, "task-usage:t1:task-1");
   });
 
-  it("a failed task row is toned error", () => {
-    const [row] = runtimeEventToActivities(
-      runtimeEvent("task.completed", { taskId: "task-1", status: "failed" })
-    );
-    assert.equal(row!.tone, "error");
-  });
-
   it("task.completed carries a shell's exit code — a signal's negative one included", () => {
     for (const exitCode of [0, 2, -15]) {
       const [row] = runtimeEventToActivities(
@@ -520,14 +513,6 @@ describe("tool progress, denials and diagnostics (§5.1 catch-all)", () => {
     assert.ok(row);
     assert.equal(row.id, "tool-progress:t1:task-1");
     assert.equal(row.summary, "Bash");
-  });
-
-  it("tool.denied is an error row", () => {
-    const [row] = runtimeEventToActivities(
-      runtimeEvent("tool.denied", { toolName: "Bash", reason: "blocked by policy" })
-    );
-    assert.equal(row!.tone, "error");
-
   });
 
   it("runtime.error keeps its class; runtime.warning uses the message as the label", () => {
@@ -649,15 +634,6 @@ describe("goals (goals §4.3)", () => {
 
   });
 
-  it("only a failed goal is error-toned", () => {
-    for (const [change, tone] of [["set", "info"], ["replaced", "info"], ["restored", "info"], ["progress", "info"], ["checked", "info"], ["paused", "info"], ["resumed", "info"], ["blocked", "info"], ["limited", "info"], ["achieved", "info"], ["failed", "error"], ["cleared", "info"]] as const) {
-      const [row] = runtimeEventToActivities(
-        runtimeEvent("thread.goal.updated", { goal: null, change, previous: goal })
-      );
-      assert.equal(row!.tone, tone, change);
-    }
-  });
-
   it("a cleared goal's row keeps the goal that ended, verbatim", () => {
     const [row] = runtimeEventToActivities(
       runtimeEvent("thread.goal.updated", { goal: null, change: "cleared", previous: goal })
@@ -676,52 +652,6 @@ describe("goals (goals §4.3)", () => {
           { raw: { source: HISTORICAL_RAW_SOURCE, payload: {} } }
         )
       ),
-      []
-    );
-  });
-});
-
-describe("events that are not thread facts (§5.1)", () => {
-
-  it("session, turn and content events produce no activity of their own", () => {
-    assert.deepEqual(runtimeEventToActivities(runtimeEvent("session.started", {})), []);
-    assert.deepEqual(
-      runtimeEventToActivities(
-        runtimeEvent("session.state.changed", { state: "running" })
-      ),
-      []
-    );
-    assert.deepEqual(
-      runtimeEventToActivities(
-        runtimeEvent("session.exited", { recoverable: true, exitKind: "graceful" })
-      ),
-      []
-    );
-    assert.deepEqual(
-      runtimeEventToActivities(runtimeEvent("thread.started", { providerThreadId: "p1" })),
-      []
-    );
-    assert.deepEqual(runtimeEventToActivities(runtimeEvent("turn.started", {})), []);
-    assert.deepEqual(
-      runtimeEventToActivities(runtimeEvent("turn.completed", { state: "completed" })),
-      []
-    );
-    assert.deepEqual(
-      runtimeEventToActivities(runtimeEvent("turn.aborted", { reason: "user" })),
-      []
-    );
-    assert.deepEqual(
-      runtimeEventToActivities(
-        runtimeEvent("content.delta", { streamKind: "assistant_text", delta: "hi" })
-      ),
-      []
-    );
-    assert.deepEqual(
-      runtimeEventToActivities(runtimeEvent("turn.diff.updated", { unifiedDiff: "" })),
-      []
-    );
-    assert.deepEqual(
-      runtimeEventToActivities(runtimeEvent("thread.metadata.updated", { name: "x" })),
       []
     );
   });

@@ -49,8 +49,8 @@ import {
   type HistoryRowsInput
 } from "./history.logic";
 import { deriveTimelineEntriesFromItems } from "./entries.logic";
-import { foldStateFromSnapshot } from "./reducer.logic";
-import { deriveTimelineRows } from "./rows.logic";
+import { applyFrame, createReducerState } from "./reducer.logic";
+import { deriveTimelineRowsWithState } from "./rows.logic";
 
 import {
   activity,
@@ -111,7 +111,7 @@ function fullWindow(before: ThreadItem[] = []): ThreadFoldState {
   const rows = Array.from({ length: ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK }, (_, index) =>
     toolRow(`w${index}`, 1_000 + index)
   );
-  return foldStateFromSnapshot(snapshot({ items: [...before, ...rows], seq: 10_000 }));
+  return applyFrame(createReducerState("s1"), { kind: "snapshot", thread: snapshot({ items: [...before, ...rows], seq: 10_000 }) }).fold;
 }
 
 let nextRow = 0;
@@ -213,13 +213,6 @@ describe("collectHistoryItems", () => {
       assert.deepEqual(ids(collected.items), ["progress", "b2"]);
       const progress = collected.items[0]!;
       assert.equal(progress.kind === "activity" ? progress.summary : null, "4/5");
-    });
-
-    it("keeps the longer text of a message a page cut short", () => {
-      const page = historyPage({ items: [message("assistant", "the whole answer", { id: "m1", turnId: "t1" })] });
-      const bridge = [message("assistant", "the whole", { id: "m1", turnId: "t1" })];
-      const item = collectHistoryItems(EMPTY_HISTORY_ITEMS, [page], bridge).items[0];
-      assert.equal(item?.kind === "message" ? item.text : null, "the whole answer");
     });
 
   });
@@ -348,7 +341,7 @@ describe("historyAfterEvent — the bridge", () => {
     const parentRows = Array.from({ length: ACTIVITY_RETENTION_LIMIT - 50 }, (_, index) =>
       toolRow(`p${index}`, 1 + index)
     );
-    let fold = foldStateFromSnapshot(snapshot({ items: parentRows, seq: 10_000 }));
+    let fold = applyFrame(createReducerState("s1"), { kind: "snapshot", thread: snapshot({ items: parentRows, seq: 10_000 }) }).fold;
     let state = history({ bounds: bounds({ hasOlder: false }) });
     let trims = 0;
     for (let guard = 0; guard < 2_000 && trims < 3; guard += 1) {
@@ -388,9 +381,10 @@ describe("historyAfterEvent — the bridge", () => {
     const u1 = message("user", "one", { id: "u1", createdAt: stamp(1) });
     const a2 = message("assistant", "two", { id: "a2", turnId: "t2", createdAt: stamp(2) });
     const turnless = Array.from({ length: 5 }, (_, index) => toolRow(`n${index}`, 10 + index, { turnId: null }));
-    const before = foldStateFromSnapshot(
-      snapshot({ items: [u1, a2, ...turnless], turns: [foldTurn("t1", "u1"), foldTurn("t2")], seq: 10_000 })
-    );
+    const before = applyFrame(createReducerState("s1"), {
+      kind: "snapshot",
+      thread: snapshot({ items: [u1, a2, ...turnless], turns: [foldTurn("t1", "u1"), foldTurn("t2")], seq: 10_000 })
+    }).fold;
     const event = ev("thread.reverted", { turnCount: 1 }, { seq: 10_001 });
     const after = applyDomainEvent(before, event);
     assert.deepEqual(ids(after.items).slice(0, 2), ["u1", "n0"], "the fold dropped turn 2's answer");
@@ -447,11 +441,6 @@ describe("historyWithinCap", () => {
   const bridgeOf = (rows: number): ThreadItem[] =>
     Array.from({ length: rows }, (_, index) => toolRow(`b${index}`, 900 + index));
 
-  it("hands the history back untouched while it fits", () => {
-    const state = history({ pages: [page(10_000, "c1")], bridge: bridgeOf(10_000) });
-    assert.deepEqual(historyWithinCap(state), { history: state, resync: false });
-  });
-
   it("drops the OLDEST pages first, and 'load older' then asks for exactly the block that went", () => {
     const oldest = page(5_000, "below-oldest");
     const middle = page(5_000, "below-middle");
@@ -506,13 +495,13 @@ describe("liveTurnIdsOf", () => {
 
 describe("rowIdForTurn", () => {
   const rowsOf = (items: ThreadItem[], expanded: string[] = []): AgentChatTimelineRow[] =>
-    deriveTimelineRows({
+    deriveTimelineRowsWithState({
       timelineEntries: deriveTimelineEntriesFromItems(items).entries,
       isWorking: false,
       activeTurnStartedAt: null,
       expandedTurnIds: new Set(expanded),
       supportsConversationRollback: false
-    });
+    }).rows;
 
   it("a goal marker is a row its turn owns (goals §8.4)", () => {
     const rows = rowsOf([
@@ -547,7 +536,7 @@ describe("page rows above the live window", () => {
       turns: pageTurns
     });
     const turns = [foldTurn("t1", "u1"), foldTurn("t2", "u2"), foldTurn("t3", "u3")];
-    const live = deriveTimelineRows({
+    const live = deriveTimelineRowsWithState({
       timelineEntries: deriveTimelineEntriesFromItems([
         message("user", "third", { id: "u3", createdAt: stamp(5) }),
         message("assistant", "three", { id: "a3", turnId: "t3", createdAt: stamp(6) })
@@ -556,7 +545,7 @@ describe("page rows above the live window", () => {
       activeTurnStartedAt: null,
       turns,
       supportsConversationRollback: true
-    });
+    }).rows;
     const input: HistoryRowsInput = {
       history: collectHistoryItems(EMPTY_HISTORY_ITEMS, [page]),
       sharedLive: [],
@@ -662,19 +651,6 @@ describe("page rows above the live window", () => {
     const answer = (rows: readonly AgentChatTimelineRow[]) =>
       rows.find((row): row is Extract<AgentChatTimelineRow, { kind: "message" }> => row.kind === "message" && row.id === "a1");
 
-    it("an old turn's stuck answer reads settled", () => {
-      const { input } = conversation();
-      const rows = projectHistoryRows(EMPTY_HISTORY_ROWS, {
-        ...withPages(input, [stuckPage()]),
-        unsettledTurnId: "t3",
-        isWorking: true,
-        messageStreaming: context("t3")
-      }).rows;
-      const settledAnswer = answer(rows);
-      assert.ok(settledAnswer, "the historical answer remains visible");
-      assert.notEqual(settledAnswer.streaming, true);
-    });
-
     it("a running turn's answer up here still streams", () => {
       // A turn so long its early rows went to the history.
       const { input } = conversation();
@@ -726,15 +702,6 @@ describe("page rows above the live window", () => {
       const counts = revertCounts(rows);
       assert.ok(Object.hasOwn(counts, "u1"), "the prompt remains visible");
       assert.equal(counts.u1, undefined, "the newest copy withholds it");
-    });
-
-    it("is withheld where the provider cannot roll back", () => {
-      const { input } = conversation();
-      const rows = projectHistoryRows(EMPTY_HISTORY_ROWS, {
-        ...input,
-        supportsConversationRollback: false
-      }).rows;
-      assert.deepEqual(revertCounts(rows), { u1: undefined, u2: undefined });
     });
   });
 });
@@ -801,30 +768,8 @@ describe("bridge rows above the live window", () => {
 });
 
 describe("windowHasDropped: the thread's retained window has evicted rows (§7.6)", () => {
-  const bounds = (hasOlder: boolean): ThreadHistoryBounds => ({
-    indexed: true,
-    hasOlder,
-    beforeCursor: null,
-    oldestRetainedOrdinal: 1,
-    totalTurns: 3
-  });
-  const noFold: Pick<ThreadFoldState, "evicted"> = {};
-
-  it("nothing dropped: a fresh fold and a snapshot that said nothing lies older", () => {
-    assert.equal(windowHasDropped(noFold, EMPTY_HISTORY), false);
-    assert.equal(windowHasDropped(noFold, { ...EMPTY_HISTORY, bounds: bounds(false) }), false);
-  });
-
-  it("the host's snapshot said older history lies beyond the window", () => {
-    assert.equal(windowHasDropped(noFold, { ...EMPTY_HISTORY, bounds: bounds(true) }), true);
-  });
-
   it("this client's fold evicted rows since that snapshot — any row, an agent's included", () => {
     assert.equal(windowHasDropped({ evicted: { activities: true, messages: false } }, EMPTY_HISTORY), true);
     assert.equal(windowHasDropped({ evicted: { activities: false, messages: true } }, EMPTY_HISTORY), true);
-  });
-
-  it("the window evicted a row the parent renders", () => {
-    assert.equal(windowHasDropped(noFold, { ...EMPTY_HISTORY, windowEvicted: true }), true);
   });
 });

@@ -129,10 +129,6 @@ describe("drillInWindow: the agent's own items, each launch's prompt at its plac
     assert.deepEqual(agentPromptOf(wire!), { itemId: "wire", truncated: true, cutAtRest: false });
     assert.deepEqual(agentPromptOf(rest!), { itemId: "rest", truncated: false, cutAtRest: true });
   });
-
-  it("an ordinary message is no prompt", () => {
-    assert.equal(agentPromptOf(message("user", "hello", { id: "u" })), null);
-  });
 });
 
 describe("drillInWindow: latest launch", () => {
@@ -147,9 +143,5 @@ describe("drillInWindow: latest launch", () => {
     const window = drillInWindow(items, "a1");
     assert.equal(window.latestLaunchAt, stamp(7));
     assert.deepEqual(window.items.map((item) => item.id), ["agent-prompt:first", "said"]);
-  });
-
-  it("no launch in the window: none", () => {
-    assert.equal(drillInWindow([message("user", "hi", { id: "u" })], "a1").latestLaunchAt, null);
   });
 });

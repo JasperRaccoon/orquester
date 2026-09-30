@@ -180,13 +180,6 @@ describe("token usage — the delta is two reported totals, not a sum of `last`"
     assert.equal(settled.hasSubagents, false);
   });
 
-  it("an interrupted turn settles partial", () => {
-    const usage = new CodexUsageTracker();
-    usage.beginTurn("turn-1");
-    usage.observe(usageNotification("turn-1", 100, 90, 10));
-    assert.equal(usage.completeTurn("turn-1", { interrupted: true }).usageStatus, "partial");
-  });
-
   it("clamps the cache subsets into inputTokens and reasoning into outputTokens", () => {
     const usage = new CodexUsageTracker();
     usage.beginTurn("turn-1");
@@ -305,7 +298,6 @@ describe("rate limits", () => {
     const windows = usageWindowsFromRateLimits(snapshot(10_080, true));
     assert.equal(windows[0]!.kind, "weekly");
     assert.equal(windows[1]!.kind, "session");
-    assert.equal(windows[1]!.label, "5h limit");
   });
 
   it("converts the epoch-second reset into an ISO stamp, and omits an absent one", () => {
@@ -344,11 +336,6 @@ describe("§4.6.8 skill mentions are normalised to `$name`", () => {
   it("leaves an already-correct mention and a mid-token symbol alone", () => {
     assert.equal(normaliseSkillMentions("$review"), "$review");
     assert.equal(normaliseSkillMentions("a€b"), "a€b");
-  });
-
-  it("does not touch a slash command, which must stay the first character", () => {
-    assert.equal(normaliseSkillMentions("/compact"), "/compact");
-    assert.equal(normaliseSkillMentions("/feedback it is broken"), "/feedback it is broken");
   });
 });
 

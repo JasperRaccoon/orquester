@@ -49,7 +49,7 @@ export function normalizeAgentPrefs(value: unknown, fallback: AgentPrefs): Agent
  * wrong-typed fields are dropped, and `usage` goes through its zod schema
  * (which also migrates the legacy pre-record shape).
  */
-export function sanitizeStoredAppConfig(raw: unknown): Partial<AppConfig> {
+function sanitizeStoredAppConfig(raw: unknown): Partial<AppConfig> {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return {};
   }

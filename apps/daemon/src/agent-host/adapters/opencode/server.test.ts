@@ -15,11 +15,7 @@ import { join } from "node:path";
 import test from "node:test";
 
 import type { AdapterLogger } from "../../adapter.ts";
-import {
-  OpenCodeServerPool,
-  parseServerUrl,
-  trimToLastLines
-} from "./server.ts";
+import { OpenCodeServerPool } from "./server.ts";
 import { makePeer, type Peer } from "./testing/peer.ts";
 
 const silentLogger: AdapterLogger = {
@@ -47,13 +43,6 @@ function makePool(
   });
 }
 
-test("the scrape ignores a line that merely mentions the phrase", () => {
-  assert.equal(
-    parseServerUrl("failed to connect: opencode server listening on http://x was expected\n"),
-    null
-  );
-  assert.equal(parseServerUrl("nothing here\n"), null);
-});
 
 test("a healthy peer is adopted, and the URL comes off stdout", async () => {
   const peer = makePeer();
@@ -382,14 +371,6 @@ test("a dead server is not reported as live by pool.list()", async () => {
   }
 });
 
-test("startup trimming preserves a ready line without turning a warning into one", () => {
-  const ready = "opencode server listening on http://127.0.0.1:12345\n";
-  const noise = `${"x".repeat(50)}\n`.repeat(10);
-  assert.equal(parseServerUrl(trimToLastLines(noise + ready, 120)), "http://127.0.0.1:12345");
-  // Cutting at the character cap must not make a phrase inside a warning
-  // look like the server's own readiness announcement.
-  assert.equal(parseServerUrl(trimToLastLines(`warning: ${ready}`, ready.length)), null);
-});
 
 test("a second stopAll waits for the first's kills: the host's two teardown calls both return only once the servers are gone", async () => {
   // The host calls the adapter's `stopAll()` twice (its abort listener, then

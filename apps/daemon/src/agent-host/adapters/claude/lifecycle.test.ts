@@ -35,7 +35,6 @@ import { AsyncEventQueue, createDeferred } from "./async-queue.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
 import { countingIds } from "./fixtures.ts";
 import { createClaudeAdapterWith } from "./index.ts";
-import { claudeIngestsAttachment } from "./session.ts";
 
 // Delay native filesystem operations for real transcript races; every operation
 // still uses the real file and returns its actual result.
@@ -882,21 +881,7 @@ describe("claude adapter — turns", () => {
 describe("claude adapter — attachment delivery (§4.1)", () => {
   const png = { type: "image" as const, id: "img-1", name: "shot.png", mimeType: "image/png", sizeBytes: 4 };
   const pdf = { type: "file" as const, id: "doc-1", name: "report.pdf", mimeType: "application/pdf", sizeBytes: 4 };
-
-  it("ingests inline only the images the API takes; everything else is a path line", () => {
-    assert.equal(claudeIngestsAttachment(png), true);
-    assert.equal(claudeIngestsAttachment(pdf), false);
-    assert.equal(
-      claudeIngestsAttachment({ type: "file", id: "t", name: "paste.txt", mimeType: "text/plain", sizeBytes: 1 }),
-      false
-    );
-    assert.equal(
-      claudeIngestsAttachment({ type: "image", id: "b", name: "x.bmp", mimeType: "image/bmp", sizeBytes: 1 }),
-      false,
-      "an image mime the API refuses is a path line, not a failed turn"
-    );
-    assert.equal(claudeIngestsAttachment({ type: "unknown", id: "u", name: "x" }), false);
-  });
+  const bmp = { type: "image" as const, id: "img-2", name: "diagram.bmp", mimeType: "image/bmp", sizeBytes: 4 };
 
   it("puts the image blocks first and the path block inside the LAST text block", async () => {
     const dir = await mkdtemp(nodePath.join(tmpdir(), "claude-attach-"));
@@ -911,7 +896,7 @@ describe("claude adapter — attachment delivery (§4.1)", () => {
       await harness.adapter.sendTurn({
         threadId: START.threadId,
         input: "/review src",
-        attachments: [png, pdf],
+        attachments: [png, pdf, bmp],
         interactionMode: "default"
       });
       if (peer.received.length === 0) {
@@ -926,7 +911,7 @@ describe("claude adapter — attachment delivery (§4.1)", () => {
       );
       assert.equal(
         content.at(-1)?.text,
-        `/review src\n\nAttached files:\n- report.pdf: ${nodePath.join(dir, pdf.id)}`
+        `/review src\n\nAttached files:\n- report.pdf: ${nodePath.join(dir, pdf.id)}\n- diagram.bmp: ${nodePath.join(dir, bmp.id)}`
       );
     } finally {
       await rm(dir, { recursive: true, force: true });

@@ -7,7 +7,6 @@ import test, { after } from "node:test";
 
 import { drain, mockProc } from "./leftover-processes.testing.ts";
 import {
-  parseLeftoverWork,
   readLeftoverWork,
   recordLeftoverWork,
   sweepLeftoverWork
@@ -73,24 +72,25 @@ test("a launch keeps its newest sessions only", async () => {
 });
 
 test("a file that is not what this host writes reads as nothing, entry by entry", async () => {
-  assert.deepEqual(parseLeftoverWork(null), []);
-  assert.deepEqual(parseLeftoverWork("not json"), []);
-  assert.deepEqual(parseLeftoverWork(JSON.stringify({ version: 99, launches: [] })), []);
+  const path = await scratch();
+  assert.deepEqual(await readLeftoverWork(path), []);
+  for (const contents of ["not json", JSON.stringify({ version: 99, launches: [] })]) {
+    await writeFile(path, contents);
+    assert.deepEqual(await readLeftoverWork(path), []);
+  }
+  await writeFile(path, JSON.stringify({
+    version: 1,
+    launches: [
+      { launchId: "", recordedAt: "t", sessions: [] },
+      { launchId: "ok", recordedAt: "t", sessions: [{ sid: 5, leaderStarttime: 1 }, { sid: "x" }, { sid: 1, leaderStarttime: 2 }] },
+      "junk"
+    ]
+  }));
   assert.deepEqual(
-    parseLeftoverWork(
-      JSON.stringify({
-        version: 1,
-        launches: [
-          { launchId: "", recordedAt: "t", sessions: [] },
-          { launchId: "ok", recordedAt: "t", sessions: [{ sid: 5, leaderStarttime: 1 }, { sid: "x" }, { sid: 1, leaderStarttime: 2 }] },
-          "junk"
-        ]
-      })
-    ),
+    await readLeftoverWork(path),
     [{ launchId: "ok", recordedAt: "t", sessions: [{ sid: 5, leaderStarttime: 1 }] }],
     "a session id is a pid above 1, a launch names itself"
   );
-  const path = await scratch();
   await writeFile(path, "{ torn");
   assert.deepEqual(await readLeftoverWork(path), []);
   await recordLeftoverWork(path, { launchId: "l1", recordedAt: "t", sessions: [{ sid: 7, leaderStarttime: 3 }] });

@@ -7,8 +7,7 @@ type AgentChatStreamFrame
 
 import {
 applyFrame,
-createReducerState,
-foldStateFromSnapshot
+createReducerState
 } from "./reducer.logic";
 import { activity,ev,resetBuilders,snapshot,stamp } from "./test-helpers";
 
@@ -50,13 +49,15 @@ describe("applyFrame — snapshots", () => {
       lastCheck: "lint still fails",
       updatedAt: stamp(3)
     };
-    assert.deepEqual(foldStateFromSnapshot(snapshot({ goal, seq: 3 })).goal, goal);
-    assert.equal(foldStateFromSnapshot(snapshot({ goal: null, seq: 3 })).goal, null);
+    const goalFrom = (thread: ReturnType<typeof snapshot>) =>
+      applyFrame(createReducerState("s1"), { kind: "snapshot", thread }).slice.goal;
+    assert.deepEqual(goalFrom(snapshot({ goal, seq: 3 })), goal);
+    assert.equal(goalFrom(snapshot({ goal: null, seq: 3 })), null);
     // A host that predates goals sends none at all.
-    assert.equal(foldStateFromSnapshot(snapshot({ seq: 3 })).goal, null);
+    assert.equal(goalFrom(snapshot({ seq: 3 })), null);
     // Verify this boundary validates once; individual schema rules live in the API tests.
     assert.equal(
-      foldStateFromSnapshot(snapshot({ goal: { ...goal, status: "done" } as never, seq: 3 })).goal,
+      goalFrom(snapshot({ goal: { ...goal, status: "done" } as never, seq: 3 })),
       null
     );
   });

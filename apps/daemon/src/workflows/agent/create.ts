@@ -91,7 +91,7 @@ export class AgentCatalog {
   }
 }
 
-export const MAX_TITLE_CHARS = 300;
+const MAX_TITLE_CHARS = 300;
 
 /** Control and format characters (ESC, BEL, C1 CSI, bidi overrides, zero-width…): never in a tab label. */
 const TITLE_UNPRINTABLE = /[\p{Cc}\p{Cf}]/gu;

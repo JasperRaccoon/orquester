@@ -14,8 +14,7 @@ import {
   discoverClaudeSkills,
   parseFrontmatterBoolean,
   parseLenientJson,
-  readSkillOverridesFromSettings,
-  skillOverrideSettingsPaths
+  readSkillOverridesFromSettings
 } from "./skills.ts";
 import { planClaudeSkillDispatch } from "./skill-dispatch.ts";
 import { buildAskUserQuestionReply, parseAskUserQuestionInput } from "./questions.ts";
@@ -149,20 +148,34 @@ describe("claude skills — filesystem discovery", () => {
     assert.deepEqual(skills, []);
   });
 
-  it("lists the settings files in the CLI's precedence order", () => {
-    const paths = skillOverrideSettingsPaths({
-      configDir: "/cfg",
-      cwd: "/repo/app",
-      platform: "linux",
-      repositoryRoot: "/repo"
-    });
-    assert.deepEqual(paths, [
-      "/cfg/settings.json",
-      "/repo/app/.claude/settings.json",
-      "/repo/app/.claude/settings.local.json",
-      "/repo/.claude/settings.local.json",
-      "/etc/claude-code/managed-settings.json"
-    ]);
+  it("lists the settings files in the CLI's precedence order", async () => {
+    const config = nodePath.join(root, "precedence-user");
+    const repo = nodePath.join(root, "precedence-repo");
+    const project = nodePath.join(repo, "app");
+    const names = ["project-over-user", "local-over-project", "root-over-local"];
+    await fs.mkdir(nodePath.join(repo, ".git"), { recursive: true });
+    await fs.mkdir(nodePath.join(project, ".claude"), { recursive: true });
+    await fs.mkdir(nodePath.join(repo, ".claude"), { recursive: true });
+    for (const name of names) {
+      await writeSkill(nodePath.join(config, "skills"), name, "---\ndescription: Precedence\n---");
+    }
+    await fs.writeFile(nodePath.join(config, "settings.json"), JSON.stringify({
+      skillOverrides: Object.fromEntries(names.map((name) => [name, "off"]))
+    }));
+    await fs.writeFile(nodePath.join(project, ".claude", "settings.json"), JSON.stringify({
+      skillOverrides: { "project-over-user": "on", "local-over-project": "off" }
+    }));
+    await fs.writeFile(nodePath.join(project, ".claude", "settings.local.json"), JSON.stringify({
+      skillOverrides: { "local-over-project": "on", "root-over-local": "off" }
+    }));
+    await fs.writeFile(nodePath.join(repo, ".claude", "settings.local.json"), JSON.stringify({
+      skillOverrides: { "root-over-local": "on" }
+    }));
+
+    const skills = await discoverClaudeSkills({ configDir: config, cwd: project });
+    for (const name of names) {
+      assert.equal(skills.find((skill) => skill.name === name)?.enabled, true, name);
+    }
   });
 });
 

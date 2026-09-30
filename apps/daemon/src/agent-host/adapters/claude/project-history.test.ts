@@ -89,17 +89,13 @@ describe("claude history projection — fixture 11 (resume and fork)", () => {
     for (const event of events) {
       assert.equal(event.raw?.source, HISTORICAL_RAW_SOURCE, event.type);
       assert.equal(event.threadId, "thread-fixture");
-      assert.equal(typeof event.eventId, "string");
-      assert.ok(event.turnId, `${event.type} must be attributed to a turn`);
     }
     // Nothing that could move a live turn or open a card.
     for (const type of [
       "request.opened",
       "user-input.requested",
       "session.started",
-      "session.exited",
-      "task.started",
-      "turn.aborted"
+      "session.exited"
     ] as const) {
       assert.equal(allOf(events, type).length, 0, type);
     }

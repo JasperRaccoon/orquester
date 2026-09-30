@@ -69,7 +69,7 @@ function normalizeSelectedOptionValues(value: string[] | undefined): string[] {
   return Array.from(new Set(value.filter((entry) => typeof entry === "string")));
 }
 
-export function resolvePendingUserInputAnswer(
+function resolvePendingUserInputAnswer(
   question: UserInputQuestion,
   draft: PendingAnswerDraft | undefined
 ): string | string[] | null {
@@ -170,7 +170,7 @@ export function buildPendingUserInputAnswers(
   return answers;
 }
 
-export function countAnsweredPendingUserInputQuestions(
+function countAnsweredPendingUserInputQuestions(
   questions: readonly UserInputQuestion[],
   draftAnswers: Record<string, PendingAnswerDraft>
 ): number {

@@ -26,7 +26,7 @@ import { formatResetIn } from "./inspector-usage";
 type ScopedRule = NonNullable<AccountPolicy["scoped"]>[number];
 
 /** The two windows every family may report, as the editor names them. */
-export const WINDOW_WORDS = { session: "5-hour", weekly: "weekly" } as const;
+const WINDOW_WORDS = { session: "5-hour", weekly: "weekly" } as const;
 
 /** "85%", "87.5%". */
 export function formatPercent(value: number): string {
@@ -39,15 +39,8 @@ const plural = (count: number, word: string): string => `${count} ${word}${count
 // The policy
 // ---------------------------------------------------------------------------
 
-/** The strategy's name, as the radio cards title it. */
-export function strategyName(strategy: AccountPolicy["strategy"]): string {
-  if (strategy === "soonest-reset") return "Quota that resets soonest";
-  if (strategy === "fixed") return "Fixed order";
-  return "Most quota left";
-}
-
 /** The strategy with its sub-choice, for a summary: "Most weekly quota left", "5-hour quota resets soonest". */
-export function strategyText(policy: Pick<AccountPolicy, "strategy" | "leastUsedMetric" | "soonestResetWindow">): string {
+function strategyText(policy: Pick<AccountPolicy, "strategy" | "leastUsedMetric" | "soonestResetWindow">): string {
   if (policy.strategy === "fixed") return "Fixed order";
   if (policy.strategy === "soonest-reset") {
     return `${policy.soonestResetWindow === "session" ? "5-hour" : "Weekly"} quota resets soonest`;
@@ -78,7 +71,7 @@ export function scopedWindowCovers(label: string, model: string, rules: readonly
  * "80% Fable". A scoped rule limited to models says so: "(not this model)"
  * when `model` is given and not among them, else "(2 models)".
  */
-export function limitParts(policy: Pick<AccountPolicy, "maxSessionPct" | "maxWeeklyPct" | "scoped">, model?: string): string[] {
+function limitParts(policy: Pick<AccountPolicy, "maxSessionPct" | "maxWeeklyPct" | "scoped">, model?: string): string[] {
   const parts: string[] = [];
   if (policy.maxSessionPct !== undefined) parts.push(`${formatPercent(policy.maxSessionPct)} 5-hour`);
   if (policy.maxWeeklyPct !== undefined) parts.push(`${formatPercent(policy.maxWeeklyPct)} weekly`);
@@ -160,7 +153,7 @@ function breachText(part: string): string | null {
 }
 
 /** Why the engine passed an account (or a whole chain entry) over, in words. */
-export function skipReasonText(skip: AccountSkip, names?: Pick<DecisionNames, "agent">): string {
+function skipReasonText(skip: AccountSkip, names?: Pick<DecisionNames, "agent">): string {
   const detail = skip.detail.trim();
   switch (skip.why) {
     case "threshold": {

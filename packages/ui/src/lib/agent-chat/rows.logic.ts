@@ -961,10 +961,6 @@ export interface TimelineRowsInput {
   agentRunStartIndex?: number;
 }
 
-export function deriveTimelineRows(input: TimelineRowsInput): AgentChatTimelineRow[] {
-  return deriveRowsDetailed(input).rows;
-}
-
 /**
  * The rows, whether any of them is a live activity row (`hasActivityRow`),
  * and the clocks of the folds they time by their rows, by the positions they

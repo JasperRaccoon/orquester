@@ -5,7 +5,6 @@ import type { ModelSelection, ProviderModel } from "@orquester/api/agent-chat";
 import {
   applyEffortArgument,
   applyModelSelection,
-  applyOptionSelection,
   currentOptionValue,
   findReasoningDescriptor,
   resolveSelectedModel
@@ -71,14 +70,6 @@ test("an unset option reads the descriptor's default, then its currentValue", ()
   assert.equal(currentOptionValue({ model: "x", options: [{ id: "effort", value: "low" }] }, EFFORT), "low");
   assert.equal(currentOptionValue(null, { ...FAST, currentValue: true }), true);
   assert.equal(currentOptionValue(null, FAST), undefined);
-});
-
-test("setting an option adds it, then replaces it in place", () => {
-  const base: ModelSelection = { model: "claude-opus-5" };
-  const withEffort = applyOptionSelection(base, "effort", "low");
-  assert.deepEqual(withEffort.options, [{ id: "effort", value: "low" }]);
-  const changed = applyOptionSelection(withEffort, "effort", "xhigh");
-  assert.deepEqual(changed.options, [{ id: "effort", value: "xhigh" }]);
 });
 
 test("switching model drops options the new model does not advertise", () => {

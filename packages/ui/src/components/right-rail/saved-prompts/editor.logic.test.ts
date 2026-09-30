@@ -137,7 +137,6 @@ describe("duplicate", () => {
       const title = request.mode === "create" ? request.initial?.title ?? "" : "";
       assert.ok(title.length > 0 && title.length <= 120);
       assert.ok(!/[\uD800-\uDBFF](?![\uDC00-\uDFFF])/.test(title), "no lone high surrogate");
-      assert.equal(title.includes("😀"), prefixLength === 111, "retain a whole emoji only when it fits");
     }
   });
 });

@@ -55,19 +55,3 @@ export function sequentialIds(prefix = "id"): () => string {
     return `${prefix}-${n}`;
   };
 }
-
-/**
- * Static markup as it reads: tags dropped, entities decoded, whitespace runs
- * collapsed — so a check can look for a guide text however it was marked up.
- */
-export function markupText(html: string): string {
-  return html
-    .replace(/<[^>]*>/g, "")
-    .replace(/&(#x[0-9a-f]+|#\d+|quot|amp|lt|gt|apos|nbsp);/gi, (entity, code: string) => {
-      const lower = code.toLowerCase();
-      if (lower.startsWith("#x")) return String.fromCodePoint(parseInt(lower.slice(2), 16));
-      if (lower.startsWith("#")) return String.fromCodePoint(Number(lower.slice(1)));
-      return ({ quot: '"', amp: "&", lt: "<", gt: ">", apos: "'", nbsp: " " } as Record<string, string>)[lower] ?? entity;
-    })
-    .replace(/\s+/g, " ");
-}

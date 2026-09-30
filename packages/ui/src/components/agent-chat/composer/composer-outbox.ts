@@ -66,7 +66,7 @@ import {
 import type { QueuedComposerMessage } from "../../../lib/agent-chat/contracts";
 
 /** The tab's `sessionStorage` key. */
-export const COMPOSER_OUTBOX_KEY = "orquester:agent-chat-outbox";
+const COMPOSER_OUTBOX_KEY = "orquester:agent-chat-outbox";
 
 /**
  * How long after its post a send may still be re-posted under its own
@@ -84,7 +84,7 @@ export const COMPOSER_OUTBOX_KEY = "orquester:agent-chat-outbox";
  * the draft, and a queued send is held at the front of its queue: nothing is
  * lost, nothing is sent twice, and the user decides.
  */
-export const OUTBOX_REPLAY_MAX_AGE_MS = 10 * 60_000;
+const OUTBOX_REPLAY_MAX_AGE_MS = 10 * 60_000;
 
 /**
  * How long a thread's queue may go unseen and still go out by itself when it
@@ -102,7 +102,7 @@ export const OUTBOX_REPLAY_MAX_AGE_MS = 10 * 60_000;
  * reload — every message comes back held, in order, under its own
  * `commandId`, waiting for its Send now.
  */
-export const OUTBOX_QUEUE_ABSENCE_MAX_MS = 10 * 60_000;
+const OUTBOX_QUEUE_ABSENCE_MAX_MS = 10 * 60_000;
 
 /**
  * The most entries the outbox keeps. Past it the oldest messages still

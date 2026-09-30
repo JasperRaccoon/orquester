@@ -61,7 +61,7 @@ const OPENCODE_KILL_GRACE_MS = 1_000;
  * `Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.` on the
  * same stream, and a whole-buffer regex would happily match inside it.
  */
-export function parseServerUrl(output: string): string | null {
+function parseServerUrl(output: string): string | null {
   for (const line of output.split("\n")) {
     if (!line.startsWith(OPENCODE_SERVER_READY_PREFIX)) {
       continue;
@@ -76,7 +76,7 @@ export function parseServerUrl(output: string): string | null {
  * Keep the tail under `maxChars` without ever cutting inside a line: drop
  * whole leading lines until it fits.
  */
-export function trimToLastLines(text: string, maxChars: number): string {
+function trimToLastLines(text: string, maxChars: number): string {
   if (text.length <= maxChars) {
     return text;
   }

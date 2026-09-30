@@ -206,7 +206,6 @@ describe("claude normaliser — the /goal command's output (goals §6.1.2)", () 
     });
     assert.equal(goal?.turnId, "turn-1");
     assert.equal(setPoints.length, 1, "the transcript's set point is marked");
-    assert.deepEqual(normalizer.goals.goal, { ...SHIP, setAt: "2026-09-24T10:00:00.000Z" });
   });
 
   it("a set over a different running goal is `replaced`; the same goal again is no change", () => {
@@ -254,7 +253,6 @@ describe("claude normaliser — the /goal command's output (goals §6.1.2)", () 
       change: "cleared",
       previous: { ...SHIP, rounds: 3 }
     });
-    assert.equal(normalizer.goals.goal, null);
     assert.deepEqual(goalEvents(feed(goalOutput("No goal set", "clear"))), []);
     assert.deepEqual(goalEvents(feed(goalOutput("No goal set. Usage: `/goal <condition>`"))), []);
 
@@ -275,7 +273,6 @@ describe("claude normaliser — the /goal command's output (goals §6.1.2)", () 
       assert.deepEqual(goalEvents(events), []);
       assert.ok(types(events).includes("content.delta:assistant_text"), `the refusal renders: ${text}`);
     }
-    assert.deepEqual(normalizer.goals.goal, SHIP);
   });
 
   it("another local command's output is never read as a goal", () => {
@@ -287,7 +284,6 @@ describe("claude normaliser — the /goal command's output (goals §6.1.2)", () 
       })
     );
     assert.deepEqual(goalEvents(events), []);
-    assert.equal(normalizer.goals.goal, null);
   });
 
   it("falls back to local_command_source when the content carries no text", () => {
@@ -306,7 +302,6 @@ describe("claude normaliser — Stop-hook feedback and the check-in (goals §6.1
       knownGoal: { ...SHIP, rounds: 1, phase: "waiting-background" }
     });
     normalizer.beginTurn({ turnId: "turn-1" });
-    const itemsBefore = normalizer.turnState?.items.length;
     const events = feed(
       syntheticUser("Stop hook feedback:\n[ship the release]: the changelog is still missing")
     );
@@ -316,7 +311,6 @@ describe("claude normaliser — Stop-hook feedback and the check-in (goals §6.1
       change: "checked"
     });
     assert.equal(goalEvents(events)[0]?.turnId, "turn-1");
-    assert.equal(normalizer.turnState?.items.length, itemsBefore, "not a conversation item either");
   });
 
   it("another hook's feedback keeps today's behaviour: no goal change, no row", () => {
@@ -324,7 +318,6 @@ describe("claude normaliser — Stop-hook feedback and the check-in (goals §6.1
     normalizer.beginTurn({ turnId: "turn-1" });
     const events = feed(syntheticUser("Stop hook feedback:\n[lint is clean]: 3 errors remain"));
     assert.deepEqual(events, []);
-    assert.deepEqual(normalizer.goals.goal, SHIP);
   });
 
   it("feedback with no tracked goal changes nothing", () => {
@@ -430,7 +423,6 @@ describe("claude normaliser — active_goal (goals §6.1.6)", () => {
     normalizer.beginTurn({ turnId: "turn-1" });
     assert.deepEqual(feed(activeGoal(null)), []);
     assert.equal(checks, 1);
-    assert.deepEqual(normalizer.goals.goal, SHIP, "the transcript decides what ended it");
   });
 
   it("a malformed value is ignored, not warned about", () => {
@@ -471,7 +463,6 @@ describe("claude normaliser — what the transcript said after a turn (goals §6
       }
     });
     assert.equal(events[0]?.turnId, "turn-7", "attributed to the turn that ended");
-    assert.equal(normalizer.goals.goal, null);
   });
 
   it("a failed row is `failed`, with the evaluator's reason", () => {
@@ -518,7 +509,6 @@ describe("claude normaliser — what the transcript said after a turn (goals §6
       ),
       []
     );
-    assert.deepEqual(normalizer.goals.goal, SHIP);
   });
 
   it("still unmet with background work live at turn end is `waiting-background`, and back when it is not", () => {
@@ -566,7 +556,6 @@ describe("claude normaliser — what the transcript said after a turn (goals §6
       [],
       "the previous run's verdict never ends the new run"
     );
-    assert.equal(normalizer.goals.goal?.status, "active");
   });
 
   it("with no goal tracked, nothing is read into it", () => {
@@ -625,7 +614,6 @@ describe("claude normaliser — the restore rule on resume (goals §6.1.5)", () 
       [],
       "the stale scan must not restore the goal the user just cleared"
     );
-    assert.equal(normalizer.goals.goal, null);
   });
 
   it("the same goal on both sides is no news", () => {

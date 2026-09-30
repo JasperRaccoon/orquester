@@ -7,12 +7,8 @@ import {
   buildSkillMenuItems,
   buildSlashMenuItems,
   compactCommandAvailable,
-  isProviderSkillUserInvocable,
   menuItemAction,
   menuItemReplacement,
-  searchSlashMenuItems,
-  skillsForSlashMenu,
-  slashMenuItemsForPromptPosition,
   type SlashMenuItem
 } from "./composer-menu.ts";
 
@@ -36,19 +32,26 @@ const BASE = {
 } as const;
 
 test("a disabled skill is never offered, and userInvocable:false hides one", () => {
-  assert.equal(isProviderSkillUserInvocable(skill("a")), true);
-  assert.equal(isProviderSkillUserInvocable(skill("a", { enabled: false })), false);
-  assert.equal(isProviderSkillUserInvocable(skill("a", { userInvocable: false })), false);
+  const items = buildSkillMenuItems([
+    skill("visible"),
+    skill("disabled", { enabled: false }),
+    skill("agent-only", { userInvocable: false })
+  ], "");
+  assert.deepEqual(items.map((item) => item.type === "skill" ? item.skill.name : null), ["visible"]);
 });
 
 test("userInvocationOnly does not hide a skill — it is the reason to show it", () => {
   const only = skill("release", { userInvocationOnly: true });
-  assert.deepEqual(skillsForSlashMenu([only], true), [only]);
+  const items = buildSlashMenuItems({ ...BASE, skills: [only] });
+  assert.deepEqual(items.filter((item) => item.type === "skill").map((item) => item.skill.name), ["release"]);
 });
 
 test("the slash-menu skill setting is honoured; the $ menu ignores it", () => {
   const s = skill("brainstorm");
-  assert.deepEqual(skillsForSlashMenu([s], false), []);
+  assert.deepEqual(
+    buildSlashMenuItems({ ...BASE, skills: [s], showSkillsInSlashMenu: false }).filter((item) => item.type === "skill"),
+    []
+  );
   assert.equal(buildSkillMenuItems([s], "").length, 1);
 });
 
@@ -69,14 +72,11 @@ test("a skill that is also advertised as a command is listed once, as the skill"
 });
 
 test("away from offset 0 provider commands are dropped; host commands and skills stay", () => {
-  const items: SlashMenuItem[] = [
-    { id: "h", type: "host-command", command: "model", label: "/model", description: "" },
-    { id: "p", type: "provider-command", command: command("init"), label: "/init", description: "" },
-    { id: "s", type: "skill", skill: skill("x"), label: "/x", description: "" }
-  ];
-  assert.equal(slashMenuItemsForPromptPosition(items, true).length, 3);
+  const input = { ...BASE, showPlanModeToggle: false, hasEffortOption: false,
+    slashCommands: [command("init")], skills: [skill("x")] };
+  assert.deepEqual(buildSlashMenuItems(input).map((item) => item.type), ["host-command", "provider-command", "skill"]);
   assert.deepEqual(
-    slashMenuItemsForPromptPosition(items, false).map((item) => item.type),
+    buildSlashMenuItems({ ...input, isAtPromptStart: false }).map((item) => item.type),
     ["host-command", "skill"]
   );
 });
@@ -136,43 +136,11 @@ test("the compact precondition rejects a non-empty draft or any attachment", () 
 });
 
 test("a name match outranks a description match", () => {
-  const items: SlashMenuItem[] = [
-    {
-      id: "p:init",
-      type: "provider-command",
-      command: command("init"),
-      label: "/init",
-      description: ""
-    },
-    {
-      id: "p:setup",
-      type: "provider-command",
-      command: command("setup", "initialise the repository"),
-      label: "/setup",
-      description: "initialise the repository"
-    }
-  ];
+  const items = buildSlashMenuItems({ ...BASE, query: "init",
+    slashCommands: [command("setup", "initialise the repository"), command("init")] });
   assert.deepEqual(
-    searchSlashMenuItems(items, "init").map((item) => item.id),
-    ["p:init", "p:setup"]
-  );
-});
-
-test("ties break host commands, then provider commands, then skills", () => {
-  const items: SlashMenuItem[] = [
-    { id: "s:plan", type: "skill", skill: skill("plan"), label: "/plan", description: "" },
-    {
-      id: "p:plan",
-      type: "provider-command",
-      command: command("plan"),
-      label: "/plan",
-      description: ""
-    },
-    { id: "h:plan", type: "host-command", command: "plan", label: "/plan", description: "" }
-  ];
-  assert.deepEqual(
-    searchSlashMenuItems(items, "plan").map((item) => item.id),
-    ["h:plan", "p:plan", "s:plan"]
+    items.map((item) => item.type === "provider-command" ? item.command.name : null),
+    ["init", "setup"]
   );
 });
 

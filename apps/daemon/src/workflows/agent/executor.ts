@@ -149,7 +149,7 @@ interface AgentTimings extends WatchTimings {
 const DEFAULT_AGENT_TIMINGS: AgentTimings = { ...DEFAULT_WATCH_TIMINGS, idleWaitMs: 120_000, retryMs: 5_000 };
 
 /** A plan card is implemented at most this many times per block; after that the plan is the answer. */
-export const MAX_PLAN_IMPLEMENTATIONS = 5;
+const MAX_PLAN_IMPLEMENTATIONS = 5;
 
 export interface AgentExecutorDeps {
   usage: UsageReader;

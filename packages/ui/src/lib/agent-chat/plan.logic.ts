@@ -18,7 +18,6 @@
  */
 
 import type { ThreadActivityItem } from "@orquester/api/agent-chat";
-import { buildPlanImplementationPrompt } from "@orquester/api/agent-chat";
 
 import type { ActivePlanState, AgentChatActions } from "./contracts";
 import type { ProposedPlanEntry } from "./entries.logic";
@@ -133,35 +132,6 @@ export function wholePlanMarkdown(
   readFull: AgentChatActions["readFullPlanMarkdown"]
 ): string | Promise<string> {
   return plan.truncated === true ? readFull(plan) : plan.planMarkdown;
-}
-
-/**
- * The prefix plus the trimmed plan — one copy in `@orquester/api/agent-chat`,
- * shared with the MCP's `implement_plan`. *T3: `proposedPlan.ts:75-77`.*
- */
-export { buildPlanImplementationPrompt };
-
-/**
- * The composer's split button:
- * - with an **empty draft** it *implements* — one turn whose input is the fixed
- *   prefix plus the plan markdown, sent with `interactionMode: "default"` so
- *   the thread leaves plan mode;
- * - with **draft text** it *refines* — sends that text and stays in plan mode.
- *
- * *T3: `proposedPlan.ts:79-96`.*
- */
-export function resolvePlanFollowUpSubmission(input: {
-  draftText: string;
-  planMarkdown: string;
-}): { text: string; interactionMode: "default" | "plan" } {
-  const trimmed = input.draftText.trim();
-  if (trimmed.length > 0) {
-    return { text: trimmed, interactionMode: "plan" };
-  }
-  return {
-    text: buildPlanImplementationPrompt(input.planMarkdown),
-    interactionMode: "default"
-  };
 }
 
 /**

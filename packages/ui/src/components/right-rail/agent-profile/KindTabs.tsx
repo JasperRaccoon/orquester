@@ -37,7 +37,7 @@ export function kindTabId(baseId: string, kind: ProfileItemKind): string {
 }
 
 /** Where a roving key moves from `index` among `count` tabs, or `null` for a key the tabs leave alone. */
-export function kindTabKeyTarget(key: string, index: number, count: number): number | null {
+function kindTabKeyTarget(key: string, index: number, count: number): number | null {
   if (count === 0) return null;
   switch (key) {
     case "ArrowRight":

@@ -9,7 +9,7 @@ import test from "node:test";
 import type { ApprovalDecision } from "@orquester/api/agent-chat";
 
 import {
-  toSlashCommands,
+  buildSnapshot,
   unusableSnapshot
 } from "./snapshot.ts";
 import {
@@ -130,11 +130,18 @@ test("§4.4: the read-only and always-allowed tools are exactly the documented s
 // ---------------------------------------------------------------------------
 
 test("§4.6.3: a real command list keeps `/compact` first and drops skill-sourced rows", () => {
-  const commands = toSlashCommands([
-    { name: "fixture", description: "a fixture command", hints: ["arg"] },
-    { name: "a-skill", source: "skill" },
-    { name: "compact", description: "the provider's own" }
-  ]);
+  const commands = buildSnapshot({
+    version: "1.18.32",
+    checkedAt: "2026-09-21T00:00:00.000Z",
+    inventory: {
+      providers: { all: [], connected: [], default: {} }, agents: [], skills: [],
+      commands: [
+        { name: "fixture", description: "a fixture command", hints: ["arg"] },
+        { name: "a-skill", source: "skill" },
+        { name: "compact", description: "the provider's own" }
+      ]
+    }
+  }).slashCommands;
   assert.deepEqual(
     commands.map((command) => command.name),
     ["compact", "fixture"],

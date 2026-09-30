@@ -188,7 +188,7 @@ const plural = (count: number, word: string): string => `${count} ${word}${count
  * A block's problems in one line ("2 errors · 1 warning") that opens into the
  * list; a single problem shows as its own row straight away.
  */
-export const ProblemBar: React.FC<{
+const ProblemBar: React.FC<{
   problems: readonly WorkflowProblem[];
   onPick: (problem: WorkflowProblem) => void;
   pickable?: (problem: WorkflowProblem) => boolean;

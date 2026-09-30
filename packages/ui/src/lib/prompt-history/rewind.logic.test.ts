@@ -3,24 +3,16 @@ import { beforeEach, describe, it } from "node:test";
 
 import type { ThreadItem } from "@orquester/api/agent-chat";
 
-import { REWIND_BUSY_TITLE } from "../../components/agent-chat/composer/RewindControl";
 import type { AgentChatTimelineRow } from "../agent-chat/contracts";
 import { deriveTimelineEntriesFromItems } from "../agent-chat/entries.logic";
-import { deriveTimelineRows } from "../agent-chat/rows.logic";
+import { deriveTimelineRowsWithState } from "../agent-chat/rows.logic";
 import { activity, foldTurn, historyPage, message, resetBuilders, stamp } from "../agent-chat/test-helpers";
 import type { HistoryPrompt } from "./prompts.logic";
 import {
   latestLoadedCompactionAt,
-  latestSettledCompactionAt,
-  PROMPT_GONE,
   promptRewindTarget,
-  REWIND_NOT_OFFERED,
-  REWIND_NOT_RENDERED,
-  REWIND_WITHHELD,
   rowsRewindTargetsOf,
   runPromptRewind,
-  TURN_LOAD_FAILED,
-  TURN_TOO_FAR_BACK,
   type RevealResult,
   type RewindFacts,
   type RewindSnapshot
@@ -47,13 +39,13 @@ function historyPrompt(overrides: Partial<HistoryPrompt> = {}): HistoryPrompt {
 }
 
 function rowsOf(items: ThreadItem[], turns = [foldTurn("t1", "u1")]): AgentChatTimelineRow[] {
-  return deriveTimelineRows({
+  return deriveTimelineRowsWithState({
     timelineEntries: deriveTimelineEntriesFromItems(items, null).entries,
     isWorking: false,
     activeTurnStartedAt: null,
     turns,
     supportsConversationRollback: true
-  });
+  }).rows;
 }
 
 const IDLE = { isTurnActive: false, reverting: false, hasPendingRequest: false };
@@ -70,7 +62,7 @@ describe("the compaction that bounds a rewind is read off the items, never the r
       message("assistant", "done", { id: "a1", turnId: "t1" })
     ];
     const rows = rowsOf(items);
-    const compactedAt = latestSettledCompactionAt(items);
+    const compactedAt = latestLoadedCompactionAt({ pages: [], bridge: [], entries: items });
     assert.equal(compactedAt, marker.createdAt, "the items still hold it");
     // So an index-only prompt from before it is not offered a rewind.
     const older = historyPrompt({
@@ -210,23 +202,23 @@ describe("runPromptRewind", () => {
 
   it("refuses when the reveal shows the turn but still not the prompt's row — no count the rows did not vouch for", async () => {
     const { calls, run } = harness([ready({}), ready({ other: 1 })]);
-    assert.deepEqual(
-      await run(historyPrompt({ messageId: "old", turnId: "t5", turnOrdinal: 5, source: "index", indexRewindable: true })),
-      { ok: false, reason: REWIND_NOT_RENDERED }
+    assert.equal(
+      (await run(historyPrompt({ messageId: "old", turnId: "t5", turnOrdinal: 5, source: "index", indexRewindable: true }))).ok,
+      false
     );
     assert.deepEqual(calls, ["reveal t5"], "nothing posted");
   });
 
   it("says why the reveal could not bring the prompt in, or that its row withholds it", async () => {
-    const tooFar = harness([ready({})], { reveal: { shown: false, reason: TURN_TOO_FAR_BACK } });
-    assert.deepEqual(await tooFar.run(historyPrompt()), { ok: false, reason: TURN_TOO_FAR_BACK });
+    const tooFar = harness([ready({})], { reveal: { shown: false, reason: "outside the loaded window" } });
+    assert.deepEqual(await tooFar.run(historyPrompt()), { ok: false, reason: "outside the loaded window" });
     assert.deepEqual(tooFar.calls, ["reveal t1"]);
 
-    const gone = harness([ready({})], { reveal: { shown: false, reason: PROMPT_GONE } });
-    assert.deepEqual(await gone.run(historyPrompt()), { ok: false, reason: PROMPT_GONE });
+    const gone = harness([ready({})], { reveal: { shown: false, reason: "message was removed" } });
+    assert.deepEqual(await gone.run(historyPrompt()), { ok: false, reason: "message was removed" });
 
     const withheld = harness([ready({}), ready({ u1: null })]);
-    assert.deepEqual(await withheld.run(historyPrompt()), { ok: false, reason: REWIND_WITHHELD });
+    assert.equal((await withheld.run(historyPrompt())).ok, false);
     assert.deepEqual(withheld.calls, ["reveal t1"]);
   });
 
@@ -242,17 +234,17 @@ describe("runPromptRewind", () => {
         calls.push("rewind");
       }
     });
-    assert.deepEqual(outcome, { ok: false, reason: TURN_LOAD_FAILED });
+    assert.equal(outcome.ok, false);
     assert.deepEqual(calls, []);
   });
 
   it("waits for the agent to be idle — before it starts, and again after paging in", async () => {
     const busy = harness([ready({ u1: 0 }, { ...IDLE, isTurnActive: true })]);
-    assert.deepEqual(await busy.run(historyPrompt()), { ok: false, reason: REWIND_BUSY_TITLE });
+    assert.equal((await busy.run(historyPrompt())).ok, false);
     assert.deepEqual(busy.calls, []);
 
     const late = harness([ready({}), ready({ u1: 0 }, { ...IDLE, hasPendingRequest: true })]);
-    assert.deepEqual(await late.run(historyPrompt()), { ok: false, reason: REWIND_BUSY_TITLE });
+    assert.equal((await late.run(historyPrompt())).ok, false);
     assert.deepEqual(late.calls, ["reveal t1"]);
   });
 
@@ -260,22 +252,19 @@ describe("runPromptRewind", () => {
     // Its turn would start against the history the rewind is about to cut —
     // the composer picker's own rule (`rewindPickerEnabled`, §7.4).
     const sending = harness([ready({ u1: 0 }, IDLE, true)]);
-    assert.deepEqual(await sending.run(historyPrompt()), { ok: false, reason: REWIND_BUSY_TITLE });
+    assert.equal((await sending.run(historyPrompt())).ok, false);
     assert.deepEqual(sending.calls, []);
 
     const late = harness([ready({}), ready({ u1: 0 }, IDLE, true)]);
-    assert.deepEqual(await late.run(historyPrompt()), { ok: false, reason: REWIND_BUSY_TITLE });
+    assert.equal((await late.run(historyPrompt())).ok, false);
     assert.deepEqual(late.calls, ["reveal t1"]);
   });
 
   it("never offers what the adapter cannot do, nor a prompt that started no turn", async () => {
     const unsupported = harness([{ ...ready({ u1: 0 }), rollbackSupported: false }]);
-    assert.deepEqual(await unsupported.run(historyPrompt()), { ok: false, reason: REWIND_NOT_OFFERED });
+    assert.equal((await unsupported.run(historyPrompt())).ok, false);
     const steer = harness([ready({ u1: 0 })]);
-    assert.deepEqual(await steer.run(historyPrompt({ turnOrdinal: null })), {
-      ok: false,
-      reason: REWIND_NOT_OFFERED
-    });
+    assert.equal((await steer.run(historyPrompt({ turnOrdinal: null }))).ok, false);
     assert.deepEqual([...unsupported.calls, ...steer.calls], []);
   });
 

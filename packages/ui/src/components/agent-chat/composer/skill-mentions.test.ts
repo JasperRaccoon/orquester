@@ -40,8 +40,3 @@ test("R2-8: any currency symbol opens a mention, as the composer trigger does", 
 test("R2-8: dots and dashes are part of a skill name", () => {
   assert.deepEqual(skillMentionsInText("$my-skill.v2 now", ["my-skill.v2"]), ["my-skill.v2"]);
 });
-
-test("R2-8: no known skills means no chips, and empty text never throws", () => {
-  assert.deepEqual(skillMentionsInText("$review", []), []);
-  assert.deepEqual(skillMentionsInText("", ["review"]), []);
-});

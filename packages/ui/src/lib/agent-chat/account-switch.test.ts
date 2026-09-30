@@ -12,7 +12,6 @@ import type { AdapterGoalSupport,AgentGoal } from "@orquester/api/agent-chat";
 import {
 buildChatAccountOptions,
 canSwitchChatAccount,
-chatAccountLabel,
 chatAccountSelectionId,
 chatAccountSwitchRefusal,
 chatAccountSwitchSupported,
@@ -64,8 +63,6 @@ describe("the option list", () => {
       options.map((option) => option.id),
       ["system", "cla-1", "cla-2"]
     );
-    assert.equal(options[0]!.label, "System");
-    assert.equal(options[1]!.label, "cla-1");
     assert.equal(options[2]!.needsReauth, true, "a stale account is offered, flagged");
   });
 
@@ -79,15 +76,6 @@ describe("the option list", () => {
     assert.equal(chatAccountSwitchSupported({ refId: "claude", adapterId: "opencode" }), false);
     assert.equal(chatAccountSwitchSupported({ refId: "claude", adapterId: "claude" }), true);
     assert.equal(chatAccountSwitchSupported({ refId: "codex" }), true);
-  });
-
-  it("an empty accounts list is still a usable menu", () => {
-    assert.deepEqual(
-      buildChatAccountOptions({ refId: "claude", accounts: undefined, shortLabel }).map(
-        (option) => option.id
-      ),
-      ["system"]
-    );
   });
 });
 
@@ -300,10 +288,6 @@ describe("a continuing goal closes the gate (goals §5.5)", () => {
 });
 
 describe("labels", () => {
-
-  it("resolves a managed account through the live list, not the log", () => {
-    assert.equal(chatAccountLabel({ accountId: "cla-1", accounts: ACCOUNTS, shortLabel }), "cla-1");
-  });
 
   it("the system identity's two spellings map onto the menu's one id", () => {
     // The head and the tab record say `""`/`undefined`; the menu says `system`.

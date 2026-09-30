@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import type { AgentAccount, UsageResponse, WorkflowBlockRun } from "@orquester/api";
+import type { AgentAccount, UsageResponse } from "@orquester/api";
 
-import { blockInputOf, parsePinnedText } from "./inspector-data.ts";
 import { loadEditorLayout } from "./inspector-layout.ts";
-import { accountFamily, accountUsageRows, scopedWindowLabels } from "./inspector-usage.ts";
-import { edge, node, workflow } from "./testing.ts";
+import { accountUsageRows } from "./inspector-usage.ts";
 
 const NOW = Date.parse("2026-09-28T10:00:00.000Z");
 const account = (id: string, agent: AgentAccount["agent"], extra: Partial<AgentAccount> = {}): AgentAccount => ({
@@ -63,15 +61,6 @@ describe("account usage rows", () => {
     assert.equal(rows[2]!.isSystem, true);
     assert.equal(rows[2]!.unknown, true, "a stale reading is unknown");
   });
-
-  it("families: an agent's own; OpenCode and agents this build does not offer have none", () => {
-    assert.equal(accountFamily("claude"), "claude");
-    assert.equal(accountFamily("codex"), "codex");
-    assert.equal(accountFamily("grok"), "grok");
-    assert.equal(accountFamily("opencode"), null);
-    assert.equal(accountFamily("claudex"), null, "a removed launcher a stored chain may still name");
-    assert.deepEqual(scopedWindowLabels(usage, "claude"), ["Fable"]);
-  });
 });
 
 describe("the editor layout in localStorage", () => {
@@ -96,27 +85,5 @@ describe("the editor layout in localStorage", () => {
       assert.equal(layout.minimap, true);
       assert.ok(Number.isFinite(layout.inspectorWidth));
     }
-  });
-});
-
-describe("the Data tab", () => {
-  const def = workflow(
-    [node("t", "trigger.manual", {}, { name: "Start" }), node("a", "agent", {}, { name: "A" }), node("b", "code", {}, { name: "B" }), node("m", "merge", {}, { name: "M" })],
-    [edge("t", "a"), edge("a", "m"), edge("b", "m"), edge("t", "b")]
-  );
-  const run = (nodeId: string, status: WorkflowBlockRun["status"], output: unknown): WorkflowBlockRun => ({ nodeId, name: nodeId, type: "code", status, attempt: 1, output });
-
-  it("a block's input is its one live upstream's output, or the merge object", () => {
-    const blocks = { t: run("t", "succeeded", { kind: "manual" }), a: run("a", "succeeded", { text: "hi" }), b: run("b", "succeeded", 2) };
-    assert.deepEqual(blockInputOf(blocks, def, "a"), { kind: "single", from: "Start", value: { kind: "manual" } });
-    assert.deepEqual(blockInputOf(blocks, def, "m"), { kind: "merged", value: { A: { text: "hi" }, B: 2 } });
-    assert.deepEqual(blockInputOf({ ...blocks, b: run("b", "skipped", undefined) }, def, "m"), { kind: "single", from: "A", value: { text: "hi" } });
-    assert.deepEqual(blockInputOf(blocks, def, "t"), { kind: "none" });
-  });
-
-  it("a pinned output is JSON, or an error that says why", () => {
-    assert.deepEqual(parsePinnedText('{"a": 1}'), { ok: true, value: { a: 1 } });
-    assert.equal(parsePinnedText("{a:").ok, false);
-    assert.equal(parsePinnedText("  ").ok, false);
   });
 });

@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { EventEmitter } from "node:events";
 import test from "node:test";
 
-import { NDJSON_MAX_LINE_BYTES, NdjsonLineReader, NdjsonWriter, parseNdjsonLine } from "./ndjson.ts";
+import { NdjsonLineReader, NdjsonWriter, parseNdjsonLine } from "./ndjson.ts";
 
 test("line reader carries a remainder across chunk boundaries", () => {
   const reader = new NdjsonLineReader();
@@ -40,7 +40,7 @@ test("line reader decodes a multi-byte codepoint split across chunks", () => {
 
 test("line reader discards an overlong partial line until the next newline", () => {
   const reader = new NdjsonLineReader();
-  const chunk = "x".repeat(NDJSON_MAX_LINE_BYTES + 1);
+  const chunk = "x".repeat(8 * 1024 * 1024 + 1);
   assert.deepEqual(reader.push(chunk), []);
   assert.deepEqual(reader.push(chunk), []);
   assert.deepEqual(reader.push("tail\nnext\n"), ["next"]);

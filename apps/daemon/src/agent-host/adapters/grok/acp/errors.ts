@@ -150,7 +150,7 @@ export function acpFailureReason(error: unknown): "usage_limit" | "auth" | undef
  * The Grok CLI's words for a login it cannot use. Not captured (a refused login could not be
  * recorded without logging the account out — fixtures README "Error shapes"); what IS known is the
  * CLI's own vocabulary: `grok models` prints "You are not authenticated." with no login (fixture
- * `12-cli-text/`, observation 2), the probe's advice is `grok login`, the binary names the
+ * README observation 35), the probe's advice is `grok login`, the binary names the
  * `authentication_failed` stop reason (observation 50), and the xAI OAuth server answers a revoked
  * or expired refresh with `invalid_grant`.
  */

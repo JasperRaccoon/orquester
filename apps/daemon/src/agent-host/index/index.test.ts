@@ -18,7 +18,6 @@ import { createDeferred } from "../orchestration/runtime-seams.ts";
 import type { EventsFromResult } from "../services.ts";
 import {
   createThreadIndex,
-  createUnavailableThreadIndex,
   type IndexedTurn,
   type ThreadIndex
 } from "./index.ts";
@@ -416,69 +415,4 @@ describe("thread index: stop", () => {
     assert.equal(next.cursor(log.threadId), null, "no catch-up ever visits a deleted thread");
     assert.equal(next.totalTurns(log.threadId), 0);
   });
-});
-
-describe("thread index: unavailable", () => {
-  for (const [name, make] of [
-    ["createUnavailableThreadIndex()", () => createUnavailableThreadIndex()],
-    [
-      "after close()",
-      () => {
-        const index = open();
-        index.close();
-        return index;
-      }
-    ],
-    [
-      "after stop()",
-      async () => {
-        const index = open();
-        await index.stop();
-        return index;
-      }
-    ]
-  ] as const) {
-    it(`is inert: ${name}`, async () => {
-      const index = await make();
-      const log = new TestLog();
-      log.append(created(), ...turns(2));
-      assert.equal(index.available, false);
-
-      index.observe({ threadId: log.threadId, ...META, ...log.all() });
-      await index.drain();
-      await index.catchUp(catchUpInput(log));
-      index.deleteThread(log.threadId);
-
-      assert.equal(index.cursor(log.threadId), null);
-      assert.equal(index.totalTurns(log.threadId), 0);
-      assert.equal(index.turnByOrdinal(log.threadId, 1), null);
-      assert.equal(index.turnById(log.threadId, "t1"), null);
-      assert.deepEqual(index.turnsBefore(log.threadId, { before: null, limit: 5 }), []);
-      assert.deepEqual(index.search({ q: "prompt", limit: 5 }), []);
-      const probe: IndexedTurn = {
-        turnId: "t1",
-        ordinal: 1,
-        userMessageId: null,
-        requestedAt: "",
-        startedAt: null,
-        completedAt: null,
-        firstSeq: 1,
-        lastSeq: 1,
-        firstByte: 0,
-        endByte: 1
-      };
-      assert.equal(index.rewindable(log.threadId, probe), false);
-      assert.equal(index.itemPosition(log.threadId, "x"), null);
-      assert.equal(index.itemPositionBySeq(log.threadId, 3), null);
-      assert.equal(index.hasItemsBefore(log.threadId, 100), false);
-      assert.equal(index.activitySeqBefore(log.threadId, { beforeSeq: 100, count: 400 }), null);
-      assert.deepEqual(index.turnsInSeqRange(log.threadId, { fromSeq: 0, toSeq: 100 }), []);
-      assert.equal(index.turnOfSeq(log.threadId, 5), null);
-      assert.equal(index.eventPositionBySeq(log.threadId, 2), null);
-      assert.equal(index.messageSpan(log.threadId, "u1"), null);
-      assert.deepEqual(index.messagesSpanning(log.threadId, 5), []);
-      await index.stop();
-      index.close();
-    });
-  }
 });

@@ -430,7 +430,7 @@ process.stdin.on("data", (chunk) => {
     const frame = JSON.parse(line);
     if (frame.id === undefined) continue; // notifications (`initialized`)
     if (process.env.FAKE_CODEX_LOG) {
-      appendFileSync(process.env.FAKE_CODEX_LOG, `${JSON.stringify({ method: frame.method, params: frame.params })}\n`);
+      appendFileSync(process.env.FAKE_CODEX_LOG, `${JSON.stringify({ pid: process.pid, method: frame.method, params: frame.params })}\n`);
     }
     if (HANG.has(frame.method)) continue;
     if (!initialized && frame.method !== "initialize") {

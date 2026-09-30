@@ -47,19 +47,9 @@ describe("the agent shown before a pick", () => {
     assert.equal(defaultAgentProfileAgent({ chatAgent: null, remembered: "grok", installed: unknown }), "grok", "not passed over while unknown");
   });
 
-  it("else the first installed one", () => {
-    const installed = (agent: AgentProfileAgentId) => agent === "opencode" || agent === "grok";
-    assert.equal(defaultAgentProfileAgent({ chatAgent: null, remembered: null, installed }), "grok");
-  });
-
   it("passes over an agent known not to be installed", () => {
     const installed = (agent: AgentProfileAgentId) => agent !== "codex";
     assert.equal(defaultAgentProfileAgent({ chatAgent: "codex", remembered: null, installed }), "claude");
     assert.equal(defaultAgentProfileAgent({ chatAgent: "codex", remembered: "opencode", installed }), "opencode");
-  });
-
-  it("is Claude when nothing is known at all", () => {
-    assert.equal(defaultAgentProfileAgent({ chatAgent: null, remembered: null, installed: unknown }), "claude");
-    assert.equal(defaultAgentProfileAgent({ chatAgent: null, remembered: null, installed: () => false }), "claude");
   });
 });

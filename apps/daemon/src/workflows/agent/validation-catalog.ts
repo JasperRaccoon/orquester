@@ -6,33 +6,22 @@
 // daemon's own REST (`loadAgents`, the very read an agent block's run-time check makes). So it is
 // cached: `current()` answers the last reading (and refreshes it in the background once stale),
 // and a write route awaits `ready()` first — a bounded refresh — so a save is judged against a
-// catalogue no older than `ttlMs`. Without a reading (no API attached yet, the registry unreadable)
+// catalogue no older than 30 seconds. Without a reading (no API attached yet, the registry unreadable)
 // nothing is checked: an unknown catalogue never refuses a definition. A failed read is not retried
-// for `ttlMs` either (the last reading, if any, stays), so a broken registry costs one read per
+// for that window either (the last reading, if any, stays), so a broken registry costs one read per
 // window, not one per request; a registry or provider change (`expire`) asks again at once.
 
 import { toWorkflowAgentCatalog, type WorkflowAgentCatalog } from "@orquester/api";
-import { loadAgents, type AgentView, type DaemonApi } from "../../chat-client/index.ts";
+import { loadAgents, type DaemonApi } from "../../chat-client/index.ts";
 
-export const VALIDATION_CATALOG_TTL_MS = 30_000;
-export const VALIDATION_CATALOG_WAIT_MS = 3_000;
-
-/**
- * The catalogue as validation reads it — `toWorkflowAgentCatalog`, the rule the editor applies to
- * the same registry and snapshots: a provider's models count as LOADED only while it is `ready`
- * (a pending or failed probe may carry a bundled fallback list, not the provider's own).
- */
-function toValidationCatalog(agents: readonly AgentView[]): WorkflowAgentCatalog {
-  return toWorkflowAgentCatalog(agents);
-}
+const VALIDATION_CATALOG_TTL_MS = 30_000;
+const VALIDATION_CATALOG_WAIT_MS = 3_000;
 
 export interface ValidationCatalog {
   /** The latest reading, or undefined; a stale one starts a refresh in the background. */
   current(): WorkflowAgentCatalog | undefined;
-  /** Refresh when stale, waiting at most `waitMs`; never rejects. */
-  ready(waitMs?: number): Promise<void>;
-  /** Drop the reading. */
-  invalidate(): void;
+  /** Refresh when stale, waiting at most three seconds; never rejects. */
+  ready(): Promise<void>;
   /**
    * The host's catalogue changed (a registry entry, a provider snapshot): the next `current()` /
    * `ready()` reads again — even inside a failed read's backoff — while the last reading still
@@ -43,12 +32,10 @@ export interface ValidationCatalog {
 
 export function createValidationCatalog(opts: {
   api: () => DaemonApi | null;
-  now?: () => number;
-  ttlMs?: number;
   logger?: { debug(msg: string, meta?: Record<string, unknown>): void };
 }): ValidationCatalog {
-  const now = opts.now ?? Date.now;
-  const ttl = opts.ttlMs ?? VALIDATION_CATALOG_TTL_MS;
+  const now = Date.now;
+  const ttl = VALIDATION_CATALOG_TTL_MS;
   let value: WorkflowAgentCatalog | undefined;
   let readAt = Number.NEGATIVE_INFINITY;
   /** After a failed read: no new read before this. */
@@ -64,7 +51,7 @@ export function createValidationCatalog(opts: {
     inFlight = loadAgents(api, { includeLegacyModels: true })
       .then((agents) => {
         if (mine !== generation) return;
-        value = toValidationCatalog(agents);
+        value = toWorkflowAgentCatalog(agents);
         readAt = now();
         retryAt = Number.NEGATIVE_INFINITY;
       })
@@ -87,24 +74,17 @@ export function createValidationCatalog(opts: {
       if (stale()) void refresh();
       return value;
     },
-    async ready(waitMs = VALIDATION_CATALOG_WAIT_MS) {
+    async ready() {
       if (!stale()) return;
       let timer: NodeJS.Timeout | undefined;
       await Promise.race([
         refresh(),
         new Promise<void>((resolve) => {
-          timer = setTimeout(resolve, waitMs);
+          timer = setTimeout(resolve, VALIDATION_CATALOG_WAIT_MS);
           timer.unref?.();
         })
       ]);
       if (timer) clearTimeout(timer);
-    },
-    invalidate() {
-      generation += 1;
-      value = undefined;
-      readAt = Number.NEGATIVE_INFINITY;
-      retryAt = Number.NEGATIVE_INFINITY;
-      inFlight = null;
     },
     expire() {
       // A read already in flight may predate the change: its answer is dropped, a new read starts.

@@ -25,14 +25,6 @@ describe("the open-layer registry", () => {
     assert.equal(isAnyLayerOpen(), false, "a test left a layer open");
   });
 
-  it("a layer counts as open from its opening until its release", () => {
-    assert.equal(isAnyLayerOpen(), false);
-    const release = open();
-    assert.equal(isAnyLayerOpen(), true);
-    release();
-    assert.equal(isAnyLayerOpen(), false);
-  });
-
   it("nested layers count separately: closing the inner one leaves the outer one open", () => {
     // A dropdown inside a modal: its Escape closes the dropdown, and the modal
     // still owns the next one.

@@ -146,7 +146,8 @@ if (mode === "silent") {
     if (upstream !== undefined) await announceUpstream();
     const announce = () => {
       if (mode === "noisy") {
-        process.stdout.write("Warning: OPENCODE_SERVER_PASSWORD is not set; server is unsecured.\\n");
+        process.stdout.write("startup noise\\n".repeat(6000));
+        process.stdout.write("Warning: expected opencode server listening on http://127.0.0.1:1\\n");
       }
       process.stdout.write("opencode server listening on http://" + host + ":" + server.address().port + "\\n");
     };

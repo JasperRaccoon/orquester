@@ -8,7 +8,6 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 
 import type { AdapterCapabilities,ProviderSnapshot } from "@orquester/api/agent-chat";
 
-let authErrorNotice: typeof import("./providers")["authErrorNotice"];
 let loadProviders: typeof import("./providers")["loadProviders"];
 let providerForRefId: typeof import("./providers")["providerForRefId"];
 let providersStore: typeof import("./providers")["providersStore"];
@@ -21,7 +20,7 @@ let page: Awaited<ReturnType<typeof isolatedPage>>;
 async function loadPage(): Promise<void> {
   await page?.dispose();
   page = await isolatedPage();
-  ({ authErrorNotice, loadProviders, providerForRefId, providersStore, refreshProvider, setProviderSideEffects } = page.providers);
+  ({ loadProviders, providerForRefId, providersStore, refreshProvider, setProviderSideEffects } = page.providers);
 }
 beforeEach(loadPage);
 afterEach(async () => { await page.dispose(); });
@@ -63,18 +62,18 @@ function transportServing(providers: ProviderSnapshot[], refreshed?: ProviderSna
 
 describe("authErrorNotice — `unknown` is not `unauthenticated` (§7.7, T3 §7)", () => {
 
-  it("says nothing at all for an `unknown` provider that merely is not installed", () => {
+  it("says nothing at all for an `unknown` provider that merely is not installed", async () => {
     // Settings → Agents, not Settings → Accounts: an absent CLI has no
     // credential to fix, and a toast pointing at accounts is pure noise.
-    assert.equal(
-      authErrorNotice(
-        provider({ installed: false, status: "error", auth: { status: "unknown" }, message: "not installed" })
-      ),
-      null
-    );
+    const notices: unknown[] = [];
+    setProviderSideEffects({ onAuthError: (notice) => notices.push(notice) });
+    await loadProviders(transportServing([
+      provider({ installed: false, status: "error", auth: { status: "unknown" }, message: "not installed" })
+    ]));
+    assert.deepEqual(notices, []);
   });
 
-  it("is silent for a PENDING snapshot — nobody has looked at that provider yet", () => {
+  it("is silent for a PENDING snapshot — nobody has looked at that provider yet", async () => {
     // Host §3.2 layer one seeds every provider with this shape at construction
     // so `GET /providers` is never `[]`. It claims no verdict, so it must not
     // read as "sign in again": `status` is `unknown`, deliberately never
@@ -87,22 +86,14 @@ describe("authErrorNotice — `unknown` is not `unauthenticated` (§7.7, T3 §7)
       message: "Claude provider status has not been checked in this session yet.",
       models: [{ slug: "default", name: "Default", isDefault: true, capabilities: null }]
     });
-    assert.equal(authErrorNotice(pending), null);
+    const notices: unknown[] = [];
+    setProviderSideEffects({ onAuthError: (notice) => notices.push(notice) });
+    await loadProviders(transportServing([pending]));
+    assert.deepEqual(notices, []);
   });
 });
 
 describe("Q2-11 — auth errors are published for the sink to de-duplicate", () => {
-  it("publishes on every read, leaving dismissal memory to the app store", async () => {
-    const raised: string[] = [];
-    setProviderSideEffects({ onAuthError: ({ message }) => raised.push(message) });
-
-    const signedOut = provider({ auth: { status: "unauthenticated" } });
-    const transport = transportServing([signedOut]);
-    await loadProviders(transport, { force: true });
-    await loadProviders(transport, { force: true });
-    assert.equal(raised.length, 2, "one memory, and it is the app store's");
-    assert.match(raised[0]!, /not signed in/);
-  });
 
   it("says nothing at all for a healthy catalog", async () => {
     const raised: string[] = [];
@@ -134,15 +125,15 @@ describe("Q2-12 — refresh appends a provider the catalog has not seen", () => 
 
 describe("rate limits", () => {
   it("reports a snapshot's windows under each registry id it serves", async () => {
-    const seen: Array<{ refId: string; ids: string[] }> = [];
+    const seen: Array<{ refId: string; windows: Array<{ id: string; usedPercent: number }> }> = [];
     setProviderSideEffects({
       onRateLimits: (refId, update) =>
-        seen.push({ refId, ids: update.windows.map((window) => window.id) })
+        seen.push({ refId, windows: update.windows.map(({ id, usedPercent }) => ({ id, usedPercent })) })
     });
     await loadProviders(
       transportServing([
         provider({
-          refIds: ["claude"],
+          refIds: ["claude", "claude-alias"],
           usageLimits: {
             checkedAt: "2026-01-01T00:00:00.000Z",
             windows: [{ id: "w1", kind: "weekly", label: "Weekly", usedPercent: 10 }]
@@ -151,7 +142,10 @@ describe("rate limits", () => {
       ]),
       { force: true }
     );
-    assert.deepEqual(seen, [{ refId: "claude", ids: ["w1"] }]);
+    assert.deepEqual(seen, [
+      { refId: "claude", windows: [{ id: "w1", usedPercent: 10 }] },
+      { refId: "claude-alias", windows: [{ id: "w1", usedPercent: 10 }] }
+    ]);
   });
 });
 
@@ -241,7 +235,8 @@ describe("R8-M4 hop 3 — the values the host actually writes reach the toast", 
       "claude"
     );
     assert.equal(raised.length, 1);
-    assert.match(raised[0]!.message, /not signed in/);
+    assert.equal(raised[0]!.adapterId, "claude");
+    assert.equal(raised[0]!.tone, "sign-in");
   });
 });
 

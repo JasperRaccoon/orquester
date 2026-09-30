@@ -112,7 +112,7 @@ test("an empty model never wins: an empty current or input model resolves like a
   const claude = (await loadAgents(api()))[0];
   assert.deepEqual(resolveModelSelection(claude, { options: { effort: "high" }, current: { model: "", options: [] } }), { model: "default", options: [{ id: "effort", value: "high" }] });
   assert.throws(() => resolveModelSelection(claude, { options: { effort: "ultra" }, current: { model: "", options: [] } }), (e: { message: string }) => /medium, high/.test(e.message));
-  assert.deepEqual(resolveModelSelection(claude, { model: "" }), resolveModelSelection(claude, {}));
+  assert.deepEqual(resolveModelSelection(claude, { model: "" }), { model: "default", options: [] });
   assert.deepEqual(resolveModelSelection(claude, { model: "", current: { model: "haiku" } }), { model: "haiku", options: [] });
 });
 

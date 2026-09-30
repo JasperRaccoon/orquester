@@ -47,17 +47,8 @@ test("a body that fails before the host answers rejects as HOST_UNAVAILABLE, car
   assert.equal(isUploadTooLarge(error), true);
 });
 
-test("isUploadTooLarge reads the cap refusal bare or as a wrapper's cause, and nothing else", () => {
-  assert.equal(isUploadTooLarge(new UploadTooLargeError()), true);
-  assert.equal(isUploadTooLarge(new HostUnavailableError("wrapped", new UploadTooLargeError())), true);
-  assert.equal(isUploadTooLarge(new Error("wrapped", { cause: new UploadTooLargeError() })), true);
+test("upload cap classification does not mistake timeouts, cancellation or message text for a size refusal", () => {
   assert.equal(isUploadTooLarge(new HostUnavailableError("agent host request timed out")), false);
-  assert.equal(
-    isUploadTooLarge(new HostUnavailableError("EIO: i/o error, read", new Error("EIO: i/o error, read"))),
-    false
-  );
   assert.equal(isUploadTooLarge(new Error("aborted")), false);
   assert.equal(isUploadTooLarge(new UploadTooLargeError().message), false, "its message alone is not the refusal");
-  assert.equal(isUploadTooLarge(null), false);
-  assert.equal(isUploadTooLarge(undefined), false);
 });

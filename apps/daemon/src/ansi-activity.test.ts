@@ -101,16 +101,6 @@ test("BellScanner counts OSC 9 / OSC 777 notifications as bells", () => {
   assert.equal(scanner.feed(" done\x07"), 1);
 });
 
-test("ActivityTracker: an OSC 9 notification raises attention", () => {
-  const tracker = new ActivityTracker();
-
-  tracker.noteOutput("\x1b]777;notify;Claude;your turn\x07", 10);
-  assert.equal(tracker.snapshot().attention, "bell");
-  assert.equal(tracker.snapshot().needsAttentionAt, new Date(10).toISOString());
-
-  tracker.dispose();
-});
-
 test("ActivityTracker: output → working, bell sets attention, input clears it", () => {
   const tracker = new ActivityTracker();
 

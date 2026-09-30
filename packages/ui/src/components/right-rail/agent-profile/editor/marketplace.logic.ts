@@ -26,7 +26,7 @@ const GITHUB_URL = /^(?:https?:\/\/)?(?:www\.)?github\.com\/([A-Za-z0-9_.-]+)\/(
 const NAME = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 
 /** `owner/repo`, also from a pasted `https://github.com/owner/repo(.git)`; `null` when it is neither. */
-export function normalizeGithubRepo(text: string): string | null {
+function normalizeGithubRepo(text: string): string | null {
   const trimmed = text.trim();
   if (REPO.test(trimmed)) return trimmed;
   const match = GITHUB_URL.exec(trimmed);

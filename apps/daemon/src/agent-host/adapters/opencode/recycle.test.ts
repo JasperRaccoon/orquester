@@ -9,23 +9,23 @@
  * into — so no `opencode`, no account and no network.
  *
  * Nothing here sleeps: every wait is on an emitted event, a recorded request,
- * the real spawned child's close event, or the recycle scheduler's drain.
+ * the real spawned child's close event, or a completed HTTP response.
  */
 
 import assert from "node:assert/strict";
 import childProcess, { type SpawnOptions } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { syncBuiltinESMExports } from "node:module";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, relative } from "node:path";
 import test from "node:test";
 
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
 import type { AgentAdapter, AdapterContext, StartSessionInput } from "../../adapter.ts";
-import { createOpenCodeAdapter, type OpenCodeAdapterImpl } from "./index.ts";
+import { createOpenCodeAdapter } from "./index.ts";
 import { createHostIngestion, HOST_THREAD_ID } from "./testing/host.ts";
 import { makePeer, type Peer } from "./testing/peer.ts";
 import { deferred } from "./util.ts";
@@ -142,7 +142,7 @@ function json(res: ServerResponse, body: unknown, status = 200): void {
 // ---------------------------------------------------------------------------
 
 interface Harness {
-  adapter: OpenCodeAdapterImpl;
+  adapter: AgentAdapter;
   recycleIdleServers: NonNullable<AgentAdapter["recycleIdleServers"]>;
   waitForExit(server: PeerServer): Promise<void>;
   fake: FakeOpenCode;
@@ -210,7 +210,7 @@ async function makeHarness(t: test.TestContext): Promise<Harness> {
     modelSelection: { model: "openrouter/google/gemini-3.1-flash-lite" },
     runtimeMode: "approval-required"
   };
-  const adapter = await createOpenCodeAdapter(ctx) as OpenCodeAdapterImpl;
+  const adapter = await createOpenCodeAdapter(ctx);
   assert.ok(adapter.recycleIdleServers !== undefined);
   // The host's one consumer of the adapter's stream.
   const consumed = (async () => {
@@ -382,7 +382,9 @@ test("a busy server is deferred, recycled once when its turn ends, and not again
     const again = h.events.length;
     runTurnToIdle(h.fake, sessionId, sessionPromptId(h));
     await h.waitFor("turn.completed", again);
-    await h.adapter.recycleSettled();
+    // Observe the peer without holding adapter work that would defer an idle recycle.
+    const health = await fetch(`${h.servers[1]!.url}/global/health`);
+    await health.arrayBuffer();
     assert.equal(h.servers.length, 2);
     assert.equal(gone(h.servers[1]!), false, "the mark was spent on the first idle");
     assert.equal(h.adapter.hasSession(HOST_THREAD_ID), true);
@@ -486,3 +488,26 @@ function sessionPromptId(h: Harness): string {
   assert.ok(typeof messageId === "string", "the prompt carried a minted message id");
   return messageId;
 }
+
+// Project identity belongs to the adapter; a thread's directory remains its own.
+test("threads share a resolved project server, falling back to cwd for malformed legacy project keys", async (t) => {
+  const h = await makeHarness(t);
+  try {
+    const first = await h.start({ projectPath: undefined });
+    const project = first.cwd;
+    assert.ok(project !== undefined);
+    const nested = join(project, "nested");
+    await mkdir(nested);
+    await h.start({ threadId: "nested", projectPath: project + "/unused/..", cwd: nested });
+    for (const [index, projectPath] of ["", "   ", 42, null].entries()) {
+      await h.start({ threadId: "legacy-" + index, projectPath: projectPath as string });
+    }
+    await h.start({ threadId: "relative", projectPath: undefined, cwd: relative(process.cwd(), project) });
+    const creates = h.fake.requests.filter((request) => request.method === "POST" && request.url.pathname === "/session");
+    assert.equal(creates.length, 7);
+    assert.deepEqual([...new Set(creates.map((request) => request.url.origin))], [h.servers[0]!.url]);
+    assert.deepEqual(creates.map((request) => request.url.searchParams.get("directory")), [project, nested, project, project, project, project, project]);
+  } finally {
+    await h.dispose();
+  }
+});

@@ -166,7 +166,7 @@ interface ParsedModelSlug {
 }
 
 /** `"<providerID>/<modelID>"`; the model id itself may contain slashes. */
-export function parseOpenCodeModelSlug(slug: string | undefined): ParsedModelSlug | null {
+function parseOpenCodeModelSlug(slug: string | undefined): ParsedModelSlug | null {
   const trimmed = slug?.trim();
   if (trimmed === undefined || trimmed.length === 0) {
     return null;
@@ -181,7 +181,7 @@ export function parseOpenCodeModelSlug(slug: string | undefined): ParsedModelSlu
   };
 }
 
-export function selectedOption(
+function selectedOption(
   selection: ModelSelection | undefined,
   id: string
 ): string | undefined {
@@ -2599,7 +2599,7 @@ function addRelated(state: OpenCodeSessionState, sessionId: string): void {
  * `items` is `unknown[]` by contract; `history.ts` is the only reader that
  * knows this shape.
  */
-export function toThreadSnapshot(
+function toThreadSnapshot(
   threadId: string,
   messages: readonly OpenCodeMessageWithParts[]
 ): ThreadSnapshot {
@@ -2663,7 +2663,7 @@ function normalizeDir(value: string): string {
 }
 
 /** Answers are keyed by `question-<index>-<header-slug>`, then by header/text. */
-export function toQuestionAnswers(
+function toQuestionAnswers(
   request: OpenCodeQuestionRequest | undefined,
   answers: Record<string, unknown>
 ): string[][] {

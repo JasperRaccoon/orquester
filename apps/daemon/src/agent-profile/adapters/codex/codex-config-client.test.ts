@@ -45,42 +45,41 @@ describe("CodexAppServerClient", () => {
     return created;
   }
 
-  async function requests(): Promise<Array<{ method: string; params: unknown }>> {
+  async function requests(): Promise<Array<{ pid: number; method: string; params: unknown }>> {
     const text = await readFile(log, "utf8").catch(() => "");
     return text
       .split("\n")
       .filter(Boolean)
-      .map((line) => JSON.parse(line) as { method: string; params: unknown });
+      .map((line) => JSON.parse(line) as { pid: number; method: string; params: unknown });
   }
 
   it("spawns on demand with CODEX_HOME, handshakes once and reuses the child", async () => {
     const c = client();
-    assert.equal(c.isRunning, false);
     const read = await c.call("config/read", { includeLayers: true });
     assert.equal(read.layers?.[0].name.type, "user");
     assert.equal(read.layers?.[0].name.file, join(codexHome, "config.toml"));
-    const pid = c.pid;
+    const pid = (await requests()).at(-1)!.pid;
     await c.call("config/read", {});
-    assert.equal(c.pid, pid, "the same app-server serves both calls");
+    assert.equal((await requests()).at(-1)!.pid, pid, "the same app-server serves both calls");
     const methods = (await requests()).map((r) => r.method);
     assert.equal(methods.filter((m) => m === "initialize").length, 1);
     await c.close();
-    assert.equal(c.isRunning, false);
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
   });
 
   it("closes after the idle window and respawns on the next call", async (t) => {
     t.mock.timers.enable({ apis: ["setTimeout"] });
     const c = client();
     await c.call("config/read", {});
-    const pid = c.pid;
+    const pid = (await requests()).at(-1)!.pid;
     t.mock.timers.tick(29_999);
-    assert.equal(c.isRunning, true, "still inside the idle window");
-    t.mock.timers.tick(1);
-    assert.equal(c.isRunning, false, "closed once idle for the whole window");
     await c.call("config/read", {});
-    assert.equal(c.isRunning, true);
-    assert.notEqual(c.pid, pid);
+    assert.equal((await requests()).at(-1)!.pid, pid, "still inside the idle window");
+    t.mock.timers.tick(30_000);
+    await c.call("config/read", {});
+    assert.notEqual((await requests()).at(-1)!.pid, pid, "an idle child is replaced");
     await c.close();
+    assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
   });
 
   it("does not close for idleness while a call is pending", async (t) => {
@@ -88,8 +87,10 @@ describe("CodexAppServerClient", () => {
     const c = client({ extraEnv: { FAKE_CODEX_LOG: log, FAKE_CODEX_HANG: "hooks/list" } });
     const pending = c.call("hooks/list", { cwds: [dir] }, { timeoutMs: 60_000 }).catch((error: unknown) => error);
     await c.call("config/read", {});
+    const pid = (await requests()).at(-1)!.pid;
     t.mock.timers.tick(30_000);
-    assert.equal(c.isRunning, true, "hooks/list is still pending, so the idle window never opened");
+    await c.call("config/read", {});
+    assert.equal((await requests()).at(-1)!.pid, pid, "pending calls keep their child alive");
     t.mock.timers.tick(30_000);
     assert.ok((await pending) instanceof AgentProfileError);
     await c.close();
@@ -100,9 +101,10 @@ describe("CodexAppServerClient", () => {
       t.mock.timers.enable({ apis: ["setTimeout"] });
       const c = client({ extraEnv: { FAKE_CODEX_LOG: log, FAKE_CODEX_HANG: "hooks/list" } });
       await c.call("config/read", {});
+      const pid = (await requests()).at(-1)!.pid;
       const hung = c.call("hooks/list", {});
       t.mock.timers.tick(9_999);
-      assert.equal(c.isRunning, true, "inside the call's deadline");
+      assert.doesNotThrow(() => process.kill(pid, 0));
       t.mock.timers.tick(1);
       await assert.rejects(hung, (error: unknown) => {
         assert.ok(error instanceof AgentProfileError);
@@ -110,9 +112,10 @@ describe("CodexAppServerClient", () => {
         assert.ok(error.message.includes("hooks/list"));
         return true;
       });
-      assert.equal(c.isRunning, false, "the wedged child is gone");
       assert.deepEqual((await c.call("config/read", {})).layers?.[0].name.type, "user", "the next call starts afresh");
+      assert.notEqual((await requests()).at(-1)!.pid, pid);
       await c.close();
+      assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
     }
   });
 
@@ -147,7 +150,6 @@ describe("CodexAppServerClient", () => {
       assert.equal(error.code, "AGENT_CLI_FAILED");
       return true;
     });
-    assert.equal(c.isRunning, false);
   });
 
   it("quotes key path segments the way the config API reads them", () => {

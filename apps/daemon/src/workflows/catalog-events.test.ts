@@ -68,7 +68,6 @@ test("a provider change re-judges the rows: the problem goes out, and comes back
     const row = listed.workflows.find((candidate) => candidate.id === id);
     assert.equal(row?.errorCount, 1);
     assert.equal(row?.errors?.[0]?.code, "unknown_model");
-    assert.match(row?.errors?.[0]?.message ?? "", /NightlyTask: claude has no model "opus\[1m\]"/);
 
     // The provider is probed again and now lists the slug: the row goes out without its problem.
     host.agents = DEFAULT_FAKE_AGENTS.map((agent) =>

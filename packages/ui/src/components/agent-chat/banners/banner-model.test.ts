@@ -4,21 +4,8 @@ import assert from "node:assert/strict";
 import {
   resolveDockCard,
   showBackgroundLivenessBanner,
-  sortBannerStack,
   splitApprovalOptions
 } from "./banner-model.ts";
-
-test("activity sorts first, then severity, then notices", () => {
-  const sorted = sortBannerStack([
-    { id: "notice", variant: "info" },
-    { id: "error", variant: "error" },
-    { id: "live", variant: "default", priority: "activity" }
-  ]);
-  assert.deepEqual(
-    sorted.map((entry) => entry.id),
-    ["live", "error", "notice"]
-  );
-});
 
 test("the default four split into Approve/Decline primary and the rest overflow", () => {
   const { primary, overflow } = splitApprovalOptions();

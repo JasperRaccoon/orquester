@@ -221,11 +221,6 @@ export class AgentProfileService {
     );
   }
 
-  /** Resolves once every mutation queued so far (for every agent) has settled. */
-  async idle(): Promise<void> {
-    await Promise.all([...this.queues.values()]);
-  }
-
   // -------------------------------------------------------------------------
   // Reads (not queued)
   // -------------------------------------------------------------------------

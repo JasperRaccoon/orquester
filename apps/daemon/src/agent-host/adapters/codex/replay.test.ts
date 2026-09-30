@@ -499,22 +499,16 @@ describe("codex replay — hooks are a Codex notification too", () => {
 
 describe("codex replay — thread/status/changed carries waitingOnApproval", () => {
   it("does not choke on activeFlags and reports the thread as active", () => {
-    const { events, notifications } = replay("02-command-approval-accept.ndjson");
-    const waiting = notifications.filter(
-      (n) =>
-        n.method === "thread/status/changed" &&
-        Array.isArray(
-          (n.params as { status?: { activeFlags?: unknown } }).status?.activeFlags
-        ) &&
-        ((n.params as { status: { activeFlags: string[] } }).status.activeFlags ?? []).includes(
-          "waitingOnApproval"
-        )
+    const { notifications } = inbound(readFixture("02-command-approval-accept.ndjson"));
+    const waiting = notifications.find((notification) =>
+      notification.method === "thread/status/changed" &&
+      (notification.params as { status?: { activeFlags?: string[] } }).status?.activeFlags?.includes("waitingOnApproval")
     );
-    assert.ok(waiting.length > 0, "the flag IS emitted, contrary to §4.2");
-    const states = events
-      .filter((event) => event.type === "thread.state.changed")
-      .map((event) => (event.payload as { state: string }).state);
-    assert.ok(states.includes("active"));
-    assert.equal(states.at(-1), "idle");
+    assert.ok(waiting !== undefined, "the captured provider frame carries the flag");
+    const normaliser = new CodexNormaliser({ usage: new CodexUsageTracker() });
+    const events = normaliser.notification("thread/status/changed", waiting.params);
+    assert.deepEqual(events.map((event) => [event.type, event.payload]), [
+      ["thread.state.changed", { state: "active" }]
+    ]);
   });
 });

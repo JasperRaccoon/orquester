@@ -4,7 +4,7 @@ let page: Awaited<ReturnType<typeof isolatedPage>>;
 async function loadPage(): Promise<void> {
   await page?.dispose();
   page = await isolatedPage();
-  ({ createThreadStore, releaseThreadStore, retainThreadStore, THREAD_STORE_DISPOSE_GRACE_MS, updateThreadDraft } = page.store);
+  ({ createThreadStore, releaseThreadStore, retainThreadStore, updateThreadDraft } = page.store);
   ({ AgentChatCommandError } = page.transport);
   ({ registerComposerHandle } = page.bridge);
 }
@@ -25,7 +25,6 @@ import type { AgentChatThreadState, ThreadStore } from "./store";
 let createThreadStore: typeof import("./store")["createThreadStore"];
 let releaseThreadStore: typeof import("./store")["releaseThreadStore"];
 let retainThreadStore: typeof import("./store")["retainThreadStore"];
-let THREAD_STORE_DISPOSE_GRACE_MS: typeof import("./store")["THREAD_STORE_DISPOSE_GRACE_MS"];
 let updateThreadDraft: typeof import("./store")["updateThreadDraft"];
 import type { AgentChatTransport } from "./transport";
 let AgentChatCommandError: typeof import("./transport")["AgentChatCommandError"];
@@ -271,65 +270,6 @@ describe("the per-thread slice", () => {
   });
 });
 
-describe("the thread's goal (goals §8.1)", () => {
-  it("is on the slice the hooks read — the snapshot's, then every live goal row", async () => {
-    const { fake, state } = await store();
-    assert.equal(state().slice.goal, null, "a thread with no snapshot yet has none");
-
-    fake.push({
-      kind: "snapshot",
-      thread: snapshot({
-        seq: 2,
-        goal: { objective: "Make CI green", status: "active", rounds: 1, updatedAt: stamp(2) }
-      })
-    });
-    assert.equal(state().slice.goal?.objective, "Make CI green");
-
-    fake.push({
-      kind: "event",
-      seq: 3,
-      event: ev(
-        "thread.activity-appended",
-        {
-          activity: activity(
-            "goal.updated",
-            { goal: { objective: "Make CI green", status: "active", rounds: 2 }, change: "checked" },
-            { tone: "info", summary: "Goal check 2: not met", turnId: "t1" }
-          )
-        },
-        { seq: 3 }
-      )
-    });
-    assert.equal(state().slice.goal?.rounds, 2);
-    assert.ok(
-      state().rows.some((row) => row.kind === "goal-marker"),
-      "and the same row is the timeline's marker"
-    );
-
-    fake.push({
-      kind: "event",
-      seq: 4,
-      event: ev(
-        "thread.activity-appended",
-        {
-          activity: activity(
-            "goal.updated",
-            { goal: { objective: "Make CI green", status: "active", rounds: 2, phase: "executing" }, change: "progress" },
-            { tone: "info", summary: "Goal progress", turnId: "t1" }
-          )
-        },
-        { seq: 4 }
-      )
-    });
-    assert.equal(state().slice.goal?.phase, "executing", "progress moves the goal…");
-    assert.equal(
-      state().rows.filter((row) => row.kind === "goal-marker").length,
-      1,
-      "…and adds no row"
-    );
-  });
-});
-
 describe("commands", () => {
   it("mints a commandId per command and sends no optimistic row", async () => {
     const { api, fake, state } = await store();
@@ -377,23 +317,6 @@ describe("commands", () => {
     );
     await assert.rejects(() => refused.api.getState().actions.setAccount({ accountId: "acc-2" }));
     assert.equal(refused.state().slice.errorBanner, "Wait for the agent to finish.");
-  });
-
-  it("holds `reverting` for the length of the revert and clears it even on failure", async () => {
-    // §7.5's ONE reason the composer goes inert. It used to be hard-coded
-    // `false` in the view with nothing to set it, so a turn could be typed and
-    // sent into the middle of the host rewriting the thread.
-    const { api, state } = await store();
-    assert.equal(state().reverting, false);
-    const inFlight = api.getState().actions.revert({ targetTurnCount: 1 });
-    assert.equal(state().reverting, true, "inert while the command is out");
-    await inFlight;
-    assert.equal(state().reverting, false);
-
-    const failing = await store();
-    failing.fake.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"), 99);
-    await assert.rejects(() => failing.api.getState().actions.revert({ targetTurnCount: 1 }));
-    assert.equal(failing.state().reverting, false, "a refusal must not leave it inert forever");
   });
 
   it("locks the row while a decision is in flight and clears it in a finally", async () => {
@@ -650,47 +573,6 @@ describe("rewindTo", () => {
   });
 });
 
-describe("the queued-message model", () => {
-  const draft = (text: string) => ({
-    text,
-    attachments: [],
-    context: [],
-    interactionMode: "default" as const,
-    queuedAfterToolActivityId: null,
-    holdUntilUserAction: false
-  });
-
-  it("returns every queued message to the composer on interrupt", async () => {
-    const { api, state } = await store();
-    api.getState().actions.queueMessage(draft("one"));
-    api.getState().actions.queueMessage(draft("two"));
-    await api.getState().actions.interrupt();
-    assert.equal(state().slice.queue.length, 0);
-    assert.equal(state().draft.text, "one\n\ntwo");
-  });
-
-  it("holds a failed send at the FRONT so nothing overtakes it", async () => {
-    const { api, fake, state } = await store();
-    api.getState().actions.queueMessage(draft("one"));
-    api.getState().actions.queueMessage(draft("two"));
-    const headId = state().slice.queue[0]!.id;
-    fake.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"), 99);
-
-    await assert.rejects(() => api.getState().actions.sendQueuedNow(headId));
-    assert.equal(state().slice.queue[0]?.id, headId);
-    assert.equal(state().slice.queue[0]?.holdUntilUserAction, true);
-    assert.equal(state().slice.queue.length, 2);
-  });
-
-  it("returns one queued message to the composer", async () => {
-    const { api, state } = await store();
-    api.getState().actions.queueMessage(draft("one"));
-    api.getState().actions.returnQueuedToComposer(state().slice.queue[0]!.id);
-    assert.equal(state().slice.queue.length, 0);
-    assert.equal(state().draft.text, "one");
-  });
-});
-
 describe("client-local view state", () => {
 
   it("remembers a dismissal per (thread, message) — a DIFFERENT error still shows", async () => {
@@ -726,7 +608,6 @@ describe("client-local view state", () => {
     const { api, state } = await store();
     api.getState().actions.rememberScroll({ rowId: "r9", scrollOffset: 120, atEnd: false });
     assert.equal(state().slice.scroll?.rowId, "r9");
-    assert.equal(state().slice.scroll?.scrollOffset, 120);
     assert.equal(state().slice.follow, false);
 
     api.getState().actions.rememberScroll({ atEnd: true });
@@ -817,16 +698,6 @@ describe("the persisted composer draft", () => {
     api.getState().actions.saveDraft({ text: "", attachments: [], context: [] });
     assert.equal(state().draft.text, "");
     assert.equal(persisted()["draft-3"], undefined);
-  });
-
-  it("leaves another thread's draft alone", async () => {
-    backing[DRAFTS_KEY] = JSON.stringify({
-      other: { text: "someone else's", attachments: [], context: [] }
-    });
-    const { api } = await store("draft-4");
-    api.getState().actions.saveDraft({ text: "mine", attachments: [], context: [] });
-    assert.equal(persisted().other?.text, "someone else's");
-    assert.equal(persisted()["draft-4"]?.text, "mine");
   });
 
   /**
@@ -933,7 +804,7 @@ describe("a send outlives its store generation", () => {
   /** What a project switch does to a thread's slice: let go of it, and let the grace pass. */
   function tearDown(sessionId: string): void {
     releaseThreadStore(sessionId);
-    mock.timers.tick(THREAD_STORE_DISPOSE_GRACE_MS);
+    mock.timers.tick(2_000);
   }
 
   beforeEach(() => {

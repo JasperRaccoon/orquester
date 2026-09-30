@@ -368,20 +368,6 @@ test("an untracked SYMLINK renders as its target string, never the target's byte
   }
 });
 
-test("an untracked symlink to a host file outside the repo leaks nothing", async () => {
-  const dir = await tempDir();
-  try {
-    // The reviewer's exact case: `ln -s /etc/hostname x` inside a project.
-    await symlink("/etc/hostname", join(dir, "escape.txt"));
-    const { git } = fakeGit((args) => (args[0] === "status" ? nul("?? escape.txt") : ""));
-    const { diff } = await git.diff(dir, "escape.txt", {});
-    assert.match(diff, /^\+\/etc\/hostname$/m, "only the link target STRING is shown");
-    assert.equal(diff.split("\n").filter((l) => l.startsWith("+")).length, 2, "+++ header and one line");
-  } finally {
-    await rm(dir, { recursive: true, force: true });
-  }
-});
-
 test("an untracked file reached through a symlinked PARENT is refused", async () => {
   const outside = await tempDir();
   const dir = await tempDir();

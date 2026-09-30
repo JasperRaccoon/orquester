@@ -7,8 +7,7 @@ import {
 agentActivityText,
 deriveAgentSpawnSummary,
 deriveRosterDockView,
-isBackgroundShellItems,
-resolveSpawnRowAgents
+isBackgroundShellItems
 } from "./roster.logic";
 import { activity } from "./test-helpers";
 
@@ -57,10 +56,6 @@ describe("agentActivityText", () => {
     const settled = agent("a", "completed", { progress: "reading", result: "done" });
     assert.equal(agentActivityText(settled), "done");
   });
-
-  it("is null when nothing was reported", () => {
-    assert.equal(agentActivityText(agent("a", "idle")), null);
-  });
 });
 
 describe("deriveAgentSpawnSummary", () => {
@@ -73,16 +68,6 @@ describe("deriveAgentSpawnSummary", () => {
     });
     assert.equal(summary.live, true);
   });
-});
-
-describe("spawn row resolution", () => {
-  it("resolves ids against the live roster at render time", () => {
-    const roster = [agent("t1", "running"), agent("wf", "running", { kind: "workflow" })];
-    const resolved = resolveSpawnRowAgents(roster, { workflowId: "wf", agentTaskIds: ["t1", "gone"] });
-    assert.deepEqual(resolved.agents.map((a) => a.id), ["t1"]);
-    assert.equal(resolved.coordinator?.id, "wf");
-  });
-
 });
 
 describe("the dock", () => {

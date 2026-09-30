@@ -1268,7 +1268,7 @@ function shouldTakePrevious(previous: TimelineEntry, suffix: TimelineEntry): boo
   return sourceOrder(previous) <= sourceOrder(suffix);
 }
 
-export function hasExactArrayPrefix<T>(previous: readonly T[], next: readonly T[]): boolean {
+function hasExactArrayPrefix<T>(previous: readonly T[], next: readonly T[]): boolean {
   if (previous === next) {
     return true;
   }
@@ -1382,7 +1382,7 @@ function replaceStreamingTimelineMessages(
  *
  * *T3: `session-logic.ts:1652-1715`.*
  */
-export function deriveTimelineEntriesWithState(
+function deriveTimelineEntriesWithState(
   messages: readonly ThreadMessageItem[],
   proposedPlans: readonly ProposedPlanEntry[],
   workEntries: readonly WorkLogEntry[],

@@ -32,7 +32,7 @@ function isStamp(value: unknown): value is string {
   return typeof value === "string" && !Number.isNaN(Date.parse(value));
 }
 
-export function sanitizeThreadVisits(raw: unknown): ThreadVisits {
+function sanitizeThreadVisits(raw: unknown): ThreadVisits {
   if (typeof raw !== "object" || raw === null || Array.isArray(raw)) {
     return {};
   }

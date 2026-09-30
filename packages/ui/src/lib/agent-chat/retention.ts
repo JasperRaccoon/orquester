@@ -35,7 +35,7 @@
  */
 
 /** How long an unreferenced thread's folded state survives its live stream. */
-export const THREAD_SNAPSHOT_IDLE_TTL_MS = 5 * 60_000;
+const THREAD_SNAPSHOT_IDLE_TTL_MS = 5 * 60_000;
 
 /**
  * How many retained threads are kept at once.
@@ -90,11 +90,6 @@ export class ThreadRetentionCache<TState> {
       this.cells.set(key, { owner, snapshot: null, timer: null, retainedAt: 0 });
     }
     return owner;
-  }
-
-  /** Whether `owner` is still the generation allowed to write this key. */
-  isOwner(key: string, owner: object): boolean {
-    return this.cells.get(key)?.owner === owner;
   }
 
   /**

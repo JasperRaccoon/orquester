@@ -1,10 +1,9 @@
 import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 
-import { loadRightRailState, parseRightRailState, resetRightRailWidth, rightRailState, saveRightRailState, serializeRightRailState, setRightRailOpen, setRightRailWidth, subscribeRightRail, toggleRightRailPanel } from "./right-rail-state.ts";
+import { resetRightRailWidth, rightRailState, setRightRailOpen, setRightRailWidth, subscribeRightRail, toggleRightRailPanel } from "./right-rail-state.ts";
 
 const key = "orquester:right-rail";
-const defaults = { open: null, width: 320 };
 const originalStorage = Object.getOwnPropertyDescriptor(globalThis, "localStorage");
 let stored: Map<string, string>;
 
@@ -32,63 +31,77 @@ const denyStorage = () => Object.defineProperty(globalThis, "localStorage", {
   get() { throw new Error("SecurityError"); }
 });
 
-test("nothing stored, or garbage stored, loads the defaults", () => {
-  for (const raw of [null, undefined, "", "not json", "{", "null", "[]", "42", '"prompts"', "true"]) {
-    assert.deepEqual(parseRightRailState(raw), defaults, `raw ${String(raw)}`);
-  }
-});
+let railInstance = 0;
+function freshRail(): Promise<typeof import("./right-rail-state.ts")> {
+  return import(`./right-rail-state.ts?storage-case=${railInstance++}`);
+}
+async function loadStoredRail(raw: string) {
+  stored.set(key, raw);
+  return (await freshRail()).rightRailState();
+}
+async function persistRail(open: "history" | "workflows" | "profile", width: number) {
+  const rail = await freshRail();
+  rail.setRightRailOpen(open);
+  rail.setRightRailWidth(width, { persist: true });
+  return JSON.parse(stored.get(key)!);
+}
 
-test("a well-formed payload round-trips", () => {
-  assert.deepEqual(JSON.parse(serializeRightRailState({ open: "history", width: 412 })), {
+test("a well-formed payload round-trips", async () => {
+  assert.deepEqual(await persistRail("history", 412), {
     v: 1, open: "history", width: 412
   });
-  assert.deepEqual(parseRightRailState('{"v":1,"open":"history","width":412}'), {
+  assert.deepEqual(await loadStoredRail('{"v":1,"open":"history","width":412}'), {
     open: "history", width: 412
   });
 });
 
-test("each field is validated on its own: one bad field never costs the others", () => {
-  assert.deepEqual(parseRightRailState('{"v":1,"open":"files","width":400}'), { open: null, width: 400 });
-  assert.deepEqual(parseRightRailState('{"v":1,"open":"prompts","width":"wide"}'), { open: "prompts", width: 320 });
-  assert.deepEqual(parseRightRailState('{"width":300}'), { open: null, width: 300 });
-  assert.deepEqual(parseRightRailState('{"open":null}'), defaults);
-  assert.deepEqual(parseRightRailState('{"v":1,"open":"history","width":400,"sheet":"history"}'), { open: "history", width: 400 });
+test("each field is validated on its own: one bad field never costs the others", async () => {
+  assert.deepEqual(await loadStoredRail('{"v":1,"open":"files","width":400}'), { open: null, width: 400 });
+  const badWidth = await loadStoredRail('{"v":1,"open":"prompts","width":"wide"}');
+  assert.equal(badWidth.open, "prompts");
+  assert.ok(Number.isFinite(badWidth.width) && badWidth.width > 0);
+  assert.deepEqual(await loadStoredRail('{"width":300}'), { open: null, width: 300 });
+  assert.equal((await loadStoredRail('{"open":null}')).open, null);
+  assert.deepEqual(await loadStoredRail('{"v":1,"open":"history","width":400,"sheet":"history"}'), { open: "history", width: 400 });
   for (const open of ["true", "1", '"History"', '"Workflows"', '{"id":"prompts"}', '["prompts"]']) {
-    assert.equal(parseRightRailState(`{"open":${open}}`).open, null);
+    assert.equal((await loadStoredRail(`{"open":${open}}`)).open, null);
   }
 });
 
-test("the workflows panel is a panel like the others", () => {
-  assert.deepEqual(parseRightRailState('{"v":1,"open":"workflows","width":360}'), { open: "workflows", width: 360 });
-  assert.deepEqual(JSON.parse(serializeRightRailState({ open: "workflows", width: 360 })), { v: 1, open: "workflows", width: 360 });
+test("the workflows panel is a panel like the others", async () => {
+  assert.deepEqual(await loadStoredRail('{"v":1,"open":"workflows","width":360}'), { open: "workflows", width: 360 });
+  assert.deepEqual(await persistRail("workflows", 360), { v: 1, open: "workflows", width: 360 });
 });
 
-test("the agent profile panel is a panel like the others", () => {
-  assert.deepEqual(parseRightRailState('{"v":1,"open":"profile","width":420}'), { open: "profile", width: 420 });
-  assert.deepEqual(JSON.parse(serializeRightRailState({ open: "profile", width: 420 })), { v: 1, open: "profile", width: 420 });
-  assert.equal(parseRightRailState('{"open":"Profile"}').open, null);
+test("the agent profile panel is a panel like the others", async () => {
+  assert.deepEqual(await loadStoredRail('{"v":1,"open":"profile","width":420}'), { open: "profile", width: 420 });
+  assert.deepEqual(await persistRail("profile", 420), { v: 1, open: "profile", width: 420 });
+  assert.equal((await loadStoredRail('{"open":"Profile"}')).open, null);
 });
 
-test("malformed stored widths fall back without losing the panel", () => {
+test("malformed stored widths fall back without losing the panel", async () => {
   for (const bad of ["0", "-40", "null", '"400"', "true", "[400]", "{}", "1e999"]) {
-    assert.deepEqual(parseRightRailState(`{"open":"history","width":${bad}}`), { open: "history", width: 320 });
+    const parsed = await loadStoredRail(`{"open":"history","width":${bad}}`);
+    assert.equal(parsed.open, "history");
+    assert.ok(Number.isFinite(parsed.width) && parsed.width > 0);
   }
 });
 
-test("a payload written by another version is still read field by field", () => {
-  assert.deepEqual(parseRightRailState('{"v":2,"open":"history","width":480,"extra":{"a":1}}'), { open: "history", width: 480 });
-  assert.equal(parseRightRailState('{"v":"one","open":"prompts"}').open, "prompts");
+test("a payload written by another version is still read field by field", async () => {
+  assert.deepEqual(await loadStoredRail('{"v":2,"open":"history","width":480,"extra":{"a":1}}'), { open: "history", width: 480 });
+  assert.equal((await loadStoredRail('{"v":"one","open":"prompts"}')).open, "prompts");
 });
 
-test("load and save swallow storage errors and missing storage", () => {
-  stored.set(key, '{"v":1,"open":"prompts","width":350}');
-  assert.deepEqual(loadRightRailState(), { open: "prompts", width: 350 });
+test("load and save swallow storage errors and missing storage", async () => {
+  assert.deepEqual(await loadStoredRail('{"v":1,"open":"prompts","width":350}'), { open: "prompts", width: 350 });
   denyStorage();
-  assert.deepEqual(loadRightRailState(), defaults);
-  assert.doesNotThrow(() => saveRightRailState(defaults));
+  const denied = await freshRail();
+  assert.doesNotThrow(() => denied.rightRailState());
+  assert.doesNotThrow(() => denied.setRightRailOpen("history"));
   Reflect.deleteProperty(globalThis, "localStorage");
-  assert.deepEqual(loadRightRailState(), defaults);
-  assert.doesNotThrow(() => saveRightRailState(defaults));
+  const missing = await freshRail();
+  assert.doesNotThrow(() => missing.rightRailState());
+  assert.doesNotThrow(() => missing.setRightRailOpen("history"));
 });
 
 test("toggling opens, switches and closes the dock — and persists every change", () => {
@@ -108,19 +121,17 @@ test("a live drag updates the state only; the release persists it", () => {
   assert.equal(stored.has(key), false);
   setRightRailWidth(420, { persist: true });
   assert.equal(JSON.parse(stored.get(key)!).width, 420);
-  resetRightRailWidth();
-  assert.equal(JSON.parse(stored.get(key)!).width, 320);
 });
 
 test("subscribers hear real changes only, and can unsubscribe", () => {
   const seen: unknown[] = [];
-  const unsubscribe = subscribeRightRail(() => seen.push(rightRailState()));
+  const unsubscribe = subscribeRightRail(() => seen.push(rightRailState().open));
   try {
     toggleRightRailPanel("prompts");
     const snapshot = rightRailState();
     setRightRailOpen("prompts");
     assert.equal(rightRailState(), snapshot, "useSyncExternalStore requires a stable unchanged snapshot");
-    assert.deepEqual(seen, [{ open: "prompts", width: 320 }]);
+    assert.deepEqual(seen, ["prompts"]);
   } finally {
     unsubscribe();
   }

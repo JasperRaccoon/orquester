@@ -98,19 +98,16 @@ export const StatusGlyph: React.FC<{ icon: StatusIcon; tone: RunTone; size?: num
 
 /**
  * A clock for live durations: every second while `live`, else every 30 s
- * (relative times). A `fixed` clock (a caller's own, or a static render) wins
- * and runs no timer.
+ * (relative times).
  */
-export function useNow(live: boolean, fixed?: number): number {
-  const [now, setNow] = useState(() => fixed ?? Date.now());
-  const pinned = fixed !== undefined;
+export function useNow(live: boolean): number {
+  const [now, setNow] = useState(() => Date.now());
   useEffect(() => {
-    if (pinned) return;
     setNow(Date.now());
     const timer = setInterval(() => setNow(Date.now()), live ? 1_000 : 30_000);
     return () => clearInterval(timer);
-  }, [live, pinned]);
-  return fixed ?? now;
+  }, [live]);
+  return now;
 }
 
 /** A section label inside a run panel ("ACCOUNT", "HOPS"). */

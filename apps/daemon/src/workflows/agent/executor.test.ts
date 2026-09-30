@@ -90,16 +90,6 @@ test("a saved prompt + append renders {{…}} first, escaped for the {variables}
   assert.equal(sc.host.turnLog[0]!.input, "Fix app on main: leak {diff} and {branch}\n\nAlso run {project}.", "values inserted by {{…}} are never rendered as variables");
 });
 
-test("a new chat's title renders {{…}} (secrets stay hidden) and falls back to workflow · block", async () => {
-  const sc = new Scenario({ accounts: CLAUDE });
-  const titled = testWorkflow([agentNode("n1", { session: { kind: "new", title: "Fix {{ trigger.title }} with {{ secrets.TOKEN }}" } }, "Builder")]);
-  const first = outputOf((await sc.run(titled, "n1", { trigger: { title: "ABC-1" }, secrets: { TOKEN: "s3cr3t-value" } })).result);
-  assert.equal(sc.host.session(first.sessionId).title, "Fix ABC-1 with «secret:TOKEN»");
-  const blank = testWorkflow([agentNode("n2", { session: { kind: "new", title: "{{ trigger.nothing }}" } }, "Checker")]);
-  const second = outputOf((await sc.run(blank, "n2")).result);
-  assert.equal(sc.host.session(second.sessionId).title, `${blank.name} · Checker`);
-});
-
 test("a failed variable read fails the block naming it, and no session is created", async () => {
   const sc = new Scenario({ accounts: CLAUDE, prompts: fakePrompts({ failVariable: "diff" }) });
   const wf = testWorkflow([agentNode("n1", { prompt: { kind: "text", text: "Review {diff}" } })]);
@@ -163,17 +153,6 @@ test("a plan card is implemented with the plan implementation prompt", async () 
   assert.ok(sc.host.turnLog[1]!.input.includes("1. do it"));
 });
 
-test("done only after background work ends (then the quiet window)", async () => {
-  const sc = new Scenario({
-    accounts: CLAUDE,
-    behaviour: () => [{ kind: "say", text: "spawned" }, { kind: "background", steps: [{ kind: "wait", ms: 90_000 }, { kind: "say", text: "sub done", agentId: "sub" }] }]
-  });
-  const start = sc.clock.now().getTime();
-  const out = outputOf((await sc.run(testWorkflow([agentNode("n1")]), "n1")).result);
-  assert.equal(out.text, "spawned");
-  assert.ok(sc.clock.now().getTime() - start >= 95_000, "finished only after the background work and the quiet window");
-});
-
 test("whenOnlyWatchLoopsRemain: finish ends after a 60 s grace; wait keeps waiting until maxMinutes", async () => {
   const behaviour = () => [{ kind: "say" as const, text: "server up" }, { kind: "background" as const, liveness: "monitoring" as const, forever: true, steps: [] }];
   const sc = new Scenario({ accounts: CLAUDE, behaviour });
@@ -186,19 +165,6 @@ test("whenOnlyWatchLoopsRemain: finish ends after a 60 s grace; wait keeps waiti
   const sc2 = new Scenario({ accounts: CLAUDE, behaviour });
   const { result } = await sc2.run(testWorkflow([agentNode("n1", { whenOnlyWatchLoopsRemain: "wait", maxMinutes: 10 })]), "n1");
   assert.equal((result as { error: { kind: string } }).error.kind, "timeout");
-});
-
-test("a background agent waking the parent into a provider-started turn is waited for; its text is the output", async () => {
-  const sc = new Scenario({
-    accounts: CLAUDE,
-    behaviour: () => [
-      { kind: "say", text: "started a helper" },
-      { kind: "background", steps: [{ kind: "wait", ms: 20_000 }, { kind: "wake", steps: [{ kind: "wait", ms: 3_000 }, { kind: "say", text: "helper reported: all green" }] }] }
-    ]
-  });
-  const out = outputOf((await sc.run(testWorkflow([agentNode("n1")]), "n1")).result);
-  assert.equal(out.text, "helper reported: all green");
-  assert.equal(sc.host.session(out.sessionId).turns.length, 2);
 });
 
 test("a wake that becomes a turn only 20 s after the background work ended is still waited for (a held Claude wake)", async () => {

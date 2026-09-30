@@ -121,18 +121,22 @@ describe("E6: a resumed thread replays the provider's own history", () => {
     // A turn of its own first: the thread now has items.
     await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "first" });
     await host.settle();
-    const ingestedAfterFirst = host.ingestion.ingested.length;
+    const projectedUserRows = () =>
+      host.ingestion.ingested.filter(
+        (event) =>
+          event.raw?.source === HISTORICAL_RAW_SOURCE &&
+          event.type === "item.completed" &&
+          event.payload.itemType === "user_message" &&
+          (event.payload as { detail?: string }).detail === "remember the token SWORDFISH"
+      );
+    assert.equal(projectedUserRows().length, 1, "the provider history reached ingestion");
 
     // A restart re-enters `startSession` with the same cursor.
     await claude.stopSession(threadId);
     await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "second" });
     await host.settle();
 
-    assert.equal(
-      host.ingestion.ingested.length,
-      ingestedAfterFirst,
-      "history is replayed at most once, and never over a live timeline"
-    );
+    assert.equal(projectedUserRows().length, 1, "existing history is not replayed a second time");
     await host.stop();
   });
 });

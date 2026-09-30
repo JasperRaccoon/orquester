@@ -33,9 +33,6 @@ const LOG_DOWNLOAD_WINDOW_BYTES = 4 * 1024 * 1024;
 
 export type LogStream = "stdout" | "stderr";
 
-/** A layout effect in the browser, a plain one in the static render checks (which run neither). */
-const useIsomorphicLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
-
 interface LogViewerViewProps {
   lines: readonly string[];
   stream: LogStream;
@@ -54,7 +51,7 @@ interface LogViewerViewProps {
   className?: string;
 }
 
-/** The viewer as a picture of its props (no stream) — what the container and the render checks draw. */
+/** The scrollable log and stream controls; LogViewer owns the reader. */
 const LogViewerView: React.FC<LogViewerViewProps> = ({
   lines,
   stream,
@@ -74,7 +71,7 @@ const LogViewerView: React.FC<LogViewerViewProps> = ({
   const [pinned, setPinned] = useState(true);
 
   // Stick to the bottom while pinned; a new stream starts pinned.
-  useIsomorphicLayoutEffect(() => {
+  useLayoutEffect(() => {
     const element = scroller.current;
     if (element && pinned) element.scrollTop = element.scrollHeight;
   }, [lines, pinned]);

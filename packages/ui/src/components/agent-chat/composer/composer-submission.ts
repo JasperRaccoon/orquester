@@ -159,7 +159,7 @@ export function composerSubmissionValidationMessage(input: {
 // ---------------------------------------------------------------------------
 
 /** 32 KiB. *T3: `textPaste.ts:1`.* */
-export const PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES = 32 * 1024;
+const PASTED_TEXT_ATTACHMENT_THRESHOLD_BYTES = 32 * 1024;
 
 export type PastedTextDisposition = "attachment" | "inline";
 
@@ -289,7 +289,7 @@ export type StageRefDecision =
   | { kind: "staged"; key: string; name: string; sizeBytes: number; mimeType: string };
 
 /** Stable per ref, so re-delivering one is idempotent all the way down. */
-export function stagedAttachmentKeyForRef(ref: { id: string }): string {
+function stagedAttachmentKeyForRef(ref: { id: string }): string {
   return `ref:${ref.id}`;
 }
 
@@ -414,7 +414,7 @@ export function pendingRequestBlocksSend(input: {
  * uploads still in the tray and the plan follow-up do not apply, and the draft
  * is never touched. One send at a time, whoever started it.
  */
-export function externalSendRefusal(input: {
+function externalSendRefusal(input: {
   text: string;
   reverting: boolean;
   sending: boolean;
@@ -455,10 +455,10 @@ export function planExternalSend(
 }
 
 /** A second identical queue from the rail inside this window is a double click's twin. */
-export const EXTERNAL_QUEUE_TWIN_MS = 1_000;
+const EXTERNAL_QUEUE_TWIN_MS = 1_000;
 
 /** Why the rail's second, identical Send was not queued again. */
-export const ALREADY_QUEUED_REASON = "Already queued — it sends when the current turn finishes.";
+const ALREADY_QUEUED_REASON = "Already queued — it sends when the current turn finishes.";
 
 /**
  * What the composer does with a message the right rail hands it to SEND —
@@ -536,13 +536,6 @@ export function hasSendableContent(input: {
 // ---------------------------------------------------------------------------
 // The plan follow-up (§7.5, §7.4 primary actions)
 // ---------------------------------------------------------------------------
-
-/**
- * The message sent when the user approves a plan: one spelling in
- * `@orquester/api/agent-chat`, shared with the host and MCP.
- * *T3: `proposedPlan.ts:74-77`.*
- */
-export { buildPlanImplementationPrompt };
 
 /** The plan's own title — its first markdown heading — or `null`. */
 export function proposedPlanTitle(planMarkdown: string): string | null {

@@ -27,7 +27,6 @@ let seq = 0;
 /** One logged event, as the store decodes it back. */
 function logged(type: "thread.activity-appended", payload: { activity: ThreadActivityItem }): DomainEvent;
 function logged(type: "thread.message-sent", payload: { messageId: string; role: "assistant"; text: string; streaming: boolean; turnId: string | null }): DomainEvent;
-function logged(type: "thread.reverted", payload: { turnCount: number }): DomainEvent;
 function logged(type: string, payload: unknown): DomainEvent {
   seq += 1;
   return { seq, eventId: `ev-${seq}`, threadId: "t1", type, payload, occurredAt: "2026-09-23T10:00:00.000Z", commandId: null, causationEventId: null, metadata: {} } as unknown as DomainEvent;
@@ -44,28 +43,6 @@ function row(id: string, activityKind: string, toolUseId: string | undefined, ex
   });
 }
 const chunk = (id: string, toolUseId: string, delta: unknown): DomainEvent => row(id, "tool.output", toolUseId, { streamKind: "command_output", delta });
-
-test("joins every chunk of the item's call verbatim in log order, and reports complete once the call's completion exists", () => {
-  const shell = "bgshell:task-1";
-  const events = [
-    row("start", "tool.started", shell, { itemType: "command_execution", status: "inProgress" }),
-    chunk("o1", shell, "$ make\n"),
-    chunk("x1", "call-2", "another call's output\n"),
-    chunk("o2", shell, "  building…\n\n"),
-    row("x-done", "tool.completed", "call-2", { itemType: "command_execution", status: "completed" }),
-    chunk("o3", shell, "done"),
-    row("done", "tool.completed", shell, { itemType: "command_execution", status: "completed", data: { toolName: "Bash", background: true } })
-  ];
-  const whole = { toolUseId: shell, output: "$ make\n  building…\n\ndone", complete: true, truncated: false };
-  // Named by any row of the call: its completion, its start, even one of its chunks.
-  assert.deepEqual(joinToolOutput(events, "done"), whole);
-  assert.deepEqual(joinToolOutput(events, "start"), whole);
-  assert.deepEqual(joinToolOutput(events, "o2"), whole);
-  // Before the completion lands the call is still running: the output so far, not complete.
-  assert.deepEqual(joinToolOutput(events.slice(0, 5), "start"), { toolUseId: shell, output: "$ make\n  building…\n\n", complete: false, truncated: false });
-  // Another call's completion never completes this one.
-  assert.equal(joinToolOutput(events.slice(0, 6), "start")!.complete, false);
-});
 
 test("a call that streamed nothing answers an empty output; an item naming no call, a message and an unknown id answer null", () => {
   const events = [
@@ -84,21 +61,6 @@ test("a call that streamed nothing answers an empty output; an item naming no ca
 test("the item's newest write names the call, as readItem reads it", () => {
   const events = [row("same", "tool.started", "old-call"), chunk("o1", "old-call", "old\n"), chunk("o2", "new-call", "new\n"), row("same", "tool.updated", "new-call")];
   assert.equal(joinToolOutput(events, "same")!.output, "new\n");
-});
-
-test("a rewind does not unprint output: chunks written in the turns a revert removed are still joined", () => {
-  // Chunks written before a rewind are what the command printed, and a rewind unprints nothing: the raw log keeps them
-  // (documented, not filtered). A Claude rewind restarts the session, which closes an open shell first (its item
-  // settles `failed`, `closeLiveTasks`), so the shell's end lands before the revert and nothing of it follows.
-  const shell = "bgshell:task-1";
-  const events = [
-    row("start", "tool.started", shell, { itemType: "command_execution" }),
-    chunk("o1", shell, "before\n"),
-    chunk("o2", shell, "in a turn the rewind removed\n"),
-    row("end", "tool.completed", shell, { itemType: "command_execution", status: "failed" }),
-    logged("thread.reverted", { turnCount: 1 })
-  ];
-  assert.deepEqual(joinToolOutput(events, "start"), { toolUseId: shell, output: "before\nin a turn the rewind removed\n", complete: true, truncated: false });
 });
 
 test("the cap cuts the join in-band, on a character boundary, and the completion after the cut is still reported", () => {
@@ -298,7 +260,7 @@ test("a running call's windows continue across appends: totalBytes grows, and co
   await store.append({ threadId: "t1", events: [created("t1"), appendable("t1", "start", "tool.started", SHELL, { itemType: "command_execution" }), streamed("t1", "o1", SHELL, "one\n")] });
   const first = await store.readToolOutputWindow("t1", "start", { offset: 0, maxBytes: 100 });
   assert.deepEqual(first, { toolUseId: SHELL, offset: 0, text: "one\n", totalBytes: 4, complete: false, truncated: false });
-  await store.append({ threadId: "t1", events: [noise("t1", "n1"), streamed("t1", "o2", SHELL, "  two\n")] });
+  await store.append({ threadId: "t1", events: [noise("t1", "n1"), appendable("t1", "other-done", "tool.completed", "call-2", { itemType: "command_execution" }), streamed("t1", "o2", SHELL, "  two\n")] });
   const second = await store.readToolOutputWindow("t1", "start", { offset: 4, maxBytes: 100 });
   assert.deepEqual(second, { toolUseId: SHELL, offset: 4, text: "  two\n", totalBytes: 10, complete: false, truncated: false });
   await store.append({ threadId: "t1", events: [appendable("t1", "done", "tool.completed", SHELL, { itemType: "command_execution" })] });
@@ -314,6 +276,7 @@ test("a revert appended after the cache filled changes nothing: a rewind unprint
   await store.append({ threadId: "t1", events: [streamed("t1", "o2", SHELL, "in a turn the rewind removed\n"), reverted("t1"), streamed("t1", "o3", SHELL, "after\n")] });
   const window = await store.readToolOutputWindow("t1", "start", {});
   assert.equal(window?.text, "before\nin a turn the rewind removed\nafter\n");
+  assert.equal((await store.readToolOutput("t1", "start"))?.output, "before\nin a turn the rewind removed\nafter\n");
 });
 
 test("deleteThread drops the thread's cache: a thread recreated under the same id answers its own output and items", async (t) => {

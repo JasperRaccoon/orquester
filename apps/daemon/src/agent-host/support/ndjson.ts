@@ -14,7 +14,7 @@ const BOM = "﻿";
  * that writes megabytes with no newline would otherwise grow the buffer
  * without limit (R4 #17); the reader resyncs at the next newline.
  */
-export const NDJSON_MAX_LINE_BYTES = 8 * 1024 * 1024;
+const NDJSON_MAX_LINE_BYTES = 8 * 1024 * 1024;
 
 /** Carries partial lines and UTF-8 across chunks, strips CRLF and a leading BOM. */
 export class NdjsonLineReader {

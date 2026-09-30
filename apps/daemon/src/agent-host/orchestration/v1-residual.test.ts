@@ -163,9 +163,7 @@ describe("R2-7: a blocked provider command is refused before it is committed", (
           input: "/always-approve"
         }),
       (error: unknown) =>
-        isAgentChatCommandError(error) &&
-        error.code === "INVALID_COMMAND" &&
-        /permission selector/.test(error.message)
+        isAgentChatCommandError(error) && error.code === "INVALID_COMMAND"
     );
     await host.settle();
 

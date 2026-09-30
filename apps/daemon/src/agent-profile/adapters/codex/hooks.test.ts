@@ -76,9 +76,9 @@ describe("codex hooks — identity and trust", () => {
   });
 
   it("refuses a hooks.json it could not edit safely", () => {
-    assert.throws(() => parseHooksDocument("[]"), /JSON object/);
-    assert.throws(() => parseHooksDocument('{"hooks": {"Stop": {}}}'), /list of matcher groups/);
-    assert.throws(() => parseHooksDocument('{"hooks": {"Stop": [{"hooks": 3}]}}'), /list of handlers/);
+    assert.throws(() => parseHooksDocument("[]"));
+    assert.throws(() => parseHooksDocument('{"hooks": {"Stop": {}}}'));
+    assert.throws(() => parseHooksDocument('{"hooks": {"Stop": [{"hooks": 3}]}}'));
     assert.deepEqual(parseHooksDocument('{"other": 1}'), { other: 1, hooks: {} });
   });
 

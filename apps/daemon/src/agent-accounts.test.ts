@@ -136,7 +136,7 @@ test("ensureFreshForUsage refreshes an idle Codex account whose token is expirin
   let called = 0;
   const svc = await makeServiceWithFetch(t, now, async () => {
     called++;
-    return new Response(JSON.stringify({ access_token: "NEW", refresh_token: "NEWR", id_token: jwt({ email: "c@x.com" }) }), { status: 200 });
+    return new Response(JSON.stringify({ access_token: "NEW", refresh_token: "NEWR", id_token: jwt({ email: "fresh@x.com" }) }), { status: 200 });
   });
   const acct = await svc.importAccount({ content: codexBlob(Math.floor((now + 60_000) / 1000)) });
   await svc.ensureFreshForUsage("codex", acct.id, new Set());
@@ -144,6 +144,7 @@ test("ensureFreshForUsage refreshes an idle Codex account whose token is expirin
   const auth = JSON.parse(await readFile(join(svc.homePath("codex", acct.id), "auth.json"), "utf8"));
   assert.equal(auth.tokens.access_token, "NEW");
   assert.equal(auth.tokens.refresh_token, "NEWR");
+  assert.equal(auth.tokens.id_token, jwt({ email: "fresh@x.com" }));
   assert.equal(auth.tokens.account_id, "acc1"); // preserved
 });
 

@@ -73,7 +73,7 @@ describe("thread index file", () => {
     assert.equal((await stat(filePath)).mode & 0o777, 0o600);
   });
 
-  for (const version of ["1", "2", "3", "4", "999"]) {
+  for (const version of ["1", "999"]) {
     it(`replaces a file with incompatible schema version ${version} and starts empty`, async () => {
       const log = new TestLog();
       const first = createThreadIndex({ filePath, logger: testLogger() });

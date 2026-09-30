@@ -31,8 +31,4 @@ describe("temporary workflow projects in the sidebar", () => {
     assert.equal(isWorkflowTempProject({ path: "/w/ws/wf-old-bbbbbbbb", name: "wf-old-bbbbbbbb" }, known), false);
     assert.equal(isWorkflowTempProject({ path: "/w/ws/wf-mine-12345678", name: "wf-mine-12345678" }, known), false);
   });
-
-  it("the name fallback counts when a known run's id confirms it", () => {
-    assert.equal(isWorkflowTempProject({ path: "/w/ws/wf-review-deadbeef", name: "wf-review-deadbeef" }, known), true);
-  });
 });

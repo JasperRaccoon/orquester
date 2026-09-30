@@ -71,7 +71,7 @@ export interface PersistableAttachment {
  * all. A failed one is dropped for the same reason: its retry needs the very
  * `File` that is going away.
  */
-export function persistableAttachmentRefs(
+function persistableAttachmentRefs(
   attachments: readonly PersistableAttachment[]
 ): AttachmentRef[] {
   const refs: AttachmentRef[] = [];
@@ -315,7 +315,7 @@ export function persistedDraftAfterReturn(input: {
 // ---------------------------------------------------------------------------
 
 /** How long a keystroke may stay unpersisted. */
-export const DRAFT_PERSIST_DELAY_MS = 300;
+const DRAFT_PERSIST_DELAY_MS = 300;
 
 export interface DraftPersistScheduler {
   /** Persist this draft at the end of the current window. */

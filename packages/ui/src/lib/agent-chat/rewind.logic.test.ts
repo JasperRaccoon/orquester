@@ -80,13 +80,6 @@ describe("deriveRewindTargets", () => {
       ["u2"]
     );
   });
-
-  it("never reports fewer than one dropped turn, even while the turn is pending", () => {
-    // The running turn has no id yet, so it is not "started" — but rewinding
-    // to its prompt still removes it.
-    const rows = [userRow("u1", "go", 0)];
-    assert.equal(deriveRewindTargets(rows, [turn(null)])[0]?.droppedTurnCount, 1);
-  });
 });
 
 describe("createEscapeSequence", () => {

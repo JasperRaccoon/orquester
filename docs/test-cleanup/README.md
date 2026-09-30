@@ -1,5 +1,7 @@
 # Test cleanup record
 
+The [current strict cleanup index](strict/README.md) records the new 5,896-case review, completed scope changes, incoming audit and pending final verification. The records below remain historical.
+
 This directory archives earlier cleanup decisions, including the incoming `7f3516cd` cleanup and older linked reports. [The slop audit](../slop-audit.md) records the final merged decisions and verification; it supersedes historical dispositions here when review retained an assertion or production interface.
 
 The cleanup starting at `9675e822` is summarized in [current.md](current.md). Its full original disposition ledgers are preserved in [commit `7f3516cd`](https://github.com/JasperRaccoon/orquester/commit/7f3516cd). The scope summaries retain concrete change reasons, risks, validation, and unique safeguards; repetitive unchanged-test inventories and temporary runner log paths are omitted. The report below describes the earlier cleanup from `008f84e6`.

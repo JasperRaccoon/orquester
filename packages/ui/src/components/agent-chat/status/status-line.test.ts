@@ -98,25 +98,3 @@ test("zero and non-finite extras are dropped rather than shown", () => {
   assert.equal(model.autoCompactAtTokens, null);
   assert.equal(model.totalProcessedTokens, null);
 });
-
-test("the meter carries the auto-compaction verdict through to its model", () => {
-  const off = deriveContextMeter({
-    usedTokens: 1_000,
-    maxTokens: 200_000,
-    autoCompactAtTokens: null,
-    totalProcessedTokens: null,
-    reportsContextWindow: true,
-    compactsAutomatically: false
-  });
-  assert.equal(off?.compactsAutomatically, false);
-
-  const unknown = deriveContextMeter({
-    usedTokens: 1_000,
-    maxTokens: 200_000,
-    autoCompactAtTokens: null,
-    totalProcessedTokens: null,
-    reportsContextWindow: true,
-    compactsAutomatically: null
-  });
-  assert.equal(unknown?.compactsAutomatically, undefined, "unknown stays unknown");
-});

@@ -82,7 +82,7 @@ export type SlashMenuItem = Extract<
  *
  * *T3: `providerSkills.ts:44-56`.*
  */
-export function isProviderSkillUserInvocable(skill: Skill): boolean {
+function isProviderSkillUserInvocable(skill: Skill): boolean {
   return skill.enabled && skill.userInvocable !== false;
 }
 
@@ -129,7 +129,7 @@ export function timelineSkillNames(
 }
 
 /** `$` always lists skills; `/` lists them only when the setting is on. */
-export function skillsForSlashMenu(
+function skillsForSlashMenu(
   skills: readonly Skill[],
   showSkillsInSlashMenu: boolean
 ): Skill[] {
@@ -137,7 +137,7 @@ export function skillsForSlashMenu(
 }
 
 /** The `$` menu: every invocable skill, deduped by name. */
-export function skillsForSkillMenu(skills: readonly Skill[]): Skill[] {
+function skillsForSkillMenu(skills: readonly Skill[]): Skill[] {
   return dedupeSkillsByName(skills.filter(isProviderSkillUserInvocable));
 }
 
@@ -235,7 +235,7 @@ export function formatSkillDisplayName(skill: Skill): string {
   return displayName ? displayName : titleCaseWords(skill.name);
 }
 
-export function skillDescription(skill: Skill): string {
+function skillDescription(skill: Skill): string {
   return (
     skill.shortDescription ?? skill.description ?? (skill.scope ? `${skill.scope} skill` : "Run provider skill")
   );
@@ -247,7 +247,7 @@ export function skillDescription(skill: Skill): string {
  *
  * *T3: `ChatComposer.tsx:2358` — `description ?? input.hint ?? "Run provider command"`.*
  */
-export function providerCommandDescription(command: SlashCommand): string {
+function providerCommandDescription(command: SlashCommand): string {
   return command.description ?? command.input?.hint ?? "Run provider command";
 }
 
@@ -255,7 +255,7 @@ export function providerCommandDescription(command: SlashCommand): string {
 // Ranking
 // ---------------------------------------------------------------------------
 
-export function normalizeSearchQuery(input: string, trimLeadingPattern?: RegExp): string {
+function normalizeSearchQuery(input: string, trimLeadingPattern?: RegExp): string {
   const trimmed = input.trim();
   if (!trimmed) return "";
   return (trimLeadingPattern ? trimmed.replace(trimLeadingPattern, "") : trimmed).toLowerCase();
@@ -281,7 +281,7 @@ function findBoundaryMatchIndex(
 }
 
 /** Subsequence ("fuzzy") distance: lower is better, `null` when it does not match. */
-export function scoreSubsequenceMatch(value: string, query: string): number | null {
+function scoreSubsequenceMatch(value: string, query: string): number | null {
   if (!query) return 0;
   let queryIndex = 0;
   let firstMatchIndex = -1;
@@ -308,7 +308,7 @@ export function scoreSubsequenceMatch(value: string, query: string): number | nu
  *
  * *T3: `searchRanking.ts:81-135`.*
  */
-export function scoreQueryMatch(input: {
+function scoreQueryMatch(input: {
   value: string;
   query: string;
   exactBase: number;
@@ -394,7 +394,7 @@ function tieBreakerFor(item: SlashMenuItem): string {
  *
  * *T3: `composerSlashCommandSearch.ts:15-29`.*
  */
-export function slashMenuItemsForPromptPosition(
+function slashMenuItemsForPromptPosition(
   items: readonly SlashMenuItem[],
   isAtPromptStart: boolean
 ): SlashMenuItem[] {
@@ -408,7 +408,7 @@ export function slashMenuItemsForPromptPosition(
   );
 }
 
-export function searchSlashMenuItems(
+function searchSlashMenuItems(
   items: readonly SlashMenuItem[],
   query: string
 ): SlashMenuItem[] {
@@ -429,7 +429,7 @@ export function searchSlashMenuItems(
   return ranked.map((entry) => entry.item);
 }
 
-export function searchSkills(skills: readonly Skill[], query: string): Skill[] {
+function searchSkills(skills: readonly Skill[], query: string): Skill[] {
   const normalized = normalizeSearchQuery(query);
   if (!normalized) return [...skills];
   const ranked: Array<{ skill: Skill; score: number }> = [];

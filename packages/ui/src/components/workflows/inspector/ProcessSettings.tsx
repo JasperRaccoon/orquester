@@ -87,7 +87,7 @@ import {
 import { TemplateEditor } from "./TemplateEditor";
 
 /** Insert `{{ secrets.NAME }}` into a field: a small menu of the workflow's secret names. */
-export const SecretPicker: React.FC<{ onPick: (reference: string) => void }> = ({ onPick }) => {
+const SecretPicker: React.FC<{ onPick: (reference: string) => void }> = ({ onPick }) => {
   const { secretNames, openSecrets } = useInspector();
   return (
     <Dropdown
@@ -229,7 +229,7 @@ const CODE_EXAMPLE = "export default async function ({ input, nodes, log }) {\n 
 const HELP_BOX = "rounded-lg border border-neutral-800 bg-neutral-950/40 px-3 py-2.5 text-[11px] leading-4 text-neutral-400";
 
 /** What a Code block's default export is called with: the signature, each argument (the shared guide) and an example. */
-export const CodeArgumentsHelp: React.FC = () => (
+const CodeArgumentsHelp: React.FC = () => (
   <div className={HELP_BOX}>
     <CopyChip text={WORKFLOW_CODE_SIGNATURE} label="Copy the function signature" className="text-[11px]" />
     <GuideItems
@@ -242,7 +242,7 @@ export const CodeArgumentsHelp: React.FC = () => (
 );
 
 /** How a Code block runs, what its result becomes and its limits (the shared guide, minus the arguments). */
-export const CodeRuntimeHelp: React.FC = () => (
+const CodeRuntimeHelp: React.FC = () => (
   <div className={HELP_BOX}>
     <GuideSections sections={blockGuideSections("code", "Runtime", "Result", "Limits")} />
   </div>

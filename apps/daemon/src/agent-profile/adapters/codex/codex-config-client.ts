@@ -283,16 +283,6 @@ export class CodexAppServerClient implements CodexConfigClient {
     this.callTimeoutMs = options.callTimeoutMs ?? CODEX_CONFIG_CALL_TIMEOUT_MS;
   }
 
-  /** Whether an app-server child is running now. */
-  get isRunning(): boolean {
-    return this.running !== null;
-  }
-
-  /** The running child's pid (tests). */
-  get pid(): number | undefined {
-    return this.running?.child.pid;
-  }
-
   async call<M extends CodexConfigMethod>(
     method: M,
     params: CodexConfigMethods[M]["params"],

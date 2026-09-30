@@ -137,7 +137,7 @@ function parseNumber(text: string): number | null {
 }
 
 /** The frontmatter the draft sends: shown fields only (see the file comment for the merge rules). */
-export function frontmatterDraft(
+function frontmatterDraft(
   kind: MarkdownKind,
   model: MarkdownEditorModel,
   form: MarkdownForm

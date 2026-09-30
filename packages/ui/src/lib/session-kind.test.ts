@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import type { AgentConversationSummary } from "@orquester/api";
 
-import { isAgentLikeSession, isChatResumableConversation, isChatSession, isDefaultThreadTitle, isLegacyAgentTerminal, isResumableByAgent, isResumableByInstalledAgent } from "./session-kind.ts";
+import { isAgentLikeSession, isChatSession, isDefaultThreadTitle, isLegacyAgentTerminal, isResumableByAgent, isResumableByInstalledAgent } from "./session-kind.ts";
 
 test("the three session kinds are classified without overlap", () => {
   const shell = { kind: "shell" } as const;
@@ -65,8 +65,9 @@ test("NewTabMenu lists a row under the agent that wrote it", () => {
 });
 
 test("a conversation whose agent has no adapter is not offered", () => {
-  assert.equal(isChatResumableConversation(conversation({ agentRefId: "deepseek" })), false);
-  assert.equal(isChatResumableConversation(conversation({ agentRefId: "gemini" })), false);
+  for (const agentRefId of ["deepseek", "gemini"]) {
+    assert.equal(isResumableByInstalledAgent(conversation({ agentRefId }), new Map([[agentRefId, { enabled: true }]])), false);
+  }
 });
 
 test("only a title nobody chose may be overwritten by the seed", () => {

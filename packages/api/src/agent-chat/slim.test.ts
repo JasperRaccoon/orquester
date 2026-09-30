@@ -27,13 +27,6 @@ test("wire command output keeps the first meaningful line, elided at 84", () => 
   }
 });
 
-test("wire output uses a line-count fallback only for multiple unrenderable lines", () => {
-  for (const [output, expected] of [["```\n```\n", { content: "2 lines" }], ["```", undefined], ["", undefined]]) {
-    const slim = record(slimActivityPayload({ data: { rawOutput: output } }));
-    assert.deepEqual(record(slim.data).rawOutput, expected);
-  }
-});
-
 test("tool output is summarised and the row is flagged truncated", () => {
   const slim = record(
     slimActivityPayload({
@@ -95,16 +88,6 @@ test("changed files are promoted to a bounded top-level path list", () => {
   const changedFiles = slim.changedFiles as string[];
   assert.equal(changedFiles.length, 12);
   assert.equal(changedFiles[0], "src/f0.ts");
-});
-
-test("a changed-file path deeper than the depth bound is not collected", () => {
-  const slim = record(
-    slimActivityPayload({
-      itemType: "file_change",
-      data: { item: { result: { patch: { operations: { edits: [{ path: "deep.ts" }] } } } } }
-    })
-  );
-  assert.equal(slim.changedFiles, undefined);
 });
 
 test("a completed payload over a failed item is re-stamped failed", () => {

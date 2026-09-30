@@ -157,7 +157,7 @@ function claudeManagedSettingsPath(platform: NodeJS.Platform): string | undefine
  * when the cwd sits deeper in a checkout, then the administrator's managed
  * policy, which wins outright.
  */
-export function skillOverrideSettingsPaths(input: {
+function skillOverrideSettingsPaths(input: {
   configDir: string;
   cwd?: string;
   platform: NodeJS.Platform;

@@ -6,9 +6,6 @@ export {
   type ProfileBackupsOptions
 } from "./backups.ts";
 export {
-  CLI_ERROR_DETAIL_MAX,
-  CLI_KILL_GRACE_MS,
-  CLI_OUTPUT_MAX_BYTES,
   type AgentCliResult,
   type AgentCliRun,
   type RedactCliOutputOptions,

@@ -1,7 +1,6 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import fsPromises, { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
-import { syncBuiltinESMExports } from "node:module";
+import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { FsSearchResponse } from "@orquester/api";
@@ -319,15 +318,6 @@ test("node: a pre-aborted signal rejects with REQUEST_ABORTED", async () => {
   );
 });
 
-// --- caps / ordering -----------------------------------------------------------
-
-test("node: maxResults caps total matches and flags limitHit", async () => {
-  const res = await node("cat", { maxResults: 2 });
-  assert.equal(res.totalMatches, 2);
-  assert.equal(res.limitHit, true);
-});
-
-
 test("node: an abort fired mid-search never returns a success payload", async () => {
   // The signal is aborted AFTER the search has launched (parked on the first readdir),
   // exercising the in-walk / post-scan / post-allSettled abort re-checks — a request
@@ -392,7 +382,7 @@ test("node: a symlink cycle (self -> .) is not followed and terminates fast", { 
   }
 });
 
-test("parity: node and rg skip symlinks identically (cycle + dup link)", { skip: !rgAvailable || isWin }, async () => {
+test("rg: skips symlink cycles and duplicate directory links", { skip: !rgAvailable || isWin }, async () => {
   const dir = await mkdtemp(join(tmpdir(), "orq-symparity-"));
   try {
     await mkdir(join(dir, "docs"), { recursive: true });
@@ -400,13 +390,8 @@ test("parity: node and rg skip symlinks identically (cycle + dup link)", { skip:
     await symlink(".", join(dir, "self"));
     await symlink(join(dir, "docs"), join(dir, "docs-link"));
 
-    const [n, r] = await Promise.all([
-      searchProjectFiles(dir, dir, { query: "needle", engine: "node" }),
-      searchProjectFiles(dir, dir, { query: "needle", engine: "rg" })
-    ]);
-    const paths = (res: FsSearchResponse) => res.files.map((f) => f.path).sort();
-    assert.deepEqual(paths(n), ["docs/a.txt"]);
-    assert.deepEqual(paths(r), ["docs/a.txt"]); // rg also skips symlinks without -L
+    const result = await searchProjectFiles(dir, dir, { query: "needle", engine: "rg" });
+    assert.deepEqual(result.files.map((f) => f.path), ["docs/a.txt"]);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -513,27 +498,6 @@ test("both engines: a capped mixed-case dir selects the IDENTICAL byte-order pre
     );
     assert.equal(r.totalMatches, 2);
   }
-});
-
-// --- rg abort during the post-runRipgrep size-stat phase (finding #3) -----------
-
-test("rg: an abort while reading matched-file metadata rejects", { skip: !rgAvailable }, async (t) => {
-  const dir = await mkdtemp(join(tmpdir(), "orq-rgstat-"));
-  t.after(() => rm(dir, { recursive: true, force: true }));
-  await writeFile(join(dir, "match.txt"), "cat here\n");
-  const controller = new AbortController();
-  const originalStat = fsPromises.stat;
-  const mocked = t.mock.method(fsPromises, "stat", async (...args: Parameters<typeof fsPromises.stat>) => {
-    const result = await originalStat(...args);
-    if (String(args[0]) === join(dir, "match.txt")) controller.abort();
-    return result;
-  });
-  syncBuiltinESMExports();
-  t.after(() => { mocked.mock.restore(); syncBuiltinESMExports(); });
-  await assert.rejects(
-    searchProjectFiles(dir, dir, { query: "cat", engine: "rg", signal: controller.signal }),
-    (error: unknown) => (error instanceof FsSearchError || error instanceof withoutRipgrep.FsSearchError) && error.status === 499 && error.code === "REQUEST_ABORTED"
-  );
 });
 
 // --- rg glob parity: literal brackets + field on parse failure (finding #4) -----

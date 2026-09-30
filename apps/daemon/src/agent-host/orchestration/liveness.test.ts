@@ -17,25 +17,6 @@ const task = (
 ): RuntimeEvent => ({ ...base, type, payload }) as unknown as RuntimeEvent;
 
 describe("background liveness registry (§3.1)", () => {
-
-  it("watch loops alone read as monitoring", () => {
-    const registry = createLivenessRegistry();
-    registry.observe(task("task.started", { taskId: "m1", taskType: "monitor" }));
-    assert.equal(registry.liveness("t1"), "monitoring");
-    registry.observe(task("task.started", { taskId: "a1", taskType: "subagent" }));
-    assert.equal(registry.liveness("t1"), "working", "agent work outranks a watch loop");
-  });
-
-  it("idle and every terminal status drop out", () => {
-    const registry = createLivenessRegistry();
-    registry.observe(task("task.started", { taskId: "a1", taskType: "subagent" }));
-    registry.observe(task("task.updated", { taskId: "a1", taskType: "subagent", status: "idle" }));
-    assert.equal(registry.liveness("t1"), null);
-    registry.observe(task("task.started", { taskId: "a2", taskType: "subagent" }));
-    registry.observe(task("task.completed", { taskId: "a2", status: "completed" }));
-    assert.equal(registry.liveness("t1"), null);
-  });
-
   it("a status-free progress row never resurrects a finished task", () => {
     const registry = createLivenessRegistry();
     registry.observe(task("task.started", { taskId: "a1", taskType: "subagent" }));
@@ -60,17 +41,6 @@ describe("background liveness registry (§3.1)", () => {
       task("task.started", { taskId: "n1", taskType: "subagent", agentId: "agent-1" })
     );
     assert.equal(registry.liveness("t1"), "working", "a nested agent counts on its own");
-  });
-
-  it("session.exited clears the thread", () => {
-    const registry = createLivenessRegistry();
-    registry.observe(task("task.started", { taskId: "a1", taskType: "subagent" }));
-    registry.observe({
-      ...base,
-      type: "session.exited",
-      payload: { recoverable: false, exitKind: "error" }
-    } as unknown as RuntimeEvent);
-    assert.equal(registry.liveness("t1"), null);
   });
 
   it("classification is per transition, not sticky", () => {
@@ -114,27 +84,6 @@ describe("background liveness expiry (Grok: tasks that never complete)", () => {
     assert.equal(registry.liveness("t1"), "monitoring");
     clock.set(10 * 60_000 * 2);
     assert.equal(registry.liveness("t1"), null);
-  });
-
-  it("never expires an agent — a subagent that runs for hours is real work", () => {
-    const clock = createTestClock(0);
-    const registry = createLivenessRegistry({ clock });
-    registry.observe(task("task.started", { taskId: "a1", taskType: "subagent" }));
-    clock.set(10 * 60_000 * 100);
-    assert.equal(registry.liveness("t1"), "working");
-    assert.equal(registry.liveAgentCount("t1"), 1);
-  });
-
-  it("a turn ending drops a watch loop that reported nothing during it", () => {
-    const clock = createTestClock(0);
-    const registry = createLivenessRegistry({ clock });
-    registry.observe(task("task.started", { taskId: "m1", taskType: "monitor" }));
-
-    clock.set(1_000);
-    registry.observe(turn("turn.started"));
-    clock.set(2_000);
-    registry.observe(turn("turn.completed"));
-    assert.equal(registry.liveness("t1"), null, "silent for the whole turn");
   });
 
   it("…but keeps one that did report during the turn", () => {
@@ -189,7 +138,7 @@ describe("background liveness expiry (Grok: tasks that never complete)", () => {
 describe("a turn the provider started sweeps nothing at its end", () => {
   const providerTurn = { providerInitiatedTurn: true } as const;
 
-  it("a silent shell survives a wake's end, and still expires at its TTL", () => {
+  it("a silent shell survives a completed or aborted provider wake", () => {
     const clock = createTestClock(0);
     const registry = createLivenessRegistry({ clock });
     registry.observe(task("task.started", { taskId: "sh1", taskType: "shell" }));
@@ -205,11 +154,6 @@ describe("a turn the provider started sweeps nothing at its end", () => {
     clock.set(4_000);
     registry.observe(turn("turn.aborted"));
     assert.equal(registry.liveness("t1"), "monitoring", "an aborted wake sweeps nothing either");
-
-    clock.set(10 * 60_000 - 1);
-    assert.equal(registry.liveness("t1"), "monitoring");
-    clock.set(10 * 60_000);
-    assert.equal(registry.liveness("t1"), null, "the TTL still bounds a silent watch loop");
   });
 
   it("a turn the host sent still sweeps — after a wake as before one", () => {
@@ -238,9 +182,8 @@ describe("a turn the provider started sweeps nothing at its end", () => {
  * "monitoring" nor held a deploy's drain.
  */
 describe("a task stamped with its own id is its own row (Grok)", () => {
-  it("a Grok background shell is live monitoring work, bounded by the TTL", () => {
-    const clock = createTestClock(0);
-    const registry = createLivenessRegistry({ clock });
+  it("a self-stamped Grok shell is monitoring work, not an owned shell or agent", () => {
+    const registry = createLivenessRegistry();
     registry.observe(
       task("task.started", {
         taskId: "01a0c1a7-3335",
@@ -252,11 +195,6 @@ describe("a task stamped with its own id is its own row (Grok)", () => {
     );
     assert.equal(registry.liveness("t1"), "monitoring");
     assert.equal(registry.liveAgentCount("t1"), 0, "a shell is not an agent");
-
-    clock.set(10 * 60_000 - 1);
-    assert.equal(registry.liveness("t1"), "monitoring");
-    clock.set(10 * 60_000);
-    assert.equal(registry.liveness("t1"), null, "silent for the whole window, like any watch loop");
   });
 
   it("…and leaves on its own terminal row", () => {

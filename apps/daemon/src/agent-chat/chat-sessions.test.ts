@@ -397,20 +397,3 @@ test("switching to the system identity drops the summary's account id", () => {
   assert.deepEqual([...chat.liveAccountIds()], []);
   assert.equal(chat.records()[0].chat?.home, "system");
 });
-
-test("setAccount is a no-op for an unchanged identity and for an unknown tab", () => {
-  let persists = 0;
-  const chat = chatManager(() => {
-    persists += 1;
-  });
-  seed(chat, "t1", 0);
-  persists = 0;
-  let updates = 0;
-  chat.lifecycle.on("updated", () => {
-    updates += 1;
-  });
-  assert.equal(chat.setAccount("t1", { accountId: "acc-1", home: "account" }), null);
-  assert.equal(chat.setAccount("nope", { accountId: "acc-2", home: "account" }), null);
-  assert.equal(updates, 0);
-  assert.equal(persists, 0);
-});

@@ -34,17 +34,6 @@ describe("rosterKindCounts", () => {
 });
 
 describe("partitionRosterRows", () => {
-  it("keeps each kind's order while splitting them", () => {
-    const rows = [
-      { id: "a1", agent: { agentKind: "agent" as const } },
-      { id: "s1", agent: { agentKind: "background" as const } },
-      { id: "a2", agent: { agentKind: "agent" as const } },
-      { id: "s2", agent: { agentKind: "background" as const } }
-    ];
-    const { agentRows, shellRows } = partitionRosterRows(rows);
-    assert.deepEqual(agentRows.map((row) => row.id), ["a1", "a2"]);
-    assert.deepEqual(shellRows.map((row) => row.id), ["s1", "s2"]);
-  });
 
   it("renders a loop and a goal with the agents, never as shells", () => {
     const rows = [

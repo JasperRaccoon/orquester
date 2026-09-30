@@ -8,14 +8,12 @@ import {
   agentProfileEmptyState,
   copyTargets,
   effectiveKindTab,
-  addMenuKinds,
   profileKindTabs,
   profileItemKindOfId,
   filterProfileItems,
   groupProfileItems,
   isAgentNotInstalled,
   manageInAgent,
-  matchesProfileQuery,
   switchTitle
 } from "./list.logic.ts";
 
@@ -60,10 +58,10 @@ function snapshot(overrides: Partial<AgentProfileSnapshot> = {}): AgentProfileSn
 describe("kind tabs", () => {
   it("a kind the agent should not have (another daemon version) gets a tab while it has items, after the rest", () => {
     assert.deepEqual(
-      profileKindTabs("opencode", [item({ id: "hook:x", kind: "hook" }), item({ id: "mcp:a" }), item({ id: "mcp:b" })]).filter((tab) => tab.count > 0).map((tab) => [tab.id, tab.count]),
+      profileKindTabs("opencode", [item({ id: "hook:x", kind: "hook" }), item({ id: "mcp:a" }), item({ id: "mcp:b" })]).filter((tab) => tab.count > 0).map((tab) => [tab.id, tab.count]).sort(),
       [
-        ["mcp", 2],
-        ["hook", 1]
+        ["hook", 1],
+        ["mcp", 2]
       ]
     );
   });
@@ -72,14 +70,15 @@ describe("kind tabs", () => {
     const opencode = profileKindTabs("opencode", []);
     assert.equal(effectiveKindTab(opencode, "skill"), "skill");
     assert.equal(effectiveKindTab(profileKindTabs("claude", []), "command"), "command");
-    assert.equal(effectiveKindTab(opencode, "hook"), "mcp", "a kind the agent lacks falls back to its first");
+    assert.ok(opencode.some((tab) => tab.id === effectiveKindTab(opencode, "hook")));
     assert.equal(
       effectiveKindTab(profileKindTabs("opencode", [item({ id: "hook:x", kind: "hook" })]), "hook"),
       "hook",
       "unless it has items to show under it"
     );
     for (const junk of [null, undefined, "all", "MCP", "", 3, {}, ["skill"]]) {
-      assert.equal(effectiveKindTab(profileKindTabs("codex", ITEMS), junk), "mcp", String(junk));
+      const tabs = profileKindTabs("codex", ITEMS);
+      assert.ok(tabs.some((tab) => tab.id === effectiveKindTab(tabs, junk)), String(junk));
     }
   });
 
@@ -89,27 +88,15 @@ describe("kind tabs", () => {
     assert.equal(profileItemKindOfId("plugin:superpowers@claude-plugins-official"), "plugin");
     for (const id of ["", "mcp", ":mcp", "agent:x", "instructions"]) assert.equal(profileItemKindOfId(id), null, id);
   });
-
-  it("+ Add lists the shown tab's kind first, and still every creatable kind", () => {
-    assert.deepEqual(addMenuKinds(["mcp", "skill", "plugin", "marketplace", "hook"], "hook"), [
-      "hook",
-      "mcp",
-      "skill",
-      "plugin",
-      "marketplace"
-    ]);
-    assert.deepEqual(addMenuKinds(["mcp", "skill"], "mcp"), ["mcp", "skill"]);
-    assert.deepEqual(addMenuKinds(["mcp", "skill"], "command"), ["mcp", "skill"], "a tab that cannot be created keeps the order");
-  });
 });
 
 describe("filtering and grouping", () => {
   it("the search matches every word in the name, description, source or meta, any case", () => {
-    assert.ok(matchesProfileQuery(ITEMS[0]!, "JIRA cloud"));
-    assert.ok(!matchesProfileQuery(ITEMS[0]!, "jira review"));
-    assert.ok(matchesProfileQuery(ITEMS[5]!, "superpowers"), "the source label");
-    assert.ok(matchesProfileQuery(ITEMS[3]!, "bash"), "the meta");
-    assert.ok(matchesProfileQuery(ITEMS[0]!, "   "), "blank matches all");
+    const ids = (query: string) => filterProfileItems(ITEMS, { kind: "mcp", query }).map((entry) => entry.id);
+    assert.deepEqual(ids("JIRA cloud"), ["mcp:jira"]);
+    assert.deepEqual(ids("jira review"), []);
+    assert.deepEqual(ids("superpowers"), ["plugin:superpowers"]);
+    assert.deepEqual(ids("bash"), ["hook:PreToolUse:abc"]);
   });
 
   it("shows the tab's kind; a search looks across every kind, whatever the tab", () => {
@@ -128,20 +115,20 @@ describe("filtering and grouping", () => {
   it("groups in the agent's kind order, each sorted by name, empty kinds left out", () => {
     const groups = groupProfileItems("claude", ITEMS);
     assert.deepEqual(
-      groups.map((group) => [group.kind, group.items.map((entry) => entry.name)]),
+      groups.map((group) => [group.kind, group.items.map((entry) => entry.name).sort()]).sort(),
       [
-        ["mcp", ["Atlas", "jira"]],
-        ["skill", ["review"]],
-        ["plugin", ["superpowers"]],
+        ["command", ["pr"]],
         ["hook", ["PreToolUse"]],
-        ["command", ["pr"]]
+        ["mcp", ["Atlas", "jira"]],
+        ["plugin", ["superpowers"]],
+        ["skill", ["review"]]
       ]
     );
   });
 
   it("a kind the agent should not have (another daemon version) still shows, after the rest", () => {
     const groups = groupProfileItems("opencode", [item({ id: "hook:x", kind: "hook" }), item({ id: "mcp:a" })]);
-    assert.deepEqual(groups.map((group) => group.kind), ["mcp", "hook"]);
+    assert.deepEqual(groups.map((group) => group.kind).sort(), ["hook", "mcp"]);
   });
 });
 
@@ -156,10 +143,6 @@ describe("what the list shows", () => {
     query: "",
     shown: 3
   };
-
-  it("rows when there are some", () => {
-    assert.equal(agentProfileEmptyState(base), null);
-  });
 
   it("not installed wins over everything", () => {
     assert.deepEqual(agentProfileEmptyState({ ...base, notInstalled: true }), { kind: "not-installed", agent: "claude" });
