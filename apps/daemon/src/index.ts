@@ -1921,7 +1921,7 @@ export function createServer(
       // never match and the dir is removed while sessions keep running.
       sessions.closeByProjectPrefix(target);
       // Cascade-close this project's browser tabs (kills its Chromium too).
-      await services.browsers.closeForProject(target);
+      await services.browsers.closeForProject(target, safe);
       // And its desktops (their hosts and apps); they match either spelling.
       await services.desktops.closeForProject(safe);
       await rm(safe, { recursive: true, force: true });
@@ -1965,7 +1965,8 @@ export function createServer(
       // join), not `safe`: stored projectPaths use the raw join form, so matching
       // the realpath would miss every session under a symlinked workspace root.
       sessions.closeByProjectPrefix(target);
-      // Every desktop of every project in it (prefix match).
+      // Every browser tab and desktop of every project in it (prefix matches).
+      await services.browsers.closeForProject(target, safe);
       await services.desktops.closeForProject(safe);
       // Drop the git includeIf binding BEFORE removing the tree: unbindWorkspace
       // realpaths the dir to rebuild the same matcher bindWorkspace used, so it
@@ -2721,7 +2722,8 @@ export function createServer(
         // and the raw resolved form — sessions store the raw client-join path.
         sessions.closeByProjectPrefix(safe);
         sessions.closeByProjectPrefix(resolve(path));
-        // Desktops rooted in the deleted tree too.
+        // Browser tabs and desktops rooted in the deleted tree too.
+        await services.browsers.closeForProject(safe, resolve(path));
         await services.desktops.closeForProject(safe);
         await rm(safe, { recursive: true, force: false });
         return { ok: true };

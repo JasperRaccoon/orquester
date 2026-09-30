@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { createHash, randomUUID } from "node:crypto";
-import { join, dirname } from "node:path";
+import { join, dirname, sep } from "node:path";
 import puppeteer, { type Browser, type CDPSession, type Page } from "puppeteer-core";
 import {
   type BrowserPickPayload,
@@ -181,9 +181,16 @@ export class BrowserManager {
     this.lifecycle.emit("closed", { id });
   }
 
-  async closeForProject(projectPath: string): Promise<void> {
+  /**
+   * Close every tab of a deleted tree: a project at one of `paths`, or any
+   * project below one. Pass every spelling the caller has (the raw join the
+   * client sent and the realpath) — tabs store the client's spelling.
+   */
+  async closeForProject(...paths: string[]): Promise<void> {
+    const inside = (projectPath: string): boolean =>
+      paths.some((path) => projectPath === path || projectPath.startsWith(path.endsWith(sep) ? path : `${path}${sep}`));
     for (const tab of [...this.tabs.values()]) {
-      if (tab.record.projectPath === projectPath) await this.close(tab.record.id);
+      if (inside(tab.record.projectPath)) await this.close(tab.record.id);
     }
   }
 
