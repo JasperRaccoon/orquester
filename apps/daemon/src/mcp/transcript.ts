@@ -1,4 +1,4 @@
-import { ACTIVE_SUBAGENT_STATUSES, anchorsCall, CALL_ROW_KINDS, commandDisplayDetail, compactionMarkerState, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isAgentOwnedActivity, isCompactionActivity, isHiddenGoalChange, isPlanImplementationMessage, parseGoalUpdatedPayload, reEmittedAssistantCopies, repairsReEmittedAssistantCopies, startedTurns, type RuntimeSubagent, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { ACTIVE_SUBAGENT_STATUSES, anchorsCall, CALL_ROW_KINDS, commandDisplayDetail, compactionMarkerState, deriveAgentPanelModel, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isAgentOwnedActivity, isCompactionActivity, isHiddenGoalChange, isPlanImplementationMessage, parseGoalUpdatedPayload, reEmittedAssistantCopies, repairsReEmittedAssistantCopies, startedTurns, type RuntimeSubagent, type StartedTurn, type ThreadActivityItem, type ThreadItem, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { capText, clipText, resultBytes } from "./result.ts";
 
 type TranscriptInclude = "reasoning" | "tools" | "activity";
@@ -18,7 +18,7 @@ export interface TranscriptEntry { turn: number | null; turnId: string | null; k
    */
   outputItemId?: string;
   requestId?: string; requestKind?: string; decision?: string;
-  questions?: string[]; answered?: boolean; subagent?: { id: string; title: string | null; status: string }; actionable?: boolean; files?: { path: string; additions: number; deletions: number }[]; state?: string; beforeTokens?: number; afterTokens?: number }
+  questions?: string[]; answered?: boolean; subagent?: RosterRow; actionable?: boolean; files?: { path: string; additions: number; deletions: number }[]; state?: string; beforeTokens?: number; afterTokens?: number }
 interface TranscriptOptions {
   /** How many turns the read covers, and `beforeTurn` which ones: the range `transcriptRange` names. */
   turns: number; beforeTurn?: number; agentId?: string; include: ReadonlySet<TranscriptInclude>;
@@ -53,8 +53,20 @@ export interface TranscriptResult {
   coveredTurns: [number, number] | null;
   /** The first and last turn of the range that could not be read whole — only when some could not. */
   unavailableTurns?: [number, number];
-  truncated: boolean; subagents: { id: string; title: string | null; status: string }[]; subagentsTruncated?: boolean;
+  truncated: boolean; subagents: RosterRow[]; subagentsTruncated?: boolean;
 }
+
+/**
+ * A workflow run's progress, on its coordinator's row: its member agents (one per slot, a retry being the same slot)
+ * counted by status, and per phase — the GUI's grouping (`deriveAgentPanelModel`), so a list shed of its members
+ * still says how far the run got. `phases` is absent when the run declared none and no member names one.
+ */
+export interface WorkflowProgress { agents: number; statuses: Record<string, number>; phases?: { index: number; title: string; state: "pending" | "running" | "done"; agents: number; settled: number }[] }
+/**
+ * A subagent in the transcript's roster and on its anchor. A workflow member names its coordinator (`parentAgentId`),
+ * its phase and, once retried, its attempt; a coordinator its workflow and the run's progress (`WorkflowProgress`).
+ */
+interface RosterRow { id: string; title: string | null; status: string; parentAgentId?: string; phaseIndex?: number; attempt?: number; workflowName?: string; workflow?: WorkflowProgress }
 
 /**
  * The room a shed result leaves under `maxChars` for the caller's `hint` field — key, quotes and comma included. A
@@ -72,7 +84,7 @@ const ROSTER_SHARE = 0.25;
 const TOOL_KINDS = new Set(["tool.started", "tool.updated", "tool.completed", "tool.denied"]);
 // A hook's start and progress are provider bookkeeping, as its successful completion is (below); the GUI keeps only
 // a completion that failed or was cancelled.
-const SKIPPED_ACTIVITY = new Set(["tool.progress", "turn.proposed.delta", "turn.plan.updated", "hook.started", "hook.progress", "context-window.updated", "checkpoint.captured", "background.requested", "task.progress", "task.updated"]);
+const SKIPPED_ACTIVITY = new Set(["tool.progress", "turn.proposed.delta", "turn.plan.updated", "hook.started", "hook.progress", "context-window.updated", "checkpoint.captured", "background.requested", "task-stop.requested", "task.progress", "task.updated"]);
 /**
  * A line of its own in the GUI's timeline, read as its summary: an `info` entry. An account switch, a model reroute —
  * and every goal row the GUI shows (goals §8.4; `isHiddenGoalRow` is the one it does not): the provider's goal updates,
@@ -117,7 +129,61 @@ const rowText = (a: ThreadActivityItem, p: P): string => {
   if (!message) return a.summary;
   return message.startsWith(a.summary.replace(/(?:\.\.\.|…)$/u, "")) ? message : `${a.summary}: ${message}`;
 };
-const rosterView = (r: RuntimeSubagent): NonNullable<TranscriptEntry["subagent"]> => ({ id: r.id, title: subagentTitle(r.title), status: r.status });
+
+/**
+ * The roster as the tools list it: in the host's order (first seen first), but each workflow coordinator followed by
+ * its members, phase by phase and slot by slot — the GUI's grouping (`deriveAgentPanelModel`) — with each run's
+ * progress by its coordinator's id. A member whose coordinator is not in the roster stays where it is. A roster with
+ * no workflow comes back as it is.
+ */
+export function groupedRoster(roster: readonly RuntimeSubagent[]): { rows: RuntimeSubagent[]; progress: ReadonlyMap<string, WorkflowProgress> } {
+  const progress = new Map<string, WorkflowProgress>();
+  if (!roster.some((r) => r.kind === "workflow")) return { rows: [...roster], progress };
+  const membersOf = new Map<string, RuntimeSubagent[]>();
+  for (const group of deriveAgentPanelModel({ agents: roster }).workflows) {
+    const members = [...group.phases.flatMap((phase) => phase.members), ...group.unphasedMembers];
+    membersOf.set(group.workflow.id, members);
+    const statuses: Record<string, number> = {};
+    for (const m of members) statuses[m.status] = (statuses[m.status] ?? 0) + 1;
+    const view: WorkflowProgress = { agents: members.length, statuses };
+    if (group.phases.length > 0) view.phases = group.phases.map((phase) => ({ index: phase.index, title: subagentTitle(phase.title) ?? "", state: phase.state, agents: phase.members.length, settled: phase.settledCount }));
+    progress.set(group.workflow.id, view);
+  }
+  const grouped = new Set([...membersOf.values()].flat());
+  const rows: RuntimeSubagent[] = [];
+  for (const r of roster) {
+    if (grouped.has(r)) continue;
+    rows.push(r);
+    for (const m of membersOf.get(r.id) ?? []) rows.push(m);
+  }
+  return { rows, progress };
+}
+
+/** A roster row's workflow fields, as both lists show them: each only when the host reported it, `attempt` once retried. */
+export function workflowFields(r: RuntimeSubagent, progress: ReadonlyMap<string, WorkflowProgress>): Pick<RosterRow, "parentAgentId" | "phaseIndex" | "attempt" | "workflowName" | "workflow"> {
+  const v: Pick<RosterRow, "parentAgentId" | "phaseIndex" | "attempt" | "workflowName" | "workflow"> = {};
+  if (typeof r.parentAgentId === "string" && r.parentAgentId) v.parentAgentId = r.parentAgentId;
+  if (typeof r.phaseIndex === "number") v.phaseIndex = r.phaseIndex;
+  if (typeof r.attempt === "number" && r.attempt > 1) v.attempt = r.attempt;
+  if (typeof r.workflowName === "string" && r.workflowName) v.workflowName = subagentTitle(r.workflowName)!;
+  const run = progress.get(r.id);
+  if (run) v.workflow = run;
+  return v;
+}
+
+const rosterView = (r: RuntimeSubagent, progress: ReadonlyMap<string, WorkflowProgress>): RosterRow => ({ id: r.id, title: subagentTitle(r.title), status: r.status, ...workflowFields(r, progress) });
+
+/**
+ * The workflow coordinator a task row of a member folds into, in the parent view — as the GUI's spawn row groups a run
+ * (`agentSpawnGroupKey`, packages/ui entries.logic.ts): its roster row's coordinator, else the id before its slot
+ * (`<coordinator>:wf:<n>`). Undefined for any other task.
+ */
+function workflowOfTask(taskId: string, roster: ReadonlyMap<string, RuntimeSubagent>): string | undefined {
+  const parent = roster.get(taskId)?.parentAgentId;
+  if (parent && roster.get(parent)?.kind === "workflow") return parent;
+  const slot = taskId.indexOf(":wf:");
+  return slot > 0 ? taskId.slice(0, slot) : undefined;
+}
 
 /**
  * The thread's latest proposed plan, and whether it is actionable: the host's own `hasActionableProposedPlan` rule
@@ -290,7 +356,6 @@ function coveredOf(rows: readonly TranscriptEntry[]): [number, number] | null {
   return last >= first ? [first, last] : null;
 }
 
-type RosterRow = NonNullable<TranscriptEntry["subagent"]>;
 const LIVE: ReadonlySet<string> = ACTIVE_SUBAGENT_STATUSES;
 
 /** A row with the bytes it adds to its JSON array — its own JSON plus the comma joining it — measured once. */
@@ -301,14 +366,29 @@ const contentBytes = (sum: number, count: number): number => (count > 0 ? sum - 
 
 /**
  * A subagent list within `allowance` bytes (its JSON, brackets excluded): settled rows go first, then live ones
- * (pending, running, waiting), each first seen first. The one rule for both lists that shed subagents — the
- * transcript's roster here and a session detail's `subagents` (views.ts). Pure, and linear: every row was measured once.
+ * (pending, running, waiting), each first seen first. A member — a row whose `parentAgentId` names a row of the list, a
+ * workflow's agent — goes before the rows around it, and its parent only after the last of them: settled members,
+ * settled rows, live members, settled parents, live rows. A parent kept keeps the run's progress (`WorkflowProgress`),
+ * so a 100-agent workflow sheds to its coordinator before it crowds out anything else. The one rule for both lists that
+ * shed subagents — the transcript's roster here and a session detail's `subagents` (views.ts). Pure, and linear: every
+ * row was measured once.
  */
-export function fitRoster<T extends { status: string }>(rows: readonly Sized<T>[], allowance: number): { rows: T[]; bytes: number; trimmed: boolean } {
+export function fitRoster<T extends { id: string; status: string; parentAgentId?: string }>(rows: readonly Sized<T>[], allowance: number): { rows: T[]; bytes: number; trimmed: boolean } {
   let sum = rows.reduce((total, r) => total + r.bytes, 0);
   let count = rows.length;
   const gone = new Set<Sized<T>>();
-  for (const r of [...rows.filter((x) => !LIVE.has(x.row.status)), ...rows.filter((x) => LIVE.has(x.row.status))]) {
+  const ids = new Set(rows.map((x) => x.row.id));
+  const isMember = (x: Sized<T>): boolean => x.row.parentAgentId !== undefined && x.row.parentAgentId !== x.row.id && ids.has(x.row.parentAgentId);
+  const parents = new Set(rows.filter(isMember).map((x) => x.row.parentAgentId));
+  const live = (x: Sized<T>): boolean => LIVE.has(x.row.status);
+  const tiers: ((x: Sized<T>) => boolean)[] = [
+    (x) => isMember(x) && !live(x),
+    (x) => !isMember(x) && !parents.has(x.row.id) && !live(x),
+    (x) => isMember(x) && live(x),
+    (x) => !isMember(x) && parents.has(x.row.id) && !live(x),
+    (x) => !isMember(x) && live(x)
+  ];
+  for (const r of tiers.flatMap((tier) => rows.filter(tier))) {
     if (contentBytes(sum, count) <= allowance) break;
     gone.add(r);
     sum -= r.bytes;
@@ -421,6 +501,7 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
   // 2. The range read, [start, end]; the turns before it are the caller's to page back to (`olderTurns`, below).
   const { start, end } = transcriptRange(turnCount, opts.turns, opts.beforeTurn);
   const roster = new Map(snap.roster.map((r) => [r.id, r]));
+  const grouped = groupedRoster(snap.roster);
   const latestPlan = proposedPlan(opts.windowItems ?? snap.items);
   const actionablePlan = latestPlan?.actionable ? latestPlan.item.id : null;
   // An old Claude log's re-emitted opening paragraphs (`reEmittedAssistantCopies`, `@orquester/api/agent-chat`) are no
@@ -551,7 +632,15 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
       }
       if (a.activityKind.startsWith("task.")) {
         if (opts.agentId) continue; // anchors live in the parent view only
-        const key = str(p.taskId) ?? a.id;
+        const taskId = str(p.taskId) ?? a.id;
+        // A workflow member's rows fold into its coordinator's one anchor, as the GUI's spawn row shows a run: the
+        // coordinator's roster row (below) says how its members stand, and the roster lists them.
+        const run = workflowOfTask(taskId, roster);
+        if (run !== undefined) {
+          if (!tasks.has(run)) { const e = base(a, "subagent"); e.subagent = { id: run, title: null, status: "running" }; tasks.set(run, e); entries.push(e); }
+          continue;
+        }
+        const key = taskId;
         let e = tasks.get(key);
         if (!e) { e = base(a, "subagent"); e.subagent = { id: key, title: subagentTitle(str(p.title) ?? str(p.description)), status: str(p.status) ?? "running" }; tasks.set(key, e); entries.push(e); }
         if (str(p.title)) e.subagent!.title = subagentTitle(str(p.title));
@@ -632,7 +721,7 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     }
     // The roster folds these same rows (a resume reopens, "stopped" is "interrupted", a dead session
     // interrupts) and is what the GUI resolves a spawn row from, so it wins whenever it has the task.
-    for (const [id, e] of tasks) { const row = roster.get(id); if (row) e.subagent = rosterView(row); }
+    for (const [id, e] of tasks) { const row = roster.get(id); if (row) e.subagent = rosterView(row, grouped.progress); }
     // Per-turn file changes from the checkpoints (§7.6 "changes").
     if (!opts.agentId) {
       for (const cp of snap.checkpoints) {
@@ -644,7 +733,7 @@ export function transcriptEntries(snap: ThreadSnapshotPayload, opts: TranscriptO
     return entries;
   };
   const entries = build();
-  const agents = opts.agentId ? [] : snap.roster.map(rosterView);
+  const agents = opts.agentId ? [] : grouped.rows.map((r) => rosterView(r, grouped.progress));
   const unavailable = opts.unavailable;
   // One shape for the result and for its frame, so what is measured is what is returned.
   const shaped = (list: TranscriptEntry[], subagents: RosterRow[], covered: [number, number] | null, olderTurns: number, truncated: boolean, subagentsTruncated: boolean): TranscriptResult => ({

@@ -2,13 +2,13 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import type { AgentGoalStatus } from "@orquester/api/agent-chat";
 import { FakeDaemonApi } from "./testing.ts";
-import { activity, chatSummary, head, message, shellSummary, snapshot, stamp, turn } from "./fixtures.ts";
+import { activity, chatSummary, head, message, rosterAgent, shellSummary, snapshot, stamp, turn, WF, workflowRoster } from "./fixtures.ts";
 import { chatDetail, pendingApprovalViews, pendingQuestionViews, sessionDetail, sessionView, type ViewContext } from "./views.ts";
 
 const encodedBytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
 
 const ctx: ViewContext = { workspacesDir: "/w", adapterByRefId: new Map([["claude", "claude"], ["codex", "codex"]]), accountLabelById: new Map([["acc-1", "jasperclaude"]]),
-  capabilitiesByAdapter: new Map([["claude", { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "slash-command", command: "/compact" }, supportsBackgroundTasks: true }]]) };
+  capabilitiesByAdapter: new Map([["claude", { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "slash-command", command: "/compact" }, supportsBackgroundTasks: true, supportsTaskStop: true }]]) };
 
 test("session views distinguish a new chat from running and exited terminals", () => {
   assert.equal(sessionView(chatSummary({ chatSessionStatus: "idle", latestTurn: null }), ctx).reason, "new");
@@ -49,7 +49,7 @@ test("sessionDetail merges the head, context window, pending requests, plan, ros
   assert.equal(d.chat.model, "claude-fable-5-1[1m]"); assert.deepEqual(d.chat.options, { effort: "high" }); assert.equal(d.chat.runtimeMode, "full-access");
   assert.equal(d.chat.home, "account"); assert.equal(d.chat.accountLabel, "jasperclaude"); assert.equal(d.chat.lastError, "boom"); assert.equal(d.chat.turnCount, 2, "two started turns (t1, t2) — counted by order, not by head.turnCount or checkpoints"); assert.equal(d.chat.continueAfterRestart, true);
   assert.deepEqual(d.chat.contextWindow, { usedTokens: 50_000, maxTokens: 200_000, percentUsed: 25, compactsAutomatically: true });
-  assert.deepEqual(d.chat.supports, { planMode: true, rollback: true, compaction: true, backgroundTasks: true, goals: null });
+  assert.deepEqual(d.chat.supports, { planMode: true, rollback: true, compaction: true, backgroundTasks: true, taskStop: true, goals: null });
   assert.equal(d.chat.goal, null, "a snapshot without a goal");
   assert.equal(d.pending.approvals[0].requestId, "r1"); assert.deepEqual(d.pending.approvals[0].tool, { name: "Bash", input: { command: "rm -rf build" } });
   assert.deepEqual(d.pending.approvals[0].decisions.map((x) => x.decision), ["accept", "acceptForSession", "decline", "cancel"]);
@@ -83,7 +83,7 @@ test("buildViewContext reads registry, accounts and providers and tolerates a fa
   const d = await chatDetail(api, "c1");
   assert.equal(d.adapter, "claude");
   assert.equal(d.chat.accountLabel, "jasperclaude");
-  assert.deepEqual(d.chat.supports, { planMode: false, rollback: false, compaction: false, backgroundTasks: false, goals: null });
+  assert.deepEqual(d.chat.supports, { planMode: false, rollback: false, compaction: false, backgroundTasks: false, taskStop: false, goals: null });
 });
 
 test("the context meter skips a row without a usable reading, as the host's snapshot drop rule expects", () => {
@@ -404,4 +404,34 @@ test("lastReply leaves out a Claude thread's re-emitted opening paragraph, as th
   // Only a Claude log holds such a copy: a Codex thread's repeat is its own words.
   const codex = snapshot({ head: head({ adapter: "codex", refId: "codex" }), items });
   assert.equal(sessionDetail(chatSummary({ refId: "codex" }), codex, ctx).lastReply?.text, `${OPENING}\n\n${ANSWER}\n\n${OPENING}`);
+});
+
+// ---- Claude workflow runs: a coordinator and its members. ----
+
+test("a workflow run lists its coordinator with the run's progress, then its members by phase and slot; no host path is shown", () => {
+  const d = sessionDetail(chatSummary(), snapshot({ roster: workflowRoster() }), ctx);
+  // The members follow their coordinator; task-late, first seen between them, comes after the run.
+  assert.deepEqual(d.subagents.map((s) => s.id), ["task-early", WF, `${WF}:wf:1`, `${WF}:wf:2`, `${WF}:wf:3`, "task-late"]);
+  const [, coordinator, retried, failed, running] = d.subagents;
+  assert.deepEqual(coordinator, {
+    id: WF, kind: "workflow", agentKind: "background", title: "Audit the frame pipeline", status: "running", startedAt: stamp(10), completedAt: null,
+    workflowName: "frame-audit", runId: "run-3f9a",
+    workflow: { agents: 3, statuses: { completed: 1, failed: 1, running: 1 }, phases: [{ index: 1, title: "Analyze", state: "done", agents: 2, settled: 2 }, { index: 2, title: "Synthesize", state: "running", agents: 1, settled: 0 }] },
+    usage: { totalTokens: 90_000, toolUses: 41, durationMs: 120_000 }
+  });
+  assert.deepEqual(retried, {
+    id: `${WF}:wf:1`, kind: "workflow_agent", agentKind: "agent", title: "analyze:fframes", status: "completed", model: "sonnet", startedAt: stamp(11), completedAt: stamp(20),
+    parentAgentId: WF, agentIndex: 1, phaseIndex: 1, phaseTitle: "Analyze", attempt: 2, usage: { totalTokens: 30_000, toolUses: 12, durationMs: 40_000 }, result: "Found 3 dropped frames in decoder.ts"
+  });
+  assert.equal(failed!.error, "Timed out reading the capture");
+  assert.equal(failed!.attempt, undefined, "a first attempt is not stated");
+  assert.deepEqual([running!.phaseIndex, running!.progress, running!.lastToolName], [2, "Merging findings", "Read"]);
+  const json = JSON.stringify(d);
+  assert.ok(!json.includes("/home/u/.claude"), "the run's script and transcript paths stay on the host");
+});
+
+test("a subagent's result is a bounded preview, cut like its other text", () => {
+  const d = sessionDetail(chatSummary(), snapshot({ roster: [rosterAgent("task-1", { result: "r".repeat(5_000) })] }), ctx);
+  assert.equal([...d.subagents[0]!.result!].length, 200);
+  assert.ok(d.subagents[0]!.result!.endsWith("…"));
 });

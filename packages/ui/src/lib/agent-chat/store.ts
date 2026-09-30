@@ -123,7 +123,7 @@ import {
   type TimelineRowsProjection
 } from "./rows.logic";
 import { providerForRefId, providersStore } from "./providers";
-import { isLoopOrGoalRow, liveAgentTaskIds } from "./roster.logic";
+import { failedTaskStopId, isLoopOrGoalRow, liveAgentTaskIds, pendingTaskStops } from "./roster.logic";
 import { isCompactingThread, latestContextWindowActivity } from "./status.logic";
 import {
   drainQueue,
@@ -271,6 +271,12 @@ export interface AgentChatThreadState {
   draft: ComposerDraft;
   /** True while an interrupt is in flight; the Stop button reads "Stopping…". */
   stopping: boolean;
+  /**
+   * Roster ids a `/task/stop` was sent for, until their row settles, leaves
+   * the roster or the provider fails the stop (`pendingTaskStops`) — their
+   * Stop reads "Stopping…". A refused command lets its id go at once.
+   */
+  stoppingTaskIds: readonly string[];
   /**
    * The turn the timeline should bring on screen (the command palette's
    * search hit), until it acknowledges the nonce. Never retained: a remount
@@ -857,6 +863,9 @@ function samePlan(left: ActivePlanState | null, right: ActivePlanState | null): 
 const COMMAND_ATTEMPT_TIMEOUT_MS = 25_000;
 
 const COMMAND_TIMED_OUT = "The agent host did not answer in time.";
+
+/** The empty `stoppingTaskIds`: one shared value, so an idle thread's roster view never re-renders on it. */
+const NO_TASK_IDS: readonly string[] = [];
 
 /**
  * The commands whose retries outlive their store generation (§7.4). A turn
@@ -1853,6 +1862,24 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         await command("background", input.toolUseId ? { toolUseId: input.toolUseId } : {});
       },
 
+      async stopTask(input) {
+        const { taskId } = input;
+        update((state) =>
+          state.stoppingTaskIds.includes(taskId)
+            ? state
+            : { ...state, stoppingTaskIds: [...state.stoppingTaskIds, taskId] }
+        );
+        try {
+          await command("task/stop", { taskId });
+        } catch (error) {
+          update((state) => ({
+            ...state,
+            stoppingTaskIds: state.stoppingTaskIds.filter((id) => id !== taskId)
+          }));
+          throw error;
+        }
+      },
+
       async setMode(input) {
         await command("mode", {
           ...(input.runtimeMode ? { runtimeMode: input.runtimeMode as RuntimeMode } : {}),
@@ -2231,6 +2258,16 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       ) {
         set({ stopping: false });
       }
+      // A task's own Stop reads "Stopping…" until its row settles — or until
+      // the provider failed the stop, when it is offered again.
+      if (state.stoppingTaskIds.length > 0) {
+        const failedTaskId =
+          frame.kind === "event" && frame.event.type === "thread.activity-appended"
+            ? failedTaskStopId(frame.event.payload.activity)
+            : null;
+        const stoppingTaskIds = pendingTaskStops(state.stoppingTaskIds, state.slice.roster, failedTaskId);
+        if (stoppingTaskIds !== state.stoppingTaskIds) set({ stoppingTaskIds });
+      }
       driveQueue();
     };
 
@@ -2454,6 +2491,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       reverting: false,
       draft: readPersistedDrafts()[sessionId] ?? EMPTY_DRAFT,
       stopping: false,
+      stoppingTaskIds: NO_TASK_IDS,
       reveal: null,
       actions
     };

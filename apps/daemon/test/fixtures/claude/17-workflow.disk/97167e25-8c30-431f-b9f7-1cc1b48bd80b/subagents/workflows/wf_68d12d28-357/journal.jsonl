@@ -1,0 +1,7 @@
+{"type":"launched"}
+{"type":"started","key":"v2:49113500e045066eee906b36fa7a9345296580ff412006fa1de222fac51edf84","agentId":"aebd584875df53fac","label":"gather:alpha","phase":"Gather"}
+{"type":"started","key":"v2:c107e93d106ee37f59ac6d0753a6477b80ac4eeb8ca4cdbeed46f9c90f02eb5b","agentId":"ad49abb53b7a1ac39","label":"gather:beta","phase":"Gather"}
+{"type":"result","key":"v2:49113500e045066eee906b36fa7a9345296580ff412006fa1de222fac51edf84","agentId":"aebd584875df53fac","result":"alpha"}
+{"type":"result","key":"v2:c107e93d106ee37f59ac6d0753a6477b80ac4eeb8ca4cdbeed46f9c90f02eb5b","agentId":"ad49abb53b7a1ac39","result":"beta"}
+{"type":"started","key":"v2:3d099f87d8e0380b37a89509890b3c5f44abe436b97d289011e46f1485e541d7","agentId":"ae9364d93a16d0ca2","label":"combine","phase":"Combine"}
+{"type":"result","key":"v2:3d099f87d8e0380b37a89509890b3c5f44abe436b97d289011e46f1485e541d7","agentId":"ae9364d93a16d0ca2","result":"alpha beta done"}

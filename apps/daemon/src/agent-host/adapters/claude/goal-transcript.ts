@@ -67,7 +67,7 @@ async function isFile(path: string): Promise<boolean> {
  * SDK's length limit is matched on its prefix, and only a dir that actually
  * holds this session's file is taken.
  */
-async function locateClaudeTranscript(input: {
+export async function locateClaudeTranscript(input: {
   configDir: string;
   cwd: string;
   sessionId: string;

@@ -379,6 +379,15 @@ export interface AgentRosterProps {
   /** Folded to its one-line summary (the rows hidden); persisted per device. */
   collapsed?: boolean;
   onCollapsedChange?: (collapsed: boolean) => void;
+  /**
+   * The provider can stop one task (`supportsTaskStop`): a live workflow run
+   * then offers its own Stop (`taskStopControl`). Absent means no such Stop —
+   * the liveness banner's, for the whole fleet, stays the only one.
+   */
+  canStopTasks?: boolean;
+  /** Roster ids a `/task/stop` is in flight for; their Stop reads "Stopping…". */
+  stoppingTaskIds?: readonly string[];
+  onStopTask?: (taskId: string) => void;
 }
 
 export interface AgentDrillInProps {

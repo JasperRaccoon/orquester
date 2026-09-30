@@ -105,6 +105,13 @@ export const agentHostRoutes = {
   revert: (threadId: string): string => `${thread(threadId)}/revert`,
   compact: (threadId: string): string => `${thread(threadId)}/compact`,
   background: (threadId: string): string => `${thread(threadId)}/background`,
+  /**
+   * Stop one live task (`TaskStopCommandBody`). Additive: a host that predates
+   * it answers its generic route-miss 404 `THREAD_NOT_FOUND` until its
+   * drain-restart — and reports no `supportsTaskStop`, so no client offers it
+   * there. `AGENT_HOST_PROTOCOL_VERSION` did not move for it.
+   */
+  taskStop: (threadId: string): string => `${thread(threadId)}/task/stop`,
   mode: (threadId: string): string => `${thread(threadId)}/mode`,
   sessionStop: (threadId: string): string => `${thread(threadId)}/session/stop`,
 

@@ -10,7 +10,8 @@ import test from "node:test";
 
 import {
   deriveAgentPanelModel,
-  foldSubagentActivities
+  foldSubagentActivities,
+  taskStopRefusal
 } from "./roster.ts";
 import { activity, agentTask, resetActivityIds } from "./test-helpers.ts";
 import type { RuntimeSubagent } from "./thread.ts";
@@ -589,4 +590,218 @@ test("a resume reopens even when the NEW run's in-place progress row precedes th
   ]);
   assert.equal(byId(late, "t1").status, "interrupted");
   assert.equal(byId(late, "t1").activationCount, 1);
+});
+
+// --- a Claude `Workflow` run, as the adapter reports it ---------------------
+//
+// A coordinator (`local_workflow`) with 1-based phases, and one member per
+// agent slot, `<coordinator>:wf:<n>` (1-based, stable across retries), whose
+// rows carry an explicit status and name the coordinator their parent.
+
+const WF = "wvg2ao9ra";
+
+function claudeCoordinator(extra: Record<string, unknown> = {}) {
+  return agentTask(WF, {
+    taskType: "local_workflow",
+    workflowName: "jasper-understand-research",
+    title: "Understand the research",
+    phases: [
+      { index: 1, title: "Gather" },
+      { index: 2, title: "Combine" }
+    ],
+    runHandles: { runId: "run-1", scriptPath: "/tmp/wf.js", transcriptDir: "/tmp/wf" },
+    ...extra
+  });
+}
+
+function claudeMember(n: number, extra: Record<string, unknown> = {}) {
+  return agentTask(`${WF}:wf:${n}`, {
+    taskType: "workflow_agent",
+    parentAgentId: WF,
+    agentIndex: n,
+    phaseIndex: n < 3 ? 1 : 2,
+    phaseTitle: n < 3 ? "Gather" : "Combine",
+    attempt: 1,
+    title: n === 1 ? "analyze:fframes" : n === 2 ? "analyze:codecs" : "combine",
+    model: "claude-opus-5-5",
+    timelineBypass: true,
+    ...extra
+  });
+}
+
+function claudeWorkflowRun() {
+  return [
+    activity("task.started", claudeCoordinator({ prompt: "export default async function run() {}" })),
+    activity("task.progress", claudeMember(1, { status: "running", lastToolName: "Read" })),
+    activity("task.progress", claudeMember(2, { status: "pending" })),
+    activity("task.progress", claudeMember(3, { status: "pending" })),
+    activity(
+      "task.progress",
+      claudeMember(1, {
+        status: "running",
+        summary: "reading frames",
+        lastToolName: "Grep",
+        usage: { totalTokens: 1200, toolUses: 4, durationMs: 9000 }
+      })
+    ),
+    activity("task.progress", claudeCoordinator({ usage: { totalTokens: 5000 } }))
+  ];
+}
+
+test("a Claude workflow folds into one group with its 1-based phases", () => {
+  resetActivityIds();
+  const agents = foldSubagentActivities(claudeWorkflowRun());
+  const group = deriveAgentPanelModel({ agents }).workflows[0]!;
+  assert.deepEqual(
+    group.phases.map((phase) => [phase.index, phase.title, phase.members.map((member) => member.id)]),
+    [
+      [1, "Gather", [`${WF}:wf:1`, `${WF}:wf:2`]],
+      [2, "Combine", [`${WF}:wf:3`]]
+    ]
+  );
+});
+
+test("a retried workflow slot reopens on its new attempt's start, exactly once", () => {
+  resetActivityIds();
+  const slot = `${WF}:wf:2`;
+  const upToRetry = [
+    ...claudeWorkflowRun(),
+    activity("task.progress", claudeMember(2, { status: "running" })),
+    activity("task.completed", claudeMember(2, { status: "failed", summary: "rate limited" })),
+    // The retry: same slot, same (or no) launching call, the next attempt.
+    activity("task.started", claudeMember(2, { attempt: 2, prompt: "try again" }))
+  ];
+  const started = byId(foldSubagentActivities(upToRetry), slot);
+  assert.equal(started.status, "running", "the retry's start alone reopens the slot");
+  assert.equal(started.activationCount, 2);
+  const agents = foldSubagentActivities([
+    ...upToRetry,
+    activity("task.progress", claudeMember(2, { attempt: 2, status: "running" }))
+  ]);
+  const retried = byId(agents, slot);
+  assert.equal(retried.status, "running");
+  assert.equal(retried.attempt, 2);
+  assert.equal(retried.activationCount, 2);
+  assert.equal(retried.error, null, "the failed attempt's error does not label the retry");
+  assert.equal(retried.completedAt, null);
+});
+
+test("a later attempt's end settles a slot whose retry start was never seen", () => {
+  resetActivityIds();
+  const agents = foldSubagentActivities([
+    ...claudeWorkflowRun(),
+    activity("task.completed", claudeMember(2, { status: "failed", summary: "rate limited" })),
+    activity("task.completed", claudeMember(2, { attempt: 2, status: "completed", summary: "done" }))
+  ]);
+  const slot = byId(agents, `${WF}:wf:2`);
+  assert.equal(slot.status, "completed");
+  assert.equal(slot.result, "done");
+  assert.equal(slot.error, null);
+  assert.ok(slot.completedAt);
+});
+
+test("a late duplicate of the same attempt's start does not reopen a settled slot", () => {
+  resetActivityIds();
+  const agents = foldSubagentActivities([
+    ...claudeWorkflowRun(),
+    activity("task.completed", claudeMember(1, { status: "completed" })),
+    activity("task.started", claudeMember(1))
+  ]);
+  assert.equal(byId(agents, `${WF}:wf:1`).status, "completed");
+  assert.equal(byId(agents, `${WF}:wf:1`).activationCount, 1);
+});
+
+test("settled workflow members finish their phases", () => {
+  resetActivityIds();
+  const agents = foldSubagentActivities([
+    ...claudeWorkflowRun(),
+    activity("task.completed", claudeMember(1, { status: "completed" })),
+    activity("task.completed", claudeMember(2, { status: "failed" })),
+    activity("task.completed", claudeCoordinator({ status: "stopped" }))
+  ]);
+  const model = deriveAgentPanelModel({ agents });
+  assert.deepEqual(model.workflows[0]!.phases.map((phase) => phase.state), ["done", "done"]);
+});
+
+test("a coordinator with no member rows yet stands for the run", () => {
+  resetActivityIds();
+  const agents = foldSubagentActivities([
+    activity("task.started", claudeCoordinator()),
+    activity("task.progress", claudeCoordinator({ usage: { totalTokens: 300 } }))
+  ]);
+  const model = deriveAgentPanelModel({ agents });
+  const group = model.workflows[0]!;
+  assert.deepEqual(group.phases.map((phase) => [phase.index, phase.state]), [
+    [1, "pending"],
+    [2, "pending"]
+  ]);
+  assert.equal(model.runningCount, 1, "it is the only thing known to be working");
+  assert.equal(model.totalTokens, 300);
+});
+
+test("missing coordinator phases are reconstructed from member metadata", () => {
+  for (const base of [0, 1]) {
+    resetActivityIds();
+    const agents = foldSubagentActivities([
+      activity("task.started", agentTask("wf", { taskType: "local_workflow" })),
+      activity("task.progress", agentTask("m1", { parentAgentId: "wf", phaseIndex: base, status: "running" })),
+      activity("task.progress", agentTask("m2", { parentAgentId: "wf", phaseIndex: base + 1, status: "running" })),
+      activity(
+        "task.progress",
+        agentTask("m3", { parentAgentId: "wf", phaseIndex: base + 1, phaseTitle: "Combine", status: "running" })
+      )
+    ]);
+    const group = deriveAgentPanelModel({ agents }).workflows[0]!;
+    assert.deepEqual(
+      group.phases.map((phase) => [phase.index, phase.members.map((member) => member.id)]),
+      [
+        [base, ["m1"]],
+        [base + 1, ["m2", "m3"]]
+      ],
+      `base ${base}`
+    );
+    assert.equal(group.phases[1]?.title, "Combine");
+  }
+});
+
+// --- /task/stop: which rows a single Stop may name --------------------------
+
+test("taskStopRefusal: a live workflow run, subagent or shell can be stopped", () => {
+  resetActivityIds();
+  const agents = foldSubagentActivities([
+    activity("task.started", claudeCoordinator()),
+    activity("task.progress", claudeMember(1, { status: "running" })),
+    activity("task.started", agentTask("sub-1", { title: "Reviewer" })),
+    activity("task.started", { taskId: "sh-1", agentKind: "background", taskType: "local_bash", title: "pnpm dev" })
+  ]);
+  assert.equal(taskStopRefusal(agents, WF), null);
+  assert.equal(taskStopRefusal(agents, "sub-1"), null);
+  assert.equal(taskStopRefusal(agents, "sh-1"), null);
+});
+
+test("taskStopRefusal: a workflow's member is refused, even once its coordinator is gone", () => {
+  resetActivityIds();
+  const agents = foldSubagentActivities([
+    activity("task.started", claudeCoordinator()),
+    activity("task.progress", claudeMember(1, { status: "running" })),
+    ...workflowRows()
+  ]);
+  assert.notEqual(taskStopRefusal(agents, `${WF}:wf:1`), null);
+  // A member of another adapter's workflow: its parent is a workflow row.
+  assert.notEqual(taskStopRefusal(agents, "m1"), null);
+  // The member's synthetic id alone says so when the coordinator was evicted.
+  const orphan = agents.filter((agent) => agent.id !== WF);
+  assert.notEqual(taskStopRefusal(orphan, `${WF}:wf:1`), null);
+});
+
+test("taskStopRefusal: an unknown, a settled or a driver row is refused", () => {
+  resetActivityIds();
+  const agents = foldSubagentActivities([
+    activity("task.started", claudeCoordinator()),
+    activity("task.completed", claudeCoordinator({ status: "stopped" })),
+    activity("task.started", { taskId: "loop-1", agentKind: "background", taskType: "scheduled", title: "tick" })
+  ]);
+  assert.notEqual(taskStopRefusal(agents, "nope"), null);
+  assert.notEqual(taskStopRefusal(agents, WF), null);
+  assert.notEqual(taskStopRefusal(agents, "loop-1"), null);
 });

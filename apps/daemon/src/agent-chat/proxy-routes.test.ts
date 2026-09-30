@@ -140,7 +140,7 @@ const tab = (id: string): SessionSummary => ({
 test("documented commands preserve their path, body, authentication and acknowledgement", async () => {
   const h = await makeHarness({ t1: tab("t1") });
   h.host.handler = (_req, res) => res.writeHead(200, { "content-type": "application/json" }).end('{"seq":42}');
-  for (const suffix of ["turn", "interrupt", "approval", "answer", "dismiss", "revert", "compact", "mode", "background", "session/stop"]) {
+  for (const suffix of ["turn", "interrupt", "approval", "answer", "dismiss", "revert", "compact", "mode", "background", "task/stop", "session/stop"]) {
     const response = await h.app.inject({
       method: "POST", url: `/api/sessions/t1/${suffix}`, payload: { commandId: "c1", input: "hi" }
     });

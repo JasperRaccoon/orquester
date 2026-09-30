@@ -13,7 +13,7 @@ import { beforeEach,describe,it } from "node:test";
 import type { ThreadItem,ThreadMessageItem } from "@orquester/api/agent-chat";
 
 import { agentPromptOf,drillInWindow } from "./agent-prompt.logic";
-import { activity,message,resetBuilders,stamp } from "./test-helpers";
+import { activity,CLAUDE_WORKFLOW_ID,claudeWorkflow,message,resetBuilders,stamp } from "./test-helpers";
 
 beforeEach(() => {
   resetBuilders();
@@ -143,5 +143,18 @@ describe("drillInWindow: latest launch", () => {
     const window = drillInWindow(items, "a1");
     assert.equal(window.latestLaunchAt, stamp(7));
     assert.deepEqual(window.items.map((item) => item.id), ["agent-prompt:first", "said"]);
+  });
+});
+
+describe("a Claude workflow's launches", () => {
+  it("heads the coordinator's drill-in with its script, marked as one", () => {
+    const script = "export default async function run(ctx) {\n  await ctx.phase('Gather');\n}";
+    const items: ThreadItem[] = [
+      activity("task.started", claudeWorkflow.coordinator({ prompt: script }), { id: "wf-start", tone: "info", createdAt: stamp(1) })
+    ];
+    const [prompt] = prompts(drillInWindow(items, CLAUDE_WORKFLOW_ID).items);
+    assert.ok(prompt);
+    assert.equal(prompt.text, script, "verbatim, newlines and all");
+    assert.equal(agentPromptOf(prompt)?.script, true);
   });
 });

@@ -7,7 +7,7 @@ import { providerRows, supportsFrom, type AgentSupports } from "./agents.ts";
 import type { DaemonApi } from "./daemon-api.ts";
 import { readThread, requireChatSession } from "./reads.ts";
 import { capText, clipText, MAX_RESULT_BYTES, resultBytes } from "./result.ts";
-import { cutTail, fitRoster, proposedPlan, sized, SUBAGENT_TEXT_CHARS } from "./transcript.ts";
+import { cutTail, fitRoster, groupedRoster, proposedPlan, sized, SUBAGENT_TEXT_CHARS, workflowFields, type WorkflowProgress } from "./transcript.ts";
 
 const VIEW_TEXT_CAP = 16_384;
 /**
@@ -57,7 +57,15 @@ export interface SessionView { id: string; kind: "chat" | "terminal"; agent: str
 interface PendingApprovalView { requestId: string; kind: ProviderRequestKind; createdAt: string; detail?: string; appName?: string; tool?: { name: string; input: unknown }; decisions: { decision: ApprovalDecision; label: string; warning?: string }[] }
 export interface PendingQuestionView { requestId: string; createdAt: string; turnId?: string; responseMode: "blocking" | "message"; dismissible: boolean;
   questions: { index: number; id: string; header: string; question: string; options: { label: string; description: string; value?: string }[]; multiSelect: boolean; allowCustomAnswer: boolean; isSecret?: boolean; isOther?: boolean }[] }
-interface SubagentView { id: string; kind: string; agentKind: "agent" | "background"; title: string | null; status: string; model?: string; effort?: string; progress?: string; lastToolName?: string; startedAt: string | null; completedAt: string | null; error?: string }
+/**
+ * A subagent as get_session lists it; every optional field only when the host reported it. A workflow run is a
+ * coordinator (`kind: "workflow"`: `workflowName`, the run's `runId`, its whole usage and `workflow`, its members'
+ * progress) followed by its members (`kind: "workflow_agent"`, id `<coordinator>:wf:<slot>`: `parentAgentId`, the slot
+ * as `agentIndex`, its phase, and `attempt` once retried). The run's script and transcript paths stay on the host.
+ */
+interface SubagentView { id: string; kind: string; agentKind: "agent" | "background"; title: string | null; status: string; model?: string; effort?: string; progress?: string; lastToolName?: string; startedAt: string | null; completedAt: string | null;
+  parentAgentId?: string; agentIndex?: number; phaseIndex?: number; phaseTitle?: string; attempt?: number; workflowName?: string; runId?: string; workflow?: WorkflowProgress;
+  usage?: { totalTokens: number; toolUses?: number; durationMs?: number }; result?: string; error?: string }
 interface PlanView { planId: string; markdown: string; truncated: boolean; actionable: boolean }
 export interface SessionDetail extends SessionView { chat: Omit<NonNullable<SessionView["chat"]>, "goal"> & { goal: GoalDetailView | null; model: string; options: Record<string, string | boolean>; runtimeMode: RuntimeMode; home: AccountHomeKind; accountLabel?: string; activeTurnId: string | null; turnCount: number; lastError?: string; continueAfterRestart: boolean;
     contextWindow?: { usedTokens: number; maxTokens?: number; percentUsed?: number; compactsAutomatically?: boolean }; supports: AgentSupports };
@@ -226,12 +234,26 @@ function planView(snap: ThreadSnapshotPayload): PlanView | null {
 /** A subagent's text as a view shows it: at most SUBAGENT_TEXT_CHARS code points, a cut ending in "…"; a non-string as its JSON. */
 const subagentText = (value: unknown): string => clipText(typeof value === "string" ? value : JSON.stringify(value), SUBAGENT_TEXT_CHARS);
 
-function subagentView(r: RuntimeSubagent): SubagentView {
+function subagentView(r: RuntimeSubagent, progress: ReadonlyMap<string, WorkflowProgress>): SubagentView {
   const v: SubagentView = { id: r.id, kind: r.kind, agentKind: r.agentKind, title: r.title == null ? null : subagentText(r.title), status: r.status, startedAt: r.startedAt ?? null, completedAt: r.completedAt ?? null };
   if (r.model) v.model = r.model;
   if (r.effort) v.effort = r.effort;
   if (r.progress) v.progress = subagentText(r.progress);
   if (r.lastToolName) v.lastToolName = r.lastToolName;
+  const w = workflowFields(r, progress);
+  if (w.parentAgentId) v.parentAgentId = w.parentAgentId;
+  if (typeof r.agentIndex === "number") v.agentIndex = r.agentIndex;
+  if (w.phaseIndex !== undefined) v.phaseIndex = w.phaseIndex;
+  if (r.phaseTitle) v.phaseTitle = subagentText(r.phaseTitle);
+  if (w.attempt !== undefined) v.attempt = w.attempt;
+  if (w.workflowName) v.workflowName = w.workflowName;
+  if (r.runHandles?.runId) v.runId = r.runHandles.runId;
+  if (w.workflow) v.workflow = w.workflow;
+  if (r.usage && typeof r.usage.totalTokens === "number") {
+    const u = r.usage;
+    v.usage = { totalTokens: u.totalTokens, ...(typeof u.toolUses === "number" ? { toolUses: u.toolUses } : {}), ...(typeof u.durationMs === "number" ? { durationMs: u.durationMs } : {}) };
+  }
+  if (r.result) v.result = subagentText(r.result);
   if (r.error) v.error = subagentText(r.error);
   return v;
 }
@@ -358,7 +380,8 @@ export function sessionDetail(s: SessionSummary, snap: ThreadSnapshotPayload, ct
   if (head.session.lastError) chat.lastError = head.session.lastError;
   const cw = latestContextWindow(snap.items);
   if (cw) chat.contextWindow = cw;
-  const detail: SessionDetail = { ...base, chat, pending: { approvals: pendingApprovalViews(snap), questions: pendingQuestionViews(snap) }, subagents: snap.roster.map(subagentView) };
+  const roster = groupedRoster(snap.roster);
+  const detail: SessionDetail = { ...base, chat, pending: { approvals: pendingApprovalViews(snap), questions: pendingQuestionViews(snap) }, subagents: roster.rows.map((r) => subagentView(r, roster.progress)) };
   const plan = planView(snap);
   if (plan) detail.plan = plan;
   const reply = lastReply(snap);

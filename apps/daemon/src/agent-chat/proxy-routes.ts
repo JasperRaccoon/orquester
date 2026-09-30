@@ -19,6 +19,7 @@ import {
   AGENT_CHAT_COMMAND_NAMES,
   AGENT_CHAT_ERROR_CODES,
   THREAD_SEARCH_MAX_QUERY_CHARS,
+  agentChatCommandPath,
   agentChatRoutes,
   type AgentChatCommandName,
   type AgentChatErrorCode,
@@ -39,6 +40,7 @@ const HOST_COMMAND_ROUTE: Record<AgentChatCommandName, (threadId: string) => str
   compact: agentHostRoutes.compact,
   mode: agentHostRoutes.mode,
   background: agentHostRoutes.background,
+  "task/stop": agentHostRoutes.taskStop,
   "session/stop": agentHostRoutes.sessionStop
 };
 
@@ -150,8 +152,7 @@ const TURN_DIFF_PATTERN = agentChatRoutes.turnDiff(":id", 0).replace(/\/0\/diff$
 export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRouteDeps): void {
   // --- §6.2 commands -------------------------------------------------------
   for (const name of AGENT_CHAT_COMMAND_NAMES) {
-    const path =
-      name === "session/stop" ? agentChatRoutes.sessionStop(":id") : agentChatRoutes[name](":id");
+    const path = agentChatCommandPath(":id", name);
     app.post<{ Params: { id: string } }>(
       pattern(path),
       async (request, reply) => {

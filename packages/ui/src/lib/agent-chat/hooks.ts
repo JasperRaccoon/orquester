@@ -137,6 +137,7 @@ export const useAgentChatRoster: UseAgentChatRoster = (sessionId) => {
   const agents = useThreadState(store, (state) => state.slice.roster);
   const backgroundLiveness = useThreadState(store, (state) => state.slice.backgroundLiveness);
   const stopping = useThreadState(store, (state) => state.stopping);
+  const stoppingTaskIds = useThreadState(store, (state) => state.stoppingTaskIds);
 
   const panel = useMemo<AgentPanelModel>(
     () => (agents.length === 0 ? emptyAgentPanelModel() : deriveAgentPanelModel({ agents })),
@@ -144,8 +145,8 @@ export const useAgentChatRoster: UseAgentChatRoster = (sessionId) => {
   );
 
   return useMemo<AgentChatRosterView>(
-    () => ({ agents, panel, backgroundLiveness, stopping }),
-    [agents, panel, backgroundLiveness, stopping]
+    () => ({ agents, panel, backgroundLiveness, stopping, stoppingTaskIds }),
+    [agents, panel, backgroundLiveness, stopping, stoppingTaskIds]
   );
 };
 

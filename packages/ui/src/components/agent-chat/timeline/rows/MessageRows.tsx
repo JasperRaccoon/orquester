@@ -177,11 +177,14 @@ function RewindToHereButton({
 function ClampedBubbleText({
   text,
   showLabel,
-  onShowFull
+  onShowFull,
+  mono = false
 }: {
   text: string;
   showLabel: string;
   onShowFull?: (() => void) | undefined;
+  /** Code, not prose: a workflow's script. */
+  mono?: boolean;
 }): React.ReactElement {
   const [expanded, setExpanded] = React.useState(false);
   const clampable = onShowFull !== undefined || shouldClampUserMessage(text);
@@ -190,7 +193,8 @@ function ClampedBubbleText({
     <>
       <div
         className={cn(
-          "whitespace-pre-wrap text-sm leading-relaxed [overflow-wrap:anywhere]",
+          "whitespace-pre-wrap [overflow-wrap:anywhere]",
+          mono ? "font-mono text-xs leading-normal" : "text-sm leading-relaxed",
           clamped &&
             "max-h-44 overflow-hidden [mask-image:linear-gradient(to_bottom,black_calc(100%-1.75rem),transparent)]"
         )}
@@ -290,14 +294,23 @@ export const AgentPromptRow = React.memo(function AgentPromptRow({
 }): React.ReactElement {
   const ctx = useTimelineRowContext();
   const text = row.message.text;
+  // A workflow's coordinator was "prompted" with the script it runs.
+  const script = prompt.script === true;
+  const caption = script ? "Workflow script" : "Prompt";
   return (
     <div className="group flex flex-col items-end gap-1" data-agent-prompt="true">
-      <span className="pe-1 text-[11px] text-neutral-500">Prompt</span>
-      <div className="relative max-w-[80%] rounded-2xl bg-neutral-800 p-3 text-neutral-100">
-        <AuthorHeading>Prompt</AuthorHeading>
+      <span className="pe-1 text-[11px] text-neutral-500">{caption}</span>
+      <div
+        className={cn(
+          "relative rounded-2xl bg-neutral-800 p-3 text-neutral-100",
+          script ? "w-full" : "max-w-[80%]"
+        )}
+      >
+        <AuthorHeading>{caption}</AuthorHeading>
         <ClampedBubbleText
           text={text}
-          showLabel="Show full prompt"
+          mono={script}
+          showLabel={script ? "Show full script" : "Show full prompt"}
           // Cut on the wire: its one "Show full prompt" reads the whole prompt
           // in the parent's viewer, never unclamps the cut text.
           onShowFull={prompt.truncated ? () => ctx.onLoadFullOutput(prompt.itemId, "prompt") : undefined}
@@ -311,7 +324,7 @@ export const AgentPromptRow = React.memo(function AgentPromptRow({
           {formatRowTimestamp(row.createdAt)}
         </span>
         {!prompt.truncated && text.length > 0 ? (
-          <CopyButton size="micro" value={text} label="Copy prompt" />
+          <CopyButton size="micro" value={text} label={script ? "Copy script" : "Copy prompt"} />
         ) : null}
       </div>
     </div>

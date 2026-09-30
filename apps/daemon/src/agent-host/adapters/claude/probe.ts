@@ -59,6 +59,9 @@ export const CLAUDE_CAPABILITIES: AdapterCapabilities = {
   // `query.backgroundTasks(toolUseId?)`: "the control-request equivalent of
   // pressing Ctrl+B in the terminal" (SDK 0.3.278 `sdk.d.ts`).
   supportsBackgroundTasks: true,
+  // `query.stopTask(taskId)`, the `stop_task` control: one task — a workflow
+  // run, a subagent, a shell — stopped while the rest keep running.
+  supportsTaskStop: true,
   // The CLI parses `/goal` itself, so it is forwarded verbatim. Its goal is a
   // Stop hook that re-runs only at a turn end: "continue" nudges an idle goal
   // on, and "clear" is `/goal clear`. There is no pause, and the CLI never

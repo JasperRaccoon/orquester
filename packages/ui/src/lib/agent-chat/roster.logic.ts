@@ -21,7 +21,9 @@
 
 import {
   ACTIVE_SUBAGENT_STATUSES,
+  TASK_STOP_FAILED_ACTIVITY_KIND,
   TERMINAL_SUBAGENT_STATUSES,
+  taskStopRefusal,
   type RuntimeSubagent,
   type RuntimeSubagentStatus,
   type ThreadItem
@@ -309,19 +311,34 @@ export function deriveAgentSpawnSummary(input: {
   return { live, lead, status, tone };
 }
 
-/** Resolve a spawn row's ids against the live roster, at render time. */
+/**
+ * Resolve a spawn row's ids against the live roster, at render time: its
+ * agents in roster order, its workflow's coordinator apart, and how many
+ * agents it launched.
+ *
+ * The coordinator is never one of the agents — it is their container, and
+ * counting it read "Kicked off 4 subagents · 1 working" for three members
+ * between phases. A workflow's agents are the rows naming it their parent as
+ * well as the ids the timeline saw: members come and go by progress snapshot
+ * and never need a timeline row of their own. `agentCount` never drops below
+ * the ids seen, so a member the roster's cap evicted still counts.
+ */
 export function resolveSpawnRowAgents(
   roster: readonly RuntimeSubagent[],
   spawn: { workflowId: string | null; agentTaskIds: readonly string[] }
-): { agents: RuntimeSubagent[]; coordinator: RuntimeSubagent | null } {
-  const byId = new Map(roster.map((agent) => [agent.id, agent]));
-  const agents = spawn.agentTaskIds
-    .map((taskId) => byId.get(taskId))
-    .filter((agent): agent is RuntimeSubagent => agent !== undefined);
-  return {
-    agents,
-    coordinator: spawn.workflowId ? (byId.get(spawn.workflowId) ?? null) : null
-  };
+): { agents: RuntimeSubagent[]; coordinator: RuntimeSubagent | null; agentCount: number } {
+  const { workflowId } = spawn;
+  const memberIds = new Set(spawn.agentTaskIds.filter((taskId) => taskId !== workflowId));
+  let coordinator: RuntimeSubagent | null = null;
+  const agents: RuntimeSubagent[] = [];
+  for (const agent of roster) {
+    if (workflowId !== null && agent.id === workflowId) {
+      coordinator = agent;
+    } else if (memberIds.has(agent.id) || (workflowId !== null && agent.parentAgentId === workflowId)) {
+      agents.push(agent);
+    }
+  }
+  return { agents, coordinator, agentCount: Math.max(agents.length, memberIds.size) };
 }
 
 /** Task ids of every still-live agent — what the live activity row reads. */
@@ -402,4 +419,60 @@ export function workingLivenessTitle(liveAgentCount: number, liveShellCount = 0)
   if (agents > 0) return `${agentLabel} working`;
   if (shells > 0) return `${shellLabel} running`;
   return "Background work";
+}
+
+// ---------------------------------------------------------------------------
+// Per-task Stop (`/task/stop`)
+// ---------------------------------------------------------------------------
+
+/** What a roster row's own Stop shows: nothing, a Stop, or "Stopping…". */
+export type TaskStopControl = "hidden" | "ready" | "stopping";
+
+/**
+ * A row's own Stop: offered only where the provider can stop one task
+ * (`supportsTaskStop`) and the host would take this one — the shared
+ * `taskStopRefusal`, so a workflow's member, a settled row or a loop never
+ * shows a button the host would refuse. "Stopping…" from the click until the
+ * row settles ({@link pendingTaskStops}), not until the command returns: an
+ * accepted stop is not yet a stopped task.
+ */
+export function taskStopControl(
+  agents: readonly RuntimeSubagent[],
+  taskId: string,
+  input: { canStopTasks: boolean; stoppingTaskIds: readonly string[] }
+): TaskStopControl {
+  if (!input.canStopTasks || taskStopRefusal(agents, taskId) !== null) return "hidden";
+  return input.stoppingTaskIds.includes(taskId) ? "stopping" : "ready";
+}
+
+/**
+ * The stops still in flight after a frame: a task stays "Stopping…" while its
+ * row is still at work, and is let go once it settles, leaves the roster, or
+ * the provider failed its stop (`failedTaskId`, from a
+ * {@link TASK_STOP_FAILED_ACTIVITY_KIND} row) — so the button offers the stop
+ * again. Returns `stopping` itself when nothing changed.
+ */
+export function pendingTaskStops(
+  stopping: readonly string[],
+  agents: readonly RuntimeSubagent[],
+  failedTaskId: string | null = null
+): readonly string[] {
+  if (stopping.length === 0) return stopping;
+  const still = stopping.filter(
+    (id) =>
+      id !== failedTaskId &&
+      agents.some((agent) => agent.id === id && ACTIVE_SUBAGENT_STATUSES.has(agent.status))
+  );
+  return still.length === stopping.length ? stopping : still;
+}
+
+/** The task a {@link TASK_STOP_FAILED_ACTIVITY_KIND} row names, or null for any other item. */
+export function failedTaskStopId(item: ThreadItem): string | null {
+  if (item.kind !== "activity" || item.activityKind !== TASK_STOP_FAILED_ACTIVITY_KIND) return null;
+  const payload = item.payload;
+  const target =
+    typeof payload === "object" && payload !== null
+      ? (payload as { targetTaskId?: unknown }).targetTaskId
+      : undefined;
+  return typeof target === "string" && target.length > 0 ? target : null;
 }

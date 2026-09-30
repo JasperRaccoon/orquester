@@ -450,3 +450,9 @@ Rewritten incoming names (the disposition entries above preserve the original na
 - `names a failed member once the workflow completes, and a failed workflow as such` → `reports failure when a member or coordinator failed`.
 - `keeps a stop pending while its row works, and lets it go once it settles, leaves or failed` → `drops evicted pending stops and preserves other tasks when one fails`.
 - `reads the task a stop failure names, and nothing else` → `ignores unrelated activities and malformed task-stop failures`.
+
+## Integrated remote result
+
+Resolved the roster-test merge conflict by preserving both baseline deletions and the audited incoming cases. Applied the incoming script-prompt and roster cleanups to the shared worktree; no deleted baseline test returned. The final scope contains 248 cases: 301 declarations reviewed across baseline and remote, with 53 DELETE, 17 REWRITE and 231 KEEP. AST reconciliation verified every surviving/deleted name, including the documented incoming renames.
+
+The merged three-file focused suite (`agent-prompt.logic.test.ts`, `entries.logic.test.ts`, `roster.logic.test.ts`) passed 59 tests / 19 suites, zero failures/skips/cancellations. The resolved files were staged; scoped staged diff check passed and no roster conflict remains. Root owns repository gates and completing the merge/commit/push.

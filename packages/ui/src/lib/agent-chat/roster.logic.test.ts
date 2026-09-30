@@ -2,14 +2,19 @@ import assert from "node:assert/strict";
 import { describe,it } from "node:test";
 
 import type { RuntimeSubagent,RuntimeSubagentStatus,ThreadItem } from "@orquester/api/agent-chat";
+import { foldSubagentActivities } from "@orquester/api/agent-chat";
 
 import {
 agentActivityText,
 deriveAgentSpawnSummary,
 deriveRosterDockView,
-isBackgroundShellItems
+failedTaskStopId,
+isBackgroundShellItems,
+pendingTaskStops,
+resolveSpawnRowAgents,
+taskStopControl
 } from "./roster.logic";
-import { activity } from "./test-helpers";
+import { activity,CLAUDE_WORKFLOW_ID as WF,claudeWorkflow } from "./test-helpers";
 
 const agent = (
   id: string,
@@ -67,6 +72,56 @@ describe("deriveAgentSpawnSummary", () => {
       coordinatorStatus: "running"
     });
     assert.equal(summary.live, true);
+  });
+});
+
+describe("a Claude workflow's spawn row", () => {
+  const spawn = { workflowId: WF, agentTaskIds: [WF, `${WF}:wf:1`] };
+  const run = () => [
+    activity("task.started", claudeWorkflow.coordinator({ prompt: "export default async () => {}" })),
+    // Members first appear by progress snapshot, some pending.
+    activity("task.progress", claudeWorkflow.member(1, { status: "running" })),
+    activity("task.progress", claudeWorkflow.member(2, { status: "pending" })),
+    activity("task.progress", claudeWorkflow.member(3, { status: "pending" }))
+  ];
+
+  it("counts the members, never the coordinator, including members the timeline never saw", () => {
+    const resolved = resolveSpawnRowAgents(foldSubagentActivities(run()), spawn);
+    assert.equal(resolved.coordinator?.id, WF);
+    assert.deepEqual(resolved.agents.map((a) => a.id), [`${WF}:wf:1`, `${WF}:wf:2`, `${WF}:wf:3`]);
+    assert.equal(resolved.agentCount, 3);
+  });
+
+  it("preserves a known member count before roster details arrive", () => {
+    const roster = foldSubagentActivities([activity("task.started", claudeWorkflow.coordinator())]);
+    const resolved = resolveSpawnRowAgents(roster, spawn);
+    assert.deepEqual(resolved.agents, []);
+    assert.equal(resolved.agentCount, 1, "the one member id the timeline saw still counts");
+  });
+
+  it("summarizes a stopped workflow as inactive", () => {
+    const summary = deriveAgentSpawnSummary({
+      agents: [agent("one", "completed"), agent("two", "interrupted")],
+      agentCount: 2,
+      coordinatorStatus: "interrupted"
+    });
+    assert.equal(summary.live, false);
+    assert.equal(summary.tone, "inactive");
+  });
+
+  it("reports failure when a member or coordinator failed", () => {
+    const failedMember = deriveAgentSpawnSummary({
+      agents: [agent("one", "completed"), agent("two", "failed")],
+      agentCount: 2,
+      coordinatorStatus: "completed"
+    });
+    assert.equal(failedMember.tone, "failed");
+    const failedRun = deriveAgentSpawnSummary({
+      agents: [],
+      agentCount: 0,
+      coordinatorStatus: "failed"
+    });
+    assert.equal(failedRun.tone, "failed");
   });
 });
 
@@ -132,5 +187,42 @@ describe("a shell known by its items alone, for a drill-in with no roster row (f
     assert.equal(isBackgroundShellItems([task("task.started", { taskId: "loop", taskType: "scheduled" }, "loop")], "loop"), false);
     assert.equal(isBackgroundShellItems([task("task.started", { taskId: "goal", taskType: "goal" }, "goal")], "goal"), false);
     assert.equal(isBackgroundShellItems([], "sh1"), false);
+  });
+});
+
+describe("the per-task Stop (/task/stop)", () => {
+  const liveRun = () =>
+    foldSubagentActivities([
+      activity("task.started", claudeWorkflow.coordinator()),
+      activity("task.progress", claudeWorkflow.member(1, { status: "running" }))
+    ]);
+  const on = { canStopTasks: true, stoppingTaskIds: [] as string[] };
+
+  it("shows on a live run where the provider can stop one task, and reads Stopping… while in flight", () => {
+    const agents = liveRun();
+    assert.equal(taskStopControl(agents, WF, on), "ready");
+    assert.equal(taskStopControl(agents, WF, { ...on, stoppingTaskIds: [WF] }), "stopping");
+  });
+
+  it("hides where the provider cannot, on a member, and on a run that settled", () => {
+    const agents = liveRun();
+    assert.equal(taskStopControl(agents, WF, { ...on, canStopTasks: false }), "hidden");
+    assert.equal(taskStopControl(agents, `${WF}:wf:1`, on), "hidden", "a member is never stopped on its own");
+    const settled = foldSubagentActivities([
+      activity("task.started", claudeWorkflow.coordinator()),
+      activity("task.completed", claudeWorkflow.coordinator({ status: "stopped" }))
+    ]);
+    assert.equal(taskStopControl(settled, WF, { ...on, stoppingTaskIds: [WF] }), "hidden");
+  });
+
+  it("drops evicted pending stops and preserves other tasks when one fails", () => {
+    const agents = [agent("a", "running"), agent("b", "running")];
+    assert.deepEqual(pendingTaskStops(["a", "b", "gone"], agents), ["a", "b"]);
+    assert.deepEqual(pendingTaskStops(["a", "b"], agents, "b"), ["a"]);
+  });
+
+  it("ignores unrelated activities and malformed task-stop failures", () => {
+    assert.equal(failedTaskStopId(activity("provider.task.stop.failed", { taskId: WF })), null);
+    assert.equal(failedTaskStopId(activity("task-stop.requested", { targetTaskId: WF })), null);
   });
 });

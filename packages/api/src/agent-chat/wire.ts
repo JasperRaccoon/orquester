@@ -57,6 +57,15 @@ export const agentChatRoutes = {
    * `backgroundTasks` control).
    */
   background: (sessionId: string): string => `${sessionBase(sessionId)}/background`,
+  /**
+   * Stop ONE live background task — a workflow run, a subagent, a background
+   * shell — by its roster id, leaving the turn and every other task running
+   * (the `task/stop` command, {@link TaskStopCommandBody}). Only a provider
+   * whose capabilities carry `supportsTaskStop` accepts it (Claude, via the
+   * SDK's `stop_task` control). The session-scoped `/interrupt` stays the way
+   * to stop the whole fleet.
+   */
+  taskStop: (sessionId: string): string => `${sessionBase(sessionId)}/task/stop`,
   sessionStop: (sessionId: string): string => `${sessionBase(sessionId)}/session/stop`,
   /**
    * Switch the managed account an existing thread runs under (§3.4 "account
@@ -325,9 +334,10 @@ export type AgentChatCommandName =
   | "compact"
   | "mode"
   | "background"
+  | "task/stop"
   | "session/stop";
 
-/** The ten §6.2 command names, in table order. */
+/** The eleven §6.2 command names, in table order. */
 export const AGENT_CHAT_COMMAND_NAMES = [
   "turn",
   "interrupt",
@@ -338,14 +348,20 @@ export const AGENT_CHAT_COMMAND_NAMES = [
   "compact",
   "mode",
   "background",
+  "task/stop",
   "session/stop"
 ] as const satisfies readonly AgentChatCommandName[];
 
 /** Resolve a command name to its route. */
 export function agentChatCommandPath(sessionId: string, name: AgentChatCommandName): string {
-  return name === "session/stop"
-    ? agentChatRoutes.sessionStop(sessionId)
-    : agentChatRoutes[name](sessionId);
+  switch (name) {
+    case "session/stop":
+      return agentChatRoutes.sessionStop(sessionId);
+    case "task/stop":
+      return agentChatRoutes.taskStop(sessionId);
+    default:
+      return agentChatRoutes[name](sessionId);
+  }
 }
 
 // ---------------------------------------------------------------------------
@@ -439,6 +455,29 @@ export interface BackgroundCommandBody extends AgentChatCommandBase {
   toolUseId?: string;
 }
 
+/**
+ * `/task/stop`: stop the one live task `taskId` names — the `id` of its row in
+ * the thread's roster (`RuntimeSubagent.id`), which for Claude is the SDK's
+ * task id. The host refuses (409 `COMMAND_REJECTED`) a task the roster does not
+ * list, one that already settled, and a row that is not a provider task of its
+ * own — a Claude workflow's member rows among them: the provider can stop the
+ * workflow run, not one of its agents. The task's own `task.completed`
+ * (`stopped`) closes its row; a stop the provider failed lands as a
+ * `provider.task.stop.failed` activity.
+ */
+export interface TaskStopCommandBody extends AgentChatCommandBase {
+  taskId: string;
+}
+
+/**
+ * The activity kinds `/task/stop` appends: the user's request, accepted (the
+ * command's own row), and a stop the provider then failed. Both name the task
+ * as `payload.targetTaskId` — never `taskId`, which would file the row among
+ * the task's own.
+ */
+export const TASK_STOP_REQUESTED_ACTIVITY_KIND = "task-stop.requested";
+export const TASK_STOP_FAILED_ACTIVITY_KIND = "provider.task.stop.failed";
+
 /** Applied per §3.4 — the ensure-session step runs on the send path. */
 export interface ModeCommandBody extends AgentChatCommandBase {
   runtimeMode?: RuntimeMode;
@@ -484,6 +523,7 @@ export type AgentChatCommandBody =
   | CompactCommandBody
   | ModeCommandBody
   | BackgroundCommandBody
+  | TaskStopCommandBody
   | SessionStopCommandBody;
 
 /** Maps each command name to its body type. */
@@ -497,6 +537,7 @@ export interface AgentChatCommandBodies {
   compact: CompactCommandBody;
   mode: ModeCommandBody;
   background: BackgroundCommandBody;
+  "task/stop": TaskStopCommandBody;
   "session/stop": SessionStopCommandBody;
 }
 

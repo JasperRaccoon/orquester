@@ -43,6 +43,7 @@ export interface ScriptedCall {
     | "respondToUserInput"
     | "compact"
     | "backgroundTasks"
+    | "stopTask"
     | "goalCommand"
     | "readThread"
     | "projectHistory"
@@ -69,6 +70,7 @@ export interface ScriptedAdapterOptions {
   failCompact?: Error | null;
   failInterrupt?: Error | null;
   failApproval?: Error | null;
+  failStopTask?: Error | null;
   version?: string | null;
   /**
    * A host-parsed `/goal …` (goals §4.6). Omit to model an adapter with no
@@ -122,7 +124,8 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
     failSendTurn: options.failSendTurn ?? null,
     failCompact: options.failCompact ?? null,
     failInterrupt: options.failInterrupt ?? null,
-    failApproval: options.failApproval ?? null
+    failApproval: options.failApproval ?? null,
+    failStopTask: options.failStopTask ?? null
   };
 
   const take = (key: string): Error | null => {
@@ -265,6 +268,11 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
     async backgroundTasks(threadId: string, toolUseId?: string): Promise<boolean> {
       calls.push({ kind: "backgroundTasks", threadId, detail: { toolUseId } });
       return true;
+    },
+    async stopTask(threadId: string, taskId: string): Promise<void> {
+      calls.push({ kind: "stopTask", threadId, detail: { taskId } });
+      const failure = take("failStopTask");
+      if (failure) throw failure;
     },
 
     ...(options.goalCommand

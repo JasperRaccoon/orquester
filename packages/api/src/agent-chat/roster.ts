@@ -460,6 +460,13 @@ function applyTaskRow(
   payload: Record<string, unknown>
 ): void {
   const at = activity.createdAt;
+  // A workflow slot retried: the row names a later attempt than the fold
+  // knows. Read before `fillMetadata` stores the new attempt. A retry reuses
+  // the slot's task id and its launching call, so a changed `toolUseId`
+  // cannot tell it from a late delivery — the attempt number does.
+  const knownAttempt = cursor.agent?.attempt ?? null;
+  const rowAttempt = asCount(payload.attempt);
+  const retried = knownAttempt !== null && rowAttempt !== undefined && rowAttempt > knownAttempt;
 
   switch (activity.activityKind) {
     case "task.started": {
@@ -489,7 +496,7 @@ function applyTaskRow(
         agent.activationCount = 1;
         agent.startedAt = agent.startedAt ?? at;
         agent.status = "running";
-      } else if (agent.status === "idle" || resumed) {
+      } else if (agent.status === "idle" || resumed || (retried && isTerminal(agent.status))) {
         applyStatus(agent, "running", at);
       }
       const description = taskDescription(payload);
@@ -507,7 +514,7 @@ function applyTaskRow(
         applyStatus(agent, explicitStatus, at);
       } else if (
         (payload.usageSnapshot !== true || !existed) &&
-        !isTerminal(agent.status) &&
+        (!isTerminal(agent.status) || retried) &&
         agent.status !== "idle"
       ) {
         applyStatus(agent, "running", at);
@@ -566,6 +573,9 @@ function applyTaskRow(
       // carries the result summary and final usage the update lacked.
       const summary = asString(payload.summary) ?? taskDescription(payload);
       const incomingUsage = asUsage(payload.usage) ?? asUsage(payload.typedUsage);
+      // The end of a later attempt whose start and progress never reached
+      // this fold: it is that attempt's outcome, not a duplicate of the last.
+      if (retried && isTerminal(agent.status)) applyStatus(agent, "running", at);
       if (isTerminal(agent.status)) {
         if (summary) {
           if (agent.status === "failed") {
@@ -1130,17 +1140,18 @@ export function deriveAgentPanelModel(input: {
       workflow.phases.length > 0
         ? workflow.phases
         : (() => {
-            const derived = new Map<number, string>();
+            const derived = new Map<number, string | null>();
             for (const member of workflowMembers) {
-              if (member.phaseIndex !== null && !derived.has(member.phaseIndex)) {
-                derived.set(
-                  member.phaseIndex,
-                  member.phaseTitle ?? `Phase ${member.phaseIndex + 1}`
-                );
+              if (member.phaseIndex !== null && (derived.get(member.phaseIndex) ?? null) === null) {
+                derived.set(member.phaseIndex, member.phaseTitle);
               }
             }
+            // Index-base-agnostic: Claude numbers phases from 1, synthetic and
+            // older payloads from 0. A title the provider never sent is
+            // numbered from 1 either way.
+            const offset = derived.has(0) ? 1 : 0;
             return Array.from(derived.entries())
-              .map(([index, title]) => ({ index, title }))
+              .map(([index, title]) => ({ index, title: title ?? `Phase ${index + offset}` }))
               .sort((a, b) => a.index - b.index);
           })();
 
@@ -1214,4 +1225,38 @@ export function deriveAgentPanelModel(input: {
     hasAgents: true,
     liveCount: runningCount + waitingCount
   };
+}
+
+/**
+ * Why `/task/stop` ({@link TaskStopCommandBody}) cannot stop the roster row
+ * `taskId` names, or `null` when it can. One rule for both sides: the host
+ * refuses the command with this message, and the client offers a row's Stop
+ * only where it answers `null` — so the button never offers what the host
+ * would refuse. The provider's own capability (`supportsTaskStop`) is the
+ * caller's to check.
+ *
+ * Refused: a row the roster does not list, a row no longer at work, a loop or
+ * a goal (they drive work and are no task of their own), and a workflow's
+ * member — a row whose parent is a workflow row, or a Claude member's
+ * synthetic `<workflowTaskId>:wf:<index>` id even with its coordinator
+ * evicted. A provider runs a workflow as ONE task (Claude's `local_workflow`),
+ * so the run can be stopped, never one of its agents.
+ */
+export function taskStopRefusal(roster: readonly RuntimeSubagent[], taskId: string): string | null {
+  const task = roster.find((agent) => agent.id === taskId);
+  if (task === undefined) {
+    return "This thread lists no such task.";
+  }
+  const parent =
+    task.parentAgentId === null ? undefined : roster.find((agent) => agent.id === task.parentAgentId);
+  if (task.id.includes(":wf:") || parent?.kind === "workflow") {
+    return "A workflow's agents cannot be stopped one by one. Stop the whole workflow instead.";
+  }
+  if (isDriverKind(task.kind)) {
+    return "A loop or a goal is not a task of its own. Use Stop to end it.";
+  }
+  if (!isActive(task.status)) {
+    return "This task is no longer running.";
+  }
+  return null;
 }

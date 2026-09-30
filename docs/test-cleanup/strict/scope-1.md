@@ -1,6 +1,6 @@
 # API and config strict cleanup ledger
 
-Status: completed cleanup of the original scope; all planned edits implemented, dead support removed, focused and full assigned-package tests/typechecks passed. Incoming remote cases have a recorded audit and prepared patch awaiting root merge/application. Scope: all 40 assigned test files. Every original AST declaration is listed below; loop declarations stand for every listed runtime variant.
+Status: completed cleanup of the original scope; all planned edits implemented, dead support removed, focused and full assigned-package tests/typechecks passed. Incoming remote roster cleanup has also been applied after merge and passed its focused tests and API typecheck. Scope: all 40 assigned test files. Every original AST declaration is listed below; loop declarations stand for every listed runtime variant.
 
 Read: AGENTS.md, README.md, both package.json scripts, test fixtures/helpers, the corresponding production modules and the independently specified contracts linked below. No live daemon was started.
 
@@ -1117,7 +1117,7 @@ Baseline bounded full assigned-file run was interrupted by the agent-session cra
 
 ## Incoming remote roster cases — 9871b50f
 
-Recorded before modifying the incoming tests. Scope: ten added declarations in `packages/api/src/agent-chat/roster.test.ts`. Read the entire added test section, existing roster tests, `roster.ts` folding/grouping/refusal owners, the public `TaskStopCommandBody` contract in `wire.ts`, adapter capability contract, and host/UI call sites. Also inspected incoming Claude Workflow adapter cases and UI workflow-group rendering cases to assign each layer one contract.
+Dispositions recorded before modifying the incoming tests; all five planned rewrites are now applied in the merged worktree. Scope: ten added declarations in `packages/api/src/agent-chat/roster.test.ts`. Read the entire added test section, existing roster tests, `roster.ts` folding/grouping/refusal owners, the public `TaskStopCommandBody` contract in `wire.ts`, adapter capability contract, and host/UI call sites. Also inspected incoming Claude Workflow adapter cases and UI workflow-group rendering cases to assign each layer one contract.
 
 Independent sources: GUI specification §7.6 requires retained workflow membership, lifecycle state and cumulative usage; incoming Claude CLI 2.1.285 fixture provenance and runtime task linkage specify one-based phase IDs and attempts; `TaskStopCommandBody` specifies that only a live provider task can be stopped and excludes workflow members. The older GUI design's statement that there is no per-task Stop is superseded by this incoming public wire contract, so it is not used to justify the new refusal cases.
 
@@ -1135,3 +1135,12 @@ Before retaining these isolated seams, the failure inventory is: drop or mis-gro
 - **REWRITE** `taskStopRefusal: an unknown, a settled or a driver row is refused`. Replace exact sentences/regex with non-null refusal. Bar 1: public Stop requires an existing live provider task; loops/goals drive tasks rather than being tasks. Bar 2: an invalid Stop is enabled or accepted. Bar 3: literal non-null refusal for unknown ID, settled coordinator and driver. Bars 4–5: stable policy result independent of English copy. Bar 6: lowest shared policy matrix; host tests separately prove that a refusal blocks dispatch and produces its command error.
 
 Incoming support: all added fixture helpers remain used by these semantic cases. No added production export is test-only: `taskStopRefusal` has daemon and UI callers. No production edits proposed. Incoming result: 5 KEEP, 5 REWRITE, 0 DELETE; this is based on distinct behaviors, not a deletion quota. The rewrites remove duplicate assertions and generated copy while preserving the new protocol behavior.
+
+
+### Incoming completion and changed-existing-case review
+
+Applied the reviewed patch after root integrated remote 9871b50f. The incoming roster cleanup changes one file, 16 lines added / 42 removed (net −26 test LOC). Both original-to-surviving case-name mappings above are implemented. No unused support remains: coordinator/member/run builders are still used by retained protocol cases, and the shared refusal export has real host/UI callers.
+
+The remote also extends the existing KEEP `route builders produce the §6 paths and encode their segments` in `packages/api/src/agent-chat/contracts.test.ts` with `/task/stop` and `/background` command paths. KEEP these two assertions: the independently documented public wire paths are caller-visible transport bytes; literal URLs are independent of the builder; the public route function is the stable lowest owner and survives identifier/implementation refactors. Host/API client tests add transport dispatch, rather than replacing this route-byte contract.
+
+Post-merge validation: `pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/agent-chat/roster.test.ts packages/api/src/agent-chat/contracts.test.ts` passed all 49 tests with zero failures/skips. `pnpm --filter @orquester/api typecheck` passed. Scoped final diff inspected and `git diff --check` passed. Repository-wide post-merge gates remain root-owned. This scope performed no commit, merge or push.

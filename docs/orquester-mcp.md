@@ -337,7 +337,7 @@ chat: { …SessionView.chat,
                                          // (a Claude goal met or failed). continuing is true beside no other status
                                          // but a paused goal an Orquester update holds (heldForUpdate: true).
                                          // Each fact only when reported.
-        supports: { planMode, rollback, compaction, backgroundTasks,
+        supports: { planMode, rollback, compaction, backgroundTasks, taskStop,
                     goals: { command: "provider" | "host", actions: ("continue" | "pause" | "resume" | "clear")[],
                              continuesAcrossTurns } | null } },
 pending: { approvals: PendingApprovalView[], questions: PendingQuestionView[] },
@@ -394,7 +394,7 @@ A terminal tab's `get_session` is just its `SessionView`: there is no transcript
   modelsTruncated?, modelCount?,                      // only when models were left out to fit
   effortOptionId,                                     // "effort" | "variant" | "reasoningEffort"
   runtimeModes: ["approval-required", "auto-accept-edits", "auto", "full-access"], defaultRuntimeMode: "full-access",
-  supports: { planMode, rollback, compaction, backgroundTasks, contextWindow,
+  supports: { planMode, rollback, compaction, backgroundTasks, taskStop, contextWindow,
               goals: { command: "provider" | "host", actions, continuesAcrossTurns } | null },
   accounts: [{ id, label, email, plan, needsReauth, isDefault }],   // { id: "system", label: "System" } first
   defaultAccountId }
@@ -454,6 +454,7 @@ and its default model (the flagged one, else the first) are never shed.
 | `create_session` | `project`, `agent` (required unless `resume`), `model?`, `options?`, `runtimeMode? = "full-access"`, `accountId?`, `title?`, `cwd?`, `resume?: {conversationId}` | `{session: SessionDetail}` | The `+` menu; the resume picker |
 | `update_session` | `sessionId`, `title?`, `model?`, `options?`, `runtimeMode?`, `accountId?`, `force? = false` | `{applied: string[], session: SessionDetail}` | The composer's model, effort/option, permission and account chips; renaming the tab |
 | `interrupt_session` | `sessionId` | `{seq, session}` | Stop / Esc |
+| `stop_task` | `sessionId`, `taskId` | `{seq, session}` | A workflow run's Stop in the agent roster |
 | `stop_session` | `sessionId` | `{seq, session}` | None — the GUI has no control for it |
 | `close_session` | `sessionId` | `{closed: true, sessionId}` | Closing the tab |
 | `revert_session` | `sessionId`, `keepTurns` | `{seq, session}` | "Rewind the conversation to here" |
@@ -518,6 +519,13 @@ and its default model (the flagged one, else the first) are never shed.
   continues a goal by itself (Codex), Stop pauses the goal first — an interrupt alone would let the
   goal's next turn start at once — so the goal reads `paused` afterwards; `send_message
   "/goal resume"` picks it up again.
+- **`stop_task`** — stops ONE live background task — a workflow run, a subagent or a background
+  shell — by its `subagents[].id`; the turn and every other task keep running. Only where
+  `supports.taskStop` is true (Claude). The agent host refuses with `COMMAND_REJECTED` a task it
+  does not list, one no longer running, a loop or a goal, and a workflow's member (`A workflow's
+  agents cannot be stopped one by one. Stop the whole workflow instead.`): the provider runs a
+  workflow as one task, so pass the workflow's own id. The stop lands as the task's `interrupted`
+  status; one the provider failed lands as a `provider.task.stop.failed` timeline row.
 - **`stop_session`** — stops the provider process but keeps the tab, its history and its resume
   cursor; the next `send_message` resumes the conversation. A session whose `chat.sessionStatus` is
   `error` still takes a message — `send_message` and `implement_plan` restart it from its cursor,
@@ -1184,7 +1192,7 @@ list_agents { "agent": "claude" }
       "effortOptionId": "effort",
       "runtimeModes": [ "approval-required", "auto-accept-edits", "auto", "full-access" ],
       "defaultRuntimeMode": "full-access",
-      "supports": { "planMode": true, "rollback": true, "compaction": true, "backgroundTasks": true, "contextWindow": true,
+      "supports": { "planMode": true, "rollback": true, "compaction": true, "backgroundTasks": true, "taskStop": true, "contextWindow": true,
                     "goals": { "command": "provider", "actions": [ "continue", "clear" ], "continuesAcrossTurns": false } },
       "accounts": [ { "id": "system", "label": "System", "email": null, "plan": null, "needsReauth": false, "isDefault": true } ],
       "defaultAccountId": "system" } ] }
@@ -1204,7 +1212,7 @@ create_session { "project": "myws/api", "agent": "claude", "model": "opus",
         "goal": null,
         "model": "opus", "options": { "effort": "high" }, "runtimeMode": "auto-accept-edits", "home": "system",
         "accountLabel": "System", "activeTurnId": null, "turnCount": 0, "continueAfterRestart": false,
-        "supports": { "planMode": true, "rollback": true, "compaction": true, "backgroundTasks": true,
+        "supports": { "planMode": true, "rollback": true, "compaction": true, "backgroundTasks": true, "taskStop": true,
                       "goals": { "command": "provider", "actions": [ "continue", "clear" ], "continuesAcrossTurns": false } } },
       "pending": { "approvals": [], "questions": [] },
       "subagents": [] } }

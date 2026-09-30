@@ -1090,6 +1090,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                   onOpenMain={() => setDrillInAgentId(null)}
                   main={rosterMain}
                   activeAgentId={drillInAgentId}
+                  // A live workflow run's own Stop, only where the provider
+                  // can stop one task; the banner's Stop stays the fleet's.
+                  canStopTasks={provider?.capabilities?.supportsTaskStop === true}
+                  stoppingTaskIds={roster.stoppingTaskIds}
+                  onStopTask={(taskId) => dispatch(() => actions.stopTask({ taskId }))}
                 />
               </div>
             ) : null}

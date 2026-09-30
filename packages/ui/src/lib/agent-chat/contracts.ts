@@ -624,6 +624,15 @@ export interface AgentChatActions {
    * where the provider's capabilities carry `supportsBackgroundTasks`.
    */
   backgroundTool(input: { toolUseId?: string }): Promise<void>;
+  /**
+   * `/task/stop` — stop ONE live background task (a workflow run, a subagent,
+   * a shell) by its roster id, leaving the turn and every other task running.
+   * Offered only where the provider's capabilities carry `supportsTaskStop`
+   * and `taskStopControl` shows the row's Stop. The id stays in
+   * `stoppingTaskIds` until its row settles; a refused command lets it go at
+   * once and surfaces on the error banner.
+   */
+  stopTask(input: { taskId: string }): Promise<void>;
   setMode(input: { runtimeMode?: RuntimeMode; modelSelection?: ModelSelection }): Promise<void>;
   /**
    * `POST /api/sessions/:id/account` — §3.4's account switch, applied on the
@@ -752,6 +761,8 @@ export interface AgentChatRosterView {
   backgroundLiveness: BackgroundLiveness | null;
   /** True while an interrupt is in flight; the Stop button reads "Stopping…". */
   stopping: boolean;
+  /** Roster ids a `/task/stop` was sent for, until their row settles; their Stop reads "Stopping…". */
+  stoppingTaskIds: readonly string[];
 }
 
 export interface AgentChatPendingView {

@@ -109,8 +109,19 @@ export function agentActivityText(
 }
 
 /**
- * The third line: `model · N tok · N tools · run N`, with only the parts the
- * provider actually reported. The token slot always renders (as `— tok` when
+ * The run marker: a workflow slot's retry is its `attempt` (1-based, the
+ * provider's own count — a retry the fold saw start mid-run bumps no
+ * activation), any other row's reactivation its `activationCount`. Nothing
+ * for a first run.
+ */
+function runMarker(agent: Pick<RuntimeSubagent, "activationCount"> & { attempt?: number | null }): string[] {
+  if (typeof agent.attempt === "number") return agent.attempt > 1 ? [`attempt ${agent.attempt}`] : [];
+  return agent.activationCount > 1 ? [`run ${agent.activationCount}`] : [];
+}
+
+/**
+ * The third line: `model · N tok · N tools · run N` (`attempt N` for a
+ * retried workflow slot), with only the parts the provider actually reported. The token slot always renders (as `— tok` when
  * unknown) so the line's shape does not change as usage arrives — the row is
  * fixed-height, and a slot that appears mid-run shifts everything after it.
  *
@@ -121,9 +132,9 @@ export function rosterRowMetrics(
     RuntimeSubagent,
     "agentKind" | "model" | "effort" | "usage" | "activationCount" | "exitCode"
   > &
-    MaybeKind
+    MaybeKind & { attempt?: number | null }
 ): string[] {
-  const run = agent.activationCount > 1 ? [`run ${agent.activationCount}`] : [];
+  const run = runMarker(agent);
   // A loop and a goal say what they are, as a shell does — neither has a
   // model of its own. A goal's tokens are the ones it reported spending (its
   // turns' and agents', which the roster never sums twice); a loop's fires
@@ -149,7 +160,7 @@ export function rosterRowMetrics(
   if (model) parts.push(model);
   parts.push(agent.usage ? `${formatSubagentTokenCount(agent.usage.totalTokens)} tok` : "— tok");
   if (agent.usage?.toolUses !== undefined) parts.push(`${agent.usage.toolUses} tools`);
-  if (agent.activationCount > 1) parts.push(`run ${agent.activationCount}`);
+  parts.push(...run);
   return parts;
 }
 
@@ -163,17 +174,21 @@ export function rosterRowMetrics(
  * of thing this is*. It is not suppressed against the title, because it names
  * the row's kind rather than a role the provider reported.
  *
+ * A workflow member with no role chips its phase: its label ("analyze:x")
+ * names the slot, the phase where in the run it sits.
+ *
  * *T3: `AgentsPanel.tsx:146-149`.*
  */
 export function rosterRoleChip(
-  agent: Pick<RuntimeSubagent, "agentKind" | "title" | "role"> & MaybeKind
+  agent: Pick<RuntimeSubagent, "agentKind" | "title" | "role"> &
+    MaybeKind & { phaseTitle?: string | null }
 ): string | null {
   // A loop and a goal chip their kind, as a shell does: the one slot on the
   // row that says what kind of thing it is.
   if (agent.kind === "loop") return LOOP_CHIP;
   if (agent.kind === "goal") return GOAL_CHIP;
   if (agent.agentKind === "background") return BACKGROUND_SHELL_CHIP;
-  const role = agent.role?.trim();
+  const role = agent.role?.trim() || (agent.kind === "workflow_agent" ? agent.phaseTitle?.trim() : undefined);
   if (!role) return null;
   return role.toLocaleLowerCase() === agent.title.trim().toLocaleLowerCase() ? null : role;
 }

@@ -11,7 +11,7 @@ itemsForAgent,
 workLogEntryFromActivity
 } from "./entries.logic";
 import { workEntryDisplayLabel } from "./presentation.logic";
-import { activity,message,resetBuilders,stamp } from "./test-helpers";
+import { activity,CLAUDE_WORKFLOW_ID,claudeWorkflow,message,resetBuilders,stamp } from "./test-helpers";
 
 beforeEach(() => {
   resetBuilders();
@@ -131,6 +131,23 @@ describe("deriveWorkLogEntries", () => {
     assert.equal(entries.length, 1, "a batch is one narrative event");
     assert.equal(entries[0]?.id, rows[0]?.id, "the row keeps the ANCHOR identity");
     assert.deepEqual(entries[0]?.agentSpawn?.agentTaskIds, ["t1", "t2"]);
+  });
+
+  it("collapses a Claude workflow run — coordinator and `:wf:` members — into ONE row", () => {
+    const rows = [
+      activity("task.started", claudeWorkflow.coordinator(), { turnId: "turn-1" }),
+      activity("task.progress", claudeWorkflow.member(1, { status: "running" }), { turnId: "turn-1" }),
+      activity("task.progress", claudeWorkflow.member(2, { status: "pending" }), { turnId: "turn-1" }),
+      activity("task.completed", claudeWorkflow.member(1, { status: "completed" }), { turnId: "turn-2" }),
+      activity("task.started", claudeWorkflow.member(2, { attempt: 2 }), { turnId: "turn-2" })
+    ];
+    const entries = deriveWorkLogEntries(rows);
+    assert.equal(entries.length, 1);
+    assert.equal(entries[0]?.id, rows[0]?.id);
+    assert.deepEqual(entries[0]?.agentSpawn, {
+      workflowId: CLAUDE_WORKFLOW_ID,
+      agentTaskIds: [CLAUDE_WORKFLOW_ID, `${CLAUDE_WORKFLOW_ID}:wf:1`, `${CLAUDE_WORKFLOW_ID}:wf:2`]
+    });
   });
 
 });

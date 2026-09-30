@@ -46,8 +46,11 @@ import {
   isUnfinishedGoal,
   recallablePromptText,
   SETTLED_TURN_STATES,
+  TASK_STOP_FAILED_ACTIVITY_KIND,
+  TASK_STOP_REQUESTED_ACTIVITY_KIND,
   slimActivityPayload,
   startedTurns,
+  taskStopRefusal,
   turnOrdinal,
   type AgentAdapterId,
   type AgentChatCommandName,
@@ -196,6 +199,7 @@ import {
   parseInteractionMode,
   parseModelSelection,
   parseOptionalTurnId,
+  parseTaskId,
   parseRequestId,
   parseRuntimeMode,
   parseTargetTurnCount,
@@ -3317,6 +3321,70 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
                 kind: "provider.background.failed",
                 summary: "Could not move the command to the background",
                 detail: describeFailure(error)
+              });
+            }
+          }
+        };
+      }
+
+      case "task/stop": {
+        // One live task — a workflow run, a subagent, a shell — stopped while
+        // the turn and every other task keep running. Refused, not ignored,
+        // where the provider cannot do it (the Stop is gated on the same
+        // capability, so a refusal means a stale client or an MCP caller), and
+        // for any row `taskStopRefusal` rules out — a workflow's member among
+        // them, which the provider cannot stop on its own.
+        const adapter = options.adapters.get(head.adapter);
+        if (!adapter?.stopTask || adapter.capabilities.supportsTaskStop !== true) {
+          throw commandRejected(`${head.adapter} cannot stop a single background task. Use Stop to end all of them.`);
+        }
+        const taskId = parseTaskId(body.taskId);
+        const refusal = taskStopRefusal(runtime.state.roster, taskId);
+        if (refusal !== null) {
+          throw commandRejected(refusal);
+        }
+        const title = runtime.state.roster.find((agent) => agent.id === taskId)?.title ?? taskId;
+        const createdAt = clock.nowIso();
+        return {
+          events: [
+            buildEvent(
+              runtime.id,
+              "thread.activity-appended",
+              {
+                activity: makeActivity({
+                  id: `task-stop:${commandId}`,
+                  tone: "info",
+                  activityKind: TASK_STOP_REQUESTED_ACTIVITY_KIND,
+                  summary: `Stopping ${title}`,
+                  // Not `taskId`: a row carrying one joins that task's rows
+                  // in the timeline, and this is the user's request, not the
+                  // task's.
+                  payload: { targetTaskId: taskId },
+                  turnId: session.activeTurnId,
+                  createdAt
+                })
+              },
+              { commandId, occurredAt: createdAt }
+            )
+          ],
+          effect: async () => {
+            if (!adapter.hasSession(runtime.id)) {
+              await appendActivity(runtime, {
+                kind: TASK_STOP_FAILED_ACTIVITY_KIND,
+                summary: `Could not stop ${title}`,
+                detail: "No active provider session is bound to this thread.",
+                payload: { targetTaskId: taskId }
+              });
+              return;
+            }
+            try {
+              await adapter.stopTask!(runtime.id, taskId);
+            } catch (error) {
+              await appendActivity(runtime, {
+                kind: TASK_STOP_FAILED_ACTIVITY_KIND,
+                summary: `Could not stop ${title}`,
+                detail: describeFailure(error),
+                payload: { targetTaskId: taskId }
               });
             }
           }

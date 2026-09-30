@@ -23,7 +23,7 @@ import { classifyRequestType, summarizeToolRequest, trimmedString } from "./clas
 import { claudeCanUseToolRoute, claudeRequestKey } from "./decisions.ts";
 import { ClaudeNormalizer, extractExitPlanModePlan } from "./normalize.ts";
 
-const CLAUDE_FIXTURES_DIR = nodePath.resolve(
+export const CLAUDE_FIXTURES_DIR = nodePath.resolve(
   nodePath.dirname(fileURLToPath(import.meta.url)),
   "../../../../test/fixtures/claude"
 );

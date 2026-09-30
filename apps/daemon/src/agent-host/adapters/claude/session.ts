@@ -15,6 +15,7 @@
 
 import { promises as fs } from "node:fs";
 import { homedir } from "node:os";
+import * as nodePath from "node:path";
 
 import type {
   CanUseTool,
@@ -46,7 +47,13 @@ import { SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES, isUnfinishedGoal } from "@orques
 import type { AdapterContext, RollbackTarget } from "../../adapter.ts";
 import { AGENT_HOST_DEADLINES, TURN_LIVENESS_WINDOWS, withDeadline } from "../../support/deadline.ts";
 import { StderrCapture } from "../../support/stderr.ts";
-import { FileTail, TAIL_MAX_READ_BYTES, TAIL_MAX_TOTAL_BYTES, resolveTildePath } from "../../support/tail-file.ts";
+import {
+  FileTail,
+  JsonlFileTail,
+  TAIL_MAX_READ_BYTES,
+  TAIL_MAX_TOTAL_BYTES,
+  resolveTildePath
+} from "../../support/tail-file.ts";
 import { appendAttachmentPathLines, type AttachmentPathLine } from "../attachment-lines.ts";
 import { createDeferred, type Deferred } from "./async-queue.ts";
 import { classifyRequestType, summarizeToolRequest, trimmedString } from "./classify.ts";
@@ -64,14 +71,15 @@ import {
 import { CLAUDE_COMPACT_DEADLINE_MS, CLAUDE_CONTEXT_USAGE_DEADLINE_MS, type ClaudeAdapterDeps } from "./deps.ts";
 import { transcriptGoalFromLastRow } from "./goal.ts";
 import { claudeConfigDir } from "./config-dir.ts";
-import { ClaudeGoalTranscript } from "./goal-transcript.ts";
+import { ClaudeGoalTranscript, locateClaudeTranscript } from "./goal-transcript.ts";
 import { createClaudeHistoryReader, type ClaudeHistoryReader } from "./history.ts";
 import { buildClaudeQueryOptions } from "./launch.ts";
 import { CLAUDE_OPTION_IDS, findModel, resolveEffortLevel, selectionStringOption } from "./models.ts";
 import {
   ClaudeNormalizer,
   extractExitPlanModePlan,
-  type BackgroundShellChange
+  type BackgroundShellChange,
+  type WorkflowAgentChange
 } from "./normalize.ts";
 import { PromptQueue } from "./prompt-queue.ts";
 import { buildAskUserQuestionReply, parseAskUserQuestionInput } from "./questions.ts";
@@ -86,6 +94,7 @@ import {
   remapClaudeForkTurnBoundaries
 } from "./rollback.ts";
 import { dispatchableSkillNames, discoverClaudeSkills } from "./skills.ts";
+import { readWorkflowHistoryRun, workflowLaunchesIn } from "./workflow-history.ts";
 import { planClaudeSkillDispatch } from "./skill-dispatch.ts";
 import type { ClaudeScopedLimitNames } from "./usage.ts";
 
@@ -114,6 +123,13 @@ const BACKGROUND_SHELL_TAIL_INTERVAL_MS = 750;
  * message loop, which is what the final drain awaits.
  */
 const BACKGROUND_SHELL_TAIL_READ_DEADLINE_MS = 5_000;
+
+/**
+ * A drain of one workflow's transcripts reads at most this many chunks per
+ * agent before the frame that settles it is handled — 16 MiB — so an agent
+ * still writing cannot hold the message loop open.
+ */
+const WORKFLOW_TAIL_DRAIN_MAX_READS = 64;
 
 /** The final drain's bound: the per-shell cap divided by one read, plus one. */
 const BACKGROUND_SHELL_DRAIN_MAX_READS = Math.ceil(TAIL_MAX_TOTAL_BYTES / TAIL_MAX_READ_BYTES) + 1;
@@ -177,6 +193,12 @@ interface BackgroundShellTail {
   tail: FileTail;
   timer: NodeJS.Timeout | undefined;
   stopped: boolean;
+}
+
+/** One workflow agent attempt's transcript, tailed into its member's drill-in. */
+interface WorkflowAgentTail {
+  memberTaskId: string;
+  tail: JsonlFileTail;
 }
 
 const IMAGE_MIME_TYPES = new Set<string>(SUPPORTED_ATTACHMENT_IMAGE_MIME_TYPES);
@@ -255,6 +277,11 @@ export class ClaudeSession {
   private watchdog: NodeJS.Timeout | undefined;
   /** One live tail per background shell, keyed by task id. */
   private readonly backgroundShells = new Map<string, BackgroundShellTail>();
+  /** Workflow agents' transcripts: coordinator task id → transcript path → tail. */
+  private readonly workflowTails = new Map<string, Map<string, WorkflowAgentTail>>();
+  private workflowTailTimer: NodeJS.Timeout | undefined;
+  /** Every transcript read, one at a time: a poll and a drain must not share an offset. */
+  private workflowTailWork: Promise<void> = Promise.resolve();
   private lastActivityMs = 0;
   private hasOpenTool = false;
   private basePermissionMode: NonNullable<
@@ -303,6 +330,7 @@ export class ClaudeSession {
       ids: options.context.ids,
       onRawFrame: (frame) => options.context.logRawFrame(options.threadId, frame),
       onBackgroundShell: (change) => this.onBackgroundShell(change),
+      onWorkflowAgent: (change) => this.onWorkflowAgent(change),
       ...(options.onUsageLimitsStale !== undefined
         ? { onUsageLimitsStale: options.onUsageLimitsStale }
         : {}),
@@ -542,6 +570,19 @@ export class ClaudeSession {
         if (settling !== undefined) {
           await this.drainBackgroundShell(settling);
         }
+        // Likewise a workflow's agents: a snapshot can end one, and the
+        // run's own end ends them all — their transcripts are read up first,
+        // so every call they made is on the log before the row that settles
+        // them.
+        const workflowSettling = workflowSettlingTaskId(message);
+        if (workflowSettling !== undefined && this.workflowTails.has(workflowSettling)) {
+          await this.drainWorkflowTails(workflowSettling);
+        }
+        // The drains await file reads: a teardown in the meantime has
+        // already closed the thread, and nothing may follow that.
+        if (this.closed) {
+          continue;
+        }
         // The two moments the window genuinely moved: a turn just ended, and a
         // compaction just rewrote the transcript. The turn id is read BEFORE
         // the frame settles the turn, so the refresh's answer — which lands
@@ -741,6 +782,155 @@ export class ClaudeSession {
     for (const taskId of [...this.backgroundShells.keys()]) {
       this.stopBackgroundShell(taskId);
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // Workflow agents' transcripts (§4.5)
+  // -------------------------------------------------------------------------
+
+  private onWorkflowAgent(change: WorkflowAgentChange): void {
+    if (change.kind === "stop") {
+      this.workflowTails.delete(change.coordinatorTaskId);
+      return;
+    }
+    if (change.kind === "untail") {
+      const tails = this.workflowTails.get(change.coordinatorTaskId);
+      for (const [path, entry] of [...(tails?.entries() ?? [])]) {
+        if (entry.memberTaskId === change.memberTaskId) {
+          tails?.delete(path);
+        }
+      }
+      return;
+    }
+    if (this.closed) {
+      return;
+    }
+    // The path comes from the CLI's own tool result, and it is only ever one
+    // of its agent transcripts under this session's config dir.
+    const path = nodePath.resolve(change.transcriptPath);
+    const projectsDir = nodePath.join(claudeConfigDir(this.options.env), "projects");
+    if (
+      !path.startsWith(projectsDir + nodePath.sep) ||
+      !/^agent-[A-Za-z0-9_-]+\.jsonl$/.test(nodePath.basename(path))
+    ) {
+      this.options.context.logger.warn(
+        `claude: not tailing a workflow transcript outside ${projectsDir}: ${path}`
+      );
+      return;
+    }
+    // The lexical check above, again on real paths: `projects` may itself be
+    // a link, and nothing under it may lead out of it.
+    const register = (): void => {
+      if (this.closed) {
+        return;
+      }
+      let tails = this.workflowTails.get(change.coordinatorTaskId);
+      if (tails === undefined) {
+        tails = new Map();
+        this.workflowTails.set(change.coordinatorTaskId, tails);
+      }
+      if (!tails.has(path)) {
+        tails.set(path, { memberTaskId: change.memberTaskId, tail: new JsonlFileTail({ path }) });
+      }
+      this.scheduleWorkflowTailPoll();
+    };
+    void Promise.all([fs.realpath(projectsDir), fs.realpath(nodePath.dirname(path))])
+      .then(([realProjects, realDir]) => {
+        if (realDir.startsWith(realProjects + nodePath.sep)) {
+          register();
+        } else {
+          this.options.context.logger.warn(
+            `claude: not tailing a workflow transcript outside ${projectsDir}: ${path}`
+          );
+        }
+      })
+      .catch((error: unknown) => {
+        this.options.context.logger.warn(
+          `claude: not tailing a workflow transcript it cannot resolve: ${path}: ${errorMessage(error)}`
+        );
+      });
+  }
+
+  private scheduleWorkflowTailPoll(): void {
+    if (this.workflowTailTimer !== undefined || this.closed || this.workflowTails.size === 0) {
+      return;
+    }
+    this.workflowTailTimer = setTimeout(() => {
+      this.workflowTailTimer = undefined;
+      this.readWorkflowTails(undefined, 1)
+        .catch((error: unknown) => {
+          // No `unhandledRejection` handler in the host: never let one out.
+          this.options.context.logger.error("claude: a workflow transcript tail failed", error);
+        })
+        .finally(() => this.scheduleWorkflowTailPoll());
+    }, BACKGROUND_SHELL_TAIL_INTERVAL_MS);
+  }
+
+  /** Read every transcript of one run up to its end, before the frame that settles it. */
+  private async drainWorkflowTails(coordinatorTaskId: string): Promise<void> {
+    await this.readWorkflowTails(coordinatorTaskId, WORKFLOW_TAIL_DRAIN_MAX_READS);
+  }
+
+  /**
+   * Up to `maxReads` chunks of each transcript (of one run, or of all), each
+   * one's new records projected into its member's items. Serialised on
+   * {@link workflowTailWork}.
+   */
+  private readWorkflowTails(coordinatorTaskId: string | undefined, maxReads: number): Promise<void> {
+    const work = this.workflowTailWork.then(async () => {
+      const runs =
+        coordinatorTaskId === undefined
+          ? [...this.workflowTails.values()]
+          : [this.workflowTails.get(coordinatorTaskId)].filter((run) => run !== undefined);
+      for (const tails of runs) {
+        for (const [path, entry] of [...tails.entries()]) {
+          for (let read = 0; read < maxReads && !this.closed; read += 1) {
+            const before = entry.tail.bytesRead;
+            let result: Awaited<ReturnType<JsonlFileTail["read"]>>;
+            try {
+              result = await withDeadline(entry.tail.read(), {
+                label: "claude/workflow-transcript-tail",
+                timeoutMs: BACKGROUND_SHELL_TAIL_READ_DEADLINE_MS
+              });
+            } catch (error) {
+              this.options.context.logger.warn(
+                `claude: reading a workflow transcript timed out: ${errorMessage(error)}`
+              );
+              break;
+            }
+            if (this.closed) {
+              return;
+            }
+            if (result.records.length > 0) {
+              try {
+                this.emit(this.normalizer.workflowAgentRecords(entry.memberTaskId, result.records));
+              } catch (error) {
+                this.options.context.logger.error("claude: projecting a workflow transcript failed", error);
+              }
+            }
+            if (result.done) {
+              tails.delete(path);
+              break;
+            }
+            // Not "no records": a chunk inside one long line yields none, and
+            // the drain must read on to that line's end.
+            if (entry.tail.bytesRead === before) {
+              break;
+            }
+          }
+        }
+      }
+    });
+    this.workflowTailWork = work.catch(() => undefined);
+    return work;
+  }
+
+  private stopAllWorkflowTails(): void {
+    if (this.workflowTailTimer !== undefined) {
+      clearTimeout(this.workflowTailTimer);
+      this.workflowTailTimer = undefined;
+    }
+    this.workflowTails.clear();
   }
 
   // -------------------------------------------------------------------------
@@ -1196,6 +1386,7 @@ export class ClaudeSession {
       // shell's item, and a poll that outlived its session would emit into a
       // thread whose turn is already settled.
       step("background shells", () => this.stopAllBackgroundShells());
+      step("workflow transcripts", () => this.stopAllWorkflowTails());
       step("the query", () => this.closeQuery());
       step("the prompt queue", () => this.promptQueue.close());
 
@@ -1763,6 +1954,24 @@ export class ClaudeSession {
     })) as boolean;
   }
 
+  /**
+   * Stop ONE background task — a workflow run, a subagent, a shell — with the
+   * SDK's `stop_task` control, leaving the turn and every other task running.
+   * The CLI then reports the task `killed` and `stopped` (fixtures README
+   * observation 24e), which closes its roster row like any other stop. The
+   * initialize option `perTaskStopAffordance` stays off: it would change what
+   * the session-scoped Stop (`interruptTurn`) kills.
+   */
+  async stopTask(taskId: string): Promise<void> {
+    if (this.closed || this.query === undefined) {
+      throw new Error("No live Claude session to stop a task in.");
+    }
+    await withDeadline(this.query.stopTask(taskId), {
+      label: "claude/stop_task",
+      timeoutMs: AGENT_HOST_DEADLINES.cancelMs
+    });
+  }
+
   async interruptTurn(turnId?: string): Promise<void> {
     if (this.closed) {
       return;
@@ -1893,13 +2102,63 @@ export class ClaudeSession {
         spawn: this.options.deps.spawn,
         nodePath: this.options.deps.nodePath
       }).readMessages({ sessionId, cwd: this.options.cwd });
-      return { threadId: this.threadId, turns: groupClaudeHistoryTurns(messages) };
+      const turns = groupClaudeHistoryTurns(messages);
+      await this.attachWorkflowHistory(sessionId, messages, turns);
+      return { threadId: this.threadId, turns };
     } catch (error) {
       this.options.context.logger.warn(
         `claude: could not read the native history for thread ${this.threadId}`,
         error
       );
       return { threadId: this.threadId, turns: [] };
+    }
+  }
+
+  /**
+   * A resumed session's `Workflow` runs: what the CLI wrote beside the
+   * transcript, read now and carried into each launch's turn as one item
+   * (`workflow-history.ts`), so the projection can rebuild the run's roster
+   * and its agents' drill-ins. Best effort — a run it cannot read keeps only
+   * its call.
+   */
+  private async attachWorkflowHistory(
+    sessionId: string,
+    messages: readonly unknown[],
+    turns: ReturnType<typeof groupClaudeHistoryTurns>
+  ): Promise<void> {
+    const launches = workflowLaunchesIn(messages);
+    if (launches.length === 0) {
+      return;
+    }
+    const transcript = await locateClaudeTranscript({
+      configDir: claudeConfigDir(this.options.env),
+      cwd: this.options.cwd,
+      sessionId
+    });
+    if (transcript === undefined) {
+      return;
+    }
+    const sessionDir = transcript.slice(0, -".jsonl".length);
+    for (const { toolUseId, launch } of launches) {
+      const turn = turns.find((candidate) =>
+        candidate.items.some((item) => launchesWorkflow(item, toolUseId))
+      );
+      if (turn === undefined) {
+        continue;
+      }
+      try {
+        turn.items.push(await readWorkflowHistoryRun({
+          projectsDir: nodePath.join(claudeConfigDir(this.options.env), "projects"),
+          sessionDir,
+          toolUseId,
+          launch
+        }));
+      } catch (error) {
+        this.options.context.logger.warn(
+          `claude: could not read workflow run ${launch.runId} for thread ${this.threadId}`,
+          error
+        );
+      }
     }
   }
 
@@ -2394,6 +2653,44 @@ function backgroundShellSettlingTaskId(message: SDKMessage): string | undefined 
       : undefined;
   }
   return undefined;
+}
+
+/** Whether a transcript row holds the `Workflow` call `toolUseId`. */
+function launchesWorkflow(item: unknown, toolUseId: string): boolean {
+  const content = (item as { message?: { content?: unknown } } | null)?.message?.content;
+  return (
+    Array.isArray(content) &&
+    content.some(
+      (block) =>
+        (block as { type?: unknown; id?: unknown } | null)?.type === "tool_use" &&
+        (block as { id?: unknown }).id === toolUseId
+    )
+  );
+}
+
+/**
+ * The workflow whose agents' transcripts must be read up before this frame
+ * is normalised: whatever settles a task (a workflow's run is a task), and a
+ * snapshot — the one that says an agent is done must not beat that agent's
+ * last calls to the log.
+ */
+function workflowSettlingTaskId(message: SDKMessage): string | undefined {
+  const settling = backgroundShellSettlingTaskId(message);
+  if (settling !== undefined) {
+    return settling;
+  }
+  const frame = message as {
+    type?: unknown;
+    subtype?: unknown;
+    task_id?: unknown;
+    workflow_progress?: unknown;
+  };
+  return frame.type === "system" &&
+    frame.subtype === "task_progress" &&
+    typeof frame.task_id === "string" &&
+    Array.isArray(frame.workflow_progress)
+    ? frame.task_id
+    : undefined;
 }
 
 /**
