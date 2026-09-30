@@ -467,11 +467,22 @@ function buildTransporter(connection: UiConnection): Transporter {
   return createTransporter(connection, { httpClient: setup?.httpClient });
 }
 
+/**
+ * A request for a file browser to open `path`; `nonce` changes on every request
+ * so asking for the same file twice still re-opens it.
+ */
+export interface FileReveal {
+  path: string;
+  nonce: number;
+}
+
 /** A client-local, non-PTY tab (e.g. the file browser). */
 export interface FileTab {
   id: string;
   projectPath: string;
   title: string;
+  /** The latest file this tab was asked to open, if any. */
+  reveal?: FileReveal;
 }
 
 /** A client-local Git tab (GitHub-Desktop-style), one per project. */
@@ -522,7 +533,7 @@ export interface WorkflowTab {
 export type ProjectTab =
   | { id: string; type: "session"; session: SessionSummary }
   | { id: string; type: "agent-chat"; sessionId: string; session: SessionSummary }
-  | { id: string; type: "files"; title: string }
+  | { id: string; type: "files"; title: string; reveal?: FileReveal }
   | { id: string; type: "git"; title: string }
   | { id: string; type: "todo"; todoId: string; title: string }
   | { id: string; type: "workflow"; workflowId: string; title: string; runId?: string | null }
@@ -997,6 +1008,11 @@ export interface AppState {
   /** Dismiss the transient after-the-fact notice. */
   dismissNotice: () => void;
   openFileBrowser: () => void;
+  /**
+   * Open absolute `path` in the current project's file browser: its first Files
+   * tab when there is one, otherwise a new one.
+   */
+  revealInFileBrowser: (path: string) => void;
   openGit: () => void;
   /**
    * Open (or focus) the editor tab of workflow `workflowId` in project
@@ -2539,6 +2555,27 @@ export const useAppStore = create<AppState>((set, get) => ({
       };
     }),
 
+  revealInFileBrowser: (path) =>
+    set((state) => {
+      const project = state.currentProject;
+      if (!project) {
+        return state;
+      }
+      const tabs = state.fileTabsByProject[project.path] ?? [];
+      const existing = tabs[0];
+      const reveal: FileReveal = { path, nonce: (existing?.reveal?.nonce ?? 0) + 1 };
+      const tab: FileTab = existing
+        ? { ...existing, reveal }
+        : { id: crypto.randomUUID(), projectPath: project.path, title: "Files", reveal };
+      return {
+        fileTabsByProject: {
+          ...state.fileTabsByProject,
+          [project.path]: existing ? [tab, ...tabs.slice(1)] : [tab]
+        },
+        activeTabByProject: { ...state.activeTabByProject, [project.path]: tab.id }
+      };
+    }),
+
   // A Git tab is a singleton per project: reuse the existing one if present,
   // otherwise create it (unlike the file browser, which allows multiple).
   openGit: () =>
@@ -3652,7 +3689,8 @@ export function useProjectTabs(): ProjectTab[] {
     const fileTabs = (fileTabsByProject[key] ?? []).map<ProjectTab>((t) => ({
       id: t.id,
       type: "files",
-      title: t.title
+      title: t.title,
+      reveal: t.reveal
     }));
     const gitTabs = (gitTabsByProject[key] ?? []).map<ProjectTab>((t) => ({
       id: t.id,

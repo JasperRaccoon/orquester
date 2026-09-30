@@ -33,7 +33,7 @@ import { SearchPanel } from "./SearchPanel";
 import { useApi } from "../../context/orquester-context";
 import { ApiError } from "../../lib/api-client";
 import { usePollWhileActive, useIsDesktop, noteFileRenamed } from "../../hooks";
-import { useAppStore } from "../../store/app";
+import { useAppStore, type FileReveal } from "../../store/app";
 import { PANE_DEFAULTS, PANE_FLEX_RESERVE, clampPaneWidth } from "../../lib/panel-sizes";
 import { gatherFromDataTransfer, gatherFromInput } from "../../lib/files";
 import { downloadPath } from "../../lib/download";
@@ -72,8 +72,13 @@ interface MenuState {
  * File browser: a lazy file tree on the left, the selected file's content on
  * the right. Create via the toolbar or right-click context menu. Responsive:
  * on narrow screens it's a master/detail (tree, then file with a back button).
+ * `reveal` asks it to open a file from outside (e.g. a chat's changed-file row).
  */
-export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ rootPath, active = true }) => {
+export const FileBrowser: React.FC<{ rootPath: string; active?: boolean; reveal?: FileReveal }> = ({
+  rootPath,
+  active = true,
+  reveal
+}) => {
   const api = useApi();
   // Persisted tree-pane width, keyed by project path (rootPath). Applied inline
   // only at md+ so the mobile w-full/hidden master-detail classes still win.
@@ -270,6 +275,41 @@ export const FileBrowser: React.FC<{ rootPath: string; active?: boolean }> = ({ 
     },
     []
   );
+
+  // Open a file another surface asked for: expand the tree down to it and
+  // select it. Keyed on the nonce so asking for the same file again re-opens it.
+  const revealPath = reveal?.path;
+  const revealNonce = reveal?.nonce;
+  useEffect(() => {
+    if (!revealPath) return;
+    let alive = true;
+    const root = rootPath.replace(/\/$/, "");
+    const dir = parentOf(revealPath);
+    // The file's folder and its ancestors below the root, top-down; none for a
+    // file at the root or outside it.
+    const chain: string[] = [];
+    if (root && dir.startsWith(root + "/")) {
+      for (let d = dir; d !== root; d = parentOf(d)) chain.unshift(d);
+    }
+    void Promise.all(
+      (chain.length > 0 ? chain : [dir]).map((d) =>
+        api.listFiles(d).then(
+          (result) => [d, result.entries] as const,
+          () => null
+        )
+      )
+    ).then((listings) => {
+      if (!alive) return;
+      const loaded = listings.filter((l) => l !== null);
+      setChildrenByPath((prev) => ({ ...prev, ...Object.fromEntries(loaded) }));
+      setExpanded((prev) => new Set([...prev, ...chain]));
+      const entry = loaded.find(([d]) => d === dir)?.[1].find((e) => e.path === revealPath);
+      openFromSearch(revealPath, entry?.size ?? 0);
+    });
+    return () => {
+      alive = false;
+    };
+  }, [api, rootPath, revealPath, revealNonce, openFromSearch]);
 
   const onSearchActiveChange = useCallback((value: boolean) => setSearchActive(value), []);
 

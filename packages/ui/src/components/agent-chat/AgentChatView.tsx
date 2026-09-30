@@ -98,6 +98,7 @@ import { FullOutputPane } from "./FullOutputPane";
 import { ChatStatusLine } from "./status/ChatStatusLine";
 import { GOAL_ACTION_TEXT, goalActions, goalActionsNote } from "./status/goal-chip";
 import { ChatTimeline } from "./timeline/ChatTimeline";
+import { resolveMarkdownImageSource } from "./timeline/markdown/local-image";
 import { TurnDiffModal, type TurnDiffRequest } from "./timeline/TurnDiffModal";
 import {
   nextHeldTimeline,
@@ -819,21 +820,21 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   React.useEffect(() => setTurnDiff(null), [sessionId]);
 
   /**
-   * Click-through from a changed-file row to the file browser.
+   * Click-through from a changed-file row (or a file link) to the file browser,
+   * opened on that file. Paths arrive project-relative or absolute.
    *
    * Reuses this project's open Files tab where there is one rather than
    * stacking a new tab per click — clicking six changed files should not leave
    * six identical tabs behind.
-   *
-   * **Known gap:** the file browser has no "reveal this path" entry point, so
-   * this lands in the browser at the project root rather than on the file.
-   * Wiring a target path through `FileBrowser` is a follow-up; opening the
-   * wrong-looking surface is still better than a dead link.
    */
   const openFile = React.useCallback(
     (path: string) => {
-      void path;
       const state = useAppStore.getState();
+      const source = resolveMarkdownImageSource(path, projectPath || undefined);
+      if (source.kind === "local") {
+        state.revealInFileBrowser(source.path);
+        return;
+      }
       const existing = state.fileTabsByProject[projectPath]?.[0];
       if (existing) {
         state.activateTab(existing.id);

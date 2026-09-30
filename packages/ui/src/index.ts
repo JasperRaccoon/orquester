@@ -52,6 +52,7 @@ export {
   useProjectTabs,
   useActiveTabId,
   type AppState,
+  type FileReveal,
   type FileTab,
   type ProjectTab,
   type WorkflowTab

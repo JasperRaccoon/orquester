@@ -357,7 +357,11 @@ export const MainView: React.FC = () => {
                   // ternary just satisfies the type — ctx.project.path is defined.
                   <GitView projectPath={ctx.kind === "project" ? ctx.project.path : ""} active={show} />
                 ) : tab.type === "files" ? (
-                  <FileBrowser rootPath={ctx.kind === "project" ? ctx.project.path : ""} active={show} />
+                  <FileBrowser
+                    rootPath={ctx.kind === "project" ? ctx.project.path : ""}
+                    active={show}
+                    reveal={tab.reveal}
+                  />
                 ) : tab.type === "browser" ? (
                   <BrowserView browser={tab.browser} active={active} />
                 ) : tab.type === "desktop" ? (
