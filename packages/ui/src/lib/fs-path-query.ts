@@ -12,10 +12,10 @@
  */
 
 /** Query parameter name carrying the base64url-encoded path. */
-export const FS_PATH_PARAM = "p";
+const FS_PATH_PARAM = "p";
 
 /** base64url (RFC 4648 §5, unpadded) of the path's UTF-8 bytes. */
-export function encodeFsPathParam(path: string): string {
+function encodeFsPathParam(path: string): string {
   const bytes = new TextEncoder().encode(path);
   let binary = "";
   for (let i = 0; i < bytes.length; i += 1) {

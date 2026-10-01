@@ -26,7 +26,7 @@ const BLANK_LINE_PATTERN = /^[ \t]*$/;
  */
 const LIST_ITEM_START_PATTERN = /^[ \t]*(?:[-*+]|\d{1,9}[.)])[ \t]/;
 
-export interface BufferedTextSplit {
+interface BufferedTextSplit {
   /** Safe to deliver now: the markdown before it will not change shape. */
   ready: string;
   /** Stays buffered until the next boundary or a completion. */

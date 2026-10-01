@@ -18,15 +18,15 @@ describe("the matches operator runs in a worker with a hard timeout", () => {
 
   test("a catastrophic pattern is stopped at the deadline, the loop stays free, and the next search works", async () => {
     const started = Date.now();
-    let ticks = 0;
-    const ticker = setInterval(() => (ticks += 1), 20);
-    const slow = await matcher.match({ source: "a*a*a*a*a*a*a*b", flags: "", text: "a".repeat(100_000) });
-    clearInterval(ticker);
+    let loopProgress = false;
+    const probe = setImmediate(() => { loopProgress = true; });
+    const slow = await matcher.match({ source: "a*a*a*a*a*a*a*b", flags: "", text: "a".repeat(100_000) })
+      .finally(() => clearImmediate(probe));
     const elapsed = Date.now() - started;
     assert.equal(slow.result, false);
-    assert.ok(slow.warning, "a stopped search reports a warning");
+    assert.match(slow.warning ?? "", /pattern took longer than \d+ ms to search and was stopped/);
     assert.ok(elapsed < 3_000, `stopped promptly (${elapsed} ms)`);
-    assert.ok(ticks >= 3, "the event loop kept running meanwhile");
+    assert.ok(loopProgress, "the event loop progresses before the search settles");
     assert.deepEqual(await matcher.match({ source: "b$", flags: "", text: "ab" }), { result: true }, "a fresh worker answers");
   });
 });

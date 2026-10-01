@@ -39,7 +39,7 @@ function prefsKey(desktopId: string): string {
 }
 
 /** Touch-first devices default to a fixed 1280×800 display: editors need room. */
-export function defaultDesktopPrefs(coarsePointer: boolean): DesktopPrefs {
+function defaultDesktopPrefs(coarsePointer: boolean): DesktopPrefs {
   return coarsePointer
     ? { muted: false, volume: 1, view: "fixed", fixedSize: { ...DESKTOP_FIXED_SIZES[0] }, fixedMode: "scale" }
     : { muted: false, volume: 1, view: "fit" };

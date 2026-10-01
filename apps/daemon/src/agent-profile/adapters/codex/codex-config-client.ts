@@ -240,14 +240,13 @@ export interface CodexConfigClient {
   close(): Promise<void>;
 }
 
-export interface CodexConfigClientOptions {
+interface CodexConfigClientOptions {
   /** The `codex` binary as the registry resolved it. */
   bin: string;
   /** `CODEX_HOME` for the child: the daemon user's own Codex home. */
   codexHome: string;
   /** `HOME` for the child (and its cwd): the daemon user's home. */
   home: string;
-  logger?: { warn(message: string): void };
 }
 
 export type CodexConfigClientFactory = (options: CodexConfigClientOptions) => CodexConfigClient;

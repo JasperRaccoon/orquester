@@ -62,7 +62,7 @@ export interface ClaudeUsageStateStore {
 }
 
 /** A live reading of an account's windows, off its own model responses. */
-export interface ClaudeLiveUsage {
+interface ClaudeLiveUsage {
   session?: UsageWindow | null;
   weekly?: UsageWindow | null;
   /** When the reading was taken (ms epoch). */

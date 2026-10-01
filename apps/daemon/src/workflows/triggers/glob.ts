@@ -25,8 +25,8 @@ function tokenize(pattern: string): Token[] {
     if (ch === "*") {
       if (chars[i + 1] === "*") {
         while (chars[i + 1] === "*") i += 1;
-        if (tokens[tokens.length - 1]?.kind !== "dstar") tokens.push({ kind: "dstar" });
-      } else if (tokens[tokens.length - 1]?.kind !== "star" && tokens[tokens.length - 1]?.kind !== "dstar") {
+        tokens.push({ kind: "dstar" });
+      } else {
         tokens.push({ kind: "star" });
       }
     } else if (ch === "?") {

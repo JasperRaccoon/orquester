@@ -17,7 +17,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { basename, dirname } from "node:path";
 import { onPath } from "./archive";
 
-export type ZipTool = { bin: string; kind: "bsdtar" | "zip" | "7z" };
+type ZipTool = { bin: string; kind: "bsdtar" | "zip" | "7z" };
 
 let resolvedZip: ZipTool | null | undefined;
 

@@ -109,7 +109,7 @@ const LABEL = "OpenCode";
 const OPENCODE_RECYCLE_NOTE = "OpenCode servers restart when idle to pick this up.";
 
 /** Orquester's own status plugin (`agent-hooks.ts` rewrites it): listed, never touched. */
-export const ORQUESTER_PLUGIN_REL = "plugin/orquester-status.js";
+const ORQUESTER_PLUGIN_REL = "plugin/orquester-status.js";
 
 const SKILL_DESCRIPTION_MAX = 1024;
 

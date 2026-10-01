@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import type { ThreadSessionState } from "@orquester/api/agent-chat";
-import { initialSessionState, nextSessionState } from "./session-status.ts";
+import { nextSessionState } from "./session-status.ts";
 import { runtimeEvent } from "./test-harness.ts";
 
 const running: ThreadSessionState = { status: "running", activeTurnId: "turn-1" };
@@ -67,7 +67,7 @@ describe("nextSessionState (§5.1 turn model)", () => {
   it("session.started keeps the resume cursor the adapter reported", () => {
     const next = nextSessionState({
       event: runtimeEvent("session.started", { resume: { cursor: 7 } }),
-      previous: initialSessionState()
+      previous: { status: "idle", activeTurnId: null }
     });
     assert.deepEqual(next.resumeCursor, { cursor: 7 });
   });

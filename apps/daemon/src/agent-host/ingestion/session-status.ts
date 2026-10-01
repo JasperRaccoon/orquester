@@ -24,7 +24,7 @@ import type {
 } from "@orquester/api/agent-chat";
 
 /** Runtime events that move the session state machine. */
-export type SessionLifecycleEvent = Extract<
+type SessionLifecycleEvent = Extract<
   RuntimeEvent,
   {
     type:
@@ -254,9 +254,4 @@ export function sameSessionState(a: ThreadSessionState, b: ThreadSessionState): 
     a.lastError === b.lastError &&
     a.resumeCursor === b.resumeCursor
   );
-}
-
-/** The state a thread starts from when ingestion has never seen it. */
-export function initialSessionState(): ThreadSessionState {
-  return { status: "idle", activeTurnId: null };
 }

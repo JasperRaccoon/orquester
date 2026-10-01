@@ -86,12 +86,6 @@ function limitParts(policy: Pick<AccountPolicy, "maxSessionPct" | "maxWeeklyPct"
   return parts;
 }
 
-/** "skip at 85% 5-hour, 90% weekly"; "" when no threshold is set. */
-export function limitsText(policy: Pick<AccountPolicy, "maxSessionPct" | "maxWeeklyPct" | "scoped">, model?: string): string {
-  const parts = limitParts(policy, model);
-  return parts.length > 0 ? `skip at ${parts.join(", ")}` : "";
-}
-
 /** "All 3 accounts", "2 of 3 accounts", "1 account", "No accounts". */
 export function accountsCountText(allowed: number, total: number): string {
   if (total === 0) return "No accounts";
@@ -110,8 +104,8 @@ export function policySummary(
   options: { model?: string; accounts?: { allowed: number; total: number } } = {}
 ): string {
   const parts = [strategyText(policy)];
-  const limits = limitsText(policy, options.model);
-  if (limits) parts.push(limits);
+  const limits = limitParts(policy, options.model);
+  if (limits.length > 0) parts.push(`skip at ${limits.join(", ")}`);
   if (options.accounts) parts.push(accountsCountText(options.accounts.allowed, options.accounts.total));
   if (policy.unknownUsage === "exclude") parts.push("skips unreadable accounts");
   return parts.join(" · ");

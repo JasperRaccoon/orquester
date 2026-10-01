@@ -23,6 +23,5 @@ export function parseSessionOwner(
   if (value === undefined) return { ok: true, owner: undefined };
   const parsed = workflowSessionOwnerSchema.safeParse(value);
   if (!parsed.success) return { ok: false, code: INVALID_OWNER, message: INVALID_OWNER_MESSAGE };
-  const { kind, workflowId, runId, nodeId } = parsed.data;
-  return { ok: true, owner: { kind, workflowId, runId, nodeId } };
+  return { ok: true, owner: parsed.data };
 }

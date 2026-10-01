@@ -50,11 +50,9 @@ function watchConnection(): void {
   });
 }
 
-const getSnapshot = (): WorkflowsState => workflowsStore.getState();
-
 /** The whole workflows store, re-rendering on every change. */
 export function useWorkflowsState(): WorkflowsState {
-  return useSyncExternalStore(workflowsStore.subscribe, getSnapshot, getSnapshot);
+  return useSyncExternalStore(workflowsStore.subscribe, workflowsStore.getState, workflowsStore.getState);
 }
 
 let tempCache: { state: WorkflowsState; value: WorkflowTempProjects } | null = null;

@@ -72,6 +72,8 @@ import {
   runAgentCliOrThrow,
   scanCommands,
   scanSkills,
+  uniqueName,
+  uniqueNameAsync,
   writeCommand,
   writeProfileFile,
   writeProfileFileVerified,
@@ -1571,18 +1573,4 @@ function hookFragmentFromDraft(draft: HookDraft, base: Record<string, unknown>, 
   const handlerOut = { ...ordered, ...handler };
   const matcher = PROFILE_HOOK_EVENTS_WITHOUT_MATCHER.includes(draft.event) ? null : normalizeMatcher(draft.matcher);
   return { event: draft.event, matcher, handler: handlerOut };
-}
-
-function uniqueName(name: string, taken: (candidate: string) => boolean): string {
-  for (let n = 2; ; n += 1) {
-    const candidate = `${name}-${n}`;
-    if (!taken(candidate)) return candidate;
-  }
-}
-
-async function uniqueNameAsync(name: string, taken: (candidate: string) => Promise<boolean>): Promise<string> {
-  for (let n = 2; ; n += 1) {
-    const candidate = `${name}-${n}`;
-    if (!(await taken(candidate))) return candidate;
-  }
 }

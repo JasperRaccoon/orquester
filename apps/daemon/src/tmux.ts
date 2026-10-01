@@ -4,19 +4,12 @@ import { homedir } from "node:os";
 import { basename, delimiter, isAbsolute, join } from "node:path";
 
 /** Prefix for every orquester-owned tmux session (`orq-<uuid>`). */
-export const TMUX_SESSION_PREFIX = "orq-";
+const TMUX_SESSION_PREFIX = "orq-";
 
-/**
- * Prefix for daemon-owned *service* sessions (e.g. `orqsvc-agent-host`, the
- * agent host). It must NOT start with `TMUX_SESSION_PREFIX` — the reaper scans
- * `list-sessions` for `orq-` names, and reattach() reaps orphans there; a service
- * session named `orq-…` would be mistaken for a user session and reaped. Because
- * `"orqsvc-".startsWith("orq-") === false` (char 3 is `s`, not `-`), service
- * sessions are invisible to `listSessions()` and thus immune.
- */
 /** tmux's stderr when no server listens on the socket (not an error for a listing). */
 const TMUX_NO_SERVER = /no server running|error connecting to .*\((No such file or directory|Connection refused)\)/i;
 
+/** Service sessions must stay outside `orq-`, which session reattachment reaps for orphans. */
 const SERVICE_SESSION_PREFIX = "orqsvc-";
 
 /** Throws unless `name` is inside the service namespace (see SERVICE_SESSION_PREFIX). */
@@ -27,7 +20,7 @@ function assertServiceName(name: string): void {
 }
 
 /** Derive the tmux session name from a session id. */
-export function tmuxName(id: string): string {
+function tmuxName(id: string): string {
   return `${TMUX_SESSION_PREFIX}${id}`;
 }
 

@@ -179,7 +179,7 @@ type Ref =
     }
   | { type: "skill"; scope: MarkdownScope; name: string; dirName: string; dir: string; file: string }
   | { type: "command"; scope: MarkdownScope; name: string; file: string }
-  | { type: "hook-file"; location: HookLocation; locked: boolean }
+  | { type: "hook-file"; location: HookLocation }
   | { type: "hook-stash"; location: HookLocation }
   | { type: "hook-toml"; location: HookLocation }
   | {
@@ -313,10 +313,6 @@ function listEdit(
     return { op: "delete", path };
   }
   return { op: "set", path, value: next };
-}
-
-function compact<T>(values: (T | null)[]): T[] {
-  return values.filter((value): value is T => value !== null);
 }
 
 function transportOf(def: Record<string, unknown>): McpTransport {
@@ -1033,7 +1029,7 @@ export class GrokProfileAdapter implements ProfileAdapter {
       if (state.data === null) continue;
       const locked = file === GROK_ORQUESTER_HOOK_FILE;
       for (const location of listHandlers(file, state.data.hooks)) {
-        push({ item: this.hookItem(location, { locked, stashed: false, readOnly: false, path: state.path }), ref: { type: "hook-file", location, locked } });
+        push({ item: this.hookItem(location, { locked, stashed: false, readOnly: false, path: state.path }), ref: { type: "hook-file", location } });
       }
     }
     for (const location of listHandlers(CONFIG_TOML, doc.hooks)) {
@@ -1419,7 +1415,7 @@ export class GrokProfileAdapter implements ProfileAdapter {
 
   /** Applies `edits` to `config.toml`, comment-preserving and verified; refuses an unreadable or moved file. */
   private async writeConfig(model: Model, edits: readonly (TomlEdit | null)[]): Promise<void> {
-    const list = compact([...edits]);
+    const list = edits.filter((edit): edit is TomlEdit => edit !== null);
     if (list.length === 0) return;
     this.requireConfig(model);
     const { config } = model;
@@ -2075,9 +2071,8 @@ export class GrokProfileAdapter implements ProfileAdapter {
         if (ref.where === "installed") {
           // Never `--confirm`: it makes Grok also uninstall every plugin
           // installed from the same source. Without it Grok refuses that case.
-          const { output, notes: cliNotes } = await this.grokRewritingConfig(model, ["plugin", "uninstall", ref.name], TIMEOUTS.uninstall);
+          const { notes: cliNotes } = await this.grokRewritingConfig(model, ["plugin", "uninstall", ref.name], TIMEOUTS.uninstall);
           notes.push(...cliNotes);
-          void output;
         } else if (ref.where === "plugins-dir" && ref.path !== undefined) {
           await removeProfilePath(ref.path, { backups: this.backups, agent: AGENT });
           this.invalidate();

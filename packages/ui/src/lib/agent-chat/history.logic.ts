@@ -138,7 +138,7 @@ export function showsNewRow(
  * under a subagent fleet: that would otherwise keep, and re-project on every
  * trim, everything the window ever evicted.
  */
-export const HISTORY_ROW_CAP = 20_000;
+const HISTORY_ROW_CAP = 20_000;
 
 const NO_ITEMS: readonly ThreadItem[] = [];
 

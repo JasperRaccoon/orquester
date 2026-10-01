@@ -454,11 +454,10 @@ function createOpenThreadIndex(input: {
     meta: IndexedThreadMeta,
     events: readonly DomainEvent[],
     positions: readonly EventPosition[]
-  ): boolean => {
+  ): void => {
     try {
-      const outcome = indexer.applyBatch(meta, events, positions);
+      indexer.applyBatch(meta, events, positions);
       failing.delete(meta.threadId);
-      return outcome === "applied" || outcome === "deleted";
     } catch (error) {
       // The transaction rolled back and the thread reloads from its rows, so
       // the next batch starts clean — it finds a hole only catch-up fills.
@@ -469,7 +468,6 @@ function createOpenThreadIndex(input: {
           error: describeError(error)
         });
       }
-      return false;
     }
   };
 

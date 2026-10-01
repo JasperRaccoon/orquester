@@ -55,7 +55,7 @@ const CODEX_AUTH_ENV_UNSET = ["OPENAI_API_KEY"];
 const GROK_AUTH_ENV_UNSET = ["XAI_API_KEY"];
 
 /** The agent families with managed (per-account HOME) credentials. */
-export type ManagedAgent = "claude" | "codex" | "grok";
+type ManagedAgent = "claude" | "codex" | "grok";
 
 const CRED_FILENAME = { claude: ".credentials.json", codex: "auth.json", grok: "auth.json" } as const;
 

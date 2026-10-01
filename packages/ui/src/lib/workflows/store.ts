@@ -201,9 +201,7 @@ let staleEpoch = 0;
 let enabledSeq = 0;
 const enabledTokens = new Map<string, number>();
 
-function getState(): WorkflowsState {
-  return workflowsStore.getState();
-}
+const getState = workflowsStore.getState;
 
 function errorText(error: unknown, fallback = "Something went wrong."): string {
   if (typeof error === "object" && error !== null) {

@@ -12,8 +12,7 @@ import {
   defaultPaContent,
   desktopLayout,
   fallbackSocketDir,
-  hostScriptArgs,
-  shellQuote
+  hostScriptArgs
 } from "./host-env.ts";
 
 const layout = desktopLayout("/srv/app/daemon/desktops/abc123", null);
@@ -97,11 +96,6 @@ test("host script args carry no secrets: dir, size, audio flag, socket dir", () 
   const args = hostScriptArgs(layout, { width: 1280, height: 800 }, false);
   assert.deepEqual(args.slice(1), [layout.dir, "1280", "800", "0", layout.dir]);
   assert.match(args[0], /assets\/desktop-host\.sh$/);
-});
-
-test("shellQuote escapes single quotes POSIX-style", () => {
-  assert.equal(shellQuote("it's"), `'it'\\''s'`);
-  assert.equal(shellQuote(""), "''");
 });
 
 test("env file round-trips nasty values through a real sh unchanged", async (t) => {

@@ -121,25 +121,19 @@ export function createWorkflowSweepers(deps: WorkflowSweepersDeps): WorkflowSwee
             }
             if (now - since < tabRetentionMs) continue;
           }
-          const closed = await api.request("DELETE", `/api/sessions/${encodeURIComponent(session.id)}`);
-          if (closed.status >= 400 && closed.status !== 404) {
-            report.errors.push(`tab ${session.id}: the daemon answered ${closed.status}`);
-            continue;
+        } else {
+          if (isRunActive(run.status) || run.endedAt === undefined) continue;
+          // A temp project's tabs go with the project.
+          if (run.tempProject && run.tempProject.path === session.projectPath) continue;
+          const endedAt = Date.parse(run.endedAt);
+          if (!Number.isFinite(endedAt) || now - endedAt < tabRetentionMs) continue;
+          if (session.kind === "agent-chat") {
+            const thread = await readThread(api, session.id);
+            const userWroteAfter = thread.items.some(
+              (item) => item.kind === "message" && item.role === "user" && !item.agentId && Date.parse(item.createdAt) > endedAt
+            );
+            if (userWroteAfter) continue;
           }
-          report.tabsClosed.push(session.id);
-          continue;
-        }
-        if (isRunActive(run.status) || run.endedAt === undefined) continue;
-        // A temp project's tabs go with the project.
-        if (run.tempProject && run.tempProject.path === session.projectPath) continue;
-        const endedAt = Date.parse(run.endedAt);
-        if (!Number.isFinite(endedAt) || now - endedAt < tabRetentionMs) continue;
-        if (session.kind === "agent-chat") {
-          const thread = await readThread(api, session.id);
-          const userWroteAfter = thread.items.some(
-            (item) => item.kind === "message" && item.role === "user" && !item.agentId && Date.parse(item.createdAt) > endedAt
-          );
-          if (userWroteAfter) continue;
         }
         const closed = await api.request("DELETE", `/api/sessions/${encodeURIComponent(session.id)}`);
         if (closed.status >= 400 && closed.status !== 404) {

@@ -12,6 +12,22 @@ function wf(nodes: [string, WorkflowNodeType, { y?: number; config?: unknown }?]
 }
 
 describe("buildStepOutline", () => {
+  it("orders branches by handle and position, preserving edge order for ties", () => {
+    const outline = buildStepOutline(
+      wf(
+        [
+          ["t", "trigger.manual"], ["fork", "code"], ["early", "code", { y: 10 }],
+          ["late", "code", { y: 10 }], ["low", "code", { y: 20 }], ["failed", "code"]
+        ],
+        [
+          ["t", "fork"], ["fork", "failed", "error"], ["fork", "low"],
+          ["fork", "late"], ["fork", "early"]
+        ]
+      )
+    );
+    assert.deepEqual(outline.map((item) => item.nodeId), ["t", "fork", "late", "early", "low", "failed"]);
+  });
+
   it("a diamond exposes each step once and links both branches to the join", () => {
     const outline = buildStepOutline(
       wf(

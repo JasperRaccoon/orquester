@@ -134,9 +134,6 @@ export interface ThreadMessageSentPayload {
    * they ride the event that creates the message. Both are optional and are
    * only meaningful on their own role; absent means unknown, and the row then
    * renders without a badge rather than guessing.
-   *
-   * *Added by W3 for W12's fields; additive (§8 rollback boundary: an older
-   * build ignores them, a newer build tolerates a row without them).*
    */
   reasoningKind?: "text" | "summary";
   messageKind?: "answer" | "commentary";

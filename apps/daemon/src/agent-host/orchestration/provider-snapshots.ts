@@ -9,60 +9,15 @@
  * with identity carried *inside* the file because "the filename alone is not
  * trusted as a routing key").
  *
- * Snapshots refresh on a slow interval, **not per request**: computed on
- * demand, cached, re-probed in the background every few minutes, and only while
- * something is actually watching provider status.
+ * Construction seeds pending snapshots; boot hydration replaces them with
+ * cache entries whose adapter, protocol and binary identities still match.
+ * Boot probes only providers without a usable cache and never blocks readiness.
+ * Cached capabilities are replaced by the current adapter's capabilities.
  *
- * **A fresh host answers `GET /providers` immediately, in three layers** —
- * T3's design, adopted whole after a deploy left every launcher showing "Still
- * loading this agent's models" for five minutes:
- *
- * 1. **A pending seed, synchronously at construction**, before any probe and
- *    before the cache file is read: one snapshot per adapter carrying
- *    `status:"unknown"`, `auth:{status:"unknown"}` and the best catalog the
- *    adapter can name without I/O. *T3:
- *    `makeManagedServerProvider.ts:69-73` (`initialSnapshot(settings)`);
- *    `Layers/ClaudeProvider.ts:595-640` (`makePendingClaudeProvider`).*
- * 2. **The on-disk cache, hydrated at boot with an identity correlation
- *    check**: an entry is used only when the identity written beside it still
- *    matches this host and this binary, and a correlated entry **overrides**
- *    the pending seed. *T3: `Layers/ProviderRegistry.ts:292-352` — "old
- *    identity-less payloads are discarded"; `:743-751` — the pending
- *    fallbacks merge UNDER the cached ones; `providerStatusCache.ts:115-160`
- *    — identity lives inside the file because "the filename alone is not
- *    trusted as a routing key".*
- * 3. **A forced probe of every provider kicked by the registry itself at
- *    boot**, off the startup critical path, serialised like every other
- *    refresh. *T3: `makeManagedServerProvider.ts:280-284` —
- *    `applySnapshot(initialSettings, {forceRefresh: true})` under
- *    `Effect.forkScoped`.* The 5-minute interval
- *    ({@link PROVIDER_SNAPSHOT_REFRESH_INTERVAL_MS}) is only a top-up, and
- *    stays demand-gated on a live watcher. *T3:
- *    `packages/contracts/src/settings.ts:921` — the 5-minute default;
- *    `makeManagedServerProvider.ts:214-222` — `hasProviderStatusDemand`.*
- *
- * **And a fourth rule, for a host that is no longer fresh: a CLI that moves
- * under a running host re-probes itself on the next read.** The three layers
- * above all answer "what do we serve before the first probe"; none of them
- * notices that the binary the last probe described has since been replaced.
- * It happened for real — `claude` updated from Settings → Agents from 2.1.278
- * to 2.1.280, which resolves the `opus` alias to a different model, and a chat
- * opened two hours later still offered the old one. Every read now compares a
- * cheap `realpath` + `stat` of the resolved bin against the identity the stored
- * snapshot was taken under ({@link PROVIDER_BIN_CHECK_INTERVAL_MS}); a mismatch
- * kicks one background refresh and the current snapshot is served meanwhile.
- * The daemon nudges the same route after an install/update it ran itself
- * (`agent-chat/service.ts`'s `onRegistryEntryChanged`), so the common case does
- * not even wait for a read.
- *
- * **And a fifth, for a host that is new but whose cache is not (goals §5.4):
- * capabilities are the ADAPTER's, not the cache's.** Layer two serves a
- * correlated cached row WITHOUT a probe, and that row carries the capability
- * block of whichever host probed it — so a deploy that gives an adapter a new
- * capability (`goals`) would keep serving the old block until the next probe,
- * which a correlated cache no longer triggers. Every row stored here is
- * stamped with the adapter's current capabilities: the pending seed's at
- * construction, then whatever the latest live probe reported.
+ * A five-minute refresh runs only while there are watchers. Reads also check
+ * the binary identity, at most once per provider every five seconds, and queue
+ * a refresh if it changed. Every refresh shares one serial queue; reads serve
+ * the current snapshot while a refresh runs.
  */
 
 import { realpathSync, statSync } from "node:fs";
@@ -85,7 +40,7 @@ import { ADAPTER_IDS, ADAPTER_PENDING_SNAPSHOTS, isAgentAdapterId } from "../ada
 import { isPendingSnapshot } from "../adapters/pending.ts";
 import { AGENT_HOST_PROTOCOL_VERSION } from "../host-protocol.ts";
 import type { Clock } from "./runtime-seams.ts";
-import { systemClock } from "./runtime-seams.ts";
+import { createSerialQueue, systemClock } from "./runtime-seams.ts";
 
 /** T3's default is five minutes and user-configurable; Orquester pins it. */
 const PROVIDER_SNAPSHOT_REFRESH_INTERVAL_MS = 5 * 60_000;
@@ -480,7 +435,7 @@ export function createProviderSnapshotRegistry(
   }
 
   // One permit, so two clients opening Settings cannot run two probes.
-  let refreshChain: Promise<unknown> = Promise.resolve();
+  const refreshQueue = createSerialQueue();
   // Concurrent `ensureWorkspaceSnapshot` calls for one (adapter, cwd) collapse.
   const inFlightWorkspaces = new Map<string, Promise<void>>();
 
@@ -570,12 +525,6 @@ export function createProviderSnapshotRegistry(
     persist();
     notify(snapshot.id);
     return true;
-  };
-
-  const serialise = <T>(task: () => Promise<T>): Promise<T> => {
-    const result = refreshChain.then(task, task);
-    refreshChain = result.catch(() => undefined);
-    return result;
   };
 
   const probeOnce = async (
@@ -685,24 +634,13 @@ export function createProviderSnapshotRegistry(
     }, PROVIDER_SNAPSHOT_REFRESH_INTERVAL_MS).unref();
   };
 
-  const refreshAllNow = async (): Promise<void> => {
+  const refreshAllNow = async (onlyUnprobed = false): Promise<void> => {
     for (const adapterId of ADAPTER_IDS) {
-      if (!probes.has(adapterId)) continue;
+      if (!probes.has(adapterId) || (onlyUnprobed && probed.has(adapterId))) continue;
       try {
-        await serialise(() => refreshOne(adapterId));
+        await refreshQueue.run(() => refreshOne(adapterId));
       } catch (error) {
         // A probe failure keeps the last good snapshot; it never fails the loop.
-        options.logger.warn(`provider snapshot refresh failed for ${adapterId}`, error);
-      }
-    }
-  };
-
-  const refreshUnprobedNow = async (): Promise<void> => {
-    for (const adapterId of ADAPTER_IDS) {
-      if (!probes.has(adapterId) || probed.has(adapterId)) continue;
-      try {
-        await serialise(() => refreshOne(adapterId));
-      } catch (error) {
         options.logger.warn(`provider snapshot refresh failed for ${adapterId}`, error);
       }
     }
@@ -765,7 +703,7 @@ export function createProviderSnapshotRegistry(
       now: current.binRealPath ?? current.binPath ?? null
     });
     binRefreshQueued.add(adapterId);
-    void serialise(() => refreshOne(adapterId))
+    void refreshQueue.run(() => refreshOne(adapterId))
       .catch((error: unknown) => {
         options.logger.warn(`provider snapshot refresh failed for ${adapterId}`, error);
       })
@@ -790,12 +728,12 @@ export function createProviderSnapshotRegistry(
     },
 
     async refresh(adapterId: AgentAdapterId, input?: { cwd?: string }): Promise<ProviderSnapshot> {
-      const { snapshot } = await serialise(() => refreshOne(adapterId, input));
+      const { snapshot } = await refreshQueue.run(() => refreshOne(adapterId, input));
       return snapshot;
     },
 
     refreshDetailed(adapterId: AgentAdapterId, input?: { cwd?: string }) {
-      return serialise(() => refreshOne(adapterId, input));
+      return refreshQueue.run(() => refreshOne(adapterId, input));
     },
 
     ensureWorkspaceSnapshot(adapterId: AgentAdapterId, cwd: string): void {
@@ -808,7 +746,7 @@ export function createProviderSnapshotRegistry(
         // Never re-probe a cwd we already hold.
         return;
       }
-      const task = serialise(() => refreshOne(adapterId, { cwd }))
+      const task = refreshQueue.run(() => refreshOne(adapterId, { cwd }))
         .then(() => undefined)
         .catch((error: unknown) => {
           options.logger.warn(`workspace snapshot refresh failed for ${adapterId}`, error);
@@ -895,7 +833,7 @@ export function createProviderSnapshotRegistry(
       // A watcher can prime a registry whose boot refresh has not started.
       if (!primed && ADAPTER_IDS.some((id) => probes.has(id) && !probed.has(id))) {
         primed = true;
-        void refreshUnprobedNow();
+        void refreshAllNow(true);
       }
       scheduleNext();
       let released = false;
@@ -994,7 +932,7 @@ export function createProviderSnapshotRegistry(
         return;
       }
       primed = true;
-      void refreshUnprobedNow();
+      void refreshAllNow(true);
     },
 
     refreshAllNow,

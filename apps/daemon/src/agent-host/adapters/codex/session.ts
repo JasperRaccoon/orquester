@@ -493,7 +493,7 @@ export class CodexSession {
             requestAttestation: false
           }
         }),
-      this.deadline("handshakeMs"),
+      AGENT_HOST_DEADLINES.handshakeMs,
       "initialize"
     );
     // `initialized` takes no params; the server rejects an explicit null.
@@ -568,8 +568,8 @@ export class CodexSession {
     items.push(...imageItems);
 
     const config = runtimeModeToThreadConfig(this.runtimeMode);
-    const effort = this.selectedOption("effort");
-    const serviceTier = this.selectedOption("serviceTier");
+    const effort = selectedOptionOf(this.modelSelection, "effort");
+    const serviceTier = selectedOptionOf(this.modelSelection, "serviceTier");
 
     const params: CodexProtocol.v2.TurnStartParams = {
       threadId: providerThreadId,
@@ -608,7 +608,7 @@ export class CodexSession {
 
     const response = await this.bounded(
       () => peer.request("turn/start", params),
-      this.deadline("submitMs"),
+      AGENT_HOST_DEADLINES.submitMs,
       "turn/start"
     );
 
@@ -713,7 +713,7 @@ export class CodexSession {
             threadId: this.requireProviderThreadId(),
             turnId: active
           }),
-        this.deadline("cancelMs"),
+        AGENT_HOST_DEADLINES.cancelMs,
         "turn/interrupt"
       );
     } catch (error) {
@@ -861,7 +861,7 @@ export class CodexSession {
     const peer = this.requirePeer();
     await this.bounded(
       () => peer.request("thread/compact/start", { threadId: this.requireProviderThreadId() }),
-      this.deadline("submitMs"),
+      AGENT_HOST_DEADLINES.submitMs,
       "thread/compact/start"
     );
   }
@@ -933,7 +933,7 @@ export class CodexSession {
 
     await this.bounded(
       () => peer.request("thread/revert", { threadId: providerThreadId, beforeTurnId }),
-      this.deadline("sessionOpenMs"),
+      AGENT_HOST_DEADLINES.sessionOpenMs,
       "thread/revert"
     );
     // The response's `turns` is ALWAYS empty by documented design; re-hydrate.
@@ -1436,7 +1436,7 @@ export class CodexSession {
               // hydration is deprecated (fixtures README observation 17).
               excludeTurns: true
             }),
-          this.deadline("sessionOpenMs"),
+          AGENT_HOST_DEADLINES.sessionOpenMs,
           "thread/resume"
         );
         this.providerThreadId = resumed.thread.id;
@@ -1478,7 +1478,7 @@ export class CodexSession {
           sandbox: config.sandbox,
           model: this.modelSelection.model
         }),
-      this.deadline("sessionOpenMs"),
+      AGENT_HOST_DEADLINES.sessionOpenMs,
       "thread/start"
     );
     // NOT `{threadId}` — `result.thread.id` (fixtures README observation 1).
@@ -1519,7 +1519,7 @@ export class CodexSession {
             ...(cursor !== null ? { cursor } : {}),
             ...(withItems ? { itemsView: "full" as const } : {})
           }),
-        this.deadline("sessionOpenMs"),
+        AGENT_HOST_DEADLINES.sessionOpenMs,
         "thread/turns/list"
       );
       turns.push(...response.data);
@@ -2529,10 +2529,6 @@ export class CodexSession {
     }
   }
 
-  private selectedOption(id: string): string | undefined {
-    return selectedOptionOf(this.modelSelection, id);
-  }
-
   /**
    * A request id unique across every session this THREAD ever had (R2-1).
    *
@@ -2561,15 +2557,7 @@ export class CodexSession {
     return id;
   }
 
-  /**
-   * Every wait on the child is bounded, and an expired deadline KILLS it
-   * rather than leaving the thread `starting` forever (§3.1). This is the one
-   * place the design does not follow T3.
-   */
-  private deadline(name: keyof typeof AGENT_HOST_DEADLINES): number {
-    return AGENT_HOST_DEADLINES[name];
-  }
-
+  /** Timeouts kill the child so an expired operation cannot leave a session starting. */
   private bounded<T>(work: () => Promise<T>, timeoutMs: number, label: string): Promise<T> {
     return withDeadline(work, {
       label: `codex ${label}`,

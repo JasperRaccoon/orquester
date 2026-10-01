@@ -55,27 +55,6 @@ function authHeader(creds: ProviderCreds): string {
 const sleep = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
 /**
- * `AccountError` that remembers the raw HTTP status so callers can branch on it
- * exactly (e.g. 409 = duplicate key) instead of pattern-matching the message,
- * which also contains up to 200 chars of response body. Mirrors
- * `bitbucket-server.ts`'s `DcHttpError`.
- */
-class CloudHttpError extends GitRemoteError {
-  constructor(
-    status: number,
-    message: string,
-    override readonly httpStatus: number
-  ) {
-    super(
-      status,
-      message,
-      httpStatus === 401 || httpStatus === 403 ? "auth" : httpStatus === 404 ? "not_found" : "upstream",
-      httpStatus
-    );
-  }
-}
-
-/**
  * Read the scopes a 403 says are missing. Scoped Atlassian API tokens answer
  * `{"error": {"message": "Your credentials lack one or more required privilege
  * scopes.", "detail": {"granted": [...], "required": [...]}}}`; null when the
@@ -178,9 +157,10 @@ async function bbRequest(
     const hint = unauthorized
       ? ` (use a SCOPED Atlassian API token — plain tokens fail; scopes: ${SCOPES}; REST username is your Atlassian account EMAIL)`
       : "";
-    throw new CloudHttpError(
+    throw new GitRemoteError(
       unauthorized ? 400 : 502,
       `Bitbucket ${method} ${pathOrUrl} → ${res.status}${hint}. ${text}`,
+      unauthorized ? "auth" : res.status === 404 ? "not_found" : "upstream",
       res.status
     );
   }
@@ -191,7 +171,7 @@ async function bbRequest(
   };
 }
 
-/** Authenticated Bitbucket Cloud REST call; throws CloudHttpError on a non-2xx. */
+/** Authenticated Bitbucket Cloud REST call; throws GitRemoteError on a non-2xx. */
 async function bb(
   creds: ProviderCreds,
   method: string,
@@ -282,7 +262,7 @@ const repoListCache = new TtlCache<RepoSummary[]>(LIST_TTL_MS);
 const ownerListCache = new TtlCache<OwnerSummary[]>(LIST_TTL_MS);
 
 function listCacheKey(creds: ProviderCreds): string {
-  return `${creds.email ?? ""} ${creds.token}`;
+  return `${creds.email ?? ""}\0${creds.token}`;
 }
 
 /** The first two fields of an OpenSSH public key ("<type> <base64>"). */
@@ -340,7 +320,7 @@ export const bitbucketCloudProvider: GitProvider = {
       });
       return { keyId: str(key?.uuid) };
     } catch (error) {
-      if (error instanceof CloudHttpError && error.httpStatus === 409) {
+      if (error instanceof GitRemoteError && error.httpStatus === 409) {
         throw new AccountError(
           409,
           "Bitbucket rejected the key: an identical SSH key is already registered to another Bitbucket account or workspace (keys are globally unique)."

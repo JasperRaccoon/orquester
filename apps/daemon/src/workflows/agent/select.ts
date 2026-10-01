@@ -162,13 +162,7 @@ export function burntWindowResetAt(input: {
   const windows = [source.session, source.weekly, ...(source.scopedWindows ?? [])]
     .map((window) => currentWindow(window ?? null, nowMs))
     .filter((window): window is UsageWindow => window !== null && window.percent >= 100);
-  if (windows.length === 0) return undefined;
-  let latest: number | undefined;
-  for (const window of windows) {
-    const t = window.resetsAt ? Date.parse(window.resetsAt) : Number.NaN;
-    if (!Number.isFinite(t)) return undefined;
-    latest = latest === undefined ? t : Math.max(latest, t);
-  }
+  const latest = freedAt(windows);
   return latest === undefined ? undefined : new Date(latest).toISOString();
 }
 
@@ -214,7 +208,7 @@ function thresholdBlockers(reading: UsageReading, policy: ResolvedPolicy, model:
 }
 
 /** When every blocker has reset (the latest reset), or undefined when one names none. */
-function freedAt(blockers: Blocker[]): number | undefined {
+function freedAt(blockers: { resetsAt?: string | null }[]): number | undefined {
   let latest: number | undefined;
   for (const blocker of blockers) {
     const t = blocker.resetsAt ? Date.parse(blocker.resetsAt) : Number.NaN;
@@ -231,19 +225,13 @@ function freedAt(blockers: Blocker[]): number | undefined {
 interface RankedCandidate {
   accountId: string;
   label?: string;
-  /** The key family (`cooldownSubject(...).family`): the account family, or the refId when accountless. */
-  family: string;
-  /** "none" = an accountless launch (no usage applies). */
-  usage: "known" | "unknown" | "none";
   reading?: UsageReading;
   /** The human-readable reason it would be chosen. */
   reason: string;
 }
 
 interface ChainEntryEvaluation {
-  chainIndex: number;
   entry: AgentChainEntry;
-  family: string;
   /** Best first. */
   ranked: RankedCandidate[];
   skipped: AccountSkip[];
@@ -265,7 +253,6 @@ function rankChainEntry(input: SelectAccountInput, chainIndex: number): ChainEnt
   const now = input.now;
   const nowMs = now.getTime();
   const accountFamily = accountFamilyOf(entry.agent);
-  const family = accountFamily ?? entry.agent;
   const keyOf = (accountId: string): string => {
     const subject = cooldownSubject(entry.agent, entry.model, accountId);
     return cooldownKey(subject.family, subject.account);
@@ -301,9 +288,9 @@ function rankChainEntry(input: SelectAccountInput, chainIndex: number): ChainEnt
     const system: Candidate = { accountId: SYSTEM_ACCOUNT_ID, label: "System", order: 0 };
     const ranked: RankedCandidate[] = [];
     if (!cooledOrTried(system)) {
-      ranked.push({ accountId: SYSTEM_ACCOUNT_ID, label: "System", family, usage: "none", reason: `${entry.agent}: has no managed accounts — runs on the system login` });
+      ranked.push({ accountId: SYSTEM_ACCOUNT_ID, label: "System", reason: `${entry.agent}: has no managed accounts — runs on the system login` });
     }
-    return { chainIndex, entry, family, ranked, skipped, ...(earliestFreeAt !== undefined ? { earliestFreeAt } : {}) };
+    return { entry, ranked, skipped, ...(earliestFreeAt !== undefined ? { earliestFreeAt } : {}) };
   }
 
   // Candidates, in allow-list order when there is one.
@@ -375,19 +362,17 @@ function rankChainEntry(input: SelectAccountInput, chainIndex: number): ChainEnt
     return Math.max(session, weekly);
   };
   const compareResets = (a: number, b: number): number => (a === b ? 0 : a < b ? -1 : 1);
+  unknown.sort((a, b) => a.order - b.order);
   if (policy.strategy === "fixed") {
     known.sort((a, b) => a.order - b.order);
-    unknown.sort((a, b) => a.order - b.order);
   } else if (policy.strategy === "soonest-reset") {
     const windowOf = (c: Eligible): UsageWindow | null => (policy.soonestResetWindow === "session" ? c.reading.session : c.reading.weekly);
     known.sort((a, b) => compareResets(resetMs(windowOf(a)), resetMs(windowOf(b))) || byLabel(a, b));
-    unknown.sort((a, b) => a.order - b.order);
   } else {
     known.sort(
       (a, b) =>
         metricOf(a.reading) - metricOf(b.reading) || compareResets(resetMs(a.reading.weekly), resetMs(b.reading.weekly)) || byLabel(a, b)
     );
-    unknown.sort((a, b) => a.order - b.order);
   }
 
   const under = (window: "session" | "weekly"): string => {
@@ -412,17 +397,15 @@ function rankChainEntry(input: SelectAccountInput, chainIndex: number): ChainEnt
     return `${labelOf(c)}: least used (${metric} ${pct(metricOf(c.reading))})${limits ? ` under ${limits}` : ""}`;
   };
   const ranked: RankedCandidate[] = [
-    ...known.map((c, position) => ({ accountId: c.accountId, ...(c.label ? { label: c.label } : {}), family, usage: "known" as const, reading: c.reading, reason: knownReason(c, position) })),
+    ...known.map((c, position) => ({ accountId: c.accountId, ...(c.label ? { label: c.label } : {}), reading: c.reading, reason: knownReason(c, position) })),
     ...unknown.map((c) => ({
       accountId: c.accountId,
       ...(c.label ? { label: c.label } : {}),
-      family,
-      usage: "unknown" as const,
       reading: c.reading,
       reason: `${labelOf(c)}: usage unknown (${c.reading.unknownWhy}) — tried after every account with known usage`
     }))
   ];
-  return { chainIndex, entry, family, ranked, skipped, ...(earliestFreeAt !== undefined ? { earliestFreeAt } : {}) };
+  return { entry, ranked, skipped, ...(earliestFreeAt !== undefined ? { earliestFreeAt } : {}) };
 }
 
 // ---------------------------------------------------------------------------
@@ -497,17 +480,12 @@ export function formatDuration(ms: number): string {
   return `${mins}m`;
 }
 
-/** "therealeduard465: weekly 90% ≥ 85%". */
-function describeSkip(skip: AccountSkip): string {
-  return `${skip.label ?? skip.accountId}: ${skip.detail}`;
-}
-
 /** One line per skip, grouped by agent: "claude — therealeduard465: weekly 90% ≥ 85%; …". */
 export function describeSkips(skips: AccountSkip[]): string {
   const byAgent = new Map<string, string[]>();
   for (const skip of skips) {
     const list = byAgent.get(skip.agent) ?? [];
-    list.push(describeSkip(skip));
+    list.push(`${skip.label ?? skip.accountId}: ${skip.detail}`);
     byAgent.set(skip.agent, list);
   }
   return [...byAgent].map(([agent, lines]) => `${agent} — ${lines.join("; ")}`).join("\n");

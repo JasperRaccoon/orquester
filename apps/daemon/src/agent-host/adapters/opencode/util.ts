@@ -3,19 +3,14 @@
 interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T | PromiseLike<T>) => void;
-  reject: (error: unknown) => void;
 }
 
 export function deferred<T = void>(): Deferred<T> {
   let resolve!: (value: T | PromiseLike<T>) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
+  const promise = new Promise<T>((res) => {
     resolve = res;
-    reject = rej;
   });
-  // A deferred nobody awaits must not crash the host.
-  promise.catch(() => undefined);
-  return { promise, resolve, reject };
+  return { promise, resolve };
 }
 
 /** One-permit semaphore, FIFO. The prompt path takes it; so do compact and rollback. */
@@ -35,7 +30,7 @@ export class Mutex {
     const gate = deferred<void>();
     this.tail = gate.promise;
     try {
-      await previous.catch(() => undefined);
+      await previous;
       return await work();
     } finally {
       this.pending -= 1;

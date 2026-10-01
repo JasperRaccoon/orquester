@@ -186,7 +186,7 @@ export function drillInAgentRow(input: {
  * session-death pass share), never a second one. A loop or a goal only drives
  * work (§7.6): it never reads as working.
  */
-export function isDrillInAgentLive(
+function isDrillInAgentLive(
   agentId: string,
   agent: DrillInAgentRow | null | undefined,
   context: MessageStreamingContext
@@ -204,7 +204,7 @@ export function isDrillInAgentLive(
  * run, so its working row follows it. Nothing known of the start — every row
  * is the run.
  */
-export function agentRunStart(entries: readonly TimelineEntry[], runStartedAt: string | null): number {
+function agentRunStart(entries: readonly TimelineEntry[], runStartedAt: string | null): number {
   const at = entries.findIndex(
     (entry) =>
       (runStartedAt === null || entry.createdAt >= runStartedAt) &&

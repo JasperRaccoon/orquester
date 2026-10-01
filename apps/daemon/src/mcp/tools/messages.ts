@@ -381,7 +381,7 @@ async function actionablePlanMarkdown(api: DaemonApi, sessionId: string, snap: T
   const plan = latest.item;
   let payload = (plan.payload ?? {}) as { planMarkdown?: unknown; truncated?: unknown };
   if (payload.truncated === true) {
-    const { item } = expectOk<ThreadItemResponse>(await api.request("GET", agentChatRoutes.item(sessionId, plan.id)), "plan");
+    const { item } = expectOk<ThreadItemResponse>(await api.request("GET", agentChatRoutes.item(sessionId, plan.id)));
     payload = (item?.kind === "activity" ? item.payload ?? {} : {}) as typeof payload;
   }
   const markdown = typeof payload.planMarkdown === "string" ? payload.planMarkdown : "";

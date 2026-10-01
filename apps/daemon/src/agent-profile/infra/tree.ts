@@ -13,7 +13,7 @@ import { basename, dirname, join } from "node:path";
 import { profileErrors } from "../errors.ts";
 
 /** What `lstat` says a path is; `other` is a socket, FIFO or device. */
-export type PathKind = "file" | "dir" | "symlink" | "other";
+type PathKind = "file" | "dir" | "symlink" | "other";
 
 /** What `lstat` says `path` is — a symlink is never followed — or `null` when nothing is there. */
 export async function pathKind(path: string): Promise<PathKind | null> {
@@ -43,9 +43,9 @@ export function isMissing(error: unknown): boolean {
 }
 
 /** How a copy treats a symlink it meets inside the tree. */
-export type SymlinkPolicy = "preserve" | "skip" | "refuse";
+type SymlinkPolicy = "preserve" | "skip" | "refuse";
 
-export interface CopyEntryOptions {
+interface CopyEntryOptions {
   symlinks: SymlinkPolicy;
   /** Follow `src` itself when it is a symlink (its contents are still never followed). */
   followRoot?: boolean;
@@ -53,9 +53,7 @@ export interface CopyEntryOptions {
   fsync?: boolean;
 }
 
-export interface CopyResult {
-  /** Regular files copied. */
-  files: number;
+interface CopyResult {
   /** Paths relative to the source root that were left out: skipped symlinks, sockets, FIFOs, devices. */
   skipped: string[];
 }
@@ -67,7 +65,7 @@ export interface CopyResult {
  * {@link copyTree} cleans up; internal callers copy into a temp path.
  */
 export async function copyEntry(src: string, dest: string, options: CopyEntryOptions): Promise<CopyResult> {
-  const result: CopyResult = { files: 0, skipped: [] };
+  const result: CopyResult = { skipped: [] };
   const st = options.followRoot ? await stat(src) : await lstat(src);
   await copyNode(src, dest, "", st, options, result);
   return result;
@@ -108,7 +106,6 @@ async function copyNode(
       await fsyncFile(dest);
     }
     await chmod(dest, st.mode & 0o777);
-    result.files += 1;
     return;
   }
   result.skipped.push(shown);

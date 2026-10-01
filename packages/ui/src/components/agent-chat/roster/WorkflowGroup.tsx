@@ -32,17 +32,17 @@ import React from "react";
 import { Check, ChevronDown, ChevronRight } from "lucide-react";
 import type { AgentPanelWorkflowGroup, RuntimeSubagent } from "@orquester/api/agent-chat";
 import { cn } from "../../../lib/cn";
-import type { TaskStopControl } from "../../../lib/agent-chat/roster.logic";
+import { isTerminalSubagentStatus, type TaskStopControl } from "../../../lib/agent-chat/roster.logic";
 import { ChatIconButton, ElapsedTicker, StatusDot } from "../primitives";
 import { formatSubagentTokenCount } from "./format";
-import { isFinishedRow, rosterRowTicks, rosterStatusVisual } from "./roster-rows";
+import { rosterRowTicks, rosterStatusVisual } from "./roster-rows";
 import { workflowGroupSummary } from "./roster-summary";
 import { AgentRosterRow } from "./AgentRosterRow";
 
 type Phase = AgentPanelWorkflowGroup["phases"][number];
 
 function workflowIsLive(group: AgentPanelWorkflowGroup): boolean {
-  return !isFinishedRow(group.workflow);
+  return !isTerminalSubagentStatus(group.workflow.status);
 }
 
 function workflowLabel(workflow: RuntimeSubagent): string {

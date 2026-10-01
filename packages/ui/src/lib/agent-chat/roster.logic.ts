@@ -53,7 +53,7 @@ export function isTerminalSubagentStatus(status: RuntimeSubagentStatus): boolean
  * `leftRunning` (Grok's "Left running when the agent host stopped — stop it
  * from Settings → Host status."): never the provider's.
  */
-export function backgroundShellActivityText(
+function backgroundShellActivityText(
   shell: Pick<RuntimeSubagent, "status" | "progress" | "exitCode"> & {
     result?: string | null;
     leftRunning?: boolean;
@@ -179,7 +179,7 @@ export function isBackgroundShellItems(items: readonly ThreadItem[], agentId: st
  * tokens", "Deleted") — a shell's bare "Stopped" hid exactly that — and the
  * state word only when there are none.
  */
-export function loopOrGoalActivityText(
+function loopOrGoalActivityText(
   row: Pick<RuntimeSubagent, "kind" | "status" | "progress" | "result" | "error">
 ): string {
   const first = (values: ReadonlyArray<string | null>): string | undefined => {
@@ -352,7 +352,7 @@ export function liveAgentTaskIds(roster: readonly RuntimeSubagent[]): Set<string
 // The dock (§7.6)
 // ---------------------------------------------------------------------------
 
-export const ROSTER_VISIBLE_ROWS = 5;
+const ROSTER_VISIBLE_ROWS = 5;
 
 export interface RosterDockView {
   /** Always rendered, in stable order. */

@@ -233,8 +233,6 @@ export interface ThreadMessageItem {
    * asks the collapsed row to be **labelled "summary"** in the second case, and
    * the distinction is not recoverable from the text — so it is carried here.
    * Absent means unknown, and the row then shows no badge rather than guessing.
-   *
-   * *Added by W12; additive. Producers: the adapters / ingestion (W3, W6–W9).*
    */
   reasoningKind?: "text" | "summary";
   /**
@@ -246,8 +244,6 @@ export interface ThreadMessageItem {
    * tool calls, live and replayed alike; the phase stays metadata so that
    * commentary can never become the turn's terminal answer
    * (`isCommentaryAssistantMessage` in the UI's `rows.logic.ts`).
-   *
-   * *Added by W12; additive. Producers: the adapters / ingestion (W3, W6–W9).*
    */
   messageKind?: "answer" | "commentary";
   streaming: boolean;

@@ -8,7 +8,6 @@
 export interface ProfileErrorInfo {
   /** The daemon's code (`ITEM_EXISTS`, `PROFILE_CONFLICT`, …), else `null` (a network failure). */
   code: string | null;
-  status: number | null;
   /** The words to show: the daemon's message when it sent one. */
   message: string;
 }
@@ -35,17 +34,16 @@ function codeOf(body: unknown): string | null {
 
 export function profileError(error: unknown, fallback = "Something went wrong."): ProfileErrorInfo {
   if (typeof error === "object" && error !== null) {
-    const record = error as { serverMessage?: unknown; message?: unknown; status?: unknown; body?: unknown };
-    const status = typeof record.status === "number" ? record.status : null;
+    const record = error as { serverMessage?: unknown; message?: unknown; body?: unknown };
     const code = codeOf(record.body);
     const server = typeof record.serverMessage === "string" ? record.serverMessage.trim() : "";
     const own = typeof record.message === "string" ? record.message.trim() : "";
-    return { code, status, message: server || own || fallback };
+    return { code, message: server || own || fallback };
   }
   if (typeof error === "string" && error.trim().length > 0) {
-    return { code: null, status: null, message: error.trim() };
+    return { code: null, message: error.trim() };
   }
-  return { code: null, status: null, message: fallback };
+  return { code: null, message: fallback };
 }
 
 export function profileErrorPlacement(info: ProfileErrorInfo): ProfileErrorPlacement {

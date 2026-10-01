@@ -488,8 +488,6 @@ export interface ProviderSnapshot {
    * `slashCommands` is a **known gap** rather than a failed probe — Codex has
    * no command-catalog RPC at all (§4.6.2 "differs": *"rather than letting an
    * empty list read as a failed probe"*). Absent means the generic empty state.
-   *
-   * *Added in the fix wave for R2 finding 9; W13 renders it.*
    */
   commandCatalogNote?: string;
   skills: Skill[];

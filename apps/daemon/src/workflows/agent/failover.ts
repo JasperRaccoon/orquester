@@ -82,7 +82,7 @@ export function emptyMemory(): FailoverMemory {
 }
 
 /** Keys the next selection must pass over: unusable ones, and tried ones still cooling down. */
-export function excludedKeys(memory: FailoverMemory, now: Date): Set<string> {
+function excludedKeys(memory: FailoverMemory, now: Date): Set<string> {
   const out = new Set(memory.unusable);
   const nowMs = now.getTime();
   for (const [key, until] of Object.entries(memory.tried)) {
@@ -162,7 +162,7 @@ function selectionInput(deps: FailoverDeps, chain: AgentChainEntry[], memory: Fa
 
 export type CandidateCheck = { ok: true; candidate: AgentCandidate } | { ok: false; scope: "chain" | "account"; skip: AccountSkip };
 
-export type PickResult =
+type PickResult =
   | { kind: "chosen"; candidate: AgentCandidate; decision: AccountSelectionDecision }
   | { kind: "none"; decision: AccountSelectionDecision };
 
@@ -242,12 +242,8 @@ export async function pickCandidate(
  * once the quota refilled, and `whenAllBurnt: "wait-for-reset"` bounds those by `maxWaitHours`
  * already — counted, a 48 h wait with hourly unknown-reset cooldowns ran out of hops after 12.
  */
-function countedHops(hops: readonly AgentHop[]): number {
-  return hops.filter((hop) => hop.via !== "resumed").length;
-}
-
 export function hopCapReached(hops: readonly AgentHop[]): boolean {
-  return countedHops(hops) >= WORKFLOW_LIMITS.maxAgentHops;
+  return hops.filter((hop) => hop.via !== "resumed").length >= WORKFLOW_LIMITS.maxAgentHops;
 }
 
 /**

@@ -23,7 +23,7 @@ import { profileErrors } from "../../errors.ts";
 import type { PortableMcpServer } from "../types.ts";
 import { type JsonObject, isJsonObject } from "./jsonc.ts";
 
-export type McpEntryType = "local" | "remote";
+type McpEntryType = "local" | "remote";
 
 /** The entry's type when it is a definition; `null` for an override-only entry. */
 export function mcpEntryType(entry: unknown): McpEntryType | null {

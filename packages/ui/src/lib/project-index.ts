@@ -41,7 +41,7 @@ function notify(): void {
   }
 }
 
-export function subscribeProjectIndex(listener: Listener): () => void {
+function subscribeProjectIndex(listener: Listener): () => void {
   listeners.add(listener);
   return () => {
     listeners.delete(listener);

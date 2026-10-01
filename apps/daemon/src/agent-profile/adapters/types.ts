@@ -14,7 +14,6 @@
 
 import type {
   AgentProfileAgentId,
-  HookDraft,
   MarketplacePluginEntry,
   McpTransport,
   ProfileConflictPolicy,
@@ -155,6 +154,3 @@ export interface ProfileAdapter {
   /** Release anything long-lived (a codex app-server). */
   close?(): Promise<void>;
 }
-
-/** Hook drafts are validated against `PROFILE_HOOK_EVENTS[agent]` by the adapter. */
-export type { HookDraft };

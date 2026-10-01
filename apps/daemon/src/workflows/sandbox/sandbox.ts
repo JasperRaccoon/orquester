@@ -20,7 +20,7 @@
 // watches for exit.json, and treats a runner that is gone without one as interrupted. The runner
 // enforces the deadline itself; `wait()` only backs it up, well past the runner's own grace.
 
-import { spawn as spawnChild, type ChildProcess } from "node:child_process";
+import { spawn as spawnChild } from "node:child_process";
 import { mkdir, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -47,22 +47,6 @@ const SANDBOX_DEADLINE_BACKSTOP_MS = 10_000;
 const DEFAULT_POLL_MS = 250;
 /** How long kill() waits for a runner that is still booting to install its SIGTERM handler. */
 const RUNNER_READY_TIMEOUT_MS = 5_000;
-
-/** What exit.json holds (the runner writes a few fields the contract does not name). */
-export interface SandboxExitRecord {
-  code: number | null;
-  signal: string | null;
-  timedOut: boolean;
-  cancelled: boolean;
-  endedAt: string;
-  stdoutBytes: number;
-  stderrBytes: number;
-  stdoutProduced?: number;
-  stderrProduced?: number;
-  stdoutCapped?: boolean;
-  stderrCapped?: boolean;
-  error?: string;
-}
 
 /** `SandboxExit` plus what the runner recorded beside it (additive; the engine may ignore it). */
 export interface SandboxExitDetail extends SandboxExit {
@@ -207,7 +191,7 @@ export function createSandboxRunner(options: SandboxRunnerOptions = {}): Detaile
   const tmpDir = options.appdirTmp ?? defaultSandboxTmpDir();
 
   /** Runners this daemon started: resolved on their `exit`, so a wait wakes at once. */
-  const ownExits = new Map<number, { promise: Promise<void>; child: ChildProcess }>();
+  const ownExits = new Map<number, Promise<void>>();
 
   const sleep = (ms: number): Promise<void> =>
     new Promise((resolve) => {
@@ -226,7 +210,7 @@ export function createSandboxRunner(options: SandboxRunnerOptions = {}): Detaile
       }
       const own = ownExits.get(handle.pid);
       const step = sleep(Math.min(50, left));
-      await (own ? Promise.race([own.promise, step]) : step);
+      await (own ? Promise.race([own, step]) : step);
     }
     return true;
   };
@@ -335,7 +319,7 @@ export function createSandboxRunner(options: SandboxRunnerOptions = {}): Detaile
         resolve();
       });
     });
-    ownExits.set(pid, { promise, child });
+    ownExits.set(pid, promise);
     child.unref();
 
     const handle: SandboxHandle = { pid, starttime: readStarttime(pid), attemptDir };
@@ -465,7 +449,7 @@ export function createSandboxRunner(options: SandboxRunnerOptions = {}): Detaile
         }
         const own = ownExits.get(handle.pid);
         if (own) {
-          void own.promise.then(() => request());
+          void own.then(() => request());
         }
         request();
       } catch (error) {

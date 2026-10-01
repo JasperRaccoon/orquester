@@ -90,7 +90,7 @@ import {
 } from "./prompt.ts";
 import { protectSecrets, revealSecrets } from "./secret-text.ts";
 import { describeSkips } from "./select.ts";
-import { autonomousAnswers, autonomousDecision, DEFAULT_WATCH_TIMINGS, observe, waitForIdle, watchAgent, type WatchTimings } from "./watch.ts";
+import { autonomousAnswers, autonomousDecision, observe, waitForIdle, watchAgent } from "./watch.ts";
 
 // ---------------------------------------------------------------------------
 // Public surface
@@ -110,21 +110,7 @@ export interface AgentBlockOutput {
   textTruncated?: true;
 }
 
-export type AgentPhase =
-  | "selecting"
-  | "creating"
-  | "sending"
-  | "watching"
-  | "answering"
-  | "interrupting"
-  | "waiting-idle"
-  | "failing-over"
-  | "switching"
-  | "handing-off"
-  | "waiting-reset"
-  | "output";
-
-const AGENT_PHASES: readonly AgentPhase[] = [
+const AGENT_PHASES = [
   "selecting",
   "creating",
   "sending",
@@ -137,16 +123,16 @@ const AGENT_PHASES: readonly AgentPhase[] = [
   "handing-off",
   "waiting-reset",
   "output"
-];
+] as const;
 
-interface AgentTimings extends WatchTimings {
+export type AgentPhase = (typeof AGENT_PHASES)[number];
+
+const DEFAULT_AGENT_TIMINGS = {
   /** How long to wait for a session to go idle after an interrupt (then once more, then hand off). */
-  idleWaitMs: number;
+  idleWaitMs: 120_000,
   /** The pause before retrying a daemon call that answered HOST_UNAVAILABLE. */
-  retryMs: number;
-}
-
-const DEFAULT_AGENT_TIMINGS: AgentTimings = { ...DEFAULT_WATCH_TIMINGS, idleWaitMs: 120_000, retryMs: 5_000 };
+  retryMs: 5_000
+};
 
 /** A plan card is implemented at most this many times per block; after that the plan is the answer. */
 const MAX_PLAN_IMPLEMENTATIONS = 5;
@@ -668,7 +654,7 @@ class AgentBlockRun {
   private async waitingIdle(): Promise<NodeResult | null> {
     const idleUntil = Date.parse(this.st.idleSince ?? this.now().toISOString()) + DEFAULT_AGENT_TIMINGS.idleWaitMs;
     const until = new Date(Math.min(idleUntil, Date.parse(this.st.deadlineAt)));
-    const result = await waitForIdle({ api: this.api, sessionId: this.st.sessionId!, clock: this.deps.clock, signal: this.ctx.signal, until, rereadMs: DEFAULT_AGENT_TIMINGS.rereadMs, logger: this.ctx.log });
+    const result = await waitForIdle({ api: this.api, sessionId: this.st.sessionId!, clock: this.deps.clock, signal: this.ctx.signal, until, logger: this.ctx.log });
     if (result === "cancelled") throw new Cancelled();
     if (result === "timeout" && this.now().getTime() >= Date.parse(this.st.deadlineAt)) return null; // the deadline takes over
     if (result === "idle") {
@@ -1102,6 +1088,3 @@ function parentAssistantText(snap: ThreadSnapshotPayload, sessionStartTurnId: st
   }
   return texts.join("\n\n");
 }
-
-export type { AgentCandidate } from "./failover.ts";
-export type { AgentBaseline } from "./classify.ts";

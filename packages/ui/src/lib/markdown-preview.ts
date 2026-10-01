@@ -28,7 +28,7 @@ function escapeHtml(s: string): string {
 }
 
 /** Markdown -> body HTML with GFM + deduped GitHub-style heading ids. */
-export function renderMarkdownBody(markdown: string): string {
+function renderMarkdownBody(markdown: string): string {
   // A fresh instance per call: the slug dedupe counter is per-document state,
   // and a shared Marked singleton would leak it across renders.
   const seen = new Map<string, number>();

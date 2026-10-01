@@ -36,8 +36,6 @@ import type { Broadcaster } from "../broadcaster.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 import type { AccountsReader, UsageReader, WorkflowLogger } from "./contracts.ts";
 import { createCooldownStore } from "./agent/cooldowns.ts";
-import { createAgentExecutor } from "./agent/executor.ts";
-import { createAccountPreview } from "./agent/preview.ts";
 import { createValidationCatalog, type ValidationCatalog } from "./agent/validation-catalog.ts";
 import { createWorkflowRuntime, realClock, type WorkflowRuntime, type WorkflowRuntimeDeps } from "./factory.ts";
 import type { WorkflowPushSender } from "./notifier.ts";
@@ -226,8 +224,6 @@ export function createWorkflowDaemon(deps: WorkflowDaemonDeps): WorkflowDaemon {
     fsRoot: deps.fsRoot,
     ...(deps.appdirTmp !== undefined ? { appdirTmp: deps.appdirTmp } : {}),
     push: deps.push,
-    createAgentExecutor,
-    createAccountPreview: (previewDeps) => createAccountPreview(previewDeps),
     logger,
     clock
   });

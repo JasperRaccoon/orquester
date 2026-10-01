@@ -64,10 +64,10 @@ export interface SerialQueue {
 }
 
 export function createSerialQueue(): SerialQueue {
-  let tail: Promise<unknown> = Promise.resolve();
+  let tail: Promise<void> = Promise.resolve();
   return {
     run<T>(task: () => Promise<T>): Promise<T> {
-      const result = tail.then(task, task);
+      const result = tail.then(task);
       tail = result.then(
         () => undefined,
         () => undefined
@@ -76,10 +76,10 @@ export function createSerialQueue(): SerialQueue {
     },
     async drain(): Promise<void> {
       // Tasks queued by tasks: keep draining until the tail stops moving.
-      let previous: Promise<unknown> | null = null;
+      let previous: Promise<void> | null = null;
       while (previous !== tail) {
         previous = tail;
-        await tail.catch(() => undefined);
+        await tail;
       }
     }
   };

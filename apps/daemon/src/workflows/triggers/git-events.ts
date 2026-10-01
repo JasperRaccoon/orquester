@@ -175,7 +175,7 @@ export function detectReleases(
   const seen: Record<string, string> = {};
   const events: DetectedEvent[] = [];
   // The page is newest first; fire oldest first.
-  for (const release of [...visible].reverse()) {
+  for (const release of visible.reverse()) {
     const key = `release:${release.id}`;
     seen[key] = release.tag;
     if (!cursor.baselined || Object.hasOwn(cursor.seen, key)) continue;
@@ -294,6 +294,5 @@ export function detectPullRequests(
 
 /** Appends `keys` to the ring, newest last, keeping the newest `FIRED_RING_SIZE`. */
 export function pushFired(ring: readonly string[], keys: readonly string[]): string[] {
-  const next = [...ring, ...keys];
-  return next.length > FIRED_RING_SIZE ? next.slice(next.length - FIRED_RING_SIZE) : next;
+  return [...ring, ...keys].slice(-FIRED_RING_SIZE);
 }

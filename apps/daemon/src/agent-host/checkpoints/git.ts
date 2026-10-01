@@ -56,7 +56,6 @@ interface GitRunResult {
   stdout: string;
   stderr: string;
   stdoutTruncated: boolean;
-  stderrTruncated: boolean;
 }
 
 /** Base class so a caller can catch every git failure in one arm. */
@@ -318,8 +317,7 @@ async function runGit(
         exitCode: reason.kind === "exit" ? reason.code : 128,
         stdout: stdout.text(input.appendTruncationMarker === true ? OUTPUT_TRUNCATED_MARKER : ""),
         stderr: stderr.text(""),
-        stdoutTruncated: stdout.truncated,
-        stderrTruncated: stderr.truncated
+        stdoutTruncated: stdout.truncated
       };
       if (input.allowNonZeroExit !== true && result.exitCode !== 0) {
         reject(new GitExitError(input.operation, result.exitCode, result.stderr));

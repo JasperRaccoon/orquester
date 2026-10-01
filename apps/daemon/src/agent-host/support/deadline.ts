@@ -22,7 +22,7 @@ export class DeadlineExceededError extends Error {
   }
 }
 
-export interface DeadlineOptions {
+interface DeadlineOptions {
   /** Named in the error message, so an expiry says which step gave up. */
   label: string;
   timeoutMs: number;

@@ -95,7 +95,7 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
         item.aggregatedOutput !== null ? boundCommandOutput(item.aggregatedOutput) : null;
       return {
         itemType: "command_execution",
-        status: commandStatus(item.status),
+        status: item.status,
         title: item.command,
         ...(item.aggregatedOutput !== null ? { detail: item.aggregatedOutput } : {}),
         ...(output?.truncated === true ? { truncated: true } : {}),
@@ -114,7 +114,7 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
     case "fileChange":
       return {
         itemType: "file_change",
-        status: patchStatus(item.status),
+        status: item.status,
         title: fileChangeTitle(item.changes),
         data: { changes: item.changes }
       };
@@ -122,7 +122,7 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
     case "mcpToolCall":
       return {
         itemType: "mcp_tool_call",
-        status: mcpStatus(item.status),
+        status: item.status,
         title: `${item.server}: ${item.tool}`,
         ...(item.error !== null ? { detail: item.error.message } : {}),
         data: {
@@ -137,7 +137,7 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
     case "dynamicToolCall":
       return {
         itemType: "dynamic_tool_call",
-        status: dynamicStatus(item.status),
+        status: item.status,
         title: item.namespace !== null ? `${item.namespace}: ${item.tool}` : item.tool,
         data: { tool: item.tool, namespace: item.namespace, arguments: item.arguments }
       };
@@ -276,22 +276,6 @@ function fileChangeTitle(changes: readonly CodexProtocol.v2.FileUpdateChange[]):
     return changes[0]!.path;
   }
   return `${changes[0]!.path} +${changes.length - 1} more`;
-}
-
-function commandStatus(status: CodexProtocol.v2.CommandExecutionStatus): RuntimeItemStatus {
-  return status;
-}
-
-function patchStatus(status: CodexProtocol.v2.PatchApplyStatus): RuntimeItemStatus {
-  return status;
-}
-
-function mcpStatus(status: CodexProtocol.v2.McpToolCallStatus): RuntimeItemStatus {
-  return status;
-}
-
-function dynamicStatus(status: CodexProtocol.v2.DynamicToolCallStatus): RuntimeItemStatus {
-  return status;
 }
 
 /** `interrupted` has no `RuntimeItemStatus` equivalent; it settles as `failed`. */

@@ -76,13 +76,6 @@ export function selectPermissionOptionId(
   }
 }
 
-/** For `full-access`: the widest grant the request offers. */
-export function selectAutoApprovedOptionId(
-  options: ReadonlyArray<PermissionOption>
-): string | undefined {
-  return selectPermissionOptionId(options, "acceptForSession") ?? selectPermissionOptionId(options, "accept");
-}
-
 // ---------------------------------------------------------------------------
 // The session-scoped grant key (§4.3)
 // ---------------------------------------------------------------------------

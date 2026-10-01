@@ -35,6 +35,7 @@ import {
 
 import type { Clock, IdGen } from "../adapter.ts";
 import type { AppendableDomainEvent, Ingestion, LivenessRegistry } from "../services.ts";
+import { systemClock } from "../orchestration/runtime-seams.ts";
 import { runtimeEventToActivities } from "./activities.ts";
 import { DeltaBufferSet, type BufferFlush } from "./buffer.ts";
 import { COALESCE_WINDOW_MS, MAX_PENDING_UPDATES, coalesceToolUpdates } from "./coalesce.ts";
@@ -52,7 +53,6 @@ import {
   type MessageStreamRole
 } from "./message-ids.ts";
 import {
-  initialSessionState,
   isSessionLifecycleEvent,
   nextSessionState,
   sameSessionState
@@ -66,7 +66,7 @@ export { projectSnapshotActivities, slimActivityEvent } from "./coalesce.ts";
  * event stream alone. Read lazily on every event, so a head rewritten by the
  * §3.3 reconcile is picked up without a restart.
  */
-export interface IngestionThreadContext {
+interface IngestionThreadContext {
   /** The head's session state, used as the base after a host restart. */
   session?: ThreadSessionState;
   /**
@@ -83,7 +83,7 @@ export interface IngestionThreadContext {
   titleManual?: boolean;
 }
 
-export interface IngestionLogger {
+interface IngestionLogger {
   warn(message: string, detail?: unknown): void;
 }
 
@@ -218,11 +218,6 @@ interface ThreadState {
   chain: Promise<void>;
 }
 
-const defaultClock: Clock = {
-  now: () => new Date(),
-  nowIso: () => new Date().toISOString()
-};
-
 function defaultIdGen(): IdGen {
   let counter = 0;
   const mint = (prefix: string): string => {
@@ -267,7 +262,7 @@ function ownerOf(event: { agentId?: string }): string | undefined {
 
 
 export function createIngestion(options: IngestionOptions): Ingestion {
-  const clock = options.clock ?? defaultClock;
+  const clock = options.clock ?? systemClock;
   const ids = options.idGen ?? defaultIdGen();
   const logger = options.logger;
 
@@ -284,7 +279,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     }
     const context = safeContext(threadId);
     const state: ThreadState = {
-      session: context?.session ?? initialSessionState(),
+      session: context?.session ?? { status: "idle", activeTurnId: null },
       ...(context?.adapter !== undefined ? { adapter: context.adapter } : {}),
       messages: undefined as unknown as DeltaBufferSet,
       toolOutput: undefined as unknown as DeltaBufferSet,

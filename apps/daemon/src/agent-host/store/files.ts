@@ -63,28 +63,18 @@ export async function fileSizeOrZero(filePath: string): Promise<number> {
   }
 }
 
-export interface SplitLines {
-  /** Every complete line, in order, without its newline. */
-  lines: string[];
-  /**
-   * True when the file did not end with a newline, so its last line was torn
-   * by a crash mid-write and has been dropped.
-   */
-  torn: boolean;
-}
-
 /**
  * Split an append-only log into complete lines. A trailing fragment with no
- * newline is DROPPED and reported: a half-written record is not a record.
+ * newline is dropped: a half-written record is not a record.
  */
-export function splitCompleteLines(contents: string): SplitLines {
+export function splitCompleteLines(contents: string): string[] {
   if (contents.length === 0) {
-    return { lines: [], torn: false };
+    return [];
   }
   const torn = !contents.endsWith("\n");
   const body = torn ? contents.slice(0, contents.lastIndexOf("\n") + 1) : contents;
   const lines = body.length === 0 ? [] : body.slice(0, -1).split("\n");
-  return { lines: lines.filter((line) => line.length > 0), torn };
+  return lines.filter((line) => line.length > 0);
 }
 
 /** One complete line of a byte window: `[start, newline)`, relative to the window. */
@@ -229,7 +219,7 @@ export async function readLastCompleteLine(
       const length = end - start;
       const buffer = Buffer.alloc(length);
       await handle.read(buffer, 0, length, start);
-      const { lines } = splitCompleteLines(buffer.toString("utf8"));
+      const lines = splitCompleteLines(buffer.toString("utf8"));
       const last = lines[lines.length - 1];
       // With start > 0 the first line of the window may itself be a fragment,
       // but the LAST complete line of a window that contains a newline is

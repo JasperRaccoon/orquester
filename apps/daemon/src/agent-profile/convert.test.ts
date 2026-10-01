@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { PortableItem, PortableMcpServer } from "./adapters/types.ts";
 import { type ProfileConverter, createProfileConverter } from "./convert.ts";
-import { isAgentProfileError } from "./errors.ts";
+import { AgentProfileError } from "./errors.ts";
 import { parseMarkdownDocument, serializeMarkdownDocument } from "./infra/index.ts";
 
 interface Scratch {
@@ -23,7 +23,7 @@ async function scratch(t: test.TestContext): Promise<Scratch> {
 
 function rejectsWith(fn: () => unknown, code: string): void {
   assert.throws(fn, (error: unknown) => {
-    assert.ok(isAgentProfileError(error), `an AgentProfileError, got ${String(error)}`);
+    assert.ok(error instanceof AgentProfileError, `an AgentProfileError, got ${String(error)}`);
     assert.equal(error.code, code);
     return true;
   });

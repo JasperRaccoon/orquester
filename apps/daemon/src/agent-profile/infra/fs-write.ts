@@ -27,7 +27,7 @@ import { isMissing, pathKind } from "./tree.ts";
 /** Symlink hops followed before giving up, as the kernel does (`ELOOP`). */
 const MAX_SYMLINK_HOPS = 40;
 
-export interface ProfileWriteOptions {
+interface ProfileWriteOptions {
   backups: ProfileBackups;
   /** The backup ring the previous version goes to (`claude`, `codex`, …). */
   agent: string;
@@ -133,7 +133,7 @@ async function fsyncDir(dir: string): Promise<void> {
   }
 }
 
-export interface VerifiedWriteOptions extends ProfileWriteOptions {
+interface VerifiedWriteOptions extends ProfileWriteOptions {
   /**
    * The parser the adapter reads this file with; it throws when the text does
    * not parse. Runs on the text re-read from disk after the write.

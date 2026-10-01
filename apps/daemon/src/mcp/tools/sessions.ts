@@ -150,7 +150,7 @@ const getTurnDiff = defineTool({
     const latestCheckpointed = snap.checkpoints.reduce((max, c) => Math.max(max, c.checkpointTurnCount), 0);
     const turnCount = args.turn ?? latestCheckpointed;
     if (turnCount < 1) throw new ToolError("INVALID_ARGUMENT", "This session has no checkpointed turn yet.");
-    const res = expectOk<TurnDiffResponse>(await api.request("GET", agentChatRoutes.turnDiff(args.sessionId, turnCount), { query: { ignoreWhitespace: "1" } }), "diff");
+    const res = expectOk<TurnDiffResponse>(await api.request("GET", agentChatRoutes.turnDiff(args.sessionId, turnCount), { query: { ignoreWhitespace: "1" } }));
     const files = snap.checkpoints.find((c) => c.checkpointTurnCount === turnCount)?.files ?? [];
     // The list gets its floor, or all the diff leaves unused of the result beside the frame — the frame counted with the
     // markers a cut list would carry.
@@ -207,7 +207,7 @@ const createSession = defineTool({
     const project = await resolveProject(api, args.project);
     let resumeRow: ResumeRow | undefined;
     if (args.resume) {
-      const res = expectOk<AgentConversationsResponse>(await api.request("GET", "/api/agents/conversations", { query: { path: project.path } }), "conversations");
+      const res = expectOk<AgentConversationsResponse>(await api.request("GET", "/api/agents/conversations", { query: { path: project.path } }));
       const row = res.conversations.find((c) => c.id === args.resume!.conversationId);
       if (!row) throw new ToolError("INVALID_ARGUMENT", `No conversation "${args.resume.conversationId}" in this project; pick one from list_conversations.`);
       resumeRow = { id: row.id, agent: row.agentRefId, title: row.title, home: row.home ?? "system", ...(row.accountId ? { accountId: row.accountId } : {}) };
@@ -230,7 +230,7 @@ const createSession = defineTool({
     const chat: CreateAgentChatSessionFields = { ...(accountId ? { accountId } : {}), modelSelection: { model: selection.model, options: selection.options }, runtimeMode: args.runtimeMode };
     if (resumeRow) chat.resume = { home: resumeRow.home, conversationId: resumeRow.id };
     const body: CreateSessionRequest = { kind: "agent-chat", refId, projectPath: project.path, cwd, title: args.title ?? (resumeRow?.title || agent.name), ...(accountId ? { accountId } : {}), chat };
-    const summary = expectOk<SessionSummary>(await api.request("POST", "/api/sessions", { body }), "create");
+    const summary = expectOk<SessionSummary>(await api.request("POST", "/api/sessions", { body }));
     try {
       return { session: await chatDetail(api, summary.id) };
     } catch (error) {
@@ -304,7 +304,7 @@ const updateSession = defineTool({
     const applied: string[] = [];
     try {
       if (args.title !== undefined && args.title !== summary.title) {
-        expectOk(await api.request("PUT", `/api/sessions/${encodeURIComponent(args.sessionId)}`, { body: { title: args.title } }), "rename");
+        expectOk(await api.request("PUT", `/api/sessions/${encodeURIComponent(args.sessionId)}`, { body: { title: args.title } }));
         applied.push("title");
       }
       if (modeFields.length) {
@@ -376,7 +376,7 @@ const closeSession = defineTool({
   annotations: DESTRUCTIVE,
   async run(args, { api }) {
     await findSession(api, args.sessionId);
-    expectOk(await api.request("DELETE", `/api/sessions/${encodeURIComponent(args.sessionId)}`), "close");
+    expectOk(await api.request("DELETE", `/api/sessions/${encodeURIComponent(args.sessionId)}`));
     return { closed: true, sessionId: args.sessionId };
   }
 });

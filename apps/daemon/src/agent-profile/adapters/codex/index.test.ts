@@ -6,9 +6,9 @@ import { afterEach, beforeEach, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "@decimalturn/toml-patch";
 import type { ProfileItem } from "@orquester/api";
-import { agentProfileBackupsDir, agentProfileStashDir } from "@orquester/config";
+import { agentProfileBackupsDir } from "@orquester/config";
 import { AgentProfileError } from "../../errors.ts";
-import { ProfileBackups, ProfileStash } from "../../infra/index.ts";
+import { ProfileBackups } from "../../infra/index.ts";
 import type { ProfileAdapterContext } from "../types.ts";
 import { CodexAppServerClient, type CodexConfigClient, type CodexConfigClientFactory } from "./codex-config-client.ts";
 import { codexHookHash } from "./hooks.ts";
@@ -189,7 +189,6 @@ async function makeFixture(
   };
   const adapter = new CodexProfileAdapter(ctx, {
     backups: new ProfileBackups({ dir: agentProfileBackupsDir(appdir) }),
-    stash: new ProfileStash({ dir: agentProfileStashDir(appdir) }),
     configClient: factory
   });
   const fixture: Fixture = {
@@ -841,7 +840,6 @@ describe("CodexProfileAdapter", () => {
       },
       {
         backups: new ProfileBackups({ dir: agentProfileBackupsDir(f.appdir) }),
-        stash: new ProfileStash({ dir: agentProfileStashDir(f.appdir) }),
         configClient: (opts) => {
           const client = new CodexAppServerClient({
             ...opts,

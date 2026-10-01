@@ -121,14 +121,3 @@ export function permissionResultForDecision(input: {
     message: decision === "cancel" ? CANCEL_MESSAGE : DECLINE_MESSAGE
   };
 }
-
-/**
- * `full-access` short-circuits to allow with **no event at all** — nothing is
- * written to the timeline (§4.3). On this CLI `acceptEdits` and
- * `bypassPermissions` already silence `canUseTool` entirely
- * (fixtures README observation 2), so this is belt-and-braces rather than the
- * only gate.
- */
-export function shouldShortCircuitToAllow(runtimeMode: string): boolean {
-  return runtimeMode === "full-access";
-}

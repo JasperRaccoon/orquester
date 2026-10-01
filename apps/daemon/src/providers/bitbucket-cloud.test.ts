@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
+import { AccountError } from "../account-error";
 import { bitbucketCloudProvider } from "./bitbucket-cloud";
+import { GitRemoteError } from "./types";
 
 test("parseRepoUrl accepts bitbucket.org https/ssh (old + new host)/shorthand", () => {
   const ctx = {};
@@ -82,4 +84,31 @@ test("credentialSpec uses the static token username; sshProbe parses the Cloud g
     ).ok,
     true
   );
+});
+
+test("SSH key uploads distinguish duplicate keys from authentication and upstream errors", async (t) => {
+  let status = 409;
+  t.mock.method(globalThis, "fetch", async () => Response.json({}, { status }));
+  const upload = () => bitbucketCloudProvider.uploadSshKey(
+    { token: "t", email: "me@example.invalid" },
+    { login: "me", name: "Me", email: "me@example.invalid" },
+    "ssh-ed25519 key",
+    "test"
+  );
+  await assert.rejects(upload(), (error: unknown) => {
+    assert.ok(error instanceof AccountError);
+    assert.equal(error.status, 409);
+    assert.match(error.message, /identical SSH key is already registered/);
+    return true;
+  });
+  for (const [httpStatus, mappedStatus, kind] of [[401, 400, "auth"], [500, 502, "upstream"]] as const) {
+    status = httpStatus;
+    await assert.rejects(upload(), (error: unknown) => {
+      assert.ok(error instanceof GitRemoteError);
+      assert.equal(error.httpStatus, httpStatus);
+      assert.equal(error.status, mappedStatus);
+      assert.equal(error.kind, kind);
+      return true;
+    });
+  }
 });

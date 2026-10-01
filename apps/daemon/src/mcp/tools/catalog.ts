@@ -14,7 +14,7 @@ import { defineTool, READ_ONLY, type ToolDef } from "../tool.ts";
  */
 async function readWorkspace(api: DaemonApi, workspace: string): Promise<{ projects: ProjectSummary[] } | { warning: string }> {
   try {
-    return { projects: expectOk<ProjectSummary[]>(await api.request("GET", `/api/workspaces/${encodeURIComponent(workspace)}/projects`), "projects") };
+    return { projects: expectOk<ProjectSummary[]>(await api.request("GET", `/api/workspaces/${encodeURIComponent(workspace)}/projects`)) };
   } catch (error) {
     // A thrown call's text can name a host path: it is logged here and never returned, as sendCommand does.
     if (!(error instanceof ToolError)) console.error("[mcp] daemon call failed", error);
@@ -34,7 +34,7 @@ const listProjects = defineTool({
   annotations: READ_ONLY,
   async run(args, { api }) {
     const [workspacesRes, recentRes, sessions] = await Promise.all([api.request("GET", "/api/workspaces"), api.request("GET", "/api/projects/recent"), listSessions(api)]);
-    const workspaces = expectOk<WorkspaceSummary[]>(workspacesRes, "workspaces");
+    const workspaces = expectOk<WorkspaceSummary[]>(workspacesRes);
     // Recency only orders the list: without it the list is alphabetical, not a failure.
     const recent = recentRes.status < 400 ? (recentRes.body as RecentProjectSummary[]) : [];
     const warnings: string[] = [];
@@ -119,7 +119,7 @@ const listConversations = defineTool({
     const agents = (registry.body as RegistryResponse).agents ?? [];
     // The GUI's `isResumableByInstalledAgent`: a chat agent, and an enabled one — create_session refuses any other.
     const launchable = new Set(agents.filter((e) => e.chat?.adapter && e.enabled).map((e) => e.id));
-    const res = expectOk<AgentConversationsResponse>(conversations, "conversations");
+    const res = expectOk<AgentConversationsResponse>(conversations);
     const rows = res.conversations.map((c) => {
       const agent = c.agentRefId;
       const resumable = launchable.has(agent);

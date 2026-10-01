@@ -49,7 +49,3 @@ export const profileErrors = {
   uploadTooLarge: (limit: number) =>
     new AgentProfileError(413, "UPLOAD_TOO_LARGE", `The upload is larger than ${limit} bytes.`)
 };
-
-export function isAgentProfileError(error: unknown): error is AgentProfileError {
-  return error instanceof AgentProfileError;
-}

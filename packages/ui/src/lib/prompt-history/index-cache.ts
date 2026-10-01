@@ -92,13 +92,13 @@ export function searchIsPaging(
 // Asking again while the host's index catches up
 // ---------------------------------------------------------------------------
 
-export const CATCH_UP_FIRST_DELAY_MS = 3_000;
-export const CATCH_UP_MAX_DELAY_MS = 30_000;
+const CATCH_UP_FIRST_DELAY_MS = 3_000;
+const CATCH_UP_MAX_DELAY_MS = 30_000;
 /**
  * Past this many "still catching up" answers in a row (about 19 minutes of
  * asking) the panel stops asking by itself and offers Retry instead.
  */
-export const CATCH_UP_MAX_ATTEMPTS = 40;
+const CATCH_UP_MAX_ATTEMPTS = 40;
 
 /**
  * How long to wait before asking again after the `attempts`-th "still
@@ -111,7 +111,7 @@ export function catchUpDelayMs(attempts: number): number | null {
 }
 
 /** When the session asks again by itself; null when it does not (it is not catching up, or gave up). */
-export function catchUpReaskDelay(state: PromptIndexState | undefined): number | null {
+function catchUpReaskDelay(state: PromptIndexState | undefined): number | null {
   if (state === undefined || state.status !== "catchingUp" || state.refreshing) return null;
   return catchUpDelayMs(state.catchUpAttempts);
 }

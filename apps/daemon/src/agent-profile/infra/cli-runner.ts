@@ -53,7 +53,7 @@ const PASSTHROUGH_ENV = [
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
-export interface AgentCliRun {
+interface AgentCliRun {
   /** The CLI, as the registry resolved it (absolute) or a bare name looked up on the session PATH. */
   bin: string;
   args: readonly string[];
@@ -238,7 +238,7 @@ export function runAgentCli(run: AgentCliRun): Promise<AgentCliResult> {
   });
 }
 
-export interface RedactCliOutputOptions {
+interface RedactCliOutputOptions {
   /** Home paths collapsed to `~`; defaults to the daemon user's home. */
   homeDirs?: readonly string[];
   /** Exact values to mask (a secret the caller knows it passed in). */

@@ -77,13 +77,13 @@ import type { ProfileImports } from "./import.ts";
 import { assertCommandName, assertMcpServerName, assertSkillName, contentHash, parseItemId } from "./infra/index.ts";
 
 /** What the registry knows about an agent's CLI. */
-export interface AgentInstallInfo {
+interface AgentInstallInfo {
   installed: boolean;
   version?: string;
 }
 
 /** An open watch; `close()` is idempotent. */
-export interface ProfileWatchHandle {
+interface ProfileWatchHandle {
   close(): void;
 }
 
@@ -95,7 +95,7 @@ export interface ProfileWatchHandle {
  */
 export type ProfileWatchFn = (path: string, onChange: () => void, onError: (error: Error) => void) => ProfileWatchHandle;
 
-export interface ProfileServiceLogger {
+interface ProfileServiceLogger {
   warn(message: string): void;
   error(message: string): void;
 }

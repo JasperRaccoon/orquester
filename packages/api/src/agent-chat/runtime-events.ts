@@ -18,12 +18,6 @@ import type { GoalUpdatedPayload } from "./goal.ts";
 // ---------------------------------------------------------------------------
 
 /**
- * Closed enum naming the native protocol a `raw` frame came from (§4.2). This
- * field is what makes `raw.ndjson` replayable into the normaliser in a test.
- *
- * *T3: `packages/contracts/src/providerRuntime.ts:23-34`.*
- */
-/**
  * The marker every event **projected from a provider's own transcript** carries
  * (`AgentAdapter.projectHistory`), as opposed to one decoded from a live frame.
  *
@@ -36,12 +30,16 @@ import type { GoalUpdatedPayload } from "./goal.ts";
  */
 export const HISTORICAL_RAW_SOURCE = "history.replay";
 
+/**
+ * Native protocol of a `raw` frame, used for normaliser replays (§4.2).
+ * T3: `packages/contracts/src/providerRuntime.ts:23-34`.
+ */
 export type RuntimeEventRawSource =
   /**
    * Not a provider frame: an event the HOST synthesised from an adapter's own
    * `readThread` when a resumed thread had no items of its own (§4.1). It is
    * persisted like any other so the timeline can render, but it describes the
-   * past — so anything that reacts to *new* work (W10's summary/push gate, the
+   * past — so anything that reacts to *new* work (the summary/push gate, the
    * §5.4 checkpoint baseline) must ignore it. Test with
    * {@link isHistoricalRuntimeEvent}, never by spelling the literal.
    */

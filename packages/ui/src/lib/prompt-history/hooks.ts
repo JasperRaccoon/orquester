@@ -113,7 +113,7 @@ export function useIsGitRepo(path: string | null, enabled: boolean): boolean | n
  * — asks again by itself, backing off, for as long as the panel shows it
  * (`scheduleCatchUpReask`; the effect's cleanup stops it).
  */
-export function usePromptIndex(cache: PromptIndexCache, sessionId: string): PromptIndexState | undefined {
+function usePromptIndex(cache: PromptIndexCache, sessionId: string): PromptIndexState | undefined {
   useEffect(() => {
     cache.ensure(sessionId);
   }, [cache, sessionId]);

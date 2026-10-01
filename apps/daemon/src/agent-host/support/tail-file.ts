@@ -31,14 +31,14 @@ export const TAIL_MAX_READ_BYTES = 64 * 1024;
 /** At most this many bytes are tailed per shell, ever. */
 export const TAIL_MAX_TOTAL_BYTES = 1024 * 1024;
 
-export interface FileTailRead {
+interface FileTailRead {
   /** The newly appended text, or a notice. Empty when nothing was appended. */
   text: string;
   /** True once the tail is finished — the cap was hit, or the file is unreadable. */
   done: boolean;
 }
 
-export interface FileTailOptions {
+interface FileTailOptions {
   path: string;
 }
 

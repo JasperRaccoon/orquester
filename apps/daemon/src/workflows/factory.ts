@@ -1,23 +1,9 @@
-// Automated workflows — the runtime the daemon starts (spec §2 "Wiring in startDaemon"): the engine
-// with every block executor, the projects/prompt/notification services it needs, and the hourly
-// sweepers. The integrator calls, in `startDaemon`:
-//
-//   const workflows = createWorkflowRuntime({...});          // after the stores are loaded
-//   ...build the unix app...
-//   workflows.attachApi(createInternalDaemonApi({...}));      // the ALWAYS-ON unix app
-//   await workflows.start();                                  // after agentChat.init(): resume, then run
-//   ...start the scheduler and the git poller against `workflows.engine` (a TriggerHost)...
-//   // and on shutdown, first:
-//   await workflows.stop();                                   // fast; never kills sandbox children
-//
-// The engine drives agents and projects ONLY through the daemon's own REST (`DaemonApi`), so it
-// cannot run before `attachApi`: a block that needs it before then fails, and `start()` refuses.
+// Builds the workflow engine, executors, services and sweepers for daemon-wiring.ts.
+// Attach the daemon API before starting: agent and project operations use its route gates.
 
 import { randomUUID } from "node:crypto";
 
 import type {
-  AccountSelectionDecision,
-  AgentChainEntry,
   GitStatusResponse,
   GitWorkingDiffResponse,
   Workflow,
@@ -31,16 +17,15 @@ import type {
   ChatClient,
   Clock,
   CooldownStore,
-  MintId,
-  NodeExecutor,
   ProjectOps,
-  PromptRenderer,
   RunStore,
   SecretStore,
   UsageReader,
   WorkflowLogger,
   WorkflowStore
 } from "./contracts.ts";
+import { createAgentExecutor } from "./agent/executor.ts";
+import { createAccountPreview } from "./agent/preview.ts";
 import { createWorkflowEngine, type WorkflowRuntimeEngine } from "./engine.ts";
 import { createNodeExecutors } from "./nodes/index.ts";
 import { createWorkflowNotifier, type WorkflowPushSender } from "./notifier.ts";
@@ -83,36 +68,8 @@ export interface WorkflowRuntimeDeps {
   appdirTmp?: string;
   /** The daemon's PushService (`notifyWorkflowRun`); null disables pushes. */
   push: WorkflowPushSender | null;
-  /**
-   * The agent block's executor factory — `createAgentExecutor` from agent/executor.ts. Without it an
-   * agent block fails "no executor".
-   */
-  createAgentExecutor?: (deps: AgentExecutorFactoryDeps) => NodeExecutor<"agent">;
-  /** "Who would run now?" — `createAccountPreview` from agent/preview.ts. */
-  createAccountPreview?: (deps: AccountPreviewFactoryDeps) => (chain: AgentChainEntry[], projectPath?: string) => Promise<AccountSelectionDecision>;
   logger: WorkflowLogger;
   clock?: Clock;
-}
-
-/** What `createAgentExecutor` (agent/executor.ts `AgentExecutorDeps`) is handed. */
-export interface AgentExecutorFactoryDeps {
-  usage: UsageReader;
-  accounts: AccountsReader;
-  cooldowns: CooldownStore;
-  prompts: PromptRenderer;
-  clock: Clock;
-  mintId: MintId;
-  logger: WorkflowLogger;
-}
-
-/** What `createAccountPreview` (agent/preview.ts `AccountPreviewDeps`) is handed. */
-export interface AccountPreviewFactoryDeps {
-  usage: UsageReader;
-  accounts: AccountsReader;
-  cooldowns: CooldownStore;
-  clock: Pick<Clock, "now">;
-  /** The daemon's own client once attached (the catalogue check reads through it), else null. */
-  api: () => DaemonApi | null;
 }
 
 export interface WorkflowRuntime {
@@ -150,7 +107,7 @@ export function createWorkflowRuntime(deps: WorkflowRuntimeDeps): WorkflowRuntim
   const sandbox = createSandboxRunner({ clock, logger: deps.logger, ...(deps.appdirTmp !== undefined ? { appdirTmp: deps.appdirTmp } : {}) });
   const notifier = createWorkflowNotifier({ push: deps.push, clock, logger: deps.logger });
   const mintId = randomUUID;
-  const agent = deps.createAgentExecutor?.({
+  const agent = createAgentExecutor({
     usage: deps.usage,
     accounts: deps.accounts,
     cooldowns: deps.cooldowns,
@@ -159,8 +116,8 @@ export function createWorkflowRuntime(deps: WorkflowRuntimeDeps): WorkflowRuntim
     mintId,
     logger: deps.logger
   });
-  const accountPreview = deps.createAccountPreview?.({ usage: deps.usage, accounts: deps.accounts, cooldowns: deps.cooldowns, clock, api: () => api });
-  const executors = createNodeExecutors(agent ? { agent } : {});
+  const accountPreview = createAccountPreview({ usage: deps.usage, accounts: deps.accounts, cooldowns: deps.cooldowns, clock, api: () => api });
+  const executors = createNodeExecutors({ agent });
 
   const engine = createWorkflowEngine({
     store: deps.store,
@@ -179,7 +136,7 @@ export function createWorkflowRuntime(deps: WorkflowRuntimeDeps): WorkflowRuntim
     publish: deps.publish,
     notifier,
     summarize: deps.summarize,
-    ...(accountPreview ? { accountPreview } : {}),
+    accountPreview,
     clock,
     mintId,
     logger: deps.logger

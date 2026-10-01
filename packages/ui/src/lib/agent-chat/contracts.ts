@@ -543,8 +543,6 @@ export type AgentChatTimelineRow =
       isNext: boolean;
     };
 
-export type AgentChatTimelineRowKind = AgentChatTimelineRow["kind"];
-
 /** The plan checklist is a **composer** surface, not a timeline row (§7.3). */
 export interface ActivePlanState {
   createdAt: string;

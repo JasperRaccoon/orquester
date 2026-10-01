@@ -12,7 +12,6 @@ import {
   approvalGrantKey,
   isEditApproval,
   permissionRequestType,
-  selectAutoApprovedOptionId,
   selectPermissionOptionId
 } from "./permissions.ts";
 
@@ -57,12 +56,6 @@ test("cancel selects nothing, so the reply is {outcome:{outcome:'cancelled'}}", 
 test("a blank option id counts as absent", () => {
   const blank: PermissionOption[] = [{ optionId: "   ", name: "Yes", kind: "allow_once" }];
   assert.equal(selectPermissionOptionId(blank, "accept"), undefined);
-});
-
-test("full-access takes the widest grant the request offers", () => {
-  assert.equal(selectAutoApprovedOptionId(REAL_OPTIONS), "allow-edits-session");
-  const onceOnly = REAL_OPTIONS.filter((option) => option.kind === "allow_once");
-  assert.equal(selectAutoApprovedOptionId(onceOnly), "allow-once");
 });
 
 // ---------------------------------------------------------------------------

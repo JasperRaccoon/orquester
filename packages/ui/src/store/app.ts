@@ -590,7 +590,7 @@ export type TabContext =
   | { kind: "workspace"; key: string; workspace: string };
 
 /** Resolve the active context from navigation. Project wins when both are set. */
-export function currentContext(state: Pick<AppState, "currentProject" | "currentWorkspace">): TabContext | null {
+function currentContext(state: Pick<AppState, "currentProject" | "currentWorkspace">): TabContext | null {
   if (state.currentProject) {
     return { kind: "project", key: state.currentProject.path, project: state.currentProject };
   }
@@ -875,7 +875,6 @@ export interface AppState {
   /** Per-project grid-view track fraction weights; persisted client-side, per device. */
   gridTracksByProject: Record<string, GridTracks>;
 
-  setApi: (api: ApiClient) => void;
   connect: () => Promise<void>;
   /** Establish a connected session on an ApiClient (auth, load, subscribe, probe). */
   establish: (api: ApiClient) => Promise<void>;
@@ -926,7 +925,6 @@ export interface AppState {
 
   // auth
   submitCredentials: (username: string, password: string) => Promise<void>;
-  signOut: () => void;
 
   loadWorkspaces: () => Promise<void>;
   createWorkspace: (name: string, gitAccountId?: string) => Promise<void>;
@@ -1185,8 +1183,6 @@ export const useAppStore = create<AppState>((set, get) => ({
   sidebarWidth: loadSidebarWidth(),
   paneSizesByProject: loadPaneSizes(),
   gridTracksByProject: loadGridTracks(),
-
-  setApi: (api) => set({ api }),
 
   connect: async () => {
     const initial = get().api;
@@ -1682,50 +1678,6 @@ export const useAppStore = create<AppState>((set, get) => ({
     await get().connect();
   },
 
-  signOut: () => {
-    const api = get().api;
-    if (api) {
-      stopReconnect();
-      closeEvents();
-      clearStoredHash(api.connection.endpoint);
-      clearStoredUsername(api.connection.endpoint);
-      invalidateProjectIndex();
-      resetSavedPrompts();
-      resetAgentProfile();
-      resetWorkflows();
-      resetWorkflowNotifications();
-      set({
-        api: apiWithCredential(api, ""),
-        connectionStatus: "error",
-        reconnectAttempt: 0,
-        connectionError: null,
-        lockedUntil: null,
-        // Drop the signed-in daemon's data with the credential (same reset
-        // `selectConnection` does). Otherwise the sidebar keeps rendering the
-        // previous session's workspaces/projects behind the auth prompt — and
-        // the archived-items curtain has no stored hash left to verify against.
-        currentWorkspace: null,
-        currentProject: null,
-        workspaces: [],
-        projects: [],
-        recentProjects: [],
-        agentConversationsByProject: {},
-        // Transient per-daemon notices: they name a session/project of the
-        // daemon we just left, and their actions would launch into it.
-        resumeError: null,
-        agentAuthError: null,
-        dismissedAgentAuthErrors: [],
-        providerRateLimits: {},
-        notice: null,
-        protectArchived: false,
-        protectArchivedLoaded: false,
-        // Workflow editor tabs name the previous daemon's workflows.
-        ...withoutWorkflowTabs(get()),
-        authPrompt: { connectionId: api.connection.id }
-      });
-    }
-  },
-
   selectConnection: async (id) => {
     const connection = get().connections.find((c) => c.id === id);
     if (!connection || id === get().activeConnectionId) {
@@ -1751,7 +1703,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       projects: [],
       recentProjects: [],
       agentConversationsByProject: {},
-      // Transient per-daemon notices (see signOut): they reference the previous
+      // Transient per-daemon notices reference the previous
       // daemon's session/project, so they must not survive the switch.
       resumeError: null,
       agentAuthError: null,
@@ -2167,7 +2119,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     // Generation guard (see establish): a list fetched from daemon A must never
-    // land in daemon B's state after a selectConnection/signOut in flight.
+    // land in daemon B's state after a selectConnection in flight.
     const gen = reconnectGen;
     try {
       const list = await api.listRecentProjects();
@@ -3477,8 +3429,8 @@ function removeLocalTab(state: AppState, id: string): Partial<AppState> {
 }
 
 /**
- * Drop every workflow editor tab (a connection switch, a sign-out: they name
- * the previous daemon's workflows), and any active-tab pointer at one.
+ * Drop the previous daemon's workflow editor tabs on a connection switch,
+ * and any active-tab pointer at one.
  */
 function withoutWorkflowTabs(
   state: Pick<AppState, "workflowTabsByProject" | "activeTabByProject">
@@ -3646,10 +3598,8 @@ export function useCurrentContext(): TabContext | null {
 }
 
 /**
- * Combined tabs of the currently open **context** (a project → sessions + file +
- * git + to-do tabs; a workspace → to-do tabs only). Four single-slice selectors +
- * a `useMemo` (per-slice `Object.is` — no custom equality), mirroring the other
- * tab selectors.
+ * Combined tabs of the current project, or to-do tabs for the current workspace.
+ * Select stable slices and memoize the derived list for zustand v5.
  */
 export function useProjectTabs(): ProjectTab[] {
   const sessions = useAppStore((s) => s.sessions);
@@ -3679,7 +3629,6 @@ export function useProjectTabs(): ProjectTab[] {
     // (same daemon-assigned `order`/`createdAt` key), only its renderer differs.
     const sessionTabs = sessions
       .filter((s) => s.projectPath === key)
-      .slice()
       .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt))
       .map<ProjectTab>((session) =>
         session.kind === "agent-chat"
@@ -3699,12 +3648,10 @@ export function useProjectTabs(): ProjectTab[] {
     }));
     const browserTabs = browsers
       .filter((b) => b.projectPath === key)
-      .slice()
       .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt))
       .map<ProjectTab>((browser) => ({ id: browser.id, type: "browser", browser }));
     const desktopTabs = desktops
       .filter((d) => d.projectPath === key)
-      .slice()
       .sort((a, b) => a.order - b.order || a.createdAt.localeCompare(b.createdAt))
       .map<ProjectTab>((desktop) => ({ id: desktop.id, type: "desktop", desktop }));
     const workflowTabs = (workflowTabsByProject[key] ?? []).map<ProjectTab>((t) => ({

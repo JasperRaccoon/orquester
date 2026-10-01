@@ -17,9 +17,9 @@ import { assertSafeSegment } from "./names.ts";
 import { copyEntry, pathKind } from "./tree.ts";
 
 /** The ring size per agent when none is given (spec §4.1). */
-export const PROFILE_BACKUPS_KEEP = 50;
+const PROFILE_BACKUPS_KEEP = 50;
 
-export interface ProfileBackupsOptions {
+interface ProfileBackupsOptions {
   /** `agentProfileBackupsDir(appdir)`. */
   dir: string;
   /** Entries kept per agent; the oldest beyond it are deleted after each save. */

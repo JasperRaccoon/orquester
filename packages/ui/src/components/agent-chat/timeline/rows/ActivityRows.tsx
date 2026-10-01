@@ -17,24 +17,21 @@ import {
   useVisibleAnimation
 } from "../../primitives";
 import { useTimelineRowContext, type TimelineRowContextValue } from "../context";
-// The ONE presentation resolver (§7.2). Everything that decides something
-// about an entry comes from here; `row-chrome` below holds only what turns a
-// decision into a class name or a glyph.
 import {
   liveWorkEntryLabel,
   omitSupersededLifecycleMarkers,
+  showDestructiveRowStyle,
   summarizeToolGroup,
+  toolGroupSummaryIconName,
   workEntryDisplayIndicatesToolFailure,
   workEntryDisplayLabel,
   workEntryIconName,
+  workEntryIsActiveTurnActivity,
   workEntryIsVisibleInGroup,
   workEntryIsWarning
 } from "../../../../lib/agent-chat/presentation.logic";
 import {
   joinLifecycleDetails,
-  showDestructiveRowStyle,
-  summaryKindIconName,
-  workEntryIsActiveTurnActivity,
   workEntryIsIdentityChange,
   workEntryIsRerouteNotice,
   type RowGlyphName
@@ -571,7 +568,7 @@ export const WorkToggleRow = React.memo(function WorkToggleRow({
       className="group/timeline-row relative flex min-h-6 w-full cursor-pointer items-center gap-1.5 rounded-md px-0.5 py-0.5 text-left text-sm leading-relaxed transition-colors duration-150 hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500"
     >
       <span className="flex h-6 w-6 shrink-0 items-center justify-center text-neutral-500">
-        <WorkEntryIcon name={summaryKindIconName(row.summaryKind)} />
+        <WorkEntryIcon name={toolGroupSummaryIconName(row.summaryKind)} />
       </span>
       <span className="min-w-0 flex-1 truncate text-neutral-400">{label}</span>
       <TimelineRowTimestamp createdAt={row.createdAt} />

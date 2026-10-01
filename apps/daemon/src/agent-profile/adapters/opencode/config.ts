@@ -18,17 +18,17 @@ import { BOM, type JsonObject, isJsonObject, parseJsoncObject } from "./jsonc.ts
 
 /** The global config files in OpenCode's load order. */
 export const CONFIG_FILE_NAMES = ["config.json", "opencode.json", "opencode.jsonc"] as const;
-export type ConfigFileName = (typeof CONFIG_FILE_NAMES)[number];
+type ConfigFileName = (typeof CONFIG_FILE_NAMES)[number];
 
 /** The file OpenCode writes to: the first of these that exists. */
 const WRITE_PREFERENCE: readonly ConfigFileName[] = ["opencode.jsonc", "opencode.json", "config.json"];
 
-export const OPENCODE_SCHEMA_URL = "https://opencode.ai/config.json";
+const OPENCODE_SCHEMA_URL = "https://opencode.ai/config.json";
 
 /** What OpenCode writes into a config file it creates. */
-export const NEW_CONFIG_TEXT = `${JSON.stringify({ $schema: OPENCODE_SCHEMA_URL }, null, 2)}`;
+const NEW_CONFIG_TEXT = JSON.stringify({ $schema: OPENCODE_SCHEMA_URL }, null, 2);
 
-export interface ConfigFile {
+interface ConfigFile {
   name: ConfigFileName;
   path: string;
   text: string;

@@ -277,11 +277,6 @@ export class FakeChatHost implements DaemonApi {
     return n;
   }
 
-  /** Close a tab from outside (the user). */
-  closeSession(id: string): void {
-    this.close(this.session(id));
-  }
-
   // --- internals ------------------------------------------------------------------
 
   private now(): string {

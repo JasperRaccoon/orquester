@@ -314,7 +314,7 @@ function SessionHistory({
               onRetry={retry}
             />
           ) : threadLoading ? (
-            <LoadingState label="Loading checkpoints…" />
+            <RailEmptyState title="Loading checkpoints…" />
           ) : model.checkpoints.length === 0 ? (
             <RailEmptyState
               title={NO_CHECKPOINTS_TITLE}
@@ -345,7 +345,7 @@ function SessionHistory({
 }
 
 /** The Prompts view's list, its edges and its empty states. */
-export function PromptsBody({
+function PromptsBody({
   prompts,
   total,
   query,
@@ -389,7 +389,7 @@ export function PromptsBody({
         <>
           {note}
           {loading ? (
-            <LoadingState label="Loading prompts…" />
+            <RailEmptyState title="Loading prompts…" />
           ) : (
             <>
               <RailEmptyState title={NO_PROMPTS_TITLE} hint={NO_PROMPTS_HINT} />
@@ -431,7 +431,7 @@ export function PromptsBody({
  * still catching up (asked again by itself), it has none, or it failed — with
  * Retry where asking again can help.
  */
-export function FallbackNote({
+function FallbackNote({
   note,
   busy,
   retryable,
@@ -477,7 +477,7 @@ const QUIET_BUTTON =
  * thread in by itself, "Load older prompts" (once that pager has stopped — at
  * its cap or on a failure — or without a search), or why a page failed.
  */
-export function PromptListEnd({
+function PromptListEnd({
   index,
   hasPrompts,
   onLoadOlder
@@ -530,7 +530,7 @@ export function PromptListEnd({
 }
 
 /** "Show 200 more" — the next cards of a list the render cap cut. */
-export function ShowMoreRow({
+function ShowMoreRow({
   hidden,
   onShowMore
 }: {
@@ -545,9 +545,4 @@ export function ShowMoreRow({
       </button>
     </div>
   );
-}
-
-/** Nothing to judge "empty" by yet — said as the Saved prompts panel says it. */
-function LoadingState({ label }: { label: string }): React.ReactElement {
-  return <RailEmptyState title={label} />;
 }

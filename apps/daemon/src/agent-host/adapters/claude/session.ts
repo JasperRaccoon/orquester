@@ -65,8 +65,7 @@ import {
 import {
   claudeCanUseToolRoute,
   claudeRequestKey,
-  permissionResultForDecision,
-  shouldShortCircuitToAllow
+  permissionResultForDecision
 } from "./decisions.ts";
 import { CLAUDE_COMPACT_DEADLINE_MS, CLAUDE_CONTEXT_USAGE_DEADLINE_MS, type ClaudeAdapterDeps } from "./deps.ts";
 import { transcriptGoalFromLastRow } from "./goal.ts";
@@ -1514,7 +1513,7 @@ export class ClaudeSession {
       return { behavior: "deny", message: EXIT_PLAN_MODE_DENY_MESSAGE };
     }
 
-    if (shouldShortCircuitToAllow(this.options.runtimeMode)) {
+    if (this.options.runtimeMode === "full-access") {
       // Allow with no event at all — nothing is written to the timeline (§4.3).
       return { behavior: "allow", updatedInput: toolInput };
     }

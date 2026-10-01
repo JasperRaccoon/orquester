@@ -108,7 +108,7 @@ const deadlineAt = Number(spec.deadlineAt);
 /** A capped log sink over a synchronously written file. */
 function createSink(name, label) {
   const fd = openSync(join(attemptDir, name), "a", 0o600);
-  const sink = { fd, written: 0, produced: 0, capped: false, closed: false };
+  const sink = { written: 0, produced: 0, capped: false, closed: false };
   sink.write = (chunk) => {
     sink.produced += chunk.length;
     if (sink.capped || sink.closed) {

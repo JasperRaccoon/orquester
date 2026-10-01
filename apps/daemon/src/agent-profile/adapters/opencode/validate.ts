@@ -20,7 +20,7 @@ import { assertInside } from "../../infra/index.ts";
 import { isJsonObject } from "./jsonc.ts";
 
 /** A command's settings besides its template (body), with their types. */
-export const COMMAND_FIELDS = {
+const COMMAND_FIELDS = {
   description: "string",
   agent: "string",
   model: "string",

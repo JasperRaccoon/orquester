@@ -37,7 +37,6 @@ export interface OutlineItem {
 export function buildStepOutline(workflow: { nodes: readonly OutlineNode[]; edges: readonly OutlineEdge[] }): OutlineItem[] {
   const nodes = workflow.nodes.filter((node) => node.type !== "note");
   const byId = new Map(nodes.map((node) => [node.id, node]));
-  const order = new Map(nodes.map((node, index) => [node.id, index]));
   const edges = workflow.edges.filter((edge) => byId.has(edge.source) && byId.has(edge.target) && edge.source !== edge.target);
   const graph = { nodes, edges };
   const reachable = reachableFromTriggers(graph);
@@ -51,19 +50,16 @@ export function buildStepOutline(workflow: { nodes: readonly OutlineNode[]; edge
       return index < 0 ? handles.length : index;
     };
     const outs = edges
-      .map((edge, index) => ({ edge, index }))
-      .filter(({ edge }) => edge.source === node.id)
+      .filter((edge) => edge.source === node.id)
       .sort((a, b) => {
-        const ta = byId.get(a.edge.target)!;
-        const tb = byId.get(b.edge.target)!;
+        const ta = byId.get(a.target)!;
+        const tb = byId.get(b.target)!;
         return (
-          rank(a.edge.sourceHandle) - rank(b.edge.sourceHandle) ||
+          rank(a.sourceHandle) - rank(b.sourceHandle) ||
           ta.position.y - tb.position.y ||
-          ta.position.x - tb.position.x ||
-          a.index - b.index
+          ta.position.x - tb.position.x
         );
-      })
-      .map(({ edge }) => edge);
+      });
     children.set(node.id, outs);
   }
 
@@ -164,7 +160,6 @@ export function buildStepOutline(workflow: { nodes: readonly OutlineNode[]; edge
   }
   // Whatever a trigger reaches but the walk could not place (a cycle keeps a join waiting).
   const leftovers = nodes.filter((node) => reachable.has(node.id) && !emitted.has(node.id));
-  leftovers.sort((a, b) => order.get(a.id)! - order.get(b.id)!);
   for (const node of leftovers) {
     if (emitted.has(node.id)) continue;
     visit(node.id, 0);

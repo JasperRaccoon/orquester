@@ -26,7 +26,7 @@ export function pushSupported(): boolean {
  * Decode a base64url VAPID public key into the `Uint8Array` that
  * `pushManager.subscribe({ applicationServerKey })` expects.
  */
-export function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
+function urlBase64ToUint8Array(base64: string): Uint8Array<ArrayBuffer> {
   const padding = "=".repeat((4 - (base64.length % 4)) % 4);
   const normalized = (base64 + padding).replace(/-/g, "+").replace(/_/g, "/");
   const raw = atob(normalized);

@@ -14,7 +14,7 @@
 import React, { useEffect, useMemo, useState } from "react";
 import { ArrowDown, ArrowUp, KeyRound } from "lucide-react";
 
-import type { AccountPolicy } from "@orquester/api";
+import { SYSTEM_ACCOUNT_ID, type AccountPolicy } from "@orquester/api";
 import type { ProviderModel } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
@@ -34,7 +34,6 @@ import {
   scopedLimitRows,
   scopedWindowLabels,
   setSystemAllowed,
-  SYSTEM_ACCOUNT_ID,
   toggleAllowedAccount,
   usageTone,
   withStrategy,

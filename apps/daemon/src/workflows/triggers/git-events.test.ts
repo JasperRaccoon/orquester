@@ -12,6 +12,9 @@ test("glob: anchored, `*` stops at `/`, `**` crosses it, `?` is one character", 
   assert.equal(matchesGlob("release/*", "x/release/1.0"), false);
   assert.equal(matchesGlob("release/**", "release/1.0/hotfix"), true);
   assert.equal(matchesGlob("**", "any/thing"), true);
+  assert.equal(matchesGlob("***", "any/thing"), true);
+  assert.equal(matchesGlob("release/****/fix*", "release/1.0/hot/fix123"), true);
+  assert.equal(matchesGlob("release/*?*", "release/1.0/hotfix"), false);
   assert.equal(matchesGlob("v*", "v1.2.0"), true);
   assert.equal(matchesGlob("v*", "release-v1"), false);
   assert.equal(matchesGlob("v?.?", "v1.2"), true);
@@ -34,6 +37,8 @@ test("sameSha compares an abbreviation (Bitbucket Cloud's 12 hex) as a prefix", 
 });
 
 test("pushFired keeps the newest 1000", () => {
+  assert.deepEqual(pushFired([], []), []);
+  assert.deepEqual(pushFired(["a"], ["b"]), ["a", "b"]);
   const ring = pushFired(Array.from({ length: 999 }, (_, i) => `k${i}`), ["a", "b"]);
   assert.equal(ring.length, 1000);
   assert.equal(ring[0], "k1");

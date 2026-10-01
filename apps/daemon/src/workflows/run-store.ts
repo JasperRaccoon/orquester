@@ -120,10 +120,6 @@ export class FileRunStore implements RunStore {
     this.logger = options.logger ?? console;
   }
 
-  get runsDir(): string {
-    return this.dir;
-  }
-
   async create(run: PersistedRun): Promise<void> {
     if (!isRunId(run.id)) throw new Error("A run id must be 1-128 letters, digits, _ or -");
     this.deleted.delete(run.id);
@@ -270,8 +266,7 @@ export class FileRunStore implements RunStore {
   }
 
   async deleteForWorkflow(workflowId: string, options: { keep?: ReadonlySet<string> } = {}): Promise<void> {
-    // A copy: deleteRun splices the live list.
-    const list = [...(this.byWorkflow.get(workflowId) ?? [])].filter((summary) => !options.keep?.has(summary.id));
+    const list = (this.byWorkflow.get(workflowId) ?? []).filter((summary) => !options.keep?.has(summary.id));
     await Promise.all(list.map((summary) => this.deleteRun(summary.id)));
     if ((this.byWorkflow.get(workflowId)?.length ?? 0) === 0) this.byWorkflow.delete(workflowId);
     void this.persistIndex();

@@ -9,12 +9,10 @@
  * Pure: the caller passes the app store's `usage` and `agentAccounts`.
  */
 
-import type { AccountPolicy, AgentAccount, AgentUsage, UsageAccount, UsageResponse, UsageWindow } from "@orquester/api";
+import { SYSTEM_ACCOUNT_ID, type AccountPolicy, type AgentAccount, type AgentUsage, type UsageAccount, type UsageResponse, type UsageWindow } from "@orquester/api";
 
 /** The managed-account families (the agent-accounts store); every other agent (OpenCode) has none. */
 const ACCOUNT_FAMILIES: ReadonlySet<string> = new Set(["claude", "codex", "grok"]);
-
-export const SYSTEM_ACCOUNT_ID = "system";
 
 /** The managed-account family a registry agent draws from; null when it has no accounts. */
 export function accountFamily(agent: string): string | null {

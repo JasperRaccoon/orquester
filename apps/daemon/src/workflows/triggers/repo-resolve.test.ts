@@ -12,7 +12,7 @@ import { advance, fakeHost, memoryState, node, silentLogger, workflow } from "./
 const WS = "/app/workspaces";
 
 function resolver(remotes: Record<string, string | null>, accounts: Record<string, string | null>) {
-  const resolve = createRepoResolver({
+  return createRepoResolver({
     workspacesDir: WS,
     git: {
       async remoteUrl(cwd) {
@@ -23,7 +23,6 @@ function resolver(remotes: Record<string, string | null>, accounts: Record<strin
       return name in accounts ? { gitAccountId: accounts[name] } : null;
     }
   });
-  return { resolve };
 }
 
 test("project repositories reject paths outside the workspace project layout", async () => {
@@ -34,7 +33,7 @@ test("project repositories reject paths outside the workspace project layout", a
 });
 
 test("repo kind url: as given, with its account or none", async () => {
-  const { resolve } = resolver({}, {});
+  const resolve = resolver({}, {});
   const wf = workflow("wf", []);
   assert.deepEqual(await resolve(wf, { kind: "url", url: " https://github.com/o/r " }), { url: "https://github.com/o/r", accountId: null });
   assert.deepEqual(await resolve(wf, { kind: "url", url: "git@github.com:o/r.git", accountId: "acc1" }), {
@@ -44,7 +43,7 @@ test("repo kind url: as given, with its account or none", async () => {
 });
 
 test("repo kind project: an existing project's origin + its workspace's account", async () => {
-  const { resolve } = resolver({ [`${WS}/team/app`]: "https://github.com/o/app.git", [`${WS}/solo/lib`]: "git@github.com:o/lib.git" }, { team: "acc-team", solo: null });
+  const resolve = resolver({ [`${WS}/team/app`]: "https://github.com/o/app.git", [`${WS}/solo/lib`]: "git@github.com:o/lib.git" }, { team: "acc-team", solo: null });
   assert.deepEqual(await resolve(workflow("a", [], { project: { kind: "existing", projectPath: `${WS}/team/app` } }), { kind: "project" }), {
     url: "https://github.com/o/app.git",
     accountId: "acc-team"
@@ -59,7 +58,7 @@ test("repo kind project: an existing project's origin + its workspace's account"
 });
 
 test("repo kind project on a temp workflow: its clone URL + that workspace's account; an empty temp project has none", async () => {
-  const { resolve } = resolver({}, { team: "acc-team" });
+  const resolve = resolver({}, { team: "acc-team" });
   const clone = workflow("t", [], { project: { kind: "temp", workspace: "team", source: { kind: "clone", url: "https://bitbucket.org/o/r.git", ref: "main" } } });
   assert.deepEqual(await resolve(clone, { kind: "project" }), { url: "https://bitbucket.org/o/r.git", accountId: "acc-team" });
   const empty = workflow("e", [], { project: { kind: "temp", workspace: "team", source: { kind: "empty" } } });
@@ -68,7 +67,7 @@ test("repo kind project on a temp workflow: its clone URL + that workspace's acc
 
 test("a project whose origin appears later is picked up by the periodic re-resolve", async () => {
   const remotes: Record<string, string | null> = {};
-  const { resolve } = resolver(remotes, { team: "acc-team" });
+  const resolve = resolver(remotes, { team: "acc-team" });
   const clock = new ManualClock("2026-09-28T10:00:00.000Z");
   const lsCalls: (string | null)[] = [];
   const poller = createGitPoller({

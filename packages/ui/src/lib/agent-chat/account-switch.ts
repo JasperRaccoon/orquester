@@ -199,7 +199,7 @@ const GOAL_HELD_SWITCH_REFUSAL =
   "The goal is paused for an Orquester update and resumes by itself once the agent host has restarted. Send /goal pause to keep it paused, then switch accounts.";
 
 /** The host's own words for a switch refused during a compaction (`identitySwitchRefusal`). */
-export const COMPACTION_SWITCH_REFUSAL =
+const COMPACTION_SWITCH_REFUSAL =
   "Wait for the context compaction to finish before switching accounts.";
 
 /**

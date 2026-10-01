@@ -29,22 +29,6 @@ export interface AddBlockOptions {
   intoEdgeId?: string | null;
 }
 
-/** A fresh block of `type` at `position` (snapped), with its default config and a free name. */
-export function newBlock(
-  type: WorkflowNodeType,
-  position: { x: number; y: number },
-  existing: readonly Pick<WorkflowNode, "name">[],
-  mintId: () => string
-): WorkflowNode {
-  return {
-    id: mintId(),
-    type,
-    name: defaultNodeName(type, existing.map((node) => node.name)),
-    position: { x: snapToGrid(position.x), y: snapToGrid(position.y) },
-    config: liveDefaultNodeConfig(type)
-  } as WorkflowNode;
-}
-
 export function addBlock<W extends Graph>(
   workflow: W,
   type: WorkflowNodeType,
@@ -52,7 +36,13 @@ export function addBlock<W extends Graph>(
   mintId: () => string,
   options: AddBlockOptions = {}
 ): { workflow: W; nodeId: string } {
-  const node = newBlock(type, position, workflow.nodes, mintId);
+  const node = {
+    id: mintId(),
+    type,
+    name: defaultNodeName(type, workflow.nodes.map((node) => node.name)),
+    position: { x: snapToGrid(position.x), y: snapToGrid(position.y) },
+    config: liveDefaultNodeConfig(type)
+  } as WorkflowNode;
   let next: W = { ...workflow, nodes: [...workflow.nodes, node] };
   if (options.intoEdgeId) {
     const edge = workflow.edges.find((candidate) => candidate.id === options.intoEdgeId);

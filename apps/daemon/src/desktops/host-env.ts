@@ -177,7 +177,7 @@ export function buildAppEnv(options: AppEnvOptions): Record<string, string> {
 }
 
 /** POSIX single-quoting: `'` becomes `'\''`. Safe for any value without NUL. */
-export function shellQuote(value: string): string {
+function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\\''`)}'`;
 }
 

@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { type FrontmatterYamlOptions, type MarkdownDocument, SKILL_FILE, parseMarkdownDocument } from "../../infra/index.ts";
 
 /** How OpenCode reads a markdown file's frontmatter: gray-matter, i.e. js-yaml 3 (YAML 1.1). */
-export const OPENCODE_YAML: FrontmatterYamlOptions = { yaml: "1.1" };
+const OPENCODE_YAML: FrontmatterYamlOptions = { yaml: "1.1" };
 
 /**
  * OpenCode's `fallbackSanitization`: a top-level `key: value` line whose

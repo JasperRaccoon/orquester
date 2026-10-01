@@ -125,7 +125,7 @@ function toolFailureFromOutput(entry: WorkLogEntry, includeCommand: boolean): bo
 }
 
 /** Includes rows that stored error output in the command field. *T3: `:437-439`.* */
-export function workEntryIndicatesToolFailure(entry: WorkLogEntry): boolean {
+function workEntryIndicatesToolFailure(entry: WorkLogEntry): boolean {
   return toolFailureFromOutput(entry, true);
 }
 
@@ -152,7 +152,7 @@ export function workEntryIndicatesToolSuccess(entry: WorkLogEntry): boolean {
  *
  * *T3: `session-logic.ts:172-190`.*
  */
-export function workEntryIndicatesToolNeutralStatus(entry: WorkLogEntry): boolean {
+function workEntryIndicatesToolNeutralStatus(entry: WorkLogEntry): boolean {
   if (entry.agentSpawn !== undefined) {
     return false;
   }
@@ -176,7 +176,7 @@ export function workEntryIndicatesToolNeutralStatus(entry: WorkLogEntry): boolea
  *
  * *T3: `session-logic.ts:161-170`.*
  */
-export function workEntrySignalsSevereFailure(entry: WorkLogEntry): boolean {
+function workEntrySignalsSevereFailure(entry: WorkLogEntry): boolean {
   return (
     entry.sourceActivityKind === "runtime.error" ||
     entry.sourceActivityKind?.endsWith(".failed") === true
@@ -448,7 +448,7 @@ export function toolGroupSummaryKind(entries: readonly WorkLogEntry[]): ToolGrou
 // ---------------------------------------------------------------------------
 
 /** First meaningful shell program in a command string, for a live row's label. */
-export function commandProgramName(command: string): string | null {
+function commandProgramName(command: string): string | null {
   const trimmed = command.trim();
   if (trimmed.length === 0) {
     return null;
@@ -516,7 +516,7 @@ export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot?: strin
 }
 
 /** Latest live activity stays present-tense unless the call itself failed. *T3: `:186-190`.* */
-export function liveActivityToolStatus(
+function liveActivityToolStatus(
   status: WorkLogEntry["toolLifecycleStatus"],
   presentTense: boolean
 ): "inProgress" | "completed" | "failed" | "declined" {

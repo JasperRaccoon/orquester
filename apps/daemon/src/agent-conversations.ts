@@ -46,7 +46,7 @@ const GROK_MAX_SESSIONS = 500;
 /** Files opened at once while scanning transcripts. */
 const READ_CONCURRENCY = 16;
 
-export interface AgentConversationOptions {
+interface AgentConversationOptions {
   /**
    * `<appdir>/daemon`. Supplying it lets the scan see MANAGED agent homes as
    * well as the daemon's own HOME — see `agentHomeRoots`.

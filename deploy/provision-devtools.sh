@@ -3,7 +3,7 @@
 #
 #     [sudo] bash deploy/provision-devtools.sh
 #
-# First-time provisioning (see AGENTS.md) runs this, so a NEW VPS gets everything out of the box.
+# remote-provision.sh runs this during first-time provisioning.
 # Re-run it to catch up an EXISTING VPS. It does NOT restart the daemon — it prints the
 # daemon-reload/restart reminder so you activate the loosened unit deliberately.
 set -euo pipefail

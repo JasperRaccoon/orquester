@@ -573,7 +573,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       return 0;
     }
     let highest = 0;
-    for (const line of splitCompleteLines(contents).lines) {
+    for (const line of splitCompleteLines(contents)) {
       try {
         const seq = (JSON.parse(line) as { seq?: unknown }).seq;
         if (typeof seq === "number" && Number.isInteger(seq) && seq > highest) {
@@ -797,10 +797,6 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
 
   // --- attachments ---------------------------------------------------------
 
-  function attachmentsDirFor(threadId: string): string {
-    return threadAttachmentsDir(rootDir, threadId);
-  }
-
   /**
    * The directory an id's bytes live in: the owning thread's, or the shared
    * pending dir for the reserved `pending` segment. Null when the id does not
@@ -816,7 +812,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       return pendingDir;
     }
     return segment === toSafeThreadAttachmentSegment(threadId)
-      ? attachmentsDirFor(threadId)
+      ? threadAttachmentsDir(rootDir, threadId)
       : null;
   }
 
@@ -1425,7 +1421,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       if (attachmentId === null) {
         throw new Error("agent-chat: thread id cannot be expressed as an attachment segment");
       }
-      const dir = attachmentsDirFor(input.threadId);
+      const dir = threadAttachmentsDir(rootDir, input.threadId);
       await fsp.mkdir(dir, { recursive: true });
       const destination = path.join(dir, `${attachmentId}${extension}`);
       // COPIED, never hard-linked: an agent editing the delivered file in
@@ -1488,7 +1484,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         input?.threadId !== undefined ? [input.threadId] : await store.listThreads();
       for (const threadId of targets) {
         try {
-          const dir = attachmentsDirFor(threadId);
+          const dir = threadAttachmentsDir(rootDir, threadId);
           // Only a stored attachment needs a verdict (`.part` files go by age
           // alone), so a thread with none is never read at all.
           const entries = await fsp.readdir(dir).catch((): string[] => []);
@@ -1548,7 +1544,7 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
       // Partials need no event-log reference scan. Keep every completed file;
       // the scheduled deep sweep will fold histories and collect true orphans.
       for (const threadId of await store.listThreads()) {
-        await sweepDirectory(attachmentsDirFor(threadId), nowMs, () => true);
+        await sweepDirectory(threadAttachmentsDir(rootDir, threadId), nowMs, () => true);
       }
     },
 

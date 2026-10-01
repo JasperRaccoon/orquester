@@ -50,7 +50,7 @@ import {
   receiveUpload,
   uploadTempPath
 } from "../upload-stream.ts";
-import { AgentProfileError, isAgentProfileError, profileErrors } from "./errors.ts";
+import { AgentProfileError, profileErrors } from "./errors.ts";
 import type { AgentProfileService } from "./service.ts";
 
 export interface AgentProfileRouteDeps {
@@ -321,7 +321,7 @@ function errorBody(code: AgentProfileErrorBody["error"]["code"], message: string
 
 /** Maps any error to `{error: {code, message}}`; the real text of an unexpected one goes to the log only. */
 function sendError(request: FastifyRequest, reply: FastifyReply, error: unknown): FastifyReply {
-  if (isAgentProfileError(error)) {
+  if (error instanceof AgentProfileError) {
     return reply.code(error.status).send(errorBody(error.code, error.message));
   }
   const frameworkCode = (error as { code?: unknown } | null)?.code;

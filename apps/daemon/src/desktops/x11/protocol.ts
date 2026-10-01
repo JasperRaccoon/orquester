@@ -44,13 +44,6 @@ export const PredefinedAtom = {
 
 export const AnyPropertyType = 0;
 
-/** Core error codes worth naming. */
-export const ErrorCode = {
-  BadWindow: 3,
-  BadAtom: 5,
-  BadMatch: 8
-} as const;
-
 const CW_EVENT_MASK = 0x0800;
 
 const pad4 = (n: number): number => (4 - (n % 4)) % 4;

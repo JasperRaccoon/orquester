@@ -209,15 +209,6 @@ interface BatchState {
   structural: boolean;
 }
 
-/**
- * - `applied` — at least one event was applied;
- * - `noop` — every event was already indexed;
- * - `gap` — the batch does not continue the cursor (the index is behind the
- *   log): nothing was applied, and only a catch-up from the log can fix it;
- * - `deleted` — a `thread.deleted` removed the thread's rows.
- */
-export type ApplyOutcome = "applied" | "noop" | "gap" | "deleted";
-
 export interface ThreadIndexer {
   /**
    * Apply one batch in one transaction. Throws on a driver error, after which
@@ -227,7 +218,7 @@ export interface ThreadIndexer {
     meta: IndexedThreadMeta,
     events: readonly DomainEvent[],
     positions: readonly EventPosition[]
-  ): ApplyOutcome;
+  ): void;
   cursor(threadId: string): { lastSeq: number; lastByte: number } | null;
   /** Delete every row of the thread and forget its memory. */
   resetThread(threadId: string): void;
@@ -1340,21 +1331,20 @@ export function createThreadIndexer(input: {
     meta: IndexedThreadMeta,
     events: readonly DomainEvent[],
     positions: readonly EventPosition[]
-  ): ApplyOutcome {
+  ): void {
     const threadId = memory.threadId;
     let start = 0;
     while (start < events.length && events[start]!.seq <= memory.lastSeq) {
       start += 1;
     }
     if (start === events.length) {
-      return "noop";
+      return;
     }
     if (events[start]!.seq !== memory.lastSeq + 1) {
       noteGap(memory, events[start]!.seq);
-      return "gap";
+      return;
     }
 
-    let outcome: ApplyOutcome = "applied";
     let stoppedAtGap = false;
     try {
       db.transaction(() => {
@@ -1378,7 +1368,6 @@ export function createThreadIndexer(input: {
             break;
           }
           if (!applyEvent(memory, event, position, batch)) {
-            outcome = "deleted";
             return;
           }
         }
@@ -1408,7 +1397,6 @@ export function createThreadIndexer(input: {
     if (!stoppedAtGap) {
       memory.gapLogged = false;
     }
-    return outcome;
   }
 
   return {
@@ -1420,11 +1408,10 @@ export function createThreadIndexer(input: {
       }
       const threadId = meta.threadId;
       // A throw has already dropped the thread's memory: nothing to evict.
-      const outcome = applyLoaded(load(threadId), meta, events, positions);
-      // Every other outcome loaded the thread — a noop or a gap as well — so
-      // every one of them keeps the bound.
+      applyLoaded(load(threadId), meta, events, positions);
+      // Even an already-indexed batch or a gap loads the thread, so enforce
+      // the memory bound after either one.
       evictIdle(threadId);
-      return outcome;
     },
 
     cursor(threadId) {

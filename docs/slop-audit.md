@@ -1,5 +1,7 @@
 # Repository cleanup audit
 
+The follow-up audit starting at `2a8a2cff` is recorded in [the current audit](slop-audit-current.md). This document retains the earlier decisions and verification.
+
 Baseline: `9675e822`. The audit covered every workspace package, daemon subsystem,
 provider adapter, test tree, frontend entry point, and repository tooling. Generated
 provider bindings, captured fixtures, assets, and historical design records were

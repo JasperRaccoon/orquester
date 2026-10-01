@@ -2,13 +2,12 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  checkoutArgs,
   cloneArgs,
   cloneRefProblem,
-  fetchCommitArgs,
   isFullSha,
   isMissingRemoteRef,
-  mayBeAbbreviatedSha
+  mayBeAbbreviatedSha,
+  resolveAbbreviatedSha
 } from "./clone-ref";
 
 const SHA = "6dcb09b5b57875f334f61aebed695e2e4193db5e";
@@ -64,8 +63,6 @@ test("cloneArgs: a name rides --branch, a sha and no ref clone plainly, the URL 
     "https://github.com/o/r.git",
     "wf-x"
   ]);
-  assert.deepEqual(checkoutArgs(SHA), ["checkout", "--detach", SHA]);
-  assert.deepEqual(fetchCommitArgs(SHA), ["fetch", "origin", SHA]);
 });
 
 test("isMissingRemoteRef recognises git's messages", () => {
@@ -74,8 +71,7 @@ test("isMissingRemoteRef recognises git's messages", () => {
   assert.equal(isMissingRemoteRef("fatal: Authentication failed"), false);
 });
 
-test("resolveAbbreviatedSha: one commit by prefix, null when none or ambiguous", async () => {
-  const { resolveAbbreviatedSha } = await import("./clone-ref");
+test("resolveAbbreviatedSha: one commit by prefix, null when none or ambiguous", () => {
   const a = `abcdef012345${"0".repeat(28)}`;
   const b = `abcdef012345${"1".repeat(28)}`;
   const listing = `${a}\trefs/heads/main\n${a}\tHEAD\n${"9".repeat(40)}\trefs/tags/v1\n`;

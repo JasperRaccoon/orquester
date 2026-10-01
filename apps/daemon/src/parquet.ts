@@ -25,7 +25,7 @@ const BYTES_PREVIEW = 32;
 /** Bad request (unknown sort column, too many rows to sort) -> HTTP 400. */
 export class ParquetRequestError extends Error {}
 
-export interface ParquetWindowOptions {
+interface ParquetWindowOptions {
   offset?: number;
   limit?: number;
   orderBy?: string;

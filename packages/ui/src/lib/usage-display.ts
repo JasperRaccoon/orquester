@@ -13,7 +13,7 @@
 /** How a window's reset time renders: countdown, wall clock, or both. */
 export type UsageResetFormat = "relative" | "absolute" | "both";
 
-export const USAGE_RESET_FORMAT_DEFAULT: UsageResetFormat = "relative";
+const USAGE_RESET_FORMAT_DEFAULT: UsageResetFormat = "relative";
 
 const STORAGE_KEY = "orquester:usage-reset-format";
 
@@ -22,7 +22,7 @@ function isResetFormat(value: unknown): value is UsageResetFormat {
 }
 
 /** Load the persisted reset format, or the default on any failure. */
-export function loadUsageResetFormat(): UsageResetFormat {
+function loadUsageResetFormat(): UsageResetFormat {
   try {
     if (typeof localStorage === "undefined") {
       return USAGE_RESET_FORMAT_DEFAULT;
@@ -81,7 +81,7 @@ export function subscribeUsageResetFormat(listener: () => void): () => void {
 /* ── Shared minute ticker ───────────────────────────────────────────────── */
 
 /** How often relative reset times are re-rendered. */
-export const USAGE_TICK_MS = 60_000;
+const USAGE_TICK_MS = 60_000;
 
 const tickListeners = new Set<() => void>();
 let tickNow = Date.now();

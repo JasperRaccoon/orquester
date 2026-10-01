@@ -82,7 +82,7 @@ export interface RecordedSession {
   readonly leaderStarttime: number;
 }
 
-export interface LeftoverProcess {
+interface LeftoverProcess {
   readonly pid: number;
   readonly starttime: number;
 }

@@ -134,7 +134,7 @@ export function chatShortcutLabel(
  * The selector `openControl` runs inside the composer shell. Kept here so the
  * attribute name has exactly one definition.
  */
-export const COMPOSER_SHORTCUT_ATTRIBUTE = "data-composer-shortcut";
+const COMPOSER_SHORTCUT_ATTRIBUTE = "data-composer-shortcut";
 
 export function composerControlSelector(command: ComposerControlCommand): string {
   return `button[${COMPOSER_SHORTCUT_ATTRIBUTE}~="${command}"]:not(:disabled)`;

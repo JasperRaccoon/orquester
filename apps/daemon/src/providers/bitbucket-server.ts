@@ -63,32 +63,6 @@ function base(creds: { baseUrl?: string }): string {
 }
 
 /**
- * `AccountError` that remembers the raw HTTP status, so callers can branch on
- * 401/403/409 without re-parsing the message. Still an `AccountError`, so route
- * handlers map `.status` exactly as before.
- */
-class DcHttpError extends GitRemoteError {
-  constructor(
-    status: number,
-    message: string,
-    override readonly httpStatus: number
-  ) {
-    super(
-      status,
-      message,
-      httpStatus === 429
-        ? "rate_limited"
-        : httpStatus === 401 || httpStatus === 403
-          ? "auth"
-          : httpStatus === 404
-            ? "not_found"
-            : "upstream",
-      httpStatus
-    );
-  }
-}
-
-/**
  * Per-account CA bundle → undici dispatcher; undefined means "system CAs".
  * Memoized per `caCertPath`: the PEM is immutable for an account's lifetime
  * (a reconnect mints a new account id ⇒ a new path), and constructing a fresh
@@ -186,7 +160,7 @@ async function dcFetch(url: string, init: RequestInit): Promise<Response> {
 /**
  * Authenticated DC REST call returning the status, decoded body and response
  * headers. A 304 comes back as `{status: 304}` only when the caller sent an
- * `etag` (`If-None-Match`); every other non-2xx throws `DcHttpError`.
+ * `etag` (`If-None-Match`); every other non-2xx throws `GitRemoteError`.
  */
 async function dcRequest(
   creds: ProviderCreds,
@@ -223,20 +197,22 @@ async function dcRequest(
   if (!response.ok) {
     const text = (await response.text().catch(() => "")).slice(0, 300);
     if (response.status === 403 && /Basic Authentication has been disabled/i.test(text)) {
-      throw new DcHttpError(
+      throw new GitRemoteError(
         502,
         "The instance rejected Basic auth — this is unexpected since Orquester uses Bearer; check for a proxy rewriting the Authorization header.",
+        "auth",
         response.status
       );
     }
     if (response.status === 429) {
-      throw new DcHttpError(429, `Bitbucket Server ${method} ${path} → 429: rate limited. ${text}`, 429);
+      throw new GitRemoteError(429, `Bitbucket Server ${method} ${path} → 429: rate limited. ${text}`, "rate_limited", 429);
     }
     const unauthorized = response.status === 401 || response.status === 403;
     const hint = unauthorized ? ` (check the token: ${SCOPES})` : "";
-    throw new DcHttpError(
+    throw new GitRemoteError(
       unauthorized ? 400 : 502,
       `Bitbucket Server ${method} ${path} → ${response.status}${hint}. ${text}`,
+      unauthorized ? "auth" : response.status === 404 ? "not_found" : "upstream",
       response.status
     );
   }
@@ -247,7 +223,7 @@ async function dcRequest(
   };
 }
 
-/** Authenticated DC REST call; throws `DcHttpError` on a non-2xx. */
+/** Authenticated DC REST call; throws `GitRemoteError` on a non-2xx. */
 async function dc(
   creds: ProviderCreds,
   method: string,
@@ -527,7 +503,7 @@ export const bitbucketServerProvider: GitProvider = {
       const key = await dc(creds, "POST", "/rest/ssh/1.0/keys", { text: publicKey });
       return key?.id === undefined ? {} : { keyId: String(key.id) };
     } catch (error) {
-      if (error instanceof DcHttpError) {
+      if (error instanceof GitRemoteError) {
         if (error.httpStatus === 401 || error.httpStatus === 403) {
           return { manualUrl: manualKeysUrl(base(creds)) };
         }
@@ -702,7 +678,7 @@ export const bitbucketServerProvider: GitProvider = {
         add([res.data]);
       } catch (error) {
         // A PR that is gone (deleted, moved) is simply not reported; anything else is a failed poll.
-        if (error instanceof DcHttpError && error.httpStatus === 404) continue;
+        if (error instanceof GitRemoteError && error.httpStatus === 404) continue;
         throw error;
       }
     }

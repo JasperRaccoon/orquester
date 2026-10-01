@@ -167,9 +167,9 @@ test("1. create a desktop; it becomes running", { skip: skipReason ?? false }, a
   groups.add(host.panePid);
 });
 
-test("2–3. xterm's window appears with its appId; closing it exits the app, not the desktop", { skip: skipReason ?? false }, async (t) => {
+test("2–3. xterm's window appears with its appId; closing it exits the app, not the desktop", { skip: skipReason ?? false }, async () => {
   assert.ok(desktopId, "needs step 1");
-  const app = await manager.launchApp(desktopId, { command: "xterm", cwd: project, env: {} });
+  const app = await manager.launchApp(desktopId, { command: "xterm -e cat", cwd: project, env: {} });
   xtermAppId = app.id;
   await until((d) => d.apps.some((a) => a.id === app.id && a.status === "running"));
   groups.add(await readPgid(app.id));
@@ -178,18 +178,13 @@ test("2–3. xterm's window appears with its appId; closing it exits the app, no
     payload.windows.find((window) => window.appId === app.id);
   let window = hasWindow(manager.get(desktopId)!);
   if (!window) {
-    try {
-      const payload = await nextEvent<DesktopWindowsPayload>(
-        manager,
-        "windows",
-        (p) => p.desktopId === desktopId && hasWindow(p) !== undefined,
-        10_000
-      );
-      window = hasWindow(payload);
-    } catch {
-      // The window tracker was a stub while this was written; skip rather than fail if it still is.
-      return t.skip("no window reached the tracker within 10 s (window tracker unavailable?)");
-    }
+    const payload = await nextEvent<DesktopWindowsPayload>(
+      manager,
+      "windows",
+      (p) => p.desktopId === desktopId && hasWindow(p) !== undefined,
+      10_000
+    );
+    window = hasWindow(payload);
   }
   assert.ok(window);
   assert.equal(window.wmClass?.toLowerCase().includes("xterm"), true, String(window.wmClass));
@@ -230,8 +225,7 @@ test("5. a second manager over the same appdir reattaches the running desktop an
     const byId = new Map(summary.apps.map((a) => [a.id, a]));
     assert.equal(byId.get(exitAppId)?.status, "exited");
     assert.equal(byId.get(exitAppId)?.exitCode, 3);
-    // xterm is exited if step 3 closed it, still running if that step was skipped.
-    assert.equal(byId.get(xtermAppId)?.status, manager.get(desktopId)!.apps.find((a) => a.id === xtermAppId)?.status);
+    assert.equal(byId.get(xtermAppId)?.status, "exited");
     assert.equal(restarted.vncSocketPath(desktopId), manager.vncSocketPath(desktopId));
   } finally {
     await restarted.shutdown();

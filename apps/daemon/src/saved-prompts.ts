@@ -72,7 +72,7 @@ const STARTER_PROMPTS: ReadonlyArray<
   }
 ];
 
-export type SavedPromptErrorCode =
+type SavedPromptErrorCode =
   | "INVALID_REQUEST"
   | "INVALID_PROJECT_PATH"
   | "SAVED_PROMPT_NOT_FOUND"
@@ -91,7 +91,7 @@ export class SavedPromptError extends Error {
   }
 }
 
-export interface SavedPromptsServiceOptions {
+interface SavedPromptsServiceOptions {
   /** `<appdir>/daemon/saved-prompts.json`. */
   file: string;
   /**

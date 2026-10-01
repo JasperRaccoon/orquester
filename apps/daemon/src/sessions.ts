@@ -129,14 +129,14 @@ export interface SessionIndexContributor {
  * Optional hook consulted at session-create time for extra env vars (and force-fail).
  * Return null/undefined to leave the launch alone. Throw SessionError to reject create.
  */
-export type ResolveSessionExtraEnv = (
+type ResolveSessionExtraEnv = (
   entry: RegistryEntry,
   ctx: { accountId?: string }
 ) =>
   | Promise<{ env: Record<string, string>; unset?: string[]; accountId?: string } | null>
   | { env: Record<string, string>; unset?: string[]; accountId?: string } | null;
 
-export interface SessionManagerOptions {
+interface SessionManagerOptions {
   resolveExtraEnv?: ResolveSessionExtraEnv;
   /** Absolute path to the daemon's unix socket, injected into agent sessions for hook delivery. */
   daemonSockPath?: string;

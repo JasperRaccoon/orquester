@@ -103,7 +103,6 @@ import { redactUrlTokens, sanitizeDevtoolsPath } from "./devtools.js";
 import { UrlWatcher } from "./url-watcher";
 import { AgentHooks } from "./agent-hooks";
 import { listAgentConversations } from "./agent-conversations.ts";
-import { claudeTimeoutEnv } from "./agent-timeout-env.ts";
 import { type ISessionManager, SessionError, createSessionManager, resumeLaunchArgs } from "./sessions";
 import { AgentChatService, ChatSessionError, type CreateAgentChatRequest } from "./agent-chat/service.ts";
 import { INVALID_OWNER, parseSessionOwner } from "./agent-chat/owner.ts";
@@ -1210,9 +1209,17 @@ export function buildAgentLaunchEnv(
   claudeTimeoutMinutes: number,
   accountEnv: LaunchEnv | null
 ): LaunchEnv | null {
-  const timeoutEnv = claudeTimeoutEnv(entryId, claudeTimeoutMinutes);
-  if (!accountEnv && !timeoutEnv) return null;
-  const merged: LaunchEnv = { env: { ...accountEnv?.env, ...timeoutEnv?.env } };
+  const isClaude = entryId === "claude";
+  if (!accountEnv && !isClaude) return null;
+  const merged: LaunchEnv = { env: { ...accountEnv?.env } };
+  if (isClaude) {
+    const ms = String(claudeTimeoutMinutes * 60_000);
+    Object.assign(merged.env, {
+      API_TIMEOUT_MS: ms,
+      CLAUDE_STREAM_IDLE_TIMEOUT_MS: ms,
+      CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS: ms
+    });
+  }
   if (accountEnv?.unset?.length) merged.unset = [...accountEnv.unset];
   if (accountEnv?.accountId !== undefined) merged.accountId = accountEnv.accountId;
   return merged;
@@ -4351,28 +4358,10 @@ function sessionUploadsDir(daemonDir: string, sessionId: string): string {
 }
 
 /**
- * Whether relaying the agent host's answer to a chat upload must close the
- * client's connection (`POST /api/sessions/:id/upload`, the chat branch).
- *
- * The host may refuse before it has read the whole body: a missing `name`, or
- * its 50 MiB cap tripping mid-body. If body bytes are still on the wire then,
- * a kept-alive connection has Node take the rest off the socket only to throw
- * it away, or stall while the route's pipe to the host stands still. So a
- * relayed refusal answers `Connection: close`, as `refuseUpload` does for the
- * daemon's own (AGENTS.md, "Uploads are raw binary streams").
- *
- * The test is `complete`, not `readableEnded`. Node's HTTP parser sets
- * `complete` the moment the last body byte comes off the socket, which is
- * exactly when a kept-alive connection has nothing left to drain.
- * `readableEnded` also waits for the route's own consumer, a pipe into a host
- * that may have stopped reading. So it stays false for a body that is already
- * entirely in memory, and closing then would only drop a healthy connection.
- * `readableEnded` implies `complete`, so the only connections `readableEnded`
- * would close and `complete` keeps are ones whose body is already entirely
- * off the wire. A raw request that does not report `complete` at all
- * (light-my-request's, under `inject`) counts as incomplete, the safe
- * direction. A success never closes: the host answers 2xx only once it has
- * read the whole body.
+ * Close a rejected chat upload while body bytes remain on the socket. `complete`
+ * tracks the HTTP parser; `readableEnded` may remain false after all bytes arrive
+ * if the agent host stopped consuming. Injected requests without `complete` are
+ * treated as incomplete. Successful uploads have already consumed their body.
  */
 function relayedUploadClosesConnection(status: number, request: { readonly complete?: boolean }): boolean {
   return status >= 400 && request.complete !== true;

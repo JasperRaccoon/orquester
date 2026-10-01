@@ -37,31 +37,16 @@ export function mayBeAbbreviatedSha(ref: string): boolean {
 
 /**
  * The `git clone` arguments (after any `-c` config): `--branch <ref>` for a branch or tag name,
- * nothing for a commit (checked out after the clone, `checkoutArgs`). The URL follows `--`.
+ * nothing for a commit (checked out after the clone). The URL follows `--`.
  */
 export function cloneArgs(url: string, destName: string, ref?: string): string[] {
   const branch = ref !== undefined && !isFullSha(ref) ? ["--branch", ref] : [];
   return ["clone", ...branch, "--", url, destName];
 }
 
-/** `git checkout --detach <commit>` in the clone. */
-export function checkoutArgs(commit: string): string[] {
-  return ["checkout", "--detach", commit];
-}
-
-/** Fetch one commit a plain clone did not bring (a PR head from a fork, an unreachable sha). */
-export function fetchCommitArgs(commit: string): string[] {
-  return ["fetch", "origin", commit];
-}
-
 /** True when a `clone --branch` failed because the remote has no such branch or tag. */
 export function isMissingRemoteRef(stderr: string): boolean {
   return /Remote branch .* not found|couldn't find remote ref|not found in upstream/i.test(stderr);
-}
-
-/** `git ls-remote origin` in the clone: every ref the remote advertises (PR refs included). */
-export function lsRemoteAllArgs(): string[] {
-  return ["ls-remote", "origin"];
 }
 
 /**

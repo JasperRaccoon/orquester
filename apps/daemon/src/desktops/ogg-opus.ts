@@ -100,9 +100,7 @@ export class OggOpusSplitter {
 
   private finishPacket(): void {
     const packet = Buffer.concat(this.partial, this.partialBytes);
-    this.partial = [];
-    this.partialBytes = 0;
-    this.inPacket = false;
+    this.dropPartial();
     if (this.headersRemaining > 0) {
       this.headersRemaining -= 1;
       return;
@@ -115,8 +113,4 @@ export class OggOpusSplitter {
     this.partialBytes = 0;
     this.inPacket = false;
   }
-}
-
-export function createOggOpusSplitter(onPacket: (packet: Buffer) => void): OggOpusSplitter {
-  return new OggOpusSplitter(onPacket);
 }

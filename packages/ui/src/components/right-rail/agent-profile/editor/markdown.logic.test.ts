@@ -5,7 +5,6 @@ import {
   initialMarkdownForm,
   markdownDraftFromForm,
   markdownEditorModel,
-  markdownFormFromDocument,
   validateMarkdownForm
 } from "./markdown.logic";
 
@@ -41,7 +40,7 @@ test("editing keeps unknown keys and type-mismatched keys untouched, and removes
   const model = markdownEditorModel("claude", "skill", document);
   assert.deepEqual(model.keptKeys, ["allowed-tools", "metadata"]);
   assert.equal(model.fields.some((field) => field.key === "allowed-tools"), false);
-  const form = markdownFormFromDocument(model, "review-pr", document);
+  const form = initialMarkdownForm(model, "review-pr", document.body);
   assert.equal(form.values.model, "opus");
   assert.equal(form.body, "Do it.");
   form.values.model = "";
@@ -65,7 +64,7 @@ test("a command carries no frontmatter name and keeps a name key found on disk",
   const document = { frontmatter: { name: "legacy", description: "Review" }, body: "Review $ARGUMENTS" };
   const model = markdownEditorModel("opencode", "command", document);
   assert.deepEqual(model.keptKeys, ["name"]);
-  const form = markdownFormFromDocument(model, "git/review", document);
+  const form = initialMarkdownForm(model, "git/review", document.body);
   form.values.subtask = true;
   assert.deepEqual(markdownDraftFromForm("command", model, form).frontmatter, { description: "Review", subtask: true });
 });

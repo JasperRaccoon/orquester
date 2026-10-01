@@ -48,16 +48,12 @@ import {
   droppedKeysNote,
   mapFrontmatter
 } from "./convert.ts";
-import { isAgentProfileError, profileErrors } from "./errors.ts";
+import { AgentProfileError, profileErrors } from "./errors.ts";
 import { type GitCloneFn, gitClone } from "./import/git-clone.ts";
 import { parseGitImportUrl } from "./import/git-url.ts";
 import { type ScannedImportCandidate, scanImportTree, toSkillName } from "./import/scan.ts";
 import { extractZip } from "./import/zip.ts";
 import { SKILL_FILE, assertInside, parseMarkdownDocument, redactCliOutput, serializeMarkdownDocument } from "./infra/index.ts";
-
-export type { GitCloneFn } from "./import/git-clone.ts";
-export { gitClone } from "./import/git-clone.ts";
-export { type GitImportSource, parseGitImportUrl } from "./import/git-url.ts";
 
 /** How long a scan's tree waits for its picks. */
 const IMPORT_TTL_MS = 15 * 60_000;
@@ -90,7 +86,7 @@ const DEFAULT_IMPORT_LIMITS: ProfileImportLimits = {
 const MAX_CHECKOUT_ENTRIES = 100_000;
 
 /** A taken import: its items, notes on what the conversion changed, and `release()`. */
-export interface ProfileImportTake {
+interface ProfileImportTake {
   items: PortableItem[];
   notes: string[];
   /** Removes the import's directory; idempotent. */
@@ -168,7 +164,7 @@ export class ProfileImportStore implements ProfileImports {
       try {
         await this.clone(source.cloneUrl, source.ref, tree, { timeoutMs: this.limits.cloneTimeoutMs });
       } catch (error) {
-        if (isAgentProfileError(error)) throw error;
+        if (error instanceof AgentProfileError) throw error;
         throw profileErrors.importFailed(`Could not clone ${source.cloneUrl}: ${redactCliOutput((error as Error).message)}`);
       }
       if ((await lstatOrNull(tree))?.isDirectory() !== true) {

@@ -36,7 +36,7 @@ export interface CodexHookHandler {
   [field: string]: unknown;
 }
 
-export interface CodexHookGroup {
+interface CodexHookGroup {
   matcher?: unknown;
   hooks?: unknown;
   [field: string]: unknown;
@@ -259,9 +259,8 @@ function positionId(position: HookPosition): string {
 /** A `[hooks.state."<key>"]` table: `enabled`, `trusted_hash`, and anything else kept. */
 export type HookStateEntry = Record<string, unknown>;
 
-export interface RekeyInput {
-  /** The handlers before the edit and after it. */
-  before: readonly CodexHookEntry[];
+interface RekeyInput {
+  /** The handlers after the edit. */
   after: readonly CodexHookEntry[];
   /**
    * Where the edit itself moved each old position (`positionId` of before →
@@ -277,7 +276,7 @@ export interface RekeyInput {
 }
 
 /** What `hooks.state` should become for the given paths: keys to write and keys to delete. */
-export interface RekeyResult {
+interface RekeyResult {
   /** Key → full entry to write (only keys whose entry changed). */
   write: Map<string, HookStateEntry>;
   /** Keys to delete. */
@@ -309,7 +308,6 @@ export function rekeyHookState(input: RekeyInput): RekeyResult {
   const touched = new Set<string>();
 
   interface Pending {
-    key: string;
     path: string;
     eventSnake: string;
     entry: HookStateEntry;
@@ -326,7 +324,6 @@ export function rekeyHookState(input: RekeyInput): RekeyResult {
     touched.add(key);
     const entry = input.state[key];
     pending.push({
-      key,
       path: parsed.path,
       eventSnake: parsed.eventSnake,
       entry,

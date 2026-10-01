@@ -256,9 +256,7 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
     conn.on("event", (event) => {
       void this.enqueue(() => this.handleEvent(conn, event)).catch((error) => this.onJobError(conn, error));
     });
-    conn.on("close", (error) => this.onClose(conn, error));
-    // Errors for requests nobody awaits cannot happen (every request is awaited); nothing to do.
-    conn.on("protocolError", () => {});
+    conn.on("close", () => this.onClose(conn));
     try {
       await this.enqueue(() => this.initialize(conn));
     } catch (error) {
@@ -443,7 +441,7 @@ export class DesktopWindowTracker extends EventEmitter<DesktopWindowTrackerEvent
     }, CHANGE_DEBOUNCE_MS);
   }
 
-  private onClose(conn: X11Connection, _error: Error | null): void {
+  private onClose(conn: X11Connection): void {
     if (this.stopped || this.session?.conn !== conn) return;
     this.session = null;
     this.disconnectedAt = Date.now();

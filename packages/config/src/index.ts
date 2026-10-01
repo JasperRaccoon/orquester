@@ -1045,39 +1045,6 @@ export function parseAgentReceiptsFile(value: unknown): AgentReceiptsFile {
   return { version: 1, receipts: receipts.slice(-AGENT_RECEIPTS_RING_SIZE) };
 }
 
-/**
- * One line of `events.ndjson`. Mirrors `DomainEvent`'s envelope in
- * `@orquester/api`; the `payload` stays `unknown` here on purpose.
- *
- * ROLLBACK BOUNDARY (§8): a log written by a newer host must still decode in
- * an older one, so validating fourteen payload shapes at the line level would
- * turn every new optional field into a truncated thread. The envelope is what
- * the reader needs to order, filter and replay; the fold in `@orquester/api`
- * is tolerant about everything inside `payload`.
- */
-export const agentDomainEventTypeSchema = z.enum([
-  "thread.created",
-  "thread.meta-updated",
-  "thread.runtime-mode-set",
-  "thread.message-sent",
-  "thread.turn-start-requested",
-  "thread.turn-interrupt-requested",
-  "thread.approval-response-requested",
-  "thread.user-input-response-requested",
-  "thread.session-set",
-  "thread.activity-appended",
-  "thread.turn-diff-completed",
-  "thread.checkpoint-revert-requested",
-  "thread.reverted",
-  "thread.deleted"
-]);
-export type AgentDomainEventType = z.infer<typeof agentDomainEventTypeSchema>;
-
-/** True for a type THIS build knows how to fold. */
-export function isKnownAgentDomainEventType(type: string): type is AgentDomainEventType {
-  return agentDomainEventTypeSchema.options.includes(type as AgentDomainEventType);
-}
-
 export const agentDomainEventMetadataSchema = z
   .object({
     providerTurnId: z.string().optional(),
@@ -1101,7 +1068,6 @@ export const agentDomainEventMetadataSchema = z
  * replay), the type is not constrained, and a type this build does not know
  * folds to a no-op that still advances `seq`. Truncation is reserved for
  * genuinely malformed JSON or a missing envelope field (§5.1).
- * {@link isKnownAgentDomainEventType} is how a caller tells the two apart.
  */
 export const agentDomainEventEnvelopeSchema = z.object({
   seq: z.number().int().positive(),
@@ -1589,7 +1555,7 @@ export function parsePushConfig(raw: unknown): PushConfig {
   return pushConfigSchema.parse(raw);
 }
 
-// ClientConfig — what the daemon reports about how to reach itself.}
+// ClientConfig — what the daemon reports about how to reach itself.
 
 export const clientConfigSchema = z.object({
   version: z.literal(1).default(1),

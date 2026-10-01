@@ -11,7 +11,7 @@
 //     a wall-clock jump (suspend, NTP) is noticed within a minute.
 //   - On every tick (and at boot) each due trigger is handled ONCE: fired when it is within
 //     `MISSED_RUN_GRACE_MINUTES` of its scheduled time, else recorded as a `missed` stub. Its next
-//     time is then computed from max(now, scheduledFor) — never a burst of catch-up runs after a
+//     time is then computed from now — never a burst of catch-up runs after a
 //     long downtime.
 //   - The advanced cursor is persisted BEFORE the fire, so a crash between the two loses a run
 //     rather than repeating one.
@@ -163,8 +163,7 @@ export function createScheduler(deps: SchedulerDeps): Scheduler {
       if (Number.isNaN(scheduledFor.getTime()) || scheduledFor.getTime() > now.getTime()) continue;
       const late = now.getTime() - scheduledFor.getTime();
       const fire = late <= graceMs;
-      const from = new Date(Math.max(now.getTime(), scheduledFor.getTime()));
-      const nextRunAt = computeNext(trigger.key, cursor.cron, cursor.timezone, from);
+      const nextRunAt = computeNext(trigger.key, cursor.cron, cursor.timezone, now);
       const firedAt = now.toISOString();
       const persisted = await writeCursors((draft) => {
         const live = draft[trigger.key];

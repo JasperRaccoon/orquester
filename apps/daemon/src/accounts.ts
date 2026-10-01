@@ -44,14 +44,11 @@ import {
   type ReleaseInfo
 } from "./providers/types";
 import {
-  checkoutArgs,
   cloneArgs,
   cloneRefProblem,
   DEFAULT_CLONE_TIMEOUT_MS,
-  fetchCommitArgs,
   isFullSha,
   isMissingRemoteRef,
-  lsRemoteAllArgs,
   resolveAbbreviatedSha,
   type LsRemoteResult,
   mayBeAbbreviatedSha,
@@ -930,7 +927,7 @@ export class AccountsService {
     }
     try {
       try {
-        await git(checkoutArgs(commit), dest);
+        await git(["checkout", "--detach", commit], dest);
       } catch (error) {
         if (timedOut(error)) throw error;
         // Not among the cloned refs (a fork's PR head, a sha no branch holds any more): fetch it
@@ -939,7 +936,7 @@ export class AccountsService {
         // against every ref the remote advertises (GitHub's refs/pull/*, DC's refs/pull-requests/*).
         let full = commit;
         if (!isFullSha(commit)) {
-          const { stdout } = await git(lsRemoteAllArgs(), dest);
+          const { stdout } = await git(["ls-remote", "origin"], dest);
           const resolved = resolveAbbreviatedSha(stdout, commit);
           if (resolved === null) {
             throw new Error(
@@ -948,8 +945,8 @@ export class AccountsService {
           }
           full = resolved;
         }
-        await git(fetchCommitArgs(full), dest);
-        await git(checkoutArgs("FETCH_HEAD"), dest);
+        await git(["fetch", "origin", full], dest);
+        await git(["checkout", "--detach", "FETCH_HEAD"], dest);
       }
     } catch (error) {
       await rm(dest, { recursive: true, force: true }).catch(() => undefined);

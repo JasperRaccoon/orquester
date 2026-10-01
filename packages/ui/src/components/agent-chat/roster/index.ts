@@ -20,9 +20,6 @@ export type { AgentRosterRowProps, RosterMainRowProps } from "./AgentRosterRow";
 export { WorkflowGroup } from "./WorkflowGroup";
 
 export {
-  isActiveStatus,
-  isFinishedRow,
-  isLiveBackgroundRow,
   rosterRowTicks,
   rosterStatusVisual,
   selectRosterRows,
@@ -39,7 +36,6 @@ export {
 } from "../../../lib/agent-chat/roster.logic";
 
 export {
-  TOOL_PREFIX,
   agentActivityText,
   formatSubagentModelLabel,
   formatSubagentTokenCount,

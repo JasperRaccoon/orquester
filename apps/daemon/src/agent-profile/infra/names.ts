@@ -16,6 +16,20 @@ import { profileErrors } from "../errors.ts";
 
 export { isValidCommandName, isValidMcpServerName, isValidSkillName };
 
+export function uniqueName(name: string, taken: (candidate: string) => boolean): string {
+  for (let n = 2; ; n += 1) {
+    const candidate = `${name}-${n}`;
+    if (!taken(candidate)) return candidate;
+  }
+}
+
+export async function uniqueNameAsync(name: string, taken: (candidate: string) => Promise<boolean>): Promise<string> {
+  for (let n = 2; ; n += 1) {
+    const candidate = `${name}-${n}`;
+    if (!(await taken(candidate))) return candidate;
+  }
+}
+
 /** Throws `INVALID_NAME` unless `name` is a valid skill name (lowercase words joined by `-`, ≤ 64). */
 export function assertSkillName(name: string): void {
   if (!isValidSkillName(name)) {

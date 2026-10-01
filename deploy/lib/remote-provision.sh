@@ -1,7 +1,6 @@
 #!/usr/bin/env bash
 # Runs ON a fresh Ubuntu VPS as root (delivered by ./deploy.sh provision).
-# Mirrors AGENTS.md "First-time provisioning" steps 1-7. Idempotent: safe to
-# re-run after a partial failure. Inputs via env:
+# Idempotent: safe to re-run after a partial failure. Inputs via env:
 #   DOMAIN  (required) public domain — DNS A record must already point here
 #   REPO    (required) git clone URL
 #   BRANCH  default main

@@ -87,7 +87,7 @@ export function itemId(kind: ProfileItemKind, name: string): string {
  * calls the handler (`command`, `timeoutSec`, a `type`, …). Pass the same
  * normalized shape for a given agent every time — the id is a hash of it.
  */
-export interface HookIdentity {
+interface HookIdentity {
   matcher?: string | null;
   [field: string]: unknown;
 }

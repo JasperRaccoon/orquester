@@ -23,7 +23,7 @@ import { join } from "node:path";
 import { Transform } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import yauzl from "yauzl";
-import { isAgentProfileError, profileErrors } from "../errors.ts";
+import { AgentProfileError, profileErrors } from "../errors.ts";
 
 interface ZipLimits {
   maxEntries: number;
@@ -49,7 +49,7 @@ function zipEntrySegments(fileName: string): string[] {
 }
 
 /** Extracts `file` into the existing, empty directory `dest`. */
-export async function extractZip(file: string, dest: string, limits: ZipLimits): Promise<{ files: number }> {
+export async function extractZip(file: string, dest: string, limits: ZipLimits): Promise<void> {
   let zip: yauzl.ZipFile;
   try {
     zip = await yauzl.openPromise(file, {
@@ -67,7 +67,6 @@ export async function extractZip(file: string, dest: string, limits: ZipLimits):
     let entries = 0;
     let declared = 0;
     let inflated = 0;
-    let files = 0;
     for await (const entry of zip.eachEntry()) {
       entries += 1;
       if (entries > limits.maxEntries) refuse(`it has more than ${limits.maxEntries} entries.`);
@@ -98,11 +97,9 @@ export async function extractZip(file: string, dest: string, limits: ZipLimits):
       });
       const out = createWriteStream(join(dest, ...segments), { flags: "wx", mode: mode & 0o111 ? 0o755 : 0o644 });
       await pipeline(await zip.openReadStreamPromise(entry), counter, out);
-      files += 1;
     }
-    return { files };
   } catch (error) {
-    if (isAgentProfileError(error)) throw error;
+    if (error instanceof AgentProfileError) throw error;
     const code = (error as NodeJS.ErrnoException).code;
     if (code === "EEXIST" || code === "ENOTDIR") refuse("two entries share one path.");
     throw profileErrors.importFailed(`The zip file could not be extracted (${(error as Error).message}).`);

@@ -50,9 +50,9 @@ export const SLIM_MAX_STRING_BYTES = 16 * 1024;
 const utf8 = new TextEncoder();
 
 /**
- * Truncate to at most {@link SLIM_MAX_STRING_BYTES} UTF-8 bytes, never
- * splitting a surrogate pair. Returns the input by identity when it fits, so
- * the common case costs no allocation and no encode of the whole string.
+ * Cap the prefix at {@link SLIM_MAX_STRING_BYTES} UTF-8 bytes, then append an
+ * ellipsis without splitting a surrogate pair. Returns null when no truncation
+ * is needed; short strings need no allocation or encoding.
  */
 function capUtf8(value: string): string | null {
   // One UTF-16 unit is at most 3 UTF-8 bytes (a surrogate PAIR is 4 bytes for

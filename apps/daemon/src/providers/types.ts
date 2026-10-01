@@ -163,7 +163,7 @@ export const POLL_PAGE_SIZE = 50;
  * backs off on a rate limit). Still an `AccountError`, so routes map `.status`
  * as before.
  */
-export type GitRemoteErrorKind =
+type GitRemoteErrorKind =
   | "auth"
   | "missing_scope"
   | "rate_limited"

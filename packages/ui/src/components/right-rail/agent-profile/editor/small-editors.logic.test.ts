@@ -204,12 +204,12 @@ test("errors: the daemon's nested code and message; placement by code", () => {
     body: { error: { code: "ITEM_EXISTS", message: "An MCP server named jira already exists" } }
   };
   const info = profileError(apiError);
-  assert.deepEqual(info, { code: "ITEM_EXISTS", status: 409, message: "An MCP server named jira already exists" });
+  assert.deepEqual(info, { code: "ITEM_EXISTS", message: "An MCP server named jira already exists" });
   assert.equal(profileErrorPlacement(info), "exists");
-  assert.equal(profileErrorPlacement({ code: "INVALID_NAME", status: 400, message: "" }), "name");
-  assert.equal(profileErrorPlacement({ code: "PROFILE_CONFLICT", status: 409, message: "" }), "changed");
-  assert.equal(profileErrorPlacement({ code: "AGENT_CLI_FAILED", status: 502, message: "" }), "general");
-  assert.deepEqual(profileError(new Error("offline")), { code: null, status: null, message: "offline" });
+  assert.equal(profileErrorPlacement({ code: "INVALID_NAME", message: "" }), "name");
+  assert.equal(profileErrorPlacement({ code: "PROFILE_CONFLICT", message: "" }), "changed");
+  assert.equal(profileErrorPlacement({ code: "AGENT_CLI_FAILED", message: "" }), "general");
+  assert.deepEqual(profileError(new Error("offline")), { code: null, message: "offline" });
   assert.equal(isAbort({ name: "AbortError" }), true);
   assert.equal(isAbort(new Error("x")), false);
 });

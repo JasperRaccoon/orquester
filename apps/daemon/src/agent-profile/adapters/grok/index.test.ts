@@ -5,7 +5,7 @@ import { join } from "node:path";
 import test from "node:test";
 import type { ProfileItem } from "@orquester/api";
 import { agentProfileBackupsDir, agentProfileStashDir } from "@orquester/config";
-import { isAgentProfileError } from "../../errors.ts";
+import { AgentProfileError } from "../../errors.ts";
 import { ProfileBackups, ProfileStash } from "../../infra/index.ts";
 import type { AgentHomes } from "../types.ts";
 import { GrokProfileAdapter } from "./index.ts";
@@ -242,7 +242,7 @@ async function item(fx: Fixture, id: string): Promise<ProfileItem> {
 
 async function rejects(promise: Promise<unknown>, code: string): Promise<void> {
   await assert.rejects(promise, (error: unknown) => {
-    assert.ok(isAgentProfileError(error), `not an AgentProfileError: ${String(error)}`);
+    assert.ok(error instanceof AgentProfileError, `not an AgentProfileError: ${String(error)}`);
     assert.equal(error.code, code, error.message);
     for (const secret of SECRETS) assert.ok(!error.message.includes(secret));
     return true;

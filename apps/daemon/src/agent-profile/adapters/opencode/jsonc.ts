@@ -38,7 +38,7 @@ export function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-export type JsoncParseResult = { ok: true; value: JsonObject } | { ok: false; error: string };
+type JsoncParseResult = { ok: true; value: JsonObject } | { ok: false; error: string };
 
 /** Line and column (1-based) of `offset` in `text`, for an error message. */
 function position(text: string, offset: number): string {

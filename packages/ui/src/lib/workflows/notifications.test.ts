@@ -108,6 +108,19 @@ describe("the notifications store", () => {
     assert.equal(state().toasts.length, 1);
   });
 
+  it("remembers the latest 500 distinct runs without refreshing repeated events", () => {
+    for (let index = 0; index < 500; index += 1) {
+      notifyWorkflowRunFinished(run({ id: `run-${index}` }), { viewing: true });
+    }
+    notifyWorkflowRunFinished(run({ id: "run-0" }), { viewing: true });
+    notifyWorkflowRunFinished(run({ id: "run-500" }), { viewing: true });
+
+    notifyWorkflowRunFinished(run({ id: "run-1" }));
+    assert.equal(state().toasts.length, 0, "the next oldest run is still remembered");
+    notifyWorkflowRunFinished(run({ id: "run-0" }));
+    assert.deepEqual(state().toasts.map((toast) => toast.runId), ["run-0"]);
+  });
+
   it("stays quiet for the run the user is looking at", () => {
     const view = {};
     setRunOnScreen(view, "run-1");

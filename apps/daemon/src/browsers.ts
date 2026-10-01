@@ -36,7 +36,7 @@ function isRetryableSandboxFailure(error: unknown): boolean {
   return /sandbox|target closed|protocol error|connection closed/i.test(msg);
 }
 
-export interface BrowserSink {
+interface BrowserSink {
   onFrame(jpeg: Buffer): void;
   onState(state: BrowserStateMessage): void;
   onPicked(payload: BrowserPickPayload): void;

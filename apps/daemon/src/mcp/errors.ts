@@ -61,8 +61,7 @@ export function daemonError(res: DaemonResponse, fallback?: { code: string; mess
 }
 
 /** The body of a successful response, or a ToolError for a failed one. */
-export function expectOk<T = unknown>(res: DaemonResponse, what: string): T {
-  if (res.status >= 400) throw daemonError(res, undefined);
-  void what;
+export function expectOk<T = unknown>(res: DaemonResponse): T {
+  if (res.status >= 400) throw daemonError(res);
   return res.body as T;
 }

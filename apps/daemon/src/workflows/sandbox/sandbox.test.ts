@@ -46,12 +46,9 @@ function waitOpts(signal: AbortSignal = new AbortController().signal, deadlineMs
   return { deadlineAt: new Date(Date.now() + deadlineMs), signal };
 }
 
-async function run(
-  req: SandboxSpawnRequest,
-  using = runner
-): Promise<{ exit: SandboxExitDetail; handle: SandboxHandle; stdout: string; stderr: string }> {
-  const handle = await using.spawn(req);
-  const exit = await using.wait(handle, waitOpts());
+async function run(req: SandboxSpawnRequest): Promise<{ exit: SandboxExitDetail; handle: SandboxHandle; stdout: string; stderr: string }> {
+  const handle = await runner.spawn(req);
+  const exit = await runner.wait(handle, waitOpts());
   const stdout = await readFile(join(req.attemptDir, "stdout.log"), "utf8").catch(() => "");
   const stderr = await readFile(join(req.attemptDir, "stderr.log"), "utf8").catch(() => "");
   return { exit, handle, stdout, stderr };
@@ -104,11 +101,12 @@ describe("code blocks", () => {
   });
 
   test("stop() ends the run as stopped, with its reason, even from a promise chain", async () => {
-    const { exit } = await code(
-      "export default async ({ stop }) => { await Promise.resolve(); try { stop('nothing to do'); } catch {} return 'not reached'; }"
+    const { exit, stdout } = await code(
+      "export default async ({ stop, log }) => { await Promise.resolve(); try { stop('nothing to do'); } catch { log('caught'); } finally { log('continued'); } return 'not reached'; }"
     );
-    assert.deepEqual(exit.result, { stop: true, reason: "nothing to do" }, "stop() wins even when its throw is swallowed");
+    assert.deepEqual(exit.result, { stop: true, reason: "nothing to do" }, "stop() records its reason");
     assert.equal(exit.code, 0, "a stop is not a crash");
+    assert.equal(stdout, "", "stop() exits before catch or finally can continue the block");
   });
 
   test("require resolves the project's own node_modules", async () => {
@@ -198,8 +196,7 @@ describe("shell blocks", () => {
           source: "env",
           attemptDir: await freshDir(),
           env: { FOO: "bar", [AGENT_LAUNCH_ENV_VAR]: "spoofed", ORQUESTER_WORKFLOW_RUN_ID: "spoofed" }
-        }),
-        runner
+        })
       );
       const env = new Map(
         stdout

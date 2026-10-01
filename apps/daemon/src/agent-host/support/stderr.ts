@@ -17,7 +17,7 @@
 const STDERR_TAIL_BYTES = 4096;
 
 /** What one classified stderr line becomes. */
-export type StderrLineClass = "drop" | "warning" | "error";
+type StderrLineClass = "drop" | "warning" | "error";
 
 export interface ClassifiedStderrLine {
   /** The line, ANSI-stripped and redacted. */
@@ -67,7 +67,7 @@ const BEARER_RE = /\bBearer\s+[A-Za-z0-9._~+/-]+=*/gi;
 const TOKEN_SHAPE_RE =
   /\b(?:sk-[A-Za-z0-9_-]{8,}|gh[pousr]_[A-Za-z0-9]{16,}|xox[abprs]-[A-Za-z0-9-]{8,})/g;
 
-export interface RedactOptions {
+interface RedactOptions {
   /**
    * Absolute home paths collapsed to `~`. Longest first, so a nested home is
    * not half-replaced by its parent.
@@ -201,7 +201,7 @@ const DEFAULT_FATAL_SNIPPETS: readonly string[] = [
 const SUBERROR_LEVEL_RE = /\b(?:TRACE|DEBUG|INFO|NOTICE|VERBOSE)\b/;
 const ERROR_LEVEL_RE = /\b(?:ERROR|FATAL|CRITICAL)\b/;
 
-export interface ClassifyOptions extends RedactOptions {
+interface ClassifyOptions extends RedactOptions {
   benignSnippets?: readonly string[];
   fatalSnippets?: readonly string[];
 }

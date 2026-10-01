@@ -66,7 +66,6 @@ import { CodexRpcError } from "../../../agent-host/adapters/codex/protocol.ts";
 import { profileErrors } from "../../errors.ts";
 import {
   type ProfileBackups,
-  type ProfileStash,
   SKILL_FILE,
   assertSkillName,
   contentHash,
@@ -81,6 +80,8 @@ import {
   resolveWriteTarget,
   scanCommands,
   scanSkills,
+  uniqueName,
+  uniqueNameAsync,
   writeProfileFile,
   writeProfileFileVerified,
   writeSkill
@@ -143,7 +144,6 @@ const LABEL = "Codex";
 
 interface CodexProfileAdapterDeps {
   backups: ProfileBackups;
-  stash: ProfileStash;
   configClient?: CodexConfigClientFactory;
 }
 
@@ -312,8 +312,7 @@ export class CodexProfileAdapter implements ProfileAdapter {
     this.client ??= (this.deps.configClient ?? createCodexAppServerClient)({
       bin,
       codexHome: this.codexHome,
-      home: this.ctx.homes.home,
-      logger: this.ctx.logger
+      home: this.ctx.homes.home
     });
     return this.client;
   }
@@ -1260,14 +1259,13 @@ export class CodexProfileAdapter implements ProfileAdapter {
   private async mutateHooks(
     loaded: Loaded,
     edit: (doc: CodexHooksDocument) => { handler?: CodexHookHandler; state?: HookStateEntry }
-  ): Promise<{ position?: HookPosition; entries: CodexHookEntry[] }> {
+  ): Promise<CodexHookEntry[]> {
     const config = this.requireConfig(loaded);
     if (loaded.hooksDoc === null) {
       throw profileErrors.unreadable(this.hooksPath, loaded.hooksError ?? "it does not parse");
     }
     const doc = loaded.hooksDoc;
-    const before = loaded.hookEntries;
-    const oldPositions = new Map<CodexHookHandler, string>(before.map((entry) => [entry.handler, hookPositionId(entry)]));
+    const oldPositions = new Map<CodexHookHandler, string>(loaded.hookEntries.map((entry) => [entry.handler, hookPositionId(entry)]));
     const { handler: fresh, state: freshState } = edit(doc);
     const after = listHookEntries(doc);
     const moved = new Map<string, HookPosition>();
@@ -1277,7 +1275,6 @@ export class CodexProfileAdapter implements ProfileAdapter {
     }
     const position = fresh !== undefined ? after.find((entry) => entry.handler === fresh) : undefined;
     const { write, remove } = rekeyHookState({
-      before,
       after,
       moved,
       state: this.hookState(config),
@@ -1315,11 +1312,10 @@ export class CodexProfileAdapter implements ProfileAdapter {
       }
       throw error;
     }
-    return { ...(position !== undefined ? { position } : {}), entries: after };
+    return after;
   }
 
-  private newHookId(entries: CodexHookEntry[], handler: CodexHookHandler | undefined): string[] {
-    if (handler === undefined) return [];
+  private newHookId(entries: CodexHookEntry[], handler: CodexHookHandler): string[] {
     const index = entries.findIndex((entry) => entry.handler === handler);
     return index === -1 ? [] : [hookEntryIds(entries)[index]];
   }
@@ -1341,11 +1337,11 @@ export class CodexProfileAdapter implements ProfileAdapter {
     }
     const trusted = codexHookHash(snake, hook.handler, hook.matcher);
     const handler = hook.handler;
-    const result = await this.mutateHooks(loaded, (doc) => {
+    const entries = await this.mutateHooks(loaded, (doc) => {
       this.insertGroup(doc, hook.event, hook.matcher, handler);
       return { handler, state: { enabled: true, ...(trusted !== null ? { trusted_hash: trusted } : {}) } };
     });
-    return { itemIds: this.newHookId(result.entries, handler), notes: [] };
+    return { itemIds: this.newHookId(entries, handler), notes: [] };
   }
 
   private async updateHook(
@@ -1365,7 +1361,7 @@ export class CodexProfileAdapter implements ProfileAdapter {
     const trusted = codexHookHash(eventSnake(hook.event), handler, hook.matcher);
     const state: HookStateEntry = { enabled: item.enabled, ...(trusted !== null ? { trusted_hash: trusted } : {}) };
     const samePlace = hook.event === entry.event && (hook.matcher ?? "") === (entry.matcher ?? "");
-    const result = await this.mutateHooks(loaded, (doc) => {
+    const entries = await this.mutateHooks(loaded, (doc) => {
       if (samePlace) {
         const handlers = doc.hooks[entry.event][entry.groupIndex].hooks as CodexHookHandler[];
         handlers[entry.handlerIndex] = handler;
@@ -1375,7 +1371,7 @@ export class CodexProfileAdapter implements ProfileAdapter {
       }
       return { handler, state };
     });
-    return { itemIds: this.newHookId(result.entries, handler), notes: [] };
+    return { itemIds: this.newHookId(entries, handler), notes: [] };
   }
 
   /** Writes one field of every path's state entry for `entry` (no re-keying: nothing moves). */
@@ -1714,20 +1710,6 @@ function parseDocumentOrUnreadable(path: string, text: string): { frontmatter: R
     return { frontmatter, body };
   } catch (error) {
     throw profileErrors.unreadable(path, message(error));
-  }
-}
-
-function uniqueName(name: string, taken: (candidate: string) => boolean): string {
-  for (let n = 2; ; n += 1) {
-    const candidate = `${name}-${n}`;
-    if (!taken(candidate)) return candidate;
-  }
-}
-
-async function uniqueNameAsync(name: string, taken: (candidate: string) => Promise<boolean>): Promise<string> {
-  for (let n = 2; ; n += 1) {
-    const candidate = `${name}-${n}`;
-    if (!(await taken(candidate))) return candidate;
   }
 }
 

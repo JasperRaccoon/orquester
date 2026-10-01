@@ -1,14 +1,8 @@
 /** Shared infrastructure for native agent configuration files. */
 
-export {
-  PROFILE_BACKUPS_KEEP,
-  ProfileBackups,
-  type ProfileBackupsOptions
-} from "./backups.ts";
+export { ProfileBackups } from "./backups.ts";
 export {
   type AgentCliResult,
-  type AgentCliRun,
-  type RedactCliOutputOptions,
   buildAgentCliEnv,
   redactCliOutput,
   runAgentCli,
@@ -22,9 +16,7 @@ export {
   serializeMarkdownDocument
 } from "./frontmatter.ts";
 export {
-  type ProfileWriteOptions,
   type ProfileWriteResult,
-  type VerifiedWriteOptions,
   readTextIfExists,
   removeProfilePath,
   resolveWriteTarget,
@@ -32,7 +24,6 @@ export {
   writeProfileFileVerified
 } from "./fs-write.ts";
 export {
-  type HookIdentity,
   contentHash,
   hookItemId,
   itemId,
@@ -41,7 +32,6 @@ export {
 } from "./hash.ts";
 export {
   SKILL_FILE,
-  type MarkdownWriteOptions,
   type ScannedCommand,
   type ScannedSkill,
   readSkillFiles,
@@ -58,14 +48,10 @@ export {
   assertSkillName,
   isValidCommandName,
   isValidMcpServerName,
-  isValidSkillName
+  isValidSkillName,
+  uniqueName,
+  uniqueNameAsync
 } from "./names.ts";
-export {
-  type ProfileStashOptions,
-  type StashEntry,
-  type StashManifest,
-  type StashOriginal,
-  ProfileStash
-} from "./stash.ts";
-export { type CopyResult, type PathKind, copyTree, pathKind } from "./tree.ts";
+export { type StashEntry, ProfileStash } from "./stash.ts";
+export { copyTree, pathKind } from "./tree.ts";
 export { SecretDigester } from "./secret-digest.ts";

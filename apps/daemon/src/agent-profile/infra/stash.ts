@@ -25,13 +25,13 @@ import { assertSafeSegment } from "./names.ts";
 import { moveEntry, pathKind } from "./tree.ts";
 
 /** Where the item goes back to on "on". */
-export type StashOriginal =
+type StashOriginal =
   | { type: "path"; path: string }
   /** A hook entry: the adapter's own JSON (the handler plus where it came from — event, matcher). */
   | { type: "fragment"; data: unknown };
 
 /** `manifest.json`, as written. */
-export interface StashManifest {
+interface StashManifest {
   version: 1;
   agent: string;
   kind: ProfileItemKind;
@@ -52,7 +52,7 @@ export interface StashEntry extends StashManifest {
   payloadPath: string | null;
 }
 
-export interface ProfileStashOptions {
+interface ProfileStashOptions {
   /** `agentProfileStashDir(appdir)`. */
   dir: string;
   now?: () => Date;

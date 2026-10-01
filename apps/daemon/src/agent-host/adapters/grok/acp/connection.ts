@@ -71,7 +71,6 @@ export class AcpConnection {
   private readonly child: ProviderChild;
   private readonly stderr: StderrCapture;
   private readonly options: AcpConnectionOptions;
-  private hostInitiatedStop = false;
   private exitSeen = false;
 
   private constructor(options: AcpConnectionOptions, child: ProviderChild, peer: AcpPeer, stderr: StderrCapture) {
@@ -164,15 +163,8 @@ export class AcpConnection {
     return initialize;
   }
 
-  /**
-   * Stop the child. The exit that follows is `graceful` whatever the code,
-   * because the host asked for it — `14-sigterm-mid-prompt.ndjson` shows the
-   * CLI installing its own SIGTERM handler and exiting **143 with
-   * `signal: null`**, so a supervisor keying on `signal === "SIGTERM"`
-   * misclassifies every clean stop.
-   */
+  /** Stop the child; the owning session classifies intentional exits. */
   async stop(): Promise<void> {
-    this.hostInitiatedStop = true;
     await this.child.kill("SIGTERM");
   }
 

@@ -93,7 +93,7 @@ function FileList({ files }: { files: readonly CheckpointFile[] }): React.ReactE
   );
 }
 
-export interface CheckpointCardViewProps {
+interface CheckpointCardViewProps {
   entry: CheckpointEntry;
   /** Docked beside the chat, or on a phone (finger-sized controls). */
   variant: "docked" | "sheet";
@@ -115,7 +115,7 @@ export interface CheckpointCardViewProps {
  * files, View diff, and "Rewind to here" on the prompt that started it (the
  * conversation-only rewind: files stay as they are).
  */
-export function CheckpointCardView(props: CheckpointCardViewProps): React.ReactElement {
+function CheckpointCardView(props: CheckpointCardViewProps): React.ReactElement {
   const { entry, expanded } = props;
   const sheet = props.variant === "sheet";
   return (

@@ -46,7 +46,7 @@ const LEFTOVER_WORK_SESSIONS = 64;
 const LEFTOVER_WORK_VERSION = 1;
 
 /** One launch's recorded task sessions. */
-export interface LeftoverLaunch {
+interface LeftoverLaunch {
   /** The value its launch env gave the marker (`ORQUESTER_AGENT_LAUNCH`). */
   readonly launchId: string;
   /** When it was last recorded (ISO): informational only. */

@@ -71,7 +71,7 @@ function applyClaudeProjectTrust(
       : {};
   const existing =
     projects[projectDir] && typeof projects[projectDir] === "object" && !Array.isArray(projects[projectDir])
-      ? { ...(projects[projectDir] as Record<string, unknown>) }
+      ? projects[projectDir] as Record<string, unknown>
       : {};
   const alreadyTrusted =
     existing.hasTrustDialogAccepted === true &&

@@ -49,7 +49,6 @@ export class HostUnavailableError extends Error {
 
 export interface HostStream {
   status: number;
-  headers: Record<string, string | string[] | undefined>;
   body: IncomingMessage;
   /** Tear the upstream down (client disconnect, backpressure overflow). */
   abort(): void;
@@ -60,7 +59,6 @@ export interface HostJsonResponse<T> {
   /** Parsed body, or null when the body was empty or not JSON. */
   value: T | null;
   raw: string;
-  headers: Record<string, string | string[] | undefined>;
 }
 
 export interface AgentHostClientOptions {
@@ -131,7 +129,6 @@ export class AgentHostClient {
         req.setTimeout(0);
         resolve({
           status: res.statusCode ?? 502,
-          headers: res.headers,
           body: res,
           abort: () => {
             res.destroy();
@@ -227,6 +224,6 @@ export class AgentHostClient {
         value = null;
       }
     }
-    return { status: stream.status, value, raw, headers: stream.headers };
+    return { status: stream.status, value, raw };
   }
 }

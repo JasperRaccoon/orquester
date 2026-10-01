@@ -23,7 +23,7 @@ function isStringOrNull(value: unknown): value is string | null {
   return value === null || typeof value === "string";
 }
 
-export function isDesktopWindow(value: unknown): value is DesktopWindow {
+function isDesktopWindow(value: unknown): value is DesktopWindow {
   return (
     isRecord(value) &&
     typeof value.id === "string" &&
@@ -34,7 +34,7 @@ export function isDesktopWindow(value: unknown): value is DesktopWindow {
   );
 }
 
-export function isDesktopApp(value: unknown): value is DesktopAppSummary {
+function isDesktopApp(value: unknown): value is DesktopAppSummary {
   return (
     isRecord(value) &&
     typeof value.id === "string" &&

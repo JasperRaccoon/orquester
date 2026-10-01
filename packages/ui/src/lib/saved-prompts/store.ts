@@ -426,7 +426,7 @@ export function loadSavedPrompts(
 }
 
 /** Refresh every scope this client has asked for — after a failed change, which may mean the copy is wrong. */
-export function reloadSavedPrompts(api: SavedPromptsApi): Promise<void> {
+function reloadSavedPrompts(api: SavedPromptsApi): Promise<void> {
   const keys = Object.keys(getState().loads);
   return Promise.all(
     keys.map((key) =>

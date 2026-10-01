@@ -21,7 +21,7 @@ const getUsage = defineTool({
   input: { refresh: z.boolean().default(false).describe("Ask the daemon to re-fetch before answering.") },
   annotations: READ_ONLY,
   async run(args, { api, now }) {
-    const usage = expectOk<UsageResponse>(await api.request("GET", "/api/usage", args.refresh ? { query: { refresh: "1" } } : undefined), "usage");
+    const usage = expectOk<UsageResponse>(await api.request("GET", "/api/usage", args.refresh ? { query: { refresh: "1" } } : undefined));
     const accountsRes = await api.request("GET", "/api/agent-accounts");
     const accounts = accountsRes.status < 400 ? (accountsRes.body as AgentAccountsResponse).accounts ?? [] : [];
     return usageView(usage, accounts, now()) as unknown as Record<string, unknown>;
@@ -35,7 +35,7 @@ const getCost = defineTool({
   input: { days: z.number().int().min(1).max(90).default(7).describe("How many UTC days back, including today.") },
   annotations: READ_ONLY,
   async run(args, { api, now }) {
-    const res = expectOk<UsageTokensResponse>(await api.request("GET", "/api/usage/tokens"), "cost");
+    const res = expectOk<UsageTokensResponse>(await api.request("GET", "/api/usage/tokens"));
     const today = new Date(now());
     const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - (args.days - 1))).toISOString().slice(0, 10);
     // Newest day first, so a cut below takes the oldest days; the daemon's order within a day is kept.

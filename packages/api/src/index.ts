@@ -44,15 +44,6 @@ export type {
   AgentChatThreadSessionStatus
 };
 
-export interface ApiEnvelope<T> {
-  data: T;
-}
-
-export interface ApiErrorPayload {
-  code: string;
-  message: string;
-}
-
 export interface HealthResponse {
   ok: true;
 }
@@ -836,22 +827,6 @@ export interface AuthInfoResponse {
   requiresUsername: boolean;
 }
 
-/** A pluggable coding agent the daemon detected on the host. */
-export interface AgentSummary {
-  id: string;
-  name: string;
-  installed: boolean;
-  version?: string;
-}
-
-/** An editor/IDE or OS tool a project folder can be opened with. */
-export interface OpenTargetSummary {
-  id: string;
-  name: string;
-  kind: "ide" | "explorer" | "terminal";
-  available: boolean;
-}
-
 // Registry — shells & agents share the same shape.
 
 /**
@@ -1460,10 +1435,6 @@ export interface EventMessage<TPayload = unknown> {
   type: string;
   createdAt: string;
   payload: TPayload;
-}
-
-export interface SubscriptionRequest {
-  channels: string[];
 }
 
 // System status — host observability for a headless VPS. Linux-only (everything

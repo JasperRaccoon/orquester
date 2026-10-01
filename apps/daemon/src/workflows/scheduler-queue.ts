@@ -21,7 +21,7 @@ export interface SlotPool {
 export function createSlotPool(size: number): SlotPool {
   const cap = Math.max(1, Math.floor(size));
   let held = 0;
-  const queue: { resolve: (release: () => void) => void; reject: (error: Error) => void; signal: AbortSignal; onAbort: () => void }[] = [];
+  const queue: { resolve: (release: () => void) => void; signal: AbortSignal; onAbort: () => void }[] = [];
 
   const makeRelease = (): (() => void) => {
     let released = false;
@@ -52,7 +52,6 @@ export function createSlotPool(size: number): SlotPool {
       return new Promise<() => void>((resolve, reject) => {
         const entry = {
           resolve,
-          reject,
           signal,
           onAbort: () => {
             const index = queue.indexOf(entry);

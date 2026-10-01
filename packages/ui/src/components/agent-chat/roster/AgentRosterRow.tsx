@@ -17,11 +17,12 @@
 import React from "react";
 import { Bot, Check, ChevronRight, Repeat, Target, Terminal } from "lucide-react";
 import type { RuntimeSubagent } from "@orquester/api/agent-chat";
+import { isTerminalSubagentStatus } from "../../../lib/agent-chat/roster.logic";
 import { cn } from "../../../lib/cn";
 import { ElapsedTicker, StatusDot } from "../primitives";
 import type { ChatTone } from "../primitives/tone";
 import { agentActivityText, rosterRoleChip, rosterRowMetrics } from "./format";
-import { isFinishedRow, rosterRowTicks, rosterRowVisual, rosterStatusVisual } from "./roster-rows";
+import { rosterRowTicks, rosterRowVisual, rosterStatusVisual } from "./roster-rows";
 
 /**
  * The identity glyph: a bot for an agent, and for the two rows that drive work
@@ -89,7 +90,7 @@ export function AgentRosterRow({
         "hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1",
         "focus-visible:ring-inset focus-visible:ring-neutral-500",
         active && "bg-neutral-800",
-        fading ? "pointer-events-none opacity-0" : isFinishedRow(agent) && "opacity-70 hover:opacity-100"
+        fading ? "pointer-events-none opacity-0" : isTerminalSubagentStatus(agent.status) && "opacity-70 hover:opacity-100"
       )}
     >
       <span className="col-start-1 row-start-1 flex items-center">
@@ -180,7 +181,7 @@ export function BackgroundShellRow({
         "hover:bg-neutral-800/40 focus:outline-none focus-visible:ring-1",
         "focus-visible:ring-inset focus-visible:ring-neutral-500",
         active && "bg-neutral-800",
-        fading ? "pointer-events-none opacity-0" : isFinishedRow(agent) && "opacity-70 hover:opacity-100"
+        fading ? "pointer-events-none opacity-0" : isTerminalSubagentStatus(agent.status) && "opacity-70 hover:opacity-100"
       )}
     >
       <span className="col-start-1 row-start-1 flex items-center">

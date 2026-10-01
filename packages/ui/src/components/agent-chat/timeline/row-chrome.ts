@@ -1,35 +1,14 @@
-/**
- * Row chrome the components own — the part of §7.3 that is not the shared
- * presentation resolver.
- *
- * **The resolver itself lives in `lib/agent-chat/presentation.logic.ts` and
- * there is exactly one of it** (fix-wave arbitration for R7-6). This file
- * holds only what has no counterpart there and never will: helpers whose
- * output is a class name, a glyph name or a re-shaped row rather than a
- * decision about an entry. Nothing here duplicates a function in that module —
- * if you are about to add one, add it there instead.
- */
+/** Timeline-specific notices, lifecycle detail joining and message formatting. */
 
 import { IDENTITY_CHANGED_ACTIVITY_KIND } from "@orquester/api/agent-chat";
 
-import type { ToolGroupSummaryKind, WorkLogEntry } from "../../../lib/agent-chat/contracts";
+import type { WorkLogEntry } from "../../../lib/agent-chat/contracts";
 import { skillMentionsInText } from "../composer/composer-menu";
 import {
   isStreamedOutputEntry,
-  toolGroupSummaryIconName,
   type WorkEntryIconName
 } from "../../../lib/agent-chat/presentation.logic";
 import { escapeRegExp } from "../../../lib/regexp";
-
-/**
- * Absorbed by W11 into the one resolver (fix-wave R7-6) and re-exported here
- * only so existing imports keep resolving. **These are not second copies** —
- * there is exactly one implementation, in `presentation.logic.ts`.
- */
-export {
-  showDestructiveRowStyle,
-  workEntryIsActiveTurnActivity
-} from "../../../lib/agent-chat/presentation.logic";
 
 /**
  * Glyph names the timeline adds on top of the shared union: a compaction
@@ -37,11 +16,6 @@ export {
  * neither belongs in the resolver's icon vocabulary.
  */
 export type RowGlyphName = WorkEntryIconName | "minimize-2" | "shuffle";
-
-/** The "+N more" row carries the contract's five-arm kind, not the resolver's. */
-export function summaryKindIconName(kind: ToolGroupSummaryKind): WorkEntryIconName {
-  return toolGroupSummaryIconName(kind);
-}
 
 /** The inline "the model you asked for was not the model that ran" notice (§7.3). */
 export function workEntryIsRerouteNotice(entry: WorkLogEntry): boolean {

@@ -96,7 +96,7 @@ const WindowPill: React.FC<{
   );
 };
 
-export const DesktopWindows: React.FC<{
+const DesktopWindows: React.FC<{
   desktop: DesktopSummary;
   narrow: boolean;
   onAction: (win: DesktopWindow, action: DesktopWindowAction) => void;
@@ -182,14 +182,14 @@ export const DesktopWindows: React.FC<{
 // Sound
 // ---------------------------------------------------------------------------
 
-export function audioUnavailableReason(desktop: DesktopSummary, audio: DesktopAudioState): string | null {
+function audioUnavailableReason(desktop: DesktopSummary, audio: DesktopAudioState): string | null {
   if (desktop.audio === "unavailable") return "Sound is unavailable for this desktop (no PulseAudio or ffmpeg on the host)";
   if (audio.decoder === "none") return "This browser can't decode the desktop's Opus audio";
   if (audio.serverState?.audio === "unavailable") return audio.serverState.reason ?? "The desktop's audio stream is unavailable";
   return null;
 }
 
-export const DesktopSound: React.FC<{
+const DesktopSound: React.FC<{
   desktop: DesktopSummary;
   audio: DesktopAudioState;
   prefs: DesktopPrefs;
@@ -251,7 +251,7 @@ export const DesktopSound: React.FC<{
 // View
 // ---------------------------------------------------------------------------
 
-export const DesktopViewMenu: React.FC<{
+const DesktopViewMenu: React.FC<{
   prefs: DesktopPrefs;
   onPrefs: (patch: Partial<DesktopPrefs>) => void;
 }> = ({ prefs, onPrefs }) => {
@@ -306,7 +306,7 @@ export const DesktopViewMenu: React.FC<{
 // Clipboard
 // ---------------------------------------------------------------------------
 
-export const DesktopClipboard: React.FC<{
+const DesktopClipboard: React.FC<{
   remoteText: string | null;
   connected: boolean;
   onSend: (text: string) => void;

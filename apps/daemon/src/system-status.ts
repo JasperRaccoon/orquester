@@ -99,7 +99,7 @@ export interface SystemStatusOptions {
 }
 
 /** A `/proc/<pid>` snapshot row. */
-export interface ProcSnapshot {
+interface ProcSnapshot {
   pid: number;
   ppid: number;
   name: string;
@@ -110,7 +110,7 @@ export interface ProcSnapshot {
 }
 
 /** Aggregate jiffies of the `cpu ` line of /proc/stat. */
-export interface CpuSample {
+interface CpuSample {
   total: number;
   idle: number;
 }
@@ -514,7 +514,7 @@ interface TreeSnapshot {
   tree: Map<number, string | undefined>;
 }
 
-export type KillResult =
+type KillResult =
   | { ok: true; killed: number }
   | { ok: false; code: KillProcessErrorCode; error: string };
 
@@ -981,7 +981,7 @@ async function snapshotProcs(): Promise<Map<number, ProcSnapshot>> {
   return procs;
 }
 
-export interface SocketOwner {
+interface SocketOwner {
   pid: number;
   processName: string;
   sessionId: string | undefined;

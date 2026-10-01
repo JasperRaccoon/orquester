@@ -10,7 +10,7 @@ import { barWidth, formatBytes, formatPercent } from "./system-format";
  * is *unknown* — the bar stays empty and the number is an em-dash, which must
  * read differently from a genuine 0%.
  */
-export const ResourceRow: React.FC<{
+const ResourceRow: React.FC<{
   icon: React.ReactNode;
   label: string;
   percent: number | null;

@@ -6,8 +6,10 @@ import { dirname, join } from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
 import { crc32, deflateRawSync } from "node:zlib";
-import { isAgentProfileError } from "./errors.ts";
-import { type GitCloneFn, ProfileImportStore, type ProfileImportStoreOptions, gitClone, parseGitImportUrl } from "./import.ts";
+import { AgentProfileError } from "./errors.ts";
+import { ProfileImportStore, type ProfileImportStoreOptions } from "./import.ts";
+import { type GitCloneFn, gitClone } from "./import/git-clone.ts";
+import { parseGitImportUrl } from "./import/git-url.ts";
 import { parseMarkdownDocument, serializeMarkdownDocument } from "./infra/index.ts";
 
 const execFileAsync = promisify(execFile);
@@ -91,7 +93,7 @@ async function makeFixture(root: string): Promise<string> {
 
 function expectCode(code: string): (error: unknown) => boolean {
   return (error: unknown) => {
-    assert.ok(isAgentProfileError(error), `an AgentProfileError, got ${String(error)}`);
+    assert.ok(error instanceof AgentProfileError, `an AgentProfileError, got ${String(error)}`);
     assert.equal(error.code, code, error.message);
     return true;
   };
@@ -248,7 +250,7 @@ test("git URLs: refused forms", () => {
     assert.throws(() => parseGitImportUrl(url), expectCode("IMPORT_FAILED"), url);
   }
   assert.throws(() => parseGitImportUrl("https://user:hunter2@github.com/a/b"), (error: unknown) => {
-    assert.ok(isAgentProfileError(error));
+    assert.ok(error instanceof AgentProfileError);
     assert.ok(!error.message.includes("hunter2"), "the credential is not echoed");
     return true;
   });
@@ -302,7 +304,7 @@ test("a tree URL clones the repo at the ref and scans only the folder", async (t
 
   await assert.rejects(store.scanGit("claude", "https://github.com/acme/skills/tree/main/nope"), expectCode("IMPORT_FAILED"));
   await assert.rejects(store.scanGit("claude", "https://github.com/acme/skills/tree/main/skills/alias"), (error: unknown) => {
-    assert.ok(isAgentProfileError(error));
+    assert.ok(error instanceof AgentProfileError);
     assert.match(error.message, /symlink/);
     return true;
   });
@@ -332,7 +334,7 @@ test("a failed clone is an IMPORT_FAILED and leaves nothing behind", async (t) =
     }
   });
   await assert.rejects(store.scanGit("claude", "https://github.com/a/private"), (error: unknown) => {
-    assert.ok(isAgentProfileError(error));
+    assert.ok(error instanceof AgentProfileError);
     assert.equal(error.code, "IMPORT_FAILED");
     return true;
   });
@@ -345,7 +347,7 @@ test("an empty scan is a 400 IMPORT_FAILED and removes the clone", async (t) => 
   await put(join(root, "repo", "README.md"), "nothing\n");
   const { store, dir } = await scratch(t, { fixture: join(root, "repo") });
   await assert.rejects(store.scanGit("claude", "https://github.com/a/b"), (error: unknown) => {
-    assert.ok(isAgentProfileError(error));
+    assert.ok(error instanceof AgentProfileError);
     assert.equal(error.status, 400);
     assert.equal(error.code, "IMPORT_FAILED");
     return true;
@@ -363,7 +365,7 @@ test("a checkout over 50 MB is refused and removed", async (t) => {
     }
   });
   await assert.rejects(store.scanGit("claude", "https://github.com/a/big"), (error: unknown) => {
-    assert.ok(isAgentProfileError(error));
+    assert.ok(error instanceof AgentProfileError);
     assert.equal(error.code, "IMPORT_FAILED");
     return true;
   });
@@ -629,13 +631,13 @@ test("upload: zip entry and size caps", async (t) => {
   const skill = { name: "s/SKILL.md", data: skillText({ name: "s", description: "S" }) };
   const many = await writeUpload(root, "many.zip", makeZip([skill, { name: "a" }, { name: "b" }, { name: "c" }]));
   await assert.rejects(store.scanUpload("claude", "many.zip", many), (error: unknown) => {
-    assert.ok(isAgentProfileError(error));
+    assert.ok(error instanceof AgentProfileError);
     assert.equal(error.code, "IMPORT_FAILED");
     return true;
   });
   const big = await writeUpload(root, "big.zip", makeZip([skill, { name: "s/blob", data: Buffer.alloc(2000), deflate: true }]));
   await assert.rejects(store.scanUpload("claude", "big.zip", big), (error: unknown) => {
-    assert.ok(isAgentProfileError(error));
+    assert.ok(error instanceof AgentProfileError);
     assert.equal(error.code, "IMPORT_FAILED");
     return true;
   });
@@ -656,7 +658,7 @@ test("upload: the default caps are 5000 entries and 100 MB", async (t) => {
   for (let i = 0; i < 5000; i += 1) entries.push({ name: `d${i}/` });
   const many = await writeUpload(root, "many.zip", makeZip(entries));
   await assert.rejects(store.scanUpload("claude", "many.zip", many), (error: unknown) => {
-    assert.ok(isAgentProfileError(error));
+    assert.ok(error instanceof AgentProfileError);
     assert.equal(error.code, "IMPORT_FAILED");
     return true;
   });
@@ -665,7 +667,7 @@ test("upload: the default caps are 5000 entries and 100 MB", async (t) => {
   for (let i = 0; i < 11; i += 1) huge.push({ name: `blob${i}`, data: tenMb, deflate: true });
   const bomb = await writeUpload(root, "bomb.zip", makeZip(huge));
   await assert.rejects(store.scanUpload("claude", "bomb.zip", bomb), (error: unknown) => {
-    assert.ok(isAgentProfileError(error));
+    assert.ok(error instanceof AgentProfileError);
     assert.equal(error.code, "IMPORT_FAILED");
     return true;
   });

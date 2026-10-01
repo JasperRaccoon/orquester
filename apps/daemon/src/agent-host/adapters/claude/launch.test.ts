@@ -11,7 +11,6 @@ import type { ModelSelection, ProviderModel, RuntimeMode } from "@orquester/api/
 
 import {
   permissionResultForDecision,
-  shouldShortCircuitToAllow,
   toSessionPermissionUpdates
 } from "./decisions.ts";
 import {
@@ -284,13 +283,6 @@ describe("claude decisions — §4.3, every row of the Claude column", () => {
     assert.equal(decline.behavior, "deny");
     assert.equal(cancel.behavior, "deny");
     assert.notDeepEqual(decline, cancel);
-  });
-
-  it("only full-access short-circuits", () => {
-    assert.equal(shouldShortCircuitToAllow("full-access"), true);
-    for (const mode of ["approval-required", "auto-accept-edits", "auto"]) {
-      assert.equal(shouldShortCircuitToAllow(mode), false, mode);
-    }
   });
 });
 

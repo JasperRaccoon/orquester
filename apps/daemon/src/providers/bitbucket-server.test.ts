@@ -3,6 +3,7 @@ import test from "node:test";
 
 import { AccountError } from "../account-error";
 import { bitbucketServerProvider, serverVersionSupportsEd25519 } from "./bitbucket-server";
+import { GitRemoteError } from "./types";
 
 const ctx = { baseUrl: "https://bb.corp.com/bitbucket", sshHost: "bb.corp.com:7999" };
 
@@ -140,4 +141,40 @@ test("sshProbe uses the account sshHost and reports HTTPS-only when absent", () 
   assert.equal(probe.target, "git@bb.corp.com");
   assert.equal(probe.port, 7999);
   assert.equal(bitbucketServerProvider.sshProbe({ baseUrl: ctx.baseUrl, login: "jdoe" }), null);
+});
+
+test("SSH key uploads preserve manual fallback, duplicate and algorithm errors", async (t) => {
+  let status = 401;
+  let message = "rejected";
+  t.mock.method(globalThis, "fetch", async () => Response.json({ errors: [{ message }] }, { status }));
+  const upload = () => bitbucketServerProvider.uploadSshKey(
+    { token: "t", baseUrl: ctx.baseUrl },
+    { login: "me", name: "Me", email: "me@example.invalid" },
+    "ssh-ed25519 key",
+    "test"
+  );
+  for (status of [401, 403]) {
+    assert.deepEqual(await upload(), { manualUrl: `${ctx.baseUrl}/plugins/servlet/ssh/account/keys` });
+  }
+  for (const [httpStatus, detail, expected] of [
+    [409, "duplicate", /already registered/],
+    [400, "key algorithm rejected", /fall back to RSA-4096/]
+  ] as const) {
+    status = httpStatus;
+    message = detail;
+    await assert.rejects(upload(), (error: unknown) => {
+      assert.ok(error instanceof AccountError);
+      assert.equal(error.status, httpStatus);
+      assert.match(error.message, expected);
+      return true;
+    });
+  }
+  status = 500;
+  await assert.rejects(upload(), (error: unknown) => {
+    assert.ok(error instanceof GitRemoteError);
+    assert.equal(error.status, 502);
+    assert.equal(error.httpStatus, 500);
+    assert.equal(error.kind, "upstream");
+    return true;
+  });
 });

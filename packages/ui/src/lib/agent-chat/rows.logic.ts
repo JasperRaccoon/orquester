@@ -482,9 +482,6 @@ function foldKeysFrom(foldKeys: readonly (string | null)[], start: number): Read
   return keys;
 }
 
-/** *T3: `MessagesTimeline.logic.ts:614-620`.* */
-export { workEntryIsActiveTurnActivity };
-
 type WorkTimelineEntry = Extract<TimelineEntry, { kind: "work" }>;
 
 /**

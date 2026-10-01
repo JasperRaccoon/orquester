@@ -7,7 +7,7 @@ import { ToolError, daemonError, expectOk } from "./errors.ts";
 
 export async function listSessions(api: DaemonApi, projectPath?: string): Promise<SessionSummary[]> {
   const res = await api.request("GET", "/api/sessions", projectPath ? { query: { projectPath } } : undefined);
-  return expectOk<SessionSummary[]>(res, "sessions");
+  return expectOk<SessionSummary[]>(res);
 }
 
 export async function findSession(api: DaemonApi, sessionId: string): Promise<SessionSummary> {
@@ -26,7 +26,7 @@ export async function requireChatSession(api: DaemonApi, sessionId: string): Pro
 
 export async function readThread(api: DaemonApi, sessionId: string): Promise<ThreadSnapshotPayload> {
   const res = await api.request("GET", agentChatRoutes.thread(sessionId));
-  const body = expectOk<ThreadReadResponse | null>(res, "thread");
+  const body = expectOk<ThreadReadResponse | null>(res);
   if (body?.kind !== "snapshot") throw new ToolError("INTERNAL", "Expected a thread snapshot.");
   return body.thread;
 }
@@ -57,7 +57,7 @@ export async function sendCommand(api: DaemonApi, sessionId: string, name: Agent
       // The exception text can carry a host path: log it here, never hand it to the caller.
       console.error("[mcp] daemon call failed", error);
     }
-    if (res && res.status < 400) return expectOk<{ seq: number }>(res, name);
+    if (res && res.status < 400) return res.body as { seq: number };
     const failure = res ? daemonError(res) : new ToolError("HOST_UNAVAILABLE", "The daemon call failed.");
     if (failure.code !== "HOST_UNAVAILABLE" || attempt === RETRIES) throw failure;
   }

@@ -7,7 +7,7 @@
 
 import { watch } from "node:fs";
 import { dirname } from "node:path";
-import { mkdir, mkdtemp, realpath, rm, readdir, readFile, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -209,15 +209,6 @@ export async function boot(root: string, opts: BootOptions = {}): Promise<Booted
       await wf.stop();
       await Promise.all([service.flush(), secrets.flush(), runStore.flush(), state.flush()]);
       await app.close();
-      const evidence = await mkdtemp(join(tmpdir(), "orq-workflow-evidence-"));
-      const runs: unknown[] = [];
-      for (const entry of await readdir(workflowRunsDir(root), { withFileTypes: true })) {
-        if (!entry.isDirectory()) continue;
-        const record = await readFile(join(workflowRunsDir(root), entry.name, "run.json"), "utf8").catch(() => null);
-        if (record) runs.push(JSON.parse(record));
-      }
-      await writeFile(join(evidence, "results.json"), JSON.stringify({ runs, events }, null, 2));
-      console.info(`Workflow evidence: ${join(evidence, "results.json")}`);
     }
   };
 }

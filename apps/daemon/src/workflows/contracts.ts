@@ -1,29 +1,11 @@
-// Automated workflows — the daemon-internal seams (docs/superpowers/specs/2026-09-28-automated-workflows-design.md).
-//
-// Every module under apps/daemon/src/workflows/ talks to its neighbours ONLY through the interfaces
-// below, so the storage, the engine, the node executors, the agent block, the sandbox and the
-// triggers can be built and tested independently (each with fakes of the others).
-//
-//   routes.ts ──► WorkflowStore, SecretStore, WorkflowEngine
-//   triggers/ ──► TriggerHost (implemented by the engine)
-//   engine.ts ──► WorkflowStore, RunStore, SecretStore, NodeExecutors, EngineServices
-//   nodes/*   ──► NodeExecutionContext (+ EngineServices it carries)
-//   agent/*   ──► ChatClient (the daemon's own REST, in-process), UsageReader, AccountsReader, CooldownStore
-//   sandbox/  ──► SandboxRunner
-//
-// Rules that hold across all of them:
-//   - No module reaches a daemon service directly for agent sessions: agents are driven through
-//     `DaemonApi` (the MCP's seam) so every route gate applies.
-//   - Every wait is event- or timer-driven and resumable: a node persists its `WaitingOn` BEFORE the
-//     side effect it waits on (a command id minted and written before the POST).
-//   - Secret VALUES never reach a persisted artifact or a broadcast: `Redactor` is applied by the
-//     engine to outputs, errors, warnings and logs.
+// Internal workflow contracts. Agent sessions use DaemonApi so route gates apply.
+// Executors persist WaitingOn before side effects; the engine redacts outputs, errors,
+// warnings and logs before persistence or broadcast.
 
 import type { AgentAccountsResponse, UsageResponse } from "@orquester/api";
 import type {
   AccountSelectionDecision,
   AgentChainEntry,
-  AgentHop,
   ListWorkflowRunsResponse,
   RunWorkflowRequest,
   RunWorkflowResponse,
@@ -411,10 +393,7 @@ export interface PromptRenderer {
   savedPromptBody(promptId: string): { body: string; title: string } | null;
 }
 
-/**
- * The agent block's seam onto chat sessions. Implemented over `DaemonApi` (the daemon's own REST,
- * in-process, unix app) by agent/chat.ts; faked in tests.
- */
+/** The daemon API attached after the runtime's services have been created. */
 export interface ChatClient {
   readonly api: DaemonApi;
 }
@@ -436,6 +415,3 @@ export interface EngineServices {
   awaitRun(runId: string, signal: AbortSignal): Promise<WorkflowRunSummary & { finalOutput?: unknown }>;
   logger: WorkflowLogger;
 }
-
-/** Helpers the agent block reports hops with. */
-export type { AgentHop };

@@ -76,17 +76,6 @@ export class ManualClock implements Clock {
     };
   }
 
-  /** Timers not yet fired or cancelled. */
-  pendingTimers(): number {
-    return this.timers.filter((timer) => !timer.cancelled).length;
-  }
-
-  /** The next due instant, or null. */
-  nextAt(): number | null {
-    const live = this.timers.filter((timer) => !timer.cancelled);
-    return live.length === 0 ? null : Math.min(...live.map((timer) => timer.at));
-  }
-
   /** Move time forward by `ms`, firing every timer due on the way (and those they arm within the window). */
   async advance(ms: number): Promise<void> {
     const target = this.current + ms;
@@ -258,9 +247,6 @@ export class InMemoryRunStore implements RunStore {
   readonly runs = new Map<string, PersistedRun>();
   readonly events = new Map<string, Record<string, unknown>[]>();
   readonly files = new Map<string, unknown>();
-  /** Makes `save` fail (to exercise the engine's logging path). */
-  failSaves = false;
-
   /** With a root, `attemptDir` creates real directories (for the real sandbox). */
   constructor(private readonly root?: string) {}
 
@@ -270,7 +256,6 @@ export class InMemoryRunStore implements RunStore {
   }
 
   async save(run: PersistedRun): Promise<void> {
-    if (this.failSaves) throw new Error("disk full");
     this.runs.set(run.id, structuredClone(run));
   }
 
@@ -483,29 +468,20 @@ export interface PendingCall<T extends WorkflowNodeType = WorkflowNodeType> {
 
 /**
  * An executor whose every call waits for the test: `calls` lists them in order; `resolve` ends one.
- * With `auto`, calls answer at once through it. An aborted call answers `cancelled` by itself.
+ * An aborted call answers `cancelled` by itself.
  */
 export function controlledExecutor<T extends WorkflowNodeType>(
-  type: T,
-  auto?: (ctx: NodeExecutionContext<T>) => NodeResult | Promise<NodeResult>
-): NodeExecutor<T> & { calls: PendingCall<T>[]; pending(): PendingCall<T>[]; answered: Set<PendingCall<T>> } {
+  type: T
+): NodeExecutor<T> & { calls: PendingCall<T>[] } {
   const calls: PendingCall<T>[] = [];
-  const answered = new Set<PendingCall<T>>();
   return {
     type,
     calls,
-    answered,
-    pending: () => calls.filter((call) => !answered.has(call)),
     execute(ctx) {
-      if (auto) return Promise.resolve(auto(ctx));
       return new Promise<NodeResult>((resolve) => {
         const call: PendingCall<T> = {
           ctx,
-          resolve: (result) => {
-            if (answered.has(call)) return;
-            answered.add(call);
-            resolve(result);
-          }
+          resolve
         };
         calls.push(call);
         ctx.signal.addEventListener("abort", () => call.resolve({ status: "cancelled" }), { once: true });

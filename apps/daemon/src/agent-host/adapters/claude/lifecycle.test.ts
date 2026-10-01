@@ -923,6 +923,25 @@ describe("claude adapter — attachment delivery (§4.1)", () => {
 });
 
 describe("claude adapter — approvals", () => {
+  it("full access allows a tool callback without opening an approval card", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession({ ...START, runtimeMode: "full-access" });
+    const peer = harness.peers[0]!;
+    await harness.drain();
+    const before = harness.events.length;
+    const toolInput = { command: "rm -f x" };
+
+    const decision = await peer.canUseTool!("Bash", toolInput, {
+      signal: new AbortController().signal,
+      toolUseID: "toolu_1",
+      requestId: "req-full-access"
+    } as unknown as Parameters<CanUseTool>[2]);
+    await harness.drain();
+
+    assert.deepEqual(decision, { behavior: "allow", updatedInput: toolInput });
+    assert.deepEqual(harness.events.slice(before), []);
+  });
+
   async function openApproval(): Promise<{
     harness: Harness;
     peer: ScriptedQuery;

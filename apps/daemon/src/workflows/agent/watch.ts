@@ -44,29 +44,21 @@ import type { Clock, WorkflowLogger } from "../contracts.ts";
 import { activityLine, agentErrorMessage, failureAfterBaseline, isNewTurn, isSettled, itemsAfterBaseline, type AgentBaseline } from "./classify.ts";
 import { AUTONOMOUS_ANSWER } from "./prompt.ts";
 
-export interface WatchTimings {
+const DEFAULT_WATCH_TIMINGS = {
   /** How long "done" must hold before the output is read. */
-  quietMs: number;
-  /** How long "done" must hold when background work ended after the latest settled turn (a wake may still come). */
-  wakeQuietMs: number;
-  /** How long only watch loops must remain before `whenOnlyWatchLoopsRemain: "finish"` finishes. */
-  monitorGraceMs: number;
-  /** The safety re-read, whatever the bus says. */
-  rereadMs: number;
-  /** At most one `activity` update per this long. */
-  activityThrottleMs: number;
-}
-
-export const DEFAULT_WATCH_TIMINGS: WatchTimings = {
   quietMs: 5_000,
+  /** How long "done" must hold when background work ended after the latest settled turn (a wake may still come). */
   wakeQuietMs: 90_000,
+  /** How long only watch loops must remain before `whenOnlyWatchLoopsRemain: "finish"` finishes. */
   monitorGraceMs: 60_000,
+  /** The safety re-read, whatever the bus says. */
   rereadMs: 10_000,
+  /** At most one `activity` update per this long. */
   activityThrottleMs: 2_000
 };
 
-export type WatchOutcome =
-  | { kind: "done"; snapshot: ThreadSnapshotPayload; summary: SessionSummary }
+type WatchOutcome =
+  | { kind: "done" }
   | { kind: "failure"; failure: ActivityFailureReason }
   | { kind: "question"; request: PendingUserInput }
   | { kind: "approval"; request: PendingApproval }
@@ -76,7 +68,7 @@ export type WatchOutcome =
   | { kind: "timeout" }
   | { kind: "cancelled" };
 
-export interface WatchInput {
+interface WatchInput {
   api: DaemonApi;
   sessionId: string;
   baseline: AgentBaseline;
@@ -92,7 +84,7 @@ export interface WatchInput {
 }
 
 /** The session's bus events and the timers, as one wake-up. */
-export interface Waker {
+interface Waker {
   /** Resolves on the next event about the session, after `ms`, or on abort — at once when one already came. */
   wait(ms: number): Promise<void>;
   dispose(): void;
@@ -140,7 +132,7 @@ function createWaker(api: DaemonApi, sessionId: string, clock: Clock, signal: Ab
   };
 }
 
-export interface Observation {
+interface Observation {
   summary: SessionSummary | null;
   snapshot: ThreadSnapshotPayload | null;
   /** The session is no longer listed (closed). */
@@ -198,7 +190,7 @@ export async function actionablePlanMarkdown(api: DaemonApi, sessionId: string, 
     let payload = (item.payload ?? {}) as { planMarkdown?: unknown; truncated?: unknown };
     if (payload.truncated === true) {
       try {
-        const { item: whole } = expectOk<ThreadItemResponse>(await api.request("GET", agentChatRoutes.item(sessionId, item.id)), "plan");
+        const { item: whole } = expectOk<ThreadItemResponse>(await api.request("GET", agentChatRoutes.item(sessionId, item.id)));
         payload = (whole?.kind === "activity" ? whole.payload ?? {} : {}) as typeof payload;
       } catch {
         // The slimmed text is still a plan to implement.
@@ -295,7 +287,7 @@ export async function watchAgent(input: WatchInput): Promise<WatchOutcome> {
           // already read `error` before this block's command and nothing new has settled since.
           const sessionError = s.chatSessionStatus === "error" && snap.head.session.status === "error";
           const failedTurn = newTurn && isSettled(latest) && latest!.state !== "completed";
-          if (failedTurn || (sessionError && (newTurn || !baselineIsError(baseline, snap)))) {
+          if (failedTurn || (sessionError && (newTurn || baseline.sessionStatus !== "error"))) {
             return { kind: "failed", message: agentErrorMessage(snap, baseline) };
           }
         }
@@ -312,13 +304,13 @@ export async function watchAgent(input: WatchInput): Promise<WatchOutcome> {
           const completedAt = latest!.completedAt ? Date.parse(latest!.completedAt) : Number.NaN;
           const wakeMayCome = endedAt !== null && !(Number.isFinite(completedAt) && completedAt >= endedAt);
           const quiet = wakeMayCome ? Math.max(DEFAULT_WATCH_TIMINGS.quietMs, DEFAULT_WATCH_TIMINGS.wakeQuietMs) : DEFAULT_WATCH_TIMINGS.quietMs;
-          if (at - doneSince >= quiet) return { kind: "done", snapshot: snap, summary: s };
+          if (at - doneSince >= quiet) return { kind: "done" };
           nextWake = Math.min(nextWake, doneSince + quiet);
         } else if (completed && rung === "monitoring" && input.whenOnlyWatchLoopsRemain === "finish") {
           doneSince = null;
           doneKey = null;
           if (monitorSince === null) monitorSince = at;
-          if (at - monitorSince >= Math.max(DEFAULT_WATCH_TIMINGS.monitorGraceMs, DEFAULT_WATCH_TIMINGS.quietMs)) return { kind: "done", snapshot: snap, summary: s };
+          if (at - monitorSince >= Math.max(DEFAULT_WATCH_TIMINGS.monitorGraceMs, DEFAULT_WATCH_TIMINGS.quietMs)) return { kind: "done" };
           nextWake = Math.min(nextWake, monitorSince + Math.max(DEFAULT_WATCH_TIMINGS.monitorGraceMs, DEFAULT_WATCH_TIMINGS.quietMs));
         } else {
           doneSince = null;
@@ -357,11 +349,6 @@ function backgroundEndedAt(snap: ThreadSnapshotPayload, baseline: AgentBaseline,
   return latest;
 }
 
-/** The session already read `error` when the baseline was taken (a failed start the block is recovering from). */
-function baselineIsError(baseline: AgentBaseline, snap: ThreadSnapshotPayload): boolean {
-  return baseline.sessionStatus === "error" && snap.head.session.status === "error";
-}
-
 /** Wait until the session is idle (`isIdle`), closed, or `until` passes. */
 export async function waitForIdle(input: {
   api: DaemonApi;
@@ -369,7 +356,6 @@ export async function waitForIdle(input: {
   clock: Clock;
   signal: AbortSignal;
   until: Date;
-  rereadMs?: number;
   logger?: WorkflowLogger;
 }): Promise<"idle" | "closed" | "timeout" | "cancelled"> {
   const waker = createWaker(input.api, input.sessionId, input.clock, input.signal);
@@ -381,7 +367,7 @@ export async function waitForIdle(input: {
       if (obs && isIdle(obs)) return "idle";
       const now = input.clock.now().getTime();
       if (now >= input.until.getTime()) return "timeout";
-      await waker.wait(Math.min(input.rereadMs ?? DEFAULT_WATCH_TIMINGS.rereadMs, input.until.getTime() - now));
+      await waker.wait(Math.min(DEFAULT_WATCH_TIMINGS.rereadMs, input.until.getTime() - now));
     }
   } finally {
     waker.dispose();

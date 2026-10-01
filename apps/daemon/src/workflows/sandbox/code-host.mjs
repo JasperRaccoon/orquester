@@ -68,13 +68,6 @@ function settle(result, exitCode) {
   process.exit(exitCode);
 }
 
-/** A sentinel that unwinds the user's stack when stop() is called from inside a promise chain. */
-class StopSignal {
-  constructor(reason) {
-    this.reason = reason;
-  }
-}
-
 let spec = {};
 try {
   spec = JSON.parse(readFileSync(join(attemptDir, "spec.json"), "utf8"));
@@ -107,16 +100,12 @@ const stop = (reason) => {
     result.reason = String(reason);
   }
   settle(result, 0);
-  // Not reached (settle exits); keeps callers that `await stop()` from continuing if it ever were.
-  throw new StopSignal(reason);
 };
 
 process.on("unhandledRejection", (reason) => {
-  if (reason instanceof StopSignal) return;
   settle({ ok: false, error: errorOf(reason) }, 1);
 });
 process.on("uncaughtException", (error) => {
-  if (error instanceof StopSignal) return;
   settle({ ok: false, error: errorOf(error) }, 1);
 });
 
@@ -125,7 +114,6 @@ async function main() {
   try {
     mod = await import(pathToFileURL(join(attemptDir, "block.mjs")).href);
   } catch (error) {
-    if (error instanceof StopSignal) return;
     settle({ ok: false, error: errorOf(error) }, 1);
     return;
   }
@@ -159,7 +147,6 @@ async function main() {
       require: createRequire(join(projectPath, "package.json"))
     });
   } catch (error) {
-    if (error instanceof StopSignal) return;
     settle({ ok: false, error: errorOf(error) }, 1);
     return;
   }

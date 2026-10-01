@@ -106,11 +106,6 @@ export function useFieldControl(explicit?: string): FieldControlProps {
     : { id: undefined, describedBy: undefined, labelledBy: undefined };
 }
 
-/** The id the enclosing `Field`'s label points at, for a custom control (TemplateEditor…); see `useFieldControl`. */
-export function useFieldId(explicit?: string): string | undefined {
-  return useFieldControl(explicit).id;
-}
-
 /** Stops a collection control's inner inputs (table rows, chips…) from taking the enclosing Field's id. */
 const NoFieldId: React.FC<{ children: React.ReactNode }> = ({ children }) => (
   <FieldContext.Provider value={null}>{children}</FieldContext.Provider>
@@ -251,7 +246,7 @@ export const HelpTip: React.FC<{
  * "optional" tag, `defaultNote` a "Default: …" note after the hint. The error
  * and the warning (each when given) show under the control, the hint under
  * them. Without `htmlFor` the label gets a generated id that the first input
- * inside takes (`useFieldId`).
+ * inside takes (`useFieldControl`).
  */
 export const Field: React.FC<{
   label: React.ReactNode;

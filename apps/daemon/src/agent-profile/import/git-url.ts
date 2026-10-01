@@ -19,7 +19,7 @@
 
 import { profileErrors } from "../errors.ts";
 
-export interface GitImportSource {
+interface GitImportSource {
   /** What `git clone` is given: credential-free, no query or fragment. */
   cloneUrl: string;
   /** A branch or tag from a tree URL. */

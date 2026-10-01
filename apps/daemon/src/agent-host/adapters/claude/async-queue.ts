@@ -51,19 +51,16 @@ export class AsyncEventQueue<T> implements AsyncIterable<T> {
   }
 }
 
-/** A promise with its settle functions exposed. */
+/** A promise with its resolver exposed. */
 export interface Deferred<T> {
   promise: Promise<T>;
   resolve: (value: T) => void;
-  reject: (error: unknown) => void;
 }
 
 export function createDeferred<T>(): Deferred<T> {
   let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
+  const promise = new Promise<T>((res) => {
     resolve = res;
-    reject = rej;
   });
-  return { promise, resolve, reject };
+  return { promise, resolve };
 }

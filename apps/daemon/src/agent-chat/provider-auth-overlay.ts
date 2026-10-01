@@ -1,22 +1,9 @@
 /**
  * Managed-account overlay for a provider snapshot's `auth` (spec §7.7).
  *
- * The host probes each provider under the HOST identity — the daemon user's
- * own `~/.claude`, `~/.codex`, `~/.grok` — because a provider-level probe has
- * no thread and therefore no account. On a box whose system login is stale but
- * whose managed accounts are all valid (the normal shape here: the system
- * Claude login is never used, every chat pins a managed account) that probe
- * says `unauthenticated`, and the client dutifully toasts "claude needs
- * signing in again" at a provider that is perfectly usable.
- *
- * The daemon is the one process that knows both facts, so it reconciles them
- * on the way out: a provider whose probe found no login, but for which at
- * least one managed account of that family is NOT flagged `needsReauth`, is
- * reported `authenticated` through that account. The toast then fires only
- * when there is genuinely nothing to launch with — no valid system login AND
- * no valid managed account — which is what the user asked for.
- *
- * Pure: takes the snapshot and the accounts list, returns a new snapshot.
+ * Provider probes use the host's system identity, without a thread account.
+ * A usable managed account still authenticates that provider; the daemon
+ * overlays it here to avoid a false sign-in warning for an expired system login.
  */
 
 import type { AgentAccount } from "@orquester/api";

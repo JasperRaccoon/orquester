@@ -25,7 +25,7 @@ import type { AttachmentRef, ComposerContextRecord } from "@orquester/api/agent-
 /** The literal default the host also uses when nothing better exists. */
 export const DEFAULT_THREAD_TITLE = "New thread";
 
-export const THREAD_TITLE_MAX_LENGTH = 50;
+const THREAD_TITLE_MAX_LENGTH = 50;
 
 /** *T3: `packages/shared/src/String.ts:1-8`.* */
 function truncateTitle(text: string, maxLength = THREAD_TITLE_MAX_LENGTH): string {

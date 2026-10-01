@@ -197,7 +197,8 @@ test("copyTree follows the root, refuses or skips inner symlinks", async (t) => 
 
   // The root may be a symlink; without inner links everything is copied, modes kept.
   const plain = await copyTree(join(root, "linked-skill"), join(root, "out", "plain"), { refuseSymlinks: true });
-  assert.deepEqual(plain, { files: 2, skipped: [] });
+  assert.deepEqual(plain, { skipped: [] });
+  assert.equal(await readFile(join(root, "out", "plain", "SKILL.md"), "utf8"), "s");
   assert.equal((await stat(join(root, "out", "plain", "scripts", "run.sh"))).mode & 0o777, 0o755);
 
   await symlink("/etc/passwd", join(src, "scripts", "evil"));
@@ -209,7 +210,7 @@ test("copyTree follows the root, refuses or skips inner symlinks", async (t) => 
   assert.equal(await pathKind(join(root, "out", "refused")), null, "nothing left behind");
 
   const skipped = await copyTree(src, join(root, "out", "skipped"), { refuseSymlinks: false });
-  assert.deepEqual(skipped, { files: 2, skipped: ["scripts/evil"] });
+  assert.deepEqual(skipped, { skipped: ["scripts/evil"] });
   assert.equal(await pathKind(join(root, "out", "skipped", "scripts", "evil")), null);
 
   // An existing destination is never merged into.

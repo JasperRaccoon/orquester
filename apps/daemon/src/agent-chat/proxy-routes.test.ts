@@ -389,8 +389,7 @@ test("the stream is piped through, and the client disconnect cancels the upstrea
     res.write(`${JSON.stringify({ kind: "synchronized", hostInstanceId: "host-1" })}\n`);
     // Deliberately never ends: this is a subscription.
   };
-  const address = await h.app.listen({ host: "127.0.0.1", port: 0 });
-  void address;
+  await h.app.listen({ host: "127.0.0.1", port: 0 });
   const port = (h.app.server.address() as AddressInfo).port;
   const controller = new AbortController();
   const response = await fetch(

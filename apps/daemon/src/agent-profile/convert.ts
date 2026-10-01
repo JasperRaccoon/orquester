@@ -67,7 +67,7 @@ import {
 } from "./infra/index.ts";
 
 /** The converted item and notes about fields changed or dropped. */
-export interface ProfileConversion {
+interface ProfileConversion {
   item: PortableItem;
   notes: string[];
 }

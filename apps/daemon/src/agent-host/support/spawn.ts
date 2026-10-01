@@ -20,7 +20,7 @@ import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from "node:ch
 /** SIGTERM, then SIGKILL after this long (§3.1 "a short grace"). */
 export const DEFAULT_KILL_GRACE_MS = 2_000;
 
-export interface SpawnProviderChildOptions {
+interface SpawnProviderChildOptions {
   /** Absolute path to the resolved binary. Never a bare name or an npm shim. */
   command: string;
   args: readonly string[];

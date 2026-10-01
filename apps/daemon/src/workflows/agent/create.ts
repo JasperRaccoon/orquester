@@ -29,7 +29,7 @@ import type { NodeExecutionContext } from "../contracts.ts";
 import { createRedactor, redactContextValue, secretPlaceholder } from "../sandbox/redact.ts";
 import type { AgentCandidate, CandidateCheck } from "./failover.ts";
 
-export interface CatalogLabels {
+interface CatalogLabels {
   agentLabel: string;
   modelLabel: string;
 }
@@ -191,5 +191,5 @@ export async function createSession(api: DaemonApi, body: CreateSessionRequest):
   } catch {
     throw new ToolError("HOST_UNAVAILABLE", "The daemon call failed.");
   }
-  return expectOk<SessionSummary>(res, "create");
+  return expectOk<SessionSummary>(res);
 }

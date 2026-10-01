@@ -338,7 +338,7 @@ export function createGitPoller(deps: GitPollerDeps): GitPoller {
       poller.triggers = new Map(group.entries.map((entry) => [entry.key, entry]));
       for (const channel of CHANNELS) {
         const ch = poller.channels[channel];
-        const users = [...poller.triggers.values()].filter((entry) => entry.channel === channel);
+        const users = usersOf(poller, channel);
         if (users.length === 0) {
           ch.timer?.cancel();
           ch.timer = null;

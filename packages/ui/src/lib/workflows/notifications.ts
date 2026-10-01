@@ -158,18 +158,14 @@ const INITIAL: WorkflowNotificationsState = { toasts: [], attention: [] };
 
 export const workflowNotificationsStore = createStore<WorkflowNotificationsState>(() => INITIAL);
 
-let notified: string[] = [];
-const notifiedSet = new Set<string>();
+const notified = new Set<string>();
 const viewed = new Set<string>();
 
 function remember(runId: string): boolean {
-  if (notifiedSet.has(runId)) return false;
-  notifiedSet.add(runId);
-  notified.push(runId);
-  if (notified.length > MAX_REMEMBERED) {
-    const drop = notified.slice(0, notified.length - MAX_REMEMBERED);
-    notified = notified.slice(-MAX_REMEMBERED);
-    for (const id of drop) notifiedSet.delete(id);
+  if (notified.has(runId)) return false;
+  notified.add(runId);
+  if (notified.size > MAX_REMEMBERED) {
+    notified.delete(notified.values().next().value!);
   }
   return true;
 }
@@ -289,8 +285,7 @@ export function isRunOnScreen(runId: string): boolean {
 
 /** A connection switch or a sign-out: nothing from the previous daemon stays. */
 export function resetWorkflowNotifications(): void {
-  notified = [];
-  notifiedSet.clear();
+  notified.clear();
   viewed.clear();
   workflowNotificationsStore.setState(INITIAL);
 }

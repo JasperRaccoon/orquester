@@ -102,7 +102,7 @@ const searchSessions = defineTool({
     // `!== undefined`, as list_sessions tests it: an empty project is refused by resolveProject, never "every project".
     const projectPath = args.project !== undefined ? (await resolveProject(api, args.project)).path : undefined;
     const res = await api.request("GET", agentChatRoutes.search, { query: { q: query, limit: String(args.limit), ...(projectPath !== undefined ? { projectPath } : {}) } });
-    const body = expectOk<ThreadSearchResponse | null>(res, "search");
+    const body = expectOk<ThreadSearchResponse | null>(res);
     // No usable index is an answer, not an error (the host's 200 `indexed: false`); the GUI reads a missing flag so too.
     if (body?.indexed !== true) return { query, hits: [], truncated: false, indexed: false, hint: UNAVAILABLE_HINT };
     const found = Array.isArray(body.hits) ? body.hits : [];

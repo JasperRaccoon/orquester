@@ -177,13 +177,13 @@ export const INPUT_ECHO_GRACE_MS = 1500;
  * coverage (gemini/deepseek) and for shells, where the bell is the ONLY
  * attention signal there is.
  */
-export const BELL_ECHO_GRACE_MS = 250;
+const BELL_ECHO_GRACE_MS = 250;
 
 /** Max gap between title changes to stay on the same streak / stay title-driven. */
 export const TITLE_STREAK_WINDOW_MS = 3000;
 
 /** Title changes inside the window before titles become the sole heartbeat. */
-export const TITLE_STREAK_THRESHOLD = 2;
+const TITLE_STREAK_THRESHOLD = 2;
 
 /**
  * Is `stamp` within `window` ms before `now`? A negative age (the wall clock

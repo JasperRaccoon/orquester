@@ -52,9 +52,9 @@ export type WholeText =
   | { status: "loading" }
   | { status: "failed"; error: string };
 
-export const EDITOR_UNAVAILABLE = "The prompt editor isn't available right now.";
+const EDITOR_UNAVAILABLE = "The prompt editor isn't available right now.";
 
-export interface PromptCardViewProps {
+interface PromptCardViewProps {
   prompt: HistoryPrompt;
   /** Docked beside the chat, or on a phone (finger-sized controls). */
   variant: "docked" | "sheet";
@@ -87,7 +87,7 @@ export interface PromptCardViewProps {
  * chip. Open (click or Enter; one at a time): the whole text, Insert / Send,
  * and the secondary actions.
  */
-export function PromptCardView(props: PromptCardViewProps): React.ReactElement {
+function PromptCardView(props: PromptCardViewProps): React.ReactElement {
   const { prompt, meta, diff, expanded, whole } = props;
   const sheet = props.variant === "sheet";
   const chip = diff !== null && diff.fileCount > 0 ? <DiffSummaryChip summary={diff} /> : null;

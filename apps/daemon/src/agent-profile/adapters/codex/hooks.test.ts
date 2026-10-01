@@ -137,7 +137,7 @@ describe("codex hooks — re-keying hooks.state", () => {
     // The managed trust sits at 0:0 (the position before a hand edit), nothing at 1:0.
     const state = { [`${SYS}:stop:0:0`]: { enabled: true, trusted_hash: managedHash } };
     const before = listHookEntries(doc);
-    const result = rekeyHookState({ before, after: before, moved: movedBy(before, before), state, paths: [SYS] });
+    const result = rekeyHookState({ after: before, moved: movedBy(before, before), state, paths: [SYS] });
     const next = apply(state, result);
     assert.deepEqual(next[`${SYS}:stop:1:0`], { enabled: true, trusted_hash: managedHash });
     assert.equal(next[`${SYS}:stop:0:0`], undefined);
@@ -150,7 +150,7 @@ describe("codex hooks — re-keying hooks.state", () => {
     const before = listHookEntries(doc);
     doc.hooks.Stop.unshift({ hooks: [{ type: "command", command: "new" }] });
     const after = listHookEntries(doc);
-    const next = apply(state, rekeyHookState({ before, after, moved: movedBy(before, after), state, paths: [SYS] }));
+    const next = apply(state, rekeyHookState({ after, moved: movedBy(before, after), state, paths: [SYS] }));
     assert.deepEqual(next[`${SYS}:stop:1:0`], { enabled: false, trusted_hash: "sha256:stale" });
     assert.equal(next[`${SYS}:stop:0:0`], undefined);
   });
@@ -163,7 +163,7 @@ describe("codex hooks — re-keying hooks.state", () => {
     const before = listHookEntries(doc);
     doc.hooks.Stop.splice(0, 1);
     const after = listHookEntries(doc);
-    const next = apply(state, rekeyHookState({ before, after, moved: movedBy(before, after), state, paths: [SYS] }));
+    const next = apply(state, rekeyHookState({ after, moved: movedBy(before, after), state, paths: [SYS] }));
     assert.equal(next[`${SYS}:stop:0:0`].enabled, false);
     assert.equal(next[`${SYS}:stop:1:0`].enabled, true);
     assert.equal(next[`${SYS}:stop:2:0`], undefined);

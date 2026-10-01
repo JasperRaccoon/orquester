@@ -2,8 +2,7 @@ import { MAX_UPLOAD_BYTES } from "@orquester/api";
 import type { ApiClient } from "./api-client";
 import { BatchProgress, type UploadProgress } from "./upload-progress";
 
-// Largest file we'll upload from the client: the daemon's own decoded cap, so we
-// fail fast before encoding instead of round-tripping a 413.
+// Match the daemon's upload cap and reject oversized files before sending them.
 export { MAX_UPLOAD_BYTES };
 
 /**
@@ -17,22 +16,9 @@ export type UploadStatus =
   | { kind: "skipped"; text: string } // some files were over the size cap
   | { kind: "error"; text: string }; // an upload threw
 
-/**
- * Build the terminal input that places uploaded file paths into the agent's
- * prompt. We do NOT append a newline/Enter — the path is only inserted, never
- * submitted; the user types their prompt and hits Enter themselves.
- *
- * Default is BRACKETED PASTE (format A): the space-joined paths wrapped in the
- * bracketed-paste escapes (`\x1b[200~`…`\x1b[201~`), with NO trailing space —
- * agents' TUIs enable bracketed-paste mode and run their attach/path detection
- * on pasted text, mimicking a native drag. To switch to RAW (format B) — paths
- * + a trailing space, no escape wrapper — replace the single returned expression
- * with `return joined + " ";` (the format is locked in via runtime verification
- * against real agents).
- */
+/** Insert paths using bracketed paste, without submitting the terminal prompt. */
 export function injectionForPaths(paths: string[]): string {
   const joined = paths.join(" ");
-  // Format A (bracketed paste). Switch to format B by returning `joined + " "`.
   return `\x1b[200~${joined}\x1b[201~`;
 }
 

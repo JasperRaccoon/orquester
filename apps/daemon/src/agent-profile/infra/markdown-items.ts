@@ -207,7 +207,7 @@ export async function readSkillFiles(dir: string): Promise<string[]> {
   return files.sort();
 }
 
-export interface MarkdownWriteOptions extends FrontmatterYamlOptions {
+interface MarkdownWriteOptions extends FrontmatterYamlOptions {
   backups: ProfileBackups;
   agent: string;
   /**

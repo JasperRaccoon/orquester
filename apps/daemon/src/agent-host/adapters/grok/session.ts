@@ -79,7 +79,6 @@ import {
   isEditApproval,
   permissionDetail,
   permissionRequestType,
-  selectAutoApprovedOptionId,
   selectPermissionOptionId
 } from "./permissions.ts";
 import { XAI_EMPTY_PLAN_MARKDOWN, XAI_EXIT_PLAN_FEEDBACK, type PlanPathHost } from "./plan.ts";
@@ -779,7 +778,7 @@ export class GrokSession {
       (autoApprovesEdits(this.options.runtimeMode) && isEditApproval(params.toolCall));
     if (auto) {
       const optionId = autoApprovesEverything(this.options.runtimeMode)
-        ? selectAutoApprovedOptionId(params.options)
+        ? selectPermissionOptionId(params.options, "acceptForSession")
         : // A remembered grant replays as `allow_once`, never `allow_always`:
           // the host owns the session scope and must not let Grok also
           // remember it, or the two can disagree about what is approved.

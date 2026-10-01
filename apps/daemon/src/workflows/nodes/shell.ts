@@ -94,8 +94,7 @@ export function createShellExecutor(): NodeExecutor<"shell"> {
       }
       if (ctx.signal.aborted) return { status: "cancelled" };
       if (outcome.kind === "lost") {
-        const { output, warnings } = await collect(ctx, attemptDir, null);
-        void warnings;
+        const { output } = await collect(ctx, attemptDir, null);
         return { status: "failed", error: { kind: "interrupted", message: "The shell block's process ended without recording its exit." }, output };
       }
       const exit = outcome.exit;

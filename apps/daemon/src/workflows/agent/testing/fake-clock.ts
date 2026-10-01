@@ -39,10 +39,6 @@ export class FakeClock implements Clock {
     return new Promise((resolve) => this.setTimeout(resolve, ms));
   }
 
-  pendingTimers(): number {
-    return this.timers.length;
-  }
-
   /** Move time forward by `ms`, firing every timer that falls due, in order. */
   async advance(ms: number): Promise<void> {
     const target = this.ms + ms;

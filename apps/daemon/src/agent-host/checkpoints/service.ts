@@ -143,7 +143,9 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
   const homeDirs = [options.gitEnv.HOME, options.gitEnv.USERPROFILE].filter(
     (dir): dir is string => typeof dir === "string" && dir.length > 1
   );
-  const describeError = (error: unknown): string => errorDetail(error, homeDirs);
+  // Git errors reach timeline rows, so redact their paths and credentials.
+  const describeError = (error: unknown): string =>
+    redactStderr(error instanceof Error ? error.message : String(error), { homeDirs });
 
   const diffCache = new Map<string, string>();
   let diffCacheBytes = 0;
@@ -176,7 +178,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     for (const [key, value] of diffCache) {
       if (key.startsWith(prefix)) {
         diffCache.delete(key);
-        diffCacheBytes -= cachedSize(value);
+        diffCacheBytes -= Buffer.byteLength(value, "utf8");
       }
     }
   };
@@ -187,14 +189,14 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
    * hold ~320 MB resident on a box documented to run with 2 GB.
    */
   const cacheDiff = (key: string, diff: string): void => {
-    const size = cachedSize(diff);
+    const size = Buffer.byteLength(diff, "utf8");
     if (size > CHECKPOINT_DIFF_CACHE_MAX_BYTES) {
       return;
     }
     const existing = diffCache.get(key);
     if (existing !== undefined) {
       diffCache.delete(key);
-      diffCacheBytes -= cachedSize(existing);
+      diffCacheBytes -= Buffer.byteLength(existing, "utf8");
     }
     while (
       diffCache.size >= CHECKPOINT_DIFF_CACHE_LIMIT ||
@@ -206,7 +208,7 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
       }
       const evicted = diffCache.get(oldest.value);
       diffCache.delete(oldest.value);
-      diffCacheBytes -= cachedSize(evicted ?? "");
+      diffCacheBytes -= Buffer.byteLength(evicted ?? "", "utf8");
     }
     diffCache.set(key, diff);
     diffCacheBytes += size;
@@ -665,20 +667,4 @@ export function createCheckpointService(options: CheckpointServiceOptions): Chec
     deleteThreadRefs,
     assertRollbackSupported
   };
-}
-
-/**
- * What a checkpoint row's `detail` may say. It is rendered in the timeline, so
- * it goes through the same redaction the stderr path uses: git messages name
- * absolute paths (`/var/lib/orquester/workspaces/...`, a home dir) and this is
- * the one place a raw host path could otherwise reach the browser.
- */
-function errorDetail(error: unknown, homeDirs: readonly string[] = []): string {
-  const message = error instanceof Error ? error.message : String(error);
-  return redactStderr(message, { homeDirs });
-}
-
-/** UTF-8 bytes, which is what the cached string actually costs on the wire. */
-function cachedSize(value: string): number {
-  return Buffer.byteLength(value, "utf8");
 }

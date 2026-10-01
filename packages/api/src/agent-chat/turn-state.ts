@@ -1,8 +1,6 @@
 /**
  * Agent chat — the turn state machine (spec §5.1, §6.4).
  *
- * **Signatures only (except the two total predicates). Package W2 implements
- * the rest.**
  * Ported from T3 Code (MIT): `apps/server/src/orchestration/projector.ts:101-115`
  * (`settledTurnStateForSessionStatus`) and `:808-868` (the `thread.session-set`
  * fold that drives `latestTurn`).

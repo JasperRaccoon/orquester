@@ -60,10 +60,6 @@ function booleanDefault(key: string): boolean {
   return BOOLEAN_DEFAULTS[key] ?? false;
 }
 
-function frontmatterFields(agent: AgentProfileAgentId, kind: MarkdownKind): readonly ProfileFieldSpec[] {
-  return PROFILE_FRONTMATTER_FIELDS[agent][kind] ?? [];
-}
-
 /** Can the field show this value from disk without changing its type on save? */
 function fits(spec: ProfileFieldSpec, value: unknown): boolean {
   if (value === undefined || value === null) return true;
@@ -98,18 +94,16 @@ export function markdownEditorModel(
   document?: MarkdownDocumentView
 ): MarkdownEditorModel {
   const original = { ...(document?.frontmatter ?? {}) };
-  const specs = frontmatterFields(agent, kind);
+  const specs = PROFILE_FRONTMATTER_FIELDS[agent][kind] ?? [];
   const fields: ProfileFieldSpec[] = [];
-  const unfit = new Set<string>();
   for (const spec of specs) {
     if (kind === "skill" && spec.key === "name") continue;
     if (fits(spec, original[spec.key])) fields.push(spec);
-    else unfit.add(spec.key);
   }
   const shown = new Set(fields.map((spec) => spec.key));
   const keptKeys = Object.keys(original).filter((key) => {
     if (kind === "skill" && key === "name") return false;
-    return !shown.has(key) || unfit.has(key);
+    return !shown.has(key);
   });
   return { fields, keptKeys, original, flatCommands: FLAT_COMMAND_AGENTS.includes(agent) };
 }
@@ -122,11 +116,6 @@ export function initialMarkdownForm(
   const values: Record<string, FieldValue> = {};
   for (const spec of model.fields) values[spec.key] = formValue(spec, model.original[spec.key]);
   return { name, values, body };
-}
-
-/** "Write" on an existing item: its name, fields and body. */
-export function markdownFormFromDocument(model: MarkdownEditorModel, name: string, document: MarkdownDocumentView): MarkdownForm {
-  return initialMarkdownForm(model, name, document.body);
 }
 
 function parseNumber(text: string): number | null {

@@ -25,7 +25,6 @@ import {
   initialMarkdownForm,
   markdownDraftFromForm,
   markdownEditorModel,
-  markdownFormFromDocument,
   markdownNameHint,
   SKILL_BODY_PLACEHOLDER,
   validateMarkdownForm,
@@ -82,7 +81,7 @@ export const MarkdownEditEditor: React.FC<{ detail: MarkdownDetail; onReload?: (
   const { agent } = useEditorEnv();
   const kind = detail.kind;
   const model = useMemo(() => markdownEditorModel(agent, kind, detail.document), [agent, kind, detail]);
-  const [form, setForm] = useState<MarkdownForm>(() => markdownFormFromDocument(model, detail.item.name, detail.document));
+  const [form, setForm] = useState<MarkdownForm>(() => initialMarkdownForm(model, detail.item.name, detail.document.body));
   return <WriteSource kind={kind} model={model} form={form} setForm={setForm} detail={detail} onReload={onReload} />;
 };
 

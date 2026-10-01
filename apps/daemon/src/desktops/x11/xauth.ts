@@ -1,8 +1,9 @@
-// Xauthority file parsing (the format libXau reads and writes): repeated entries of a big-endian
+// Xauthority file format (read and written by libXau): repeated entries of a big-endian
 // u16 family followed by address, display number, auth name and auth data, each a big-endian u16
 // length plus bytes.
 
-import { readFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { readFile, rm, writeFile } from "node:fs/promises";
 
 import type { XAuthData } from "./protocol.ts";
 
@@ -69,4 +70,19 @@ export function encodeXauthEntry(entry: XauthEntry): Buffer {
   field(Buffer.from(entry.name, "latin1"));
   field(entry.data);
   return Buffer.concat(parts);
+}
+
+/**
+ * Replace the host's authority file with a fresh 16-byte MIT cookie (0600).
+ * FamilyWild and an empty display number match whatever `-displayfd` picks.
+ */
+export async function writeXauthority(path: string): Promise<void> {
+  await rm(path, { force: true });
+  await writeFile(path, encodeXauthEntry({
+    family: 0xffff,
+    address: Buffer.alloc(0),
+    number: "",
+    name: MIT_MAGIC_COOKIE,
+    data: randomBytes(16)
+  }), { mode: 0o600 });
 }

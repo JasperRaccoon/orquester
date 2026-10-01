@@ -50,7 +50,7 @@ const AMBIENT_CREDENTIAL_ENV_VARS: Record<AgentAdapterId, readonly string[]> = {
   grok: ["XAI_API_KEY", "GROK_API_KEY"]
 };
 
-export interface BuildProviderEnvInput {
+interface BuildProviderEnvInput {
   adapter: AgentAdapterId;
   /**
    * `sessionPath()` — deliberately WIDER than the daemon's own PATH, which

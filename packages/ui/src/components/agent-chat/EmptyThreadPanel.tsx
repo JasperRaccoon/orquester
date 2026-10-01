@@ -5,7 +5,7 @@ import { useAppStore } from "../../store/app";
 import { RecentConversationsList } from "../main/ProjectOverview";
 
 /** Newest-first rows the empty-thread panel lists; the rest stay in the overview. */
-export const EMPTY_PANEL_LIMIT = 10;
+const EMPTY_PANEL_LIMIT = 10;
 
 /**
  * What an EMPTY thread shows instead of "No messages yet.": the provider's

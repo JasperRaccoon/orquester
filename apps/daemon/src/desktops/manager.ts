@@ -50,7 +50,7 @@ import { hasRenderNode } from "./host-status.ts";
 import { reconcile } from "./reconcile.ts";
 import { DesktopStore } from "./store.ts";
 import { DesktopWindowNotFoundError, DesktopWindowTracker, type DesktopWindowTrackerOptions } from "./windows.ts";
-import { writeXauthority } from "./xauth.ts";
+import { writeXauthority } from "./x11/xauth.ts";
 
 /** A refusal the routes answer verbatim: `status` with `{ code, message, hint? }`. */
 export class DesktopError extends Error {
@@ -321,7 +321,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     const rt = this.mustGet(id);
     await this.enqueue(rt, async () => {
       if (!this.isCurrent(rt)) return;
-      await this.teardown(rt, true);
+      await this.teardown(rt);
       rt.status = "stopped";
       rt.error = undefined;
       void this.store.persist();
@@ -355,7 +355,7 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     const rt = this.mustGet(id);
     await this.enqueue(rt, async () => {
       if (!this.isCurrent(rt)) return;
-      await this.teardown(rt, true);
+      await this.teardown(rt);
       this.desktops.delete(id);
       void this.store.persist();
       this.emit("closed", { id });
@@ -680,10 +680,10 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
   /**
    * Take a desktop down (§5.4 "Stop desktop"): watchers and tracker off, every
    * live app's group SIGKILLed and its exit awaited (app-run.sh records it once
-   * it has reaped the app), then the host, the audio encoder and — with
-   * `removeDir` — the directory. Apps end `exited`.
+   * it has reaped the app), then the host, the audio encoder and the directory.
+   * Apps end `exited`.
    */
-  private async teardown(rt: Runtime, removeDir: boolean): Promise<void> {
+  private async teardown(rt: Runtime): Promise<void> {
     rt.generation += 1;
     this.unwatch(rt);
     this.stopTracker(rt);
@@ -716,10 +716,8 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     rt.windows = [];
     rt.activeWindowId = null;
     this.emit("windows", { desktopId: rt.record.id, windows: [], activeWindowId: null });
-    if (removeDir) {
-      await rm(layout.dir, { recursive: true, force: true });
-      if (layout.socketDir !== layout.dir) await rm(layout.socketDir, { recursive: true, force: true });
-    }
+    await rm(layout.dir, { recursive: true, force: true });
+    if (layout.socketDir !== layout.dir) await rm(layout.socketDir, { recursive: true, force: true });
   }
 
   /** The host exited on its own (Xvnc crash, host killed): §5.4 "Host exit". */

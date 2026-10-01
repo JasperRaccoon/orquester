@@ -39,7 +39,7 @@ export function counterIdGen(prefix = "e"): IdGen {
   };
 }
 
-export interface RecordedBatch {
+interface RecordedBatch {
   threadId: string;
   events: AppendableDomainEvent[];
 }
