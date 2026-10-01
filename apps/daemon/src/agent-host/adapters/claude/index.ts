@@ -276,6 +276,7 @@ export async function createClaudeAdapterWith(
       env,
       ...(cursor !== undefined ? { resumeCursor: cursor } : {}),
       ...(input.knownGoal !== undefined ? { knownGoal: input.knownGoal } : {}),
+      ...(input.prefetchHistory === true ? { prefetchHistory: true } : {}),
       scopedLimitNames,
       emit,
       onClosed: (closed) => {

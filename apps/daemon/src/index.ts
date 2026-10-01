@@ -816,6 +816,14 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     managedCredentialPath: (agent, id) => join(agentAccounts.homePath(agent, id), MANAGED_CRED_FILENAME[agent])
   }).catch((error) => console.error("Model proxy retirement failed", error));
   await agentAccounts.init();
+  // After reattach, so a tab still running under a deleted account keeps its
+  // home until it is closed. Best-effort: a sweep error must not block startup.
+  await agentAccounts
+    .pruneOrphanHomes(sessions.liveAccountIds())
+    .then((removed) => {
+      for (const dir of removed) console.warn(`Removed orphan account home ${dir}`);
+    })
+    .catch((error) => console.error("Orphan account home sweep failed", error));
   agentAccounts.startRefresher(() => sessions.liveAccountIds());
   // First usage reading only now: managed accounts are loaded and reattached
   // sessions are known (its token-freshness pass consults liveAccountIds()).
@@ -3130,7 +3138,10 @@ export function createServer(
         // (agent-accounts/<family>/<id>/home), not just
         // the daemon's own HOME — most sessions here run under one of those.
         return {
-          conversations: await listAgentConversations(resolve(path), { daemonDir: resolved.daemonDir })
+          conversations: await listAgentConversations(resolve(path), {
+            daemonDir: resolved.daemonDir,
+            accountIds: new Set(agentAccounts.list().accounts.map((account) => account.id))
+          })
         };
       } catch {
         return { conversations: [] };
@@ -3220,6 +3231,17 @@ export function createServer(
 
   app.delete("/api/agent-accounts/:id", async (request, reply) => {
     const { id } = request.params as { id: string };
+    // A session still running under the account would write its next line into
+    // the deleted home and re-create it as an orphan, so it goes first.
+    if (sessions.liveAccountIds().has(id)) {
+      const titles = sessions
+        .list()
+        .filter((session) => session.accountId === id)
+        .map((session) => `"${session.title}"`);
+      return reply.code(409).send({
+        error: `This account is still in use by ${titles.length > 0 ? titles.join(", ") : "an open tab"}. Close ${titles.length === 1 ? "that tab" : "those tabs"} first, then remove it.`
+      });
+    }
     try {
       await agentAccounts.removeAccount(id);
       return { ok: true };
@@ -3317,7 +3339,11 @@ export function createServer(
         const code = error instanceof ChatSessionError ? error.code : "SESSION_UNAVAILABLE";
         const message =
           error instanceof Error ? error.message : "Failed to create the chat session.";
-        return reply.code(code === "HOST_UNAVAILABLE" ? 503 : 400).send({ code, message });
+        const ownerSessionId =
+          error instanceof ChatSessionError ? error.ownerSessionId : undefined;
+        return reply
+          .code(code === "HOST_UNAVAILABLE" ? 503 : 400)
+          .send({ code, message, ...(ownerSessionId ? { ownerSessionId } : {}) });
       }
     }
     // `initialCommand` is TYPED into the fresh PTY (see sessions.ts), so it gets

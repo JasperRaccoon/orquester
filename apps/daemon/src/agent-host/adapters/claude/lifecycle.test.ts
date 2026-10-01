@@ -2258,6 +2258,35 @@ describe("claude adapter — a resumed thread has a timeline (E6)", () => {
     assert.deepEqual(texts, ["what is the capital of France?", "and of Spain?"]);
   });
 
+  it("reads the transcript alongside the CLI's start-up when the host asks for it", async () => {
+    let reads = 0;
+    let queriesAtFirstRead = -1;
+    const harness: Harness = await makeHarness({
+      historyStdout: (method) => {
+        if (method === "getSessionMessages") {
+          reads += 1;
+          if (queriesAtFirstRead < 0) queriesAtFirstRead = harness.peers.length;
+          return JSON.stringify(transcript);
+        }
+        return "{}";
+      }
+    });
+    await harness.adapter.startSession({
+      ...START,
+      resumeCursor: { threadId: START.threadId, resume: conversationId },
+      prefetchHistory: true
+    });
+    assert.equal(reads, 1, "read during the start, not after it");
+    assert.equal(queriesAtFirstRead, 0, "before the CLI was even launched");
+
+    const snapshot = await harness.adapter.readThread(START.threadId);
+    assert.equal(reads, 1, "the host's read is answered from the one already made");
+    assert.deepEqual(
+      snapshot.turns.map((turn) => turn.id),
+      ["turn-a", "turn-b"]
+    );
+  });
+
   it("an unreadable transcript degrades to an empty timeline, never an error", async () => {
     const harness = await makeHarness({ historyStdout: () => "not json at all" });
     await harness.adapter.startSession({

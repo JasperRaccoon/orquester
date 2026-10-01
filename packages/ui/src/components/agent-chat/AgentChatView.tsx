@@ -88,6 +88,8 @@ import {
 import { AgentRoster } from "./roster/AgentRoster";
 import { rosterKindCounts } from "./roster/roster-summary";
 import { EmptyThreadPanel } from "./EmptyThreadPanel";
+import { ChatLoadingScreen } from "./ChatLoadingScreen";
+import { useRegistry } from "../../hooks";
 
 /** Per-device: the roster folded to its summary line. */
 const ROSTER_COLLAPSED_KEY = "orquester.chat.roster-collapsed";
@@ -203,6 +205,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const rosterCounts = React.useMemo(() => rosterKindCounts(roster.agents), [roster.agents]);
   const status = useAgentChatStatus(sessionId);
   const provider = useProviderSnapshot(session.refId);
+  const registry = useRegistry();
   // The skills a sent `$mention` re-chips against (§4.6.7): the ones the
   // composer offers for this thread's cwd — in the thread and in a drill-in.
   const skills = React.useMemo(() => timelineSkillNames(provider, session.cwd), [provider, session.cwd]);
@@ -856,6 +859,25 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
         !active && "[--ac-anim-state:paused]"
       )}
     >
+      {/* A resumed conversation's history is still being replayed: the
+          loading screen, over the whole tab, until it is in. */}
+      {slice.historyImport !== null ? (
+        <ChatLoadingScreen
+          className="absolute inset-0 z-30"
+          title={session.title}
+          agentRefId={session.refId}
+          agentName={registry.agents.find((a) => a.id === session.refId)?.name ?? session.refId}
+          stage={
+            slice.historyImport.phase === "importing"
+              ? {
+                  kind: "importing",
+                  done: slice.historyImport.done,
+                  total: slice.historyImport.total ?? 0
+                }
+              : { kind: "reading" }
+          }
+        />
+      ) : null}
       {/* Its "Try again" also leaves an open drill-in: the fallback replaced the
           Back button and the roster, and a child row that threw would throw
           again. A child's own crash is caught below, around the drill-in. */}

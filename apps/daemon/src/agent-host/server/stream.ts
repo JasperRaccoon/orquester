@@ -22,7 +22,8 @@ import {
   AGENT_CHAT_HEARTBEAT_MS,
   AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES,
   type AgentChatStreamFrame,
-  type DomainEvent
+  type DomainEvent,
+  type HistoryImportProgress
 } from "@orquester/api/agent-chat";
 import { slimActivityEvent } from "../ingestion/index.ts";
 
@@ -122,8 +123,14 @@ function coalesceToolUpdates(events: readonly DomainEvent[]): DomainEvent[] {
 export interface ThreadStreamOptions {
   response: ServerResponse;
   hostInstanceId: string;
-  /** Wired to the orchestrator's per-thread subscription. */
-  subscribe(listener: (events: DomainEvent[]) => void): Promise<() => void>;
+  /**
+   * Wired to the orchestrator's per-thread subscription. `onHistoryImport`
+   * hears a resumed conversation's replay progress (transient, unsequenced).
+   */
+  subscribe(
+    listener: (events: DomainEvent[]) => void,
+    onHistoryImport?: (progress: HistoryImportProgress) => void
+  ): Promise<() => void>;
   /**
    * Reads the snapshot or the replay. Runs **after** the live tail is attached
    * — attaching afterwards loses every event published while the read is in
@@ -157,6 +164,8 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
   let live = false;
   /** Events observed while the read was in flight, not yet emitted. */
   const preReadBuffer: DomainEvent[] = [];
+  /** The latest replay progress heard before going live; sent after `synchronized`. */
+  let preReadImport: HistoryImportProgress | null = null;
   /** Tool updates waiting on the 50 ms coalescing window. */
   let pendingUpdates: DomainEvent[] = [];
   let windowHandle: ReturnType<typeof setTimeout> | null = null;
@@ -280,6 +289,17 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     }
   };
 
+  const offerHistoryImport = (progress: HistoryImportProgress): void => {
+    if (closed) return;
+    if (!live) {
+      preReadImport = progress;
+      return;
+    }
+    // After any tool updates still in their window: they were committed first.
+    flushPending();
+    writeFrame({ kind: "history-import", progress });
+  };
+
   const start = async (): Promise<void> => {
     response.statusCode = 200;
     response.setHeader("content-type", "application/x-ndjson; charset=utf-8");
@@ -294,9 +314,14 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     });
 
     // Attach live delivery BEFORE reading either replay or snapshot state.
-    const attached = await subscribe((events) => {
-      offerLive(events);
-    });
+    const attached = await subscribe(
+      (events) => {
+        offerLive(events);
+      },
+      (progress) => {
+        offerHistoryImport(progress);
+      }
+    );
     if (closed) {
       // The client went away during the await, so `close()` already ran and
       // found `unsubscribe` still null. Detach here or the subscriber stays in
@@ -352,6 +377,12 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     emitEvents(coalesceToolUpdates(buffered.filter((event) => event.seq > highest)));
     writeFrame({ kind: "synchronized", hostInstanceId });
     live = true;
+    // A replay still running is announced after the marker, which clears
+    // the client's view of it; one that ended meanwhile needs nothing.
+    if (preReadImport !== null && preReadImport.phase !== "done") {
+      writeFrame({ kind: "history-import", progress: preReadImport });
+    }
+    preReadImport = null;
   };
 
   return {

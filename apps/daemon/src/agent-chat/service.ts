@@ -20,6 +20,7 @@ import type {
   RegistryEntry,
   SessionSummary, AgentAccount } from "@orquester/api";
 import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
+import { CONVERSATION_ALREADY_OPEN } from "@orquester/api/agent-chat";
 import type { AgentChatHome, RuntimePlatform } from "@orquester/config";
 import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
 import {
@@ -627,13 +628,22 @@ export class AgentChatService {
       ...(fields.resume ? { resume: fields.resume } : {})
     };
     try {
-      const response = await this.client.json<{ error?: { code: string; message: string } }>(
-        "POST",
-        agentHostRoutes.createThread,
-        body
-      );
+      const response = await this.client.json<{
+        error?: { code: string; message: string; detail?: unknown };
+      }>("POST", agentHostRoutes.createThread, body);
       if (response.status >= 400) {
         const code = response.value?.error?.code;
+        // The conversation is already open in another tab (the host names it).
+        // Its own code, so the client can switch to that tab instead of
+        // reporting a failure — a second click on a slow resume is exactly this.
+        const detail = response.value?.error?.detail as { ownerThreadId?: unknown } | undefined;
+        if (typeof detail?.ownerThreadId === "string" && detail.ownerThreadId) {
+          throw new ChatSessionError(
+            response.value?.error?.message ?? "That conversation is already open in another tab.",
+            CONVERSATION_ALREADY_OPEN,
+            detail.ownerThreadId
+          );
+        }
         throw new ChatSessionError(
           response.value?.error?.message ?? "The agent host refused the thread.",
           code === "RESUME_UNAVAILABLE" ? "RESUME_UNAVAILABLE" : "SESSION_UNAVAILABLE"

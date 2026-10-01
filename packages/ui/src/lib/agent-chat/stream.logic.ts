@@ -104,6 +104,18 @@ export function parseStreamLine(line: string): StreamLine {
       }
       return { kind: "frame", frame: decoded as unknown as AgentChatStreamFrame };
     }
+    case "history-import": {
+      const progress = decoded.progress;
+      if (
+        !isRecord(progress) ||
+        (progress.phase !== "reading" && progress.phase !== "importing" && progress.phase !== "done") ||
+        typeof progress.done !== "number" ||
+        (progress.total !== null && typeof progress.total !== "number")
+      ) {
+        return { kind: "malformed", line };
+      }
+      return { kind: "frame", frame: decoded as unknown as AgentChatStreamFrame };
+    }
     default:
       return { kind: "malformed", line };
   }

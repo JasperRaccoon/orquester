@@ -92,7 +92,7 @@ import {
   AGENT_CHAT_REPLAY_PAYLOAD_BUDGET_BYTES
 } from "@orquester/api/agent-chat";
 
-import type { AccountHome } from "@orquester/api/agent-chat";
+import type { AccountHome, HistoryImportProgress } from "@orquester/api/agent-chat";
 
 import { stat } from "node:fs/promises";
 
@@ -295,6 +295,11 @@ interface OrchestratorOptions {
 interface ThreadSubscription {
   /** Stamped events, in order, exactly as they were persisted. */
   onEvents(events: DomainEvent[]): void;
+  /**
+   * Where a resumed conversation's history replay stands. Told at once on
+   * subscribing while one runs, then on every change; never persisted.
+   */
+  onHistoryImport?(progress: HistoryImportProgress): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -420,6 +425,17 @@ interface ThreadRuntime {
    */
   historyPending: boolean;
   /**
+   * Non-null while `projectHistoryIfEmpty` replays the provider's history:
+   * what the ingestion sink produced and has not committed yet. A long
+   * conversation is hundreds of events, and committing each one alone (an
+   * fsync, an index update and a client frame apiece) made a resume take
+   * seconds; they land {@link HISTORY_IMPORT_CHUNK} at a time instead, in
+   * the order the sink saw them.
+   */
+  historyBuffer: AppendableDomainEvent[] | null;
+  /** The replay's progress while one runs (`reportHistoryImport`), else null. */
+  historyImport: HistoryImportProgress | null;
+  /**
    * Target of the most recent `thread.reverted`, until the next turn starts;
    * otherwise null.
    *
@@ -471,6 +487,12 @@ function isUnanswered(answers: unknown): boolean {
 }
 
 const HEAD_SAVE_EVENT_INTERVAL = 50;
+
+/** Events per commit while a resumed thread's history is replayed (`historyBuffer`). */
+const HISTORY_IMPORT_CHUNK = 500;
+
+/** Provider history events between two `history-import` progress frames. */
+const HISTORY_IMPORT_PROGRESS_STEP = 100;
 
 /**
  * Inside a long turn a fold snapshot is written once at least this many
@@ -1049,6 +1071,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       historyPending:
         (state.items ?? []).length === 0 &&
         (bindingResumeCursor(binding) ?? state.head?.session.resumeCursor) !== undefined,
+      historyBuffer: null,
+      historyImport: null,
       // Both as the log leaves them (§5.1, §5.5): a restart re-derives them.
       revertedTo: loaded.derived.revertedTo,
       titleManual: loaded.derived.titleManual,
@@ -1111,6 +1135,21 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     for (const subscriber of [...runtime.subscribers]) {
       try {
         subscriber.onEvents(events);
+      } catch (error) {
+        logger.warn("agent-host: thread subscriber failed", error);
+      }
+    }
+  };
+
+  /**
+   * Tell the thread's streams where its history replay stands, so a resumed
+   * tab shows a loading screen rather than an empty thread. `done` ends it.
+   */
+  const reportHistoryImport = (runtime: ThreadRuntime, progress: HistoryImportProgress): void => {
+    runtime.historyImport = progress.phase === "done" ? null : progress;
+    for (const subscriber of [...runtime.subscribers]) {
+      try {
+        subscriber.onHistoryImport?.(progress);
       } catch (error) {
         logger.warn("agent-host: thread subscriber failed", error);
       }
@@ -1187,7 +1226,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       headChanged ||
       (runtime.eventsSinceSnapshot >= FOLD_SNAPSHOT_EVENT_INTERVAL &&
         clock.now().getTime() - runtime.lastSnapshotAt >= FOLD_SNAPSHOT_MIN_INTERVAL_MS);
-    if (result.events.length > 0 && snapshotDue) {
+    // Not mid-import: the replay's chunks would each serialize the growing
+    // state; the `thread.session-set` that ends the start writes one anyway.
+    if (result.events.length > 0 && snapshotDue && runtime.historyBuffer === null) {
       writeFoldSnapshot(runtime, result.logBytes);
     }
     if (runtime.eventsSinceHeadSave >= HEAD_SAVE_EVENT_INTERVAL || headChanged) {
@@ -1662,6 +1703,30 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     pendingTurnStart: boolean,
     goal: { carryGoal: boolean } = { carryGoal: false }
   ): Promise<ProviderSession> => {
+    // A resumed thread with no timeline yet: its streams show a loading
+    // screen from now — the agent's start-up is part of the wait — until the
+    // replay below is over, however it ends.
+    const replaying = resumeCursor !== undefined && runtime.historyPending;
+    if (!replaying) {
+      return startSessionNow(runtime, head, desired, resumeCursor, pendingTurnStart, goal);
+    }
+    reportHistoryImport(runtime, { phase: "reading", done: 0, total: null });
+    try {
+      return await startSessionNow(runtime, head, desired, resumeCursor, pendingTurnStart, goal);
+    } finally {
+      const total = runtime.historyImport?.total ?? 0;
+      reportHistoryImport(runtime, { phase: "done", done: total, total });
+    }
+  };
+
+  const startSessionNow = async (
+    runtime: ThreadRuntime,
+    head: ThreadHead,
+    desired: DesiredSessionShape,
+    resumeCursor: unknown,
+    pendingTurnStart: boolean,
+    goal: { carryGoal: boolean }
+  ): Promise<ProviderSession> => {
     const adapter = adapterFor(head.adapter);
     // §3.2: an out-of-range CLI is refused with the required version in the
     // message rather than started and allowed to fail on the first frame.
@@ -1696,7 +1761,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       // goals §5.3: on EVERY start, so an adapter emits only real changes — a
       // resumed provider repeating the goal the thread already shows is not one.
       knownGoal: knownGoalOf(runtime),
-      ...(goal.carryGoal ? { carryGoal: true } : {})
+      ...(goal.carryGoal ? { carryGoal: true } : {}),
+      // `projectHistoryIfEmpty` below reads the history right after the start;
+      // let the adapter overlap that read with its own start-up.
+      ...(resumeCursor !== undefined && runtime.historyPending ? { prefetchHistory: true } : {})
     });
     runtime.bound = { ...desired, session };
     runtime.sessionStartedAt = clock.now().getTime();
@@ -1769,16 +1837,39 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         label: `history:${adapter.id}`
       });
       const events = stampHistoryTimes(adapter.projectHistory(snapshot), head.createdAt);
-      for (const event of events) {
-        if (!isHistoricalRuntimeEvent(event)) {
-          logger.warn("agent-host: a projected history event was not marked historical", {
-            threadId: runtime.id,
-            type: event.type
-          });
-        }
-        await ingestion.ingest(event);
+      if (events.length === 0) {
+        // An empty replay is not an empty conversation: say so, as above.
+        await appendActivity(runtime, {
+          kind: "runtime.warning",
+          tone: "info",
+          summary: "History not available for this provider",
+          detail: "The agent replayed nothing for this conversation. New messages appear here as usual."
+        });
+        return;
       }
-      await ingestion.flushThread(runtime.id);
+      const total = events.length;
+      reportHistoryImport(runtime, { phase: "importing", done: 0, total });
+      runtime.historyBuffer = [];
+      try {
+        for (const [index, event] of events.entries()) {
+          if (index > 0 && index % HISTORY_IMPORT_PROGRESS_STEP === 0) {
+            reportHistoryImport(runtime, { phase: "importing", done: index, total });
+          }
+          if (!isHistoricalRuntimeEvent(event)) {
+            logger.warn("agent-host: a projected history event was not marked historical", {
+              threadId: runtime.id,
+              type: event.type
+            });
+          }
+          await ingestion.ingest(event);
+        }
+        await ingestion.flushThread(runtime.id);
+      } finally {
+        // Whatever was translated lands, even when the replay failed part-way.
+        const rest = runtime.historyBuffer;
+        runtime.historyBuffer = null;
+        await append(runtime, rest);
+      }
     } catch (error) {
       await appendActivity(runtime, {
         kind: "runtime.warning",
@@ -3605,7 +3696,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           const canFork =
             options.adapters.get(adapterId)?.capabilities.supportsSessionFork === true;
           if (!canFork) {
-            const ownerTitle = headOf(runtimes.get(owner)!)?.title ?? owner;
+            // Titles default to the first prompt, which can be a whole paragraph.
+            const fullTitle = headOf(runtimes.get(owner)!)?.title ?? owner;
+            const ownerTitle = fullTitle.length > 60 ? `${fullTitle.slice(0, 59)}…` : fullTitle;
             throw new AgentChatCommandError(
               "COMMAND_REJECTED",
               `That conversation is already open in "${ownerTitle}". Close that tab first, or open a new conversation.`,
@@ -3688,15 +3781,34 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         // old conversation UNDER the new prompt, because the `/turn` had
         // already committed its message. Queued on `effects`, so it neither
         // delays this response nor races a later turn's session start.
+        //
+        // The tab's loading screen starts now, before this answers, so the
+        // client's first stream already shows it rather than an empty thread.
+        reportHistoryImport(runtime, { phase: "reading", done: 0, total: null });
         void runtime.effects
           .run(() => ensureSession(runtime))
-          .catch((error: unknown) => {
+          .catch(async (error: unknown) => {
             // A resume that cannot open its session is reported by the turn
             // that needs it; opening early is an optimisation, not a contract.
             logger.info("agent-host: eager resume session did not open", {
               threadId,
               error: describeFailure(error)
             });
+            // But the tab must say so: without a row it showed an empty
+            // thread, as if the conversation had never existed (a signed-out
+            // account's "Authentication required" was only in this log).
+            await appendActivity(runtime, {
+              kind: "runtime.warning",
+              tone: "info",
+              summary: "This conversation could not be opened",
+              detail: describeFailure(error)
+            }).catch(() => undefined);
+          })
+          .finally(() => {
+            // However the eager start went, the loading screen ends with it.
+            if (runtime.historyImport !== null) {
+              reportHistoryImport(runtime, { phase: "done", done: 0, total: 0 });
+            }
           });
       }
       return requireHead(runtime);
@@ -4860,6 +4972,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
       runtime.subscribers.add(subscription);
+      if (runtime.historyImport !== null) {
+        subscription.onHistoryImport?.(runtime.historyImport);
+      }
       return () => {
         runtime.subscribers.delete(subscription);
       };
@@ -5211,6 +5326,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           : { ...event, payload: { ...event.payload, session } }
       ];
     });
+    const buffer = runtime.historyBuffer;
+    if (buffer !== null) {
+      buffer.push(...guarded);
+      if (buffer.length >= HISTORY_IMPORT_CHUNK) {
+        await append(runtime, buffer.splice(0));
+      }
+      return;
+    }
     await append(runtime, guarded);
   };
 

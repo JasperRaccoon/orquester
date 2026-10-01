@@ -25,6 +25,7 @@ import { createTestClock } from "../../orchestration/testing/fakes.ts";
 import type { AppendableDomainEvent } from "../../services.ts";
 import type { SessionNotification } from "./acp/_generated/schema.ts";
 import { agentFrames, readCapture } from "./fixtures.ts";
+import { projectGrokHistory } from "./history.ts";
 import { GrokNormalizer } from "./normalize.ts";
 
 const THREAD = "thread-1";
@@ -555,3 +556,67 @@ test("a subagent's own shell the CLI revived counts on its own once the subagent
 // ---------------------------------------------------------------------------
 // 2026-09-26: a loop and a goal through ingestion and the fold (fixtures 29, 30)
 // ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// A resumed conversation's history through ingestion and the fold (E6)
+// ---------------------------------------------------------------------------
+
+test("a session/load replay projects to the conversation: its messages, and one completed row per call", async () => {
+  const s = seam();
+  const CALL = "call-0b7d4e2a-9c1f-4a3e-8d56-7e2f1a0c9b84-0";
+  const READ_META = {
+    "x.ai/tool": { version: 1, name: "read_file", kind: "read", namespace: "grok_build", label: "Read", read_only: true }
+  };
+  const replay = (update: Record<string, unknown>): RuntimeEvent[] =>
+    s.grok.handleSessionUpdate({
+      sessionId: SESSION,
+      update,
+      _meta: { eventId: `${SESSION}-1`, isReplay: true, promptId: "p1" }
+    } as never);
+  // Frames of the shape CLI 1.0.46 persists and replays (text invented).
+  const live = [
+    ...replay({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "what does a.js do?" } }),
+    ...replay({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Read it first." } }),
+    ...replay({ sessionUpdate: "tool_call", toolCallId: CALL, title: "read_file", rawInput: { target_file: "/w/p/a.js" }, _meta: READ_META }),
+    ...replay({ sessionUpdate: "tool_call_update", toolCallId: CALL, kind: "read", title: "Read `/w/p/a.js`", _meta: READ_META }),
+    ...replay({
+      sessionUpdate: "tool_call_update",
+      toolCallId: CALL,
+      status: "completed",
+      content: [{ type: "content", content: { type: "text", text: "export const add = (a, b) => a + b;" } }]
+    }),
+    ...replay({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "It adds two numbers." } }),
+    ...s.grok.handleXaiNotification("_x.ai/session/update", {
+      sessionId: SESSION,
+      update: { sessionUpdate: "turn_completed", prompt_id: "p1", stop_reason: "end_turn" },
+      _meta: { eventId: `${SESSION}-9`, isReplay: true }
+    })
+  ];
+  assert.deepEqual(live.filter((event) => event.type !== "thread.token-usage.updated"), [], "replay emits nothing live");
+
+  let n = 0;
+  await s.feed(
+    projectGrokHistory(
+      { threadId: THREAD, turns: s.grok.historyTurns() },
+      { threadId: THREAD, stamp: () => ({ eventId: `h${(n += 1)}`, createdAt: new Date(T0 + n).toISOString() }) }
+    )
+  );
+
+  const state = s.state();
+  const messages = state.items.filter(
+    (item): item is Extract<(typeof state.items)[number], { kind: "message" }> => item.kind === "message"
+  );
+  assert.deepEqual(
+    messages.map((message) => [message.role, message.text, message.turnId]),
+    [
+      ["user", "what does a.js do?", "p1"],
+      ["reasoning", "Read it first.", "p1"],
+      ["assistant", "It adds two numbers.", "p1"]
+    ]
+  );
+  const rows = rowsOfCall(state.activities, CALL);
+  assert.equal(rows.length, 1, "one row for the call's three frames");
+  assert.equal(rows[0]?.activityKind, "tool.completed");
+  assert.equal((rows[0]?.payload as { status?: string }).status, "completed");
+  assert.equal((rows[0]?.payload as { title?: string }).title, "Read `/w/p/a.js`");
+});

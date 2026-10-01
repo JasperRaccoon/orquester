@@ -20,7 +20,12 @@ import type { AgentChatHome, SessionRecord } from "@orquester/config";
 
 /** Thrown for a refusal the route maps to a 400. */
 export class ChatSessionError extends Error {
-  constructor(message: string, readonly code = "SESSION_UNAVAILABLE") {
+  constructor(
+    message: string,
+    readonly code = "SESSION_UNAVAILABLE",
+    /** Set with `CONVERSATION_ALREADY_OPEN`: the tab that already owns the conversation. */
+    readonly ownerSessionId?: string
+  ) {
     super(message);
     this.name = "ChatSessionError";
   }

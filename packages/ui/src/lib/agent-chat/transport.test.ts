@@ -92,6 +92,29 @@ describe("the stream reader", () => {
     handle.close();
   });
 
+  it("hands one chunk's frames over together when the caller takes batches", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    const batches: string[][] = [];
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const handle = transport.stream("s1", {}, {
+      onFrame: () => assert.fail("onFrames replaces onFrame"),
+      onFrames: (frames) => batches.push(frames.map((frame) => frame.kind))
+    });
+    transporter.latest.handlers.onData(
+      line({ kind: "snapshot", thread: snapshot({ seq: 3 }) }) +
+        line({ kind: "event", seq: 4, event: ev("thread.reverted", { turnCount: 1 }, { seq: 4 }) }) +
+        line({ kind: "synchronized", hostInstanceId: "h1" })
+    );
+    transporter.latest.handlers.onData(":hb\n");
+    transporter.latest.handlers.onData(
+      line({ kind: "history-import", progress: { phase: "reading", done: 0, total: null } })
+    );
+    assert.deepEqual(batches, [["snapshot", "event", "synchronized"], ["history-import"]]);
+    assert.equal(handle.lastSeq, 4);
+    handle.close();
+  });
+
   it("resumes from the highest applied sequence after a drop", () => {
     const transporter = new FakeTransporter();
     const transport = createAgentChatTransport(transporter);

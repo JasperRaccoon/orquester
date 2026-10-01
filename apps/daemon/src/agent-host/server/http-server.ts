@@ -691,7 +691,11 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
       const stream = createThreadStream({
         response,
         hostInstanceId,
-        subscribe: (listener) => orchestrator.subscribe(threadId, { onEvents: listener }),
+        subscribe: (listener, onHistoryImport) =>
+          orchestrator.subscribe(threadId, {
+            onEvents: listener,
+            ...(onHistoryImport ? { onHistoryImport } : {})
+          }),
         read: async (): Promise<AgentChatStreamFrame[]> => {
           const read = await orchestrator.readThread(threadId, after);
           if (read.kind === "snapshot") {

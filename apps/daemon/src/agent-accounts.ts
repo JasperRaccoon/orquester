@@ -54,6 +54,33 @@ const CODEX_AUTH_ENV_UNSET = ["OPENAI_API_KEY"];
 // OAuth login in GROK_HOME/auth.json.
 const GROK_AUTH_ENV_UNSET = ["XAI_API_KEY"];
 
+/** An account home's directory name: the UUID `importAccount` mints. */
+const ACCOUNT_DIR_NAME = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/;
+
+/**
+ * The first file under `src` (relative path) whose namesake under `dst` has
+ * different bytes, or null when every shared name holds the same content.
+ * Symlinks are not followed.
+ */
+async function firstDifferingFile(src: string, dst: string, rel = ""): Promise<string | null> {
+  const entries = await readdir(join(src, rel), { withFileTypes: true }).catch(() => []);
+  for (const entry of entries) {
+    const path = join(rel, entry.name);
+    const other = await lstat(join(dst, path)).catch(() => null);
+    if (other === null) continue;
+    if (entry.isDirectory()) {
+      if (!other.isDirectory()) return path;
+      const nested = await firstDifferingFile(src, dst, path);
+      if (nested !== null) return nested;
+    } else if (entry.isFile()) {
+      if (!other.isFile()) return path;
+      const [a, b] = await Promise.all([readFile(join(src, path)), readFile(join(dst, path))]);
+      if (!a.equals(b)) return path;
+    }
+  }
+  return null;
+}
+
 /** The agent families with managed (per-account HOME) credentials. */
 type ManagedAgent = "claude" | "codex" | "grok";
 
@@ -176,6 +203,65 @@ export class AgentAccountsService {
     if (this.index.defaults[record.agent] === id) this.index.defaults[record.agent] = null;
     await this.persist();
     this.emitChanged();
+  }
+
+  /**
+   * Remove the account homes the index no longer lists.
+   *
+   * Deleting an account removes its home, but a CLI still running under it
+   * writes its next transcript line and so re-creates the path — as a plain
+   * directory, not the shared-history link, and with nothing that would ever
+   * sync it again (only registered accounts are synced). Such a home showed up
+   * in the conversation list as an account that does not exist.
+   *
+   * Its shared history is first moved into the shared store (only what the
+   * store lacks); a home holding a transcript the store has with DIFFERENT
+   * content is left alone and reported, never deleted. Homes of accounts a live
+   * session still names (`inUse`) are skipped. Answers the paths removed.
+   */
+  async pruneOrphanHomes(inUse: ReadonlySet<string>): Promise<string[]> {
+    const removed: string[] = [];
+    const registered = new Set(this.index.accounts.map((a) => a.id));
+    for (const agent of ["claude", "codex", "grok"] as const) {
+      const familyDir = join(this.opts.accountsDir, agent);
+      const names = await readdir(familyDir, { withFileTypes: true }).catch(() => []);
+      for (const entry of names) {
+        const id = entry.name;
+        if (!entry.isDirectory() || registered.has(id) || inUse.has(id) || !ACCOUNT_DIR_NAME.test(id)) {
+          continue;
+        }
+        const dir = join(familyDir, id);
+        const run = (this.syncChains.get(agent) ?? Promise.resolve()).then(async () => {
+          const shared = this.sharedHistoryDir(agent);
+          const own = join(dir, "home", basename(shared));
+          const ownStat = await lstat(own).catch(() => null);
+          if (ownStat?.isDirectory()) {
+            const conflict = await firstDifferingFile(own, shared);
+            if (conflict !== null) {
+              this.opts.logger?.warn?.(
+                `orphan account home ${agent}/${id} kept: ${conflict} differs from the shared copy`
+              );
+              return;
+            }
+            await this.mergeInto(own, shared);
+          }
+          await rm(dir, { recursive: true, force: true });
+          removed.push(dir);
+        });
+        this.syncChains.set(agent, run.catch(() => undefined));
+        await run.catch((e) =>
+          this.opts.logger?.warn?.(`orphan account home ${agent}/${id} not removed: ${String(e)}`)
+        );
+      }
+    }
+    return removed;
+  }
+
+  /** The shared conversation-history dir every account home of `agent` links to. */
+  private sharedHistoryDir(agent: ManagedAgent): string {
+    return agent === "claude"
+      ? join(this.systemClaudeDir(), "projects")
+      : join(agent === "codex" ? this.systemCodexHome() : this.systemGrokHome(), "sessions");
   }
 
   async setDefaults(

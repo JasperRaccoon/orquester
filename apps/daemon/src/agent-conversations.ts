@@ -52,6 +52,13 @@ interface AgentConversationOptions {
    * well as the daemon's own HOME — see `agentHomeRoots`.
    */
   daemonDir?: string;
+  /**
+   * The managed account ids the daemon has registered. When given, only their
+   * homes are scanned: a home left behind by a deleted account (a CLI still
+   * running under it re-creates the path) is not an account, and a resume
+   * offered under it would name an id the daemon cannot launch.
+   */
+  accountIds?: ReadonlySet<string>;
 }
 
 /**
@@ -62,7 +69,7 @@ export async function listAgentConversations(
   projectPath: string,
   opts: AgentConversationOptions = {}
 ): Promise<AgentConversationSummary[]> {
-  const roots = await agentHomeRoots(opts.daemonDir);
+  const roots = await agentHomeRoots(opts.daemonDir, opts.accountIds);
   const listers: Array<() => Promise<AgentConversationSummary[]>> = [
     () => listClaude(projectPath, roots.claude),
     () => listCodex(projectPath, roots.codex),
@@ -141,7 +148,10 @@ function attribution(root: AgentHomeRoot): Pick<AgentConversationSummary, "home"
  * the same set `agent-hooks.ts` installs hooks into. Best-effort throughout:
  * an unreadable dir simply contributes no roots.
  */
-async function agentHomeRoots(daemonDir?: string): Promise<AgentHomeRoots> {
+async function agentHomeRoots(
+  daemonDir?: string,
+  accountIds?: ReadonlySet<string>
+): Promise<AgentHomeRoots> {
   const home = homedir();
   const roots: AgentHomeRoots = {
     claude: [{ dir: process.env.CLAUDE_CONFIG_DIR || join(home, ".claude"), home: "system" }],
@@ -156,6 +166,7 @@ async function agentHomeRoots(daemonDir?: string): Promise<AgentHomeRoots> {
   await Promise.all(
     families.map(async (family) => {
       for (const id of await subdirNames(join(accountsDir, family))) {
+        if (accountIds !== undefined && !accountIds.has(id)) continue;
         roots[family].push({ dir: join(accountsDir, family, id, "home"), home: "account", accountId: id });
       }
     })

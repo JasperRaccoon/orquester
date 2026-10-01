@@ -401,10 +401,11 @@ export class GrokNormalizer {
    * A REPLAY frame (`_meta.isReplay`) produces **no events at all**, and that
    * is a deliberate, declared deviation from README 27's "the replay path must
    * keep `user_message_chunk`": the HOST owns the thread history
-   * (`events.ndjson`), so re-emitting five replayed rows would duplicate the
-   * timeline rather than restore it — and `session/load` replays only a
-   * fraction anyway (39 events produced, 5 replayed), so it could never be a
-   * reconstruction. A replayed `turn_completed` is still read for its usage
+   * (`events.ndjson`), so re-emitting the replayed rows would duplicate the
+   * timeline rather than restore it. They are collected instead, and a thread
+   * whose log is empty — a resume of a conversation the host never saw — is
+   * rebuilt from them by `projectHistory` (`history.ts`), once, stamped as
+   * history. A replayed `turn_completed` is still read for its usage
    * block, and a replayed `goal_updated` for the goal it leaves (see
    * {@link handleXaiNotification}); nothing else is.
    */

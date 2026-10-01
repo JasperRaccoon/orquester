@@ -459,6 +459,39 @@ test("the tab record is written FIRST and rolled back when the host refuses", as
   await f.cleanup();
 });
 
+test("a conversation already open elsewhere is refused with the owning tab's id", async () => {
+  const f = await makeFixture(OPENCODE, null);
+  f.refuse = {
+    status: 409,
+    body: {
+      error: {
+        code: "COMMAND_REJECTED",
+        message: 'That conversation is already open in "old tab".',
+        detail: { code: "RESUME_UNAVAILABLE", ownerThreadId: "owner-tab" }
+      }
+    }
+  };
+  await assert.rejects(
+    () =>
+      f.service.createSession(
+        {
+          kind: "agent-chat",
+          refId: "opencode",
+          projectPath: "/w/p",
+          cwd: "/w/p",
+          chat: { modelSelection: { model: "" }, resume: { home: "system", conversationId: "ses_1" } }
+        },
+        0
+      ),
+    (error: unknown) =>
+      error instanceof ChatSessionError &&
+      error.code === "CONVERSATION_ALREADY_OPEN" &&
+      error.ownerSessionId === "owner-tab"
+  );
+  assert.deepEqual(f.service.chat.list(), [], "the refused tab is rolled back");
+  await f.cleanup();
+});
+
 test("an agent row with no chat adapter cannot open a chat tab", async () => {
   const f = await makeFixture({ ...OPENCODE, chat: undefined }, null);
   await assert.rejects(

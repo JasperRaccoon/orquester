@@ -8,9 +8,14 @@
  * a **child process** with that one account's env, exactly as T3 does
  * (`apps/server/src/claudeHistoryWorker.ts` + `claude-history-worker.ts`).
  *
- * Usage: `node --import tsx history-worker.ts <method> <sessionId> <jsonArgs>`
+ * Usage: `node history-worker.mjs <method> <sessionId> <jsonArgs>`
  * Prints the JSON result on stdout; any failure exits non-zero with the
  * message on stderr.
+ *
+ * Plain JavaScript on purpose: it is started for every history read of a
+ * managed account (each resume, each rewind), and booting it through
+ * `--import tsx` cost seconds per start — enough, on a loaded host, to blow
+ * the read's deadline and leave a resumed chat without its history.
  *
  * The SDK import here is static. The §8 "no lazy dynamic `import()`" rule is
  * about the surviving host process; this is a separate, short-lived child.
@@ -18,8 +23,12 @@
 
 import { forkSession, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 
-/** Await pipe flush before allowing the worker to exit. */
-function writeAll(text: string): Promise<void> {
+/**
+ * Await pipe flush before allowing the worker to exit.
+ * @param {string} text
+ * @returns {Promise<void>}
+ */
+function writeAll(text) {
   return new Promise((resolve, reject) => {
     process.stdout.write(text, (error) => {
       if (error) reject(error);
@@ -28,13 +37,13 @@ function writeAll(text: string): Promise<void> {
   });
 }
 
-async function main(): Promise<void> {
+async function main() {
   const [method, sessionId, rawArgs] = process.argv.slice(2);
   if (method === undefined || sessionId === undefined) {
     throw new Error("usage: history-worker <getSessionMessages|forkSession> <sessionId> [json]");
   }
-  const args: unknown = rawArgs === undefined ? {} : JSON.parse(rawArgs);
-  const options = args !== null && typeof args === "object" ? (args as Record<string, unknown>) : {};
+  const args = rawArgs === undefined ? {} : JSON.parse(rawArgs);
+  const options = args !== null && typeof args === "object" ? args : {};
 
   if (method === "getSessionMessages") {
     const messages = await getSessionMessages(sessionId, options);
@@ -55,7 +64,7 @@ main().then(
     // hold queued bytes and the loop must be allowed to drain them.
     process.exitCode = 0;
   },
-  (error: unknown) => {
+  (error) => {
     process.stderr.write(error instanceof Error ? error.message : String(error));
     process.exitCode = 1;
   }

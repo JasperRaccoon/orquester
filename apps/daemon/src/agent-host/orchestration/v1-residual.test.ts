@@ -12,6 +12,7 @@ import { describe, it } from "node:test";
 import { HISTORICAL_RAW_SOURCE } from "@orquester/api/agent-chat";
 import type {
   DomainEvent,
+  HistoryImportProgress,
   RuntimeEvent,
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
@@ -351,6 +352,68 @@ describe("E2E R2-2: a resumed tab fills itself, above the new prompt", () => {
       rows.slice(0, 2).every((event) => Date.parse(event.occurredAt) < Date.parse(created)),
       "history is stamped before the thread was created, so a time sort agrees with the log"
     );
+    await host.stop();
+  });
+
+  it("commits a long history in chunks and tells the tab how far it is", async () => {
+    const turns = Array.from({ length: 300 }, (_, index) => ({
+      id: `long-${index}`,
+      items: [
+        { role: "user", text: `question ${index}` },
+        { role: "assistant", text: `answer ${index}` }
+      ]
+    }));
+    const claude = createScriptedAdapter({
+      id: "claude",
+      history: { threadId: "thread-1", turns },
+      projectHistory: (snapshot) => historyEvents("thread-1", snapshot)
+    });
+    // Held until the test is subscribed, so it sees the whole replay.
+    let release!: () => void;
+    const gate = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const readThread = claude.readThread.bind(claude);
+    claude.readThread = async (threadId) => {
+      await gate;
+      return readThread(threadId);
+    };
+    const host = createTestHost({ adapters: { claude } });
+    host.ingestion.translate = translateHistoryMessages;
+    const appendSizes: number[] = [];
+    const append = host.store.append.bind(host.store);
+    host.store.append = async (input) => {
+      if (input.events.some((event) => event.type === "thread.message-sent")) {
+        appendSizes.push(input.events.length);
+      }
+      return append(input);
+    };
+    const threadId = await host.createThread({
+      resume: { home: "account", conversationId: "conv-long" }
+    });
+    const progress: HistoryImportProgress[] = [];
+    await host.orchestrator.subscribe(threadId, {
+      onEvents: () => undefined,
+      onHistoryImport: (step) => {
+        progress.push(step);
+      }
+    });
+    release();
+    await host.settle();
+
+    assert.equal(messages(host, threadId).length, 600, "every message landed, in order");
+    assert.equal(messages(host, threadId)[599]?.text, "answer 299");
+    assert.deepEqual(appendSizes, [500, 100], "500 events per commit, not one commit per event");
+    const start = claude.calls.find((call) => call.kind === "startSession")?.detail as
+      | StartSessionInput
+      | undefined;
+    assert.equal(start?.prefetchHistory, true, "the adapter may read the history while it starts");
+
+    assert.equal(progress[0]?.phase, "reading", "the screen is up before the history is read");
+    const importing = progress.filter((step) => step.phase === "importing");
+    assert.ok(importing.length > 1, "progress moves during the import");
+    assert.ok(importing.every((step) => step.total === 1200));
+    assert.deepEqual(progress.at(-1), { phase: "done", done: 1200, total: 1200 });
     await host.stop();
   });
 });

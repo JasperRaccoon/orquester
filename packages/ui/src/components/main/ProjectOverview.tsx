@@ -128,8 +128,9 @@ const ResumeRow: React.FC<{
       });
     launchWithNotice(opened, agentName);
     // AFTER the resumed tab exists and is active — closing the empty tab first
-    // flashed the project overview between the two (owner, 2026-09-22).
-    if (onPicked) void opened.then(() => onPicked(), () => undefined);
+    // flashed the project overview between the two (owner, 2026-09-22). Only
+    // when a tab did open: a refused or duplicate launch keeps this one.
+    if (onPicked) void opened.then((session) => session && onPicked(), () => undefined);
   };
 
   return (

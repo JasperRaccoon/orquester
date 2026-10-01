@@ -57,6 +57,13 @@ import {
 export interface AgentChatStreamHandlers {
   /** One decoded `snapshot` / `event` / `synchronized` frame, in wire order. */
   onFrame(frame: AgentChatStreamFrame): void;
+  /**
+   * Every frame one network chunk decoded to, in wire order. When given it
+   * replaces `onFrame`: a resumed conversation's history arrives as hundreds
+   * of events at once, and handing them over one by one made the store
+   * re-project the whole timeline once per event.
+   */
+  onFrames?(frames: AgentChatStreamFrame[]): void;
   /** The underlying HTTP response opened. Fires again on every reconnect. */
   onOpen?(): void;
   /** The transport dropped; a reconnect is scheduled. `delayMs` is when. */
@@ -633,6 +640,7 @@ function openAgentChatStream(
           handlers.onOpen?.();
         }
         armStall();
+        const frames: AgentChatStreamFrame[] = [];
         for (const line of lines.push(chunk)) {
           const parsed = parseStreamLine(line);
           if (parsed.kind !== "frame") {
@@ -649,13 +657,21 @@ function openAgentChatStream(
             lastSeq = frame.seq;
           } else if (frame.kind === "snapshot") {
             lastSeq = frame.thread.seq;
-          } else {
+          } else if (frame.kind === "synchronized") {
             hostInstanceId = frame.hostInstanceId;
             // A live stream is proof of health: reset the backoff only here,
             // so a host that accepts and immediately drops us still backs off.
             attempt = 0;
           }
-          handlers.onFrame(frame);
+          frames.push(frame);
+        }
+        if (frames.length === 0) {
+          return;
+        }
+        if (handlers.onFrames) {
+          handlers.onFrames(frames);
+        } else {
+          for (const frame of frames) handlers.onFrame(frame);
         }
       },
       onEnd: () => {

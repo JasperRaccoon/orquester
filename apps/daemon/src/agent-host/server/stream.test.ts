@@ -5,6 +5,7 @@ import { describe, it } from "node:test";
 import {
   type AgentChatStreamFrame,
   type DomainEvent,
+  type HistoryImportProgress,
   type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
 
@@ -343,5 +344,59 @@ describe("thread stream — live delivery", () => {
     assert.deepEqual(closed, ["client"]);
     t.mock.timers.tick(30_000);
     assert.equal(fake.lines.length, before, "heartbeats stop after disconnect");
+  });
+});
+
+describe("thread stream — history replay progress", () => {
+  it("announces a replay still running after `synchronized`, then every change live", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const fake = fakeResponse();
+    let progress: (step: HistoryImportProgress) => void = () => undefined;
+    const stream = createThreadStream({
+      response: fake.response,
+      hostInstanceId: "host-1",
+      subscribe: async (_listener, onHistoryImport) => {
+        progress = onHistoryImport ?? (() => undefined);
+        // The orchestrator tells a new subscriber where a running replay is.
+        progress({ phase: "reading", done: 0, total: null });
+        return () => undefined;
+      },
+      read: async () => {
+        progress({ phase: "importing", done: 100, total: 400 });
+        return [{ kind: "snapshot", thread: snapshot(1) }];
+      }
+    });
+    await stream.start();
+    progress({ phase: "done", done: 400, total: 400 });
+
+    assert.deepEqual(
+      parse(fake.lines).map((frame) => frame.kind),
+      ["snapshot", "synchronized", "history-import", "history-import"]
+    );
+    const [before, after] = parse(fake.lines).slice(2) as Array<{ progress: HistoryImportProgress }>;
+    assert.deepEqual(before?.progress, { phase: "importing", done: 100, total: 400 }, "only the latest");
+    assert.equal(after?.progress.phase, "done");
+    stream.close();
+  });
+
+  it("says nothing about a replay that ended before the stream went live", async (t) => {
+    t.mock.timers.enable({ apis: ["setTimeout"] });
+    const fake = fakeResponse();
+    const stream = createThreadStream({
+      response: fake.response,
+      hostInstanceId: "host-1",
+      subscribe: async (_listener, onHistoryImport) => {
+        onHistoryImport?.({ phase: "reading", done: 0, total: null });
+        onHistoryImport?.({ phase: "done", done: 0, total: 0 });
+        return () => undefined;
+      },
+      read: async () => [{ kind: "snapshot", thread: snapshot(1) }]
+    });
+    await stream.start();
+    assert.deepEqual(
+      parse(fake.lines).map((frame) => frame.kind),
+      ["snapshot", "synchronized"]
+    );
+    stream.close();
   });
 });

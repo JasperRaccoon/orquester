@@ -41,6 +41,7 @@ import {
   savePreferredModels
 } from "../lib/preferred-model";
 import type { ModelSelection } from "@orquester/api/agent-chat";
+import { CONVERSATION_ALREADY_OPEN } from "@orquester/api/agent-chat";
 import { loadChatPrefs, saveChatPrefs, type ChatPrefs } from "../lib/chat-prefs";
 import {
   hasUnseenCompletion,
@@ -770,6 +771,17 @@ export interface AppState {
   /** Client-derived working/idle + attention per session id (drives the status dot). */
   activityById: Record<string, SessionActivity>;
   /**
+   * A resume launch in flight (`openTab` with `chat.resume`): its project's
+   * main view shows the chat loading screen over everything until the tab
+   * exists, and the same conversation cannot be launched a second time.
+   */
+  openingChat: {
+    projectPath: string;
+    conversationId: string;
+    title: string;
+    refId: string;
+  } | null;
+  /**
    * Transient notice for a refused resume: the daemon answered
    * `RESUME_UNAVAILABLE` (the conversation id is unusable, or this agent has no
    * resume flag), so NO session was created. Carries what's needed to offer a
@@ -1159,6 +1171,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   launchDialog: null,
   activityById: {},
   resumeError: null,
+  openingChat: null,
   agentAuthError: null,
   dismissedAgentAuthErrors: [],
   providerRateLimits: {},
@@ -1706,6 +1719,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       // Transient per-daemon notices reference the previous
       // daemon's session/project, so they must not survive the switch.
       resumeError: null,
+      openingChat: null,
       agentAuthError: null,
       dismissedAgentAuthErrors: [],
       providerRateLimits: {},
@@ -2346,70 +2360,106 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     const project = get().currentProject;
-    let session: SessionSummary;
-    try {
-      session = await api.createSession({
-        kind,
-        refId,
-        title,
-        projectPath: project?.path ?? "",
-        cwd: project?.path,
-        accountId,
-        resumeConversationId,
-        initialCommand,
-        chat
-      });
-    } catch (error) {
-      // A refused RESUME is the one create failure with a useful recovery ("open
-      // a fresh one instead"), and the daemon guarantees no session was created,
-      // so it becomes a toast rather than an unhandled rejection in the
-      // fire-and-forget callers. Every other failure keeps the old behaviour.
-      const code =
-        error instanceof ApiError && error.body && typeof error.body === "object"
-          ? (error.body as { code?: unknown }).code
-          : undefined;
-      if (code === "RESUME_UNAVAILABLE") {
-        set({
-          resumeError: {
-            agentId: refId,
-            agentName: title ?? refId,
-            message:
-              (error as ApiError).serverMessage ??
-              "That conversation cannot be resumed with this agent.",
-            // Replay material for "Start fresh": the identity, kind and project
-            // this attempt targeted, not whatever is current when it is clicked.
-            accountId,
-            projectPath: project?.path ?? "",
-            kind,
-            // Drop the cursor the daemon just refused; everything else about the
-            // chat launch (model selection, runtime mode) replays as-is.
-            chat: chat ? { ...chat, resume: undefined } : undefined
-          }
-        });
-        // The refusal means our cached list offered an id the daemon rejects —
-        // the transcript is gone or moved. Re-scan so the stale row disappears
-        // instead of inviting the same failure again.
-        if (project?.path) {
-          void get().loadAgentConversations(project.path, true);
-        }
-        return;
-      }
-      throw error;
+    // A slow resume used to leave the clicked row looking inert, so a second
+    // click launched the same conversation again and was refused. The first
+    // one now owns the screen (`openingChat`) until it lands.
+    const resume = chat?.resume;
+    if (resume && get().openingChat?.conversationId === resume.conversationId) {
+      return undefined;
     }
-    set((state) => ({
-      sessions: upsertSession(state.sessions, session),
-      activeTabByProject: project
-        ? { ...state.activeTabByProject, [project.path]: session.id }
-        : state.activeTabByProject,
-      resumeError: null,
-      // The agent this just launched is about to write a new conversation (or
-      // extend the resumed one), so the cached list for its project is stale.
-      agentConversationsByProject: dropConversationCache(
-        state.agentConversationsByProject,
-        session.projectPath
-      )
-    }));
-    return session;
+    const opening = resume
+      ? {
+          projectPath: project?.path ?? "",
+          conversationId: resume.conversationId,
+          title: title ?? refId,
+          refId
+        }
+      : null;
+    if (opening) {
+      set({ openingChat: opening });
+    }
+    try {
+      let session: SessionSummary;
+      try {
+        session = await api.createSession({
+          kind,
+          refId,
+          title,
+          projectPath: project?.path ?? "",
+          cwd: project?.path,
+          accountId,
+          resumeConversationId,
+          initialCommand,
+          chat
+        });
+      } catch (error) {
+        // A refused RESUME is the one create failure with a useful recovery ("open
+        // a fresh one instead"), and the daemon guarantees no session was created,
+        // so it becomes a toast rather than an unhandled rejection in the
+        // fire-and-forget callers. Every other failure keeps the old behaviour.
+        const body =
+          error instanceof ApiError && error.body && typeof error.body === "object"
+            ? (error.body as { code?: unknown; ownerSessionId?: unknown })
+            : undefined;
+        const code = body?.code;
+        // The conversation is already open in a tab of this project — typically
+        // the same resume clicked twice while the first was still loading. Going
+        // to that tab is what the user wanted; anywhere else it stays a refusal.
+        if (code === CONVERSATION_ALREADY_OPEN && typeof body?.ownerSessionId === "string") {
+          const owner = get().sessions.find((s) => s.id === body.ownerSessionId);
+          if (owner && project && owner.projectPath === project.path) {
+            get().activateTab(owner.id);
+            return owner;
+          }
+        }
+        if (code === "RESUME_UNAVAILABLE" || code === CONVERSATION_ALREADY_OPEN) {
+          set({
+            resumeError: {
+              agentId: refId,
+              agentName: title ?? refId,
+              message:
+                (error as ApiError).serverMessage ??
+                "That conversation cannot be resumed with this agent.",
+              // Replay material for "Start fresh": the identity, kind and project
+              // this attempt targeted, not whatever is current when it is clicked.
+              accountId,
+              projectPath: project?.path ?? "",
+              kind,
+              // Drop the cursor the daemon just refused; everything else about the
+              // chat launch (model selection, runtime mode) replays as-is.
+              chat: chat ? { ...chat, resume: undefined } : undefined
+            }
+          });
+          // The refusal means our cached list offered an id the daemon rejects —
+          // the transcript is gone or moved. Re-scan so the stale row disappears
+          // instead of inviting the same failure again. (An already-open refusal
+          // says nothing about the transcript, so it keeps the list.)
+          if (project?.path && code === "RESUME_UNAVAILABLE") {
+            void get().loadAgentConversations(project.path, true);
+          }
+          return;
+        }
+        throw error;
+      }
+      set((state) => ({
+        sessions: upsertSession(state.sessions, session),
+        activeTabByProject: project
+          ? { ...state.activeTabByProject, [project.path]: session.id }
+          : state.activeTabByProject,
+        resumeError: null,
+        // The agent this just launched is about to write a new conversation (or
+        // extend the resumed one), so the cached list for its project is stale.
+        agentConversationsByProject: dropConversationCache(
+          state.agentConversationsByProject,
+          session.projectPath
+        )
+      }));
+      return session;
+    } finally {
+      if (opening && get().openingChat === opening) {
+        set({ openingChat: null });
+      }
+    }
   },
 
   dismissResumeError: () => set({ resumeError: null }),

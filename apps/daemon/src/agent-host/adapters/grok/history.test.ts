@@ -80,7 +80,7 @@ test("each replayed turn projects started / items / completed, in order", () => 
 
   assert.deepEqual(
     events.map((event) => event.type),
-    ["turn.started", "item.completed", "item.completed", "turn.completed"]
+    ["turn.started", "item.completed", "item.completed", "item.completed", "turn.completed"]
   );
   assert.equal(
     events.every((event) => event.turnId === "f8f85d1b-e6be-4e6c-9073-5ae82cd1b299"),
@@ -96,8 +96,12 @@ test("each replayed turn projects started / items / completed, in order", () => 
   );
   assert.equal(items[0].payload.itemType, "user_message");
   assert.equal(items[0].payload.detail, "Reply with exactly: OK");
-  assert.equal(items[1].payload.itemType, "assistant_message");
-  assert.equal(items[1].payload.detail, "OK");
+  // The replayed `agent_thought_chunk` comes back as the reasoning row the
+  // live stream built, between the prompt and the answer it led to.
+  assert.equal(items[1].payload.itemType, "reasoning");
+  assert.match(String(items[1].payload.detail), /^The user wants me to reply with exactly "OK"/);
+  assert.equal(items[2].payload.itemType, "assistant_message");
+  assert.equal(items[2].payload.detail, "OK");
   assert.equal(
     items.every((event) => event.payload.status === "completed"),
     true
@@ -367,4 +371,165 @@ test("non-text content and an id-less tool call are ignored, never thrown on", (
   collector.observeAcpUpdate({ sessionUpdate: "session_info_update", title: "ignored" });
   collector.observeXaiUpdate({ sessionUpdate: "hook_execution" });
   assert.deepEqual(collector.snapshotTurns(), []);
+});
+
+// ---------------------------------------------------------------------------
+// A replayed call is one row, in the order the turn wrote it
+// ---------------------------------------------------------------------------
+
+/**
+ * The frames a `search_replace` call leaves in a session's persisted update
+ * log (what `session/load` replays), shaped on the CLI 1.0.46 log of a real
+ * session: the `tool_call` names only the vendor tool, the first update adds
+ * ACP's `kind`, a readable title and the file, the last one the status and
+ * the outcome. Paths and text invented.
+ */
+const EDIT_CALL = "call-5e2b7a10-0c4d-4b8e-9a61-3f2d8c7e1b90-0";
+const EDIT_META = {
+  "x.ai/tool": { version: 1, name: "search_replace", kind: "edit", namespace: "grok_build", label: "Edit", read_only: false }
+};
+const editFrames: Record<string, unknown>[] = [
+  {
+    sessionUpdate: "tool_call",
+    toolCallId: EDIT_CALL,
+    title: "search_replace",
+    rawInput: { file_path: "/w/p/README.md", old_string: "teh", new_string: "the" },
+    _meta: EDIT_META
+  },
+  {
+    sessionUpdate: "tool_call_update",
+    toolCallId: EDIT_CALL,
+    kind: "edit",
+    title: "Edit `/w/p/README.md`",
+    locations: [{ path: "/w/p/README.md" }],
+    rawInput: { variant: "SearchReplace", file_path: "/w/p/README.md", old_string: "teh", new_string: "the" },
+    _meta: EDIT_META
+  },
+  {
+    sessionUpdate: "tool_call_update",
+    toolCallId: EDIT_CALL,
+    status: "completed",
+    content: [{ type: "diff", path: "/w/p/README.md", oldText: "teh", newText: "the" }],
+    rawOutput: { replacements: 1 }
+  }
+];
+
+test("a replayed call's frames fold into ONE row, typed and titled as the live path writes it", () => {
+  const collector = new GrokHistoryCollector();
+  collector.observeAcpUpdate({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "fix the typo" } });
+  collector.observeAcpUpdate({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "A one-word fix." } });
+  collector.observeAcpUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Fixing it." } });
+  for (const frame of editFrames) {
+    collector.observeAcpUpdate(frame);
+  }
+  collector.observeAcpUpdate({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "Done; " } });
+  collector.observeAcpUpdate({ sessionUpdate: "agent_thought_chunk", content: { type: "text", text: "report it." } });
+  collector.observeAcpUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "Fixed." } });
+  collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "p1" });
+
+  const events = projectGrokHistory(
+    { threadId: "t1", turns: collector.snapshotTurns() },
+    { threadId: "t1", ...stamps() }
+  );
+  const items = events.filter(
+    (event): event is Extract<RuntimeEvent, { type: "item.completed" }> => event.type === "item.completed"
+  );
+  assert.deepEqual(
+    items.map((event) => [event.payload.itemType, event.payload.itemType === "file_change" ? event.itemId : event.payload.detail]),
+    [
+      ["user_message", "fix the typo"],
+      ["reasoning", "A one-word fix."],
+      ["assistant_message", "Fixing it."],
+      ["file_change", EDIT_CALL],
+      ["reasoning", "Done; report it."],
+      ["assistant_message", "Fixed."]
+    ],
+    "the order the turn wrote, one row for the call's three frames"
+  );
+  const edit = items[3]!;
+  assert.equal(edit.payload.status, "completed");
+  assert.equal(edit.payload.title, "Edit `/w/p/README.md`", "the latest title, not the bare tool name");
+  const data = edit.payload.data as Record<string, unknown>;
+  assert.equal(data.toolUseId, EDIT_CALL);
+  assert.equal(data.kind, "edit");
+  assert.equal(data.vendorTool, "search_replace");
+  assert.deepEqual(data.locations, [{ path: "/w/p/README.md" }]);
+  assert.deepEqual(data.content, [{ type: "diff", path: "/w/p/README.md", oldText: "teh", newText: "the" }]);
+  assert.deepEqual(data.rawOutput, { replacements: 1 });
+  assert.equal((data.rawInput as { variant?: string }).variant, "SearchReplace");
+  // Every message carries its whole text in `data.text`, which ingestion
+  // prefers to `detail` for a replayed message.
+  for (const event of items.filter((event) => event.payload.itemType !== "file_change")) {
+    assert.equal((event.payload.data as { text?: string }).text, event.payload.detail);
+  }
+});
+
+test("a replayed shell is a command row; a call the replay never saw end is closed failed", () => {
+  const collector = new GrokHistoryCollector();
+  collector.observeAcpUpdate({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "run it" } });
+  collector.observeAcpUpdate({
+    sessionUpdate: "tool_call",
+    toolCallId: "call-sh",
+    title: "run_terminal_command",
+    rawInput: { command: "npm test" },
+    _meta: { "x.ai/tool": { version: 1, name: "run_terminal_command", kind: "execute", namespace: "grok_build", label: "Run", read_only: false } }
+  });
+  collector.observeAcpUpdate({ sessionUpdate: "tool_call_update", toolCallId: "call-sh", status: "completed" });
+  collector.observeAcpUpdate({
+    sessionUpdate: "tool_call",
+    toolCallId: "call-cut",
+    title: "read_file",
+    rawInput: { target_file: "/w/p/a.js" },
+    _meta: { "x.ai/tool": { version: 1, name: "read_file", kind: "read", namespace: "grok_build", label: "Read", read_only: true } }
+  });
+  collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "p1", stop_reason: "cancelled" } as never);
+
+  const tools = projectGrokHistory(
+    { threadId: "t1", turns: collector.snapshotTurns() },
+    { threadId: "t1", ...stamps() }
+  ).filter(
+    (event): event is Extract<RuntimeEvent, { type: "item.completed" }> =>
+      event.type === "item.completed" && event.itemId !== undefined && event.itemId.startsWith("call-")
+  );
+  assert.deepEqual(
+    tools.map((event) => [event.itemId, event.payload.itemType, event.payload.status, event.payload.detail]),
+    [
+      ["call-sh", "command_execution", "completed", "npm test"],
+      ["call-cut", "dynamic_tool_call", "failed", "read_file"]
+    ]
+  );
+});
+
+test("a replayed spawn_subagent call is an agent launch row", () => {
+  const collector = new GrokHistoryCollector();
+  collector.observeAcpUpdate({
+    sessionUpdate: "tool_call",
+    toolCallId: "call-spawn",
+    title: "spawn_subagent",
+    rawInput: { description: "look around" },
+    _meta: { "x.ai/tool": { version: 1, name: "spawn_subagent", kind: "other", namespace: "grok_build", label: "Spawn Subagent", read_only: false } }
+  });
+  collector.observeAcpUpdate({ sessionUpdate: "tool_call_update", toolCallId: "call-spawn", status: "completed" });
+  collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "p1" });
+  const row = projectGrokHistory(
+    { threadId: "t1", turns: collector.snapshotTurns() },
+    { threadId: "t1", ...stamps() }
+  ).find((event): event is Extract<RuntimeEvent, { type: "item.completed" }> => event.type === "item.completed");
+  assert.equal(row?.payload.itemType, "collab_agent_tool_call");
+});
+
+test("a call id seen in an earlier turn opens a new row in the next one", () => {
+  const collector = new GrokHistoryCollector();
+  collector.observeAcpUpdate({ sessionUpdate: "tool_call", toolCallId: "call-1", title: "a", status: "completed" });
+  collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "p1" });
+  collector.observeAcpUpdate({ sessionUpdate: "tool_call", toolCallId: "call-1", title: "b", status: "completed" });
+  collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "p2" });
+  const turns = collector.snapshotTurns();
+  assert.deepEqual(
+    turns.map((turn) => [turn.id, (turn.items as GrokHistoryItem[]).map((item) => (item as { title?: string }).title)]),
+    [
+      ["p1", ["a"]],
+      ["p2", ["b"]]
+    ]
+  );
 });

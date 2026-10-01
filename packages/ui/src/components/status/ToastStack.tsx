@@ -17,10 +17,15 @@ import { WorkflowRunToast } from "../workflows/runs/WorkflowRunToast";
  * be failing), then a refused resume, then the agent-auth failure (every turn
  * on that thread will fail until it is fixed), then a finished workflow run,
  * then plain notices.
+ *
+ * The column also bounds the cards on a phone: each is capped to the column's
+ * width and long unbroken text (a prompt-derived tab title with a URL in it)
+ * wraps anywhere, so a card can never grow past the screen edges. The top
+ * offset clears the status bar of an installed PWA.
  */
 export const ToastStack: React.FC = () =>
   createPortal(
-    <div className="pointer-events-none fixed inset-x-0 top-3 z-[95] flex flex-col items-center gap-2 px-3">
+    <div className="pointer-events-none fixed inset-x-0 top-[calc(env(safe-area-inset-top)+0.75rem)] z-[95] mx-auto flex max-w-[calc(32rem+1.5rem)] flex-col items-center gap-2 px-3 [overflow-wrap:anywhere] [&>*]:max-w-full">
       <ConnectionStatusToast />
       <ResumeErrorToast />
       <AgentAuthErrorToast />

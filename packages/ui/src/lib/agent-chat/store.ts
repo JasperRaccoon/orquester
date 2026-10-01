@@ -2080,8 +2080,10 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
           applyStreamFrame({ kind: "snapshot", thread: response.thread });
           return;
         }
-        for (const event of response.events) {
-          applyStreamFrame({ kind: "event", seq: event.seq, event });
+        if (response.events.length > 0) {
+          applyStreamFrames(
+            response.events.map((event) => ({ kind: "event" as const, seq: event.seq, event }))
+          );
         }
       },
 
@@ -2149,6 +2151,16 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
 
     const applyStreamFrame = (
       frame: Parameters<typeof applyFrame>[1],
+      options: { keepConnection?: boolean } = {}
+    ): void => applyStreamFrames([frame], options);
+
+    /**
+     * Fold a run of stream frames — one network chunk's worth — in ONE store
+     * update, so the timeline is projected once per chunk rather than once
+     * per event (a resumed conversation's history arrives hundreds at a time).
+     */
+    const applyStreamFrames = (
+      frames: Parameters<typeof applyFrame>[1][],
       options: {
         /**
          * Keep the connection state the frame would reset: a re-read's
@@ -2161,7 +2173,11 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       // §7.7: when an open chat tab's stream delivers `thread.turn-diff-completed`
       // the client refreshes the git tab for that project. No new bus event is
       // introduced for it (§6.4) — the thread stream already knows.
-      if (frame.kind === "event" && frame.event.type === "thread.turn-diff-completed") {
+      if (
+        frames.some(
+          (frame) => frame.kind === "event" && frame.event.type === "thread.turn-diff-completed"
+        )
+      ) {
         const projectPath = get().slice.head?.projectPath;
         if (projectPath) {
           nudgeProjectGit(projectPath);
@@ -2169,11 +2185,14 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       }
       const historyBefore = get().slice.history;
       update((state) => {
-        // §6.3/§8: a different host instance id means re-read, not resume.
-        // Decided inside the updater, performed after `set` returns: a zustand
-        // updater must be pure, or a replay double-fires the read (Q2-9).
-        resyncWanted ||= needsResync(state.reducer.hostInstanceId, frame);
-        let reducer = applyFrame(state.reducer, frame);
+        let reducer = state.reducer;
+        for (const frame of frames) {
+          // §6.3/§8: a different host instance id means re-read, not resume.
+          // Decided inside the updater, performed after `set` returns: a zustand
+          // updater must be pure, or a replay double-fires the read (Q2-9).
+          resyncWanted ||= needsResync(reducer.hostInstanceId, frame);
+          reducer = applyFrame(reducer, frame);
+        }
         if (reducer === state.reducer) {
           return state;
         }
@@ -2222,8 +2241,11 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       const historyAfter = get().slice.history;
       if (
         revealed !== null &&
-        (frame.kind === "snapshot" ||
-          (frame.kind === "event" && frame.event.type === "thread.reverted") ||
+        (frames.some(
+          (frame) =>
+            frame.kind === "snapshot" ||
+            (frame.kind === "event" && frame.event.type === "thread.reverted")
+        ) ||
           historyAfter.pages.length < historyBefore.pages.length ||
           historyAfter.bridge.length < historyBefore.bridge.length) &&
         !get().rows.some((row) => row.id === revealed.rowId)
@@ -2261,11 +2283,14 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       // A task's own Stop reads "Stopping…" until its row settles — or until
       // the provider failed the stop, when it is offered again.
       if (state.stoppingTaskIds.length > 0) {
-        const failedTaskId =
-          frame.kind === "event" && frame.event.type === "thread.activity-appended"
-            ? failedTaskStopId(frame.event.payload.activity)
-            : null;
-        const stoppingTaskIds = pendingTaskStops(state.stoppingTaskIds, state.slice.roster, failedTaskId);
+        let stoppingTaskIds = state.stoppingTaskIds;
+        for (const frame of frames) {
+          const failedTaskId =
+            frame.kind === "event" && frame.event.type === "thread.activity-appended"
+              ? failedTaskStopId(frame.event.payload.activity)
+              : null;
+          stoppingTaskIds = pendingTaskStops(stoppingTaskIds, state.slice.roster, failedTaskId);
+        }
         if (stoppingTaskIds !== state.stoppingTaskIds) set({ stoppingTaskIds });
       }
       driveQueue();
@@ -2455,6 +2480,7 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
         resumeOptions,
         {
           onFrame: applyStreamFrame,
+          onFrames: applyStreamFrames,
           onOpen: () => {
             if (get().slice.connection === "idle") {
               setSlice({ connection: "connecting" });

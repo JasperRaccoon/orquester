@@ -10,9 +10,8 @@
  * Every wait on that child has a deadline (§3.1); an expired one kills it.
  */
 
-import { createRequire } from "node:module";
 import * as nodePath from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { fileURLToPath } from "node:url";
 
 import { forkSession, getSessionMessages } from "@anthropic-ai/claude-agent-sdk";
 
@@ -22,23 +21,8 @@ import type { ClaudeHistoryMessage } from "./rollback.ts";
 
 const HISTORY_WORKER_PATH = nodePath.resolve(
   nodePath.dirname(fileURLToPath(import.meta.url)),
-  "history-worker.ts"
+  "history-worker.mjs"
 );
-
-/**
- * `--import tsx` is resolved by node against the child's **cwd**, and the
- * worker's cwd is the thread's project directory — which has no
- * `node_modules` of its own. A bare specifier therefore failed with
- * `ERR_MODULE_NOT_FOUND: Cannot find package 'tsx'` and the worker never
- * started, so this is resolved from THIS module's own location instead.
- */
-const TSX_IMPORT_SPECIFIER = ((): string => {
-  try {
-    return pathToFileURL(createRequire(import.meta.url).resolve("tsx")).href;
-  } catch {
-    return "tsx";
-  }
-})();
 
 /** A bounded window for one history read or fork. */
 const HISTORY_DEADLINE_MS = 30_000;
@@ -108,8 +92,6 @@ export function createClaudeHistoryReader(
     const child = spawn({
       command: options.nodePath ?? process.execPath,
       args: [
-        "--import",
-        TSX_IMPORT_SPECIFIER,
         HISTORY_WORKER_PATH,
         method,
         sessionId,

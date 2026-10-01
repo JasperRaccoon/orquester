@@ -31,6 +31,15 @@ describe("parseStreamLine", () => {
     assert.equal(parseStreamLine(JSON.stringify([1, 2])).kind, "malformed");
   });
 
+  it("accepts a history-import progress frame and rejects a malformed one", () => {
+    const frame = (progress: unknown) => JSON.stringify({ kind: "history-import", progress });
+    assert.equal(parseStreamLine(frame({ phase: "reading", done: 0, total: null })).kind, "frame");
+    assert.equal(parseStreamLine(frame({ phase: "importing", done: 5, total: 9 })).kind, "frame");
+    assert.equal(parseStreamLine(frame({ phase: "later", done: 0, total: null })).kind, "malformed");
+    assert.equal(parseStreamLine(frame({ phase: "done", done: "0", total: 0 })).kind, "malformed");
+    assert.equal(parseStreamLine(frame(null)).kind, "malformed");
+  });
+
   it("accepts an event whose payload carries fields this bundle does not know", () => {
     const line = JSON.stringify({
       kind: "event",

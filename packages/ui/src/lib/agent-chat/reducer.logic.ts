@@ -95,7 +95,8 @@ export function emptySlice(sessionId: string): AgentChatThreadSlice {
     respondingRequestIds: [],
     errorBanner: null,
     history: EMPTY_HISTORY,
-    goal: null
+    goal: null,
+    historyImport: null
   };
 }
 
@@ -305,8 +306,16 @@ export function applyFrame(
       return {
         ...state,
         hostInstanceId: frame.hostInstanceId,
-        slice: { ...state.slice, connection }
+        // A replay still running is re-announced right after this frame;
+        // one that ended while the stream was away must not linger.
+        slice: { ...state.slice, connection, historyImport: null }
       };
+    }
+    case "history-import": {
+      const historyImport = frame.progress.phase === "done" ? null : frame.progress;
+      return historyImport === null && state.slice.historyImport === null
+        ? state
+        : { ...state, slice: { ...state.slice, historyImport } };
     }
   }
 }

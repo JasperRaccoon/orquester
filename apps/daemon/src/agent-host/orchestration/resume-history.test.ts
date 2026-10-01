@@ -90,6 +90,45 @@ const SNAPSHOT: ThreadSnapshot = {
 
 describe("E6: a resumed thread replays the provider's own history", () => {
 
+  it("says so in the timeline when the resumed session cannot open at all", async () => {
+    const grok = createScriptedAdapter({
+      id: "grok",
+      failStartSession: new Error("session/load: Authentication required")
+    });
+    const host = createTestHost({ adapters: { grok } });
+    const threadId = await host.createThread({
+      refId: "grok",
+      resume: { home: "account", conversationId: "conv-auth" }
+    });
+    await host.settle();
+
+    const notice = activities(host, threadId).find(
+      (row) => row.summary === "This conversation could not be opened"
+    );
+    assert.ok(notice, "a signed-out account is not an empty conversation");
+    assert.match(JSON.stringify(notice?.payload), /Authentication required/);
+    await host.stop();
+  });
+
+  it("says so in the timeline when the replay comes back empty", async () => {
+    const claude = createScriptedAdapter({
+      id: "claude",
+      history: { threadId: "thread-1", turns: [] },
+      projectHistory: () => []
+    });
+    const host = createTestHost({ adapters: { claude } });
+    const threadId = await host.createThread({
+      resume: { home: "account", conversationId: "conv-empty" }
+    });
+    await host.settle();
+
+    const notice = activities(host, threadId).find(
+      (row) => row.summary === "History not available for this provider"
+    );
+    assert.ok(notice, "an empty replay is explained, not left as an empty thread");
+    await host.stop();
+  });
+
   it("says so in the timeline when the adapter cannot replay history", async () => {
     const grok = createScriptedAdapter({ id: "grok" });
     const host = createTestHost({ adapters: { grok } });

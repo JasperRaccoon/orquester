@@ -31,7 +31,8 @@ import type {
   ThreadTokenUsage,
   ToolLifecycleItemType,
   Turn,
-  TurnState
+  TurnState,
+  HistoryImportProgress
 } from "@orquester/api/agent-chat";
 import type { ComposerDraft } from "./composer.logic";
 
@@ -205,6 +206,12 @@ export interface AgentChatThreadSlice {
    * keeps its identity through every event that does not move it.
    */
   goal: ThreadGoal | null;
+  /**
+   * A resumed conversation's history replay still under way (the host's
+   * transient `history-import` frame); null when none is, or the host
+   * predates the frame.
+   */
+  historyImport: HistoryImportProgress | null;
 }
 
 /**

@@ -90,7 +90,8 @@ import {
   isAnchorReachableAfterCompaction,
   planClaudeRollback,
   planClaudeRollbackById,
-  remapClaudeForkTurnBoundaries
+  remapClaudeForkTurnBoundaries,
+  type ClaudeHistoryMessage
 } from "./rollback.ts";
 import { dispatchableSkillNames, discoverClaudeSkills } from "./skills.ts";
 import { readWorkflowHistoryRun, workflowLaunchesIn } from "./workflow-history.ts";
@@ -253,6 +254,8 @@ interface ClaudeSessionOptions {
   onUsageLimitsStale?: () => void;
   /** The fold's goal (goals §5.3); the session reports only what changes from it. */
   knownGoal?: AgentGoal | null;
+  /** Begin the resumed transcript's read during `start` (`StartSessionInput.prefetchHistory`). */
+  prefetchHistory?: boolean;
 }
 
 export class ClaudeSession {
@@ -293,6 +296,14 @@ export class ClaudeSession {
   /** True when this session was started from a cursor, i.e. it has a past. */
   private readonly startedFromCursor: boolean;
   private resumeSessionAt: string | undefined;
+  /**
+   * The resumed transcript, read while the CLI starts when the host asked for
+   * it (`prefetchHistory`). Taken by the first `readThread` for the same
+   * session id; anything else reads afresh.
+   */
+  private historyPrefetch:
+    | { sessionId: string; messages: Promise<ClaudeHistoryMessage[]> }
+    | undefined;
   /**
    * The CLI's own transcript, read for what stdout never says about a goal:
    * met, impossible, cleared by an error (goals §6.1.4), and what `--resume`
@@ -395,6 +406,18 @@ export class ClaudeSession {
   // -------------------------------------------------------------------------
 
   async start(): Promise<ProviderSession> {
+    // The history read (a worker process for a managed account) and the CLI's
+    // handshake are independent, so a resume no longer pays for them in turn.
+    if (
+      this.options.prefetchHistory === true &&
+      this.startedFromCursor &&
+      this.resumeSessionId !== undefined
+    ) {
+      const messages = this.readHistoryMessages(this.resumeSessionId);
+      // Failure is `readThread`'s to report; never an unhandled rejection here.
+      messages.catch(() => undefined);
+      this.historyPrefetch = { sessionId: this.resumeSessionId, messages };
+    }
     const built = buildClaudeQueryOptions({
       cwd: this.options.cwd,
       executablePath: this.options.executablePath,
@@ -2093,14 +2116,12 @@ export class ClaudeSession {
     if (sessionId === undefined || !this.startedFromCursor) {
       return { threadId: this.threadId, turns: [] };
     }
+    const prefetch = this.historyPrefetch;
+    this.historyPrefetch = undefined;
     try {
-      const messages = await createClaudeHistoryReader({
-        env: this.options.env,
-        cwd: this.options.cwd,
-        hostConfigDir: this.options.deps.hostConfigDir,
-        spawn: this.options.deps.spawn,
-        nodePath: this.options.deps.nodePath
-      }).readMessages({ sessionId, cwd: this.options.cwd });
+      const messages = await (prefetch?.sessionId === sessionId
+        ? prefetch.messages
+        : this.readHistoryMessages(sessionId));
       const turns = groupClaudeHistoryTurns(messages);
       await this.attachWorkflowHistory(sessionId, messages, turns);
       return { threadId: this.threadId, turns };
@@ -2111,6 +2132,16 @@ export class ClaudeSession {
       );
       return { threadId: this.threadId, turns: [] };
     }
+  }
+
+  private readHistoryMessages(sessionId: string): Promise<ClaudeHistoryMessage[]> {
+    return createClaudeHistoryReader({
+      env: this.options.env,
+      cwd: this.options.cwd,
+      hostConfigDir: this.options.deps.hostConfigDir,
+      spawn: this.options.deps.spawn,
+      nodePath: this.options.deps.nodePath
+    }).readMessages({ sessionId, cwd: this.options.cwd });
   }
 
   /**

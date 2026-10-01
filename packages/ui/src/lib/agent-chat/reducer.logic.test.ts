@@ -62,3 +62,32 @@ describe("applyFrame — snapshots", () => {
     );
   });
 });
+
+describe("applyFrame — history replay progress", () => {
+  it("shows a replay until it is done, and drops a stale one on (re)synchronizing", () => {
+    let state = applyFrame(createReducerState("s1"), {
+      kind: "snapshot",
+      thread: snapshot({ seq: 1 })
+    });
+    state = applyFrame(state, { kind: "synchronized", hostInstanceId: "h1" });
+    assert.equal(state.slice.historyImport, null);
+
+    state = applyFrame(state, {
+      kind: "history-import",
+      progress: { phase: "importing", done: 100, total: 400 }
+    });
+    assert.deepEqual(state.slice.historyImport, { phase: "importing", done: 100, total: 400 });
+
+    const done = applyFrame(state, {
+      kind: "history-import",
+      progress: { phase: "done", done: 400, total: 400 }
+    });
+    assert.equal(done.slice.historyImport, null);
+
+    // The stream dropped mid-replay and came back after it ended: the host
+    // announces nothing, so the marker alone must clear the old progress.
+    const reconnecting = { ...state, slice: { ...state.slice, connection: "reconnecting" as const } };
+    const resynced = applyFrame(reconnecting, { kind: "synchronized", hostInstanceId: "h1" });
+    assert.equal(resynced.slice.historyImport, null);
+  });
+});

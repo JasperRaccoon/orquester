@@ -600,3 +600,60 @@ test("Claude: an account copy never replaces a dangling shared CLAUDE.md link", 
   assert.equal(await readlink(join(f.system, "CLAUDE.md")), join(f.base, "not-yet.md"), "the owner's link is kept");
   assert.equal(await readFile(join(f.home, "CLAUDE.md"), "utf8"), "account", "the account's copy is left in place");
 });
+
+// --- orphan account homes ---------------------------------------------------
+
+const ORPHAN = "836bbf19-80d7-4dc8-adb2-a851fed9bc1f";
+
+/** What a CLI still running under a deleted account leaves: a home with its own `projects/`. */
+async function orphanHome(base: string, agent: string, id: string, files: Record<string, string>) {
+  const home = join(base, "agent-accounts", agent, id, "home");
+  for (const [path, content] of Object.entries(files)) {
+    await mkdir(join(home, path, ".."), { recursive: true });
+    await writeFile(join(home, path), content);
+  }
+  return join(base, "agent-accounts", agent, id);
+}
+
+test("pruneOrphanHomes moves an orphan's history into the shared store and removes it", async () => {
+  const { base, svc } = await makeService();
+  const shared = join(base, ".claude", "projects");
+  await mkdir(join(shared, "-w-p"), { recursive: true });
+  await writeFile(join(shared, "-w-p", "same.jsonl"), "line\n");
+  const dir = await orphanHome(base, "claude", ORPHAN, {
+    "projects/-w-p/same.jsonl": "line\n",
+    "projects/-w-p/only-here.jsonl": "kept\n",
+    ".claude.json": "{}"
+  });
+
+  const removed = await svc.pruneOrphanHomes(new Set());
+
+  assert.deepEqual(removed, [dir]);
+  await assert.rejects(() => lstat(dir), "the orphan is gone");
+  assert.equal(await readFile(join(shared, "-w-p", "only-here.jsonl"), "utf8"), "kept\n");
+  assert.equal(await readFile(join(shared, "-w-p", "same.jsonl"), "utf8"), "line\n");
+});
+
+test("pruneOrphanHomes keeps an orphan whose transcript differs from the shared copy", async () => {
+  const { base, svc } = await makeService();
+  const shared = join(base, ".claude", "projects");
+  await mkdir(join(shared, "-w-p"), { recursive: true });
+  await writeFile(join(shared, "-w-p", "s.jsonl"), "short\n");
+  const dir = await orphanHome(base, "claude", ORPHAN, { "projects/-w-p/s.jsonl": "short\nand longer\n" });
+
+  assert.deepEqual(await svc.pruneOrphanHomes(new Set()), []);
+  assert.equal(await readFile(join(dir, "home", "projects", "-w-p", "s.jsonl"), "utf8"), "short\nand longer\n");
+});
+
+test("pruneOrphanHomes never touches a registered account, one in use, or a foreign dir", async () => {
+  const { base, svc } = await makeService();
+  await mkdir(join(base, ".claude", "projects"), { recursive: true });
+  const acct = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t" } }), label: "L" });
+  const inUse = await orphanHome(base, "claude", ORPHAN, { "projects/-w-p/a.jsonl": "x" });
+  const foreign = await orphanHome(base, "claude", "not-an-account", { "notes.txt": "mine" });
+
+  assert.deepEqual(await svc.pruneOrphanHomes(new Set([ORPHAN])), []);
+  await lstat(svc.homePath("claude", acct.id));
+  await lstat(inUse);
+  await lstat(foreign);
+});

@@ -15,9 +15,10 @@ import { desktopTabTitle } from "../../lib/desktop-state";
 import { getRegistryIcon } from "../../icons";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { ResizeHandle } from "../ui";
-import { useIsDesktop } from "../../hooks";
+import { useIsDesktop, useRegistry } from "../../hooks";
 import { GRID_MIN_COL_PX, GRID_MIN_ROW_PX, type GridTracks } from "../../lib/panel-sizes";
 import { AgentChatView } from "../agent-chat";
+import { ChatLoadingScreen } from "../agent-chat/ChatLoadingScreen";
 import { activeChatSessionIdFor, setActiveChatTab } from "../../lib/agent-chat-active-tab";
 import {
   isSessionTab,
@@ -101,6 +102,8 @@ export const MainView: React.FC = () => {
   const activateTab = useAppStore((s) => s.activateTab);
   const requestCloseTab = useAppStore((s) => s.requestCloseTab);
   const openLaunchDialog = useAppStore((s) => s.openLaunchDialog);
+  const openingChat = useAppStore((s) => s.openingChat);
+  const registry = useRegistry();
 
   // Grid is a desktop-only layout; a persisted "grid" falls back to tab view on
   // narrow viewports (the toggle isn't shown there either). A workspace context
@@ -133,9 +136,24 @@ export const MainView: React.FC = () => {
     );
   }
 
+  // A past conversation being opened in this project: the loading screen
+  // covers the main view until its tab exists (the tab then carries on with
+  // its own), so the list it was picked from cannot be clicked again.
+  const openingOverlay =
+    openingChat && ctx.kind === "project" && openingChat.projectPath === ctx.project.path ? (
+      <ChatLoadingScreen
+        className="absolute inset-0 z-20"
+        title={openingChat.title}
+        agentRefId={openingChat.refId}
+        agentName={registry.agents.find((a) => a.id === openingChat.refId)?.name ?? openingChat.refId}
+        stage={{ kind: "opening" }}
+      />
+    ) : null;
+
   if (tabs.length === 0) {
     return (
-      <main className="min-h-0 flex-1 overflow-hidden bg-neutral-950">
+      <main className="relative min-h-0 flex-1 overflow-hidden bg-neutral-950">
+        {openingOverlay}
         {ctx.kind === "project" ? (
           <ProjectOverview projectPath={ctx.project.path} />
         ) : (
@@ -287,7 +305,8 @@ export const MainView: React.FC = () => {
   };
 
   return (
-    <main className="min-h-0 flex-1 overflow-hidden bg-neutral-950">
+    <main className="relative min-h-0 flex-1 overflow-hidden bg-neutral-950">
+      {openingOverlay}
       <div
         ref={gridRef}
         className={cn("h-full w-full", grid && "relative grid gap-px")}

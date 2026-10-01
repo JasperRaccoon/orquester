@@ -15,14 +15,16 @@
  * why an adapter that only knows `_x.ai/session_notification` sees none of the
  * `turn_completed` rows that delimit the turns.
  *
- * **And the honest limit.** Replay is *partial*: capture `02` produced 39
- * events and `session/load` replayed **5** (README 10). So this projection
- * restores the shape of the conversation — who said what, which turns
- * happened — and never claims to be the transcript. Token usage is reported
- * `unavailable` for every projected turn even when a replayed `turn_completed`
- * carries a usage block, because that block covers the original turn's whole
- * work and attributing it to a handful of replayed rows would overstate what
- * is being shown.
+ * **What the replay holds.** The session's persisted update log — the
+ * `updates.jsonl` the CLI keeps beside each session — with its streamed
+ * chunks already coalesced: capture `02` produced 39 events and its
+ * `session/load` replayed 5 (README 10), every word of them still there. So a
+ * turn comes back as its prompt, its reasoning and answer text in the order
+ * they were written, and every tool call — the `tool_call` frame and each of
+ * its `tool_call_update`s — which this module folds into one row per call, as
+ * the live path does. Token usage is still reported `unavailable` for every
+ * projected turn even when a replayed `turn_completed` carries a usage block:
+ * the cost line belongs to the turns that ran in this thread.
  */
 
 import {
@@ -30,11 +32,23 @@ import {
   type ProviderThreadTurnSnapshot,
   type RuntimeEvent,
   type RuntimeEventRaw,
-  type ThreadSnapshot
+  type ThreadSnapshot,
+  type ToolLifecycleItemType
 } from "@orquester/api/agent-chat";
 
 import { stripAttachmentPathLines } from "../attachment-lines.ts";
 import { goalCommandFromReminder } from "./goal.ts";
+import { GROK_TOOL_NAMESPACE, SPAWN_SUBAGENT_TOOL } from "./subagents.ts";
+import {
+  acpKindFromVendorKind,
+  boundRawOutput,
+  boundToolContent,
+  extractToolCommand,
+  itemTypeFromToolKind,
+  normalizeToolKind,
+  toolContentText
+} from "./tool-output.ts";
+import { xaiToolMeta } from "./xai-meta.ts";
 
 /**
  * The method stamped on every projected event's `raw`. The SOURCE is
@@ -54,13 +68,20 @@ const GROK_HISTORY_RAW_METHOD = "_x.ai/session/update#replay";
 export type GrokHistoryItem =
   | { readonly kind: "user_message"; readonly text: string }
   | { readonly kind: "assistant_message"; readonly text: string }
+  | { readonly kind: "reasoning"; readonly text: string }
   | {
       readonly kind: "tool_call";
       readonly toolCallId: string;
       readonly title?: string;
+      /** ACP's `kind`, as the latest frame that named one said it. */
       readonly toolKind?: string;
       readonly status?: string;
-      readonly detail?: string;
+      /** `_meta["x.ai/tool"]`: the CLI's own name, kind and namespace for the tool. */
+      readonly vendor?: { readonly name: string; readonly kind: string; readonly namespace: string; readonly readOnly: boolean };
+      readonly rawInput?: unknown;
+      readonly rawOutput?: unknown;
+      readonly content?: unknown;
+      readonly locations?: unknown;
     }
   /** A turn this process observed live; it carries no restorable content. */
   | {
@@ -71,6 +92,9 @@ export type GrokHistoryItem =
       readonly errorMessage?: string;
     };
 
+type GrokHistoryToolCall = Extract<GrokHistoryItem, { kind: "tool_call" }>;
+type GrokHistoryText = Extract<GrokHistoryItem, { kind: "user_message" | "assistant_message" | "reasoning" }>;
+
 function isGrokHistoryItem(value: unknown): value is GrokHistoryItem {
   if (value === null || typeof value !== "object") {
     return false;
@@ -79,6 +103,7 @@ function isGrokHistoryItem(value: unknown): value is GrokHistoryItem {
   return (
     kind === "user_message" ||
     kind === "assistant_message" ||
+    kind === "reasoning" ||
     kind === "tool_call" ||
     kind === "observed_turn"
   );
@@ -98,8 +123,7 @@ export interface ProjectHistoryDeps {
  * process ran and already streamed — contributes nothing, because its events
  * are already in the host's log and projecting them again would double them.
  *
- * Returns `[]` when there is nothing to project; the host renders its own info
- * activity in that case rather than an empty timeline.
+ * Returns `[]` when there is nothing to project.
  */
 export function projectGrokHistory(snapshot: ThreadSnapshot, deps: ProjectHistoryDeps): RuntimeEvent[] {
   const events: RuntimeEvent[] = [];
@@ -153,7 +177,7 @@ function projectTurn(turn: ProviderThreadTurnSnapshot, deps: ProjectHistoryDeps)
         events.push(
           event(
             "item.completed",
-            { itemType: "user_message", status: "completed", detail: text },
+            { itemType: "user_message", status: "completed", detail: text, data: { text } },
             `${turn.id}:user:${index}`
           )
         );
@@ -163,28 +187,24 @@ function projectTurn(turn: ProviderThreadTurnSnapshot, deps: ProjectHistoryDeps)
         events.push(
           event(
             "item.completed",
-            { itemType: "assistant_message", status: "completed", detail: item.text },
+            { itemType: "assistant_message", status: "completed", detail: item.text, data: { text: item.text } },
             `${turn.id}:assistant:${index}`
           )
         );
         break;
-      case "tool_call":
+      case "reasoning":
+        // The same reasoning row the live `agent_thought_chunk`s build, as
+        // Claude's projection restores its thinking blocks.
         events.push(
           event(
             "item.completed",
-            {
-              // The replayed rows carry no ACP `kind`, so a tool call is
-              // restored as the generic tool-lifecycle type rather than a
-              // guess at which one it was.
-              itemType: "dynamic_tool_call",
-              status: item.status === "failed" ? "failed" : "completed",
-              ...(item.title === undefined ? {} : { title: item.title }),
-              ...(item.detail === undefined ? {} : { detail: item.detail }),
-              data: { toolUseId: item.toolCallId }
-            },
-            item.toolCallId
+            { itemType: "reasoning", status: "completed", detail: item.text, data: { text: item.text } },
+            `${turn.id}:reasoning:${index}`
           )
         );
+        break;
+      case "tool_call":
+        events.push(event("item.completed", toolCallPayload(item), item.toolCallId));
         break;
       default:
         break;
@@ -195,56 +215,101 @@ function projectTurn(turn: ProviderThreadTurnSnapshot, deps: ProjectHistoryDeps)
     event("turn.completed", {
       state: "completed",
       stopReason: null,
-      // Never `complete`: a replayed `turn_completed`'s usage covers the whole
-      // original turn, and attributing it to the handful of rows replay
-      // actually returns would overstate what is being shown.
+      // Never `complete`: a replayed `turn_completed`'s usage is the original
+      // turn's, and the cost line belongs to the turns that ran here.
       tokenUsage: { usageScope: "main_agent", usageStatus: "unavailable", hasSubagents: false }
     })
   );
   return events;
 }
 
+/**
+ * One finished tool call's row: the shape the live path writes for the call's
+ * last frame (`tool-calls.ts`), so a replayed shell reads as a command, an
+ * edit as a file change, a subagent launch as an agent launch. A call the
+ * replay never saw end — its turn was cut short — is closed `failed` rather
+ * than left spinning: a historical row must never look live.
+ */
+function toolCallPayload(item: GrokHistoryToolCall): Record<string, unknown> {
+  const spawnsSubagent = item.vendor?.name === SPAWN_SUBAGENT_TOOL && item.vendor.namespace === GROK_TOOL_NAMESPACE;
+  const itemType: ToolLifecycleItemType = spawnsSubagent
+    ? "collab_agent_tool_call"
+    : itemTypeFromToolKind(acpKindFromVendorKind(item.vendor?.kind) ?? item.toolKind);
+  const status = item.status === "completed" ? "completed" : "failed";
+  const command = extractToolCommand(item.rawInput, item.title);
+  const contentText = toolContentText(item.content);
+  // On a FAILED call the content is the reason; everywhere else the command
+  // is the better summary — the live path's order.
+  const detail =
+    status === "failed" ? (contentText ?? command ?? item.title) : (command ?? contentText ?? item.title);
+  return {
+    itemType,
+    status,
+    ...(item.title === undefined ? {} : { title: item.title }),
+    ...(detail === undefined ? {} : { detail }),
+    data: {
+      toolUseId: item.toolCallId,
+      ...(item.toolKind === undefined ? {} : { kind: item.toolKind }),
+      ...(command === undefined ? {} : { command }),
+      ...(item.vendor === undefined ? {} : { vendorTool: item.vendor.name, readOnly: item.vendor.readOnly }),
+      ...(item.rawInput === undefined ? {} : { rawInput: item.rawInput }),
+      ...(item.rawOutput === undefined ? {} : { rawOutput: item.rawOutput }),
+      ...(item.content === undefined ? {} : { content: item.content }),
+      ...(item.locations === undefined ? {} : { locations: item.locations })
+    }
+  };
+}
+
 // ---------------------------------------------------------------------------
 // Collecting the replay
 // ---------------------------------------------------------------------------
+
+/** The text item a chunk kind accumulates into. */
+const TEXT_CHUNK_KINDS: Readonly<Record<string, GrokHistoryText["kind"]>> = {
+  user_message_chunk: "user_message",
+  agent_message_chunk: "assistant_message",
+  agent_thought_chunk: "reasoning"
+};
 
 /**
  * Accumulates the frames `session/load` replays into turns.
  *
  * The delimiter is the private channel's `turn_completed`, which names its
- * `prompt_id` — the provider's own turn id. Chunks seen before it belong to
- * that turn; anything left over at the end is a turn the agent never finished
+ * `prompt_id` — the provider's own turn id. Items keep the order the replay
+ * wrote them in: consecutive chunks of one kind are one message, a chunk of
+ * another kind or a tool call ends it. A tool call's frames — `tool_call`,
+ * then its `tool_call_update`s — fold into the one item its first frame
+ * opened. Anything left over at the end is a turn the agent never finished
  * recording, and is kept under a synthetic id so it is not silently lost.
  */
 export class GrokHistoryCollector {
   private readonly turns: ProviderThreadTurnSnapshot[] = [];
   private pending: GrokHistoryItem[] = [];
-  private userText = "";
-  private assistantText = "";
+  /** The open turn's calls by id, each at its index in {@link pending}. */
+  private calls = new Map<string, number>();
+  private segment: { kind: GrokHistoryText["kind"]; text: string } | null = null;
 
   /** One replayed `session/update` body. */
-  observeAcpUpdate(update: { sessionUpdate?: unknown; content?: unknown; toolCallId?: unknown; title?: unknown; status?: unknown }): void {
-    const kind = update.sessionUpdate;
-    if (kind === "user_message_chunk") {
-      this.userText += textOf(update.content);
+  observeAcpUpdate(update: Record<string, unknown>): void {
+    const kind = update["sessionUpdate"];
+    if (typeof kind !== "string") {
       return;
     }
-    if (kind === "agent_message_chunk") {
-      this.assistantText += textOf(update.content);
+    const textKind = TEXT_CHUNK_KINDS[kind];
+    if (textKind !== undefined) {
+      const text = textOf(update["content"]);
+      if (text.length === 0) {
+        return;
+      }
+      if (this.segment?.kind !== textKind) {
+        this.flushText();
+        this.segment = { kind: textKind, text: "" };
+      }
+      this.segment.text += text;
       return;
     }
     if (kind === "tool_call" || kind === "tool_call_update") {
-      const toolCallId = update.toolCallId;
-      if (typeof toolCallId !== "string" || toolCallId.length === 0) {
-        return;
-      }
-      this.flushText();
-      this.pending.push({
-        kind: "tool_call",
-        toolCallId,
-        ...(typeof update.title === "string" ? { title: update.title } : {}),
-        ...(typeof update.status === "string" ? { status: update.status } : {})
-      });
+      this.observeToolCall(update);
     }
   }
 
@@ -263,15 +328,58 @@ export class GrokHistoryCollector {
     return this.turns.map((turn) => ({ id: turn.id, items: [...turn.items] }));
   }
 
+  private observeToolCall(update: Record<string, unknown>): void {
+    const toolCallId = update["toolCallId"];
+    if (typeof toolCallId !== "string" || toolCallId.trim().length === 0) {
+      return;
+    }
+    const at = this.calls.get(toolCallId);
+    const previous = at === undefined ? undefined : (this.pending[at] as GrokHistoryToolCall);
+    const vendor = xaiToolMeta(update["_meta"]);
+    const title = typeof update["title"] === "string" && update["title"].length > 0 ? update["title"] : previous?.title;
+    const toolKind = normalizeToolKind(update["kind"]) ?? previous?.toolKind;
+    const status = typeof update["status"] === "string" ? update["status"] : previous?.status;
+    const rawInput = update["rawInput"] ?? previous?.rawInput;
+    const rawOutput = update["rawOutput"] === undefined || update["rawOutput"] === null
+      ? previous?.rawOutput
+      : boundRawOutput(update["rawOutput"]);
+    const content = update["content"] === undefined || update["content"] === null
+      ? previous?.content
+      : boundToolContent(update["content"]);
+    const locations = update["locations"] ?? previous?.locations;
+    const next: GrokHistoryToolCall = {
+      kind: "tool_call",
+      toolCallId,
+      ...(title === undefined ? {} : { title }),
+      ...(toolKind === undefined ? {} : { toolKind }),
+      ...(status === undefined ? {} : { status }),
+      ...(vendor === undefined
+        ? previous?.vendor === undefined
+          ? {}
+          : { vendor: previous.vendor }
+        : { vendor: { name: vendor.name, kind: vendor.kind, namespace: vendor.namespace, readOnly: vendor.read_only } }),
+      ...(rawInput === undefined || rawInput === null ? {} : { rawInput }),
+      ...(rawOutput === undefined ? {} : { rawOutput }),
+      ...(content === undefined ? {} : { content }),
+      ...(locations === undefined || locations === null ? {} : { locations })
+    };
+    if (at !== undefined) {
+      this.pending[at] = next;
+      return;
+    }
+    // A tool call ends the text before it.
+    this.flushText();
+    this.calls.set(toolCallId, this.pending.length);
+    this.pending.push(next);
+  }
+
   private flushText(): void {
-    if (this.userText.length > 0) {
-      this.pending.push({ kind: "user_message", text: this.userText });
-      this.userText = "";
+    const segment = this.segment;
+    this.segment = null;
+    if (segment === null || segment.text.length === 0) {
+      return;
     }
-    if (this.assistantText.length > 0) {
-      this.pending.push({ kind: "assistant_message", text: this.assistantText });
-      this.assistantText = "";
-    }
+    this.pending.push({ kind: segment.kind, text: segment.text });
   }
 
   private closeTurn(promptId: string | undefined): void {
@@ -284,6 +392,7 @@ export class GrokHistoryCollector {
       items: this.pending
     });
     this.pending = [];
+    this.calls = new Map();
   }
 }
 

@@ -391,6 +391,14 @@ export interface CreateAgentChatSessionFields {
 /** §6.1's create-time refusal code. Deliberately not in {@link AgentChatErrorCode}. */
 export const RESUME_UNAVAILABLE = "RESUME_UNAVAILABLE";
 
+/**
+ * Create-time refusal for a resume whose conversation is already open in
+ * another tab. The 400 body carries `ownerSessionId` (that tab), so a client
+ * switches to it instead of reporting a failure. Like
+ * {@link RESUME_UNAVAILABLE}, deliberately not in {@link AgentChatErrorCode}.
+ */
+export const CONVERSATION_ALREADY_OPEN = "CONVERSATION_ALREADY_OPEN";
+
 // ---------------------------------------------------------------------------
 // §6.2 command bodies
 // ---------------------------------------------------------------------------
@@ -653,7 +661,33 @@ export type AgentChatStreamFrame =
        * sequence.
        */
       hostInstanceId: string;
-    };
+    }
+  | HistoryImportFrame;
+
+/**
+ * Where a resumed conversation's history replay stands (E6), so a client can
+ * show a loading screen instead of an empty thread.
+ *
+ * - `reading`: the agent is starting and its own history is being read;
+ * - `importing`: `done` of `total` history events are in the thread's log;
+ * - `done`: the replay is over (finished, failed or skipped).
+ */
+export interface HistoryImportProgress {
+  phase: "reading" | "importing" | "done";
+  done: number;
+  /** Null until the history has been read. */
+  total: number | null;
+}
+
+/**
+ * **Transient, never persisted and never sequenced.** Sent after
+ * `synchronized` on a stream that attaches while a replay runs, then on every
+ * change. A client that does not know the kind skips the line.
+ */
+export interface HistoryImportFrame {
+  kind: "history-import";
+  progress: HistoryImportProgress;
+}
 
 /**
  * The comment line sent every {@link AGENT_CHAT_HEARTBEAT_MS} to keep proxies

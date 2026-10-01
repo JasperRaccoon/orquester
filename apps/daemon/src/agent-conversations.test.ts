@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -148,6 +148,33 @@ test("a codex account home is attributed, and unrelated projects are ignored", a
   await rm(root, { recursive: true, force: true });
 });
 
+test("a home left behind by a deleted account is not scanned", async () => {
+  const root = await scratch();
+  const daemonDir = join(root, "daemon");
+  const projectPath = join(root, "workspaces", "acme", "orphans");
+
+  await writeClaudeTranscript(
+    join(daemonDir, "agent-accounts", "claude", "acclive", "home"),
+    projectPath,
+    "live-1",
+    "from a registered account"
+  );
+  await writeClaudeTranscript(
+    join(daemonDir, "agent-accounts", "claude", "accgone", "home"),
+    projectPath,
+    "gone-1",
+    "from an account that was deleted"
+  );
+
+  const rows = await listAgentConversations(projectPath, {
+    daemonDir,
+    accountIds: new Set(["acclive"])
+  });
+  assert.deepEqual(rows.map((row) => row.id), ["live-1"]);
+
+  await rm(root, { recursive: true, force: true });
+});
+
 test("without a daemonDir only the system homes are scanned", async () => {
   const root = await scratch();
   const daemonDir = join(root, "daemon");
@@ -164,6 +191,41 @@ test("without a daemonDir only the system homes are scanned", async () => {
   const rows = await listAgentConversations(projectPath);
   assert.deepEqual(rows.map((row) => row.id), ["sys-only"]);
   assert.equal(rows[0]?.home, "system");
+
+  await rm(root, { recursive: true, force: true });
+});
+
+test("grok rows a managed home reaches through its sessions symlink are listed once, under the system home", async () => {
+  // How a managed Grok account is seeded on a deployed host: its `sessions`
+  // is a symlink to the system home's, so every conversation it writes lands
+  // in the SYSTEM history dir. The row says so, and carries no account id —
+  // which is why a resume of it must not pin the System identity
+  // (`packages/ui/src/lib/resume-account.ts`): the system home is where the
+  // transcript lives, not necessarily a signed-in Grok.
+  const root = await scratch();
+  const daemonDir = join(root, "daemon");
+  const projectPath = join(root, "workspaces", "acme", "docs");
+  const systemSessions = join(process.env.GROK_HOME as string, "sessions");
+  const session = join(systemSessions, encodeURIComponent(projectPath), "01a0f691-f54d-7292-9691-173b2865837d");
+  await mkdir(session, { recursive: true });
+  await writeFile(
+    join(session, "summary.json"),
+    JSON.stringify({
+      info: { id: "01a0f691-f54d-7292-9691-173b2865837d" },
+      generated_title: "Review docs for bugs",
+      last_active_at: "2026-10-01T09:05:00.123456789Z"
+    }),
+    "utf8"
+  );
+  const accountHome = join(daemonDir, "agent-accounts", "grok", "accg1", "home");
+  await mkdir(accountHome, { recursive: true });
+  await symlink(systemSessions, join(accountHome, "sessions"));
+
+  const rows = await listAgentConversations(projectPath, { daemonDir });
+  assert.deepEqual(
+    rows.map((row) => [row.id, row.agentRefId, row.title, row.home, row.accountId]),
+    [["01a0f691-f54d-7292-9691-173b2865837d", "grok", "Review docs for bugs", "system", undefined]]
+  );
 
   await rm(root, { recursive: true, force: true });
 });

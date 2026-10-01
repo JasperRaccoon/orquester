@@ -78,6 +78,13 @@ export interface StartSessionInput {
    * re-creates {@link knownGoal} rather than reporting it cleared.
    */
   carryGoal?: boolean;
+  /**
+   * True when the host will ask for {@link AgentAdapter.readThread} right
+   * after this start to replay a resumed thread's history (E6). An adapter
+   * whose history read is slow may begin it now, alongside its own start-up,
+   * and answer that `readThread` from it. Purely a hint: ignoring it is correct.
+   */
+  prefetchHistory?: boolean;
 }
 
 export interface SendTurnInput {

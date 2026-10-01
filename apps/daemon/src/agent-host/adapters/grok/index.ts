@@ -444,11 +444,15 @@ class GrokAdapter implements AgentAdapter {
    * `events.ndjson` predates this host.
    *
    * Grok has no transcript RPC; the only source is what `session/load`
-   * replays, which is **partial by construction** (README 10: capture `02`
-   * produced 39 events, replay returned 5). So this restores the shape of the
-   * conversation and never claims to be the transcript, and every projected
-   * turn reports `tokenUsage: unavailable`. A thread with nothing replayed
-   * projects `[]` and the host renders its own info activity.
+   * replays — the session's persisted update log, its chunks coalesced
+   * (README 10: capture `02` produced 39 events, replay returned 5 with the
+   * same text). Each turn comes back as its prompt, reasoning, answer and one
+   * row per tool call (`history.ts`), and every projected turn reports
+   * `tokenUsage: unavailable`. A thread with nothing replayed projects `[]`.
+   *
+   * The replay needs a signed-in identity: `session/load` under a home with
+   * no login answers "Authentication required", the session never opens and
+   * nothing reaches here — a resume must launch under an account that works.
    */
   projectHistory(snapshot: ThreadSnapshot): RuntimeEvent[] {
     return projectGrokHistory(snapshot, {

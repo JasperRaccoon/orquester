@@ -5,6 +5,7 @@ import { Button, ConfirmDialog, Input } from "../ui";
 import { getRegistryIcon } from "../../icons";
 import { cn } from "../../lib/cn";
 import { useApi } from "../../context/orquester-context";
+import { ApiError } from "../../lib/api-client";
 import { useAppStore } from "../../store/app";
 import { GrokDeviceLink } from "./GrokDeviceLink";
 import { Badge, EmptyState, FormField, Notice, SettingRow, SettingsPage, SettingsSection } from "./primitives";
@@ -46,7 +47,8 @@ export function AgentAccountsSettings() {
         await load();
         return true;
       } catch (e) {
-        setErr(e instanceof Error ? e.message : String(e));
+        // The daemon's own reason ("still in use by …"), not the request line.
+        setErr(e instanceof ApiError ? (e.serverMessage ?? e.message) : e instanceof Error ? e.message : String(e));
         return false;
       } finally {
         setBusy(false);
