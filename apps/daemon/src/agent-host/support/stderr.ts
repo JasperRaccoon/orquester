@@ -200,6 +200,9 @@ const DEFAULT_FATAL_SNIPPETS: readonly string[] = [
 /** Log levels below ERROR that are dropped when a line carries one (§3.1). */
 const SUBERROR_LEVEL_RE = /\b(?:TRACE|DEBUG|INFO|NOTICE|VERBOSE)\b/;
 const ERROR_LEVEL_RE = /\b(?:ERROR|FATAL|CRITICAL)\b/;
+/** Any log level a child prints while it keeps running (everything below FATAL). */
+const LOG_LEVEL_RE = /\b(?:TRACE|DEBUG|INFO|NOTICE|VERBOSE|WARN|WARNING|ERROR)\b/;
+const FATAL_LEVEL_RE = /\b(?:FATAL|CRITICAL)\b/;
 
 interface ClassifyOptions extends RedactOptions {
   benignSnippets?: readonly string[];
@@ -208,8 +211,8 @@ interface ClassifyOptions extends RedactOptions {
 
 /**
  * ANSI-strip, redact, then classify one line: log lines below ERROR and the
- * benign list are dropped, the fatal list becomes an error, everything else a
- * warning. A blank line is dropped.
+ * benign list are dropped, the fatal list becomes an error unless the line is
+ * leveled below FATAL, everything else a warning. A blank line is dropped.
  */
 export function classifyStderrLine(
   raw: string,
@@ -226,8 +229,13 @@ export function classifyStderrLine(
     return { text, class: "drop" };
   }
 
+  // A leveled log line below FATAL is the child reporting a condition it is
+  // handling — it is alive to log it. Codex logs a failed tool call as
+  // `ERROR codex_core::tools::router: … No such file or directory` and carries
+  // on with the turn, so a fatal snippet inside such a line must not fail it.
+  const leveled = LOG_LEVEL_RE.test(text) && !FATAL_LEVEL_RE.test(text);
   const fatal = options.fatalSnippets ?? DEFAULT_FATAL_SNIPPETS;
-  if (fatal.some((snippet) => lower.includes(snippet))) {
+  if (!leveled && fatal.some((snippet) => lower.includes(snippet))) {
     return { text, class: "error" };
   }
 

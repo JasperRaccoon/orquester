@@ -69,6 +69,21 @@ test("classification: fatal snippets become errors, everything else a warning", 
   assert.equal(classifyStderrLine("2026-09-21 ERROR provider.stream reset").class, "warning");
 });
 
+test("classification: a leveled log line is never fatal, even when it names a fatal snippet", () => {
+  // Codex logs a tool failure it hands back to the model and keeps running the
+  // turn; failing the turn on it stranded a live Codex turn as "Ready".
+  assert.equal(
+    classifyStderrLine(
+      "2026-10-01T19:22:14.705304Z ERROR codex_core::tools::router: error=unable to locate image at `/tmp/x.png`: No such file or directory (os error 2)"
+    ).class,
+    "warning"
+  );
+  assert.equal(classifyStderrLine("WARN sandbox: permission denied").class, "warning");
+  assert.equal(classifyStderrLine("DEBUG probe: enoent").class, "drop");
+  // A FATAL/CRITICAL level is the child saying it is going down.
+  assert.equal(classifyStderrLine("FATAL codex: not logged in").class, "error");
+});
+
 test("classification redacts before it classifies, so the text is always safe", () => {
   const line = classifyStderrLine("\u001b[31mfatal error: key sk-abcdefghijklmnop\u001b[0m");
   assert.equal(line.class, "error");
