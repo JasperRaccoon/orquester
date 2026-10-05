@@ -29,6 +29,7 @@ import { assertOwnedAccountHome, AgentAccountError, ACCOUNT_MARKER } from "./age
 import {
   detectAgentFromBlob,
   claudePlanFromBlob,
+  claudeBlobHasTokens,
   parseCodexIdentity,
   parseGrokIdentity,
   grokAuthEntry,
@@ -157,6 +158,11 @@ export class AgentAccountsService {
       email = idn.email;
       label = input.label?.trim() || idn.email || "Grok account";
     } else {
+      if (!claudeBlobHasTokens(parsed)) {
+        throw new AgentAccountError(
+          'Claude credential file contains no OAuth tokens (probably a stale or logged-out keychain entry). Log in to Claude Code again, or export with `security find-generic-password -s "Claude Code-credentials" -a "$USER" -w`.'
+        );
+      }
       if (!input.label?.trim()) {
         throw new AgentAccountError("A label is required for Claude accounts (the credentials file has no email).");
       }

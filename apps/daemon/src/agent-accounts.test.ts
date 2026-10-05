@@ -49,6 +49,35 @@ test("import claude requires a label and stores subscriptionType as plan", async
   assert.equal(creds.claudeAiOauth.refreshToken, "r");
 });
 
+test("import claude rejects a blob with empty OAuth tokens", async () => {
+  const { svc } = await makeService();
+  const blob = JSON.stringify({
+    claudeAiOauth: {
+      accessToken: "",
+      refreshToken: "",
+      expiresAt: 0,
+      refreshTokenExpiresAt: 1791749244038,
+      scopes: ["user:inference"],
+      subscriptionType: "max",
+      rateLimitTier: "default_claude_max_20x"
+    }
+  });
+  await assert.rejects(
+    () => svc.importAccount({ content: blob, label: "Work" }),
+    (e: Error) => e.name === "AgentAccountError" && /contains no OAuth tokens/.test(e.message) && /-a "\$USER"/.test(e.message)
+  );
+  assert.equal(svc.list().accounts.filter((a) => a.agent === "claude").length, 0);
+});
+
+test("import claude accepts a refresh-token-only blob", async () => {
+  const { svc } = await makeService();
+  const blob = JSON.stringify({ claudeAiOauth: { accessToken: "", refreshToken: "r", expiresAt: 0 } });
+  const acct = await svc.importAccount({ content: blob, label: "Work" });
+  assert.equal(acct.agent, "claude");
+  const creds = JSON.parse(await readFile(join(svc.homePath("claude", acct.id), ".credentials.json"), "utf8"));
+  assert.equal(creds.claudeAiOauth.refreshToken, "r");
+});
+
 test("resolveLaunchEnv selects Claude/Codex homes and unsets competing API credentials", async () => {
   const { svc } = await makeService();
   const claude = await svc.importAccount({ content: JSON.stringify({ claudeAiOauth: { accessToken: "t" } }), label: "L" });

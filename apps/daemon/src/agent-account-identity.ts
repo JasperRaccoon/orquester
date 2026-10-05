@@ -35,6 +35,17 @@ export function parseGrokIdentity(parsed: unknown): { email: string | null; user
   };
 }
 
+/**
+ * Whether a Claude credential blob carries a usable OAuth token: a refresh token
+ * alone can recover, an access token alone works until it expires. A stale or
+ * logged-out keychain entry keeps the record but with both tokens empty.
+ */
+export function claudeBlobHasTokens(parsed: unknown): boolean {
+  if (!isRecord(parsed) || !isRecord(parsed.claudeAiOauth)) return false;
+  const { accessToken, refreshToken } = parsed.claudeAiOauth;
+  return (typeof accessToken === "string" && accessToken !== "") || (typeof refreshToken === "string" && refreshToken !== "");
+}
+
 export function claudePlanFromBlob(parsed: unknown): string | null {
   if (!isRecord(parsed) || !isRecord(parsed.claudeAiOauth)) return null;
   const t = parsed.claudeAiOauth.subscriptionType;
