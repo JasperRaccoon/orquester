@@ -213,7 +213,7 @@ const COMPONENTS: Components = {
     <th className="px-3 py-[0.45rem] text-left font-semibold text-neutral-200">{children}</th>
   ),
   td: ({ children }) => (
-    <td className="max-w-96 truncate px-3 py-[0.45rem] align-top text-neutral-300">{children}</td>
+    <td className="px-3 py-[0.45rem] align-top break-words text-neutral-300">{children}</td>
   )
 };
 
