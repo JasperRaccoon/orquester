@@ -95,14 +95,11 @@ export interface IndexedItemPosition {
  * One message's lines: the first that named it (`firstSeq`/`firstByte`) and
  * the latest (`lastSeq` — its final line once it finished streaming).
  */
-export interface IndexedMessageSpan {
+export interface SpanningMessage {
+  messageId: string;
   firstSeq: number;
   firstByte: number;
   lastSeq: number;
-}
-
-export interface SpanningMessage extends IndexedMessageSpan {
-  messageId: string;
 }
 
 /** One page of the thread's prompts; the host adds `threadId` and `indexed`. */
@@ -249,8 +246,6 @@ export interface ThreadIndex {
    * line, else the first line of a message. Null for any other line.
    */
   eventPositionBySeq(threadId: string, seq: number): IndexedItemPosition | null;
-  /** Where a message began and where it was last written; null when unknown. */
-  messageSpan(threadId: string, messageId: string): IndexedMessageSpan | null;
   /**
    * Every message a page boundary at `seq` would cut in two: `firstSeq < seq
    * && seq <= lastSeq`, oldest first — the host moves the boundary back to
@@ -745,10 +740,6 @@ function createOpenThreadIndex(input: {
       return serving() ? read(() => queries.eventPositionBySeq(threadId, seq), null) : null;
     },
 
-    messageSpan(threadId, messageId) {
-      return serving() ? read(() => queries.messageSpan(threadId, messageId), null) : null;
-    },
-
     messagesSpanning(threadId, seq) {
       return serving() ? read(() => queries.messagesSpanning(threadId, seq), []) : [];
     },
@@ -853,7 +844,6 @@ export function createUnavailableThreadIndex(): ThreadIndex {
     turnsInSeqRange: () => [],
     turnOfSeq: () => null,
     eventPositionBySeq: () => null,
-    messageSpan: () => null,
     messagesSpanning: () => [],
     firstBoundaryAfter: () => null,
     latestRevertSeq: () => 0,

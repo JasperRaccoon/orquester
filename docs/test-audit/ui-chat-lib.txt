@@ -1,0 +1,579 @@
+COMPLETED CLEANUP AUDIT — UI AGENT-CHAT LIBRARY (excluding separately delegated store/history and timeline projection files)
+
+Pre-edit disposition ledger, prepared after reading each listed test and its production owner. Final outcomes follow the recorded decisions.
+Independent documents: docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md; docs/superpowers/specs/2026-09-24-agent-goals-design.md; indexed history design; AGENTS.md; packages/api/src/agent-chat/wire.ts.
+Validation V: from packages/ui, node --import tsx --import ../../scripts/test/assert-ok.mjs --import ./test/svg-loader.mjs --import ../../scripts/test/quiet-mock-timers.mjs --test --test-concurrency=2 followed by all 18 file paths listed below. Parent owns pnpm check/test/build.
+
+Isolated-unit failure inventory: wire conversion can select wrong routes/IDs/cursors, lose bytes, accept invalid pages, retry permanent errors or send binary as JSON; state parsing can crash/drop valid legacy data; UI selectors can attribute another account/agent, expose unavailable actions, hide active work, or leave stale status; queues can send twice/out of order/while blocked; timers and read cancellations can remain active after completion.
+These are concrete failure modes, not coverage goals. No source/markup snapshots or implementation-derived expected transformations are retained.
+
+FILE packages/ui/src/lib/agent-chat/account-switch.test.ts
+Independent contract: GUI design §3.4/§7.4 and goals design §5.5/§5.7: identity switching is idle-only; host goal verdict wins and handover holds continue.
+Seam and non-test callers: account-switch.ts selectors; AgentChatView.tsx account chip.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP offers System plus the launcher's OWN family
+    Failure detected: Cross-provider account leakage or loss of System/stale-auth choices. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP OpenCode has no per-thread account, decided without waiting for a snapshot
+    Failure detected: OpenCode briefly offers an unusable account switch before its snapshot arrives. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP opens only when nothing is in flight
+    Failure detected: An idle thread cannot switch identity. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP closes for every in-flight shape
+    Failure detected: Identity switch races a send, active work, pending approval, reconnect, compaction or goal hold. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP an active goal on a provider that starts its own turns is continuing — and only that
+    Failure detected: An autonomous Codex goal appears idle between turns, or a user-driven provider goal unnecessarily blocks switching. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP final wave (8): only on a live session — a stopped or errored one may switch
+    Failure detected: A stopped goal blocks identity switches forever, or a restart-marked goal incorrectly permits them. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP final wave (8): the host's own verdict wins whenever the view has it
+    Failure detected: A stale fold/head overrides the authoritative host continuing verdict. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP goals §5.7: a goal a deploy HELD is continuing — paused or not, whatever the session says
+    Failure detected: A deployment-held goal permits switching while the next host will resume it. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP goals §5.7: held without a continuing verdict still closes the chip, as the host refuses it
+    Failure detected: A missing adapter goal block incorrectly opens the switch despite a known hold. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP goals §5.7: the head's hold mark continues nothing the provider would not set going again
+    Failure detected: An ended/limited or non-autonomous goal falsely reads continuing from a stale hold mark. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP goals §5.7: the host's verdict still wins over the head's hold mark
+    Failure detected: A stale head hold overrides a host verdict that the hold ended. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP the system identity's two spellings map onto the menu's one id
+    Failure detected: The System identity has no selectable menu match for empty/absent persisted identity. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/composer.logic.test.ts
+Independent contract: AGENTS.md persisted-data validation; GUI §7.4 draft attachment references survive reload with field-wise validation.
+Seam and non-test callers: parsePersistedDrafts / attachmentPathOf; store.ts and composer-outbox.ts.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP survives garbage without letting it reach typed code
+    Failure detected: Corrupt persisted drafts reach typed code or crash loading. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP keeps the valid entries of a partly-malformed blob
+    Failure detected: One malformed draft/ref destroys another valid draft or leaves invalid context in state. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP keeps a string path on a persisted ref and drops a malformed one, so an old blob still loads
+    Failure detected: Legacy attachment paths are lost, or malformed path values survive and break removal. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/full-output.test.ts
+Independent contract: GUI §5.6/§6.3/§7.6: full-output and prompt reads preserve content, distinguish partial/running output, support old hosts and cancel retired reads.
+Seam and non-test callers: readFullOutput / fullOutputText / fullOutputSourceOf / createViewerReads; timeline/row-chrome.ts and timeline/ChatTimeline.tsx.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP shows the whole output of a command whose early chunks the window evicted, not what it still holds
+    Failure detected: The output viewer presents only retained tail chunks as the whole command output. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP a running call's output is what exists now, and a join past the host's cap is its head: both said
+    Failure detected: Running or host-capped output is falsely labelled complete/whole. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP reads the item where the host has no join (a 404) or the call streamed nothing: never an error
+    Failure detected: An old host or empty stream makes full-output viewing fail instead of using its item. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP a row whose payload the wire cut reads its item alone: the join is never asked
+    Failure detected: A file-change item is erroneously read as command output. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP a join read that fails is the viewer's error, not a quiet fallback
+    Failure detected: A failed output read silently falls back and displays incomplete content as success. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP reads the call's join before its item's head: the host holds the whole output
+    Failure detected: A Codex stored-cut completion hides the complete output still available in streamed chunks. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP shows the head as the command printed it, saying only part was kept, where no join answers
+    Failure detected: A Codex stored output head appears as JSON or as the whole output when no join exists. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP a completion that kept its whole output still reads it, and never asks the join
+    Failure detected: An intact command completion loses its output or unnecessarily depends on the join endpoint. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP an update stored cut reads the join too, then (nothing streamed) its payload, never its preview
+    Failure detected: A stored-cut command update shows only its preview without attempting the available output join. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP with no join to give, shows the part the tool kept as text, saying only part was kept — never that it is the start
+    Failure detected: OpenCode tail output is labelled a head or lost when streamed output is unavailable. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP anything else as the viewer always showed it: a message's text, a string payload, JSON, else the summary
+    Failure detected: Non-command payloads, messages or summaries disappear or become incorrectly extracted command text. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP a new read retires the one before it, and closing the viewer retires the last
+    Failure detected: A closed/replaced viewer retains an active request whose response can overwrite the current view. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP shows the prompt itself, never its launch row as JSON
+    Failure detected: Opening full prompt shows task JSON instead of the actual launch instructions. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP a task row is no tool output: the prompt has its own read, the prompt row's
+    Failure detected: A wire-cut agent launch falsely promises full tool output on its spawn row. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/goal.logic.test.ts
+Independent contract: goals design §5.7/§8.3/§9: unfinished-goal marker, field-wise old-host handling, 200-character Unicode-safe accessible objectives, authoritative handover holds.
+Seam and non-test callers: goalSummaryMarker / clipGoalText / isGoalHeldForUpdate; session-status-dot.tsx, status/goal-chip.ts and AgentChatView.tsx.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP draws nothing for no goal or a finished one
+    Failure detected: Tabs claim a goal is unfinished after it completed or when none exists. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP validates the wire field-wise: anything it cannot read draws nothing, never a crash
+    Failure detected: Unknown/malformed host summary shapes crash or produce misleading goal markers. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  REWRITE never splits a surrogate pair
+    Failure and retained bar: Existing assertion accepts empty output; assert independently specified retained prefix plus ellipsis to prove no content loss or lone surrogate. Same Unicode-safe accessibility requirement; no production change. Bars 1–6 above apply to the retained Unicode-content assertion.
+  KEEP paused in the fold while the host still reports it continuing: held
+    Failure detected: A paused goal still continuing under a deploy hold is mistaken for a user pause. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP paused and NOT continuing is an ordinary pause — the user's, a Stop's, a stall's
+    Failure detected: A user pause stays labelled deployment-held because a stale head mark outlives it. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP an active goal is never held — the chip reads the fold, whatever the summary still says
+    Failure detected: A resumed active goal keeps displaying a stale deployment hold. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP the head's mark decides only when the view has no summary verdict
+    Failure detected: Missing/older host summaries lose the head fallback, or explicit null incorrectly revives a hold. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP a summary that has not caught up with the fold's pause is not a hold
+    Failure detected: A just-paused fold against an older active summary falsely flashes deployment-hold status. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP only a paused goal can be held: no goal, or one that stopped some other way, is not
+    Failure detected: A blocked, limited or ended goal falsely claims a deployment hold. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP reads the summary field-wise: what is not a verdict leaves the head's mark to decide
+    Failure detected: Malformed additive summary fields become an authoritative hold verdict. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/hooks.logic.test.ts
+Independent contract: GUI §5.1/§7.6 and E1 regression: elapsed timer stops when either turn or session settles.
+Seam and non-test callers: useAgentChatStatus hook through real store snapshots; status/ChatStatusLine.tsx.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP ticks only while the turn is unsettled AND the session is live
+    Failure detected: A live running/pending turn loses the elapsed timer. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP stops on every settled turn state
+    Failure detected: A completed/failed/interrupted/cancelled turn leaves the elapsed timer running. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP stops when the session left `running`, even if the turn row still says running
+    Failure detected: A stopped/ready/error session leaves the elapsed timer running despite a stale running turn. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/keybindings.logic.test.ts
+Independent contract: GUI §7.4 keyboard contract: Escape interruption, mod+Shift+Enter queue send, model/effort shortcuts, mode chord avoids Attention Center conflict and repeat/Alt suppression.
+Seam and non-test callers: resolveChatShortcut; ChatComposer.tsx and ChatTimeline.tsx.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP interrupts on a bare Escape
+    Failure detected: Bare Escape fails to request interruption. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP sends the head of the queue on mod+Shift+Enter
+    Failure detected: Ctrl/Cmd+Shift+Enter fails to send the queue head. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP uses mod+Shift+M for the mode picker — mod+Shift+A is the Attention Center's
+    Failure detected: Mode selection steals Attention Center Ctrl/Cmd+Shift+A or loses its own M chord. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP opens the model and effort controls
+    Failure detected: The documented model/effort keyboard controls resolve to the wrong action. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP ignores a held key and an Alt chord
+    Failure detected: Held-key repeats or Alt chords accidentally trigger chat actions. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP ignores an unbound chord
+    Failure detected: Ordinary typing or unrelated modified keys trigger a chat action. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/plan.logic.test.ts
+Independent contract: GUI §7.3/§7.4: retain latest checklist across turns, safely parse steps, proposal selection, plan follow-up gates, full plan copy within user gesture.
+Seam and non-test callers: deriveActivePlanState / findLatestProposedPlan / shouldShowPlanFollowUpPrompt / wholePlanMarkdown; store.ts, AgentChatView.tsx and timeline/rows/StructureRows.tsx.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP prefers the current turn's plan
+    Failure detected: The checklist shows another turn's plan instead of the active turn's. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP falls back to the most recent plan from ANY turn so a follow-up does not blank it
+    Failure detected: A follow-up without a new checklist blanks the previous plan. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP is null when no plan was ever reported
+    Failure detected: A thread that never had a plan displays an invented checklist. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP tolerates a malformed step list
+    Failure detected: Corrupt plan steps crash or pollute the checklist rather than preserving valid steps. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  DELETE summarises progress for the composer's checklist
+    Failure formerly detected: Only verifies dead planProgress selector; it has no production caller, so no user-visible failure can make this test necessary. Remaining stronger coverage: ChatStatusLine uses status-line.ts formatPlanProgress; retained checklist derivation tests protect actual plan state.
+  KEEP docks only under all five conditions
+    Failure detected: The Implement/follow-up affordance appears during an active turn, pending question, wrong mode or attachment draft. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP picks the current turn's proposal, else the newest of any turn
+    Failure detected: The composer implements the wrong turn's proposal or misses the newest fallback. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP returns an intact plan synchronously without reading it
+    Failure detected: Copying an intact plan becomes asynchronous and loses the browser clipboard user gesture. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP reads a truncated proposal by id and never falls back to its cut text
+    Revised from pre-edit DELETE after a concrete counterexample: making wholePlanMarkdown always return plan.planMarkdown leaves every store reader test green but copies the wire-cut preview. This case alone observes the Copy/Download selection at its production seam. The full-plan requirement (GUI §5.6/§7.3) is independent; expected whole bytes and error come from the upstream read fixture, while the real wrapper selects whether to read. Literal full text can disagree with returned preview; no internal collaborator inventory or implementation-derived oracle. Equivalent refactors preserve whole-copy/rejection behavior. Store reader validation is a different lower contract and cannot replace this selection case. Low risk; validate restored test separately.
+
+FILE packages/ui/src/lib/agent-chat/presentation.logic.test.ts
+Independent contract: GUI §7.3 running-output regression: error-looking partial command output is not proof of a failed command.
+Seam and non-test callers: workEntryDisplayIndicatesToolFailure; rows.logic.ts and timeline/rows/ActivityRows.tsx.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP an in-progress call is not failed by its output, however it reads
+    Failure detected: A running command is painted failed merely because its partial output contains an error-like line. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/providers.test.ts
+Independent contract: GUI §3.2/§4.6.4/§6.3/§7.7/§8 and goals §8.1: old-host provider repair, auth verdict notices, refreshing newly installed providers, quota aliases.
+Seam and non-test callers: loadProviders / refreshProvider / providersStore and registered ambient sinks; hooks.ts and app store side-effect registration.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP says nothing at all for an `unknown` provider that merely is not installed
+    Failure detected: An absent CLI emits a misleading credential-failure notice. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP is silent for a PENDING snapshot — nobody has looked at that provider yet
+    Failure detected: An unchecked pending provider emits a false sign-in notice. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP says nothing at all for a healthy catalog
+    Failure detected: Healthy provider catalogs produce unnecessary auth errors. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP appends rather than silently dropping it
+    Failure detected: Installing and refreshing a previously absent provider silently discards it. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP still replaces one it already has
+    Failure detected: Refresh duplicates a provider or leaves its old version visible. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP reports a snapshot's windows under each registry id it serves
+    Failure detected: Provider aliases do not receive their usage windows. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP toasts end-to-end when the host writes `auth: unauthenticated`
+    Failure detected: A real unauthenticated host verdict fails to reach the sign-in notice sink. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP still surfaces `status: error` with auth unresolved — but never as a sign-in demand
+    Failure detected: An unresolved provider error disappears or falsely asks for sign-in. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP stays silent for `status: degraded`, which is not a credential verdict
+    Failure detected: A degraded/version-advisory status falsely produces a credential warning. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP reports a refresh's auth error too, not just the catalog read
+    Failure detected: An explicit refresh drops auth errors that catalog load would publish. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP defaults a missing `capabilities` block to the withholding shape
+    Failure detected: Older host rows missing capabilities crash composer consumers or offer unsupported controls. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP keeps what a partial `capabilities` block does carry
+    Failure detected: Partial old-host capabilities are lost, or absent capabilities are guessed supported. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP defaults the list fields so `.map` on them cannot throw
+    Failure detected: Old-host missing lists crash .map consumers or orphan the provider from registry IDs. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP repairs a missing `auth` block into `unknown` rather than toasting or crashing
+    Failure detected: Absent auth becomes a false sign-in verdict or crashes the composer. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP drops only the rows that cannot be repaired, keeping the rest of the catalog
+    Failure detected: An unrecoverable catalog row destroys healthy neighboring providers. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP a row from the catalog read is repaired the same way
+    Failure detected: A malformed goals block reaches action callers instead of being withheld. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/queue.logic.test.ts
+Independent contract: GUI §7.4 queue contract: single dispatch, ordered failed sends, pending-request and connecting guards, latest finished tool boundary.
+Seam and non-test callers: takeQueued / holdAtFront / isQueuedMessageDue / latestCompletedToolActivityId; store.ts queue driver (helper calls are real production calls).
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  REWRITE answers null when another caller already took it
+    Pre-edit follow-up: add a successful-first-take control; otherwise an implementation that never takes anything passes. The exact once-only consumption contract is independent GUI §7.4. Failure: double dispatch or inability to consume a queued message. Fixed text/id examples are independent. Public queue operation survives refactors. Store boundary tests do not attempt the identical ID twice, so this remains the lowest seam for that distinct case. No test-only production seam; low risk; validate V.
+  DELETE guard 2, in order: a later failure is held behind the ones held before it, still ahead of the rest
+    Failure formerly detected: Duplicate pure queue transition below retained reload-dispatch contract. Remaining stronger coverage: store.reload.test.ts: holds the in-flight leftovers whose re-posts fail in the order they were posted, ahead of the rest.
+  DELETE guard 2, in order: with the ones it follows gone, a failure goes to the very front — never behind one queued after it
+    Failure formerly detected: Duplicate helper case below retained replay failure ordering. Remaining stronger coverage: store.reload.test.ts: never holds a failed re-post behind a waiting message once the user has sent the one held before it; holds a failed re-post ahead of messages queued after it, even ones held because nobody saw them.
+  KEEP guard 3: nothing flushes while a request is pending
+    Failure detected: Queued chat dispatches while the user still owes an approval/answer. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  DELETE never sends a held message
+    Failure formerly detected: Same guard already observed at actual queued command dispatch after failure and reload. Remaining stronger coverage: store.test.ts: when the torn-down generation's queued send fails, it is held at the front and the next one still waits; store.reload.test.ts held queue cases.
+  KEEP never sends while connecting — the gap between a send and pick-up
+    Failure detected: A queued message dispatches during the send-to-provider connection gap. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  DELETE sends at turn end
+    Failure formerly detected: Duplicate predicate assertion below observable dispatch on turn end. Remaining stronger coverage: store.test.ts: the live generation waits for the torn-down one's queued send in flight before sending the next (setup asserts first dispatch upon ready snapshot).
+  DELETE sends mid-turn only once a LATER tool call finished
+    Failure formerly detected: Duplicate pure predicate below stronger real-store dispatch and remainder re-anchoring. Remaining stronger coverage: store.fixwave.test.ts: sends exactly one queued message per tool-call boundary.
+  KEEP picks the newest completed tool call, ignoring position
+    Failure detected: An out-of-order snapshot or later tool.updated marker selects the wrong dispatch boundary. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/reducer.logic.test.ts
+Independent contract: GUI §5.1/§6.3/§6.6 and goals §4.4: snapshot request tombstones, goal adoption, history replay progress reset.
+Seam and non-test callers: applyFrame; store.ts stream ingestion.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP re-tombstones resolved requests so a replayed request cannot reopen a card
+    Failure detected: Reload resurrects an already answered approval, or incorrectly tombstones a genuinely reused request ID. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP adopts the snapshot's goal, validated, and reads a missing one as none (goals §4.4)
+    Failure detected: A snapshot drops the goal, trusts an invalid goal, or fails with an older host lacking goals. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP shows a replay until it is done, and drops a stale one on (re)synchronizing
+    Failure detected: Replay progress remains visible after completion/reconnection or disappears while replay is active. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/rewind.logic.test.ts
+Independent contract: GUI §7.4/§7.5: eligible rewind targets and two Escape presses inside 600 ms; reset prevents stale double-press.
+Seam and non-test callers: deriveRewindTargets / createEscapeSequence; AgentChatView.tsx, ChatComposer.tsx and composer/RewindControl.tsx.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP lists rewindable user messages newest first, with the turns each drops
+    Failure detected: The rewind picker orders/targets prompts incorrectly or computes wrong dropped-turn counts. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP is a projection of the rows: a row without revertTurnCount is not a target
+    Failure detected: A non-rewindable steer appears as a rewind target. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP completes on the second press inside the window and then starts over
+    Failure detected: Double Escape fails within the window, or a third press fires another double. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP a press outside the window is a first press
+    Failure detected: A stale first Escape combines with a later unrelated press. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP reset forgets the first press
+    Failure detected: Resetting the sequence leaves a stale first press armed. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/roster.logic.test.ts
+Independent contract: GUI §7.6 and wire per-task stop contract: correct member identity/count/status, background access after turn end, provider capability/task eligibility, pending stop recovery.
+Seam and non-test callers: roster view selectors and taskStopControl / pendingTaskStops / failedTaskStopId; roster/roster-rows.ts, SpawnRow.tsx, hooks.ts and store.ts.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP prefers progress while live and reverses that order once settled
+    Failure detected: The live row shows stale results instead of progress, or settled work keeps showing progress. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP keeps a workflow coordinator live between member launches
+    Failure detected: A workflow appears finished in the gap between member launches. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP counts the members, never the coordinator, including members the timeline never saw
+    Failure detected: A workflow coordinator is counted as a member or progress-only members disappear. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP preserves a known member count before roster details arrive
+    Failure detected: Known member IDs are lost while roster detail has not arrived. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP summarizes a stopped workflow as inactive
+    Failure detected: A stopped workflow is shown as still working/completed. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP reports failure when a member or coordinator failed
+    Failure detected: Member or coordinator failure is hidden in a successful-looking workflow summary. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP fades settled rows once the turn ends
+    Failure detected: Finished foreground rows remain in the settled dock or live rows disappear. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP exempts a live background row from collapsing AND from fading
+    Failure detected: A live background process becomes inaccessible when its parent turn settles or its roster collapses. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP does fade a SETTLED background row
+    Failure detected: A completed background row remains pinned as if still live. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP a Claude shell: its own command item, `bgshell:<id>` — its start, or a chunk alone
+    Failure detected: An evicted Claude shell is no longer recognized from retained command/output rows. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP a Grok shell, or any shell's launch: task rows naming it, of a shell's kind
+    Failure detected: An evicted Grok/monitor/local-bash task loses its shell drill-in. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP never an agent, a loop, a goal — nor an id with nothing in the window
+    Failure detected: An agent/loop/goal or unrelated ID is mistakenly shown as a shell. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP shows on a live run where the provider can stop one task, and reads Stopping… while in flight
+    Failure detected: A supported live task lacks Stop or stops reading in-flight before it ends. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP hides where the provider cannot, on a member, and on a run that settled
+    Failure detected: Unsupported, member-only or settled task rows offer a Stop the host rejects. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP drops evicted pending stops and preserves other tasks when one fails
+    Failure detected: Evicted/failed task stops remain stuck while clearing another task's stop. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP ignores unrelated activities and malformed task-stop failures
+    Failure detected: An unrelated or malformed activity clears the wrong pending task stop. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/status.logic.test.ts
+Independent contract: GUI §7.6 and compaction regression: valid latest context reading and compaction only while live; failed/settled/dead sessions clear phase.
+Seam and non-test callers: latestContextWindowActivity / isCompactingThread; store.ts.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP reads the newest context-window activity and skips malformed ones
+    Failure detected: A malformed latest context update hides the previous valid token reading. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP ends on `compacted`
+    Failure detected: Compaction remains active after a successful terminal marker. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP ends on `compaction-failed`
+    Failure detected: Compaction remains active after a failure marker. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP ends when the turn settles even though no terminal marker ever arrived
+    Failure detected: A turn that ends without a terminal compaction event leaves a permanent compaction phase. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP ends when the session is no longer live
+    Failure detected: A dead session keeps showing compaction, or a starting session clears it too soon. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP is off for an old log, which only ever recorded the settled marker
+    Failure detected: A legacy settled-only log invents a currently running compaction. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP reads the LATEST marker, so a second compaction re-enters the phase
+    Failure detected: A second compaction fails to restart the phase because an earlier terminal marker wins. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP ignores everything that is not a compaction marker
+    Failure detected: Unrelated tool activity clears an in-flight compaction phase. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/stream.logic.test.ts
+Independent contract: GUI §6.3 and agent-chat/wire.ts: NDJSON split framing, tolerant malformed input, validated history progress, forward-compatible unknown event payload fields.
+Seam and non-test callers: NdjsonLineBuffer / parseStreamLine; transport.ts.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP splits complete lines and holds the partial one
+    Failure detected: HTTP chunk boundaries drop or prematurely parse a partial NDJSON frame. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP skips blank lines
+    Failure detected: Blank NDJSON lines are treated as frames/errors. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP rejects malformed JSON and structurally wrong frames without throwing
+    Failure detected: Malformed JSON/frame structures throw or reach the reducer as valid frames. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP accepts a history-import progress frame and rejects a malformed one
+    Failure detected: Valid history progress is discarded, or invalid progress shape reaches typed state. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP accepts an event whose payload carries fields this bundle does not know
+    Failure detected: A newer host's extra payload fields cause the client to reject an otherwise valid event. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/timeline-position.test.ts
+Independent contract: GUI §7.2 and AGENTS.md: per-thread persisted scroll/disclosure LRU, 100-entry bound, tolerant legacy/corrupt localStorage.
+Seam and non-test callers: TimelinePositionStore / parseTimelinePositions; timelinePositionStore singleton used by store.ts.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP evicts the oldest past the limit
+    Failure detected: Timeline memory grows past its documented bound or evicts the newest reading position. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP delete-then-set moves an entry to the end so it survives eviction
+    Failure detected: Revisiting a thread fails to refresh its retention position and loses its new offset. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP persists as an ordered array, and replaying it rebuilds the same order
+    Failure detected: Persisted ordering changes on reload and evicts the wrong thread later. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP forgets a thread
+    Failure detected: A forgotten/deleted thread returns from saved localStorage. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP degrades to nothing remembered on garbage, never a crash
+    Failure detected: Corrupt persisted timeline memory crashes the client. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP keeps the valid rows of a partly-malformed payload
+    Failure detected: One invalid stored position drops valid neighbors. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP repairs a row an older bundle wrote with missing fields
+    Failure detected: A record from an older bundle with missing fields crashes or restores unusable state. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP drops non-string ids and non-numeric offsets from the disclosure set
+    Failure detected: Invalid disclosure IDs/offsets survive deserialization. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP caps a persisted payload that is already over the limit
+    Failure detected: An over-limit legacy stored payload bypasses the retention bound. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/title.logic.test.ts
+Independent contract: GUI §7.7 explicitly adopts first-message reference stripping, 50-character cap and Image/File/context fallback chain.
+Seam and non-test callers: deriveThreadTitleSeed; AgentChatView.tsx.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP uses the first message, stripped of context references
+    Failure detected: Thread titles expose composer reference markup instead of the referenced basename/skill. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP truncates at 50 characters
+    Failure detected: Long first prompts violate the specified 50-character title seed cap. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP falls back to the first image, then the first file, then a chip
+    Failure detected: Attachment-only/context-only threads select the wrong fallback title source. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP collapses fenced code and whitespace rather than seeding a wall of code
+    Failure detected: Fenced code or repeated whitespace turns the title into an unreadable code dump. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+FILE packages/ui/src/lib/agent-chat/transport.test.ts
+Independent contract: GUI §6.2/§6.3/§6.6; indexed-history design §C; packages/api agent-chat/wire.ts: actual encoded routes, receipts/errors, NDJSON cursors, windowed output, metadata and binary attachment reads.
+Seam and non-test callers: createAgentChatTransport / attachmentRefFromUpload over Transporter; api-client.ts transport resolution; store.ts, composer and timeline readers.
+Six-bar rationale applying to each KEEP/REWRITE below:
+  1. The independent contract above specifies the exact data/state outcome named by each case.
+  2. The named failure changes user-visible content, action eligibility, persistence, or caller-visible protocol results.
+  3. Inputs and expected outputs are fixed examples or protocol literals; expected results are not computed by the production selector/parser.
+  4. Assertions observe the named production seam, returned data/state or external Transporter protocol; no private collaborator inventories.
+  5. Internal renaming/reordering/extraction with equivalent output preserves the assertions. Storage order, wire paths and command identities are intentional contracts.
+  6. This is the lowest owner for these distinct cases; mocked upstream stores cannot protect parsing, selectors cannot protect dispatch, API/server tests cannot protect UI transport conversion. Duplicates identified below are removed.
+Default remaining stronger coverage for KEEP: none covering the exact owner-specific branch; adjacent integration tests exercise different lifecycle or protocol contracts.
+Risk for KEEP: no behavior change. Risk for DELETE: low; only dead helper or documented stronger coverage remains. Validation: V.
+  KEEP opens without a cursor from a cold start and decodes frames in order
+    Failure detected: A cold stream incorrectly requests replay or changes snapshot/event/sync delivery order. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP hands one chunk's frames over together when the caller takes batches
+    Failure detected: Batch consumers receive per-frame duplicates or lose history-import frames. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP resumes from the highest applied sequence after a drop
+    Failure detected: Reconnect uses a stale/lower cursor and replays or loses chat events. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP drops a replayed event so a reconnect duplicates nothing
+    Failure detected: Overlapping replay delivers the same event twice. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP asks for a snapshot when the host instance changed
+    Failure detected: A new host is resumed with the old host's cursor instead of requesting a snapshot. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP reports the reconnect and stops for good on close
+    Failure detected: A disposed stream silently reconnects or fails to signal its drop. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP closes a wedged stream once the heartbeat window lapses
+    Failure detected: A silent wedged connection never closes/reconnects after the heartbeat timeout. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP posts to the right route and returns the receipt
+    Failure detected: Commands post to the wrong wire route or lose command identity/receipt sequence. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP turns an error envelope into a typed error
+    Failure detected: A permanent command refusal loses its typed code or becomes retryable. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP marks HOST_UNAVAILABLE retryable — the same commandId may be re-posted
+    Failure detected: Host-unavailable refuses a safe same-ID retry. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP defaults the turn diff to ignoring whitespace
+    Failure detected: Turn diffs include whitespace changes contrary to the API default. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP asks for an older page by cursor and turn count
+    Failure detected: History requests misencode thread IDs or drop page cursor/turn count. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP omits the cursor for the first page below the window
+    Failure detected: An absent history cursor is sent as an empty cursor and changes paging meaning. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP searches every thread with the query, the limit and an optional project
+    Failure detected: Global/project-scoped search drops the query, project filter or limit. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP forwards the abort signal on both reads
+    Failure detected: History/search reads cannot be cancelled through their supplied signal. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP maps INDEX_UNAVAILABLE to a typed, non-retryable error
+    Failure detected: A rebuilding index loses its typed permanent INDEX_UNAVAILABLE result. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP pages a window chain to the end and answers the whole join
+    Failure detected: Windowed output joins skip/duplicate multibyte content or request wrong encoded item paths/offsets. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP says what the last window says: a running call's output so far, a join cut at the host's cap
+    Failure detected: The joined output ignores the final page's running/truncation status. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP answers an empty join empty — the call streamed nothing
+    Failure detected: A command that streamed nothing becomes an erroneous/malformed output result. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP takes the whole join a host from before windows answers, whatever the query asked
+    Failure detected: An older host's whole-output response is rejected or incorrectly repaged. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP answers null on a 404: the host's ITEM_NOT_FOUND, or a host from before the route
+    Failure detected: An absent item/older route returns an error instead of the specified null fallback. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP keeps any other failure's code
+    Failure detected: A non-404 output failure is swallowed as missing output or loses its host error code. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP refuses a body of neither shape, and windows that do not meet end to end
+    Failure detected: Invalid/overlapping/gapped/zero-progress/other-call windows fabricate output or loop. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP refuses a window wider than one read takes, and a join past the host's cap
+    Failure detected: Oversized windows or output totals bypass protocol memory bounds. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP takes a whole join arriving mid-chain (an older host back after a rollback) as the answer
+    Failure detected: A rollback host whole response is appended to a prior partial page, duplicating text. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP answers null on a 404 mid-chain — the thread deleted between two reads — dropping what it had
+    Failure detected: A deleted thread mid-read returns partial output as though complete. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP forwards the abort signal on every page
+    Failure detected: Later output pages lose the abort signal and keep fetching after cancellation. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP carries a chat upload's server-minted AttachmentRef verbatim (the host answers the ref itself)
+    Failure detected: Chat attachment IDs are incorrectly reconstructed as terminal paths, breaking sends. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP turns an upload response into metadata only — never bytes, never a data URL
+    Failure detected: Terminal upload metadata is misclassified or gains unsupported binary/data-URL fields. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP keeps the host's absolute path so the composer can name the file in the prompt (§7.4)
+    Failure detected: Host attachment absolute paths are lost before the composer can name uploaded files. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+  KEEP reads an attachment's bytes back over requestBytes, and refuses where the transporter has none (§7.4)
+    Failure detected: Attachment bytes use the JSON channel, target the wrong route, or treat failed binary responses as success. No remaining stronger test covers this same owner-specific condition. The full six-bar rationale, caller search, risk and validation above apply.
+
+Dead support/seams removed: removed planProgress from plan.logic.ts (no production reference; status line computes its own progress); removed the unused holdAtFront test import; removed unused goal-test builder reset. All remaining imported seams have production callers. No fixtures or snapshots become orphaned.
+
+Disposition counts: {'KEEP': 156, 'REWRITE': 2, 'DELETE': 6}
+Validation: final changed-file run passed 21/21 tests across goal.logic.test.ts, plan.logic.test.ts and queue.logic.test.ts (--test-concurrency=2; /tmp/ui-chat-lib-final-changed.log). The broader 18-file audit run passed 157/157 tests, no skipped/cancelled tests (/tmp/ui-chat-lib-before.log, 578.6s under host contention). It started before edits and is not claimed as a pristine baseline; the 21-test final changed-file run separately validates the final revisions. Parent owns final pnpm check/test/build. git diff --check passes for this scope.
+
+Cross-scope validation: store.fixwave.test.ts cases “marks the actionable proposal truncated and reads the whole plan back by its id”, “never reads an intact proposal back”, and “refuses, rather than answer the cut text, when the read-back fails or brings no plan” passed in the store agent's broad run before it was interrupted later (/tmp/ui-chat-store-tests.tap). They are unchanged reader-validation owners; final review restored the separate Copy/Download wrapper selection case because those reader tests do not cover it.
+
+Final counterexample review restored the truncated-copy case; the final complete plan.logic.test.ts run passed 8/8 tests, zero skips/failures (/tmp/ui-chat-plan-final.log, 49.2s). Final suite count is 158 tests in these 18 files; the prior 157-test run excludes only this restored baseline case.

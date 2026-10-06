@@ -466,7 +466,7 @@ export function toProfileError(
 }
 
 /** `error.data.config_write_error_code` of a `config/*` write refusal, when there is one. */
-export function configWriteErrorCode(error: CodexRpcError): string | null {
+function configWriteErrorCode(error: CodexRpcError): string | null {
   const data = error.data;
   if (typeof data === "object" && data !== null) {
     const code = (data as Record<string, unknown>).config_write_error_code;

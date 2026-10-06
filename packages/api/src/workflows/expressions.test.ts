@@ -308,11 +308,9 @@ describe("rewriteNodeReferences", () => {
 describe("renderTemplate maxLength", () => {
   it("stops appending past the budget, cuts there and evaluates nothing after", () => {
     const context = ctx();
-    const big = "{{ nodes | json }}".repeat(1000);
-    const whole = renderTemplate(big, context);
-    const capped = renderTemplate(big + "{{ input.nope }}", context, { maxLength: 500 });
+    const capped = renderTemplate("{{ input.text }}{{ input.nope }}", ctx({ input: { text: "abcdef" } }), { maxLength: 4 });
     assert.equal(capped.truncated, true);
-    assert.equal(capped.text, whole.text.slice(0, 500));
+    assert.equal(capped.text, "abcd");
     assert.ok(!capped.warnings.some((w) => w.includes("input.nope")), "nothing after the cut is evaluated");
     assert.deepEqual(renderTemplate("a{{ input.a }}", context, { maxLength: 10 }), { text: "a1", warnings: [] });
     assert.equal(renderTemplate("😀😀", context, { maxLength: 3 }).text, "😀", "never half a surrogate pair");

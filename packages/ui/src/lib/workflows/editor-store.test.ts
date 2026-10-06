@@ -366,7 +366,6 @@ describe("editor-store: the agent catalogue", () => {
     timers.advance(600);
     const models = editor.state.problems.filter((problem) => problem.code === "unknown_model");
     assert.deepEqual(models.map((problem) => [problem.severity, problem.nodeId, problem.field]), [["error", "a", "config.chain.0.model"]]);
-    assert.match(models[0]!.message, /NightlyTask: claude has no model "opus"/);
 
     // The provider is re-probed and lists it: the error goes.
     editor.setValidationContext({

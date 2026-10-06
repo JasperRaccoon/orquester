@@ -1,0 +1,221 @@
+Thread index audit and cleanup — decisions recorded before editing
+Scope: index.test.ts, indexer.test.ts, queries.test.ts, sqlite.test.ts, their testing.ts support, and removed dead messageSpan production accessor.
+Independent sources: docs/superpowers/specs/2026-09-23-thread-index-and-lazy-boot-design.md section C and invariants 1,4,6,7,8; AGENTS durable-log/cache/security rules; agent-host/README.md index contract; ThreadIndex prompt/history public caller contract.
+Production owner inspected: index.ts queue/catch-up/coverage, indexer.ts turn/message/revert persistence, queries.ts SQLite reads, sqlite.ts file lifecycle. Real callers: agent-host/orchestration/orchestrator.ts history/search/prompt routes and main.ts lazy index lifecycle.
+Unit failure modes: lost/duplicated/out-of-order turns, incorrect byte ranges/split messages, stale or unsafe rewind gates, search leakage/query syntax, falsely complete prompt pages, pending state lost at restart, cache corruption breaking host readiness, insecure file mode.
+Six-bar rationale for EVERY KEEP/REWRITE below (case-specific oracle/failure/uniqueness follows each name):
+1. Independently specified persisted-log/cache/history/prompt contract above; no implementation AST or private collaborator order is the oracle.
+2. Each case below identifies the recognizable missing/wrong history, prompt, search, rewind or lifecycle result it detects.
+3. Inputs are explicit DomainEvents with fixture-assigned independent byte positions; expected IDs/sequences/text/permissions are specified by hand. TestLog calculates JSON byte positions only; it does not compute index rows, search, turn ownership or query results.
+4. Stable seam is createThreadIndex returning the production ThreadIndex contract over a real temp SQLite database. Corruption tests use the documented on-disk cache boundary; no mock implements index behavior. Rewrites move away from messageSpan, which has no real caller.
+5. Internal refactors preserving these outputs remain valid; no assertion snapshots private collections, statement counts or call order. Deferred I/O gates express real concurrent arrivals. SQLite corruption setup tracks the persisted schema, whose compatibility is explicitly a retention exception.
+6. These are the lowest real database-owner cases for each named contract. Host route tests cover HTTP/wiring; reducers do not test SQLite persistence/queries. Case reasons distinguish adjacent timing/input partitions; deleted case names its surviving stronger owner.
+Risk: low; remove only unreachable internal accessor. Keep documented drain synchronization for deterministic queue completion (AGENTS asks for drains over timing). SQL schema does not change.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 apps/daemon/src/agent-host/index/{index,indexer,queries,sqlite}.test.ts
+
+apps/daemon/src/agent-host/index/index.test.ts
+KEEP | recovers every turn from a large log while yielding to the event loop
+  150 turns/1201 persisted events must be recovered and a queued event-loop callback must run; detects blocking rebuilds and omitted tail chunks, unlike small-log cases.
+KEEP | continues catch-up from a persisted cursor
+  After two already-indexed turns, catch-up must retain those and add t3-t5; detects a cursor-resume that overwrites or skips the existing prefix.
+KEEP | re-indexes from byte 0 when the log no longer matches the cursor
+  A rewritten same-ID log invalidates its old byte cursor; old searchable prompt 2 disappears and replacement turns 7-37 appear. This exercises mismatch recovery, not ordinary append recovery.
+KEEP | re-indexes a log that got SHORTER than the index (cursor ahead of logSeq)
+  A shorter log must replace the ahead-of-log cache with one new turn and a matching shorter cursor; ordinary cursor continuation cannot exercise this direction.
+KEEP | leaves unreadable logs behind after catch-up returns
+  A reader returning mismatch even at zero must leave coverage behind, not complete; prevents an empty prompt/history cache masquerading as the whole unreadable log.
+KEEP | fills the hole a live batch found before the boot catch-up reached its thread
+  A live t3 batch past missing t1/t2 must not advance the cursor; catch-up then yields t1/t2/t3. Distinct from a persisted-prefix gap because the thread has no index row yet.
+KEEP | a live observe queued during a catch-up applies after it, in order
+  Catch-up reads a fixed prefix while a live append arrives; after both settle t1/t2/t3 and the exact latest byte cursor remain. Deferred gate models actual I/O interleaving, not a mocked index result.
+KEEP | deletes the rows at once and drops what was queued or in flight for the thread
+  Immediate deletion must suppress queued and in-flight repopulation while another thread remains searchable. Generation races are not covered by a plain deletion event.
+KEEP | a driver error rolls its batch back without poisoning later ones; catch-up repairs the hole
+  A real second SQLite connection locks a transaction; cursor rollback, later gap rejection and successful catch-up prove the writer recovers without missing prompt 1.
+KEEP | a turn not started yet survives a failed write: the catch-up adopts it at its prompt
+  A transaction failure while adopting a pending prompt must recover its original userMessageId and byte boundary; basic lock rollback would miss misattributing the prompt after memory loss.
+KEEP | never throws out of observe, even for a malformed batch
+  Malformed positions must not throw from asynchronous observe or advance the cursor, and a subsequent valid batch must work; proves cache failure cannot break durable host commits.
+KEEP | ends a catch-up at its next chunk boundary, applies what was queued before, then closes
+  Stopping during a chunked rebuild must reject late work, persist queued observes and only a prefix of rebuild, then let a new index finish it. Read-in-flight stop below exercises a different race point.
+KEEP | a catch-up still reading when the stop lands applies nothing of what it read
+  Stopping while the first log read is pending must persist no part of that read; a later reopened index has no cursor. Chunk-boundary cancellation cannot exercise pre-first-commit stop.
+KEEP | still deletes a thread's rows while it stops
+  Delete while stopping must survive reopening, because a deleted log will never participate in the next catch-up; a stop incorrectly gating delete would resurrect private conversation rows.
+
+apps/daemon/src/agent-host/index/indexer.test.ts
+KEEP | derives turn rows: ordinals, timestamps, prompt, and byte ranges that tile the log
+  Independent event positions identify exact prompt starts, settled timestamps and adjacent byte ranges; catches history pages losing prompts/checkpoints or numbering turns inconsistently with rewind.
+KEEP | indexes finished messages and every activity write, with item positions and markers
+  User text, streamed assistant text and tool details must all be searchable with correct IDs, roles, turns and timestamps; multi-table indexing and first-vs-final timestamps are not tested by grammar-only search cases.
+KEEP | is idempotent: a replayed batch changes nothing
+  Refeeding individual batches and the entire log must not duplicate turns/search hits or move the cursor; protects append replay idempotency.
+KEEP | drops a batch that skips ahead of the cursor, and resumes once the hole is filled
+  An out-of-sequence batch must remain invisible until the missing middle batch arrives; unlike catchUp tests this proves observe rejects and subsequently accepts the actual live batches.
+KEEP | anchors a replayed history turn at its prompt, though its row is minted at its end
+  Imported provider history announces settled turns after their messages; boundaries must start at the earlier prompt and end before the next prompt, so replayed history remains pageable.
+KEEP | follows the fold's text rule: a final text replaces, an empty one keeps, a reopened message continues
+  Final message text replaces drafts, empty finals preserve accumulated text, and reopened streams append; explicit search terms detect stale drafts or lost streaming text in SQLite.
+REWRITE | keeps the last write of an activity, and moves its marker with it
+  Last activity content must replace old searchable text and kind/seq. Remove unused compaction setup and rename: no assertion actually observes a moved marker; compaction gating is covered in queries.test.ts.
+KEEP | a hidden goal progress row keeps its place in the log but never reaches the search
+  Hidden goal-progress rows must not flood search while a visible goal-set objective stays searchable; literal queries/IDs exercise the search projection independently of UI filtering.
+KEEP | a revert drops the removed turns and everything from their first line on, and closes every range
+  Revert must remove later turn/search rows, discard their compaction gate, seal survivor bytes and allocate subsequent turn 4 ordinal 2 even after restart; distinct from clipping already-overlapping ranges.
+KEEP | thread.deleted removes every row of the thread
+  A durable thread.deleted event removes only that thread's cursor/turn/search rows, leaving the other thread searchable; direct deleteThread alone would miss event dispatch.
+KEEP | a restart mid-turn resumes the open turn from its rows
+  Restart after an answer but before settlement must preserve the open turn's original start and extend it through the later checkpoint; no pending turn exists in this scenario.
+REWRITE | a message's first line survives a restart in the middle of its stream
+  Move the restart-mid-message regression to messagesSpanning(thread, 6), the production paging seam. It must report m1 starting at seq 5 and ending at 7 after reopening; an index losing the first chunk's boundary would split history.
+KEEP | a turn the provider never started leaves its rows with the turn before it
+  A provider-refused request must not claim a turn ID or steal the next successful turn's prompt; byte ranges still meet at the successful prompt.
+KEEP | a capture that lands after the next turn began still falls inside its turn: ranges overlap
+  A late checkpoint after t2 starts must remain inside t1's overlapping range and remain extendable after restart; prevents losing a turn-end diff from Load older.
+KEEP | a capture that lands between the next prompt and the next turn's start stays with its turn
+  A checkpoint between t2's prompt and adoption must stop t1 at its last own row rather than truncate it to t2's prompt; different adoption timing from the preceding late-after-start case.
+KEEP | an unknown prompt starts the turn at its row; a turn adopted from a session-set at that event
+  Missing opening prompt falls back to request row, while provider-initiated continuation with no request starts at session-set; prevents guessing nonexistent prompt bytes.
+KEEP | nothing extends a range across a revert — not even a late event naming the turn
+  No late checkpoint may reopen a range sealed by revert, including after restart; otherwise loading older can fold the revert or removed conversation again.
+KEEP | a revert clips a surviving turn at the cut: a late event's stretch never brings the removed turns back
+  A range already stretched across a removed turn must be clipped at that turn's first byte on revert and stay clipped after restart; ordinary non-overlap sealing misses this regression.
+KEEP | a late event far past the next turn's start does not stretch the earlier turn
+  A late reference more than 2 MiB past the next prompt must not grow the older page unboundedly; fixed payload size is an independent resource-limit fixture.
+KEEP | a restart between a turn's request and its adoption keeps the turn at its prompt
+  Restart between request and provider adoption must preserve the prompt in t2's own page and outside t1's page; a started-turn restart cannot detect dropped pending state.
+KEEP | a prompt remembered before a restart still anchors the turn that claims it after
+  Imported history prompt remembered before restart must anchor the settled turn announced after restart; this has no pending request and tests prompt memory separately.
+KEEP | queued turns survive restarts in order, and each adoption takes the oldest
+  Two pending requests must survive successive restarts and be adopted FIFO, preserving both IDs; a single-pending case cannot catch dropped queue members or reversed adoption.
+KEEP | a turn requested before a replayed history keeps its place among the replayed turns
+  A live request made before history replay must retain ordinal 1 when its provider turn starts later, so rewind counts t1/h1/h2 rather than append order.
+KEEP | a turn that settled without ever starting is not kept, and moves no ordinal or range
+  A pending request settled as stopped must not later materialize as an extra turn after restart; guards persistence of invalid pending state distinct from error/refused-state behavior.
+KEEP | an in-flight state that does not read back is ignored whole: an empty one, never a crash
+  Persisted malformed inflight JSON, types, counts, spans and ordering must be ignored atomically; the valid later provider turn must still index from its own adoption. SQL corruption targets an independently specified persisted cache schema.
+KEEP | never drops a thread with a turn not started yet or a message mid-stream, however many pass
+  More threads than the resident cache permits must not evict pending turn anchors or partial assistant text; real final searchable text/userMessageId observes data loss without private LRU-size assertions.
+KEEP | never indexes half a surrogate pair — not even one a chunk boundary split at the cap
+  Whole and streamed text at the 131072-unit cap must omit complete astral pairs and all excluded tail terms; checks safe UTF-16 truncation in search snippets, not a computed copy of capText.
+
+apps/daemon/src/agent-host/index/queries.test.ts
+KEEP | pages from the newest turns down, oldest first within a page
+  Seven turns page as 5/6/7 then 2/3/4 then 1/2 by cursor; exact ordinal sequences catch skipped/duplicated pages and reversed presentation.
+KEEP | the cursor wins over beforeTurn, and a foreign cursor reads as none
+  An explicit matching-thread cursor takes precedence over beforeTurn, while a foreign cursor falls back to beforeTurn; prevents another conversation's cursor from hiding local history.
+KEEP | a cursor whose turn is gone still means 'older than its anchor'
+  A disappeared turn ID still bounds older history by its content timestamp; rebuild/revert must not reset the reader to an unrelated page.
+KEEP | pages by the log's order even when turn timestamps tie or run backwards
+  Equal replay timestamps and lexical turn IDs must not override log ordinal order; explicit t-z/t-a/t-m IDs distinguish the ordering rules.
+KEEP | withholds exactly the turns a settled compaction lies after — mid-turn included
+  A settled parent compaction inside t2 blocks rewinding t1/t2 but permits t3; independently specified rewind safety gate, not just marker storage.
+KEEP | an in-flight or failed compaction dropped nothing and withholds nothing
+  Running/failed compactions leave rewind allowed because no provider context was dropped; only settled-marker coverage would overblock history actions.
+KEEP | the legacy marker — thread.state.changed {state: compacted} — withholds the turns before it
+  Legacy thread.state.changed compacted rows must enforce the same rewind gate; older logs cannot silently lose their safety marker.
+KEEP | a subagent's own compaction withholds nothing, whether the row or its payload names the agent
+  Subagent compactions, owned on either row or payload, cannot block parent rewind; explicitly different context ownership prevents false denial.
+KEEP | matches operators, quotes and punctuation as plain text, never as syntax
+  FTS operators, quotes, punctuation, accents and Japanese must search as literal user text; hand-specified hit IDs expose query injection, syntax exceptions and unwanted prefix semantics.
+KEEP | an empty or whitespace query finds nothing
+  Empty and whitespace-only search must return no hits even when searchable data exists; malformed-query fixtures alone do not prove this valid empty input contract.
+KEEP | clamps the limit to [1, 50] across both tables
+  Search must cap the combined message/activity result set at 50, use caller limits, and normalize invalid limits; prevents two independently limited tables doubling the public cap.
+KEEP | filters by project and names each hit's thread
+  Project filtering must isolate matching threads and retain their title/project metadata; no-result project and unfiltered search distinguish absent data from accidental cross-project exclusion.
+KEEP | follows a renamed thread
+  Renaming a thread must update metadata on old hits without rewriting old messages; otherwise search navigates with stale titles.
+KEEP | itemPosition: an activity's latest line
+  Lookup by activity ID returns the last line and excludes messages/foreign threads; this is the host's actual unslimmed-item positioning seam.
+KEEP | itemPositionBySeq: only an activity's latest line answers
+  Lookup by activity seq returns only latest writes; old replaced seqs and message seqs must not become history activity anchors.
+KEEP | hasItemsBefore
+  At the oldest retained activity seq, hasItemsBefore is false; one seq above is true, infinity includes all, unknown thread false. Detects a false Load older affordance caused by replaced rows.
+KEEP | activitySeqBefore: `count` back, else the oldest, else null
+  Backtracking activity budget is exclusive, returns nth prior activity or oldest available, and handles no history/count bounds; explicit seqs 15/14/13/6 drive correct history-window sizes.
+KEEP | turnsInSeqRange: every turn whose range meets [from, to), ordinal order
+  Intersecting turns includes both overlapping ranges and excludes empty/reversed/nonoverlap ranges; prevents missing turns while reading a byte-history block.
+KEEP | turnOfSeq: the containing turn, the newest start when ranges overlap
+  A seq in overlapping turns resolves to the newest start; pre-first-turn and foreign-thread lookups have no owner. Direct query contract used by history page attribution.
+KEEP | turnOfSeq: a row a revert left between its survivor and the next turn gets the survivor
+  A post-revert gap row inherits the surviving turn for attribution without falsely claiming its range overlaps; distinguishes containing-turn lookup from interval intersection.
+KEEP | latestRevertSeq and firstBoundaryAfter: where a page may end just past the latest revert
+  The latest revert watermark and first allowable message/activity boundary after it must move independently; prevents a cursor from sitting inside a revert gap or on session bookkeeping.
+KEEP | turnByPrompt: the turn that names a message as its opening prompt
+  Only a message explicitly named as a turn's opening prompt resolves a turn; reverted opening prompts disappear and assistant messages never open turns.
+KEEP | keepsUserMessage: a user message until a revert drops it by the fold's rule
+  Retained-user lookup removes both reverted-turn prompts and unclaimed idle messages, preserving only the surviving prompt; history-gap reader uses this API rather than prompt-list normalization.
+DELETE | a message streamed in three chunks around activity boundaries reports its span
+  messageSpan is a test-only accessor. Remaining messagesSpanning boundary matrix proves the same first/last span; indexer finished-message search proves assembled text. Remove accessor/SQL/forwarding, not preserve this private seam.
+KEEP | messagesSpanning: a boundary inside the message returns it, one outside returns nothing
+  Boundary 6/8/10 must include m1 with exact span 5..10, while first/outside/foreign boundaries exclude it; this is the actual production pagination seam preventing split messages.
+KEEP | eventPositionBySeq answers for an activity line and a message's first line, nothing else
+  Only latest activity or first message lines can be page boundaries; intermediate/final streaming chunks and turn bookkeeping must be rejected.
+REWRITE | every message has a span, text or not; a reopened one keeps where it began
+  REWRITE through eventPositionBySeq and messagesSpanning: an empty message still contributes its first boundary, and a reopened m2 spans original seq 3 through 6. Keep original creation timestamp search assertion; drop test-only messageSpan.
+REWRITE | a revert drops the spans of the messages it removed
+  REWRITE through eventPositionBySeq and messagesSpanning: surviving a1 still spans its middle chunk, removed a2 does not, and removed u2 loses its first-line boundary after revert. Independent seqs prevent a vacuous empty query.
+KEEP | lists the parent's prompts newest first, each with the turn it opened
+  Parent prompts must list newest-first with prompt text, turn identity/ordinal, timestamps and rewind state. This tests the joined prompt-list public response, beyond raw turn or search APIs.
+KEEP | lists a steer on the turn it steered, and a prompt no turn has started yet, with no ordinal
+  Steers and requested-but-unstarted prompts have no opening ordinal/rewind action, while t1's opener does; prevents offering rewind on non-opening messages.
+KEEP | a replayed prompt opens the replayed turn that names it
+  Imported transcript prompts join the settled history turn that names them even though the turn is minted later; ensures prompt-list turn metadata is not restricted to live messages.
+KEEP | refuses what the user did not type, and strips image placeholders from what they did
+  Internal notifications, commands, generated plan sends, blank/image-only messages and assistant text are excluded; typed mixed image text is normalized and user slash prompts survive. Real indexed candidates prove filtering before list and by-ID disclosure.
+KEEP | never lists a subagent's user message; an empty owner is the parent's own
+  Message ownership belongs to its first line: later owner changes cannot expose child prompts or hide parent prompts; SQL parent filtering must also treat empty owner as parent.
+KEEP | a revert takes the reverted turns' prompts and their steers with it
+  Revert deletes removed opening prompts and steers then reuses ordinal 2 for a new turn; prompt-list joins must agree with turn pruning.
+KEEP | pages by its cursor, and refused rows never cost a page a slot
+  Rejected notification/compact rows do not consume page slots; full pages plus exhaustion cursor catch filtering applied after LIMIT.
+KEEP | clamps the limit to [1, 500], and anything not a number is the default
+  Prompt limits normalize zero/negative/fractional/NaN/infinite inputs and cap at 500; independent explicit limits protect bounded API responses.
+KEEP | cuts an entry's text at 4_000, never inside a surrogate pair
+  List preview cuts at 4000 UTF-16 units without half an astral pair while by-ID lookup keeps full below-index-cap text; list and lookup deliberately have different budgets.
+KEEP | reads a malformed or foreign cursor as a first page
+  Malformed/noncanonical/foreign cursors fall back to first page; valid cursor and tolerated extra fields go older. Fixed public cursor bytes independently exercise parsing and compatibility.
+KEEP | answers a read it cannot make with null or failed — never an empty page; no prompts is an empty page
+  Unavailable/closed cache must report failed/null while a complete thread with no user prompts reports an empty successful page; callers must not cache transient failure as permanent emptiness.
+KEEP | coverage: whole once every line is indexed; catching up while a catch-up will close the gap; behind when none will
+  Coverage distinguishes behind, queued/active sweep catching-up, live append settled complete, and permanent hole after sweep; protects prompt-list completeness claims through actual queue state.
+KEEP | prompt(): a listed prompt by id, with its line; null for anything the list would not show
+  By-ID lookup returns normalized prompt with its durable first-line position and denies assistants, child prompts, removed prompts and foreign thread IDs; enables full prompt text fallback safely.
+KEEP | prompt(): says when the index's copy may be only the head of a longer prompt
+  At the index's 131072-unit cap, cut is set; repeated message writes carry a later lastSeq so full-text callers know no single line is sufficient. Distinct from list-preview cap.
+KEEP | a revert drops a turn-less prompt no turn claims, before the cut — as the fold does
+  Unclaimed idle user messages before the positional revert cut still disappear under semantic turn retention; byte-range pruning alone incorrectly preserves them.
+KEEP | …unless the fold's fallback restores it, for retained turns that have no prompt
+  A kept autonomous turn lacking a prompt permits the fallback idle prompt; guards overaggressive dropping that previous negative retention case cannot catch.
+KEEP | a resumed thread's first live prompt, requested before the replay, goes with its turn
+  Live prompt requested before replay must disappear when its own first-ordinal turn is reverted and survive when that turn remains, despite its unusual byte ordering.
+KEEP | continues a short page after the prompt scan budget is exhausted
+  After 3000 excluded notices exhaust the scan budget, an empty first page must still provide a cursor that reaches the actual older prompt; prevents falsely ending History.
+KEEP | walks past a user message that never had text, counting it
+  A textless user row must not stall or terminate prompt scanning; p2 and p1 remain ordered with the empty row excluded from both list and by-ID lookup.
+
+apps/daemon/src/agent-host/index/sqlite.test.ts
+KEEP | bootstraps a fresh private WAL database and its parent directories
+  Fresh nested appdir opens successfully, file permissions are 0600 and SQLite uses WAL; guards both sensitive conversation exposure and independent persisted lifecycle requirements.
+KEEP | reopens an intact file without rebuilding it
+  An intact reopened file retains its byte/seq cursor instead of rebuilding; corruption recovery cases cannot detect needless loss of a healthy cache.
+KEEP | tightens a pre-existing file to 0600
+  An already existing 0644 file becomes 0600 on open; fresh-file creation permissions do not protect legacy files.
+KEEP | replaces a file that is not a database at all
+  A non-SQLite text file is replaced and accepts a real observed event/cursor; verifies usable rebuild after corruption, not merely a success flag.
+KEEP | replaces a file that claims the version but lacks a table
+  A same-version database missing markers must reopen available after rebuild; catches corrupt partial schemas that a version-only check would trust.
+KEEP | rebuilds a file at this version whose tables predate a column this build writes
+  A same-version message_docs table lacking required columns must rebuild, not permanently disable indexing; table-existence recovery alone cannot catch prepared-statement incompatibility.
+KEEP | runs unavailable when the file can be neither opened nor recreated
+  A directory at the database file path must result in unavailable without crashing; unlike recoverable corruption, recreation cannot succeed here.
+KEEP | replaces a file with incompatible schema version 1 and starts empty
+  Literal old/future schema versions must drop old cursor/search rows and reopen available. Protects downgrade as well as upgrade incompatibility, rather than comparing the schema declaration to itself; same-version corruption cases do not exercise version rejection.
+KEEP | replaces a file with incompatible schema version 999 and starts empty
+  Literal old/future schema versions must drop old cursor/search rows and reopen available. Protects downgrade as well as upgrade incompatibility, rather than comparing the schema declaration to itself; same-version corruption cases do not exercise version rejection.
+
+Totals before edits: {"KEEP": 92, "REWRITE": 4, "DELETE": 1}
+Support: TestLog/event builders/logger remain used. Remove dead ThreadIndex.messageSpan, ThreadIndexQueries.messageSpan, prepared lookup SQL, unavailable and main lazy forwarding implementations; merge the now-single-use IndexedMessageSpan type into SpanningMessage. No persisted schema or public transport changes.
+
+Baseline before edits: all 97 tests across 16 suites passed (real SQLite). Implemented the recorded 1 DELETE / 4 REWRITE; all 92 KEEP cases retained. Post-edit focused suite passed all 96 tests in 16 suites, 0 failures/skips. git diff --check passed. Root owns full pnpm check/test/build and commit/push gates. Test-only messageSpan removed; persisted schema unchanged.

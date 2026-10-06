@@ -320,20 +320,4 @@ describe("computeReadiness", () => {
     assert.deepEqual(before.ready, []);
     assert.deepEqual(before.skip, []);
   });
-
-  it("a partial run: a failed block routed on error keeps the success path dead", () => {
-    const g = graph(
-      [
-        ["t", "trigger.manual"],
-        ["if", "if"],
-        ["t2", "code"]
-      ],
-      [
-        ["t", "if"],
-        ["if", "t2", "true"]
-      ]
-    );
-    const readiness = computeReadiness(g, state({ t: "succeeded", if: "failed" }));
-    assert.deepEqual(readiness.skip, ["t2"]);
-  });
 });

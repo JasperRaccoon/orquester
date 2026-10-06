@@ -11,8 +11,7 @@ import {
   buildAppEnv,
   defaultPaContent,
   desktopLayout,
-  fallbackSocketDir,
-  hostScriptArgs
+  fallbackSocketDir
 } from "./host-env.ts";
 
 const layout = desktopLayout("/srv/app/daemon/desktops/abc123", null);
@@ -82,7 +81,6 @@ test("socket dir fallback above 100 bytes", () => {
   // Everything that is not a socket stays in the desktop dir.
   assert.equal(moved.xauthority, `${long}/Xauthority`);
   assert.equal(moved.ready, `${long}/ready`);
-  assert.equal(hostScriptArgs(moved, { width: 800, height: 600 }, true).at(-1), fallback);
 });
 
 test("default.pa loads one native socket, the orq null sink as default", () => {
@@ -90,12 +88,6 @@ test("default.pa loads one native socket, the orq null sink as default", () => {
   assert.match(text, /module-native-protocol-unix socket="\/srv\/app\/daemon\/desktops\/abc123\/pulse\/native" auth-anonymous=1/);
   assert.match(text, /module-null-sink sink_name=orq/);
   assert.match(text, /set-default-sink orq/);
-});
-
-test("host script args carry no secrets: dir, size, audio flag, socket dir", () => {
-  const args = hostScriptArgs(layout, { width: 1280, height: 800 }, false);
-  assert.deepEqual(args.slice(1), [layout.dir, "1280", "800", "0", layout.dir]);
-  assert.match(args[0], /assets\/desktop-host\.sh$/);
 });
 
 test("env file round-trips nasty values through a real sh unchanged", async (t) => {

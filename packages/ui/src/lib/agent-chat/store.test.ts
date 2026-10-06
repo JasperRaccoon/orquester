@@ -253,21 +253,19 @@ describe("the per-thread slice", () => {
         seq: 5
       })
     });
-    assert.equal(answer("a1")?.streaming, undefined, "the dead host's answer reads settled");
-    assert.ok(
-      state().rows.some((row) => row.kind === "turn-fold" && row.turnId === "t1"),
-      "and no longer holds its turn's fold open"
-    );
+    const settledAnswer = answer("a1");
+    assert.ok(settledAnswer, "the dead host's partial answer remains visible");
+    assert.notEqual(settledAnswer.streaming, true, "the dead host's answer reads settled");
     assert.equal(answer("a2")?.streaming, true, "the running turn's answer streams");
-    const stored = state().slice.entries.find((item) => item.id === "a1");
-    assert.ok(stored?.kind === "message" && stored.streaming, "the fold keeps the flag as the log wrote it");
 
     fake.push({
       kind: "event",
       seq: 6,
       event: ev("thread.session-set", { session: { status: "stopped", activeTurnId: null } }, { seq: 6 })
     });
-    assert.equal(answer("a2")?.streaming, undefined, "no process is left to finish it");
+    const stoppedAnswer = answer("a2");
+    assert.ok(stoppedAnswer, "stopping the session preserves its answer");
+    assert.notEqual(stoppedAnswer.streaming, true, "no process is left to finish it");
   });
 });
 

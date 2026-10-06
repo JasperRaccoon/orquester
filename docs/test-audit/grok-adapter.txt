@@ -1,0 +1,1289 @@
+Grok adapter cleanup — implemented; pre-edit dispositions preserved below
+
+Scope: all 20 *.test.ts files under apps/daemon/src/agent-host/adapters/grok, plus smoke.ts and associated support. 364 source declarations; table-driven declarations expand at runtime. Existing previous audits were consulted as leads, not as automatic retention.
+
+Read root README/AGENTS, daemon package scripts, agent-host module map, fixture README and relevant owners. Baseline focused run was started before edits, using node --import tsx --import ../../scripts/test/assert-ok.mjs --import ../../scripts/test/quiet-mock-timers.mjs --test --test-concurrency=2 src/agent-host/adapters/grok/*.test.ts src/agent-host/adapters/grok/acp/*.test.ts from apps/daemon. Final validation recorded below.
+
+Before deciding isolated units, failure modes considered: protocol framing/correlation; unknown input handling; permission escalation and lost grants; secret exposure; unsafe overlay writes; lost/misattributed history, goal, task or text; stale/duplicate lifecycle transitions; account/cost errors; stuck requests or orphaned owned processes. Internal declaration shape and implementation identifiers are not independent failure modes.
+
+For each file, B1-B6 are the six required retention bars. Each numbered KEEP/REWRITE case inherits that file's source and seam and narrows it to its literal scenario, named expectation and state history. DELETE rows identify the surviving stronger owner. Existing interface/protocol requirements supply the oracle; the production implementation is not the expected-value source. All rows use the focused command above restricted to their listed file; modifications to fixture support additionally run all retained Grok replays. Risk: deleting duplicates/nonbehavioral probes is low; rewritten negative controls expose previously invisible failures without altering production. Retained protocol/security/lifecycle cases protect the concrete failure families below.
+
+FILE apps/daemon/src/agent-host/adapters/grok/acp/connection.test.ts
+B1 independent source: ACP captured initialize/auth methods and headless authentication safety (fixture README observation 2; GUI design §4.5).
+B2 recognizable failure family: Authentication selection can start an invisible sign-in, skip cached auth, or pick the wrong advertised method; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: AcpConnection.handshake over real child stdio; session.ts and probe.ts use it.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L58: a bound logged-in home uses the advertised default
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L74: an UNAUTHENTICATED home never auto-selects the interactive sign-in
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L89: a non-interactive method is preferred when the agent names no default
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L104: a default that IS the sign-in is refused, not obeyed
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L116: no advertised methods at all means no authenticate
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/acp/errors.test.ts
+B1 independent source: JSON-RPC/ACP error codes and captured errors (fixture 13); workflow account-failure contract.
+B2 recognizable failure family: Incorrect auth/quota classification blocks retries/account recovery or attributes an MCP error to the user account; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: acpFailureReason consumed by session.ts and probe.ts.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L7: acpFailureReason: the codes first, then the CLI's own words on an RPC error only
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L17: the auth wording: the CLI's sentences, not a tool's or an MCP server's noise
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/acp/peer.test.ts
+B1 independent source: JSON-RPC 2.0 framing, IDs, duplex replies; AGENTS unknown-event/deadline rules; captured xAI extensions.
+B2 recognizable failure family: Lost replies, wrong correlation, blocked duplex traffic, hung requests or raw secret disclosure; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: AcpPeer send/receive/request/notification/close public protocol boundary, consumed by connection.ts.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L55: concurrent requests are framed as JSON-RPC and resolved by response id
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L73: a notification carries NO id and no extra keys
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L80: a malformed line is surfaced and the stream keeps going
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L94: a blank line is ignored without a warning
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L102: an inbound request with id 0 is a request, not a notification
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L114: the inbound id is echoed verbatim, string or number
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L122: a slow request handler does not block the read loop
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L145: a handler that throws answers -32603 rather than dying
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L158: an unknown inbound REQUEST is answered -32601 and warned about
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L170: an unknown inbound NOTIFICATION is warned about and not answered
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L177: the warning summarises the payload rather than copying it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L190: an extension is registered under BOTH spellings
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L203: extension dispatch unwraps matching envelopes and preserves unrelated method fields
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L227: an error response becomes a typed AcpRpcError carrying data
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L242: a request deadline rejects and sends nothing to the peer
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L254: a reply after the deadline is a warning, not a crash
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L261: transport death fails every in-flight request exactly once, then fails fast
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L281: an aborted request rejects with the signal's reason
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L299: a frame that is not JSON-RPC 2.0 is warned about but still dispatched
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L312: an inbound request id that is not a string or a number is refused
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L328: a re-emitted error keeps the peer's own message, undecorated
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L341: a reply carrying one of the agent's own request ids is its own traffic: no warning
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/acp/redact.test.ts
+B1 independent source: AGENTS secrets-host-only rule and fixture README redaction requirements.
+B2 recognizable failure family: Credential/home/host identifier leakage or unbounded hostile frame traversal; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: redactAcpFrame used by AcpConnection.onRawFrame before writing provider data.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+REWRITE L11: every MCP server env value is masked before the line is written
+Use an ordinary JIRA_HOST value in addition to credential-shaped fields: the existing email/token strings were masked by the generic redactor even if env-array masking broke. Assert its absence and diagnostic server/key preservation.
+
+KEEP L36: credential-shaped values are masked wherever they appear
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L53: home paths collapse and token shapes are masked inside free text
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L73: a deeply nested frame is bounded rather than walked forever
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L83: an MCP env given as an OBJECT MAP is masked too
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L105: `environment` and `envVars` are env containers too
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/fold-seam.test.ts
+B1 independent source: GUI timeline/roster contracts; AGENTS durable ordering and deploy-liveness rules; recorded regressions described in each case.
+B2 recognizable failure family: Wrong folded status/ownership, merged resumed messages, missed liveness or duplicated imported history; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: GrokNormalizer -> real ingestion -> API reducer/liveness registry, used by host orchestration.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L145: a late status-less update of a finished call leaves the timeline one completed call
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L244: a Grok subagent Stop closed counts live again when a poll answers running, for its hour
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L273: a Grok agent nobody polls holds working for an hour, re-armed by a running poll
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L299: a loop a later launch reports again reopens its row: each launch numbers its own runs
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L362: a resume in a later turn keeps each run's words and thinking apart, each on its own turn
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L423: a subagent's own shell counts on its own once the subagent's run ends, until its own end
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L504: a subagent's own shell RESTING when the subagent ends does not count live: its row keeps its status
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L524: a subagent's own shell the CLI revived counts on its own once the subagent ends
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L564: a session/load replay projects to the conversation: its messages, and one completed row per call
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/goal.test.ts
+B1 independent source: agent goals design §6.3 and Grok fixture README observations 53/57.
+B2 recognizable failure family: Wrong goal transition, false clear on resume, lost objective/check/budget, duplicate visible progress or corrupted prompt history; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: GrokNormalizer frame/reconcileGoal outputs, consumed by session.ts; goalCommandFromReminder consumed by history.ts.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L149: frames whose counters alone moved emit nothing
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L171: a malformed goal_updated emits no goal row or warning
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L187: every Grok status maps onto the goal status set
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L215: the frame maps field by field
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L264: a null token_budget is kept as 'no budget', and a malformed field is dropped, not guessed
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L276: a verification check reads the verdict — with its attempt when both counts are known — never the worker's summary
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L305: the frames that repeat a check's verdict keep it; the next round's summary replaces it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L340: every last_event maps onto its change
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L372: goal_created replaces an unfinished goal and sets over a finished one
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L391: goal_cleared clears the goal, carrying it as it ended
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L409: 1.0.34's /goal clear — status cleared, goal_id and objective emptied, no last_event — clears the goal the thread shows
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L460: a goal_cleared for a goal the thread never showed emits nothing
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L465: a status change with no new event is named by the status it moved to
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L491: every other last_event is progress, emitted only when the goal state moved
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L519: progress is throttled to one per 30 s per thread; a status change never is
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L549: `planning: true` is the planning phase: one hidden progress as the planner starts, one as it ends, none per frame
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L577: a frame that is not running the goal keeps its own phase, whatever `planning` says
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L598: a second not_achieved verdict is a second check
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L619: a verdict is keyed on its details file: a moved run count alone is not a second check
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L645: a dropped goal_created leaves no trace: the next valid one is still a set, not a restore
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L657: a new objective under the same goal_id is a replacement, at once, not throttled progress
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L675: a named event carrying a new objective under the same goal_id is a replacement, not the event
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L702: the identical-frame drop is observable: a repeat never delivers a throttled update, a moved counter does
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L744: replayed goal rows emit nothing as they arrive, on every method name
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L757: after a load, a replayed goal the thread lacks is restored — once
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L768: after a load, the goal the thread already shows emits nothing
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L774: after a load, the same goal with only its progress moved is a hidden progress row
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L783: after a load, the same goal in another status is restored in that status
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L793: after a load that replayed NO goal row, the goal the thread shows is left alone — absence is not a clear
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L805: after a load whose last goal row is goal_cleared, the goal is cleared
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L815: after a load, a goal that finished while the thread showed it running is achieved or failed
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L830: after a load, ANOTHER goal that finished means the one the thread shows is gone: cleared, nothing more
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L841: after a load, a new objective under the same goal_id is restored, not a hidden progress row
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L851: after a load, a finished goal the thread never showed running emits nothing
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L860: a finished goal the thread never showed stays out of the live stream too
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L879: a finished goal the thread shows is left alone when nothing was replayed
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L886: after the comparison, live frames continue from the replayed state, not from scratch
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L902: a goal loaded while still planning is not set a second time by its next live frame
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L918: a goal a host from before the planning phase showed as executing learns it at the load, as progress
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L930: a live frame during the load leaves the comparison nothing to add
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L942: a FRESH session (session/new) has no goal by definition: an unfinished goal the thread shows is cleared
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L958: a fresh session with no goal, or a finished one, to show says nothing
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L972: the goal <system-reminder> block reads as the /goal command that set it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1001: text after the goal block stays, beneath the /goal line
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1012: only a LEADING block whose first line sets the goal is a goal block
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/history.test.ts
+B1 independent source: GUI resumed-history contract and fixtures 06; goal design §6.3; CLI 1.0.46 replay forms documented in file.
+B2 recognizable failure family: Lost/reordered replayed messages, duplicated calls, invented accounting, live side effects or misclassified historic tools; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: GrokHistoryCollector/projectGrokHistory consumed by normalize.ts/index.ts.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L67: a live turn contributes nothing — its events are already in the host's log
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L77: each replayed turn projects started / items / completed, in order
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L111: a projected turn never claims token usage it cannot account for
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L125: every projected event is stamped as replayed history, not live traffic
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L137: a LIVE event never carries the historical marker
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L183: chunks accumulate and a turn_completed closes the turn under its prompt id
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L199: a replayed prompt loses the `Attached files:` block the adapter appended, from the whole message
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L238: a replayed goal <system-reminder> projects as the /goal that set it, and the goal rows project nothing
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L313: text after a replayed goal block survives beneath the /goal line, its attachment block stripped
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L327: a reminder that is not a goal block projects as it was replayed
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+DELETE L342: a tool call is kept, and it flushes the text before it
+Duplicate collector ordering covered more strongly by history.test.ts a replayed call's frames fold into ONE row: actual projected user/reasoning/assistant/tool order, merged call payload and later text are all asserted.
+
+KEEP L358: an unterminated replay tail preserves its user message
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L367: non-text content and an id-less tool call are ignored, never thrown on
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L417: a replayed call's frames fold into ONE row, typed and titled as the live path writes it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L467: a replayed shell is a command row; a call the replay never saw end is closed failed
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L503: a replayed spawn_subagent call is an agent launch row
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L521: a call id seen in an earlier turn opens a new row in the next one
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/launch.test.ts
+B1 independent source: CLI version/argv/model protocol; fixtures 01/09/13; AGENTS GROK_CONFIG_PATH overlay and symlink safety.
+B2 recognizable failure family: Unusable launch/model RPC, overwritten global config, incorrect supported-version gate; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: launch.ts parsers/config writer consumed by index.ts/session.ts/probe.ts.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L20: the version line the CLI actually prints parses
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L26: the gate refuses below the minimum and names the required version
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L34: an unreadable version does not block a working CLI
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L44: the product slug is never sent
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L48: nothing changed means no RPC at all
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L56: a valid effort rides as _meta.reasoningEffort
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L66: an invalid effort is DROPPED, not forwarded
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L74: an absent preference is never an explicit clear
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L80: effort token validation matches T3's shape guard
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L111: the overlay is written into a host-owned dir and its path returned
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L124: a SYMLINKED config is never written — the bug that rewrote the user's global config
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L141: an unwritable directory degrades to a warning, not a failed session
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/lifecycle.test.ts
+B1 independent source: AgentAdapter public lifecycle contract; GUI §§3.1/4.1–4.5; AGENTS request ordering, process ownership and deploy rules; Grok fixture observations.
+B2 recognizable failure family: Stuck or wrongly settled turns/cards, lost steering/wake output, invalid permissions/cursors, leaked/killed unrelated processes; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: createGrokAdapter over real spawn/stdio, consumed by adapter registry and host orchestrator.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L251: a missing binary is refused with a message, not a hang
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L257: a binary that cannot be spawned settles rather than hanging
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L263: a handshake that never answers times out and kills the child
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L289: a CLI that dies after its session opened but before it was announced fails the open — never announced ready
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L317: a session that fails to open reports nothing of its own: its start's rejection is the report
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L340: the happy path: session, turn, usage, and a settled turn
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L386: the live command catalog replaces the handshake's, minus the two filtered names
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L399: an approval opens a request, and the decision reaches the agent
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L431: a declined tool settles as cancelled, not as an interrupt
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+REWRITE L449: full-access answers the approval itself with no card at all
+Require completed turn state in addition to no request.opened: a silent rejection/cancellation previously satisfied the negative-only check.
+
+REWRITE L461: auto-accept-edits answers an edit itself, because the CLI flag is a no-op
+Require completed turn state in addition to no request.opened: a silent rejection/cancellation previously satisfied the negative-only check.
+
+KEEP L474: interrupt settles the pending approval BEFORE the cancel, then settles the turn
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L497: interrupt is turn-scoped: a Stop naming another turn is a no-op
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L514: a child that exits mid-turn settles the turn, closes items and then exits
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+DELETE L539: lazy recovery: a fresh session starts from the persisted cursor after a death
+The second rig is manually created with a literal cursor and no shared persistence; no lazy recovery operation occurs. Death is owned by the mid-turn-exit case; minimal/native-cursor loading and replay suppression are owned by the host-minimal-cursor case and goals load case, plus fold-seam history suppression.
+
+KEEP L574: a cursor with the wrong shape means 'no resume', never an error
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L585: compaction is a /compact turn, and is refused while a turn runs
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L594: rollback validates first and then always refuses
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L605: stopSession settles everything and emits a graceful exit
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L625: listSessions reflects active sessions
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L636: attachments reach the agent as PATHS, because promptCapabilities.image is false
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L661: the input guard bounds the typed text, never the Attached files block after it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L689: readThread returns the turns the adapter actually observed
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L711: stopAll stops sessions without ending the event stream
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L727: a session starts from the host's minimal cursor, not just our own
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L749: a steer closes the call its cancel cut, on the turn it steers — the CLI never answers it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L768: a steer settles the turn from the STEERED prompt, not the cancelled one
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L818: a steer closes the cancelled prompt's bubble: the steered reply is a new assistant item
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L893: a chunk the cancelled prompt sends after the steer stays in ITS bubble, never the steered reply's
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L935: Stop with NO active turn is session-scoped: live background work is closed
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L981: Stop with no turn closes the open call BEFORE the background task
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L997: stopSession closes the open call BEFORE the background task
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1010: an exit closes the open call BEFORE the background task, both before session.exited
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1024: the CLI's own prompt after a turn is a turn of its own; a message during it steers it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1056: a Stop while the CLI's own prompt waits for its turn opens no turn for it — what it streamed joins ours
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1116: a waiting wake that outgrows the hold loses nothing: all 300 chunks join the open turn, in order
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1132: a waiting wake within the hold gets its own turn with every chunk
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1152: a Stop after the waiting wake finished keeps its reply, on a turn of its own
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1169: a steer after the waiting wake finished keeps its reply: it joins the turn the steer continues, before ours
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1188: a steer while the CLI has its own prompt queued keeps that prompt's reply, in the order the CLI ran it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1206: stopSession with frames waiting for a wake's turn keeps them: they join the open turn
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1219: an exit with frames waiting for a wake's turn keeps them: they join the open turn
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1230: a question the CLI's own prompt asks while our turn settles rides no turn — our turn's end cannot sweep it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1253: a subagent's child session's question rides no turn, as Codex's does
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1267: the host's cancel of a question reaches the CLI as `cancelled`, never as an empty answer
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1290: a user's empty answer to a question stays an answer
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1307: a request answered without a card leaves a waiting wake's frames waiting for its own turn
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1322: a woken parent's spawn is one agent, launched by its call: its subagent_spawned waits behind it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1343: a model the CLI refuses warns once per session, not at every turn
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1383: full-access: a CLI resolving its own interactions is what was asked for — no advisory
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1395: supervised: a CLI resolving its own interactions is told ONCE, not at every turn end
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1407: a session that dies on its own is removed from the adapter's map
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1421: a host-initiated stop emits no runtime.error after session.exited
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1441: sendTurn refuses /always-approve with INVALID_COMMAND / 400
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1548: a session's end stops its helpers — and never what daemonized into a session of its own
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1567: the host's teardown and a restart stop a Grok session's helpers — never its running work
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1601: the host's teardown resolves only once every session's stop is done: the second stopAll() waits for the first's
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1623: at the host's teardown a helper that ignores SIGTERM is killed after a 1 s grace, not spawn.ts's 2 s
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1684: the user ending the session stops its running work too — never what daemonized away
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1703: the user's stop sweeps the running work even when the CLI exits in the middle of it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1728: the user's end is prepared before its card is answered: a CLI that exits on the cancel before any stop still has its work stopped, and says so
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1769: a deploy leaves the dev server running and says so; closing the tab under the next host stops it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1795: a CLI that exits on its own takes its helpers with it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1830: a session's end sweeps its own launch's sessions — another launch's processes are never touched
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1852: a session that fails to open stops everything its CLI started
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1884: a host teardown while the session opens sweeps the CLI's helpers — never remembered as the user's work
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1912: a CLI that dies while its session opens takes the helpers it booted with it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1942: goals: live goal frames on every private-channel spelling become goal rows, never warnings
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L2001: goals: a load replays the goal silently, then restores it once, after the session is up
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L2027: goals: a fresh session (session/new) clears the unfinished goal the thread still shows
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L2060: stopSession with a parked approval settles it once, as nobody's answer
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L2078: stopSession with a parked question settles it once, as nobody's answer, on the stamp it was asked with
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L2093: an exit with a parked approval settles it once, before session.exited
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L2107: an exit with a parked question settles it once, before session.exited
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L2131: a rate_limit stop is a usage limit, named by its reason — with no reset time to give
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L2145: `an authentication_failed stop is a refused login, named by its reason${noPromptComplete ? " (no prompt_complete)" : ""}`
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L2163: `a prompt the CLI answers with "${message}" (-32603) names ${reason ?? "no account failure"}`
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/normalize.test.ts
+B1 independent source: captured ACP/xAI data vocabulary and GUI tool/task/ownership contracts; recorded Stop/resume/reordering regressions in case comments.
+B2 recognizable failure family: Lost/misattributed text/tasks/tools, wrong terminal status, duplicate ends, stale liveness or crossed parent/child state; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: GrokNormalizer public frame/lifecycle API consumed by session.ts.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L106: a restated end the CLI already sent emits nothing — the open bubble stays open
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L123: a CLI end after the adapter's own close still lands — once: it is the call's first real end
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L364: a failed spawn whose child ran settles its agent failed, with the reason
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L374: a Stop that cuts a spawn no subagent_spawned joined ends its agent stopped: it never started
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L393: a spawn the CLI reports after the Stop cut it joins its launch: one agent, never a second
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L409: a foreground spawn its turn cut with no CLI end stays live until Stop
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L425: the id a launch reports anywhere in its result is enough to resume it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L439: a resume the CLI refuses leaves the running agent running
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L452: a resume that opens no run carries no prompt: the agent was never given it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L473: a resume_from naming an id no launch reported starts a row of its own, under that id
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L480: an id the launch itself named is never taken for its subagent's
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L489: the CLI's own output names the subagent; a summary quoting other ids never steals them
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L512: hasSubagents: this turn launched one — a steer keeps it, a turn under a live one does not
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L528: a poll answering running re-arms the agent; a finished one ends it with its output, once
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L551: every status spelling and exit code T3's reader maps, in a MultiResult
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L577: the captured kill answer ends a run — outcome killed; snapshot fields on it end nothing
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L599: an already_exited kill outcome ends a run it finds live as completed, or by the answer's own status
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L626: an answer arriving between turns ends the agent on the turn it ran in
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L638: a poll ends a known shell with its first output line; an id nobody reported starts nothing
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L692: a shell whose end the CLI reported never starts again — by a snapshot or a late frame
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L712: a shell the adapter closed itself counts live again while the CLI still lists it running
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L740: a terminal listing of a shell the adapter closed is the CLI's end: no row, and final
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L750: a shell Stop closed counts live again when a poll answers running — its own start row
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L771: a subagent Stop closed counts live again on any CLI report that it still runs
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L804: the CLI's end of a task Stop closed writes no second end, and is final
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L822: a resting listing of a task Stop closed says nothing — neither a run nor an end
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L833: an ended subagent's ids outlive its launch's memory: a snapshot listing one is no new shell
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L849: an ended shell's id quoted in a subagent's answer is never taken for the agent's
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L866: a resume clears `listed`: a snapshot without the resumed agent does not end it mid-resume
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L883: only grok_build's spawn_subagent launches a subagent; `background` is its background flag
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L940: one bubble per prompt: a chunk naming another prompt closes the open bubble and opens its own
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L966: a prompt's dispatch keeps a prompt-named bubble open for its late chunks, and closes one no chunk named
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1012: a child's turn_completed is never the parent turn's usage
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1026: a child's catalog, title, mode, model and context size never become the parent's
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1060: a child's hooks, permission_denied and self-resolved interactions are not the parent's
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1081: a child's words open its agent's own segment; its turn end closes it and leaves the parent's open
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1110: a background agent's words after the parent's turn ended are turnless, closed by their own completion
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1140: a run's end closes its child's open calls BEFORE its task row
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1170: an unchanged background_tasks listing emits nothing, however often it is restated
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1189: a changed listing emits exactly one row, carrying every change
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1209: a listing's cancelled status ends the task once — Stop then writes no second end
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1217: a revived shell's changes ride a status-less row; an unchanged listing still says nothing
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1232: a child session's listing never ends the parent's tasks
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1271: the session's end closes a live loop; a later fire notes itself, the CLI re-creating it is a new run
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1296: an end the user did not choose says why on a live loop's closing row; the user's end and a Stop say nothing
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L1310: a loop's deletion by expiry completes it; a report of a loop never seen created starts its row first
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/permissions.test.ts
+B1 independent source: GUI approval decisions/modes and least-privilege session grants; captured option IDs/vendor metadata.
+B2 recognizable failure family: Wrong option selected, grant escalated across operations, grant lost after renamed tool call, wrong approval category; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: permission and launch policy functions consumed by session.ts.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L29: accept -> the allow_once option id
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L33: acceptForSession -> allow_always when advertised
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L39: acceptForSession -> allow_once when allow_always is absent
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L44: acceptAlways falls through to reject_once and is never surfaced
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L48: decline -> the reject_once option id
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L52: cancel selects nothing, so the reply is {outcome:{outcome:'cancelled'}}
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L56: a blank option id counts as absent
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L65: the argv per runtime mode, including the flag that moves
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L73: auto approves edits without granting every approval
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L86: the key is the operation, so the same write twice matches
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+REWRITE L108: a Bash description is stripped, because the model rewords it every run
+Require a defined operation key before asserting equality. Formerly two undefined keys passed even when the session could never remember the grant.
+
+KEEP L126: no command and no input means NO key, so nothing blanket-approves
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L131: a generic title with different commands does not collide
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L141: session grants ignore object key order but distinguish ordered operation arguments
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L152: the vendor tool kind beats ACP's coarser one
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/plan.test.ts
+B1 independent source: managed GROK_HOME plan-location contract; fixture 07 declared plan metadata; GUI proposed-plan workflow.
+B2 recognizable failure family: Unrelated file promoted as plan, legitimate managed plan hidden, stale plan mode after failed tool; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: planMarkdownFromToolCall/nextPlanModeActive consumed by tool-calls.ts/normalize.ts/session.ts.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L24: a workspace plan.md never matches
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L29: a `..` segment is refused outright, not normalised
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L37: at least one intermediate directory is required
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L42: a non-plan file under the sessions dir does not match
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L47: a `~/.grok` layout still matches, for a system-identity thread
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L52: matching is case-insensitive only on win32
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L58: both GROK_HOME layouts are accepted
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L63: a non-string path is never a plan
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L70: the plan markdown is read from the write tool's rawInput
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L77: the plan markdown is read from a diff content entry
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L87: an empty plan write resets the fallback without proposing anything
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L114: plan mode is DECLARED by _meta['x.ai/tool'].kind, not matched on a title
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L121: the title heuristic is the fallback when no vendor meta is present
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L128: a FAILED enter_plan_mode must not leave the flag stuck on
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/questions.test.ts
+B1 independent source: captured 07b question-text-keyed provider response, InputAnswer contract and CLI Other annotation vocabulary.
+B2 recognizable failure family: User selection/free text/preview lost or provider receives wrong keyed response; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: answersToXaiResponse consumed by session.ts answerUserInput.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L31: the envelope is keyed by question TEXT — the only key that can work here
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L38: an array of answers is accepted, trimmed, and blanks dropped
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L44: free text that matches no option becomes `Other` plus a note
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L50: a mix of a known label and free text keeps the label and notes the text
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L56: an unanswered question is dropped from the envelope
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L61: an explicit question id is honoured, and the text still works as a fallback
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L70: a preview rides as an annotation on a single-select question only
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/replay.test.ts
+B1 independent source: recorded fixtures 02–11 output data/order; GUI context/plan/tool/liveness contracts.
+B2 recognizable failure family: Lost captured text/metadata/usage or wrong task/tool/plan/compaction translation; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: captured frames through GrokNormalizer; session.ts owns production use; real registry only for self-owned-shell regression.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+DELETE L82: every capture folds without an unmapped-frame warning
+The test prefilters method names through a handwritten allowlist; an unregistered provider method is silently ignored by the harness. This is a fixture inventory assertion, not exhaustive adapter dispatch. Actual dispatch remains owned by acp/peer.test.ts unknown-method/request cases, xai-updates.test.ts unknown private update, and session-replay.test.ts captured scheduler registration.
+
+KEEP L95: 02 plain prompt: assistant text is one segment with a bounded delta stream
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L116: 02 plain prompt: EVERY chunk-driven meter row carries the window, not just the session's
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+REWRITE L129: a window nobody resolved is omitted rather than invented
+Require at least one actual usage event before asserting absent maxTokens; formerly an empty event stream passed. Contract is unknown context-window omission without losing captured meter data.
+
+KEEP L136: 03 allow-once: the write tool is one item lifecycle, ending completed
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L152: 03 allow-once: the session title arrives as thread.metadata.updated
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L161: 04 reject: the tool fails with the provider rejection detail
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L168: 05 Stop: the write its permission held is closed with the turn it cut — the CLI never answers it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+DELETE L184: 06 session/load: every replayed frame is dropped from the live stream
+False-negative oracle: it checks only that a user_message_chunk does not become content.delta; normalize.ts drops user chunks on the LIVE path as well. fold-seam.test.ts session/load projection verifies replayed assistant, reasoning and tool frames emit nothing live and project once; goal.test.ts and xai-updates.test.ts own private replay suppression.
+
+KEEP L200: 07 plan mode: the plan file write becomes turn.proposed.completed once
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L207: 10 compact: auto_compact_completed becomes thread.state.changed
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L217: 11 background task: the roster and the tool-call join produce one task.started
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L230: 11 background task: the shell is live work — monitoring — in the real registry, bounded by its TTL
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L246: hooks on the private channel become hook.started / hook.completed pairs
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/session-replay.test.ts
+B1 independent source: captured duplex ACP scenarios 16/20/25/29/31 plus AgentAdapter temporal/request ownership.
+B2 recognizable failure family: Broken notification registration, wrong wake serialization, child permission ownership or question cancellation ordering; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: real createGrokAdapter with recorded stdio peer, production registry/orchestrator caller.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L133: 16 replayed: the CLI's wake after a background agent's end is a turn the adapter opens and settles
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L189: 20 replayed: a monitor's first event wakes the agent before the prompt settles — its turn opens right after
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L244: 25 replayed, supervised: a subagent's own write asks on the PARENT's session — the parent's card, on the parent's turn
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L335: 29 replayed: the scheduler's reports reach the normaliser — a loop row, never an unhandled-method warning
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L364: 29 replayed: a loop the host's teardown ends says why — it lived in the CLI the teardown stopped
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L387: 31 replayed: the host's cancel of a question is the CLI's own; a Stop's order ends the turn interrupted
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/subagent-replay.test.ts
+B1 independent source: captured fixtures 15–28 child/launch/poll/kill/resume/monitor protocol; GUI agent roster/prompt contract.
+B2 recognizable failure family: Wrong child ownership, duplicate terminal rows, lost prompt or monitor output, resume identities crossed; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: real GrokNormalizer and GrokWakes capture driver; consumed by session.ts.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L75: 15 foreground: the call starts the agent, subagent_finished ends it once with its clean output
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L110: 15 foreground: the child session's frames are the agent's own rows, on the parent turn
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L154: 15 foreground: the child's context size never moves the parent's meter
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L174: 16 background: a running poll re-arms, subagent_finished ends it, the late poll adds nothing
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L191: 16 background: the child's own auto-backgrounded shell is the agent's, and ends by task_completed
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L217: 17 resume_from: the same roster task runs again under the new call and the new subagent id
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L249: 18 kill: the captured KillTask answer ends the agent stopped, once — subagent_finished adds nothing
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L258: 18 kill: a killed shell ends once, by task_completed — the kill answer and the failed listing add nothing
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L272: 19 unpolled: subagent_finished alone ends the run, and the CLI wakes the parent
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L291: 20 monitor: one monitor task, its events as progress, its end by task_completed
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L329: 22 await budget: the Text answer sends the run to the background, once; subagent_finished ends it
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L351: 23 cut: session/cancel cancels the foreground child — never sent to the background, ended stopped
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L367: 23 cut: the Stop closes the spawn call it cut — the CLI never answers it after session/cancel
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L417: 15–28: every spawn's start carries the prompt its call gave it, verbatim
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L433: no shell, monitor, loop or CLI-spawned agent start (a loop's fire, a goal's planner) carries a prompt
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/tool-output.test.ts
+B1 independent source: GUI §4.5 explicit 8000-char tail, 256-char/10-update coalescing; captured tool forms.
+B2 recognizable failure family: Unbounded output, missing progressive output, wrong item/approval category or command data; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: tool-output.ts conversion functions consumed by tool-calls.ts and permissions.ts.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L19: long output keeps the specified 8000-character tail and truncation marker
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L26: boundRawOutput bounds Grok's cumulative text fields
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L34: boundRawOutput bounds the BYTE ARRAY T3's list does not know about
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L41: boundRawOutput reaches one level into Grok's discriminated payload
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L49: toolContentText joins and bounds the text entries
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L66: a terminal status always emits
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L76: a first sighting, a title change and a status change all emit
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L83: an UNCHANGED update is not emitted and does not count as a skip
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L92: small growth is skipped until the coalesce limit
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L117: big growth emits immediately, and a SHRINKING tail counts too
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+REWRITE L139: stdout growth emits even when the command detail stays unchanged
+Supply the independently known prior emitted length (7 for echo hi). Without it decideToolEmission always emits on first measurement, so the old test passed even if stdout length was never measured. Now the 900-character stdout growth must cross the specified 256-character threshold.
+
+KEEP L151: the item map and the request map differ on `read` and on `search`
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L165: the command comes from rawInput, then argv, then the title's backticks
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L173: the vendor tool kind leads, because ACP's is absent on the first frame
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/usage.test.ts
+B1 independent source: captured prompt usage/initialize metadata and protocol USD x 1e9 scale.
+B2 recognizable failure family: Wrong billed cost/token totals, blanked context meter or invented malformed usage; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: usage.ts/xai-meta.ts conversion consumed by normalize.ts/session.ts/probe.ts.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L19: costUsdTicks is USD x 1e9
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L26: the recorded prompt result parses into a complete TurnTokenUsage
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L43: a locally handled slash command reports totalTokens 0, which is NOT a context size
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L50: contextTokensOf reads the running size from a chunk's _meta and rejects 0
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L57: the context WINDOW comes from the model state and is 500k on 1.0.34
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L70: response_completed's snake_case per-call usage normalises to the same shape
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L83: a malformed usage block is undefined rather than a throw
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/work-replay.test.ts
+B1 independent source: captured 26–30 rejected/capped/killed tasks, scheduler and goal protocol; deploy-liveness contract.
+B2 recognizable failure family: Wrong task end or schedule classification, goal on roster, loop falsely holding deploy; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: real GrokNormalizer/GrokWakes output and real liveness registry.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L56: 26 a subagent whose own write the user declined ends stopped, the CLI's reason its result
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L65: 28 a subagent the runtime stopped at its turn cap ends stopped, naming the cap
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L82: 27 a kill of a shell and a subagent that had already finished adds no second end
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L98: 29 a loop is a roster row of its own: started when created, re-noted per fire, ended when deleted
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L120: 29 a fire is the CLI's own subagent: an agent row under its id, whose end wakes the parent
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L130: 29 a loop never holds a deploy: only its fire's run is live work
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L156: 30 the goal is the thread's goal: set, stopped by its budget, cleared by /goal clear
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L195: 30 the goal's planner is the CLI's own subagent; with it done, nothing of the goal holds a deploy
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+FILE apps/daemon/src/agent-host/adapters/grok/xai-updates.test.ts
+B1 independent source: fixture README observation 58 and recorded subagent pairing regressions; AGENTS unknown-event warning rule.
+B2 recognizable failure family: Crossed subagent ownership, lost retry heartbeat, duplicate compaction, wrong shell ends or silently lost unknown frames; each case below selects its exact input/state/outcome.
+B3 independent oracle: literal externally specified values/captured payloads and required transitions in each case; relational identity assertions preserve data ownership, never recalculate the owner algorithm.
+B4 stable seam and non-test callers: GrokNormalizer ACP/private frame outputs; real API fold for roster join; consumed by session.ts.
+B5 refactor survival: assertions observe returned data, normalized/public events, protocol bytes, persisted config or process state; private branching, helper names and storage shape can change.
+B6 lowest owner: each retained case covers a distinct input/state transition at this seam. Pure conversions own mapping; adapter subprocess cases own real registration/ordering/authorization; fold cases own composition into durable display state or liveness. A conversion test cannot replace a composition regression, and no retained stronger owner covers the same complete scenario.
+
+KEEP L268: a cancelled subagent stops with the CLI's reason; a failed one fails
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L283: an explore subagent is the spawn_subagent call that launched it: the call starts it, the spawn joins it, and it runs detached
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L333: in the real order — the call's result first, the spawn after — a subagent joins by the id the result names
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L406: a call the description pairing already gave away is never given to a second subagent
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L436: two launches of one description: each child joins the call whose prompt it received, whichever spawns first
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L475: a prompt streamed in pieces still tells the launches apart
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L490: launches identical in every argument are told apart by nothing before an answer: the oldest, at the child's first row
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L507: an echo that is one call's whole prompt and only the start of another's is that call's child
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L524: a spawn of the CLI's own whose echo is no open call's prompt is an agent of its own, and takes no call
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L552: a launch the user declined is no candidate for a child of its description
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L579: a Stop while a join waits decides it as before: no child is left without its agent
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L595: a call that answered with its child's id is never taken by another child of its description
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L618: a goal's planner, workers, skeptics and summarizer show on the roster as agents
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L661: a repeated spawn frame starts nothing twice; a finish naming no agent this session knows writes nothing
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+REWRITE L671: a subagent_spawned without an id is one visible warning; a finish without one writes nothing
+Assert one warning event rather than exact diagnostic sentence. The contract is surfacing the malformed spawn; internal wording is not specified.
+
+KEEP L690: a retry episode keeps the running turn visibly alive, once per episode
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L718: a retry between turns flips nothing: an idle session must not read as running
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L724: a new turn opens a new episode
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L737: compaction_checkpoint is known and silent: auto_compact_completed carries the boundary
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L748: task_completed closes the background shell it names, with its exit code
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L773: task_completed for a shell the thread never showed is silent, and a finished shell is not reopened
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L790: replayed frames of all five kinds emit nothing and leave nothing live
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+KEEP L803: an unknown private update still warns
+Protects the exact scenario above against the file's caller-visible failure family. Remaining stronger coverage: none for this complete input/state transition; neighboring tests cover different protocol variants, temporal order or composition. B1–B6 above apply to this case.
+
+DELETE apps/daemon/src/agent-host/adapters/grok/smoke.ts — main/print manual probe. Assertion-free live CLI probe: a failed turn/session exit resolves successfully, output is merely printed, and the leftover scratch README is not a verified workflow artifact. It does not satisfy critical-workflow E2E retention. No production importers or root/package commands reference it. Session lifecycle/replay tests own protocol behavior with assertions; no replacement is added. Remove the unused script/flags and hardcoded host scratch path with it. Validation: focused Grok tests and repository typecheck.
+
+SUPPORT removed: fixtures.ts captureFiles and its readdirSync import have only replay.test.ts inventory-sweep callers; no non-test caller. GROK_FIXTURES_DIR/readCapture/agentFrames/promptResults remain used by replay tests and mock-grok. No generated bindings were edited. No production behavior changed and no injection seam was added.
+
+PROTOCOL SOURCES retained deliberately: captures 07b (questions.test.ts literal source), 08 (session.ts concurrent-prompt source), 09a/09b/09c (fixture README permission-mode observations and launch.ts documented argv/compensation), 13 (acp/errors.ts/connection.ts and launch.ts protocol-error/model/auth provenance), 14 (acp/peer.ts process-death provenance). These remain independently referenced source records even after removing the all-files smoke sweep. Every other NDJSON capture is directly read by retained scenario tests. The inspect JSON is used by agent-profile tests outside this scope.
+
+VALIDATION
+The preliminary focused run passed 365/365, zero failures (636620 ms). It began before source edits, but Node queued later files while edits proceeded; this was a mixed-revision preliminary run, not an immutable baseline. The same full 20-file command passed against the completed source changes with concurrency 2: 363 tests, 363 passed, zero failures/cancellations/skips (501232 ms). Full scoped diff reviewed; git diff --check passed. Repository check/test gates are owned by the coordinating agent. No live CLI, daemon, authenticated account or network workflow was launched.
+
+Disposition totals: 364 original source test declarations = 353 KEEP + 7 REWRITE + 4 DELETE. Including table expansions: 367 original runtime cases = 356 KEEP + 7 REWRITE + 4 DELETE; 363 runtime cases remain. The separate assertion-free smoke.ts probe is also DELETE. Table-driven declarations produce additional runtime cases. Source/support delta: 21 lines added, 298 removed, net -277 lines; audit documentation excluded. Every retained case has its named scenario plus B1–B6 above; rewritten cases inherit those same six bars with the newly distinguishing assertion described beside their names.
+
+Independent source paths used above:
+- GUI design: docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md, provider contracts §4.5; lines 1928–1930 explicitly specify the 8000-char tail and 256-char/10-update coalescing thresholds. These numeric protocol/data tests are requirement tests, not implementation snapshots.
+- Goals design: docs/superpowers/specs/2026-09-24-agent-goals-design.md §6.3; lines 885–888 explicitly specify Verification wording. Retained exact goal-copy assertions protect that stated exception.
+- Wire/provider provenance: apps/daemon/test/fixtures/grok/README.md. The NDJSON captures retained without direct runtime reads remain sources: questions.test.ts:3 cites 07b; session.ts:975 cites 08; launch.ts:18–29 and README permission observation 6 cite the 09a/b/c experiments; acp/errors.ts:8, acp/connection.ts:133, launch.ts:156 and README:672 cite 13; acp/peer.ts:38 cites 14. Fixture paths are apps/daemon/test/fixtures/grok/{07b-ask-user-question,08-steering-second-prompt,09a-permission-mode-acceptEdits,09b-permission-mode-auto,09c-always-approve,13-errors-and-rpcs,14-sigterm-mid-prompt}.ndjson. These protocol records are not unused snapshots.
+
+No production-only seam was discovered whose sole remaining purpose was a removed test. The deleted exports/flags/options belonged to fixtures.ts, testing/capture-driver.ts or the deleted manual smoke script. Public adapter/normalizer/protocol seams remain production-owned.
+
+Additional dead-support decisions recorded before edits: xai-updates.test.ts Rig.debug and its capturing callback have no reads/assertions. Remove that unused accumulator/callback; production debug logging remains used by GrokSession. testing/capture-driver.ts exposes DrivenCapture.grok and DriverControl.grok/turn that no test reads; remove these returned escape hatches. Its endAtNote option has no callers anywhere in the repository; remove the option, branch and obsolete documentation. TurnCursor is internal once the unused control property is removed; remove its export. All are test-support-only; no production callers. Retained driver users exercise all remaining options (atNote, contextWindow). Risk low; validation covers subagent/work/replay files.
+
+Expanded KEEP cases for the two lifecycle.test.ts table-driven declarations (in addition to the shared B1–B6 justification above):
+- an authentication_failed stop is a refused login, named by its reason: captured authentication failure must produce exactly one auth error even when prompt_complete also arrives; catches duplicate or missing account classification at the actual adapter boundary.
+- an authentication_failed stop is a refused login, named by its reason (no prompt_complete): the same provider failure must reach account handling without relying on an optional private completion frame; catches a silent refused login that the previous variant cannot expose.
+- a prompt the CLI answers with "You are not authenticated." (-32603) names auth: the provider's generic JSON-RPC code plus captured authentication text must trigger the auth classification through the session transport; the pure classifier alone cannot prove session delivery.
+- a prompt the CLI answers with "xai: 429 grok-usage-exhausted" (-32603) names usage_limit: the generic code plus quota response must deliver a usage_limit error exactly once so account rotation can distinguish quota from login; distinct protocol input/recovery decision.
+- a prompt the CLI answers with "model returned an empty response" (-32603) names no account failure: an ordinary model error must remain a visible error without blaming/disabling the account; prevents overbroad classification while the positive variants alone would pass.
+All five use independent literal protocol inputs and public runtime error states, not private call shape; transport/implementation refactors preserving these behaviors leave the assertions valid.

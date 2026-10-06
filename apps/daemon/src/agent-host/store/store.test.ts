@@ -278,12 +278,6 @@ test("an unknown type as the LAST line still seeds seq, so no append re-uses it"
 });
 
 test("genuinely malformed lines still truncate — §5.1's rule is unchanged", async (t) => {
-  const rootDir = await tempRoot();
-  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
-  t.after(() => store.close());
-  await store.append({ threadId: "t1", events: [created()] });
-  await store.drain();
-
   // Not JSON at all, and a JSON object missing the envelope's own fields:
   // both are corruption, not a newer build.
   for (const bad of ['{"seq":2,"type":', JSON.stringify({ seq: 2, type: "thread.deleted" })]) {

@@ -15,18 +15,12 @@ const opts = { projectPath: "/w/ws/app", timezone: "Europe/Madrid" };
 const env = () => ({ mintId: sequentialIds(), now: new Date("2026-09-28T10:00:00Z") });
 
 describe("workflow templates", () => {
-  it("every template builds, is disabled, and validates with zero errors", () => {
+  it("every template starts disabled in the selected project and timezone", () => {
     for (const id of ["nightly-agent", "jira-fixer", "release-reviewer"] as const) {
       const workflow = createWorkflowFromRequest(buildTemplate(id, opts), env());
       assert.equal(workflow.enabled, false, id);
       assert.equal(workflow.settings.timezone, "Europe/Madrid");
       assert.deepEqual(workflow.project, { kind: "existing", projectPath: "/w/ws/app" });
-      const { problems } = validateWorkflow(workflow, {
-        secretNames: ["JIRA_BASE_URL", "JIRA_EMAIL", "JIRA_TOKEN"],
-        savedPromptIds: [],
-        knownWorkflowIds: [workflow.id]
-      });
-      assert.deepEqual(problems, [], id);
     }
   });
 

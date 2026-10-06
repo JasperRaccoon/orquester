@@ -60,7 +60,7 @@ function validSize(value: unknown): { width: number; height: number } | undefine
 }
 
 /** Field-wise validation with per-field fallback to the device default; never throws. */
-export function sanitizeDesktopPrefs(raw: unknown, coarsePointer: boolean): DesktopPrefs {
+function sanitizeDesktopPrefs(raw: unknown, coarsePointer: boolean): DesktopPrefs {
   const defaults = defaultDesktopPrefs(coarsePointer);
   if (!isRecord(raw)) return defaults;
   const muted = typeof raw.muted === "boolean" ? raw.muted : defaults.muted;

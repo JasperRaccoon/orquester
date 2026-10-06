@@ -42,14 +42,14 @@ export function notifyPrefsOf(
   };
 }
 
-export type RunOutcomeKind = "failure" | "success" | "quiet";
+type RunOutcomeKind = "failure" | "success" | "quiet";
 
 /**
  * How a finished run counts for notifications: failed/interrupted are
  * failures; succeeded and a Stop block's end are successes (§3.4); a user's
  * cancel and a skipped fire say nothing (the user did it, or nothing ran).
  */
-export function runOutcomeKind(status: WorkflowRunSummary["status"]): RunOutcomeKind {
+function runOutcomeKind(status: WorkflowRunSummary["status"]): RunOutcomeKind {
   switch (status) {
     case "failed":
     case "interrupted":

@@ -22,23 +22,23 @@ export function createTriggerExecutors(): [NodeExecutor<"trigger.manual">, NodeE
   return [make("trigger.manual"), make("trigger.schedule"), make("trigger.git")];
 }
 
-export function createIfExecutor(matcher: RuleMatcher = defaultMatcher): NodeExecutor<"if"> {
+export function createIfExecutor(): NodeExecutor<"if"> {
   return {
     type: "if",
     async execute(ctx): Promise<NodeResult> {
       const context = ruleContext(ctx);
-      const evaluated = await evaluateRulesAsync(ctx.node.config.combine, ctx.node.config.rules, context, matcher);
+      const evaluated = await evaluateRulesAsync(ctx.node.config.combine, ctx.node.config.rules, context, defaultMatcher);
       return { status: "succeeded", output: context.input, handle: evaluated.result ? "true" : "false", warnings: evaluated.warnings };
     }
   };
 }
 
-export function createSwitchExecutor(matcher: RuleMatcher = defaultMatcher): NodeExecutor<"switch"> {
+export function createSwitchExecutor(): NodeExecutor<"switch"> {
   return {
     type: "switch",
     async execute(ctx): Promise<NodeResult> {
       const context = ruleContext(ctx);
-      const evaluated = await evaluateSwitchAsync(ctx.node.config, context, matcher);
+      const evaluated = await evaluateSwitchAsync(ctx.node.config, context, defaultMatcher);
       // No case and no fallback output: every outgoing edge is dead.
       return { status: "succeeded", output: context.input, handle: evaluated.handle ?? "none", warnings: evaluated.warnings };
     }

@@ -92,7 +92,7 @@ function excludedKeys(memory: FailoverMemory, now: Date): Set<string> {
   return out;
 }
 
-export function candidateFromChoice(choice: NonNullable<AccountSelectionDecision["chosen"]>): AgentCandidate {
+function candidateFromChoice(choice: NonNullable<AccountSelectionDecision["chosen"]>): AgentCandidate {
   const subject = cooldownSubject(choice.agent, choice.model, choice.accountId);
   return {
     chainIndex: choice.chainIndex,

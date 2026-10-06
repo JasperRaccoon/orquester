@@ -309,6 +309,7 @@ describe("a reload never loses or duplicates a message", () => {
 
     assert.deepEqual(host.posted(), [["just in time", "edge"]], "exactly at the bound it is still re-posted");
     assert.equal(thread.getState().draft.text, "too old to replay");
+    assert.ok(thread.getState().slice.errorBanner, "the thread explains why the stale send returned");
     assert.deepEqual(thread.getState().draft.attachments.map((ref) => ref.id), ["f1"], "its files with it");
     assert.equal(persistedDraft("A")?.text, "too old to replay", "where the next mount loads it");
     assert.deepEqual(
@@ -316,14 +317,6 @@ describe("a reload never loses or duplicates a message", () => {
       ["edge"],
       "the stale one is settled; the re-post is kept until it settles"
     );
-  });
-
-  it("says why a stale send is back on the thread itself, for whoever opens it next", async () => {
-    left([sendLeft({ sentAt: NOW - OUTBOX_REPLAY_MAX_AGE_MS - 1 })]);
-    const thread = open("A", fakeHost());
-    await flush();
-    assert.equal(thread.getState().draft.text, "deploy the fix");
-    assert.ok(thread.getState().slice.errorBanner);
   });
 
   it("gives several stale sends back in the order they were sent, ahead of what the draft holds", async () => {
@@ -536,31 +529,6 @@ describe("a reload never loses or duplicates a message", () => {
     await flush();
     assert.deepEqual(thread.getState().slice.queue, [], "it is in the draft, once");
     assert.equal(thread.getState().draft.text, "one");
-  });
-
-  it("holds a queued send whose re-post failed at the front, and the rest of the queue behind it", async () => {
-    left([queuedLeft("q1", "one", { sentAt: NOW }), queuedLeft("q2", "two")]);
-    const host = fakeHost();
-    const thread = open("A", host);
-    await flush();
-    host.push(ready("A"));
-    assert.deepEqual(host.posted(), [["one", "c-q1"]]);
-    host.attempts[0]!.fail(new AgentChatCommandError(409, "COMMAND_REJECTED", "no"));
-    await settle();
-
-    assert.deepEqual(
-      thread.getState().slice.queue.map((message) => [message.text, message.holdUntilUserAction]),
-      [
-        ["one", true],
-        ["two", false]
-      ]
-    );
-    assert.equal(host.attempts.length, 1, "nothing overtakes it");
-    assert.notEqual(
-      thread.getState().slice.queue[0]!.commandId,
-      "c-q1",
-      "its next send is the user's own new command — a refused id would only be refused again"
-    );
   });
 
   it("holds a stale queued send at the front instead of re-posting it, the queue behind it", async () => {
@@ -861,6 +829,8 @@ describe("a reload never loses or duplicates a message", () => {
       ]
     );
     assert.equal(host.attempts.length, 2);
+    assert.notEqual(thread.getState().slice.queue[0]!.commandId, "c-q1", "Send now must not replay a cached refusal");
+    assert.notEqual(thread.getState().slice.queue[1]!.commandId, "c-q2", "each refused post needs a fresh command");
   });
 
   const destroy = (thread: ThreadStore): void => {

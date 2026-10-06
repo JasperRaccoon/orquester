@@ -13,10 +13,10 @@ import * as path from "node:path";
 
 import type { ProviderSessionBinding } from "@orquester/api/agent-chat";
 
-import { BINDING_FILE_NAME, bindingResumeCursor, mergeSessionBinding } from "./binding.ts";
+import { BINDING_FILE_NAME, mergeSessionBinding } from "./binding.ts";
 import { createThreadStore } from "./index.ts";
 
-const base = (overrides: Partial<ProviderSessionBinding> = {}): ProviderSessionBinding => ({
+const base = (): ProviderSessionBinding => ({
   threadId: "t1",
   adapter: "claude",
   adapterKey: "claude",
@@ -25,8 +25,7 @@ const base = (overrides: Partial<ProviderSessionBinding> = {}): ProviderSessionB
   status: "running",
   resumeCursor: { resume: "sess-1" },
   providerThreadId: "prov-1",
-  lastSeenAt: "2026-09-22T00:00:00.000Z",
-  ...overrides
+  lastSeenAt: "2026-09-22T00:00:00.000Z"
 });
 
 const merge = (
@@ -89,12 +88,6 @@ describe("mergeSessionBinding (§3.3)", () => {
 
   it("`lastSeenAt` is always the write's own stamp", () => {
     assert.equal(merge(base(), {}).lastSeenAt, "2026-09-22T01:00:00.000Z");
-  });
-
-  it("bindingResumeCursor reports null and a missing binding the same way — `undefined`", () => {
-    assert.equal(bindingResumeCursor(null), undefined);
-    assert.equal(bindingResumeCursor(base({ resumeCursor: null })), undefined);
-    assert.deepEqual(bindingResumeCursor(base()), { resume: "sess-1" });
   });
 });
 

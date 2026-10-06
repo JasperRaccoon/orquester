@@ -2,7 +2,7 @@
  * Agent profile — the write backups (spec §4.1). Before every write or delete
  * the previous file (or the whole directory, for a directory delete) is copied
  * to `<appdir>/daemon/agent-profile/backups/<agent>/<stamp>-<basename>`; each
- * agent keeps a ring of its newest `keep` entries. There is no UI for them —
+ * agent keeps a ring of its newest 50 entries. There is no UI for them —
  * they are the owner's undo by hand, and the verify-failed rollback's source.
  *
  * Entries sort by name: the stamp is a fixed-width UTC time, so lexical order
@@ -16,14 +16,12 @@ import { randomUUID } from "node:crypto";
 import { assertSafeSegment } from "./names.ts";
 import { copyEntry, pathKind } from "./tree.ts";
 
-/** The ring size per agent when none is given (spec §4.1). */
+/** The ring size per agent (spec §4.1). */
 const PROFILE_BACKUPS_KEEP = 50;
 
 interface ProfileBackupsOptions {
   /** `agentProfileBackupsDir(appdir)`. */
   dir: string;
-  /** Entries kept per agent; the oldest beyond it are deleted after each save. */
-  keep?: number;
   now?: () => Date;
 }
 
@@ -34,12 +32,10 @@ function stamp(date: Date): string {
 
 export class ProfileBackups {
   readonly dir: string;
-  private readonly keep: number;
   private readonly now: () => Date;
 
   constructor(options: ProfileBackupsOptions) {
     this.dir = options.dir;
-    this.keep = Math.max(1, Math.floor(options.keep ?? PROFILE_BACKUPS_KEEP));
     this.now = options.now ?? (() => new Date());
   }
 
@@ -69,9 +65,8 @@ export class ProfileBackups {
   }
 
   /**
-   * Puts a backup back at `target` (the verify-failed rollback): a file is
-   * copied beside `target` and renamed over it; a directory or symlink replaces
-   * whatever is at `target`. The backup itself stays in the ring.
+   * Puts a file backup back at `target` after a failed write: it is copied
+   * beside `target` and renamed over it. The backup stays in the ring.
    */
   async restore(backupPath: string, target: string): Promise<void> {
     const kind = await pathKind(backupPath);
@@ -82,22 +77,11 @@ export class ProfileBackups {
     const tmp = join(dirname(target), `.${basename(target)}.${randomUUID()}.restore`);
     try {
       await copyEntry(backupPath, tmp, { symlinks: "preserve", fsync: true });
-      if (kind !== "file") {
-        // rename() cannot replace a non-empty directory; a file can be renamed over.
-        await rm(target, { recursive: true, force: true });
-      }
       await rename(tmp, target);
     } catch (error) {
       await rm(tmp, { recursive: true, force: true }).catch(() => undefined);
       throw error;
     }
-  }
-
-  /** The agent's backups, oldest first. */
-  async list(agent: string): Promise<string[]> {
-    assertSafeSegment(agent);
-    const agentDir = join(this.dir, agent);
-    return (await this.entries(agentDir)).map((name) => join(agentDir, name));
   }
 
   private async entries(agentDir: string): Promise<string[]> {
@@ -110,7 +94,7 @@ export class ProfileBackups {
 
   private async prune(agentDir: string): Promise<void> {
     const names = await this.entries(agentDir);
-    for (const name of names.slice(0, Math.max(0, names.length - this.keep))) {
+    for (const name of names.slice(0, Math.max(0, names.length - PROFILE_BACKUPS_KEEP))) {
       await rm(join(agentDir, name), { recursive: true, force: true });
     }
   }

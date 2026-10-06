@@ -1,7 +1,6 @@
 /**
- * The host's own teardown — and the user's end of a session, the other end
- * the host drives through every adapter hook — through the real composition
- * root.
+ * The host's teardown and intentional-stop handover through the real
+ * composition root.
  *
  * Every deploy's drain-restart, a manual host restart and a SIGTERM run
  * `startAgentHost(...).stop()`: `shutdown.abort()` fires each adapter's own
@@ -20,7 +19,7 @@
 
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { chmodSync, existsSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { chmodSync, readFileSync, readdirSync, rmSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -141,6 +140,7 @@ function sessionSets(log: readonly DomainEvent[]): Array<Extract<DomainEvent, { 
 }
 
 interface Rig {
+  threadId: string;
   root: string;
   appdir: string;
   project: string;
@@ -221,13 +221,13 @@ async function bootHost(shims: Record<string, string>, extraEnv: Record<string, 
   let onStopped!: () => void;
   const stopped = new Promise<void>((resolve) => { onStopped = resolve; });
   const host = await startHost(appdir, env, onStopped);
-  return { root, appdir, project, env, host, stopped, hosts: [host] };
+  return { threadId: randomUUID(), root, appdir, project, env, host, stopped, hosts: [host] };
 }
 
-/** Start a Grok thread `t1` whose turn leaves the mock's `leftover` work running, and settle it. */
+/** Start a Grok thread whose turn leaves the mock's `leftover` work running, and settle it. */
 async function grokTurnWithLeftovers(rig: Rig, launchEnv: Record<string, string>): Promise<void> {
   await rig.host.orchestrator.createThread({
-    threadId: "t1",
+    threadId: rig.threadId,
     projectPath: rig.project,
     cwd: rig.project,
     title: "teardown",
@@ -242,14 +242,14 @@ async function grokTurnWithLeftovers(rig: Rig, launchEnv: Record<string, string>
   // member and a daemonizing grandchild, then reports the shell and ends.
   const settled = persisted(
     rig.host,
-    "t1",
+    rig.threadId,
     (event) =>
       event.type === "thread.session-set" &&
       event.payload.session.status === "ready" &&
       event.payload.session.activeTurnId === null &&
       event.payload.turn !== undefined
   );
-  await rig.host.orchestrator.command("t1", "turn", {
+  await rig.host.orchestrator.command(rig.threadId, "turn", {
     commandId: randomUUID(),
     input: "go",
     interactionMode: "default"
@@ -280,7 +280,7 @@ test(
       assert.deepEqual(after.member, before.member);
       assert.deepEqual(after.daemon, before.daemon, "nor what daemonized away");
 
-      const log = await readLog(rig.appdir, "t1");
+      const log = await readLog(rig.appdir, rig.threadId);
       assert.deepEqual(
         activitiesOf(log, "task.completed")
           .filter((activity) => (activity.payload as { taskId?: string }).taskId === "task-bg-1")
@@ -292,7 +292,7 @@ test(
         "the shell's closing row reaches the log, saying where to stop it"
       );
       assert.equal(sessionSets(log).at(-1)?.payload.session.status, "stopped", "and so does the session's own stop");
-      const remembered = JSON.parse(await readFile(agentChatThreadLeftoverWorkPath(rig.appdir, "t1"), "utf8")) as {
+      const remembered = JSON.parse(await readFile(agentChatThreadLeftoverWorkPath(rig.appdir, rig.threadId), "utf8")) as {
         launches: unknown[];
       };
       assert.equal(remembered.launches.length, 1, "the work it left running is remembered for the user's end");
@@ -339,7 +339,7 @@ test(
     try {
       rig = await bootHost({ codex: server.bin });
       await rig.host.orchestrator.createThread({
-        threadId: "t1",
+        threadId: rig.threadId,
         projectPath: rig.project,
         cwd: rig.project,
         title: "teardown",
@@ -351,18 +351,19 @@ test(
       });
       const started = persisted(
         rig.host,
-        "t1",
+        rig.threadId,
         (event) =>
           event.type === "thread.activity-appended" && event.payload.activity.activityKind === "task.started"
       );
-      await rig.host.orchestrator.command("t1", "turn", {
+      await rig.host.orchestrator.command(rig.threadId, "turn", {
         commandId: randomUUID(),
         input: "go",
         interactionMode: "default"
       });
       await started;
+      const marker = `ORQUESTER_SESSION_ID=${rig.threadId}`;
       const child = (): number[] =>
-        processesWith("ORQUESTER_SESSION_ID=t1")
+        processesWith(marker)
           .filter(({ argv }) => argv.includes(server.bin))
           .map(({ pid }) => pid);
       assert.equal(child().length, 1, "the session's app-server runs");
@@ -370,7 +371,7 @@ test(
       await rig.host.stop();
 
       assert.deepEqual(child(), [], "the app-server is gone before the teardown resolves");
-      const log = await readLog(rig.appdir, "t1");
+      const log = await readLog(rig.appdir, rig.threadId);
       const sets = sessionSets(log);
       assert.equal(sets.at(-1)?.payload.session.status, "stopped", "the session's stop reaches the log");
       assert.ok(
@@ -386,90 +387,10 @@ test(
         "and the live agent's stop"
       );
     } finally {
-      reap("ORQUESTER_SESSION_ID=t1");
+      if (rig !== undefined) reap(`ORQUESTER_SESSION_ID=${rig.threadId}`);
       await rig?.host.stop();
       if (rig !== undefined) await rm(rig.root, { recursive: true, force: true, maxRetries: 3 });
       rmSync(server.dir, { recursive: true, force: true });
-    }
-  }
-);
-
-test(
-  "the user's end of a Grok session is prepared before its card is answered: a CLI that exits on the cancel still has its work stopped, and its row says so",
-  { skip: process.platform !== "linux" },
-  async () => {
-    // `leftover-question-exit`: the turn leaves a background shell (with a
-    // member and a daemonizing grandchild) and a question open, and the CLI
-    // exits the moment its card is answered — which the host does, with a
-    // cancel, right after `prepareUserEnd` and before it stops the session.
-    // Whether the exit lands before the stop begins or inside it is the
-    // scheduler's call here: the ORDER is pinned in `orchestrator.test.ts`,
-    // and the exit before any stop in the Grok `lifecycle.test.ts`; this pins
-    // the outcome through the real composition.
-    const mark = randomUUID();
-    let rig: Rig | undefined;
-    try {
-      rig = await bootHost({ grok: GROK_MOCK });
-      await rig.host.orchestrator.createThread({
-        threadId: "t1",
-        projectPath: rig.project,
-        cwd: rig.project,
-        title: "user end",
-        refId: "grok",
-        accountId: "",
-        home: "system",
-        modelSelection: { model: "grok-4.6" },
-        runtimeMode: "approval-required",
-        launchEnv: { GROK_MOCK_SCENARIO: "leftover-question-exit", GROK_RIG_MARK: mark }
-      });
-      // The shell is reported before the question is asked, on one stream:
-      // once the card is in the log, so is the shell's start.
-      const asked = persisted(
-        rig.host,
-        "t1",
-        (event) =>
-          event.type === "thread.activity-appended" && event.payload.activity.activityKind === "user-input.requested"
-      );
-      await rig.host.orchestrator.command("t1", "turn", {
-        commandId: randomUUID(),
-        input: "go",
-        interactionMode: "default"
-      });
-      await asked;
-      const before = launched(mark);
-      assert.equal(before.shell.length, 1, "the shell runs");
-      assert.equal(before.member.length, 1);
-      assert.equal(before.daemon.length, 1);
-
-      // The session stop command, as the GUI and the MCP send it.
-      await rig.host.orchestrator.command("t1", "session/stop", { commandId: randomUUID() });
-      await rig.host.orchestrator.drain();
-
-      const after = launched(mark);
-      assert.deepEqual(after.helper, []);
-      assert.deepEqual(after.shell, [], "the user ended the session: its work goes with it");
-      assert.deepEqual(after.member, []);
-      assert.deepEqual(after.daemon, before.daemon, "never what daemonized away");
-      const log = await readLog(rig.appdir, "t1");
-      assert.deepEqual(
-        activitiesOf(log, "task.completed")
-          .filter((activity) => (activity.payload as { taskId?: string }).taskId === "task-bg-1")
-          .map((activity) => {
-            const payload = activity.payload as { status?: string; summary?: string; leftRunning?: boolean };
-            return [payload.status, payload.leftRunning];
-          }),
-        [["stopped", undefined]],
-        "it really stopped: nothing left running to speak of"
-      );
-      assert.equal(
-        existsSync(agentChatThreadLeftoverWorkPath(rig.appdir, "t1")),
-        false,
-        "and the thread remembers none of it"
-      );
-    } finally {
-      reap(`GROK_RIG_MARK=${mark}`);
-      await rig?.host.stop();
-      if (rig !== undefined) await rm(rig.root, { recursive: true, force: true, maxRetries: 3 });
     }
   }
 );
@@ -542,7 +463,7 @@ async function handover(
   beforeNextHost: () => Promise<void> = async () => undefined
 ): Promise<{ first: string; log: DomainEvent[] }> {
   await rig.host.orchestrator.createThread({
-    threadId: "t1",
+    threadId: rig.threadId,
     projectPath: rig.project,
     cwd: rig.project,
     title: "handover",
@@ -553,16 +474,16 @@ async function handover(
     runtimeMode: "approval-required",
     ...(thread.launchEnv === undefined ? {} : { launchEnv: thread.launchEnv })
   });
-  const running = untilLog(rig.host, rig.appdir, "t1", (log) => runningTurn(log) !== null, "the turn running");
-  await rig.host.orchestrator.command("t1", "turn", {
+  const running = untilLog(rig.host, rig.appdir, rig.threadId, (log) => runningTurn(log) !== null, "the turn running");
+  await rig.host.orchestrator.command(rig.threadId, "turn", {
     commandId: randomUUID(),
     input: "a long job",
     interactionMode: "default"
   });
   const first = runningTurn(await running)!;
-  await stopThroughHttp(rig, ["t1"]);
+  await stopThroughHttp(rig, [rig.threadId]);
 
-  const stopped = await readMeta(rig.appdir, "t1");
+  const stopped = await readMeta(rig.appdir, rig.threadId);
   assert.equal(stopped.session.status, "stopped", "the teardown's rows reached the log");
   assert.equal(stopped.session.activeTurnId, null);
   // Stamped: only a marker this code wrote may continue a turn the teardown
@@ -575,7 +496,7 @@ async function handover(
   const log = await untilLog(
     next,
     rig.appdir,
-    "t1",
+    rig.threadId,
     (entries) => {
       const turn = runningTurn(entries);
       return turn !== null && turn !== first;
@@ -589,7 +510,7 @@ async function handover(
 
 /** What the handover must leave: the old turn settled once, by the teardown; no error; no marker. */
 async function assertContinued(rig: Rig, first: string, log: readonly DomainEvent[]): Promise<void> {
-  assert.equal((await readMeta(rig.appdir, "t1")).continueAfterRestart, undefined, "the marker is cleared");
+  assert.equal((await readMeta(rig.appdir, rig.threadId)).continueAfterRestart, undefined, "the marker is cleared");
   assert.equal(
     sessionSets(log).filter((event) => event.payload.turn?.turnId === first).length,
     1,
@@ -632,7 +553,7 @@ test("an intentional stop's running Codex turn is continued by the next host, th
     assert.equal(resumed.length, 1, "the next host resumed the thread from its cursor");
   } finally {
     await stopHosts(rig);
-    reap("ORQUESTER_SESSION_ID=t1");
+    if (rig !== undefined) reap(`ORQUESTER_SESSION_ID=${rig.threadId}`);
     if (rig !== undefined) await rm(rig.root, { recursive: true, force: true, maxRetries: 3 });
     rmSync(firstServer.dir, { recursive: true, force: true });
     rmSync(nextServer.dir, { recursive: true, force: true });

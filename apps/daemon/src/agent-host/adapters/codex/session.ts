@@ -403,10 +403,6 @@ export class CodexSession {
     return this.status !== "stopped" && this.status !== "error";
   }
 
-  get currentTurnId(): string | null {
-    return this.activeTurnId;
-  }
-
   /**
    * Spawn the child, handshake, then `thread/resume` or `thread/start`.
    *

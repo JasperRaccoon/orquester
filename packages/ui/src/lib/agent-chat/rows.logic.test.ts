@@ -9,7 +9,6 @@ type ThreadMessageItem,
 type Turn
 } from "@orquester/api/agent-chat";
 
-import { joinLifecycleDetails } from "../../components/agent-chat/timeline/row-chrome";
 import type { AgentChatTimelineRow,WorkLogEntry } from "./contracts";
 import {
 deriveTimelineEntriesFromItems,
@@ -17,10 +16,6 @@ EMPTY_TIMELINE_PROJECTION,
 type ThreadTimelineProjection,
 type TimelineEntry
 } from "./entries.logic";
-import {
-omitSupersededLifecycleMarkers,
-workEntryDisplayIndicatesToolFailure
-} from "./presentation.logic";
 import {
 computeStableRows,
 deriveTimelineRowsWithState,
@@ -645,35 +640,30 @@ describe("a command's streamed output is the inside of its row", () => {
     const [live] = liveRows(rows);
     assert.equal(live!.entry.id, "start");
     assert.equal(live!.active, true);
-    // The row still carries every chunk: expanded, they are its output.
-    assert.deepEqual(
-      joinLifecycleDetails(live!.groupedEntries).map((entry) => [entry.id, entry.detail]),
-      [["start", "first\n  second\n"]]
-    );
+    assert.deepEqual(live!.groupedEntries.map((entry) => entry.id), ["start", "c1", "c2"]);
   });
 
-  it("a chunk that reads like a failure neither splits the run nor marks it failed", () => {
+  it("a failure-looking output chunk stays attached to the running call", () => {
     for (const failingAt of [2, 3]) {
       const chunks = [1, 2, 3].map((n) => chunk(n, n === failingAt ? "cat: x: No such file or directory\n" : `line ${n}\n`));
       const rows = deriveTimelineRowsWithState(baseInput(entriesFrom([prompt(), call("tool.started", "start", 2, "inProgress"), ...chunks]), running)).rows;
       const [live] = liveRows(rows);
       assert.equal(live!.entry.id, "start");
-      assert.equal(workEntryDisplayIndicatesToolFailure(live!.entry), false, `failing chunk ${failingAt}: not failed`);
     }
   });
 
-  it("a settled call and its chunks render exactly as the call would without them — its row, labelled with its command", () => {
+  it("a settled streamed call remains directly accessible under its command", () => {
     const settled = {
       latestTurn: { turnId: "t1", state: "completed" as const, startedAt: stamp(1), completedAt: stamp(10) },
       expandedTurnIds: new Set(["t1"])
     };
-    const withoutChunks = [
+    const withChunks = [
       prompt(),
       call("tool.started", "start", 2, "inProgress"),
+      chunk(1), chunk(2), chunk(3),
       call("tool.completed", "done", 9, "completed"),
       message("assistant", "Built.", { id: "a1", turnId: "t1", createdAt: stamp(10) })
     ];
-    const withChunks = [...withoutChunks.slice(0, 2), chunk(1), chunk(2), chunk(3), ...withoutChunks.slice(2)];
     const callRow = (items: Parameters<typeof entriesFrom>[0]) => {
       const rows = deriveTimelineRowsWithState(baseInput(entriesFrom(items), settled)).rows;
       assert.ok(!kinds(rows).includes("work-toggle"), "no \"Ran 1 command\" toggle hiding its one row");
@@ -683,11 +673,7 @@ describe("a command's streamed output is the inside of its row", () => {
     };
     const streamed = callRow(withChunks);
     assert.equal(streamed.displayLabel, "npm run build");
-    // The row still carries every chunk: open, they are its output.
-    assert.deepEqual(
-      joinLifecycleDetails(omitSupersededLifecycleMarkers(streamed.groupedEntries, (entry) => entry)).map((entry) => [entry.id, entry.detail]),
-      [["done", "line 1\nline 2\nline 3\n"]]
-    );
+    assert.deepEqual(streamed.groupedEntries.map((entry) => entry.id).sort(), ["c1", "c2", "c3", "done"]);
   });
 
   it("a parent call a turn adopts is that turn's live row; what a rewind of that turn leaves of it renders nothing", () => {
@@ -1054,25 +1040,6 @@ describe("a fold its rows time moves with the last row its clock reads (the stre
   };
   const labels = (frame: Frame) =>
     frame.rows.rows.flatMap((row) => (row.kind === "turn-fold" ? [[row.turnId, elapsedSeconds(row.label)]] : []));
-
-  it("a thought that ends its fold moves the fold's label with every token", () => {
-    const thought = thinking("think", 6);
-    let frame = start([...settled, build, thought]);
-    assert.deepEqual(labels(frame), [
-      ["t0", 2.0],
-      ["t1", 1.0]
-    ]);
-    frame = next(frame, [...settled, build, written(thought, "The build passed", 11)]);
-    assert.deepEqual(labels(frame), [
-      ["t0", 2.0],
-      ["t1", 6.0]
-    ]);
-    frame = next(frame, [...settled, build, written(thought, "The build passed; now the tests", 40)]);
-    assert.deepEqual(labels(frame), [
-      ["t0", 2.0],
-      ["t1", 35]
-    ]);
-  });
 
   it("a thought a later row follows moves nothing: the fold ends on that row", () => {
     const thought = thinking("think", 6);

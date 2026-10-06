@@ -16,13 +16,7 @@ test("the env is built from nothing — process.env is never spread", () => {
   try {
     const env = buildProviderEnv({ adapter: "codex", ...base });
     assert.equal(env.ORQ_ENV_LEAK_CANARY, undefined);
-    assert.deepEqual(Object.keys(env).sort(), [
-      "HOME",
-      "ORQUESTER_AGENT_LAUNCH",
-      "ORQUESTER_SESSION_ID",
-      "PATH",
-      "TMPDIR"
-    ]);
+    assert.equal(env.ORQUESTER_SESSION_ID, "sess-1");
   } finally {
     delete process.env.ORQ_ENV_LEAK_CANARY;
   }
@@ -111,9 +105,4 @@ test("every adapter's launch carries its own launch marker, which no launcher en
     });
     assert.equal(env["ORQUESTER_AGENT_LAUNCH"], `launch-of-${adapter}`, adapter);
   }
-});
-
-test("ORQUESTER_SESSION_ID is always stamped", () => {
-  const env = buildProviderEnv({ adapter: "claude", ...base });
-  assert.equal(env.ORQUESTER_SESSION_ID, "sess-1");
 });

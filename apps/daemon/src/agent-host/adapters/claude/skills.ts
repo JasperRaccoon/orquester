@@ -209,7 +209,7 @@ function parseSkillOverrideValue(value: string): SkillOverride {
  * comments and trailing commas in them, so the read is lenient in exactly
  * those two ways and strict about everything else.
  */
-export function parseLenientJson(contents: string): unknown {
+function parseLenientJson(contents: string): unknown {
   const withoutComments = stripJsonComments(contents);
   const withoutTrailingCommas = withoutComments.replace(/,(\s*[}\]])/g, "$1");
   try {

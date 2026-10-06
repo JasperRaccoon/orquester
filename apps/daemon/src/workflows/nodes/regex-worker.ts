@@ -39,7 +39,7 @@ export interface RegexMatcher {
   close(): Promise<void>;
 }
 
-export function createRegexMatcher(): RegexMatcher {
+function createRegexMatcher(): RegexMatcher {
   const timeoutMs = RULE_MATCH_TIMEOUT_MS;
   let worker: Worker | null = null;
   /** Resolves once the current worker runs: its boot never counts against a search's deadline. */

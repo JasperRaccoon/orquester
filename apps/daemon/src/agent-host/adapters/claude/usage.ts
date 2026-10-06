@@ -419,7 +419,7 @@ export const CLAUDE_SESSION_WINDOW_ID = "session";
 export const CLAUDE_WEEKLY_WINDOW_ID = "weekly_all";
 
 /** `weekly_scoped` rows differ only by their scope, so the id carries it. */
-export function scopedWindowId(displayName: string): string {
+function scopedWindowId(displayName: string): string {
   return `weekly_scoped:${displayName.toLowerCase().replace(/[^a-z0-9]+/g, "_")}`;
 }
 

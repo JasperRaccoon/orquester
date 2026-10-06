@@ -553,7 +553,8 @@ describe("revealTurn", () => {
     synchronize(fake);
 
     assert.equal(await state().actions.revealTurn("t3"), true);
-    assert.deepEqual(state().reveal, { turnId: "t3", rowId: "u3", nonce: 1 });
+    assert.equal(state().reveal?.turnId, "t3");
+    assert.equal(state().reveal?.rowId, "u3");
     assert.equal(fake.historyCalls.length, 0);
   });
 
@@ -678,9 +679,13 @@ describe("revealTurn", () => {
     synchronize(fake);
     await state().actions.revealTurn("t3");
 
-    state().actions.acknowledgeReveal(99);
-    assert.notEqual(state().reveal, null, "a stale acknowledgement clears nothing");
-    state().actions.acknowledgeReveal(1);
+    const previous = state().reveal!;
+    await state().actions.revealTurn("t3");
+    const current = state().reveal!;
+    assert.notEqual(current.nonce, previous.nonce);
+    state().actions.acknowledgeReveal(previous.nonce);
+    assert.deepEqual(state().reveal, current, "a stale acknowledgement clears nothing");
+    state().actions.acknowledgeReveal(current.nonce);
     assert.equal(state().reveal, null);
   });
 });

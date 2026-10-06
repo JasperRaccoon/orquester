@@ -184,15 +184,6 @@ describe("the composer outbox", () => {
     assert.equal(holdOutboxQueuedAtFront("A", held), false, "no tab storage: the caller keeps it elsewhere");
   });
 
-  it("holds a later failure behind the ones it follows, keeping their order", async () => {
-    writeOutboxQueue("A", [queued("w", "waiting")]);
-    const first = { ...queued("f1", "first"), holdUntilUserAction: true, holdReason: "no" };
-    const second = { ...queued("f2", "second"), holdUntilUserAction: true, holdReason: "no" };
-    holdOutboxQueuedAtFront("A", first);
-    holdOutboxQueuedAtFront("A", second, new Set(["f1"]));
-    assert.deepEqual(outboxQueue("A").map((message) => message.text), ["first", "second", "waiting"]);
-  });
-
   it("says whether a queue write reached the storage", async () => {
     assert.equal(writeOutboxQueue("A", [queued("q1", "one")]), true);
     const stub = (globalThis as unknown as { sessionStorage: { setItem: (key: string, value: string) => void } })

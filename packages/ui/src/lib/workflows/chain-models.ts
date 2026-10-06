@@ -90,11 +90,9 @@ function resolveConfig(config: unknown, providers: readonly ProviderSnapshot[]):
 }
 
 /** A create request with every agent block's chain resolved against the live catalogue. */
-export function withLiveChainModels(
-  request: CreateWorkflowRequest,
-  providers: readonly ProviderSnapshot[] = providersStore.getState().providers
-): CreateWorkflowRequest {
+export function withLiveChainModels(request: CreateWorkflowRequest): CreateWorkflowRequest {
   if (!request.nodes) return request;
+  const providers = providersStore.getState().providers;
   return {
     ...request,
     nodes: request.nodes.map((node) => {
@@ -109,9 +107,6 @@ export function withLiveChainModels(
  * A fresh block's config (`defaultNodeConfig`), an agent block's chain
  * resolved against the live catalogue this client holds.
  */
-export function liveDefaultNodeConfig<T extends WorkflowNodeType>(
-  type: T,
-  providers: readonly ProviderSnapshot[] = providersStore.getState().providers
-): WorkflowNodeConfig<T> {
-  return resolveConfig(defaultNodeConfig(type), providers) as WorkflowNodeConfig<T>;
+export function liveDefaultNodeConfig<T extends WorkflowNodeType>(type: T): WorkflowNodeConfig<T> {
+  return resolveConfig(defaultNodeConfig(type), providersStore.getState().providers) as WorkflowNodeConfig<T>;
 }

@@ -92,9 +92,9 @@ export async function scanDesktopEntries(
     .sort((a, b) => a.name.localeCompare(b.name));
 }
 
-export const MAX_PROJECT_EXECUTABLES = 50;
+const MAX_PROJECT_EXECUTABLES = 50;
 /** Deepest `bin/` dir searched under the project (`build/linux/editor-install/bin` is 4). */
-export const MAX_EXECUTABLE_DEPTH = 4;
+const MAX_EXECUTABLE_DEPTH = 4;
 /** Directories visited under `build/` at most, so a huge build tree stays cheap. */
 const MAX_BUILD_DIRS = 2000;
 

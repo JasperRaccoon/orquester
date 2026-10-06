@@ -26,7 +26,7 @@ describe("revealInFileBrowser", () => {
     store().revealInFileBrowser(`${P}/src/a.ts`);
     const tabs = store().fileTabsByProject[P];
     assert.equal(tabs.length, 1);
-    assert.deepEqual(tabs[0].reveal, { path: `${P}/src/a.ts`, nonce: 1 });
+    assert.equal(tabs[0].reveal?.path, `${P}/src/a.ts`);
     assert.equal(store().activeTabByProject[P], tabs[0].id);
   });
 
@@ -37,11 +37,13 @@ describe("revealInFileBrowser", () => {
     useAppStore.setState({ activeTabByProject: { [P]: second.id } });
 
     store().revealInFileBrowser(`${P}/src/a.ts`);
+    const previous = store().fileTabsByProject[P][0].reveal?.nonce;
     store().revealInFileBrowser(`${P}/src/a.ts`);
 
     const tabs = store().fileTabsByProject[P];
     assert.deepEqual(tabs.map((t) => t.id), [first.id, second.id]);
-    assert.deepEqual(tabs[0].reveal, { path: `${P}/src/a.ts`, nonce: 2 });
+    assert.equal(tabs[0].reveal?.path, `${P}/src/a.ts`);
+    assert.notEqual(tabs[0].reveal?.nonce, previous);
     assert.equal(tabs[1].reveal, undefined);
     assert.equal(store().activeTabByProject[P], first.id);
   });

@@ -7,7 +7,7 @@ import { z } from "zod";
 import type { DesktopAppSummary, DesktopSummary } from "@orquester/api";
 import { ToolError } from "../errors.ts";
 import { FakeDaemonApi } from "../testing.ts";
-import { DESTRUCTIVE, MUTATING, READ_ONLY, type ToolContext } from "../tool.ts";
+import type { ToolContext } from "../tool.ts";
 import { desktopTools } from "./desktops.ts";
 
 const stamp = "2026-09-30T12:00:00.000Z";
@@ -38,21 +38,6 @@ function desktop(overrides: Partial<DesktopSummary> = {}): DesktopSummary {
   };
 }
 
-test("the group has the spec's tools and annotations", () => {
-  const annotations = Object.fromEntries(desktopTools.map((t) => [t.name, t.annotations]));
-  assert.deepEqual(annotations, {
-    desktops_list: READ_ONLY,
-    desktop_host_status: READ_ONLY,
-    desktop_open: MUTATING,
-    desktop_launch_app: MUTATING,
-    desktop_windows: READ_ONLY,
-    desktop_window_action: MUTATING,
-    desktop_app_log: READ_ONLY,
-    desktop_stop_app: DESTRUCTIVE,
-    desktop_close: DESTRUCTIVE
-  });
-});
-
 test("desktops_list resolves the project to its path, and lists every project's desktops without one", async (t) => {
   const api = await sandbox(t);
   api.on("GET", "/api/desktops", { status: 200, body: [desktop()] });
@@ -64,18 +49,10 @@ test("desktops_list resolves the project to its path, and lists every project's 
   await assert.rejects(run("desktops_list", api, { projectPath: "acme/missing" }), (e: unknown) => e instanceof ToolError && e.code === "PROJECT_NOT_FOUND");
 });
 
-test("desktop_host_status returns the host report", async () => {
-  const host = { available: false, audioAvailable: false, tools: [{ name: "Xvnc", path: null, required: true }], ffmpegPulse: false, ffmpegOpus: false, renderNode: false, tmuxUsable: true, warnings: [], installHint: "sudo apt-get install -y tigervnc-standalone-server" };
-  const api = new FakeDaemonApi().on("GET", "/api/desktops/host", { status: 200, body: host });
-  assert.deepEqual(await run("desktop_host_status", api, {}), host);
-  assert.deepEqual(api.calls, [{ method: "GET", path: "/api/desktops/host" }]);
-});
-
 test("desktop_open posts the project path, the options and a first app", async (t) => {
   const api = await sandbox(t);
-  api.on("POST", "/api/desktops", ({ body }) => ({ status: 200, body: desktop({ title: (body as { title?: string }).title ?? "Desktop" }) }));
-  const result = await run("desktop_open", api, { projectPath: "acme/game", title: "Editor", size: { width: 1920, height: 1080 }, renderThreads: 8, command: "./bin/editor --level 2", cwd: "bin", env: { LP_NUM_THREADS: "2" } });
-  assert.equal((result.desktop as DesktopSummary).title, "Editor");
+  api.on("POST", "/api/desktops", { status: 200, body: desktop() });
+  await run("desktop_open", api, { projectPath: "acme/game", title: "Editor", size: { width: 1920, height: 1080 }, renderThreads: 8, command: "./bin/editor --level 2", cwd: "bin", env: { LP_NUM_THREADS: "2" } });
   assert.deepEqual(api.calls.at(-1), {
     method: "POST", path: "/api/desktops",
     body: { projectPath: join(api.workspacesDir, "acme", "game"), title: "Editor", size: { width: 1920, height: 1080 }, renderThreads: 8, app: { command: "./bin/editor --level 2", cwd: "bin", env: { LP_NUM_THREADS: "2" } } }

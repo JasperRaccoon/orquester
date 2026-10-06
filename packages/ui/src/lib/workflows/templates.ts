@@ -9,7 +9,6 @@
  */
 
 import { buildTemplate, type CreateWorkflowRequest, type WorkflowProject, type WorkflowTemplateId as ApiTemplateId } from "@orquester/api";
-import type { ProviderSnapshot } from "@orquester/api/agent-chat";
 
 import { withLiveChainModels } from "./chain-models";
 
@@ -76,17 +75,16 @@ export function blankWorkflowRequest(
 /**
  * What a starter template creates: the template's whole graph for an existing
  * project. A temporary project gets the same graph, re-pointed at it. Each
- * agent block's models are resolved against the live catalogue (`providers`,
- * this client's provider snapshots by default), so a template never names a
+ * agent block's models are resolved against this client's live catalogue,
+ * so a template never names a
  * slug the host does not list (`withLiveChainModels`).
  */
 export function createFromTemplate(
   id: WorkflowTemplateId,
   project: WorkflowProject,
-  timezone: string = browserTimeZone(),
-  providers?: readonly ProviderSnapshot[]
+  timezone: string = browserTimeZone()
 ): CreateWorkflowRequest {
   const projectPath = project.kind === "existing" ? project.projectPath : "";
-  const request = withLiveChainModels(buildTemplate(API_TEMPLATE_ID[id], { projectPath, timezone }), providers);
+  const request = withLiveChainModels(buildTemplate(API_TEMPLATE_ID[id], { projectPath, timezone }));
   return project.kind === "existing" ? request : { ...request, project };
 }

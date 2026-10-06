@@ -67,7 +67,7 @@ export function desktopAudioState(audio: DesktopAudioAvailability, reason?: stri
 }
 
 /** `[u8 type=1][u8 flags=0][u16 reserved=0][u32 seq BE][opus]`. */
-export function frameDesktopAudioPacket(seq: number, opus: Buffer): Buffer {
+function frameDesktopAudioPacket(seq: number, opus: Buffer): Buffer {
   const packet = Buffer.allocUnsafe(DESKTOP_AUDIO_HEADER_BYTES + opus.length);
   packet.writeUInt8(DESKTOP_AUDIO_PACKET_OPUS, 0);
   packet.writeUInt8(0, 1);
@@ -78,7 +78,7 @@ export function frameDesktopAudioPacket(seq: number, opus: Buffer): Buffer {
 }
 
 /** ffmpeg arguments for one desktop's encoder (spec §8.1; measured ~21 ms sink → packet). */
-export function desktopAudioFfmpegArgs(pulseSocketPath: string): string[] {
+function desktopAudioFfmpegArgs(pulseSocketPath: string): string[] {
   return [
     "-hide_banner",
     "-loglevel", "error",

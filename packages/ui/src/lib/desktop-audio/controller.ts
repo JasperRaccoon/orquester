@@ -77,13 +77,13 @@ export interface DesktopAudioControllerDeps {
   createOutput(volume: number): DesktopAudioOutput | null;
 }
 
-export interface AudioPacket {
+interface AudioPacket {
   seq: number;
   /** View into the frame's buffer, after the header. */
   payload: Uint8Array;
 }
 
-export const AUDIO_KEEPALIVE_MS = 10_000;
+const AUDIO_KEEPALIVE_MS = 10_000;
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 10_000;
 /** Decoded frames held while the worklet node is being created (~300 ms). */
@@ -92,19 +92,19 @@ const SOCKET_CONNECTING = 0;
 const SOCKET_OPEN = 1;
 
 /** The controller rule: stream only while the tab is active, sound is unlocked and not muted. */
-export function shouldStreamAudio(inputs: Pick<DesktopAudioInputs, "url" | "active" | "unlocked" | "muted">): boolean {
+function shouldStreamAudio(inputs: Pick<DesktopAudioInputs, "url" | "active" | "unlocked" | "muted">): boolean {
   return Boolean(inputs.url) && inputs.active && inputs.unlocked && !inputs.muted;
 }
 
 /** `[u8 type=1][u8 flags][u16 reserved][u32 seq BE][opus packet]`, or `null` if not an Opus packet. */
-export function parseAudioPacket(data: ArrayBuffer): AudioPacket | null {
+function parseAudioPacket(data: ArrayBuffer): AudioPacket | null {
   if (data.byteLength <= DESKTOP_AUDIO_HEADER_BYTES) return null;
   const view = new DataView(data);
   if (view.getUint8(0) !== DESKTOP_AUDIO_PACKET_OPUS) return null;
   return { seq: view.getUint32(4, false), payload: new Uint8Array(data, DESKTOP_AUDIO_HEADER_BYTES) };
 }
 
-export function parseAudioServerMessage(text: string): DesktopAudioServerJsonMessage | null {
+function parseAudioServerMessage(text: string): DesktopAudioServerJsonMessage | null {
   let value: unknown;
   try {
     value = JSON.parse(text);
@@ -166,11 +166,6 @@ export class DesktopAudioController {
   };
 
   getSnapshot = (): DesktopAudioSnapshot => this.snapshot;
-
-  /** Whether a socket is open or opening (for tests and diagnostics). */
-  get streaming(): boolean {
-    return this.connection !== null;
-  }
 
   update(inputs: DesktopAudioInputs): void {
     this.inputs = { ...inputs };

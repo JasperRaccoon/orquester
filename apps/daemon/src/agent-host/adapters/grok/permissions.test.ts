@@ -120,6 +120,7 @@ test("a Bash description is stripped, because the model rewords it every run", (
       rawInput: { variant: "Bash", command: "ls", description: "Show what is here" }
     })
   );
+  assert.equal(typeof a, "string", "the operation can be remembered as a session grant");
   assert.equal(a, b);
 });
 

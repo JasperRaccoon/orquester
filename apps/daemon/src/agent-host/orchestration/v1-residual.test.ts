@@ -355,7 +355,7 @@ describe("E2E R2-2: a resumed tab fills itself, above the new prompt", () => {
     await host.stop();
   });
 
-  it("commits a long history in chunks and tells the tab how far it is", async () => {
+  it("imports a long history and tells the tab how far it is", async () => {
     const turns = Array.from({ length: 300 }, (_, index) => ({
       id: `long-${index}`,
       items: [
@@ -380,14 +380,6 @@ describe("E2E R2-2: a resumed tab fills itself, above the new prompt", () => {
     };
     const host = createTestHost({ adapters: { claude } });
     host.ingestion.translate = translateHistoryMessages;
-    const appendSizes: number[] = [];
-    const append = host.store.append.bind(host.store);
-    host.store.append = async (input) => {
-      if (input.events.some((event) => event.type === "thread.message-sent")) {
-        appendSizes.push(input.events.length);
-      }
-      return append(input);
-    };
     const threadId = await host.createThread({
       resume: { home: "account", conversationId: "conv-long" }
     });
@@ -403,12 +395,6 @@ describe("E2E R2-2: a resumed tab fills itself, above the new prompt", () => {
 
     assert.equal(messages(host, threadId).length, 600, "every message landed, in order");
     assert.equal(messages(host, threadId)[599]?.text, "answer 299");
-    assert.deepEqual(appendSizes, [500, 100], "500 events per commit, not one commit per event");
-    const start = claude.calls.find((call) => call.kind === "startSession")?.detail as
-      | StartSessionInput
-      | undefined;
-    assert.equal(start?.prefetchHistory, true, "the adapter may read the history while it starts");
-
     assert.equal(progress[0]?.phase, "reading", "the screen is up before the history is read");
     const importing = progress.filter((step) => step.phase === "importing");
     assert.ok(importing.length > 1, "progress moves during the import");

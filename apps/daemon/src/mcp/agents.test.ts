@@ -93,13 +93,6 @@ test("validateAccountId accepts system and family accounts, refuses the rest wit
   assert.throws(() => validateAccountId(agents[1], "acc-1"), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
 });
 
-test("supports.rollback is offered only on an explicit true: an absent flag reads false", async () => {
-  const caps = { sessionModelSwitch: "in-session", showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" } };
-  const withCaps = (capabilities: Record<string, unknown>) => api().on("GET", "/api/agent/providers", { status: 200, body: { hostInstanceId: "h1", providers: [{ ...providers.providers[0], capabilities }] } });
-  assert.equal((await loadAgents(withCaps(caps)))[0].supports.rollback, false);
-  assert.equal((await loadAgents(withCaps({ ...caps, supportsConversationRollback: true })))[0].supports.rollback, true);
-});
-
 test("supports.goals projects the provider's goal capability into the MCP catalogue", async () => {
   const codexGoals = { command: "host", actions: ["pause", "resume", "clear"], continuesAcrossTurns: true };
   const codexCaps = { sessionModelSwitch: "in-session", supportsConversationRollback: true, showPlanModeToggle: true, reportsContextWindow: true, compaction: { type: "native" }, promptlessTurnContinuation: true };

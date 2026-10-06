@@ -50,24 +50,30 @@ describe("FileTail", () => {
     await writeFile(path, `${prefix}ébb`, "utf8");
     const tail = new FileTail({ path });
 
-    const one = await tail.read();
-    assert.equal(one.text, prefix, "the dangling lead byte is held back, never rendered as U+FFFD");
-    const two = await tail.read();
-    assert.equal(two.text, "ébb");
-    assert.equal(`${one.text}${two.text}`, `${prefix}ébb`);
+    let text = "";
+    while (tail.bytesRead < Buffer.byteLength(`${prefix}ébb`)) {
+      const before = tail.bytesRead;
+      const part = await tail.read();
+      assert.ok(tail.bytesRead > before, "the read makes progress");
+      text += part.text;
+    }
+    assert.equal(text, `${prefix}ébb`);
   });
 
   it("stops at the per-shell cap with one truncation notice naming the file", async () => {
     const path = nodePath.join(dir, "big.log");
     await writeFile(path, "x".repeat(1024 * 1024 + 1), "utf8");
     const tail = new FileTail({ path });
-    for (let read = 0; read < 15; read += 1) {
-      assert.deepEqual(await tail.read(), { text: "x".repeat(65536), done: false });
+    let text = "";
+    for (;;) {
+      const part = await tail.read();
+      text += part.text;
+      if (part.done) break;
+      assert.notEqual(part.text, "", "the read makes progress");
     }
-    const capped = await tail.read();
-    assert.equal(capped.done, true);
-    assert.ok(capped.text.startsWith("x".repeat(65536)));
-    assert.ok(capped.text.includes(path), "the notice names the file so the user can read the rest");
+    assert.equal(tail.bytesRead, 1024 * 1024);
+    assert.ok(text.startsWith("x".repeat(1024 * 1024)));
+    assert.ok(text.includes(path), "the notice names the file so the user can read the rest");
 
     const three = await tail.read();
     assert.deepEqual(three, { text: "", done: true }, "and then nothing, ever again");

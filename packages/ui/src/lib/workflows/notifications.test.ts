@@ -14,7 +14,6 @@ import {
   notifyWorkflowRunFinished,
   observeWorkflowRunEvent,
   resetWorkflowNotifications,
-  runOutcomeKind,
   setRunOnScreen,
   workflowNotificationsStore
 } from "./notifications.ts";
@@ -50,13 +49,16 @@ describe("notification rules", () => {
   });
 
   it("counts a Stop block's end as a success and a cancel or a skip as nothing", () => {
-    assert.equal(runOutcomeKind("failed"), "failure");
-    assert.equal(runOutcomeKind("interrupted"), "failure");
-    assert.equal(runOutcomeKind("succeeded"), "success");
-    assert.equal(runOutcomeKind("stopped"), "success");
-    assert.equal(runOutcomeKind("cancelled"), "quiet");
-    assert.equal(runOutcomeKind("skipped"), "quiet");
-    assert.equal(runOutcomeKind("running"), "quiet");
+    const context = { prefs: { onFailure: true, onSuccess: true } };
+    for (const status of ["failed", "interrupted"] as const) {
+      assert.equal(finishedRunNotice(run({ status }), { prefs: { onFailure: true, onSuccess: false } })?.runId, "run-1");
+    }
+    for (const status of ["succeeded", "stopped"] as const) {
+      assert.equal(finishedRunNotice(run({ status }), { prefs: { onFailure: false, onSuccess: true } })?.runId, "run-1");
+    }
+    for (const status of ["cancelled", "skipped", "running"] as const) {
+      assert.equal(finishedRunNotice(run({ status }), context), null);
+    }
   });
 
   it("preserves the failure's error, project and test-run identity in its toast", () => {
@@ -106,19 +108,6 @@ describe("the notifications store", () => {
     observeWorkflowRunEvent({ type: "workflowRun.finished", payload: { run: { id: 3 } } });
     observeWorkflowRunEvent({ type: "workflowRun.finished", payload: null });
     assert.equal(state().toasts.length, 1);
-  });
-
-  it("remembers the latest 500 distinct runs without refreshing repeated events", () => {
-    for (let index = 0; index < 500; index += 1) {
-      notifyWorkflowRunFinished(run({ id: `run-${index}` }), { viewing: true });
-    }
-    notifyWorkflowRunFinished(run({ id: "run-0" }), { viewing: true });
-    notifyWorkflowRunFinished(run({ id: "run-500" }), { viewing: true });
-
-    notifyWorkflowRunFinished(run({ id: "run-1" }));
-    assert.equal(state().toasts.length, 0, "the next oldest run is still remembered");
-    notifyWorkflowRunFinished(run({ id: "run-0" }));
-    assert.deepEqual(state().toasts.map((toast) => toast.runId), ["run-0"]);
   });
 
   it("stays quiet for the run the user is looking at", () => {

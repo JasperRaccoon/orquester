@@ -38,7 +38,6 @@ import {
   historyAfterRevert,
   historyBoundsFromSnapshot,
   historyWithinCap,
-  liveTurnIdsOf,
   nextHistoryCursor,
   historyWithPage,
   projectHistoryRows,
@@ -481,18 +480,6 @@ describe("historyWithinCap", () => {
   });
 });
 
-describe("liveTurnIdsOf", () => {
-  it("counts a turn whose rows or whose prompt the window holds, never a subagent's", () => {
-    const items: ThreadItem[] = [
-      message("assistant", "two", { id: "a2", turnId: "t2" }),
-      message("user", "three", { id: "u3" }),
-      message("assistant", "child", { id: "c4", turnId: "t4", agentId: "agent-1" })
-    ];
-    const turns = [foldTurn("t1", "u1"), foldTurn("t2", "u2"), foldTurn("t3", "u3"), foldTurn("t4", "u4")];
-    assert.deepEqual([...liveTurnIdsOf(items, turns)].sort(), ["t2", "t3"]);
-  });
-});
-
 describe("rowIdForTurn", () => {
   const rowsOf = (items: ThreadItem[], expanded: string[] = []): AgentChatTimelineRow[] =>
     deriveTimelineRowsWithState({
@@ -672,14 +659,6 @@ describe("page rows above the live window", () => {
         historyTurn("t1", 1, { userMessageId: "u1" }),
         historyTurn("t2", 5, { userMessageId: "u2" })
       ]);
-      assert.deepEqual(revertCounts(projectHistoryRows(EMPTY_HISTORY_ROWS, input).rows), {
-        u1: 0,
-        u2: undefined
-      });
-    });
-
-    it("is withheld on a prompt whose turn the page does not list", () => {
-      const { input } = conversation([historyTurn("t1", 1, { userMessageId: "u1" })]);
       assert.deepEqual(revertCounts(projectHistoryRows(EMPTY_HISTORY_ROWS, input).rows), {
         u1: 0,
         u2: undefined

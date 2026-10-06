@@ -3,12 +3,12 @@ import { after, describe, test } from "node:test";
 
 import { evaluateRulesAsync, type ExpressionContext } from "@orquester/api";
 
-import { createRegexMatcher } from "./regex-worker.ts";
+import { sharedRegexMatcher } from "./regex-worker.ts";
 
 const ctx = (input: unknown): ExpressionContext => ({ nodes: {}, input, trigger: null, run: {}, project: {}, secrets: {} });
 
 describe("the matches operator runs in a worker with a hard timeout", () => {
-  const matcher = createRegexMatcher();
+  const matcher = sharedRegexMatcher();
   after(() => matcher.close());
 
   test("an ordinary pattern answers", async () => {

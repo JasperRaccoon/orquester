@@ -140,6 +140,7 @@ test("stdout growth emits even when the command detail stays unchanged", () => {
   assert.equal(decideToolEmission({
     previous: { detail: "echo hi", rawOutput: { output_for_prompt: "" } },
     next: { detail: "echo hi", rawOutput: { output_for_prompt: "y".repeat(900) } },
+    lastEmittedProgressLength: 7,
     skippedSinceEmit: 0
   }).emit, true);
 });

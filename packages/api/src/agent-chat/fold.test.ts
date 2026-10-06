@@ -7,8 +7,6 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
-  ACTIVITY_RETENTION_LIMIT,
-  ACTIVITY_RETENTION_SLACK,
   applyDomainEvent,
   createEmptyThreadState,
   foldThread,
@@ -31,6 +29,8 @@ function activities(state: ThreadFoldState): ThreadActivityItem[] {
   return state.items.filter((item): item is ThreadActivityItem => item.kind === "activity");
 }
 
+// Retention numbers below come from the approved fold-performance design B
+// and its running-work follow-up; keep them independent of production constants.
 function reset(): void {
   resetSeq();
   resetActivityIds();
@@ -39,11 +39,11 @@ function reset(): void {
 /**
  * Enough unrelated parent rows, after two early rows, for batch retention to
  * trim once and take both: the window trims only when more than
- * `ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK` droppable parent rows
+ * `500 + 50` droppable parent rows
  * pile up (design `2026-09-23-fold-performance-design.md`, B), and then cuts
  * back to the limit.
  */
-const PAST_THE_PARENT_TRIM = ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK + 10;
+const PAST_THE_PARENT_TRIM = 500 + 50 + 10;
 
 // --- head ------------------------------------------------------------------
 
@@ -497,7 +497,7 @@ test("retention that drops a request row re-derives pending on that very event",
   ];
   // Batch retention: the approval is the oldest of LIMIT + SLACK droppable
   // parent rows — past the limit, but nothing trims before the slack is used up.
-  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK - 1; i += 1) {
+  for (let i = 0; i < 500 + 50 - 1; i += 1) {
     events.push(
       ev("thread.activity-appended", {
         activity: activity("tool.started", { toolUseId: `t${i}` }, { id: `noise-${i}` })
@@ -559,7 +559,7 @@ test("a compaction marker never ages out of the window", () => {
     })
   );
   // The marker does not count toward the trigger: LIMIT + SLACK + 1 rows trim.
-  for (let i = 0; i < ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK + 1; i += 1) {
+  for (let i = 0; i < 500 + 50 + 1; i += 1) {
     events.push(
       ev("thread.activity-appended", {
         activity: activity("tool.completed", { toolUseId: `t${i}` }, { id: `noise-${i}` })
@@ -567,7 +567,7 @@ test("a compaction marker never ages out of the window", () => {
     );
   }
   const state = fold(events);
-  assert.equal(state.activities.length, ACTIVITY_RETENTION_LIMIT + 1);
+  assert.equal(state.activities.length, 500 + 1);
   assert.equal(state.activities[0]?.id, "marker", "the marker is kept, ahead of the window");
   assert.equal(state.evicted?.activities, true, "the trim really ran");
 });

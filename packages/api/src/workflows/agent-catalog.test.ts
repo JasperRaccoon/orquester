@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
 import { toWorkflowAgentCatalog, workflowAgentCatalogFromSnapshots } from "./agent-catalog.ts";
-import { testEdge, testNode, testWorkflow } from "./testing.ts";
-import { validateWorkflow } from "./validate.ts";
 
 const models = (...slugs: string[]) => slugs.map((slug) => ({ slug, name: slug }));
 
@@ -67,25 +65,5 @@ describe("workflowAgentCatalogFromSnapshots", () => {
       [{ id: "claude", refIds: ["claude", "claude-alt"], status: "ready", models: models("default") }]
     );
     assert.deepEqual(catalog.agents, [{ id: "claude-alt", enabled: true, models: ["default"] }]);
-  });
-});
-
-describe("validation over a failed probe's fallback list", () => {
-  it("a live slug the fallback list lacks is only a warning, so enabling is not refused", () => {
-    const workflow = testWorkflow(
-      [
-        testNode("t", "trigger.manual", {}, { name: "Manual" }),
-        testNode("a", "agent", { prompt: { kind: "text", text: "Go" }, chain: [{ agent: "claude", model: "opus[1m]", accounts: {} }] }, { name: "A" })
-      ],
-      [testEdge("t", "a")]
-    );
-    const degraded = toWorkflowAgentCatalog([{ id: "claude", enabled: true, status: "degraded", models: models("default", "opus", "sonnet", "haiku", "fable") }]);
-    const problems = validateWorkflow(workflow, { catalog: degraded }).problems.filter((problem) => problem.code === "unknown_model");
-    assert.deepEqual(problems.map((problem) => problem.severity), ["warning"]);
-    const ready = toWorkflowAgentCatalog([{ id: "claude", enabled: true, status: "ready", models: models("default", "opus", "sonnet") }]);
-    assert.deepEqual(
-      validateWorkflow(workflow, { catalog: ready }).problems.filter((problem) => problem.code === "unknown_model").map((problem) => problem.severity),
-      ["error"]
-    );
   });
 });

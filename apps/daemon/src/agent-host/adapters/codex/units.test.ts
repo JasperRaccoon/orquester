@@ -442,17 +442,14 @@ describe("the adapter event queue", () => {
   it("drops the OLDEST past the cap and reports it", async () => {
     let dropped = 0;
     const queue = new AsyncEventQueue<RuntimeEvent>({
-      maxBuffered: 2,
       onDrop: (count) => {
         dropped += count;
       }
     });
-    queue.push(event("a"));
-    queue.push(event("b"));
-    queue.push(event("c"));
+    for (let index = 0; index <= 10_000; index += 1) queue.push(event(String(index)));
     assert.equal(dropped, 1);
     const iterator = queue[Symbol.asyncIterator]();
-    assert.equal((await iterator.next()).value?.eventId, "b", "the newest events survive");
+    assert.equal((await iterator.next()).value?.eventId, "1", "the oldest event was dropped");
     queue.close();
   });
 

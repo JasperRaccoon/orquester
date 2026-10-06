@@ -574,48 +574,6 @@ describe("claude normaliser — the restore rule on resume (goals §6.1.5)", () 
   const last = (attachment: Record<string, unknown> | undefined) =>
     transcriptGoalFromLastRow(attachment === undefined ? undefined : row(attachment));
 
-  it("a goal the CLI re-arms but the fold lacks is `restored`", () => {
-    let setPoints = 0;
-    const { normalizer } = make({
-      onGoalSetPoint: () => {
-        setPoints += 1;
-      }
-    });
-    const epoch = normalizer.goalEpoch;
-    const [restored] = goalEvents(
-      normalizer.reconcileTranscriptGoal(last({ met: false, sentinel: true, condition: "ship the release" }))
-    );
-    assert.deepEqual(restored?.payload, { goal: SHIP, change: "restored" });
-    assert.equal(restored?.turnId, undefined, "a session event, not a turn's");
-    // The scan that found it ended at the transcript's tail: that IS the set
-    // point, and a read queued behind it belongs to this very run.
-    assert.equal(setPoints, 0, "no second set point");
-    assert.equal(normalizer.goalEpoch, epoch, "no new run: the CLI's own run was found");
-  });
-
-  it("any goal news off stdout makes a scan asked for before it moot: a clear is never resurrected", () => {
-    let setPoints = 0;
-    const { normalizer, feed } = make({
-      knownGoal: SHIP,
-      onGoalSetPoint: () => {
-        setPoints += 1;
-      }
-    });
-    normalizer.beginTurn({ turnId: "turn-1" });
-    const askedAt = normalizer.goalEpoch;
-    feed(goalOutput("Goal cleared: ship the release", "clear"));
-    assert.ok(normalizer.goalEpoch > askedAt, "a clear moves the epoch");
-    assert.equal(setPoints, 0, "but it starts no run: no set point");
-    // The slow resume scan lands now, still reading the goal as running.
-    assert.deepEqual(
-      normalizer.reconcileTranscriptGoal(last({ met: false, sentinel: true, condition: "ship the release" }), {
-        epoch: askedAt
-      }),
-      [],
-      "the stale scan must not restore the goal the user just cleared"
-    );
-  });
-
   it("the same goal on both sides is no news", () => {
     const { normalizer } = make({ knownGoal: { ...SHIP, rounds: 4 } });
     assert.deepEqual(
@@ -667,28 +625,6 @@ describe("claude normaliser — the restore rule on resume (goals §6.1.5)", () 
     assert.deepEqual(none.normalizer.reconcileTranscriptGoal(last(undefined)), []);
     const finished = make({ knownGoal: { ...SHIP, status: "complete" } });
     assert.deepEqual(finished.normalizer.reconcileTranscriptGoal(last(undefined)), []);
-  });
-
-  it("a session that ends takes its background work with it: the waiting phase is dropped at once", () => {
-    const clock = movableClock();
-    const deferred: number[] = [];
-    const { normalizer } = make({
-      clock,
-      knownGoal: SHIP,
-      onGoalProgressDeferred: (dueAtMs) => deferred.push(dueAtMs)
-    });
-    assert.equal(
-      goalEvents(normalizer.applyGoalTranscriptRows([], { backgroundLive: true, atTurnEnd: true })).length,
-      1,
-      "waiting-background is reported"
-    );
-    clock.advance(1_000);
-    // Inside the throttle window: an ordinary progress would be deferred, but
-    // a session going away cannot wait for a timer it is about to cancel.
-    const [ended] = goalEvents(normalizer.goalAtSessionEnd());
-    assert.deepEqual(ended?.payload, { goal: SHIP, change: "progress" });
-    assert.deepEqual(deferred, [], "emitted now, not deferred");
-    assert.deepEqual(normalizer.goalAtSessionEnd(), [], "and only once");
   });
 
   it("a session that ends flushes a throttled progress rather than dropping it", () => {

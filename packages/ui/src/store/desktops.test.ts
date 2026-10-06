@@ -131,7 +131,7 @@ describe("desktop channel events", () => {
     const [d1, d2] = store().desktops;
     assert.equal(d1?.windows[0]?.title, "xterm");
     assert.equal(d1?.activeWindowId, "0x1");
-    assert.equal(d2, other, "the other desktop is untouched");
+    assert.deepEqual(d2, other, "the other desktop is untouched");
   });
 
   it("closing a desktop dismisses its pending confirm and retargets an open launch dialog", () => {

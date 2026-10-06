@@ -7,7 +7,7 @@ import { after, before, describe, test } from "node:test";
 
 import type { SandboxHandle, SandboxSpawnRequest } from "../contracts.ts";
 import { AGENT_LAUNCH_ENV_VAR } from "../../agent-host/support/leftover-processes.ts";
-import { HAS_PROC, isSameProcessAlive, readStarttime } from "./proc.ts";
+import { isSameProcessAlive, readStarttime } from "./proc.ts";
 import { createSandboxRunner, type SandboxExitDetail } from "./sandbox.ts";
 
 const runner = createSandboxRunner();
@@ -231,6 +231,7 @@ describe("shell blocks", () => {
   test("a missing cwd refuses the spawn", async () => {
     await assert.rejects(
       runner.spawn(request({ kind: "shell", source: "true", attemptDir: await freshDir(), cwd: join(root, "does-not-exist") })),
+      { code: "ENOENT" },
       "the runner cannot start in a directory that does not exist"
     );
   });
@@ -268,7 +269,7 @@ describe("deadlines, cancels and restarts", () => {
   });
 
   test("a cancel kills the whole group, grandchildren included", async (t) => {
-    if (!HAS_PROC) {
+    if (process.platform !== "linux") {
       t.skip("needs /proc");
       return;
     }
@@ -306,7 +307,7 @@ describe("deadlines, cancels and restarts", () => {
   });
 
   test("a runner killed outright reads as interrupted, and its work is ended", async (t) => {
-    if (!HAS_PROC) {
+    if (process.platform !== "linux") {
       t.skip("needs /proc");
       return;
     }
@@ -344,7 +345,7 @@ describe("deadlines, cancels and restarts", () => {
   });
 
   test("isAlive refuses a recycled pid (starttime mismatch)", (t) => {
-    if (!HAS_PROC) {
+    if (process.platform !== "linux") {
       t.skip("needs /proc");
       return;
     }

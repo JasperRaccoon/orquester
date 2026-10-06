@@ -105,7 +105,7 @@ function keysOf(value: Record<string, unknown>): { keys: Record<string, string>;
 }
 
 /** A value's shallow shape; undefined for a value that is not there. */
-export function shapeOf(value: unknown): WorkflowExpressionShape | undefined {
+function shapeOf(value: unknown): WorkflowExpressionShape | undefined {
   if (value === undefined) return undefined;
   const shape: WorkflowExpressionShape = { type: jsonType(value) };
   if (isRecord(value)) Object.assign(shape, keysOf(value));

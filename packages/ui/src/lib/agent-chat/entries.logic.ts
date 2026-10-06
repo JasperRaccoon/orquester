@@ -1096,7 +1096,7 @@ function collapseDerivedWorkLogEntries(
 // Splitting a thread's items
 // ---------------------------------------------------------------------------
 
-export interface SplitThreadItems {
+interface SplitThreadItems {
   messages: ThreadMessageItem[];
   activities: ThreadActivityItem[];
   proposedPlans: ProposedPlanEntry[];
@@ -1125,7 +1125,7 @@ export interface SplitThreadItemsOptions {
  * them. Pass the drill-in's own agent id to keep its messages; the parent
  * passes nothing. The item list itself is filtered by {@link itemsForAgent}.
  */
-export function splitThreadItems(
+function splitThreadItems(
   items: readonly ThreadItem[],
   ownerAgentId?: string,
   options?: SplitThreadItemsOptions

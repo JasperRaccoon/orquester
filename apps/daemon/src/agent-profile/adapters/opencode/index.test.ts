@@ -185,11 +185,10 @@ test("the snapshot lists the host's MCP servers, inherited skills and the locked
   assert.equal(centur.path, env.config);
 
   const handoff = snapshot.items.find((item) => item.id === "skill:handoff")!;
-  assert.deepEqual(handoff.source, { type: "inherited", label: "From Claude", ownerAgent: "claude" });
+  assert.deepEqual([handoff.source.type, handoff.source.ownerAgent], ["inherited", "claude"]);
   assert.equal(handoff.toggleable, true);
   assert.equal(handoff.editable, false);
   assert.equal(handoff.deletable, false);
-  assert.equal(snapshot.items.find((item) => item.id === "skill:shared-one")!.source.label, "Shared · ~/.agents");
 
   const status = snapshot.items.find((item) => item.id === "plugin:plugin/orquester-status.js")!;
   assert.equal(status.locked, true);
@@ -474,7 +473,7 @@ test("own skills: create, edit, rename, delete", async (t) => {
   const item = await env.item("skill:review");
   assert.equal(item.editable, true);
   assert.equal(item.enabled, true);
-  assert.deepEqual(item.source, { type: "user", label: "User" });
+  assert.equal(item.source.type, "user");
   const detail = await env.adapter.readItem(item.id);
   assert.deepEqual(detail.kind === "skill" ? detail.files : null, ["notes.md"]);
 

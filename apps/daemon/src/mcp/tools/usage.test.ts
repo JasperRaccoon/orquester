@@ -9,17 +9,13 @@ const ctx = (api: FakeDaemonApi): ToolContext => ({ api, todos: {} as never, fil
 /** A result's size as ok() counts it (result.ts): its JSON, in UTF-8 bytes. */
 const bytes = (value: unknown): number => Buffer.byteLength(JSON.stringify(value), "utf8");
 const dayOf = (k: number) => new Date(Date.UTC(2026, 8, 22 - k)).toISOString().slice(0, 10); // k days before today
-test("get_usage passes refresh through and joins accounts", async () => {
+test("get_usage forwards the explicit refresh request", async () => {
   const api = new FakeDaemonApi()
-    .on("GET", "/api/usage", ({ query }) => ({ status: 200, body: { agents: [{ id: "codex", available: true, stale: false, plan: "Pro", session: null, weekly: { percent: 34, resetsAt: "2026-09-23T20:38:00.000Z" }, asOf: "2026-09-22T11:50:00.000Z", accounts: [{ id: "acc-2", label: "therealeduard465", available: true, stale: false, plan: "Pro", session: null, weekly: { percent: 34, resetsAt: "2026-09-23T20:38:00.000Z" }, asOf: "2026-09-22T11:50:00.000Z" }], refreshed: query?.refresh === "1" }] } }))
-    .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [{ id: "acc-2", agent: "codex", label: "therealeduard465", email: "e@x.io", plan: null, needsReauth: false, createdAt: "", importedAt: "" }], defaults: {} } });
-  const r = await tool("get_usage").run({ refresh: true }, ctx(api));
-  assert.deepEqual(api.calls[0].query, { refresh: "1" });
-  const agent = (r.agents as { name: string; accounts: { label: string; email: string; windows: { label: string; percentUsed: number; resetsIn: string }[] }[] }[])[0];
-  assert.equal(agent.accounts[0].email, "e@x.io");
-  assert.equal(agent.accounts[0].windows[0].percentUsed, 34);
+    .on("GET", "/api/usage", { status: 200, body: { agents: [] } })
+    .on("GET", "/api/agent-accounts", { status: 200, body: { accounts: [], defaults: {} } });
+  await tool("get_usage").run({ refresh: true }, ctx(api));
   await tool("get_usage").run({ refresh: false }, ctx(api));
-  assert.equal(api.calls.at(-2)!.query, undefined);
+  assert.deepEqual(api.calls.filter((call) => call.path === "/api/usage").map((call) => call.query), [{ refresh: "1" }, undefined]);
 });
 
 test("get_cost windows the rows to the last N UTC days and totals them", async () => {

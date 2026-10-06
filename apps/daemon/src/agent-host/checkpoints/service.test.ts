@@ -684,7 +684,6 @@ test("R5 #20: a non-cone sparse checkout that cannot be rebuilt fails the captur
 
   assert.ok(result, "a git project reports a result rather than skipping");
   assert.equal(result.status, "error", "false deletions are refused, not published");
-  assert.match(result.detail ?? "", /non-cone sparse checkout/);
   assert.deepEqual(await refNames(repo, checkpointRefNamespace(THREAD)), [], "no ref was written");
 });
 

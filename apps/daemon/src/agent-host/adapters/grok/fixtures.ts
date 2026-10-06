@@ -5,10 +5,10 @@
  * The fixtures under `apps/daemon/test/fixtures/grok/` are real ACP traffic
  * from `grok 1.0.34`. This module only reads them; it holds no assertions, so
  * a test can feed the same frames through the normaliser, through the peer, or
- * through the catalog check without three copies of the parser.
+ * through the session without duplicating the parser.
  */
 
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -29,12 +29,6 @@ export function readCapture(file: string): CaptureEntry[] {
     .split("\n")
     .filter((line) => line.trim().length > 0)
     .map((line) => JSON.parse(line) as CaptureEntry);
-}
-
-export function captureFiles(): string[] {
-  return readdirSync(GROK_FIXTURES_DIR)
-    .filter((name) => name.endsWith(".ndjson"))
-    .sort();
 }
 
 export interface JsonRpcFrame {

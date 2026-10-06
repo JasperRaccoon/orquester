@@ -33,7 +33,7 @@ import { resumeCursorFor } from "../../orchestration/resume.ts";
 import type { ChildExitReason, ProviderChild } from "../../support/spawn.ts";
 import { AsyncEventQueue, createDeferred } from "./async-queue.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
-import { countingIds } from "./fixtures.ts";
+import { countingIds, readClaudeFixture } from "./fixtures.ts";
 import { createClaudeAdapterWith } from "./index.ts";
 
 // Delay native filesystem operations for real transcript races; every operation
@@ -923,6 +923,37 @@ describe("claude adapter — attachment delivery (§4.1)", () => {
 });
 
 describe("claude adapter — approvals", () => {
+  it("09: ExitPlanMode preserves the captured plan and denies the SDK gate, even in full access", async () => {
+    const captured = readClaudeFixture("09-plan-mode-exitplanmode-denied.ndjson")
+      .find((line) => line.kind === "canUseTool" &&
+        (line.data as { toolName?: string }).toolName === "ExitPlanMode")!
+      .data as { input: { plan: string; planFilePath: string }; options: { toolUseID: string; requestId: string } };
+    const harness = await makeHarness();
+    await harness.adapter.startSession({ ...START, runtimeMode: "full-access" });
+    await harness.adapter.sendTurn({
+      threadId: START.threadId, input: "plan the change", attachments: [], interactionMode: "plan"
+    });
+    await harness.peers[0]!.nextTurn();
+    const callback = harness.peers[0]!.canUseTool!;
+    const options = {
+      signal: new AbortController().signal,
+      toolUseID: captured.options.toolUseID,
+      requestId: captured.options.requestId
+    };
+
+    const decision = await callback("ExitPlanMode", captured.input, options);
+    await callback("ExitPlanMode", captured.input, options);
+    await harness.drain();
+
+    assert.ok(decision);
+    assert.equal(decision.behavior, "deny");
+    const plans = harness.events.filter((event) => event.type === "turn.proposed.completed");
+    assert.equal(plans.length, 1);
+    assert.equal(plans[0]!.payload.planMarkdown.trim(), captured.input.plan.trim());
+    assert.equal(plans[0]!.payload.planFilePath, captured.input.planFilePath);
+    assert.equal(harness.events.some((event) => event.type === "request.opened"), false);
+  });
+
   it("full access allows a tool callback without opening an approval card", async () => {
     const harness = await makeHarness();
     await harness.adapter.startSession({ ...START, runtimeMode: "full-access" });
@@ -982,6 +1013,7 @@ describe("claude adapter — approvals", () => {
     const { harness, decision, requestId } = await openApproval();
     assert.equal(requestId, "req-abc");
     const opened = findEvent(harness.events, "request.opened");
+    assert.equal(opened?.agentId, undefined, "a parent approval stays on the parent's thread");
     assert.equal(opened?.payload.detail, "Remove x");
     assert.equal(opened?.payload.dismissible, false);
     harness.adapter.respondToApproval(START.threadId, requestId, "accept");

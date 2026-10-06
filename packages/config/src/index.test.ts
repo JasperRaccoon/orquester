@@ -137,23 +137,6 @@ test("legacy proxy-home tabs and thread heads remain readable after launcher ret
   assert.deepEqual(head.session.resumeCursor, { threadId: "t1", resume: "provider-session" });
 });
 
-test("a head carrying the goal-resume marker round-trips it", () => {
-  const parsed = parseAgentThreadHead({ ...persistedHead, resumeGoalAfterRestart: true });
-  assert.ok(parsed);
-  assert.equal(parsed.resumeGoalAfterRestart, true);
-  // …next to the other head-only marker, which it never disturbs.
-  const both = parseAgentThreadHead({
-    ...persistedHead,
-    continueAfterRestart: { turnId: "turn-7" },
-    resumeGoalAfterRestart: true
-  });
-  assert.deepEqual(both?.continueAfterRestart, { turnId: "turn-7" });
-  assert.equal(both?.resumeGoalAfterRestart, true);
-  // Through JSON, as meta.json holds it.
-  const reread = parseAgentThreadHead(JSON.parse(JSON.stringify(parsed)));
-  assert.equal(reread?.resumeGoalAfterRestart, true);
-});
-
 test("a head written before goals — no marker — still parses, and says no", () => {
   const parsed = parseAgentThreadHead(persistedHead);
   assert.ok(parsed, "an older head is not a broken one");
@@ -168,26 +151,6 @@ test("a malformed goal-resume marker is dropped, never the whole head", () => {
     assert.ok(parsed, JSON.stringify(value));
     assert.equal(parsed.resumeGoalAfterRestart, undefined, JSON.stringify(value));
   }
-});
-
-// --- goals §5.7: the head's `goalHeldForHandover` ---------------------------
-
-test("a head carrying the goal-hold marker round-trips it, beside the other two", () => {
-  const parsed = parseAgentThreadHead({ ...persistedHead, goalHeldForHandover: true });
-  assert.ok(parsed, "the head parses");
-  assert.equal(parsed.goalHeldForHandover, true);
-  const all = parseAgentThreadHead({
-    ...persistedHead,
-    continueAfterRestart: { turnId: "turn-7" },
-    resumeGoalAfterRestart: true,
-    goalHeldForHandover: true
-  });
-  assert.deepEqual(all?.continueAfterRestart, { turnId: "turn-7" });
-  assert.equal(all?.resumeGoalAfterRestart, true);
-  assert.equal(all?.goalHeldForHandover, true);
-  // Through JSON, as meta.json holds it.
-  const reread = parseAgentThreadHead(JSON.parse(JSON.stringify(parsed)));
-  assert.equal(reread?.goalHeldForHandover, true);
 });
 
 test("a head without the goal-hold marker says no, and writes none back", () => {

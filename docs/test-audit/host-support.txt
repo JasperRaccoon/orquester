@@ -1,0 +1,684 @@
+Completed cleanup: agent-host support, server, checkpoints and direct host tests.
+Inventory/dispositions recorded before edits; subsequent owner-confirmed duplicate deletion was recorded before removal.
+176 original cases: 2 DELETE, 12 REWRITE, 162 KEEP. No production behavior changes.
+Reviewed AGENTS.md, root/agent-host README, root/daemon package.json, test bodies, production owners and non-test caller references.
+
+Bar justification shared by each KEEP/REWRITE, specialized by its file contract and named case below:
+1. Independent source: each file section identifies the protocol, storage, security, documented requirement or credible regression source.
+2. Observable failure: each case name specifies the behavior whose violation fails the test; its concrete assertion excerpt records an observable oracle.
+3. Independent expectation: fixed protocol bytes, seeded input/output values, error types, filesystem/process observations or order/boundedness invariants; expectations are not computed by the implementation being judged.
+4. Stable seam: listed per file, used by listed production callers. Mocks supply external events/OS replies/adapter responses; they do not implement the asserted owner behavior.
+5. Refactor stability: tests inspect output values, protocol events, persisted artifacts, process ownership or public lifecycle state. No source spelling/export inventory/private algorithm requirement remains. The rewrite entries remove incidental inventories, copy, chunk layout and fake-state details.
+6. Lowest stable owner: listed per file. Retained integration cases own HTTP translation or real lifecycle composition, while unit cases own byte parsing/safety/ref operations. Explicit duplicate workflow, private-state and byte-assembly assertions were deleted as described. No stronger remaining test covers the complete distinguishing scenario of each KEEP.
+
+Failure families considered before keeping isolated cases: lost/reordered bytes; invalid parsing; wrong value/error/status; wrong checkpoint refs/files; leaked credentials; wrong process signalled; hangs on timeout/shutdown; lost durable state across boot/handover.
+Validation V: from apps/daemon, pnpm exec node --import tsx --import ../../scripts/test/assert-ok.mjs --import ../../scripts/test/quiet-mock-timers.mjs --test --test-concurrency=2 <listed source test>. Root agent owns pnpm check/test and final repository gates.
+Risk R: retention keeps externally observable contracts; pruning removes duplicate/incidental checks while named owner coverage survives. No test-only production seam or fixture becomes unused. Removed support: existsSync import in host-teardown; ThreadActivityItem import in HTTP tests.
+
+apps/daemon/src/agent-host/checkpoints/baseline-dispatch.test.ts
+  B1: GUI spec §5.4 baseline must precede provider work and capture failure must not fail a turn; R5 #6.
+  B4 / callers: orchestrator command with real checkpoint service or injected git failure; non-test callers: orchestrator sendTurnEffect.
+  B6: Only the orchestrator-to-checkpoint boundary owns capture before provider startup can change files, and turn continuation after checkpoint failure; service tests cannot prove dispatch order.
+  Validation: V with src/agent-host/checkpoints/baseline-dispatch.test.ts. Risk: R.
+  KEEP — R5 #6: the pre-turn baseline is captured before the provider is asked
+    B2/B3 oracle excerpt: assert.equal( await repo.gitReadOnly("show", `${checkpointRefForThreadTurn(threadId, 0)}:tracked.txt`), "before the turn\n" ); assert.deepEqual(completed?.files, [{ path: "tracked.txt", additions: 1, deletions: 1 }]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — R5 #6: a baseline failure never blocks the turn
+    B2/B3 oracle excerpt: assert.equal(host.adapter.lastTurn?.input, "hello", "the turn was sent anyway");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/checkpoints/git.test.ts
+  B1: GUI spec §5.4 bounded git commands/retries, §3.1 explicit environment and shutdown.
+  B4 / callers: createGitRunner.run with real child processes; non-test callers: checkpoint capture and service.
+  B6: The exported helper/service is the lowest owner of the listed external-byte, state, safety or lifecycle contract. Higher adapter/HTTP tests do not exercise these malformed inputs, controlled races and real filesystem/process outcomes independently.
+  Validation: V with src/agent-host/checkpoints/git.test.ts. Risk: R.
+  KEEP — the child env is exactly what was configured, plus the runner's defaults
+    B2/B3 oracle excerpt: assert.equal(env.ORQ_CHECKPOINT_CANARY, undefined, "process.env is never spread in"); assert.equal(env.HOME, "/tmp/home");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a non-zero exit throws unless the caller allows it
+    B2/B3 oracle excerpt: assert.rejects( runner.run({ operation: "test", cwd: process.cwd(), args: ["exit", "3", "boom"] }), (error: unknown) => { assert.ok(error instanceof GitExitError); assert.equal(error.exitCode, 3);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a hung child is killed at the deadline
+    B2/B3 oracle excerpt: assert.rejects( runner.run({ operation: "test", cwd: process.cwd(), args: ["hang"], timeoutMs: 120 }), GitTimeoutError );
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — output over the cap truncates, or fails when the answer must be whole
+    B2/B3 oracle excerpt: assert.equal(truncated.stdoutTruncated, true); assert.equal(truncated.stdout.slice(0, 100), "x".repeat(100));
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a transient lock failure is retried, and only when the caller asked
+    B2/B3 oracle excerpt: assert.equal(recovered.stdout, "recovered after 3"); assert.rejects( runner.run({ operation: "test", cwd: process.cwd(), args: ["flaky", other, "2"] }), (error: unknown) => { assert.ok(error instanceof GitExitError);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — stdin reaches the child byte for byte
+    B2/B3 oracle excerpt: assert.equal(result.stdout, Buffer.from(payload, "utf8").toString("hex"));
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — R5 #13: a streaming scanner is never replayed by the retry
+    B2/B3 oracle excerpt: assert.rejects( runner.run({ operation: "test", cwd: process.cwd(), args: ["flaky-stream", counter, "2"], retryTransient: true, onStdoutChunk: (chunk) => chunks.push(chunk.toString("utf8")) ; assert.equal((await readFile(counter, "utf8")).trim(), "1", "the command ran exactly once");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — Q1 #44: an already-aborted signal never spawns a process
+    B2/B3 oracle excerpt: assert.rejects( runner.run({ operation: "test", cwd: process.cwd(), args: ["trace", trace], signal: controller.signal }), GitAbortedError ); assert.rejects(readFile(trace, "utf8"), /ENOENT/, "nothing ever ran");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — Q1 #44: an abort mid-run kills the child and reports the abort
+    B2/B3 oracle excerpt: assert.rejects(pending, GitAbortedError);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — only real lock/ENOENT noise is classified as transient
+    B2/B3 oracle excerpt: assert.rejects( runner.run({ operation: "test", cwd: process.cwd(), args: ["exit", "1", stderr] }), (error: unknown) => { assert.ok(error instanceof GitExitError); assert.equal(error.retryable, retryable);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/checkpoints/numstat.test.ts
+  B1: Git --numstat -z external byte format and GUI spec §5.4 changed-file summaries.
+  B4 / callers: parseTurnDiffFilesFromNumstat; non-test callers: checkpoint service completion summaries.
+  B6: The exported helper/service is the lowest owner of the listed external-byte, state, safety or lifecycle contract. Higher adapter/HTTP tests do not exercise these malformed inputs, controlled races and real filesystem/process outcomes independently.
+  Validation: V with src/agent-host/checkpoints/numstat.test.ts. Risk: R.
+  KEEP — a rename spends two extra records on the source and the destination
+    B2/B3 oracle excerpt: assert.deepEqual(parseTurnDiffFilesFromNumstat(numstat), [ { path: "new/name.ts", additions: 1, deletions: 1 }, { path: "other.ts", additions: 5, deletions: 0 } ]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a binary file reports zero counts rather than being dropped
+    B2/B3 oracle excerpt: assert.deepEqual(parseTurnDiffFilesFromNumstat("-\t-\tassets/logo.png\u0000"), [ { path: "assets/logo.png", additions: 0, deletions: 0 } ]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — empty and malformed output yields no files
+    B2/B3 oracle excerpt: assert.deepEqual(parseTurnDiffFilesFromNumstat(""), []); assert.deepEqual(parseTurnDiffFilesFromNumstat("not a record\u0000"), []);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a path containing a newline survives, because records are NUL-delimited
+    B2/B3 oracle excerpt: assert.deepEqual(parseTurnDiffFilesFromNumstat("1\t0\tweird\nname.txt\u0000"), [ { path: "weird\nname.txt", additions: 1, deletions: 0 } ]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/checkpoints/refs.test.ts
+  B1: GUI spec §5.4 persisted refs/orquester/checkpoints/<base64url>/turn/<n> format.
+  B4 / callers: checkpoint ref encode/parse; non-test callers: checkpoint capture and service.
+  B6: The exported helper/service is the lowest owner of the listed external-byte, state, safety or lifecycle contract. Higher adapter/HTTP tests do not exercise these malformed inputs, controlled races and real filesystem/process outcomes independently.
+  Validation: V with src/agent-host/checkpoints/refs.test.ts. Risk: R.
+  KEEP — a checkpoint ref is the thread's base64url namespace plus its turn
+    B2/B3 oracle excerpt: assert.equal(ref, "refs/orquester/checkpoints/dGhyZWFkLTE/turn/7");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — the namespace stays inside git's safe ref alphabet for an awkward thread id
+    B2/B3 oracle excerpt: assert.match(encoded, /^[A-Za-z0-9_-]+$/); assert.equal(Buffer.from(encoded, "base64url").toString("utf8"), threadId);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — an empty thread id or a bad turn count is refused rather than encoded
+    B2/B3 oracle excerpt: assert.throws(() => checkpointRefNamespace(""), TypeError); assert.throws(() => checkpointRefForThreadTurn("t", -1), TypeError);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — turn counts round-trip, and nothing else is read as a checkpoint
+    B2/B3 oracle excerpt: assert.equal(turnCountFromCheckpointRef("t", "refs/orquester/checkpoints/dA/turn/0"), 0); assert.equal(turnCountFromCheckpointRef("t", "refs/orquester/checkpoints/dA/turn/42"), 42);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/checkpoints/service.test.ts
+  B1: GUI spec §5.4/§5.5 persisted checkpoint/ref/diff and conversation-only revert contracts; numbered regression cases.
+  B4 / callers: CheckpointService with real temporary git repositories; non-test callers: orchestrator checkpoint capture/diff/revert and delete flows.
+  B6: The exported helper/service is the lowest owner of the listed external-byte, state, safety or lifecycle contract. Higher adapter/HTTP tests do not exercise these malformed inputs, controlled races and real filesystem/process outcomes independently.
+  Validation: V with src/agent-host/checkpoints/service.test.ts. Risk: R.
+  KEEP — captures tracked, staged and untracked files and never an ignored one
+    B2/B3 oracle excerpt: assert.ok(result, "a git project captures a baseline"); assert.equal(result.turnCount, 0);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — the user's index, HEAD, refs, stash and reflog are byte-identical afterwards
+    B2/B3 oracle excerpt: assert.equal(after.indexSha, before.indexSha, "the user's index was not rewritten"); assert.equal(after.head, before.head);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — turn end diffs against the baseline and reports the changed files
+    B2/B3 oracle excerpt: assert.ok(summary); assert.equal(summary.turnCount, 1);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a missing baseline keeps the post ref and records an empty file list
+    B2/B3 oracle excerpt: assert.ok(summary); assert.equal(summary.turnCount, 1);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a placeholder checkpoint is reused at its own turn count
+    B2/B3 oracle excerpt: assert.ok(summary); assert.equal(summary.turnCount, 1, "reused, not incremented past");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a turn that already has a real checkpoint is skipped
+    B2/B3 oracle excerpt: assert.equal(summary, null); assert.deepEqual(await refNames(repo, checkpointRefNamespace(THREAD)), [ checkpointRefForThreadTurn(THREAD, 0) ]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — only the session's active turn produces a completion checkpoint
+    B2/B3 oracle excerpt: assert.equal(stale, null); assert.ok(live);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — readTurnDiff: equal turns short-circuit without touching git
+    B2/B3 oracle excerpt: assert.equal(diff, "");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — readTurnDiff ignores whitespace by default and can be told not to
+    B2/B3 oracle excerpt: assert.equal(ignored, "", "a whitespace-only change is no diff by default"); assert.match(exact, /^diff --git a\/a\.txt b\/a\.txt$/m);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — readTurnDiff refuses a turn above the thread's highest checkpoint
+    B2/B3 oracle excerpt: assert.rejects( service.readTurnDiff({ threadId: THREAD, cwd: repo.dir, fromTurnCount: 0, toTurnCount: 4 }), (error: unknown) => { assert.ok(error instanceof CheckpointTurnRangeError); assert.equal(error.requestedTurnCount, 4);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — captures prune to the 200-ref cap, oldest first
+    B2/B3 oracle excerpt: assert.ok(summary); assert.equal(summary.turnCount, 200);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — pruneAbove deletes every ref above the target and nothing else
+    B2/B3 oracle excerpt: assert.deepEqual(await refNames(repo, checkpointRefNamespace(THREAD)), [ checkpointRefForThreadTurn(THREAD, 0), checkpointRefForThreadTurn(THREAD, 1) ]); assert.deepEqual(await refNames(repo, checkpointRefNamespace("other-thread")), [ checkpointRefForThreadTurn("other-thread", 0) ]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — deleteThreadRefs removes every ref under the thread's prefix and nothing else
+    B2/B3 oracle excerpt: assert.deepEqual(await refNames(repo, checkpointRefNamespace(THREAD)), []); assert.deepEqual(await refNames(repo, checkpointRefNamespace("other-thread")), [ checkpointRefForThreadTurn("other-thread", 0) ]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a non-git directory is a silent no-op on every path
+    B2/B3 oracle excerpt: assert.equal( await service.captureBaseline({ threadId: THREAD, cwd: dir }), null, "null is reserved for a project with no checkpoints at all" ); assert.equal( await service.captureTurnEnd({ threadId: THREAD, cwd: dir, turnId: "turn-1", assistantMessageId: null }), null );
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — an untracked embedded repository does not break capture
+    B2/B3 oracle excerpt: assert.ok(result, "the capture recovered by excluding the embedded repo"); assert.equal(result.status, "ready");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a cone sparse checkout captures skipped files instead of deleting them
+    B2/B3 oracle excerpt: assert.ok(result); assert.equal(result.status, "ready");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — concurrent captures on two threads of one repo do not corrupt each other
+    B2/B3 oracle excerpt: assert.ok(first); assert.ok(second);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a repository with no commits at all still captures a baseline
+    B2/B3 oracle excerpt: assert.ok(result); assert.equal(result.status, "ready");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a capture failure is reported, never thrown into the turn
+    B2/B3 oracle excerpt: assert.ok(baseline, "a git project still reports a result"); assert.equal(baseline.status, "error");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — assertRollbackSupported refuses grok and allows every other adapter
+    B2/B3 oracle excerpt: assert.throws(() => service.assertRollbackSupported("grok"), CheckpointRollbackUnsupportedError);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — R5 #10: a turn whose baseline is missing diffs against HEAD, not 404
+    B2/B3 oracle excerpt: assert.ok(summary); assert.equal(summary.turnCount, 1);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — R5 #10: with no HEAD at all the fallback is the empty tree
+    B2/B3 oracle excerpt: assert.ok(summary); assert.match(diff, /^\+\+\+ b\/only\.txt$/m);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — R5 #11: a stale turn end for a turn that never started is refused
+    B2/B3 oracle excerpt: assert.equal(stale, null); assert.deepEqual(await refNames(repo, checkpointRefNamespace(THREAD)), [ checkpointRefForThreadTurn(THREAD, 0) ]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — R5 #11: a replayed turn end is refused even with no fold rows to check
+    B2/B3 oracle excerpt: assert.ok(first); assert.equal(replay, null, "the second delivery of the same completion captures nothing");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  REWRITE — R5 #20: a non-cone sparse checkout that cannot be rebuilt fails the capture
+    B2/B3 oracle: capture status is error and git lists no checkpoint refs for the thread.
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+    Change / remaining owner: Remove incidental diagnostic wording match; preserve error state and absence of published refs.
+  KEEP — Q1 #42: a ref that survives deletion fails the prune instead of reporting success
+    B2/B3 oracle excerpt: assert.rejects( service.pruneAbove({ threadId: THREAD, cwd: repo.dir, targetTurnCount: 0 }), (error: unknown) => { assert.ok(error instanceof CheckpointRefDeleteError, `unexpected error: ${S; assert.deepEqual([...error.refs], [surviving]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — E2E #E8: a capture for a turn a revert truncated is dropped
+    B2/B3 oracle excerpt: assert.ok(first); assert.equal(late, null, "the truncated turn's capture is dropped");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — S1 #9: a failure detail collapses the host's home path to ~
+    B2/B3 oracle excerpt: assert.ok(result); assert.equal(result.status, "error");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — §5.5: a named turn count numbers the baseline and the turn end — a sparse 26 → 27 pair
+    B2/B3 oracle excerpt: assert.ok(baseline); assert.deepEqual(baseline, { turnCount: 26, ref: checkpointRefForThreadTurn(THREAD, 26), status: "ready" });
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — §5.5: a named turn count wins over a placeholder's count and over the derived counter
+    B2/B3 oracle excerpt: assert.ok(summary); assert.equal(summary.turnCount, 3, "the turn's own ordinal, not 5 and not 1");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — §5.5: a turn count no ref can carry is ignored, never thrown into the turn
+    B2/B3 oracle excerpt: assert.equal(baseline?.turnCount, 0, "derived, as if no count had been named"); assert.equal(summary?.turnCount, 1);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — §5.5: pruneAbove also deletes the dropped turns' own counts, however low
+    B2/B3 oracle excerpt: assert.deepEqual( await refNames(repo, checkpointRefNamespace(THREAD)), [checkpointRefForThreadTurn(THREAD, 0), checkpointRefForThreadTurn(THREAD, 1)].sort(), "turn/2 went with its turn alth; assert.deepEqual(await refNames(repo, checkpointRefNamespace("other-thread")), [ checkpointRefForThreadTurn("other-thread", 0) ]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/host-teardown.test.ts
+  B1: AGENTS process ownership and durable logs; host README teardown ordering/continuation markers; spec §3.1/§3.3.
+  B4 / callers: real isolated host stop/HTTP stop and durable event log plus OS process state; non-test callers: agent-host main process lifecycle, daemon handover.
+  B6: The real composition root uniquely owns shutdown-abort/stopAll/drain ordering and cross-host continuation with real children. Its stop completion is inspected against real process state and durable events.ndjson. The user-end workflow duplicate was removed in favor of deterministic lower owners.
+  Validation: V with src/agent-host/host-teardown.test.ts. Risk: R.
+  REWRITE — a host teardown waits for every Grok session's stop: its helpers swept, the left-running row and the stop in the log, its work left running
+    B2/B3 oracle excerpt: assert.equal(before.helper.length, 1, "the helper runs"); assert.equal(before.shell.length, 1, "and so does the shell the turn left");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  REWRITE — an authenticated host stop reaps a helper that ignores SIGTERM before reporting completion
+    B2/B3 oracle excerpt: assert.equal(launched(mark).helper.length, 1, "the helper runs"); assert.deepEqual(launched(mark).helper, [], "only the SIGKILL ends it, and it came");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  REWRITE — a host teardown waits for every Codex session's stop: the turn's settle, a live agent's stop and the session's in the log, the child gone
+    B2/B3 oracle excerpt: assert.equal(child().length, 1, "the session's app-server runs"); assert.deepEqual(child(), [], "the app-server is gone before the teardown resolves");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  DELETE — the user's end of a Grok session is prepared before its card is answered: a CLI that exits on the cancel still has its work stopped, and its row says so
+    Pre-edit failure: host composition did not stop a Grok shell when question cancellation exited its CLI.
+    Stronger remaining coverage: adapters/grok/lifecycle.test.ts "the user's end is prepared before its card is answered: a CLI that exits on the cancel before any stop still has its work stopped, and says so" deterministically waits for CLI exit before stop, inspects real process ownership and stopped task rows. orchestration/orchestrator.test.ts "the user's end lets the adapter prepare it before any card is answered" proves the host ordering at the AgentAdapter seam. Both owners confirmed retention.
+    Fails bar 6: repeats those same workflow outcomes through the composition root with nondeterministic race timing; no additional independent contract.
+    Non-test callers: host.stopSessionInternal and Grok lifecycle unchanged; no production seam becomes unused.
+    Support removed: existsSync import used only by this duplicate; shared rig and scenario remain used elsewhere.
+    Risk: low with deterministic race and host ordering retained; direct teardown and intentional handover integrations remain.
+  REWRITE — an intentional stop's running Grok turn is continued by the next host, the teardown's rows kept
+    B2/B3 oracle excerpt: Lifecycle await must complete; public stop/exit and durable log assertions in the named case.
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  REWRITE — an intentional stop's running Codex turn is continued by the next host, the teardown's rows kept
+    B2/B3 oracle excerpt: assert.equal(resumed.length, 1, "the next host resumed the thread from its cursor");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/main.test.ts
+  B1: GUI spec §5.1 boot attachment collection; host README boot sequence; S1 #5 regression.
+  B4 / callers: startAgentHost with isolated appdir and observable files; non-test callers: agent-host process entrypoint.
+  B6: Only the real boot proves attachment collection is scheduled on startup, before the six-hour interval; store tests independently own sweep selection.
+  Validation: V with src/agent-host/main.test.ts. Risk: R.
+  KEEP — sweeps once at boot, so a restart collects what accumulated while it was down
+    B2/B3 oracle excerpt: assert.equal((await readdir(pendingDir)).includes("attachment-1-abcdef.part"), false); assert.ok(await stat(fresh), "an upload still in flight is not collected");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/server/http-server.test.ts
+  B1: host-protocol.ts and API public wire contracts; GUI spec §6.1–§6.4; indexed history design C; goals design §5.7.
+  B4 / callers: real authenticated HTTP-over-Unix-socket requests/responses; non-test callers: AgentHostClient used by daemon proxy/supervisor.
+  B6: HTTP is the lowest owner of authentication, URL/body/query decoding, error status/envelope mapping, and route response variants. Stream internals belong to stream.test.ts; tool-output byte assembly to store/tool-output.test.ts; goal persistence and deletion to orchestrator tests. Their duplicate assertions were removed here.
+  Validation: V with src/agent-host/server/http-server.test.ts. Risk: R.
+  KEEP — answers one identical 401 for a missing and for a wrong token
+    B2/B3 oracle excerpt: assert.equal(missing.status, 401); assert.deepEqual(wrong, missing);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — health reports the protocol version and host identity
+    B2/B3 oracle excerpt: assert.equal(result.status, 200); assert.equal(body.ok, true);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — reports live and active-turn threads for the drain-restart
+    B2/B3 oracle excerpt: assert.deepEqual(body.liveThreadIds, [threadId]); assert.deepEqual(body.activeTurnThreadIds, [threadId]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — routes every §6.2 command and answers `{seq}`
+    B2/B3 oracle excerpt: assert.equal(turn.status, 200); assert.equal(typeof (turn.body as { seq: number }).seq, "number");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — maps every rejection to its §6.2 status
+    B2/B3 oracle excerpt: assert.equal(invalid.status, 400); assert.equal((invalid.body as { error: { code: string } }).error.code, "INVALID_COMMAND");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  REWRITE — creates, renames and deletes a thread
+    B2/B3 oracle: HTTP create/rename succeeds; subsequent read returns "Renamed"; delete succeeds and subsequent read is 404.
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+    Change / remaining owner: Remove private checkpoint fake deleted-call assertion; retain HTTP rename/read/delete effects. Checkpoint deletion is owned by checkpoints/service.test.ts and orchestration deletion tests.
+  KEEP — 404s an unknown item and an unknown turn diff
+    B2/B3 oracle excerpt: assert.equal((await h.call("GET", agentHostRoutes.item(threadId, "nope"))).status, 404); assert.equal((await h.call("GET", agentHostRoutes.turnDiff(threadId, 7))).status, 404);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — serves a tool call's streamed output joined from the log, and 404s with its own code
+    B2/B3 oracle excerpt: assert.equal(running.status, 200); assert.deepEqual(running.body, { toolUseId: shell, output: "one\n two\n", complete: false, truncated: false });
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  REWRITE — answers one window of the join when offset or maxBytes asks for it, and the whole join without either
+    B2/B3 oracle: HTTP offset/maxBytes produce explicit window data/nextOffset; either parameter alone selects a window; absence of both selects legacy whole-output shape.
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+    Change / remaining owner: Delete repeated whole-stream pagination reconstruction. Retain HTTP query dispatch for either parameter and legacy no-query response. Store/tool-output.test.ts owns byte assembly and page chaining.
+  KEEP — refuses a malformed offset, clamps maxBytes, and answers an offset past the end as the end
+    B2/B3 oracle excerpt: assert.equal(refused.status, 400, offset); assert.equal((refused.body as { error: { code: string } }).error.code, "INVALID_COMMAND", offset);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — serves the provider snapshots with the host instance id
+    B2/B3 oracle excerpt: assert.equal(result.status, 200); assert.deepEqual(result.body, { providers: [], hostInstanceId: "host-test" });
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — claims an attachment from a raw octet-stream body and resolves it back
+    B2/B3 oracle excerpt: assert.equal(uploaded.status, 200); assert.equal(ref.name, "notes.md");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — serves the §6.4 summary fields the daemon cannot derive from the log
+    B2/B3 oracle excerpt: assert.equal(summary.status, 200); assert.equal(body.chatSessionStatus, "running");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — names every open request so the daemon can publish agentChat.pending
+    B2/B3 oracle excerpt: assert.equal(body.hasPendingApprovals, true); assert.deepEqual(body.pendingRequests.map(({ requestId, kind }) => ({ requestId, kind })), [ { requestId: "req-7", kind: "approval" } ]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — answers an unknown route with 404 rather than hanging
+    B2/B3 oracle excerpt: assert.equal((await h.call("GET", "/nope")).status, 404); assert.equal((await h.call("POST", "/threads/thread-1/unknown", {})).status, 404);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — opens with a snapshot, marks synchronized, then streams live events
+    B2/B3 oracle excerpt: assert.equal(live.frames[0]?.kind, "snapshot"); assert.ok(synchronizedIndex < messageIndex, "live frames follow the marker");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — replays by cursor when the range is small enough
+    B2/B3 oracle excerpt: assert.equal(live.frames[0]?.kind, "event", "a small range replays instead of snapshotting");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — two clients converge on the same order (§6.6)
+    B2/B3 oracle excerpt: assert.deepEqual(seen(a.frames), seen(b.frames)); assert.deepEqual( seen(a.frames), [...seen(a.frames)].sort((left, right) => left - right) );
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — closes every open stream when the host stops
+    B2/B3 oracle: after an established synchronized HTTP stream, server.close must trigger the response close event before the explicit 10-second test timeout; an unresolved close fails the test.
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — is a 409 COMMAND_REJECTED once the host is up, never a 500
+    B2/B3 oracle excerpt: assert.equal(answer.status, 409); assert.equal(envelope.error.code, "COMMAND_REJECTED");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — is a 503 HOST_UNAVAILABLE while the host is still cold
+    B2/B3 oracle excerpt: assert.equal(answer.status, 503); assert.equal((answer.body as { error: { code: string } }).error.code, "HOST_UNAVAILABLE");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — answers 503 INDEX_UNAVAILABLE for history without a usable index, 404 for no thread
+    B2/B3 oracle excerpt: assert.equal(answer.status, 503); assert.equal( (answer.body as { error: { code: string } }).error.code, "INDEX_UNAVAILABLE" );
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — stamps the snapshot a thread read answers with its history bounds
+    B2/B3 oracle excerpt: assert.equal(read.status, 200); assert.deepEqual(thread.history, { indexed: true, hasOlder: false, beforeCursor: null, oldestRetainedOrdinal: null, totalTurns: 0 });
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — caps the search query by code point and answers blank queries
+    B2/B3 oracle excerpt: assert.equal( Array.from((clamped.body as ThreadSearchResponse).query).length, 200 ); assert.equal(blank.status, 200);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — answers search `indexed: false` with a 200 when there is no usable index
+    B2/B3 oracle excerpt: assert.equal(answer.status, 200); assert.deepEqual(answer.body, { query: "anything", hits: [], truncated: false, indexed: false });
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — lists the thread's prompts from the index, newest first — steers included
+    B2/B3 oracle excerpt: assert.equal(answer.status, 200); assert.equal(body.threadId, threadId);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — answers the list `indexed: false` without a usable index, the text 503, and 404 for no thread
+    B2/B3 oracle excerpt: assert.equal(list.status, 200); assert.deepEqual(list.body, { threadId, prompts: [], before: null, indexed: false } satisfies ThreadPromptsResponse);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — serves one prompt's whole text, and 404 PROMPT_NOT_FOUND for any other id
+    B2/B3 oracle excerpt: assert.ok(entry !== undefined && entry.messageId.includes(":"), "an id the path must encode"); assert.equal(answer.status, 200);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — answers `catchingUp` while the index catches up with a thread, the page once it has, and `indexed:false` for one it never will
+    B2/B3 oracle excerpt: assert.equal(catching.status, 200); assert.deepEqual(catching.body, { threadId, prompts: [], before: null, indexed: false, catchingUp: true } satisfies ThreadPromptsResponse);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — answers a read that failed with a retryable 503 INDEX_UNAVAILABLE, never an empty page
+    B2/B3 oracle excerpt: assert.equal(answer.status, 503, path); assert.equal((answer.body as { error: { code: string } }).error.code, "INDEX_UNAVAILABLE", path);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — reads a prompt longer than the index keeps back from its own line in the log
+    B2/B3 oracle excerpt: assert.equal(longEntry.text.length, 4000); assert.equal(longEntry.truncated, true);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — POST /opencode/recycle-idle answers the OpenCode adapter's counts
+    B2/B3 oracle excerpt: assert.equal(answered.status, 200); assert.deepEqual(answered.body, { recycled: 2, deferred: 1 } satisfies AgentHostRecycleOpenCodeResponse);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — recycles nothing when no adapter serves OpenCode
+    B2/B3 oracle excerpt: assert.equal(answered.status, 200); assert.deepEqual(answered.body, { recycled: 0, deferred: 0 });
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  REWRITE — POST /goals/hold renews the lease and answers every thread held after it
+    B2/B3 oracle: HTTP hold returns no ids initially, then the known continuing goal thread id; renewal returns that id again; GET is rejected with 404.
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+    Change / remaining owner: Remove fake-store head/log introspection. Keep actual HTTP hold result and renewal; orchestration/goals.test.ts owns durable marker and activity semantics.
+  KEEP — POST /goals/resume-sessions takes the threads it knows and refuses a malformed body whole
+    B2/B3 oracle excerpt: assert.equal(taken.status, 200); assert.deepEqual(taken.body, { threadIds: [threadId] } satisfies AgentHostResumeGoalSessionsResponse);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/server/stream.test.ts
+  B1: GUI spec §6.3/§6.6 stream synchronization, heartbeat/budget and coalescing; API wire frames.
+  B4 / callers: createThreadStream serialized output; non-test callers: HTTP host event route.
+  B6: The serializer/subscriber seam is the lowest owner of synchronization overlap, timer-driven coalescing/heartbeat and drain budget. HTTP tests exercise transport wiring, not these controlled races/backpressure cases.
+  Validation: V with src/agent-host/server/stream.test.ts. Risk: R.
+  KEEP — loses no event published while the read is in flight, and duplicates none
+    B2/B3 oracle excerpt: assert.equal(frames[0]?.kind, "snapshot"); assert.deepEqual( frames.slice(1, -1).map((frame) => (frame as { seq: number }).seq), [6] );
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — pushes `synchronized` after everything buffered, never straight to the socket
+    B2/B3 oracle excerpt: assert.deepEqual( frames.map((frame) => ("seq" in frame ? frame.seq : frame.kind)), [1, 2, 3, "synchronized"] );
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — coalesces live tool updates on the 50 ms window and flushes on any other frame
+    B2/B3 oracle excerpt: assert.equal(fake.lines.length, 0, "updates wait on the window"); assert.deepEqual( parse(fake.lines).map((frame) => (frame as { seq: number }).seq), [11] );
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — sends `:hb` on the heartbeat interval
+    B2/B3 oracle excerpt: assert.equal(fake.lines.includes(":hb"), false); assert.equal(fake.lines.at(-1), ":hb");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — closes the stream when the undrained write buffer passes its budget
+    B2/B3 oracle excerpt: assert.equal(stream.closed, true); assert.deepEqual(closed, ["budget"]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — releases the charge once the socket drains
+    B2/B3 oracle excerpt: assert.equal(stream.closed, false, "a client that keeps up is never cut");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — stops writing once the client disconnects
+    B2/B3 oracle excerpt: assert.equal(fake.lines.length, before); assert.deepEqual(closed, ["client"]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — announces a replay still running after `synchronized`, then every change live
+    B2/B3 oracle excerpt: assert.deepEqual( parse(fake.lines).map((frame) => frame.kind), ["snapshot", "synchronized", "history-import", "history-import"] ); assert.deepEqual(before?.progress, { phase: "importing", done: 100, total: 400 }, "only the latest");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — says nothing about a replay that ended before the stream went live
+    B2/B3 oracle excerpt: assert.deepEqual( parse(fake.lines).map((frame) => frame.kind), ["snapshot", "synchronized"] );
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/support/code-stamp.test.ts
+  B1: Git HEAD/packed-refs/worktree storage formats and host README deployment stamp contract.
+  B4 / callers: readCodeStamp; non-test callers: main.ts and agent-chat supervisor.
+  B6: The exported helper/service is the lowest owner of the listed external-byte, state, safety or lifecycle contract. Higher adapter/HTTP tests do not exercise these malformed inputs, controlled races and real filesystem/process outcomes independently.
+  Validation: V with src/agent-host/support/code-stamp.test.ts. Risk: R.
+  KEEP — resolves a symbolic HEAD through a loose ref
+    B2/B3 oracle excerpt: assert.equal(readCodeStamp(root), SHA_A); assert.equal(readCodeStamp(join(root, "apps", "daemon")), SHA_A);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — falls back to packed-refs and reads a detached HEAD verbatim
+    B2/B3 oracle excerpt: assert.equal(readCodeStamp(root), SHA_B); assert.equal(readCodeStamp(root), SHA_A);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — follows a worktree's gitdir pointer and its commondir for refs
+    B2/B3 oracle excerpt: assert.equal(readCodeStamp(wt), SHA_B);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — is null outside a repository and never throws
+    B2/B3 oracle excerpt: assert.equal(readCodeStamp(root), null); assert.equal(readCodeStamp(join(root, "missing")), null);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/support/deadline.test.ts
+  B1: agent-chat GUI spec §3.1 bounded child waits, host README deadline contract.
+  B4 / callers: withDeadline; non-test callers: provider adapters, HTTP server, host lifecycle.
+  B6: The exported helper/service is the lowest owner of the listed external-byte, state, safety or lifecycle contract. Higher adapter/HTTP tests do not exercise these malformed inputs, controlled races and real filesystem/process outcomes independently.
+  Validation: V with src/agent-host/support/deadline.test.ts. Risk: R.
+  KEEP — resolves the underlying value when it beats the deadline
+    B2/B3 oracle excerpt: assert.equal(value, 7);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — propagates the underlying rejection unchanged
+    B2/B3 oracle excerpt: assert.rejects( withDeadline(Promise.reject(boom), { label: "probe", timeoutMs: 1_000 }), (error: unknown) => error === boom );
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — expiry rejects with DeadlineExceededError and runs onTimeout
+    B2/B3 oracle excerpt: assert.rejects( withDeadline(new Promise<never>(() => {}), { label: "handshake", timeoutMs: 5, onTimeout: () => { killed = true; } }), (error: unknown) => { assert.ok(error instanceof Deadli; assert.equal(error.label, "handshake");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a late rejection after expiry does not become an unhandled rejection
+    B2/B3 oracle excerpt: assert.rejects(withDeadline(work, { label: "cancel", timeoutMs: 5 }));
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a failing onTimeout never replaces the deadline error
+    B2/B3 oracle excerpt: assert.rejects( withDeadline(new Promise<never>(() => {}), { label: "interrupt", timeoutMs: 5, onTimeout: () => { throw new Error("kill failed");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — an abort signal wins, before and during the wait
+    B2/B3 oracle excerpt: assert.rejects( withDeadline(new Promise<never>(() => {}), { label: "x", timeoutMs: 1_000, signal: already }), /host stopping/ ); assert.rejects(pending, /shutdown/);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/support/env.test.ts
+  B1: GUI spec §3.1 launch environment, §4.5 account homes and AGENTS secret isolation.
+  B4 / callers: buildProviderEnv; non-test callers: all four provider adapters.
+  B6: The exported helper/service is the lowest owner of the listed external-byte, state, safety or lifecycle contract. Higher adapter/HTTP tests do not exercise these malformed inputs, controlled races and real filesystem/process outcomes independently.
+  Validation: V with src/agent-host/support/env.test.ts. Risk: R.
+  REWRITE — the env is built from nothing — process.env is never spread
+    B2/B3 oracle: ambient ORQ_ENV_LEAK_CANARY is absent; ORQUESTER_SESSION_ID equals independently supplied "sess-1".
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+    Change / remaining owner: Remove exact environment-key inventory: unrelated legitimate additions are behavior-preserving. Keep ambient canary exclusion and session identifier value, absorbing the redundant standalone stamp test.
+  KEEP — every adapter binds its account home through its own variable
+    B2/B3 oracle excerpt: assert.equal(env[variable], "/var/lib/orquester/daemon/agent-accounts/x/home"); assert.equal(claude.HOME, base.homeDir);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — ambient vendor credentials are stripped from extraEnv
+    B2/B3 oracle excerpt: assert.equal(env.XAI_API_KEY, undefined); assert.equal(env.GROK_OAUTH2_REFERRER, "https://x.ai");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — extraEnv can never move a child off the session PATH, TMPDIR or HOME
+    B2/B3 oracle excerpt: assert.equal(env.PATH, base.sessionPath); assert.equal(env.TMPDIR, base.tmpDir);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — the account binding wins over anything extraEnv sets
+    B2/B3 oracle excerpt: assert.equal(env.CODEX_HOME, "/accounts/codex/home");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — undefined values are dropped, never stringified
+    B2/B3 oracle excerpt: assert.ok(!("MAYBE" in env)); assert.equal(env.REAL, "1");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — every adapter's launch carries its own launch marker, which no launcher env shadows
+    B2/B3 oracle excerpt: assert.equal(env["ORQUESTER_AGENT_LAUNCH"], `launch-of-${adapter}`, adapter);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  DELETE — ORQUESTER_SESSION_ID is always stamped
+    Failure detected (bar 2): caller-visible violation of this specific scenario: ORQUESTER_SESSION_ID is always stamped.
+    Reason / remaining stronger coverage: The builder security contract test now asserts the same exact session identifier. No independent failure remains; production buildProviderEnv callers remain all adapters.
+    Risk: low; identical value assertion remains at the builder owner. No deleted export/helper.
+
+apps/daemon/src/agent-host/support/leftover-processes.test.ts
+  B1: AGENTS session ownership; host README process marker/session/starttime safety contract; Linux proc format.
+  B4 / callers: findLeftoverProcesses/stopLeftoverProcesses/recordChildSessions; non-test callers: Grok lifecycle and daemon system-status.
+  B6: The exported helper/service is the lowest owner of the listed external-byte, state, safety or lifecycle contract. Higher adapter/HTTP tests do not exercise these malformed inputs, controlled races and real filesystem/process outcomes independently.
+  Validation: V with src/agent-host/support/leftover-processes.test.ts. Risk: R.
+  KEEP — finds exactly the processes of a recorded session carrying this launch's marker
+    B2/B3 oracle excerpt: assert.deepEqual(found.map((entry) => [entry.pid, entry.starttime]), [[100, 10], [101, 11]]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a recycled session id is not ours: its live leader must be the process recorded
+    B2/B3 oracle excerpt: assert.deepEqual(await findLeftoverProcesses(LAUNCH, { sessions: [led(120, 10)] }), []);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a member whose leader is gone is still its session's
+    B2/B3 oracle excerpt: assert.deepEqual(found.map((entry) => entry.pid), [131]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a pid recycled while it was being read is not matched
+    B2/B3 oracle excerpt: assert.deepEqual(await findLeftoverProcesses(LAUNCH, { sessions: [led(200, 20)] }), []);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — SIGTERM first; SIGKILL only for what outlived the grace, by a fresh scan of the same sessions
+    B2/B3 oracle excerpt: assert.deepEqual(proc.signals, [[300, "SIGTERM"], [301, "SIGTERM"]], "no early escalation"); assert.deepEqual(await running, { found: 2, terminated: 2, killed: 2 });
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — the wait ends as soon as everything is gone — a zombie counts as gone
+    B2/B3 oracle excerpt: assert.deepEqual(result, { found: 2, terminated: 2, killed: 0 }); assert.deepEqual(proc.signals, [[400, "SIGTERM"], [401, "SIGTERM"]]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a pid recycled before its signal is never signalled
+    B2/B3 oracle excerpt: assert.deepEqual(result, { found: 2, terminated: 1, killed: 0 }); assert.ok(recycled !== undefined && proc.table.has(recycled));
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — off Linux there is no /proc: nothing is read and nothing is signalled
+    B2/B3 oracle excerpt: assert.deepEqual(await stopLeftoverProcesses({ launchId: LAUNCH, sessions: [led(100, 10)] }), { found: 0, terminated: 0, killed: 0 }); assert.deepEqual(await recordChildSessions(100), []);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — an empty launch id matches nothing
+    B2/B3 oracle excerpt: assert.deepEqual(await findLeftoverProcesses("", { sessions: [led(600, 60)] }), []);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — recordChildSessions: each child's own session, and the parent's for a child that shares it
+    B2/B3 oracle excerpt: assert.deepEqual([...sessions].sort((a, b) => a.sid - b.sid), [led(700, 70), led(701, 71), led(702, 72)]); assert.deepEqual(await recordChildSessions(799), []);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — the real /proc: a recorded session's members are stopped, a daemon and a stranger spared
+    B2/B3 oracle excerpt: assert.ok( sessions.some((session) => session.sid === pids.get("shell")), "the shell's own session is recorded while its parent lives" ); assert.equal(result.found, 3, "the shell and its two members");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/support/leftover-work.test.ts
+  B1: host README leftover-work durable format, bounds, 0600 and user-end policy.
+  B4 / callers: record/read/sweepLeftoverWork; non-test callers: Grok sweepEndedSession.
+  B6: The exported helper/service is the lowest owner of the listed external-byte, state, safety or lifecycle contract. Higher adapter/HTTP tests do not exercise these malformed inputs, controlled races and real filesystem/process outcomes independently.
+  Validation: V with src/agent-host/support/leftover-work.test.ts. Risk: R.
+  KEEP — a thread's leftover work is kept per launch, merged by launch, the newest launches only, 0600
+    B2/B3 oracle excerpt: assert.deepEqual(await readLeftoverWork(path), [ { launchId: "l1", recordedAt: "t2", sessions: [ { sid: 10, leaderStarttime: 100 }, { sid: 11, leaderStarttime: 110 } ] } ]); assert.equal((await stat(path)).mode & 0o777, 0o600, "as sensitive as the thread dir it lives in");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a launch keeps its newest sessions only
+    B2/B3 oracle excerpt: assert.equal(launch?.sessions.length, 64); assert.equal(launch?.sessions.at(-1)?.sid, 64 + 11, "the newest sessions kept");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a file that is not what this host writes reads as nothing, entry by entry
+    B2/B3 oracle excerpt: assert.deepEqual(await readLeftoverWork(path), []); assert.deepEqual(await readLeftoverWork(path), []);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a record never recreates a thread directory that is gone — no ghost thread at the next boot
+    B2/B3 oracle excerpt: assert.equal(existsSync(threadDir), false, "the store deleted the thread: a late record writes nothing"); assert.deepEqual(await readLeftoverWork(path), []);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — concurrent records of one thread are serialised: none is lost
+    B2/B3 oracle excerpt: assert.equal((await readLeftoverWork(path)).length, 6);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — the sweep stops each launch's work by its own marker and sessions — nothing else — then forgets it
+    B2/B3 oracle excerpt: assert.deepEqual(proc.signals.map(([pid]) => pid).sort((a, b) => a - b), [200, 201, 300]); assert.deepEqual(result, { found: 3, terminated: 3, killed: 0 });
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a close sweeps every remembered launch at once: one grace window, not one per launch
+    B2/B3 oracle excerpt: assert.equal(proc.signals.filter(([, signal]) => signal === "SIGTERM").length, launches); assert.deepEqual(await running, { found: launches, terminated: launches, killed: launches });
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a thread with nothing remembered sweeps nothing, and off Linux nothing is read
+    B2/B3 oracle excerpt: assert.deepEqual(await sweepLeftoverWork(path), { found: 0, terminated: 0, killed: 0 }); assert.deepEqual(await sweepLeftoverWork(path), { found: 0, terminated: 0, killed: 0 });
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/support/ndjson.test.ts
+  B1: host README NDJSON transport contract, UTF-8/CRLF framing and bounded writer backpressure.
+  B4 / callers: NdjsonLineReader/parseNdjsonLine/NdjsonWriter; non-test callers: Codex protocol, Grok ACP connection and transcript tailers.
+  B6: The exported helper/service is the lowest owner of the listed external-byte, state, safety or lifecycle contract. Higher adapter/HTTP tests do not exercise these malformed inputs, controlled races and real filesystem/process outcomes independently.
+  Validation: V with src/agent-host/support/ndjson.test.ts. Risk: R.
+  KEEP — line reader carries a remainder across chunk boundaries
+    B2/B3 oracle excerpt: assert.deepEqual(reader.push('{"a":'), []); assert.deepEqual(reader.push('1}\n{"b":2}\n'), ['{"a":1}', '{"b":2}']);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — line reader strips CRLF and never emits a phantom blank line on a split CRLF
+    B2/B3 oracle excerpt: assert.deepEqual(reader.push("one\r"), []); assert.deepEqual(reader.push("\ntwo\r\n"), ["one", "two"]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — line reader strips a leading BOM exactly once
+    B2/B3 oracle excerpt: assert.deepEqual(reader.push('﻿{"a":1}\n﻿tail\n'), ['{"a":1}', "﻿tail"]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — line reader flushes an unterminated final line
+    B2/B3 oracle excerpt: assert.deepEqual(reader.push("a\nb"), ["a"]); assert.deepEqual(reader.flush(), ["b"]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — line reader decodes a multi-byte codepoint split across chunks
+    B2/B3 oracle excerpt: assert.deepEqual(reader.push(bytes.subarray(0, 1)), []); assert.deepEqual(reader.push(bytes.subarray(1)), ["é"]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — line reader discards an overlong partial line until the next newline
+    B2/B3 oracle excerpt: assert.deepEqual(reader.push(chunk), []); assert.deepEqual(reader.push(chunk), []);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — parseNdjsonLine skips blanks and comments
+    B2/B3 oracle excerpt: assert.equal(parseNdjsonLine(""), undefined); assert.equal(parseNdjsonLine(" "), undefined);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — writer queues behind backpressure and flushes in order on drain
+    B2/B3 oracle excerpt: assert.deepEqual(sink.written, ['{"n":1}\n']); assert.deepEqual(sink.written, ['{"n":1}\n', '{"n":2}\n', '{"n":3}\n']);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — writer drops rather than growing past the queue budget
+    B2/B3 oracle excerpt: assert.equal(writer.write({ padding: "x".repeat(3 * 1024 * 1024) }), true); assert.equal(writer.write({ padding: "x".repeat(3 * 1024 * 1024) }), false, "second queued record drops");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — writer survives a non-serialisable record without taking the stream down
+    B2/B3 oracle excerpt: assert.equal(writer.write(cyclic), false); assert.equal(writer.write({ ok: true }), true);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — writer appends the newline only when missing, and stops after close
+    B2/B3 oracle excerpt: assert.deepEqual(sink.written, ['{"a":1}\n', '{"b":2}\n']);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/support/spawn-group.test.ts
+  B1: GUI spec §3.1/§4.5 provider subprocess ownership, E20 orphan-server regression.
+  B4 / callers: spawnProviderChild.kill; non-test callers: all provider adapters.
+  B6: The exported helper/service is the lowest owner of the listed external-byte, state, safety or lifecycle contract. Higher adapter/HTTP tests do not exercise these malformed inputs, controlled races and real filesystem/process outcomes independently.
+  Validation: V with src/agent-host/support/spawn-group.test.ts. Risk: R.
+  KEEP — a grandchild dies with the provider child
+    B2/B3 oracle excerpt: assert.ok(Number.isFinite(grandchild) && grandchild > 0); assert.equal(isAlive(grandchild), true, "the grandchild is up before the kill");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/support/spawn.test.ts
+  B1: GUI spec §3.1 child supervision/explicit environment/exit and escalation rules.
+  B4 / callers: spawnProviderChild/exitOutcome; non-test callers: all provider adapters and checkpoint git runner.
+  B6: The exported helper/service is the lowest owner of the listed external-byte, state, safety or lifecycle contract. Higher adapter/HTTP tests do not exercise these malformed inputs, controlled races and real filesystem/process outcomes independently.
+  Validation: V with src/agent-host/support/spawn.test.ts. Risk: R.
+  KEEP — records the pid and resolves with the exit code
+    B2/B3 oracle excerpt: assert.equal(typeof proc.pid, "number"); assert.ok((proc.pid ?? 0) > 0);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — the environment is exactly what was passed — nothing is inherited
+    B2/B3 oracle excerpt: assert.deepEqual(keys, ["ORQUESTER_SESSION_ID", "PATH"]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — stderr is piped, not discarded
+    B2/B3 oracle excerpt: assert.equal(Buffer.concat(chunks).toString("utf8"), "boom\n");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — a spawn failure is an outcome, never a throw
+    B2/B3 oracle excerpt: assert.equal(reason.kind, "spawn-error");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — kill escalates SIGTERM to SIGKILL past the grace deadline
+    B2/B3 oracle excerpt: assert.equal(reason.kind, "signal"); assert.equal(reason.signal, "SIGKILL");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — kill is idempotent and safe after the child is already gone
+    B2/B3 oracle excerpt: assert.deepEqual(a, b); assert.deepEqual(a, { kind: "exit", code: 0, signal: null });
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — exitOutcome follows the §3.1 rule
+    B2/B3 oracle excerpt: assert.equal(exitOutcome(zero, false).status, "stopped"); assert.equal(exitOutcome(zero, false).exitKind, "graceful");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/support/stderr.test.ts
+  B1: GUI spec §3.1 redaction/classification, host README 4 KiB safe tail, observed Codex leveled-tool-error regression.
+  B4 / callers: classifyStderrLine/redactStderr/StderrCapture; non-test callers: all provider adapters, HTTP errors and checkpoints.
+  B6: The exported helper/service is the lowest owner of the listed external-byte, state, safety or lifecycle contract. Higher adapter/HTTP tests do not exercise these malformed inputs, controlled races and real filesystem/process outcomes independently.
+  Validation: V with src/agent-host/support/stderr.test.ts. Risk: R.
+  KEEP — stripAnsi removes colour, cursor and OSC sequences
+    B2/B3 oracle excerpt: assert.equal(classifyStderrLine("\u001b[31mred\u001b[0m").text, "red"); assert.equal(classifyStderrLine("\u001b[2K\u001b[1Gline").text, "line");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — redaction collapses home paths, longest first
+    B2/B3 oracle excerpt: assert.equal(out, "read ~/creds");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — redaction collapses a percent-encoded home too, in either hex case
+    B2/B3 oracle excerpt: assert.equal(out, "tail ~/.grok/sessions/~%2Fwork/a.log and ~%2fwork"); assert.equal(redactStderr("x %2Fa.b%2Fc", { homeDirs: ["/a.b"] }), "x ~%2Fc");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — redaction masks auth headers, bearer values and token shapes
+    B2/B3 oracle excerpt: assert.equal( redactStderr("Authorization: Bearer abc.def-ghi"), "Authorization: [redacted]" ); assert.equal(redactStderr("x-api-key=supersecretvalue"), "x-api-key=[redacted]");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — classification: benign snippets and sub-ERROR levels drop
+    B2/B3 oracle excerpt: assert.equal(classifyStderrLine("").class, "drop"); assert.equal( classifyStderrLine("WARN state db missing rollout path for thread abc").class, "drop" );
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — classification: fatal snippets become errors, everything else a warning
+    B2/B3 oracle excerpt: assert.equal(classifyStderrLine("codex: command not found").class, "error"); assert.equal(classifyStderrLine("Error: ENOENT no such file or directory").class, "error");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — classification: a leveled log line is never fatal, even when it names a fatal snippet
+    B2/B3 oracle excerpt: assert.equal( classifyStderrLine( "2026-10-01T19:22:14.705304Z ERROR codex_core::tools::router: error=unable to locate image at `/tmp/x.png`: No such file or directory (os error 2)" ).class,; assert.equal(classifyStderrLine("WARN sandbox: permission denied").class, "warning");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — classification redacts before it classifies, so the text is always safe
+    B2/B3 oracle excerpt: assert.equal(line.class, "error"); assert.equal(line.text, "fatal error: key [redacted]");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — capture splits lines with a remainder and flushes the tail
+    B2/B3 oracle excerpt: assert.deepEqual(capture.push("one unusual\ntwo unu").map((l) => l.text), ["one unusual"]); assert.deepEqual(capture.push("sual\n").map((l) => l.text), ["two unusual"]);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — capture keeps a redacted, bounded tail
+    B2/B3 oracle excerpt: assert.equal(capture.excerpt(), "opening ~/creds with [redacted]\n"); assert.ok(Buffer.byteLength(excerpt) <= 4096, "tail stays inside its budget");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — capture tolerates a single line longer than the whole tail budget
+    B2/B3 oracle excerpt: assert.ok(Buffer.byteLength(capture.excerpt()) <= 4096);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+apps/daemon/src/agent-host/support/tail-file.test.ts
+  B1: GUI spec §4.5 background shell output and host README; UTF-8 encoding contract.
+  B4 / callers: FileTail.read/resolveTildePath; non-test callers: Claude session background-shell reader.
+  B6: The exported helper/service is the lowest owner of the listed external-byte, state, safety or lifecycle contract. Higher adapter/HTTP tests do not exercise these malformed inputs, controlled races and real filesystem/process outcomes independently.
+  Validation: V with src/agent-host/support/tail-file.test.ts. Risk: R.
+  KEEP — reads only the bytes appended since the previous read
+    B2/B3 oracle excerpt: assert.equal(one.text, "first\n"); assert.equal(one.done, false);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  REWRITE — a multibyte character split across two reads decodes once, whole
+    B2/B3 oracle: joined incremental reads equal the seeded ASCII prefix followed by "ébb", with consumed-byte progress on every read.
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+    Change / remaining owner: Assert joined UTF-8 bytes across reads rather than pinning the 64 KiB chunk division; different read window sizes must preserve the output.
+  REWRITE — stops at the per-shell cap with one truncation notice naming the file
+    B2/B3 oracle: consumes exactly 1 MiB, emits the seeded prefix and file path, then returns empty/done on the next read.
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+    Change / remaining owner: Drain until completion and assert total output cap plus path-bearing notice; delete exact per-read count/chunk shape expectations.
+  KEEP — an unreadable file yields ONE notice carrying the code and the path, then nothing
+    B2/B3 oracle excerpt: assert.equal(one.done, true); assert.ok(one.text.includes("ENOENT"), one.text);
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — restarts from the beginning when the file is truncated under it
+    B2/B3 oracle excerpt: assert.equal((await tail.read()).text, "0123456789"); assert.equal((await tail.read()).text, "new", "a shorter file is a new file, not a negative read");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+  KEEP — resolves a leading ~/ against the CLI's own HOME and leaves everything else alone
+    B2/B3 oracle excerpt: assert.equal(resolveTildePath("~/tmp/a.output", "/homes/acc-1"), "/homes/acc-1/tmp/a.output"); assert.equal(resolveTildePath("~", "/homes/acc-1"), "/homes/acc-1");
+    B5: preserves the named observable outcome across internal refactors; B1/B4/B6 and validation/risk inherit this file section.
+
+
+Pre-edit retained-host-test isolation correction (all five surviving host-teardown cases):
+  Real failure: Codex cleanup searched ORQUESTER_SESSION_ID=t1 globally, potentially killing another concurrently running test's provider.
+  Rewrite: assign each isolated host rig a random thread ID, use it in thread commands/artifact lookups/stop response expectations, and scope process discovery/reaping to that ID.
+  Independent contract, outcome oracle and B1–B6 for these five cases remain as recorded above; setup/cleanup identity changes only. No production code or behavior changes.
+  Risk: low, provider-native resume IDs remain provider-generated and unchanged. Validation: focused host-teardown.test.ts, then root gates.
+
+Validation results:
+  Scoped command: from apps/daemon, pnpm exec node --import tsx --import ../../scripts/test/assert-ok.mjs --import ../../scripts/test/quiet-mock-timers.mjs --test --test-concurrency=2 src/agent-host/support/*.test.ts src/agent-host/server/*.test.ts src/agent-host/checkpoints/*.test.ts src/agent-host/main.test.ts src/agent-host/host-teardown.test.ts
+  Result: 175 tests, 17 suites, all passed; 0 failures/cancellations/skips. Duration 634.3 seconds under concurrent repository audits.
+  The runner loaded host-teardown before its final duplicate deletion and UUID isolation; other edited tests ran final code. Current scope has 174 cases. Final host rerun: 5/5 passed after duplicate removal and UUID isolation, 0 failures/cancellations/skips (85.2 seconds).
+  Scoped git diff --check: clean. Root agent handles repository typecheck/test gates, remote reconciliation and commit/push.
+  Final review: all five changed test files and this report inspected; git diff --check clean. Net test LOC: -101. No retained baseline failure encountered; no production fix required.

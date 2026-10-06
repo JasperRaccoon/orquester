@@ -5,16 +5,6 @@ import test from "node:test";
 
 import type { DomainEvent } from "./domain-events.ts";
 import {
-  ACTIVITY_RETENTION_LIMIT,
-  ACTIVITY_RETENTION_SLACK,
-  AGENT_ACTIVITY_RETENTION_LIMIT,
-  AGENT_ACTIVITY_RETENTION_SLACK,
-  AGENT_ACTIVITY_TOTAL_LIMIT,
-  AGENT_ACTIVITY_TOTAL_SLACK,
-  MESSAGE_RETENTION_LIMIT,
-  MESSAGE_RETENTION_SLACK,
-  OPEN_WORK_RETENTION_LIMIT,
-  OPEN_WORK_TOTAL_RETENTION_LIMIT,
   applyDomainEvent,
   createEmptyThreadState,
   foldThread,
@@ -33,6 +23,8 @@ import {
   session
 } from "./test-helpers.ts";
 
+// Retention numbers below come from the approved fold-performance design B
+// and its running-work follow-up; keep them independent of production constants.
 function reset(): void {
   resetSeq();
   resetActivityIds();
@@ -80,12 +72,12 @@ function statesOf(events: readonly DomainEvent[]): ThreadFoldState[] {
 test("the parent window grows to its limit plus slack, then one trim cuts it to the limit", () => {
   reset();
   const events: DomainEvent[] = [created()];
-  for (let index = 0; index <= ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK; index += 1) {
+  for (let index = 0; index <= 500 + 50; index += 1) {
     events.push(parentRow(index));
   }
   const states = statesOf(events);
   const beforeTrim = states.at(-2)!;
-  assert.equal(beforeTrim.activities.length, ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK);
+  assert.equal(beforeTrim.activities.length, 500 + 50);
   assert.ok(
     states.slice(0, -1).every((state) => itemsDroppedByRetention(state).length === 0),
     "no step before the trigger drops anything"
@@ -93,13 +85,13 @@ test("the parent window grows to its limit plus slack, then one trim cuts it to 
   assert.equal(beforeTrim.evicted, undefined, "nothing was ever evicted yet");
 
   const trimmed = states.at(-1)!;
-  assert.equal(trimmed.activities.length, ACTIVITY_RETENTION_LIMIT);
+  assert.equal(trimmed.activities.length, 500);
   assert.deepEqual(
     itemsDroppedByRetention(trimmed).map((item) => item.id),
-    Array.from({ length: ACTIVITY_RETENTION_SLACK + 1 }, (_, index) => `p-${index}`),
+    Array.from({ length: 50 + 1 }, (_, index) => `p-${index}`),
     "the oldest rows, in list order"
   );
-  assert.equal(trimmed.activities[0]?.id, `p-${ACTIVITY_RETENTION_SLACK + 1}`);
+  assert.equal(trimmed.activities[0]?.id, `p-${50 + 1}`);
   assert.deepEqual(trimmed.evicted, { activities: true, messages: false });
 });
 
@@ -118,21 +110,21 @@ test("an agent's own window trims past 200 + 50 of its rows, keeping its anchors
   ];
   // Past the gate first, with parent rows that stay under their own trigger.
   for (let index = 0; index < 300; index += 1) events.push(parentRow(index));
-  for (let index = 0; index <= AGENT_ACTIVITY_RETENTION_LIMIT + AGENT_ACTIVITY_RETENTION_SLACK; index += 1) {
+  for (let index = 0; index <= 200 + 50; index += 1) {
     events.push(agentRow("ag", index));
   }
   const states = statesOf(events);
   const owned = (state: ThreadFoldState): ThreadActivityItem[] =>
     state.activities.filter((row) => row.agentId === "ag");
-  assert.equal(owned(states.at(-2)!).length, AGENT_ACTIVITY_RETENTION_LIMIT + AGENT_ACTIVITY_RETENTION_SLACK + 1);
+  assert.equal(owned(states.at(-2)!).length, 200 + 50 + 1);
   const trimmed = states.at(-1)!;
   assert.equal(
     owned(trimmed).length,
-    AGENT_ACTIVITY_RETENTION_LIMIT + 1,
+    200 + 1,
     "cut to its last 200 rows, plus its own anchor"
   );
   assert.equal(owned(trimmed)[0]?.id, "anchor-nested");
-  assert.equal(owned(trimmed)[1]?.id, `ag-row-${AGENT_ACTIVITY_RETENTION_SLACK + 1}`);
+  assert.equal(owned(trimmed)[1]?.id, `ag-row-${50 + 1}`);
   assert.ok(trimmed.activities.some((row) => row.id === "anchor-start"));
   assert.equal(
     trimmed.activities.filter((row) => row.agentId === undefined).length,
@@ -155,16 +147,16 @@ test("the gate: 400 activities of one agent fold losslessly — a history page n
   const states = statesOf(events);
   assert.ok(states.every((state) => itemsDroppedByRetention(state).length === 0));
   const last = states.at(-1)!;
-  assert.equal(last.activities.length, ACTIVITY_RETENTION_LIMIT, "400 + 99 + the anchor, all kept");
+  assert.equal(last.activities.length, 500, "400 + 99 + the anchor, all kept");
   assert.equal(last.evicted, undefined);
 
   // One row more opens the gate, and the agent's window trims at once.
   const opened = applyDomainEvent(last, parentRow(99));
   assert.equal(
     opened.activities.filter((row) => row.agentId === "solo").length,
-    AGENT_ACTIVITY_RETENTION_LIMIT
+    200
   );
-  assert.equal(itemsDroppedByRetention(opened).length, 400 - AGENT_ACTIVITY_RETENTION_LIMIT);
+  assert.equal(itemsDroppedByRetention(opened).length, 400 - 200);
 });
 
 test("the ceiling across agents trims past 2 000 + 200 of their rows, oldest first, ties in list order", () => {
@@ -177,7 +169,7 @@ test("the ceiling across agents trims past 2 000 + 200 of their rows, oldest fir
   // Round robin, every agent's row of one round stamped with the same instant:
   // the ceiling sorts by `createdAt`, and a tie must keep the list's order.
   let round = 0;
-  while (events.length < 1 + agents.length + AGENT_ACTIVITY_TOTAL_LIMIT + AGENT_ACTIVITY_TOTAL_SLACK + 1) {
+  while (events.length < 1 + agents.length + 2_000 + 200 + 1) {
     const stamp = new Date(Date.UTC(2026, 5, 1) + round * 1000).toISOString();
     for (const id of agents) events.push(agentRow(id, round, stamp));
     round += 1;
@@ -187,15 +179,15 @@ test("the ceiling across agents trims past 2 000 + 200 of their rows, oldest fir
   assert.notEqual(trimStep, -1);
   const agentRows = (state: ThreadFoldState): number =>
     state.activities.filter((row) => row.agentId !== undefined).length;
-  assert.equal(agentRows(states[trimStep - 1]!), AGENT_ACTIVITY_TOTAL_LIMIT + AGENT_ACTIVITY_TOTAL_SLACK);
-  assert.equal(agentRows(states[trimStep]!), AGENT_ACTIVITY_TOTAL_LIMIT, "cut to exactly the ceiling");
+  assert.equal(agentRows(states[trimStep - 1]!), 2_000 + 200);
+  assert.equal(agentRows(states[trimStep]!), 2_000, "cut to exactly the ceiling");
   // The dropped rows are the oldest rounds, and within the last round cut the
   // agents in list order.
   const dropped = itemsDroppedByRetention(states[trimStep]!).map((item) => item.id);
   const expected: string[] = [];
-  for (let r = 0; expected.length < AGENT_ACTIVITY_TOTAL_SLACK + 1; r += 1) {
+  for (let r = 0; expected.length < 200 + 1; r += 1) {
     for (const id of agents) {
-      if (expected.length < AGENT_ACTIVITY_TOTAL_SLACK + 1) expected.push(`${id}-row-${r}`);
+      if (expected.length < 200 + 1) expected.push(`${id}-row-${r}`);
     }
   }
   assert.deepEqual([...dropped].sort(), [...expected].sort());
@@ -215,13 +207,13 @@ test("messages trim past 2 000 + 200 without touching the activities, pending or
       activity: activity("approval.requested", { requestId: "r1", requestType: "command_execution_approval" })
     })
   ];
-  for (let index = 0; index < MESSAGE_RETENTION_LIMIT + MESSAGE_RETENTION_SLACK; index += 1) {
+  for (let index = 0; index < 2_000 + 200; index += 1) {
     events.push(message(index));
   }
   const before = foldThread(events);
-  const after = applyDomainEvent(before, message(MESSAGE_RETENTION_LIMIT + MESSAGE_RETENTION_SLACK));
-  assert.equal(after.items.length - after.activities.length, MESSAGE_RETENTION_LIMIT);
-  assert.equal(itemsDroppedByRetention(after).length, MESSAGE_RETENTION_SLACK + 1);
+  const after = applyDomainEvent(before, message(2_000 + 200));
+  assert.equal(after.items.length - after.activities.length, 2_000);
+  assert.equal(itemsDroppedByRetention(after).length, 200 + 1);
   assert.ok(itemsDroppedByRetention(after).every((item) => item.kind === "message"));
   assert.deepEqual(after.activities.map((row) => row.activityKind), ["task.started", "approval.requested"]);
   assert.deepEqual(after.pending.approvals.map((entry) => entry.requestId), ["r1"]);
@@ -236,16 +228,16 @@ test("a trim cuts every class at once, whichever one tripped it", () => {
   // LIMIT but inside theirs: the parent trigger fires, and the one trim cuts
   // both back to their limits.
   const events: DomainEvent[] = [created()];
-  for (let index = 0; index < MESSAGE_RETENTION_LIMIT + 100; index += 1) events.push(message(index));
-  for (let index = 0; index < ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK; index += 1) {
+  for (let index = 0; index < 2_000 + 100; index += 1) events.push(message(index));
+  for (let index = 0; index < 500 + 50; index += 1) {
     events.push(parentRow(index));
   }
   const before = foldThread(events);
   assert.equal(before.evicted, undefined, "no class passed its slack yet");
-  const last = parentRow(ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK);
+  const last = parentRow(500 + 50);
   const after = applyDomainEvent(before, last);
-  assert.equal(after.activities.length, ACTIVITY_RETENTION_LIMIT);
-  assert.equal(after.items.length - after.activities.length, MESSAGE_RETENTION_LIMIT);
+  assert.equal(after.activities.length, 500);
+  assert.equal(after.items.length - after.activities.length, 2_000);
   assert.deepEqual(after.evicted, { activities: true, messages: true });
 });
 
@@ -253,7 +245,7 @@ test("more open questions than the slack keep the trigger on without dropping th
   reset();
   const events: DomainEvent[] = [created()];
   // 60 open message-mode questions, then enough rows to pass the trigger.
-  for (let index = 0; index < ACTIVITY_RETENTION_SLACK + 10; index += 1) {
+  for (let index = 0; index < 50 + 10; index += 1) {
     events.push(
       ev("thread.activity-appended", {
         activity: activity(
@@ -268,23 +260,23 @@ test("more open questions than the slack keep the trigger on without dropping th
       })
     );
   }
-  for (let index = 0; index < ACTIVITY_RETENTION_LIMIT; index += 1) events.push(parentRow(index));
+  for (let index = 0; index < 500; index += 1) events.push(parentRow(index));
   const states = statesOf(events);
   const last = states.at(-1)!;
   // The questions count toward the trigger (60 + 500 > 550) but the trim keeps
   // them, and it finds nothing else old enough to drop: the arrays stay shared
   // and nothing reads as evicted.
   assert.ok(states.every((state) => itemsDroppedByRetention(state).length === 0));
-  assert.equal(last.activities.length, ACTIVITY_RETENTION_SLACK + 10 + ACTIVITY_RETENTION_LIMIT);
+  assert.equal(last.activities.length, 50 + 10 + 500);
   assert.equal(last.evicted, undefined);
-  assert.equal(last.pending.userInputs.length, ACTIVITY_RETENTION_SLACK + 10);
-  const next = applyDomainEvent(last, parentRow(ACTIVITY_RETENTION_LIMIT));
+  assert.equal(last.pending.userInputs.length, 50 + 10);
+  const next = applyDomainEvent(last, parentRow(500));
   assert.deepEqual(
     itemsDroppedByRetention(next).map((item) => item.id),
     ["p-0"],
     "each further row now trims the oldest droppable one, exactly as per-event retention did"
   );
-  assert.equal(next.pending.userInputs.length, ACTIVITY_RETENTION_SLACK + 10);
+  assert.equal(next.pending.userInputs.length, 50 + 10);
 });
 
 test("compaction markers are exempt in the parent window only", () => {
@@ -299,7 +291,7 @@ test("compaction markers are exempt in the parent window only", () => {
     })
   ];
   for (let index = 0; index < 300; index += 1) events.push(parentRow(index));
-  for (let index = 0; index <= AGENT_ACTIVITY_RETENTION_LIMIT + AGENT_ACTIVITY_RETENTION_SLACK - 1; index += 1) {
+  for (let index = 0; index <= 200 + 50 - 1; index += 1) {
     events.push(agentRow("ag", index));
   }
   const state = foldThread(events);
@@ -330,12 +322,12 @@ test("the legacy compaction marker is kept whatever its age, as context-compacti
     // A subagent's own legacy marker is an ordinary row of its agent's window.
     stateRow("agent-legacy-marker", { state: "compacted" }, "ag")
   ];
-  for (let index = 0; index < AGENT_ACTIVITY_RETENTION_LIMIT; index += 1) {
+  for (let index = 0; index < 200; index += 1) {
     events.push(agentRow("ag", index));
   }
   // The marker counts in no class: beside the three other state rows, this
   // fills the parent with exactly its limit plus slack of droppable rows.
-  const fill = ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK - 3;
+  const fill = 500 + 50 - 3;
   for (let index = 0; index < fill; index += 1) events.push(parentRow(index));
   const states = statesOf(events);
   assert.ok(
@@ -355,20 +347,20 @@ test("the legacy compaction marker is kept whatever its age, as context-compacti
       "state-compacting",
       "state-none",
       "agent-legacy-marker",
-      ...Array.from({ length: ACTIVITY_RETENTION_SLACK - 2 }, (_, index) => `p-${index}`)
+      ...Array.from({ length: 50 - 2 }, (_, index) => `p-${index}`)
     ],
     "the other states go with the oldest parent rows, the agent's marker with its agent's window"
   );
   assert.equal(after.activities[0]?.id, "legacy-marker", "the parent's legacy marker stays, still the oldest row");
   assert.equal(
     after.activities.filter((row) => row.agentId === undefined).length,
-    ACTIVITY_RETENTION_LIMIT + 1,
+    500 + 1,
     "the parent's last 500 rows, plus its marker"
   );
   // However many trims follow.
   let state = after;
   let trims = 0;
-  for (let index = fill + 1; index <= fill + 3 * (ACTIVITY_RETENTION_SLACK + 1); index += 1) {
+  for (let index = fill + 1; index <= fill + 3 * (50 + 1); index += 1) {
     state = applyDomainEvent(state, parentRow(index));
     if (itemsDroppedByRetention(state).length > 0) trims += 1;
   }
@@ -438,7 +430,7 @@ test("a running agent-owned call keeps its opening row through 1 200 of its own 
   assert.equal(lost, -1, `the opening row was dropped on chunk ${lost - from}`);
   const owned = (state: ThreadFoldState): number => state.activities.filter((row) => row.agentId === "sh1").length;
   assert.ok(
-    states.every((state) => owned(state) <= AGENT_ACTIVITY_RETENTION_LIMIT + AGENT_ACTIVITY_RETENTION_SLACK),
+    states.every((state) => owned(state) <= 200 + 50),
     "the agent's window stays within its limit and slack"
   );
   assert.ok(states.filter((state) => itemsDroppedByRetention(state).length > 0).length >= 15);
@@ -450,7 +442,7 @@ test("a running agent-owned call keeps its opening row under the ceiling across 
   const events: DomainEvent[] = [created(), running(), appended(opening), chunkRow("bgshell:sh1", 1, "sh1")];
   // Twelve agents, each inside its own window, together past the ceiling.
   const agents = ["a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l"];
-  for (let round = 0; round < AGENT_ACTIVITY_RETENTION_LIMIT; round += 1) {
+  for (let round = 0; round < 200; round += 1) {
     for (const id of agents) events.push(agentRow(id, round));
   }
   const states = statesOf(events);
@@ -463,7 +455,7 @@ test("a running agent-owned call keeps its opening row under the ceiling across 
     "the ceiling reached past the opening row: the call's own chunk, the next oldest row, went"
   );
   const agentRows = (state: ThreadFoldState): number => state.activities.filter((row) => row.agentId !== undefined).length;
-  assert.ok(states.every((state) => agentRows(state) <= AGENT_ACTIVITY_TOTAL_LIMIT + AGENT_ACTIVITY_TOTAL_SLACK));
+  assert.ok(states.every((state) => agentRows(state) <= 2_000 + 200));
 });
 
 for (const closer of ["tool.completed", "tool.denied"] as const) {
@@ -473,7 +465,7 @@ for (const closer of ["tool.completed", "tool.denied"] as const) {
     const events: DomainEvent[] = [created(), running(), appended(opening)];
     for (let index = 1; index <= 700; index += 1) events.push(chunkRow("build", index));
     const closedAt = events.push(appended(callRow(closer, "build", "build-end"))) - 1;
-    for (let index = 0; index < ACTIVITY_RETENTION_SLACK + 10; index += 1) events.push(parentRow(index));
+    for (let index = 0; index < 50 + 10; index += 1) events.push(parentRow(index));
     const states = statesOf(events);
     const trimSteps = states.flatMap((state, step) => (itemsDroppedByRetention(state).length > 0 ? [step] : []));
     assert.ok(trimSteps.filter((step) => step < closedAt).length >= 3, "trims reached past it while it ran");
@@ -489,8 +481,8 @@ for (const window of ["parent", "agent"] as const) {
     const agentId = window === "agent" ? "ag" : undefined;
     const [limit, slack] =
       window === "parent"
-        ? [ACTIVITY_RETENTION_LIMIT, ACTIVITY_RETENTION_SLACK]
-        : [AGENT_ACTIVITY_RETENTION_LIMIT, AGENT_ACTIVITY_RETENTION_SLACK];
+        ? [500, 50]
+        : [200, 50];
     const events: DomainEvent[] = [created(), running()];
     if (agentId !== undefined) {
       for (let index = 0; index < 520; index += 1) events.push(parentRow(index));
@@ -517,13 +509,13 @@ for (const window of ["parent", "agent"] as const) {
       const dropped = itemsDroppedByRetention(state).filter((item) => item.kind === "activity" && item.agentId === agentId);
       if (dropped.length === 0) return;
       trims += 1;
-      assert.ok(dropped.length >= slack - OPEN_WORK_RETENTION_LIMIT, `step ${step}: the trim freed ${dropped.length} rows`);
-      assert.ok(step - previousTrim >= slack - OPEN_WORK_RETENTION_LIMIT, `step ${step}: a trim ${step - previousTrim} steps after the last`);
+      assert.ok(dropped.length >= slack - 16, `step ${step}: the trim freed ${dropped.length} rows`);
+      assert.ok(step - previousTrim >= slack - 16, `step ${step}: a trim ${step - previousTrim} steps after the last`);
       previousTrim = step;
       // All the trim kept past the window's newest rows: at most 16 openings.
       const rows = rowsOf(state);
       const keptPast = rows.slice(0, rows.length - limit);
-      assert.ok(keptPast.length <= OPEN_WORK_RETENTION_LIMIT, `step ${step}: ${keptPast.length} rows kept past the window`);
+      assert.ok(keptPast.length <= 16, `step ${step}: ${keptPast.length} rows kept past the window`);
       assert.ok(keptPast.every((row) => row.activityKind === "tool.started"), `step ${step}: only openings`);
     });
     assert.ok(trims >= 15, `trims: ${trims}`);
@@ -591,17 +583,17 @@ test("the ceiling's slots go to openings that survived their own window: those a
   }
   // Agent `a`'s own rows put its thirty openings behind its newest 200; then its calls print, and its 251st row trims
   // its window — its cap keeps sixteen openings — with the rows across agents past the ceiling.
-  for (let index = 0; index < AGENT_ACTIVITY_RETENTION_LIMIT; index += 1) events.push(agentRow("a", 1_000 + index));
+  for (let index = 0; index < 200; index += 1) events.push(agentRow("a", 1_000 + index));
   for (let index = 0; index < 21; index += 1) events.push(chunkRow(`a-call-${index}`, index, "a"));
   const states = statesOf(events);
   const trimAt = states.findIndex((state) => itemsDroppedByRetention(state).length > 0);
   assert.equal(trimAt, events.length - 1, "one trim, at the last row");
   const trimmed = states[trimAt]!;
   const held = (rows: readonly ThreadActivityItem[]): number => rows.filter((row) => trimmed.activities.some((entry) => entry.id === row.id)).length;
-  assert.equal(held(busy), OPEN_WORK_RETENTION_LIMIT, "agent a's own cap kept sixteen of its thirty openings");
+  assert.equal(held(busy), 16, "agent a's own cap kept sixteen of its thirty openings");
   assert.equal(
     held(quiet),
-    OPEN_WORK_TOTAL_RETENTION_LIMIT - OPEN_WORK_RETENTION_LIMIT,
+    64 - 16,
     "the ceiling's other 48 slots went to the quiet agents' openings, not to the fourteen agent a's cap dropped"
   );
 });
@@ -639,7 +631,7 @@ test("a running background shell keeps its task.started through 600 parent rows,
   );
   state = applyDomainEvent(state, appended(callRow("tool.completed", "bgshell:sh1", "shell-call-end", "sh1")));
   let droppedStart = false;
-  for (let index = 600; index < 600 + ACTIVITY_RETENTION_SLACK + 10; index += 1) {
+  for (let index = 600; index < 600 + 50 + 10; index += 1) {
     state = applyDomainEvent(state, parentRow(index));
     if (itemsDroppedByRetention(state).some((row) => row.id === "shell-start")) droppedStart = true;
   }
@@ -664,7 +656,7 @@ test("evicted: absent until a trim drops something, then only ever grows, and su
     ev("thread.activity-appended", {
       activity: activity("tool.completed", { toolUseId: `p${index}` }, { id: `p-${index}`, turnId: "T-1" })
     });
-  for (let index = 0; index <= ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK; index += 1) {
+  for (let index = 0; index <= 500 + 50; index += 1) {
     events.push(turnRow(index));
   }
   const states = statesOf(events);
@@ -675,12 +667,12 @@ test("evicted: absent until a trim drops something, then only ever grows, and su
 
   // A later activity trim preserves flags; a message trim adds its flag.
   let state = states.at(-1)!;
-  for (let index = 0; index <= ACTIVITY_RETENTION_SLACK; index += 1) {
+  for (let index = 0; index <= 50; index += 1) {
     state = applyDomainEvent(state, turnRow(1_000 + index));
   }
   assert.ok(itemsDroppedByRetention(state).length > 0, "a second trim ran");
   assert.deepEqual(state.evicted, { activities: true, messages: false });
-  for (let index = 0; index <= MESSAGE_RETENTION_LIMIT + MESSAGE_RETENTION_SLACK; index += 1) {
+  for (let index = 0; index <= 2_000 + 200; index += 1) {
     state = applyDomainEvent(state, message(index));
   }
   assert.deepEqual(state.evicted, { activities: true, messages: true });

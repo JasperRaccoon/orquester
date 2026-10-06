@@ -606,7 +606,7 @@ describe("§3.2 boot: pending seed, correlated cache, forced boot probe", () => 
       probe.next = snapshotFor("claude", { version: "2.1.210" });
       probe.gate.open();
       probe.gate = undefined;
-      await registry.refreshAllNow();
+      await registry.refresh("claude");
       await registry.flush();
 
       assert.equal(registry.get("claude")?.status, "ready");
@@ -631,7 +631,7 @@ describe("§3.2 boot: pending seed, correlated cache, forced boot probe", () => 
           await new Promise<void>((resolve) => setImmediate(resolve));
 
           assert.equal(probe.calls, 0, "boot must serve the correlated cache without a live probe");
-          await registry.refreshAllNow();
+          await registry.refresh("claude");
           assert.equal(probe.calls, 1, "an explicit refresh still probes the provider");
         },
         { stateDir, binPath: "/usr/bin/claude" }
@@ -644,10 +644,10 @@ describe("§3.2 boot: pending seed, correlated cache, forced boot probe", () => 
   it("the first watcher's priming is a no-op once the boot probe has run", async () => {
     await withSeeded(async ({ registry, probe }) => {
       registry.startBootRefresh();
-      await registry.refreshAllNow();
+      await registry.refresh("claude");
       const after = probe.calls;
       const release = registry.addWatcher();
-      await registry.refreshAllNow();
+      await registry.refresh("claude");
       // The watcher itself added no extra pass; only the explicit one above.
       assert.equal(probe.calls, after + 1);
       release();

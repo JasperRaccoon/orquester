@@ -1,0 +1,1273 @@
+UI other tests — completed cleanup and exhaustive disposition record.
+Scope: all packages/ui tests/checks except lib/agent-chat, components/agent-chat, lib/workflows, components/workflows.
+Read: AGENTS.md, README.md, packages/ui/package.json, test bodies, production owners and relevant design/wire requirements.
+Independent failure inventory for isolated units is recorded per file below; each named case exercises a distinct input/state in that inventory.
+Validation V: from packages/ui, node --import tsx --import ../../scripts/test/assert-ok.mjs --import ./test/svg-loader.mjs --import ../../scripts/test/quiet-mock-timers.mjs --test --test-concurrency=2 <retained .test.ts files>; execute retained .check.ts with the same loaders. Parent runs repository gates.
+Default risk: low for deleted redundant assertions; medium for removing test-only audio timing/state interfaces, checked by focused protocol tests and typecheck.
+Shared KEEP/REWRITE bar 3: expected literals, outcomes and payloads are fixture-specified, never imported owner constants or owner-derived oracles after rewrites. Bar 5: assert public state/data/effects, not private ordering/identity except React snapshot identity explicitly required by useSyncExternalStore.
+Shared bar 6: each owner is the lowest stable seam for its UI policy. Daemon/API tests validate transport/data independently but cannot detect browser cache, form, navigation or keyboard decisions. Channel-router integration tests cover channel dispatch, not duplicate per-store mutation policy.
+
+packages/ui/src/components/command-palette/conversation-search.test.ts
+  Bar 1 / independent source: thread-index and lazy-boot design Search/Client; ThreadSearchResponse marked snippet/error protocol.
+  Bar 2 / failure inventory: search mode wrong, matches swallowed, or retryable errors hidden.
+  Bar 4 / seam and non-test callers: CommandPalette; input/query/snippet/result models.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: switches to search when `?` is typed first, and keeps the rest as the query
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: leaves an ordinary query alone
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: treats a `?` typed inside the mode as text
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: trims, and sends nothing for blank input
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: never sends more than the host would read
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: splits a snippet on its «marks»
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: keeps a snippet without marks, or with an unclosed one, as plain text
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: says the index is unavailable only when the host answers `indexed: false`
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: never reads an HTTP error as an unavailable index — it is a failure worth retrying
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: says there are no matches, rather than showing nothing
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: shows the previous results while the next search runs
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: surfaces any other failure in words
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: says when more matched than it shows
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/components/desktop/desktop-keys.test.ts
+  Bar 1 / independent source: desktop-tab design §§7.2,10,11.2; DesktopSummary/LaunchAppRequest and persisted viewer preferences.
+  Bar 2 / failure inventory: lost/wrong desktop data, invalid launch requests, unavailable controls, incorrect wire input or broken adaptive streaming.
+  Bar 4 / seam and non-test callers: DesktopView, LaunchAppDialog, app store, MainView; storage, request builders, socket channel and state transitions.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: Latin-1 characters are their own keysym
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: other code points use the Unicode keysym range
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  REWRITE: newline and tab map to Return and Tab; other controls are dropped
+    Literal X11/RFB keysyms replace owner XK constants; wrong table and mapper can no longer agree silently.
+  REWRITE: text splits by code point, not UTF-16 unit
+    Literal X11/RFB keysyms replace owner XK constants; wrong table and mapper can no longer agree silently.
+  REWRITE: named keys
+    Literal X11/RFB keysyms replace owner XK constants; wrong table and mapper can no longer agree silently.
+
+packages/ui/src/components/desktop/launch-dialog-model.test.ts
+  Bar 1 / independent source: desktop-tab design §§7.2,10,11.2; DesktopSummary/LaunchAppRequest and persisted viewer preferences.
+  Bar 2 / failure inventory: lost/wrong desktop data, invalid launch requests, unavailable controls, incorrect wire input or broken adaptive streaming.
+  Bar 4 / seam and non-test callers: DesktopView, LaunchAppDialog, app store, MainView; storage, request builders, socket channel and state transitions.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: suggestions list recents, then .desktop entries by name, then executables as ./path
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an executable path keeps an explicit prefix
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: empty input lists the first suggestions; typing fuzzy-matches name and command
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an input that already is a suggestion's command lists nothing
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  REWRITE: the command must be one non-empty line within the limit
+    Retains validation outcomes and wire size boundary without requiring error copy.
+  KEEP: env rows: blanks ignored, keys validated, duplicates refused
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  REWRITE: rows round-trip a recent launch's env
+    Retains environment values through form conversion, deletes synthetic row-id/order assertions.
+  KEEP: the launch request trims, and omits an empty cwd and env
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a new desktop sends size and render threads only when not the defaults
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  REWRITE: daemon errors show their message and a 409's install hint
+    Checks daemon reason and install hint independently of separator typography.
+
+packages/ui/src/components/right-rail/agent-profile/default-agent.test.ts
+  Bar 1 / independent source: agent-profile design §§6–8 and packages/api/src/agent-profile.ts; AGENTS.md tolerant payloads and host-only secrets.
+  Bar 2 / failure inventory: wrong agent/item, lost native configuration, secret replacement, stale mutation, stale cache or inaccessible matching data.
+  Bar 4 / seam and non-test callers: AgentProfilePanel and its editors, app event router; profile store actions, form-to-wire drafts and list decisions.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: is the provider serving the tab's refId
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: falls back to the registry's chat adapter while the providers have not loaded
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: is none for no tab, or an agent this panel has no profile for
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: is the visible chat tab's agent first
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: else the one last picked
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: passes over an agent known not to be installed
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/components/right-rail/agent-profile/editor/markdown.logic.test.ts
+  Bar 1 / independent source: agent-profile design §§6–8 and packages/api/src/agent-profile.ts; AGENTS.md tolerant payloads and host-only secrets.
+  Bar 2 / failure inventory: wrong agent/item, lost native configuration, secret replacement, stale mutation, stale cache or inaccessible matching data.
+  Bar 4 / seam and non-test callers: AgentProfilePanel and its editors, app event router; profile store actions, form-to-wire drafts and list decisions.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: a new skill's switches start at the CLI's defaults and send nothing until changed
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: editing keeps unknown keys and type-mismatched keys untouched, and removes a cleared key
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a command carries no frontmatter name and keeps a name key found on disk
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: names: Grok's commands are flat files — a folder is refused before the daemon does
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: validation: a skill needs its description and a body; a command's description is optional
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/components/right-rail/agent-profile/editor/mcp.logic.test.ts
+  Bar 1 / independent source: agent-profile design §§6–8 and packages/api/src/agent-profile.ts; AGENTS.md tolerant payloads and host-only secrets.
+  Bar 2 / failure inventory: wrong agent/item, lost native configuration, secret replacement, stale mutation, stale cache or inaccessible matching data.
+  Bar 4 / seam and non-test callers: AgentProfilePanel and its editors, app event router; profile store actions, form-to-wire drafts and list decisions.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: splitCommandLine splits like a shell: quotes, escapes, continuations, no expansion
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a pasted command line becomes command + args, with leading assignments as env
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: secret drafts: untouched rows keep, replaced and new rows send a value, removed rows are absent
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: secret rows: bad keys, duplicates (headers case-insensitively) and an empty replacement are refused
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: the stdio draft carries command, args, cwd and env; the http draft url and headers only
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: advanced fields are coerced by type; unknown keys on disk pass through; blanks are left out
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: validation: stdio needs a command, http a real http(s) URL, numbers must parse
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: editing an SSE server preserves its transport in the saved draft
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/components/right-rail/agent-profile/editor/saved.test.ts
+  Bar 1 / independent source: agent-profile design §§6–8 and packages/api/src/agent-profile.ts; AGENTS.md tolerant payloads and host-only secrets.
+  Bar 2 / failure inventory: wrong agent/item, lost native configuration, secret replacement, stale mutation, stale cache or inaccessible matching data.
+  Bar 4 / seam and non-test callers: AgentProfilePanel and its editors, app event router; profile store actions, form-to-wire drafts and list decisions.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: a save puts the answer's snapshot in the store and tells the panel what changed
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an answer without a usable snapshot still tells the panel, and leaves the store alone
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/components/right-rail/agent-profile/editor/small-editors.logic.test.ts
+  Bar 1 / independent source: agent-profile design §§6–8 and packages/api/src/agent-profile.ts; AGENTS.md tolerant payloads and host-only secrets.
+  Bar 2 / failure inventory: wrong agent/item, lost native configuration, secret replacement, stale mutation, stale cache or inaccessible matching data.
+  Bar 4 / seam and non-test callers: AgentProfilePanel and its editors, app event router; profile store actions, form-to-wire drafts and list decisions.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: hook: the matcher is left out for events that ignore it, and when blank
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: hook: a multi-line command keeps its inner lines
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: hook: the agent's events, an unlisted event on disk kept selectable, validation
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: plugin: marketplaces from the snapshot, filtering, OpenCode specs
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: marketplace: GitHub repos (URLs normalised), git URLs, paths; ref only where it applies
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: import: new candidates start ticked; collisions among the picks ask first
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: import: git URLs, upload names, upload progress
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: copy: every other agent; only the source agent's own items of the kind
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: instructions: overwrite re-reads for the fresh revision, then writes mine
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: errors: the daemon's nested code and message; placement by code
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/components/right-rail/agent-profile/list.logic.test.ts
+  Bar 1 / independent source: agent-profile design §§6–8 and packages/api/src/agent-profile.ts; AGENTS.md tolerant payloads and host-only secrets.
+  Bar 2 / failure inventory: wrong agent/item, lost native configuration, secret replacement, stale mutation, stale cache or inaccessible matching data.
+  Bar 4 / seam and non-test callers: AgentProfilePanel and its editors, app event router; profile store actions, form-to-wire drafts and list decisions.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: a kind the agent should not have (another daemon version) gets a tab while it has items, after the rest
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: shows the remembered tab when it is one of the agent's, else the agent's first
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: reads a saved item's kind off its id
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: the search matches every word in the name, description, source or meta, any case
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: shows the tab's kind; a search looks across every kind, whatever the tab
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: groups in the agent's kind order, each sorted by name, empty kinds left out
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a kind the agent should not have (another daemon version) still shows, after the rest
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: not installed wins over everything
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: loading, then an error with its message, while there is no snapshot
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: no matches while searching, else the empty tab's own state
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: knows an agent is not installed from its snapshot, its refusal, or the overview
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: its tooltip carries the adapter's off-switch caveat while on
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: copies only copyable kinds, to the other installed agents that have the kind
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: names where an inherited item is managed
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: lists the four agents, installed as the snapshot, else the overview, says
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/components/right-rail/dock-keyboard.test.ts
+  Bar 1 / independent source: agent-chat/right-rail keyboard ownership and IME semantics.
+  Bar 2 / failure inventory: dock digits answer agent questions or Escape leaks to interrupt.
+  Bar 4 / seam and non-test callers: RightRailDock; dockKeyAction.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: an Escape nothing inside the dock handled leaves the dock
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an Escape the panel consumed (the search field clearing itself) stays the panel's
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an Escape an open dropdown, menu or dialog of the panel closes is that layer's alone
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an IME composition's Escape cancels the composition, nothing else
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a held Escape leaves once: its auto-repeat is not another press
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: keys from a portaled child (a dropdown the panel opened) are never the dock's
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: every other key typed in the dock is contained there
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/components/right-rail/history/history-format.test.ts
+  Bar 1 / independent source: Unicode integrity regression in history prompt preview.
+  Bar 2 / failure inventory: preview exposes half an emoji surrogate.
+  Bar 4 / seam and non-test callers: HistoryPanel; previewText.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  REWRITE: never ends on half a surrogate pair
+    Checks original text survives too; returning an empty preview cannot satisfy Unicode integrity.
+
+packages/ui/src/components/right-rail/right-rail-state.test.ts
+  Bar 1 / independent source: AGENTS.md tolerant persisted configuration; React useSyncExternalStore stable snapshot contract.
+  Bar 2 / failure inventory: stored panel lost, unavailable storage crashes, or subscriber loops.
+  Bar 4 / seam and non-test callers: RightRailDock; public rail actions, subscriber and localStorage.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: a well-formed payload round-trips
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: each field is validated on its own: one bad field never costs the others
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: the workflows panel is a panel like the others
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: the agent profile panel is a panel like the others
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: malformed stored widths fall back without losing the panel
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a payload written by another version is still read field by field
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: load and save swallow storage errors and missing storage
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: toggling opens, switches and closes the dock — and persists every change
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a live drag updates the state only; the release persists it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: subscribers hear real changes only, and can unsubscribe
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a storage that throws never breaks the store
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/components/right-rail/saved-prompts/deliver.test.ts
+  Bar 1 / independent source: SavedPrompt API create/update/event contracts; AGENTS.md Right rail, tolerant storage and shared UI state; credible concurrent-edit and wrong-chat regressions.
+  Bar 2 / failure inventory: lost/overwritten saved text, wrong project/chat delivery, stale cache, duplicate save, invalid mutation or unusable search.
+  Bar 4 / seam and non-test callers: SavedPromptsPanel, SavedPromptEditor, chat-target and composer menu; public store, saver/deliverer and form/request/list seams.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: renders for the chat captured at the click, delivers there, and counts the use
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: refuses when another chat is on screen once the prompt is rendered — nothing lands, nothing counted
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: with no chat at the click, refuses at once and renders nothing
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a click supersedes the one still resolving: the first lands nowhere, its git reads stop
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: dispose (the panel going away) stops the delivery in flight
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: counts the use only when the chat took it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/components/right-rail/saved-prompts/editor-save.test.ts
+  Bar 1 / independent source: SavedPrompt API create/update/event contracts; AGENTS.md Right rail, tolerant storage and shared UI state; credible concurrent-edit and wrong-chat regressions.
+  Bar 2 / failure inventory: lost/overwritten saved text, wrong project/chat delivery, stale cache, duplicate save, invalid mutation or unusable search.
+  Bar 4 / seam and non-test callers: SavedPromptsPanel, SavedPromptEditor, chat-target and composer menu; public store, saver/deliverer and form/request/list seams.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: an edit that changes nothing sends nothing, and closes
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an invalid draft is not sent
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: one save at a time: a second while the first is in flight is not sent
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: closed while saving: a success still lands and is revealed
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: closed while saving: a failure becomes the panel's notice
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a request that throws is a failure, and the guard is released
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/components/right-rail/saved-prompts/editor.logic.test.ts
+  Bar 1 / independent source: SavedPrompt API create/update/event contracts; AGENTS.md Right rail, tolerant storage and shared UI state; credible concurrent-edit and wrong-chat regressions.
+  Bar 2 / failure inventory: lost/overwritten saved text, wrong project/chat delivery, stale cache, duplicate save, invalid mutation or unusable search.
+  Bar 4 / seam and non-test callers: SavedPromptsPanel, SavedPromptEditor, chat-target and composer menu; public store, saver/deliverer and form/request/list seams.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: a title and a body are required — as missing, not as errors
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: mirrors every limit
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a create: the whole record, normalised; This project = the open project
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an edit: only the fields that changed
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an edit moves a prompt only when its scope changes — and to the open project
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: never cuts an emoji in half
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: inserts at the caret, or over the selection, and puts the caret after it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/components/system/session-owner.check.ts
+  Bar 1 / independent source: archived-data curtain; SessionSummary/WorkspaceSummary project identity.
+  Bar 2 / failure inventory: archived session title disclosed or project navigation wrong.
+  Bar 4 / seam and non-test callers: System SessionChip; resolveSessionOwner.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: top-level contract assertions
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/components/system/system-format.check.ts
+  Bar 1 / independent source: SystemProcessInfo and process-kill error protocol; credible recycled-pid cycle.
+  Bar 2 / failure inventory: tree loops, managed pid omitted or kill refusal misclassified.
+  Bar 4 / seam and non-test callers: System process tree and kill controls; forest/subtree/error API.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: top-level contract assertions
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/components/topbar/usage-format.check.ts
+  Bar 1 / independent source: ProviderUsageLimitsUpdate sparse windows and AgentUsage API; README usage widget.
+  Bar 2 / failure inventory: quota pool disappears/duplicates or wrong provider/capacity shown.
+  Bar 4 / seam and non-test callers: UsageWidget and app event state; normalized data and driver selection.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: top-level contract assertions
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/components/topbar/usage-format.test.ts
+  Bar 1 / independent source: ProviderUsageLimitsUpdate sparse windows and AgentUsage API; README usage widget.
+  Bar 2 / failure inventory: quota pool disappears/duplicates or wrong provider/capacity shown.
+  Bar 4 / seam and non-test callers: UsageWidget and app event state; normalized data and driver selection.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: a sparse update replaces only the windows it names
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a window the daemon's own poll already covers is dropped, not printed twice
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/icons/registry-icons.test.ts
+  Bar 1 / independent source: RegistryKind wire data and credible prototype-member refId render crash.
+  Bar 2 / failure inventory: wire refId causes React rendering to throw.
+  Bar 4 / seam and non-test callers: RegistryIcon and tabs/agent pickers; rendered getRegistryIcon.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: an id naming an Object.prototype member falls back to the generic icon instead of crashing
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/agent-auth-notice.test.ts
+  Bar 1 / independent source: agent-chat GUI §7.7 auth dismissal and distinct provider verdicts.
+  Bar 2 / failure inventory: dismissed toast returns or a new provider auth failure is hidden.
+  Bar 4 / seam and non-test callers: app store and AgentAuthErrorToast; dismissal registry.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: a dismissal sticks across the re-publish the provider load causes
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a DIFFERENT message on the same provider still gets through
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: the same message on a different provider still gets through
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: the key spans [adapterId, status, auth.status, message] (T3's banner key)
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/agent-chat-active-tab.test.ts
+  Bar 1 / independent source: agent-chat GUI keyboard ownership; credible hidden-tab answer/send regression.
+  Bar 2 / failure inventory: a hidden tab receives a send/answer or popover dismisses during activation.
+  Bar 4 / seam and non-test callers: MainView and chat key handlers; active-tab registry and derivation.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: only the published tab is active; every other mounted tab is not
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: no chat tab showing means no chat tab owns the keyboard
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: subscribers see each change once and never a repeat of the same id
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a tab releases the keyboard only while it still holds it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: the active chat tab is the one showing, not merely one that is mounted
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a terminal tab on screen means NO chat tab owns the keyboard
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: no active tab, or an id naming none, owns nothing
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a popover subscribed while its unfocused grid cell is being activated stays open
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/agent-profile/app-wiring.test.ts
+  Bar 1 / independent source: agent-profile design §§6–8 and packages/api/src/agent-profile.ts; AGENTS.md tolerant payloads and host-only secrets.
+  Bar 2 / failure inventory: wrong agent/item, lost native configuration, secret replacement, stale mutation, stale cache or inaccessible matching data.
+  Bar 4 / seam and non-test callers: AgentProfilePanel and its editors, app event router; profile store actions, form-to-wire drafts and list decisions.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: agentProfile.changed on the agent-profile channel refetches the loaded agent
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: the same message on another channel does not
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/agent-profile/store.test.ts
+  Bar 1 / independent source: agent-profile design §§6–8 and packages/api/src/agent-profile.ts; AGENTS.md tolerant payloads and host-only secrets.
+  Bar 2 / failure inventory: wrong agent/item, lost native configuration, secret replacement, stale mutation, stale cache or inaccessible matching data.
+  Bar 4 / seam and non-test callers: AgentProfilePanel and its editors, app event router; profile store actions, form-to-wire drafts and list decisions.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: keeps a well-formed snapshot as it is
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: refuses a snapshot that names no known agent
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: drops malformed items rather than failing the snapshot, and keeps the first of a duplicate id
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: fails permissions closed and locks everything on a locked item
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: repairs the source, the warnings and the meta
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: repairs the instructions and the file errors, and tolerates a missing list
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: sanitizes the overview: known agents once, counts of known kinds only
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: loads a snapshot, and a second unforced load asks nothing
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: is single-flight: concurrent callers share one request
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a forced load during one in flight asks once more after it — shared by every forced caller
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a first load that fails is an error; a refresh that fails keeps the snapshot beside the error
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: keeps the daemon's refusal code for a not-installed agent
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an answer for another agent or in a bad shape is an error, not state
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: loads the overview, sanitized
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: marks everything loaded stale on a reconnect, and a load crossing it asks again
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: refetches a loaded agent whose revision moved
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: does nothing for the revision already held
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: does not fetch an agent that was never loaded
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: refreshes a loaded overview too
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a change during an agent's FIRST load asks once more after it (that answer may predate the change)
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: ignores a malformed payload or another type without a throw
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: replaces the snapshot with the answer's and says so, the change carrying the item's revision
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: the daemon's notes become the notice
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a 409 PROFILE_CONFLICT refetches the agent and says it changed on disk
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: another refusal becomes the notice in the daemon's words
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: AGENT_NOT_INSTALLED refetches the agent and the overview (the picker learns it)
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a copy lands the TARGET's snapshot on the target
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a copy whose name is taken answers ITEM_EXISTS quietly; the retry carries onConflict
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an answer whose snapshot does not parse refetches instead
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a load that started before a mutation answered does not overwrite the mutation's snapshot
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: forgets everything, and an answer in flight across it is dropped
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a client of another connection resets first
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: after a reset an event refetches nothing (no client bound)
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: parses field by field, and anything unusable is no pick
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: keeps a tab only for a known agent that has that kind
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: serializes over what another bundle stored, keeping its fields and tabs
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: reads stored selections, remembers each agent's tab, and keeps preferences across a reset
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a storage that throws leaves the pick and the tabs in memory
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/app-config.check.ts
+  Bar 1 / independent source: AGENTS.md validate localStorage; AppConfig schema and legacy usage migration.
+  Bar 2 / failure inventory: old/corrupt storage breaks startup or missing fields override host defaults.
+  Bar 4 / seam and non-test callers: web bootstrap and app store; localStorage adapter.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: top-level contract assertions
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/chat-prefs.test.ts
+  Bar 1 / independent source: agent-chat GUI §§4.4,7.4 and persisted-shape rule in AGENTS.md.
+  Bar 2 / failure inventory: malformed/old preferences crash or change permission/followup choices.
+  Bar 4 / seam and non-test callers: app store and launchers; loadChatPrefs/runtimeModeForAgent.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: a missing or non-object blob falls back whole
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a blob from an older bundle keeps the fields it does have
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: wrong-typed fields are dropped, not coerced
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: only known permission modes survive the per-agent map
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an agent with no remembered mode gets the full-access default
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/composer-inbox.test.ts
+  Bar 1 / independent source: agent-chat GUI §7.4: uploaded/design feedback becomes a draft with host attachment paths.
+  Bar 2 / failure inventory: delivery lost before mount, replayed, crossed sessions or sent with unusable file id.
+  Bar 4 / seam and non-test callers: PickComposeSheet, composer and app store; delivery queue.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: a delivery made before the composer mounts is waiting for it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a mounted composer receives deliveries directly and nothing queues
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: after unsubscribing, deliveries queue again
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: deliveries are per session and never cross
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: clearing a closed tab drops what was queued for it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a delivery becomes draft text plus one attachment path per line
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: either half alone stands on its own, and an empty delivery is empty text
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/copy-produced.test.ts
+  Bar 1 / independent source: browser Clipboard write user-activation contract; credible WebKit delayed-read and unhandled-rejection regressions.
+  Bar 2 / failure inventory: copy rejected after user activation expires, partial text copied or unhandled rejection.
+  Bar 4 / seam and non-test callers: CopyButton; copyProduced with browser clipboard interface.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: a string is written with writeText at once, inside the click
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a text still being read starts write() inside the click, and copies it once read
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: without ClipboardItem, or without write(), a text being read falls back to writeText once read
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a read that fails copies nothing down either path, and never the cut text
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a write refused without reading its item leaves nothing unhandled when the read fails too
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: with no async clipboard at all (an insecure origin) nothing is copied, and a failing read is still observed
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/desktop-audio/controller.test.ts
+  Bar 1 / independent source: desktop-tab design §§7.2,8.2,13.3: framed audio, active/unlocked/unmuted streams, bounded adaptive latency and smooth samples.
+  Bar 2 / failure inventory: incorrect playback, background audio, clicks, unbounded latency, broken reconnect or corrupt protocol frames.
+  Bar 4 / seam and non-test callers: DesktopView / use-desktop-audio and player.worklet; controller.update/socket callbacks and JitterBuffer.push/render/stats.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  DELETE: the socket is wanted only with a url, an active tab, unlocked sound and no mute
+    Predicate mirrors implementation; rewritten controller policy test supplies independent fixed decisions.
+  REWRITE: the controller opens and closes the socket by the same table
+    Literal policy cases and real socket effects replace the production-derived oracle and private streaming getter.
+  KEEP: staying in the playing state keeps the one socket
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a new url (fresh token) replaces the socket
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: no socket without a usable decoder; none until detection finishes
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: volume drives the gain; mute zeroes it and closes the socket
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  REWRITE: parseAudioPacket reads the 8-byte header and validates the type
+    Fixed protocol frames now flow through socket to decoder, with unsigned BE sequence/payload expectations; private parser export removed.
+  REWRITE: parseAudioServerMessage accepts state and pong only
+    Socket text now updates actual viewer snapshot; malformed data must leave valid state intact. Private parser export removed.
+  KEEP: packets reach the decoder in order and a seq gap inserts nothing
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  DELETE: state messages become serverState
+    Duplicated by rewritten socket state test, which also rejects malformed messages.
+  KEEP: decoded frames wait for the player, then flow; closing disposes both
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  REWRITE: keepalive pings every 10 s and drops a silent connection
+    Specified 10000 ms replaces owner timeout constant; assert error state rather than exact UI copy.
+  REWRITE: an unexpected close reconnects with growing backoff; data resets it
+    Retains backoff and recovery assertions; daemon reason must survive without fixing UI sentence prose.
+  KEEP: pausing cancels a pending reconnect
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a decoder error tears the stream down and retries
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: dispose closes everything and a later update reopens (StrictMode remount)
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/desktop-audio/jitter-buffer.test.ts
+  Bar 1 / independent source: desktop-tab design §§7.2,8.2,13.3: framed audio, active/unlocked/unmuted streams, bounded adaptive latency and smooth samples.
+  Bar 2 / failure inventory: incorrect playback, background audio, clicks, unbounded latency, broken reconnect or corrupt protocol frames.
+  Bar 4 / seam and non-test callers: DesktopView / use-desktop-audio and player.worklet; controller.update/socket callbacks and JitterBuffer.push/render/stats.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  REWRITE: ${ppm > 0 ? "+" : ""}${ppm} ppm drift over 2 simulated hours keeps depth ≤ target + 40 ms
+    Both +100 and -100 cases: independent specified 40 ms overflow margin; observe production stats instead of private getters.
+  REWRITE: a burst after a 300 ms stall recovers without growing latency
+    Independent 40 ms bound and production stats API retain bounded latency and smooth output.
+  REWRITE: underruns raise the target by 10 ms up to 150 ms
+    Drive push/render until public underrun stats advances; no test-only isPlaying API.
+  REWRITE: stable periods lower the target by 5 ms per 30 s down to 20 ms
+    Observe target from production stats API, permitting private getter removal.
+  REWRITE: an overflow drop crossfades instead of stepping
+    Independent 40 ms limit and public stats preserve smooth audible overflow recovery.
+  REWRITE: an underrun ramps to silence and the restart fades in
+    Shared simulation reads production stats, not private getters; retains silence and smoothness checks.
+  REWRITE: underrun partway through a fade-in blends from the ramp instead of jumping
+    Public underrun counter determines refill, production default fade is exercised; no isPlaying or fade injection.
+  DELETE: reset forgets buffered audio but keeps the learned target
+    Kept unreachable reset API alive; no production caller. Streams dispose the worklet and reuse learned target through controller stats.
+  KEEP: a mono packet plays on both channels
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/desktop-prefs.test.ts
+  Bar 1 / independent source: desktop-tab design §§7.2,10,11.2; DesktopSummary/LaunchAppRequest and persisted viewer preferences.
+  Bar 2 / failure inventory: lost/wrong desktop data, invalid launch requests, unavailable controls, incorrect wire input or broken adaptive streaming.
+  Bar 4 / seam and non-test callers: DesktopView, LaunchAppDialog, app store, MainView; storage, request builders, socket channel and state transitions.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: non-touch default is fit, unmuted, full volume
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: touch default is fixed 1280×800, scaled
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: write then read round-trips under orq.desktop.prefs.<id>
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: clear removes the key
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: corrupt JSON falls back to the device default
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  REWRITE: invalid fields fall back one by one
+    Malformed/legacy JSON is exercised through production readDesktopPrefs and storage; private sanitizer export removed.
+  REWRITE: a fixed view always gets a valid size and mode
+    Malformed/legacy JSON is exercised through production readDesktopPrefs and storage; private sanitizer export removed.
+  REWRITE: fit keeps a remembered fixed choice for switching back
+    Malformed/legacy JSON is exercised through production readDesktopPrefs and storage; private sanitizer export removed.
+  KEEP: works with no localStorage at all
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/desktop-quality.test.ts
+  Bar 1 / independent source: desktop-tab design §§7.2,10,11.2; DesktopSummary/LaunchAppRequest and persisted viewer preferences.
+  Bar 2 / failure inventory: lost/wrong desktop data, invalid launch requests, unavailable controls, incorrect wire input or broken adaptive streaming.
+  Bar 4 / seam and non-test callers: DesktopView, LaunchAppDialog, app store, MainView; storage, request builders, socket channel and state transitions.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  DELETE: starts at quality 6
+    Redundant: retained step-down and strict-threshold cases assert the same default before exercising behavior.
+  KEEP: 3 consecutive slow samples step down one level
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: steps 6 → 4 → 2 and stops at 2
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: the thresholds are strict: exactly 150 ms is not slow, exactly 50 ms is not fast
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a sample in between breaks the streak
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: 5 consecutive fast samples step up one level, up to 6
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a slow sample resets the fast streak and vice versa
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/desktop-state.test.ts
+  Bar 1 / independent source: desktop-tab design §§7.2,10,11.2; DesktopSummary/LaunchAppRequest and persisted viewer preferences.
+  Bar 2 / failure inventory: lost/wrong desktop data, invalid launch requests, unavailable controls, incorrect wire input or broken adaptive streaming.
+  Bar 4 / seam and non-test callers: DesktopView, LaunchAppDialog, app store, MainView; storage, request builders, socket channel and state transitions.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: a well-formed summary parses; unknown fields ride along
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: malformed summaries are refused
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  REWRITE: a windows payload is checked and patches only its desktop
+    Retains window parser validation/default contract; stronger app-store event test owns patch behavior.
+  REWRITE: upserts replace by id or append
+    Retains unique app replacement; desktop upsert duplicates app-store created/updated test. No reference identity assertion.
+  REWRITE: tab title adds the active window's title
+    Check selected window and desktop identity data, excluding inactive window, without punctuation/copy coupling.
+  REWRITE: the close message names the running apps
+    Check active app identity and exclude exited apps; remove prose/pluralization/fallback-copy assertions.
+
+packages/ui/src/lib/desktop-vnc-socket.test.ts
+  Bar 1 / independent source: desktop-tab design §§7.2,10,11.2; DesktopSummary/LaunchAppRequest and persisted viewer preferences.
+  Bar 2 / failure inventory: lost/wrong desktop data, invalid launch requests, unavailable controls, incorrect wire input or broken adaptive streaming.
+  Bar 4 / seam and non-test callers: DesktopView, LaunchAppDialog, app store, MainView; storage, request builders, socket channel and state transitions.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  REWRITE: exposes every property noVNC's Websock.attach requires
+    Now: noVNC attaches the channel and receives RFB bytes. Actual installed Websock.attach owns the external channel ABI; fixed RFB bytes received through its public queue prove compatibility and catch missing field declarations before handler assignment. Independent library requirements, visible failed attachment, independent bytes, real consumer seam, refactor-stable contract, and unique attachment coverage satisfy bars 1–6.
+  REWRITE: forces arraybuffer and mirrors readyState and protocol
+    Assert exposed channel binary type used by noVNC, not the private wrapped socket property.
+  DELETE: binary frames reach noVNC unchanged
+    The rewritten real noVNC attachment/receive test owns binary delivery. Buffer object identity is not the wire contract.
+  REWRITE: text frames are consumed as control messages and a pong yields an RTT sample
+    Platform clock is mocked; onRtt remains a genuine production callback.
+  REWRITE: pings every interval while open and stops after close
+    Uses specified default interval and platform timers/clock; test-only timing options removed.
+  REWRITE: a silent link is closed so the viewer reconnects
+    Uses specified default stale period and fixed application code 4000; no owner-derived oracle or timing injection.
+  KEEP: open, close and error reach noVNC's handlers
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/file-icon.test.ts
+  Bar 1 / independent source: credible prototype-member filename/MIME render crash.
+  Bar 2 / failure inventory: crafted attachment filename resolves to Object instead of icon id.
+  Bar 4 / seam and non-test callers: FileTypeIcon; fileIconIdFor.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: reads only its own table keys: a name or mime spelled like an Object.prototype member is unknown
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/file-kind.test.ts
+  Bar 1 / independent source: README file preview dispatch and credible Object.prototype lookup crash.
+  Bar 2 / failure inventory: wrong preview MIME/kind or crafted extension crashes rendering.
+  Bar 4 / seam and non-test callers: FileBrowser preview; detectFileKind.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: never resolves a prototype member: an extension like `constructor` is the text fallback
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: classifies by lowercased extension and collapses .tar.* names
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/launch-models.test.ts
+  Bar 1 / independent source: ProviderModelSelection requires a served model; credible empty-model launch failure.
+  Bar 2 / failure inventory: launch refuses, retired model sent, or a selected/searchable model disappears.
+  Bar 4 / seam and non-test callers: ProjectOverview and launcher model menu; model selection/filter API.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: a launch always names a model, so the host cannot refuse it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: the remembered pick wins while the catalogue still serves it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a remembered pick the catalogue dropped falls back to the default
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: no default flag at all falls back to the first entry
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: no catalogue yields null, so the caller can refuse instead of posting
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: the selected model is always shown, even when a query excludes it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: search matches the slug or the display name, case-insensitively
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a query with no match shows nothing but the selection
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/open-layers.test.ts
+  Bar 1 / independent source: modal keyboard ownership; credible Escape interrupt under output viewer regression.
+  Bar 2 / failure inventory: Escape interrupts agent under a modal or phantom layer blocks keyboard.
+  Bar 4 / seam and non-test callers: modal/menu/sheet hooks and chat handlers; layer registry.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: nested layers count separately: closing the inner one leaves the outer one open
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a release runs once in effect: a second call never closes another layer
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a tracked layer knows when a newer one (a dropdown inside a sheet) is above it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/preferred-model.test.ts
+  Bar 1 / independent source: ProviderModelSelection wire contract and AGENTS.md tolerant storage.
+  Bar 2 / failure inventory: invalid remembered selections leak to launch or options cross models.
+  Bar 4 / seam and non-test callers: app store and launchers; stored model/options and launch selection.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: round-trips model and options, and drops what it cannot type
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: launch carries the remembered options only for the remembered model
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: garbage storage loads as empty rather than throwing
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/prompt-history/checkpoints.logic.test.ts
+  Bar 1 / independent source: agent-chat GUI history/rewind requirements and ThreadPrompts/Checkpoint protocol; thread-index design and AGENTS.md durable event ordering.
+  Bar 2 / failure inventory: lost historical prompts, incorrect order/turn association, rewind across compaction, stale busy state or paging failure.
+  Bar 4 / seam and non-test callers: HistoryPanel and prompt-history/hooks; cache API, prompt/checkpoint models and rewind runner.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: lists only ready checkpoints, newest turn first
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: adds the older ones only a loaded history page carries; the fold's copy wins
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: is its turn's, for a prompt that started one
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: is none for a steer — it rides a turn another prompt opened
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: counts files and sums the lines
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: names what opened each turn, newest first
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  REWRITE: goes back to whichever user message opened the turn, and to none the agent opened
+    Compare opener data instead of exact object reference; preserves rewind target and source safety.
+  KEEP: numbers a card by its turn's ordinal, falling back to the checkpoint's own count
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: matches the opening prompt and the changed paths together
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/prompt-history/index-cache.test.ts
+  Bar 1 / independent source: agent-chat GUI history/rewind requirements and ThreadPrompts/Checkpoint protocol; thread-index design and AGENTS.md durable event ordering.
+  Bar 2 / failure inventory: lost historical prompts, incorrect order/turn association, rewind across compaction, stale busy state or paging failure.
+  Bar 4 / seam and non-test callers: HistoryPanel and prompt-history/hooks; cache API, prompt/checkpoint models and rewind runner.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: coalesces a session's first page and caches its prompts
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: falls back for a host without an index, and does not ask it again
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: asks a host without an index once more when the thread says its history is indexed
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: falls back on a failure, says why, and retries on request
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: keeps catching-up state during retries until the index answers
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: turns a failed re-ask into a failure the user can retry, and a terminal answer into no index
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: appends the next page once per message and moves the cursor
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: keeps what it has when an older page fails, and retries it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: wants the next older page only when one exists and nothing is in the way
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: reads as paging while a page is on its way or the next one is due
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: reads a cut prompt once, and again only after a failure
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: keeps asking while the list holds less than a page and the host has more
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/prompt-history/prompts.logic.test.ts
+  Bar 1 / independent source: agent-chat GUI history/rewind requirements and ThreadPrompts/Checkpoint protocol; thread-index design and AGENTS.md durable event ordering.
+  Bar 2 / failure inventory: lost historical prompts, incorrect order/turn association, rewind across compaction, stale busy state or paging failure.
+  Bar 4 / seam and non-test callers: HistoryPanel and prompt-history/hooks; cache API, prompt/checkpoint models and rewind runner.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: numbers opening prompts by started turns and keeps the first claim
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: walks the pages, the bridge, then the window — parent user messages only, once each
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: lists the parent's reusable prompts newest first, with the turn each one started
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: leaves out what nobody typed, and says what it was
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: numbers a pending prompt when its turn starts
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: keeps the chat's copy of a prompt both hold, and adds what only the index has below it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: drops an index entry whose turn the fold no longer knows — a rewind removed it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: merges by time, newest first, each list keeping its own order; a tie keeps the loaded prompt first
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: lists an index prompt once even when two pages carried it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: needs every word, in any order
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: shows all prompts for a blank query
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/prompt-history/rewind.logic.test.ts
+  Bar 1 / independent source: agent-chat GUI history/rewind requirements and ThreadPrompts/Checkpoint protocol; thread-index design and AGENTS.md durable event ordering.
+  Bar 2 / failure inventory: lost historical prompts, incorrect order/turn association, rewind across compaction, stale busy state or paging failure.
+  Bar 4 / seam and non-test callers: HistoryPanel and prompt-history/hooks; cache API, prompt/checkpoint models and rewind runner.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: finds a compaction the settled turn's fold hides from the rows
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: takes the newest across the loaded pages, the bridge and the window
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: reads a rendered prompt's verdict off its row
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: is never offered where the adapter cannot roll back, or for a prompt that started no turn
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: vouches for an index-only prompt by its page's `rewindable`, unless a compaction came since
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: rewinds a rendered prompt to its row's count, without paging anything in
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: brings an older prompt in first, then reads its count off the fresh rows
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: refuses when the reveal shows the turn but still not the prompt's row — no count the rows did not vouch for
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: says why the reveal could not bring the prompt in, or that its row withholds it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: reads a reveal that threw as a history page that failed
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: waits for the agent to be idle — before it starts, and again after paging in
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: waits for a composer send still on its way, read fresh at each step
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: never offers what the adapter cannot do, nor a prompt that started no turn
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: says why the rewind failed
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/prompt-history/thread-inputs.test.ts
+  Bar 1 / independent source: agent-chat GUI history/rewind requirements and ThreadPrompts/Checkpoint protocol; thread-index design and AGENTS.md durable event ordering.
+  Bar 2 / failure inventory: lost historical prompts, incorrect order/turn association, rewind across compaction, stale busy state or paging failure.
+  Bar 4 / seam and non-test callers: HistoryPanel and prompt-history/hooks; cache API, prompt/checkpoint models and rewind runner.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: moves when what the panel shows moves: the turn settling, a request docking, a rewind
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/regexp.test.ts
+  Bar 1 / independent source: ECMAScript regular expression literal matching, including Unicode mode.
+  Bar 2 / failure inventory: literal text becomes regex syntax or Unicode regex throws.
+  Bar 4 / seam and non-test callers: composer paths, skill mentions and HTML preview; escapeRegExp.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: escapes every metacharacter so the escaped form matches the literal
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: axb
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/resume-account.test.ts
+  Bar 1 / independent source: AGENTS.md preserve provider resume identity in originating account home; conversation attribution protocol.
+  Bar 2 / failure inventory: resume uses wrong account home or signed-out system home.
+  Bar 4 / seam and non-test callers: ProjectOverview/NewTabMenu; resumeAccountId.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: forces the managed account whose own home holds the transcript
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a system-home row with no preference is left to the daemon's per-agent default
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a system-home row honours the caller's selection, System included
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a row from a daemon predating attribution falls back to the caller's choice
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/saved-prompts/app-wiring.test.ts
+  Bar 1 / independent source: SavedPrompt API create/update/event contracts; AGENTS.md Right rail, tolerant storage and shared UI state; credible concurrent-edit and wrong-chat regressions.
+  Bar 2 / failure inventory: lost/overwritten saved text, wrong project/chat delivery, stale cache, duplicate save, invalid mutation or unusable search.
+  Bar 4 / seam and non-test callers: SavedPromptsPanel, SavedPromptEditor, chat-target and composer menu; public store, saver/deliverer and form/request/list seams.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: an upsert and a delete on the saved-prompts channel reach the store
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: the same message on another channel does not
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/saved-prompts/list.logic.test.ts
+  Bar 1 / independent source: SavedPrompt API create/update/event contracts; AGENTS.md Right rail, tolerant storage and shared UI state; credible concurrent-edit and wrong-chat regressions.
+  Bar 2 / failure inventory: lost/overwritten saved text, wrong project/chat delivery, stale cache, duplicate save, invalid mutation or unusable search.
+  Bar 4 / seam and non-test callers: SavedPromptsPanel, SavedPromptEditor, chat-target and composer menu; public store, saver/deliverer and form/request/list seams.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: the project can use every global prompt and its own, never another project's
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: All is global + this project's; Project is this project's only
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: folds the letters no decomposition takes apart: ł, ø, ß and their capitals
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: matches title, description, tags and body, case- and accent-insensitively
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: every word must match, each anywhere
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an edited record is searched by its new text
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: favorites are separated from unpinned prompts
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/saved-prompts/store.test.ts
+  Bar 1 / independent source: SavedPrompt API create/update/event contracts; AGENTS.md Right rail, tolerant storage and shared UI state; credible concurrent-edit and wrong-chat regressions.
+  Bar 2 / failure inventory: lost/overwritten saved text, wrong project/chat delivery, stale cache, duplicate save, invalid mutation or unusable search.
+  Bar 4 / seam and non-test callers: SavedPromptsPanel, SavedPromptEditor, chat-target and composer menu; public store, saver/deliverer and form/request/list seams.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: repairs optional fields and refuses what cannot be trusted
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: shares concurrent loads and refreshes only when stale or forced
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: no project loads the global list alone
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a reload replaces exactly its scope: what the daemon dropped goes, another project's stays
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an event that overtakes the load answer it is newer than survives the answer
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an answer never brings back a prompt deleted meanwhile, nor overwrites a newer copy
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an id nothing touched during the load takes the answer as-is, even stamped older
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a first load that fails is an error; a failed refresh keeps the rows beside the error
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a forced load asked while one is in flight asks again after it — once, for every such call
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a project list the daemon refuses (400) falls back to the global list, and says why
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: any other failure of a project list does not fall back
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an answer of the wrong shape is a load error, not a crash
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a malformed row is dropped, the rest of the answer kept
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: stale marks a reconnect: the rows stay and the next load refreshes in the background
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a load that crosses a reconnect asks once more, then is fresh
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a failed load that crossed a reconnect retries once, not forever
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an older record never replaces a newer one; a later use does
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a delete removes, and nothing brings the id back
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: malformed payloads and unknown types are ignored without a throw
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an update applies its answer; a delete removes and tombstones
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a failed change becomes the notice and reloads every loaded scope
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a quiet failure leaves the notice to the caller
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a pin shows at once, then carries the daemon's record
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a refused pin falls back to the held value, with the notice
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: two quick flips: only the latest answer clears the flip
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a use bumps the record; a failed bump is silent and reloads nothing
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: forgets everything, and an answer from before it is dropped
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a reset before the request left sends nothing
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a client of another connection starts over
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a mutation answered after a reset is not applied
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/saved-prompts/variables.test.ts
+  Bar 1 / independent source: SavedPrompt API create/update/event contracts; AGENTS.md Right rail, tolerant storage and shared UI state; credible concurrent-edit and wrong-chat regressions.
+  Bar 2 / failure inventory: lost/overwritten saved text, wrong project/chat delivery, stale cache, duplicate save, invalid mutation or unusable search.
+  Bar 4 / seam and non-test callers: SavedPromptsPanel, SavedPromptEditor, chat-target and composer menu; public store, saver/deliverer and form/request/list seams.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: renders both as empty without a target chat
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: labels an agent by its registry name and a model by its catalogue name, else the raw id
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/session-kind.test.ts
+  Bar 1 / independent source: AGENTS.md Session/GUI/Terminal terms and agent-chat GUI §§5.2–5.3 migration/resume.
+  Bar 2 / failure inventory: chat disappears from agent surfaces, incompatible resume offered, or manual title overwritten.
+  Bar 4 / seam and non-test callers: ambient surfaces, ProjectOverview, NewTabMenu and app store; session predicates.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: the three session kinds are classified without overlap
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: ProjectOverview offers a row only while its agent is installed
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: NewTabMenu lists a row under the agent that wrote it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a conversation whose agent has no adapter is not offered
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: only a title nobody chose may be overwritten by the seed
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/thread-visits.test.ts
+  Bar 1 / independent source: AGENTS.md tolerant localStorage; credible completion-read race and mark-unread behavior.
+  Bar 2 / failure inventory: new completion swallowed, another thread changed, corrupt persisted data accepted.
+  Bar 4 / seam and non-test callers: app store and AgentChatView; visit persistence and read/unread operations.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: a junk blob loads as empty and bad entries are dropped
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: reading a thread stamps the TURN'S COMPLETION, never the clock
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a thread whose latest turn never completed has nothing to read
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: visits are monotonic: an older stamp never moves the mark back
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: mark-unread makes the completed turn unread without changing another thread
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: mark-unread is a no-op without a completed turn, and is idempotent
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a never-visited thread is not unread, and a running turn is never unread
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: an unreadable visit stamp reads as unread rather than silently read
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/lib/transporters/http-transporter-stream.test.ts
+  Bar 1 / independent source: HTTP 2xx stream/error protocol and transporter callback contract.
+  Bar 2 / failure inventory: HTTP error JSON shown as log data or missing/duplicate termination.
+  Bar 4 / seam and non-test callers: workflow log stream consumers; HttpTransporter.openStream.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: a non-2xx answer is one error and one end — its JSON body is never stream data
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a 2xx body streams, then ends once
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/store/desktops.test.ts
+  Bar 1 / independent source: desktop-tab design §§7.2,10,11.2; DesktopSummary/LaunchAppRequest and persisted viewer preferences.
+  Bar 2 / failure inventory: lost/wrong desktop data, invalid launch requests, unavailable controls, incorrect wire input or broken adaptive streaming.
+  Bar 4 / seam and non-test callers: DesktopView, LaunchAppDialog, app store, MainView; storage, request builders, socket channel and state transitions.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: created and updated upsert; closed removes and moves the active tab on
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: malformed payloads never reach state
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  REWRITE: desktop.windows patches that desktop's windows and active window
+    Untouched desktop is compared by data, not object identity; preserves event routing contract.
+  KEEP: closing a desktop dismisses its pending confirm and retargets an open launch dialog
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: createDesktopWithApp posts, adds the desktop and activates its tab
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: launchIntoDesktop posts the app, records it and focuses that desktop
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a daemon refusal rejects so the dialog can show it
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: the launch dialog opens and closes
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: running apps always ask first, even with session confirms off
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a desktop with no running apps closes without asking
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: a failed stop keeps the tab and says why; an already-gone desktop is dropped
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/store/file-reveal.test.ts
+  Bar 1 / independent source: GUI changed-file navigation to project Files tab.
+  Bar 2 / failure inventory: click creates duplicate tab, fails to reopen same file or targets wrong project.
+  Bar 4 / seam and non-test callers: AgentChatView and FileBrowser; useAppStore.revealInFileBrowser.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  REWRITE: opens a Files tab on the file when the project has none
+    Asserts target path and activated tab, not arbitrary initial nonce value.
+  REWRITE: reuses the first Files tab and bumps the nonce, even for the same file
+    Asserts repeated navigation changes notification nonce, not exact increment arithmetic.
+  KEEP: does nothing without a current project
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+packages/ui/src/store/open-tab.test.ts
+  Bar 1 / independent source: conversation resume protocol CONVERSATION_ALREADY_OPEN; GUI launch ownership.
+  Bar 2 / failure inventory: double launch, stuck opening screen or wrong-project resume.
+  Bar 4 / seam and non-test callers: ProjectOverview/NewTabMenu; useAppStore.openTab.
+  Bar 3 and 5: shared rationale above; per-case differences and rewrites are recorded below.
+  Bar 6 / stronger remaining coverage: no stronger test owns the entire named UI contract unless a DELETE note identifies it.
+  Risk: retained contracts stay protected; changes limited to redundant assertions and unreachable test-only interfaces. Validation: V.
+  KEEP: shows the opening screen until the tab exists, and ignores a second click meanwhile
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: clears the opening screen when the launch fails
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: switches to the tab that already holds the conversation instead of failing
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+  KEEP: still refuses when the owning tab is not in this project
+    Protects the named failure through this file’s documented seam and independent source; six-bar rationale above applies.
+
+Pre-edit changes selected:
+DELETE desktop-quality.test.ts / starts at quality 6: same default assertion already required by step-down and strict-threshold cases. No unique failure.
+Initial DELETE decision later corrected by independent consumer review (see final REWRITE disposition): desktop-vnc-socket.test.ts / exposes every property noVNC's Websock.attach requires. RAW_CHANNEL_PROPS fixture removed; actual Websock.attach now protects ABI compatibility.
+DELETE desktop-audio/controller.test.ts / the socket is wanted only with a url, an active tab, unlocked sound and no mute: repeats predicate expression; controller effect test will own fixed independent decisions.
+REWRITE desktop-audio/controller.test.ts / the controller opens and closes the socket by the same table: literal policy cases, actual socket state; remove COMBOS, shouldStreamAudio export, streaming getter. Remaining protocol/decoder tests cover lifecycle; actual hook supplies dependencies so those stay.
+REWRITE desktop-audio/controller.test.ts / keepalive pings every 10 s and drops a silent connection: use specified 10000 ms, not production timeout as oracle; hide AUDIO_KEEPALIVE_MS export.
+REWRITE desktop-vnc-socket.test.ts / text frames; pings every interval; silent link: mock platform performance.now and timers; use specified 2000/20000 ms defaults. Remove now/pingIntervalMs/staleAfterMs test injection options (DesktopView supplies only onRtt). No production behavior changes.
+REWRITE desktop-audio/jitter-buffer.test.ts / drift (+100 and -100), burst, overflow: specified 40 ms bound instead of production JITTER_BUFFER_DEFAULTS. Hide defaults export.
+DELETE desktop-audio/jitter-buffer.test.ts / reset forgets buffered audio but keeps the learned target: reset has no production caller (worklet is disposed per stream); remove reset method.
+REWRITE desktop-audio/jitter-buffer.test.ts / underruns raise the target; underrun partway through fade-in: drive push/render and stats, remove test-only isPlaying getter; depth/target getters become private and tests use production stats API. Remove explicit default fade option.
+REWRITE desktop-prefs.test.ts / invalid fields; fixed valid size; fit remembered choice: drive persisted JSON through readDesktopPrefs; hide sanitizeDesktopPrefs export (only in-file production caller). Retains AGENTS.md persistence contract.
+REWRITE desktop-state.test.ts / windows payload: keep parser contract; store/desktops.test.ts owns actual window patching.
+REWRITE desktop-state.test.ts / upserts replace by id or append: retain app replacement (no stronger owner); desktop upsert is covered by store desktop channel tests.
+REWRITE desktop-state.test.ts / tab title and close message: assert identifying data and excluded exited app, not punctuation/prose. Keep unique active-window and command-basename behavior.
+REWRITE launch-dialog-model.test.ts / command line limit, env round-trip, daemon errors: remove wording and synthetic row-id ordering assertions; retain request validation and daemon message/hint preservation.
+REWRITE store/file-reveal.test.ts / first tab and repeated reveal: compare revealed path and changed nonce, not literal implementation counter values.
+REWRITE history-format.test.ts / never ends on half a surrogate pair: assert retained original prefix too; returning empty text must not pass.
+All other pre-edit reviewed cases: KEEP under the per-file six-bar rationale, unless final inspection documents a further disposition.
+Additional final-diff decisions before edits:
+REWRITE store/desktops.test.ts / desktop.windows: compare untouched desktop data, not object identity; no rendering identity contract requires that exact object.
+REWRITE prompt-history/checkpoints.logic.test.ts / goes back to whichever user message opened the turn: compare opener data, not reference identity.
+REWRITE desktop-audio/controller.test.ts / reconnect: preserve daemon reason without requiring UI sentence copy. Keep socket binaryType assertion: browser ArrayBuffer delivery is a real transport requirement.
+REWRITE desktop-vnc-socket.test.ts / silent link: assert specified application code 4000 independently, not the exported owner constant; privatize unused timing/code constants.
+REWRITE desktop-state.test.ts / app upserts: unknown desktop remains unchanged by value, not array reference.
+Before final seam edit: JitterBufferOptions has no external type consumer. Only worklet sampleRate/channels/initialTargetMs are supplied by production. Make the implementation options type private and restrict constructor overrides to those three production inputs; the deleted fadeMs test was the only alternate policy override. No runtime caller changes. Risk low; audio simulation and repository typecheck validate.
+REWRITE components/desktop/desktop-keys.test.ts / newline and tab; text splits; named keys: use fixed X11 keysyms 0xff0d, 0xff09, 0xff08 and 0xff52 instead of importing XK from the owner. Those tests otherwise let an incorrect exported constant and mapper agree. The production XK export remains used by DesktopView keyboard controls. Independent source: X11/RFB keysym protocol; failure: remote Return/Tab/Backspace/Up becomes the wrong key. Stable seam: keysym conversion; lowest owner, no stronger numeric fixture.
+Focused validation caught a rewrite error in the fade test: depth zero can mean the last frame ended exactly at the quantum boundary before any underrun. Refilling then produces an intentional discontinuity in the source, unlike the original starvation scenario. Corrected setup to refill only when the public stats underrun count advances; retained the independent smooth-output assertion. This was a test scenario change, not a baseline product failure.
+Pre-edit protocol consolidation:
+REWRITE controller.test.ts / parseAudioPacket reads the 8-byte header and validates the type: feed those fixed frames through the actual controller socket and inspect decoder bytes/sequence; catches header endian/type/truncation errors at the lowest production-consumed boundary. Make parser and AudioPacket type private (no external production consumer).
+REWRITE controller.test.ts / parseAudioServerMessage accepts state and pong only: feed actual socket text and inspect serverState; keep state normalization and malformed message rejection while making parser private.
+DELETE controller.test.ts / state messages become serverState: stronger rewritten server-message test owns this success path plus invalid frames. Pong liveness is additionally owned by the keepalive test, not repeated as a parser-output declaration.
+Shared audio fixture cleanup: replace a fixed count of five promise microtasks with a single event-loop drain (setImmediate). The fixture no longer depends on private async call depth. No sleep or production injection added; existing setup/action/assertion contracts stay unchanged.
+
+Final disposition totals (named baseline declarations; drift declaration executes twice): {"KEEP": 347, "REWRITE": 35, "DELETE": 5}.
+Production removals: JitterBuffer.reset and isPlaying; private depth/target getters; exported JITTER_BUFFER_DEFAULTS and policy-options type/override fields; DesktopAudioController.streaming; exports shouldStreamAudio, parseAudioPacket, parseAudioServerMessage, AudioPacket, AUDIO_KEEPALIVE_MS; DesktopVncChannel clock/interval/stale injection and unused exported timing/code constants; sanitizeDesktopPrefs export. Genuine browser/controller dependency interfaces remain used by use-desktop-audio; SVG loaders remain used by retained render/store tests.
+Dead test support removed: COMBOS decision generator, RAW_CHANNEL_PROPS inventory, exported-constant imports, reset-only scenario, synthetic environment row-id expectations; five-microtask fixture drain replaced by event-loop completion.
+
+Pre-edit independent review correction: noVNC 1.7.0 core/websock.js:258 checks channel keys before installing handlers. The standalone channel tests install those keys themselves and cannot detect erased field declarations. REWRITE the reflected inventory as a real installed Websock.attach / binary receive-queue integration. Independent source is the external noVNC attachment ABI; lost viewer connection is the failure; fixed RFB bytes are the oracle; public attachment and receive queue are the seam; implementation renames/refactors preserve this contract; no remaining test loads the real consumer. Test globals supply browser constants/logging only. Validation: focused desktop-vnc-socket.test.ts.
+Pre-edit consolidation: DELETE binary frames reach noVNC unchanged; the rewritten real noVNC attach/receive test owns delivery of fixed binary RFB bytes through the raw socket and catches the same visible loss/corruption. ArrayBuffer object identity is not a wire contract. No fixtures/seams become unused.
+
+Focused validation completed: final controller/jitter-buffer/desktop-keys/store-desktops/checkpoints selection passed 48 tests, 0 failures. Earlier 65-test desktop/controller/jitter/prefs/quality/vnc/state/launch/reveal/history selection had 64 passes and one rewrite-harness failure (fade scenario corrected above and now passing). Final real noVNC integration verification passed: desktop-vnc-socket.test.ts, 6 tests, 0 failures. Repository gates owned by root agent.
+Final diff inspection: git diff --check passed. Production edits remove unused test-only surface while preserving production defaults and callers. The persisted invalid-volume fixture now explicitly uses null (JSON cannot persist NaN); behavior is unchanged from its previous serialized representation. Net source/test change for this scope: 162 insertions, 238 deletions across 16 files (audit prose excluded).

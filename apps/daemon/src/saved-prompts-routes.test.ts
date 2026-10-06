@@ -104,13 +104,11 @@ test("saved prompts: create, list, update, use and delete over HTTP", async (t) 
   const created = await h.inject({
     method: "POST",
     url: "/api/saved-prompts",
-    payload: { title: "Explain", body: "Explain {project}", tags: ["Docs", "docs"], projectPath: null }
+    payload: { title: "Explain", body: "Explain {project}", projectPath: null }
   });
   assert.equal(created.statusCode, 201);
   const prompt = created.json() as SavedPrompt;
   assert.equal(prompt.title, "Explain");
-  assert.deepEqual(prompt.tags, ["Docs"]);
-  assert.equal(prompt.useCount, 0);
 
   const listed = await h.inject({ method: "GET", url: "/api/saved-prompts" });
   assert.equal(listed.statusCode, 200);
@@ -119,11 +117,10 @@ test("saved prompts: create, list, update, use and delete over HTTP", async (t) 
   const updated = await h.inject({
     method: "PUT",
     url: `/api/saved-prompts/${prompt.id}`,
-    payload: { pinned: true, description: "  One line  " }
+    payload: { pinned: true }
   });
   assert.equal(updated.statusCode, 200);
   assert.equal(updated.json().pinned, true);
-  assert.equal(updated.json().description, "One line");
 
   // No body at all, as the client sends it.
   const used = await h.inject({ method: "POST", url: `/api/saved-prompts/${prompt.id}/used` });

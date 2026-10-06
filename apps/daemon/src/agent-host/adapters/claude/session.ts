@@ -62,11 +62,7 @@ import {
   claudeTurnBoundariesFromCursor,
   type ClaudeResumeCursor
 } from "./cursor.ts";
-import {
-  claudeCanUseToolRoute,
-  claudeRequestKey,
-  permissionResultForDecision
-} from "./decisions.ts";
+import { permissionResultForDecision } from "./decisions.ts";
 import { CLAUDE_COMPACT_DEADLINE_MS, CLAUDE_CONTEXT_USAGE_DEADLINE_MS, type ClaudeAdapterDeps } from "./deps.ts";
 import { transcriptGoalFromLastRow } from "./goal.ts";
 import { claudeConfigDir } from "./config-dir.ts";
@@ -1514,12 +1510,11 @@ export class ClaudeSession {
       return { behavior: "deny", message: "The Claude session is no longer running." };
     }
 
-    const route = claudeCanUseToolRoute(toolName);
-    if (route === "user-input") {
+    if (toolName === "AskUserQuestion") {
       return this.handleAskUserQuestion(toolInput, callbackOptions);
     }
 
-    if (route === "proposed-plan") {
+    if (toolName === "ExitPlanMode") {
       const plan = extractExitPlanModePlan(toolInput);
       if (plan) {
         this.emit(
@@ -2746,4 +2741,10 @@ function isInterruptLikeError(error: unknown): boolean {
     message.includes("interrupted by user") ||
     message.includes("closed")
   );
+}
+
+/** Redelivered SDK requests share their original card; absent ids get a new key. */
+function claudeRequestKey(requestId: string | undefined, fallback: () => string): string {
+  const trimmed = typeof requestId === "string" ? requestId.trim() : "";
+  return trimmed.length > 0 ? trimmed : fallback();
 }

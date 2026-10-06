@@ -297,7 +297,7 @@ describe("thread index: observe", () => {
     assert.equal(reasoning!.role, "reasoning");
   });
 
-  it("keeps the last write of an activity, and moves its marker with it", async () => {
+  it("keeps the last searchable write of an activity", async () => {
     const log = new TestLog();
     feed(
       index,
@@ -308,9 +308,7 @@ describe("thread index: observe", () => {
         activity("x1", "tool.completed", {
           summary: "Build finished",
           payload: { detail: "no errors", title: "Build" }
-        }),
-        compaction("c1", null, "compacting"),
-        compaction("c1", null, "compaction-failed")
+        })
       )
     );
     await index.drain();
@@ -451,11 +449,12 @@ describe("thread index: observe", () => {
     feed(index, log, log.append(delta("m1", "after it", "t1"), done("m1", "t1")));
     await index.drain();
 
-    assert.deepEqual(index.messageSpan(log.threadId, "m1"), {
+    assert.deepEqual(index.messagesSpanning(log.threadId, 6), [{
+      messageId: "m1",
       firstSeq: 5,
       firstByte: log.at(5).byteOffset,
-      lastSeq: log.lastSeq
-    });
+      lastSeq: 7
+    }]);
   });
 
   it("a turn the provider never started leaves its rows with the turn before it", async () => {

@@ -22,7 +22,6 @@
  * | `snapshot.ts` | `GET /provider` → models + auth + commands + skills |
  * | `cli-inventory.ts` | The machine-level CLI catalogue, for a cwd-less probe |
  * | `history.ts` | A `readThread` snapshot replayed as runtime events (E6) |
- * | `smoke.ts` | A manual one-turn drive against the real CLI (`ORQ_AGENT_SMOKE=1`) |
  *
  * **`StartSessionInput.home` is deliberately not honoured.** The server is
  * shared by a project's threads (§3.2), and `OPENCODE_DATA` is a property of

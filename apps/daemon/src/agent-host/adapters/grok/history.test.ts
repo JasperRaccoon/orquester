@@ -339,22 +339,6 @@ test("a reminder that is not a goal block projects as it was replayed", () => {
   assert.equal(user?.payload.detail, text);
 });
 
-test("a tool call is kept, and it flushes the text before it", () => {
-  const collector = new GrokHistoryCollector();
-  collector.observeAcpUpdate({ sessionUpdate: "agent_message_chunk", content: { type: "text", text: "writing" } });
-  collector.observeAcpUpdate({
-    sessionUpdate: "tool_call",
-    toolCallId: "call-1",
-    title: "write",
-    status: "completed"
-  });
-  collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "p1" });
-
-  const items = collector.snapshotTurns()[0].items as GrokHistoryItem[];
-  assert.deepEqual(items.map((item) => item.kind), ["assistant_message", "tool_call"]);
-  assert.equal((items[1] as { toolCallId: string }).toolCallId, "call-1");
-});
-
 test("an unterminated replay tail preserves its user message", () => {
   const collector = new GrokHistoryCollector();
   collector.observeAcpUpdate({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "q" } });

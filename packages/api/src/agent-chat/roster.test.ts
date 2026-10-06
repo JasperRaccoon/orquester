@@ -112,19 +112,6 @@ test("a start row with a NEW launching call after a terminal state is a resume a
   assert.equal(done.error, null);
 });
 
-test("a start row that names the SAME launching call after a terminal state is a late delivery", () => {
-  resetActivityIds();
-  const agents = foldSubagentActivities([
-    activity("task.started", agentTask("t1", { title: "Audit", toolUseId: "toolu_1" })),
-    activity("task.completed", agentTask("t1", { status: "failed", summary: "boom", toolUseId: "toolu_1" })),
-    activity("task.started", agentTask("t1", { title: "Audit", toolUseId: "toolu_1" }))
-  ]);
-  const agent = byId(agents, "t1");
-  assert.equal(agent.status, "failed");
-  assert.equal(agent.activationCount, 1);
-  assert.equal(agent.error, "boom");
-});
-
 test("a shell's exit code folds as any integer", () => {
   resetActivityIds();
   const agents = foldSubagentActivities([

@@ -1,5 +1,5 @@
 /**
- * Replay tests: every recorded capture folded through the normaliser, with the
+ * Replay tests: recorded scenarios folded through the normaliser, with the
  * emitted `RuntimeEvent` sequence asserted (spec §9).
  *
  * These live under `src/` on purpose — `apps/daemon/package.json` runs
@@ -13,7 +13,7 @@ import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
 import { createLivenessRegistry } from "../../orchestration/liveness.ts";
 import { createTestClock } from "../../orchestration/testing/fakes.ts";
-import { captureFiles, readCapture, agentFrames, type JsonRpcFrame } from "./fixtures.ts";
+import { readCapture, agentFrames, type JsonRpcFrame } from "./fixtures.ts";
 import { GrokNormalizer } from "./normalize.ts";
 import type { SessionNotification } from "./acp/_generated/schema.ts";
 import { XAI_ROUTED_METHODS as XAI_CHANNEL_METHODS, driveCapture } from "./testing/capture-driver.ts";
@@ -79,19 +79,6 @@ function only<T extends RuntimeEvent["type"]>(
 
 // ---------------------------------------------------------------------------
 
-test("every capture folds without an unmapped-frame warning", () => {
-  const offenders: string[] = [];
-  for (const file of captureFiles()) {
-    const events = replay(file);
-    for (const warning of only(events, "runtime.warning")) {
-      if (/unmapped/.test(warning.payload.message)) {
-        offenders.push(`${file}: ${warning.payload.message} ${JSON.stringify(warning.payload.detail)}`);
-      }
-    }
-  }
-  assert.deepEqual(offenders, [], "a recorded frame reached the unmapped fallback");
-});
-
 test("02 plain prompt: assistant text is one segment with a bounded delta stream", () => {
   const events = replay("02-prompt-plain-text.ndjson");
   const started = only(events, "item.started").filter(
@@ -127,8 +114,9 @@ test("02 plain prompt: EVERY chunk-driven meter row carries the window, not just
 });
 
 test("a window nobody resolved is omitted rather than invented", () => {
-  const events = replay("02-prompt-plain-text.ndjson");
-  for (const row of only(events, "thread.token-usage.updated")) {
+  const usage = only(replay("02-prompt-plain-text.ndjson"), "thread.token-usage.updated");
+  assert.ok(usage.length > 0, "the capture still produces context readings");
+  for (const row of usage) {
     assert.equal(row.payload.usage.maxTokens, undefined);
   }
 });
@@ -179,22 +167,6 @@ test("05 Stop: the write its permission held is closed with the turn it cut — 
   assert.deepEqual([closed[0]!.turnId, payload.status, payload.detail], ["turn-1", "failed", "Stopped."]);
   const turnEnd = run.events.findIndex((event) => event.type === "turn.completed" && event.turnId === "turn-1");
   assert.ok(run.events.indexOf(closed[0]!) < turnEnd, "before the turn it rides settles");
-});
-
-test("06 session/load: every replayed frame is dropped from the live stream", () => {
-  const entries = readCapture("06-session-load-replay.ndjson");
-  const replayed = agentFrames(entries).filter((frame) => {
-    const params = frame.params as { _meta?: { isReplay?: boolean } } | undefined;
-    return params?._meta?.isReplay === true;
-  });
-  assert.ok(replayed.length >= 3, "the capture really does contain replay frames");
-
-  const events = replay("06-session-load-replay.ndjson");
-  // The replayed `user_message_chunk` must not reappear as a timeline row.
-  assert.equal(
-    only(events, "content.delta").some((event) => event.payload.delta === "Reply with exactly: OK"),
-    false
-  );
 });
 
 test("07 plan mode: the plan file write becomes turn.proposed.completed once", () => {

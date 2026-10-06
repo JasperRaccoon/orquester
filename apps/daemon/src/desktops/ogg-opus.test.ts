@@ -98,7 +98,7 @@ test("fixture: header packets skipped, one 10 ms audio packet per page", () => {
 });
 
 test("fixture: 1-byte and odd-sized chunking give identical output", () => {
-  const whole = split([FIXTURE]);
+  const whole = pageBodies(FIXTURE).slice(2);
   assert.deepEqual(split(chunked(FIXTURE, 1)), whole);
   assert.deepEqual(split(chunked(FIXTURE, 7)), whole);
   assert.deepEqual(split(chunked(FIXTURE, 4096)), whole);
@@ -109,7 +109,7 @@ test("fixture: 1-byte and odd-sized chunking give identical output", () => {
 });
 
 test("garbage before, between and inside pages resyncs on the next capture pattern", () => {
-  const whole = split([FIXTURE]);
+  const whole = pageBodies(FIXTURE).slice(2);
   const bodies = pageBodies(FIXTURE);
   // Page boundaries: garbage between pages 5 and 6 loses nothing.
   let offset = 0;

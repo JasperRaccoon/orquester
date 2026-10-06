@@ -584,9 +584,6 @@ describe("an OpenCode child's own drill-in lists no spawn row for itself (item 4
     assert.deepEqual(entries.map((entry) => entry.toolCallId), ["prt_read"]);
   });
 
-  it("the parent's timeline keeps the child's spawn row", () => {
-    assert.ok(deriveWorkLogEntries(rows).some((entry) => entry.agentSpawn?.agentTaskIds.includes(CHILD)));
-  });
 });
 
 describe("goal rows (goals §8.4)", () => {

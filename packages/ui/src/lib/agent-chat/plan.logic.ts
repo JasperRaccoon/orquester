@@ -92,21 +92,6 @@ export function deriveActivePlanState(
   return newestAnyTurn ? planStateFromActivity(newestAnyTurn) : null;
 }
 
-export function planProgress(plan: ActivePlanState | null): {
-  completed: number;
-  total: number;
-  currentStep: string | null;
-} {
-  if (!plan) {
-    return { completed: 0, total: 0, currentStep: null };
-  }
-  const completed = plan.steps.filter((step) => step.status === "completed").length;
-  const current =
-    plan.steps.find((step) => step.status === "inProgress") ??
-    plan.steps.find((step) => step.status === "pending");
-  return { completed, total: plan.steps.length, currentStep: current?.step ?? null };
-}
-
 // ---------------------------------------------------------------------------
 // Proposals
 // ---------------------------------------------------------------------------

@@ -1,0 +1,732 @@
+UI WORKFLOWS — pre-edit disposition ledger, then completed-cleanup validation
+Scope: 203 test cases in 31 files, discovered from current source (not historical deletion totals).
+Independent references: docs/superpowers/specs/2026-09-28-automated-workflows-design.md; current API workflow contracts/config schema; AGENTS payload validation/persisted unknown-field rules.
+Pre-edit failure inventory: account edits may widen credentials; model resolution may substitute fallback slugs; saves/events may race and lose user data; graph edits may disconnect work; parsers may accept unsafe data; navigation may open wrong runs; logs may corrupt bytes or spin; shell variable suggestions may collide or change process behavior.
+For each KEEP/REWRITE below, B1 is the group independent source plus the exact per-case contract/failure. B2 is the named wrong user/caller result. B3: fixtures/literal data, calendar arithmetic, external shell/environment semantics or wire fields provide independent expected output; API fakes supply responses, never implement client state behavior. B4 is the production-used owner seam in the group. B5: retained assertions observe semantic input/output/state and tolerate internal refactors, including renamed identifiers; rewritten tests remove private classifiers and arbitrary naming. B6: each row owns its listed distinct scenario; no remaining stronger test executes that same operation/input transition, except deleted cases which name their replacement owner.
+Risk for every unchanged KEEP: no code change. Risk for DELETE/REWRITE: low, because unique documented semantic behavior remains and no runtime algorithm changes. Non-test callers are listed per group; export removals have only internal production callers, reviewed repository-wide.
+Validation for every row: from packages/ui run node --import tsx --import ../../scripts/test/assert-ok.mjs --import ./test/svg-loader.mjs --import ../../scripts/test/quiet-mock-timers.mjs --test --test-concurrency=2 src/lib/workflows/*.test.ts src/components/workflows/{canvas,phone,runs,steps}/*.test.ts. Parent runs pnpm check/test/build and final diff.
+
+packages/ui/src/lib/workflows/agent-policy-text.test.ts
+  B1 source: §5.2 account allow-list and quota policy; daemon workflows/agent/select.ts account resolution. B4 stable seam: inspector-usage.ts account view/edit functions. Non-test callers: AccountPolicyEditor and ChainEditor.
+  KEEP: reads no list as every account, the System login last when included
+    B1/B2/B6 contract, concrete failure and coverage: No allow-list means all managed accounts; opt-in system login follows them. Detects hiding available accounts or silently choosing system credentials.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: matches ids, then labels, keeps list order, and reports entries naming nobody
+    B1/B2/B6 contract, concrete failure and coverage: Detects resolving an account label to the wrong credential, changing fixed priority, losing missing-account warnings, or duplicating selected identities.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: unticks an account into a list, and back to no list when all are ticked
+    B1/B2/B6 contract, concrete failure and coverage: Checkbox edits must encode the intended allowed credential set in AccountPolicy; detects accidental all-account permission after an exclusion.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: never writes an empty list (the engine would read it as every account)
+    B1/B2/B6 contract, concrete failure and coverage: Unchecking the last account must refuse an empty allow-list because daemon semantics interpret it as every credential, a concrete privilege widening bug.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: excludes accounts in fixed order, keeping the order of the rest
+    B1/B2/B6 contract, concrete failure and coverage: Removing and restoring credentials must preserve the remaining fixed priority; otherwise the next run uses the wrong account.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: moves accounts in fixed order and drops a list that is back in the family's order
+    B1/B2/B6 contract, concrete failure and coverage: Reordering must change account priority and respect endpoints/system identity without changing allowed membership; adjacent toggle tests do not exercise movement.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: adds and removes the System login in a list
+    B1/B2/B6 contract, concrete failure and coverage: System opt-in/out must update both wire flags and explicit membership; otherwise the daemon may run under unintended host credentials.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: keeps entries naming nobody until they are dropped
+    B1/B2/B6 contract, concrete failure and coverage: An unrelated checkbox edit must preserve unknown account references; explicit removal and allow-all actions have separately specified data effects.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: drops an order-only list when leaving fixed order, and keeps a real restriction
+    B1/B2/B6 contract, concrete failure and coverage: Strategy changes must preserve credential restrictions while removing ordering that no longer applies; detects silently broadening a restricted policy.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: lists reported windows, each rule for them, then rules for windows not reported
+    B1/B2/B6 contract, concrete failure and coverage: Every configured scoped quota rule must remain editable, including missing and case-equivalent reported windows; literal rule indices identify the persisted policy entry, not visual geometry.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/app-wiring.test.ts
+  Source: §7.2; workflow event-channel wire contract. Stable owners and non-test callers: store/app.ts applyEvent/openWorkflowTab/closeTab; WorkflowsHost, tab strip and tab switcher. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: an upsert and a delete on the workflows channel reach the module store
+    B1/B2/B6 contract, concrete failure and coverage: Wrong-channel routing or omitted routing leaves list state stale; actual app event entry point is not exercised by reducer-only store cases.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: the same message on another channel does not reach workflows
+    B1/B2/B6 contract, concrete failure and coverage: An unrelated event channel could mutate workflow state; the positive route test prevents a reject-all implementation from passing.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: opens one tab per workflow per project, reusing it and updating its run
+    B1/B2/B6 contract, concrete failure and coverage: Opening/reopening a workflow must preserve one tab per project, selection and omitted-versus-null run identity; other tab cases do not exercise reuse.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: an unknown workflow takes the caller's title
+    B1/B2/B6 contract, concrete failure and coverage: Before list loading completes a newly opened tab must use the caller-supplied name, not lose it.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: follows a rename and closes with its workflow, handing the focus on
+    B1/B2/B6 contract, concrete failure and coverage: Remote rename/delete must update every project tab and transfer focus after removal; reducer tests cannot detect stale app tab state.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: closeTab closes a workflow tab like any local tab
+    B1/B2/B6 contract, concrete failure and coverage: Explicit closeTab must remove the workflow tab and active selection; remote-delete coverage uses another action.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/chain-models.test.ts
+  B1 source: provider catalogue protocol (exact live model slugs); §5.1 agent chain creation. B4 stable seam: chain-models.ts create-request and default-block resolution. Non-test callers: templates.ts, use-workflow-editor, Steps and canvas creation.
+  REWRITE: resolves each entry against its own agent's loaded catalogue and keeps the rest
+    Setup seam change: populate providersStore, the same catalogue read by production, instead of injecting an optional provider list that no production caller supplies. Semantic assertions stay unchanged.
+    B1/B2/B6 contract, concrete failure and coverage: New requests must name live slugs per provider without changing unrelated account policy or unknown providers; catches cross-provider model selection and stale aliases.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  REWRITE: never resolves against a list that may be a fallback: pending, degraded or errored
+    Setup seam change: populate providersStore, the same catalogue read by production, instead of injecting an optional provider list that no production caller supplies. Semantic assertions stay unchanged.
+    B1/B2/B6 contract, concrete failure and coverage: Unready provider fallback catalogues must not overwrite stored live slugs; literal status fixtures differ from live resolution and catch data loss during discovery.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  DELETE: the Codex reviewer keeps the current default, gpt-6-astra
+    B1/B2/B6 contract, concrete failure and coverage: Freezes the static API template model through a UI wrapper, without exercising live-model substitution. No independent requirement fixes this model slug. Stronger API templates.test.ts validates every starter against live/pending catalogues, and the retained UI request-resolution case owns actual live resolution. Fails bars 1, 5 and 6.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  DELETE: an old static `opus` resolves to `opus[1m]`
+    B1/B2/B6 contract, concrete failure and coverage: Duplicate of resolves each entry against its own agent's loaded catalogue and keeps the rest. Both call withLiveChainModels with the same alias; template/default request cases cover creation. Fails bar 6; no unique behavior becomes unprotected.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  DELETE: without a catalogue the request is untouched
+    B1/B2/B6 contract, concrete failure and coverage: Only reads the static nightly template default through createFromTemplate; API template validation owns starter validity, while the retained live-default block and unready-provider cases own unresolved/default model behavior. Fails bar 6; no unique UI request conversion is asserted.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  REWRITE: a fresh agent block names a listed model; other blocks are their defaults
+    Setup seam change: populate providersStore, the same catalogue read by production, instead of injecting an optional provider list that no production caller supplies. Semantic assertions stay unchanged.
+    B1/B2/B6 contract, concrete failure and coverage: Fresh blocks resolve against provider defaults independently of complete template requests; catches creation of a block with an immediately invalid model.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/clipboard.test.ts
+  Source: §7.2 clipboard transfer; §3.3 node references; config node schemas. Stable owners and non-test callers: clipboard.ts serializer/parser/paste; WorkflowEditorTab and Steps duplicate. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: carries the selected blocks and only the edges between them, under the marker
+    B1/B2/B6 contract, concrete failure and coverage: Only selected nodes and internal edges travel with literal interoperable marker bytes; paste tests do not prove exported payload boundaries.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: is not fooled by other text, or by a payload whose blocks do not parse
+    B1/B2/B6 contract, concrete failure and coverage: Unrelated text, unsupported marker versions and malformed node payloads must not paste; the unsupported-version fixture otherwise contains a valid node.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: re-mints ids and names and keeps inner edges and references
+    B1/B2/B6 contract, concrete failure and coverage: Paste must remint identity and internal references while retaining external references; a sequential/string-only rename would corrupt continued sessions or templates.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: keeps a name that is free in the target workflow (a paste across workflows)
+    B1/B2/B6 contract, concrete failure and coverage: Cross-workflow paste must preserve an unoccupied name; collision tests exercise a distinct branch.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: does not turn A→B, B→C renames into A→C
+    B1/B2/B6 contract, concrete failure and coverage: Simultaneous Post/Post2 collisions must not cascade into references to the wrong copied node; literals independently identify the intended destinations.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/deep-link.test.ts
+  Source: §5.11 notification navigation; web service-worker message protocol; AGENTS bridge validation. Stable owners and non-test callers: deep-link.ts parse/consume/decide; apps/web main and WorkflowsHost. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: parses ?workflow=&run=
+    B1/B2/B6 contract, concrete failure and coverage: URL workflow/run identifiers must parse and unsafe/invalid identifiers reject; message parsing has a separate input format.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: strips its parameters and keeps the rest
+    B1/B2/B6 contract, concrete failure and coverage: Consuming a link must remove only workflow/run query fields and preserve other query/hash/path state, avoiding repeated opens or lost routes.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: parses the service worker's message; anything else is null
+    B1/B2/B6 contract, concrete failure and coverage: Only the literal service-worker message type with valid identity may navigate; URL parsing cannot detect malformed bridge messages.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: one pending link, taken once, listeners told
+    B1/B2/B6 contract, concrete failure and coverage: Newest pending notification navigation must be delivered once rather than replay old/opened targets; subscriber/queue seam is used by WorkflowsHost.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: waits for the connection and the workflows, opens in the workflow's own project
+    B1/B2/B6 contract, concrete failure and coverage: Navigation must wait for a connection/loading, choose the workflow project and distinguish a removed workflow; URL decoding does not own readiness.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/durations.test.ts
+  B1 source: §5.9 time limits; wire fields use canonical seconds or minutes. B4 stable seam: durations.ts canonicalDuration. Non-test callers: workflows/ui/controls.tsx DurationInput.
+  KEEP: converts typed values to the canonical unit without float noise
+    B1/B2/B6 contract, concrete failure and coverage: Typed fractional hours/minutes must become mathematically correct persisted minutes/seconds; literal 30/6/20/90 values catch unit or floating-point conversion errors.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: clamps in the canonical unit, never at a converted bound
+    B1/B2/B6 contract, concrete failure and coverage: A one-minute minimum must remain exactly one minute after hour editing; detects rounding the converted floor into an invalid stored bound.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/editor-store.test.ts
+  Source: §7.2 autosave/conflicts/history/continuous validation; §8.1 revision protocol; AGENTS connection ownership. Stable owners and non-test callers: editor-store.ts WorkflowEditor and shared editor registry; use-workflow-editor, WorkflowEditorTab and PhoneEditor. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: a missing workflow is an error with words, not a crash
+    B1/B2/B6 contract, concrete failure and coverage: A missing remote workflow must yield an error state and no editable draft, not throw through the editor.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: saves 600 ms after the last change, once, with the revision the draft is based on
+    B1/B2/B6 contract, concrete failure and coverage: Edits must debounce 600ms from the last edit and submit the latest draft against its known revision; literal time comes from §7.2, not imported production constants.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: the body leaves out the daemon's own fields
+    B1/B2/B6 contract, concrete failure and coverage: ReplaceWorkflowRequest must omit daemon-owned identity/revision/timestamps from the definition body; typed wire protocol owns these fields separately.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: serializes saves: a change during a save is saved right after it, on the new revision
+    B1/B2/B6 contract, concrete failure and coverage: A save crossing another edit must not issue concurrent stale writes or discard the newer edit; held network response exposes a real revision race.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a failed save says so and keeps the edit; flush retries it
+    B1/B2/B6 contract, concrete failure and coverage: A transport failure must retain unsaved user text and flush must retry it; the fake provides failure/success responses, not editor state logic.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: an enabled draft the daemon refuses as invalid is saved disabled, and the editor says so
+    B1/B2/B6 contract, concrete failure and coverage: An invalid enabled draft must retain the edit by saving it disabled and expose that state to the user, per errors-block-enabling-not-saving requirement.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a 409 raises the banner and stops autosaving
+    B1/B2/B6 contract, concrete failure and coverage: A stale revision response must stop automatic overwrite attempts and expose conflict; otherwise another client's edit is silently lost.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: Reload takes their copy and drops the edits (and the undo history)
+    B1/B2/B6 contract, concrete failure and coverage: Reload must take the remote version and clear stale local history; the conflict prompt's discard action differs from overwrite.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: Keep mine overwrites theirs with the draft
+    B1/B2/B6 contract, concrete failure and coverage: Keep mine must fetch current revision and save the retained draft; otherwise a conflict cannot be resolved in favor of local edits.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a newer revision while clean reloads silently
+    B1/B2/B6 contract, concrete failure and coverage: A newer remote revision must refresh a clean editor; dirty-draft conflict coverage cannot detect stale clean views.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a newer revision over unsaved edits raises the banner
+    B1/B2/B6 contract, concrete failure and coverage: A remote update must preserve unsaved local edits and surface conflict; save-response 409 coverage does not exercise the event path.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: an own-save event before its response preserves the draft without a false conflict
+    B1/B2/B6 contract, concrete failure and coverage: An own-save event can precede its HTTP answer without generating a false conflict or losing edits; distinct event/response race.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: undo drops a selection of blocks the older draft does not have
+    B1/B2/B6 contract, concrete failure and coverage: Undoing an inserted node must drop its selected identity, preventing an inspector selection pointing at a nonexistent node; history-only snapshots cannot prove this.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: enabling saves pending edits first, then patches set_enabled on the new revision
+    B1/B2/B6 contract, concrete failure and coverage: Enable must flush pending draft first and patch the new revision; otherwise enabling creates stale conflicts or loses the latest edit.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: validates the draft a moment after each change
+    B1/B2/B6 contract, concrete failure and coverage: Editing an expression to reference a missing node must publish validation problems; validator tests do not prove validation is scheduled after a UI edit.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  REWRITE: marks a model the live catalogue does not list, as the daemon does — and follows the catalogue
+    B1/B2/B6 contract, concrete failure and coverage: Remove exact model diagnostic prose; keep error severity, node identity, field path and eventual disappearance after catalogue refresh. These stable data identify the invalid choice.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a catalogue not loaded yet raises no false errors
+    B1/B2/B6 contract, concrete failure and coverage: Partial registry/provider discovery must not block valid edits with invented unknown-model errors; distinguishes not-loaded warnings from invalid live models.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a reconnect's new client keeps the same editor and its unsaved draft (keyed by connection id)
+    B1/B2/B6 contract, concrete failure and coverage: A rebuilt client for the same connection must retain unsaved draft and write through the new transport, while another connection gets isolated state.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a load that lands after the user typed keeps the edit and raises the banner
+    B1/B2/B6 contract, concrete failure and coverage: Typing while a remote load is pending must not let its answer replace newer user text; held GET response demonstrates the race.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: an Enable event before its response preserves enabled state without a false conflict
+    B1/B2/B6 contract, concrete failure and coverage: An enable event preceding its HTTP answer must not falsely conflict or revert enabled state; separate patch path from save echoes.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: undo never flips enabled
+    B1/B2/B6 contract, concrete failure and coverage: Undo must restore edited content while leaving enabled state alone; undoing rename must not accidentally resume/pause triggers.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: reconnect: a failed save is retried; a newer daemon revision is a conflict
+    B1/B2/B6 contract, concrete failure and coverage: Reconnect must retry a failed dirty save only when the daemon revision still matches, otherwise preserve the draft as conflict.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: flushAllWorkflowEditors saves a pending edit at once (pagehide)
+    B1/B2/B6 contract, concrete failure and coverage: The pagehide flush operation must submit a pending draft before the debounce fires; editor registry iteration is production lifecycle ownership.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/flow-settings.test.ts
+  B1 source: §7.2 Wait form; config discriminated unions; AGENTS preserve unknown persisted fields. B4 stable seam: flow-settings.ts waitConfigForKind. Non-test callers: inspector/FlowSettings.tsx.
+  KEEP: drops the other kind's fields and keeps unknown ones
+    B1/B2/B6 contract, concrete failure and coverage: Switching Wait variants must remove incompatible fields and retain forward-compatible data; same-kind re-selection must not reset an existing wait.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/format.test.ts
+  Source: §7.1 workflow filters; §7.2 creation; §6.2 poll errors; §8.1 create protocol. Stable owners and non-test callers: format.ts/new-workflow.ts/templates.ts; WorkflowCard, RunsList, WorkflowsPanel, NewWorkflowDialog and WorkflowEditorTab. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: times a run: its duration once ended, the time so far while running
+    B1/B2/B6 contract, concrete failure and coverage: Live duration uses elapsed time and ended duration uses recorded duration, with unknown start remaining unknown; these are displayed numeric data rather than prose.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: shows the running run over a queued one
+    B1/B2/B6 contract, concrete failure and coverage: When queued and running runs coexist, the card must report the running one; run-mode selection owns a different run list and policy.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: filters by scope, by running, and by the search
+    B1/B2/B6 contract, concrete failure and coverage: Project/running/search filters must expose the right workflow IDs and normalize trailing slashes; a failed filter hides the user's workflows.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a blank workflow is one manual trigger the daemon names and places, in the browser's time zone
+    B1/B2/B6 contract, concrete failure and coverage: Blank-create request must carry a manual trigger, selected project and timezone without invented node IDs; this is caller-visible REST data rather than a template markup snapshot.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: defaults to this project, and resolves each target
+    B1/B2/B6 contract, concrete failure and coverage: New-workflow form must resolve this/other/temp clone choices to their correct target paths and trimmed input; daemon schema does not own form-to-request conversion.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: names the first thing missing
+    B1/B2/B6 contract, concrete failure and coverage: Incomplete/oversized creation data must report the missing field and refuse submission; successful resolution cases supply the complementary positive control.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: maps each trigger whose last poll failed to its error, and nothing else
+    B1/B2/B6 contract, concrete failure and coverage: Poll failure messages must be associated with the correct trigger ID and absent failures omitted; backend trigger tests cannot prove UI association.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/history.test.ts
+  Source: §7.2 undo/redo, 100 steps and coalesced drags. Stable owners and non-test callers: history.ts SnapshotHistory; WorkflowEditor. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: undo hands back the state before each change, redo walks forward again
+    B1/B2/B6 contract, concrete failure and coverage: Undo/redo must return chronological pre-edit snapshots and stop at the ends; editor integration cases do not cover multi-step replay.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a burst with one key is one step; a pause or another key starts a new one
+    B1/B2/B6 contract, concrete failure and coverage: A drag/typing burst must undo in one step while a pause or different field starts another; prevents fragmented or conflated user undo operations.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a null key never coalesces, and seal() ends a burst early
+    B1/B2/B6 contract, concrete failure and coverage: Independent changes and explicitly sealed bursts must remain independently undoable; sealHistory is invoked by actual editor editing flows.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a new change after an undo drops what could be redone
+    B1/B2/B6 contract, concrete failure and coverage: Editing after undo must discard the abandoned redo branch, preventing restoration of superseded user work.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: keeps at most 100 steps, dropping the oldest
+    B1/B2/B6 contract, concrete failure and coverage: History must enforce the independently specified 100-step retention without discarding newer edits first; no geometry assertion.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/inspector-autocomplete.test.ts
+  Source: §7.2 upstream template completion; §3.2 output context and §3.3 expression grammar. Stable owners and non-test callers: inspector-autocomplete.ts completionScopeFor/templateCompletions; Inspector and TemplateEditor. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: offers the roots right after {{
+    B1/B2/B6 contract, concrete failure and coverage: An opening expression must offer valid language roots and prefix filtering; roots are independently documented expression names, not UI copy.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: walks nodes → a block → output → its known fields, from the caret back
+    B1/B2/B6 contract, concrete failure and coverage: Nested node/output/error/PR paths must suggest accessible properties and replace only the typed suffix; this catches invalid completions or overwriting surrounding text.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: knows the trigger's fields, the run, the project, the secrets and the input
+    B1/B2/B6 contract, concrete failure and coverage: Context-specific trigger/run/project/secret/input completions must expose values supported by the expression protocol; dynamic secret names are supplied data.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: offers filters after a pipe, with arguments filled in
+    B1/B2/B6 contract, concrete failure and coverage: Pipe completion must yield executable filter syntax including required arguments; path completion tests cannot detect malformed filter insertion.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: says nothing outside an expression, after one closed, or after an escape
+    B1/B2/B6 contract, concrete failure and coverage: Plain, closed or escaped expression text must not activate completion; otherwise editor typing is interrupted outside the template language.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: offers {variables} in a prompt only, and never inside {{
+    B1/B2/B6 contract, concrete failure and coverage: Saved-prompt single-brace variables are enabled only in prompt scope; ordinary template fields must not receive unsupported expansions.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/inspector-data.test.ts
+  B1 source: §7.6 pinned outputs; set_pinned null means unpin; §3.3 template grammar. B4 stable seam: inspector-data.ts parsePinnedText and outputReference. Non-test callers: inspector/DataTab.tsx.
+  KEEP: refuses JSON over the pinned-data limit
+    B1/B2/B6 contract, concrete failure and coverage: Pinned-data form must reject payloads above the independent 1 MiB storage limit before saving them.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: refuses null, which set_pinned would read as unpin
+    B1/B2/B6 contract, concrete failure and coverage: Reject null to avoid removing a pin; preserve false and zero as real JSON values. These independent protocol sentinels catch truthiness bugs.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: explains a syntax error
+    B1/B2/B6 contract, concrete failure and coverage: Malformed JSON must return an actionable error instead of throwing through the form or accepting broken data; valid scalar case supplies a positive control.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: writes the template reference to a block's output
+    B1/B2/B6 contract, concrete failure and coverage: Copied template text must use the literal documented nodes.Name.output grammar; these are executable bytes, not optional presentation wording.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/inspector-pin.test.ts
+  Source: §7.6 pinned outputs; §8.1 whole-output endpoint. Stable owners and non-test callers: inspector-data.ts pinnableOutputOf; DataTab pinFromRun. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: pins a whole recorded output as is, without asking the daemon
+    B1/B2/B6 contract, concrete failure and coverage: Whole recorded output must remain pinnable without a redundant network request; an offline daemon must not prevent pinning already available data.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: reads the whole output when the run kept only a preview
+    B1/B2/B6 contract, concrete failure and coverage: A truncated preview must be replaced with the separately fetched full output before pinning; differing preview and full values catch wrong-source selection despite a stub transport.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: refuses a malformed answer rather than pinning the preview
+    B1/B2/B6 contract, concrete failure and coverage: A malformed full-output response must refuse pinning rather than persist the preview; the adjacent valid-response case prevents reject-all false positives.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/inspector-support.test.ts
+  Source: §5.2/§7.2 account selection; AGENTS localStorage validation; §3.2 live inputs; §7.6 pinned JSON. Stable owners and non-test callers: inspector-usage.ts, inspector-layout.ts, inspector-data.ts; AccountPolicyEditor, ChainEditor, use-workflow-editor and DataTab. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: joins managed accounts to their windows by id; an expired window says nothing
+    B1/B2/B6 contract, concrete failure and coverage: Managed-account usage must join by account identity, omit wrong families and treat expired/stale readings as unknown; selecting another account's usage changes allow-list decisions.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: loads persisted choices field by field and falls back on unreadable data
+    B1/B2/B6 contract, concrete failure and coverage: Malformed localStorage fields cannot poison UI state or discard independently valid fields; literal versioned storage key is the persistence contract.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/json-tree.test.ts
+  Source: §7.3 data copy; §3.3 expression path grammar. Stable owners and non-test callers: json-tree.ts jsonChildren/jsonCopyText; runs/JsonTree. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: escapes quoted keys and keeps root paths usable
+    B1/B2/B6 contract, concrete failure and coverage: Copyable expression paths must escape quotes and remain syntactically valid at object/array roots; literal paths catch corrupt template references.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: pages children with their paths
+    B1/B2/B6 contract, concrete failure and coverage: Pages must include the requested array segment/object values with valid paths and no children for leaves; wrong page offsets lose displayed/copied data, not merely row geometry.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: copies strings raw and preserves JSON values
+    B1/B2/B6 contract, concrete failure and coverage: Copying strings must preserve raw text while objects preserve JSON structure; double-quoting strings or corrupting nested JSON breaks user clipboard data.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/notifications.test.ts
+  Source: §5.11 notification policy; §3.4 stopped/interrupted outcomes; AGENTS isolation; public UI exports. Stable owners and non-test callers: notifications.ts public rules/store operations; app applyEvent, WorkflowRunToast, WorkflowAttention and use-run-on-screen. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: reads notify settings field-wise, defaulting to failures only
+    B1/B2/B6 contract, concrete failure and coverage: Missing/malformed notify settings must safely default failures on/successes off while honoring valid booleans; store-success examples do not cover malformed field fallback.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  REWRITE: counts a Stop block's end as a success and a cancel or a skip as nothing
+    B1/B2/B6 contract, concrete failure and coverage: Observe finishedRunNotice output for terminal statuses under failure-only or success-only preferences, and quiet statuses with both enabled; remove direct internal classification assertions and runOutcomeKind export. Catch missing/spurious actual notices rather than private enum labels.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: preserves the failure's error, project and test-run identity in its toast
+    B1/B2/B6 contract, concrete failure and coverage: Notification data must carry the actual failure and destination/test identity while default success notifications stay disabled; protects useful navigation/error reporting.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: says nothing about a sub-workflow's run
+    B1/B2/B6 contract, concrete failure and coverage: Child runs must not raise their own duplicate notification; parent-run identity is independent of success/failure preference cases.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: puts failed runs in the Attention Center, never test runs
+    B1/B2/B6 contract, concrete failure and coverage: Failure attention entries must carry exact run/workflow/project/error data and exclude test runs; the expected strings are user/server data, not UI copy.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: raises a toast and an entry once per run, however often the event arrives
+    B1/B2/B6 contract, concrete failure and coverage: Duplicate finished events notify once and irrelevant/malformed events cannot add notifications; prevents reconnect spam through the app's real event-consumer seam.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  DELETE: remembers the latest 500 distinct runs without refreshing repeated events
+    B1/B2/B6 contract, concrete failure and coverage: The internal MAX_REMEMBERED capacity and insertion-order eviction are implementation choices, absent from the notification requirement. Dedupe/reconnect semantics remain covered by raises a toast and an entry once per run. Fails bars 1 and 5; only the cache-policy change detector is removed.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: stays quiet for the run the user is looking at
+    B1/B2/B6 contract, concrete failure and coverage: A visible run already being viewed must not notify; mounted state is distinct from explicitly marking an ended run read.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a mounted run in a hidden document does not swallow the failure
+    B1/B2/B6 contract, concrete failure and coverage: A hidden document must still surface its mounted run's failure; otherwise background completion silently disappears.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: viewing a LIVE run never silences its later failure
+    B1/B2/B6 contract, concrete failure and coverage: Merely viewing a still-live run must not silence its later failure after leaving; prevents premature read acknowledgement.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: the workflow summary's notify settings decide (a success toast when asked, no failure when off)
+    B1/B2/B6 contract, concrete failure and coverage: Current workflow summary preferences must control failure suppression/success notification; direct pure-rule tests do not exercise preference lookup.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: clears a run's toast and entry once it is viewed, and stays quiet about it after
+    B1/B2/B6 contract, concrete failure and coverage: Viewing one ended run clears only its notices and suppresses replay, while other runs remain visible; distinguishes read state from global dismissal.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: dismisses the toasts and one entry at a time
+    B1/B2/B6 contract, concrete failure and coverage: Dismiss-all toast and dismiss-one attention commands must not accidentally clear unrelated entries or attention state.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: reads the workflow's notify settings from a loaded run's definition
+    B1/B2/B6 contract, concrete failure and coverage: Without a summary, the loaded frozen definition must supply notification preferences, and successful runs never become failure attention entries.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: forgets everything on a connection switch
+    B1/B2/B6 contract, concrete failure and coverage: Reset must clear notices and deduplication memory so the same ID on another connection can notify; it tests the public reset operation, not connection-switch wiring.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/open-bridge.test.ts
+  B1 source: §5.10 session workflow ownership and navigation; SessionSummary.owner contract. B4 stable seam: open-bridge.ts event delivery and workflowRunTargetOf parser. Non-test callers: WorkflowChip and WorkflowsHost.
+  KEEP: every listener takes the run, and unsubscribing takes it out
+    B1/B2/B6 contract, concrete failure and coverage: Open-run delivery must reach subscribers, stop after unsubscribe, and report no listeners so navigation fallback can work.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: only a chat tab with a whole workflow owner links to a run
+    B1/B2/B6 contract, concrete failure and coverage: Only complete workflow-owned agent-chat identity may link to a run; malformed/foreign/shell owner data must not navigate to an unusable target.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/overlay.test.ts
+  B1 source: §7.2 live run overlay and §3.4 taken/error branches. B4 stable seam: overlay.ts deriveRunOverlay. Non-test callers: WorkflowCanvas and PhoneEditor.
+  KEEP: per block: status, duration (live for a running one), attempt, handle, account and hops
+    B1/B2/B6 contract, concrete failure and coverage: Overlay must preserve actual block duration, selected account, attempt, activity and handle while omitting unreached blocks; independent from timeline mapping owner.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: edges: taken, active into a running block, dead, idle — read off the source when the lists lag
+    B1/B2/B6 contract, concrete failure and coverage: Edges must distinguish executed/live-target/dead/unreached paths even before recorded edge lists catch up; wrong colors here convey wrong execution data, not geometry.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a failed block takes its error edge unless the run records another path
+    B1/B2/B6 contract, concrete failure and coverage: Failed blocks use error edges and explicit recorded paths override inferred handles; prevents falsely reporting success routes after failure.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/process-settings.test.ts
+  B1 source: §5.6 shell scripts and separate environment values; HTTP config wire schema; AGENTS preserve unknown fields; shell environment semantics. B4 stable seam: process-settings.ts form conversion, validation and planShellEnvVariables. Non-test callers: inspector/ProcessSettings.tsx.
+  KEEP: leaves the config untouched when the kind is already chosen
+    B1/B2/B6 contract, concrete failure and coverage: Re-picking HTTP body kind must not destroy form fields or text content type already entered by the user.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: carries a written value across, and starts JSON as an empty object
+    B1/B2/B6 contract, concrete failure and coverage: HTTP body edits must preserve entered text when convertible, clear removed bodies and create valid JSON for a newly enabled body.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: keeps the success statuses when their mode is re-picked, and restores the latest list
+    B1/B2/B6 contract, concrete failure and coverage: Switching response acceptance mode must not discard the remembered custom status codes; parser tests do not own form state conversion.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: reads codes separated by commas, semicolons or spaces, once each, in order
+    B1/B2/B6 contract, concrete failure and coverage: User-entered HTTP status lists must preserve numeric meanings and remove duplicate codes across supported separators.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: names what isn't a status code
+    B1/B2/B6 contract, concrete failure and coverage: HTTP codes outside 100..599 and nonnumeric tokens must surface validation problems; a positive valid list prevents reject-all behavior.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: accepts JSON, with expressions standing in for values or inside strings
+    B1/B2/B6 contract, concrete failure and coverage: Valid HTTP JSON templates containing raw expression values or quoted strings must not be blocked by JSON-only parsing.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: accepts exactly one expression: its value is encoded as JSON
+    B1/B2/B6 contract, concrete failure and coverage: An entire HTTP JSON body may be a raw expression; prefix/suffix whitespace cannot make that protocol form invalid.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: names a body that won't parse, without positions into the stand-in text
+    B1/B2/B6 contract, concrete failure and coverage: Invalid JSON structure must show a problem without offsets into generated placeholder text; fixtures include adjacent expressions and unquoted keys.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  DELETE: leaves a broken expression to the validator
+    B1/B2/B6 contract, concrete failure and coverage: Asserts that one helper returns no problem for malformed input because another validator owns diagnostics; combining validators preserves behavior yet breaks this test. API expressions/validation tests own syntax errors; retained JSON-body cases own acceptance and malformed JSON. Fails bars 2, 5 and 6.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  REWRITE: plans one row per distinct expression and never touches the script
+    Final name: plans one row per distinct expression.
+    B1/B2/B6 contract, concrete failure and coverage: Keep distinct expressions and corresponding environment values with unique usable variable names. Remove arbitrary INPUT_TEXT/FETCH_ID spelling and absence-of-script-property assertion; the latter only checked a declaration shape.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  REWRITE: never suggests a name the shell, the loader or a common tool reads
+    B1/B2/B6 contract, concrete failure and coverage: Use literal dangerous shell/tool names as an independent forbidden set and assert proposed names are usable, nonreserved and carry the expression. Remove exact WF_ naming and circular isReservedEnvName oracle; make that helper internal.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  REWRITE: never takes a name a row or a word of the script already uses
+    B1/B2/B6 contract, concrete failure and coverage: Keep collisions with existing environment and script assignments plus invalid-name avoidance; assert names are distinct from occupied names, not arbitrary numeric suffix selection.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  REWRITE: reuses a row only when it holds exactly that expression and wins at run time
+    B1/B2/B6 contract, concrete failure and coverage: Keep exact-match reuse and rejection of whitespace/prefix/filter/shadowed/reserved mismatches, asserting reused versus newly allocated identity without freezing invented new names.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  REWRITE: doesn't reuse a row the script itself sets or reads other than as $NAME
+    B1/B2/B6 contract, concrete failure and coverage: Keep assignment/read/nameref/default-assignment collision cases and plain-read reuse, with independent A identity instead of prescribed INPUT_A fallback.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  REWRITE: keeps every row as it was, fields a newer version wrote included
+    B1/B2/B6 contract, concrete failure and coverage: Keep unknown fields and reused existing rows, then assert the appended expression value; remove new variable spelling irrelevant to persisted-data preservation.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  REWRITE: adds nothing the second time, also once the script reads the variables
+    B1/B2/B6 contract, concrete failure and coverage: Keep idempotence and halfway-manual-replacement reuse; build the second input from actual suggested identities, with unchanged environment as the independent idempotence oracle.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  REWRITE: leaves Go-style {{.Field}} alone and notes a broken expression
+    B1/B2/B6 contract, concrete failure and coverage: Keep expression/Go-template discrimination and incomplete-state output; remove invented INPUT_REPO spelling.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: flags environment names the shell block fails on, and repeats
+    B1/B2/B6 contract, concrete failure and coverage: Environment row editing must identify invalid names, missing names and shadowed duplicates; last-row-wins semantics comes from shell environment execution.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: flags header names the HTTP block fails on and nameless rows it skips
+    B1/B2/B6 contract, concrete failure and coverage: Invalid HTTP header tokens must error while query names may contain spaces; missing name with data must warn rather than silently lose input.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/run-behaviour.test.ts
+  B1 source: §5.9 limits; daemon run-context timeout precedence and old config migration. B4 stable seam: run-behaviour.ts movedTimeoutPatch. Non-test callers: inspector/CommonSettings.tsx.
+  KEEP: moves the value as the daemon applies it, capped at the type's maximum
+    B1/B2/B6 contract, concrete failure and coverage: Migration of legacy timeout values must preserve minutes for processes, convert to seconds for HTTP and honor independent 24h/1h limits.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: has nothing to move for other types or without a value
+    B1/B2/B6 contract, concrete failure and coverage: Migration must not invent a process timeout for agent blocks or absent legacy values; positive migration cases prevent no-op implementations passing.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/run-view.test.ts
+  B1 source: §7.3 run details, inputs, actions and history; §3.2 merge semantics; RunWorkflowRequest. B4 stable seam: run-view.ts timeline/input/request/filter/page operations. Non-test callers: RunTimeline, BlockRunDetails, RunsList and use-run-actions.
+  KEEP: preserves failed block details and distinguishes unreached steps in a finished run
+    B1/B2/B6 contract, concrete failure and coverage: Completed runs must retain errors/attempt/duration and mark unreached blocks skipped; failed block must be selected for diagnosis.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: shows a working agent's account, hops and activity
+    B1/B2/B6 contract, concrete failure and coverage: Live agent steps must show the current account/activity/duration and select that step while downstream unstarted steps remain pending; finished-run case cannot detect premature skipped state.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: builds a block's input from its live upstreams
+    B1/B2/B6 contract, concrete failure and coverage: Run details must reconstruct trigger/single live branch inputs and exclude untaken/skipped edges; inspector DataTab uses a distinct implementation.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: merges several live inputs by name
+    B1/B2/B6 contract, concrete failure and coverage: Multiple live inputs merge under predecessor names and propagate truncation; single-source case does not catch overwrite or false-whole display.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: offers what makes sense now
+    B1/B2/B6 contract, concrete failure and coverage: Only meaningful cancel/retry/retry-failed/delete-temp actions are offered for current run state; wrong actions affect caller-visible commands.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: retries with the same input, or from the same event
+    B1/B2/B6 contract, concrete failure and coverage: Retries must preserve input/event/test identity and avoid empty requests before trigger data loads; asserts exact independently defined wire fields.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: filters by status and counts each filter
+    B1/B2/B6 contract, concrete failure and coverage: Status filters/counts must group stopped with success and interrupted with failure; verifies selected run IDs and data counts, not rendered row counts.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: merges the live page with older pages, the live copy winning, newest first
+    B1/B2/B6 contract, concrete failure and coverage: History merging must preserve one row per run with live/known state winning and chronological order; initial store list loads do not own older-page composition.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/runs-mode.test.ts
+  B1 source: §7.3 requested run and selected block navigation. B4 stable seam: runs-mode.ts pickRunId and pickBlockId. Non-test callers: RunsMode.tsx.
+  KEEP: shows the run asked for, else the newest live one, else the newest
+    B1/B2/B6 contract, concrete failure and coverage: An explicit older run must remain selectable, otherwise prefer live/newest or none; initial list sorting does not own selection precedence.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: keeps the picked block while the run has it; else the run's own default
+    B1/B2/B6 contract, concrete failure and coverage: Keep the user's selected block while present and select a useful default after disappearance; direct default-selection tests cannot detect lost retained selection.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/store.test.ts
+  Source: §7.1 shared client state; §8.1 workflow/run/secret API; AGENTS bridge validation and connection isolation. Stable owners and non-test callers: store.ts load/event/mutation APIs and sanitize.ts; app router, workflow hooks, editor and both frontend renderers. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: drops a row with no id or name, and repairs the rest field by field
+    B1/B2/B6 contract, concrete failure and coverage: Malformed summary rows/fields must not enter typed client state or attach another workflow's run; fixtures independently specify valid vs invalid wire values.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: keeps the listed errors and what they leave out
+    B1/B2/B6 contract, concrete failure and coverage: Wire summary errors and omitted count must survive sanitization so a truncated list still communicates all blocking failures.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: an older daemon's row (the count alone) has no list
+    B1/B2/B6 contract, concrete failure and coverage: Mixed-version summary compatibility must retain error counts without fabricating detailed problems absent from the old daemon response.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: repairs a malformed list entry by entry, and never counts fewer errors than it lists
+    B1/B2/B6 contract, concrete failure and coverage: Malformed error arrays must retain valid blocking problems, drop warnings/invalid entries, and avoid contradictory counts; AGENTS demands payload validation.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: loads once, shares a request in flight, and refreshes when stale
+    B1/B2/B6 contract, concrete failure and coverage: Concurrent panel consumers share a load, loaded data stays cached, and stale refresh removes absent workflows; visible refresh convergence plus request lifecycle, not private collaborator ordering.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a failure is the error state, and a refresh failure keeps the rows
+    B1/B2/B6 contract, concrete failure and coverage: Initial load error must surface, while refresh failure retains prior rows with stale/error state; prevents disappearing workflows during network outages.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: an event that crosses the answer is not undone by it
+    B1/B2/B6 contract, concrete failure and coverage: A list response crossing newer upsert/delete events must not regress names or resurrect deleted records; held response catches real network race.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a client of another connection resets first
+    B1/B2/B6 contract, concrete failure and coverage: Loading another connection must replace prior daemon data rather than mix identically scoped workflows.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: ignores malformed payloads and unknown types without a throw
+    B1/B2/B6 contract, concrete failure and coverage: Malformed or unknown events must leave state intact and avoid throwing through event dispatch; valid event cases make this meaningful validation coverage.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: repeated events neither duplicate rows nor resurrect deleted workflows
+    B1/B2/B6 contract, concrete failure and coverage: Repeated upserts must preserve one record and cannot defeat deletion tombstones; detects reconnect event replay resurrecting removed workflows.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a run's start, updates and end fold into its workflow's row
+    B1/B2/B6 contract, concrete failure and coverage: Run start/progress/end must update row/cache together and never revert terminal state due to late events or stale summaries; lower server tests do not protect UI convergence.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a secrets change marks the scopes it touches stale
+    B1/B2/B6 contract, concrete failure and coverage: Workflow-scoped secret changes stale only that scope; global changes stale every inherited list and malformed scoped metadata is discarded.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: block updates accept a retry but ignore an earlier attempt or state
+    B1/B2/B6 contract, concrete failure and coverage: A retry's newer attempt may return to running while old attempts/earlier same-attempt states cannot regress progress; unique ordering invariant.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a workflow's recent runs load newest first, and a started run joins them
+    B1/B2/B6 contract, concrete failure and coverage: Recent runs must be isolated by workflow, ordered newest first, and accept new started runs; pagination composition is a separate caller.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a loaded run keeps the deltas that landed while it was in flight
+    B1/B2/B6 contract, concrete failure and coverage: A loaded detail response must retain newer block deltas received in flight while adding previously unknown blocks.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a reconnect marks a held run stale; a forced reload clears it and takes the run's end
+    B1/B2/B6 contract, concrete failure and coverage: Reconnect must mark held detail stale and a successful forced fetch must learn its terminal status and clear staleness.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a list refresh updates the summary of a run held whole
+    B1/B2/B6 contract, concrete failure and coverage: A history refresh must update an already loaded whole run's summary, recovering missed terminal events through a different response path.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a run whose definition does not parse is not published and does not crash
+    B1/B2/B6 contract, concrete failure and coverage: Malformed frozen workflow definitions must be discarded before shared run state while load remains safe; catches invalid protocol data reaching run renderers.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: enabling shows at once, then carries the daemon's answer
+    B1/B2/B6 contract, concrete failure and coverage: Enable must show optimistic state, issue the current revision patch and adopt daemon-confirmed revision/state; daemon patch mocks do not implement UI overrides.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a refusal rolls back and becomes the notice; a stale revision is re-read once
+    B1/B2/B6 contract, concrete failure and coverage: Stale enable requests must retry with fetched revision; rejected requests must roll back optimistic state and expose a dismissible error notice.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: an overlap skip offers Run anyway
+    B1/B2/B6 contract, concrete failure and coverage: An overlap skip must offer Run anyway and retry with force in the wire request, independently specified in §5.11.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: create shows the row at once; delete removes it, and a gone workflow counts as deleted
+    B1/B2/B6 contract, concrete failure and coverage: Successful create must immediately enter client state; delete of an already-gone server record still removes its client row.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a write's own row lists the errors its answer carries
+    B1/B2/B6 contract, concrete failure and coverage: Write responses must update the workflow list with actual blocking errors, excluding warnings; list sanitization alone does not exercise write-result conversion.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a reset drops answers still in flight
+    B1/B2/B6 contract, concrete failure and coverage: Reset during an in-flight response must discard the old answer and remain idle, preventing cross-connection stale data leakage.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/temp-projects.test.ts
+  Source: §5.10 temporary-project ownership and sidebar attribution. Stable owners and non-test callers: temp-projects.ts workflowTempProjects/isWorkflowTempProject; sidebar workspace/project listing. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: marks a project a known run names as its temp project
+    B1/B2/B6 contract, concrete failure and coverage: A known run temporary path must mark the corresponding project despite trailing slash normalization; avoids missing workflow attribution.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: never a deleted one, and never a wf- folder on its name alone
+    B1/B2/B6 contract, concrete failure and coverage: Deleted temp projects and merely similarly named user projects must not be attributed to a workflow; positive case prevents reject-all implementation.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/lib/workflows/trigger-text.test.ts
+  B1 source: §6 trigger schedules/manual JSON/Git source filters; config discriminated unions; unknown-field preservation. B4 stable seam: trigger-text.ts schedule/repository/event form transitions and JSON diagnostics. Non-test callers: inspector/TriggerSettings.tsx.
+  KEEP: builds a last-day-of-month cron the scheduler accepts
+    B1/B2/B6 contract, concrete failure and coverage: Monthly last-day UI must serialize cron that runs Jan 31 and Feb 28 at selected time; independent calendar dates catch erroneous fixed-day schedules.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: accepts empty or valid JSON
+    B1/B2/B6 contract, concrete failure and coverage: Manual example input permits absence and valid JSON scalars/objects, so optional input must not block workflow editing.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: points at the line and column of a mistake
+    B1/B2/B6 contract, concrete failure and coverage: User JSON diagnostics must locate the actual malformed token in multiline input; asserted line/column are source positions, not arbitrary error prose.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: re-picking the current schedule kind changes nothing
+    B1/B2/B6 contract, concrete failure and coverage: Choosing the existing schedule kind must retain configured times, days and unknown fields; prevents silent resets while editing.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: switching the schedule kind starts it fresh, keeping the time of day
+    B1/B2/B6 contract, concrete failure and coverage: Schedule kind conversion must preserve selected time of day while producing a valid new preset; catches unexpected trigger firing time shifts.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: re-picking the current repository kind keeps the URL and account
+    B1/B2/B6 contract, concrete failure and coverage: Repository source edits must retain URL/credential/unknown fields when kind stays same and remove fields belonging to a different source kind.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: changing the account keeps every other repository field
+    B1/B2/B6 contract, concrete failure and coverage: Credential edits must preserve repository URL and future fields; clearing credentials must omit the account reference rather than send an invalid empty ID.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: re-picking the current event kind changes nothing
+    B1/B2/B6 contract, concrete failure and coverage: Git event kind re-selection must preserve filters and unknown fields; valid variant defaults avoid malformed trigger requests when switching.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: edits within an event keep its other fields
+    B1/B2/B6 contract, concrete failure and coverage: Editing one Git filter must preserve other event configuration and omit cleared optional filters; detects losing actions, future fields or broadened trigger matching.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/components/workflows/canvas/connection.test.ts
+  Source: §3.4 DAG/input/output constraints; §7.2 add/insert/delete operations. Stable owners and non-test callers: connection.ts/ops.ts; WorkflowCanvas, WorkflowEditorTab and PhoneEditor. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: adds a block wired from an output
+    B1/B2/B6 contract, concrete failure and coverage: Add-from-output must create the chosen executable block and wire it from the selected source; no geometry asserted.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: inserts a block into an edge: source → new → target
+    B1/B2/B6 contract, concrete failure and coverage: Insertion must replace one edge with source→new→target; losing either side disconnects the runnable workflow.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: removes blocks with their edges and pinned outputs
+    B1/B2/B6 contract, concrete failure and coverage: Removing a block must also remove incident edges and its pinned output; Steps healing tests do not protect pinned-state cleanup.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/components/workflows/canvas/tap-connect.test.ts
+  Source: §7.4 tap-to-connect workflow; §3.4 graph eligibility. Stable owners and non-test callers: tap-connect.ts reduceTapConnect; PhoneEditor. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: start → tap a block: connects, back to idle
+    B1/B2/B6 contract, concrete failure and coverage: Two taps must produce the exact requested connection and leave picking mode; no rendering or private React props are inspected.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a refused target keeps picking and says why
+    B1/B2/B6 contract, concrete failure and coverage: Rejected target must leave picking active with explanation and permit a later valid target; validator-only tests do not protect the interaction state.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: its own block or Cancel ends it; a tap while idle does nothing; a new start replaces
+    B1/B2/B6 contract, concrete failure and coverage: Self-tap/cancel must clear pending connection, idle tap does nothing and new source replaces old selection; prevents accidental stale-source edges.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/components/workflows/phone/key-bar.test.ts
+  Source: §7.4 code/prompt key bar; §3.3 expression syntax. Stable owners and non-test callers: key-bar.ts applyKeyBarKey; KeyBar DOM/CodeMirror insertion. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: a character replaces the selection; the caret goes after it
+    B1/B2/B6 contract, concrete failure and coverage: Symbol insertion/replacement must preserve surrounding text for forward/backward selections and place the caret after inserted content.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: {{ }} puts the caret inside, or wraps the selection
+    B1/B2/B6 contract, concrete failure and coverage: Expression shortcut must produce syntactically usable braces around a selected expression or position the caret inside an empty expression.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: Tab indents by the editor's unit
+    B1/B2/B6 contract, concrete failure and coverage: Tab must use the caller-selected indentation and move the caret consistently; actual edit result, not key declaration inventory.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/components/workflows/runs/log-buffer.test.ts
+  Source: §7.3 live log text; terminal escape/control semantics; bounded client log retention. Stable owners and non-test callers: log-buffer.ts appendLog/visibleLogLines; LogViewer. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: drops colours, cursor moves, OSC titles and links
+    B1/B2/B6 contract, concrete failure and coverage: ANSI colors/cursor/OSC sequences and unsafe control bytes must not leak into displayed text, while legitimate text and tabs remain.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: carries an escape sequence split across chunks
+    B1/B2/B6 contract, concrete failure and coverage: Escape sequences split between chunks must be consumed without losing ordinary text; single-chunk sanitizer coverage cannot catch carry mistakes.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: keeps what a terminal would show
+    B1/B2/B6 contract, concrete failure and coverage: Carriage-return progress must replace its prior line and CRLF must terminate once; ordinary newline splitting does not protect terminal-style output.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: splits chunks into lines and keeps the line in progress
+    B1/B2/B6 contract, concrete failure and coverage: Chunk boundaries must preserve incomplete lines without duplicating/dropping content; literal words form an independent stream oracle.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/components/workflows/runs/log-follower.test.ts
+  Source: §7.3 log tail/download; API X-Log-* byte-offset protocol. Stable owners and non-test callers: log-follower.ts; LogViewer; parseWorkflowLogWindow in api-client.ts consumed by workflow log API. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: reads a finished log to its end, window after window, by the daemon's offsets
+    B1/B2/B6 contract, concrete failure and coverage: Finished logs must read all server windows using raw-byte cursors even when redaction expands displayed text; otherwise portions duplicate/vanish.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: polls a live log, and a failed read resumes from the same offset once — no duplicates
+    B1/B2/B6 contract, concrete failure and coverage: A transient live-read failure must retry the same offset and continue without duplicate text, then cease polling at terminal EOF.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: an error on a finished log is reported, not appended
+    B1/B2/B6 contract, concrete failure and coverage: A failed completed-log read must report an error without adding error text as log content; live retries exercise a different branch.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: stop() ends it: no further reads, including after wake
+    B1/B2/B6 contract, concrete failure and coverage: Stopping the viewer must terminate polling and make later wake inert, avoiding background log requests after unmount.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a live log held at a partial last line waits for the next poll instead of spinning
+    B1/B2/B6 contract, concrete failure and coverage: A held partial line with no cursor advance must wait for a poll rather than spin synchronous reads; the transport stub supplies the documented stalled cursor, not retry logic.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: readWholeLog reads every window to the end (the download)
+    B1/B2/B6 contract, concrete failure and coverage: Full download must concatenate every log window rather than only the displayed tail or first response; follower and download are separate implementations.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: parseWorkflowLogWindow reads the X-Log-* headers, case-insensitively
+    B1/B2/B6 contract, concrete failure and coverage: Case-insensitive X-Log headers must decode cursor/eof/size/live correctly and missing headers fall back to raw response bytes; concrete wire protocol parser.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+packages/ui/src/components/workflows/steps/steps-logic.test.ts
+  Source: §7.4 phone Steps edits; §3.4 graph validity. Stable owners and non-test callers: steps-logic.ts editing/candidate operations; PhoneEditor and StepSheets. No stronger retained test substitutes for the distinct behavior below unless its row names one.
+  KEEP: splices into a chain without losing downstream connections
+    B1/B2/B6 contract, concrete failure and coverage: Adding after an occupied output must preserve downstream chain connections; this selection/splice decision is distinct from lower canvas insertion mutation.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a block with no outputs (Stop) never splices: it becomes another branch
+    B1/B2/B6 contract, concrete failure and coverage: Adding Stop must keep existing downstream path as a sibling branch because Stop has no onward output; prevents silently cutting off workflow work.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: the first step goes after the trigger; with no trigger, loose
+    B1/B2/B6 contract, concrete failure and coverage: The first executable step must attach to an available trigger, while a new trigger in an empty graph remains standalone.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: connect candidates: connectable first, with why the rest cannot
+    B1/B2/B6 contract, concrete failure and coverage: Connect choices must omit self/triggers and favor legal targets while explaining illegal ancestors; edge validation alone cannot detect missing legal choices.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: move to another output: re-hangs the row's edge; loops are refused
+    B1/B2/B6 contract, concrete failure and coverage: Moving must change the selected incoming edge and preserve downstream edges; refused descendant move must keep graph intact and current candidate identified.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: deleting a middle step heals the chain
+    B1/B2/B6 contract, concrete failure and coverage: Deleting a simple middle step must heal predecessor→successor rather than cut off downstream work.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: a join (two edges in) is deleted without guessing a heal
+    B1/B2/B6 contract, concrete failure and coverage: Deleting a multi-input join must avoid inventing ambiguous replacement paths, preserving independent upstream branches.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: duplicate puts the copy right after the original, taking over what it fed
+    B1/B2/B6 contract, concrete failure and coverage: Duplicate-after must splice the copied block into the selected chain; clipboard reminting tests do not own Steps graph wiring.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+  KEEP: disable / enable
+    B1/B2/B6 contract, concrete failure and coverage: Disable/enable must affect only the selected block IDs and reverse cleanly; false-versus-omitted property spelling is not asserted.
+    B3/B4/B5, risk and validation: group/common justifications above apply to this specific fixture and action.
+
+Planned dead-seam cleanup: remove external exports of runOutcomeKind/RunOutcomeKind (internal notification callers only) and isReservedEnvName (internal shell-planning callers only); remove runOutcomeKind barrel export. No orphan fixture/snapshot or injected production hook results. Shared testing.ts remains used by graph/clipboard/editor tests.
+Status before edits: ledger complete; initial focused test running.
+Implementation complete: 5 DELETE, 13 REWRITE, 185 KEEP; 198 surviving cases. No fixtures or snapshots became orphaned. Removed two test-only function exports and one type export; implementations remain in use internally. Both web and desktop consume the shared UI barrel; no entry point imports removed names.
+Initial subsystem invocation: stopped its own process tree after retained editor/history/form cases passed without failures, because shared-host import contention made repeated unchanged-file execution costly. It began before changes and loaded later files after edits; it is not a completed clean baseline. Changed-file validation passed: the four-file run (chain-models, editor-store, notifications, process-settings) completed 60 tests with zero failures; it still included two subsequently deleted template cases. After final provider-hook removal and shell assertion refinement, a fresh chain-models/process-settings run completed 21 tests with zero failures. Root owns all-package gates.
+
+Additional pre-edit review: API templates.ts and templates.test.ts confirmed that the two static model checks merely restate template literals through createFromTemplate. Remove that now-unused test import; the production helper remains used by NewWorkflowDialog. Risk low; same focused chain-models command plus root API/UI gates.
+
+Cross-owner confirmation: API audit retains template validity across live/pending catalogues, valid default agent chain, and disabled/project/timezone creation contracts. No deleted UI static-template assertion was their sole owner.
+
+Pre-edit dead-hook follow-up: repository-wide calls show createFromTemplate providers argument is now unused, and withLiveChainModels/liveDefaultNodeConfig optional provider arguments are supplied only by chain-model tests or that forwarding wrapper. Production callers WorkflowsPanel and canvas ops always use providersStore. Remove all three test-only injection parameters and the now-unused templates ProviderSnapshot import; run surviving chain tests through providersStore with per-case reset. Risk: no production caller changes behavior; focused chain run and root typecheck/build validate signatures.
+
+COMPLETED CLEANUP — final verification
+- Audited all 203 original cases across 31 files: 5 DELETE, 13 REWRITE, 185 KEEP; 198 remain.
+- Focused run: 60 passed; final chain-models/process-settings rerun after all source/signature changes: 21 passed, zero failed/cancelled/skipped.
+- Final scoped git diff --check passed; final diff reviewed. Repository-wide caller search confirms no remaining consumers of removed exported names or optional provider injections.
+- Net source/test LOC: -56, including -48 test LOC. Audit documentation is excluded from this count.
+- Removed dead support: unused createFromTemplate/ProviderSnapshot test imports; public runOutcomeKind/RunOutcomeKind and isReservedEnvName exports; UI barrel's runOutcomeKind export; three test-only optional provider-catalogue injection parameters. No orphan fixtures/snapshots; shared testing.ts and live internal algorithms remain required.
+- Production callers and both frontend entry points retain their previous behavior; no daemon/session was started or disturbed. Root will record repository-wide check/test/build, merge, commit and push.

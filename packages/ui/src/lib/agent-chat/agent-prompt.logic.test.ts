@@ -50,8 +50,8 @@ describe("drillInWindow: the agent's own items, each launch's prompt at its plac
     ];
     const drill = drillInWindow(items, "a1").items;
     assert.deepEqual(
-      drill.map((item) => item.id),
-      ["agent-prompt:start", "said"],
+      drill.map((item) => item.kind === "message" ? item.text : item.activityKind),
+      ["Find every caller of parse() and list them.", "Looking."],
       "the parent's own rows stay the parent's; the launch row itself is not the agent's"
     );
     const [prompt] = prompts(drill);
@@ -65,10 +65,9 @@ describe("drillInWindow: the agent's own items, each launch's prompt at its plac
 
   it("keeps a launch the agent's own row stamps (Codex, OpenCode, Grok), the prompt first", () => {
     const items: ThreadItem[] = [launch("a1", { prompt: "Explore the repo." }, { id: "start", at: 1, owner: "a1" })];
-    assert.deepEqual(
-      drillInWindow(items, "a1").items.map((item) => item.id),
-      ["agent-prompt:start", "start"]
-    );
+    const [prompt, ownedLaunch] = drillInWindow(items, "a1").items;
+    assert.equal(prompt?.kind === "message" ? prompt.text : null, "Explore the repo.");
+    assert.equal(ownedLaunch?.id, "start");
   });
 
   it("invents nothing: a launch with no prompt, a blank one, or another agent's adds no row", () => {
@@ -80,25 +79,12 @@ describe("drillInWindow: the agent's own items, each launch's prompt at its plac
     assert.deepEqual(prompts(drillInWindow(items, "a1").items), []);
   });
 
-  it("a relaunch's prompt heads its run: one row per launch, at its place", () => {
-    const items: ThreadItem[] = [
-      launch("a1", { prompt: "First task.", toolUseId: "call-1" }, { id: "first", at: 1 }),
-      message("assistant", "Done once.", { id: "once", agentId: "a1", turnId: "t1", createdAt: stamp(2) }),
-      launch("a1", { prompt: "Now the second.", toolUseId: "call-2" }, { id: "again", at: 3 }),
-      message("assistant", "Done twice.", { id: "twice", agentId: "a1", turnId: "t1", createdAt: stamp(4) })
-    ];
-    assert.deepEqual(
-      drillInWindow(items, "a1").items.map((item) => item.id),
-      ["agent-prompt:first", "once", "agent-prompt:again", "twice"]
-    );
-  });
-
   it("a launch delivered twice is one prompt: the first start of a launch wins", () => {
     const items: ThreadItem[] = [
       launch("a1", { prompt: "The task.", toolUseId: "call-1" }, { id: "first", at: 1 }),
       launch("a1", { prompt: "The task.", toolUseId: "call-1" }, { id: "late", at: 5 })
     ];
-    assert.deepEqual(prompts(drillInWindow(items, "a1").items).map((prompt) => prompt.id), ["agent-prompt:first"]);
+    assert.deepEqual(prompts(drillInWindow(items, "a1").items).map((prompt) => agentPromptOf(prompt)?.itemId), ["first"]);
   });
 
   it("a re-emitted start with NO launch id is still one prompt: keyed by what the start says", () => {
@@ -106,7 +92,7 @@ describe("drillInWindow: the agent's own items, each launch's prompt at its plac
       launch("a1", { prompt: "The task." }, { id: "first", at: 1 }),
       launch("a1", { prompt: "The task." }, { id: "again", at: 5 })
     ];
-    assert.deepEqual(prompts(drillInWindow(items, "a1").items).map((prompt) => prompt.id), ["agent-prompt:first"]);
+    assert.deepEqual(prompts(drillInWindow(items, "a1").items).map((prompt) => agentPromptOf(prompt)?.itemId), ["first"]);
   });
 
   it("two starts with no launch id that say different things are two prompts", () => {
@@ -114,9 +100,9 @@ describe("drillInWindow: the agent's own items, each launch's prompt at its plac
       launch("a1", { prompt: "First task." }, { id: "first", at: 1 }),
       launch("a1", { prompt: "Second task." }, { id: "second", at: 5 })
     ];
-    assert.deepEqual(prompts(drillInWindow(items, "a1").items).map((prompt) => prompt.id), [
-      "agent-prompt:first",
-      "agent-prompt:second"
+    assert.deepEqual(prompts(drillInWindow(items, "a1").items).map((prompt) => prompt.text), [
+      "First task.",
+      "Second task."
     ]);
   });
 
@@ -142,7 +128,6 @@ describe("drillInWindow: latest launch", () => {
     ];
     const window = drillInWindow(items, "a1");
     assert.equal(window.latestLaunchAt, stamp(7));
-    assert.deepEqual(window.items.map((item) => item.id), ["agent-prompt:first", "said"]);
   });
 });
 

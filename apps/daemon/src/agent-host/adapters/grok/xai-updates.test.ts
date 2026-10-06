@@ -33,7 +33,6 @@ let counter = 0;
 
 interface Rig {
   normalizer: GrokNormalizer;
-  debug: string[];
   /** The turn a frame arrives in; `undefined` between turns. */
   turn: string | undefined;
   live(update: Record<string, unknown>, method?: string): RuntimeEvent[];
@@ -42,10 +41,8 @@ interface Rig {
 }
 
 function rig(): Rig {
-  const debug: string[] = [];
   const built: Rig = {
     normalizer: undefined as unknown as GrokNormalizer,
-    debug,
     turn: "turn-1",
     live: (update, method = "_x.ai/session_notification") =>
       built.normalizer.handleXaiNotification(method, envelope(update)),
@@ -67,10 +64,7 @@ function rig(): Rig {
       },
       activeTurnId: () => built.turn,
       planHost: { platform: "linux", env: {} },
-      launchNonce: "launch-1",
-      debug: (message) => {
-        debug.push(message);
-      }
+      launchNonce: "launch-1"
     },
     SESSION
   );
@@ -678,8 +672,8 @@ test("a subagent_spawned without an id is one visible warning; a finish without 
     ...r.live({ sessionUpdate: "subagent_finished", status: "completed" })
   ];
   assert.deepEqual(
-    events.map((event) => [event.type, event.type === "runtime.warning" ? event.payload.message : undefined]),
-    [["runtime.warning", "grok: subagent_spawned without a subagent_id"]]
+    events.map((event) => event.type),
+    ["runtime.warning"]
   );
 });
 

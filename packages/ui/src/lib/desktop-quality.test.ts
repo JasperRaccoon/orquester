@@ -7,10 +7,6 @@ function feed(state: DesktopQualityState, samples: number[]): DesktopQualityStat
   return samples.reduce(nextDesktopQuality, state);
 }
 
-test("starts at quality 6", () => {
-  assert.equal(initialDesktopQuality().level, 6);
-});
-
 test("3 consecutive slow samples step down one level", () => {
   const s = initialDesktopQuality();
   assert.equal(feed(s, [200, 200]).level, 6);

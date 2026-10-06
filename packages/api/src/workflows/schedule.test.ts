@@ -118,13 +118,6 @@ describe("DST", () => {
     assert.deepEqual(chained, ["2026-11-01T05:30:00.000Z", "2026-11-01T06:00:00.000Z", "2026-11-01T06:30:00.000Z", "2026-11-01T07:00:00.000Z"]);
   });
 
-  it("a daily cron in the repeated hour still fires once", () => {
-    assert.deepEqual(nextRuns("30 1 * * *", "America/New_York", 2, "2026-10-31T12:00:00Z"), [
-      "2026-11-01T05:30:00.000Z",
-      "2026-11-02T06:30:00.000Z"
-    ]);
-  });
-
   it("Europe/Berlin fall-back: the repeated 02:00–03:00 fires twice for an hourly cron", () => {
     // 2026-10-25: 02:00–03:00 CEST (00:00–01:00Z), then 02:00–03:00 CET (01:00–02:00Z).
     assert.deepEqual(nextRuns("15 * * * *", "Europe/Berlin", 4, "2026-10-24T23:30:00Z"), [

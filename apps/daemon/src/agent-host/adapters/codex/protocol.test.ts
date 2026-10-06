@@ -99,8 +99,10 @@ describe("codex transport — framing", () => {
     const h = harness();
     const params = { clientInfo: { name: "x", title: null, version: "1" }, capabilities: null };
     const pending = h.peer.request("initialize", params);
-    assert.deepEqual(h.sent[0], { id: 1, method: "initialize", params });
-    h.deliver({ id: 1, result: { userAgent: "orquester/0.154.0" } });
+    const { id, ...request } = h.sent[0]!;
+    assert.ok(typeof id === "number" || typeof id === "string");
+    assert.deepEqual(request, { method: "initialize", params });
+    h.deliver({ id, result: { userAgent: "orquester/0.154.0" } });
     await pending;
   });
 
@@ -114,11 +116,11 @@ describe("codex transport — framing", () => {
   it("resolves a response and rejects an error with the method named", async () => {
     const h = harness();
     const ok = h.peer.request("thread/compact/start", { threadId: "t" });
-    h.deliver({ id: 1, result: {} });
+    h.deliver({ id: h.sent.at(-1)!.id, result: {} });
     assert.deepEqual(await ok, {});
 
     const bad = h.peer.request("turn/interrupt", { threadId: "t", turnId: "x" });
-    h.deliver({ id: 2, error: { code: -32600, message: "no active turn to interrupt" } });
+    h.deliver({ id: h.sent.at(-1)!.id, error: { code: -32600, message: "no active turn to interrupt" } });
     const error = await bad.catch((e: unknown) => e);
     assert.ok(error instanceof CodexRpcError);
     assert.equal(error.code, -32600);
@@ -132,7 +134,7 @@ describe("codex transport — framing", () => {
     const h = harness();
     const reject = (message: string): Promise<unknown> => {
       const pending = h.peer.request("turn/interrupt", { threadId: "t", turnId: "x" });
-      h.deliver({ id: h.sent.length, error: { code: -32600, message } });
+      h.deliver({ id: h.sent.at(-1)!.id, error: { code: -32600, message } });
       return pending.catch((error: unknown) => error);
     };
 
@@ -171,12 +173,13 @@ describe("codex transport — the two id spaces are independent", () => {
     const h = harness({ onRequest: () => Promise.resolve({ decision: "accept" }) });
     // Both directions may use the same numeric id (fixtures README obs. 15).
     const pending = h.peer.request("thread/compact/start", { threadId: "t" });
-    h.deliver({ id: 1, method: "item/fileChange/requestApproval", params: { threadId: "t" } });
+    const id = h.sent[0]!.id;
+    h.deliver({ id, method: "item/fileChange/requestApproval", params: { threadId: "t" } });
     await tick();
     await tick();
     // The server request was answered, and our request is still parked.
-    assert.deepEqual(h.sent.at(-1), { id: 1, result: { decision: "accept" } });
-    h.deliver({ id: 1, result: { from: "server response" } });
+    assert.deepEqual(h.sent.at(-1), { id, result: { decision: "accept" } });
+    h.deliver({ id, result: { from: "server response" } });
     assert.deepEqual(await pending, { from: "server response" });
   });
 

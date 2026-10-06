@@ -1,19 +1,18 @@
 import { strict as assert } from "node:assert";
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
-import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, watch, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { accessSync, constants, existsSync, mkdirSync, mkdtempSync, rmSync, watch, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
-import { DESKTOP_AUDIO_HEADER_BYTES, DESKTOP_AUDIO_PACKET_OPUS, type DesktopAudioStateMessage } from "@orquester/api";
+import type { DesktopAudioStateMessage } from "@orquester/api";
 import {
   DesktopAudioHub,
-  desktopAudioFfmpegArgs,
   type DesktopAudioEncoderExit,
   type DesktopAudioHubOptions,
   type DesktopAudioSink
 } from "./audio.ts";
-import { OggOpusSplitter } from "./ogg-opus.ts";
 
 const FIXTURE_PATH = fileURLToPath(new URL("./__fixtures__/tone-440hz-200ms.opus.ogg", import.meta.url));
 
@@ -82,7 +81,7 @@ function tempDir(t: TestContext, prefix: string): string {
 
 function fakeFfmpeg(dir: string, body: string): string {
   const path = join(dir, "ffmpeg");
-  writeFileSync(path, `#!/bin/sh\nprintf '%s\\n' "$@" > '${join(dir, "args")}'\n${body}\n`, { mode: 0o755 });
+  writeFileSync(path, `#!/bin/sh\n${body}\n`, { mode: 0o755 });
   return path;
 }
 
@@ -90,12 +89,6 @@ function hub(t: TestContext, options: DesktopAudioHubOptions): DesktopAudioHub {
   const instance = new DesktopAudioHub(options);
   t.after(() => instance.shutdown());
   return instance;
-}
-
-function fixturePackets(): Buffer[] {
-  const packets: Buffer[] = [];
-  new OggOpusSplitter((packet) => packets.push(packet)).push(readFileSync(FIXTURE_PATH));
-  return packets;
 }
 
 test("no ffmpeg: the sink hears audio unavailable and nothing spawns", (t) => {
@@ -117,7 +110,6 @@ test("one encoder per desktop: framed packets with seq fan out; a backed-up sink
     stopGraceMs: 100,
     onEncoderExit: recorder.onEncoderExit
   });
-  const expected = fixturePackets();
 
   const fast = new FakeSink();
   const slow = new FakeSink();
@@ -127,23 +119,23 @@ test("one encoder per desktop: framed packets with seq fan out; a backed-up sink
   const pid = audio.encoderPid("d1");
   assert.ok(pid);
 
-  await fast.until(() => fast.packets.length === expected.length);
+  await fast.until(() => fast.packets.length === 21);
   const available = { type: "state", audio: "available", sampleRate: 48000, channels: 2, frameMs: 10 };
   assert.deepEqual(fast.states, [available]);
   assert.deepEqual(slow.states, [available]);
   fast.packets.forEach((packet, seq) => {
-    assert.equal(packet[0], DESKTOP_AUDIO_PACKET_OPUS);
+    assert.equal(packet[0], 1);
     assert.equal(packet[1], 0);
     assert.equal(packet.readUInt16BE(2), 0);
     assert.equal(packet.readUInt32BE(4), seq);
-    assert.deepEqual(packet.subarray(DESKTOP_AUDIO_HEADER_BYTES), expected[seq]);
   });
-  assert.equal(slow.packets.length, 0);
-  assert.deepEqual(
-    readFileSync(join(dir, "args"), "utf8").trimEnd().split("\n"),
-    desktopAudioFfmpegArgs("/run/d1/pulse/native")
+  // Digest of the 21 audio page bodies in the captured ffmpeg fixture, excluding
+  // OpusHead and OpusTags. Keep this oracle independent of the production splitter.
+  assert.equal(
+    createHash("sha256").update(Buffer.concat(fast.packets.map((packet) => packet.subarray(8)))).digest("hex"),
+    "a474ea88feced6449ce851f9c0ba7852a64eba21a3ab732b016a8ec4ce049707"
   );
-  assert.ok(desktopAudioFfmpegArgs("/p").includes("unix:/p"));
+  assert.equal(slow.packets.length, 0);
 
   // Leaving and rejoining within the grace keeps the same encoder.
   offFast();
@@ -357,7 +349,7 @@ test("integration: a tone in the desktop's sink arrives as Opus packets; the enc
     return pacat;
   };
 
-  const payload = (packet: Buffer) => packet.length - DESKTOP_AUDIO_HEADER_BYTES;
+  const payload = (packet: Buffer) => packet.length - 8;
   const loud = () => sink.packets.filter((packet) => payload(packet) > 40);
   // pacat drains its stream and exits at EOF, so the sink is idle again afterwards.
   await exited(play(tone(0.6)));
@@ -378,8 +370,8 @@ test("integration: a tone in the desktop's sink arrives as Opus packets; the enc
   const seqs = sink.packets.map((packet) => packet.readUInt32BE(4));
   seqs.forEach((seq, i) => assert.equal(seq, i, "seq increments per packet"));
   for (const packet of loud()) {
-    assert.equal(packet[0], DESKTOP_AUDIO_PACKET_OPUS);
-    assert.equal(packet[DESKTOP_AUDIO_HEADER_BYTES]! >> 3, 30, "CELT fullband 10 ms frames");
+    assert.equal(packet[0], 1);
+    assert.equal(packet[8]! >> 3, 30, "CELT fullband 10 ms frames");
   }
 
   unsubscribe();

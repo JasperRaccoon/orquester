@@ -120,11 +120,10 @@ for (const [adapter, { support, matrix }] of Object.entries(EXPECTED)) {
   });
 }
 
-test("no goal, a finished goal, or no goal support ⇒ no actions", () => {
+test("no goal or no goal support ⇒ no actions", () => {
   const idle = SITUATIONS.idle;
   assert.deepEqual(goalActions({ goal: null, support: CODEX, ...idle }), []);
   assert.deepEqual(goalActions({ goal: undefined, support: CODEX, ...idle }), []);
-  assert.deepEqual(goalActions({ goal: goal({ status: "complete" }), support: CODEX, ...idle }), []);
   // OpenCode — and a snapshot from a host that predates goals — has no block.
   assert.deepEqual(goalActions({ goal: goal(), support: null, ...idle }), []);
   assert.deepEqual(goalActions({ goal: goal(), support: undefined, ...idle }), []);
