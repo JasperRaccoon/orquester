@@ -7,8 +7,8 @@ import { test, type TestContext } from "node:test";
 import websocketPlugin from "@fastify/websocket";
 import Fastify from "fastify";
 import { WebSocket } from "ws";
-import { DESKTOP_AUDIO_HEADER_BYTES, desktopRoutes, type DesktopAudioStateMessage } from "@orquester/api";
-import { desktopAudioState, frameDesktopAudioPacket, type DesktopAudioHub, type DesktopAudioSink } from "./audio.ts";
+import { desktopRoutes, type DesktopAudioStateMessage } from "@orquester/api";
+import { desktopAudioState, type DesktopAudioHub, type DesktopAudioSink } from "./audio.ts";
 import { registerDesktopWsRoutes, type DesktopWsDeps } from "./ws-routes.ts";
 
 // Route-level coverage for /ws-desktop and /ws-desktop-audio against a real
@@ -338,8 +338,8 @@ test("audio route: state message first, then framed packets; ping/pong; close un
   await opened(client);
   const sink = await fake.subscribed;
   assert.equal(sink.bufferedAmount(), 0);
-  sink.send(frameDesktopAudioPacket(0, Buffer.from([0xf4, 1, 2])));
-  sink.send(frameDesktopAudioPacket(1, Buffer.from([0xf4, 3])));
+  const packets = [Buffer.from([1, 0, 0, 0, 0, 0, 0, 0, 0xf4, 1, 2]), Buffer.from([1, 0, 0, 0, 0, 0, 0, 1, 0xf4, 3])];
+  for (const packet of packets) sink.send(packet);
   client.send(JSON.stringify({ type: "ping" }));
   await gotAll;
 
@@ -348,9 +348,8 @@ test("audio route: state message first, then framed packets; ping/pong; close un
   assert.deepEqual(state, { type: "state", audio: "available", sampleRate: 48000, channels: 2, frameMs: 10 });
   const [first, second] = [messages[1]!, messages[2]!];
   assert.equal(first.binary, true);
-  assert.deepEqual([...first.data.subarray(0, DESKTOP_AUDIO_HEADER_BYTES)], [1, 0, 0, 0, 0, 0, 0, 0]);
-  assert.deepEqual([...first.data.subarray(DESKTOP_AUDIO_HEADER_BYTES)], [0xf4, 1, 2]);
-  assert.equal(second.data.readUInt32BE(4), 1);
+  assert.equal(second.binary, true);
+  assert.deepEqual([first.data, second.data], packets);
   assert.deepEqual(JSON.parse(messages[3]!.data.toString()), { type: "pong" });
 
   client.close();

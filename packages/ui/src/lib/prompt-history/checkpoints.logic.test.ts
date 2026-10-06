@@ -159,7 +159,7 @@ describe("deriveCheckpointEntries", () => {
     const openers = new Map(
       entries.map((entry) => [entry.checkpoint.checkpointTurnCount, checkpointRewindPrompt(entry.origin)])
     );
-    assert.equal(openers.get(1), listed, "a listed prompt is its own opener");
+    assert.deepEqual(openers.get(1), listed, "a listed prompt is its own opener");
     assert.equal(openers.get(2), null, "no prompt opened it");
     assert.equal(openers.get(3), null, "the CLI's own row is never gone back to");
     assert.equal(openers.get(6), null, "a checkpoint with no turn names no message");

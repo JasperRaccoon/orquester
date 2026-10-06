@@ -13,7 +13,6 @@ import {
   dispatchableSkillNames,
   discoverClaudeSkills,
   parseFrontmatterBoolean,
-  parseLenientJson,
   readSkillOverridesFromSettings
 } from "./skills.ts";
 import { planClaudeSkillDispatch } from "./skill-dispatch.ts";
@@ -190,12 +189,8 @@ describe("claude skills — parsers", () => {
     assert.equal(parseFrontmatterBoolean("maybe"), undefined);
   });
 
-  it("tolerates comments and trailing commas in a settings file", () => {
-    assert.deepEqual(parseLenientJson('{ "a": 1, /* x */ "b": [2,], }'), { a: 1, b: [2] });
-    assert.equal(parseLenientJson("{ not json"), undefined);
-  });
-
   it("drops every override in a file when one entry is invalid, as the CLI does", () => {
+    assert.equal(readSkillOverridesFromSettings("{ not json"), undefined);
     assert.equal(
       readSkillOverridesFromSettings('{"skillOverrides": {"a": "off", "b": "bogus"}}'),
       undefined

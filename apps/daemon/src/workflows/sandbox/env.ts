@@ -20,8 +20,8 @@ import { homedir, tmpdir, userInfo } from "node:os";
 import { AGENT_LAUNCH_ENV_VAR } from "../../agent-host/support/leftover-processes.ts";
 import { sessionPath } from "../../tmux.ts";
 
-export const WORKFLOW_RUN_ID_ENV_VAR = "ORQUESTER_WORKFLOW_RUN_ID";
-export const WORKFLOW_ID_ENV_VAR = "ORQUESTER_WORKFLOW_ID";
+const WORKFLOW_RUN_ID_ENV_VAR = "ORQUESTER_WORKFLOW_RUN_ID";
+const WORKFLOW_ID_ENV_VAR = "ORQUESTER_WORKFLOW_ID";
 
 const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/;
 

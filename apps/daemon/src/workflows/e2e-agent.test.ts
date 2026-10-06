@@ -19,7 +19,7 @@ import type { AgentBlockOutput } from "./agent/executor.ts";
 import { account, staticAccounts, staticUsage } from "./agent/testing/fake-context.ts";
 import { FakeChatHost } from "./agent/testing/fake-chat-host.ts";
 import { FakeClock, flushAsync } from "./agent/testing/fake-clock.ts";
-import { boot, runFinished, tempAppdir, waitForFileState, type Booted } from "./testing/daemon-harness.ts";
+import { boot, retainWorkflowArtifact, runFinished, tempAppdir, waitForFileState, type Booted } from "./testing/daemon-harness.ts";
 
 const FIXED = { strategy: "fixed", includeSystem: false, soonestResetWindow: "weekly", leastUsedMetric: "max", unknownUsage: "last" } as const;
 const ACCOUNTS = [account("claude", "a1", "alpha")];
@@ -103,6 +103,7 @@ describe("e2e: agent blocks through the engine", () => {
       assert.equal(run.blocks.work!.attempt, 1, "resumed, not retried");
       assert.equal(host.commandCount("turn"), 1, "the turn was sent once");
       assert.equal(host.sessionsOwnedBy("work").length, 1, "one session");
+      await retainWorkflowArtifact(t, { runId, status: run.status, attempt: run.blocks.work!.attempt, output: run.blocks.work!.output });
     } finally {
       await h.close();
     }
@@ -138,6 +139,7 @@ describe("e2e: agent blocks through the engine", () => {
       assert.deepEqual(run.blocks.work!.warnings ?? [], [], "nothing read missing");
       assert.ok(host.turnLog[0]!.input.startsWith(`Run Nightly review (${workflowId}).`), host.turnLog[0]!.input);
       assert.equal(host.sessionsOwnedBy("work")[0]!.title, "Nightly review · chat");
+      await retainWorkflowArtifact(t, { runId, status: run.status, warnings: run.blocks.work!.warnings ?? [], title: host.sessionsOwnedBy("work")[0]!.title });
     } finally {
       await h.close();
     }

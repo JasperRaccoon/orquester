@@ -96,12 +96,10 @@ describe("codex replay — no item is left dangling inProgress (R3 finding 1)", 
    * `item.started` / `item.completed` by `itemId`. Before the fix, `06-…`,
    * `14-…` and `05-…` each left one.
    *
-   * `14-…` is SIGTERM with no `turn/completed` at all, so the protocol stream
-   * alone cannot close it — the session's `handleExit` does, which the replay
-   * models by draining `closeOpenItems()` at stream end exactly as
-   * `handleExit` step 1 does.
+   * `14-…` is SIGTERM with no `turn/completed`. The session exit regression
+   * owns that teardown; a notification replay cannot prove process cleanup.
    */
-  function danglingItems(name: string, drainAtEnd: boolean): string[] {
+  function danglingItems(name: string): string[] {
     const normaliser = new CodexNormaliser({ usage: new CodexUsageTracker() });
     const open = new Map<string, string>();
     const apply = (drafts: ReturnType<CodexNormaliser["notification"]>): void => {
@@ -116,17 +114,15 @@ describe("codex replay — no item is left dangling inProgress (R3 finding 1)", 
     for (const notification of inbound(readFixture(name)).notifications) {
       apply(normaliser.notification(notification.method as never, notification.params));
     }
-    if (drainAtEnd) {
-      apply(normaliser.closeOpenItems("failed"));
-    }
     return [...open.keys()];
   }
 
   it("every capture that ends with a settled turn closes all its items", () => {
     const leftOpen: Record<string, string[]> = {};
     for (const name of fixtureNames()) {
-      // `14-…` is the SIGTERM capture: the stream simply stops.
-      const dangling = danglingItems(name, name.startsWith("14-"));
+      // SIGTERM has no closing provider frame; session.test.ts owns exit cleanup.
+      if (name.startsWith("14-")) continue;
+      const dangling = danglingItems(name);
       if (dangling.length > 0) {
         leftOpen[name] = dangling;
       }

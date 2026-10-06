@@ -167,7 +167,8 @@ async function writeUpload(root: string, name: string, bytes: Buffer | string): 
 async function importDirs(dir: string): Promise<string[]> {
   try {
     return await readdir(dir);
-  } catch {
+  } catch (error) {
+    assert.equal((error as NodeJS.ErrnoException).code, "ENOENT");
     return [];
   }
 }

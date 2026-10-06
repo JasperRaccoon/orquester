@@ -46,21 +46,14 @@ test("appForPid: walks ancestors whose groups differ (a child that made its own 
     300: { ppid: 200, pgrp: 300 },
     200: { ppid: 1, pgrp: 200 }
   });
-  const seen: number[] = [];
-  const app = appForPid(320, (pgid) => {
-    seen.push(pgid);
-    return pgid === 300 ? "app2" : null;
-  }, read);
+  const app = appForPid(320, (pgid) => pgid === 300 ? "app2" : null, read);
   assert.equal(app, "app2");
-  assert.deepEqual(seen, [320, 310, 300]);
 });
 
 test("appForPid: unmatched up to pid 1, a vanished process, and a ppid cycle all give null", () => {
   const none = (): string | null => null;
   const read = table({ 50: { ppid: 40, pgrp: 50 }, 40: { ppid: 1, pgrp: 40 }, 1: { ppid: 0, pgrp: 1 } });
-  const visited: number[] = [];
-  assert.equal(appForPid(50, none, (pid) => (visited.push(pid), read(pid))), null);
-  assert.deepEqual(visited, [50, 40], "pid 1 is not inspected");
+  assert.equal(appForPid(50, none, read), null);
   assert.equal(appForPid(60, () => "x", read), null, "missing /proc entry");
   const cycle = table({ 70: { ppid: 71, pgrp: 70 }, 71: { ppid: 70, pgrp: 71 } });
   assert.equal(appForPid(70, none, cycle), null);

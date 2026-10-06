@@ -569,21 +569,6 @@ describe("thread index: message spans", () => {
     return log;
   }
 
-  it("a message streamed in three chunks around activity boundaries reports its span", async () => {
-    const log = await streamedAroundActivities();
-    const id = log.threadId;
-    assert.deepEqual(index.messageSpan(id, "m1"), {
-      firstSeq: 5,
-      firstByte: log.at(5).byteOffset,
-      lastSeq: 10
-    });
-    const [hit] = index.search({ q: "three", limit: 5 });
-    assert.equal(hit!.id, "m1");
-    assert.match(hit!.snippet, /part one, part two, part «three»/);
-    assert.equal(index.messageSpan(id, "nope"), null);
-    assert.equal(index.messageSpan("other-thread", "m1"), null);
-  });
-
   it("messagesSpanning: a boundary inside the message returns it, one outside returns nothing", async () => {
     const log = await streamedAroundActivities();
     const id = log.threadId;
@@ -621,17 +606,13 @@ describe("thread index: message spans", () => {
       done("m2", null) // 6
     ]);
     const id = log.threadId;
-    assert.deepEqual(index.messageSpan(id, "empty"), {
-      firstSeq: 2,
-      firstByte: log.at(2).byteOffset,
-      lastSeq: 2
-    });
-    assert.deepEqual(index.messageSpan(id, "m2"), {
+    assert.deepEqual(index.eventPositionBySeq(id, 2), log.at(2));
+    assert.deepEqual(index.messagesSpanning(id, 4), [{
+      messageId: "m2",
       firstSeq: 3,
       firstByte: log.at(3).byteOffset,
       lastSeq: 6
-    });
-    assert.deepEqual(index.messagesSpanning(id, 4).map((span) => span.messageId), ["m2"]);
+    }]);
     const [hit] = index.search({ q: "again", limit: 5 });
     assert.equal(hit!.at, stampAt(3), "stamped where it began");
   });
@@ -645,9 +626,9 @@ describe("thread index: message spans", () => {
       reverted(1)
     ]);
     const id = log.threadId;
-    assert.notEqual(index.messageSpan(id, "a1"), null);
-    assert.equal(index.messageSpan(id, "a2"), null);
-    assert.equal(index.messageSpan(id, "u2"), null);
+    assert.deepEqual(index.messagesSpanning(id, 6).map((span) => span.messageId), ["a1"]);
+    assert.deepEqual(index.messagesSpanning(id, 14), []);
+    assert.equal(index.eventPositionBySeq(id, 10), null);
   });
 });
 

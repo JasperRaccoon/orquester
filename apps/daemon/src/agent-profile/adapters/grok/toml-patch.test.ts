@@ -61,7 +61,7 @@ describe("grok toml-patch", () => {
   });
 
 
-  it("falls back to the library when the parent is an inline table", () => {
+  it("adds a server when mcp_servers is an inline table", () => {
     const text = `mcp_servers = { a = { command = "x" } }\n`;
     const out = editToml(text, [{ op: "set", path: ["mcp_servers", "b"], value: { command: "y" } }]);
     assert.deepEqual(parseToml(out).mcp_servers, { a: { command: "x" }, b: { command: "y" } });

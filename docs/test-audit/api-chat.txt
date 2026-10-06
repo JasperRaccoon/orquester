@@ -1,0 +1,740 @@
+COMPLETED CLEANUP — packages/api/src/agent-chat (recorded before edits; completion appended afterwards).
+
+Method: read AGENTS.md, README.md, package test command, every scoped test, production owners and public wire/domain shapes. Cross-checked approved GUI, goals, fold-performance and thread-index designs; inspected non-test callers. Regex enumerated cases, not verdicts.
+Validation: cd packages/api && node --import tsx --import ../../scripts/test/assert-ok.mjs --test --test-concurrency=2 src/agent-chat/*.test.ts
+Initial focused run started before edits; because node:test loads files as workers become available, it overlapped editing and is not claimed as a pristine full-baseline result. Result appended below. Root agent owns full repository gates and commit/remote reconciliation.
+Production seams/support: no helper becomes unused; test-helpers.ts assembles inputs and does not model expected behavior. Production export review: AGENT_ACTIVITY_RETENTION_SLACK, AGENT_ACTIVITY_TOTAL_SLACK and the OPEN_WORK retention constants have no remaining external runtime callers, but are published by the public agent-chat barrel and named in the approved design. Preserve API compatibility; do not infer test-only origin from absence of internal imports. Other slack/message constants retain separate test callers. No dead fixtures, helpers or proven test-only production hooks remain after these deletes.
+
+The per-file six-part bar justification applies to EACH listed KEEP and REWRITE. Each enumerated test name identifies its distinct behavior and failure. DELETE entries identify stronger remaining coverage. Retained cases have no stronger remaining owner of the exact input/state transition at a lower seam; provider replays cover normalization, daemon tests persistence/transport, UI tests surface integration. Shared pure contract tests remain at their owner.
+Isolated-unit failure modes are listed before each file cases. Risk: deletion low where exact coverage remains; literal-boundary rewrites make drift from approved numbers fail. KEEP changes nothing. Cache validation is a storage contract, not a markup snapshot or export inventory.
+
+packages/api/src/agent-chat/command-output.test.ts
+Bar 1 / independent source: GUI spec §7.2; provider command output wire formats and full-output endpoint contract.
+Bar 2 / recognizable failure modes: missing or corrupted command output, echoes hiding results, falsely complete truncated output.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: commandDisplayDetail / commandOutputText / storedCommandOutput. Non-test callers: UI entries.logic.ts and full-output.ts; daemon mcp/transcript.ts and mcp/tools/output.ts.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+DELETE: Codex: a command with no detail shows its item's aggregatedOutput, trimmed
+  Reason: Duplicate of commandOutputText: Codex aggregatedOutput whitespace case and commandOutputText reads the places in the preview order; those assert both full and preview outputs, including item.result fallback.
+KEEP: a detail that repeats the row's title gives way to the output
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: Grok: an executing call whose detail echoes the command shows rawOutput's stdout and stderr, joined
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+DELETE: Grok: ACP content blocks are read when rawOutput says nothing, only their `content` blocks' text
+  Reason: Duplicate of commandOutputText: ACP content blocks texts, which asserts both complete output and preview, ignores diff blocks, and skips blanks.
+KEEP: an echo with no output yet shows no detail at all: the row already shows the command
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an echo cut short with "..." or "…" is still an echo, and cannot mask the output
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an echo counts only on a call whose data says it executes (ACP's kind, any case)
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a provider detail that already says more stands (OpenCode's output, Codex's own detail)
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: any other row shows its own detail, trimmed, whatever output its data carries
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: options.detail is the detail the caller kept: none reads as an empty one
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: Codex aggregated output remains readable after wire projection
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: commandOutputText: Codex's aggregatedOutput whole — every line and its whitespace — where the preview trims it
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: commandOutputText: rawOutput's stdout then its stderr, each starting a line of its own; a blank stream is no output
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: commandOutputText: ACP content blocks' texts, each starting a line of its own — only `content` blocks, blank ones skipped
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: commandOutputText reads the places in the preview's order: the same place wins, as the provider wrote it
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: commandOutputText: no output is undefined — no data, blanks, non-text values
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: storedCommandOutput: an item stored whole holds its output whole, whatever row of the call it is
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: storedCommandOutput: a completion stored cut holds its output's head — Codex past 64 KiB — never the whole
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: storedCommandOutput: an update stored cut holds no part of the output — its data is the wire's one-line preview
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: storedCommandOutput: no command, or no output, is nothing
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/compaction.test.ts
+Bar 1 / independent source: GUI spec §5.5/§7.3; legacy persisted marker compatibility.
+Bar 2 / recognizable failure modes: rewind offered before removed context or incorrectly blocked by a subagent marker.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: compaction marker classifiers. Non-test callers: daemon agent-host index and MCP rewind; UI timeline/history gates.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: a context-compaction row is settled unless it says it is running or failed
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: the legacy thread.state.changed marker counts only when it says compacted
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a subagent's own compaction is not the conversation's: agentId on the row or on its payload
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a blank or non-string agentId owns nothing — the UI's quiet-timeline rule
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: every phase of the conversation's own marker is a conversation compaction; only compacted is settled
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a message is never a compaction marker, whatever it says or whoever owns it
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an activity of any other kind is not one, even with a compacted state
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/contracts.test.ts
+Bar 1 / independent source: GUI spec §6 paths; wire.ts public response contract; provider task protocol.
+Bar 2 / recognizable failure modes: misrouted encoded IDs, legacy whole joins accepted as windows, agents incorrectly classified.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: agentChatRoutes / agentChatCommandPath / isThreadItemOutputWindow / classifyTaskAgentKind. Non-test callers: HTTP client, daemon HTTP handlers and ingestion.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: route builders produce the §6 paths and encode their segments
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: isThreadItemOutputWindow accepts one window of a join, and never the whole join a host that ignores the query answers
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: classifyTaskAgentKind is a denylist, and nesting flips it
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/failure-reason.test.ts
+Bar 1 / independent source: Workflow account failover contract §5.4 and documented legacy adapter messages.
+Bar 2 / recognizable failure modes: wrong account failover, guessed reset deadlines, or legacy auth/quota failures missed.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: failureReasonOfActivity. Non-test callers: daemon workflow account failover / agent watch.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: the structured reason and reset are read off the payload
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an unreadable reset is dropped, never guessed
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: only runtime.error and runtime.warning rows name a failure
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an unknown reason is no failure this reader knows — and never read by its text
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: legacy: the adapters' real sentences
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: legacy: a parked-turn warning's reset comes from its rate_limit_info detail
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: legacy: a prefix only counts at the start, and not when a reason is present
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: the summary stands in for a payload with no message
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/fold-snapshot.test.ts
+Bar 1 / independent source: AGENTS.md durable-log/cache rule; thread-index lazy-boot design A2; goals §4.4/§5.5/§5.7.
+Bar 2 / recognizable failure modes: state loss after restart, corrupted or foreign cache trusted, lost tombstones, markers or streamed deltas.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: serializeFoldState / deserializeFoldState / parseFoldSnapshotFile and fold after JSON restore. Non-test callers: daemon agent-host ThreadStore snapshot loading and saving.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+DELETE: deserialize(serialize(state)) is the state, Sets and Maps included
+  Reason: Duplicate of a well-formed snapshot file parses, and its state restores the fold: same richLog input and whole-state equality plus actual file-envelope validation.
+KEEP: a streamed message after restore updates the message following a colliding activity id
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: the empty state and a headless state round-trip
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a state built before the tombstone stamps existed keeps closedRequestAt absent
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a head carrying the §3.3 continuation marker round-trips
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a head carrying the goals §5.5 resume marker round-trips
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a head carrying the goals §5.7 hold marker round-trips
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a restored snapshot preserves closed requests, streamed text and activity updates through a trim
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: anything that is not a serialized fold state deserializes to null
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a missing top-level field is rejected; only closedRequestAt is optional
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a field of the wrong shape anywhere in the state is rejected
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: what the fold copies through untouched is not second-guessed
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a well-formed snapshot file parses, and its state restores the fold
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+DELETE: a snapshot file without extras parses without an extras key
+  Reason: Checks absent-key representation rather than behavior. Serializing absent and undefined extras yields the same JSON; remaining valid-file and empty-file tests exercise missing extras acceptance.
+KEEP: a snapshot file of another version, another thread or a bad shape is rejected
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a snapshot of an empty, headless fold is a valid file
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: goal: null is a thread with no goal — accepted, and written for every state that has none
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a stored goal that is neither null nor a valid ThreadGoal rejects the snapshot: a cache miss
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/fold.goal.test.ts
+Bar 1 / independent source: Goals design §4.4: latest valid provider goal wins, independent of rewind/retention.
+Bar 2 / recognizable failure modes: goal disappears on retention/rewind, malformed row erases it, timestamp or snapshot differs from provider state.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: foldThread / applyDomainEvent / toThreadSnapshot. Non-test callers: daemon ThreadStore and shared UI event reducer.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: a goal.updated row sets the goal, stamped with the ROW's updatedAt, and is appended as usual
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: the last row wins, a null goal clears it, and a cleared thread can set another
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a row that does not parse leaves the goal as it was — and is still appended
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: only a goal.updated row moves the goal
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: the fold keeps the PARSED goal: bad optional fields and unknown keys never reach it
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a goal row replaced in place still decides the goal
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+REWRITE: retention never drops the goal, even once its row has aged out of the window
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+KEEP: a rewind never touches the goal, even when it removes the row that set it
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: toThreadSnapshot carries the goal, and null when there is none
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+REWRITE: a state built before goals existed still folds, and its missing goal reads as null
+  Reason: Remove only the private absent-key assertion. Keep the caller-visible null snapshot and subsequent goal adoption for a legacy state.
+
+packages/api/src/agent-chat/fold.retention.test.ts
+Bar 1 / independent source: Approved fold-performance design B and running-work follow-up; AGENTS.md durable logs.
+Bar 2 / recognizable failure modes: history-page loss, unbounded memory, disappearing live call/task anchors, lost bridge rows or eviction flags.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: foldThread / applyDomainEvent / itemsDroppedByRetention. Non-test callers: daemon ThreadStore; UI reducer and history bridge.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+REWRITE: the parent window grows to its limit plus slack, then one trim cuts it to the limit
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+REWRITE: an agent's own window trims past 200 + 50 of its rows, keeping its anchors
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+REWRITE: the gate: 400 activities of one agent fold losslessly — a history page never trims
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+REWRITE: the ceiling across agents trims past 2 000 + 200 of their rows, oldest first, ties in list order
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+REWRITE: messages trim past 2 000 + 200 without touching the activities, pending or roster
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+REWRITE: a trim cuts every class at once, whichever one tripped it
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+REWRITE: more open questions than the slack keep the trigger on without dropping them — time, never correctness
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+REWRITE: compaction markers are exempt in the parent window only
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+REWRITE: the legacy compaction marker is kept whatever its age, as context-compaction is; any other thread.state.changed is an ordinary row
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+KEEP: a running parent call keeps its opening row through 1 200 of its own chunks, and the window stays bounded
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+REWRITE: a running agent-owned call keeps its opening row through 1 200 of its own chunks in a busy thread
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+REWRITE: a running agent-owned call keeps its opening row under the ceiling across agents, where its older chunk goes
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+REWRITE: once a tool.completed closes the call, the next trim drops its opening row, and no trim before it did
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+REWRITE: once a tool.denied closes the call, the next trim drops its opening row, and no trim before it did
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+REWRITE: the parent window keeps the openings of the 16 most recently active open calls behind its cut: a streaming call outranks 40 opened after it and left quiet, and every trim frees its slack minus 16
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+REWRITE: the agent window keeps the openings of the 16 most recently active open calls behind its cut: a streaming call outranks 40 opened after it and left quiet, and every trim frees its slack minus 16
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+KEEP: a burst of calls in flight inside the window takes no slot from an old quiet shell's start: a window's cap ranks only the openings its cut would drop
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+REWRITE: the ceiling's slots go to openings that survived their own window: those an agent's own cap dropped take none
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+REWRITE: a running background shell keeps its task.started through 600 parent rows, so the roster keeps it; once it ends, a trim drops it
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+REWRITE: evicted: absent until a trim drops something, then only ever grows, and survives a rewind
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+KEEP: itemsDroppedByRetention: exactly the rows the step's trim removed, in list order, and stable
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/fold.test.ts
+Bar 1 / independent source: GUI spec §5.1/§5.4/§5.5/§6.3; AGENTS.md event order and resume cursor rules; documented R2/R5 regressions.
+Bar 2 / recognizable failure modes: wrong transcript/turn/checkpoint state, replay corruption, reopened resolved requests, broken rewind or lost resume identity.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: foldThread / applyDomainEvent / toThreadSnapshot. Non-test callers: daemon ThreadStore and UI event reducer.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: an empty fold has no head and is snapshot-refusing
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: thread.created builds the head; meta and mode updates patch it
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an event with seq <= the state's is dropped (overlapping replay windows)
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an event for another thread is not this fold's
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: thread.deleted marks the fold deleted
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: streaming deltas append; a non-empty completion replaces; an empty one keeps
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: reasoning is a sibling message with its own role and id namespace
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: the turn settles from session status, not from a checkpoint
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an interrupt settles the turn interrupted and keeps its completedAt
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an error session fails the turn
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a provider-initiated turn the host never commanded is still recorded
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: the first assistant message of a turn becomes its anchor
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a turn records the prompt that opened it, through adoption, settlement and capture
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a turn with no nameable prompt records none
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a missing placeholder never clobbers a captured ready checkpoint
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: checkpoints stay sorted by turn count and the head mirrors the highest
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an activity with a known id is replaced in place, not appended
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a tombstoned request stays closed after its resolution ages out of retention
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+REWRITE: an aged-out user-input resolution keeps its question closed too
+  Reason: Use the approved retention boundary for noise setup independently of production constants; retain the explicit aged-out row precondition and pending-request outcome.
+REWRITE: a RECYCLED request id opens a fresh card even across retention (R2-1)
+  Reason: Use the approved retention boundary for noise setup independently of production constants; retain the explicit aged-out row precondition and pending-request outcome.
+REWRITE: retention that drops a request row re-derives pending on that very event
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+KEEP: the roster re-derives on task rows and interrupts live rows when the session dies
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+REWRITE: a compaction marker never ages out of the window
+  Reason: Use the independent approved retention numbers (500/50 parent, 200/50 per agent, 2000/200 messages and total agent rows, 16/64 open work) in setup and expectations instead of importing implementation constants; actions and behavioral assertions are otherwise unchanged.
+KEEP: a revert truncates by retained turn id and recomputes the latest turn
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: turn-less rows survive a revert
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: the fallback pass is bounded at `target` per role
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a message whose turn was truncated is never restored by the fallback
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a revert re-derives pending and roster from the surviving activities
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a revert on a thread with no checkpoints keeps exactly the first `target` turns
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: densely numbered checkpoints go with their turns, not with their counts
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a sparse checkpoint list never reorders the retained turns
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a revert to zero turns keeps only the thread's turn-less rows
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a steer follows the turn it was steered into
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a retained turn whose prompt no turn row names still keeps it (a /compact turn)
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a prompt a dropped turn claims is never resurrected by the fallback
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: the legacy fallback: with no started turn, a revert still truncates by checkpoint count
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: toThreadSnapshot projects the §6.3 read shape
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: toThreadSnapshot carries each turn's prompt through, before and after a revert
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: fold — the resume cursor outlives a session block that omits it (kept across a settle, replaced only explicitly)
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/goal.test.ts
+Bar 1 / independent source: Goals design §4.1/§4.3/§4.5/§5.1 defines each parser, predicate and command rule.
+Bar 2 / recognizable failure modes: malformed goals, unsupported actions shown, updates suppressed incorrectly, command text misclassified or broken Unicode.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: public goal parsers/predicates/summary and parseGoalSupport. Non-test callers: provider goal adapters, ingestion, UI goal controls, MCP command dispatch.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+DELETE: parseAgentGoal keeps a full goal field for field
+  Reason: Duplicate of unknown keys are dropped, a thread goal updatedAt included: that parses FULL plus extra keys and independently requires the entire FULL value.
+KEEP: an objective and a status are all a goal needs
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a goal without a usable objective or status is no goal
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: anything that is not a record is no goal, and nothing makes the parser throw
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an optional field of the wrong type or range is dropped, and the goal kept
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a null token budget is kept — the goal has none — and zero is a count, not a gap
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: unknown keys are dropped, a thread goal's updatedAt included
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a payload with a goal, a change and the previous goal parses
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a null goal is the thread having none any more
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a goal that does not parse, or no goal field at all, is no payload
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an unknown or missing change is no payload
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a previous goal that does not parse is dropped, and the payload kept
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: unknown keys are dropped at every level of the payload
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: anything that is not a record is no payload
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a truncated goal summary never splits a surrogate pair
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: only a progress row is hidden
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a goal is unfinished until it is complete or failed
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: sameGoalState compares objective, status, rounds, phase and last check — nothing else
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: sameGoalState reads no goal as no goal, whichever way it is spelled
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a thread goal is a goal plus the string updatedAt of the row that produced it
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a thread goal without a string updatedAt, or whose goal does not parse, is none
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: isGoalCommandText is `/goal` then whitespace or nothing, in any case, after trimming
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: parseGoalSupport keeps a well-formed block and only the actions this build knows
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: parseGoalSupport reads a block that does not parse as none
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/history-cursor.test.ts
+Bar 1 / independent source: Thread-index lazy-boot design History page; RFC 4648 base64url and UTF-8 wire contract.
+Bar 2 / recognizable failure modes: wrong page/thread selection, invalid query exceptions, lost Unicode IDs or incompatible additive fields.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: encodeHistoryCursor / decodeHistoryCursor. Non-test callers: daemon history paging and client-facing history routes.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: the encoding is base64url of JSON {t, a, i}, unpadded
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: non-ASCII ids survive the round trip (UTF-8, not Latin-1)
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a cursor minted for another thread decodes to null
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: anything malformed decodes to null and never throws
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: standard base64 (with + / and padding) is not base64url
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: fields beyond {t, a, i} are ignored, so a later field cannot break an old host
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a cursor may carry a sequence bound inside its turn, and a bad one is rejected
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/identity.test.ts
+Bar 1 / independent source: GUI spec §3.4/§6.1/§6.2 account switching and field-wise metadata updates.
+Bar 2 / recognizable failure modes: encoded account routes break, wrong identity after switch, rename erases account or system identity retains old ID.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: agentChatRoutes.account and shared event fold. Non-test callers: daemon account switch routes and UI snapshot/event consumers.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: the account route is daemon-owned: a path, never a proxied command name
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: thread.meta-updated carries the new identity onto the head
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a meta update that names neither identity field leaves the head's identity alone
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: switching to the system identity clears the account id through the same event
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/message-liveness.test.ts
+Bar 1 / independent source: Documented old-log regressions: dead-host streams and turnless Claude subagent reasoning must stop shimmering.
+Bar 2 / recognizable failure modes: completed/dead messages stream forever or live parent/agent messages appear settled.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: messageStreamingContext / isMessageStreaming. Non-test callers: UI message rows and timeline/history turn folds; MCP readers.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: a turnless agent message reads settled once its agent completed, streaming while it runs
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a parent message of a completed turn reads settled, of the running turn streaming
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: nothing reads streaming while the session is not live
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an agent is active while pending, running or waiting — never idle or settled
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/open-work.test.ts
+Bar 1 / independent source: Fold-performance running-work follow-up; persisted tool lifecycle and background-task contract.
+Bar 2 / recognizable failure modes: closed calls retained as live, output-only rows invent calls, malformed task IDs protect junk forever.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: openWorkOf. Non-test callers: fold retention, daemon MCP history and UI callers.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: a closer closes a call for good: a completion or a denial, wherever it sits, and a call that only printed never opened
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: blank ids are ignored, and so is a row whose payload is not a record
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/pending.test.ts
+Bar 1 / independent source: GUI spec §5.1/§6.2; native approval/question protocols and R2-1/R5-4 regressions.
+Bar 2 / recognizable failure modes: missing or stale approval/question cards, impossible answers, recycled IDs block provider or wrong dismissal/retry eligibility.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: derivePendingRequests. Non-test callers: shared fold used by daemon and UI.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: native approval types retain their canonical kinds in pending requests
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: tracks open approvals and removes resolved ones
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a REPLAY of a resolved request cannot reopen it
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a dismissal's user-input.resolved row closes the question it answered
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: tool_user_input and auth_tokens_refresh never become approvals
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an unrecognised request type still yields an actionable command approval
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a canonical requestKind on the row wins over the raw requestType
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: keeps detail, appName and well-formed options; drops malformed options
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a stale-failure row closes the request; any other failure leaves it open
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a stale user-input failure closes the question
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: only async questions are dismissible
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: `responseMode` is promoted onto the pending entry, with the turn that asked
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an unrecognised `responseMode` is not a message-mode question
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: pending questions preserve native answer keys and drop unanswerable cards
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a question row with no decodable question at all is dropped, not shown empty
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: rows are ordered by createdAt
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: rows with no requestId, and non-request kinds, are ignored
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a request that arrives AFTER a resolution with the same id opens fresh
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a recycled question id opens fresh too
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a seeded tombstone closes only requests at or before its stamp
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a seed with no stamps stays conservative
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/plan.test.ts
+Bar 1 / independent source: GUI proposed-plan follow-up protocol shared by Implement, MCP implement_plan and host plan retirement.
+Bar 2 / recognizable failure modes: Implement sends wrong command bytes or ordinary message retires the proposed plan.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: buildPlanImplementationPrompt / isPlanImplementationMessage. Non-test callers: UI Implement action, daemon orchestration, workflows and MCP transcript.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: the implementation prompt is the prefix plus the trimmed plan
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: isPlanImplementationMessage matches only the prefixed message
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/prompts.test.ts
+Bar 1 / independent source: Prompt recall behavior; native transcript scaffolding and generated plan/compact commands are excluded.
+Bar 2 / recognizable failure modes: recall includes provider scaffolding/image placeholders or loses real user slash commands.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: recallablePromptText. Non-test callers: daemon prompt history and UI prompt-history logic.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: keeps what the user typed, trimmed
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: drops the rows a provider's transcript wrote itself
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: drops the verbatim /compact and the plan's Implement prompt
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: removes image placeholders with the space before them
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: drops a message that was only images or whitespace
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: keeps a slash command the user typed
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/re-emitted.test.ts
+Bar 1 / independent source: Historical Claude duplicate-opening regression, live thread 19976137 seq 38664/38963; GUI §7.3.
+Bar 2 / recognizable failure modes: duplicate opening replaces real answer, legitimate repeated conclusions disappear, cross-author text removed.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: reEmittedAssistantCopies. Non-test callers: UI entries and daemon MCP views/transcript.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: only a copy of the turn's OPENING message, at its end: a goal run's rounds may end on the same words
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a repeat of the opening that is not the turn's last message is the agent's own words
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: word for word is the exact text, and the opening is the first FINISHED message with any text
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: only the assistant's own messages with a turn count: a user or reasoning row, or a turnless row, is never one
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: one author's messages only, in the view asked for: the parent's, or one subagent's
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a copy is found per turn, in each turn it closes
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/roster.test.ts
+Bar 1 / independent source: GUI spec §7.6; native task/workflow lifecycle and stop contracts; documented resumed-agent incidents.
+Bar 2 / recognizable failure modes: agents stuck terminal after resume, missing members, incorrect usage/counts, unsafe URLs, invalid per-member stop.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: foldSubagentActivities / deriveAgentPanelModel / taskStopRefusal. Non-test callers: shared fold, UI agent panel, daemon MCP transcript and task stop handler.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: builds an agent from start → progress → completion
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a task.completed {status: stopped} folds to interrupted
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a status that resolves through the prototype chain is not a status
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: progress can create an agent when its start row aged out of retention
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: completion before start stays terminal; a late start only fills metadata
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a start row with a NEW launching call after a terminal state is a resume and reopens the run
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+DELETE: a start row that names the SAME launching call after a terminal state is a late delivery
+  Reason: Duplicate of the late-delivery arm of a resume reopens even when the NEW run in-place progress row precedes OLD terminal row; same launching identity must keep terminal status and activation count. Basic completion-before-start also checks failure metadata retention.
+KEEP: a shell's exit code folds as any integer
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: duplicate terminal events are idempotent: timestamps do not slide
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a completion after a terminal task.updated still enriches result and usage
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: reactivation increments the run count and clears the previous result
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: idle is non-terminal: an idle agent resumes without losing identity
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: usage max-merges field-wise and a partial terminal frame keeps the breakdown
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: metadata is never downgraded to null by a later partial event
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: tool.progress is the agent-owned heartbeat and never creates a row
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: provider endedAt wins over ingestion time on the settling transition
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a non-http session url is dropped at the fold boundary
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: malformed rows are skipped individually without failing the fold
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: background rows join the roster, stamped agentKind background
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an unstamped row is background, and a later agent stamp promotes it
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a stampless later row never demotes a known agent
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a scheduled prompt folds to a loop row and an autonomous goal to a goal row, both background
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a loop and a goal drive work and are no work of their own: never counted, never token-summed
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a stop that left the task's process running is marked, and a new run forgets it
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a dead session interrupts live rows but preserves idle and settled
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a settled coordinator cascades onto members with no terminal row
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an attempt bump reactivates the same workflow slot exactly once
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: deriveAgentPanelModel groups members by phase and keeps direct spawns
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a member with an unknown phase index lands in unphasedMembers, never vanishes
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a pending workflow member counts as active work in its phase
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a workflow coordinator with members is not counted or token-summed
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an orphaned member falls back to the direct list
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: direct agents stay in first-seen order as their activity changes
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: counts split waiting and idle out of running and settled
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: the cap evicts by rank but returns survivors in first-seen order
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a resume reopens even when the NEW run's in-place progress row precedes the OLD run's terminal row
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a Claude workflow folds into one group with its 1-based phases
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a retried workflow slot reopens on its new attempt's start, exactly once
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a later attempt's end settles a slot whose retry start was never seen
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a late duplicate of the same attempt's start does not reopen a settled slot
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: settled workflow members finish their phases
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a coordinator with no member rows yet stands for the run
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: missing coordinator phases are reconstructed from member metadata
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: taskStopRefusal: a live workflow run, subagent or shell can be stopped
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: taskStopRefusal: a workflow's member is refused, even once its coordinator is gone
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: taskStopRefusal: an unknown, a settled or a driver row is refused
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/slim.test.ts
+Bar 1 / independent source: GUI spec §5.6 bounded wire payload, fields preserved for roster/goal and full-output affordance.
+Bar 2 / recognizable failure modes: oversized wire data, dropped goal/task linkage or prompts, false success, missing full-output option or broken UTF-8.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: slimActivityPayload. Non-test callers: daemon ingestion and read projection before snapshot/event/history transport.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: a non-record payload passes through
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: wire command output keeps the first meaningful line, elided at 84
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: tool output is summarised and the row is flagged truncated
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an MCP tool call keeps only the allow-listed item fields
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: changed files are promoted to a bounded top-level path list
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a completed payload over a failed item is re-stamped failed
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a declined nested item re-stamps too, and a real success is left alone
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a compaction summary survives slimming, capped and flagged
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: an agent's launch prompt survives slimming, capped and flagged, beside its at-rest mark
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: the cap counts UTF-8 bytes, not UTF-16 code units
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a multi-byte string below the wire cap stays complete
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: the task linkage bundle survives slimming so the roster still folds
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a goal row's payload survives slimming whole: goal, change and previous (goals §4.3)
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a goal row's strings meet the same wire cap as every other string, and nothing else moves
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a small tool row that loses nothing is not flagged truncated
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: ACP content blocks are summarised
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/turn-state.test.ts
+Bar 1 / independent source: GUI spec §5.1/§6.4 session-driven turn settlement.
+Bar 2 / recognizable failure modes: late session bounce extends a settled turn or pending turn remains unsettled after error.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: applySessionStatusToTurn. Non-test callers: shared fold sessionSetTurns.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: a settled turn never moves again: a late transition cannot extend it
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: a pending turn (no turn id yet) settles too
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+packages/api/src/agent-chat/turns.test.ts
+Bar 1 / independent source: GUI rewind/turn ordinal protocol §5.5; IDs identify started turns.
+Bar 2 / recognizable failure modes: duplicate or pending turns shift ordinal so rewind targets the wrong turn.
+Bar 3 / independent oracle: literal fixture statuses, IDs, text/byte expectations or independently specified membership; no behavior implemented by mocks. Storage round trips require supplied data preservation and separately reject malformed input. Retention rewrites use approved numbers, not production constants.
+Bar 4 / stable seam: startedTurns / turnOrdinal. Non-test callers: shared fold rewind planning, daemon MCP/host history, UI revert controls.
+Bar 5 / refactor independence: returned protocol/domain values or cache acceptance and subsequent fold outcomes; no source scans, private call counts, CSS/geometry or reference identity.
+Bar 6 / ownership: lowest shared seam for the named contract. Fold integration cases cover event wiring, retention, restore, rewind or invalidation that standalone parsers cannot prove. Shared fixture cases exercise distinct input or state transitions; named duplicates are deleted.
+Risk and validation: low deletion/assertion-only rewrite risk; focused command above runs every retained case.
+KEEP: a duplicate id counts once, so later ordinals stay aligned
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+KEEP: turnOrdinal is 1-based and null for a pending or unknown turn
+  Reason: Protects the named behavior against the listed caller-visible failure modes; all six bar items above apply.
+
+VALIDATION UPDATE: pnpm --filter @orquester/api typecheck passed (exit 0). git diff --check for scoped test files/report passed. Final diff reviewed: 6 deleted cases, numeric-oracle rewrites only plus one removed absent-key assertion; no fixture/helper stranded and no production diff. Focused test results pending below.
+
+Initial focused run completed: 266 tests passed, 0 failed, exit 0. This run overlapped edits; the separate final run verifies the surviving suite. No retained test failed before or after its rewrite.
+
+FINAL SCOPE RESULT: 268 original tests audited: DELETE 6, REWRITE 24, KEEP 238. Surviving focused suite passed all 262 tests (0 failures/skips/cancellations; exit 0). API typecheck passed. Scoped git diff --check passed and final diff reviewed. Test source changes: 66 insertions / 132 deletions, net -66 lines. No replacement test added, no production behavior changed, no dead supporting fixture/helper left by deletes. Repository gates and commit/merge/push belong to the coordinating agent.

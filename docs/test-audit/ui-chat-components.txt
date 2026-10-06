@@ -1,0 +1,423 @@
+Agent-chat components audit and completed cleanup (composer has a separate report).
+Scope: every .test.ts/.check.ts below packages/ui/src/components/agent-chat excluding composer/.
+Pre-edit audit: README.md, root instructions, package test command, all tests and production owners read.
+Independent sources: docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md (GUI), docs/superpowers/specs/2026-09-24-agent-goals-design.md (Goal), shared API wire types, Git unified-diff and CommonMark contracts.
+Validation V: from packages/ui, node --import tsx --import ../../scripts/test/assert-ok.mjs --import ./test/svg-loader.mjs --import ../../scripts/test/quiet-mock-timers.mjs --test --test-concurrency=2 <test path>; for .check.ts omit --test and --test-concurrency.
+Risk: retained tests do not change behavior; the sole local rewrite removes only the complete-goal assertion already exercised for every adapter/situation by the same file action matrix.
+Production seams/support: all tested functions retain non-test callers below. No test-only production hook, helper or fixture becomes unused in this non-composer scope. Shared lib/agent-chat/test-helpers remains used by retained shell/render/roster tests.
+Disposition is per named test below. Each numbered bar explanation applies to each explicitly enumerated member, whose name identifies its exact independently expected case.
+
+packages/ui/src/components/agent-chat/banners/approval-detail.test.ts
+Failure modes before considering isolated tests: wrong write/command shown before approval; missing or malformed provider detail crashes or becomes misleading.
+Source: GUI §§4.3,5.6,7.5 and E7 approval-detail regression.
+Non-test seam callers: resolveApprovalDetail; ApprovalCard.tsx.
+Remaining/stronger coverage: Banner render covers disabled state and warning data, not detail joins; timeline detail joining owns a different input contract.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: E7: the request's own detail wins and is marked as such
+  KEEP: E7: with no detail, the card joins the gated tool call by toolUseId
+  KEEP: E7: the path list alone is enough when the item carries no diff
+  KEEP: E7: the join is by id only — a second write in flight is never guessed at
+  KEEP: E7: the newest activity wins when a tool id is reused across updates
+  KEEP: E7: a command payload is used when there are no changed files
+  KEEP: E7: a missing or malformed payload never throws
+Bar 1: GUI §§4.3,5.6,7.5 and E7 approval-detail regression specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects wrong write/command shown before approval; missing or malformed provider detail crashes or becomes misleading.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes resolveApprovalDetail, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Banner render covers disabled state and warning data, not detail joins; timeline detail joining owns a different input contract; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/banners/banner-model.test.ts
+Failure modes before considering isolated tests: unsupported decision grouping, hidden urgent approval, or absent idle background Stop access.
+Source: GUI §§4.3,7.5,7.6 approval default protocol, request priority and idle background Stop access.
+Non-test seam callers: splitApprovalOptions/resolveDockCard/showBackgroundLivenessBanner; ApprovalCard.tsx and ChatBannerDock.tsx.
+Remaining/stronger coverage: Render checks cover card state rather than this priority/default/capability decision table.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: the default four split into Approve/Decline primary and the rest overflow
+  KEEP: an empty advertised list falls back to the default four
+  KEEP: advertised approval decisions keep their grouping when reordered
+  KEEP: the liveness banner is hidden while a turn is working
+  KEEP: the dock shows one card at a time, in a fixed priority order
+Bar 1: GUI §§4.3,7.5,7.6 approval default protocol, request priority and idle background Stop access specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects unsupported decision grouping, hidden urgent approval, or absent idle background Stop access.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes splitApprovalOptions/resolveDockCard/showBackgroundLivenessBanner, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Render checks cover card state rather than this priority/default/capability decision table; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/banners/pending-answer.test.ts
+Failure modes before considering isolated tests: wrong answer bytes/type, premature incomplete upload submission, lost draft, credential leak, cross-question attachment collision or invisible-tab keyboard submission.
+Source: GUI §§4.2,4.5 Codex,7.5; answers wire contract and secret-answer confidentiality.
+Non-test seam callers: pending-answer exported answer/shortcut functions; QuestionCard.tsx and ChatBannerDock.tsx.
+Remaining/stronger coverage: Provider/daemon tests own response transport; these own draft-to-answer selection and keyboard eligibility before transport.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: an option with no value answers with its label
+  KEEP: a custom answer beats a selected option
+  KEEP: a custom answer is refused when the question forbids one
+  KEEP: multi-select answers with an array and drops unknown values
+  KEEP: an attachment alone satisfies a question
+  KEEP: an unfinished upload keeps the answer unresolved
+  KEEP: a choice-only question offers no attachments
+  KEEP: an `isOther` option asks for text rather than answering with its label
+  KEEP: a secret answer is never carried back into the thread draft
+  KEEP: displaced text lands after whatever was already in the draft
+  KEEP: toggling clears the custom answer; multi-select toggles in place
+  KEEP: a new single-select choice becomes the submitted answer
+  KEEP: custom text overrides a choice while empty text preserves it
+  KEEP: the answers map is null until every question resolves
+  KEEP: progress reports the active question, the count and completeness
+  KEEP: an out-of-range question index is clamped, never thrown on
+  KEEP: attachment drafts are namespaced per (requestId, questionId)
+  KEEP: a digit picks its option on the visible tab
+  KEEP: an open layer keeps the digit: it never answers the question behind a modal, a menu or a popover
+  KEEP: a digit never answers from a hidden tab, while typing, or under a modifier
+  KEEP: only 1–9, and only an option the question has
+Bar 1: GUI §§4.2,4.5 Codex,7.5; answers wire contract and secret-answer confidentiality specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects wrong answer bytes/type, premature incomplete upload submission, lost draft, credential leak, cross-question attachment collision or invisible-tab keyboard submission.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes pending-answer exported answer/shortcut functions, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Provider/daemon tests own response transport; these own draft-to-answer selection and keyboard eligibility before transport; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/drill-in-navigation.test.ts
+Failure modes before considering isolated tests: reader unexpectedly returned from completed child, wrong child liveness inherited, or search result left invisible.
+Source: GUI §§7.3,7.6 auto-return/read-position and palette-reveal regressions.
+Non-test seam callers: nextDrillInReturn/revealClosesDrillIn; AgentChatView.tsx.
+Remaining/stronger coverage: Rows/drill-in tests own projected rows; none owns parent navigation state transitions.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: an agent seen at work that settles while the reader follows its end hands the view back
+  KEEP: opening a finished agent from a running agent's view stays open (was one flag for the whole view)
+  KEEP: a reader who scrolled up stays when it settles — and is not yanked later on reaching the end
+  KEEP: idle is not at work: an idle agent that settles returns nothing
+  KEEP: an agent the roster dropped, then back, starts over
+  KEEP: A → B → A: each agent is watched from its own opening
+  KEEP: a NEW reveal closes an open drill-in, so the thread's timeline takes it at once
+  KEEP: no new reveal closes nothing: opening a drill-in while an old one is pending leaves it open
+Bar 1: GUI §§7.3,7.6 auto-return/read-position and palette-reveal regressions specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects reader unexpectedly returned from completed child, wrong child liveness inherited, or search result left invisible.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes nextDrillInReturn/revealClosesDrillIn, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Rows/drill-in tests own projected rows; none owns parent navigation state transitions; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/escape-action.test.ts
+Failure modes before considering isolated tests: Escape interrupts hidden/wrong thread, steals a modal/field key, closes wrong surface, or rewinds after unrelated input.
+Source: GUI §§5.5,7.1,7.4,7.6; hidden-tab, modal, held-key and external-field regressions.
+Non-test seam callers: resolveChatEscape/chatEscapeSequenceStep; AgentChatView.tsx.
+Remaining/stronger coverage: Composer tests own the disjoint composer event scope; this module owns outside-composer actions and double-press eligibility.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: the drill-in wins over the interrupt
+  KEEP: Escape interrupts a running turn from anywhere in the tab
+  KEEP: a hidden tab never acts, whatever it is doing
+  KEEP: a blocking layer keeps the key: Escape closes the modal, not the thread
+  KEEP: focus inside the composer belongs to the composer's own arm, not this one
+  KEEP: an event another listener already handled is not handled twice
+  KEEP: a held Escape is one press: its auto-repeat never stops the turn the first press spared
+  KEEP: only Escape
+  KEEP: a second idle Escape opens the rewind picker
+  KEEP: the first idle Escape does nothing — it is only half of the gesture
+  KEEP: no message to go back to, no picker
+  KEEP: the double press never outranks leaving a drill-in or stopping a turn
+  KEEP: the rewind obeys every gate the other two do
+  KEEP: only an idle Escape is pressed into the double-press sequence
+  KEEP: an Escape that did something else starts the count over
+  KEEP: any other key between two Escapes breaks the sequence
+  KEEP: holding Escape is one press, and its auto-repeat breaks nothing either
+  KEEP: an Escape typed into a field outside this chat is that field's: nothing here, and Esc Esc starts over
+Bar 1: GUI §§5.5,7.1,7.4,7.6; hidden-tab, modal, held-key and external-field regressions specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects Escape interrupts hidden/wrong thread, steals a modal/field key, closes wrong surface, or rewinds after unrelated input.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes resolveChatEscape/chatEscapeSequenceStep, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Composer tests own the disjoint composer event scope; this module owns outside-composer actions and double-press eligibility; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/primitives/elapsed.test.ts
+Failure modes before considering isolated tests: invalid CLI timestamp leaks NaN into user-visible elapsed readout.
+Source: Provider timestamp tolerance and malformed timestamp rendering regression.
+Non-test seam callers: elapsedBetween; ElapsedTicker.tsx.
+Remaining/stronger coverage: Valid duration-format tests do not exercise invalid timestamp interpretation.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: elapsedBetween returns empty for missing or unparseable stamps
+Bar 1: Provider timestamp tolerance and malformed timestamp rendering regression specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects invalid CLI timestamp leaks NaN into user-visible elapsed readout.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes elapsedBetween, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Valid duration-format tests do not exercise invalid timestamp interpretation; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/roster/background-shell.test.ts
+Failure modes before considering isolated tests: shell output missing/stale, wrong title, Grok description shown as output, or disclosure key changes while streaming.
+Source: GUI §7.6 shell drill-in protocol projection and streaming disclosure regressions.
+Non-test seam callers: projectBackgroundShell; AgentDrillIn.tsx.
+Remaining/stronger coverage: row-chrome owns generic joins; this owns shell-specific wire-to-entry mapping, lifecycle identity and cache invalidation; SSR owns final component integration.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: the row keeps the first frame's id, so a streaming row cannot close itself
+  KEEP: with no lifecycle frame left, the shell is titled from its roster row, its whole output joined
+  KEEP: a Grok shell folds its task lifecycle into the command's output and status
+  KEEP: a running Grok shell has no output until it prints
+  KEEP: a Grok monitor's latest line is its output
+  KEEP: a chunk of the shell's own updates the cached output
+Bar 1: GUI §7.6 shell drill-in protocol projection and streaming disclosure regressions specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects shell output missing/stale, wrong title, Grok description shown as output, or disclosure key changes while streaming.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes projectBackgroundShell, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: row-chrome owns generic joins; this owns shell-specific wire-to-entry mapping, lifecycle identity and cache invalidation; SSR owns final component integration; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/roster/drill-in-memory.test.ts
+Failure modes before considering isolated tests: reopened child loses reading state/title, state leaks between children, follow restores stale position, or memory evicts wrong child.
+Source: GUI §7.6 bounded 50-agent reading/disclosure memory and follow-rearm regression.
+Non-test seam callers: rememberDrillIn/recallDrillIn/drillInOpening; AgentChatView.tsx and AgentDrillIn.tsx.
+Remaining/stronger coverage: Main-thread LRU tests cover persistent thread state, not this intentionally separate per-agent in-memory store.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: an agent never opened opens as today: at its end, following, nothing open
+  KEEP: re-opening an agent restores its disclosures and a mid-list position, with follow OFF
+  KEEP: a reader who re-armed follow (the pill, mod+J) comes back to the end, whatever position was published before
+  KEEP: an entry keeps the last roster row seen, so a reopened agent the roster evicted keeps its title and kind
+  KEEP: A → B saves A's and restores B's, and each keeps its own
+  KEEP: keeps the 50 most recent agents: the least recently remembered goes first
+Bar 1: GUI §7.6 bounded 50-agent reading/disclosure memory and follow-rearm regression specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects reopened child loses reading state/title, state leaks between children, follow restores stale position, or memory evicts wrong child.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes rememberDrillIn/recallDrillIn/drillInOpening, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Main-thread LRU tests cover persistent thread state, not this intentionally separate per-agent in-memory store; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/roster/roster-summary.test.ts
+Failure modes before considering isolated tests: false live-agent count, tokens counted twice, or loop/goal rendered as a shell.
+Source: GUI §7.6 kind-aware roster and workflow counts; shell miscount and coordinator double-count regressions.
+Non-test seam callers: rosterKindCounts/workflowGroupSummary/partitionRosterRows; AgentRoster.tsx and WorkflowGroup.tsx.
+Remaining/stronger coverage: API fold/panel tests own normalized roster/group membership; these own displayed aggregate counts and kind partition.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: counts agents and shells apart, live ones included
+  KEEP: counts a loop and a goal as neither an agent nor a shell
+  KEEP: counts the members as agents and the coordinator with members as none
+  KEEP: counts a coordinator with no members yet as the one agent it stands for
+  KEEP: summarises the group's header from its members
+  KEEP: has no members to settle before the first is reported, and the coordinator's tokens
+  KEEP: renders a loop and a goal with the agents, never as shells
+Bar 1: GUI §7.6 kind-aware roster and workflow counts; shell miscount and coordinator double-count regressions specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects false live-agent count, tokens counted twice, or loop/goal rendered as a shell.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes rosterKindCounts/workflowGroupSummary/partitionRosterRows, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: API fold/panel tests own normalized roster/group membership; these own displayed aggregate counts and kind partition; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/status/goal-chip.test.ts
+Failure modes before considering isolated tests: pause queues behind active provider work, spent budget gets Resume, unsupported action appears, or action sends wrong command.
+Source: Goal design §§4.5,8.2 adapter action matrix and literal goal-command wire text.
+Non-test seam callers: goalActions; AgentChatView.tsx.
+Remaining/stronger coverage: Host action tests own execution; these own which action is offered before any command is sent.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: the action matrix — claude × every status × running/idle × background liveness
+  KEEP: the action matrix — codex × every status × running/idle × background liveness
+  KEEP: the action matrix — grok × every status × running/idle × background liveness
+  REWRITE: no goal, a finished goal, or no goal support ⇒ no actions
+    Remove repeated complete-status case; rename to "no goal or no goal support ⇒ no actions". Null/undefined goal/support cases remain; complete status remains in each adapter matrix.
+  KEEP: only the actions an adapter honours are ever offered
+  KEEP: each action sends exactly the §8.2 text, as the user's message
+Bar 1: Goal design §§4.5,8.2 adapter action matrix and literal goal-command wire text specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects pause queues behind active provider work, spent budget gets Resume, unsupported action appears, or action sends wrong command.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes goalActions, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Host action tests own execution; these own which action is offered before any command is sent; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/status/status-line.test.ts
+Failure modes before considering isolated tests: invented percentage, negative remaining budget, or invalid usage readout.
+Source: GUI §7.6 and thread.token-usage.updated protocol: unknown context capacity stays unknown.
+Non-test seam callers: deriveContextMeter; ChatStatusLine.tsx.
+Remaining/stronger coverage: Daemon usage tests own reported input; this is the lowest owner of display arithmetic and absent/invalid data handling.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: the meter reports a percentage only when a context window is reported
+  KEEP: without maxTokens there is no ring and no percentage — never a zero
+  KEEP: an adapter that does not report a context window degrades even if a max leaks through
+  KEEP: usage past the window clamps at 100% and never reports negative remaining
+  KEEP: no usage frame yet means no meter at all, not a zeroed one
+  KEEP: zero and non-finite extras are dropped rather than shown
+Bar 1: GUI §7.6 and thread.token-usage.updated protocol: unknown context capacity stays unknown specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects invented percentage, negative remaining budget, or invalid usage readout.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes deriveContextMeter, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Daemon usage tests own reported input; this is the lowest owner of display arithmetic and absent/invalid data handling; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/thread-switch.test.ts
+Failure modes before considering isolated tests: loading flashes empty, old rows stay actionable for new thread, or settled empty view leaks another thread.
+Source: GUI §7.1 paint hold: loading retains old rows inert; settled empty thread is empty.
+Non-test seam callers: resolveThreadSwitchTimeline; AgentChatView.tsx.
+Remaining/stronger coverage: Store retention tests own cached snapshots, not view selection or inertness when session prop changes.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: rows for the named thread always win
+  KEEP: a reconnect on the same thread repaints its own rows, still interactive
+  KEEP: switching to a thread with no snapshot holds the previous one, inert
+  KEEP: a settled empty thread renders empty rather than someone else's rows
+Bar 1: GUI §7.1 paint hold: loading retains old rows inert; settled empty thread is empty specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects loading flashes empty, old rows stay actionable for new thread, or settled empty view leaks another thread.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes resolveThreadSwitchTimeline, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Store retention tests own cached snapshots, not view selection or inertness when session prop changes; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/timeline/diff-tree.test.ts
+Failure modes before considering isolated tests: incorrect changed-line stats, mixed file patches, lost deletion/binary/quoted/truncated file path.
+Source: GUI §7.3 changed-file stats and Git unified-diff file boundaries.
+Non-test seam callers: buildDiffTree/summarizeDiffStats/splitUnifiedDiff/countDiffLines; ChangedFilesCard.tsx and InlineDiff.tsx.
+Remaining/stronger coverage: Git diff renderer owns hunk rendering; daemon owns diff generation; this module owns client per-file split and aggregate stats.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: buildDiffTree rolls stats up through every ancestor
+  KEEP: summarizeDiffStats totals changed lines
+  KEEP: splitUnifiedDiff yields one entry per file with its own patch text
+  KEEP: a deletion keeps the old path when the new one is /dev/null
+  KEEP: a binary file is flagged rather than dropped
+  KEEP: a bare patch with no `diff --git` preamble is still one file
+  KEEP: a quoted path with spaces is unquoted
+  KEEP: an empty or whitespace diff is no files, not a throw
+  KEEP: a truncated patch still yields the file it started
+  KEEP: countDiffLines ignores the file headers
+Bar 1: GUI §7.3 changed-file stats and Git unified-diff file boundaries specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects incorrect changed-line stats, mixed file patches, lost deletion/binary/quoted/truncated file path.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes buildDiffTree/summarizeDiffStats/splitUnifiedDiff/countDiffLines, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Git diff renderer owns hunk rendering; daemon owns diff generation; this module owns client per-file split and aggregate stats; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/timeline/follow.test.ts
+Failure modes before considering isolated tests: streaming scroll animates despite accessibility preference.
+Source: GUI §7.3 prefers-reduced-motion must suppress smooth follow.
+Non-test seam callers: shouldAnimateFollow; ChatTimeline.tsx.
+Remaining/stronger coverage: No browser geometry assertion; this is the policy owner of animation eligibility.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: snaps when the user prefers reduced motion, even mid-turn
+Bar 1: GUI §7.3 prefers-reduced-motion must suppress smooth follow specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects streaming scroll animates despite accessibility preference.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes shouldAnimateFollow, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: No browser geometry assertion; this is the policy owner of animation eligibility; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/timeline/plan-reader.test.ts
+Failure modes before considering isolated tests: truncated plan accepted as whole when its store is gone.
+Source: GUI §5.6 full-output/plan retrieval: never copy/download incomplete plan.
+Non-test seam callers: readPlanWithoutStore; ChatTimeline.tsx and fallback TimelineRowContext.
+Remaining/stronger coverage: Store full-plan reader tests cover a live reader; this fallback specifically has no store to fetch from.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: with no thread store, a truncated plan rejects rather than returning partial markdown
+Bar 1: GUI §5.6 full-output/plan retrieval: never copy/download incomplete plan specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects truncated plan accepted as whole when its store is gone.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes readPlanWithoutStore, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Store full-plan reader tests cover a live reader; this fallback specifically has no store to fetch from; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/timeline/row-chrome.test.ts
+Failure modes before considering isolated tests: wrong compaction rendering, lost message bytes, mixed tool outputs, stale approval detail, or unavailable full command output.
+Source: GUI §§4.6.5(b),4.6.7,5.6,7.3; persisted compact command, lossless mention text, tool-call lifecycle protocol.
+Non-test seam callers: isCompactCommandMessage/splitSkillMentions/joinLifecycleDetails; TimelineRow.tsx, row-format.ts, MessageRows.tsx, ActivityRows.tsx.
+Remaining/stronger coverage: Composer tokenization owns mention recognition but not split text reconstruction; lib rows owns filtering/folding, not this distinct render-time recognition/join owner.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: a `/compact` user message is recognised at render time
+  KEEP: only a bare `/compact` from the user, with no attachments, is the command
+  KEEP: the concatenated runs always reproduce the input exactly
+  KEEP: a fileChange approval with no diff borrows it from its own item.started
+  KEEP: several orphan chunks of one call join into ONE row: the first carries all their text, nothing lost
+  KEEP: the row a command's streamed output joins onto says the call streamed, however its rows were built
+  KEEP: the join never overwrites a value the row already has
+  KEEP: the join is keyed on toolCallId only — never on a label match
+Bar 1: GUI §§4.6.5(b),4.6.7,5.6,7.3; persisted compact command, lossless mention text, tool-call lifecycle protocol specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects wrong compaction rendering, lost message bytes, mixed tool outputs, stale approval detail, or unavailable full command output.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes isCompactCommandMessage/splitSkillMentions/joinLifecycleDetails, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Composer tokenization owns mention recognition but not split text reconstruction; lib rows owns filtering/folding, not this distinct render-time recognition/join owner; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/timeline/markdown/highlight-core.test.ts
+Failure modes before considering isolated tests: code bytes disappear or row fails, or oversized code invokes costly grammar.
+Source: GUI §7.3 syntax highlighting preserves source; unknown/failed grammar fallback; documented 120000-character parse budget.
+Non-test seam callers: highlightCode/createIncrementalTreeHighlighter; CodeBlock.tsx.
+Remaining/stronger coverage: Lezer owns grammar correctness; these own lossless conversion and fallback; fake parser only injects failure, never implements asserted output.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: highlighting preserves source bytes across styled, empty and trailing lines
+  KEEP: an oversized block preserves the source without running the grammar
+  KEEP: a grammar failure preserves the source instead of killing the row
+  KEEP: an unknown grammar preserves the source
+Bar 1: GUI §7.3 syntax highlighting preserves source; unknown/failed grammar fallback; documented 120000-character parse budget specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects code bytes disappear or row fails, or oversized code invokes costly grammar.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes highlightCode/createIncrementalTreeHighlighter, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Lezer owns grammar correctness; these own lossless conversion and fallback; fake parser only injects failure, never implements asserted output; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/timeline/markdown/incremental.test.ts
+Failure modes before considering isolated tests: late references stay broken, cached definitions disappear, CRLF duplicates newline, or interior BOM lost.
+Source: CommonMark reference resolution/text preservation and GUI §7.3 streamed markdown cache regressions.
+Non-test seam callers: createIncrementalMarkdownPlugin through ReactMarkdown public rendering; ChatMarkdown.tsx.
+Remaining/stronger coverage: Markdown library tests do not exercise our cross-render prefix cache; observed href/text is data/navigation, not markup snapshot.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: a reference in the prefix resolves when its definition arrives later
+  KEEP: a streamed reference resolves a definition before the cached fence
+  KEEP: a streamed CR becoming CRLF preserves text and one line break
+  KEEP: a BOM inside streamed text remains an interior character
+Bar 1: CommonMark reference resolution/text preservation and GUI §7.3 streamed markdown cache regressions specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects late references stay broken, cached definitions disappear, CRLF duplicates newline, or interior BOM lost.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes createIncrementalMarkdownPlugin through ReactMarkdown public rendering, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Markdown library tests do not exercise our cross-render prefix cache; observed href/text is data/navigation, not markup snapshot; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/timeline/markdown/local-image.test.ts
+Failure modes before considering isolated tests: image loads from wrong origin/path, query becomes file name, or unresolved relative path is falsely treated as host path.
+Source: GUI local screenshot rendering; URI/path normalization and host file API boundary.
+Non-test seam callers: resolveMarkdownImageSource; ChatMarkdown.tsx and AgentChatView.tsx.
+Remaining/stronger coverage: Daemon containment tests remain authoritative for authorization; these own client image-source routing only.
+Risk: low; no production change. Validation: V for this path.
+  KEEP: joins a project-relative path onto the project root
+  KEEP: keeps an absolute host path and drops a query or fragment
+  KEEP: leaves URLs to the browser
+  KEEP: cannot place a relative path without a project, nor a home-relative one
+Bar 1: GUI local screenshot rendering; URI/path normalization and host file API boundary specifies these cases, rather than the test inferring requirements from production branch structure.
+Bar 2: the named scenario detects image loads from wrong origin/path, query becomes file name, or unresolved relative path is falsely treated as host path.
+Bar 3: expected literals, protocol payloads, navigation decisions, or original input bytes are fixed by the scenario; expected results are never calculated by the implementation being tested.
+Bar 4: observes resolveMarkdownImageSource, a production data/decision API; assertions concern returned behavior, not private call order.
+Bar 5: internal algorithms, local identifiers, React markup/classes and dependency decomposition can change while retaining these behavioral inputs/results.
+Bar 6: Daemon containment tests remain authoritative for authorization; these own client image-source routing only; no stronger retained test owns this exact boundary.
+
+packages/ui/src/components/agent-chat/banners/banner-render.check.ts
+KEEP (unnamed executable assertions, separately enumerated):
+  ApprovalCard responding disables all decision controls.
+  QuestionCard responding disables answer controls/custom input.
+  Provider warning data and option label reach accessible approval controls.
+  Native callback question has no dismiss action; message-mode question does.
+  Compact secret question uses a masked password field and no text/file input.
+Before edit: failure modes are double submission, lost approval warning, dismissal of blocking callback, or credential exposure.
+Non-test callers: ChatBannerDock renders ApprovalCard/QuestionCard; AgentChatView renders ChatBannerDock.
+Stronger coverage: answer-model tests cannot observe DOM disabled/password attributes; provider request tests cannot verify renderer gates.
+Risk: low; retained as-is. Validation: V check form.
+Bar 1: GUI §§4.2,4.5,7.5 expressly require these disabled, warning, dismissible, secret behaviors.
+Bar 2: each failing semantic attribute/action exposes the named user failure.
+Bar 3: fixture warning/label strings and HTML disabled/password semantics are independent expected data.
+Bar 4: public React component props and rendered native control/accessibility attributes.
+Bar 5: no classes, geometry or markup tree snapshot; internal component refactors retain native semantic control behavior.
+Bar 6: renderer is lowest seam that can prove disabled/password/dismiss attributes are emitted; no duplicate lower model assertion proves it.
+
+packages/ui/src/components/agent-chat/roster/drill-in-render.check.ts
+KEEP (unnamed executable assertions): seeded shell drill-in renders command and streamed output without another click.
+Before edit: second projection in ChatTimeline previously replaced shell rows with closed parent-turn folds.
+Non-test callers: AgentChatView renders AgentDrillIn, which renders ChatTimeline.
+Stronger coverage: projectBackgroundShell unit tests can all pass while ChatTimeline discards their projection; real store-to-render integration is required for this regression.
+Risk: low; fake transport supplies stream frames only, not projection/render behavior. Validation: V check form.
+Bar 1: GUI §7.6 and documented lost-output integration regression require immediately visible shell command/output.
+Bar 2: expected command/output text missing from actual rendered drill-in is exactly the visible failure.
+Bar 3: source command/output fixture bytes are fixed independent of renderer.
+Bar 4: real public stream snapshot and real AgentDrillIn component rendering.
+Bar 5: no child-call shape, row count, class or DOM tree snapshot; any working component structure passes.
+Bar 6: lowest integration owning the projection handoff; retaining it does not repeat the shell mapping unit cases.
+
+Completed cleanup and validation:
+- Non-composer final inventory: 126 KEEP + 1 REWRITE named tests; both executable semantic render checks KEEP. Composer dispositions are in ui-chat-composer.txt.
+- V over all 19 non-composer test files passed: 127 tests, 7 suites, zero failures/skips/cancellations. The goal rewrite was loaded and passed under its final name.
+- banner-render.check.ts passed; drill-in-render.check.ts passed (seeded shell command/output visible).
+- Final scoped diff and git diff --check inspected and clean. Non-composer change is one redundant complete-goal assertion removed; no replacement tests or production changes.
+- Combined component cleanup: two composer test deletions, one goal-case rewrite, net 27 test lines removed. No fixture/snapshot/helper/test-only production seam becomes unused; one unused composer test import removed.
+- Cross-scope coordination: ui_chat_lib/rows retains compact row-projection tests for its distinct owner and removes redundant join assertions in favor of row-chrome owner coverage. store.reload consecutive no-generation failure-order case is the stronger owner retained for deleted composer outbox duplicate.
+- Root agent owns repository gates, remote integration, commit and push.

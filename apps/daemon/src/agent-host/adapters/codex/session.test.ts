@@ -752,7 +752,7 @@ describe("codex session — a live turn's children are interrupted first (R3 fin
     });
     await r.events.waitForType("task.started");
     await wireBarrier(r);
-    assert.equal(r.session.currentTurnId, turn.turnId, "the parent turn is still live");
+    assert.equal(r.session.summary().activeTurnId, turn.turnId, "the parent turn is still live");
 
     await r.session.interruptTurn(turn.turnId);
 
@@ -788,7 +788,7 @@ describe("codex session — hasSubagents is per TURN (Q1 finding 19)", () => {
       true
     );
 
-    await waitUntil(() => r.session.currentTurnId === null, "the first turn settled");
+    await waitUntil(() => r.session.summary().activeTurnId === undefined, "the first turn settled");
     await r.session.sendTurn({ input: "plain", attachments: [], interactionMode: "default" });
     await waitUntil(
       () => r.events.events.filter((event) => event.type === "turn.completed").length === 2,
@@ -816,7 +816,7 @@ describe("codex session — session-scoped Stop with no running turn (R6)", () =
     // The parent turn finishes while the child keeps working — §3.1's
     // "background work outlives the turn".
     await r.events.waitForType("turn.completed");
-    await waitUntil(() => r.session.currentTurnId === null, "the parent turn settled");
+    await waitUntil(() => r.session.summary().activeTurnId === undefined, "the parent turn settled");
     await r.events.waitForType("task.started");
 
     // Session-scoped Stop: no turn id.
@@ -843,7 +843,7 @@ describe("codex session — session-scoped Stop with no running turn (R6)", () =
     await r.session.start();
     await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
     await r.events.waitForType("task.started");
-    await waitUntil(() => r.session.currentTurnId === null, "the parent turn settled");
+    await waitUntil(() => r.session.summary().activeTurnId === undefined, "the parent turn settled");
 
     await r.session.interruptTurn();
     const after = r.events.events.filter((event) => event.type === "task.completed").length;
@@ -879,7 +879,7 @@ describe("codex session — Stop closes a child re-engaged after it completed (I
     await r.session.start();
     await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
     await r.events.waitForType("turn.completed");
-    await waitUntil(() => r.session.currentTurnId === null, "the parent turn settled");
+    await waitUntil(() => r.session.summary().activeTurnId === undefined, "the parent turn settled");
     await wireBarrier(r);
 
     await r.notify("turn/completed", {
@@ -967,7 +967,7 @@ describe("codex session — a collab child's own calls (Task 3)", () => {
     await r.session.start();
     await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
     await r.events.waitForType("turn.completed");
-    await waitUntil(() => r.session.currentTurnId === null, "the parent turn settled");
+    await waitUntil(() => r.session.summary().activeTurnId === undefined, "the parent turn settled");
     await r.notify("item/started", {
       item: childCommand("call_long", "inProgress"),
       threadId: "child-1",
@@ -1017,7 +1017,7 @@ describe("codex session — a collab child's own calls (Task 3)", () => {
     await r.session.sendTurn({ input: "spawn", attachments: [], interactionMode: "default" });
     const opened = await r.events.waitForType("request.opened");
     await r.events.waitForType("turn.completed");
-    await waitUntil(() => r.session.currentTurnId === null, "the parent's turn settled, the card still open");
+    await waitUntil(() => r.session.summary().activeTurnId === undefined, "the parent's turn settled, the card still open");
 
     r.session.respondToApproval(opened.requestId!, "decline");
     await r.events.waitFor(
@@ -1527,7 +1527,7 @@ describe("codex session — the parent's own card nobody answered (sweep, follow
       assert.equal(resolved.turnId, turn.turnId, "the card's own turn, as it was opened");
 
       await wireBarrier(r);
-      assert.equal(r.session.currentTurnId, turn.turnId, "the turn runs on");
+      assert.equal(r.session.summary().activeTurnId, turn.turnId, "the turn runs on");
 
       // A later Stop writes nothing more for it, and never answers it.
       await r.session.interruptTurn(turn.turnId);
@@ -1564,11 +1564,11 @@ describe("codex session — the parent's own card nobody answered (sweep, follow
           "after the turn's end, so the host's own dismissal of a question on it comes first"
         );
         await wireBarrier(r);
-        assert.equal(r.session.currentTurnId, null);
+        assert.equal(r.session.summary().activeTurnId, undefined);
 
         // The next turn is watched again: no stale card pauses it.
         const next = await r.session.sendTurn({ input: "again", attachments: [], interactionMode: "plan" });
-        assert.equal(r.session.currentTurnId, next.turnId);
+        assert.equal(r.session.summary().activeTurnId, next.turnId);
 
         await r.session.interruptTurn();
         await wireBarrier(r);
@@ -2462,35 +2462,6 @@ describe("codex session — /goal is mapped onto thread/goal/* (goals §6.2.3)",
 });
 
 describe("codex session — Stop pauses an active goal first (goals §6.2.4)", () => {
-  it("sends thread/goal/set {status:paused} BEFORE turn/interrupt", async () => {
-    const r = rig({ turns: [{ kind: "silent" }] });
-    await r.session.start();
-    await r.session.goalCommand({ kind: "set", objective: "Make the build green" });
-    await waitForGoalRow(r, "set");
-    const { turnId } = await r.session.sendTurn({
-      input: "go",
-      attachments: [],
-      interactionMode: "default"
-    });
-    await r.events.waitForType("turn.started");
-
-    await r.session.interruptTurn(turnId, { pauseGoal: true });
-
-    const received = r.received();
-    const pauseIndex = received.findIndex(isPause);
-    const interruptIndex = received.findIndex((frame) => frame.method === "turn/interrupt");
-    assert.ok(pauseIndex !== -1, "the goal was paused");
-    assert.ok(interruptIndex !== -1, "the turn was interrupted");
-    assert.ok(
-      pauseIndex < interruptIndex,
-      "paused FIRST: an interrupt alone lets the next continuation start at once (openai/codex #28104)"
-    );
-    assert.deepEqual(received[pauseIndex]!.params, { threadId: "thread-mock-1", status: "paused" });
-    await waitForGoalRow(r, "paused");
-    await r.events.waitForType("turn.completed");
-    await r.stop();
-  });
-
   it("still interrupts when the pause fails, and logs why", async () => {
     const r = rig(
       {

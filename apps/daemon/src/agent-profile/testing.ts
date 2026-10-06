@@ -36,20 +36,17 @@ export function fakeItem(kind: ProfileItemKind, name: string, patch: Partial<Pro
   };
 }
 
-export interface Deferred<T = void> {
+interface Deferred<T = void> {
   promise: Promise<T>;
   resolve(value: T): void;
-  reject(error: unknown): void;
 }
 
-export function deferred<T = void>(): Deferred<T> {
+function deferred<T = void>(): Deferred<T> {
   let resolve!: (value: T) => void;
-  let reject!: (error: unknown) => void;
-  const promise = new Promise<T>((res, rej) => {
+  const promise = new Promise<T>((res) => {
     resolve = res;
-    reject = rej;
   });
-  return { promise, resolve, reject };
+  return { promise, resolve };
 }
 
 function draftName(draft: ProfileItemDraft): string {

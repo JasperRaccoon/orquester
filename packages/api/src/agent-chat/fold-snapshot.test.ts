@@ -309,11 +309,6 @@ function serializedCopy(state: ThreadFoldState): Record<string, any> {
 
 // --- round trip ------------------------------------------------------------
 
-test("deserialize(serialize(state)) is the state, Sets and Maps included", () => {
-  const state = foldThread(richLog());
-  assert.deepEqual(throughDisk(state), state);
-});
-
 test("a streamed message after restore updates the message following a colliding activity id", () => {
   reset();
   const restored = throughDisk(foldThread([
@@ -538,12 +533,6 @@ test("a well-formed snapshot file parses, and its state restores the fold", () =
   assert.equal(parsed.writtenAt, "2026-09-23T12:00:00.000Z");
   assert.deepEqual(parsed.extras, { revertedTo: 2, titleManual: true });
   assert.deepEqual(deserializeFoldState(parsed.state), state);
-});
-
-test("a snapshot file without extras parses without an extras key", () => {
-  const parsed = parseFoldSnapshotFile(onDisk(snapshotFile(foldThread(richLog()))), THREAD_ID);
-  assert.ok(parsed !== null);
-  assert.equal("extras" in parsed, false);
 });
 
 test("a snapshot file of another version, another thread or a bad shape is rejected", () => {

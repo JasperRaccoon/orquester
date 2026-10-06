@@ -1,16 +1,11 @@
 import assert from "node:assert/strict";
-import { beforeEach,describe,it } from "node:test";
+import { describe,it } from "node:test";
 
 import {
 clipGoalText,
 goalSummaryMarker,
 isGoalHeldForUpdate
 } from "./goal.logic";
-import { resetBuilders } from "./test-helpers";
-
-beforeEach(() => {
-  resetBuilders();
-});
 
 describe("goalSummaryMarker — the tab marker, off `SessionSummary.goal` (goals §8.3)", () => {
 
@@ -44,8 +39,7 @@ describe("final wave (5): an objective in an accessible name is capped at 200 ch
   it("never splits a surrogate pair", () => {
     const text = `${"a".repeat(198)}😀tail`;
     const cut = clipGoalText(text);
-    assert.ok(cut.length <= 200);
-    assert.ok(!/[\uD800-\uDBFF]…$/.test(cut), "no lone high surrogate before the ellipsis");
+    assert.equal(cut, `${"a".repeat(198)}…`);
   });
 });
 

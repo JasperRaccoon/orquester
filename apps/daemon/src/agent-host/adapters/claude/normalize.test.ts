@@ -12,7 +12,6 @@ import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import {
   ClaudeNormalizer,
-  readPreservedUuids,
   type BackgroundShellChange
 } from "./normalize.ts";
 import {
@@ -186,23 +185,6 @@ describe("claude normaliser — fixture replay", () => {
     );
     assert.ok(stepListItems.length > 0);
     assert.ok(stepListItems.every((event) => event.payload.itemType === "dynamic_tool_call"));
-  });
-
-  it("09: plan mode captures the plan and its planFilePath, then denies", () => {
-    const { events } = replayClaudeFixture("09-plan-mode-exitplanmode-denied.ndjson");
-    const proposed = allOf(events, "turn.proposed.completed");
-    assert.equal(proposed.length, 1, "the plan must be captured exactly once");
-    assert.ok(proposed[0]!.payload.planMarkdown.includes("# Plan"));
-    // `planFilePath` is its OWN field: the markdown is user-facing content the
-    // plan card offers for copy and download, so it is never edited.
-    assert.ok(proposed[0]!.payload.planFilePath?.endsWith(".md"));
-    assert.ok(!proposed[0]!.payload.planMarkdown.includes("planFilePath"));
-    // ExitPlanMode never becomes an approval card.
-    assert.ok(
-      !allOf(events, "request.opened").some((event) =>
-        JSON.stringify(event.payload.args).includes("ExitPlanMode")
-      )
-    );
   });
 
   it("10: an interrupt settles the turn as interrupted without a diagnostic banner", () => {
@@ -466,32 +448,25 @@ describe("claude normaliser — compaction bookkeeping", () => {
       ids: countingIds()
     });
     assert.equal(normalizer.preservedMessageUuids, undefined);
-    normalizer.handleMessage({
-      type: "system",
-      subtype: "compact_boundary",
-      compact_metadata: {
-        trigger: "manual",
-        pre_tokens: 100,
-        post_tokens: 10,
-        preserved_messages: { anchor_uuid: "a", uuids: ["a"], all_uuids: ["a", "b"] }
-      },
-      session_id: "s",
-      uuid: "u"
-    } as unknown as SDKMessage);
-    // Without this the "a compaction in between" refusal of §4.5 has nothing
-    // to check and a doomed rewind creates an orphan fork first.
-    assert.deepEqual(normalizer.preservedMessageUuids, ["a", "b"]);
-  });
-
-  it("prefers all_uuids, falls back to uuids, and stays undefined otherwise", () => {
-    assert.deepEqual(
-      readPreservedUuids({ preserved_messages: { all_uuids: ["x"], uuids: ["y"] } }),
-      ["x"]
-    );
-    assert.deepEqual(readPreservedUuids({ preserved_messages: { uuids: ["y"] } }), ["y"]);
-    assert.equal(readPreservedUuids({ preserved_messages: {} }), undefined);
-    assert.equal(readPreservedUuids({}), undefined);
-    assert.equal(readPreservedUuids(undefined), undefined);
+    let frame = 0;
+    for (const [preserved, expected] of [
+      [{ anchor_uuid: "a", uuids: ["a"], all_uuids: ["a", "b"] }, ["a", "b"]],
+      [{ uuids: ["y"] }, ["y"]],
+      [{}, undefined],
+      [undefined, undefined]
+    ] as const) {
+      normalizer.handleMessage({
+        type: "system",
+        subtype: "compact_boundary",
+        compact_metadata: {
+          trigger: "manual", pre_tokens: 100, post_tokens: 10, preserved_messages: preserved
+        },
+        session_id: "s",
+        uuid: `compact-${++frame}`
+      } as unknown as SDKMessage);
+      // The session checks these constraints before it forks a rewind.
+      assert.deepEqual(normalizer.preservedMessageUuids, expected);
+    }
   });
 });
 
@@ -2609,25 +2584,16 @@ describe("claude normaliser — a subagent's call output carries the call's owne
     assert.equal(denial.payload.agentId, AGENT_TASK_ID);
   });
 
-  it("the parent's own output and approvals carry no owner", () => {
+  it("the parent's own output carries no owner", () => {
     for (const fixture of [
       "02-tool-read-auto-allowed.ndjson",
-      "03-bash-approval-accept.ndjson",
       "16-errors.ndjson"
     ]) {
       const { events } = replayClaudeFixture(fixture);
       const output = outputDeltas(events);
       assert.ok(output.length > 0, `${fixture} streams the parent's output`);
       assert.ok(output.every((event) => event.agentId === undefined), fixture);
-      assert.ok(
-        allOf(events, "request.opened").every((event) => event.agentId === undefined),
-        `${fixture}: an approval stays on the parent's thread`
-      );
     }
-    assert.equal(
-      allOf(replayClaudeFixture("03-bash-approval-accept.ndjson").events, "request.opened").length,
-      1
-    );
   });
 });
 

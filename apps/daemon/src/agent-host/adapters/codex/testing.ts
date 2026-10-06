@@ -31,7 +31,7 @@ export interface FakeContext {
 }
 
 export function createFakeContext(
-  overrides: Partial<AdapterContext> & { cwd?: string } = {}
+  overrides: Partial<AdapterContext> = {}
 ): FakeContext {
   let eventSeq = 0;
   let uuidSeq = 0;
@@ -92,7 +92,7 @@ export type MockParentAskEnd = ("turn-interrupted" | "turn-failed" | "resolved" 
 /** One programmed turn. */
 export type MockTurnScript =
   | { kind: "text"; text: string }
-  | { kind: "command-approval"; command: string; availableDecisions?: unknown[]; afterAsking?: MockParentAskEnd }
+  | { kind: "command-approval"; command: string; afterAsking?: MockParentAskEnd }
   | { kind: "file-change-approval"; path: string; diff: string; /** Stay silent after the answer, until a wire notification or interrupt. */ holdAfterApproval?: boolean }
   | { kind: "user-input"; questionId: string; header: string; question: string; options: { label: string; description: string }[] | null; isOther?: boolean; isSecret?: boolean; isBlocking?: boolean; /** Append a question the filter must drop, to exercise the partial-refusal rule. */ withUnrenderable?: boolean; afterAsking?: MockParentAskEnd }
   | {
@@ -176,7 +176,6 @@ interface MockGoal {
 export interface MockConfig {
   emptyCatalog?: boolean;
   skillName?: string;
-  userAgent?: string;
   stderr?: string;
   /** Never answer `initialize`, to exercise the handshake deadline. */
   hangOnInitialize?: boolean;
@@ -497,7 +496,7 @@ async function runTurn(turnId, script) {
         kind: "command", threadId, turnId, itemId, startedAtMs: 0, environmentId: "local",
         command: script.command, cwd: process.cwd(), commandActions: [],
         proposedExecpolicyAmendment: ["ls", "-1"],
-        availableDecisions: script.availableDecisions ?? ["accept", { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["ls", "-1"] } }, "cancel"]
+        availableDecisions: ["accept", { acceptWithExecpolicyAmendment: { execpolicy_amendment: ["ls", "-1"] } }, "cancel"]
       });
       if (script.afterAsking) {
         endParentAsk(turnId, requestId, script.afterAsking);
@@ -676,7 +675,7 @@ function handle(frame) {
   switch (method) {
     case "initialize":
       if (config.hangOnInitialize) return;
-      send({ id, result: { userAgent: "orquester/" + (config.userAgent ?? "0.154.0") + " (test)", codexHome: process.env.CODEX_HOME ?? "/nonexistent", platformFamily: "unix", platformOs: "linux" } });
+      send({ id, result: { userAgent: "orquester/0.154.0 (test)", codexHome: process.env.CODEX_HOME ?? "/nonexistent", platformFamily: "unix", platformOs: "linux" } });
       return;
     case "initialized":
       return;

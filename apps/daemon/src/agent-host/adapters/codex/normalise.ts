@@ -246,10 +246,6 @@ export class CodexNormaliser {
     this.goals = options.goals ?? new CodexGoalTracker();
   }
 
-  get currentTurnId(): string | null {
-    return this.activeTurnId;
-  }
-
   /** True when `turn/completed` has already settled this turn (Q1 finding 3). */
   hasSettled(turnId: string): boolean {
     return this.settledTurns.has(turnId);

@@ -1,0 +1,43 @@
+Repository tooling audit (base 21f43b1c6956c9fac8f389cab28c6fbae323775a)
+
+This record was written before edits; no changes were needed in this scope.
+Workspace test/check cases are enumerated by the other reports in this directory.
+apps/web, apps/desktop and packages/registry have no separate test/check suites.
+
+KEEP scripts/smoke-web.mjs :: clean-storage
+1. Independent requirement: README's post-deploy browser smoke check and usable
+   browser app shell; deploy.sh runs this script after deployment.
+2. Detects missing/broken emitted assets, uncaught startup errors, or failure to
+   render the accessible Settings control in an actual browser.
+3. Oracle is successful page startup and a visible accessible control, not a
+   rendering snapshot or values computed by the implementation.
+4. Seam is the deployed browser URL and rendered accessible DOM.
+5. Internal component, bundler and stylesheet refactors preserve these outcomes.
+6. Unit tests cannot detect missing deployment assets or startup wiring failures;
+   this is the lowest seam for the assembled deployed-shell contract.
+Remaining coverage: app-config and schema tests cover parsing, not deployed boot.
+Risk: low, unchanged. Screenshot and results.json are already emitted artifacts.
+Validation: node --check scripts/smoke-web.mjs; optional browser execution needs a
+safe emitted frontend surface. No live daemon startup or deployment is authorized.
+
+KEEP scripts/smoke-web.mjs :: legacy-usage-prefs-pre-agents-record
+1. Independent regression: README's legacy-localStorage smoke scenario and the
+   previously persisted pre-agents usage preference format. AGENTS.md requires
+   validating localStorage before shared state and tolerating old records.
+2. Detects the app crashing on startup with an actual old persisted payload.
+3. Fixed historical JSON fixture supplies the input; success is usable app startup.
+4. Seam is real localStorage before browser bundle execution.
+5. Internal parser/store/component refactors do not alter that outcome.
+6. Config tests own migration values; this scenario uniquely proves migrated
+   state reaches and can initialize the emitted UI. It does not replay parser
+   permutations or assert the same migration fields at another layer.
+Remaining coverage: packages/config/src/usage-prefs-migrate.test.ts and
+packages/ui/src/lib/app-config.check.ts own schema/adapter behavior.
+Risk: low, unchanged. Existing screenshot and results.json make execution verifiable.
+Validation: node --check scripts/smoke-web.mjs and parse the JSON fixture.
+
+KEEP support: scripts/smoke-web-fixtures.json is used by that retained scenario.
+scripts/test/assert-ok.mjs, assert-ok-hooks.mjs and quiet-mock-timers.mjs remain
+referenced by package test/check commands. They are active harness support, not
+orphaned helpers. The assert shim's regression tests are audited by daemon-root.
+No production seam, fixture, snapshot, dependency or script removed in this scope.

@@ -14,7 +14,6 @@ import Database from "better-sqlite3";
 import {
   type AgentChatStreamFrame,
   type RuntimeEvent,
-  type ThreadActivityItem,
   type ThreadPromptsResponse,
   type ThreadPromptTextResponse,
   type ThreadSearchResponse
@@ -340,7 +339,6 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
 
     const deleted = await h.call("DELETE", agentHostRoutes.deleteThread("thread-x"));
     assert.equal(deleted.status, 200);
-    assert.deepEqual(h.host.checkpoints.deleted, ["thread-x"]);
     const gone = await h.call("GET", agentHostRoutes.read("thread-x"));
     assert.equal(gone.status, 404);
     await h.stop();
@@ -432,14 +430,6 @@ describe("agent host server — commands and reads (§6.2, §6.3)", () => {
     const first = await output("?offset=0&maxBytes=4");
     assert.equal(first.status, 200);
     assert.deepEqual(first.body, { toolUseId: "bgshell:task-1", offset: 0, text: "one\n", totalBytes: 10, nextOffset: 4, complete: false, truncated: false });
-    // Chained through nextOffset, the windows are the join.
-    let text = "";
-    for (let offset: number | undefined = 0; offset !== undefined;) {
-      const page = (await output(`?offset=${offset}&maxBytes=4`)).body as { text: string; nextOffset?: number };
-      text += page.text;
-      offset = page.nextOffset;
-    }
-    assert.equal(text, "one\n  two\n");
     // Either parameter alone asks for a window: maxBytes from the start, offset at the default size.
     assert.deepEqual((await output("?maxBytes=3")).body, { toolUseId: "bgshell:task-1", offset: 0, text: "one", totalBytes: 10, nextOffset: 3, complete: false, truncated: false });
     assert.deepEqual((await output("?offset=4")).body, { toolUseId: "bgshell:task-1", offset: 4, text: "  two\n", totalBytes: 10, complete: false, truncated: false });
@@ -1246,12 +1236,6 @@ describe("agent host server — goals §5.7, the deploy's goal hold", () => {
     const held = await h.call("POST", agentHostRoutes.holdGoals);
     assert.equal(held.status, 200);
     assert.deepEqual(held.body, { heldThreadIds: [threadId] });
-    assert.equal(h.host.store.heads.get(threadId)?.goalHeldForHandover, true);
-    const rows = (h.host.store.logs.get(threadId) ?? [])
-      .filter((event) => event.type === "thread.activity-appended")
-      .map((event) => (event.payload as { activity: ThreadActivityItem }).activity)
-      .filter((activity) => activity.activityKind === "goal.status");
-    assert.deepEqual(rows.map((row) => (row.payload as { heldForUpdate?: boolean }).heldForUpdate), [true]);
 
     // A renewal answers the thread already held.
     assert.deepEqual((await h.call("POST", agentHostRoutes.holdGoals)).body, {

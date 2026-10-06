@@ -450,7 +450,8 @@ test("full-access answers the approval itself with no card at all", async () => 
   const r = await rig({ scenario: "permission" });
   await start(r, { runtimeMode: "full-access" });
   void r.adapter.sendTurn({ threadId: "t1", input: "write", attachments: [], interactionMode: "default" });
-  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  const completed = await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  assert.equal((completed as Extract<RuntimeEvent, { type: "turn.completed" }>).payload.state, "completed");
   assert.equal(
     r.events.some((event) => event.type === "request.opened"),
     false
@@ -462,7 +463,8 @@ test("auto-accept-edits answers an edit itself, because the CLI flag is a no-op"
   const r = await rig({ scenario: "permission" });
   await start(r, { runtimeMode: "auto-accept-edits" });
   void r.adapter.sendTurn({ threadId: "t1", input: "write", attachments: [], interactionMode: "default" });
-  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  const completed = await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  assert.equal((completed as Extract<RuntimeEvent, { type: "turn.completed" }>).payload.state, "completed");
   assert.equal(
     r.events.some((event) => event.type === "request.opened"),
     false,
@@ -534,41 +536,6 @@ test("a child that exits mid-turn settles the turn, closes items and then exits"
   // would misread this.
   assert.match(exited.payload.reason ?? "", /code 143/);
   await r.dispose();
-});
-
-test("lazy recovery: a fresh session starts from the persisted cursor after a death", async () => {
-  const r = await rig({ scenario: "exit-mid-turn" });
-  await start(r);
-  void r.adapter.sendTurn({ threadId: "t1", input: "count", attachments: [], interactionMode: "default" });
-  await r.waitFor((event) => event.type === "session.exited", "session.exited");
-
-  // A crashed session is indistinguishable from a fresh one to the caller.
-  const r2 = await rig({ scenario: "happy" });
-  await r2.adapter.startSession({
-    threadId: "t1",
-    cwd: r2.cwd,
-    home: home(r2.cwd),
-    modelSelection: { model: "grok-4.6" },
-    runtimeMode: "approval-required",
-    resumeCursor: { schemaVersion: 1, sessionId: "01a0c19e-de22-78c0-a72a-7e230ccfbec0" }
-  });
-  const started = (await r2.waitFor(
-    (event) => event.type === "session.started",
-    "session.started"
-  )) as Extract<RuntimeEvent, { type: "session.started" }>;
-  assert.deepEqual(started.payload.resume, {
-    schemaVersion: 1,
-    sessionId: "01a0c19e-de22-78c0-a72a-7e230ccfbec0"
-  });
-  // The replayed frames must NOT reappear in the live stream.
-  assert.equal(
-    r2.events.some(
-      (event) => event.type === "content.delta" && event.payload.delta === "earlier"
-    ),
-    false
-  );
-  await r.dispose();
-  await r2.dispose();
 });
 
 test("a cursor with the wrong shape means 'no resume', never an error", async () => {

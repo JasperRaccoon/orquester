@@ -372,13 +372,6 @@ test("a mutation that fails after writing part of its work still announces the c
 // Copy
 // ---------------------------------------------------------------------------
 
-async function exists(path: string): Promise<boolean> {
-  return access(path).then(
-    () => true,
-    () => false
-  );
-}
-
 test("copy: exports from the source, imports into the target, answers the TARGET's snapshot and removes the temp dir", async () => {
   const h = harness();
   h.adapters.claude.items = [fakeItem("skill", "review")];
@@ -387,7 +380,7 @@ test("copy: exports from the source, imports into the target, answers the TARGET
   assert.deepEqual(response.itemIds, ["skill:review"]);
   const [dir] = h.adapters.claude.exportedDirs;
   assert.ok(dir);
-  assert.equal(await exists(dir), false, "the exported skill dir is gone");
+  await assert.rejects(access(dir), { code: "ENOENT" }, "the exported skill dir is gone");
   assert.deepEqual(h.events.map((event) => event.agent), ["grok"]);
 });
 
@@ -398,7 +391,7 @@ test("copy: the temp dir is removed when the import fails too", async () => {
   await rejectsWith(h.service.copy("claude", "skill:review", "codex"), 409, "ITEM_EXISTS");
   const [dir] = h.adapters.claude.exportedDirs;
   assert.ok(dir);
-  assert.equal(await exists(dir), false);
+  await assert.rejects(access(dir), { code: "ENOENT" });
 });
 
 test("copy: refused onto the same agent, for non-copyable kinds, and where the target cannot create the kind", async () => {
@@ -422,7 +415,7 @@ test("copy with a converter: imports the converted item and removes its temp dir
   h.adapters.claude.items = [fakeItem("command", "deploy")];
   const response = await h.service.copy("claude", "command:deploy", "codex");
   assert.deepEqual(response.itemIds, ["skill:deploy"]);
-  assert.equal(await exists(converted), false);
+  await assert.rejects(access(converted), { code: "ENOENT" });
 });
 
 test("copy: opposite copies between two agents do not deadlock", async () => {

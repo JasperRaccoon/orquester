@@ -173,80 +173,87 @@ test("discard of a folder pathspec covers the entries beneath it", async () => {
   }
 });
 
-test("log carries parent hashes for the commit graph", async () => {
-  const record = [
-    "abc123", "abc12", "p1 p2", "Ann", "ann@example.com",
-    "2026-01-01T00:00:00Z", "HEAD -> main, tag: v1", "subject", "body"
-  ].join("\x1f");
-  const { git } = fakeGit(() => `${record}\0`);
-  const [entry] = await git.log("/repo", { limit: 1 });
-  assert.deepEqual(entry.parents, ["p1", "p2"]);
-  assert.deepEqual(entry.refs, ["main", "v1"]);
+test("log carries parent hashes for the commit graph", async (t) => {
+  const dir = await tempRepo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const run = (...args: string[]) => exec("git", args, { cwd: dir });
+  const root = (await run("rev-parse", "HEAD")).stdout.trim();
+  await run("checkout", "-qb", "feature");
+  await run("commit", "--allow-empty", "-qm", "feature");
+  const feature = (await run("rev-parse", "HEAD")).stdout.trim();
+  await run("checkout", "-q", "main");
+  await run("commit", "--allow-empty", "-qm", "main");
+  const main = (await run("rev-parse", "HEAD")).stdout.trim();
+  await run("merge", "--no-ff", "feature", "-m", "merge");
+  await run("tag", "v1");
+
+  const entries = await new GitService().log(dir, {});
+  assert.deepEqual(entries[0].parents, [main, feature]);
+  assert.deepEqual(entries[0].refs, ["main", "v1"]);
+  assert.deepEqual(entries.find((entry) => entry.sha === root)?.parents, []);
 });
 
-test("log reports a root commit as parentless, not as one empty parent", async () => {
-  const record = ["abc", "ab", "", "A", "a@b", "d", "", "s", ""].join("\x1f");
-  const { git } = fakeGit(() => `${record}\0`);
-  assert.deepEqual((await git.log("/repo", {}))[0].parents, []);
-});
+test("branches report divergence from the upstream and omit remote HEAD aliases", async (t) => {
+  const dir = await tempRepo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const run = (...args: string[]) => exec("git", args, { cwd: dir });
+  await run("branch", "solo");
+  await run("checkout", "-qb", "upstream");
+  await run("commit", "--allow-empty", "-qm", "remote work");
+  await run("remote", "add", "origin", dir);
+  await run("update-ref", "refs/remotes/origin/main", "HEAD");
+  await run("symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main");
+  await run("checkout", "-q", "main");
+  await run("branch", "-D", "upstream");
+  await run("commit", "--allow-empty", "-qm", "local work");
+  await run("commit", "--allow-empty", "-qm", "more local work");
+  await run("branch", "--set-upstream-to=origin/main", "main");
 
-test("branches derive ahead/behind from %(upstream:track)", async () => {
-  const { git } = fakeGit((args) =>
-    args[1] === "refs/heads" || args[2] === "refs/heads"
-      ? "main\torigin/main\t*\t[ahead 2, behind 3]\nsolo\t\t\t\n"
-      : "refs/remotes/origin/main\nrefs/remotes/origin/HEAD\n"
-  );
-  const { local, remote, current } = await git.branches("/repo");
+  const { local, remote, current } = await new GitService().branches(dir);
   assert.equal(current, "main");
   assert.deepEqual(local, [
-    { name: "main", current: true, ahead: 2, behind: 3, upstream: "origin/main" },
+    { name: "main", current: true, ahead: 2, behind: 1, upstream: "origin/main" },
     { name: "solo", current: false, ahead: 0, behind: 0 }
   ]);
   assert.deepEqual(remote, ["origin/main"]);
 });
 
-test("commitDetail parses -z name-status/numstat rename records (old-then-new)", async () => {
-  const { git } = fakeGit((args) => {
-    if (args.includes("-s")) return ["sha", "shrt", "Ann", "a@b", "date", "subject", "body"].join("\x1f");
-    if (args.includes("--name-status")) return nul("R100", "näme with ünicode.txt", "renamed ünicode.txt");
-    if (args.includes("--numstat")) return nul("0\t0\t", "näme with ünicode.txt", "renamed ünicode.txt");
-    return "";
-  });
-  const detail = await git.commitDetail("/repo", "sha");
+test("commitDetail reports Unicode renames and binary changes", async (t) => {
+  const dir = await tempRepo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const run = (...args: string[]) => exec("git", args, { cwd: dir });
+  await run("mv", "kept.txt", "näme with ünicode.txt");
+  await run("commit", "-qm", "original name");
+  await run("mv", "näme with ünicode.txt", "renamed ünicode.txt");
+  await writeFile(join(dir, "logo.png"), Buffer.from([0, 1, 2]));
+  await run("add", "logo.png");
+  await run("commit", "-qm", "rename and binary");
+
+  const detail = await new GitService().commitDetail(dir, "HEAD");
   assert.deepEqual(detail.files, [
-    {
-      path: "renamed ünicode.txt",
-      oldPath: "näme with ünicode.txt",
-      status: "renamed",
-      additions: 0,
-      deletions: 0,
-      binary: false
-    }
+    { path: "logo.png", status: "added", additions: 0, deletions: 0, binary: true },
+    { path: "renamed ünicode.txt", oldPath: "näme with ünicode.txt", status: "renamed", additions: 0, deletions: 0, binary: false }
   ]);
 });
 
-test("commitDetail marks git's '-' numstat pair as binary with zero counts", async () => {
-  const { git } = fakeGit((args) => {
-    if (args.includes("-s")) return ["sha", "shrt", "A", "a@b", "d", "s", ""].join("\x1f");
-    if (args.includes("--name-status")) return nul("M", "logo.png");
-    if (args.includes("--numstat")) return nul("-\t-\tlogo.png");
-    return "";
-  });
-  const [file] = (await git.commitDetail("/repo", "sha")).files;
-  assert.deepEqual([file.binary, file.additions, file.deletions], [true, 0, 0]);
-});
+test("stash list returns newest first with branch and named or default message", async (t) => {
+  const dir = await tempRepo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  const date = "2026-08-16T17:13:07+02:00";
+  const run = (...args: string[]) => exec("git", args, { cwd: dir, env: { ...process.env, GIT_AUTHOR_DATE: date, GIT_COMMITTER_DATE: date } });
+  const root = (await run("rev-parse", "--short", "HEAD")).stdout.trim();
+  await writeFile(join(dir, "kept.txt"), "unnamed work\n");
+  await run("stash", "push");
+  const first = (await run("rev-parse", "refs/stash")).stdout.trim();
+  await run("checkout", "-qb", "feature");
+  await writeFile(join(dir, "kept.txt"), "named work\n");
+  await run("stash", "push", "-m", "work in progress");
+  const second = (await run("rev-parse", "refs/stash")).stdout.trim();
 
-test("stash list splits on the record separator and unwraps git's WIP subject", async () => {
-  const records = [
-    ["aaa", "WIP on main: 0a1afe4 pure rename", "2026-08-16T17:13:07+02:00"].join("\x1f"),
-    ["bbb", "On feature: work in progress", "2026-08-15T09:00:00+02:00"].join("\x1f")
-  ];
-  const { git } = fakeGit((args) =>
-    args[0] === "rev-parse" ? "true\n" : `${records.join("\x1e\n")}\x1e\n`
-  );
-  assert.deepEqual(await git.stashList("/repo"), [
-    { index: 0, sha: "aaa", branch: "main", message: "0a1afe4 pure rename", date: "2026-08-16T17:13:07+02:00" },
-    { index: 1, sha: "bbb", branch: "feature", message: "work in progress", date: "2026-08-15T09:00:00+02:00" }
+  const entries = await new GitService().stashList(dir);
+  assert.deepEqual(entries, [
+    { index: 0, sha: second, branch: "feature", message: "work in progress", date },
+    { index: 1, sha: first, branch: "main", message: `${root} root`, date }
   ]);
 });
 
@@ -261,15 +268,11 @@ test("stash mutations reject invalid index or missing identity before invoking g
   assert.equal(calls.length, 0);
 });
 
-test("a stash op refuses (409) when the index no longer resolves at all", async () => {
-  const { git } = fakeGit((args) => {
-    if (args[0] === "rev-parse") throw Object.assign(new Error("bad revision"), { code: 128 });
-    return "";
-  });
-  await assert.rejects(git.stashDrop("/repo", 9, "old-sha"), (error: unknown) => {
-    assert.equal((error as GitError).status, 409);
-    return true;
-  });
+test("a stash op refuses (409) when the index no longer resolves at all", async (t) => {
+  const dir = await tempRepo();
+  t.after(() => rm(dir, { recursive: true, force: true }));
+  await assert.rejects(new GitService().stashDrop(dir, 9, "old-sha"), (error: unknown) =>
+    error instanceof GitError && error.status === 409);
 });
 
 test("watcher polls only while subscribed, and only emits on a real change", async (t) => {

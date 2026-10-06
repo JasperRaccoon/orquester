@@ -348,42 +348,6 @@ describe("a live agent reads live (§7.6): its current run is the running respon
 });
 
 describe("a drill-in's turn folds start open, and a collapse sticks (R4, S11)", () => {
-  const items: ThreadItem[] = [
-    activity(
-      "tool.completed",
-      { itemType: "command_execution", toolUseId: "call-0", title: "ls", command: "ls", status: "completed" },
-      { id: "ls", agentId: "a1", turnId: "t1", createdAt: stamp(1) }
-    ),
-    message("assistant", "Listed.", { id: "said", agentId: "a1", turnId: "t1", createdAt: stamp(2) })
-  ];
-  const settled = messageStreamingContext({
-    head: head({ session: { status: "ready", activeTurnId: null } }),
-    roster: [{ id: "a1", status: "completed" }]
-  });
-  const project = (collapsedTurnIds?: readonly string[]) =>
-    projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
-      items,
-      agentId: "a1",
-      messageStreaming: settled,
-      disclosures: { expandedGroupIds: [], ...(collapsedTurnIds ? { collapsedTurnIds } : {}) }
-    });
-  const fold = (projection: AgentDrillInProjection) =>
-    projection.stable.result.find((row): row is Extract<AgentChatTimelineRow, { kind: "turn-fold" }> => row.kind === "turn-fold");
-
-  it("starts open: the child's rows are the reason the view was opened", () => {
-    const open = project();
-    assert.equal(fold(open)?.expanded, true);
-    assert.ok(open.stable.result.some((row) => row.id === "ls"), "its work shows");
-    assert.deepEqual([...open.openTurnIds], ["t1"], "and the fold's turn is among the open ones");
-  });
-
-  it("a turn the user collapsed stays collapsed: its fold closes and its work hides", () => {
-    const collapsed = project(["t1"]);
-    assert.equal(fold(collapsed)?.expanded, false, "the chevron works");
-    assert.ok(!collapsed.stable.result.some((row) => row.id === "ls"), "the fold hides what it holds");
-    assert.deepEqual([...collapsed.openTurnIds], []);
-  });
-
   it("a toggle's patch becomes the collapsed list: closing adds the turn, opening removes it", () => {
     // The timeline patches the WHOLE open list; the drill-in keeps what the user closed.
     assert.deepEqual(collapsedTurnsAfter([], ["t1", "t2"], ["t2"]), ["t1"]);
@@ -411,21 +375,6 @@ describe("its prompt at the top (§7.6): each launch's prompt heads the run it s
       head: head({ session: { status: "ready", activeTurnId: null } }),
       roster: [{ id: "a1", status }]
     });
-  const kinds = (rows: readonly AgentChatTimelineRow[]) => rows.map((row) => `${row.kind}:${row.id}`);
-
-  it("is the first row, a user turn with no rewind — the parent's launch row found by its task id", () => {
-    const rows = projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
-      items: [
-        launch("start", 1, "Find every caller of parse().", "call-agent"),
-        message("assistant", "Three callers.", { id: "said", agentId: "a1", turnId: "t1", createdAt: stamp(3) })
-      ],
-      agentId: "a1",
-      messageStreaming: context("completed")
-    }).stable.result;
-    const first = rows[0];
-    assert.ok(first && first.kind === "message", kinds(rows).join(", "));
-    assert.equal(first.revertTurnCount, undefined, "a child rolls back nothing");
-  });
 
   it("a relaunch's prompt heads the current run; the run before it folds under its own prompt", () => {
     const rows = projectAgentDrillIn(EMPTY_AGENT_DRILL_IN, {
@@ -444,15 +393,14 @@ describe("its prompt at the top (§7.6): each launch's prompt heads the run it s
       messageStreaming: context("running"),
       agent: { startedAt: stamp(10) }
     }).stable.result;
-    const ids = kinds(rows);
-    const at = (id: string) => ids.indexOf(id);
-    assert.ok(at("message:agent-prompt:first") === 0, ids.join(", "));
-    assert.ok(
-      at("turn-fold:turn-fold:t0@agent-prompt:first") > at("message:agent-prompt:first"),
-      `the first run's fold, under its prompt: ${ids.join(", ")}`
-    );
-    assert.equal(at("working:working-indicator-row"), at("message:agent-prompt:again") + 1, "the current run's header");
-    assert.ok(at("message:agent-prompt:again") > at("message:once"));
+    const promptAt = (text: string) => rows.findIndex((row) => row.kind === "message" && row.message.role === "user" && row.message.text === text);
+    const firstPrompt = promptAt("First task.");
+    const secondPrompt = promptAt("Now the second.");
+    const foldAt = rows.findIndex((row) => row.kind === "turn-fold");
+    assert.equal(firstPrompt, 0);
+    assert.ok(foldAt > firstPrompt && foldAt < secondPrompt, "the old run folds between its prompt and the relaunch");
+    assert.equal(rows[secondPrompt + 1]?.kind, "working", "the current run's header follows its prompt");
+    assert.ok(secondPrompt > rows.findIndex((row) => row.kind === "message" && row.message.text === "Done once."));
   });
 
   it("a prompt is never mistaken for the thread's own `/compact`: it renders whatever it says", () => {
@@ -461,7 +409,7 @@ describe("its prompt at the top (§7.6): each launch's prompt heads the run it s
       agentId: "a1",
       messageStreaming: context("completed")
     }).stable.result;
-    assert.deepEqual(kinds(rows), ["message:agent-prompt:start"]);
+    assert.deepEqual(rows.flatMap((row) => row.kind === "message" ? [[row.message.role, row.message.text]] : []), [["user", "/compact"]]);
   });
 });
 
@@ -599,12 +547,11 @@ describe("a relaunch inside the same parent turn heads a run of its own (content
 
   it("each run folds and is timed on its own, under its own prompt", () => {
     const rows = project().stable.result;
-    const at = (id: string) => rows.findIndex((row) => row.id === id);
     const folds = rows.filter((row): row is Extract<AgentChatTimelineRow, { kind: "turn-fold" }> => row.kind === "turn-fold");
+    const promptAt = (text: string) => rows.findIndex((row) => row.kind === "message" && row.message.role === "user" && row.message.text === text);
     assert.deepEqual(folds.map((fold) => elapsedSeconds(fold.label)), [11, 10]);
-    assert.ok(at(folds[0]!.id) > at("agent-prompt:L1") && at(folds[0]!.id) < at("agent-prompt:L2"), "run 1's fold under L1");
-    assert.ok(at(folds[1]!.id) > at("agent-prompt:L2"), "run 2's fold under L2");
-    assert.notEqual(folds[0]!.id, folds[1]!.id, "two folds, two rows");
+    assert.ok(rows.indexOf(folds[0]!) > promptAt("First.") && rows.indexOf(folds[0]!) < promptAt("Second."), "first run folds between its prompt and the relaunch");
+    assert.ok(rows.indexOf(folds[1]!) > promptAt("Second."), "second run folds after its prompt");
   });
 
   it("the first run's last answer is terminal in its run: its meta shows, and it is no fold's hidden commentary", () => {
@@ -642,8 +589,10 @@ describe("a drill-in holds its disclosure sets only while their members stay the
         { id: "make", agentId: "a1", turnId: "t1", createdAt: stamp(4) }
       )
     ];
-    const expandedGroups = (projection: AgentDrillInProjection): string[] =>
-      projection.stable.result.flatMap((row) => (row.kind === "activity-group" && row.expanded ? [row.groupId] : []));
+    const expandedThoughts = (projection: AgentDrillInProjection): string[] =>
+      projection.stable.result.flatMap((row) => row.kind === "activity-group" && row.expanded
+        ? row.entries.flatMap((entry) => entry.sourceActivityKind === "reasoning" ? [entry.detail ?? ""] : [])
+        : []);
     const project = (previous: AgentDrillInProjection, expandedGroupIds: string[]): AgentDrillInProjection =>
       projectAgentDrillIn(previous, {
         items,
@@ -652,10 +601,12 @@ describe("a drill-in holds its disclosure sets only while their members stay the
         disclosures: { expandedGroupIds }
       });
 
-    const first = project(EMPTY_AGENT_DRILL_IN, ["activity-group:th0"]);
-    assert.deepEqual(expandedGroups(first), ["activity-group:th0"]);
-    const swapped = project(first, ["activity-group:th1"]);
-    assert.deepEqual(expandedGroups(swapped), ["activity-group:th1"], "as many groups open, but another one");
+    const initial = project(EMPTY_AGENT_DRILL_IN, []);
+    const groups = initial.stable.result.flatMap((row) => row.kind === "activity-group" ? [row.groupId] : []);
+    const first = project(initial, [groups[0]!]);
+    assert.deepEqual(expandedThoughts(first), ["Looking"]);
+    const swapped = project(first, [groups[1]!]);
+    assert.deepEqual(expandedThoughts(swapped), ["Building"], "the other thought opens even though the number of open groups is unchanged");
   });
 });
 

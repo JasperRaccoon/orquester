@@ -1,0 +1,660 @@
+API/config cleanup decision record (recorded before edits)
+Scope: all packages/api tests except src/agent-chat; every packages/config test. packages/registry has no test/check script beyond TypeScript build/typecheck. README, AGENTS and package scripts read.
+Status: cleanup implemented; decisions were recorded before edits; final focused validation appended below.
+Each named case below inherits the numbered six-bar proof and non-test-caller/seam/risk record for its file. Its concrete failure/oracle is the quoted case behavior exercised with fixed test inputs. Parameterized cases remain one named test.
+No new production behavior or test-only production hooks are needed. Existing support functions remain used by surviving tests.
+
+packages/api/src/prompt-variable-values.test.ts
+Failure modes considered before retention: Detached/no-repository state confused with a branch; rename/untracked paths lost; oversized changed-file payloads; patch truncation omitted.
+Non-test callers: UI saved-prompt insertion and daemon workflow agent prompts.
+1. Independent source: Saved-prompt GitStatusResponse/GitWorkingDiffResponse value contract, including rename paths, patch bytes and untracked paths.
+2. Caller-visible failure: Detached/no-repository state confused with a branch; rename/untracked paths lost; oversized changed-file payloads; patch truncation omitted; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: resolvePromptVariables.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/prompt-variable-values.test.ts
+
+KEEP | {branch}: detached or no repository
+  Detects violation of the concrete caller contract stated by this case: {branch}: detached or no repository. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | {changedFiles}: one line per file, renames with both paths
+  Detects violation of the concrete caller contract stated by this case: {changedFiles}: one line per file, renames with both paths. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | {changedFiles}: not a repo, and capped
+  Detects violation of the concrete caller contract stated by this case: {changedFiles}: not a repo, and capped. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | {diff}: the patch, then the cut, then the untracked files
+  Detects violation of the concrete caller contract stated by this case: {diff}: the patch, then the cut, then the untracked files. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | {diff}: untracked alone, clean, and not a repo
+  Detects violation of the concrete caller contract stated by this case: {diff}: untracked alone, clean, and not a repo. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+
+packages/api/src/prompt-variables.test.ts
+Failure modes considered before retention: Wrong project/date/time/agent values or partial prompts after a failed git read; stale resolution after cancellation.
+Non-test callers: UI lib/saved-prompts/variables.ts; daemon workflows/agent prompt rendering.
+1. Independent source: Saved-prompt variable API; workflows design 3.3 and 5.3 require context expansion at use time and propagation of failed reads/cancellation.
+2. Caller-visible failure: Wrong project/date/time/agent values or partial prompts after a failed git read; stale resolution after cancellation; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: resolvePromptVariables.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/prompt-variables.test.ts
+
+KEEP | renders every variable
+  The literal combined result distinguishes project basename/workspace parent, absolute path, main branch, patch bytes, UTC date/time and supplied agent/model labels. A missing resolver switch arm fails independently of the variable catalogue declaration.
+KEEP | dates and times follow the given zone
+  Detects violation of the concrete caller contract stated by this case: dates and times follow the given zone. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | without a zone, the runtime's local clock (the browser's)
+  Detects violation of the concrete caller contract stated by this case: without a zone, the runtime's local clock (the browser's). The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | names the failed read and the variables that needed it
+  Detects violation of the concrete caller contract stated by this case: names the failed read and the variables that needed it. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | an aborted resolve is cancelled
+  Detects violation of the concrete caller contract stated by this case: an aborted resolve is cancelled. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | no project reads as no repository
+  Detects violation of the concrete caller contract stated by this case: no project reads as no repository. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+
+packages/api/src/saved-prompts.test.ts
+Failure modes considered before retention: Unknown/code braces altered; literal escapes expanded; inserted text recursively expanded; empty value mistaken for absent.
+Non-test callers: UI saved prompt editor/history; daemon workflow prompts.
+1. Independent source: Public saved-prompt variable grammar and save-as-prompt inverse escaping; workflows design 3.3.
+2. Caller-visible failure: Unknown/code braces altered; literal escapes expanded; inserted text recursively expanded; empty value mistaken for absent; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: promptVariablesUsed, renderPromptTemplate, escapePromptVariables.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/saved-prompts.test.ts
+
+KEEP | lists the known variables a body uses, once each, in first-use order
+  Detects violation of the concrete caller contract stated by this case: lists the known variables a body uses, once each, in first-use order. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | renders known variables and leaves everything else as written
+  Detects violation of the concrete caller contract stated by this case: renders known variables and leaves everything else as written. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | renders an escaped known name as its literal text
+  Detects violation of the concrete caller contract stated by this case: renders an escaped known name as its literal text. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | substitutes a value verbatim, even one that looks like a variable
+  Detects violation of the concrete caller contract stated by this case: substitutes a value verbatim, even one that looks like a variable. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | substitutes an empty value
+  Detects violation of the concrete caller contract stated by this case: substitutes an empty value. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | keeps a sent prompt literal through a save and a render
+  Detects violation of the concrete caller contract stated by this case: keeps a sent prompt literal through a save and a render. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+
+packages/api/src/workflows/agent-catalog.test.ts
+Failure modes considered before retention: Unloaded fallback models treated as authoritative; registry aliases or legacy models lost; non-chat providers exposed.
+Non-test callers: daemon workflows/agent/validation-catalog.ts; UI lib/workflows/chain-models.ts.
+1. Independent source: Workflow validation catalog protocol: only ready probes are authoritative; unknown/degraded models cannot block enabling; spec 7.2.
+2. Caller-visible failure: Unloaded fallback models treated as authoritative; registry aliases or legacy models lost; non-chat providers exposed; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: toWorkflowAgentCatalog, workflowAgentCatalogFromSnapshots.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/workflows/agent-catalog.test.ts
+
+KEEP | lists a probed provider's slugs, legacy ones included
+  Detects violation of the concrete caller contract stated by this case: lists a probed provider's slugs, legacy ones included. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | reads models as not known while the provider is unknown, missing, or lists none
+  Detects violation of the concrete caller contract stated by this case: reads models as not known while the provider is unknown, missing, or lists none. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | never counts a list a failed probe left in place: degraded, errored or unrecognised reads as not known
+  Five non-ready provider statuses carrying a real-looking fallback list must produce models:null. Otherwise live model slugs absent from stale bundled fallbacks become blocking unknown_model errors.
+KEEP | joins chat registry entries to their adapter's snapshot and skips non-chat entries
+  Detects violation of the concrete caller contract stated by this case: joins chat registry entries to their adapter's snapshot and skips non-chat entries. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | falls back to the snapshot that lists the entry among its refIds
+  Detects violation of the concrete caller contract stated by this case: falls back to the snapshot that lists the entry among its refIds. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+DELETE | a live slug the fallback list lacks is only a warning, so enabling is not refused
+  Duplicate composition: catalog tests already prove degraded/error snapshots become models:null; validate.test.ts agent chain catalogue case independently proves null models warn and missing ready models error. This test manually pipes those same owners together without testing production wiring.
+
+packages/api/src/workflows/expression-preview.test.ts
+Failure modes considered before retention: Malformed bodies accepted, valid optional fields lost, unbounded requests accepted, route identifiers not encoded.
+Non-test callers: daemon workflows/http route and expression-preview.ts; API client.
+1. Independent source: Public expression-preview REST request contract and encoded workflow route.
+2. Caller-visible failure: Malformed bodies accepted, valid optional fields lost, unbounded requests accepted, route identifiers not encoded; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: parseExpressionPreviewRequest, workflowRoutes.expressionPreview.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/workflows/expression-preview.test.ts
+
+KEEP | reads every field and ignores unknown keys
+  Detects violation of the concrete caller contract stated by this case: reads every field and ignores unknown keys. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | refuses a body without templates, too many, or a non-text one
+  Detects violation of the concrete caller contract stated by this case: refuses a body without templates, too many, or a non-text one. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | refuses a template the renderer would not parse (past MAX_TEMPLATE_LENGTH)
+  Detects violation of the concrete caller contract stated by this case: refuses a template the renderer would not parse (past MAX_TEMPLATE_LENGTH). The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | refuses malformed optional fields
+  Detects violation of the concrete caller contract stated by this case: refuses malformed optional fields. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | has a route under the workflow
+  Literal route /api/workflows/a%20b/expression-preview verifies the public endpoint bytes and percent-encoding of a workflow ID containing a space; no import/export declaration is compared to itself.
+
+packages/api/src/workflows/expressions.test.ts
+Failure modes considered before retention: Wrong lexical grammar/coercion/defaults; dangerous object/secret traversal; escaped text expanded; rename corruption; over-budget or broken-Unicode previews.
+Non-test callers: daemon workflow engine/nodes/expression-preview; shared validator and patcher.
+1. Independent source: Workflow expression grammar/security spec 3.3 and public RenderOptions budget contract.
+2. Caller-visible failure: Wrong lexical grammar/coercion/defaults; dangerous object/secret traversal; escaped text expanded; rename corruption; over-budget or broken-Unicode previews; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: parseTemplate errors; renderTemplate; renderTemplateValue; hasTemplate; rewriteNodeReferences.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/workflows/expressions.test.ts
+
+KEEP | parses dot, index and quoted keys, and filters with arguments
+  Detects violation of the concrete caller contract stated by this case: parses dot, index and quoted keys, and filters with arguments. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | accepts literal kinds in filter arguments
+  Detects violation of the concrete caller contract stated by this case: accepts literal kinds in filter arguments. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | reports syntax errors and keeps the broken text literal
+  Detects violation of the concrete caller contract stated by this case: reports syntax errors and keeps the broken text literal. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | an unclosed {{ is an error and the rest is text
+  Detects violation of the concrete caller contract stated by this case: an unclosed {{ is an error and the rest is text. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | finds the closing braces past quoted }}
+  Detects violation of the concrete caller contract stated by this case: finds the closing braces past quoted }}. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | \{{ is a literal
+  Detects violation of the concrete caller contract stated by this case: \{{ is a literal. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | caps path depth
+  Detects violation of the concrete caller contract stated by this case: caps path depth. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | does not parse a template over the length cap
+  Detects violation of the concrete caller contract stated by this case: does not parse a template over the length cap. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | handles many expressions and hostile input without blowing up
+  Detects violation of the concrete caller contract stated by this case: handles many expressions and hostile input without blowing up. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | inserts strings as they are and anything else as pretty JSON
+  Detects violation of the concrete caller contract stated by this case: inserts strings as they are and anything else as pretty JSON. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | reads node status and error
+  Detects violation of the concrete caller contract stated by this case: reads node status and error. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a missing path renders empty and warns with the expression
+  Detects violation of the concrete caller contract stated by this case: a missing path renders empty and warns with the expression. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | default() fills a missing, null or empty value and silences the warning
+  Detects violation of the concrete caller contract stated by this case: default() fills a missing, null or empty value and silences the warning. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | filters
+  Hand-specified examples require first/last of [1,2,3] to be 1/3, length 3, upper(x)=X, lines(2) to preserve two input lines, lines(0) empty, chained default/trim pad, and object length by own keys. JSON.stringify is the independent JSON standard encoder, never the expression implementation. Wrong filter order, coercion or selection changes rendered workflow inputs.
+KEEP | filter misuse warns and renders empty
+  Detects violation of the concrete caller contract stated by this case: filter misuse warns and renders empty. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a cyclic value warns rather than throwing
+  Detects violation of the concrete caller contract stated by this case: a cyclic value warns rather than throwing. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | broken expressions stay as written and warn
+  Detects violation of the concrete caller contract stated by this case: broken expressions stay as written and warn. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | escapeValue applies to inserted values only
+  Detects violation of the concrete caller contract stated by this case: escapeValue applies to inserted values only. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | never reads inherited properties
+  Detects violation of the concrete caller contract stated by this case: never reads inherited properties. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | does not traverse non-plain objects
+  Detects violation of the concrete caller contract stated by this case: does not traverse non-plain objects. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | own JSON keys that look dangerous are refused at parse time
+  Detects violation of the concrete caller contract stated by this case: own JSON keys that look dangerous are refused at parse time. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | secrets must name exactly one secret
+  Detects violation of the concrete caller contract stated by this case: secrets must name exactly one secret. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a context missing a root reads as missing
+  Detects violation of the concrete caller contract stated by this case: a context missing a root reads as missing. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a single expression yields the raw value
+  Detects violation of the concrete caller contract stated by this case: a single expression yields the raw value. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | anything else renders as text
+  Detects violation of the concrete caller contract stated by this case: anything else renders as text. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | hasTemplate: workflow expressions only
+  Detects violation of the concrete caller contract stated by this case: hasTemplate: workflow expressions only. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | rewrites dot and bracket references, preserving the rest
+  Detects violation of the concrete caller contract stated by this case: rewrites dot and bracket references, preserving the rest. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | leaves escapes, broken expressions and unrelated text alone
+  Detects violation of the concrete caller contract stated by this case: leaves escapes, broken expressions and unrelated text alone. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+REWRITE | stops appending past the budget, cuts there and evaluates nothing after
+  Replace expected output obtained by calling renderTemplate itself with a short literal oracle: input abcdef at budget 4 yields abcd, truncates, and never warns for the trailing missing reference; keep surrogate-pair and under-budget contracts.
+KEEP | applies to renderTemplateValue's text, never to a lone expression's value
+  Detects violation of the concrete caller contract stated by this case: applies to renderTemplateValue's text, never to a lone expression's value. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+
+packages/api/src/workflows/graph.test.ts
+Failure modes considered before retention: Premature joins, permanently stalled live branches, execution of dead/cancelled routes, repeated execution, note nodes becoming executable.
+Non-test callers: daemon workflows/engine.ts; shared validator; workflow editor.
+1. Independent source: Workflow execution semantics spec 3.4: incoming edges settle, at least one live, dead-path elimination, all/first joins.
+2. Caller-visible failure: Premature joins, permanently stalled live branches, execution of dead/cancelled routes, repeated execution, note nodes becoming executable; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: computeReadiness, upstreamOf, downstreamOf, reachableFromTriggers.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/workflows/graph.test.ts
+
+KEEP | upstream / downstream / reachable
+  The fixed fork/join graph requires upstream(c)={a,b,m,t}, downstream(t)={a,b,c,m}, no ancestors for t, and reachable excludes note n/disconnected x. Wrong direction or traversing notes changes validation and partial-run selection.
+KEEP | a straight line: the next block is ready once the previous finished
+  Detects violation of the concrete caller contract stated by this case: a straight line: the next block is ready once the previous finished. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | triggers that did not fire are skipped: their paths die
+  Detects violation of the concrete caller contract stated by this case: triggers that did not fire are skipped: their paths die. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | IF: the untaken branch is skipped, transitively
+  Detects violation of the concrete caller contract stated by this case: IF: the untaken branch is skipped, transitively. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | diamond: the join waits for both branches
+  Detects violation of the concrete caller contract stated by this case: diamond: the join waits for both branches. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | diamond after an IF: the join runs on the one live branch
+  Detects violation of the concrete caller contract stated by this case: diamond after an IF: the join runs on the one live branch. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | error routes: a failure takes the error edge; success kills it
+  Detects violation of the concrete caller contract stated by this case: error routes: a failure takes the error edge; success kills it. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | one stop fed by several error edges runs on whichever fired
+  Detects violation of the concrete caller contract stated by this case: one stop fed by several error edges runs on whichever fired. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | merge in first mode starts on the first live input
+  Detects violation of the concrete caller contract stated by this case: merge in first mode starts on the first live input. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | switch: the taken case lives; a switch that matched nothing kills every output
+  Detects violation of the concrete caller contract stated by this case: switch: the taken case lives; a switch that matched nothing kills every output. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a cancelled source kills its edges; an unconnected block is skipped
+  Detects violation of the concrete caller contract stated by this case: a cancelled source kills its edges; an unconnected block is skipped. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | finished, running and waiting blocks are neither ready nor skipped; triggers never are
+  Detects violation of the concrete caller contract stated by this case: finished, running and waiting blocks are neither ready nor skipped; triggers never are. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+DELETE | a partial run: a failed block routed on error keeps the success path dead
+  Duplicate failed-source routing matrix. Remaining error routes case proves failed blocks activate error and kill untaken outputs; IF case proves branch routing. No partial-run API is exercised here.
+
+packages/api/src/workflows/guide.test.ts
+Failure modes considered before retention: Published recipes cannot save/run; agent JSON reply extraction fails or accepts no JSON.
+Non-test callers: UI workflow guide insertion; daemon workflow sandbox executes embedded source.
+1. Independent source: User-insertable workflow recipes must validate and their JSON extraction code must parse actual replies; workflows design 7.2.
+2. Caller-visible failure: Published recipes cannot save/run; agent JSON reply extraction fails or accepts no JSON; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: createWorkflowFromRequest plus validateWorkflow for recipes; recipe default code export.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/workflows/guide.test.ts
+
+KEEP | every recipe builds and validates with no error and no warning against a live catalogue
+  Detects violation of the concrete caller contract stated by this case: every recipe builds and validates with no error and no warning against a live catalogue. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+REWRITE | the JSON-parsing recipe turns an agent's chatty reply into an object, and throws on a reply without JSON
+  Remove exact diagnostic prose matcher; retain independently specified parsed object and rejection when the reply contains no JSON.
+
+packages/api/src/workflows/outline.test.ts
+Failure modes considered before retention: Missing/duplicated join steps, wrong join references, actionable notes, disconnected steps presented as reachable, cyclic drafts hanging.
+Non-test callers: UI lib/workflows/outline-display.ts.
+1. Independent source: Workflow spec 7.4 Steps view represents executable dependency order and actionable block identity.
+2. Caller-visible failure: Missing/duplicated join steps, wrong join references, actionable notes, disconnected steps presented as reachable, cyclic drafts hanging; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: buildStepOutline.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/workflows/outline.test.ts
+
+DELETE | orders branches by handle and position, preserving edge order for ties
+  Locks canvas coordinate tie-breaking and edge insertion order, not the independent topological Steps contract in workflows spec 7.4. Remaining diamond, unreachable and cycle cases prove step identity, dependency order and completeness without presentation geometry.
+KEEP | a diamond exposes each step once and links both branches to the join
+  Detects violation of the concrete caller contract stated by this case: a diamond exposes each step once and links both branches to the join. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | disconnected blocks are marked unreachable and notes are not actionable steps
+  Detects violation of the concrete caller contract stated by this case: disconnected blocks are marked unreachable and notes are not actionable steps. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a cycle does not loop forever
+  Detects violation of the concrete caller contract stated by this case: a cycle does not loop forever. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+
+packages/api/src/workflows/patch.test.ts
+Failure modes considered before retention: Partial failed patch writes; stale renamed references; dangling edges/pins; unwanted ID/type changes; lost supplied data/defaults; invalid errors attributed to wrong op.
+Non-test callers: daemon workflows/service.ts and MCP tools/workflows.ts; UI editor-store.ts.
+1. Independent source: Public workflow patch operations spec 8.2; batch atomicity, stable identity, reference rewriting and creation defaults.
+2. Caller-visible failure: Partial failed patch writes; stale renamed references; dangling edges/pins; unwanted ID/type changes; lost supplied data/defaults; invalid errors attributed to wrong op; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: applyWorkflowPatch, createWorkflowFromRequest.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/workflows/patch.test.ts
+
+KEEP | never mutates its input and stamps updatedAt
+  set_enabled must return true with the supplied clock timestamp while leaving the original workflow and daemon-owned revision untouched; caller undo/history and atomic saving depend on nonmutation.
+KEEP | add_node mints unique ids and names, fills defaults and merges config
+  Detects violation of the concrete caller contract stated by this case: add_node mints unique ids and names, fills defaults and merges config. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | add_node keeps caller identity and position and rejects invalid node data
+  Detects violation of the concrete caller contract stated by this case: add_node keeps caller identity and position and rejects invalid node data. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | update_node merges config one level deep; null clears
+  Detects violation of the concrete caller contract stated by this case: update_node merges config one level deep; null clears. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | update_node refuses id/type changes, unknown fields and invalid configs
+  Detects violation of the concrete caller contract stated by this case: update_node refuses id/type changes, unknown fields and invalid configs. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | update_node with a name renames and rewrites references, including its own
+  Detects violation of the concrete caller contract stated by this case: update_node with a name renames and rewrites references, including its own. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | rename_node rewrites every template reference and session.fromNode
+  Detects violation of the concrete caller contract stated by this case: rename_node rewrites every template reference and session.fromNode. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | remove_node drops its edges and pin
+  Detects violation of the concrete caller contract stated by this case: remove_node drops its edges and pin. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | connect checks handles, inputs, self-loops and duplicates
+  Detects violation of the concrete caller contract stated by this case: connect checks handles, inputs, self-loops and duplicates. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | disconnect by id or by endpoints
+  Both public addressing forms must remove the intended edge while missing or wrong-handle references fail. Testing only edge creation cannot catch disconnect by name/ID disagreement.
+KEEP | settings, project, enabled, name, pins
+  Patch must deep-merge notification settings, switch to a temp project, trim supplied name, preserve one pin while removing another, and clear optional description/pins on null. Invalid concurrency/project/name/enabled data must identify the failing operation; create defaults do not cover updates/clears.
+KEEP | is atomic: the failing op is named and nothing applies
+  Detects violation of the concrete caller contract stated by this case: is atomic: the failing op is named and nothing applies. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | mints ids and names, applies defaults and resolves edge refs by name
+  Detects violation of the concrete caller contract stated by this case: mints ids and names, applies defaults and resolves edge refs by name. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | names the failing node or edge
+  Detects violation of the concrete caller contract stated by this case: names the failing node or edge. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+
+packages/api/src/workflows/rules.test.ts
+Failure modes considered before retention: Wrong branch selection, mismatched coercion/presence semantics, lost warnings, catastrophic regex admitted or unbounded input searched.
+Non-test callers: daemon workflows/nodes/flow.ts (real isolated regex matcher is injected there).
+1. Independent source: Workflow rule and switch language spec 4, regex safety contract and documented coercion semantics.
+2. Caller-visible failure: Wrong branch selection, mismatched coercion/presence semantics, lost warnings, catastrophic regex admitted or unbounded input searched; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: evaluateRuleAsync, evaluateRulesAsync, evaluateSwitchAsync.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/workflows/rules.test.ts
+
+KEEP | equals / notEquals compare loosely across representations
+  Detects violation of the concrete caller contract stated by this case: equals / notEquals compare loosely across representations. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | contains searches lists by element and text by substring
+  Detects violation of the concrete caller contract stated by this case: contains searches lists by element and text by substring. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | numeric comparisons parse numbers and warn on non-numbers
+  Detects violation of the concrete caller contract stated by this case: numeric comparisons parse numbers and warn on non-numbers. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | presence operators treat a missing value as an answer, without a warning
+  Detects violation of the concrete caller contract stated by this case: presence operators treat a missing value as an answer, without a warning. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | isTrue / isFalse
+  TRUE and false input strings must select their corresponding boolean branches; abc must select neither. Numeric/comparison cases do not cover boolean conversion.
+KEEP | matches with plain and /literal/flags patterns
+  Detects violation of the concrete caller contract stated by this case: matches with plain and /literal/flags patterns. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | matches refuses catastrophic patterns
+  Detects violation of the concrete caller contract stated by this case: matches refuses catastrophic patterns. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | matches only searches the first 100 KB
+  Detects violation of the concrete caller contract stated by this case: matches only searches the first 100 KB. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | combines with all / any
+  Detects violation of the concrete caller contract stated by this case: combines with all / any. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | collects every rule's warnings
+  Detects violation of the concrete caller contract stated by this case: collects every rule's warnings. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | takes the first matching case
+  Detects violation of the concrete caller contract stated by this case: takes the first matching case. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | falls back to default, or to nothing
+  Detects violation of the concrete caller contract stated by this case: falls back to default, or to nothing. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+
+packages/api/src/workflows/schedule.test.ts
+Failure modes considered before retention: Wrong UTC fire instant, repeated or missed DST run, impossible cron accepted, false every-N interval promise.
+Non-test callers: daemon workflow scheduler and API schedule-preview; shared editor/validator.
+1. Independent source: Workflow schedule spec 4/6.1; calendar/timezone/DST semantics and every-N interval promise.
+2. Caller-visible failure: Wrong UTC fire instant, repeated or missed DST run, impossible cron accepted, false every-N interval promise; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: presetToCron, validateCron, nextRuns, nextScheduleRun, scheduleIntervalProblem.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/workflows/schedule.test.ts
+
+KEEP | derives 5-field crons
+  Detects violation of the concrete caller contract stated by this case: derives 5-field crons. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | accepts 5 fields, nicknames and 6 fields with a fixed second
+  Detects violation of the concrete caller contract stated by this case: accepts 5 fields, nicknames and 6 fields with a fixed second. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | refuses the rest with a reason
+  Detects violation of the concrete caller contract stated by this case: refuses the rest with a reason. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | every 15 minutes, from a given instant, in UTC ISO
+  Detects violation of the concrete caller contract stated by this case: every 15 minutes, from a given instant, in UTC ISO. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a daily time follows the zone's wall clock across the spring DST change
+  Detects violation of the concrete caller contract stated by this case: a daily time follows the zone's wall clock across the spring DST change. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a time that does not exist on the spring-forward day still fires once that day
+  Detects violation of the concrete caller contract stated by this case: a time that does not exist on the spring-forward day still fires once that day. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a time repeated on the fall-back day fires once
+  Detects violation of the concrete caller contract stated by this case: a time repeated on the fall-back day fires once. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | other zones
+  Independent New York 09:00 UTC instants across fall-back and Kolkata Monday 09:00 half-hour offset catch assuming European DST or whole-hour timezone offsets.
+KEEP | an invalid cron or zone yields nothing
+  Detects violation of the concrete caller contract stated by this case: an invalid cron or zone yields nothing. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | America/New_York fall-back: a sub-daily cron fires in the repeated hour too
+  Detects violation of the concrete caller contract stated by this case: America/New_York fall-back: a sub-daily cron fires in the repeated hour too. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+DELETE | a daily cron in the repeated hour still fires once
+  Duplicate daily fall-back once-only contract. Remaining nextRuns case a time repeated on the fall-back day fires once covers the same rule; other zones and sub-daily DST cases retain New York coverage.
+KEEP | Europe/Berlin fall-back: the repeated 02:00–03:00 fires twice for an hourly cron
+  Detects violation of the concrete caller contract stated by this case: Europe/Berlin fall-back: the repeated 02:00–03:00 fires twice for an hourly cron. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | spring-forward never repeats or reorders instants
+  Detects violation of the concrete caller contract stated by this case: spring-forward never repeats or reorders instants. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | accepts exactly the divisors of 60 (minutes) and 24 (hours)
+  Detects violation of the concrete caller contract stated by this case: accepts exactly the divisors of 60 (minutes) and 24 (hours). The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+
+packages/api/src/workflows/templates.test.ts
+Failure modes considered before retention: Template cannot save/run; wrong project/timezone or premature activation; wrong Jira auth/endpoint, dropped ADF text or incorrect ticket transitions.
+Non-test callers: UI workflow creation; daemon workflow engine sandbox.
+1. Independent source: Workflow templates are user-insertable disabled definitions with selected project/timezone; Jira template HTTP/API and result contract.
+2. Caller-visible failure: Template cannot save/run; wrong project/timezone or premature activation; wrong Jira auth/endpoint, dropped ADF text or incorrect ticket transitions; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: buildTemplate + createWorkflowFromRequest/validateWorkflow; default embedded code export.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/workflows/templates.test.ts
+
+REWRITE | every template builds, is disabled, and validates with zero errors
+  Retain disabled-by-default, selected timezone and project placement. Delete repeated validateWorkflow assertion: the following live/pending catalogue test already validates every same template against stronger contexts.
+KEEP | every template validates with zero errors against catalogues shaped like a live host's and a pending one's
+  Actual built-in definitions must save against a ready Claude/Codex catalogue and a pending one with fallback slugs; literal independent provider models expose broken defaults such as bare opus vs opus[1m]. Validator unit tests cannot exercise the shipped template definitions.
+KEEP | a fresh agent block's default chain validates against a live Claude catalogue
+  Materializing an agent node with no caller chain must choose a model accepted by an independently supplied ready provider. Protects creation defaults beyond explicitly configured template chains.
+KEEP | FetchTickets searches, flattens descriptions, and stops when there is nothing
+  Execute shipped template source with only HTTP substituted: fixed ADF input must become the expected ticket data, endpoint/auth must follow Jira protocol, and empty issues must return the injected stop result. Stub only provides wire responses, never ticket transformation.
+KEEP | MarkDone transitions what the agent fixed
+  Execute shipped code against independent transition responses: only fixed PROJ-1 can POST transition 31, PROJ-2 reports failure, PROJ-3 stays skipped, no-JSON input rejects. Literal outgoing URL/body and result IDs catch wrong external side effects.
+
+packages/api/src/workflows/triggers-text.test.ts
+Failure modes considered before retention: Wrong owner/repository shown for supported URL formats.
+Non-test callers: daemon workflows/summary.ts; UI trigger text/settings.
+1. Independent source: Clone URL parsing as public repository identity: HTTPS, SSH, SCP and Bitbucket Server URL forms.
+2. Caller-visible failure: Wrong owner/repository shown for supported URL formats; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: repoDisplayName.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/workflows/triggers-text.test.ts
+
+KEEP | reads owner/repo from any clone URL
+  Fixed HTTPS, trailing slash, SCP, SSH-with-port and Bitbucket Server /scm examples must recover the correct owner/repo identifiers. These are repository data extracted from protocols, not arbitrary summary copy.
+
+packages/api/src/workflows/validate.test.ts
+Failure modes considered before retention: Invalid workflows accepted or valid workflows blocked; wrong field/severity, unsafe secret/script expressions, lost actionable diagnostics.
+Non-test callers: daemon workflow service/store/MCP; UI editor.
+1. Independent source: Workflow public validation/diagnostic contract, spec 3/4/5.9/7.2/8; secret and shell safety rules.
+2. Caller-visible failure: Invalid workflows accepted or valid workflows blocked; wrong field/severity, unsafe secret/script expressions, lost actionable diagnostics; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: validateWorkflow, workflowSummaryErrors, hasWorkflowErrors.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/api/src/workflows/validate.test.ts
+
+KEEP | has no problems and parses
+  A valid manual→agent→HTTP graph with saved-prompt and workflow expressions must validate to wf-1 with no error. Prevents a validator that trivially rejects everything; negative tests cannot prove acceptance.
+KEEP | rejects a non-object and non-JSON
+  Detects violation of the concrete caller contract stated by this case: rejects a non-object and non-JSON. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | maps record issues to fields, and still checks the blocks
+  Detects violation of the concrete caller contract stated by this case: maps record issues to fields, and still checks the blocks. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a broken block reports its own problem with its id; the others are still checked
+  Detects violation of the concrete caller contract stated by this case: a broken block reports its own problem with its id; the others are still checked. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | unknown block types and bad edges are schema problems
+  Detects violation of the concrete caller contract stated by this case: unknown block types and bad edges are schema problems. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | nodes and edges must be lists
+  Detects violation of the concrete caller contract stated by this case: nodes and edges must be lists. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | counts blocks, connections, name length and size
+  Independent boundary fixtures require 201 nodes, 401 edges, 121-character name, over-2-MiB ASCII and multibyte emoji definitions to yield the exact corresponding limit codes. These are resource/API constraints, not rendered row counts.
+KEEP | unique ids and names, valid names
+  Duplicate node IDs/names and syntactically invalid names must produce their distinct public diagnostic codes and affected IDs; otherwise expression references become ambiguous or unusable.
+KEEP | each integrity rule
+  A fixed invalid edge matrix expects unknown source/target, invalid handles, no-input targets, self-loop, duplicate edge and duplicate edge ID diagnostics on their exact edge IDs. These callers use diagnostic identity to highlight the broken connection; the expected map is independent of graph implementation.
+KEEP | switch handles follow its cases
+  Detects violation of the concrete caller contract stated by this case: switch handles follow its cases. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | cycles
+  Detects violation of the concrete caller contract stated by this case: cycles. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | syntax errors in every template field
+  Detects violation of the concrete caller contract stated by this case: syntax errors in every template field. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | code source is JavaScript, not a template
+  Detects violation of the concrete caller contract stated by this case: code source is JavaScript, not a template. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | unknown blocks are errors; blocks that do not run first are warnings
+  Detects violation of the concrete caller contract stated by this case: unknown blocks are errors; blocks that do not run first are warnings. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | {{ }} in a shell script is refused with the fix
+  Detects violation of the concrete caller contract stated by this case: {{ }} in a shell script is refused with the fix. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | secrets: unknown names, whole-store reads, and prompts
+  Detects violation of the concrete caller contract stated by this case: secrets: unknown names, whole-store reads, and prompts. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a secret in a chat title is a note, not a transcript warning
+  Detects violation of the concrete caller contract stated by this case: a secret in a chat title is a note, not a transcript warning. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | untrusted git text in a prompt warns
+  Detects violation of the concrete caller contract stated by this case: untrusted git text in a prompt warns. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | agent: empty prompt, saved prompt, chain length, max minutes
+  Detects violation of the concrete caller contract stated by this case: agent: empty prompt, saved prompt, chain length, max minutes. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | agent: the chain is checked against the host catalogue when one is given
+  Detects violation of the concrete caller contract stated by this case: agent: the chain is checked against the host catalogue when one is given. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | agent: model slugs match exactly — a catalogue shaped like a live Claude one has no bare `opus`
+  Detects violation of the concrete caller contract stated by this case: agent: model slugs match exactly — a catalogue shaped like a live Claude one has no bare `opus`. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | agent: continue must name an upstream agent
+  Detects violation of the concrete caller contract stated by this case: agent: continue must name an upstream agent. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | code: size, default export, memory, timeout
+  Over-512-KiB code, missing default export, too-small memory and excessive timeout must each emit its own validation code. The supplied JavaScript and resource values are fixed, avoiding a declaration-driven test.
+KEEP | http: url and timeout
+  Empty URL, ftp URL and excessive HTTP timeout require distinct http_url_missing/http_url_invalid/timeout_too_long codes, while a templated URL remains valid. Invalid inputs cannot pass merely due to another error.
+KEEP | wait, block timeouts
+  Over-seven-day wait, invalid IANA zone and over-day shell timeout must produce exactly the three expected error codes. Catching one generic schema rejection would not satisfy this oracle.
+KEEP | schedule: cron and zone, preset drift
+  Detects violation of the concrete caller contract stated by this case: schedule: cron and zone, preset drift. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | schedule: an 'every N' preset must divide the hour/day — an error on a save, a warning on a stored definition
+  Detects violation of the concrete caller contract stated by this case: schedule: an 'every N' preset must divide the hour/day — an error on a save, a warning on a stored definition. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | git: releases are GitHub only
+  Detects violation of the concrete caller contract stated by this case: git: releases are GitHub only. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | sub-workflow: unset, self, unknown
+  Detects violation of the concrete caller contract stated by this case: sub-workflow: unset, self, unknown. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | no trigger is information only
+  Detects violation of the concrete caller contract stated by this case: no trigger is information only. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | blocks no trigger reaches never run
+  Detects violation of the concrete caller contract stated by this case: blocks no trigger reaches never run. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | pinned data
+  A pin naming a missing node and a pin above 1 MiB must produce pinned_unknown_node and pinned_too_large respectively; protects partial-run data from invalid references/unbounded storage.
+KEEP | the result carries schema defaults
+  Detects violation of the concrete caller contract stated by this case: the result carries schema defaults. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | is a zero count with no list when there are no errors
+  No errors and warning/info-only input both produce errorCount:0 with no errors payload, which keeps valid workflow enablement from being blocked by informational diagnostics.
+KEEP | lists the errors only, field-wise, and counts what it leaves out
+  Warning/info entries must not become actionable errors; error count remains 8 when only first five error codes are listed and omitted count is 3. Extra source properties cannot leak into the public summary.
+
+packages/config/src/agent-accounts.test.ts
+Failure modes considered before retention: Legacy account metadata/defaults lost; unsupported persisted account provider accepted.
+Non-test callers: daemon agent-accounts.ts.
+1. Independent source: Managed account persisted config contract; README multiple managed Claude/Codex/Grok accounts.
+2. Caller-visible failure: Legacy account metadata/defaults lost; unsupported persisted account provider accepted; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: parseAgentAccounts.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/config/src/agent-accounts.test.ts
+
+KEEP | parseAgentAccounts fills defaults and coerces missing fields
+  Legacy account a1 without optional metadata must preserve the account with null email/plan, false reauth and null per-provider defaults; otherwise older account indexes change login/default selection on upgrade.
+KEEP | parseAgentAccounts rejects an unknown agent
+  A record valid in every required field except provider gemini must reject; this prevents unsupported managed-account homes while the preceding valid Claude record proves the fixture shape itself is accepted.
+
+packages/config/src/desktops-config.test.ts
+Failure modes considered before retention: Stored apps/desktops/recent entries lost; unsafe outer version rewritten; invalid size/defaults; user project spelling lost.
+Non-test callers: daemon desktops/store.ts/manager.ts/index.ts.
+1. Independent source: Desktop design spec 9 persisted schema and AGENTS tolerant JSON preservation rule.
+2. Caller-visible failure: Stored apps/desktops/recent entries lost; unsafe outer version rewritten; invalid size/defaults; user project spelling lost; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: parseDesktopsFile, serializeDesktopsFile and appdir paths.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/config/src/desktops-config.test.ts
+
+KEEP | desktop paths live under the daemon dir
+  Detects violation of the concrete caller contract stated by this case: desktop paths live under the daemon dir. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+REWRITE | defaults are applied to desktop and app records
+  Replace production-derived render-thread and empty-file expectations with literal storage contract defaults from desktop spec 9; remove imports used only to derive expected results.
+KEEP | unknown record fields and top-level keys survive a parse/serialise round trip
+  Detects violation of the concrete caller contract stated by this case: unknown record fields and top-level keys survive a parse/serialise round trip. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a bad record is kept verbatim in rejected while the good ones load
+  Mixed desktop records must retain d-1/d-2, preserve malformed and duplicate entries exactly, and serialize them back. Detects data destruction that a mere successful-parse probe cannot.
+KEEP | the outer shape still throws (quarantine, never overwrite)
+  Detects violation of the concrete caller contract stated by this case: the outer shape still throws (quarantine, never overwrite). The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | size is clamped to the display bounds
+  These numbers are persisted Xvnc input bounds specified in desktop design section 9, not UI geometry: 10x10 clamps to 320x240, 100000x100000 to 7680x4320, and fractional dimensions round to valid integer display sizes.
+REWRITE | recent launches are capped per project; unreadable entries are set aside, not used
+  Use independently specified 20-entry limit from desktop spec 9, with 25 input records, rather than importing the implementation limit into both setup and expectation.
+KEEP | unreadable recent entries are written back verbatim
+  Detects violation of the concrete caller contract stated by this case: unreadable recent entries are written back verbatim. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | one unreadable app entry is kept verbatim and does not wipe the others
+  Detects violation of the concrete caller contract stated by this case: one unreadable app entry is kept verbatim and does not wipe the others. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | records keep the client's projectPath spelling beside the realpath
+  Detects violation of the concrete caller contract stated by this case: records keep the client's projectPath spelling beside the realpath. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+
+packages/config/src/index.test.ts
+Failure modes considered before retention: Path escape accepted; account pin/workflow owner lost; old thread inaccessible; restart/handover continuation marks lost or malformed marker destroys whole head.
+Non-test callers: daemon workspace/file/MCP routes, sessions.ts, agent-host thread-store/recovery.
+1. Independent source: AGENTS filesystem containment and tolerant persistence; goals design 5.5/5.7; restart continuation stamp contract; legacy proxy-home migration.
+2. Caller-visible failure: Path escape accepted; account pin/workflow owner lost; old thread inaccessible; restart/handover continuation marks lost or malformed marker destroys whole head; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: isValidName; assertInsideFsRoot; parseSessionsConfig; parseAgentThreadHead.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/config/src/index.test.ts
+
+KEEP | isValidName rejects traversal and empties
+  Detects violation of the concrete caller contract stated by this case: isValidName rejects traversal and empties. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | sessionRecordSchema round-trips accountId so reattach keeps the account pin
+  Detects violation of the concrete caller contract stated by this case: sessionRecordSchema round-trips accountId so reattach keeps the account pin. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | sessionRecordSchema keeps a workflow owner and drops a malformed one, never the record
+  Detects violation of the concrete caller contract stated by this case: sessionRecordSchema keeps a workflow owner and drops a malformed one, never the record. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | assertInsideFsRoot allows in-root paths and rejects escapes
+  Detects violation of the concrete caller contract stated by this case: assertInsideFsRoot allows in-root paths and rejects escapes. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | legacy proxy-home tabs and thread heads remain readable after launcher retirement
+  Detects violation of the concrete caller contract stated by this case: legacy proxy-home tabs and thread heads remain readable after launcher retirement. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+DELETE | a head carrying the goal-resume marker round-trips it
+  Duplicate success-path persistence. Remaining stronger case: a stamped continuation marker round-trips beside both goal marks, through JSON; it proves both goal booleans and the continuation record survive together. Absent and malformed marker cases remain.
+KEEP | a head written before goals — no marker — still parses, and says no
+  Detects violation of the concrete caller contract stated by this case: a head written before goals — no marker — still parses, and says no. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a malformed goal-resume marker is dropped, never the whole head
+  Detects violation of the concrete caller contract stated by this case: a malformed goal-resume marker is dropped, never the whole head. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+DELETE | a head carrying the goal-hold marker round-trips it, beside the other two
+  Duplicate success-path persistence. Remaining stronger case: a stamped continuation marker round-trips beside both goal marks, through JSON. Absent and malformed marker cases remain.
+KEEP | a head without the goal-hold marker says no, and writes none back
+  Detects violation of the concrete caller contract stated by this case: a head without the goal-hold marker says no, and writes none back. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a malformed goal-hold marker is dropped, never the whole head
+  Detects violation of the concrete caller contract stated by this case: a malformed goal-hold marker is dropped, never the whole head. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a stamped continuation marker round-trips beside both goal marks — through JSON, as meta.json holds it
+  Detects violation of the concrete caller contract stated by this case: a stamped continuation marker round-trips beside both goal marks — through JSON, as meta.json holds it. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a malformed continuation stamp reads as unstamped — an older host's marker — never an unreadable head
+  Detects violation of the concrete caller contract stated by this case: a malformed continuation stamp reads as unstamped — an older host's marker — never an unreadable head. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+
+packages/config/src/saved-prompts-config.test.ts
+Failure modes considered before retention: Stored prompts disappear after downgrade, malformed entry wipes siblings, duplicate ID replaces first record, prototype-key pollution, unknown outer version overwritten.
+Non-test callers: daemon saved-prompts.ts/index.ts.
+1. Independent source: AGENTS tolerant JSON rule; saved-prompts persisted config contract and daemon-owned saved-prompts.json path.
+2. Caller-visible failure: Stored prompts disappear after downgrade, malformed entry wipes siblings, duplicate ID replaces first record, prototype-key pollution, unknown outer version overwritten; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: parseSavedPromptsConfig, savedPromptsPath.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/config/src/saved-prompts-config.test.ts
+
+KEEP | savedPromptsPath lives beside the other daemon-owned indexes
+  Detects violation of the concrete caller contract stated by this case: savedPromptsPath lives beside the other daemon-owned indexes. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a well-formed library round-trips unchanged
+  Explicit saved-prompt records include pinned/use-count/timestamps, project scope and global null scope; parse must retain all supplied stored data. This tests persistence, not markup or return-shape inventory.
+KEEP | bad entries are set aside one by one, verbatim; the rest of the library loads
+  Detects violation of the concrete caller contract stated by this case: bad entries are set aside one by one, verbatim; the rest of the library loads. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | a repeated id keeps its first record; the others are set aside, not dropped
+  Detects violation of the concrete caller contract stated by this case: a repeated id keeps its first record; the others are set aside, not dropped. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | unknown top-level keys are kept, exactly as found
+  Detects violation of the concrete caller contract stated by this case: unknown top-level keys are kept, exactly as found. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | optional fields default, limits are NOT re-applied, and unknown fields pass through
+  A minimal stored record gets the fixed legacy defaults; a 1000-character title, 20 tags and future color field remain readable. Write-time limit tests would miss downgrade data loss caused by applying limits while reading.
+KEEP | the outer shape still throws — an unknown version included — so the file is not rewritten
+  Detects violation of the concrete caller contract stated by this case: the outer shape still throws — an unknown version included — so the file is not rewritten. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+
+packages/config/src/usage-prefs-migrate.test.ts
+Failure modes considered before retention: User usage preference forgotten on upgrade, disabled agents polled/shown, invalid or supported chip preference mishandled.
+Non-test callers: daemon usage.ts; UI UsageOverview/UsageWidget.
+1. Independent source: Legacy app.json migration contract and master/per-agent usage preferences.
+2. Caller-visible failure: User usage preference forgotten on upgrade, disabled agents polled/shown, invalid or supported chip preference mishandled; each named case isolates the operation/input family stated in its title.
+3. Independent oracle: hand-specified input/output data, fixed error codes/fields, persisted bytes/keys, explicit calendar instants or mathematical divisors. No expected value comes from the owner after the listed rewrites.
+4. Stable seam: usagePrefsSchema, usageAgentEnabled, parseAppConfig, createDefaultAppConfig.
+5. Refactor tolerance: return values, errors, persisted schemas and protocol data only; no private call counts, AST layout or source grep. Coordinates supplied to patch operations are persisted caller data, not computed appearance.
+6. Lowest stable owner: this package owns the shared grammar/config/patch/validation contract. Service/UI suites exercise delivery and orchestration. No remaining same-owner case repeats the exact same input partition; deleted compositions/duplicates name their stronger coverage below.
+Risk: low test-only cleanup; surviving cases retain the listed distinct security/storage/public contract failures.
+Validation: pnpm exec node --import tsx --import ./scripts/test/assert-ok.mjs --test --test-concurrency=2 packages/config/src/usage-prefs-migrate.test.ts
+
+KEEP | legacy claude/codex booleans migrate into agents record
+  Detects violation of the concrete caller contract stated by this case: legacy claude/codex booleans migrate into agents record. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | new agents record passes through
+  Explicit Claude false disables Claude while absent Codex defaults enabled, through actual usageAgentEnabled. Legacy booleans migration and global disable test different precedence inputs.
+KEEP | disabled master switch overrides per-agent
+  Detects violation of the concrete caller contract stated by this case: disabled master switch overrides per-agent. The file-level six bars apply to this distinct input/operation; remaining cases target other inputs or operations.
+KEEP | usage defaults and legacy app migration preserve supported chip preferences
+  Fresh and version-1 app config must enable usage and choose busiest; invalid chip values reject and Grok remains accepted. Fixed persisted settings protect upgrade behavior rather than TypeScript declarations.
+
+Planned totals: {"KEEP": 183, "DELETE": 6, "REWRITE": 5}
+Dead support removal: unused agent-catalog test imports (testEdge/testNode/testWorkflow/validateWorkflow); desktop implementation-constant/default-factory test imports. No fixture/snapshot/helper file becomes orphaned. No non-test API export is removed.
+
+Implementation note: template defaults case renamed to "every template starts disabled in the selected project and timezone". Removed unused coordinate/config overrides from outline fixture helper after deleting geometry test.
+
+Completed validation: focused changed-file command passed 91 tests, 20 suites, 0 failures/skips. git diff --check passed. Root agent owns pnpm check/test/build and commit/push gates. Production behavior untouched within API/config scope; test LOC net -111.

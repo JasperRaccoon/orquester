@@ -15,9 +15,7 @@
  *   and the capture's end is its exit: whatever still waits joins the open
  *   turn.
  * - A harness `note` is handed to `atNote`, which is how a test plays the
- *   user's part at the recorded moment (a Stop, say); `endAtNote` ends the
- *   drive there, when the recorded rest answered a move the test did not
- *   make.
+ *   user's part at the recorded moment (a Stop, say).
  *
  * Test-only code, kept beside the mock peer: nothing under `src/` imports it
  * but tests.
@@ -52,21 +50,18 @@ export const XAI_ROUTED_METHODS: ReadonlySet<string> = new Set<string>([
  */
 const CAPTURE_EPOCH_MS = Date.UTC(2026, 8, 25, 12, 0, 0);
 
-export interface TurnCursor {
+interface TurnCursor {
   current: string | undefined;
 }
 
 /** What a test can do at a recorded harness note. */
 interface DriverControl {
-  readonly grok: GrokNormalizer;
-  readonly turn: TurnCursor;
   /** Settle the open turn as the session's `interrupt` does (a Stop). */
   interrupt(): RuntimeEvent[];
 }
 
 export interface DrivenCapture {
   readonly events: RuntimeEvent[];
-  readonly grok: GrokNormalizer;
   /** Every turn the drive opened, in order: `turn-N` for a prompt, `wake-N` for the CLI's own. */
   readonly turns: string[];
   /** The parent ACP session the capture's `session/new` answered. */
@@ -77,13 +72,6 @@ export function driveCapture(
   file: string,
   options: {
     atNote?: (note: string, control: DriverControl) => RuntimeEvent[];
-    /**
-     * End the drive at the first harness note this accepts, once `atNote`
-     * handled it: what the capture recorded after it is what the CLI did
-     * after the HARNESS's move, not after the test's own (a Stop in place of
-     * an answer, say). The capture's end follows, as ever.
-     */
-    endAtNote?: (note: string) => boolean;
     contextWindow?: number;
   } = {}
 ): DrivenCapture {
@@ -162,8 +150,6 @@ export function driveCapture(
     wakes.turnSettled();
   };
   const control: DriverControl = {
-    grok,
-    turn,
     interrupt: () => {
       const before = events.length;
       // As the session's `interrupt`: the cancel ends the CLI prompt still
@@ -180,9 +166,6 @@ export function driveCapture(
     now = Math.max(now, entry.t);
     if (entry.dir === "note") {
       events.push(...(options.atNote?.(String(entry.frame), control) ?? []));
-      if (options.endAtNote?.(String(entry.frame)) === true) {
-        break;
-      }
       continue;
     }
     const frame = entry.frame as JsonRpcFrame;
@@ -215,7 +198,7 @@ export function driveCapture(
   }
   // The capture's end is the process's: what still waits joins the open turn.
   wakes.drop("the capture ended");
-  return { events, grok, turns, sessionId };
+  return { events, turns, sessionId };
 
   /** One agent frame, through the session's own gate. */
   function fold(frame: JsonRpcFrame): void {

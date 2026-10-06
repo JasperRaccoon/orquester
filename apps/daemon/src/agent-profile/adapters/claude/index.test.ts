@@ -355,7 +355,6 @@ test("the snapshot lists every kind from a realistic ~/.claude, secrets masked",
   assert.equal(byId(snapshot, "skill:chdb-sql").meta?.symlink, "true");
   assert.equal(byId(snapshot, "skill:handoff").description, "Creates a handoff document");
   const pluginSkill = byId(snapshot, "skill:superpowers:brainstorming");
-  assert.equal(pluginSkill.source.label, "Plugin · superpowers");
   assert.equal(pluginSkill.toggleable, false, "skillOverrides ignores plugin skills");
 
   assert.equal(byId(snapshot, "plugin:superpowers@claude-plugins-official").enabled, true);

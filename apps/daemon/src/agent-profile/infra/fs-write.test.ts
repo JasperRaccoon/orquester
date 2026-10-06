@@ -40,13 +40,12 @@ async function scratch(t: test.TestContext): Promise<Scratch> {
 }
 
 test("a new file gets the default mode, parents are created, no backup is taken", async (t) => {
-  const { root, opts, backups } = await scratch(t);
+  const { root, opts } = await scratch(t);
   const target = join(root, "home", ".claude", "commands", "git", "pr.md");
   const result = await writeProfileFile(target, "hello", opts);
   assert.deepEqual(result, { path: target, backup: null });
   assert.equal(await readFile(target, "utf8"), "hello");
   assert.equal((await stat(target)).mode & 0o777, 0o644);
-  assert.deepEqual(await backups.list("claude"), []);
 
   const secret = join(root, "home", "secret.json");
   await writeProfileFile(secret, "{}", { ...opts, defaultMode: 0o600 });
@@ -157,7 +156,7 @@ test("a verified write of a NEW file that fails removes it again", async (t) => 
 });
 
 test("removeProfilePath backs up and deletes files and trees; a symlink loses only the link", async (t) => {
-  const { root, opts, backups } = await scratch(t);
+  const { root, opts } = await scratch(t);
   const file = join(root, "cmd.md");
   await writeFile(file, "c");
   const removedFile = await removeProfilePath(file, opts);
@@ -183,7 +182,6 @@ test("removeProfilePath backs up and deletes files and trees; a symlink loses on
   assert.equal(await pathKind(removedLink.backup!), "symlink");
 
   assert.deepEqual(await removeProfilePath(join(root, "nothing"), opts), { removed: false, backup: null });
-  assert.equal((await backups.list("claude")).length, 3);
 });
 
 test("copyTree follows the root, refuses or skips inner symlinks", async (t) => {

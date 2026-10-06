@@ -181,14 +181,6 @@ describe("codex goal — progress is throttled to one per 30 s (goals §6)", () 
     assert.equal(goals.notified(goal({ tokensUsed: 150, status: "paused" }))?.change, "paused");
   });
 
-  it("any row restarts the window", () => {
-    const { goals, advance } = tracker({ known: goal() });
-    advance(60_000);
-    goals.notified(goal({ status: "paused" }));
-    advance(10_000);
-    assert.equal(goals.notified(goal({ status: "paused", tokensUsed: 5 })), null);
-  });
-
   it("an exact repeat of what the thread was told is no row, however late", () => {
     const { goals, advance } = tracker({ known: goal() });
     advance(60_000);

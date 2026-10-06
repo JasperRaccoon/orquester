@@ -6,7 +6,7 @@ import test from "node:test";
 import type { AgentChainEntry, AgentHop, UsageResponse } from "@orquester/api";
 import type { NodeResult } from "../contracts.ts";
 import type { AgentBlockOutput } from "./executor.ts";
-import { candidateFromChoice, candidateKey, coolDown, emptyMemory, type FailoverDeps } from "./failover.ts";
+import { candidateKey, coolDown, emptyMemory, type FailoverDeps } from "./failover.ts";
 import { FakeClock } from "./testing/fake-clock.ts";
 import { MemoryCooldowns, staticAccounts, staticUsage } from "./testing/fake-context.ts";
 import { FakeChatHost } from "./testing/fake-chat-host.ts";
@@ -171,6 +171,8 @@ test("OpenCode has no accounts: a limit goes to the next chain entry", async () 
   const out = outputOf((await sc.run(wf, "n1")).result);
   assert.equal(out.text, "claude took over");
   assert.equal(sc.host.commandCount("account"), 0, "no account switch on OpenCode");
+  assert.ok(sc.cooldowns.entries["opencode:provider:oc"], "the answering provider owns the cooldown");
+  assert.equal(sc.cooldowns.entries["opencode:system"], undefined, "other OpenCode providers stay eligible");
   assert.deepEqual(out.hops.map((h) => [h.agent, h.accountId, h.via]), [["opencode", "system", "initial"], ["claude", "a1", "handoff"]]);
 });
 
@@ -295,14 +297,13 @@ test("coolDown keys accountless launches by provider and never reads another quo
   const cooldowns = new MemoryCooldowns(clock);
   const deps: FailoverDeps = { usage: staticUsage(usage), accounts: staticAccounts(new FakeChatHost({ clock })), cooldowns, clock };
   const memory = emptyMemory();
-  const choice = (agent: string, model: string, accountId: string) => candidateFromChoice({ agent, model, accountId, chainIndex: 0 });
 
-  const managed = choice("codex", "gpt-5", "c1");
+  const managed = { agent: "codex", model: "gpt-5", accountId: "c1", chainIndex: 0, options: [], family: "codex", cooldownAccount: "c1" };
   assert.equal(candidateKey(managed), "codex:c1");
   await coolDown(deps, memory, managed, { reason: "usage_limit" });
   assert.equal(cooldowns.entries["codex:c1"]!.until, inDays(3), "a managed account's burnt window still counts");
 
-  const oc = choice("opencode", "anthropic/claude-sonnet", "system");
+  const oc = { agent: "opencode", model: "anthropic/claude-sonnet", accountId: "system", chainIndex: 0, options: [], family: "opencode", cooldownAccount: "provider:anthropic" };
   assert.equal(candidateKey(oc), "opencode:provider:anthropic");
   await coolDown(deps, memory, oc, { reason: "usage_limit" });
   assert.equal(cooldowns.entries["opencode:provider:anthropic"]!.until, new Date(now + HOUR).toISOString(), "not the codex system row's 5-day reset");

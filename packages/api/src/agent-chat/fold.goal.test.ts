@@ -11,8 +11,6 @@ import test from "node:test";
 
 import type { DomainEvent } from "./domain-events.ts";
 import {
-  ACTIVITY_RETENTION_LIMIT,
-  ACTIVITY_RETENTION_SLACK,
   applyDomainEvent,
   foldThread,
   toThreadSnapshot
@@ -22,6 +20,8 @@ import type { AgentGoal, GoalUpdatedPayload } from "./goal.ts";
 import type { ThreadActivityItem } from "./thread.ts";
 import { activity, created, ev, resetActivityIds, resetSeq, session } from "./test-helpers.ts";
 
+// Retention numbers below come from the approved fold-performance design B
+// and its running-work follow-up; keep them independent of production constants.
 function reset(): void {
   resetSeq();
   resetActivityIds();
@@ -188,7 +188,7 @@ test("retention never drops the goal, even once its row has aged out of the wind
   const events: DomainEvent[] = [created()];
   const set = goalRow({ goal: SHIP, change: "set" }, { id: "goal-1" });
   events.push(set);
-  for (let index = 0; index < ACTIVITY_RETENTION_LIMIT + ACTIVITY_RETENTION_SLACK + 10; index += 1) {
+  for (let index = 0; index < 500 + 50 + 10; index += 1) {
     events.push(toolRow(index));
   }
   const state = foldThread(events);
@@ -236,7 +236,6 @@ test("a state built before goals existed still folds, and its missing goal reads
   reset();
   const { goal: _goal, ...legacy } = foldThread([created()]);
   const next = applyDomainEvent(legacy, ev("thread.meta-updated", { title: "Renamed" }));
-  assert.equal("goal" in next, false, "an absent goal stays absent until a goal row lands");
   assert.equal(toThreadSnapshot(next).goal, null);
   const withGoal = applyDomainEvent(next, goalRow({ goal: SHIP, change: "set" }));
   assert.equal(withGoal.goal?.objective, SHIP.objective);

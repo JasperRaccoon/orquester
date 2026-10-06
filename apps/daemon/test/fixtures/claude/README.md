@@ -93,14 +93,13 @@ plus `CLAUDE_CODE_AUTO_CONNECT_IDE=0`, `CLAUDE_CODE_IDE_SKIP_AUTO_INSTALL=1`,
 > run on a capture. Hook coverage was obtained instead from a project-level `.claude/settings.json`
 > in the sandbox; see observation **9**.
 
-The 15 retained replay fixtures are listed below. The protocol observations also preserve
+The 14 retained replay fixtures are listed below. The protocol observations also preserve
 excerpts from the permission and question captures that do not need full raw replay files.
 
 | # | File | `Options` beyond the common set | Demonstrates |
 |---|---|---|---|
 | 1 | `01-init-plain-text.ndjson` | none (default model → `claude-opus-4-8[1m]`) | init + one plain-text turn: `system/init`, `rate_limit_event`, the full `stream_event` delta sequence, `assistant`, `result` with `usage`/`modelUsage`/`total_cost_usd`. Also carries the `initializationResult()` response. |
 | 2 | `02-tool-read-auto-allowed.ndjson` | `model:"sonnet"`, `canUseTool` installed | `Read` (and an `ls` `Bash`) in the default mode: `tool_use` → `tool_result` blocks, and **zero** `canUseTool` calls — see observation **1**. |
-| 3 | `03-bash-approval-accept.ndjson` | `model:"sonnet"`, `canUseTool` | a Bash call that really does prompt (`rm -f …`) → `accept` = `{behavior:"allow", updatedInput}`. Records the callback's full argument set incl. `suggestions`. |
 | 7 | `07-subagent-task.ndjson` | `model:"sonnet"`, 2 turns | a subagent (`system/task_started` → `task_progress` → `task_updated` → `task_notification`, `parent_tool_use_id` on the nested messages) and a **background** Bash task (`system/background_tasks_changed`). |
 | 8 | `08-todowrite.ndjson` | `model:"sonnet"` | the step-list tools — which are **`TaskCreate` / `TaskUpdate`**, not `TodoWrite`. See observation **3**. |
 | 9 | `09-plan-mode-exitplanmode-denied.ndjson` | `model:"sonnet"`, `setPermissionMode("plan")` before the turn, back to `"default"` after | plan mode; `ExitPlanMode` arriving through `canUseTool` and being denied with T3's fixed message; the plan markdown **and** the new `planFilePath`. |
@@ -410,7 +409,7 @@ Two consequences:
 > cause is the capture's own deviation: these fixtures were taken with
 > `settingSources: ["project","local"]`, dropping `"user"`. The adapter sets
 > `["user","project","local"]` as §4.5 requires, and driving the real CLI that way
-> (`smoke.ts`, claude **2.1.278**) produced `system/hook_started` and `system/hook_response`
+> (a manual live run, claude **2.1.278**) produced `system/hook_started` and `system/hook_response`
 > for the host's own user-level `SessionStart` hooks — four of each, with `hook_id`,
 > `hook_name` (`SessionStart:startup`), `hook_event`, `outcome`, `exit_code` and `stdout`.
 > So the `hook.*` group **does** have a producer, the Claude adapter emits it, and a re-capture
@@ -458,7 +457,7 @@ The model also called **`ToolSearch`** (`{"query":"select:ExitPlanMode","max_res
 
 ### 11. `canUseTool`'s third argument carries five fields T3 ignores, one of which matters
 
-`03-bash-approval-accept.ndjson`:
+The original bash-approval capture (03; raw replay removed after callback coverage moved to the SDK session seam):
 
 ```json
 {"signal":"…","suggestions":[{"type":"addRules","rules":[{"toolName":"Bash","ruleContent":"rm -f scratch-tmp.txt"}],"behavior":"allow","destination":"localSettings"},{"type":"addDirectories","directories":["…/sandbox"],"destination":"session"},{"type":"setMode","mode":"acceptEdits","destination":"session"}],"blockedPath":"…/sandbox/scratch-tmp.txt","displayName":"Bash","description":"Remove scratch-tmp.txt","toolUseID":"toolu_01PpiUNR3V2PoJVR419oroP9","requestId":"c2648055-c40a-4c3f-b3de-e65803eed8d0"}

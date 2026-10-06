@@ -37,7 +37,7 @@
  */
 const RESUME_ID_PATTERN = /^[\w.][\w.\-/]*$/;
 
-export function isResumeId(value: unknown): value is string {
+function isResumeId(value: unknown): value is string {
   if (typeof value !== "string" || value.length === 0 || value.length > 256) {
     return false;
   }

@@ -15,13 +15,9 @@ import { resumeCursorFor } from "../../orchestration/resume.ts";
 import {
   buildClaudeResumeCursor,
   claudeTurnBoundariesFromCursor,
-  isResumeId,
   readClaudeResumeCursor
 } from "./cursor.ts";
 import {
-  ROLLBACK_BOUNDARY_UNAVAILABLE,
-  ROLLBACK_COMPACTED,
-  ROLLBACK_HISTORY_UNAVAILABLE,
   isAnchorReachableAfterCompaction,
   isClaudeHumanTurnStart,
   mergeClaudeTurnBoundaries,
@@ -131,14 +127,14 @@ describe("claude rollback — planning", () => {
   it("refuses when a boundary is missing from the history", () => {
     assert.throws(
       () => planClaudeRollback({ messages, boundaries: ["t1", "gone"], numTurns: 1 }),
-      new RegExp(ROLLBACK_BOUNDARY_UNAVAILABLE.slice(0, 40))
+      /turn boundary is unavailable/i
     );
   });
 
   it("refuses an empty history", () => {
     assert.throws(
       () => planClaudeRollback({ messages: [], boundaries: ["t1"], numTurns: 1 }),
-      new RegExp(ROLLBACK_HISTORY_UNAVAILABLE)
+      /history is unavailable/i
     );
   });
 
@@ -294,7 +290,7 @@ describe("claude rollback — by turn id", () => {
     assert.deepEqual(turnIds(plan.boundaries), ["turn-a", "turn-b"]);
     assert.throws(
       () => planClaudeRollbackById({ messages: forked, boundaries, firstRemovedTurnId: "f2" }),
-      { message: ROLLBACK_BOUNDARY_UNAVAILABLE }
+      /turn boundary is unavailable/i
     );
   });
 
@@ -306,7 +302,7 @@ describe("claude rollback — by turn id", () => {
           boundaries: [{ turnId: "turn-a", uuid: "h1" }],
           firstRemovedTurnId: "turn-unknown"
         }),
-      { message: ROLLBACK_BOUNDARY_UNAVAILABLE }
+      /turn boundary is unavailable/i
     );
   });
 
@@ -322,7 +318,7 @@ describe("claude rollback — by turn id", () => {
           firstRemovedTurnId: "h2",
           preservedUuids
         }),
-      { message: ROLLBACK_COMPACTED }
+      /compacted after that turn/i
     );
     // An anchor the compaction preserved is still reachable.
     const plan = planClaudeRollbackById({
@@ -375,7 +371,7 @@ describe("claude rollback — by turn id", () => {
           firstRemovedTurnId: "h1",
           preservedUuids: ["a1"]
         }),
-      { message: ROLLBACK_COMPACTED }
+      /compacted after that turn/i
     );
   });
 
@@ -393,7 +389,7 @@ describe("claude rollback — by turn id", () => {
     for (const firstRemovedTurnId of ["turn-gone", "turn-unplaced"]) {
       assert.throws(
         () => planClaudeRollbackById({ messages: transcript, boundaries, firstRemovedTurnId }),
-        { message: ROLLBACK_BOUNDARY_UNAVAILABLE },
+        /turn boundary is unavailable/i,
         firstRemovedTurnId
       );
     }
@@ -450,7 +446,7 @@ describe("claude rollback — by turn id", () => {
   it("refuses an empty history", () => {
     assert.throws(
       () => planClaudeRollbackById({ messages: [], boundaries: [], firstRemovedTurnId: "h1" }),
-      { message: ROLLBACK_HISTORY_UNAVAILABLE }
+      /history is unavailable/i
     );
   });
 });
@@ -487,7 +483,6 @@ describe("claude resume cursor — a bad cursor means no resume, never an error"
 
   it("accepts every id the host's own resume rule accepts", () => {
     for (const id of [sessionId, "conv_2026-09-21.01", "a", "a/b/c", "x.y-z_0"]) {
-      assert.equal(isResumeId(id), true, id);
       assert.equal(readClaudeResumeCursor({ resume: id })?.resume, id, id);
     }
   });

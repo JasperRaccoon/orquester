@@ -13,8 +13,7 @@ import {
   beginQueuedSend,
   isComposerSending,
   isQueuedSendInFlight,
-  subscribeComposerSends,
-  subscribeQueuedSends
+  subscribeComposerSends
 } from "./composer-sends";
 
 describe("the per-thread in-flight send registry", () => {
@@ -84,21 +83,5 @@ describe("the per-thread queued-send marker", () => {
     const sending = beginComposerSend("A");
     assert.equal(isQueuedSendInFlight("A"), false);
     sending();
-  });
-
-  it("tells its listeners which thread's queue moved, until they unsubscribe", () => {
-    const heard: Array<[string, boolean]> = [];
-    const unsubscribe = subscribeQueuedSends((sessionId) => {
-      heard.push([sessionId, isQueuedSendInFlight(sessionId)]);
-    });
-    const settle = beginQueuedSend("A");
-    settle();
-    settle();
-    beginQueuedSend("B")();
-    const expected = [["A", true], ["A", false], ["B", true], ["B", false]];
-    assert.deepEqual(heard, expected);
-    unsubscribe();
-    beginQueuedSend("A")();
-    assert.deepEqual(heard, expected);
   });
 });

@@ -4690,7 +4690,7 @@ function compactionAnchorUuid(compactMetadata: unknown): string | undefined {
  * CLI that does not ship the wider list. `undefined` when the frame names
  * nothing, so a caller can tell "no constraint" from "nothing survived".
  */
-export function readPreservedUuids(compactMetadata: unknown): string[] | undefined {
+function readPreservedUuids(compactMetadata: unknown): string[] | undefined {
   if (compactMetadata === null || typeof compactMetadata !== "object") {
     return undefined;
   }

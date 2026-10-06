@@ -121,4 +121,13 @@ test("MCP profile creation and partial edits persist secrets without returning t
     const item = (result.item ?? (result.items as Record<string, unknown>[]).find((entry) => entry.id === id)) as { meta?: { url?: string } } | undefined;
     assert.equal(item?.meta?.url, redacted, `${operation}: summary metadata hides the complete userinfo`);
   }
+
+  const artifactDir = await mkdtemp(join(tmpdir(), "orq-profile-mcp-artifact-"));
+  const artifact = join(artifactDir, "result.json");
+  await writeFile(artifact, JSON.stringify({
+    workflow: "MCP profile create and partial update",
+    checks: ["native secret values persisted", "partial update preserved omitted secrets", "responses omitted secrets", "URL userinfo redacted"],
+    detail, remote, listed, updated
+  }, null, 2), { mode: 0o600 });
+  t.diagnostic(`Verified artifact: ${artifact}`);
 });

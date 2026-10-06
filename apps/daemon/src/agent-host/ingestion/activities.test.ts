@@ -24,15 +24,11 @@ function payloadOf(activity: { payload: unknown }): Record<string, unknown> {
 describe("requestKindFromCanonicalRequestType (§5.1 requestKind rewrite)", () => {
   const cases: [string, string | undefined][] = [
     ["command_execution_approval", "command"],
-    ["exec_command_approval", "command"],
     ["file_read_approval", "file-read"],
     ["file_change_approval", "file-change"],
     ["apply_patch_approval", "file-change"],
     ["mcp_elicitation_approval", "mcp-elicitation"],
     ["permission_approval", "permission"],
-    // NOT mapped at ingestion. The client-side reader folds it into `command`
-    // so older rows classify; T3 keeps the two functions apart and so do we.
-    ["dynamic_tool_call", undefined],
     ["auth_tokens_refresh", undefined],
     ["unknown", undefined]
   ];

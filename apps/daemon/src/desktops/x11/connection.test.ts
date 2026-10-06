@@ -146,10 +146,14 @@ describe("X11Connection", () => {
 
   test("sequence numbers widen across the 16-bit wrap", async () => {
     const { server, conn } = await connected();
-    Reflect.set(conn, "sequence", 0x1fffe);
-    const a = conn.internAtom("A"); // 0x1ffff
-    const b = conn.internAtom("B"); // 0x20000 → wire 0x0000
-    await server.untilRequests(2);
+    for (let sequence = 1; sequence <= 0xfffe; sequence++) {
+      const pending = conn.internAtom("padding");
+      server.push(atomReply(sequence, 7));
+      await pending;
+    }
+    const a = conn.internAtom("A"); // wire 0xffff
+    const b = conn.internAtom("B"); // wire 0x0000
+    await server.untilRequests(0x10000);
     server.push(atomReply(0xffff, 1));
     server.push(atomReply(0x0000, 2));
     assert.equal(await a, 1);

@@ -451,7 +451,7 @@ const RESERVED_ENV_PREFIXES: readonly string[] = [
 ];
 
 /** Whether a variable name is one the shell, the loader, the sandbox or a common tool gives a meaning of its own. */
-export function isReservedEnvName(name: string): boolean {
+function isReservedEnvName(name: string): boolean {
   const upper = name.toUpperCase();
   return RESERVED_ENV_NAMES.has(upper) || RESERVED_ENV_PREFIXES.some((prefix) => upper.startsWith(prefix));
 }

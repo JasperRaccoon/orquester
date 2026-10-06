@@ -1,0 +1,646 @@
+UI agent-chat store/history test audit — COMPLETED CLEANUP; pre-edit decisions retained
+
+Scope: all currently present named tests in the six files below. Read AGENTS.md, README.md, package scripts, all six test files, store.ts, retention.ts, history.logic.ts, and source callers before editing. Historical docs/test-cleanup reports were cross-checked but are not treated as authority over current tests.
+
+Independent sources:
+- docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md (§6.2, §7.2–7.4).
+- docs/superpowers/specs/2026-09-23-thread-index-and-lazy-boot-design.md (§C History page / Client).
+- docs/superpowers/specs/2026-09-23-fold-performance-design.md (Client history bridge).
+- docs/superpowers/specs/2026-09-24-agent-goals-design.md (§8.4).
+- packages/api/src/agent-chat wire/fold types and packages/ui/src/lib/agent-chat/contracts.ts public actions.
+
+Six-bar justification applied individually to each KEEP/REWRITE below:
+1. Each file-specific source and named scenario identifies a required public behavior or credible recorded regression, independently of the owner implementation.
+2. Failure means the named user operation loses/duplicates/reorders data, dispatches a stale command, targets the wrong row, shows a stale state/action, strands a pending operation or violates its documented boundedness.
+3. Oracles are fixture message/attachment IDs, literal content supplied by a fake host, independent persisted wire data, independently specified age/request limits, or conservation of fixture log order. Fakes deliver protocol inputs and defer results; they do not implement recovery, folding, dispatch or projection.
+4. Store cases observe public AgentChatActions, transport requests, incoming frames, browser storage/events, and caller-consumed slice/row/draft state. Pure history cases observe the production transformation seam from wire/fold data into history/projection outputs.
+5. Internal identifiers, functions and algorithms can be refactored without changing the retained behavior assertions. Rewrite entries specifically remove private counter/false-negative assumptions; test doubles implement the external transport/storage/bridge contracts only.
+6. Each retained named scenario covers a distinct branch or race not caught by other remaining tests: malformed wire fields, two data-source ownership boundaries, stale vs fresh lifecycle generations, sync vs async failures, command acceptance vs later event completion, or specific queue/cache fallback. The four duplicate scenarios below have a stronger owner named explicitly. Pure rules remain only where store scenarios do not exercise the same condition.
+
+Non-test callers / seam audit:
+- createThreadStore is called by ensureThreadStore; retain/release/peek are used by hooks and timeline consumers. ThreadStoreDeps.transport is the real transport dependency, not a test-only hook.
+- updateThreadDraft is called by composer-failed-send and store recovery; returnMessage and restoreFailedSend bridge handles are installed by ChatComposer.
+- ThreadRetentionCache is instantiated by store.ts; no direct cache-only tests remain.
+- history exports are consumed by store.ts and reducer.logic.ts or compose internally into those production paths. Removed direct liveTurnIdsOf test leaves its real store callers intact.
+- isolated-page, transport fakes, test builders and fixture frames remain used by retained tests. No orphan fixture/snapshot or test-only production seam is identified by these deletions.
+
+Risk: low for duplicate deletion; protocol/persistence and real data-loss regressions retained. No production behavior edit is planned.
+Validation command (from packages/ui): pnpm exec node --import tsx --import ../../scripts/test/assert-ok.mjs --import ./test/svg-loader.mjs --import ../../scripts/test/quiet-mock-timers.mjs --test --test-concurrency=2 src/lib/agent-chat/store.test.ts src/lib/agent-chat/store.fixwave.test.ts src/lib/agent-chat/store.reload.test.ts src/lib/agent-chat/store.retention.test.ts src/lib/agent-chat/store.history.test.ts src/lib/agent-chat/history.logic.test.ts
+Root coordinator owns pnpm check, pnpm test, final diff review, commit and push.
+
+FILE packages/ui/src/lib/agent-chat/store.test.ts
+Independent requirement: GUI design §6.2 command receipts and §7.2/§7.4 thread state, rewind, draft and send lifecycle; task-stop public protocol; older Claude duplicate-output and killed-host streaming regressions.
+
+KEEP | never counts a live loop or goal as background work — the host treats both as inert
+Contract/failure: never counts a live loop or goal as background work — the host treats both as inert. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | drops a Claude log's re-emitted copy and leaves another provider's repeat alone
+Contract/failure: drops a Claude log's re-emitted copy and leaves another provider's repeat alone. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+REWRITE | reads a message's liveness through the rule: a stuck answer is settled, the running turn's streams
+Contract/failure and correction: Close false-positive negative assertions: assert the settled answer exists before checking it is not streaming, accepting false or absent instead of requiring an implementation-specific undefined. Remove the internal folded-log streaming-flag assertion and decorative fold-presence assertion; visible active/stopped answer state is the contract.
+Bars 1–6: file source + named scenario + common six-bar justification above. Remaining stronger owner: none for this exact scenario; this is its retained owner.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | mints a commandId per command and sends no optimistic row
+Contract/failure: mints a commandId per command and sends no optimistic row. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | setAccount posts the daemon-owned route with a minted commandId (§3.4)
+Contract/failure: setAccount posts the daemon-owned route with a minted commandId (§3.4). Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | setAccount retries HOST_UNAVAILABLE with the same id and banners a refusal
+Contract/failure: setAccount retries HOST_UNAVAILABLE with the same id and banners a refusal. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | locks the row while a decision is in flight and clears it in a finally
+Contract/failure: locks the row while a decision is in flight and clears it in a finally. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | omits turnId unless the session is running
+Contract/failure: omits turnId unless the session is running. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | posts `revert`, stays inert until the truncation lands, then hands the message back
+Contract/failure: posts `revert`, stays inert until the truncation lands, then hands the message back. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | settles at once when the truncation was folded before the command answered
+Contract/failure: settles at once when the truncation was folded before the command answered. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | rejects with the reason of a NEW rewind failure, and clears `reverting`
+Contract/failure: rejects with the reason of a NEW rewind failure, and clears `reverting`. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | falls back to the failure row's summary when it carries no detail
+Contract/failure: falls back to the failure row's summary when it carries no detail. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | rejects a message it cannot find — or one that is not the user's — without posting
+Contract/failure: rejects a message it cannot find — or one that is not the user's — without posting. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | refuses a second rewind while one is in flight — one `/revert`, one message back
+Contract/failure: refuses a second rewind while one is in flight — one `/revert`, one message back. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | unlocks the composer after two minutes without claiming the rewind completed
+Contract/failure: unlocks the composer after two minutes without claiming the rewind completed. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | settles when its store is destroyed mid-wait, handing the message back to the persisted draft
+Contract/failure: settles when its store is destroyed mid-wait, handing the message back to the persisted draft. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | remembers a dismissal per (thread, message) — a DIFFERENT error still shows
+Contract/failure: remembers a dismissal per (thread, message) — a DIFFERENT error still shows. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | retries a lost response with the SAME commandId
+Contract/failure: retries a lost response with the SAME commandId. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | writes the scroll/disclosure LRU and mirrors follow from atEnd
+Contract/failure: writes the scroll/disclosure LRU and mirrors follow from atEnd. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | writes a saved draft straight through to storage, under its own thread id
+Contract/failure: writes a saved draft straight through to storage, under its own thread id. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | seeds a fresh store from storage — which is what a reload is
+Contract/failure: seeds a fresh store from storage — which is what a reload is. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | drops the entry when the draft is cleared, so a sent message never returns
+Contract/failure: drops the entry when the draft is cleared, so a sent message never returns. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | with no slice open, lands in storage, where the thread's next slice seeds from, and moves no other thread's draft
+Contract/failure: with no slice open, lands in storage, where the thread's next slice seeds from, and moves no other thread's draft. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | with a slice open, goes through that slice, whose draft the next composer mount loads
+Contract/failure: with a slice open, goes through that slice, whose draft the next composer mount loads. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | a turn or an answer whose generation was destroyed mid-retry keeps retrying with the SAME commandId
+Contract/failure: a turn or an answer whose generation was destroyed mid-retry keeps retrying with the SAME commandId. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | an attempt that never answers times out and is retried with the SAME commandId, so no send reads Sending forever
+Contract/failure: an attempt that never answers times out and is retried with the SAME commandId, so no send reads Sending forever. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | a queued send that fails after its generation was destroyed is held at the front of the thread's live generation
+Contract/failure: a queued send that fails after its generation was destroyed is held at the front of the thread's live generation. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | the live generation waits for the torn-down one's queued send in flight before sending the next
+Contract/failure: the live generation waits for the torn-down one's queued send in flight before sending the next. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | when the torn-down generation's queued send fails, it is held at the front and the next one still waits
+Contract/failure: when the torn-down generation's queued send fails, it is held at the front and the next one still waits. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | with no live generation, a queued send that fails after the teardown goes back to the persisted draft
+Contract/failure: with no live generation, a queued send that fails after the teardown goes back to the persisted draft. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | a rewind torn down before the host answered merges into the thread's live slice, never over its newer draft
+Contract/failure: a rewind torn down before the host answered merges into the thread's live slice, never over its newer draft. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | an answer in flight across a teardown never locks the next generation's card
+Contract/failure: an answer in flight across a teardown never locks the next generation's card. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | with no composer mounted, a Stop returning two full queued messages keeps all sixteen files for the next mount
+Contract/failure: with no composer mounted, a Stop returning two full queued messages keeps all sixteen files for the next mount. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | with a composer mounted, the returned message reaches it without a hidden persisted copy
+Contract/failure: with a composer mounted, the returned message reaches it without a hidden persisted copy. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | a file the composer still refuses is written into its draft as its path, never parked behind it
+Contract/failure: a file the composer still refuses is written into its draft as its path, never parked behind it. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | posts the task's id and holds its Stop pending until the row settles
+Contract/failure: posts the task's id and holds its Stop pending until the row settles. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | lets the Stop go at once when the host refuses it, and says why on the banner
+Contract/failure: lets the Stop go at once when the host refuses it, and says why on the banner. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | offers the Stop again when the provider failed it
+Contract/failure: offers the Stop again when the provider failed it. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+FILE packages/ui/src/lib/agent-chat/store.fixwave.test.ts
+Independent requirement: GUI design §7.4 next-tool-boundary queue dispatch and §5.6/§7.3 truncated plan read-back; AgentChatActions.readFullPlanMarkdown contract in contracts.ts.
+
+KEEP | sends exactly one queued message per tool-call boundary
+Contract/failure: sends exactly one queued message per tool-call boundary. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | marks the actionable proposal truncated and reads the whole plan back by its id
+Contract/failure: marks the actionable proposal truncated and reads the whole plan back by its id. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | never reads an intact proposal back
+Contract/failure: never reads an intact proposal back. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | refuses, rather than answer the cut text, when the read-back fails or brings no plan
+Contract/failure: refuses, rather than answer the cut text, when the read-back fails or brings no plan. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+FILE packages/ui/src/lib/agent-chat/store.reload.test.ts
+Independent requirement: GUI design §7.4 explicit reload/outbox requirements: at-most-once command IDs, replay age, ordering, stale queue holds, lifecycle visibility stamps, failed restoration and storage-quota recovery.
+
+KEEP | re-posts a send the page was still posting under the SAME commandId, once, the thread reading Sending meanwhile
+Contract/failure: re-posts a send the page was still posting under the SAME commandId, once, the thread reading Sending meanwhile. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+REWRITE | does not re-post a send older than the replay bound: it comes back to the thread's draft
+Contract/failure and correction: Absorb the deleted duplicate stale-send notice check into the existing age-boundary and draft/attachment/outbox restoration workflow.
+Bars 1–6: file source + named scenario + common six-bar justification above. Remaining stronger owner: none for this exact scenario; this is its retained owner.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+DELETE | says why a stale send is back on the thread itself, for whoever opens it next
+Reason / stronger remaining coverage: Repeats stale-send restoration setup. Move the sole unique banner-presence assertion into the existing does not re-post a send older than the replay bound case, which additionally checks age boundary, attachments, persisted draft and outbox removal.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | gives several stale sends back in the order they were sent, ahead of what the draft holds
+Contract/failure: gives several stale sends back in the order they were sent, ahead of what the draft holds. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | hands a stale send to the composer that shows the thread, saying why it is back
+Contract/failure: hands a stale send to the composer that shows the thread, saying why it is back. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | gives nothing back for a stale Implement: its prompt was the composer's, and the plan is still there
+Contract/failure: gives nothing back for a stale Implement: its prompt was the composer's, and the plan is still there. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | puts a refused re-post back into the draft, as any send that did not go out
+Contract/failure: puts a refused re-post back into the draft, as any send that did not go out. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | tells the composer that shows the thread why a refused re-post is back — a message from before the reload
+Contract/failure: tells the composer that shows the thread why a refused re-post is back — a message from before the reload. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | brings queued messages back as queued, in order, under the commandIds they were queued with
+Contract/failure: brings queued messages back as queued, in order, under the commandIds they were queued with. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | leaves nothing for a reload once a send settled — delivered, or given back to the draft
+Contract/failure: leaves nothing for a reload once a send settled — delivered, or given back to the draft. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | re-posts first, under its own id, the queued send a page was posting when it reloaded
+Contract/failure: re-posts first, under its own id, the queued send a page was posting when it reloaded. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | does not bring back as queued what Stop returned to the composer
+Contract/failure: does not bring back as queued what Stop returned to the composer. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+DELETE | holds a queued send whose re-post failed at the front, and the rest of the queue behind it
+Reason / stronger remaining coverage: Duplicate failed replay ordering exercised more strongly by holds the in-flight leftovers whose re-posts fail in the order they were posted, ahead of the rest. Move its unique fresh-command-ID assertion to that multiple-failure test; otherwise this simple fixture detects no additional failure.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | holds a stale queued send at the front instead of re-posting it, the queue behind it
+Contract/failure: holds a stale queued send at the front instead of re-posting it, the queue behind it. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | brings back a queue its page showed less than ten minutes ago as it was, to go out by itself
+Contract/failure: brings back a queue its page showed less than ten minutes ago as it was, to go out by itself. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | holds a queue its page last showed more than ten minutes ago, in order, under its commandIds — nothing goes out by itself
+Contract/failure: holds a queue its page last showed more than ten minutes ago, in order, under its commandIds — nothing goes out by itself. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | measures that absence from when the page last showed the queue, never from when a message was queued
+Contract/failure: measures that absence from when the page last showed the queue, never from when a message was queued. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | stamps the queue as last shown when the page is hidden
+Contract/failure: stamps the queue as last shown when the page is hidden. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | does not move that stamp at a teardown while the page is hidden
+Contract/failure: does not move that stamp at a teardown while the page is hidden. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | stamps the queue as last shown on pagehide
+Contract/failure: stamps the queue as last shown on pagehide. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | lets a queue kept in the page go on by itself when its thread comes back within ten minutes
+Contract/failure: lets a queue kept in the page go on by itself when its thread comes back within ten minutes. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | holds a queue kept in the page when its thread comes back more than ten minutes later
+Contract/failure: holds a queue kept in the page when its thread comes back more than ten minutes later. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | holds a queued send that fails with no live generation at the front of the kept queue, reason and all — the next generation shows it there
+Contract/failure: holds a queued send that fails with no live generation at the front of the kept queue, reason and all — the next generation shows it there. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | brings a message held before the reload back held, with the reason it waits
+Contract/failure: brings a message held before the reload back held, with the reason it waits. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | re-posts a thread's in-flight leftovers one at a time, in the order they were posted — a composer send among them
+Contract/failure: re-posts a thread's in-flight leftovers one at a time, in the order they were posted — a composer send among them. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+REWRITE | holds the in-flight leftovers whose re-posts fail in the order they were posted, ahead of the rest
+Contract/failure and correction: Absorb the deleted simpler replay failure test's command-ID-renewal assertion for both refused posts. Fresh IDs avoid replaying the daemon's cached rejection on Send now.
+Bars 1–6: file source + named scenario + common six-bar justification above. Remaining stronger owner: none for this exact scenario; this is its retained owner.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | never holds a failed re-post behind a waiting message once the user has sent the one held before it
+Contract/failure: never holds a failed re-post behind a waiting message once the user has sent the one held before it. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | holds a failed re-post ahead of messages queued after it, even ones held because nobody saw them
+Contract/failure: holds a failed re-post ahead of messages queued after it, even ones held because nobody saw them. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | keeps the order of consecutive failures that land with no live generation
+Contract/failure: keeps the order of consecutive failures that land with no live generation. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | never leaves a thread reading Sending when giving a refused re-post back throws — and still re-posts the rest
+Contract/failure: never leaves a thread reading Sending when giving a refused re-post back throws — and still re-posts the rest. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | opens the thread's stream even when giving a stale send back throws: the outbox is a safety net, never a failure
+Contract/failure: opens the thread's stream even when giving a stale send back throws: the outbox is a safety net, never a failure. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | does not trust a kept queue whose last write failed: the retained snapshot has what came after
+Contract/failure: does not trust a kept queue whose last write failed: the retained snapshot has what came after. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | takes a held message only the kept queue has into the snapshot's queue after a failed write
+Contract/failure: takes a held message only the kept queue has into the snapshot's queue after a failed write. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+FILE packages/ui/src/lib/agent-chat/store.retention.test.ts
+Independent requirement: GUI design §7.2 retained snapshot requirements: 5-minute idle TTL, immediate paint, sequence resume, per-generation ownership, transient-error removal, held queue/disclosures.
+
+KEEP | paints the retained state on remount and resumes with after=<seq>
+Contract/failure: paints the retained state on remount and resumes with after=<seq>. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | does a full load once the idle TTL has elapsed
+Contract/failure: does a full load once the idle TTL has elapsed. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | refuses a write from a generation a newer store has replaced
+Contract/failure: refuses a write from a generation a newer store has replaced. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | keeps the held queue and disclosure state on remount
+Contract/failure: keeps the held queue and disclosure state on remount. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | never paints a retained error banner
+Contract/failure: never paints a retained error banner. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+FILE packages/ui/src/lib/agent-chat/store.history.test.ts
+Independent requirement: Indexed-history design §C History page / Client and fold-performance design Client history bridge: public paging/reveal, 25-page reveal budget, five-page load budget, cap resnapshot, contiguous stream and rewind handling.
+
+KEEP | pages by the oldest page's cursor and keeps the pages oldest first
+Contract/failure: pages by the oldest page's cursor and keeps the pages oldest first. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | shares one request between overlapping loads
+Contract/failure: shares one request between overlapping loads. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | asks nothing when the snapshot offers nothing older
+Contract/failure: asks nothing when the snapshot offers nothing older. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | recovers from a transport that throws before it answers, and can page again
+Contract/failure: recovers from a transport that throws before it answers, and can page again. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | discards a page that lands after the snapshot it was asked against was replaced
+Contract/failure: discards a page that lands after the snapshot it was asked against was replaced. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | renders a call once, at the page's position, with the window's completion
+Contract/failure: renders a call once, at the page's position, with the window's completion. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | renders a task once, at the page's position, with the window's completion
+Contract/failure: renders a task once, at the page's position, with the window's completion. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | gates history rewinds by its position, not wholesale
+Contract/failure: gates history rewinds by its position, not wholesale. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | rewinds to a prompt only a page holds, and hands it back once it is gone
+Contract/failure: rewinds to a prompt only a page holds, and hands it back once it is gone. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+REWRITE | scrolls to a turn the window already holds, without a request
+Contract/failure and correction: Assert requested turn and visible row identity while treating reveal nonce as opaque rather than requiring the first counter value to be 1.
+Bars 1–6: file source + named scenario + common six-bar justification above. Remaining stronger owner: none for this exact scenario; this is its retained owner.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | loads older pages until the turn is on screen, then reveals it
+Contract/failure: loads older pages until the turn is on screen, then reveals it. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | pages on past a page that lists the turn but shows none of it — a subagent's late row alone
+Contract/failure: pages on past a page that lists the turn but shows none of it — a subagent's late row alone. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | gives up at once on a turn the thread no longer has
+Contract/failure: gives up at once on a turn the thread no longer has. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | gives up after 25 pages
+Contract/failure: gives up after 25 pages. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | waits for the thread to synchronize before looking
+Contract/failure: waits for the thread to synchronize before looking. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | drops an unhandled reveal whose row a new snapshot no longer has
+Contract/failure: drops an unhandled reveal whose row a new snapshot no longer has. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+REWRITE | clears the reveal only for the nonce the timeline handled
+Contract/failure and correction: Use two real reveals: acknowledge the older token and prove the newer request survives, then acknowledge the current token. Removes invented token 99/1 assumptions while keeping stale-ack race coverage.
+Bars 1–6: file source + named scenario + common six-bar justification above. Remaining stronger owner: none for this exact scenario; this is its retained owner.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | brings a thread back with its pages, and never with a dead request's spinner
+Contract/failure: brings a thread back with its pages, and never with a dead request's spinner. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | keeps pages, bridge and window ONE contiguous stretch while retention trims under them — nothing lost, nothing twice, in order
+Contract/failure: keeps pages, bridge and window ONE contiguous stretch while retention trims under them — nothing lost, nothing twice, in order. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | renders the rows the first page repeats from the window ONCE — at the page's place, with the newest content — before and after the window evicts them to the bridge
+Contract/failure: renders the rows the first page repeats from the window ONCE — at the page's place, with the newest content — before and after the window evicts them to the bridge. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | drops pages and bridge once the bridge no longer fits beside the newest page, and reads fresh bounds — the stream stays live
+Contract/failure: drops pages and bridge once the bridge no longer fits beside the newest page, and reads fresh bounds — the stream stays live. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | refuses a re-read older than what the stream has folded since, and the next load asks without a cursor
+Contract/failure: refuses a re-read older than what the stream has folded since, and the next load asks without a cursor. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | drops pages AND bridge for a rewind that removes a bridge row's turn, and keeps both for one confined to the window
+Contract/failure: drops pages AND bridge for a rewind that removes a bridge row's turn, and keeps both for one confined to the window. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | reveals a turn only the bridge still shows, without loading a page
+Contract/failure: reveals a turn only the bridge still shows, without loading a page. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | keeps what the window evicts while the FIRST page is on its way, and joins it to the page once it lands
+Contract/failure: keeps what the window evicts while the FIRST page is on its way, and joins it to the page once it lands. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | lets that bridge go when the first page fails, and the retry asks without the snapshot's cursor
+Contract/failure: lets that bridge go when the first page fails, and the retry asks without the snapshot's cursor. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | drops pages, bridge and cut on a new snapshot
+Contract/failure: drops pages, bridge and cut on a new snapshot. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | brings the bridge back with its pages on a remount — and a first page's orphan bridge never
+Contract/failure: brings the bridge back with its pages on a remount — and a first page's orphan bridge never. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | offers 'Load older' as soon as the window evicts a row, though the snapshot said nothing was older — and asks without a cursor
+Contract/failure: offers 'Load older' as soon as the window evicts a row, though the snapshot said nothing was older — and asks without a cursor. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | renders the window's old prompts and answers in log order above a page — with no bridge yet
+Contract/failure: renders the window's old prompts and answers in log order above a page — with no bridge yet. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | renders the window's older rows above a page that shares NONE of them — a prompt, an agent's launch, a compaction marker — in log order
+Contract/failure: renders the window's older rows above a page that shares NONE of them — a prompt, an agent's launch, a compaction marker — in log order. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | asks for the next page while a page shows nothing the timeline did not, and stops at the first that shows an older row — busy throughout
+Contract/failure: asks for the next page while a page shows nothing the timeline did not, and stops at the first that shows an older row — busy throughout. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | loads at most five pages in one click, and the next click goes on below the oldest
+Contract/failure: loads at most five pages in one click, and the next click goes on below the oldest. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | stops at a page that reaches the thread's start, and at a failed one — keeping what landed
+Contract/failure: stops at a page that reaches the thread's start, and at a failed one — keeping what landed. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | keeps a running turn live across history eviction, then settles it
+Contract/failure: keeps a running turn live across history eviction, then settles it. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+FILE packages/ui/src/lib/agent-chat/history.logic.test.ts
+Independent requirement: Indexed-history wire types and design §C; fold-performance Client history bridge; GUI quiet parent timeline / streaming rules; goals design §8.4 turn-owned goal landmarks.
+
+KEEP | offers nothing for a malformed bounds block rather than a broken button
+Contract/failure: offers nothing for a malformed bounds block rather than a broken button. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | lists every page's items once, oldest page first — the newest page's copy of anything but a message
+Contract/failure: lists every page's items once, oldest page first — the newest page's copy of anything but a message. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | keeps the LONGER text of a message two pages share — never a concatenation
+Contract/failure: keeps the LONGER text of a message two pages share — never a concatenation. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | renders a stable-id row the bridge received twice at its first place, with its last content
+Contract/failure: renders a stable-id row the bridge received twice at its first place, with its last content. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | hands over a denial that closes a call a page began, so its start never renders running in the history
+Contract/failure: hands over a denial that closes a call a page began, so its start never renders running in the history. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | hands over the later rows of a task whose launch row lies before the cut
+Contract/failure: hands over the later rows of a task whose launch row lies before the cut. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | keeps a spawn batch whole when the cut falls between its launch rows
+Contract/failure: keeps a spawn batch whole when the cut falls between its launch rows. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | drops them for a bridge prompt whose turn the rewind removes — a prompt carries no turn id
+Contract/failure: drops them for a bridge prompt whose turn the rewind removes — a prompt carries no turn id. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | drops them for a turn-less prompt a page shows that no kept turn claims — the fold's fallback may drop it
+Contract/failure: drops them for a turn-less prompt a page shows that no kept turn claims — the fold's fallback may drop it. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | drops them for such a prompt on the bridge too
+Contract/failure: drops them for such a prompt on the bridge too. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | keeps them for a page's prompt a kept turn claims, and for a subagent's turn-less words
+Contract/failure: keeps them for a page's prompt a kept turn claims, and for a subagent's turn-less words. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | notes nothing when the window only dropped rows the parent timeline never showed
+Contract/failure: notes nothing when the window only dropped rows the parent timeline never showed. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | keeps only the rows the parent timeline renders — an agent's own rows live in its drill-in
+Contract/failure: keeps only the rows the parent timeline renders — an agent's own rows live in its drill-in. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | recounts the cut when a rewind confined to the window removes a row before it
+Contract/failure: recounts the cut when a rewind confined to the window removes a row before it. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | takes whichever rule reaches further, and falls back when the window no longer holds that row
+Contract/failure: takes whichever rule reaches further, and falls back when the window no longer holds that row. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | reads the page's end field-wise — a string or null as sent, anything else as absent
+Contract/failure: reads the page's end field-wise — a string or null as sent, anything else as absent. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | drops the OLDEST pages first, and 'load older' then asks for exactly the block that went
+Contract/failure: drops the OLDEST pages first, and 'load older' then asks for exactly the block that went. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | never drops the newest page on its own: past the cap with it, everything goes and fresh bounds are asked for
+Revised after final owner review: this fixture starts with multiple pages, evicts the oldest, and STILL exceeds the cap. The store test starts with one page; it cannot detect incorrectly stopping cap enforcement after one eviction. Bars 1–6: independent fold-performance cap requirement; user-visible unbounded retained history; literal 20,000 cap and input sizes; public cap transformation seam; no private algorithm/counter assertions; unique post-eviction still-over-cap condition. Non-test caller: store.ts applyStreamFrames. Risk: retain this genuine resource-bound regression. Validation: focused command above.
+
+KEEP | drops everything when the bridge alone passes the cap
+Contract/failure: drops everything when the bridge alone passes the cap. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+DELETE | counts a turn whose rows or whose prompt the window holds, never a subagent's
+Reason / stronger remaining coverage: Duplicates public reveal workflows in store.history.test.ts: scrolls to a turn the window already holds; pages on past a page that lists the turn but shows none of it; reveals a turn only the bridge still shows. These exercise parent prompt, work, and child-only exclusion through actual navigation. liveTurnIdsOf retains store production callers.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | a goal marker is a row its turn owns (goals §8.4)
+Contract/failure: a goal marker is a row its turn owns (goals §8.4). Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | drops an old Claude log's re-emitted copy from the history rows when the store asks
+Contract/failure: drops an old Claude log's re-emitted copy from the history rows when the store asks. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | keeps a turn's work in log order across a page boundary
+Contract/failure: keeps a turn's work in log order across a page boundary. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | a running turn's answer up here still streams
+Contract/failure: a running turn's answer up here still streams. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | is withheld where the index and the fold disagree about the turn's place
+Contract/failure: is withheld where the index and the fold disagree about the turn's place. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+DELETE | is withheld on a prompt whose turn the page does not list
+Reason / stronger remaining coverage: Duplicate of history.logic.test.ts / offers rewind on a prompt that came through the bridge by the fold's own numbering; a page prompt stays gated. That combined fixture already asserts u2 remains visible with no rewind when the page does not list its turn.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | is withheld on every page once the live window holds a settled compaction
+Contract/failure: is withheld on every page once the live window holds a settled compaction. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | reads a turn listed on two pages by the newest page's copy
+Contract/failure: reads a turn listed on two pages by the newest page's copy. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | offers rewind on a prompt that came through the bridge by the fold's own numbering; a page prompt stays gated
+Contract/failure: offers rewind on a prompt that came through the bridge by the fold's own numbering; a page prompt stays gated. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | anchors a spawn row on the window's launch row, not on a progress row the bridge got after it
+Contract/failure: anchors a spawn row on the window's launch row, not on a progress row the bridge got after it. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+KEEP | this client's fold evicted rows since that snapshot — any row, an agent's included
+Contract/failure: this client's fold evicted rows since that snapshot — any row, an agent's included. Bars 1–6: file source and common six-bar justification above; this named protocol/lifecycle/input condition is the unique retained scenario at this seam. Remaining stronger owner: none covering the same complete condition.
+Risk: low deletion risk; preserve the named data/state/protocol guarantee. Validation: focused command above.
+
+Initial pre-edit totals: {'KEEP': 136, 'REWRITE': 5, 'DELETE': 5}
+Final disposition after duplicate-owner review: {'KEEP': 137, 'REWRITE': 5, 'DELETE': 4}
+
+Execution results: final focused run PASSED (12 selected tests passed, 125 intentionally skipped by name filter, 0 failures/cancellations; exit 0). Broader six-file runs were deliberately stopped without observed failures because each isolated store generation costs approximately 20–25 seconds under concurrent repository checks. The final focused run adds --test-name-pattern for all five rewritten cases and every stronger owner cited for deletion; root-owned full gates remain required. No result from an interrupted run is claimed as a completed pass.
+
+Final focused name pattern: reads a message.s liveness|does not re-post a send older|holds the in-flight leftovers|scrolls to a turn the window|clears the reveal only|pages on past a page|reveals a turn only|offers rewind on a prompt|never drops the newest page|drops pages and bridge once|sends exactly one queued|keeps the order of consecutive
+
+Additional observed individual successes in /tmp/ui-chat-store-tests.tap before its later interruption: all three store.fixwave.test.ts plan cases (truncated full-plan read, intact no-read, failed/missing-plan refusal) passed. These unchanged cases are also stronger owners for sibling plan-wrapper deletions; this is an individual-case result, not a claim that the interrupted six-file command completed.
+
+Final scoped git diff --check passed. Final diff reviewed: 4 tests deleted, 5 existing tests rewritten, 137 kept; 48 net test lines removed. No production changes, dead fixtures or test-only production seams removed; only the now-unused liveTurnIdsOf test import and empty suite were removed. Repository gates/commit/merge/push are delegated to the root coordinator, not claimed here.

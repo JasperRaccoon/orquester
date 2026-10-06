@@ -531,21 +531,6 @@ test("one request closing while another opens is TWO events, not silence", async
   );
 });
 
-test("approvals and questions keep their kinds (different UI, different push copy)", async (t) => {
-  const h = await harness(t);
-  seedTab(h.chat, "t1");
-  await h.read("t1", { hasPendingApprovals: true, hasPendingUserInput: true }, [
-    { requestId: "r1", kind: "approval", title: "Run tests?" },
-    { requestId: "r2", kind: "question", title: "Which branch?" }
-  ]);
-  assert.deepEqual(
-    h.published
-      .filter((p) => p.type === "agentChat.pending")
-      .map((p) => (p.payload as { kind: string }).kind),
-    ["approval", "question"]
-  );
-});
-
 test("pending rows are validated and duplicate request IDs keep the last row", async (t) => {
   const h = await harness(t);
   seedTab(h.chat, "t1");

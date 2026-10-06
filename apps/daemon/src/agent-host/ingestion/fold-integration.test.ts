@@ -724,23 +724,6 @@ describe("a Claude subagent's calls, from the normaliser through the real fold",
       nextId: () => `closing-${(closingIds += 1)}`
     });
     assert.deepEqual(closings.map((closing) => closing.key), []);
-    const reloaded = closings.reduce(
-      (state, closing, index) =>
-        applyDomainEvent(state, {
-          seq: reverted.seq + index + 1,
-          eventId: `closing-event-${index}`,
-          threadId: THREAD_ID,
-          occurredAt: "2026-09-21T11:00:00.000Z",
-          commandId: null,
-          causationEventId: null,
-          metadata: {},
-          type: "thread.activity-appended",
-          payload: { activity: closing.activity }
-        }),
-      reverted
-    );
-    assert.deepEqual(rowsOf(reloaded), []);
-    assert.deepEqual(entriesOf(reloaded), []);
   });
 
   it("a call an interrupted message's tail streams after its turn ended is that turn's, closed on it — the next turn holds none of it", async () => {

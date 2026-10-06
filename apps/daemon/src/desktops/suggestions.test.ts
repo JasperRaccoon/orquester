@@ -4,7 +4,6 @@ import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  MAX_PROJECT_EXECUTABLES,
   findProjectExecutables,
   parseDesktopEntry,
   scanDesktopEntries,
@@ -103,8 +102,8 @@ test("project executables: root, bin/ and build/**/bin/ up to depth 4", async (t
 test("project executables are capped", async (t) => {
   const project = await mkdtemp(join(tmpdir(), "orq-desktop-cap-"));
   t.after(() => rm(project, { recursive: true, force: true }));
-  for (let i = 0; i < MAX_PROJECT_EXECUTABLES + 10; i += 1) {
+  for (let i = 0; i < 60; i += 1) {
     await writeFile(join(project, `x${String(i).padStart(3, "0")}`), "", { mode: 0o755 });
   }
-  assert.equal((await findProjectExecutables(project)).length, MAX_PROJECT_EXECUTABLES);
+  assert.equal((await findProjectExecutables(project)).length, 50);
 });

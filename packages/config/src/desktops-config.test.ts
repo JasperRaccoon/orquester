@@ -1,9 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  DESKTOP_DEFAULT_RENDER_THREADS,
-  DESKTOP_MAX_RECENT_LAUNCHES,
-  createDefaultDesktopsFile,
   desktopRuntimeDir,
   desktopsIndexPath,
   desktopsRuntimeDir,
@@ -41,7 +38,7 @@ test("defaults are applied to desktop and app records", () => {
   assert.equal(record.order, 0);
   assert.equal(record.display, null);
   assert.deepEqual(record.size, { width: 1280, height: 800 });
-  assert.equal(record.renderThreads, DESKTOP_DEFAULT_RENDER_THREADS);
+  assert.equal(record.renderThreads, 4);
   assert.equal(record.socketDir, null);
   const [launched] = record.apps;
   assert.deepEqual(launched.env, {});
@@ -50,7 +47,7 @@ test("defaults are applied to desktop and app records", () => {
   assert.equal(launched.exitedAt, null);
   // A missing status is not trusted as running.
   assert.equal(launched.status, "exited");
-  assert.deepEqual(parseDesktopsFile({}), createDefaultDesktopsFile());
+  assert.deepEqual(parseDesktopsFile({}), { version: 1, desktops: [], recent: {}, recentRejected: {}, rejected: [], extra: {} });
 });
 
 test("unknown record fields and top-level keys survive a parse/serialise round trip", () => {
@@ -101,7 +98,7 @@ test("size is clamped to the display bounds", () => {
 });
 
 test("recent launches are capped per project; unreadable entries are set aside, not used", () => {
-  const launches = Array.from({ length: DESKTOP_MAX_RECENT_LAUNCHES + 5 }, (_, i) => ({
+  const launches = Array.from({ length: 25 }, (_, i) => ({
     command: `app-${i}`,
     cwd: "/ws/acme/game",
     lastUsedAt: "2026-09-30T10:00:00.000Z"
@@ -112,7 +109,7 @@ test("recent launches are capped per project; unreadable entries are set aside, 
     recent: { "/ws/acme/game": [{ command: 5 }, ...launches], "/ws/acme/other": "nope" }
   });
   const recent = file.recent["/ws/acme/game"];
-  assert.equal(recent.length, DESKTOP_MAX_RECENT_LAUNCHES);
+  assert.equal(recent.length, 20);
   assert.equal(recent[0].command, "app-0");
   assert.deepEqual(recent[0].env, {});
   assert.equal(file.recent["/ws/acme/other"], undefined);

@@ -7,8 +7,7 @@
  * so a replay test asserts the normalised `RuntimeEvent` sequence against
  * reality rather than against the design's guesses.
  *
- * It lives beside the source (not under `test/`) because the smoke script uses
- * the same deterministic clock and id generator.
+ * Shared by the adapter replay and lifecycle tests.
  */
 
 import { readFileSync } from "node:fs";
@@ -19,9 +18,7 @@ import type { RuntimeEvent } from "@orquester/api/agent-chat";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 
 import type { Clock, IdGen } from "../../adapter.ts";
-import { classifyRequestType, summarizeToolRequest, trimmedString } from "./classify.ts";
-import { claudeCanUseToolRoute, claudeRequestKey } from "./decisions.ts";
-import { ClaudeNormalizer, extractExitPlanModePlan } from "./normalize.ts";
+import { ClaudeNormalizer } from "./normalize.ts";
 
 export const CLAUDE_FIXTURES_DIR = nodePath.resolve(
   nodePath.dirname(fileURLToPath(import.meta.url)),
@@ -67,8 +64,8 @@ interface ReplayResult {
 
 /**
  * Replay one capture. `input` lines open a turn (the harness stamps the turn
- * id as the message uuid, exactly as `sendTurn` does), `canUseTool` lines open
- * an approval or a proposed plan, and `canUseToolResult` lines resolve it.
+ * id as the message uuid, exactly as `sendTurn` does). SDK callbacks are
+ * exercised through the real session in lifecycle.test.ts.
  */
 export function replayClaudeFixture(name: string): ReplayResult {
   const lines = readClaudeFixture(name);
@@ -78,10 +75,6 @@ export function replayClaudeFixture(name: string): ReplayResult {
     ids: countingIds()
   });
   const events: RuntimeEvent[] = [];
-  let pendingRequest:
-    | { requestId: string; toolName: string; toolUseId?: string }
-    | undefined;
-  let requestSeq = 0;
 
   for (const line of lines) {
     switch (line.kind) {
@@ -95,87 +88,8 @@ export function replayClaudeFixture(name: string): ReplayResult {
         events.push(...normalizer.handleMessage(line.data as SDKMessage));
         break;
       }
-      case "canUseTool": {
-        const data = line.data as {
-          toolName?: unknown;
-          input?: unknown;
-          options?: { toolUseID?: unknown; requestId?: unknown; description?: unknown };
-        };
-        const toolName = typeof data.toolName === "string" ? data.toolName : "unknown";
-        const toolInput =
-          data.input !== null && typeof data.input === "object"
-            ? (data.input as Record<string, unknown>)
-            : {};
-        // Both the key and the branch come from the SAME functions the live
-        // session uses, so a replay exercises the adapter's own routing rather
-        // than a copy of it in the harness.
-        const requestId = claudeRequestKey(
-          typeof data.options?.requestId === "string" ? data.options.requestId : undefined,
-          () => `req-${(requestSeq += 1)}`
-        );
-        const toolUseId = trimmedString(data.options?.toolUseID);
-        const route = claudeCanUseToolRoute(toolName);
-        if (route === "proposed-plan") {
-          const plan = extractExitPlanModePlan(toolInput);
-          if (plan) {
-            events.push(
-              ...normalizer.proposedPlanCompleted({
-                planMarkdown: plan.planMarkdown,
-                ...(toolUseId !== undefined ? { toolUseId } : {}),
-                ...(plan.planFilePath !== undefined ? { planFilePath: plan.planFilePath } : {}),
-                source: "claude.sdk.permission",
-                method: "canUseTool/ExitPlanMode",
-                payload: { toolName, input: toolInput }
-              })
-            );
-          }
-          pendingRequest = undefined;
-          break;
-        }
-        events.push(
-          normalizer.requestOpened({
-            requestId,
-            requestType: classifyRequestType(toolName),
-            detail: trimmedString(data.options?.description) ?? summarizeToolRequest(toolName, toolInput),
-            toolName,
-            toolInput,
-            ...(toolUseId !== undefined ? { toolUseId } : {})
-          })
-        );
-        pendingRequest = {
-          requestId,
-          toolName,
-          ...(toolUseId !== undefined ? { toolUseId } : {})
-        };
-        break;
-      }
-      case "canUseToolResult": {
-        if (!pendingRequest) {
-          break;
-        }
-        const data = line.data as { result?: { behavior?: unknown } };
-        const behavior = data.result?.behavior;
-        const decision =
-          behavior === "allow"
-            ? ((data.result as { updatedPermissions?: unknown }).updatedPermissions !== undefined
-                ? ("acceptForSession" as const)
-                : ("accept" as const))
-            : ((data.result as { message?: unknown }).message === "User cancelled tool execution."
-                ? ("cancel" as const)
-                : ("decline" as const));
-        events.push(
-          normalizer.requestResolved({
-            requestId: pendingRequest.requestId,
-            requestType: classifyRequestType(pendingRequest.toolName),
-            decision,
-            ...(pendingRequest.toolUseId !== undefined
-              ? { toolUseId: pendingRequest.toolUseId }
-              : {})
-          })
-        );
-        pendingRequest = undefined;
-        break;
-      }
+      case "canUseTool":
+      case "canUseToolResult":
       case "control":
       case "note":
         break;

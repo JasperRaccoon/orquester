@@ -1,0 +1,454 @@
+Composer test audit — decisions recorded BEFORE edits.
+Scope: packages/ui/src/components/agent-chat/composer/*.test.ts and composer-send-render.check.ts.
+Read root AGENTS.md/README.md, packages/ui/package.json, all scoped tests and their production owners; reviewed GUI/goals specs and store.reload stronger ownership.
+Sources: docs/superpowers/specs/2026-09-21-agent-chat-gui-design.md and docs/superpowers/specs/2026-09-24-agent-goals-design.md; public packages/api agent-chat types; AGENTS.md.
+Isolated failure inventories below were established before deciding retention.
+Validation V1: cd packages/ui && node --import tsx --import ../../scripts/test/assert-ok.mjs --import ./test/svg-loader.mjs --import ../../scripts/test/quiet-mock-timers.mjs --test --test-concurrency=2 src/components/agent-chat/composer/*.test.ts
+Validation V2: same imports, execute src/components/agent-chat/composer/composer-send-render.check.ts (without --test).
+Root agent owns repository typecheck/test/build gates.
+
+packages/ui/src/components/agent-chat/composer/composer-bridge.test.ts
+Independent source (bar 1): GUI §7.4 inter-surface insertion and credible stale-effect cleanup race.
+Failure inventory / user consequence (bar 2): A stale component cleanup disconnects the currently mounted composer; delivered text silently disappears.
+Stable production seam and non-test callers (bar 4): registerComposerHandle/insertComposerText, called by ChatComposer and composer inbox/rail consumers.
+Independent oracle (bar 3): expected literals, public payload examples, persisted values, or specified state decisions; no expected result is computed by the function under test.
+Refactor tolerance (bar 5): assertions compare externally consumed data/actions, not source text, classes, private helper counts, or traversal. Internal algorithms may change while the contract stays fixed.
+Lowest owner / stronger coverage (bar 6): retained names below isolate the named boundary and failure condition at its lowest existing production seam. Store/daemon tests do not own composer interpretation; any proven duplicate is explicitly deleted below.
+Risk: low; no production behavior changes. Validation: V1.
+KEEP: a stale unregister cannot drop the handle that replaced it
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+
+packages/ui/src/components/agent-chat/composer/composer-draft.test.ts
+Independent source (bar 1): GUI §7.4 unsent draft persistence and returned-message preservation; API AttachmentRef/ComposerDraft storage contract.
+Failure inventory / user consequence (bar 2): Reload loses text/files/context, creates duplicate image markers, drops attachments beyond the send cap, loses rejected file paths, or resurrects a sent draft from a delayed write.
+Stable production seam and non-test callers (bar 4): composerDraftToPersist/loadComposerDraft/draftAfterReturn/persistedDraftAfterReturn/createDraftPersistScheduler, called by ChatComposer and store draft restore.
+Independent oracle (bar 3): expected literals, public payload examples, persisted values, or specified state decisions; no expected result is computed by the function under test.
+Refactor tolerance (bar 5): assertions compare externally consumed data/actions, not source text, classes, private helper counts, or traversal. Internal algorithms may change while the contract stays fixed.
+Lowest owner / stronger coverage (bar 6): retained names below isolate the named boundary and failure condition at its lowest existing production seam. Store/daemon tests do not own composer interpretation; any proven duplicate is explicitly deleted below.
+Risk: low; no production behavior changes. Validation: V1.
+KEEP: builds the persisted shape from text, uploaded refs and the carried context
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: re-stages every uploaded attachment as a ready chip and keeps the text verbatim
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: keeps every file a restore wrote, over the eight, de-duplicated — the send gate holds the rest
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a file a bound still refuses leaves the message as its chip's X would take it, and is handed back for its path
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: merges behind the persisted draft, keeping every file and its context
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: writes a returned file a bound refuses into the text as its path, so no later mount drops a file
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: flushes synchronously, so an unmount or a reload keeps the tail
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: writes a clear immediately and drops anything the debounce still held
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+
+packages/ui/src/components/agent-chat/composer/composer-failed-send.test.ts
+Independent source (bar 1): GUI §7.4 failed-send ownership across project switches.
+Failure inventory / user consequence (bar 2): Failed text/images return to another thread, overwrite a live draft behind its owner, disappear after unmount, or generated commands contaminate an unsent draft. Callback spies measure recipient delivery only; real restoration/persistence owns the data assertions.
+Stable production seam and non-test callers (bar 4): restoreFailedSendDraft plus real updateThreadDraft/localStorage and public composer bridge; called by ChatComposer.
+Independent oracle (bar 3): expected literals, public payload examples, persisted values, or specified state decisions; no expected result is computed by the function under test.
+Refactor tolerance (bar 5): assertions compare externally consumed data/actions, not source text, classes, private helper counts, or traversal. Internal algorithms may change while the contract stays fixed.
+Lowest owner / stronger coverage (bar 6): retained names below isolate the named boundary and failure condition at its lowest existing production seam. Store/daemon tests do not own composer interpretation; any proven duplicate is explicitly deleted below.
+Risk: low; no production behavior changes. Validation: V1.
+KEEP: handed another thread while it was in flight: into its own thread's persisted draft, never the one on screen
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: unmounted by a project switch: into its own thread's persisted draft, where the next mount loads it
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: still showing its thread: into the live draft, as always, and nothing is written behind it
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: its tab open again in another composer: into that composer's live draft, never behind its back
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a composer that no longer shows the thread refuses it, and the persisted draft takes it
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a send that gives nothing back writes no draft: a refusal, a failed Implement
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+
+packages/ui/src/components/agent-chat/composer/composer-files.test.ts
+Independent source (bar 1): GUI §7.4 attachment path insertion/removal and literal filesystem path semantics.
+Failure inventory / user consequence (bar 2): Removing a chip leaves its path, removes a repeated user-authored occurrence, or interprets filename punctuation as a regexp and deletes unrelated text.
+Stable production seam and non-test callers (bar 4): removeFilePath, called by ChatComposer removal and returned-draft handling.
+Independent oracle (bar 3): expected literals, public payload examples, persisted values, or specified state decisions; no expected result is computed by the function under test.
+Refactor tolerance (bar 5): assertions compare externally consumed data/actions, not source text, classes, private helper counts, or traversal. Internal algorithms may change while the contract stays fixed.
+Lowest owner / stronger coverage (bar 6): retained names below isolate the named boundary and failure condition at its lowest existing production seam. Store/daemon tests do not own composer interpretation; any proven duplicate is explicitly deleted below.
+Risk: low; no production behavior changes. Validation: V1.
+KEEP: removing a file drops its path and one adjacent space
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: removes exactly one occurrence, so a path the user repeated stays
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: treats the path literally: metacharacters in a name never widen the match
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+
+packages/ui/src/components/agent-chat/composer/composer-images.test.ts
+Independent source (bar 1): GUI §7.4 numbered image references and thumbnail lifecycle; Blob URL resource lifecycle.
+Failure inventory / user consequence (bar 2): Image references point to the wrong attachment, removed images retain stale numbering, Blob URLs leak or unrelated previews are revoked, or failed-send chips retain dead preview URLs. Blob revocation is verified through real fetch, not a mocked revoke spy.
+Stable production seam and non-test callers (bar 4): imageOrdinal/imagePlaceholder/removeImagePlaceholder/revokeImagePreviews/withoutPreviews, called by ChatComposer and mergeMessageIntoDraft.
+Independent oracle (bar 3): expected literals, public payload examples, persisted values, or specified state decisions; no expected result is computed by the function under test.
+Refactor tolerance (bar 5): assertions compare externally consumed data/actions, not source text, classes, private helper counts, or traversal. Internal algorithms may change while the contract stays fixed.
+Lowest owner / stronger coverage (bar 6): retained names below isolate the named boundary and failure condition at its lowest existing production seam. Store/daemon tests do not own composer interpretation; any proven duplicate is explicitly deleted below.
+Risk: low; no production behavior changes. Validation: V1.
+KEEP: numbers images by position among images only
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: removing an image drops its placeholder and renumbers the later ones
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: releases every staged preview without revoking an unrelated image
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: hands chips back without their revoked preview URLs, and the rest untouched
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+
+packages/ui/src/components/agent-chat/composer/composer-menu.test.ts
+Independent source (bar 1): GUI §§4.6.4–4.6.8 command/skill selection contract; goals §8.5 host /goal menu behavior.
+Failure inventory / user consequence (bar 2): Users can select disabled/noninvocable skills, duplicate or invalid-position commands, destructive compaction with draft content, wrong command text/actions, or provider permission changes that desynchronize host mode. Each named case specifies a distinct availability, insertion, dispatch, or ranking condition.
+Stable production seam and non-test callers (bar 4): buildSlashMenuItems/buildSkillMenuItems/compactCommandAvailable/menuItemReplacement/menuItemAction/blockedProviderCommandMessage, called by ChatComposer and ComposerTokenMenu.
+Independent oracle (bar 3): expected literals, public payload examples, persisted values, or specified state decisions; no expected result is computed by the function under test.
+Refactor tolerance (bar 5): assertions compare externally consumed data/actions, not source text, classes, private helper counts, or traversal. Internal algorithms may change while the contract stays fixed.
+Lowest owner / stronger coverage (bar 6): retained names below isolate the named boundary and failure condition at its lowest existing production seam. Store/daemon tests do not own composer interpretation; any proven duplicate is explicitly deleted below.
+Risk: low; no production behavior changes. Validation: V1.
+KEEP: a disabled skill is never offered, and userInvocable:false hides one
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: userInvocationOnly does not hide a skill — it is the reason to show it
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the slash-menu skill setting is honoured; the $ menu ignores it
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a skill that is also advertised as a command is listed once, as the skill
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: away from offset 0 provider commands are dropped; host commands and skills stay
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: /plan and /default appear only where the plan toggle is shown
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: /effort appears only when the selected model has a reasoning descriptor
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: /compact is hidden until its full precondition list holds
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the compact precondition rejects a non-empty draft or any attachment
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a name match outranks a description match
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: insertion: provider commands and skills insert text, host commands insert nothing
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: R2-2: a synthesised provider /effort never duplicates the host row
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: R2-5: Grok's /always-approve is refused with a pointer at the mode chip
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: R2-5: the refusal is Grok-only and never fires on a lookalike
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: goals §8.5: a host-parsed /goal (Codex) joins the host commands, with its description and hint
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: goals §8.5: a provider adapter's own /goal entry is used unchanged
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: goals §8.5: the host row replaces a provider row of the same name — one /goal, never two
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: goals §8.5: picking /goal TYPES it — the host parses the sent text, so it must reach the draft
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: goals §8.5: /goal is offered only at the start of the prompt — the host recognises nothing else
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: goals §8.5: picking /goal ACTS on nothing — the insertion is the whole pick, nothing is sent
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+
+packages/ui/src/components/agent-chat/composer/composer-model.test.ts
+Independent source (bar 1): API ProviderModel/ModelSelection/ProviderOptionDescriptor contracts; GUI §§4.1/4.6.5/7.4 model and reasoning selectors.
+Failure inventory / user consequence (bar 2): A provider reasoning ID is ignored, boolean data is mistaken for a select, a vanished model leaves no selectable fallback, an option shows the wrong value, or model switches submit invalid options. Literal descriptors/selection results are independent protocol examples.
+Stable production seam and non-test callers (bar 4): findReasoningDescriptor/resolveSelectedModel/currentOptionValue/applyModelSelection/applyEffortArgument, called by ChatComposer and ComposerChips.
+Independent oracle (bar 3): expected literals, public payload examples, persisted values, or specified state decisions; no expected result is computed by the function under test.
+Refactor tolerance (bar 5): assertions compare externally consumed data/actions, not source text, classes, private helper counts, or traversal. Internal algorithms may change while the contract stays fixed.
+Lowest owner / stronger coverage (bar 6): retained names below isolate the named boundary and failure condition at its lowest existing production seam. Store/daemon tests do not own composer interpretation; any proven duplicate is explicitly deleted below.
+Risk: low; no production behavior changes. Validation: V1.
+KEEP: the reasoning descriptor is found under any of the four adapters' ids
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a boolean descriptor is never mistaken for the reasoning select
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the selected model falls back to the provider default, then to the first
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: an unset option reads the descriptor's default, then its currentValue
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: switching model drops options the new model does not advertise
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: an option whose value is no longer a valid choice is dropped too
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: /effort <id> matches by id or label and refuses anything else
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+
+packages/ui/src/components/agent-chat/composer/composer-outbox.test.ts
+Independent source (bar 1): GUI §7.4 tab reload outbox contract; AGENTS.md tolerant localStorage/bridge payload validation; persisted v1 byte shape.
+Failure inventory / user consequence (bar 2): Tab reload loses or duplicates pending work, cross-thread entries leak, settled work is replayed, queue writes erase in-flight work, cap eviction drops a posted message, failed storage writes are reported as saved, or malformed persisted fields destroy otherwise valid messages. Remaining store.reload coverage owns full send/queue lifecycle; retained tests isolate unique persisted byte/ownership/limit/error boundaries.
+Stable production seam and non-test callers (bar 4): composer-outbox public write/read/adopt APIs, called by store.ts; isolatedPage loads actual fresh modules without implementing outbox logic.
+Independent oracle (bar 3): expected literals, public payload examples, persisted values, or specified state decisions; no expected result is computed by the function under test.
+Refactor tolerance (bar 5): assertions compare externally consumed data/actions, not source text, classes, private helper counts, or traversal. Internal algorithms may change while the contract stays fixed.
+Lowest owner / stronger coverage (bar 6): retained names below isolate the named boundary and failure condition at its lowest existing production seam. Store/daemon tests do not own composer interpretation; any proven duplicate is explicitly deleted below.
+Risk: low; no production behavior changes. Validation: V1.
+KEEP: hands what this page is sending to the next page of the tab, once — never back to this page
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: hands a thread its own leftovers only, and leaves every other thread's for that thread
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: forgets a settled entry even while it is still stored under the page that left it
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: writes a queue over any stored copy of its messages, whichever page stored it
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: mirrors a thread's queue in order, keeping the send in flight and every other thread's queue
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: never drops a send in flight to stay under the cap — only messages still waiting, oldest first
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: holds a message at the front of a thread's kept queue, reason and all, and says whether it could
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+DELETE: holds a later failure behind the ones it follows, keeping their order
+  Reason: Duplicates store.reload.test.ts / keeps the order of consecutive failures that land with no live generation, which actually posts, destroys the store, rejects both posts, recreates the store, and observes ordered held messages. This lower test hand-supplies the behind set the real owner must derive. holdOutboxQueuedAtFront still serves store.ts.
+KEEP: says whether a queue write reached the storage
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: keeps a thread's last-shown stamp while it has queued messages, and forgets it with them
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: is fresh while the later of the queue's last showing and the message's queueing is within the bound
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: keeps every send in flight even past the cap: the bound only ever drops a waiting message
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: reads nothing out of a value that is not a v1 outbox
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: keeps the entries it can read, and drops each one it cannot
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: drops a malformed optional field, never the message it belongs to
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: keeps a model selection and a plan-mode turn it can read
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: reads a held message's reason, and the last-shown stamps, field-wise
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: keeps the first of two entries under one commandId
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+
+packages/ui/src/components/agent-chat/composer/composer-sends.test.ts
+Independent source (bar 1): GUI §7.4 in-flight ownership across unmount and separate queued-send serialization.
+Failure inventory / user consequence (bar 2): A double settlement closes another send, settling A enables B, concurrent queue ownership clears early, or queued work incorrectly changes the composer Sending state. These retained cases probe overlapping ownership and independent registries not covered by the one-send render check.
+Stable production seam and non-test callers (bar 4): beginComposerSend/isComposerSending/beginQueuedSend/isQueuedSendInFlight, called by store.ts and useComposerSending.
+Independent oracle (bar 3): expected literals, public payload examples, persisted values, or specified state decisions; no expected result is computed by the function under test.
+Refactor tolerance (bar 5): assertions compare externally consumed data/actions, not source text, classes, private helper counts, or traversal. Internal algorithms may change while the contract stays fixed.
+Lowest owner / stronger coverage (bar 6): retained names below isolate the named boundary and failure condition at its lowest existing production seam. Store/daemon tests do not own composer interpretation; any proven duplicate is explicitly deleted below.
+Risk: low; no production behavior changes. Validation: V1.
+KEEP: each settle closes its own send only, and a second call is a no-op
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a send that left A, settling late, never re-enables B's send
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: tells subscribers about every change, until they unsubscribe
+  Reason: React useSyncExternalStore consumes subscribeComposerSends. Its synchronous store-change notification and cleanup contract is independently specified; omitting notifications leaves a mounted composer enabled while a send runs. Literal observed boolean transitions are independent of the token algorithm. Subscription/read is the stable production seam and survives registry refactors. The SSR render check never subscribes, so it cannot catch this bug; this is the lowest notification owner. Final review restored this case before completion.
+KEEP: holds a thread's queue while any of its queued sends is in flight, and no other thread's
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: is not a composer send: a queued send never reads as Sending, and a composer send never holds the queue
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+DELETE: tells its listeners which thread's queue moved, until they unsubscribe
+  Reason: Pins private wake-up event sequence and count. Remaining stronger owner: store.reload.test.ts and store queue lifecycle tests exercise queue continuation across send settlement through the real subscribed store. The production store still needs subscribeQueuedSends; no export becomes dead.
+
+packages/ui/src/components/agent-chat/composer/composer-submission.test.ts
+Independent source (bar 1): GUI §§4.1/4.6.5/7.4/7.5/7.8 submission, attachment, failed-send and IME contracts; goals §§5.1/8.2.
+Failure inventory / user consequence (bar 2): The explicitly named user action sends when it should not, queues a host control, loses/refuses a valid attachment, posts truncated/oversized plan text, loses user text on failure, restores generated text into a draft, or renumbers references to another message’s images. Send spies record the public transport input; the production send coordinator, not the stub, resolves plans and chooses the outcome.
+Stable production seam and non-test callers (bar 4): composer-submission decision/transition functions, called by ChatComposer, draft restoration and store send ownership.
+Independent oracle (bar 3): expected literals, public payload examples, persisted values, or specified state decisions; no expected result is computed by the function under test.
+Refactor tolerance (bar 5): assertions compare externally consumed data/actions, not source text, classes, private helper counts, or traversal. Internal algorithms may change while the contract stays fixed.
+Lowest owner / stronger coverage (bar 6): retained names below isolate the named boundary and failure condition at its lowest existing production seam. Store/daemon tests do not own composer interpretation; any proven duplicate is explicitly deleted below.
+Risk: low; no production behavior changes. Validation: V1.
+KEEP: Enter sends on desktop and Shift+Enter is a newline
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: mobile never sends on Enter, whatever else is held
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: mod+Enter during a running turn is the per-message inversion
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the mod-enter shortcut requires the modifier and makes a bare Enter a newline
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: mod-enter-multiline only demands the modifier once the draft has a newline
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: steer vs queue is the preference XOR the per-message inversion
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: nothing queues when no turn is running
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the prompt limit accepts 120000 characters and refuses the next
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: an answer to a pending question is exempt from the turn input bound
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a paste at or over 32 KiB becomes an attachment
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the byte length folds a paste the character count would let through
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a smaller paste still folds when it would blow the input limit
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the escape hatch and a composer that cannot attach both keep the paste inline
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the paste-as-text chord is platform-specific
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the attachment budget counts staged and in-flight together
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: an unsupported image type and an oversized file are both refused
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: an unfinished or failed upload blocks send
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a draft with only whitespace has nothing to send
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: an empty draft implements the plan and leaves plan mode
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: text in the draft refines the plan and STAYS in plan mode
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a ref that arrives under a different key is still matched by its id
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a ref with no declared mimeType is measured as a file, never guessed into an image
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a file coming back is never refused for the count, and every other bound still applies
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the status line works the count out from the draft, so it follows every chip removed and goes once the draft fits
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a draft over eight attachments cannot be sent
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: Q2-5: Enter during an IME composition is not a send
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: Q2-5: the keyCode 229 fallback is honoured for engines without isComposing
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: R7-3: an empty draft with an actionable plan is NOT a no-op submit
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: R2-3: /plan is swallowed only where the toggle is shown
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: R2-3: /default follows the same gate, and an attachment defeats both
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: R2-3: only a STANDALONE command is swallowed
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: goals §8.2: a chip action is refused for exactly what refuses the composer's own send
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: fix round 1 (7): a typed host /goal is never queued — the host applies it at once
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: final wave (4): an open card never holds back a goal command the HOST applies
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: final wave (4): everything else still waits for the card
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: Implement on a plan that cannot be read back sends nothing, and says why
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a read-back prompt over the turn bound is refused before it is sent, and nothing goes back to the draft
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a plan read back whole is what gets sent, not the cut one
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a plain send goes out as typed, and one the host refuses goes back to the draft as typed
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a failed Implement leaves the draft alone: its prompt is the composer's, not the user's
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: send ownership marks only generated prompts to stay out of the draft after reload
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: every Implement reads its plan at send time, intact or cut, and no other send does
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: what was typed or staged while it was in flight stays, behind it, and no chip is doubled
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: an image staged meanwhile keeps its own [Image #N] once the sent images are back ahead of it
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a send that went out, a refusal and a failed Implement all leave the draft as it is
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a message returned behind the draft keeps naming its own images, never the draft's
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a returned message joins the draft's text with one blank line, and no blank lines when either side is empty
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a failed send comes back ahead of the draft exactly as it was sent, the draft's own images renumbered behind it
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: goals §8.2: a failed goal chip action says why and writes nothing back into any draft
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the rail's Send measures the TRIMMED text against the length bound, as Enter does
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the rail's Send: a double click's twin is not queued twice
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+
+packages/ui/src/components/agent-chat/composer/composer-trigger.test.ts
+Independent source (bar 1): GUI §§4.6.7/7.4 token and insertion grammar.
+Failure inventory / user consequence (bar 2): A slash inside a path starts a command, whitespace keeps a command trigger active, supported currency/path tokens fail, the caret sees future text, or selecting a completion corrupts adjacent text/caret position. Caret indices are editing results, not layout geometry.
+Stable production seam and non-test callers (bar 4): detectComposerTrigger/replaceTextRange/extendReplacementRangeForTrailingSpace, called by ChatComposer.
+Independent oracle (bar 3): expected literals, public payload examples, persisted values, or specified state decisions; no expected result is computed by the function under test.
+Refactor tolerance (bar 5): assertions compare externally consumed data/actions, not source text, classes, private helper counts, or traversal. Internal algorithms may change while the contract stays fixed.
+Lowest owner / stronger coverage (bar 6): retained names below isolate the named boundary and failure condition at its lowest existing production seam. Store/daemon tests do not own composer interpretation; any proven duplicate is explicitly deleted below.
+Risk: low; no production behavior changes. Validation: V1.
+KEEP: slash opens the command menu only at the start of a line
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a slash trigger dies as soon as the token contains whitespace
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the bare slash itself is a trigger with an empty query
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: any currency symbol starts a skill token, not just $
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: @ starts a path token on the current whitespace-delimited word
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a caret before the trigger character sees no trigger
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: replaceTextRange splices and reports the caret after the replacement
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+
+packages/ui/src/components/agent-chat/composer/skill-mentions.test.ts
+Independent source (bar 1): GUI §§4.6.7/4.6.8 persisted text skill token grammar.
+Failure inventory / user consequence (bar 2): Known skill mentions disappear or duplicate, unknown/email/path fragments become skill chips, or supported case/currency/name punctuation stops recognizing a skill. This parser observes sent text, distinct from the active-caret trigger.
+Stable production seam and non-test callers (bar 4): skillMentionsInText, called by sent-message rendering.
+Independent oracle (bar 3): expected literals, public payload examples, persisted values, or specified state decisions; no expected result is computed by the function under test.
+Refactor tolerance (bar 5): assertions compare externally consumed data/actions, not source text, classes, private helper counts, or traversal. Internal algorithms may change while the contract stays fixed.
+Lowest owner / stronger coverage (bar 6): retained names below isolate the named boundary and failure condition at its lowest existing production seam. Store/daemon tests do not own composer interpretation; any proven duplicate is explicitly deleted below.
+Risk: low; no production behavior changes. Validation: V1.
+KEEP: R2-8: known $skill mentions are found in order, deduped
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: R2-8: an UNKNOWN mention stays literal — it is not a chip
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: R2-8: a mention must start a token, so an email or a path is not one
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: R2-8: matching is case-insensitive but the text's own spelling is returned
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: R2-8: any currency symbol opens a mention, as the composer trigger does
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: R2-8: dots and dashes are part of a skill name
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+
+packages/ui/src/components/agent-chat/composer/tab-visibility.test.ts
+Independent source (bar 1): GUI §§7.4/7.6/10.1 Escape ownership and documented unintended-interrupt regressions.
+Failure inventory / user consequence (bar 2): Escape interrupts while closing a menu/layer or child view, triggers two interrupts, is stolen from the textarea, or held-key repeats stop a turn. Shell Escape tests own a different listener scope; these are the composer’s actual decision seam.
+Stable production seam and non-test callers (bar 4): composerOwnsEscape/composerEscapeAction, called by ChatComposer keyboard listeners.
+Independent oracle (bar 3): expected literals, public payload examples, persisted values, or specified state decisions; no expected result is computed by the function under test.
+Refactor tolerance (bar 5): assertions compare externally consumed data/actions, not source text, classes, private helper counts, or traversal. Internal algorithms may change while the contract stays fixed.
+Lowest owner / stronger coverage (bar 6): retained names below isolate the named boundary and failure condition at its lowest existing production seam. Store/daemon tests do not own composer interpretation; any proven duplicate is explicitly deleted below.
+Risk: low; no production behavior changes. Validation: V1.
+KEEP: while a layer is up, the composer yields Escape
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: with a subagent view open, the composer claims Escape even while idle
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the composer claims running-turn Escape only inside its shell
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the textarea keeps Escape to itself — the token menu gets first refusal
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: whoever ran first can stand the other down via defaultPrevented
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: Escape with no turn running never interrupts from the composer
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: the token menu takes the textarea's Escape before anything else
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: an open layer takes the textarea's Escape: no interrupt, and no half of Esc Esc
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: with a subagent's view open, the textarea's Escape leaves it — never an interrupt
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: with a subagent's view open, a menu or a layer still takes its Escape first
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: with nothing open, Escape stops a running turn, and an idle one is half of Esc Esc
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: a held Escape is one press: its auto-repeat does nothing, whatever is open
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+
+packages/ui/src/components/agent-chat/composer/workspace-skills.test.ts
+Independent source (bar 1): GUI §§4.6.4/4.6.7 per-cwd catalog overlay contract.
+Failure inventory / user consequence (bar 2): The wrong project’s skills are offered or an empty overlay erases the provider’s machine catalog. Other menu tests accept already-resolved skills and cannot detect this selection error.
+Stable production seam and non-test callers (bar 4): workspaceSkills, called by composer menus and timelineSkillNames.
+Independent oracle (bar 3): expected literals, public payload examples, persisted values, or specified state decisions; no expected result is computed by the function under test.
+Refactor tolerance (bar 5): assertions compare externally consumed data/actions, not source text, classes, private helper counts, or traversal. Internal algorithms may change while the contract stays fixed.
+Lowest owner / stronger coverage (bar 6): retained names below isolate the named boundary and failure condition at its lowest existing production seam. Store/daemon tests do not own composer interpretation; any proven duplicate is explicitly deleted below.
+Risk: low; no production behavior changes. Validation: V1.
+KEEP: the cwd's overlay wins where it lists any skill
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: an empty overlay, another cwd, or none: the machine-level catalogue
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+KEEP: no snapshot, no skills
+  Reason: Protects the exact stated case within the failure inventory and all six bar findings above; no remaining test in this scope covers that same input boundary and consequence.
+
+packages/ui/src/components/agent-chat/composer/composer-send-render.check.ts
+KEEP: per-thread send and rewind disabled states while a send outlives its composer, unaffected thread controls, and re-enabled controls after settlement.
+Bar 1: GUI §7.4 forbids duplicate sends and rewind during pending send. Bar 2: switching away/back permits duplicate sending or rewind races. Bar 3: hard-coded semantic disabled attribute states, independent of production guards. Bar 4: render actual ChatComposer via production provider and registry; stable documented data-composer-shortcut controls. Bar 5: no class/layout/tree assertion; wrappers/styles may change freely. Bar 6: registry state alone cannot catch the component forgetting to consume it, so this render check owns a distinct integration failure.
+Non-test seam callers: ChatComposer and useComposerSending; no artificial production export. Risk low. Validation V2.
+
+Dead support/seams: removal of deleted tests’ imports only; all tested production APIs retain genuine non-test callers, so no production seam is removed. No fixtures or snapshots become unreferenced.
+Execution status at record time: baseline V1 running; cleanup not yet applied.
+
+Completed cleanup / verification:
+- Final disposition: 2 DELETE, 150 KEEP named tests, plus KEEP semantic composer render check; no replacements added.
+- V1 passed 149 tests, zero failures. This run loaded composer-sends before the final retention review restored the composer subscription test.
+- Final composer-sends.test.ts rerun passed all 5 tests, including that restored subscription test. Together these runs verify every final retained case.
+- V2 passed: composer send render checks passed.
+- Final scoped git diff and git diff --check reviewed: clean. Net test LOC: -26; one now-unused test import removed. No production behavior or test-only production seams changed.
+- Root agent owns remaining repository gates and commit/remote integration/push.

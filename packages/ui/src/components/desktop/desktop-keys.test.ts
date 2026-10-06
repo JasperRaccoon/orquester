@@ -1,7 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { XK, keysymForCodePoint, keysymForNamedKey, keysymsForText } from "./desktop-keys.ts";
+import { keysymForCodePoint, keysymForNamedKey, keysymsForText } from "./desktop-keys.ts";
 
 test("Latin-1 characters are their own keysym", () => {
   assert.equal(keysymForCodePoint("a".codePointAt(0)!), 0x61);
@@ -16,18 +16,18 @@ test("other code points use the Unicode keysym range", () => {
 });
 
 test("newline and tab map to Return and Tab; other controls are dropped", () => {
-  assert.equal(keysymForCodePoint(0x0a), XK.Return);
-  assert.equal(keysymForCodePoint(0x09), XK.Tab);
+  assert.equal(keysymForCodePoint(0x0a), 0xff0d);
+  assert.equal(keysymForCodePoint(0x09), 0xff09);
   assert.equal(keysymForCodePoint(0x01), null);
   assert.equal(keysymForCodePoint(0x85), null);
 });
 
 test("text splits by code point, not UTF-16 unit", () => {
-  assert.deepEqual(keysymsForText("a😀\n"), [0x61, 0x0101f600, XK.Return]);
+  assert.deepEqual(keysymsForText("a😀\n"), [0x61, 0x0101f600, 0xff0d]);
 });
 
 test("named keys", () => {
-  assert.equal(keysymForNamedKey("Backspace"), XK.BackSpace);
-  assert.equal(keysymForNamedKey("ArrowUp"), XK.Up);
+  assert.equal(keysymForNamedKey("Backspace"), 0xff08);
+  assert.equal(keysymForNamedKey("ArrowUp"), 0xff52);
   assert.equal(keysymForNamedKey("a"), null);
 });

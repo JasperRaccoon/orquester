@@ -41,11 +41,11 @@ export interface ClaudeHistoryMessage {
   isCompactSummary?: boolean;
 }
 
-export const ROLLBACK_BOUNDARY_UNAVAILABLE =
+const ROLLBACK_BOUNDARY_UNAVAILABLE =
   "The exact Claude turn boundary is unavailable, possibly after compaction or recovery of older history. Start a new thread instead.";
 export const ROLLBACK_FORK_MISALIGNED =
   "Claude fork history did not preserve the retained turn boundaries. Start a new thread instead.";
-export const ROLLBACK_HISTORY_UNAVAILABLE = "Claude session history is unavailable.";
+const ROLLBACK_HISTORY_UNAVAILABLE = "Claude session history is unavailable.";
 export const ROLLBACK_COMPACTED =
   "This conversation was compacted after that turn, so Claude no longer holds the messages the rewind would restore. Start a new thread instead.";
 export const ROLLBACK_SESSION_UNAVAILABLE = "Claude session id is unavailable.";

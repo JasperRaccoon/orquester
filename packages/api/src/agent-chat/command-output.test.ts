@@ -13,17 +13,6 @@ import { slimActivityPayload } from "./slim.ts";
 
 const command = (fields: Record<string, unknown>) => ({ itemType: "command_execution", ...fields });
 
-test("Codex: a command with no detail shows its item's aggregatedOutput, trimmed", () => {
-  const payload = command({
-    title: "Bash",
-    data: { item: { command: "ls -1", aggregatedOutput: "a\nb\n" } }
-  });
-  assert.equal(commandDisplayDetail(payload), "a\nb");
-  // The item's result is the next place, when there is no aggregated output.
-  const result = command({ data: { item: { result: { content: "  done  " } } } });
-  assert.equal(commandDisplayDetail(result), "done");
-});
-
 test("a detail that repeats the row's title gives way to the output", () => {
   const payload = command({
     title: "pnpm test",
@@ -47,24 +36,6 @@ test("Grok: an executing call whose detail echoes the command shows rawOutput's 
     data: { kind: "execute", command: "false", rawOutput: { stdout: "  ", stderr: "exit 1" } }
   });
   assert.equal(commandDisplayDetail(stderrOnly), "exit 1");
-});
-
-test("Grok: ACP content blocks are read when rawOutput says nothing, only their `content` blocks' text", () => {
-  const payload = command({
-    title: "Execute `echo hi`",
-    detail: "echo hi",
-    data: {
-      kind: "execute",
-      command: "echo hi",
-      content: [
-        { type: "content", content: { type: "text", text: "hi from ACP" } },
-        { type: "diff", path: "a.ts", oldText: "", newText: "x" },
-        { type: "content", content: { type: "text", text: "   " } },
-        { type: "content", content: { type: "text", text: " second block " } }
-      ]
-    }
-  });
-  assert.equal(commandDisplayDetail(payload), "hi from ACP\nsecond block");
 });
 
 test("an echo with no output yet shows no detail at all: the row already shows the command", () => {

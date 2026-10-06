@@ -21,7 +21,7 @@ export interface DesktopAudioStats {
   drops: number;
 }
 
-export interface JitterBufferOptions {
+interface JitterBufferOptions {
   sampleRate: number;
   channels: number;
   initialTargetMs: number;
@@ -36,7 +36,7 @@ export interface JitterBufferOptions {
   capacityMs: number;
 }
 
-export const JITTER_BUFFER_DEFAULTS: JitterBufferOptions = {
+const JITTER_BUFFER_DEFAULTS: JitterBufferOptions = {
   sampleRate: 48_000,
   channels: 2,
   initialTargetMs: 30,
@@ -77,7 +77,7 @@ export class JitterBuffer {
   private underrunCount = 0;
   private dropCount = 0;
 
-  constructor(options: Partial<JitterBufferOptions> = {}) {
+  constructor(options: Partial<Pick<JitterBufferOptions, "sampleRate" | "channels" | "initialTargetMs">> = {}) {
     this.opts = { ...JITTER_BUFFER_DEFAULTS, ...options };
     const { sampleRate, channels } = this.opts;
     this.capacity = Math.ceil((this.opts.capacityMs * sampleRate) / 1000);
@@ -92,16 +92,12 @@ export class JitterBuffer {
   }
 
   /** Buffered audio not already committed to a drop, in frames. */
-  get depthFrames(): number {
+  private get depthFrames(): number {
     return this.size - this.dropOffset;
   }
 
-  get targetMs(): number {
+  private get targetMs(): number {
     return this.framesToMs(this.targetFrames);
-  }
-
-  get isPlaying(): boolean {
-    return this.playing;
   }
 
   stats(): DesktopAudioStats {
@@ -169,14 +165,6 @@ export class JitterBuffer {
       this.setTarget(this.targetFrames - this.msToFrames(this.opts.stableStepMs));
       this.stableSince = this.clock;
     }
-  }
-
-  /** Forget buffered audio (new stream); keeps the learned target and counters. */
-  reset(): void {
-    this.readIdx = 0;
-    this.size = 0;
-    this.cancelDrop();
-    if (this.playing) this.stopPlaying();
   }
 
   private start(): void {

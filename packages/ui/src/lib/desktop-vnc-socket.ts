@@ -12,7 +12,7 @@ import type { DesktopVncControlMessage } from "@orquester/api";
  * - binary frames are handed to noVNC's `onmessage` unchanged;
  * - text frames are consumed here; a pong yields an RTT sample (the congestion
  *   signal for adaptive quality, §11.2);
- * - no frame at all for `staleAfterMs` (pongs arrive every 2 s even on an idle
+ * - no frame at all for 20 seconds (pongs arrive every 2 s even on an idle
  *   display) closes the socket, so a dead link turns into a reconnect.
  *
  * noVNC's `Websock.attach` requires the channel to expose `send`, `close`,
@@ -37,17 +37,12 @@ export interface VncRawSocket {
 export interface DesktopVncChannelOptions {
   /** One RTT sample (ms) per answered ping. */
   onRtt?: (rttMs: number) => void;
-  /** Ping period; the relay contract says 2 s. */
-  pingIntervalMs?: number;
-  /** Close the socket after this long without any frame. */
-  staleAfterMs?: number;
-  now?: () => number;
 }
 
-export const DESKTOP_VNC_PING_INTERVAL_MS = 2000;
-export const DESKTOP_VNC_STALE_AFTER_MS = 20_000;
+const DESKTOP_VNC_PING_INTERVAL_MS = 2000;
+const DESKTOP_VNC_STALE_AFTER_MS = 20_000;
 /** Close code used when the link went silent (application range). */
-export const DESKTOP_VNC_STALE_CLOSE_CODE = 4000;
+const DESKTOP_VNC_STALE_CLOSE_CODE = 4000;
 
 const OPEN = 1;
 
@@ -81,21 +76,15 @@ export class DesktopVncChannel {
 
   private readonly socket: VncRawSocket;
   private readonly onRtt: ((rttMs: number) => void) | undefined;
-  private readonly pingIntervalMs: number;
-  private readonly staleAfterMs: number;
-  private readonly now: () => number;
   private timer: ReturnType<typeof setInterval> | null = null;
   private lastFrameAt = 0;
 
   constructor(socket: VncRawSocket, options: DesktopVncChannelOptions = {}) {
     this.socket = socket;
     this.onRtt = options.onRtt;
-    this.pingIntervalMs = options.pingIntervalMs ?? DESKTOP_VNC_PING_INTERVAL_MS;
-    this.staleAfterMs = options.staleAfterMs ?? DESKTOP_VNC_STALE_AFTER_MS;
-    this.now = options.now ?? defaultNow;
     socket.binaryType = "arraybuffer";
     socket.onopen = (ev) => {
-      this.lastFrameAt = this.now();
+      this.lastFrameAt = defaultNow();
       this.startPinging();
       this.onopen?.(ev);
     };
@@ -106,7 +95,7 @@ export class DesktopVncChannel {
     };
     socket.onerror = (ev) => this.onerror?.(ev);
     if (socket.readyState === OPEN) {
-      this.lastFrameAt = this.now();
+      this.lastFrameAt = defaultNow();
       this.startPinging();
     }
   }
@@ -138,11 +127,11 @@ export class DesktopVncChannel {
   }
 
   private receive(ev: MessageEvent): void {
-    this.lastFrameAt = this.now();
+    this.lastFrameAt = defaultNow();
     if (typeof ev.data === "string") {
       const msg = parseControl(ev.data);
       if (msg?.type === "pong") {
-        const rtt = Math.max(0, this.now() - msg.t);
+        const rtt = Math.max(0, defaultNow() - msg.t);
         this.lastRttMs = rtt;
         this.onRtt?.(rtt);
       }
@@ -153,8 +142,8 @@ export class DesktopVncChannel {
 
   private tick(): void {
     if (this.socket.readyState !== OPEN) return;
-    const now = this.now();
-    if (now - this.lastFrameAt > this.staleAfterMs) {
+    const now = defaultNow();
+    if (now - this.lastFrameAt > DESKTOP_VNC_STALE_AFTER_MS) {
       this.close(DESKTOP_VNC_STALE_CLOSE_CODE, "stale");
       return;
     }
@@ -165,7 +154,7 @@ export class DesktopVncChannel {
   private startPinging(): void {
     if (this.timer !== null) return;
     this.tick(); // an early sample instead of waiting a full period
-    this.timer = setInterval(() => this.tick(), this.pingIntervalMs);
+    this.timer = setInterval(() => this.tick(), DESKTOP_VNC_PING_INTERVAL_MS);
   }
 
   private stopPinging(): void {

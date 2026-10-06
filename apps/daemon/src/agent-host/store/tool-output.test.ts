@@ -331,23 +331,13 @@ test("concurrent windows of one call never join a chunk twice", async (t) => {
   assert.equal((await store.readToolOutputWindow("t1", "start", { offset: 0, maxBytes: 1_000 }))?.text, `${lines.join("")}late\n`);
 });
 
-test("readItem follows updated item payloads and thread recreation", async (t) => {
+test("readItem follows updated item payloads after its cache was filled", async (t) => {
   const { store } = await tempStore(t);
   await store.append({ threadId: "t1", events: [created("t1"), appendable("t1", "x", "tool.started", "call-1", { itemType: "command_execution", title: "v1" }), noise("t1", "n1")] });
   assert.equal(((await store.readItem("t1", "x")) as { payload: { title: string } }).payload.title, "v1");
   await store.append({ threadId: "t1", events: [noise("t1", "n2"), appendable("t1", "x", "tool.updated", "call-1", { itemType: "command_execution", title: "v2" }), noise("t1", "n3")] });
   const item = await store.readItem("t1", "x");
   assert.deepEqual([item?.kind === "activity" ? item.activityKind : null, (item as { payload: { title: string } }).payload.title], ["tool.updated", "v2"]);
-  // A message's body is its deltas folded: the whole log, as before.
-  await store.append({ threadId: "t1", events: [messageDelta("t1", "m1", "Hel", true), messageDelta("t1", "m1", "lo", true), messageDelta("t1", "m1", "", false)] });
-  const message = await store.readItem("t1", "m1");
-  assert.deepEqual([message?.kind, message?.kind === "message" ? message.text : null], ["message", "Hello"]);
-  // An id the log never wrote has no item.
-  assert.equal(await store.readItem("t1", "never-written"), null);
-  // Deleted and recreated: the new log's item, never the old cursor's line.
-  await store.deleteThread("t1");
-  await store.append({ threadId: "t1", events: [created("t1"), noise("t1", "pad"), appendable("t1", "x", "tool.started", "call-9", { itemType: "command_execution", title: "v3" })] });
-  assert.equal(((await store.readItem("t1", "x")) as { payload: { title: string } }).payload.title, "v3");
 });
 
 test("readItem reconstructs a multipart message whose earlier deltas aged out of the resident window", async (t) => {

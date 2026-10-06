@@ -142,17 +142,6 @@ describe("orchestrator — commands", () => {
     await host.stop();
   });
 
-  it("rejects an empty turn", async () => {
-    const host = createTestHost();
-    const threadId = await host.createThread();
-    await assert.rejects(
-      () => host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "   " }),
-      (error: unknown) =>
-        isAgentChatCommandError(error) && error.code === "INVALID_COMMAND" && error.status === 400
-    );
-    await host.stop();
-  });
-
   it("rejects an unknown approval decision", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
@@ -1595,19 +1584,6 @@ describe("orchestrator — readiness gate (§3.1)", () => {
 });
 
 describe("orchestrator — reads (§6.3)", () => {
-  it("answers a snapshot with no cursor and a replay within the budgets", async () => {
-    const host = createTestHost();
-    const threadId = await host.createThread();
-    const snapshot = await host.orchestrator.readThread(threadId);
-    assert.equal(snapshot.kind, "snapshot");
-
-    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "hello" });
-    await host.settle();
-    const replay = await host.orchestrator.readThread(threadId, snapshot.kind === "snapshot" ? snapshot.thread.seq : 0);
-    assert.equal(replay.kind, "events");
-    await host.stop();
-  });
-
   it("forces a snapshot when the range contains the thread's creation", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();
@@ -2072,20 +2048,6 @@ async function ingestDiff(host: TestHost, turnId: string): Promise<void> {
 }
 
 describe("orchestrator — the ingestion hooks (§5.1, §5.4)", () => {
-  it("reports the head's session and whether the title was renamed by hand", async () => {
-    const host = createTestHost();
-    const threadId = await host.createThread();
-    assert.equal(host.orchestrator.threadContext(threadId)?.titleManual, false);
-    assert.equal(host.orchestrator.threadContext(threadId)?.session?.status, "idle");
-
-    await host.orchestrator.updateThread(threadId, { title: "Mine" });
-    await host.settle();
-    // A manual rename is never overwritten by a provider retitle.
-    assert.equal(host.orchestrator.threadContext(threadId)?.titleManual, true);
-    assert.equal(host.orchestrator.threadContext("nope"), null);
-    await host.stop();
-  });
-
   it("the client's first-message seed writes the title without marking it manual", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();

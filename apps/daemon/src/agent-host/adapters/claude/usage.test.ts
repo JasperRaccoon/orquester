@@ -7,8 +7,6 @@ import { describe, it } from "node:test";
 
 import { readClaudeFixture } from "./fixtures.ts";
 import {
-  CLAUDE_SESSION_WINDOW_ID,
-  CLAUDE_WEEKLY_WINDOW_ID,
   claudeTotalProcessedTokens,
   compactBoundarySnapshot,
   contextUsageSnapshot,
@@ -19,7 +17,6 @@ import {
   normalizeTaskUsage,
   normalizeTurnTokenUsage,
   rateLimitEventToUpdate,
-  scopedWindowId,
   toThreadTokenUsage,
   totalProcessedFromModelUsage,
   usageResponseToLimits
@@ -162,13 +159,13 @@ describe("claude subscription windows", () => {
     assert.equal(limits.unavailable, undefined);
     const byId = new Map(limits.windows.map((window) => [window.id, window]));
 
-    assert.equal(byId.get(CLAUDE_SESSION_WINDOW_ID)?.usedPercent, 83);
-    assert.equal(byId.get(CLAUDE_SESSION_WINDOW_ID)?.kind, "session");
-    assert.equal(byId.get(CLAUDE_WEEKLY_WINDOW_ID)?.usedPercent, 66);
+    assert.equal(byId.get("session")?.usedPercent, 83);
+    assert.equal(byId.get("session")?.kind, "session");
+    assert.equal(byId.get("weekly_all")?.usedPercent, 66);
 
     // A `weekly_scoped` row is distinguished ONLY by its scope, so two of them
     // must not collapse onto one id.
-    const scoped = byId.get(scopedWindowId("Fable"));
+    const scoped = byId.get("weekly_scoped:fable");
     assert.equal(scoped?.usedPercent, 59);
     assert.equal(scoped?.label, "Weekly · Fable");
     assert.equal(names.overageIncluded, "Fable");
@@ -204,7 +201,7 @@ describe("claude subscription windows", () => {
     });
     assert.deepEqual(
       limits.windows.map((window) => window.id),
-      [CLAUDE_SESSION_WINDOW_ID, CLAUDE_WEEKLY_WINDOW_ID, scopedWindowId("Fable")]
+      ["session", "weekly_all", "weekly_scoped:fable"]
     );
     assert.equal(names.overageIncluded, "Fable");
   });
@@ -230,7 +227,7 @@ describe("claude subscription windows", () => {
     assert.deepEqual(update, {
       windows: [
         {
-          id: CLAUDE_SESSION_WINDOW_ID,
+          id: "session",
           kind: "session",
           label: "Session",
           windowDurationMins: 300,
@@ -238,7 +235,7 @@ describe("claude subscription windows", () => {
           resetsAt: new Date(1790623200 * 1000).toISOString()
         },
         {
-          id: CLAUDE_WEEKLY_WINDOW_ID,
+          id: "weekly_all",
           kind: "weekly",
           label: "Weekly",
           windowDurationMins: 7 * 24 * 60,
@@ -259,7 +256,7 @@ describe("claude subscription windows", () => {
       { rateLimitType: "five_hour", utilization: 0.98, resetsAt: 1789969200 },
       {}
     );
-    assert.equal(update?.windows[0]?.id, CLAUDE_SESSION_WINDOW_ID);
+    assert.equal(update?.windows[0]?.id, "session");
     assert.equal(update?.windows[0]?.usedPercent, 98);
     assert.equal(typeof update?.windows[0]?.resetsAt, "string");
 
@@ -281,7 +278,7 @@ describe("claude subscription windows", () => {
         { rateLimitType: "seven_day_overage_included", utilization: 0.5 },
         { overageIncluded: "Fable" }
       )?.windows[0]?.id,
-      scopedWindowId("Fable")
+      "weekly_scoped:fable"
     );
   });
 

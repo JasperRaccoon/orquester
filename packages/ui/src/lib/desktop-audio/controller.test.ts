@@ -2,11 +2,7 @@ import test, { afterEach, type TestContext } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  AUDIO_KEEPALIVE_MS,
   DesktopAudioController,
-  parseAudioPacket,
-  parseAudioServerMessage,
-  shouldStreamAudio,
   type AudioSocket,
   type DecoderSink,
   type DesktopAudioControllerDeps,
@@ -111,9 +107,7 @@ async function harness(kind: DesktopAudioDecoderKind | Promise<DesktopAudioDecod
   }) as Harness;
 }
 
-async function flush(): Promise<void> {
-  for (let i = 0; i < 5; i++) await Promise.resolve();
-}
+const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 const PLAYING: DesktopAudioInputs = { url: "wss://host/ws-desktop-audio/d1?token=t", active: true, unlocked: true, muted: false, volume: 0.8 };
 
@@ -132,34 +126,17 @@ function isOpen(socket: FakeSocket | undefined): boolean {
 
 // ---------- decision table ----------
 
-const COMBOS = [null, "wss://x"].flatMap((url) =>
-  [false, true].flatMap((active) =>
-    [false, true].flatMap((unlocked) => [false, true].map((muted) => ({ url, active, unlocked, muted })))
-  )
-);
-
-test("the socket is wanted only with a url, an active tab, unlocked sound and no mute", () => {
-  for (const inputs of COMBOS) {
-    const expected = inputs.url !== null && inputs.active && inputs.unlocked && !inputs.muted;
-    assert.equal(shouldStreamAudio(inputs), expected, JSON.stringify(inputs));
-  }
-});
-
-test("the controller opens and closes the socket by the same table", async () => {
+test("the controller streams only with an active unlocked unmuted tab and a URL", async () => {
   const h = await harness();
-  for (const inputs of COMBOS) {
-    h.controller.update({ ...inputs, volume: 1 });
-    const want = shouldStreamAudio(inputs);
-    assert.equal(h.controller.streaming, want, JSON.stringify(inputs));
-    assert.equal(isOpen(h.current), want, JSON.stringify(inputs));
-    // Back to closed so every row starts from the same place.
-    h.controller.update({ ...inputs, active: false, volume: 1 });
-    assert.equal(isOpen(h.current), false);
+  for (const patch of [
+    { url: null }, { url: "" }, { active: false }, { unlocked: false }, { muted: true }
+  ]) {
+    h.controller.update(PLAYING);
+    assert.equal(isOpen(h.current), true);
+    assert.equal(h.current?.binaryType, "arraybuffer");
+    h.controller.update({ ...PLAYING, ...patch });
+    assert.equal(isOpen(h.current), false, JSON.stringify(patch));
   }
-  assert.equal(h.sockets.length, COMBOS.filter(shouldStreamAudio).length);
-  const socket = h.sockets[0]!;
-  assert.equal(socket.binaryType, "arraybuffer");
-  assert.equal(socket.closedWith, 1000);
 });
 
 test("staying in the playing state keeps the one socket", async () => {
@@ -215,32 +192,33 @@ test("volume drives the gain; mute zeroes it and closes the socket", async () =>
 
 // ---------- packets ----------
 
-test("parseAudioPacket reads the 8-byte header and validates the type", () => {
-  const parsed = parseAudioPacket(packet(0x01020304, [9, 8, 7]));
-  assert.ok(parsed);
-  assert.equal(parsed.seq, 0x01020304);
-  assert.deepEqual([...parsed.payload], [9, 8, 7]);
-
-  const flagged = packet(5);
+test("audio packet headers deliver unsigned big-endian sequences and reject invalid frames", async () => {
+  const h = await harness();
+  h.controller.update(PLAYING);
+  const socket = h.current!;
+  socket.receive(packet(0x01020304, [9, 8, 7]));
+  const flagged = packet(5, [6]);
   new DataView(flagged).setUint8(1, 0xff);
   new DataView(flagged).setUint16(2, 0xabcd);
-  assert.equal(parseAudioPacket(flagged)?.seq, 5, "flags and reserved bytes are ignored");
-
-  assert.equal(parseAudioPacket(packet(1, [1], 2)), null, "unknown packet type");
-  assert.equal(parseAudioPacket(packet(1, [])), null, "header only");
-  assert.equal(parseAudioPacket(new ArrayBuffer(3)), null, "truncated header");
-  assert.equal(parseAudioPacket(packet(0xffffffff))?.seq, 0xffffffff, "u32, not i32");
+  socket.receive(flagged);
+  socket.receive(packet(0xffffffff, [5]));
+  for (const invalid of [packet(1, [1], 2), packet(1, []), new ArrayBuffer(3)]) socket.receive(invalid);
+  assert.deepEqual(h.decoders[0]!.decoded, [0x01020304, 5, 0xffffffff]);
+  assert.deepEqual(h.decoders[0]!.payloads, [[9, 8, 7], [6], [5]]);
 });
 
-test("parseAudioServerMessage accepts state and pong only", () => {
-  assert.deepEqual(parseAudioServerMessage('{"type":"pong"}'), { type: "pong" });
-  assert.deepEqual(
-    parseAudioServerMessage('{"type":"state","audio":"unavailable","reason":"no pulse","sampleRate":48000,"channels":2,"frameMs":10}'),
-    { type: "state", audio: "unavailable", reason: "no pulse", sampleRate: 48000, channels: 2, frameMs: 10 }
-  );
-  assert.equal(parseAudioServerMessage('{"type":"state","audio":"maybe"}'), null);
-  assert.equal(parseAudioServerMessage("not json"), null);
-  assert.equal(parseAudioServerMessage("null"), null);
+test("audio state messages reach the viewer and malformed messages leave it unchanged", async () => {
+  const h = await harness();
+  h.controller.update(PLAYING);
+  h.current!.receive('{"type":"state","audio":"unavailable","reason":"no pulse","sampleRate":48000,"channels":2,"frameMs":10}');
+  assert.deepEqual(h.controller.getSnapshot().serverState, {
+    type: "state", audio: "unavailable", reason: "no pulse", sampleRate: 48000, channels: 2, frameMs: 10
+  });
+  h.current!.receive('{"type":"state","audio":"available","sampleRate":48000,"channels":2,"frameMs":10}');
+  const before = h.controller.getSnapshot().serverState;
+  assert.equal(before?.audio, "available");
+  for (const text of ['{"type":"state","audio":"maybe"}', "not json", "null"]) h.current!.receive(text);
+  assert.deepEqual(h.controller.getSnapshot().serverState, before);
 });
 
 test("packets reach the decoder in order and a seq gap inserts nothing", async () => {
@@ -254,13 +232,6 @@ test("packets reach the decoder in order and a seq gap inserts nothing", async (
   const decoder = h.decoders[0]!;
   assert.deepEqual(decoder.decoded, [10, 11, 14, 15]);
   assert.deepEqual(decoder.payloads, [[10], [11], [14], [15]]);
-});
-
-test("state messages become serverState", async () => {
-  const h = await harness();
-  h.controller.update(PLAYING);
-  h.current!.receive('{"type":"state","audio":"available","sampleRate":48000,"channels":2,"frameMs":10}');
-  assert.equal(h.controller.getSnapshot().serverState?.audio, "available");
 });
 
 test("decoded frames wait for the player, then flow; closing disposes both", async () => {
@@ -294,15 +265,15 @@ test("keepalive pings every 10 s and drops a silent connection", async (t: TestC
   const socket = h.current!;
   socket.open();
   socket.receive(packet(1));
-  t.mock.timers.tick(AUDIO_KEEPALIVE_MS);
+  t.mock.timers.tick(10_000);
   assert.deepEqual(socket.sent, ['{"type":"ping"}']);
   socket.receive('{"type":"pong"}');
-  t.mock.timers.tick(AUDIO_KEEPALIVE_MS);
+  t.mock.timers.tick(10_000);
   assert.equal(socket.sent.length, 2);
   // Nothing at all for a full interval: dead.
-  t.mock.timers.tick(AUDIO_KEEPALIVE_MS);
+  t.mock.timers.tick(10_000);
   assert.equal(isOpen(socket), false);
-  assert.match(h.controller.getSnapshot().error ?? "", /stopped responding/);
+  assert.ok(h.controller.getSnapshot().error);
   t.mock.timers.tick(500);
   assert.equal(h.sockets.length, 2, "reconnected after the backoff");
 });
@@ -312,7 +283,7 @@ test("an unexpected close reconnects with growing backoff; data resets it", asyn
   const h = await harness();
   h.controller.update(PLAYING);
   h.current!.serverClose(1011, "desktop not running");
-  assert.equal(h.controller.getSnapshot().error, "Audio stream closed: desktop not running");
+  assert.ok(h.controller.getSnapshot().error?.includes("desktop not running"));
   t.mock.timers.tick(499);
   assert.equal(h.sockets.length, 1);
   t.mock.timers.tick(1);

@@ -1,8 +1,7 @@
-import test, { mock } from "node:test";
+import test, { afterEach, mock } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  DESKTOP_VNC_STALE_CLOSE_CODE,
   DesktopVncChannel,
   type VncRawSocket
 } from "./desktop-vnc-socket.ts";
@@ -34,25 +33,43 @@ class FakeSocket implements VncRawSocket {
   }
 }
 
-/** noVNC's `Websock.attach` check, verbatim in spirit (core/websock.js). */
-const RAW_CHANNEL_PROPS = ["send", "close", "binaryType", "onerror", "onmessage", "onopen", "protocol", "readyState"];
+afterEach(() => mock.restoreAll());
 
 function clock(start = 1000) {
   let t = start;
-  return { now: () => t, advance: (ms: number) => { t += ms; } };
+  mock.method(performance, "now", () => t);
+  return { advance: (ms: number) => { t += ms; } };
 }
 
-test("exposes every property noVNC's Websock.attach requires", () => {
-  const channel = new DesktopVncChannel(new FakeSocket());
-  const props = [...Object.keys(channel), ...Object.getOwnPropertyNames(Object.getPrototypeOf(channel))];
-  for (const prop of RAW_CHANNEL_PROPS) assert.ok(props.includes(prop), `missing ${prop}`);
+test("noVNC attaches the channel and receives RFB bytes", async () => {
+  const globals = globalThis as Record<string, unknown>;
+  const originals = ["window", "WebSocket"].map((key) => [key, Object.getOwnPropertyDescriptor(globals, key)] as const);
+  globals.window = { console };
+  globals.WebSocket = { CONNECTING: 0, OPEN: 1, CLOSING: 2, CLOSED: 3 };
+  const socket = new FakeSocket();
+  const channel = new DesktopVncChannel(socket);
+  try {
+    // Resolve beside the installed RFB entry point: its channel consumer owns this ABI.
+    const { default: Websock } = await import(new URL("./websock.js", import.meta.resolve("@novnc/novnc")).href);
+    const receiver = new Websock();
+    receiver.attach(channel);
+    assert.equal(receiver.readyState, "connecting");
+    socket.message(new Uint8Array([82, 70, 66, 32]).buffer);
+    assert.equal(receiver.rQshiftStr(4), "RFB ");
+  } finally {
+    channel.close();
+    for (const [key, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(globals, key, descriptor);
+      else delete globals[key];
+    }
+  }
 });
 
 test("forces arraybuffer and mirrors readyState and protocol", () => {
   const socket = new FakeSocket();
   socket.protocol = "binary";
   const channel = new DesktopVncChannel(socket);
-  assert.equal(socket.binaryType, "arraybuffer");
+  assert.equal(channel.binaryType, "arraybuffer");
   assert.equal(channel.readyState, 0);
   assert.equal(channel.protocol, "binary");
   socket.open();
@@ -60,24 +77,11 @@ test("forces arraybuffer and mirrors readyState and protocol", () => {
   channel.close();
 });
 
-test("binary frames reach noVNC unchanged", () => {
-  const socket = new FakeSocket();
-  const channel = new DesktopVncChannel(socket);
-  const received: MessageEvent[] = [];
-  channel.onmessage = (ev) => received.push(ev);
-  socket.open();
-  const bytes = new Uint8Array([82, 70, 66, 32]).buffer;
-  socket.message(bytes);
-  assert.equal(received.length, 1);
-  assert.equal(received[0].data, bytes);
-  channel.close();
-});
-
 test("text frames are consumed as control messages and a pong yields an RTT sample", () => {
   const c = clock();
   const socket = new FakeSocket();
   const samples: number[] = [];
-  const channel = new DesktopVncChannel(socket, { now: c.now, onRtt: (ms) => samples.push(ms) });
+  const channel = new DesktopVncChannel(socket, { onRtt: (ms) => samples.push(ms) });
   const received: MessageEvent[] = [];
   channel.onmessage = (ev) => received.push(ev);
   socket.open();
@@ -98,7 +102,7 @@ test("pings every interval while open and stops after close", () => {
   try {
     const c = clock();
     const socket = new FakeSocket();
-    const channel = new DesktopVncChannel(socket, { now: c.now, pingIntervalMs: 2000 });
+    const channel = new DesktopVncChannel(socket);
     mock.timers.tick(5000);
     assert.equal(socket.sent.length, 0, "no pings before open");
     socket.open();
@@ -120,13 +124,13 @@ test("a silent link is closed so the viewer reconnects", () => {
   try {
     const c = clock();
     const socket = new FakeSocket();
-    new DesktopVncChannel(socket, { now: c.now, pingIntervalMs: 2000, staleAfterMs: 5000 });
+    new DesktopVncChannel(socket);
     socket.open();
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 11; i++) {
       c.advance(2000);
       mock.timers.tick(2000);
     }
-    assert.equal(socket.closed?.code, DESKTOP_VNC_STALE_CLOSE_CODE);
+    assert.equal(socket.closed?.code, 4000);
   } finally {
     mock.timers.reset();
   }

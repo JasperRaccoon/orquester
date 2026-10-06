@@ -77,7 +77,6 @@ describe("projects", () => {
     assert.equal(await ops.resolveExisting(join(root, "ws")), null, "a workspace is not a project");
     assert.equal(await ops.resolveExisting(join(root, "ws", "missing")), null);
     assert.equal(await ops.resolveExisting("/etc"), null);
-    assert.equal(await ops.currentBranch(join(root, "ws", "app")), "feature/x");
   });
 
   test("createTemp and deleteProject go through the daemon's routes", async () => {
@@ -125,7 +124,6 @@ describe("projects", () => {
     assert.ok(Buffer.byteLength(text) <= 1024);
     const clean = createProjectOps({ api: null as never, git: { status: async () => cleanStatus(), currentBranch: async () => null }, workspacesDir: "/w", fsRoot: "/w" });
     assert.equal(await clean.gitStatusShort("/w/ws/app", 1024), "(no changes)");
-    assert.equal(await clean.currentBranch("/w/ws/app"), undefined);
   });
 });
 

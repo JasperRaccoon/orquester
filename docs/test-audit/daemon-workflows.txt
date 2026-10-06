@@ -1,0 +1,961 @@
+COMPLETED CLEANUP: daemon workflows (pre-edit decisions recorded before implementation; validation appended below).
+Independent source: docs/superpowers/specs/2026-09-28-automated-workflows-design.md; AGENTS.md storage/security/runtime rules; public API/config/provider contracts.
+All 36 current test files read; current production owners and non-test callers inspected. Historical cleanup documents are not treated as acceptance evidence.
+
+Six-bar justification applied to EACH KEEP/REWRITE row:
+B1: the per-file independent contract plus the exact named scenario defines the obligation.
+B2: the scenario failure changes public output, error/status, durable state, external protocol, process lifetime, or security; each row names that observable failure.
+B3: fixtures and expected values are independent literals or original input values, never a call to the function under test to compute the expected answer. Test provider/clock/executor fakes supply external stimuli only.
+B4: per-file seam and non-test callers below. Persisted record variants and external command payloads are protocol contracts, not private implementation inventories.
+B5: no surviving source grep, identifier inventory, markup snapshot, visual geometry, private method spying, or behavior-free execution probe. The PR-order rewrite removes its incidental ordering requirement.
+B6: per-file ownership/stronger-coverage comparison below. Each named scenario is a different input/failure state; higher integration cases retain only distinct wiring and artifact obligations.
+Risk: low for the deletion and support removal; no production behavior changed. Surviving security/crash tests retain their existing public outcomes.
+Validation for every file below: from apps/daemon, node --import tsx --import ../../scripts/test/assert-ok.mjs --import ../../scripts/test/quiet-mock-timers.mjs --test --test-concurrency=2 src/workflows/<path>.test.ts. Full focused scope uses all listed paths. Repository gates are coordinated by parent.
+
+apps/daemon/src/workflows/agent/cooldowns.test.ts
+Independent contract: §5.4 cooldown expiry, persistence, auth delay and escalation
+Stable seam / production callers: cooldowns.ts buildCooldown/createCooldownStore; executor/failover and daemon-wiring callers
+Remaining ownership comparison: Real cooldown serialization and reset precedence are not exercised by selection fakes.
+KEEP L17 | the cooldown store keys <family>:<accountId>, serves only active ones and prunes expired on write
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L40 | cooldownUntil: resetsAt, else the burnt window's reset, else an hour; auth always an hour
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L51 | cooldownUntil: a limit with no known reset escalates per strike (1 h, 2 h, 4 h at most); a known reset never does
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/agent/executor.test.ts
+Independent contract: §5.1–5.5 unattended execution, prompt interpolation, completion, cancel and error contracts
+Stable seam / production callers: executor.ts, create.ts, watch.ts and prompt.ts through NodeExecutor.execute; nodes/index.ts registers it
+Remaining ownership comparison: The host fake supplies provider protocol events, not selection, prompt rendering or executor control. Resume tests cover replay, not these ordinary command/result cases.
+KEEP L13 | happy path: creates the session like the MCP, sends the prompt with the autonomy note, returns the last message
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L50 | continue-session mode: a follow-up turn into the upstream block's session; its text only
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L75 | continue-session mode without an upstream session fails as a validation error
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L84 | a saved prompt + append renders {{…}} first, escaped for the {variables} pass, then the variables
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L93 | a failed variable read fails the block naming it, and no session is created
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L104 | a missing saved prompt fails the block
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L111 | questions are answered autonomously: custom text where allowed, else (Recommended), else the first option — message-mode too, never dismissed
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L138 | an approval is accepted
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L146 | a plan card is implemented with the plan implementation prompt
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L156 | whenOnlyWatchLoopsRemain: finish ends after a 60 s grace; wait keeps waiting until maxMinutes
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L170 | a wake that becomes a turn only 20 s after the background work ended is still waited for (a held Claude wake)
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L181 | background work that ended with no wake finishes after the 90 s wake window
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L193 | a quiet window catches a wake that comes right after the turn settles
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L205 | maxMinutes interrupts the agent and fails the block with timeout
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L215 | the run's cancel interrupts the agent and ends the block cancelled
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L225 | a failed turn without a limit/auth reason is an agent_error with the host's message
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L233 | the live fields: selection, sessionId, hops and a throttled activity line
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L245 | a host that is restarting (503 on create) is retried on the clock; one session results
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L253 | an account the daemon would not launch (gone from its catalogue) is passed over by the catalogue check, never sent
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L269 | a stored chain naming an agent this host does not offer (a removed launcher) passes it over and runs the next entry
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/agent/failover.test.ts
+Independent contract: §5.4 account switching, cross-family handoff, shared cooldowns and bounded waits
+Stable seam / production callers: executor.ts and failover.ts through execution and cooldown decision methods; factory and executor callers
+Remaining ownership comparison: Selection tests do not execute account switches or handoffs; each scenario varies the failure stage, identity, refusal or wait budget.
+KEEP L50 | limit at create (the provider never starts): switch account in the same session
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L58 | limit mid-turn: the partial work stays in the session and the new account continues it
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L68 | limit while parked (Claude's warning, turn still running): cooled until resetsAt, interrupted, switched
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L81 | limit during background work: the whole thread is interrupted, then switched
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L96 | a switch refused once (something still in flight) waits for idle again, then switches
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L104 | a switch the host keeps refusing hands off to a NEW session on the same agent's next account
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L113 | cross-family handoff: a new session with the handoff prompt (original prompt, notice, last messages, git status)
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L136 | an auth handoff says the login failed and never passes the provider's error text as the agent's messages
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L155 | the handoff caps the previous messages at 32 KiB (newest kept) and git status at 8 KiB
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+REWRITE L168 | OpenCode has no accounts: a limit goes to the next chain entry
+  Preserve the removed helper-level mapping assertion at the existing production executor seam: after oc/model reaches a limit, cooldowns must contain opencode:provider:oc and omit opencode:system. This catches candidate conversion wiring that selection-policy tests cannot. B1–B6: independent per-provider quota isolation, observable shared cooldown state, literal keys, real executor, stable persisted namespace, sole conversion integration owner.
+KEEP L177 | chain exhausted: fails all_burnt with every hop and skip
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L189 | wait-for-reset: waits until the earliest reset, then resumes in the same session on that account
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L206 | wait-for-reset refuses a reset beyond maxWaitHours
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L214 | an auth failure skips the account (1 h cooldown, unusable for the run) and fails over
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L228 | at most 12 hops: a chain of 14 burnt accounts gives up with limit_exceeded
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L236 | the cooldown is shared: the next block skips the burnt account
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L248 | a model the catalogue does not list skips its chain entry (why: catalog) and the next entry runs
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L257 | wait-for-reset over 48 h with limits that never name a reset: resumed hops are not counted, cooldowns escalate
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+REWRITE L274 | coolDown keys accountless launches by provider and never reads another quota's reset
+  Use fixed candidate input fixtures rather than the production candidateFromChoice mapper to prepare inputs; remove that test-only export. Keep independent cooldown keys/reset deadlines; account selection owns choice-to-candidate integration. B1–B6: shared file contract, unchanged observable oracle, production seam, and distinct failure apply.
+
+apps/daemon/src/workflows/agent/helpers.test.ts
+Independent contract: §5.3–5.5 baseline isolation, transcript bounds, activity reporting and host-only secret titles
+Stable seam / production callers: classify.ts, create.ts, failover.ts; executor/watch use the functions directly
+Remaining ownership comparison: Window loss, stale summaries, title transformations and per-block transcript isolation are absent from normal execution fixtures.
+KEEP L38 | only failures after this block's baseline count
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L46 | a baseline row that left the window falls back to the time cut
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L52 | the baseline takes the thread's latest turn over a lagging summary
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L60 | the output text is capped at 2 MiB
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L70 | the handoff reads the parent's words since the block began in the session
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L87 | wait-for-reset honours maxWaitHours from the first wait
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L95 | the activity line reads tool calls and assistant text, never a provider's stderr or warnings
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L105 | a chat title renders its {{…}} like the prompt, but never a secret's value
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L131 | a chat title never shows a secret the render escaped, transformed or nested
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L172 | a chat title drops control and format characters
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/agent/resume.test.ts
+Independent contract: §5.8 durable WaitingOn and command receipts; §5.7 host-only secret values
+Stable seam / production callers: executor.execute with serialized WaitingOn; engine.ts resumes the same contract
+Remaining ownership comparison: Each phase is a durable record variant or lost acknowledgment; ordinary runs cannot catch replay duplication, renewed deadlines or persisted secret values. E2E covers real store wiring only once.
+KEEP L124 | a persisted state this version cannot read ends the block interrupted
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L134 | the deadline is wall-clock: a resumed block does not get its maxMinutes again
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L166 | a handoff prompt carrying the secret keeps it out of the state and sends the real value
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP | restart at selecting (plain)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at creating (plain)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at sending (plain)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at watching (plain)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at output (plain)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at sending (plain), the ack after creating lost
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at watching (plain), the ack after sending lost
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at answering (question)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at watching #2 (question), the ack after answering lost
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at interrupting (switch)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at waiting-idle (switch)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at failing-over (switch)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at switching (switch)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at sending #2 (switch), the ack after switching lost
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at sending #2 (switch)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at watching #2 (switch)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at handing-off (handoff)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at creating #2 (handoff)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at sending #2 (handoff), the ack after creating lost
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at waiting-reset (reset)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at failing-over #2 (reset)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | restart at sending #2 (reset)
+  Distinct durable phase/replay boundary: restart must complete with the expected answer and exactly one session/turn per logical command. The receipt fake only deduplicates when the production executor supplies the original command ID. B1–B6: persisted protocol variant, literal final answer/count oracle, no stronger phase-specific owner.
+KEEP | a secret in the prompt is never persisted, and a restart at creating still sends the real value
+  Detects plaintext secret leakage to WaitingOn or incorrect marker restoration for this durable phase. B1–B6: §5.7–5.8, actual persisted snapshots and outgoing host command, fixed secret absence/presence, distinct create/send restart state.
+KEEP | a secret in the prompt is never persisted, and a restart at sending still sends the real value
+  Detects plaintext secret leakage to WaitingOn or incorrect marker restoration for this durable phase. B1–B6: §5.7–5.8, actual persisted snapshots and outgoing host command, fixed secret absence/presence, distinct create/send restart state.
+
+apps/daemon/src/workflows/agent/secret-text.test.ts
+Independent contract: §5.7–5.8 persisted secret-reference bytes and restoration on resume
+Stable seam / production callers: secret-text.ts protectSecrets/revealSecrets; executor and create callers
+Remaining ownership comparison: Lower redactor is irreversible and cannot check persisted markers, name collisions or removed-secret restoration.
+KEEP L7 | protectSecrets hides every value (longest first, ≥ 4 chars); revealSecrets restores the exact text
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L14 | a secret whose value is another secret's name never corrupts a marker
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L21 | a marker for a secret that no longer exists is sent as nothing; text without markers is untouched
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/agent/select.test.ts
+Independent contract: §5.2 selection policies, quotas, reset ordering, unknown usage and provider identity
+Stable seam / production callers: select.ts selectAccount/burntWindowResetAt; preview and failover callers
+Remaining ownership comparison: Lowest policy owner. Higher fake-host scenarios do not cover ranking/filter matrix or stale and model-scoped usage.
+KEEP L93 | owner's example: soonest weekly reset under 85% picks jasperclaude and skips therealeduard465
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L103 | soonest-reset without a threshold takes the earliest weekly reset
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L109 | soonest-reset on the session window: unknown resets go last
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L114 | least-used (max) picks jasperinuwu
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L119 | least-used ties break on the soonest weekly reset, then the label
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L134 | fixed order [therealeduard465, jasperclaude] under 85% weekly picks jasperclaude — by label or by id
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L145 | an allow-list filters the family, and names what it cannot find
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L151 | a scoped threshold applies only to the models it names
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L163 | a window at 100% is always burnt; a burnt scoped window stops only the models it covers
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L182 | expired windows are ignored: a pre-reset 100% no longer blocks
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L188 | unknown usage is tried after every known account — or dropped with unknownUsage: exclude
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L217 | needsReauth, cooldowns and the exclude set drop candidates
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L240 | an expired cooldown no longer counts
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L245 | cross-family fallback: claude (all burnt or cooling) → codex (reauth, burnt) → grok
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L280 | nothing eligible anywhere: chosen null and the earliest instant a candidate frees
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L299 | a threshold breach with an unknown reset contributes no earliest instant
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L306 | opencode has no accounts: one system candidate, only its cooldown applies
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L319 | system: the family's system row, or its head row when it has no managed accounts
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L340 | chosen carries the entry's model options
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L345 | burntWindowResetAt: the latest reset among burnt windows
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L361 | accountless cooldowns are per provider: one provider's limit never cools another's entries
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/agent/validation-catalog.test.ts
+Independent contract: §7.2 live catalogue validation; bounded unavailable-host refresh regression
+Stable seam / production callers: validation-catalog.ts current/ready/expire; daemon-wiring callers
+Remaining ownership comparison: Catalogue event E2E does not exercise late attachment, failed read backoff or retaining the last good snapshot.
+KEEP L7 | nothing is known before the client is attached; ready() then reads the host's catalogue
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L31 | a failed read is not retried on every request, only once the refresh window has passed
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L52 | expire() reads again at once — even inside a failure's backoff — and keeps the last reading until then
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/catalog-events.test.ts
+Independent contract: §7.1–7.2 registry/provider changes update public workflow problems without an edit
+Stable seam / production callers: daemon-wiring.ts and routes.ts through real routes and registry/workflow events
+Remaining ownership comparison: Unique integration of registry subscription, catalogue refresh and summary event publishing; pure catalogue/summary tests cannot detect a disconnected subscription.
+KEEP L21 | a provider change re-judges the rows: the problem goes out, and comes back, without an edit
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/e2e-agent.test.ts
+Independent contract: §5.1, §5.3, §5.8 agent run persistence and workflow expression context
+Stable seam / production callers: daemon-wiring, engine, agent executor via real workflow routes/stores and host protocol fake
+Remaining ownership comparison: Restart proves real disk and runtime adoption, leaving run.json; workflow context case catches engine-to-agent context loss absent from fake NodeExecutionContext tests.
+REWRITE L68 | a restart while the agent works resumes the watcher and never sends the turn twice
+  Retain already-asserted public result data as a JSON artifact outside the deleted fixture appdir; test diagnostics expose its location. Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+REWRITE L111 | an agent prompt and its chat title read {{ workflow.… }} as every other block does
+  Retain already-asserted public result data as a JSON artifact outside the deleted fixture appdir; test diagnostics expose its location. Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/e2e-mcp.test.ts
+Independent contract: §8.3 public MCP workflow tools and published authoring guide
+Stable seam / production callers: MCP JSON-RPC tools/call to real routes/runtime; external MCP clients
+Remaining ownership comparison: Guide consumer validity, draft normalization and bus-wait/persisted output are real integration obligations; no fake implements workflow business logic here.
+REWRITE L53 | the published Jira create and edit example stays valid on the real routes
+  Retain already-asserted public result data as a JSON artifact outside the deleted fixture appdir; test diagnostics expose its location. Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+REWRITE L71 | validate_workflow: a draft with the placeholders the tool fills in validates on the real route
+  Keep only the minimal draft that needs MCP normalization before real-route validation. Remove full-schema happy path and bad shell-template matrix owned by API workflow validation. B1–B6: public minimal-draft acceptance, real tools/call→route seam, literal valid=true oracle, no dependence on private call shape, sole cross-layer normalization contract.
+REWRITE L113 | run_workflow waits for a real run and its stored output can be read by node name
+  Retain already-asserted public result data as a JSON artifact outside the deleted fixture appdir; test diagnostics expose its location. Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/e2e.test.ts
+Independent contract: §2, §5.6–5.8, §6 critical manual, restart, schedule and git workflows
+Stable seam / production callers: real routes/runtime/stores/sandbox and workflow events; production index.ts wiring
+Remaining ownership comparison: These integration tests leave verifiable run/state/log artifacts and catch disconnected wiring; lower owners cover policy edge cases rather than this end-to-end composition.
+REWRITE L97 | every block's status, output, handle and edge; the run persisted; secrets redacted everywhere
+  Final name: a manual pipeline produces its final output and redacts secrets in public and durable artifacts. Narrow the manual E2E to cross-block final output, the real outbound HTTP request, public run events, durable artifacts and log redaction. Remove repeated per-block output/exit assertions already owned by integration.test.ts and engine.test.ts. B1–B6: critical user pipeline and persisted artifact remain at the real runtime seam; fixed final data proves code→IF→shell→HTTP composition without duplicating each owner matrix.
+REWRITE L220 | the runtime stops while a shell block sleeps; a new one over the same appdir resumes it
+  Retain already-asserted public result data as a JSON artifact outside the deleted fixture appdir; test diagnostics expose its location. Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+REWRITE L272 | nextRunAt reaches the rail, the scheduler fires the run on time, the next time follows
+  Retain already-asserted public result data as a JSON artifact outside the deleted fixture appdir; test diagnostics expose its location. Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+REWRITE L325 | the poller baselines, fires once on a push, and a failing poll shows on the rail
+  Retain already-asserted public result data as a JSON artifact outside the deleted fixture appdir; test diagnostics expose its location. Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/engine-fixes.test.ts
+Independent contract: §5.7–5.10 and AGENTS.md persist-before-effect, redaction, crash recovery and containment
+Stable seam / production callers: engine.ts lifecycle with real HTTP executor or controlled service boundaries; routes and trigger hosts call it
+Remaining ownership comparison: Distinct credible races: stop during POST/spawn/project creation/deletion, failed durable registration, corrupt records and inherited secrets; ordinary engine tests do not put execution at these crash boundaries.
+KEEP L54 | an HTTP POST reached after stop() is not sent; the resumed run sends it exactly once
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L83 | a runner spawned while the engine stopped is adopted from its handle, never spawned twice
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L115 | a parent's secret rendered into a sub-workflow's input is redacted in the child run
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L130 | a code runner stopped from outside fails the block; the run does not succeed
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L142 | a block that answers cancelled while nothing cancelled the run fails it
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L151 | a missing existing project fails the run with errorKind project_missing
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L166 | a restart during the creation: the pending path is on disk, removed, and made again
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L195 | a failed creation removes what it left and records nothing pending
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L205 | a run whose saved state cannot be read is due for the sweeper
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L231 | stopping during the finalize's delete leaves the project due for the sweeper
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L247 | a release event clones at its tag; a PR head the clone cannot resolve is retried at the PR branch
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L300 | a run is not active until its record exists; a failed create leaves nothing active
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L319 | a stored run naming a block `__proto__` is interrupted, never walked
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L348 | an invalid URL quoting a long secret is redacted before it is cut
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/engine-resume.test.ts
+Independent contract: §5.8 safe restart of timers, processes, HTTP and child runs
+Stable seam / production callers: engine.ts stop/resume/run and PersistedRun records; daemon-wiring startup/shutdown
+Remaining ownership comparison: Each record variant has different replay safety; the detached-shell E2E cannot protect POST replay refusal, lost records, retry delays and handover write ownership.
+KEEP L50 | a Wait block's timer resumes at the same wall-clock instant
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L74 | a retry delay resumes, then the next attempt runs
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L93 | a code process that ended while the daemon was down: its exit.json is read
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L114 | a process gone without a record is interrupted — retried when the policy allows
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L148 | a child run is re-subscribed by its parent
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L175 | an HTTP GET is re-issued; a POST fails interrupted
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L207 | a block running without a WaitingOn: a pure block re-runs as the same attempt
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L243 | a side-effecting block running without a WaitingOn is interrupted (no retry)
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L260 | queued runs start after a restart; a run whose definition cannot be read is marked interrupted
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L284 | stop() persists the last state and writes nothing after
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/engine.test.ts
+Independent contract: §3.2–3.4, §4, §5.8–5.11, §7.6 graph scheduling, retry, cancellation, limits, outputs and test runs
+Stable seam / production callers: engine.ts run/fire/cancel/testNode and returned/persisted/event state; routes, scheduler and poller callers
+Remaining ownership comparison: Fake executors supply outcomes but do not implement scheduling or lifecycle. API graph tests only compute readiness; these prove actual admission, side effects, run results and downstream context.
+KEEP L23 | IF takes one branch; the other is skipped with its edges dead
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L49 | Switch: the first matching case wins, the fallback takes the rest, no fallback kills every edge
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L77 | independent branches run concurrently; Merge (all) waits for every live input
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L100 | Merge (first) runs on the first arrival and ignores the later one
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L125 | a block with several live inputs and no Merge reads the merge object
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L139 | a failure with an error edge routes down it and the run succeeds
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L167 | a failure without an error edge fails the run and cancels the running siblings
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L185 | retries wait their delay on a persisted timer, then succeed
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L215 | all_burnt and limit_exceeded failures are never retried
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L227 | an agent waiting for a usage reset (kind agent, phase waiting-reset) reads waiting and resumes as such
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L257 | retries exhausted: the last failure stands
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L267 | a disabled block passes its input through as success without running
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L277 | Stop as failure fails the run with its message and value
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L294 | code's stop() ends the run as stopped
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L305 | a trigger-less workflow starts at its roots with the manual input
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L315 | a fired trigger runs; the others are skipped
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L341 | a run with validation errors is refused (manual) or recorded as failed (trigger)
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L352 | a projectOverride block runs in that project; a missing one fails the block
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L370 | an executor that throws or answers nonsense fails its block as internal
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L386 | a big output goes to a file with an inline preview; downstream and nodeOutput read it whole
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L410 | an output over the hard cap fails the block with limit_exceeded
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L419 | a secret appearing in an output, an error or a warning is redacted everywhere
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L448 | the per-run update events are throttled; the final state is always published
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L478 | cancel mid-block aborts it and ends the run cancelled
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L494 | a block that ignores its abort cannot hold a cancelled run forever
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L507 | the run timeout fails the run and cancels what runs
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L526 | skip: a second fire records a skipped stub; force runs anyway
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L543 | queue: one pending fire waits for the active run; a further fire is skipped
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L565 | parallel: up to maxConcurrent, then skipped
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L575 | the global run cap queues runs beyond it, FIFO
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L596 | a queued run can be cancelled before it starts
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L608 | agent blocks and sandbox processes wait behind their global caps
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L631 | an agent block's timer wait releases its slot; waking takes it back
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L652 | usePinned: a pinned block is not executed and downstream reads its pin
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L665 | without usePinned, pins are ignored
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L673 | fromNodeId runs that block and its downstream; upstream from pins, else the latest run
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L694 | testNode executes only that block, even with no upstream data
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L708 | testNode seeds only the tested block's upstream: downstream and side branches stay skipped
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L733 | retryOf reuses the succeeded blocks and re-runs the failed ones
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L754 | retryOf + fromNodeId on the fired trigger re-runs everything with the same event
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L782 | retryOf + a non-trigger fromNodeId runs from there on that run's upstream outputs
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L796 | retryOf does not reuse a success that sits below a block being re-run
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L820 | created per run, deleted when the run succeeds
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L831 | kept keepFailedTempDays when the run fails; Delete now removes it
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L843 | a git trigger on the project repo clones at the event's sha
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L864 | the child's final output is the block's output; runs are linked both ways
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L878 | a failing child fails the block with child_run_failed
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L887 | the depth limit and cycles are refused at run time
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L911 | cancelling the parent cancels the child
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L924 | child runs bypass the global run cap (no deadlock)
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L937 | deleting a workflow cancels its runs and stops writing them
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L953 | enabledTriggers lists enabled workflows' live trigger nodes; definition changes are forwarded
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L973 | recordSkipped writes a visible stub
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/git-remote/clone-ref.test.ts
+Independent contract: §5.10 Git clone ref and option-safety protocol
+Stable seam / production callers: clone-ref.ts validation, git argv and ref parsing; accounts.ts and index.ts callers
+Remaining ownership comparison: Lowest Git protocol owner; workflow project fakes never run argument validation or parse Git failure bytes.
+KEEP L15 | cloneRefProblem accepts branches, tags and shas
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L21 | cloneRefProblem refuses empty, long, option-like, whitespace and control characters
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L39 | sha detection: only full ids skip --branch; short hex may be either
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L50 | cloneArgs: a name rides --branch, a sha and no ref clone plainly, the URL follows --
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L68 | isMissingRemoteRef recognises git's messages
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L74 | resolveAbbreviatedSha: one commit by prefix, null when none or ambiguous
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/git-remote/ls-remote.test.ts
+Independent contract: §6.2 Git ls-remote text protocol including peeled tags, SHA-256 and hostile refs
+Stable seam / production callers: ls-remote.ts parser; accounts.ts remote reader caller
+Remaining ownership comparison: Pollers receive parsed structures; only these cases protect raw Git byte variants and prototype keys.
+KEEP L11 | parseLsRemote reads heads, lightweight and annotated tags, and the HEAD symref
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L31 | parseLsRemote: a peeled line before its tag, CRLF, junk and uppercase shas
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L44 | parseLsRemote: no HEAD line → no defaultBranch; a __proto__ branch stays an own key
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L52 | parseLsRemote: SHA-256 object ids
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/git-remote/remote-url.test.ts
+Independent contract: §6.2 repo identity and supported transports; AGENTS.md secret redaction
+Stable seam / production callers: remote-url.ts URL normalization/validation/redaction; accounts, resolver and poller callers
+Remaining ownership comparison: Lowest URL policy owner. Provider parsers and UI display helpers have different contracts; live poll test proves integration, not the URL/credential syntax matrix.
+KEEP L6 | repoKeyOf: every GitHub form of one repo has one key
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L30 | repoKeyOf: Bitbucket Cloud's old and new SSH hosts are one host
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L43 | repoKeyOf: Bitbucket Server/DC forms reduce to host/project/repo
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L58 | repoKeyOf: other hosts keep their whole path (GitLab subgroups)
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L63 | repoKeyOf: refuses what git would not be handed
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L79 | repoDisplayName keeps the original case
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L86 | remoteUrlProblem accepts the four transports and refuses the rest
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L102 | stripUrlCredentials drops the whole http(s) userinfo (a token may be the user) and an ssh password
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L113 | redactUrlUserinfo hides a token user in http(s) text and a password anywhere, keeps ssh logins
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/integration.test.ts
+Independent contract: §4, §5.6–5.9 shell/HTTP external I/O and result/error translation
+Stable seam / production callers: real shell and local HTTP via engine and nodes executors; factory.ts callers
+Remaining ownership comparison: Sandbox tests cannot check workflow error kinds or shell env rendering; manual E2E cannot check redirects, malformed bodies, cancellation and network errors.
+KEEP L41 | a shell block gets its env (secrets included), never a rendered script; exit codes map
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L73 | cancelling a run kills its shell promptly
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L159 | JSON responses are parsed; query and headers are rendered (secrets allowed, redacted after)
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L176 | text stays text; redirects are followed or not; statuses map
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L192 | bodies: JSON rendered from a value, form fields, text
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L205 | the body cap, the timeout and a network error each fail the block with their kind
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/nodes/nodes.test.ts
+Independent contract: §4 Wait timezone precedence; §3.2 shell output tail cap
+Stable seam / production callers: real wait/shell executors via engine; nodes/index.ts callers
+Remaining ownership comparison: UTC duration resume and raw 50 MiB sandbox logs do not cover next-local-time or 16 MiB workflow tail output.
+KEEP L16 | until HH:MM waits for the next such time in the block's time zone
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L34 | the workflow's own time zone applies when the block names none
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L65 | stdout and stderr are the tails within the cap, with a warning; the whole log stays on disk
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/nodes/regex-worker.test.ts
+Independent contract: §4 bounded worker regex execution; §5.7 redact warnings before clipping
+Stable seam / production callers: regex-worker.ts actual worker and API evaluateRulesAsync; flow.ts callers
+Remaining ownership comparison: Actual worker tests detect event-loop blocking, ignored flags and failed recovery. API owner confirmed clipped-warning secret case is unique.
+REWRITE L14 | an ordinary pattern answers
+  Exercise the production sharedRegexMatcher entry point; remove the test-only factory export without changing literal regex result oracles. B1–B6: shared file contract, unchanged observable oracle, production seam, and distinct failure apply.
+REWRITE L19 | a catastrophic pattern is stopped at the deadline, the loop stays free, and the next search works
+  Exercise the production sharedRegexMatcher entry point; preserve the distinct event-loop/timeout/recovery regression and remove the otherwise test-only factory export. B1–B6: shared file contract, unchanged observable oracle, production seam, and distinct failure apply.
+KEEP L35 | a clipped value is redacted before the clip
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/routes.test.ts
+Independent contract: §8.1 public HTTP status/body/header contracts, §5.7 host-only secrets and expression preview API
+Stable seam / production callers: routes.ts registered Fastify routes, real stores, expression-preview.ts; API client and MCP callers
+Remaining ownership comparison: HTTP adaptation, unavailable-engine fallback, resource scope checks, cascade and preview source selection belong here; storage and engine tests cannot detect wire errors.
+KEEP L165 | without the engine: acting routes answer 503 ENGINE_UNAVAILABLE
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L183 | without the engine: history, run detail and outputs are read from the run store
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L221 | validate uses the daemon's saved-prompt catalog and reports malformed or missing resources
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L236 | the list filters by project: the existing project, plus temp workflows of its workspace
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L252 | block types and the schedule preview
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L265 | secrets: names only, write-only values, scoped to an existing workflow
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L290 | delete cascades: active runs cancelled through the engine, runs and secrets removed
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L319 | with the engine: runs, tests, cancels and summaries go through it
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L336 | log windows are redacted and report their position
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L357 | log follow streams as the file grows and redacts a secret split across writes
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L405 | an engine refusal keeps its status, code and problems (never a generic 500)
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L424 | DELETE of a secret refuses prototype names and unknown workflows
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L433 | write routes take a body past 1 MiB, and one past their limit answers LIMIT_EXCEEDED
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L444 | account-preview refuses a chain entry it cannot read (400, never 500)
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L452 | the delete cascade keeps a run record whose temp project it could not delete; deletes it directly when it can
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L520 | expression preview: returns node-relative data, missing/error state and source metadata
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L550 | expression preview: secrets render as placeholders and a secret inside an output is redacted
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L579 | expression preview: the block's point of view decides input; several inputs are keyed by name
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L595 | expression preview: value mode keeps a number a number and says when nothing was read
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L607 | expression preview: pinned outputs replace recorded ones; with no run they are the only data
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L627 | expression preview: the default run is the latest that reached the block; big outputs are read whole
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L662 | expression preview: refusals use the workflow error codes
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L681 | expression preview: a block name containing a secret value stays readable (only values are redacted)
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L717 | expression preview: a starting block of a workflow with no trigger reads the run's input (engine computeForced)
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L745 | expression preview: rendering stops at the byte cap and parse errors are deduplicated and capped
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L765 | expression preview: without a block, a queued newest run gives way to the newest with finished blocks
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/run-store.test.ts
+Independent contract: §5.8 persisted run files, disposable index, paging, retention and output containment
+Stable seam / production callers: run-store.ts FileRunStore and wire projection; engine/routes/sweepers callers
+Remaining ownership comparison: In-memory engine fakes do not prove real permissions, serialization, durable ordering, stale index rebuilding or filesystem containment.
+KEEP L61 | create/save: run.json is atomic and 0600, the last save wins, the index follows
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L87 | init rebuilds the index from the run directories; an unreadable run.json is skipped
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L119 | paging: `before` is a run id cursor, newest first; an unknown cursor is a first page
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L136 | sweep keeps the newest 100 and nothing older than 30 days, preserving active runs
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L159 | sweep keeps a run whose temporary project is still there, until the project is deleted
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L178 | events append as NDJSON; attempt dirs and output files live under the run
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L205 | deleteForWorkflow removes every run of that workflow only
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L218 | toRunSummary / persistedRunToWire: bookkeeping stripped, outputs cut to the preview
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/sandbox/log-reader.test.ts
+Independent contract: §5.7 byte-window redaction, UTF-8 integrity and live log termination
+Stable seam / production callers: log-reader.ts readLogWindow/followLog on files; routes and shell executor callers
+Remaining ownership comparison: Only seam covering offsets inside secrets, all byte-window sizes, held prefixes and abort; route test covers HTTP mapping instead.
+KEEP L46 | windows of any size cut at character boundaries and join to the whole text
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L57 | a secret is never split across windows
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L71 | an offset inside a secret serves its placeholder, never its tail
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L79 | holdTail keeps back a partial character and a possible secret prefix
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L95 | a missing file reads as empty
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L102 | yields as the file grows and ends once it is not live and fully read
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L127 | an abort ends a live follow
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/sandbox/redact.test.ts
+Independent contract: §5.7 longest-first literal secret replacement, nested values, nonmutation
+Stable seam / production callers: redact.ts createRedactor text/value; engine, HTTP, shell and title callers
+Remaining ownership comparison: Lowest redaction owner, distinct from streaming byte offsets and reversible persisted markers.
+KEEP L9 | text: every value ≥ 4 chars, longest first
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L17 | value: deep through arrays and objects, values only
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L36 | special regex characters in a value are literal
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/sandbox/sandbox.test.ts
+Independent contract: §5.6–5.8 code/shell sandbox ABI, env isolation, process limits and restart adoption
+Stable seam / production callers: sandbox.ts spawn/wait/kill/isAlive with real detached runners and artifacts; process.ts/factory callers
+Remaining ownership comparison: Lowest real subprocess owner: code host semantics, PID reuse, orphan/group cleanup and environment leakage are not implemented by engine fakes or one E2E restart.
+KEEP L77 | a return value is the result; log() and console.log reach stdout
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L90 | undefined returns as null
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L95 | a throw is a failure with message and stack
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L103 | stop() ends the run as stopped, with its reason, even from a promise chain
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L112 | require resolves the project's own node_modules
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L122 | a module with top-level await works
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L127 | a non-serializable return is an error
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L133 | a return over maxOutputBytes is an error
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L139 | a default export that is not a function is a clear error
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L148 | a syntax error is a failure
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L153 | an open handle does not hold the attempt
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L160 | stdout, stderr and the exit code
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L172 | sh works too, and the cwd is the request's
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L178 | each stream is capped with one notice line
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L189 | the environment is built, never inherited
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L223 | an invalid env name refuses the spawn
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+REWRITE L231 | a missing cwd refuses the spawn
+  Require ENOENT so an unrelated spawn error cannot satisfy the rejection. The filesystem/process API independently defines this error for a missing cwd.
+  B1–B6: file contract/seam/ownership above; same fixture/action and fixed caller-visible outcomes remain, with incidental assertion removed or refusal narrowed.
+KEEP L240 | the runner enforces the deadline itself
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L251 | a work that ignores SIGTERM is SIGKILLed after the grace
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+REWRITE L270 | a cancel kills the whole group, grandchildren included
+  Use the independent Node process.platform value for the Linux-only precondition, removing a test-only HAS_PROC export. Existing cancellation artifact/process outcomes remain. B1–B6: shared file contract, unchanged observable oracle, production seam, and distinct failure apply.
+KEEP L297 | kill() ends a running attempt
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+REWRITE L308 | a runner killed outright reads as interrupted, and its work is ended
+  Use Node process.platform for the Linux-only precondition, removing a test-only HAS_PROC export. Existing orphan-cleanup and interruption outcomes remain. B1–B6: shared file contract, unchanged observable oracle, production seam, and distinct failure apply.
+KEEP L325 | a restarted daemon adopts a running attempt and reads its exit
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+REWRITE L346 | isAlive refuses a recycled pid (starttime mismatch)
+  Use Node process.platform for the Linux-only precondition, removing a test-only HAS_PROC export. Existing PID-reuse security outcome remains. B1–B6: shared file contract, unchanged observable oracle, production seam, and distinct failure apply.
+
+apps/daemon/src/workflows/secrets.test.ts
+Independent contract: §5.7 secret names, workflow/global scopes, permission and failure-safe persistence
+Stable seam / production callers: secrets.ts WorkflowSecretsService; routes, engine and daemon-wiring callers
+Remaining ownership comparison: Real secret store owns permissions, shadowing, corrupt backup and unreadable preservation; HTTP tests only cover adaptation and values never leaving routes.
+KEEP L31 | values are stored 0600 (also after an existing file was looser) and never listed
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L54 | a workflow's own secret shadows a global one; list shows both scopes; deleteForWorkflow removes its own
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L84 | names and values are validated: 400 SECRET_INVALID
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L97 | a foreign-version file is moved aside, without quoting a value
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L111 | an unreadable path makes the store read-only (503) and preserves existing content
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/service.test.ts
+Independent contract: §3.1, §8 workflow revision, atomic tolerant storage and mutation/event semantics
+Stable seam / production callers: service.ts WorkflowService and publishWorkflowEvents; daemon-wiring/routes callers
+Remaining ownership comparison: Lowest durable definition owner; config parses individual values but cannot check serialization, revision conflicts, transactional edits or published events.
+KEEP L73 | create → read back; persisted atomically at 0600; a reload lists it
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L92 | tolerant load: rejected entries and unknown keys are written back verbatim and never listed
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L117 | a corrupt or foreign-version file is moved aside, never overwritten
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L136 | an unreadable path blocks mutation with 503 WORKFLOWS_UNAVAILABLE and preserves content
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L147 | revisions: +1 on every write, a stale revision is a 409 naming the current one
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L168 | a bad patch op is 400 INVALID_WORKFLOW naming the op, and changes nothing
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L189 | a definition with errors saves disabled, but can never be (or stay) enabled
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L217 | a schema-invalid replace is refused whole
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L231 | limits: the workflow count and the definition size are LIMIT_EXCEEDED
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L262 | duplicate: new ids for the workflow, blocks and connections; disabled; pins follow
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L284 | events: upserted after every write, deleted after a delete; the bridge publishes summaries
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/services.test.ts
+Independent contract: §5.9–5.11 project safety, concurrency, notification and retention contracts
+Stable seam / production callers: projects.ts, notifier.ts, scheduler-queue.ts, sweepers.ts; factory/engine/daemon-wiring callers
+Remaining ownership comparison: These own adapter mapping, debouncing, aborted queue removal and abandoned-resource cleanup; engine tests exercise consumer lifecycle, not all service policies.
+REWRITE L72 | resolveExisting accepts exactly <workspacesDir>/<ws>/<project>
+  Remove currentBranch passthrough echo assertion; retain project boundary/lookup outcomes. The constant fake branch reply proves only forwarding and does not add a distinct contract.
+  B1–B6: file contract/seam/ownership above; same fixture/action and fixed caller-visible outcomes remain, with incidental assertion removed or refusal narrowed.
+KEEP L83 | createTemp and deleteProject go through the daemon's routes
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L105 | a refused create names the daemon's code
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+REWRITE L113 | gitStatusShort renders porcelain-style lines within the byte cap
+  Remove unrelated null currentBranch passthrough assertion. Retain independently specified Git short-status formatting and byte bound.
+  B1–B6: file contract/seam/ownership above; same fixture/action and fixed caller-visible outcomes remain, with incidental assertion removed or refusal narrowed.
+KEEP L146 | pushes per settings.notify, debounced per workflow and kind
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L171 | FIFO past the cap; aborted waiters leave the queue; force skips it
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L220 | deletes temp projects past deleteAfter and closes old workflow tabs nobody wrote in
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L272 | runs hourly on the injected clock and stops cleanly
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/state-store.test.ts
+Independent contract: §5.8, §6 tolerant runtime-state persistence, snapshots and concurrent mutations
+Stable seam / production callers: state-store.ts WorkflowStateStore on real files; cooldown/scheduler/poller callers
+Remaining ownership comparison: Only real state store tests protect copy isolation, atomic recovery and coalesced durable writes; trigger fake state cannot.
+KEEP L26 | a missing file loads empty, silently; updates persist atomically at 0600
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L45 | get() is a snapshot
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L52 | a corrupt file starts empty, is moved aside and logged — never thrown
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L67 | bad entries are dropped by the tolerant parse, good ones kept
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L77 | an unreadable path starts empty and logs
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L86 | concurrent updates are immediately visible and all become durable
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L97 | a throwing mutator changes nothing; a failed write retains changes for the next write
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/storage-fixes.test.ts
+Independent contract: AGENTS.md tolerant forward-compatible stores and prototype containment; §5.8 recoverable runs
+Stable seam / production callers: config schema, API validation, secrets and FileRunStore public operations; service/engine callers
+Remaining ownership comparison: API/config owner confirmed nested unknown fields and workflow prototype identifiers are not duplicated. Secret unknown records and index-before-save crash are unique storage regressions.
+KEEP L43 | a newer build's nested fields survive this build's parse (a save never erases them)
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L68 | block and connection ids that could key Object.prototype are refused, by the schema and by validation
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L90 | the secrets file keeps what this build cannot read, verbatim, across a write
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L114 | the secrets store never indexes past its own maps
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L130 | an unfinished run remains recoverable when the index lands before its pending save
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/summary.test.ts
+Independent contract: §5.11 notifications must follow settings across clients
+Stable seam / production callers: summary.ts buildWorkflowSummary; routes, engine and daemon-wiring callers
+Remaining ownership comparison: Notification projection is distinct from notifier push behavior; catalogue refresh is now solely owned by catalogue-events integration plus API validation.
+KEEP L9 | the summary carries settings.notify so open clients honour it
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+DELETE L29 | a changed agent catalogue re-judges a cached definition
+  Failure formerly detected: stale summary validation when the catalogue changes. Stronger retained coverage: catalog-events.test.ts changes the provider models twice without editing and observes real public workflow.upserted problems. API validation owns unknown/pending catalogue semantics. Removes duplicate cache implementation-focused setup; low risk. nightly/liveCatalog test fixtures and edge import removed. No production seam loses its last caller.
+
+apps/daemon/src/workflows/triggers/git-events.test.ts
+Independent contract: §6.2 glob matching, bounded persisted dedup and PR/push transitions
+Stable seam / production callers: git-events.ts and glob.ts detection functions; git-poller caller
+Remaining ownership comparison: Distinct raw transition/cursor matrix not covered by the regular poller scenario: rollback, reopened PRs, old scrolling pages and page-base high mark.
+KEEP L7 | glob: anchored, `*` stops at `/`, `**` crosses it, `?` is one character
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L31 | sameSha compares an abbreviation (Bitbucket Cloud's 12 hex) as a prefix
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L39 | pushFired keeps the newest 1000
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L64 | pull requests: an old PR scrolling into the page is recorded silently; one opened and merged between polls yields both
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L76 | pull requests: a lower-numbered new PR walked after a higher one still opens (the mark is the page's base)
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L90 | pull requests: dedup keys name the transition — a force-push rollback and a second close after a reopen fire
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L114 | push: a force-push rollback (A..B then B..A) is a new dedup key, not a repeat of the first push to A
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/triggers/git-poller.test.ts
+Independent contract: §6.2 baseline, periodic remote protocol, dedup, changes, rate limits and atomic cursors
+Stable seam / production callers: git-poller.ts start/stop/triggerState and GitRemoteReader protocol; daemon-wiring caller
+Remaining ownership comparison: Detector tests have no timers/remote/state; provider tests do not know trigger cursors. Tests protect dispatch and provider inputs, not private function identities.
+KEEP L77 | push: the first poll only baselines; a later push fires once with previousSha..sha
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L118 | push: branch globs; a new matching branch fires with no previousSha; deleted branches are ignored
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L142 | push: branches [] watches the default branch, read only when unknown and every 10th poll
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L163 | tag: one run per new matching tag (version order), at most 10 per poll, the rest skipped; moved tags ignored
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L192 | release: drafts never, pre-releases only when asked for
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L237 | release on a provider without releases shows an error and fires nothing
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L264 | pull_request: opened, updated, merged and closed; the base filter; payload and text
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L311 | pull_request: Bitbucket Cloud's 12-char head sha compares consistently and polls every 180 s
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L333 | ETags: a baselined listing sends its ETag; a 304 fires nothing and still counts as a poll
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L355 | dedup survives a restart: a new poller over the same state never re-fires, and still fires what is new
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L384 | a changed filter or repo re-baselines; a disabled or deleted trigger is pruned
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L416 | two triggers on one repo share one poller (one ls-remote per poll); another account is another poller
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L439 | failures back off exponentially to 15 min, show on the trigger, honour Retry-After and never fire
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L474 | a PR listing without the scope says which scope is missing; push triggers on the same repo keep polling
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L489 | an unresolvable repository shows why and polls nothing; stop() leaves no timer
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L500 | stop() mid-poll commits and fires nothing
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L521 | a token typed as the URL's user never reaches the poll, the payload or the error text
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L542 | ETags: a new ETag is written in the same state update as the cursors that judged its page
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+REWRITE L566 | the pulls poll names the PRs its triggers last saw open (so a DC listing can look them up)
+  Drop incidental descending PR order; assert the set of open PR numbers required by §6.2 and providers/types.ts ConditionalListOptions. An omitted open PR can never be checked for a later merge. Provider tests cannot catch missing cursor forwarding.
+  B1–B6: file contract/seam/ownership above; same fixture/action and fixed caller-visible outcomes remain, with incidental assertion removed or refusal narrowed.
+KEEP L577 | pull_request: an abbreviated head (Bitbucket Cloud) is completed from the branch heads before it fires
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/triggers/repo-resolve.test.ts
+Independent contract: §6.2 project origin/workspace account resolution and delayed-origin recovery
+Stable seam / production callers: repo-resolve.ts resolver and poller refresh; daemon-wiring caller
+Remaining ownership comparison: Remote URL parsing cannot choose the workflow workspace account or recover when a project gains an origin.
+KEEP L28 | project repositories reject paths outside the workspace project layout
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L35 | repo kind url: as given, with its account or none
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L45 | repo kind project: an existing project's origin + its workspace's account
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L60 | repo kind project on a temp workflow: its clone URL + that workspace's account; an empty temp project has none
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L68 | a project whose origin appears later is picked up by the periodic re-resolve
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+apps/daemon/src/workflows/triggers/scheduler.test.ts
+Independent contract: §6.1 cron trigger timing, durable cursor-before-fire and bounded missed-run handling
+Stable seam / production callers: scheduler.ts start/stop/triggerState with durable state where required; daemon-wiring caller
+Remaining ownership comparison: API cron tests calculate dates but cannot catch duplicate fires, cursor-write errors, disabled-trigger reconciliation or clock jumps.
+KEEP L28 | a new trigger is scheduled from now and fires at its time, once, with the schedule payload
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L56 | the cursor is persisted before the fire
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L72 | the timer never sleeps more than 60 s, and a clock jump is noticed within a minute
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L88 | boot: a run missed by less than the grace fires once; beyond it one missed stub, never a burst
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L118 | edits rearm: a changed cron or zone recomputes from now; disable prunes, re-enable never fires a stale time; delete prunes
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L154 | an unrelated edit keeps the cursor; a disabled node is not scheduled; an invalid cron warns once and never fires
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L174 | a failed cursor write skips that one run but never stops the timer
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+KEEP L196 | a failed write while reconciling still arms the timer
+  Detects the named observable failure under the independent contract; fixed scenario oracle at the listed stable owner. B1–B6 apply as expanded above.
+
+Production/support disposition recorded before editing:
+REMOVE optional matcher injection parameters from createIfExecutor/createSwitchExecutor: rg callers finds only nodes/index.ts calling each with no arguments; no surviving test or production caller injects a matcher. Default shared worker behavior is unchanged.
+REMOVE shapeOf export from expression-preview.ts: only internal calls remain; no production or test import. Keep function private.
+No fixtures/snapshots files become orphaned; shared workflow and host harnesses remain used by retained contracts.
+Validation outcomes are recorded below; parent owns full repository checks/commit/push.
+
+Pre-edit refinement to the E2E REWRITE: input.json removal must fail stat with ENOENT, rather than accepting arbitrary I/O errors. Detects secret-file lifecycle regression; no stronger composed artifact owner; existing run/log API clients use the seam; low risk; validate e2e.test.ts.
+
+Pre-edit dead-seam follow-up: make createRegexMatcher, candidateFromChoice, HAS_PROC, WORKFLOW_RUN_ID_ENV_VAR and WORKFLOW_ID_ENV_VAR private. rg found no external non-test callers; sharedRegexMatcher remains the daemon public worker seam, Node platform selects Linux-only checks, and cooldown tests receive fixed input candidates. Keep SlotAbortedError exported as the documented SlotPool rejection type. Risks low; focused validation regex-worker/sandbox/failover plus scope suite.
+
+Pre-edit review correction: candidate conversion was uniquely covered through the old helper setup. Keep its provider-key failure mode in the existing OpenCode executor scenario before removing the export, as identified by independent reviewer /root/api_config. No new test or implementation-derived oracle needed.
+
+Validation completed:
+- After-edit impacted files: agent/failover, e2e-mcp, e2e, nodes/regex-worker, nodes/nodes, routes, sandbox/sandbox, services, summary, triggers/git-poller: 111 tests passed, 0 failures/skips (concurrency 2).
+- Independent-review correction recheck: agent/failover.test.ts: 19 tests passed, 0 failures/skips (concurrency 2).
+- git diff --check for workflow files/report passed; final workflow diff inspected.
+Disposition totals: 370 original concrete cases = 1 DELETE + 20 REWRITE + 349 KEEP; 369 remain. Test LOC: 34 added, 97 deleted (net -63); no replacement tests. Six unused exports made private, two unused matcher injection parameters removed, plus local duplicate-test fixtures removed.
+- Complete workflow scope: all 36 files, 369 tests passed, 0 failures/skips (concurrency 2). This scope run started before edits and completed after them; the affected-file pass and final failover recheck above verify the final changed contents. No pristine-baseline claim is made.
+- API and UI ownership coordination completed; independent API reviewer checked removed seams and identified the provider-key assertion that is now retained at the executor seam.
+
+Pre-edit E2E artifact correction: the earlier run/state/log files were verified but deleted with their fixture appdirs. All nine cases in e2e.test.ts/e2e-agent.test.ts/e2e-mcp.test.ts now retain selected already-asserted public run/MCP result data in separate temporary artifact directories. No raw logs, host secret values, private waiting-state or assertion-free evidence is copied. Existing daemon-harness gains the shared 0600 JSON writer and reports each artifact via TestContext.diagnostic. Low risk, no production changes. Validate all three E2E files; seven former KEEP cases become REWRITE (the manual pipeline and minimal MCP draft were already REWRITE). Six-bar ownership and failure oracles stay unchanged.
+
+E2E artifact final verification: all three E2E files passed (9 tests, 0 failures/skips, concurrency 2). Independently reopened all nine diagnostic artifact paths after fixture cleanup, parsed every JSON file, verified 0600 modes and absence of the raw test token; manual pipeline finalOutput retains the expected «secret:TOKEN» placeholder. Artifacts are outside deleted appdirs and paths appear in TAP diagnostics. Net workflow source/test/support LOC after artifact follow-up: -54. Final diff and git diff --check reviewed again.

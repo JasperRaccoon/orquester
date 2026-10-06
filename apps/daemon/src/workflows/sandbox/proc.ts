@@ -9,7 +9,7 @@ import { readFileSync } from "node:fs";
 
 import { parseStat } from "../../agent-host/support/leftover-processes.ts";
 
-export const HAS_PROC = process.platform === "linux";
+const HAS_PROC = process.platform === "linux";
 
 /** State + starttime of a pid off `/proc/<pid>/stat`, or null when it is gone/unreadable. */
 function readProcStat(pid: number): { state: string; starttime: number } | null {

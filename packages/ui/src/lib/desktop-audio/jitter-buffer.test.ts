@@ -1,12 +1,12 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { JitterBuffer, JITTER_BUFFER_DEFAULTS } from "./jitter-buffer.ts";
+import { JitterBuffer } from "./jitter-buffer.ts";
 
 const RATE = 48_000;
 const QUANTUM = 128;
 const PACKET = 480; // 10 ms
-const MARGIN_FRAMES = (JITTER_BUFFER_DEFAULTS.overflowMarginMs * RATE) / 1000;
+const MARGIN_FRAMES = (40 * RATE) / 1000;
 
 /** Deterministic PRNG (mulberry32) so the jittered runs are reproducible. */
 function prng(seed: number): () => number {
@@ -50,10 +50,10 @@ function run(buffer: JitterBuffer, stream: Stream, seconds: number, record = fal
     const now = (q * QUANTUM) / RATE;
     while (stream.arrival(next) <= now) buffer.push(stream.packet(next++));
     buffer.render(out);
-    const targetFrames = (buffer.targetMs * RATE) / 1000;
-    maxExcessFrames = Math.max(maxExcessFrames, buffer.depthFrames - targetFrames);
-    maxTargetMs = Math.max(maxTargetMs, buffer.targetMs);
-    if (q % 375 === 0) depthsMs.push(buffer.stats().depthMs); // every second
+    const stats = buffer.stats();
+    maxExcessFrames = Math.max(maxExcessFrames, ((stats.depthMs - stats.targetMs) * RATE) / 1000);
+    maxTargetMs = Math.max(maxTargetMs, stats.targetMs);
+    if (q % 375 === 0) depthsMs.push(stats.depthMs); // every second
     if (record) {
       output[0]!.set(out[0]!, q * QUANTUM);
       output[1]!.set(out[1]!, q * QUANTUM);
@@ -144,21 +144,21 @@ test("underruns raise the target by 10 ms up to 150 ms", () => {
   const expected = [40, 50, 60];
   for (const target of expected) {
     // Fill to the current target, play it out, then starve it.
-    while (!buffer.isPlaying) {
+    while (buffer.stats().depthMs < buffer.stats().targetMs) {
       buffer.push(sinePacket(0));
-      buffer.render(out);
     }
-    while (buffer.isPlaying) buffer.render(out);
-    assert.equal(buffer.targetMs, target);
+    const prior = buffer.stats().underruns;
+    do { buffer.render(out); } while (buffer.stats().underruns === prior);
+    assert.equal(buffer.stats().targetMs, target);
   }
   for (let i = 0; i < 20; i++) {
-    while (!buffer.isPlaying) {
+    while (buffer.stats().depthMs < buffer.stats().targetMs) {
       buffer.push(sinePacket(0));
-      buffer.render(out);
     }
-    while (buffer.isPlaying) buffer.render(out);
+    const prior = buffer.stats().underruns;
+    do { buffer.render(out); } while (buffer.stats().underruns === prior);
   }
-  assert.equal(buffer.targetMs, 150);
+  assert.equal(buffer.stats().targetMs, 150);
   assert.equal(buffer.stats().underruns, 23);
 });
 
@@ -176,9 +176,9 @@ test("stable periods lower the target by 5 ms per 30 s down to 20 ms", () => {
     return from + quanta;
   };
   let q = playFor(Math.ceil(q30s) + 50, 0); // + the 60 ms it buffers first
-  assert.equal(buffer.targetMs, 55);
+  assert.equal(buffer.stats().targetMs, 55);
   q = playFor(Math.ceil(q30s * 12), q);
-  assert.equal(buffer.targetMs, 20);
+  assert.equal(buffer.stats().targetMs, 20);
   assert.equal(buffer.stats().underruns, 0);
 });
 
@@ -208,31 +208,24 @@ test("an underrun ramps to silence and the restart fades in", () => {
 });
 
 test("underrun partway through a fade-in blends from the ramp instead of jumping", () => {
-  const buffer = new JitterBuffer({ fadeMs: 2.5 });
+  const buffer = new JitterBuffer();
   const out = [new Float32Array(QUANTUM), new Float32Array(QUANTUM)];
   const signal: number[] = [];
   const loud = [new Float32Array(PACKET).fill(0.9), new Float32Array(PACKET).fill(0.9)];
   const quiet = [new Float32Array(PACKET).fill(-0.9), new Float32Array(PACKET).fill(-0.9)];
   // Play loud, starve, refill with the opposite level straight away.
   for (let i = 0; i < 4; i++) buffer.push(loud);
+  let underruns = 0;
   for (let i = 0; i < 20; i++) {
     buffer.render(out);
     signal.push(...out[0]!);
-    if (!buffer.isPlaying && i > 2) for (let p = 0; p < 6; p++) buffer.push(quiet);
+    if (buffer.stats().underruns > underruns) {
+      underruns = buffer.stats().underruns;
+      for (let p = 0; p < 6; p++) buffer.push(quiet);
+    }
   }
   // The fades are linear over 120 frames: a full-scale swing moves ≤ 2·0.9/120 per frame.
   assert.ok(maxStep(Float32Array.from(signal)) <= 0.02, `step ${maxStep(Float32Array.from(signal))}`);
-});
-
-test("reset forgets buffered audio but keeps the learned target", () => {
-  const buffer = new JitterBuffer({ initialTargetMs: 50 });
-  for (let i = 0; i < 6; i++) buffer.push(sinePacket(i));
-  buffer.render([new Float32Array(QUANTUM), new Float32Array(QUANTUM)]);
-  assert.ok(buffer.isPlaying);
-  buffer.reset();
-  assert.equal(buffer.isPlaying, false);
-  assert.equal(buffer.depthFrames, 0);
-  assert.equal(buffer.targetMs, 50);
 });
 
 test("a mono packet plays on both channels", () => {

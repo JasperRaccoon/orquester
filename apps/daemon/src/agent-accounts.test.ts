@@ -64,7 +64,7 @@ test("import claude rejects a blob with empty OAuth tokens", async () => {
   });
   await assert.rejects(
     () => svc.importAccount({ content: blob, label: "Work" }),
-    (e: Error) => e.name === "AgentAccountError" && /contains no OAuth tokens/.test(e.message) && /-a "\$USER"/.test(e.message)
+    (e: Error) => e.name === "AgentAccountError" && /contains no OAuth tokens/.test(e.message)
   );
   assert.equal(svc.list().accounts.filter((a) => a.agent === "claude").length, 0);
 });

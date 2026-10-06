@@ -219,14 +219,6 @@ test("the item's own unslimmed output takes precedence over the streamed copy", 
 });
 
 for (const [host, answering] of HOSTS) {
-  test(`${host}: a background shell's output — in no item's data — answers the host's join as command-output`, async () => {
-    const row = shellDone();
-    const api = answering(row, joinedOutput());
-    const r = await read(api, { itemId: row.id });
-    const text = "make: entering\n  [100%] linked\n";
-    assert.deepEqual(r, { itemId: row.id, kind: "command-output", text, offset: 0, totalBytes: Buffer.byteLength(text) });
-  });
-
   test(`${host}: a running call answers its output so far with running: true, and says truncated when the host's cap cut it`, async () => {
     const started = activity("tool.started", { itemType: "command_execution", toolUseId: "call-1", title: "pnpm test", status: "inProgress", data: { item: { command: "pnpm test", aggregatedOutput: null } } }, { tone: "tool" });
     const so_far = await read(answering(started, joinedOutput({ toolUseId: "call-1", output: "test 0 passed\n", complete: false })), { itemId: started.id });

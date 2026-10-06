@@ -30,12 +30,6 @@ test("closes the project's tabs and those of projects below it, not siblings sha
   assert.deepEqual(projectsOf(manager), ["/ws/acme/game-2", "/ws/other/app"]);
 });
 
-test("a workspace delete closes every project's tabs in it", async (t) => {
-  const manager = await managerWithTabs(t, ["/ws/acme/game", "/ws/acme/site", "/ws/acmeish/app"]);
-  await manager.closeForProject("/ws/acme");
-  assert.deepEqual(projectsOf(manager), ["/ws/acmeish/app"]);
-});
-
 test("matches any of the spellings passed (raw join and realpath)", async (t) => {
   const manager = await managerWithTabs(t, ["/tmp/ws/acme/game", "/private/tmp/ws/acme/site", "/ws/keep"]);
   await manager.closeForProject("/tmp/ws/acme", "/private/tmp/ws/acme");

@@ -103,7 +103,7 @@ describe("E6: a resumed thread replays the provider's own history", () => {
     await host.settle();
 
     const notice = activities(host, threadId).find(
-      (row) => row.summary === "This conversation could not be opened"
+      (row) => row.activityKind === "runtime.warning" && row.tone === "info"
     );
     assert.ok(notice, "a signed-out account is not an empty conversation");
     assert.match(JSON.stringify(notice?.payload), /Authentication required/);
@@ -123,7 +123,7 @@ describe("E6: a resumed thread replays the provider's own history", () => {
     await host.settle();
 
     const notice = activities(host, threadId).find(
-      (row) => row.summary === "History not available for this provider"
+      (row) => row.activityKind === "runtime.warning" && row.tone === "info"
     );
     assert.ok(notice, "an empty replay is explained, not left as an empty thread");
     await host.stop();

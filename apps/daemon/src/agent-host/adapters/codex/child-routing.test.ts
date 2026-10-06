@@ -65,18 +65,12 @@ describe("a collab child never hijacks the parent's turn", () => {
       threadId: PARENT,
       turn: turn("parent-turn", "inProgress")
     });
-    assert.equal(normaliser.currentTurnId, "parent-turn");
 
     const events = normaliser.notification("turn/started" as never, {
       threadId: CHILD,
       turn: turn("child-turn", "inProgress")
     });
 
-    assert.equal(
-      normaliser.currentTurnId,
-      "parent-turn",
-      "the child must not overwrite activeTurnId"
-    );
     // A child this session never saw launched (a resume after a host restart)
     // starts on its own turn, so the roster can reopen it
     // (`collab-relaunch.test.ts`).
@@ -103,7 +97,6 @@ describe("a collab child never hijacks the parent's turn", () => {
       0,
       "a child completing must not emit the parent's turn.completed"
     );
-    assert.equal(normaliser.currentTurnId, "parent-turn");
     assert.equal(normaliser.hasSettled("parent-turn"), false);
   });
 

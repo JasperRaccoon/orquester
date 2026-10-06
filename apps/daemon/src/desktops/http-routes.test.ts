@@ -4,7 +4,7 @@ import { createWriteStream } from "node:fs";
 import { mkdir, mkdtemp, realpath, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DESKTOP_MAX_COMMAND_LENGTH, DESKTOP_UNAVAILABLE_CODE, type DesktopSummary } from "@orquester/api";
+import { DESKTOP_UNAVAILABLE_CODE, type DesktopSummary } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
 import { createServer } from "../index.js";
 import { type CreateDesktopInput, DesktopError, type LaunchAppInput } from "./manager.ts";
@@ -192,7 +192,7 @@ test("launch: command and env validation (400), never echoing a value", async (t
     { command: "xterm\nrm -rf /" },
     { command: "xterm\r" },
     { command: "xterm\u0000" },
-    { command: "x".repeat(DESKTOP_MAX_COMMAND_LENGTH + 1) },
+    { command: "x".repeat(4097) },
     { command: "xterm", env: { "BAD-KEY": "v" } },
     { command: "xterm", env: { "1ABC": "v" } },
     { command: "xterm", env: { TOKEN: "sekrit-line-1\nsekrit-line-2" } },
@@ -209,7 +209,7 @@ test("launch: command and env validation (400), never echoing a value", async (t
   const ok = await h.inject({
     method: "POST",
     url: "/api/desktops/d1/apps",
-    payload: { command: "x".repeat(DESKTOP_MAX_COMMAND_LENGTH), env: { _A1: "it's $fine" } }
+    payload: { command: "x".repeat(4096), env: { _A1: "it's $fine" } }
   });
   assert.equal(ok.statusCode, 200);
 });

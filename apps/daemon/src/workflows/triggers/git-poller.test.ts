@@ -570,7 +570,7 @@ test("the pulls poll names the PRs its triggers last saw open (so a DC listing c
   await poller.start();
   await run(5 * S);
   await run(120 * S);
-  assert.deepEqual(remote.knownOpenCalls, [undefined, [9, 4]]);
+  assert.deepEqual(remote.knownOpenCalls.map((ids) => ids && new Set(ids)), [undefined, new Set([4, 9])]);
   poller.stop();
 });
 

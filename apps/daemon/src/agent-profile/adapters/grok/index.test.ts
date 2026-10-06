@@ -261,14 +261,14 @@ test("the snapshot lists every kind from its real home, with sources, locks and 
   assert.equal(serena?.editable, true);
   assert.equal(byId.get("mcp:jira")?.meta?.transport, "http");
   const claudeSrv = byId.get("mcp:claude-srv");
-  assert.deepEqual(claudeSrv?.source, { type: "inherited", label: "From Claude", ownerAgent: "claude" });
+  assert.deepEqual([claudeSrv?.source.type, claudeSrv?.source.ownerAgent], ["inherited", "claude"]);
   assert.deepEqual([claudeSrv?.toggleable, claudeSrv?.editable, claudeSrv?.deletable], [true, false, false]);
-  assert.equal(byId.get("mcp:plug-srv")?.source.label, "Plugin · demo-plug");
+  assert.equal(byId.get("mcp:plug-srv")?.source.pluginId, "demo-plug");
   assert.equal(byId.has("mcp:project-only"), false);
 
   assert.equal(byId.get("skill:own-skill")?.editable, true);
-  assert.equal(byId.get("skill:claude/claude-skill")?.source.label, "From Claude");
-  assert.equal(byId.get("skill:agents/shared-skill")?.source.label, "Shared · ~/.agents");
+  assert.equal(byId.get("skill:claude/claude-skill")?.source.ownerAgent, "claude");
+  assert.equal(byId.get("skill:agents/shared-skill")?.source.type, "inherited");
   assert.deepEqual([byId.get("skill:bundled/imagine")?.source.type, byId.get("skill:bundled/imagine")?.toggleable], ["bundled", true]);
   assert.equal(byId.get("skill:plugin/demo-plug/plug-skill")?.source.pluginId, "demo-plug");
   assert.equal(byId.get("command:plugin/demo-plug/plug-cmd")?.kind, "command");
@@ -287,7 +287,7 @@ test("the snapshot lists every kind from its real home, with sources, locks and 
   const demo = byId.get("plugin:demo-plug");
   assert.deepEqual([demo?.enabled, demo?.deletable, demo?.meta?.version, demo?.meta?.marketplace], [true, true, "1.2.3", "mkt"]);
   assert.deepEqual([byId.get("plugin:linked-plug")?.enabled, byId.get("plugin:linked-plug")?.deletable], [false, true]);
-  assert.deepEqual([byId.get("plugin:claude-plug")?.source.label, byId.get("plugin:claude-plug")?.deletable], ["From Claude", false]);
+  assert.deepEqual([byId.get("plugin:claude-plug")?.source.ownerAgent, byId.get("plugin:claude-plug")?.deletable], ["claude", false]);
 
   const market = byId.get("marketplace:xAI Official");
   assert.equal(market?.meta?.source, "xai-org/plugin-marketplace");
@@ -479,7 +479,7 @@ test("skills and commands: create, edit, toggle via [skills] disabled (inherited
 
   // Delete an off skill: its directory goes and so does its [skills] disabled entry.
   await fx.adapter.remove("skill:own-skill", (await item(fx, "skill:own-skill")).revision);
-  assert.equal(await lstat(join(fx.homes.grokHome, "skills/own-skill")).catch(() => null), null);
+  await assert.rejects(lstat(join(fx.homes.grokHome, "skills/own-skill")), { code: "ENOENT" });
   doc = parseToml(await config(fx));
   assert.deepEqual((doc.skills as Record<string, unknown>).disabled, ["shared-skill", "imagine", "my-cmd"]);
 
@@ -591,7 +591,7 @@ test("plugins: toggle through [plugins] lists, install and uninstall through gro
 
   await fx.adapter.remove("plugin:demo-plug", (await item(fx, "plugin:demo-plug")).revision);
   await fx.adapter.remove("plugin:linked-plug", (await item(fx, "plugin:linked-plug")).revision);
-  assert.equal(await lstat(join(fx.homes.grokHome, "plugins/linked-plug")).catch(() => null), null);
+  await assert.rejects(lstat(join(fx.homes.grokHome, "plugins/linked-plug")), { code: "ENOENT" });
   assert.ok(await lstat(join(fx.linkedPluginTarget, "plugin.json")));
   await rejects(fx.adapter.remove("plugin:claude-plug", (await item(fx, "plugin:claude-plug")).revision), "NOT_DELETABLE");
   await rejects(fx.adapter.update("plugin:claude-plug", (await item(fx, "plugin:claude-plug")).revision, { kind: "plugin", plugin: { spec: "x" } }), "NOT_EDITABLE");
@@ -652,13 +652,12 @@ test("instructions: write with a revision, and GROK.md folded into AGENTS.md", a
   const current = await fx.adapter.readInstructions();
   assert.equal(current.info.lines, 2);
   await rejects(fx.adapter.migrateLegacyInstructions(info.revision), "PROFILE_CONFLICT");
-  const result = await fx.adapter.migrateLegacyInstructions(current.info.revision);
-  assert.equal(result.notes.length, 1);
+  await fx.adapter.migrateLegacyInstructions(current.info.revision);
   assert.equal(
     await readFile(join(fx.homes.grokHome, "AGENTS.md"), "utf8"),
     "# Grok rules\nMore\n\n<!-- moved from GROK.md -->\n# Old notes\nkeep me\n"
   );
-  assert.equal(await lstat(join(fx.homes.grokHome, "GROK.md")).catch(() => null), null);
+  await assert.rejects(lstat(join(fx.homes.grokHome, "GROK.md")), { code: "ENOENT" });
   const after = await fx.adapter.readInstructions();
   assert.equal(after.info.legacyPath, undefined);
   assert.deepEqual(after.info.warnings, []);

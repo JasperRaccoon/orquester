@@ -258,9 +258,9 @@ describe("CodexProfileAdapter", () => {
       assert.deepEqual([bundled.editable, bundled.deletable, bundled.toggleable, bundled.source.type], [false, false, true, "bundled"]);
       const shared = byId.get("skill:agents/shared-one")!;
       assert.deepEqual([shared.editable, shared.deletable, shared.toggleable], [false, false, true]);
-      assert.deepEqual(shared.source, { type: "inherited", label: "Shared · ~/.agents" });
+      assert.equal(shared.source.type, "inherited");
       const pluginSkill = byId.get("skill:hello:hello-skill")!;
-      assert.deepEqual(pluginSkill.source, { type: "plugin", label: "Plugin · hello", pluginId: "hello@test-mkt" });
+      assert.deepEqual([pluginSkill.source.type, pluginSkill.source.pluginId], ["plugin", "hello@test-mkt"]);
 
       const hello = byId.get("plugin:hello@test-mkt")!;
       assert.equal(hello.enabled, true);
@@ -338,7 +338,7 @@ describe("CodexProfileAdapter", () => {
         { key: "CENTUR_PASSWORD", set: true }
       ]);
       const web = await f.adapter.readItem("mcp:web");
-      if (web.kind !== "mcp") return;
+      assert.ok(web.kind === "mcp");
       assert.deepEqual(web.mcp.headers, [{ key: "X-Api-Key", set: true }]);
       assert.deepEqual(web.mcp.advanced, { startup_timeout_sec: 20 });
       for (const secret of SECRETS) assert.ok(!JSON.stringify([detail, web]).includes(secret));
@@ -432,7 +432,7 @@ describe("CodexProfileAdapter", () => {
       }
     });
 
-    it("renames a server in one batch", async () => {
+    it("renames a server and preserves secret values", async () => {
       const centur = await f.item("mcp:centur");
       const result = await f.adapter.update(centur.id, centur.revision, {
         kind: "mcp",
@@ -533,7 +533,7 @@ describe("CodexProfileAdapter", () => {
 
       item = await f.item("skill:review");
       await f.adapter.remove(item.id, item.revision);
-      await assert.rejects(lstat(join(f.codexHome, "skills", "review")));
+      await assert.rejects(lstat(join(f.codexHome, "skills", "review")), { code: "ENOENT" });
     });
 
     it("toggles a symlinked skill by its realpath, and deleting it removes only the link", async () => {
@@ -543,7 +543,7 @@ describe("CodexProfileAdapter", () => {
       assert.deepEqual((await f.config()).skills.config, [{ path: real, enabled: false }]);
       item = await f.item("skill:chdb-sql");
       await f.adapter.remove(item.id, item.revision);
-      await assert.rejects(lstat(join(f.codexHome, "skills", "chdb-sql")));
+      await assert.rejects(lstat(join(f.codexHome, "skills", "chdb-sql")), { code: "ENOENT" });
       assert.ok((await stat(real)).isFile(), "the link's target is untouched");
       assert.equal((await f.config()).skills, undefined, "the switch of the removed skill is dropped");
     });
@@ -583,7 +583,7 @@ describe("CodexProfileAdapter", () => {
         document: { name: "hand-off", frontmatter: {}, body: "Renamed.\n" }
       });
       assert.deepEqual(result.itemIds, ["skill:hand-off"]);
-      await assert.rejects(lstat(join(f.codexHome, "skills", "handoff")));
+      await assert.rejects(lstat(join(f.codexHome, "skills", "handoff")), { code: "ENOENT" });
       const renamed = await f.item("skill:hand-off");
       assert.equal(renamed.enabled, false);
       assert.deepEqual((await f.config()).skills.config, [
@@ -890,7 +890,7 @@ describe("CodexProfileAdapter", () => {
 
       await f.adapter.remove(hello.id, hello.revision);
       assert.equal((await f.config()).plugins["hello@test-mkt"], undefined);
-      await assert.rejects(stat(join(f.codexHome, "plugins", "cache", "test-mkt", "hello")));
+      await assert.rejects(stat(join(f.codexHome, "plugins", "cache", "test-mkt", "hello")), { code: "ENOENT" });
 
       const installed = await f.adapter.create(
         { kind: "plugin", plugin: { plugin: "other", marketplace: "test-mkt" } },
@@ -943,7 +943,7 @@ describe("CodexProfileAdapter", () => {
       const portable = await f.adapter.exportItem(prompt.id);
       assert.equal(portable.kind, "command");
       await f.adapter.remove(prompt.id, prompt.revision);
-      await assert.rejects(stat(join(f.codexHome, "prompts", "old.md")));
+      await assert.rejects(stat(join(f.codexHome, "prompts", "old.md")), { code: "ENOENT" });
       await assert.rejects(
         f.adapter.create({ kind: "command", document: { name: "x", frontmatter: {}, body: "" } }, { onConflict: "fail" }),
         assertProfileError("INVALID_ITEM")

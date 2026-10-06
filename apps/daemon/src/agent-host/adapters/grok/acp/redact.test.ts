@@ -18,6 +18,7 @@ test("every MCP server env value is masked before the line is written", () => {
           name: "jira-cloud",
           command: "/usr/bin/node",
           env: [
+            { name: "JIRA_HOST", value: "example.atlassian.net" },
             { name: "JIRA_EMAIL", value: "someone@example.com" },
             { name: "JIRA_API_TOKEN", value: "ATATT3xFfGF0abcdefghijklmnop" }
           ]
@@ -28,6 +29,7 @@ test("every MCP server env value is masked before the line is written", () => {
   const redacted = JSON.stringify(redactAcpFrame(frame));
   assert.equal(redacted.includes("ATATT3xFfGF0abcdefghijklmnop"), false);
   assert.equal(redacted.includes("someone@example.com"), false);
+  assert.equal(redacted.includes("example.atlassian.net"), false);
   // The structure survives, so the frame is still diagnosable.
   assert.match(redacted, /JIRA_API_TOKEN/);
   assert.match(redacted, /jira-cloud/);

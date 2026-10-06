@@ -41,10 +41,6 @@ function goal(objective: string, extra: Partial<AgentGoal> = {}): AgentGoal {
 
 // --- parseAgentGoal -------------------------------------------------------------
 
-test("parseAgentGoal keeps a full goal field for field", () => {
-  assert.deepEqual(parseAgentGoal(FULL), FULL);
-});
-
 test("an objective and a status are all a goal needs", () => {
   assert.deepEqual(parseAgentGoal({ objective: "x", status: "paused" }), {
     objective: "x",

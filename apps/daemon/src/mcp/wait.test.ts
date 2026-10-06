@@ -11,7 +11,6 @@ const done = (over = {}) => chatSummary({ latestTurn: { turnId: "t2", state: "co
 test("waitForTurn: a new turn completing after the baseline, a pending question, a plan, an error, and a steer", async () => {
   const idle = chatSummary();
   const base = turnBaseline(idle);
-  assert.deepEqual(base, { turnId: "t1", completedAt: stamp(1), running: false });
   const api = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [idle] });
   const p = waitForTurn(api, "c1", base, { timeoutMs: 5_000, signal: new AbortController().signal, now });
   await new Promise((r) => setImmediate(r));
@@ -26,7 +25,6 @@ test("waitForTurn: a new turn completing after the baseline, a pending question,
   const err = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [chatSummary({ chatSessionStatus: "error" })] });
   assert.equal((await waitForTurn(err, "c1", base, { timeoutMs: 5_000, signal: new AbortController().signal, now })).outcome, "failed");
   const steerBase = turnBaseline(running());
-  assert.deepEqual(steerBase, { turnId: "t2", completedAt: null, running: true });
   const steer = new FakeDaemonApi().on("GET", "/api/sessions", { status: 200, body: [running()] });
   const sp = waitForTurn(steer, "c1", steerBase, { timeoutMs: 5_000, signal: new AbortController().signal, now });
   await new Promise((r) => setImmediate(r));

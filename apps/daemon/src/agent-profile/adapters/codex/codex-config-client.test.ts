@@ -6,7 +6,7 @@ import { after, before, describe, it } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CodexRpcError } from "../../../agent-host/adapters/codex/protocol.ts";
 import { AgentProfileError } from "../../errors.ts";
-import { CodexAppServerClient, configWriteErrorCode, keyPath, toProfileError } from "./codex-config-client.ts";
+import { CodexAppServerClient, keyPath, toProfileError } from "./codex-config-client.ts";
 
 const FAKE = fileURLToPath(new URL("./testing/fake-app-server.mjs", import.meta.url));
 
@@ -128,7 +128,6 @@ describe("CodexAppServerClient", () => {
       })
       .catch((e: unknown) => e);
     assert.ok(error instanceof CodexRpcError);
-    assert.equal(configWriteErrorCode(error), "configVersionConflict");
     const mapped = toProfileError("config/batchWrite", error);
     assert.ok(mapped instanceof AgentProfileError);
     assert.equal(mapped.status, 409);

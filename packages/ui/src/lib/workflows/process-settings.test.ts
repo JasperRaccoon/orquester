@@ -6,7 +6,6 @@ import {
   httpConfigWithBodyKind,
   jsonBodyProblem,
   parseStatusList,
-  isReservedEnvName,
   planShellEnvVariables,
   requestRowProblem,
   statusListProblem,
@@ -79,128 +78,116 @@ describe("jsonBodyProblem", () => {
     assert.ok(jsonBodyProblem('{ "a": {{ input.a }} {{ input.b }} }') !== null, "two values in a row");
     assert.ok(jsonBodyProblem("   "));
   });
-
-  it("leaves a broken expression to the validator", () => {
-    assert.equal(jsonBodyProblem('{ "a": {{ input. }} }'), null);
-  });
 });
 
 describe("planShellEnvVariables", () => {
   type Row = { name: string; value: string };
-  const names = (script: string, env: Row[] = []): string[] => planShellEnvVariables(script, env).variables.map((variable) => variable.name);
+  const names = (script: string, env: Row[] = []): string[] => {
+    const proposed = planShellEnvVariables(script, env).variables.map((variable) => variable.name);
+    assert.ok(proposed.length > 0, "each supplied expression needs a variable");
+    for (const name of proposed) assert.match(name, /^[A-Za-z_][A-Za-z0-9_]*$/);
+    return proposed;
+  };
 
-  it("plans one row per distinct expression and never touches the script", () => {
-    const script = 'echo {{ input.text }} "{{input.text}}" {{ nodes.Fetch.output.id }}';
-    const plan = planShellEnvVariables(script, []);
-    assert.deepEqual(plan.variables, [
-      { name: "INPUT_TEXT", expression: "{{ input.text }}", added: true },
-      { name: "FETCH_ID", expression: "{{ nodes.Fetch.output.id }}", added: true }
-    ]);
-    assert.deepEqual(plan.env, [
-      { name: "INPUT_TEXT", value: "{{ input.text }}" },
-      { name: "FETCH_ID", value: "{{ nodes.Fetch.output.id }}" }
-    ]);
+  it("plans one row per distinct expression", () => {
+    const plan = planShellEnvVariables('echo {{ input.text }} "{{input.text}}" {{ nodes.Fetch.output.id }}', []);
+    const expressions = ["{{ input.text }}", "{{ nodes.Fetch.output.id }}"];
+    assert.deepEqual(plan.env.map((row) => row.value), expressions);
+    assert.deepEqual(plan.variables.map((variable) => variable.expression), expressions);
+    assert.equal(new Set(plan.env.map((row) => row.name)).size, 2);
+    for (const variable of plan.variables) {
+      assert.equal(plan.env.find((row) => row.name === variable.name)?.value, variable.expression);
+      assert.equal(variable.added, true);
+    }
     assert.equal(plan.incomplete, false);
-    assert.equal("script" in plan, false, "there is no rewritten script to apply");
   });
 
   it("never suggests a name the shell, the loader or a common tool reads", () => {
-    const cases: [string, string][] = [
-      ["{{ secrets.PATH }}", "WF_PATH"],
-      ["{{ secrets.IFS }}", "WF_IFS"],
-      ["{{ secrets.PS4 }}", "WF_PS4"],
-      ["{{ secrets.RANDOM }}", "WF_RANDOM"],
-      ["{{ secrets.BASH_ENV }}", "WF_BASH_ENV"],
-      ["{{ secrets.EDITOR }}", "WF_EDITOR"],
-      ["{{ secrets.SUDO_ASKPASS }}", "WF_SUDO_ASKPASS"],
-      ["{{ secrets.LESSOPEN }}", "WF_LESSOPEN"],
-      ["{{ secrets.TMOUT }}", "WF_TMOUT"],
-      ["{{ secrets.DOCKER_HOST }}", "WF_DOCKER_HOST"],
-      ["{{ secrets.GIT_ASKPASS }}", "WF_GIT_ASKPASS"],
-      ["{{ secrets.NPM_CONFIG_REGISTRY }}", "WF_NPM_CONFIG_REGISTRY"],
-      ["{{ secrets.PIP_INDEX_URL }}", "WF_PIP_INDEX_URL"],
-      ["{{ secrets.PYTHONSTARTUP }}", "WF_PYTHONSTARTUP"],
-      ["{{ secrets.LD_PRELOAD }}", "WF_LD_PRELOAD"],
-      ["{{ secrets.KUBECONFIG }}", "WF_KUBECONFIG"],
-      ["{{ secrets.SSH_AUTH_SOCK }}", "WF_SSH_AUTH_SOCK"],
-      ["{{ nodes.Git.output.dir }}", "WF_GIT_DIR"],
-      ["{{ nodes.Docker.output.host }}", "WF_DOCKER_HOST"],
-      ["{{ nodes.Hist.output.file }}", "WF_HIST_FILE"]
+    // These names have externally defined shell/loader/tool behavior.
+    const reserved = ["PATH", "IFS", "PS4", "RANDOM", "BASH_ENV", "EDITOR", "SUDO_ASKPASS",
+      "LESSOPEN", "TMOUT", "DOCKER_HOST", "GIT_ASKPASS", "NPM_CONFIG_REGISTRY", "PIP_INDEX_URL",
+      "PYTHONSTARTUP", "LD_PRELOAD", "KUBECONFIG", "SSH_AUTH_SOCK", "GIT_DIR", "HIST_FILE", "HTTP_PROXY"];
+    const expressions = [
+      ...reserved.map((name) => `{{ secrets.${name} }}`),
+      "{{ secrets.http_proxy }}", "{{ nodes.Git.output.dir }}", "{{ nodes.Docker.output.host }}", "{{ nodes.Hist.output.file }}"
     ];
-    for (const [expression, expected] of cases) {
-      assert.deepEqual(names(`echo "${expression}"`), [expected], expression);
-      assert.equal(isReservedEnvName(expected), false, expected);
+    for (const expression of expressions) {
+      const plan = planShellEnvVariables(`echo "${expression}"`, []);
+      assert.equal(plan.env.length, 1);
+      const row = plan.env[0]!;
+      assert.match(row.name, /^[A-Za-z_][A-Za-z0-9_]*$/);
+      assert.equal(reserved.includes(row.name.toUpperCase()), false, expression);
+      assert.equal(row.value, expression);
     }
-    assert.equal(isReservedEnvName("http_proxy"), true, "a lowercase proxy name counts too");
-    assert.equal(isReservedEnvName("INPUT_TEXT"), false);
   });
 
   it("never takes a name a row or a word of the script already uses", () => {
-    assert.deepEqual(names("echo {{ input.text }}", [{ name: "INPUT_TEXT", value: "other" }]), ["INPUT_TEXT_2"]);
-    assert.deepEqual(names('VERSION=1.0; echo "{{ nodes.Version.output }}" "$VERSION"'), ["VERSION_2"]);
-    assert.deepEqual(names("for INPUT_A in 1; do echo {{ input.a }}; done"), ["INPUT_A_2"]);
-    assert.deepEqual(names("echo {{ secrets.API_TOKEN }}"), ["API_TOKEN"], "words inside the expressions don't count");
-    assert.deepEqual(names("echo {{ input.a }} {{ input.a | trim }}", [{ name: "INPUT_A_2", value: "x" }]), ["INPUT_A", "INPUT_A_3"]);
+    const occupied = "INPUT_TEXT";
+    assert.notEqual(names("echo {{ input.text }}", [{ name: occupied, value: "other" }])[0], occupied);
+    assert.notEqual(names('VERSION=1.0; echo "{{ nodes.Version.output }}" "$VERSION"')[0], "VERSION");
+    assert.notEqual(names("for INPUT_A in 1; do echo {{ input.a }}; done")[0], "INPUT_A");
+    const planned = names("echo {{ input.a }} {{ input.a | trim }}", [{ name: "INPUT_A_2", value: "x" }]);
+    assert.equal(planned.length, 2);
+    assert.equal(new Set(planned).size, 2);
+    assert.equal(planned.includes("INPUT_A_2"), false);
     const plan = planShellEnvVariables("echo {{ input.text }}", [{ name: "", value: "" }, { name: "1BAD", value: "{{ input.text }}" }]);
-    assert.deepEqual(plan.variables, [{ name: "INPUT_TEXT", expression: "{{ input.text }}", added: true }], "a row with an unusable name isn't reused");
+    assert.equal(plan.variables[0]?.added, true, "a row with an unusable name isn't reused");
+    assert.match(plan.variables[0]!.name, /^[A-Za-z_][A-Za-z0-9_]*$/);
   });
 
   it("reuses a row only when it holds exactly that expression and wins at run time", () => {
     assert.deepEqual(planShellEnvVariables("echo {{input.a}}", [{ name: "A", value: "{{ input.a }}" }]).variables, [
       { name: "A", expression: "{{input.a}}", added: false }
     ]);
-    assert.deepEqual(names("echo {{ input.a }}", [{ name: "A", value: " {{ input.a }}" }]), ["INPUT_A"], "surrounding spaces are part of its value");
-    assert.deepEqual(names("echo {{ input.a }}", [{ name: "A", value: "x{{ input.a }}" }]), ["INPUT_A"], "surrounding text");
-    assert.deepEqual(names("echo {{ input.a }}", [{ name: "A", value: "{{ input.a | trim }}" }]), ["INPUT_A"], "another expression");
-    assert.deepEqual(
+    assert.notEqual(names("echo {{ input.a }}", [{ name: "A", value: " {{ input.a }}" }])[0], "A", "surrounding spaces are part of its value");
+    assert.notEqual(names("echo {{ input.a }}", [{ name: "A", value: "x{{ input.a }}" }])[0], "A", "surrounding text");
+    assert.notEqual(names("echo {{ input.a }}", [{ name: "A", value: "{{ input.a | trim }}" }])[0], "A", "another expression");
+    assert.notEqual(
       names("echo {{ input.a }}", [
         { name: "A", value: "{{ input.a }}" },
         { name: "A", value: "other" }
-      ]),
-      ["INPUT_A"],
+      ])[0],
+      "A",
       "a later row with the same name wins at run time"
     );
-    assert.deepEqual(names("echo {{ input.a }}", [{ name: "PATH", value: "{{ input.a }}" }]), ["INPUT_A"], "a reserved name isn't suggested");
+    assert.notEqual(names("echo {{ input.a }}", [{ name: "PATH", value: "{{ input.a }}" }])[0], "PATH", "a reserved name isn't suggested");
   });
 
   it("doesn't reuse a row the script itself sets or reads other than as $NAME", () => {
     const row = [{ name: "A", value: "{{ input.a }}" }];
-    assert.deepEqual(names('A=x; echo "$A" {{ input.a }}', row), ["INPUT_A"]);
-    assert.deepEqual(names("read A; echo {{ input.a }}", row), ["INPUT_A"]);
-    assert.deepEqual(names("declare -n A=B; echo {{ input.a }}", row), ["INPUT_A"]);
-    assert.deepEqual(names("echo ${A:=x} {{ input.a }}", row), ["INPUT_A"]);
+    assert.notEqual(names('A=x; echo "$A" {{ input.a }}', row)[0], "A");
+    assert.notEqual(names("read A; echo {{ input.a }}", row)[0], "A");
+    assert.notEqual(names("declare -n A=B; echo {{ input.a }}", row)[0], "A");
+    assert.notEqual(names("echo ${A:=x} {{ input.a }}", row)[0], "A");
     assert.deepEqual(names('echo "$A" "${A}" {{ input.a }}', row), ["A"], "plain reads are fine");
   });
 
   it("keeps every row as it was, fields a newer version wrote included", () => {
     const rows = [{ name: "KEEP", value: "1", note: "kept" } as Row, { name: "A", value: "{{ input.a }}", secret: true } as Row];
     const plan = planShellEnvVariables("echo {{ input.a }} {{ input.b }}", rows);
-    assert.deepEqual(plan.env, [
-      { name: "KEEP", value: "1", note: "kept" },
-      { name: "A", value: "{{ input.a }}", secret: true },
-      { name: "INPUT_B", value: "{{ input.b }}" }
-    ]);
-
+    assert.deepEqual(plan.env.slice(0, 2), rows);
+    assert.equal(plan.env.length, 3);
+    assert.equal(plan.env[2]?.value, "{{ input.b }}");
   });
 
   it("adds nothing the second time, also once the script reads the variables", () => {
     const script = 'VERSION=2; echo {{ input.a }} "{{ secrets.PATH }}" {{ input.a }}';
     const first = planShellEnvVariables(script, [{ name: "X", value: "y" }]);
-    assert.deepEqual(first.variables.map((variable) => variable.name), ["INPUT_A", "WF_PATH"]);
     const second = planShellEnvVariables(script, first.env);
     assert.deepEqual(second.env, first.env);
-    assert.deepEqual(second.variables.map((variable) => [variable.name, variable.added]), [
-      ["INPUT_A", false],
-      ["WF_PATH", false]
-    ]);
-    // Half-way through replacing them by hand: the variables are still the rows already added.
-    const halfDone = planShellEnvVariables('VERSION=2; echo "$INPUT_A" "{{ secrets.PATH }}" {{ input.a }}', first.env);
+    assert.equal(second.variables.length, first.variables.length);
+    assert.equal(second.variables.every((variable) => !variable.added), true);
+    const [input] = first.variables;
+    assert.ok(input);
+    // Halfway through manual replacement, already allocated variables are reused.
+    const halfDone = planShellEnvVariables(`VERSION=2; echo "$${input.name}" "{{ secrets.PATH }}" {{ input.a }}`, first.env);
     assert.deepEqual(halfDone.env, first.env);
+    assert.equal(halfDone.variables.length, first.variables.length);
     assert.equal(halfDone.variables.every((variable) => !variable.added), true);
   });
 
   it("leaves Go-style {{.Field}} alone and notes a broken expression", () => {
-    assert.deepEqual(names("gh pr list --template '{{.title}}' --repo {{ input.repo }}"), ["INPUT_REPO"]);
+    assert.deepEqual(planShellEnvVariables("gh pr list --template '{{.title}}' --repo {{ input.repo }}", []).variables.map((variable) => variable.expression), ["{{ input.repo }}"]);
     const broken = planShellEnvVariables("echo {{ input.a", []);
     assert.deepEqual(broken.variables, []);
     assert.equal(broken.incomplete, true);

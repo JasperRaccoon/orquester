@@ -52,6 +52,6 @@ describe("workflow recipes", () => {
     const main = loadDefaultExport((parse.config as { source: string }).source);
     // The VM's objects come from another realm: compare their JSON.
     assert.equal(JSON.stringify(await main({ input: { text: "Sure:\n{\"severity\": \"high\", \"summary\": \"disk full\"}" } })), "{\"severity\":\"high\",\"summary\":\"disk full\"}");
-    await assert.rejects(main({ input: { text: "no idea" } }), /No JSON in the reply/);
+    await assert.rejects(main({ input: { text: "no idea" } }));
   });
 });

@@ -238,8 +238,6 @@ export interface ManagedProviderSnapshotRegistry extends ProviderSnapshotRegistr
     adapterId: AgentAdapterId,
     input?: { cwd?: string }
   ): Promise<{ snapshot: ProviderSnapshot; changed: boolean }>;
-  /** Run one background pass now, respecting the refresh semaphore. */
-  refreshAllNow(): Promise<void>;
   /** Await the in-flight cache write. The drain seam a test waits on (§9). */
   flush(): Promise<void>;
   /**
@@ -910,7 +908,7 @@ export function createProviderSnapshotRegistry(
      * snapshot this host should serve. Re-probing it here made every deploy
      * launch a heavyweight Claude SDK process that could block the event loop
      * long enough for the supervisor to kill an otherwise-ready host. Manual
-     * and scheduled refreshes still use `refreshAllNow()`.
+     * and scheduled refreshes still probe providers with a usable cache.
      *
      * Fire-and-forget by contract — the caller must never await it. The HTTP
      * socket is already bound and the readiness gate is already open when this
@@ -934,8 +932,6 @@ export function createProviderSnapshotRegistry(
       primed = true;
       void refreshAllNow(true);
     },
-
-    refreshAllNow,
 
     async flush(): Promise<void> {
       await persistChain.catch(() => undefined);

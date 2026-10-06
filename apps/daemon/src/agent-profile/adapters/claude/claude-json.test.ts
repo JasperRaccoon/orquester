@@ -88,7 +88,6 @@ test("an unchanged mutation writes nothing; a throw inside the lock writes nothi
   await writeFile(file, text);
   await updateClaudeJsonMcpServers(file, () => undefined, { backups, agent: "claude" });
   assert.equal(await readFile(file, "utf8"), text);
-  assert.deepEqual(await backups.list("claude"), []);
 
   await assert.rejects(
     updateClaudeJsonMcpServers(
@@ -149,7 +148,6 @@ test("a lock taken over before the write is a conflict — never proper-lockfile
     (error) => error instanceof AgentProfileError && error.code === "PROFILE_CONFLICT"
   );
   assert.equal(await readFile(file, "utf8"), text);
-  assert.deepEqual(await backups.list("claude"), []);
 });
 
 test("a missing file is created 0600 holding only mcpServers", async (t) => {

@@ -4,7 +4,6 @@ import { beforeEach,describe,it } from "node:test";
 import {
 deriveActivePlanState,
 findLatestProposedPlan,
-planProgress,
 shouldShowPlanFollowUpPrompt,
 wholePlanMarkdown
 } from "./plan.logic";
@@ -46,23 +45,6 @@ describe("deriveActivePlanState", () => {
     );
     assert.equal(plan?.steps.length, 1);
     assert.equal(plan?.steps[0]?.status, "pending");
-  });
-
-  it("summarises progress for the composer's checklist", () => {
-    const plan = deriveActivePlanState(
-      [
-        activity("turn.plan.updated", {
-          plan: [
-            { step: "a", status: "completed" },
-            { step: "b", status: "inProgress" },
-            { step: "c", status: "pending" }
-          ]
-        })
-      ],
-      null
-    );
-    assert.deepEqual(planProgress(plan), { completed: 1, total: 3, currentStep: "b" });
-    assert.deepEqual(planProgress(null), { completed: 0, total: 0, currentStep: null });
   });
 });
 

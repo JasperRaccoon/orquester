@@ -21,7 +21,6 @@ import {
 
 import type {
   IndexedItemPosition,
-  IndexedMessageSpan,
   IndexedPrompt,
   IndexedPromptsPage,
   IndexedTurn,
@@ -39,7 +38,6 @@ export interface ThreadIndexQueries {
   turnsInSeqRange(threadId: string, input: { fromSeq: number; toSeq: number }): IndexedTurn[];
   turnOfSeq(threadId: string, seq: number): IndexedTurn | null;
   eventPositionBySeq(threadId: string, seq: number): IndexedItemPosition | null;
-  messageSpan(threadId: string, messageId: string): IndexedMessageSpan | null;
   messagesSpanning(threadId: string, seq: number): SpanningMessage[];
   firstBoundaryAfter(threadId: string, seq: number): IndexedItemPosition | null;
   latestRevertSeq(threadId: string): number;
@@ -119,10 +117,6 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
     messageFirstLine: db.prepare(
       `SELECT first_seq AS seq, first_byte AS byte_offset, first_length AS byte_length
        FROM message_docs WHERE thread_id = ? AND first_seq = ? LIMIT 1`
-    ),
-    messageSpan: db.prepare(
-      `SELECT message_id, first_seq, first_byte, seq FROM message_docs
-       WHERE thread_id = ? AND message_id = ?`
     ),
     messagesSpanning: db.prepare(
       `SELECT message_id, first_seq, first_byte, seq FROM message_docs
@@ -332,16 +326,6 @@ export function createThreadIndexQueries(db: SqliteDatabase): ThreadIndexQueries
         toItemPosition(sql.itemPositionBySeq.get(threadId, seq)) ??
         toItemPosition(sql.messageFirstLine.get(threadId, seq))
       );
-    },
-
-    messageSpan(threadId, messageId) {
-      if (typeof messageId !== "string") {
-        return null;
-      }
-      const span = toSpanningMessage(sql.messageSpan.get(threadId, messageId));
-      return span === null
-        ? null
-        : { firstSeq: span.firstSeq, firstByte: span.firstByte, lastSeq: span.lastSeq };
     },
 
     /**

@@ -12,20 +12,17 @@
  */
 
 interface EventQueueOptions {
-  /** Past this many buffered events the OLDEST are dropped. */
-  maxBuffered?: number;
   onDrop?: (dropped: number) => void;
 }
 
 export class AsyncEventQueue<T> implements AsyncIterable<T> {
   private readonly buffer: T[] = [];
   private readonly waiters: ((result: IteratorResult<T>) => void)[] = [];
-  private readonly maxBuffered: number;
+  private readonly maxBuffered = 10_000;
   private readonly onDrop: ((dropped: number) => void) | undefined;
   private closed = false;
 
   constructor(options: EventQueueOptions = {}) {
-    this.maxBuffered = options.maxBuffered ?? 10_000;
     this.onDrop = options.onDrop;
   }
 

@@ -4,7 +4,6 @@ import assert from "node:assert/strict";
 import {
   clearDesktopPrefs,
   readDesktopPrefs,
-  sanitizeDesktopPrefs,
   writeDesktopPrefs
 } from "./desktop-prefs.ts";
 
@@ -34,6 +33,12 @@ afterEach(() => {
   delete g.localStorage;
   delete g.matchMedia;
 });
+
+function loadStored(raw: unknown, coarse: boolean) {
+  const storage = install(coarse);
+  storage.setItem("orq.desktop.prefs.fixture", JSON.stringify(raw));
+  return readDesktopPrefs("fixture");
+}
 
 test("non-touch default is fit, unmuted, full volume", () => {
   install(false);
@@ -74,37 +79,37 @@ test("corrupt JSON falls back to the device default", () => {
 });
 
 test("invalid fields fall back one by one", () => {
-  assert.deepEqual(sanitizeDesktopPrefs({ muted: "yes", volume: 3, view: "zoom" }, false), {
+  assert.deepEqual(loadStored({ muted: "yes", volume: 3, view: "zoom" }, false), {
     muted: false,
     volume: 1,
     view: "fit"
   });
-  assert.deepEqual(sanitizeDesktopPrefs({ muted: true, volume: -0.1, view: "fit" }, false), {
+  assert.deepEqual(loadStored({ muted: true, volume: -0.1, view: "fit" }, false), {
     muted: true,
     volume: 1,
     view: "fit"
   });
-  assert.equal(sanitizeDesktopPrefs({ volume: Number.NaN }, false).volume, 1);
-  assert.deepEqual(sanitizeDesktopPrefs([1, 2], false), { muted: false, volume: 1, view: "fit" });
-  assert.deepEqual(sanitizeDesktopPrefs(null, true).fixedSize, { width: 1280, height: 800 });
+  assert.equal(loadStored({ volume: null }, false).volume, 1);
+  assert.deepEqual(loadStored([1, 2], false), { muted: false, volume: 1, view: "fit" });
+  assert.deepEqual(loadStored(null, true).fixedSize, { width: 1280, height: 800 });
 });
 
 test("a fixed view always gets a valid size and mode", () => {
-  assert.deepEqual(sanitizeDesktopPrefs({ view: "fixed", fixedSize: { width: 99999, height: 800 }, fixedMode: "zoom" }, false), {
+  assert.deepEqual(loadStored({ view: "fixed", fixedSize: { width: 99999, height: 800 }, fixedMode: "zoom" }, false), {
     muted: false,
     volume: 1,
     view: "fixed",
     fixedSize: { width: 1280, height: 800 },
     fixedMode: "scale"
   });
-  assert.deepEqual(sanitizeDesktopPrefs({ view: "fixed", fixedSize: { width: 1280.5, height: 800 } }, false).fixedSize, {
+  assert.deepEqual(loadStored({ view: "fixed", fixedSize: { width: 1280.5, height: 800 } }, false).fixedSize, {
     width: 1280,
     height: 800
   });
 });
 
 test("fit keeps a remembered fixed choice for switching back", () => {
-  const prefs = sanitizeDesktopPrefs({ view: "fit", fixedSize: { width: 1920, height: 1080 }, fixedMode: "pan" }, false);
+  const prefs = loadStored({ view: "fit", fixedSize: { width: 1920, height: 1080 }, fixedMode: "pan" }, false);
   assert.deepEqual(prefs, { muted: false, volume: 1, view: "fit", fixedSize: { width: 1920, height: 1080 }, fixedMode: "pan" });
 });
 

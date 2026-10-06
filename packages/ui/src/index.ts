@@ -94,7 +94,6 @@ export {
   notifyWorkflowRunFinished,
   observeWorkflowRunEvent,
   resetWorkflowNotifications,
-  runOutcomeKind,
   workflowNotificationsStore,
   type WorkflowAttentionEntry,
   type WorkflowNotificationsState,
