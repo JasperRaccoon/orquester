@@ -1,13 +1,15 @@
-import React, { useEffect, useState } from "react";
-import { ChevronDown, Gauge, RefreshCw } from "lucide-react";
-import type { AgentUsage, ScopedUsageWindow, UsageAccount, UsageTokenRow, UsageWindow } from "@orquester/api";
+import React, { useContext, useEffect, useState } from "react";
+import { ChevronDown, ChevronRight, Gauge, RefreshCw } from "lucide-react";
+import type { AgentUsage, UsageAccount, UsageTokenRow } from "@orquester/api";
 import { shortAccountLabel } from "../../lib/account-label";
 import { usageAgentEnabled } from "@orquester/config";
-import { AdaptiveMenu } from "../ui";
+import { AdaptiveMenu, DropdownContext } from "../ui";
+import { SegmentedControl } from "../settings/primitives";
+import { UsageAccountCard, maxWindowCount } from "./UsageAccountCard";
 import { getRegistryIcon } from "../../icons";
 import { useUsageNow, useUsageResetFormat } from "../../hooks";
 import { useAppStore } from "../../store/app";
-import { STALE_MIN, barClass, compactCount, formatAgo, formatChipWindows, formatClock, formatReset, formatUsageCapacity, gaugeClass, labelForAgent, minutesSince, missingUsageAgents, normalizeUsageWindows, pickDriver, usageLoginHint, windowMax, type NormalizedUsageWindow } from "./usage-format";
+import { STALE_MIN, compactCount, formatAgo, formatChipWindows, formatClock, gaugeClass, labelForAgent, minutesSince, missingUsageAgents, normalizeUsageWindows, pickDriver, usageLoginHint, windowMax } from "./usage-format";
 
 /** "claude-opus-4-8-20260115" → "Opus 4.8", "gpt-5.6-sol" → "GPT-5.6 Sol". */
 function labelForModel(model: string): string {
@@ -179,119 +181,88 @@ const CostTab: React.FC<{ rows: UsageTokenRow[] }> = ({ rows }) => {
   );
 };
 
-const Bar: React.FC<{ window: NormalizedUsageWindow; muted: boolean }> = ({ window, muted }) => {
+const AccountRow: React.FC<{ agentId: string; account: UsageAccount }> = ({ agentId, account }) => {
   const [resetFormat] = useUsageResetFormat();
   const now = useUsageNow();
-  const pct = window.percent;
-  const capacity = formatUsageCapacity(window);
-  const reset = formatReset(window.resetsAt, resetFormat, now);
+  const windows = normalizeUsageWindows(agentId, account);
   return (
-    <div className="py-1.5">
-      <div className="flex items-center justify-between gap-2 text-xs">
-        <span className="text-neutral-300">{window.label}</span>
-        <span className={muted ? "text-neutral-500" : "text-neutral-200"}>{`${Math.round(pct)}%`}</span>
-      </div>
-      <div className="mt-1 h-1.5 w-full rounded-full bg-neutral-800">
-        <div
-          className={`h-full rounded-full ${muted ? "bg-neutral-600" : barClass(pct)}`}
-          style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
-        />
-      </div>
-      {capacity && <p className="mt-1 text-[11px] tabular-nums text-neutral-400">{capacity}</p>}
-      {/* Both lines are omitted rather than rendered empty — a window with no
-          absolute numbers and no reset time must not leave a gap under its bar. */}
-      {reset && <p className="mt-1 text-[11px] text-neutral-500">{reset}</p>}
-    </div>
+    <UsageAccountCard
+      name={shortAccountLabel(account.label) || account.id}
+      meta={account.plan && <span className="text-[11px] text-neutral-500">{account.plan}</span>}
+      windows={windows}
+      muted={account.stale || windows.length === 0}
+      resetFormat={resetFormat}
+      now={now}
+    />
   );
 };
 
-/**
- * Render only the windows that have a reading. Claude (5h+week) shows both;
- * week-only Codex/Grok show a single Week bar — no empty "5h —" row.
- * Labels are always compact ("5h"/"Week") so single-agent and multi-account
- * rows share the same alignment as the Claude/Codex account cards.
- */
-const WindowBars: React.FC<{
-  agentId: string;
-  session: UsageWindow | null;
-  weekly: UsageWindow | null;
-  scopedWindows?: ScopedUsageWindow[];
-  muted: boolean;
-}> = ({ agentId, session, weekly, scopedWindows, muted }) => (
-  <>
-    {normalizeUsageWindows(agentId, { session, weekly, scopedWindows }).map((w) => (
-      <Bar key={w.id} window={w} muted={muted} />
-    ))}
-  </>
-);
-
-const AccountRow: React.FC<{ agentId: string; account: UsageAccount }> = ({ agentId, account }) => {
-  const muted = account.stale || !(account.session || account.weekly || account.scopedWindows?.length);
-  return (
-    <div className="mt-1.5 rounded-md bg-neutral-900/60 px-2 py-1.5">
-      <div className="flex items-center justify-between gap-2">
-        <p className="truncate text-xs font-medium text-neutral-300">{shortAccountLabel(account.label) || account.id}</p>
-        {account.plan && <span className="shrink-0 text-[10px] text-neutral-500">{account.plan}</span>}
-      </div>
-      <WindowBars
-        agentId={agentId}
-        session={account.session}
-        weekly={account.weekly}
-        scopedWindows={account.scopedWindows}
-        muted={muted}
-      />
-    </div>
-  );
-};
+/** Column flex weight: a 3-window agent (Claude) gets ~1.9× a week-only one. */
+function columnWeight(agent: AgentUsage): number {
+  return 1 + 0.45 * (maxWindowCount(agent) - 1);
+}
 
 const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
   // Ticks with the shared minute timer so "Updated 12m ago" ages while the
   // panel stays open, in step with the countdowns below it.
   const now = useUsageNow();
+  const [resetFormat] = useUsageResetFormat();
+  const openSettings = useAppStore((s) => s.openSettings);
+  const { close } = useContext(DropdownContext);
   const hasTimestamp = Boolean(agent.asOf);
   const accounts = agent.accounts ?? [];
   const hasData = hasTimestamp && (agent.session || agent.weekly || agent.scopedWindows?.length || accounts.length > 0);
   const isOld = hasTimestamp && minutesSince(agent.asOf, now) > STALE_MIN;
   const muted = !hasData || isOld;
+  const label = labelForAgent(agent.id);
 
   return (
-    <div className="px-3 py-2">
-      <div className="flex items-center justify-between">
-        <p className="flex items-center gap-1.5 text-sm text-neutral-200">
-          {getRegistryIcon("agent", agent.id, 14)}
-          <span>{labelForAgent(agent.id)} Usage</span>
-        </p>
-        {/* Per-account rows carry their own plan chip; only show it here when pooled. */}
-        {accounts.length === 0 && agent.plan && <span className="text-xs text-neutral-500">{agent.plan}</span>}
-      </div>
+    <section className="flex h-full flex-col rounded-lg border border-neutral-800 bg-neutral-900/40">
+      <header className="flex items-center gap-2 py-2 pl-3 pr-1.5">
+        <span className="shrink-0">{getRegistryIcon("agent", agent.id, 16)}</span>
+        <p className="min-w-0 flex-1 truncate text-sm font-medium text-neutral-100">{label} Usage</p>
+        {/* Per-account cards carry their own plan; only show it here when pooled. */}
+        {accounts.length === 0 && agent.plan && <span className="shrink-0 text-[11px] text-neutral-500">{agent.plan}</span>}
+        <button
+          type="button"
+          className="shrink-0 rounded p-1 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+          aria-label={`Open ${label} usage settings`}
+          title="Open usage settings"
+          onClick={() => {
+            close();
+            openSettings("usage");
+          }}
+        >
+          <ChevronRight size={15} />
+        </button>
+      </header>
       {!hasData ? (
-        <p className="text-[11px] text-warn">Signed in — usage updating…</p>
+        <p className="px-3 pb-2 text-[11px] text-warn">Signed in — usage updating…</p>
       ) : isOld ? (
-        <p className="text-[11px] text-warn">Updated {formatAgo(agent.asOf, now)}</p>
+        <p className="px-3 pb-2 text-[11px] text-warn">Updated {formatAgo(agent.asOf, now)}</p>
       ) : null}
-      {accounts.length > 0 ? (
-        <>
-          {accounts.map((a) => (
-            <AccountRow key={a.id} agentId={agent.id} account={a} />
-          ))}
-          {/* The System (daemon-home) login pools into the worst-account head
-              numbers, so it must be visible — hidden, it can drive the chip
-              above every listed account. */}
-          {agent.system && <AccountRow key={agent.system.id} agentId={agent.id} account={agent.system} />}
-        </>
-      ) : (
-        /* Same card chrome as AccountRow so week-only agents align with Claude/Codex. */
-        <div className="mt-1.5 rounded-md bg-neutral-900/60 px-2 py-1.5">
-          <WindowBars
-            agentId={agent.id}
-            session={agent.session}
-            weekly={agent.weekly}
-            scopedWindows={agent.scopedWindows}
+      <div className="space-y-2 px-2 pb-2">
+        {accounts.length > 0 ? (
+          <>
+            {accounts.map((a) => (
+              <AccountRow key={a.id} agentId={agent.id} account={a} />
+            ))}
+            {/* The System (daemon-home) login pools into the worst-account head
+                numbers, so it must be visible — hidden, it can drive the chip
+                above every listed account. */}
+            {agent.system && <AccountRow key={agent.system.id} agentId={agent.id} account={agent.system} />}
+          </>
+        ) : (
+          /* Same card chrome as AccountRow so week-only agents align with Claude/Codex. */
+          <UsageAccountCard
+            windows={normalizeUsageWindows(agent.id, agent)}
             muted={muted}
+            resetFormat={resetFormat}
+            now={now}
           />
-        </div>
-      )}
-    </div>
+        )}
+      </div>
+    </section>
   );
 };
 
@@ -339,69 +310,65 @@ export const UsageWidget: React.FC = () => {
   );
 
   // One column per agent on the Windows tab so three agents with several
-  // accounts each read side by side instead of one screen-height stack. The
-  // desktop dropdown widens with the column count (the mobile bottom sheet
-  // stays stacked — AdaptiveMenu switches at md, the same breakpoint as the
-  // `md:` column classes below); the Cost tab keeps the original width.
-  const cols = Math.min(agents.length, 3);
-  const windowsWidth =
-    cols <= 1 ? "w-80" : cols === 2 ? "w-[39rem] max-w-[calc(100vw-1rem)]" : "w-[58rem] max-w-[calc(100vw-1rem)]";
+  // accounts each read side by side instead of one screen-height stack. Each
+  // column is weighted by how many windows its cards lay side by side, and the
+  // desktop dropdown's width follows the summed weight (capped to the
+  // viewport). The mobile bottom sheet stays stacked — AdaptiveMenu switches
+  // at md, the same breakpoint as the `md:` classes below. The Cost tab keeps
+  // its narrow width.
+  const weights = agents.map(columnWeight);
+  const windowsWidth = `${Math.round(weights.reduce((a, w) => a + w, 0) * 18)}rem`;
 
   return (
-    <AdaptiveMenu title="Usage" trigger={trigger} align="right" width={tab === "cost" ? "w-80" : windowsWidth}>
-      <div className="flex items-center justify-between px-3 pt-2 text-[11px] text-neutral-500">
-        <span>{freshestAsOf ? `Updated ${formatClock(freshestAsOf)}` : "Updating…"}</span>
-        <button
-          type="button"
-          className="rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
-          onClick={(e) => {
-            e.stopPropagation();
-            void loadUsage(true);
-          }}
-          aria-label="Refresh usage"
-        >
-          <RefreshCw size={13} />
-        </button>
-      </div>
-      <div className="flex gap-1 px-3 pt-1">
-        {(
-          [
-            ["windows", "Windows"],
-            ["cost", "Cost"]
-          ] as const
-        ).map(([id, label]) => (
+    <AdaptiveMenu title="Usage" trigger={trigger} align="right" width={tab === "cost" ? "w-80" : undefined}>
+      <div
+        className={tab === "windows" ? "md:w-[min(var(--usage-panel-w),calc(100vw_-_2rem))]" : undefined}
+        style={{ "--usage-panel-w": windowsWidth } as React.CSSProperties}
+      >
+        <div className="flex items-center justify-between px-3 pt-2 text-[11px] text-neutral-500">
+          <span>{freshestAsOf ? `Updated ${formatClock(freshestAsOf)}` : "Updating…"}</span>
           <button
-            key={id}
             type="button"
-            className={`rounded px-2 py-0.5 text-[11px] ${
-              tab === id ? "bg-neutral-700 text-neutral-100" : "text-neutral-500 hover:text-neutral-300"
-            }`}
+            className="rounded p-1 text-neutral-400 hover:bg-neutral-800 hover:text-neutral-200"
             onClick={(e) => {
               e.stopPropagation();
-              setTab(id);
+              void loadUsage(true);
             }}
+            aria-label="Refresh usage"
           >
-            {label}
+            <RefreshCw size={13} />
           </button>
-        ))}
-      </div>
-      {tab === "windows" ? (
-        <>
-          <div className="flex flex-col md:flex-row md:items-start md:divide-x md:divide-neutral-800/70">
-            {agents.map((a) => (
-              <div key={a.id} className="min-w-0 md:min-w-[17rem] md:flex-1 md:basis-0">
-                <AgentSection agent={a} />
+        </div>
+        <div className="px-3 pb-1 pt-1">
+          <SegmentedControl
+            size="xs"
+            ariaLabel="Usage view"
+            value={tab}
+            onChange={setTab}
+            options={[
+              { value: "windows", label: "Windows" },
+              { value: "cost", label: "Cost" }
+            ]}
+          />
+        </div>
+        {tab === "windows" ? (
+          <>
+            <div className="flex flex-col gap-2 p-2 md:flex-row md:items-stretch">
+              {agents.map((a, i) => (
+                <div key={a.id} className="min-w-0 md:basis-0" style={{ flexGrow: weights[i] }}>
+                  <AgentSection agent={a} />
+                </div>
+              ))}
+            </div>
+            {missing.map((id) => (
+              <div key={id} className="px-3 pb-2 text-xs text-neutral-500">
+                {labelForAgent(id)} — not logged in <span className="text-neutral-600">({usageLoginHint(id)})</span>
               </div>
             ))}
-          </div>
-          {missing.map((id) => (
-            <div key={id} className="px-3 py-2 text-xs text-neutral-500">
-              {labelForAgent(id)} — not logged in <span className="text-neutral-600">({usageLoginHint(id)})</span>
-            </div>
-          ))}
-        </>
-      ) : null}
-      {tab === "cost" ? <CostTab rows={usageTokens?.rows ?? []} /> : null}
+          </>
+        ) : null}
+        {tab === "cost" ? <CostTab rows={usageTokens?.rows ?? []} /> : null}
+      </div>
     </AdaptiveMenu>
   );
 };

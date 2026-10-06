@@ -2,7 +2,6 @@ import React from "react";
 import { Gauge, Loader2, RefreshCw } from "lucide-react";
 import type { AgentUsage, ProviderUsageWindow, UsageAccount } from "@orquester/api";
 import { usageAgentEnabled } from "@orquester/config";
-import { cn } from "../../lib/cn";
 import { shortAccountLabel } from "../../lib/account-label";
 import type { UsageResetFormat } from "../../lib/usage-display";
 import { getRegistryIcon } from "../../icons";
@@ -10,19 +9,17 @@ import { useUsageNow, useUsageResetFormat } from "../../hooks";
 import { useAppStore } from "../../store/app";
 import { Button } from "../ui";
 import { Badge, EmptyState, SettingsCard } from "./primitives";
+import { cn } from "../../lib/cn";
+import { UsageAccountCard, maxWindowCount } from "../topbar/UsageAccountCard";
 import {
   STALE_MIN,
-  barClass,
   formatAgo,
-  formatReset,
-  formatUsageCapacity,
   labelForAgent,
   minutesSince,
   missingUsageAgents,
   normalizeUsageWindows,
   providerWindowsToNormalized,
-  usageLoginHint,
-  type NormalizedUsageWindow
+  usageLoginHint
 } from "../topbar/usage-format";
 
 /** Stable empty slice, so an agent with no live windows never churns props. */
@@ -31,49 +28,7 @@ const NO_PROVIDER_WINDOWS: readonly ProviderUsageWindow[] = [];
 /** Same surface as `SettingsCard`, so the quota cards sit in the page's family. */
 const CARD = "overflow-hidden rounded-xl border border-neutral-800 bg-neutral-900/40";
 
-/** One labelled window: percent, bar, absolute numbers when the source has them. */
-const WindowRow: React.FC<{
-  window: NormalizedUsageWindow;
-  resetFormat: UsageResetFormat;
-  now: number;
-  muted: boolean;
-}> = ({ window, resetFormat, now, muted }) => {
-  const pct = window.percent;
-  const capacity = formatUsageCapacity(window);
-  const reset = formatReset(window.resetsAt, resetFormat, now);
-  return (
-    <div>
-      <div className="flex items-baseline justify-between gap-3">
-        <span className="min-w-0 truncate text-xs text-neutral-400">{window.longLabel}</span>
-        <span
-          className={cn(
-            "shrink-0 text-sm font-semibold tabular-nums",
-            muted ? "text-neutral-500" : "text-neutral-100"
-          )}
-        >
-          {Math.round(pct)}%
-        </span>
-      </div>
-      <div className="mt-1.5 h-1.5 w-full overflow-hidden rounded-full bg-neutral-800">
-        <div
-          className={cn("h-full rounded-full transition-[width] duration-500", muted ? "bg-neutral-600" : barClass(pct))}
-          style={{ width: `${Math.max(0, Math.min(100, pct))}%` }}
-        />
-      </div>
-      {/* Gated on content: a percent-only window with no reset time (most of
-          them today) must not leave an empty ~22px row under the bar. The
-          spacer keeps the reset time right-aligned when only it is present. */}
-      {(capacity || reset) && (
-        <div className="mt-1 flex flex-wrap items-baseline justify-between gap-x-3 gap-y-0.5 text-[11px] text-neutral-500">
-          {capacity ? <span className="tabular-nums text-neutral-400">{capacity}</span> : <span />}
-          {reset && <span className="tabular-nums">{reset}</span>}
-        </div>
-      )}
-    </div>
-  );
-};
-
-/** Per-account block inside a card (agents that pool several logins). */
+/** Per-account card inside an agent card (agents that pool several logins). */
 const AccountBlock: React.FC<{
   agentId: string;
   account: UsageAccount;
@@ -81,24 +36,21 @@ const AccountBlock: React.FC<{
   now: number;
 }> = ({ agentId, account, resetFormat, now }) => {
   const windows = normalizeUsageWindows(agentId, account);
-  const muted = account.stale || windows.length === 0;
   return (
-    <div className="space-y-2.5 px-4 py-3">
-      <div className="flex items-center justify-between gap-2">
-        <p className="min-w-0 truncate text-xs font-medium text-neutral-200">
-          {shortAccountLabel(account.label) || account.id}
-        </p>
-        <div className="flex shrink-0 items-center gap-1">
+    <UsageAccountCard
+      name={shortAccountLabel(account.label) || account.id}
+      meta={
+        <>
           {account.stale && windows.length > 0 && <Badge tone="warn">Stale</Badge>}
           {account.plan && <Badge>{account.plan}</Badge>}
-        </div>
-      </div>
-      {windows.length > 0 ? (
-        windows.map((w) => <WindowRow key={w.id} window={w} resetFormat={resetFormat} now={now} muted={muted} />)
-      ) : (
-        <p className="text-[11px] text-neutral-500">No reading yet.</p>
-      )}
-    </div>
+        </>
+      }
+      windows={windows}
+      muted={account.stale || windows.length === 0}
+      resetFormat={resetFormat}
+      now={now}
+      long
+    />
   );
 };
 
@@ -163,7 +115,7 @@ const AgentCard: React.FC<{
           {hidden && <Badge title="Turned off below, so it stays out of the top-bar chip and panel.">Hidden</Badge>}
         </div>
       </header>
-      <div className="divide-y divide-neutral-800/60 border-t border-neutral-800/80">
+      <div className="space-y-2 border-t border-neutral-800/80 p-3">
         {accounts.length > 0 || agent.system ? (
           <>
             {accounts.map((a) => (
@@ -181,24 +133,16 @@ const AgentCard: React.FC<{
               />
             )}
             {/* A pooling agent still gets its live provider windows: they are
-                per credential, not per account, so they sit below the blocks
+                per credential, not per account, so they sit below the cards
                 rather than inside one. */}
             {providerWindows.length > 0 && (
-              <div className="space-y-3 px-4 py-3">
-                {providerWindows.map((w) => (
-                  <WindowRow key={w.id} window={w} resetFormat={resetFormat} now={now} muted={muted} />
-                ))}
-              </div>
+              <UsageAccountCard windows={providerWindows} muted={muted} resetFormat={resetFormat} now={now} long />
             )}
           </>
         ) : ownWindows.length > 0 ? (
-          <div className="space-y-3 px-4 py-3">
-            {ownWindows.map((w) => (
-              <WindowRow key={w.id} window={w} resetFormat={resetFormat} now={now} muted={muted} />
-            ))}
-          </div>
+          <UsageAccountCard windows={ownWindows} muted={muted} resetFormat={resetFormat} now={now} long />
         ) : (
-          <p className="px-4 py-4 text-center text-[11px] text-neutral-500">No quota windows reported yet.</p>
+          <p className="py-1 text-center text-[11px] text-neutral-500">No quota windows reported yet.</p>
         )}
       </div>
     </article>
@@ -224,8 +168,9 @@ const MissingCard: React.FC<{ id: string }> = ({ id }) => (
 
 /**
  * The wide usage overview in Settings → Usage: one card per reporting agent in
- * a CSS multi-column masonry (single column on mobile, two from `sm` up — no JS
- * layout, so cards keep their natural height and never scroll sideways).
+ * a CSS multi-column masonry (single column on mobile, two from `lg` up, with
+ * three-window agents spanning both — no JS layout, so cards keep their
+ * natural height and never scroll sideways).
  *
  * Unlike the top-bar panel this shows every reporting agent, marking the ones
  * switched off below as "Hidden" rather than dropping them — the toggles sit
@@ -288,9 +233,11 @@ export const UsageOverview: React.FC<{
   }
 
   return (
-    <div className="columns-1 gap-3 sm:columns-2">
+    <div className="columns-1 gap-3 lg:columns-2">
       {agents.map((a) => (
-        <div key={a.id} className="mb-3 break-inside-avoid">
+        // A three-window agent (Claude) spans both columns, so its windows sit
+        // side by side at a readable width instead of wrapping their resets.
+        <div key={a.id} className={cn("mb-3 break-inside-avoid", maxWindowCount(a) >= 3 && "[column-span:all]")}>
           <AgentCard
             agent={a}
             hidden={!usageAgentEnabled(prefs, a.id)}
