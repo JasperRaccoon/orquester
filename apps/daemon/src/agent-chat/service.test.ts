@@ -40,6 +40,8 @@ interface Fixture {
   identities: Array<{ threadId: string; body: SetThreadIdentityRequest }>;
   /** Set to make the fake host refuse the thread. */
   refuse: { status: number; body: unknown } | null;
+  /** Set to make the fake host drop the thread create's connection without answering. */
+  dropCreate: boolean;
   /** Set to make the fake host refuse `POST /threads/:id/identity`. */
   refuseIdentity: { status: number; body: unknown } | null;
   /**
@@ -143,6 +145,7 @@ async function makeFixture(
     created: [],
     identities: [],
     refuse: null,
+    dropCreate: false,
     refuseIdentity: null,
     refuseUpload: null,
     refuseUploadAfterBody: null,
@@ -256,6 +259,10 @@ async function makeFixture(
       }
       if (req.url === "/threads" && req.method === "POST") {
         state.created.push(JSON.parse(body) as CreateHostThreadRequest);
+        if (state.dropCreate) {
+          req.socket.destroy();
+          return;
+        }
         if (state.refuse) {
           res
             .writeHead(state.refuse.status, { "content-type": "application/json" })
@@ -456,6 +463,25 @@ test("the tab record is written FIRST and rolled back when the host refuses", as
   );
   assert.equal(f.created.length, 1, "the host was asked");
   assert.deepEqual(f.service.chat.list(), [], "a tab pointing at no thread is worse than none");
+  await f.cleanup();
+});
+
+test("a host that stops answering a create reads as not responding, not as not running", async () => {
+  const f = await makeFixture(OPENCODE, null);
+  // Adopted and still healthy to the supervisor, but the request gets no answer.
+  f.dropCreate = true;
+  await assert.rejects(
+    () =>
+      f.service.createSession(
+        { kind: "agent-chat", refId: "opencode", projectPath: "/w/p", cwd: "/w/p" },
+        0
+      ),
+    (error: unknown) =>
+      error instanceof ChatSessionError &&
+      error.code === "HOST_UNAVAILABLE" &&
+      error.message === "The agent host is not responding. Try again in a moment."
+  );
+  assert.deepEqual(f.service.chat.list(), [], "the tab is rolled back");
   await f.cleanup();
 });
 

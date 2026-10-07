@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { exitOutcome, spawnProviderChild } from "./spawn.ts";
+import { getPriority } from "node:os";
+
+import { exitOutcome, PROVIDER_CHILD_NICENESS, spawnProviderChild } from "./spawn.ts";
 
 const NODE = process.execPath;
 
@@ -61,6 +63,15 @@ test("a spawn failure is an outcome, never a throw", async () => {
   });
   const reason = await proc.exited;
   assert.equal(reason.kind, "spawn-error");
+});
+
+test("the child runs at a lower CPU priority than the host", { skip: process.platform === "win32" }, async () => {
+  const proc = child("process.stdout.write(String(require('node:os').getPriority()))");
+  const chunks: Buffer[] = [];
+  proc.stdout.on("data", (c: Buffer) => chunks.push(c));
+  assert.deepEqual(await proc.exited, { kind: "exit", code: 0, signal: null });
+  // Relative to whatever this runner itself was started at; 19 is the floor.
+  assert.equal(Number(Buffer.concat(chunks).toString("utf8")), Math.min(19, getPriority() + PROVIDER_CHILD_NICENESS));
 });
 
 test("kill escalates SIGTERM to SIGKILL past the grace deadline", async () => {

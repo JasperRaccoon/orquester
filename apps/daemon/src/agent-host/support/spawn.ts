@@ -16,9 +16,42 @@
  */
 
 import { spawn as nodeSpawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { accessSync, constants, existsSync } from "node:fs";
 
 /** SIGTERM, then SIGKILL after this long (§3.1 "a short grace"). */
 export const DEFAULT_KILL_GRACE_MS = 2_000;
+
+/**
+ * The nice value every provider child runs at, and so every build, test run
+ * and tool command it starts. The host and the daemon stay at the default, so
+ * they keep answering while agent workloads saturate the box (owner incident
+ * 2026-10-07: a load of ~180 on 12 CPUs starved the host past its health
+ * probes and it was restarted under every live turn).
+ */
+export const PROVIDER_CHILD_NICENESS = 10;
+
+/**
+ * `nice(1)`, where the platform has one. It sets the value before it execs the
+ * provider, so every thread the provider later starts inherits it — a
+ * `setpriority` after the spawn reaches only the main thread on Linux.
+ */
+const NICE_BIN =
+  process.platform === "win32" ? null : (["/usr/bin/nice", "/bin/nice"].find((path) => existsSync(path)) ?? null);
+
+/**
+ * The command and args to spawn: the provider under {@link NICE_BIN}. A
+ * binary that cannot be executed is spawned bare, so its failure is still a
+ * `spawn-error` rather than `nice` exiting 126/127.
+ */
+function launchCommand(command: string, args: readonly string[]): { command: string; args: string[] } {
+  if (NICE_BIN === null) return { command, args: [...args] };
+  try {
+    accessSync(command, constants.X_OK);
+  } catch {
+    return { command, args: [...args] };
+  }
+  return { command: NICE_BIN, args: ["-n", String(PROVIDER_CHILD_NICENESS), command, ...args] };
+}
 
 interface SpawnProviderChildOptions {
   /** Absolute path to the resolved binary. Never a bare name or an npm shim. */
@@ -71,7 +104,8 @@ export function spawnProviderChild(options: SpawnProviderChildOptions): Provider
   const { command, args, env, cwd, killGraceMs } = options;
   const grace = killGraceMs ?? DEFAULT_KILL_GRACE_MS;
 
-  const child = nodeSpawn(command, [...args], {
+  const launch = launchCommand(command, args);
+  const child = nodeSpawn(launch.command, launch.args, {
     cwd,
     env,
     stdio: ["pipe", "pipe", "pipe"],
