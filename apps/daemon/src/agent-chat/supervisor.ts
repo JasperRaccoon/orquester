@@ -55,6 +55,22 @@ const UNREACHABLE_PROBES_BEFORE_RESTART = 2;
 const UNREACHABLE_PROBES_BEFORE_RESTART_BUSY = 4;
 
 /**
+ * 1-minute load average per CPU at or above which a silent host whose process
+ * is still alive is treated as starved, not dead. Owner incident 2026-10-07:
+ * agent builds and test runs drove the load to ~180 on 12 CPUs, the host
+ * missed four 5 s probes, and the restart took down every live turn while the
+ * replacement booted on the same saturated box.
+ */
+const SATURATED_LOAD_PER_CPU = 2;
+
+/**
+ * How long a starved-but-alive host is waited for, from the first miss of
+ * its streak, before it is restarted anyway — a host that is genuinely wedged
+ * while the box happens to be busy still recovers.
+ */
+const STARVED_HOST_PATIENCE_MS = 10 * 60_000;
+
+/**
  * How long the daemon waits for a stopped host to actually EXIT before killing
  * its tmux session. `/stop` returns once the continuation markers are written;
  * the teardown that follows closes the socket first, then stops every provider
@@ -199,6 +215,12 @@ export interface SupervisorAdapters {
    * "nothing running".
    */
   backgroundWorkThreadIds?(): readonly string[] | null;
+  /**
+   * The machine's 1-minute load average divided by its CPU count. Absent (or
+   * 0, as on Windows) means "never saturated": a silent host is restarted on
+   * the miss count alone.
+   */
+  loadPerCpu?(): number;
   logger?: { log?: (...a: unknown[]) => void; warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
 }
 
@@ -280,6 +302,8 @@ export class AgentHostSupervisor {
   private nextRespawnAt = 0;
   /** Consecutive unreachable probes; cleared by any healthy adoption. */
   private missedProbes = 0;
+  /** When the current missed-probe streak began; meaningful only while {@link missedProbes} > 0. */
+  private firstMissAt = 0;
   /** The last logged reason a pending version restart was deferred. */
   private lastDrainDeferral: string | null = null;
   /** What the host a deploy waits on answered to its §5.7 goal hold ({@link GoalHoldState}). */
@@ -472,6 +496,7 @@ export class AgentHostSupervisor {
       // the last good health reported an active turn or live background work:
       // that is positive evidence the host had work, so give it the full
       // window.
+      if (this.missedProbes === 0) this.firstMissAt = this.opts.adapters.now();
       this.missedProbes++;
       const required =
         this.health !== null && hostHasWork(this.health, this.daemonBackgroundWork())
@@ -485,8 +510,27 @@ export class AgentHostSupervisor {
         return;
       }
 
+      // A host that is alive but starved of CPU answers late, not never; a
+      // restart would only boot its replacement into the same contention.
+      const load = this.loadPerCpu();
+      if (
+        load >= SATURATED_LOAD_PER_CPU &&
+        this.opts.adapters.now() - this.firstMissAt < STARVED_HOST_PATIENCE_MS &&
+        (await this.hostProcessAlive())
+      ) {
+        this.log(
+          "warn",
+          `agent host did not answer (${this.missedProbes}/${required}), but its process is alive and the system is saturated (load ${load.toFixed(1)} per CPU); not restarting a starved host`
+        );
+        return;
+      }
+
       if (this.opts.adapters.now() < this.nextRespawnAt) return; // still backing off
       this.respawnAttempts++;
+      this.log(
+        "warn",
+        `agent host did not answer (${this.missedProbes}/${required}); restarting it (attempt ${this.respawnAttempts}/${MAX_RESPAWNS})`
+      );
       const ready = await this.spawnAndWait(true);
       this.nextRespawnAt = this.opts.adapters.now() + this.backoffMs(this.respawnAttempts);
       if (ready) return;
@@ -551,6 +595,29 @@ export class AgentHostSupervisor {
 
   private hostPid(): number | null {
     return this.directHandle?.pid ?? this.health?.pid ?? null;
+  }
+
+  /** {@link SupervisorAdapters.loadPerCpu}; a failing or absent reader reads as idle. */
+  private loadPerCpu(): number {
+    try {
+      const load = this.opts.adapters.loadPerCpu?.() ?? 0;
+      return Number.isFinite(load) ? load : 0;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Whether our host's process still exists: its tmux service session (which
+   * ends with its command), or the direct child. A host adopted from outside
+   * our session reads as not alive, so it is restarted as before.
+   */
+  private async hostProcessAlive(): Promise<boolean> {
+    const tmux = this.opts.adapters.tmux;
+    if (tmux) {
+      return tmux.hasServiceSession(AGENT_HOST_SERVICE_SESSION).catch(() => false);
+    }
+    return this.directHandle?.isAlive?.() === true;
   }
 
   /**

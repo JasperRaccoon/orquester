@@ -52,11 +52,12 @@ async function workerOutput(t: TestContext, output: string): Promise<void> {
   const script = join(root, "broken-worker.mjs");
   await fs.writeFile(script, `process.stdout.write(${JSON.stringify(output)});\n`);
   const spawn = childProcess.spawn;
+  // Node runs the script directly, whatever launcher (`nice`) the real spawn goes through.
   const mocked = t.mock.method(childProcess, "spawn", (
-    command: string,
+    _command: string,
     _args: readonly string[],
     options: childProcess.SpawnOptions
-  ) => spawn(command, [script], options));
+  ) => spawn(process.execPath, [script], options));
   syncBuiltinESMExports();
   t.after(() => {
     mocked.mock.restore();

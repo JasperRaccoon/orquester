@@ -213,7 +213,8 @@ process.stdout.write(command === "models" ? fs.readFileSync("models.json") : com
     const child = spawn(command, args, options);
     live += 1;
     peak = Math.max(peak, live);
-    if (args[0] === "models") modelsStarted += 1;
+    // `includes`, not `args[0]`: the binary may run under a launcher (`nice`).
+    if (args.includes("models")) modelsStarted += 1;
     child.once("close", () => { live -= 1; });
     return child;
   });

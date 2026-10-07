@@ -9,7 +9,7 @@
  */
 
 import { spawn } from "node:child_process";
-import { homedir } from "node:os";
+import { availableParallelism, homedir, loadavg } from "node:os";
 import { join } from "node:path";
 import { readCodeStamp } from "../agent-host/support/code-stamp.ts";
 import { randomUUID } from "node:crypto";
@@ -250,6 +250,8 @@ export class AgentChatService {
         // poll starts, and an empty view would read as "nothing running".
         backgroundWorkThreadIds: () =>
           this.summary.hasPolled() ? this.summary.threadsWithBackgroundLiveness() : null,
+        // Tells a starved host from a dead one before it is restarted.
+        loadPerCpu: () => loadavg()[0] / availableParallelism(),
         logger: opts.logger
       }
     });
@@ -532,6 +534,18 @@ export class AgentChatService {
   /** Threads the OLD host marked for continuation on its way out (§3.3). */
   private lastMarkedThreadIds: string[] = [];
 
+  /** HOST_UNAVAILABLE, worded for what the supervisor is doing about it. */
+  private hostUnavailable(): ChatSessionError {
+    const state = this.supervisor.status().state;
+    const message =
+      state === "starting"
+        ? "The agent host is restarting. Try again in a moment."
+        : state === "healthy"
+          ? "The agent host is not responding. Try again in a moment."
+          : "The agent host is not running.";
+    return new ChatSessionError(message, "HOST_UNAVAILABLE");
+  }
+
   // --- §6.1 lifecycle ------------------------------------------------------
 
   /**
@@ -563,7 +577,7 @@ export class AgentChatService {
       );
     }
     if (!this.supervisor.isHealthy()) {
-      throw new ChatSessionError("The agent host is not running.", "HOST_UNAVAILABLE");
+      throw this.hostUnavailable();
     }
 
     let launch: ChatLaunchEnv | null = null;
@@ -653,7 +667,7 @@ export class AgentChatService {
       this.chat.close(id);
       if (error instanceof ChatSessionError) throw error;
       if (error instanceof HostUnavailableError) {
-        throw new ChatSessionError("The agent host is not running.", "HOST_UNAVAILABLE");
+        throw this.hostUnavailable();
       }
       throw new ChatSessionError(error instanceof Error ? error.message : String(error));
     }
@@ -720,7 +734,7 @@ export class AgentChatService {
       }
     }
     if (!this.supervisor.isHealthy()) {
-      throw new ChatSessionError("The agent host is not running.", "HOST_UNAVAILABLE");
+      throw this.hostUnavailable();
     }
 
     let launch: ChatLaunchEnv | null = null;
@@ -777,7 +791,7 @@ export class AgentChatService {
     } catch (error) {
       if (error instanceof ChatSessionError) throw error;
       if (error instanceof HostUnavailableError) {
-        throw new ChatSessionError("The agent host is not running.", "HOST_UNAVAILABLE");
+        throw this.hostUnavailable();
       }
       throw new ChatSessionError(error instanceof Error ? error.message : String(error));
     }

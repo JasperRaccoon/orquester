@@ -62,6 +62,8 @@ interface Harness {
   /** Every `POST /goals/resume-sessions` body, and what the fake host answers. */
   resumeCalls: string[][];
   resumeHook?: (threadIds: readonly string[]) => Promise<readonly string[] | null>;
+  /** Every line the supervisor logged, joined. */
+  logs: string[];
   /** The injected clock, read. */
   now(): number;
   cleanup(): Promise<void>;
@@ -119,6 +121,8 @@ async function makeHarness(
     codeStamp?: string | null;
     /** The daemon's own liveness view (`SupervisorAdapters.backgroundWorkThreadIds`). */
     daemonBackground?: () => readonly string[] | null;
+    /** The machine's load per CPU (`SupervisorAdapters.loadPerCpu`). */
+    loadPerCpu?: () => number;
   } = {}
 ): Promise<Harness> {
   const dir = await mkdtemp(join(tmpdir(), "orq-agent-host-"));
@@ -146,6 +150,7 @@ async function makeHarness(
     sessionStops: [],
     sessionStopThrows: false,
     resumeCalls: [],
+    logs: [],
     now: () => clock,
     advance: (ms) => {
       clock += ms;
@@ -206,6 +211,12 @@ async function makeHarness(
         harness.providerRevisions++;
       },
       ...(opts.daemonBackground ? { backgroundWorkThreadIds: opts.daemonBackground } : {}),
+      ...(opts.loadPerCpu ? { loadPerCpu: opts.loadPerCpu } : {}),
+      logger: {
+        log: (...a) => harness.logs.push(a.join(" ")),
+        warn: (...a) => harness.logs.push(a.join(" ")),
+        error: (...a) => harness.logs.push(a.join(" "))
+      },
       requestStop: async () => {
         harness.stopRequests++;
       },
@@ -579,6 +590,65 @@ test("a single answered probe clears the missed-probe streak", async () => {
   h.advance(120_000);
   await h.supervisor.checkHealth();
   assert.equal(h.spawns.length, 0, "the streak restarted, so this is miss 1 of 2");
+  await h.cleanup();
+});
+
+test("a silent host whose process is alive on a saturated box is starved, not dead — it is not restarted", async () => {
+  const h = await makeHarness([healthy()], { seedToken: "tok", tmux: true, loadPerCpu: () => 15 });
+  await h.supervisor.init();
+  h.probes = [{ ok: false, reachable: false }];
+  for (let i = 0; i < 6; i++) {
+    h.advance(15_000);
+    await h.supervisor.checkHealth();
+  }
+  assert.equal(h.spawns.length, 0, "the host was alive and the box saturated");
+  assert.equal(h.supervisor.status().state, "healthy");
+  assert.ok(h.logs.some((line) => line.includes("not restarting a starved host")));
+  h.probes = [healthy()];
+  h.advance(15_000);
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 0, "it answered once the load let it");
+  await h.cleanup();
+});
+
+test("a starved host is restarted anyway once its patience runs out", async () => {
+  const h = await makeHarness([healthy()], { seedToken: "tok", tmux: true, loadPerCpu: () => 15 });
+  await h.supervisor.init();
+  h.probes = [{ ok: false, reachable: false }];
+  h.advance(15_000);
+  await h.supervisor.checkHealth();
+  h.advance(15_000);
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 0);
+  h.advance(10 * 60_000);
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 1, "a wedged host on a busy box still recovers");
+  await h.cleanup();
+});
+
+test("a saturated box does not shield a host whose process is gone", async () => {
+  // No tmux and no direct child of ours: nothing says the host is alive.
+  const h = await makeHarness([healthy()], { seedToken: "tok", tmux: false, loadPerCpu: () => 15 });
+  await h.supervisor.init();
+  h.probes = [{ ok: false, reachable: false }];
+  h.advance(15_000);
+  await h.supervisor.checkHealth();
+  h.advance(15_000);
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 1);
+  await h.cleanup();
+});
+
+test("a restart for missed probes is logged", async () => {
+  const h = await makeHarness([healthy()], { seedToken: "tok", tmux: true, loadPerCpu: () => 0.5 });
+  await h.supervisor.init();
+  h.probes = [{ ok: false, reachable: false }];
+  h.advance(15_000);
+  await h.supervisor.checkHealth();
+  h.advance(15_000);
+  await h.supervisor.checkHealth();
+  assert.equal(h.spawns.length, 1, "an idle box gives a silent host no extra patience");
+  assert.ok(h.logs.includes("agent host did not answer (2/2); restarting it (attempt 1/5)"), h.logs.join("\n"));
   await h.cleanup();
 });
 
