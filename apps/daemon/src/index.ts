@@ -3068,11 +3068,12 @@ export function createServer(
     );
   }
 
-  // System status — host resources, this daemon's own process tree, and the TCP
-  // ports those processes listen on. Linux-only (all three read /proc); off Linux
-  // each route answers `supported: false`, mirroring /api/fs/capabilities' host
-  // gating. Everything is best-effort: a /proc entry that vanished mid-scan is
-  // skipped, never a 500. No background poller — resources are computed on demand
+  // System status — host resources, every process on the host (this daemon's own
+  // tree marked managed), and the TCP ports the managed processes listen on.
+  // Linux-only (all three read /proc); off Linux each route answers
+  // `supported: false`, mirroring /api/fs/capabilities' host gating. Everything
+  // is best-effort: a /proc entry that vanished mid-scan is skipped, never a
+  // 500. No background poller — resources are computed on demand
   // behind a short cache (the Broadcaster exposes no client-count signal to gate
   // one on, and an always-on poller on a VPS is not worth the wakeups).
   const systemStatus = new SystemStatusService({
@@ -3084,9 +3085,9 @@ export function createServer(
     // CHILDREN stay legal targets — see `extraRootPids` below, which is what
     // actually makes them reachable on a tmux host.
     protectedPids: () => {
-      const pids: Array<{ pid: number; label: string }> = [];
+      const pids: Array<{ pid: number; label: string; role: "agent-host" }> = [];
       for (const hostPid of services.agentChat?.protectedPids() ?? []) {
-        pids.push({ pid: hostPid, label: "the agent host that runs your chat threads" });
+        pids.push({ pid: hostPid, label: "the agent host that runs your chat threads", role: "agent-host" });
       }
       return pids;
     },
@@ -3099,7 +3100,13 @@ export function createServer(
 
   app.get("/api/system/resources", async (): Promise<SystemResourcesResponse> => systemStatus.resources());
 
-  app.get("/api/system/processes", async (): Promise<SystemProcessesResponse> => systemStatus.processes());
+  // `?scope=host` lists the whole host; without it only the daemon's own tree,
+  // which is all a client that predates whole-host listing knows how to show.
+  app.get<{ Querystring: { scope?: string } }>(
+    "/api/system/processes",
+    async (request): Promise<SystemProcessesResponse> =>
+      systemStatus.processes(request.query.scope === "host" ? "host" : "tree")
+  );
 
   // Guarded kill: refused for any pid outside this daemon's tree, and for the
   // daemon and the tmux server themselves (see SystemStatusService.kill). The

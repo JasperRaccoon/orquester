@@ -1460,9 +1460,26 @@ export interface SystemResourcesResponse {
     usedPercent: number | null;
     path: string;
   };
+  /**
+   * Bytes/s over every non-virtual network interface (loopback, veth, bridges
+   * excluded). Null until two samples exist. Absent from daemons that predate it.
+   */
+  network?: { rxBps: number; txBps: number } | null;
+  /** Bytes/s read from / written to whole block devices. Null until two samples exist. */
+  diskIo?: { readBps: number; writeBps: number } | null;
+  /** 1, 5 and 15 minute load averages. */
+  loadAverage?: [number, number, number];
+  uptimeSeconds?: number;
+  host?: { hostname: string; kernel: string; arch: string; user: string };
 }
 
-/** One process in the daemon's own tree (GET /api/system/processes). */
+/** Linux scheduler state of a process, from /proc/<pid>/stat. */
+export type SystemProcessState = "running" | "sleeping" | "disk-wait" | "stopped" | "zombie" | "idle" | "other";
+
+/** Orquester infrastructure a process row is, for highlighting. */
+export type SystemProcessRole = "daemon" | "agent-host" | "tmux";
+
+/** One process on the host (GET /api/system/processes). */
 export interface SystemProcessInfo {
   pid: number;
   ppid: number;
@@ -1473,13 +1490,48 @@ export interface SystemProcessInfo {
   rssBytes: number;
   /** Session whose tmux pane is the nearest ancestor, when the pid belongs to one. */
   sessionId?: string;
+  /**
+   * Inside this daemon's own tree, so `/api/system/processes/kill` may target
+   * it. Daemons that predate whole-host listing omit it (and list only their
+   * own tree, where every row is managed).
+   */
+  managed?: boolean;
+  role?: SystemProcessRole;
+  /**
+   * Share of the whole host's CPU (every core together = 100) since the previous
+   * scan. Null on the first sight of a process or after a long gap between scans.
+   */
+  cpuPercent?: number | null;
+  state?: SystemProcessState;
+  threads?: number;
+  /** Owner's user name, or the numeric uid when /etc/passwd does not name it. */
+  user?: string;
+  /** Epoch milliseconds. */
+  startedAt?: number;
+  /**
+   * Block I/O bytes/s since the previous scan. Null when not measurable: the
+   * kernel only exposes /proc/<pid>/io to the process owner, and the first scan
+   * has nothing to subtract from.
+   */
+  diskReadBps?: number | null;
+  diskWriteBps?: number | null;
 }
+
+/**
+ * `GET /api/system/processes?scope=`: `tree` (the default) lists only this
+ * daemon's own tree — what clients that predate whole-host listing expect, as
+ * they offer Stop on every row; `host` lists every user-space process.
+ */
+export type SystemProcessesScope = "tree" | "host";
 
 export interface SystemProcessesResponse {
   supported: boolean;
   /** The daemon's own pid — a tree root, and never a valid kill target. */
   daemonPid: number;
-  /** Flat list (parent before child is not guaranteed); ascending by pid. */
+  /**
+   * Flat list (parent before child is not guaranteed); ascending by pid.
+   * Kernel threads are never listed; `managed` marks this daemon's own tree.
+   */
   processes: SystemProcessInfo[];
 }
 

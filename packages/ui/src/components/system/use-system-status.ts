@@ -139,7 +139,7 @@ export function useSystemResources(active: boolean): SystemPoll<SystemResourcesR
 
 export function useSystemProcesses(active: boolean): SystemPoll<SystemProcessesResponse> {
   const api = useApi();
-  return usePolledResource(active, (signal) => api.systemProcesses(signal), unsupported);
+  return usePolledResource(active, (signal) => api.systemProcesses(signal, "host"), unsupported);
 }
 
 export function useSystemPorts(active: boolean): SystemPoll<SystemPortsResponse> {

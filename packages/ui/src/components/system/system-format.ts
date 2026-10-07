@@ -2,7 +2,7 @@ import type { KillProcessErrorCode, SystemProcessInfo } from "@orquester/api";
 
 /**
  * Pure helpers behind the System status surfaces (top-bar chip, Settings →
- * System). Kept free of React and of any transport import so `system-format.check.ts`
+ * Host status). Kept free of React and of any transport import so `system-format.check.ts`
  * can assert them with plain `node --import tsx`.
  */
 
@@ -35,95 +35,57 @@ export function formatPercent(value: number | null | undefined): string {
   return `${Math.round(Math.max(0, Math.min(100, value)))}%`;
 }
 
+/** Bytes per second ("4.1 MB/s"), em-dash when unknown. */
+export function formatByteRate(bytesPerSecond: number | null | undefined): string {
+  return bytesPerSecond == null || !Number.isFinite(bytesPerSecond) ? "—" : `${formatBytes(bytesPerSecond)}/s`;
+}
+
+const BIT_UNITS = ["bps", "Kbps", "Mbps", "Gbps", "Tbps"] as const;
+
+/** Network throughput in bits per second, the unit links are sold in ("87.3 Mbps"). */
+export function formatBitRate(bytesPerSecond: number | null | undefined): string {
+  if (bytesPerSecond == null || !Number.isFinite(bytesPerSecond)) {
+    return "—";
+  }
+  let value = Math.max(0, bytesPerSecond) * 8;
+  let unit = 0;
+  while (value >= 1000 && unit < BIT_UNITS.length - 1) {
+    value /= 1000;
+    unit += 1;
+  }
+  const digits = unit === 0 ? 0 : value < 100 ? 1 : 0;
+  return `${value.toFixed(digits)} ${BIT_UNITS[unit]}`;
+}
+
+/** A process's CPU share with one decimal ("62.4%"); em-dash when not measured yet. */
+export function formatCpu(percent: number | null | undefined): string {
+  if (percent == null || !Number.isFinite(percent)) {
+    return "—";
+  }
+  return `${Math.max(0, percent).toFixed(1)}%`;
+}
+
+/** Elapsed time, two most significant units: "45s", "42m", "2h 14m", "5d 3h". */
+export function formatDuration(seconds: number | null | undefined): string {
+  if (seconds == null || !Number.isFinite(seconds)) {
+    return "—";
+  }
+  const total = Math.max(0, Math.floor(seconds));
+  const days = Math.floor(total / 86_400);
+  const hours = Math.floor((total % 86_400) / 3600);
+  const minutes = Math.floor((total % 3600) / 60);
+  if (days > 0) return `${days}d ${hours}h`;
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m`;
+  return `${total}s`;
+}
+
 /** Bar width for a possibly-unknown percent: an unknown bar is drawn empty. */
 export function barWidth(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) {
     return "0%";
   }
   return `${Math.max(0, Math.min(100, value))}%`;
-}
-
-export interface ProcessNode {
-  proc: SystemProcessInfo;
-  children: ProcessNode[];
-  /** RSS of this process plus everything under it — what a kill would reclaim. */
-  subtreeRssBytes: number;
-}
-
-/** Depth cap for the ancestor walk that rejects a cyclic ppid chain. */
-const ANCESTOR_WALK_LIMIT = 256;
-
-/**
- * Flat `/api/system/processes` list → forest. A pid whose ppid is absent from
- * the list is a root: the daemon itself, every tmux pane (whose real parent is
- * the tmux server, which the daemon deliberately keeps out of the tree), and
- * every orphan a provider CLI left behind (reparented to init, and listed by
- * the launch marker it inherited).
- *
- * A pid recycled between the daemon's scan passes could in principle describe a
- * cycle; linking is therefore refused whenever the candidate parent already has
- * the node among its ancestors, so the returned forest is always acyclic and
- * safe to render recursively.
- */
-export function buildProcessTree(processes: readonly SystemProcessInfo[]): ProcessNode[] {
-  const byPid = new Map<number, ProcessNode>();
-  for (const proc of processes) {
-    byPid.set(proc.pid, { proc, children: [], subtreeRssBytes: proc.rssBytes });
-  }
-
-  const reachesPid = (from: ProcessNode, target: number): boolean => {
-    let cursor: ProcessNode | undefined = from;
-    for (let step = 0; cursor && step < ANCESTOR_WALK_LIMIT; step += 1) {
-      if (cursor.proc.pid === target) {
-        return true;
-      }
-      cursor = byPid.get(cursor.proc.ppid);
-    }
-    // Ran out of budget without terminating: treat as cyclic and don't link.
-    return cursor !== undefined;
-  };
-
-  const roots: ProcessNode[] = [];
-  for (const node of byPid.values()) {
-    const parent = byPid.get(node.proc.ppid);
-    if (parent && parent !== node && !reachesPid(parent, node.proc.pid)) {
-      parent.children.push(node);
-    } else {
-      roots.push(node);
-    }
-  }
-
-  const byPidAsc = (a: ProcessNode, b: ProcessNode) => a.proc.pid - b.proc.pid;
-  for (const node of byPid.values()) {
-    node.children.sort(byPidAsc);
-  }
-  roots.sort(byPidAsc);
-
-  // Post-order subtree sums, iteratively — the tree is shallow but a recursive
-  // sum on thousands of pids is a stack risk for no gain.
-  const order: ProcessNode[] = [];
-  const stack = [...roots];
-  while (stack.length > 0) {
-    const node = stack.pop() as ProcessNode;
-    order.push(node);
-    stack.push(...node.children);
-  }
-  for (let i = order.length - 1; i >= 0; i -= 1) {
-    const node = order[i];
-    node.subtreeRssBytes = node.children.reduce((sum, child) => sum + child.subtreeRssBytes, node.proc.rssBytes);
-  }
-
-  return roots;
-}
-
-/** Total processes in a forest (the header count). */
-export function countProcessNodes(nodes: readonly ProcessNode[]): number {
-  return nodes.reduce((total, node) => total + 1 + countProcessNodes(node.children), 0);
-}
-
-/** Pids in `node`'s subtree, itself included — what a kill would signal. */
-export function subtreePids(node: ProcessNode): number[] {
-  return node.children.reduce<number[]>((pids, child) => pids.concat(subtreePids(child)), [node.proc.pid]);
 }
 
 /**
@@ -153,9 +115,9 @@ export function killErrorCode(error: unknown): KillProcessErrorCode | null {
 export function killErrorMessage(code: KillProcessErrorCode | null, label: string): string {
   switch (code) {
     case "PROCESS_PROTECTED":
-      return `${label} is protected — the daemon and the tmux server that keeps your sessions alive can't be stopped from here.`;
+      return `${label} is protected — the daemon, the agent host and the tmux server that keeps your sessions alive can't be stopped from here.`;
     case "PROCESS_NOT_MANAGED":
-      return `${label} is no longer in this daemon's process tree — it probably exited already. Refresh the list.`;
+      return `${label} was not started by Orquester, or has exited since — only Orquester's own processes can be stopped here.`;
     case "INVALID_PID":
       return `${label} is not a valid target. Refresh the list and try again.`;
     case "UNSUPPORTED_PLATFORM":

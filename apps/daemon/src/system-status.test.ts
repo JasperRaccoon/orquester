@@ -16,14 +16,25 @@ import {
   cpuPercentFromSamples,
   decodeProcNetAddress,
   descendsFromRoot,
+  isVirtualInterface,
   launchMarkerOf,
+  parseBootTime,
   parseCmdline,
   parseCpuSample,
+  parseDiskStats,
   parseMemInfo,
+  parseNetDev,
+  parsePasswd,
+  parseProcIo,
   parseProcNetTcp,
   parseProcStat,
+  parseProcStatDetail,
   parseProcStatus,
   parseSocketInode,
+  procMetrics,
+  processCpuPercent,
+  processStateOf,
+  ratePerSecond,
   readProcIdentity,
   resolveSocketOwners,
   verifyProcessIdentity
@@ -236,6 +247,133 @@ test("parseProcStat survives a comm containing spaces and parentheses", () => {
   assert.equal(parseProcStat("garbage without a paren"), null);
 });
 
+test("parseProcStatDetail reads state, cpu ticks, threads and starttime past a weird comm", () => {
+  const line =
+    "4242 (my (weird) proc) S 1197 4242 4242 0 -1 4194304 100 0 0 0 " +
+    "11 22 0 0 20 0 5 0 987654 1234 56 " +
+    "18446744073709551615 1 1 0 0 0 0 0 0 0 0 0 0 17 3 0 0 0 0 0\n";
+  assert.deepEqual(parseProcStatDetail(line), {
+    kernelThread: false,
+    state: "sleeping",
+    ppid: 1197,
+    cpuTicks: 33,
+    threads: 5,
+    starttime: 987654
+  });
+  // PF_KTHREAD (0x00200000) in the flags field marks a kernel thread, whatever its pid.
+  const kthread = "17 (kworker/0:1) I 2 0 0 0 -1 69238880 0 0 0 0 0 5 0 0 20 0 1 0 300 0 0";
+  assert.equal(parseProcStatDetail(kthread)?.kernelThread, true);
+  assert.equal(parseProcStatDetail("garbage without a paren"), null);
+  assert.equal(parseProcStatDetail("1 (x) R 0"), null);
+});
+
+test("processStateOf names every scheduler state and falls back to other", () => {
+  assert.deepEqual(
+    ["R", "S", "D", "T", "t", "Z", "X", "I", "W"].map(processStateOf),
+    ["running", "sleeping", "disk-wait", "stopped", "stopped", "zombie", "zombie", "idle", "other"]
+  );
+});
+
+test("parseProcIo reads the block-layer byte counters, not rchar/wchar", () => {
+  const io = "rchar: 4092\nwchar: 10\nsyscr: 9\nsyscw: 0\nread_bytes: 8192\nwrite_bytes: 4096\ncancelled_write_bytes: 0\n";
+  assert.deepEqual(parseProcIo(io), { readBytes: 8192, writeBytes: 4096 });
+  assert.equal(parseProcIo("rchar: 1\n"), null);
+});
+
+test("parseNetDev sums physical interfaces and skips loopback, bridges and tunnels", () => {
+  const dev = [
+    "Inter-|   Receive                                                |  Transmit",
+    " face |bytes    packets errs drop fifo frame compressed multicast|bytes    packets errs drop fifo colls carrier compressed",
+    "    lo: 900 1 0 0 0 0 0 0 900 1 0 0 0 0 0 0",
+    "  eth0: 100 1 0 0 0 0 0 0 200 1 0 0 0 0 0 0",
+    "  ens4: 10 1 0 0 0 0 0 0 20 1 0 0 0 0 0 0",
+    "docker0: 50 1 0 0 0 0 0 0 50 1 0 0 0 0 0 0",
+    "veth1a2b: 50 1 0 0 0 0 0 0 50 1 0 0 0 0 0 0",
+    "tailscale0: 70 1 0 0 0 0 0 0 70 1 0 0 0 0 0 0"
+  ].join("\n");
+  assert.deepEqual(parseNetDev(dev), { rxBytes: 110, txBytes: 220 });
+  assert.equal(parseNetDev(dev.split("\n").slice(0, 3).join("\n")), null, "loopback alone is no measurement");
+  assert.equal(isVirtualInterface("br-12ab"), true);
+  assert.equal(isVirtualInterface("wg0"), true);
+  assert.equal(isVirtualInterface("enp3s0"), false);
+});
+
+test("parseDiskStats counts whole disks only, in 512-byte sectors", () => {
+  const stats = [
+    "   7       0 loop0 11 0 28 0 0 0 0 0 0 1 0",
+    "   8       0 sda 100 0 10 0 50 0 20 0 0 0 0",
+    "   8       1 sda1 100 0 10 0 50 0 20 0 0 0 0",
+    " 259       0 nvme0n1 1 0 2 0 1 0 4 0 0 0 0",
+    " 259       1 nvme0n1p1 1 0 2 0 1 0 4 0 0 0 0",
+    " 253       0 dm-0 1 0 99 0 1 0 99 0 0 0 0"
+  ].join("\n");
+  assert.deepEqual(parseDiskStats(stats), { readBytes: 12 * 512, writeBytes: 24 * 512 });
+  assert.equal(parseDiskStats("   7       0 loop0 11 0 28 0 0 0 0 0 0 1 0"), null);
+});
+
+test("parsePasswd maps uids to names and skips malformed lines", () => {
+  const users = parsePasswd("root:x:0:0:root:/root:/bin/bash\norquester:x:999:999::/var/lib/orquester:/bin/sh\nbroken\n:x:5:5\n");
+  assert.deepEqual([...users], [[0, "root"], [999, "orquester"]]);
+});
+
+test("parseBootTime reads btime from /proc/stat", () => {
+  assert.equal(parseBootTime("cpu  1 2 3 4\nbtime 1700000000\nprocesses 5\n"), 1700000000);
+  assert.equal(parseBootTime("cpu  1 2 3 4\n"), null);
+});
+
+test("ratePerSecond and processCpuPercent refuse resets and empty intervals", () => {
+  assert.equal(ratePerSecond(1000, 3000, 2000), 1000);
+  assert.equal(ratePerSecond(3000, 1000, 2000), null, "a counter that went backwards was reset");
+  assert.equal(ratePerSecond(1000, 3000, 0), null);
+  // 12 ticks of a 400-tick interval across all cores is 3% of the machine.
+  assert.equal(processCpuPercent(100, 112, 400), 3);
+  assert.equal(processCpuPercent(100, 101, 300), 0.3);
+  assert.equal(processCpuPercent(112, 100, 400), null);
+  assert.equal(processCpuPercent(100, 112, 0), null);
+});
+
+test("procMetrics diffs only the same process within the staleness window", () => {
+  const first = procMetrics(
+    new Map([
+      [10, { stat: { starttime: 5, cpuTicks: 100 }, io: { readBytes: 0, writeBytes: 0 } }],
+      [11, { stat: { starttime: 6, cpuTicks: 50 } }]
+    ]),
+    null,
+    1_000,
+    10_000
+  );
+  assert.deepEqual(first.metrics.get(10), { cpuPercent: null, diskReadBps: null, diskWriteBps: null }, "first sight has no delta");
+
+  const second = procMetrics(
+    new Map([
+      [10, { stat: { starttime: 5, cpuTicks: 120 }, io: { readBytes: 4096, writeBytes: 2048 } }],
+      // Pid 11 was recycled: a new starttime must not be diffed against the old process.
+      [11, { stat: { starttime: 99, cpuTicks: 10 } }],
+      [12, {}]
+    ]),
+    first.samples,
+    3_000,
+    10_400
+  );
+  assert.deepEqual(second.metrics.get(10), { cpuPercent: 5, diskReadBps: 2048, diskWriteBps: 1024 });
+  assert.deepEqual(second.metrics.get(11), { cpuPercent: null, diskReadBps: null, diskWriteBps: null });
+  assert.equal(second.metrics.has(12), false, "a row with no stat has nothing to measure");
+
+  const stale = procMetrics(
+    new Map([[10, { stat: { starttime: 5, cpuTicks: 200 } }]]),
+    second.samples,
+    3_000 + 60_000,
+    20_000
+  );
+  assert.equal(stale.metrics.get(10)?.cpuPercent, null, "a baseline a minute old is not 'now'");
+  // Two scans that land together (the kill guard's fresh scan beside a poll):
+  // the second diffs over a sliver of time, which is noise, and must not
+  // become the next baseline either.
+  const sliver = procMetrics(new Map([[10, { stat: { starttime: 5, cpuTicks: 121 } }]]), second.samples, 3_200, 10_402);
+  assert.equal(sliver.metrics.get(10)?.cpuPercent, null, "a 200 ms delta is not a rate");
+  assert.equal(sliver.samples, second.samples, "the earlier baseline is kept");
+});
+
 test("cpuPercentFromSamples is the busy share of the delta", () => {
   assert.equal(cpuPercentFromSamples({ total: 1000, idle: 900 }, { total: 1100, idle: 950 }), 50);
   assert.equal(cpuPercentFromSamples({ total: 1000, idle: 900 }, { total: 1100, idle: 1000 }), 0);
@@ -427,7 +565,7 @@ test("a process carrying the agent host's launch marker is managed even as an or
   }
 });
 
-test("a marked process whose parent still runs outside every root is no orphan: never listed, never killable", async () => {
+test("a marked process whose parent still runs outside every root is no orphan: listed unmanaged, never killable", async () => {
   if (!SYSTEM_STATUS_SUPPORTED) {
     return;
   }
@@ -443,9 +581,9 @@ test("a marked process whose parent still runs outside every root is no orphan: 
   const [parent, marked] = pids as [number, number];
   try {
     const status = service({ listSessionIds: () => new Set(["chat-1"]) });
-    const listed = (await status.processes()).processes;
-    assert.equal(listed.find((row) => row.pid === marked), undefined, "the marked child is not listed");
-    assert.equal(listed.find((row) => row.pid === parent), undefined, "nor is its unmarked parent");
+    const listed = (await status.processes("host")).processes;
+    assert.equal(listed.find((row) => row.pid === marked)?.managed, false, "the marked child is not ours");
+    assert.equal(listed.find((row) => row.pid === parent)?.managed, false, "nor is its unmarked parent");
     const refused = await status.kill(marked);
     assert.equal(refused.ok === false && refused.code, "PROCESS_NOT_MANAGED");
     assert.doesNotThrow(() => process.kill(marked, 0), "a refused kill signalled nothing");
@@ -495,5 +633,60 @@ test("kill() refuses a protectedPids entry, directly and inside a subtree", asyn
       try { process.kill(pid, "SIGKILL"); } catch { /* Already gone. */ }
     }
     await allGone(Promise.all([parentGone, guardedGone]).then(() => undefined), "owned children exiting");
+  }
+});
+
+test("processes() lists only our own tree unless the whole host is asked for", async () => {
+  if (!SYSTEM_STATUS_SUPPORTED) return;
+  const status = service();
+  const tree = (await status.processes()).processes;
+  assert.ok(tree.length > 0);
+  assert.ok(tree.every((row) => row.managed === true), "an older client offers Stop on every row it gets");
+  const host = (await status.processes("host")).processes;
+  assert.ok(host.length > tree.length, "the host has processes that are not ours");
+});
+
+test("processes() lists the whole host, marks our tree managed and tags the daemon and agent host", async () => {
+  if (!SYSTEM_STATUS_SUPPORTED) return;
+  const child = spawn("sleep", ["30"], { stdio: "ignore" });
+  const exited = once(child, "exit").then(() => undefined);
+  try {
+    await once(child, "spawn");
+    assert.ok(child.pid);
+    const status = service({ protectedPids: () => [{ pid: child.pid!, label: "the agent host", role: "agent-host" }] });
+    const { processes, daemonPid } = await status.processes("host");
+    const self = processes.find((row) => row.pid === daemonPid);
+    assert.equal(self?.role, "daemon");
+    assert.equal(self?.managed, true);
+    assert.ok(self?.state && self.state !== "zombie");
+    assert.ok((self?.threads ?? 0) >= 1);
+    assert.ok(self?.user && self.user.length > 0);
+    assert.ok(self?.startedAt && Math.abs(self.startedAt - (Date.now() - process.uptime() * 1000)) < 5_000, "startedAt is when this process began");
+
+    const sleeper = processes.find((row) => row.pid === child.pid);
+    assert.equal(sleeper?.role, "agent-host");
+    assert.equal(sleeper?.managed, true);
+    assert.equal(sleeper?.cpuPercent, null, "nothing to diff against on the first scan");
+
+    const init = processes.find((row) => row.pid === 1);
+    if (init) assert.equal(init.managed, false, "init is listed but never ours");
+    assert.equal(processes.some((row) => row.pid === 2 || row.ppid === 2), false, "kernel threads are left out");
+  } finally {
+    child.kill("SIGKILL");
+    await allGone(exited, "the sleep exiting");
+  }
+});
+
+test("resources() reports host rates, load, uptime and identity", async () => {
+  if (!SYSTEM_STATUS_SUPPORTED) return;
+  const resources = await service().resources();
+  assert.equal(resources.loadAverage?.length, 3);
+  assert.ok((resources.uptimeSeconds ?? 0) > 0);
+  assert.ok(resources.host?.hostname);
+  assert.ok(resources.host?.kernel);
+  // The constructor seeds a baseline, so both rates exist on any host that
+  // exposes a physical interface / a whole disk; either may be null in a container.
+  for (const rate of [resources.network?.rxBps, resources.network?.txBps, resources.diskIo?.readBps, resources.diskIo?.writeBps]) {
+    if (rate !== undefined) assert.ok(rate >= 0);
   }
 });

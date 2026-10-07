@@ -3,21 +3,27 @@ import type {
   SystemPortInfo,
   SystemPortsResponse,
   SystemProcessInfo,
+  SystemProcessRole,
+  SystemProcessState,
   SystemProcessesResponse,
+  SystemProcessesScope,
   SystemResourcesResponse
 } from "@orquester/api";
 import { readFileSync } from "node:fs";
 import { readFile, readdir, readlink, statfs } from "node:fs/promises";
-import { cpus } from "node:os";
+import { arch, cpus, hostname, loadavg, release, uptime, userInfo } from "node:os";
+import { performance } from "node:perf_hooks";
 import { setTimeout as delay } from "node:timers/promises";
 import { AGENT_LAUNCH_ENV_VAR } from "./agent-host/support/leftover-processes.ts";
 import { Tmux } from "./tmux";
 
 /**
- * Host observability for a headless VPS: CPU/memory/disk, the process tree that
- * belongs to THIS daemon (its own children plus every tmux session pane and their
+ * Host observability for a headless VPS: CPU/memory/disk/network, every
+ * user-space process on the host with the tree that belongs to THIS daemon
+ * marked `managed` (its own children plus every tmux session pane and their
  * descendants — and whatever a provider CLI left behind, see `rootPids`), and
- * the TCP ports those processes listen on.
+ * the TCP ports the managed processes listen on. Only a managed process is
+ * ever a kill target; the rest of the host is listed read-only.
  *
  * Linux-only by construction — everything here reads `/proc`, which no other
  * platform provides. Off Linux every read returns a `supported: false` payload
@@ -85,7 +91,7 @@ export interface SystemStatusOptions {
    * host), each with the label a refusal names. Read at kill time (not
    * construction): the set changes as things respawn.
    */
-  protectedPids?: () => Iterable<{ pid: number; label: string }>;
+  protectedPids?: () => Iterable<{ pid: number; label: string; role?: SystemProcessRole }>;
   /**
    * Extra tree ROOTS to descend from, beyond this process and the `orq-*` tmux
    * panes — today the agent host (chat design spec §3.1 "Kill guard"). It runs
@@ -107,6 +113,10 @@ interface ProcSnapshot {
   rssBytes: number;
   /** The real uid, when the status names one: only our own processes' environments are read. */
   uid?: number;
+  /** From /proc/<pid>/stat; absent when that read failed (the row is still listed). */
+  stat?: ProcStatDetail;
+  /** Cumulative block I/O, read only for our own uid (the kernel refuses the rest). */
+  io?: ProcIo;
 }
 
 /** Aggregate jiffies of the `cpu ` line of /proc/stat. */
@@ -114,6 +124,45 @@ interface CpuSample {
   total: number;
   idle: number;
 }
+
+/** The per-process fields of /proc/<pid>/stat the process table shows. */
+interface ProcStatDetail {
+  /** PF_KTHREAD is set: a kernel thread, not a process anyone ran. */
+  kernelThread: boolean;
+  state: SystemProcessState;
+  ppid: number;
+  /** utime + stime, in USER_HZ ticks. */
+  cpuTicks: number;
+  threads: number;
+  /** Ticks after boot. */
+  starttime: number;
+}
+
+interface ProcIo {
+  readBytes: number;
+  writeBytes: number;
+}
+
+/**
+ * The kernel's USER_HZ — the unit of every tick count /proc exposes to user
+ * space. Fixed at 100 on every mainstream architecture regardless of the
+ * kernel's internal HZ; only `startedAt` depends on it (CPU shares are a ratio
+ * of two tick counts and need no unit).
+ */
+const USER_HZ = 100;
+
+/** How long the uid → user name map from /etc/passwd is reused. */
+const PASSWD_CACHE_MS = 5 * 60_000;
+
+/** PF_KTHREAD in the `flags` field of /proc/<pid>/stat (include/linux/sched.h). */
+const PF_KTHREAD = 0x00200000;
+
+/**
+ * The least time between two process scans that are diffed for rates. Two
+ * scans can overlap (the kill guard's fresh one beside a poll) and finish
+ * milliseconds apart; a delta over that sliver is noise, not a rate.
+ */
+const MIN_SAMPLE_INTERVAL_MS = 1000;
 
 // ---------------------------------------------------------------------------
 // Pure parsers (unit-tested without /proc)
@@ -247,6 +296,186 @@ export function parseProcStat(content: string): { ppid: number; starttime: numbe
     return null;
   }
   return { ppid, starttime };
+}
+
+/** The one-letter state of /proc/<pid>/stat as a named state. */
+export function processStateOf(code: string): SystemProcessState {
+  switch (code) {
+    case "R":
+      return "running";
+    case "S":
+      return "sleeping";
+    case "D":
+      return "disk-wait";
+    case "T":
+    case "t":
+      return "stopped";
+    case "Z":
+    case "X":
+      return "zombie";
+    case "I":
+      return "idle";
+    default:
+      return "other";
+  }
+}
+
+/**
+ * State, ppid, the kernel-thread flag (field 9), CPU ticks (utime + stime,
+ * fields 14–15), thread count (field 20) and starttime (field 22) of
+ * /proc/<pid>/stat, with the same after-the-last-")" split as
+ * {@link parseProcStat}: field 3 is index 0 there.
+ */
+export function parseProcStatDetail(content: string): ProcStatDetail | null {
+  const close = content.lastIndexOf(")");
+  if (close < 0) {
+    return null;
+  }
+  const fields = content.slice(close + 1).trim().split(/\s+/);
+  const ppid = Number(fields[1]);
+  const flags = Number(fields[6]);
+  const utime = Number(fields[11]);
+  const stime = Number(fields[12]);
+  const threads = Number(fields[17]);
+  const starttime = Number(fields[19]);
+  if (
+    !fields[0] ||
+    !Number.isInteger(ppid) ||
+    ![flags, utime, stime, threads, starttime].every((value) => Number.isFinite(value))
+  ) {
+    return null;
+  }
+  return {
+    // `&` works on 32 bits; the flag sits well inside them.
+    kernelThread: (flags & PF_KTHREAD) !== 0,
+    state: processStateOf(fields[0]),
+    ppid,
+    cpuTicks: utime + stime,
+    threads,
+    starttime
+  };
+}
+
+/**
+ * `read_bytes`/`write_bytes` of /proc/<pid>/io — bytes that actually reached
+ * the block layer, unlike `rchar`/`wchar`, which count page-cache hits and
+ * pipe/socket traffic too.
+ */
+export function parseProcIo(content: string): ProcIo | null {
+  let readBytes: number | null = null;
+  let writeBytes: number | null = null;
+  for (const line of content.split("\n")) {
+    if (line.startsWith("read_bytes:")) {
+      readBytes = Number(line.slice("read_bytes:".length).trim());
+    } else if (line.startsWith("write_bytes:")) {
+      writeBytes = Number(line.slice("write_bytes:".length).trim());
+    }
+  }
+  if (readBytes === null || writeBytes === null || !Number.isFinite(readBytes) || !Number.isFinite(writeBytes)) {
+    return null;
+  }
+  return { readBytes, writeBytes };
+}
+
+/**
+ * Interfaces whose traffic is not the host's own wire traffic: loopback, and
+ * container/VPN plumbing (veth pairs, bridges, overlay and tunnel devices) whose
+ * bytes ALSO cross the physical interface — counting both would double them.
+ */
+export function isVirtualInterface(name: string): boolean {
+  return /^(lo|veth|docker|br-|virbr|cni|flannel|cali|vxlan|tailscale|tun|tap|wg|zt)/.test(name);
+}
+
+/** Summed rx/tx bytes of /proc/net/dev over every non-virtual interface. */
+export function parseNetDev(content: string): { rxBytes: number; txBytes: number } | null {
+  let rxBytes = 0;
+  let txBytes = 0;
+  let seen = false;
+  for (const line of content.split("\n").slice(2)) {
+    const separator = line.indexOf(":");
+    if (separator < 0) {
+      continue;
+    }
+    const name = line.slice(0, separator).trim();
+    const fields = line.slice(separator + 1).trim().split(/\s+/).map(Number);
+    if (isVirtualInterface(name) || !Number.isFinite(fields[0]) || !Number.isFinite(fields[8])) {
+      continue;
+    }
+    rxBytes += fields[0];
+    txBytes += fields[8];
+    seen = true;
+  }
+  return seen ? { rxBytes, txBytes } : null;
+}
+
+/** A whole block device — not a partition, loop, ram, zram, device-mapper or optical drive. */
+const WHOLE_DISK = /^(sd[a-z]+|vd[a-z]+|xvd[a-z]+|hd[a-z]+|nvme\d+n\d+|mmcblk\d+)$/;
+
+/**
+ * Bytes read/written by whole disks in /proc/diskstats. Partitions and the
+ * device-mapper volumes stacked on a disk are skipped: their I/O is the same
+ * I/O the disk below already counts. Sectors here are always 512 bytes.
+ */
+export function parseDiskStats(content: string): { readBytes: number; writeBytes: number } | null {
+  let readBytes = 0;
+  let writeBytes = 0;
+  let seen = false;
+  for (const line of content.split("\n")) {
+    const fields = line.trim().split(/\s+/);
+    if (!WHOLE_DISK.test(fields[2] ?? "")) {
+      continue;
+    }
+    const sectorsRead = Number(fields[5]);
+    const sectorsWritten = Number(fields[9]);
+    if (!Number.isFinite(sectorsRead) || !Number.isFinite(sectorsWritten)) {
+      continue;
+    }
+    readBytes += sectorsRead * 512;
+    writeBytes += sectorsWritten * 512;
+    seen = true;
+  }
+  return seen ? { readBytes, writeBytes } : null;
+}
+
+/** uid → name from /etc/passwd; malformed lines are skipped. */
+export function parsePasswd(content: string): Map<number, string> {
+  const users = new Map<number, string>();
+  for (const line of content.split("\n")) {
+    const [name, , rawUid] = line.split(":");
+    const uid = Number(rawUid);
+    if (name && rawUid !== undefined && rawUid !== "" && Number.isInteger(uid) && !users.has(uid)) {
+      users.set(uid, name);
+    }
+  }
+  return users;
+}
+
+/** The `btime` line of /proc/stat: boot time in epoch seconds. */
+export function parseBootTime(content: string): number | null {
+  const line = content.split("\n").find((candidate) => candidate.startsWith("btime "));
+  const value = Number(line?.slice("btime ".length).trim());
+  return line && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/** Per-second rate of a cumulative counter, or null when unusable (reset, no time passed). */
+export function ratePerSecond(previous: number, current: number, elapsedMs: number): number | null {
+  if (elapsedMs <= 0 || current < previous) {
+    return null;
+  }
+  return Math.round(((current - previous) / elapsedMs) * 1000);
+}
+
+/**
+ * A process's share of the whole host's CPU between two scans: its own tick
+ * delta over the delta of /proc/stat's aggregate line (which sums every core),
+ * so every core busy is 100. One decimal; null when either delta is unusable.
+ */
+export function processCpuPercent(previousTicks: number, currentTicks: number, totalDelta: number): number | null {
+  if (totalDelta <= 0 || currentTicks < previousTicks) {
+    return null;
+  }
+  const percent = ((currentTicks - previousTicks) / totalDelta) * 100;
+  return Math.round(Math.min(100, percent) * 10) / 10;
 }
 
 /** NUL-separated /proc/<pid>/cmdline → a display string (empty for kernel threads). */
@@ -501,9 +730,151 @@ export async function verifyProcessIdentity(pid: number, expectedPpid: number): 
   return identity !== null && identity.ppid === expectedPpid ? identity.starttime : null;
 }
 
-interface TimedCpuSample {
-  sample: CpuSample;
+/**
+ * One reading of every cumulative host counter the resource rates derive from,
+ * taken together so CPU, network and disk all describe the same interval.
+ */
+interface HostCounters {
+  /** Monotonic milliseconds (`performance.now()`). */
   at: number;
+  cpu: CpuSample | null;
+  net: { rxBytes: number; txBytes: number } | null;
+  disk: { readBytes: number; writeBytes: number } | null;
+}
+
+function parseHostCounters(
+  at: number,
+  stat: string | null,
+  netDev: string | null,
+  diskStats: string | null
+): HostCounters {
+  return {
+    at,
+    cpu: stat ? parseCpuSample(stat) : null,
+    net: netDev ? parseNetDev(netDev) : null,
+    disk: diskStats ? parseDiskStats(diskStats) : null
+  };
+}
+
+function readHostCountersSync(): HostCounters {
+  const read = (path: string): string | null => {
+    try {
+      return readFileSync(path, "utf8");
+    } catch {
+      return null;
+    }
+  };
+  return parseHostCounters(performance.now(), read("/proc/stat"), read("/proc/net/dev"), read("/proc/diskstats"));
+}
+
+async function readHostCounters(): Promise<HostCounters> {
+  const [stat, netDev, diskStats] = await Promise.all([
+    readTextFile("/proc/stat"),
+    readTextFile("/proc/net/dev"),
+    readTextFile("/proc/diskstats")
+  ]);
+  return parseHostCounters(performance.now(), stat, netDev, diskStats);
+}
+
+/** Both directions of a counter pair as rates, or null if either is unusable. */
+function ratePair<K extends string>(
+  previous: Record<K, number> | null,
+  current: Record<K, number> | null,
+  elapsedMs: number,
+  keys: readonly [K, K]
+): [number, number] | null {
+  if (!previous || !current) {
+    return null;
+  }
+  const first = ratePerSecond(previous[keys[0]], current[keys[0]], elapsedMs);
+  const second = ratePerSecond(previous[keys[1]], current[keys[1]], elapsedMs);
+  return first === null || second === null ? null : [first, second];
+}
+
+/** Host identity for the status footer; a field that cannot be read is left out. */
+function hostInfo(): NonNullable<SystemResourcesResponse["host"]> {
+  let user = "";
+  try {
+    user = userInfo().username;
+  } catch {
+    // No passwd entry for this uid (a bare container): leave it blank.
+  }
+  return { hostname: hostname(), kernel: release(), arch: arch(), user };
+}
+
+/** What one process scan measured for a pid, against the scan before it. */
+interface ProcMetrics {
+  cpuPercent: number | null;
+  diskReadBps: number | null;
+  diskWriteBps: number | null;
+}
+
+/** The counters a scan keeps per pid so the next scan can take a delta. */
+interface ProcSample {
+  /** Identity: a recycled pid has a different starttime and must not be diffed. */
+  starttime: number;
+  cpuTicks: number;
+  io?: ProcIo;
+}
+
+interface ProcSamples {
+  /** Monotonic milliseconds (`performance.now()`): a wall-clock step must not stall the rates. */
+  at: number;
+  /** /proc/stat's aggregate tick total at the scan. */
+  totalTicks: number;
+  byPid: Map<number, ProcSample>;
+}
+
+/**
+ * Per-pid CPU share and disk rates of `procs` against `previous`. A pid absent
+ * from the previous scan, recycled since (different starttime), or diffed over
+ * a gap outside [`MIN_SAMPLE_INTERVAL_MS`, `CPU_STALE_INTERVAL_MS`] gets null:
+ * a number averaged over an idle hour is not "now", and one over a few
+ * milliseconds is noise. `samples` is the baseline for the next scan — the
+ * previous one is kept until a scan is far enough past it to replace it.
+ */
+export function procMetrics(
+  procs: ReadonlyMap<number, { stat?: { starttime: number; cpuTicks: number }; io?: ProcIo }>,
+  previous: ProcSamples | null,
+  at: number,
+  totalTicks: number | null
+): { metrics: Map<number, ProcMetrics>; samples: ProcSamples | null } {
+  const metrics = new Map<number, ProcMetrics>();
+  const gap = previous ? at - previous.at : 0;
+  const usable =
+    previous !== null &&
+    totalTicks !== null &&
+    gap >= MIN_SAMPLE_INTERVAL_MS &&
+    gap <= CPU_STALE_INTERVAL_MS;
+  const elapsedMs = previous ? at - previous.at : 0;
+  const totalDelta = previous && totalTicks !== null ? totalTicks - previous.totalTicks : 0;
+  const byPid = new Map<number, ProcSample>();
+  for (const [pid, proc] of procs) {
+    if (!proc.stat) {
+      continue;
+    }
+    const sample: ProcSample = { starttime: proc.stat.starttime, cpuTicks: proc.stat.cpuTicks };
+    if (proc.io) {
+      sample.io = proc.io;
+    }
+    byPid.set(pid, sample);
+    const before = usable ? previous.byPid.get(pid) : undefined;
+    if (!before || before.starttime !== sample.starttime) {
+      metrics.set(pid, { cpuPercent: null, diskReadBps: null, diskWriteBps: null });
+      continue;
+    }
+    const io = ratePair(before.io ?? null, sample.io ?? null, elapsedMs, ["readBytes", "writeBytes"]);
+    metrics.set(pid, {
+      cpuPercent: processCpuPercent(before.cpuTicks, sample.cpuTicks, totalDelta),
+      diskReadBps: io ? io[0] : null,
+      diskWriteBps: io ? io[1] : null
+    });
+  }
+  // Replace the baseline only once this scan is far enough past it (or past
+  // staleness) — a scan that finished right after another must not become the
+  // next one's baseline.
+  const replaces = totalTicks !== null && (previous === null || gap >= MIN_SAMPLE_INTERVAL_MS);
+  return { metrics, samples: replaces ? { at, totalTicks, byPid } : previous };
 }
 
 /** The /proc process scan plus the tree derived from it, cached for a beat. */
@@ -512,6 +883,8 @@ interface TreeSnapshot {
   procs: Map<number, ProcSnapshot>;
   roots: Map<number, string | undefined>;
   tree: Map<number, string | undefined>;
+  metrics: Map<number, ProcMetrics>;
+  tmuxServerPid: number | null;
 }
 
 type KillResult =
@@ -520,24 +893,22 @@ type KillResult =
 
 export class SystemStatusService {
   private readonly tmux: Tmux;
-  private cpuSample: TimedCpuSample | null = null;
+  private counters: HostCounters | null = null;
   private lastCpuPercent = 0;
   private resourcesCache: { at: number; value: SystemResourcesResponse } | null = null;
   private treeCache: TreeSnapshot | null = null;
   /** The /proc scan currently in flight, shared by concurrent cold callers. */
   private treeScan: Promise<TreeSnapshot> | null = null;
+  /** Per-pid counters of the latest scan, the baseline of the next one's rates. */
+  private procSamples: ProcSamples | null = null;
+  private passwd: { at: number; users: Map<number, string> } | null = null;
 
   constructor(private readonly options: SystemStatusOptions) {
     this.tmux = new Tmux(options.tmuxSocket);
-    // Seed the CPU delta at construction so the first read has something to
+    // Seed the counters at construction so the first read has something to
     // subtract from (sysinfo does the same); without it the first GET is 0%.
     if (SYSTEM_STATUS_SUPPORTED) {
-      try {
-        const sample = parseCpuSample(readFileSync("/proc/stat", "utf8"));
-        this.cpuSample = sample ? { sample, at: Date.now() } : null;
-      } catch {
-        this.cpuSample = null;
-      }
+      this.counters = readHostCountersSync();
     }
   }
 
@@ -555,46 +926,42 @@ export class SystemStatusService {
   }
 
   /**
-   * Busy CPU share since the previous read. With no background poller the stored
-   * baseline is as old as the last request — after an idle hour the first read
-   * would report the average load over that hour, not the load right now. Past
-   * `CPU_STALE_INTERVAL_MS` the stale baseline is discarded and a fresh pair of
-   * samples a few hundred ms apart is measured instead.
+   * CPU share and network/disk rates since the previous read. With no
+   * background poller the stored baseline is as old as the last request — after
+   * an idle hour the first read would report the average over that hour, not
+   * the load right now. Past `CPU_STALE_INTERVAL_MS` the stale baseline is
+   * discarded and a fresh pair of samples a few hundred ms apart is measured
+   * instead.
    */
-  private async readCpuPercent(): Promise<number> {
-    const raw = await readTextFile("/proc/stat");
-    const sample = raw ? parseCpuSample(raw) : null;
-    if (!sample) {
-      return this.lastCpuPercent;
+  private async readHostRates(): Promise<
+    Pick<SystemResourcesResponse, "network" | "diskIo"> & { cpuPercent: number }
+  > {
+    let previous = this.counters;
+    let current = await readHostCounters();
+    if (!previous || current.at - previous.at > CPU_STALE_INTERVAL_MS) {
+      await delay(CPU_RESAMPLE_DELAY_MS);
+      previous = current;
+      current = await readHostCounters();
     }
-    const at = Date.now();
-    const previous = this.cpuSample;
-    this.cpuSample = { sample, at };
+    this.counters = current;
 
-    if (previous && at - previous.at <= CPU_STALE_INTERVAL_MS) {
-      const percent = cpuPercentFromSamples(previous.sample, sample);
-      if (percent !== null) {
-        this.lastCpuPercent = percent;
-      }
-      return this.lastCpuPercent;
+    const percent = previous.cpu && current.cpu ? cpuPercentFromSamples(previous.cpu, current.cpu) : null;
+    if (percent !== null) {
+      this.lastCpuPercent = percent;
     }
-
-    await delay(CPU_RESAMPLE_DELAY_MS);
-    const secondRaw = await readTextFile("/proc/stat");
-    const second = secondRaw ? parseCpuSample(secondRaw) : null;
-    if (second) {
-      this.cpuSample = { sample: second, at: Date.now() };
-      const percent = cpuPercentFromSamples(sample, second);
-      if (percent !== null) {
-        this.lastCpuPercent = percent;
-      }
-    }
-    return this.lastCpuPercent;
+    const elapsedMs = current.at - previous.at;
+    const net = ratePair(previous.net, current.net, elapsedMs, ["rxBytes", "txBytes"]);
+    const disk = ratePair(previous.disk, current.disk, elapsedMs, ["readBytes", "writeBytes"]);
+    return {
+      cpuPercent: this.lastCpuPercent,
+      network: net ? { rxBps: net[0], txBps: net[1] } : null,
+      diskIo: disk ? { readBps: disk[0], writeBps: disk[1] } : null
+    };
   }
 
   private async readResources(): Promise<SystemResourcesResponse> {
-    const [cpuPercent, memRaw, disk] = await Promise.all([
-      this.readCpuPercent(),
+    const [rates, memRaw, disk] = await Promise.all([
+      this.readHostRates(),
       readTextFile("/proc/meminfo"),
       statfs(this.options.fsRoot).catch(() => null)
     ]);
@@ -605,10 +972,11 @@ export class SystemStatusService {
     // ("unknown"), never 0/0%: an unmeasurable volume must not look like a full one.
     const diskTotal = disk ? Number(disk.blocks) * Number(disk.bsize) : null;
     const diskFree = disk ? Number(disk.bavail) * Number(disk.bsize) : null;
+    const [one, five, fifteen] = loadavg();
 
     return {
       supported: true,
-      cpu: { percent: cpuPercent, cores: cpus().length },
+      cpu: { percent: rates.cpuPercent, cores: cpus().length },
       memory: {
         totalBytes: memory.totalBytes,
         availableBytes: memory.availableBytes,
@@ -619,35 +987,101 @@ export class SystemStatusService {
         freeBytes: diskFree,
         usedPercent: diskTotal === null || diskFree === null ? null : usedPercent(diskTotal, diskFree),
         path: this.options.fsRoot
-      }
+      },
+      network: rates.network,
+      diskIo: rates.diskIo,
+      loadAverage: [one, five, fifteen],
+      uptimeSeconds: Math.round(uptime()),
+      host: hostInfo()
     };
   }
 
-  async processes(): Promise<SystemProcessesResponse> {
+  /** uid → user name, re-read from /etc/passwd every few minutes. */
+  private async users(): Promise<Map<number, string>> {
+    const now = Date.now();
+    if (this.passwd && now - this.passwd.at < PASSWD_CACHE_MS) {
+      return this.passwd.users;
+    }
+    const raw = await readTextFile("/etc/passwd");
+    this.passwd = { at: now, users: raw ? parsePasswd(raw) : new Map() };
+    return this.passwd.users;
+  }
+
+  /**
+   * `tree` (the default) lists the daemon's own tree only — what a client that
+   * predates whole-host listing renders, with Stop on every row; `host` lists
+   * every user-space process with `managed` marking ours.
+   */
+  async processes(scope: SystemProcessesScope = "tree"): Promise<SystemProcessesResponse> {
     if (!SYSTEM_STATUS_SUPPORTED) {
       return { supported: false, daemonPid: process.pid, processes: [] };
     }
-    const { procs, tree } = await this.snapshot();
+    const [{ procs, tree, metrics, tmuxServerPid }, users, bootTime] = await Promise.all([
+      this.snapshot(),
+      this.users(),
+      readTextFile("/proc/stat").then((raw) => (raw ? parseBootTime(raw) : null))
+    ]);
+    const roles = new Map<number, SystemProcessRole>([[process.pid, "daemon"]]);
+    if (tmuxServerPid !== null) {
+      roles.set(tmuxServerPid, "tmux");
+    }
+    for (const [pid, entry] of this.protectedPidEntries()) {
+      if (entry.role) {
+        roles.set(pid, entry.role);
+      }
+    }
 
     const processes: SystemProcessInfo[] = [];
-    for (const [pid, sessionId] of tree) {
-      const proc = procs.get(pid);
-      if (!proc) {
+    for (const [pid, proc] of procs) {
+      const managed = tree.has(pid);
+      if (proc.stat?.kernelThread || (scope === "tree" && !managed)) {
         continue;
       }
-      processes.push({
+      const sessionId = tree.get(pid);
+      const role = roles.get(pid);
+      const measured = metrics.get(pid);
+      const row: SystemProcessInfo = {
         pid,
         ppid: proc.ppid,
         name: proc.name,
-        // Kernel threads and processes that scrubbed their argv have no cmdline;
-        // the comm name is the only thing left to show.
+        // Processes that scrubbed their argv have no cmdline; the comm name is
+        // the only thing left to show.
         cmdline: proc.cmdline || proc.name,
         rssBytes: proc.rssBytes,
-        ...(sessionId ? { sessionId } : {})
-      });
+        ...(sessionId ? { sessionId } : {}),
+        managed,
+        ...(role ? { role } : {}),
+        cpuPercent: measured?.cpuPercent ?? null,
+        diskReadBps: measured?.diskReadBps ?? null,
+        diskWriteBps: measured?.diskWriteBps ?? null
+      };
+      if (proc.stat) {
+        row.state = proc.stat.state;
+        row.threads = proc.stat.threads;
+        if (bootTime !== null) {
+          row.startedAt = Math.round((bootTime + proc.stat.starttime / USER_HZ) * 1000);
+        }
+      }
+      if (proc.uid !== undefined) {
+        row.user = users.get(proc.uid) ?? String(proc.uid);
+      }
+      processes.push(row);
     }
     processes.sort((left, right) => left.pid - right.pid);
     return { supported: true, daemonPid: process.pid, processes };
+  }
+
+  /** The `protectedPids` supplier as a map; a throwing supplier yields nothing. */
+  private protectedPidEntries(): Map<number, { label: string; role?: SystemProcessRole }> {
+    const out = new Map<number, { label: string; role?: SystemProcessRole }>();
+    try {
+      for (const entry of this.options.protectedPids?.() ?? []) {
+        out.set(entry.pid, entry.role ? { label: entry.label, role: entry.role } : { label: entry.label });
+      }
+    } catch {
+      return new Map();
+    }
+    return out;
   }
 
   /**
@@ -655,15 +1089,7 @@ export class SystemStatusService {
    * Best-effort: a throwing supplier must not turn a kill into a 500.
    */
   private protectedPids(): Map<number, string> {
-    const out = new Map<number, string>();
-    try {
-      for (const entry of this.options.protectedPids?.() ?? []) {
-        out.set(entry.pid, entry.label);
-      }
-    } catch {
-      return new Map();
-    }
-    return out;
+    return new Map([...this.protectedPidEntries()].map(([pid, entry]) => [pid, entry.label] as const));
   }
 
   /**
@@ -837,13 +1263,32 @@ export class SystemStatusService {
     }
     const scan = (async (): Promise<TreeSnapshot> => {
       const known = this.options.listSessionIds();
-      const [procs, roots] = await Promise.all([snapshotProcs(), this.rootPids(known)]);
+      const [procs, roots, statRaw, tmuxServerPid] = await Promise.all([
+        snapshotProcs(),
+        this.rootPids(known),
+        readTextFile("/proc/stat"),
+        this.tmux.serverPid().catch(() => null)
+      ]);
       // Whatever a provider CLI left behind is ours too, though no root leads
       // to it any more: an orphan is found by the launch marker it inherited.
       for (const [pid, sessionId] of await launchedOrphans(procs, collectTree(procs, roots), known)) {
         roots.set(pid, sessionId);
       }
-      const value: TreeSnapshot = { at: now, procs, roots, tree: collectTree(procs, roots) };
+      // Rates are diffed against the previous scan. Two scans can overlap (the
+      // kill guard's fresh one beside a poll); `procMetrics` diffs only over a
+      // gap of at least MIN_SAMPLE_INTERVAL_MS, so the second of two scans that
+      // land together reads null, never garbage.
+      const totalTicks = statRaw ? (parseCpuSample(statRaw)?.total ?? null) : null;
+      const { metrics, samples } = procMetrics(procs, this.procSamples, performance.now(), totalTicks);
+      this.procSamples = samples;
+      const value: TreeSnapshot = {
+        at: now,
+        procs,
+        roots,
+        tree: collectTree(procs, roots),
+        metrics,
+        tmuxServerPid
+      };
       this.treeCache = value;
       return value;
     })();
@@ -948,7 +1393,10 @@ async function launchedOrphans(
   return orphans;
 }
 
-/** Every process on the host, by pid. Vanished/unreadable entries are skipped. */
+/**
+ * Every process on the host, by pid, with its stat detail and — for our own
+ * uid — its I/O counters. Vanished/unreadable entries are skipped.
+ */
 async function snapshotProcs(): Promise<Map<number, ProcSnapshot>> {
   let entries: string[];
   try {
@@ -957,19 +1405,35 @@ async function snapshotProcs(): Promise<Map<number, ProcSnapshot>> {
     return new Map();
   }
   const pids = entries.map(Number).filter((pid) => Number.isInteger(pid) && pid > 0);
+  const ownUid = process.getuid?.();
   const rows = await mapLimited(
     pids,
     PROC_READ_CONCURRENCY,
     async (pid): Promise<ProcSnapshot | null> => {
-      const [status, cmdline] = await Promise.all([
+      const [status, cmdline, stat] = await Promise.all([
         readTextFile(`/proc/${pid}/status`),
-        readTextFile(`/proc/${pid}/cmdline`)
+        readTextFile(`/proc/${pid}/cmdline`),
+        readTextFile(`/proc/${pid}/stat`)
       ]);
       const parsed = status ? parseProcStatus(status) : null;
       if (!parsed) {
         return null;
       }
-      return { pid, ...parsed, cmdline: parseCmdline(cmdline ?? "") };
+      const row: ProcSnapshot = { pid, ...parsed, cmdline: parseCmdline(cmdline ?? "") };
+      const detail = stat ? parseProcStatDetail(stat) : null;
+      if (detail) {
+        row.stat = detail;
+      }
+      // The kernel shows /proc/<pid>/io to the owner only; asking for anyone
+      // else's is a guaranteed EACCES per pid per scan.
+      if (ownUid !== undefined && parsed.uid === ownUid) {
+        const io = await readTextFile(`/proc/${pid}/io`);
+        const parsedIo = io ? parseProcIo(io) : null;
+        if (parsedIo) {
+          row.io = parsedIo;
+        }
+      }
+      return row;
     }
   );
   const procs = new Map<number, ProcSnapshot>();

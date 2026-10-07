@@ -63,6 +63,7 @@ import type {
   SetAgentAccountDefaultsRequest,
   SystemPortsResponse,
   SystemProcessesResponse,
+  SystemProcessesScope,
   SystemResourcesResponse,
   TodoListRecord,
   TodoScope,
@@ -1397,8 +1398,8 @@ export class ApiClient {
     return this.send("GET", "/api/system/resources", { signal });
   }
 
-  systemProcesses(signal?: AbortSignal): Promise<SystemProcessesResponse> {
-    return this.send("GET", "/api/system/processes", { signal });
+  systemProcesses(signal?: AbortSignal, scope: SystemProcessesScope = "tree"): Promise<SystemProcessesResponse> {
+    return this.send("GET", scope === "host" ? "/api/system/processes?scope=host" : "/api/system/processes", { signal });
   }
 
   systemPorts(signal?: AbortSignal): Promise<SystemPortsResponse> {

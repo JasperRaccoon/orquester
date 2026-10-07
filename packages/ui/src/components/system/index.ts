@@ -1,7 +1,9 @@
 export { SystemStatusChip } from "./SystemStatusChip";
 export { SystemSettings } from "./SystemSettings";
 export { SystemResourcePanel, SystemUnsupported } from "./SystemResources";
-export { ProcessTreeView } from "./ProcessTree";
+export { TaskManager } from "./TaskManager";
+export { HostResourceCards } from "./HostResourceCards";
+export { OrquesterCore } from "./OrquesterCore";
 export { PortsTable } from "./PortsTable";
 export { SessionChip } from "./SessionChip";
 export { resolveSessionOwner, type SessionOwner } from "./session-owner";
@@ -15,13 +17,13 @@ export {
 } from "./use-system-status";
 export {
   barWidth,
-  buildProcessTree,
-  countProcessNodes,
+  formatBitRate,
+  formatByteRate,
   formatBytes,
+  formatCpu,
+  formatDuration,
   formatPercent,
   killErrorCode,
   killErrorMessage,
-  processLabel,
-  subtreePids,
-  type ProcessNode
+  processLabel
 } from "./system-format";
