@@ -9,7 +9,7 @@ import { MobileSectionOverlay } from "./MobileSections";
 import { toggleRightRailPanel, useRightRailState } from "./right-rail-state";
 import { AgentProfileEditorHost } from "./agent-profile/AgentProfileEditorHost";
 import { SavedPromptEditorHost } from "./saved-prompts/SavedPromptEditorHost";
-import type { RightRailPanelId } from "./types";
+import type { DockPanelId } from "./types";
 
 /**
  * The open project's directory, or `null`: the landing view (nothing open) and
@@ -30,7 +30,7 @@ export interface RightRailRowProps {
   /** The open project on a desktop viewport; `null` shows neither the rail nor the dock. */
   projectPath: string | null;
   /** The docked panel, or `null` with the dock closed. */
-  open: RightRailPanelId | null;
+  open: DockPanelId | null;
   /** The dock's stored width (px). */
   width: number;
   /**
@@ -115,18 +115,18 @@ export const RightRailFrame: React.FC<{ children: React.ReactNode }> = ({ childr
 };
 
 /**
- * The rail's editors — the saved-prompt editor and the agent-profile editor —
- * each mounted once while a project is open, desktop or mobile, whichever
- * panel is showing, so both variants of a panel (docked, or a phone's
- * section) open them through their bridges (`saved-prompts/editor-bridge.ts`,
- * `agent-profile/editor-bridge.ts`).
+ * The panels' editors, each mounted once, so every variant of a panel (docked,
+ * the left sidebar, or a phone's section) opens them through their bridges
+ * (`saved-prompts/editor-bridge.ts`, `agent-profile/editor-bridge.ts`). The
+ * saved-prompt editor needs an open project; the agent profile is the CLIs'
+ * global config, reachable from the left sidebar with no project open.
  */
 export const RightRailEditorHost: React.FC = () => {
   const projectPath = useOpenProjectPath();
-  return projectPath !== null ? (
+  return (
     <>
-      <SavedPromptEditorHost />
+      {projectPath !== null ? <SavedPromptEditorHost /> : null}
       <AgentProfileEditorHost />
     </>
-  ) : null;
+  );
 };

@@ -12,9 +12,10 @@
  * itself and nothing here can throw on what it reads.
  *
  * Stored under `orquester:right-rail` as
- * `{ "v": 1, "open": "prompts" | "history" | "workflows" | "profile" | null, "width": <px> }`. (Earlier
- * bundles also wrote a `sheet` field, the mobile sheet's last tab: ignored now,
- * and gone at the next write.)
+ * `{ "v": 1, "open": "prompts" | "history" | null, "width": <px> }`. (Earlier
+ * bundles also wrote a `sheet` field, the mobile sheet's last tab, and could
+ * dock `"workflows"` or `"profile"`, which moved to the left sidebar: both read
+ * as nothing now, and are gone at the next write.)
  * `v` is written for a future migration; this version reads any payload field
  * by field whatever its `v`, so a rollback after a newer bundle wrote v2 keeps
  * whatever still validates.
@@ -26,7 +27,7 @@
 
 import React from "react";
 
-import type { RightRailPanelId } from "./types";
+import type { DockPanelId } from "./types";
 
 const RIGHT_RAIL_STORAGE_KEY = "orquester:right-rail";
 const RIGHT_RAIL_STATE_VERSION = 1;
@@ -45,7 +46,7 @@ const RIGHT_RAIL_CONTENT_MIN = 360;
 
 export interface RightRailState {
   /** The panel docked beside the tab content (desktop), or `null` with the dock closed. */
-  readonly open: RightRailPanelId | null;
+  readonly open: DockPanelId | null;
   /** The dock's width in px, within `[RIGHT_RAIL_WIDTH_MIN, RIGHT_RAIL_WIDTH_MAX]`. */
   readonly width: number;
 }
@@ -55,8 +56,8 @@ export const RIGHT_RAIL_DEFAULT_STATE: RightRailState = Object.freeze({
   width: RIGHT_RAIL_WIDTH_DEFAULT
 });
 
-function isRightRailPanelId(value: unknown): value is RightRailPanelId {
-  return value === "prompts" || value === "history" || value === "workflows" || value === "profile";
+function isDockPanelId(value: unknown): value is DockPanelId {
+  return value === "prompts" || value === "history";
 }
 
 /* ── Clamps ─────────────────────────────────────────────────────────────── */
@@ -117,7 +118,7 @@ function sanitizeRightRailState(value: unknown): RightRailState {
     typeof value === "object" && value !== null && !Array.isArray(value)
       ? (value as Record<string, unknown>)
       : {};
-  const open = isRightRailPanelId(record.open) ? record.open : RIGHT_RAIL_DEFAULT_STATE.open;
+  const open = isDockPanelId(record.open) ? record.open : RIGHT_RAIL_DEFAULT_STATE.open;
   const rawWidth = record.width;
   const width =
     typeof rawWidth === "number" && Number.isFinite(rawWidth) && rawWidth > 0
@@ -235,12 +236,12 @@ function update(patch: Partial<RightRailState>, persist: boolean): void {
 }
 
 /** A rail button: open that panel, switch to it, or — when it is the open one — close the dock. */
-export function toggleRightRailPanel(id: RightRailPanelId): void {
+export function toggleRightRailPanel(id: DockPanelId): void {
   update({ open: rightRailState().open === id ? null : id }, true);
 }
 
 /** Open a panel in the dock, or close the dock with `null`. */
-export function setRightRailOpen(id: RightRailPanelId | null): void {
+export function setRightRailOpen(id: DockPanelId | null): void {
   update({ open: id }, true);
 }
 

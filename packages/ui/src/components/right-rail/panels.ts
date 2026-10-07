@@ -1,6 +1,6 @@
 /**
- * The right rail's panels, by id: what the rail button, the dock's header and
- * a phone's section bar call each one, its icon, and the component that
+ * The right rail's panels, by id: what the rail button, the dock's header, the
+ * left sidebar's panel header and a phone's section bar call each one, its icon, and the component that
  * renders it (`RightRailPanelProps`). One table, so the three surfaces never
  * disagree on a name.
  */
@@ -12,7 +12,7 @@ import { AgentProfilePanel } from "./agent-profile/AgentProfilePanel";
 import { PromptHistoryPanel } from "./history/PromptHistoryPanel";
 import { SavedPromptsPanel } from "./saved-prompts/SavedPromptsPanel";
 import { WorkflowsPanel } from "./workflows/WorkflowsPanel";
-import type { RightRailPanelId, RightRailPanelProps } from "./types";
+import type { DockPanelId, RightRailPanelId, RightRailPanelProps } from "./types";
 
 export interface RightRailPanelSpec {
   id: RightRailPanelId;
@@ -71,8 +71,14 @@ export const RIGHT_RAIL_PANEL_REGISTRY: RightRailPanelRegistry = {
   }
 };
 
-/** Rail order, top to bottom (and a phone's section bar, left to right). */
-export const RIGHT_RAIL_PANEL_ORDER: readonly RightRailPanelId[] = ["prompts", "history", "workflows", "profile"];
+/** The desktop rail's order, top to bottom. */
+export const RIGHT_RAIL_PANEL_ORDER: readonly DockPanelId[] = ["prompts", "history"];
+
+/**
+ * A phone's section bar, left to right: every panel, since a phone has no left
+ * sidebar panels to host workflows and the agent profile.
+ */
+export const MOBILE_SECTION_ORDER: readonly RightRailPanelId[] = ["prompts", "history", "workflows", "profile"];
 
 /** The dock's element id — what the active rail button `aria-controls`. */
 export const RIGHT_RAIL_DOCK_ID = "right-rail-dock";

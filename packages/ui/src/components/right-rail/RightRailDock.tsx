@@ -43,12 +43,12 @@ import {
   rightRailState,
   setRightRailWidth
 } from "./right-rail-state";
-import type { RightRailPanelId, RightRailPanelProps } from "./types";
+import type { DockPanelId, RightRailPanelProps } from "./types";
 
 const TITLE_ID = `${RIGHT_RAIL_DOCK_ID}-title`;
 
 export interface RightRailDockProps {
-  panel: RightRailPanelId;
+  panel: DockPanelId;
   /** The open project's directory. */
   projectPath: string;
   /** The stored width (px); the render also caps it against the row. */
@@ -71,6 +71,34 @@ function leaveDock(dock: HTMLElement): void {
   if (focused instanceof HTMLElement && dock.contains(focused)) {
     focused.blur();
   }
+}
+
+/**
+ * The dock's keydown handler, built over its layer's "is another layer open?"
+ * question (`useDockKeyboardLayer`). The left sidebar's panels
+ * (`sidebar/SidebarPanel.tsx`) hold the keyboard the same way.
+ */
+export function dockKeyDownHandler(
+  otherLayerOpen: () => boolean
+): (event: React.KeyboardEvent<HTMLElement>) => void {
+  return (event) => {
+    const dock = event.currentTarget;
+    const target = event.target;
+    const action = dockKeyAction({
+      key: event.key,
+      repeat: event.repeat,
+      defaultPrevented: event.defaultPrevented,
+      isComposing: event.nativeEvent.isComposing || event.keyCode === 229,
+      targetInsideDock: target instanceof Node && dock.contains(target),
+      otherLayerOpen
+    });
+    if (action === "ignore") return;
+    event.stopPropagation();
+    if (action === "leave") {
+      event.preventDefault();
+      leaveDock(dock);
+    }
+  };
 }
 
 /**
@@ -116,24 +144,7 @@ export const RightRailDock: React.FC<RightRailDockProps> = ({
     return -drawnWidth();
   };
 
-  const onKeyDown = (event: React.KeyboardEvent<HTMLElement>): void => {
-    const dock = event.currentTarget;
-    const target = event.target;
-    const action = dockKeyAction({
-      key: event.key,
-      repeat: event.repeat,
-      defaultPrevented: event.defaultPrevented,
-      isComposing: event.nativeEvent.isComposing || event.keyCode === 229,
-      targetInsideDock: target instanceof Node && dock.contains(target),
-      otherLayerOpen
-    });
-    if (action === "ignore") return;
-    event.stopPropagation();
-    if (action === "leave") {
-      event.preventDefault();
-      leaveDock(dock);
-    }
-  };
+  const onKeyDown = dockKeyDownHandler(otherLayerOpen);
 
   return (
     <aside

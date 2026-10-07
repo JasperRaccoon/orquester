@@ -9,7 +9,7 @@
  *   up (every row of the screen is worth more to the field being typed in),
  *   and shows at most {@link MOBILE_SECTION_BAR_MAX} items: past that, the
  *   last slot is "More", a bottom sheet listing the rest. A new panel added to
- *   `panels.ts` shows up here by itself.
+ *   `MOBILE_SECTION_ORDER` (`panels.ts`) shows up here.
  * - **A section** (`MobileSectionView`) covers the tab content inside the same
  *   row (`RightRailRow`), never replacing it in the tree: moving `MainView`
  *   would remount every tab, every terminal and chat stream with it. It is a
@@ -36,7 +36,7 @@ import { DropdownItem } from "../ui/dropdown";
 import { BottomSheet } from "../ui/sheet";
 import { useActiveChatTarget } from "./chat-target";
 import { setMobileSection, useMobileSection } from "./mobile-section";
-import { RIGHT_RAIL_PANEL_ORDER, RIGHT_RAIL_PANEL_REGISTRY } from "./panels";
+import { MOBILE_SECTION_ORDER, RIGHT_RAIL_PANEL_REGISTRY } from "./panels";
 import type { RightRailPanelId } from "./types";
 
 /** The most items the bar shows side by side, "More" included. */
@@ -188,7 +188,7 @@ export const MobileSectionBar: React.FC<MobileSectionBarProps> = ({
       title: chatTab ? "Back to the chat" : "Back to the tab",
       Icon: chatTab ? MessageSquare : AppWindow
     },
-    ...RIGHT_RAIL_PANEL_ORDER.map((id) => ({
+    ...MOBILE_SECTION_ORDER.map((id) => ({
       id,
       label: RIGHT_RAIL_PANEL_REGISTRY[id].shortTitle,
       title: RIGHT_RAIL_PANEL_REGISTRY[id].title,

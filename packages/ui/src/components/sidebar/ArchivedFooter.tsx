@@ -10,45 +10,47 @@ import {
 } from "../ui";
 import { useAppStore } from "../../store/app";
 
+/** Which archived items an entry lists. */
+export type ArchivedScope = "workspaces" | "projects";
+
 /**
- * Muted sidebar-footer entry for archived items. Context-sensitive: at the top
- * level it lists archived workspaces; inside a workspace, that workspace's
- * archived projects. Hidden entirely when nothing is archived in the current
- * context. Rows are inert except Unarchive — no navigation into archived
- * items (spec). With "Protect archived data" on, the panel body demands the
+ * Muted sidebar entry for archived items: the archived workspaces (under the
+ * workspace list), or the open workspace's archived projects (inside its
+ * expanded row). Hidden entirely when nothing is archived in that scope.
+ * Rows are inert except Unarchive — no navigation into archived items (spec). With "Protect archived data" on, the panel body demands the
  * password on every open: the dropdown/sheet unmounts its children on close,
  * so the `verified` state below cannot outlive one open.
  */
-export const ArchivedFooter: React.FC = () => {
-  const currentWorkspace = useAppStore((s) => s.currentWorkspace);
+export const ArchivedFooter: React.FC<{ scope: ArchivedScope }> = ({ scope }) => {
   const workspaces = useAppStore((s) => s.workspaces);
   const projects = useAppStore((s) => s.projects);
 
-  const count = currentWorkspace
-    ? projects.filter((p) => p.isArchived).length
-    : workspaces.filter((w) => w.isArchived).length;
+  const count =
+    scope === "projects"
+      ? projects.filter((p) => p.isArchived).length
+      : workspaces.filter((w) => w.isArchived).length;
 
   if (count === 0) {
     return null;
   }
 
   const trigger = (
-    <span className="flex w-full items-center gap-2 px-1 py-0.5 text-left text-neutral-600 transition-colors hover:text-neutral-400">
+    <span className="flex w-full items-center gap-2 rounded-md px-2 py-1 text-left text-neutral-500 transition-colors hover:text-neutral-300">
       <Archive size={13} className="shrink-0" />
-      <span className="flex-1 truncate text-xs">Archived · {count}</span>
+      <span className="flex-1 truncate text-xs">
+        {scope === "projects" ? "Archived projects" : "Archived workspaces"} ({count})
+      </span>
     </span>
   );
 
   return (
-    <div className="px-2 pb-1">
-      <AdaptiveMenu title="Archived" trigger={trigger} width="w-64">
-        <ArchivedPanel />
-      </AdaptiveMenu>
-    </div>
+    <AdaptiveMenu title="Archived" trigger={trigger} width="w-64" triggerClassName="flex w-full">
+      <ArchivedPanel scope={scope} />
+    </AdaptiveMenu>
   );
 };
 
-const ArchivedPanel: React.FC = () => {
+const ArchivedPanel: React.FC<{ scope: ArchivedScope }> = ({ scope }) => {
   // Dismissing the gate closes the whole menu (dropdown on desktop, bottom
   // sheet on mobile) — both provide this context.
   const { close } = useContext(DropdownContext);
@@ -87,36 +89,36 @@ const ArchivedPanel: React.FC = () => {
       </>
     );
   }
-  return <ArchivedList />;
+  return <ArchivedList scope={scope} />;
 };
 
-const ArchivedList: React.FC = () => {
-  const currentWorkspace = useAppStore((s) => s.currentWorkspace);
+const ArchivedList: React.FC<{ scope: ArchivedScope }> = ({ scope }) => {
   const workspaces = useAppStore((s) => s.workspaces);
   const projects = useAppStore((s) => s.projects);
   const setWorkspaceArchived = useAppStore((s) => s.setWorkspaceArchived);
   const setProjectArchived = useAppStore((s) => s.setProjectArchived);
 
-  const rows = currentWorkspace
-    ? projects
-        .filter((p) => p.isArchived)
-        .map((p) => ({
-          key: p.path,
-          name: p.name,
-          unarchive: () => void setProjectArchived(p, false)
-        }))
-    : workspaces
-        .filter((w) => w.isArchived)
-        .map((w) => ({
-          key: w.path,
-          name: w.name,
-          unarchive: () => void setWorkspaceArchived(w.name, false)
-        }));
+  const rows =
+    scope === "projects"
+      ? projects
+          .filter((p) => p.isArchived)
+          .map((p) => ({
+            key: p.path,
+            name: p.name,
+            unarchive: () => void setProjectArchived(p, false)
+          }))
+      : workspaces
+          .filter((w) => w.isArchived)
+          .map((w) => ({
+            key: w.path,
+            name: w.name,
+            unarchive: () => void setWorkspaceArchived(w.name, false)
+          }));
 
   return (
     <>
       <DropdownLabel>
-        {currentWorkspace ? "Archived projects" : "Archived workspaces"}
+        {scope === "projects" ? "Archived projects" : "Archived workspaces"}
       </DropdownLabel>
       {rows.length === 0 && <DropdownEmpty>Nothing archived</DropdownEmpty>}
       {rows.map((row) => (

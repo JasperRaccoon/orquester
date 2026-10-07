@@ -38,9 +38,10 @@ const SettingsButton: React.FC = () => {
 
 /**
  * Desktop: a single titlebar row (project switcher · tabs · new tab | usage ·
- * settings · window controls). Mobile: a two-row header (menu · project · usage
- * · settings) then a tab row (current tab switcher · new tab); the right
- * rail's panels are the bottom section bar's (`MobileSections.tsx`).
+ * window controls); settings sit at the bottom of the sidebar's activity bar.
+ * Mobile: a two-row header (menu · project · usage · settings) then a tab row
+ * (current tab switcher · new tab); the right rail's panels are the bottom
+ * section bar's (`MobileSections.tsx`).
  */
 export const TopBar: React.FC = () => {
   const { useTitlebar } = useOrquester();
@@ -108,7 +109,6 @@ export const TopBar: React.FC = () => {
         <div className="app-no-drag">
           <UsageWidget />
         </div>
-        <SettingsButton />
         {useTitlebar && <div className="mx-1 h-4 w-px self-center bg-neutral-800" />}
         {useTitlebar && <WindowControls />}
       </div>

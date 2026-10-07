@@ -39,7 +39,7 @@ async function loadStoredRail(raw: string) {
   stored.set(key, raw);
   return (await freshRail()).rightRailState();
 }
-async function persistRail(open: "history" | "workflows" | "profile", width: number) {
+async function persistRail(open: "prompts" | "history", width: number) {
   const rail = await freshRail();
   rail.setRightRailOpen(open);
   rail.setRightRailWidth(width, { persist: true });
@@ -68,15 +68,10 @@ test("each field is validated on its own: one bad field never costs the others",
   }
 });
 
-test("the workflows panel is a panel like the others", async () => {
-  assert.deepEqual(await loadStoredRail('{"v":1,"open":"workflows","width":360}'), { open: "workflows", width: 360 });
-  assert.deepEqual(await persistRail("workflows", 360), { v: 1, open: "workflows", width: 360 });
-});
-
-test("the agent profile panel is a panel like the others", async () => {
-  assert.deepEqual(await loadStoredRail('{"v":1,"open":"profile","width":420}'), { open: "profile", width: 420 });
-  assert.deepEqual(await persistRail("profile", 420), { v: 1, open: "profile", width: 420 });
-  assert.equal((await loadStoredRail('{"open":"Profile"}')).open, null);
+test("workflows and the agent profile, now in the left sidebar, no longer open the dock", async () => {
+  assert.deepEqual(await loadStoredRail('{"v":1,"open":"workflows","width":360}'), { open: null, width: 360 });
+  assert.deepEqual(await loadStoredRail('{"v":1,"open":"profile","width":420}'), { open: null, width: 420 });
+  assert.deepEqual(await persistRail("prompts", 360), { v: 1, open: "prompts", width: 360 });
 });
 
 test("malformed stored widths fall back without losing the panel", async () => {

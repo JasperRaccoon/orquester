@@ -6,13 +6,13 @@ import {
   RIGHT_RAIL_PANEL_ORDER,
   RIGHT_RAIL_PANEL_REGISTRY
 } from "./panels";
-import type { RightRailPanelId } from "./types";
+import type { DockPanelId } from "./types";
 
 export interface RightRailProps {
   /** The docked panel, or `null` with the dock closed. */
-  open: RightRailPanelId | null;
+  open: DockPanelId | null;
   /** A button was clicked: open its panel, switch to it, or close it when it is the open one. */
-  onToggle: (id: RightRailPanelId) => void;
+  onToggle: (id: DockPanelId) => void;
 }
 
 /**

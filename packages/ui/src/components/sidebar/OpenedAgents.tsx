@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useState } from "react";
-import { Bot, ChevronDown, ChevronRight, Dot, Workflow as WorkflowIcon } from "lucide-react";
+import { Dot, Workflow as WorkflowIcon } from "lucide-react";
 import { cn } from "../../lib/cn";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { ContextMenu } from "../ui/context-menu";
@@ -16,11 +16,7 @@ import {
   refreshProjectIndex,
   useProjectIndex
 } from "../../lib/project-index";
-import {
-  groupAgentSessionsByRepo,
-  loadOpenedAgentsCollapsed,
-  saveOpenedAgentsCollapsed
-} from "../../lib/opened-agents";
+import { groupAgentSessionsByRepo, matchesSidebarQuery } from "../../lib/opened-agents";
 import { useAppStore, useThreadUnread } from "../../store/app";
 import { WorkflowAttention, useWorkflowAttention } from "../workflows/runs/WorkflowAttention";
 import {
@@ -33,26 +29,30 @@ import {
   verifiedAgentSessions,
   type AgentSessionEntry
 } from "../attention";
+import { CountPill, SectionHeader } from "./parts";
 
 /**
- * Sidebar rows **recede** when they want nothing from you (§7.7).
+ * One agent, as a card: its icon, title and `workspace / project`, with the
+ * status dot on the right. The visible chat reads as selected (a raised card
+ * with a ring).
+ *
+ * Cards **recede** when they want nothing from you (§7.7).
  *
  * *T3: `Sidebar.logic.ts:820-833`.* The rule itself lives in `status.logic.ts`;
- * this supplies the row's three inputs and paints the result. `isUnread` is the
- * per-device "finished since you last looked" signal, which is what keeps a
+ * this supplies the card's three inputs and paints the result. `isUnread` is
+ * the per-device "finished since you last looked" signal, which is what keeps a
  * settled agent loud until it has been read — the daemon's `needsAttentionAt`
  * still drives the status dot and the Attention Center, and this refines that
  * rather than replacing it.
  */
-const AgentRow: React.FC<{ entry: AgentSessionEntry; showWorkspace: boolean }> = ({
-  entry,
-  showWorkspace
-}) => {
+const AgentCard: React.FC<{ entry: AgentSessionEntry }> = ({ entry }) => {
   const markTabUnread = useAppStore((s) => s.markTabUnread);
   const unread = useThreadUnread(entry.session.id);
-  const selected = useAppStore(
+  const activeInProject = useAppStore(
     (s) => s.activeTabByProject[entry.session.projectPath] === entry.session.id
   );
+  const inOpenProject = useAppStore((s) => s.currentProject?.path === entry.session.projectPath);
+  const onScreen = activeInProject && inOpenProject;
   const [menu, setMenu] = useState<{ x: number; y: number } | null>(null);
 
   const recede =
@@ -60,7 +60,7 @@ const AgentRow: React.FC<{ entry: AgentSessionEntry; showWorkspace: boolean }> =
     shouldRecedeSidebarThread({
       status: resolveSidebarThreadStatus(entry.session),
       isUnread: unread,
-      isSelected: selected
+      isSelected: activeInProject
     });
 
   // Offered only where there is a turn to have missed — the same rule the tab
@@ -78,16 +78,27 @@ const AgentRow: React.FC<{ entry: AgentSessionEntry; showWorkspace: boolean }> =
           event.preventDefault();
           setMenu({ x: event.clientX, y: event.clientY });
         }}
+        aria-current={onScreen ? "page" : undefined}
         className={cn(
-          "flex w-full items-center gap-2 rounded px-2 py-1.5 text-left text-sm text-neutral-300",
-          "transition-[background-color,color,opacity] hover:bg-neutral-800 hover:text-neutral-100",
+          "flex w-full items-center gap-3 rounded-xl border px-3 py-2 text-left",
+          "transition-[background-color,border-color,opacity]",
+          "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
+          onScreen
+            ? "border-neutral-600 bg-neutral-800/80"
+            : "border-neutral-800 bg-neutral-900/60 hover:border-neutral-700 hover:bg-neutral-800/50",
           recede ? "opacity-60 hover:opacity-100" : "opacity-100"
         )}
       >
-        <span className="flex h-4 w-4 shrink-0 items-center justify-center text-neutral-500">
-          {getRegistryIcon(entry.session.kind, entry.session.refId, 14)}
+        <span className="flex h-5 w-5 shrink-0 items-center justify-center text-neutral-400">
+          {getRegistryIcon(entry.session.kind, entry.session.refId, 17)}
         </span>
-        <span className="min-w-0 flex-1 truncate">{entry.session.title}</span>
+        <span className="flex min-w-0 flex-1 flex-col">
+          <span className="truncate text-[13px] text-neutral-100">{entry.session.title}</span>
+          <span className="truncate text-xs text-neutral-500">
+            {entry.project.workspace ? `${entry.project.workspace} / ` : ""}
+            {entry.project.name}
+          </span>
+        </span>
         {unread && (
           <span
             aria-label="Unread"
@@ -95,15 +106,6 @@ const AgentRow: React.FC<{ entry: AgentSessionEntry; showWorkspace: boolean }> =
             className="h-1.5 w-1.5 shrink-0 rounded-full bg-neutral-300"
           />
         )}
-        {/* Just the checkout dir — the group header already names the repo. The
-            workspace prefix appears only when the group spans several workspaces
-            (`showWorkspace`), where the bare dir would be ambiguous. `shrink` (not
-            `shrink-0`) so a long name yields to the title instead of crushing it;
-            `min-w-0` is what lets it truncate. */}
-        <span className="min-w-0 shrink truncate text-[10px] text-neutral-500">
-          {showWorkspace && entry.project.workspace ? `${entry.project.workspace}/` : ""}
-          {entry.project.name}
-        </span>
         <SessionStatusDot
           sessionId={entry.session.id}
           status={entry.session.status}
@@ -130,43 +132,22 @@ const AgentRow: React.FC<{ entry: AgentSessionEntry; showWorkspace: boolean }> =
   );
 };
 
-const AgentGroup: React.FC<{
-  title: string;
-  items: AgentSessionEntry[];
-  showWorkspace: boolean;
-}> = ({ title, items, showWorkspace }) => {
-  if (items.length === 0) {
-    return null;
-  }
-  return (
-    <div className="pb-1 last:pb-0">
-      <div className="px-2 pb-1 pt-2 text-[10px] font-medium uppercase tracking-wider text-neutral-600">
-        {title}
-      </div>
-      {items.map((entry) => (
-        <AgentRow key={entry.session.id} entry={entry} showWorkspace={showWorkspace} />
-      ))}
-    </div>
-  );
-};
-
 /**
- * Sidebar "Opened Agents" section: every agent session across every workspace,
- * grouped by the git repo its project belongs to — every checkout of one
- * remote shares a group, even across workspaces — above the
- * workspace/project lists, collapsible, with the counts
- * always on the header. Status stays on the per-row dot; groups and rows keep
- * a stable alphabetical order (never reshuffled by activity).
- * `Ctrl+Shift+A` still walks the bucket-derived Needs-Attention list (see
- * GlobalShortcutListener) — display grouping doesn't change it.
+ * Sidebar "Opened agents" section: every agent session across every
+ * workspace, as cards, in a stable order — by the git repo its project
+ * belongs to (every checkout of one remote side by side), never reshuffled by
+ * activity. Status stays on each card's dot.
  *
- * "Seen" semantics survive the move from the top-bar popover: an attention
- * episode counts as looked-at only while the rows are actually on screen —
- * expanded, and (on mobile) with the drawer open, since the drawer stays
- * mounted off-canvas. Collapsing keeps the previous seen set, so the header
- * badge turns amber only for episodes the user has genuinely not seen.
+ * Every agent is shown; a search (`query`) narrows the cards to those whose
+ * title, project or workspace matches. `Ctrl+Shift+A` still walks the bucket-derived Needs-Attention
+ * list (see GlobalShortcutListener) — display order doesn't change it.
+ *
+ * "Seen" semantics: an attention episode counts as looked-at only while the
+ * cards are actually on screen — on mobile, with the drawer open, since the
+ * drawer stays mounted off-canvas. The count turns amber only for episodes the
+ * user has genuinely not seen.
  */
-export const OpenedAgents: React.FC = () => {
+export const OpenedAgents: React.FC<{ query: string }> = ({ query }) => {
   const api = useApi();
   const isDesktop = useIsDesktop();
   const drawerOpen = useAppStore((s) => s.sidebarDrawerOpen);
@@ -176,10 +157,7 @@ export const OpenedAgents: React.FC = () => {
   const index = useProjectIndex();
   // Failed workflow runs: the Attention Center's other source (workflows spec §5.11).
   const workflowFailures = useWorkflowAttention().length;
-
-  const [collapsed, setCollapsed] = useState(loadOpenedAgentsCollapsed);
   const [seenKeys, setSeenKeys] = useState<ReadonlySet<string>>(() => new Set());
-  const expanded = !collapsed;
 
   const entries = useMemo(() => verifiedAgentSessions(derived, index), [derived, index]);
 
@@ -193,15 +171,14 @@ export const OpenedAgents: React.FC = () => {
     [summarized, seenKeys]
   );
 
-  // Re-verify the archived curtain whenever the session list changes shape,
-  // the *workspace list* changes (`wsKey` — membership or archive flags), or
-  // the section is toggled (the moral successor of the old popover's
-  // refresh-on-open). The workspaces key is load-bearing at boot: the mount
-  // fetch runs against a still-empty workspace list and publishes an empty
-  // index, and without this dep nothing would ever re-verify it — the section
-  // sat on "No agent sessions" until a toggle forced a refresh. A cold cache
-  // goes through `ensure` so this dedupes with the command palette / cycle
-  // shortcut instead of racing them.
+  // Re-verify the archived curtain whenever the session list changes shape
+  // or the *workspace list* changes (`wsKey` — membership or archive flags).
+  // The workspaces key is load-bearing at boot: the
+  // mount fetch runs against a still-empty workspace list and publishes an
+  // empty index, and without this dep nothing would ever re-verify it — the
+  // section sat on "No agent sessions" until something forced a refresh. A cold
+  // cache goes through `ensure` so this dedupes with the command palette /
+  // cycle shortcut instead of racing them.
   const pathsKey = useMemo(
     () =>
       Array.from(new Set(derived.map((entry) => entry.session.projectPath)))
@@ -221,7 +198,7 @@ export const OpenedAgents: React.FC = () => {
     const controller = new AbortController();
     void refreshProjectIndex(api, useAppStore.getState().workspaces, controller.signal);
     return () => controller.abort();
-  }, [api, pathsKey, wsKey, expanded]);
+  }, [api, pathsKey, wsKey]);
 
   // Invalidation (archive/restore, disconnect) nulls the cache out-of-band;
   // refetch so the section doesn't sit on "Loading…" until something changes.
@@ -231,8 +208,8 @@ export const OpenedAgents: React.FC = () => {
     }
   }, [api, index]);
 
-  // Mark the flagged episodes seen only while the rows are genuinely visible.
-  const contentVisible = expanded && (isDesktop || drawerOpen);
+  // Mark the flagged episodes seen only while the cards are genuinely visible.
+  const contentVisible = isDesktop || drawerOpen;
   const flaggedKeyString = entries
     .filter((entry) => isFlaggedBucket(entry.bucket))
     .map(attentionKey)
@@ -245,80 +222,67 @@ export const OpenedAgents: React.FC = () => {
     setSeenKeys((prev) => nextSeenKeys(prev, keys));
   }, [contentVisible, flaggedKeyString]);
 
-  const toggle = () => {
-    setCollapsed((prev) => {
-      saveOpenedAgentsCollapsed(!prev);
-      return !prev;
-    });
-  };
+  const searching = query.trim().length > 0;
+  const ordered = useMemo(() => {
+    if (index === null) return [];
+    const matching = entries.filter((entry) =>
+      matchesSidebarQuery(query, entry.session.title, entry.project.name, entry.project.workspace)
+    );
+    return groupAgentSessionsByRepo(matching, index).flatMap((group) => group.items);
+  }, [entries, index, query]);
+
+  // A search with no matching agent drops the section; the workspaces below
+  // may still match.
+  if (searching && ordered.length === 0) {
+    return null;
+  }
 
   return (
-    <div className="flex shrink-0 flex-col border-b border-neutral-800">
-      <button
-        type="button"
-        onClick={toggle}
-        aria-expanded={expanded}
-        title={`${label} — Ctrl+Shift+A cycles the agents needing attention`}
-        className="flex h-9 w-full items-center gap-1 px-2 text-left hover:bg-neutral-800/50"
-      >
-        {expanded ? (
-          <ChevronDown size={13} className="shrink-0 text-neutral-500" />
-        ) : (
-          <ChevronRight size={13} className="shrink-0 text-neutral-500" />
-        )}
-        <span className="flex-1 text-[10px] font-medium uppercase tracking-wider text-neutral-500">
-          Opened Agents
-        </span>
-        {(total > 0 || flaggedCount > 0) && (
-          <span
-            className={cn(
-              "flex items-center gap-1 text-xs font-medium tabular-nums",
-              unseenCount > 0 ? "text-warn" : "text-neutral-500"
+    <section aria-label="Opened agents" className="space-y-1.5">
+      <SectionHeader
+        title="Opened agents"
+        count={
+          <>
+            {(total > 0 || flaggedCount > 0) && (
+              <CountPill
+                tone={unseenCount > 0 ? "warn" : "default"}
+                title={`${label} — Ctrl+Shift+A cycles the agents needing attention`}
+              >
+                {total}
+                {flaggedCount > 0 && <span>· {flaggedCount}</span>}
+              </CountPill>
             )}
-          >
-            <Bot size={12} />
-            <span>{total}</span>
-            {flaggedCount > 0 && <span>· {flaggedCount}</span>}
-          </span>
-        )}
-        {workflowFailures > 0 && (
-          <span
-            title={`${workflowFailures} failed workflow run${workflowFailures === 1 ? "" : "s"}`}
-            className="ml-1.5 flex items-center gap-1 text-xs font-medium tabular-nums text-danger"
-          >
-            <WorkflowIcon size={12} />
-            <span>{workflowFailures}</span>
-          </span>
-        )}
-      </button>
+            {workflowFailures > 0 && (
+              <CountPill
+                tone="danger"
+                title={`${workflowFailures} failed workflow run${workflowFailures === 1 ? "" : "s"}`}
+              >
+                <WorkflowIcon size={11} aria-hidden />
+                {workflowFailures}
+              </CountPill>
+            )}
+          </>
+        }
+      />
 
-      {expanded && (
-        // Bounded so a long agent list can't crowd the workspace/project list
-        // out of the sidebar; it scrolls on its own past that.
-        <div className="max-h-[40vh] overflow-y-auto px-2 pb-2">
-          <WorkflowAttention touch={!isDesktop} />
-          {/* An index built before the workspace list loaded is empty-but-
-              resolved — that's "still loading", not "no sessions". */}
-          {index === null || (entries.length === 0 && workspacesLoading) ? (
-            <div className="px-2 py-1.5 text-sm italic text-neutral-600">Loading…</div>
-          ) : entries.length === 0 ? (
-            <div className="px-2 py-1.5 text-sm italic text-neutral-600">
-              {index.incomplete
-                ? "No agent sessions in the workspaces that loaded"
-                : "No agent sessions"}
-            </div>
-          ) : (
-            groupAgentSessionsByRepo(entries, index).map((group) => (
-              <AgentGroup
-                key={group.key}
-                title={group.title}
-                items={group.items}
-                showWorkspace={group.multiWorkspace}
-              />
-            ))
-          )}
+      <WorkflowAttention touch={!isDesktop} />
+      {/* An index built before the workspace list loaded is empty-but-
+          resolved — that's "still loading", not "no sessions". */}
+      {index === null || (entries.length === 0 && workspacesLoading) ? (
+        <p className="px-2 py-1.5 text-xs text-neutral-600">Loading…</p>
+      ) : entries.length === 0 ? (
+        <p className="rounded-xl border border-dashed border-neutral-800 px-3 py-2.5 text-xs text-neutral-500">
+          {index.incomplete
+            ? "No agent sessions in the workspaces that loaded"
+            : "No agents running. Open a project and start a chat from its tab bar."}
+        </p>
+      ) : (
+        <div className="space-y-1.5">
+          {ordered.map((entry) => (
+            <AgentCard key={entry.session.id} entry={entry} />
+          ))}
         </div>
       )}
-    </div>
+    </section>
   );
 };

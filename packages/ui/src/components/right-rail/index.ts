@@ -24,9 +24,10 @@ export {
   useActiveChatTarget,
   type ChatDelivery
 } from "./chat-target";
-export type { RightRailPanelId, RightRailPanelProps } from "./types";
+export type { DockPanelId, RightRailPanelId, RightRailPanelProps } from "./types";
 export { RightRail, type RightRailProps } from "./RightRail";
-export { RightRailDock, type RightRailDockProps } from "./RightRailDock";
+export { RightRailDock, dockKeyDownHandler, type RightRailDockProps } from "./RightRailDock";
+export { useDockKeyboardLayer, useFocusInside } from "./dock-keyboard";
 export {
   RightRailEditorHost,
   RightRailFrame,
@@ -44,6 +45,7 @@ export {
 } from "./MobileSections";
 export { mobileSection, setMobileSection, subscribeMobileSection, useMobileSection } from "./mobile-section";
 export {
+  MOBILE_SECTION_ORDER,
   RIGHT_RAIL_DOCK_ID,
   RIGHT_RAIL_PANEL_ORDER,
   RIGHT_RAIL_PANEL_REGISTRY,
