@@ -313,16 +313,20 @@ export const UsageWidget: React.FC = () => {
   // accounts each read side by side instead of one screen-height stack. Each
   // column is weighted by how many windows its cards lay side by side, and the
   // desktop dropdown's width follows the summed weight (capped to the
-  // viewport). The mobile bottom sheet stays stacked — AdaptiveMenu switches
-  // at md, the same breakpoint as the `md:` classes below. The Cost tab keeps
-  // its narrow width.
+  // viewport): the content below carries that width and the panel is `w-max`
+  // around it — leaving `width` unset would fall back to the Dropdown's own
+  // `w-56` and scroll the columns sideways inside it. The mobile bottom sheet
+  // stays stacked — AdaptiveMenu switches at md, the same breakpoint as the
+  // `md:` classes below. The Cost tab keeps its narrow width.
   const weights = agents.map(columnWeight);
   const windowsWidth = `${Math.round(weights.reduce((a, w) => a + w, 0) * 18)}rem`;
 
   return (
-    <AdaptiveMenu title="Usage" trigger={trigger} align="right" width={tab === "cost" ? "w-80" : undefined}>
+    <AdaptiveMenu title="Usage" trigger={trigger} align="right" width={tab === "cost" ? "w-80" : "w-max"}>
       <div
-        className={tab === "windows" ? "md:w-[min(var(--usage-panel-w),calc(100vw_-_2rem))]" : undefined}
+        // `max-w-full` gives back the vertical scrollbar's width when the
+        // panel is taller than the viewport.
+        className={tab === "windows" ? "md:w-[min(var(--usage-panel-w),calc(100vw_-_2rem))] md:max-w-full" : undefined}
         style={{ "--usage-panel-w": windowsWidth } as React.CSSProperties}
       >
         <div className="flex items-center justify-between px-3 pt-2 text-[11px] text-neutral-500">
