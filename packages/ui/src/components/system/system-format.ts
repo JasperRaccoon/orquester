@@ -98,6 +98,7 @@ export function killErrorCode(error: unknown): KillProcessErrorCode | null {
   const code = (body as { code?: unknown } | null | undefined)?.code;
   switch (code) {
     case "INVALID_PID":
+    case "INVALID_SIGNAL":
     case "PROCESS_NOT_MANAGED":
     case "PROCESS_PROTECTED":
     case "UNSUPPORTED_PLATFORM":
@@ -120,6 +121,8 @@ export function killErrorMessage(code: KillProcessErrorCode | null, label: strin
       return `${label} was not started by Orquester, or has exited since — only Orquester's own processes can be stopped here.`;
     case "INVALID_PID":
       return `${label} is not a valid target. Refresh the list and try again.`;
+    case "INVALID_SIGNAL":
+      return `This server can't send that signal to ${label}.`;
     case "UNSUPPORTED_PLATFORM":
       return "Stopping processes is only available on Linux hosts.";
     default:

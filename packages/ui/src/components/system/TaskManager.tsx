@@ -11,9 +11,11 @@ import {
   Loader2,
   MoreHorizontal,
   Search,
+  Skull,
   X
 } from "lucide-react";
 import type {
+  KillProcessSignal,
   SystemPortsResponse,
   SystemProcessInfo,
   SystemProcessState,
@@ -437,7 +439,7 @@ const ProcessDetails: React.FC<{
   now: number;
   busy: boolean;
   onSelect: (pid: number) => void;
-  onStop: (proc: SystemProcessInfo) => void;
+  onStop: (proc: SystemProcessInfo, signal?: KillProcessSignal) => void;
   onClose: () => void;
 }> = ({ proc, daemonPid, parent, ports, now, busy, onSelect, onStop, onClose }) => {
   const [copied, setCopied] = useState(false);
@@ -469,6 +471,18 @@ const ProcessDetails: React.FC<{
             >
               {busy ? <Loader2 size={12} className="animate-spin" /> : <X size={12} />}
               Stop process
+            </button>
+          )}
+          {stoppable && (
+            <button
+              type="button"
+              disabled={busy}
+              onClick={() => onStop(proc, "SIGKILL")}
+              title="SIGKILL — for a process that ignores Stop"
+              className="inline-flex h-7 items-center gap-1.5 rounded-md border border-danger-900/60 px-2.5 text-xs text-danger hover:bg-danger-soft/30 disabled:opacity-50"
+            >
+              <Skull size={12} />
+              Force kill
             </button>
           )}
           <button
@@ -536,7 +550,8 @@ const ProcessDetails: React.FC<{
  * Settings → Host status' process table: every process on the host, sortable
  * by any column, filterable, flat / as a tree / grouped by name, with a details
  * panel and a guarded Stop for the processes the daemon manages. Stop is a
- * SIGTERM of the whole subtree and is always confirmed first.
+ * SIGTERM of the whole subtree, Force kill a SIGKILL of it; both are always
+ * confirmed first.
  */
 export const TaskManager: React.FC<{
   snapshot: SystemProcessesResponse;
@@ -556,7 +571,7 @@ export const TaskManager: React.FC<{
   const [toggled, setToggled] = useState<ReadonlySet<string>>(() => new Set());
   const [columns, setColumns] = useState<ProcessColumn[]>(loadColumns);
   const [menu, setMenu] = useState<{ proc: SystemProcessInfo; x: number; y: number } | null>(null);
-  const [pending, setPending] = useState<SystemProcessInfo | null>(null);
+  const [pending, setPending] = useState<{ proc: SystemProcessInfo; signal: KillProcessSignal } | null>(null);
   const [busyPid, setBusyPid] = useState<number | null>(null);
   const [error, setError] = useState<string | null>(null);
   const bodyRef = useRef<HTMLTableSectionElement>(null);
@@ -608,20 +623,25 @@ export const TaskManager: React.FC<{
     saveColumns(next);
   };
 
-  const askStop = (proc: SystemProcessInfo) => {
-    if (canStop(proc, snapshot.daemonPid)) setPending(proc);
+  const askStop = (proc: SystemProcessInfo, signal: KillProcessSignal = "SIGTERM") => {
+    if (canStop(proc, snapshot.daemonPid)) setPending({ proc, signal });
   };
 
-  const confirmStop = async (proc: SystemProcessInfo) => {
+  const confirmStop = async (proc: SystemProcessInfo, signal: KillProcessSignal) => {
     const label = processLabel(proc);
     setPending(null);
     setBusyPid(proc.pid);
     setError(null);
     try {
-      const result = await api.killSystemProcess(proc.pid);
+      const result = await api.killSystemProcess(proc.pid, signal);
       // `killed` counts the signals actually sent; zero means every target had
       // already exited between the snapshot and the signal.
-      setError(result.killed === 0 ? `${label} had already exited — nothing was signalled.` : null);
+      if (result.killed === 0) {
+        setError(`${label} had already exited — nothing was signalled.`);
+      } else if (signal === "SIGKILL" && result.signal !== "SIGKILL") {
+        // A daemon that predates the choice ignores it and echoes no signal.
+        setError(`This server can't force kill yet — ${label} was sent SIGTERM instead.`);
+      }
     } catch (err) {
       setError(killErrorMessage(killErrorCode(err), label));
     } finally {
@@ -630,24 +650,41 @@ export const TaskManager: React.FC<{
     }
   };
 
-  const menuItems = (proc: SystemProcessInfo): ContextMenuItem[] => [
-    { label: "Show details", icon: <Info size={13} />, onClick: () => onSelect(proc.pid) },
-    { label: "Copy PID", icon: <Copy size={13} />, onClick: () => void copyText(String(proc.pid)) },
-    { label: "Copy command line", icon: <Copy size={13} />, onClick: () => void copyText(proc.cmdline) },
-    {
-      label: canStop(proc, snapshot.daemonPid)
-        ? "Stop process…"
-        : proc.role
-          ? `Stop — ${ROLE_LABEL[proc.role].toLowerCase()} is protected`
-          : "Stop — not started by Orquester",
-      icon: <X size={13} />,
-      danger: true,
-      disabled: !canStop(proc, snapshot.daemonPid),
-      onClick: () => askStop(proc)
-    }
-  ];
+  const menuItems = (proc: SystemProcessInfo): ContextMenuItem[] => {
+    const stoppable = canStop(proc, snapshot.daemonPid);
+    return [
+      { label: "Show details", icon: <Info size={13} />, onClick: () => onSelect(proc.pid) },
+      { label: "Copy PID", icon: <Copy size={13} />, onClick: () => void copyText(String(proc.pid)) },
+      { label: "Copy command line", icon: <Copy size={13} />, onClick: () => void copyText(proc.cmdline) },
+      {
+        label: stoppable
+          ? "Stop process… (SIGTERM)"
+          : proc.role
+            ? `Stop — ${ROLE_LABEL[proc.role].toLowerCase()} is protected`
+            : "Stop — not started by Orquester",
+        icon: <X size={13} />,
+        danger: true,
+        disabled: !stoppable,
+        onClick: () => askStop(proc)
+      },
+      // The refusal above already says why; a second greyed row adds nothing.
+      ...(stoppable
+        ? [
+            {
+              label: "Force kill… (SIGKILL)",
+              icon: <Skull size={13} />,
+              danger: true,
+              onClick: () => askStop(proc, "SIGKILL")
+            }
+          ]
+        : [])
+    ];
+  };
 
-  /** Arrow keys walk the rows, Left/Right fold a tree node, Delete asks to stop. */
+  /**
+   * Arrow keys walk the rows, Left/Right fold a tree node, Delete asks to stop
+   * and Shift+Delete to force kill.
+   */
   const onBodyKeyDown = (event: React.KeyboardEvent<HTMLTableSectionElement>) => {
     const row = (event.target as HTMLElement).closest("tr");
     if (!row) return;
@@ -673,7 +710,7 @@ export const TaskManager: React.FC<{
       case "Delete":
         if (proc) {
           event.preventDefault();
-          askStop(proc);
+          askStop(proc, event.shiftKey ? "SIGKILL" : "SIGTERM");
         }
         break;
     }
@@ -863,21 +900,26 @@ export const TaskManager: React.FC<{
 
       <ConfirmDialog
         open={pending !== null}
-        title="Stop process"
-        confirmLabel="Stop"
+        title={pending?.signal === "SIGKILL" ? "Force kill process" : "Stop process"}
+        confirmLabel={pending?.signal === "SIGKILL" ? "Force kill" : "Stop"}
         message={
           pending && (
             <>
               <p>
-                SIGTERM <span className="text-neutral-200">{pending.name}</span> (PID {pending.pid})
+                {pending.signal} <span className="text-neutral-200">{pending.proc.name}</span> (PID {pending.proc.pid})
                 {(() => {
-                  const under = descendantCount(snapshot.processes, pending.pid);
+                  const under = descendantCount(snapshot.processes, pending.proc.pid);
                   return under > 0 ? ` and the ${under} process${under === 1 ? "" : "es"} under it` : "";
                 })()}
                 ?
               </p>
-              <p className="mt-2 break-all text-xs text-neutral-500">{pending.cmdline}</p>
-              {pending.sessionId && (
+              <p className="mt-2 break-all text-xs text-neutral-500">{pending.proc.cmdline}</p>
+              {pending.signal === "SIGKILL" && (
+                <p className="mt-2 text-xs text-warn/90">
+                  SIGKILL can't be caught — the process gets no chance to save or clean up. Try Stop first.
+                </p>
+              )}
+              {pending.proc.sessionId && (
                 <p className="mt-2 text-xs text-warn/90">
                   This process belongs to a session tab — stopping it ends what that tab is running.
                 </p>
@@ -886,7 +928,7 @@ export const TaskManager: React.FC<{
           )
         }
         onConfirm={() => {
-          if (pending) void confirmStop(pending);
+          if (pending) void confirmStop(pending.proc, pending.signal);
         }}
         onCancel={() => setPending(null)}
       />

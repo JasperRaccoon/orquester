@@ -3109,17 +3109,18 @@ export function createServer(
   );
 
   // Guarded kill: refused for any pid outside this daemon's tree, and for the
-  // daemon and the tmux server themselves (see SystemStatusService.kill). The
-  // service's own code is passed through verbatim so a client can distinguish a
-  // bad request from a protected target from an unsupported host.
+  // daemon and the tmux server themselves (see SystemStatusService.kill).
+  // SIGTERM unless the body asks for SIGKILL. The service's own code is passed
+  // through verbatim so a client can distinguish a bad request from a protected
+  // target from an unsupported host.
   app.post<{ Body: Partial<KillProcessRequest> }>(
     "/api/system/processes/kill",
     async (request, reply): Promise<KillProcessResponse | KillProcessErrorResponse> => {
-      const result = await systemStatus.kill(Number(request.body?.pid));
+      const result = await systemStatus.kill(Number(request.body?.pid), request.body?.signal ?? "SIGTERM");
       if (!result.ok) {
         return reply.code(400).send({ code: result.code, message: result.error });
       }
-      return { ok: true, killed: result.killed };
+      return { ok: true, killed: result.killed, signal: result.signal };
     }
   );
 

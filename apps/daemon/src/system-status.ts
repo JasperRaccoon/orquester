@@ -1,5 +1,6 @@
 import type {
   KillProcessErrorCode,
+  KillProcessSignal,
   SystemPortInfo,
   SystemPortsResponse,
   SystemProcessInfo,
@@ -888,7 +889,7 @@ interface TreeSnapshot {
 }
 
 type KillResult =
-  | { ok: true; killed: number }
+  | { ok: true; killed: number; signal: KillProcessSignal }
   | { ok: false; code: KillProcessErrorCode; error: string };
 
 export class SystemStatusService {
@@ -1093,20 +1094,24 @@ export class SystemStatusService {
   }
 
   /**
-   * SIGTERM `pid` and everything under it. Refused unless `pid` is inside this
+   * Signal `pid` and everything under it — SIGTERM unless the caller asks for
+   * SIGKILL; any other value is refused. Refused unless `pid` is inside this
    * daemon's own tree, and refused outright for the daemon itself, for the
    * tmux server — the tmux server IS the session-persistence layer, so killing
    * it would take down every terminal on the box, and it is never a legitimate
    * target even though it sits at the top of the session panes — and for
    * anything the host reports via `protectedPids`.
    */
-  async kill(pid: number): Promise<KillResult> {
+  async kill(pid: number, signal: unknown = "SIGTERM"): Promise<KillResult> {
     if (!SYSTEM_STATUS_SUPPORTED) {
       return {
         ok: false,
         code: "UNSUPPORTED_PLATFORM",
         error: "Process management is only available on Linux."
       };
+    }
+    if (signal !== "SIGTERM" && signal !== "SIGKILL") {
+      return { ok: false, code: "INVALID_SIGNAL", error: "Signal must be SIGTERM or SIGKILL." };
     }
     if (!Number.isInteger(pid) || pid <= 1) {
       return { ok: false, code: "INVALID_PID", error: "Invalid pid." };
@@ -1151,7 +1156,7 @@ export class SystemStatusService {
     }
 
     // Two passes, because a pid can be recycled between the snapshot and the
-    // signal and we must never hand a SIGTERM to a stranger. Pass one confirms
+    // signal and we must never hand a signal to a stranger. Pass one confirms
     // every target is still the process the snapshot saw (its parent is
     // unchanged) and records its starttime; pass two re-checks that starttime
     // immediately before signalling. Splitting them is what makes killing a
@@ -1185,7 +1190,7 @@ export class SystemStatusService {
         continue;
       }
       try {
-        process.kill(target.pid, "SIGTERM");
+        process.kill(target.pid, signal);
         killed += 1;
       } catch {
         // Already gone (ESRCH) or not ours (EPERM) — best-effort by design.
@@ -1193,7 +1198,7 @@ export class SystemStatusService {
     }
     // The tree just changed; don't let a poll a moment later show the corpses.
     this.treeCache = null;
-    return { ok: true, killed };
+    return { ok: true, killed, signal };
   }
 
   async ports(): Promise<SystemPortsResponse> {

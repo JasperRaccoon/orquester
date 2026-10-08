@@ -249,8 +249,9 @@ export const HostStatusView: React.FC<{ status: HostStatus }> = ({ status }) => 
           {tab === "processes" ? (
             <>
               <p className="text-xs text-neutral-500">
-                Every process on the host. Orquester's own are bright; only those can be stopped, which sends SIGTERM to
-                the process and everything under it. Click a row for details, right-click for actions.
+                Every process on the host. Orquester's own are bright; only those can be stopped (SIGTERM) or force
+                killed (SIGKILL), which signals the process and everything under it. Click a row for details,
+                right-click for actions.
               </p>
               {processes.data ? (
                 <TaskManager

@@ -522,6 +522,36 @@ test("kill() refuses with a discriminating code and only kills our own subtree",
 
 });
 
+test("kill() sends SIGKILL when asked, ending a process SIGTERM cannot, and refuses any other signal", async () => {
+  if (!SYSTEM_STATUS_SUPPORTED) {
+    return;
+  }
+  const status = service();
+  // The shell announces itself only once its trap is in place; the sleeps it
+  // runs inherit the ignored SIGTERM, so nothing in the subtree dies of one.
+  const stubborn = spawn("sh", ["-c", 'trap "" TERM; echo ready; while :; do sleep 1; done'], {
+    stdio: ["ignore", "pipe", "ignore"]
+  });
+  const exited = once(stubborn, "exit");
+  await once(stubborn.stdout, "data");
+  try {
+    assert.ok(stubborn.pid);
+    const refused = await status.kill(stubborn.pid, "SIGSTOP");
+    assert.equal(refused.ok === false && refused.code, "INVALID_SIGNAL");
+
+    const term = await status.kill(stubborn.pid);
+    assert.equal(term.ok === true && term.signal, "SIGTERM", "SIGTERM stays the default");
+    assert.doesNotThrow(() => process.kill(stubborn.pid!, 0), "the shell ignores SIGTERM");
+
+    const forced = await status.kill(stubborn.pid, "SIGKILL");
+    assert.equal(forced.ok === true && forced.signal, "SIGKILL");
+    const [, signal] = await withDeadline(exited, { label: "the SIGTERM-proof shell exiting", timeoutMs: 5_000 });
+    assert.equal(signal, "SIGKILL");
+  } finally {
+    try { process.kill(stubborn.pid!, "SIGKILL"); } catch { /* Already gone. */ }
+  }
+});
+
 test("a process carrying the agent host's launch marker is managed even as an orphan: listed, labelled, killable", async () => {
   if (!SYSTEM_STATUS_SUPPORTED) {
     return;

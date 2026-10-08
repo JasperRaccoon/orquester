@@ -1535,14 +1535,24 @@ export interface SystemProcessesResponse {
   processes: SystemProcessInfo[];
 }
 
+/** What a kill sends: a SIGTERM the process may handle, or an uncatchable SIGKILL. */
+export type KillProcessSignal = "SIGTERM" | "SIGKILL";
+
 export interface KillProcessRequest {
   pid: number;
+  /** Absent means SIGTERM, which is all a client that predates the choice asks for. */
+  signal?: KillProcessSignal;
 }
 
 export interface KillProcessResponse {
   ok: boolean;
   /** How many pids (the target plus its descendants) were signalled. */
   killed: number;
+  /**
+   * The signal that was sent. Absent from a daemon that predates the choice
+   * and so sent SIGTERM whatever was asked.
+   */
+  signal?: KillProcessSignal;
 }
 
 /**
@@ -1552,6 +1562,7 @@ export interface KillProcessResponse {
  */
 export type KillProcessErrorCode =
   | "INVALID_PID"
+  | "INVALID_SIGNAL"
   | "PROCESS_NOT_MANAGED"
   | "PROCESS_PROTECTED"
   | "UNSUPPORTED_PLATFORM";

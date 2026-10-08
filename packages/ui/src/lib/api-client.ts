@@ -41,6 +41,7 @@ import type {
   HealthResponse,
   ImportAgentAccountRequest,
   KillProcessResponse,
+  KillProcessSignal,
   MarkRecentProjectRequest,
   OpenResult,
   OwnerSummary,
@@ -1407,12 +1408,12 @@ export class ApiClient {
   }
 
   /**
-   * SIGTERM a pid and its descendants. Refusals come back as a 400 whose body
+   * Signal a pid and its descendants — SIGTERM, or SIGKILL to force. Refusals come back as a 400 whose body
    * carries a {@link KillProcessErrorCode} — thrown as an ApiError, so callers
    * read `error.body.code` to tell "protected" from "not managed".
    */
-  killSystemProcess(pid: number): Promise<KillProcessResponse> {
-    return this.send("POST", "/api/system/processes/kill", { body: { pid } });
+  killSystemProcess(pid: number, signal: KillProcessSignal = "SIGTERM"): Promise<KillProcessResponse> {
+    return this.send("POST", "/api/system/processes/kill", { body: { pid, signal } });
   }
 }
 

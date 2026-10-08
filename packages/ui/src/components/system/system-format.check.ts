@@ -5,6 +5,7 @@ import { killErrorCode } from "./system-format";
 assert.equal(killErrorCode({ body: { code: "PROCESS_PROTECTED" } }), "PROCESS_PROTECTED");
 assert.equal(killErrorCode({ body: { code: "PROCESS_NOT_MANAGED" } }), "PROCESS_NOT_MANAGED");
 assert.equal(killErrorCode({ body: { code: "INVALID_PID" } }), "INVALID_PID");
+assert.equal(killErrorCode({ body: { code: "INVALID_SIGNAL" } }), "INVALID_SIGNAL");
 assert.equal(killErrorCode({ body: { code: "UNSUPPORTED_PLATFORM" } }), "UNSUPPORTED_PLATFORM");
 assert.equal(killErrorCode({ body: { code: "SOMETHING_ELSE" } }), null);
 assert.equal(killErrorCode(new Error("network down")), null);
