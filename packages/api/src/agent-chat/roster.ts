@@ -438,6 +438,14 @@ interface TaskCursor {
    * restart under three running subagents, all relaunched by the agent).
    */
   lastToolUseId: string | undefined;
+  /**
+   * Whether the list holds a `task.started` of the task at all, naming a
+   * launching call or not. With none, a settled task's first start row is a
+   * launch and nothing else; with one that named no call (an agent an older
+   * host launched, the agent host's `legacyLaunchStarts`), a start row naming
+   * one only records it.
+   */
+  startSeen: boolean;
 }
 
 /**
@@ -485,13 +493,20 @@ function applyTaskRow(
       // resume's start row names a NEW launching tool call, a late delivery
       // of the old run names the old one, so a changed `toolUseId` reopens
       // the row as a new activation and an unchanged one does not.
+      //
+      //
+      // And a start row naming a call when the list holds NO start of the
+      // task: the list began after the launch (a Claude session imported past
+      // its compaction opens with the resumed CLI's `stopped` notice for an
+      // agent launched before it), so there is no old run's start for this
+      // row to be a late delivery of. The roster read 4 of 5 revived agents
+      // as working and the fifth `interrupted` for as long as it ran.
       const toolUseId = asString(payload.toolUseId);
       const previousToolUseId = cursor.lastToolUseId;
       const resumed =
         isTerminal(agent.status) &&
         toolUseId !== undefined &&
-        previousToolUseId !== undefined &&
-        toolUseId !== previousToolUseId;
+        (previousToolUseId !== undefined ? toolUseId !== previousToolUseId : !cursor.startSeen);
       if (agent.activationCount === 0 && !isTerminal(agent.status)) {
         agent.activationCount = 1;
         agent.startedAt = agent.startedAt ?? at;
@@ -623,6 +638,7 @@ function applyTaskRow(
   if (activity.activityKind === "task.started") {
     const toolUseId = asString(payload.toolUseId);
     if (toolUseId) cursor.lastToolUseId = toolUseId;
+    cursor.startSeen = true;
   }
 }
 
@@ -684,6 +700,8 @@ interface TaskFold {
   readonly agent: RuntimeSubagent | null;
   /** {@link TaskCursor.lastToolUseId} after `rows`. */
   readonly lastToolUseId: string | undefined;
+  /** {@link TaskCursor.startSeen} after `rows`. */
+  readonly startSeen: boolean;
   /**
    * The creation ordinal: the agent's index in {@link TaskRosterEngine.created},
    * i.e. the list order of the row that created it among every creating row.
@@ -745,21 +763,21 @@ function withTaskFold(
   rows: readonly ThreadActivityItem[],
   cursor: TaskCursor
 ): TaskRosterEngine {
-  const { agent, lastToolUseId } = cursor;
+  const { agent, lastToolUseId, startSeen } = cursor;
   if (previous !== undefined && previous.ordinal !== -1) {
     const created = engine.created.slice();
-    created[previous.ordinal] = { taskId, rows, agent, lastToolUseId, ordinal: previous.ordinal };
+    created[previous.ordinal] = { taskId, rows, agent, lastToolUseId, startSeen, ordinal: previous.ordinal };
     return { ...engine, created };
   }
   if (agent === null) {
     const uncreated = new Map(engine.uncreated);
-    uncreated.set(taskId, { taskId, rows, agent, lastToolUseId, ordinal: -1 });
+    uncreated.set(taskId, { taskId, rows, agent, lastToolUseId, startSeen, ordinal: -1 });
     return { ...engine, uncreated };
   }
   // A new agent. Only an append gets here, so its creating row is the newest
   // row of the list and the agent goes last.
   const ordinal = engine.created.length;
-  const created = [...engine.created, { taskId, rows, agent, lastToolUseId, ordinal }];
+  const created = [...engine.created, { taskId, rows, agent, lastToolUseId, startSeen, ordinal }];
   const ordinals = new Map(engine.ordinals);
   ordinals.set(taskId, ordinal);
   let uncreated = engine.uncreated;
@@ -788,6 +806,7 @@ export function createRosterEngine(activities: readonly ThreadActivityItem[]): R
       rows: [],
       agent: null,
       lastToolUseId: undefined,
+      startSeen: false,
       ordinal: -1
     };
     task.rows.push(activity);
@@ -829,7 +848,8 @@ export function rosterEngineAppend(engine: RosterEngine, activity: ThreadActivit
   const agent = task === undefined ? null : task.agent;
   const cursor: TaskCursor = {
     agent: agent === null ? null : { ...agent },
-    lastToolUseId: task?.lastToolUseId
+    lastToolUseId: task?.lastToolUseId,
+    startSeen: task?.startSeen ?? false
   };
   applyTaskRow(cursor, taskId, activity, activity.payload as Record<string, unknown>);
   const rows = task === undefined ? [activity] : [...task.rows, activity];
@@ -889,7 +909,7 @@ function isObject(value: unknown): value is object {
 
 /** A task's fold from scratch: its rows, in list order, through {@link applyTaskRow}. */
 function foldTaskRows(taskId: string, rows: readonly ThreadActivityItem[]): TaskCursor {
-  const cursor: TaskCursor = { agent: null, lastToolUseId: undefined };
+  const cursor: TaskCursor = { agent: null, lastToolUseId: undefined, startSeen: false };
   for (const row of rows) {
     const payload = asRecord(row.payload);
     if (payload !== null) applyTaskRow(cursor, taskId, row, payload);

@@ -579,6 +579,44 @@ test("a resume reopens even when the NEW run's in-place progress row precedes th
   assert.equal(byId(late, "t1").activationCount, 1);
 });
 
+test("a resume reopens a task whose launch this list never held", () => {
+  // The resumed CLI's `stopped` notice is the task's FIRST row when the list
+  // begins after the launch (a Claude session imported past its compaction,
+  // on an account switch), so no start row ever named the killed run's
+  // launching call. The relaunch names one, and with no start of the task in
+  // the list that alone is the resume: the roster read 4 of 5 revived agents
+  // as working, the fifth `interrupted` for as long as it ran.
+  resetActivityIds();
+  const agents = foldSubagentActivities([
+    activity("task.completed", agentTask("t1", { status: "stopped", summary: "didn't finish" })),
+    activity("task.started", agentTask("t1", { title: "BI simulator", toolUseId: "toolu_new" })),
+    activity("task.progress", agentTask("t1", { summary: "Running git status", toolUseId: "toolu_new" }))
+  ]);
+  const agent = byId(agents, "t1");
+  assert.equal(agent.status, "running", "the relaunched run is live");
+  assert.equal(agent.completedAt, null);
+  assert.equal(agent.result, null, "the 'didn't finish' notice does not label the new run");
+  assert.equal(agent.progress, "Running git status");
+
+  // A start that named no call is still a start of the settled run: the row
+  // that then names one only records it (the agent host's
+  // `legacyLaunchStarts`), and the next start naming another reopens.
+  resetActivityIds();
+  const legacy = [
+    activity("task.started", agentTask("t1", { title: "Legacy" })),
+    activity("task.completed", agentTask("t1", { status: "completed", summary: "done" })),
+    activity("task.started", agentTask("t1", { title: "Legacy", toolUseId: "legacy-launch:t1" }))
+  ];
+  assert.equal(byId(foldSubagentActivities(legacy), "t1").status, "completed");
+  assert.equal(byId(foldSubagentActivities(legacy), "t1").activationCount, 1);
+  const relaunched = foldSubagentActivities([
+    ...legacy,
+    activity("task.started", agentTask("t1", { title: "Legacy", toolUseId: "toolu_new" }))
+  ]);
+  assert.equal(byId(relaunched, "t1").status, "running");
+  assert.equal(byId(relaunched, "t1").activationCount, 2);
+});
+
 // --- a Claude `Workflow` run, as the adapter reports it ---------------------
 //
 // A coordinator (`local_workflow`) with 1-based phases, and one member per

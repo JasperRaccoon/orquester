@@ -87,7 +87,7 @@ import type {
  * `seq`; a bumped version makes the next load discard it and fold from byte 0,
  * once.
  */
-export const FOLD_SNAPSHOT_VERSION = 5;
+export const FOLD_SNAPSHOT_VERSION = 6;
 
 /**
  * {@link ThreadFoldState} as JSON: without `activities` (rebuilt from

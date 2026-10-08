@@ -469,9 +469,9 @@ interface AgentRows {
  * host never wrote on its start — `[]` for anything but an OpenCode or Codex
  * thread (the head's adapter).
  *
- * The roster reopens a settled agent only on a start whose `toolUseId`
- * differs from the previous start's, both defined (`roster.ts`, the
- * `task.started` arm): a new call is a relaunch, the same one a late
+ * The roster reopens a settled agent that has a start only on a start whose
+ * `toolUseId` differs from the previous start's, both defined (`roster.ts`,
+ * the `task.started` arm): a new call is a relaunch, the same one a late
  * delivery. A host with the relaunch fix starts every run under a launch id,
  * but an agent an older host launched has none behind it, so its first
  * relaunch reads as a late delivery and the agent stays settled while it
