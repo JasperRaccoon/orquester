@@ -1,5 +1,5 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from "react";
-import { createPortal } from "react-dom";
+import { createPortal, flushSync } from "react-dom";
 import { useOpenLayer } from "../../hooks/use-open-layer";
 import { cn } from "../../lib/cn";
 import {
@@ -97,7 +97,7 @@ const MARGIN = 8;
  * (`useOpenLayer`), hover-opened included, so the app-level key handlers that
  * run first leave that Escape to it. It flips vertically when there is no room
  * below, and a panel that would leave the viewport sideways is clamped back
- * inside (`dropdownHorizontalPosition`).
+ * inside (`dropdownHorizontalPosition`) — again whenever its size changes.
  */
 export const Dropdown: React.FC<DropdownProps> = ({
   trigger,
@@ -118,6 +118,7 @@ export const Dropdown: React.FC<DropdownProps> = ({
   const [position, setPosition] = useState<PanelPosition | null>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const panelRef = useRef<HTMLDivElement | null>(null);
+  const panelObserver = useRef<ResizeObserver | null>(null);
   const hoverTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   /**
@@ -216,12 +217,25 @@ export const Dropdown: React.FC<DropdownProps> = ({
    * The panel mounting: measure it and re-position before the browser paints
    * (a clamped panel never visibly jumps), and move focus into it when asked.
    * A new panel element mounts on every open, so this runs once per open.
+   *
+   * The horizontal position depends on the panel's width, so a panel that
+   * changes width while open (the usage panel's tabs) is measured again: the
+   * clamp of the old width would leave a narrower panel stranded mid-screen
+   * and a wider one off the edge. `flushSync` because an observer callback
+   * runs between layout and paint — a deferred update would paint the stale
+   * position for a frame.
    */
   const attachPanel = useCallback(
     (node: HTMLDivElement | null) => {
+      panelObserver.current?.disconnect();
+      panelObserver.current = null;
       panelRef.current = node;
       if (!node) return;
       updatePosition();
+      if (typeof ResizeObserver !== "undefined") {
+        panelObserver.current = new ResizeObserver(() => flushSync(updatePosition));
+        panelObserver.current.observe(node);
+      }
       if (focusOnOpen) dropdownFocusTarget(node).focus({ preventScroll: true });
     },
     [focusOnOpen, updatePosition]
