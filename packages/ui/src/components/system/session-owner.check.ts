@@ -33,6 +33,7 @@ const sessions = [
 // The happy path names the tab and its project.
 assert.deepEqual(resolveSessionOwner("live", sessions, workspaces, projects), {
   title: "claude",
+  kind: "agent",
   project: projects[0]
 });
 

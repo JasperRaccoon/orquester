@@ -1557,6 +1557,31 @@ export interface SystemProcessesResponse {
   processes: SystemProcessInfo[];
 }
 
+/**
+ * `GET /api/system/processes/:pid`: what one process' expanded row shows on top
+ * of its {@link SystemProcessInfo}, read on demand rather than for every scan.
+ * The kernel lets only the owner resolve exe, cwd and fd, so for another user's
+ * process those are `null`; a gone pid answers `found: false`.
+ */
+export interface SystemProcessDetailsResponse {
+  supported: boolean;
+  pid: number;
+  found: boolean;
+  /**
+   * Epoch milliseconds, so a client can tell the process it asked about from
+   * one that was handed the same pid since. Null when unreadable.
+   */
+  startedAt: number | null;
+  /** Resolved /proc/<pid>/exe; a binary replaced on disk ends in " (deleted)". */
+  exe: string | null;
+  /** Resolved /proc/<pid>/cwd. */
+  cwd: string | null;
+  /** Entries in /proc/<pid>/fd. */
+  openFiles: number | null;
+  /** cgroup path (the v2 unified one when present), e.g. "/system.slice/orquester.service". */
+  cgroup: string | null;
+}
+
 /** What a kill sends: a SIGTERM the process may handle, or an uncatchable SIGKILL. */
 export type KillProcessSignal = "SIGTERM" | "SIGKILL";
 

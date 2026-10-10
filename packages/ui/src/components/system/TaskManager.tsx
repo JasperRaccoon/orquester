@@ -17,11 +17,13 @@ import {
 import type {
   KillProcessSignal,
   SystemPortsResponse,
+  SystemProcessDetailsResponse,
   SystemProcessInfo,
   SystemProcessState,
   SystemProcessesResponse
 } from "@orquester/api";
 import { useApi } from "../../context/orquester-context";
+import { useAppStore } from "../../store/app";
 import { copyText } from "../../lib/clipboard";
 import { cn } from "../../lib/cn";
 import { ConfirmDialog, ContextMenu, Dropdown, DropdownItem, DropdownLabel, type ContextMenuItem } from "../ui";
@@ -29,8 +31,10 @@ import { Badge, SegmentedControl } from "../settings/primitives";
 import { ROLE_LABEL } from "./OrquesterCore";
 import { ProcessIcon } from "./ProcessIcon";
 import { SessionChip } from "./SessionChip";
+import { resolveSessionOwner } from "./session-owner";
 import {
   PROCESS_COLUMNS,
+  ancestorsOf,
   buildRows,
   canStop,
   defaultDirection,
@@ -40,6 +44,7 @@ import {
   parseColumns,
   processRowKey,
   processUsers,
+  subtreeSummary,
   type ProcessColumn,
   type ProcessGrouping,
   type ProcessScope,
@@ -162,7 +167,7 @@ const StatePill: React.FC<{ state: SystemProcessState | undefined }> = ({ state 
 const INDENT_PX = 16;
 
 interface RowCallbacks {
-  onSelect: (pid: number) => void;
+  onSelect: (pid: number | null) => void;
   onToggle: (key: string) => void;
   onMenu: (proc: SystemProcessInfo, x: number, y: number) => void;
 }
@@ -250,13 +255,10 @@ const ProcessRow: React.FC<
       data-pid={proc.pid}
       tabIndex={0}
       aria-selected={selected}
-      onClick={() => onSelect(proc.pid)}
-      // Keyboard navigation selects as it moves. Focus that bubbled up from a
-      // control inside the row (chevron, actions, session chip) must not: a
-      // mousedown focuses the button before its click can stop propagating.
-      onFocus={(event) => {
-        if (event.target === event.currentTarget) onSelect(proc.pid);
-      }}
+      aria-expanded={selected}
+      // The selected row is the expanded one: a click opens its details, a
+      // second click folds them away.
+      onClick={() => onSelect(selected ? null : proc.pid)}
       onContextMenu={(event) => {
         event.preventDefault();
         onMenu(proc, event.clientX, event.clientY);
@@ -268,7 +270,9 @@ const ProcessRow: React.FC<
         !isManaged(proc) && !selected && "text-neutral-400"
       )}
     >
-      <td className="relative py-1.5 pl-2 pr-2">
+      {/* Clipped: in a fixed layout anything wider than the column would paint
+          over the Status and CPU cells beside it. */}
+      <td className="relative overflow-hidden py-1.5 pl-2 pr-2">
         {core && <span aria-hidden className="absolute inset-y-0 left-0 w-0.5 bg-info" />}
         <div className="flex min-w-0 items-center gap-1.5" style={{ paddingLeft: row.depth * INDENT_PX }}>
           <button
@@ -299,9 +303,10 @@ const ProcessRow: React.FC<
           <span className="min-w-0 truncate text-[11px] text-neutral-500" title={proc.cmdline}>
             {proc.cmdline}
           </span>
+          {/* The chip gives way before the name does; the expanded row names the session in full. */}
           {proc.sessionId && (
-            <span className="ml-auto shrink-0" onClick={(event) => event.stopPropagation()}>
-              <SessionChip sessionId={proc.sessionId} />
+            <span className="ml-auto flex min-w-[1.75rem] max-w-[10rem] shrink" onClick={(event) => event.stopPropagation()}>
+              <SessionChip sessionId={proc.sessionId} className="min-w-0 max-w-full" />
             </span>
           )}
         </div>
@@ -313,7 +318,20 @@ const ProcessRow: React.FC<
         now,
         isManaged(proc) ? "Not measured yet" : "Only readable for processes owned by the daemon's user"
       )}
-      <td className="w-9 px-1 py-1.5 text-right">
+      <td className="whitespace-nowrap px-1 py-1.5 text-right">
+        <button
+          type="button"
+          tabIndex={-1}
+          aria-label={selected ? `Hide details of ${processLabel(proc)}` : `Show details of ${processLabel(proc)}`}
+          title={selected ? "Hide details" : "Show details"}
+          onClick={(event) => {
+            event.stopPropagation();
+            onSelect(selected ? null : proc.pid);
+          }}
+          className="rounded p-1 text-neutral-500 hover:bg-neutral-700/60 hover:text-neutral-100"
+        >
+          <ChevronDown size={13} className={cn("transition-transform", selected && "rotate-180")} />
+        </button>
         <button
           type="button"
           tabIndex={-1}
@@ -379,7 +397,7 @@ const GroupRow: React.FC<{
         cell
       )
     )}
-    <td className="w-9" />
+    <td />
   </tr>
 );
 
@@ -424,43 +442,166 @@ const selectClass = cn(
   "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
 );
 
-const Detail: React.FC<{ label: string; children: React.ReactNode }> = ({ label, children }) => (
+const Detail: React.FC<{ label: string; title?: string; children: React.ReactNode }> = ({ label, title, children }) => (
   <div className="min-w-0">
     <dt className="text-[10px] text-neutral-500">{label}</dt>
-    <dd className="truncate text-xs tabular-nums text-neutral-200">{children}</dd>
+    <dd className="truncate text-xs tabular-nums text-neutral-200" title={title}>
+      {children}
+    </dd>
   </div>
 );
 
+const KIND_LABEL: Partial<Record<string, string>> = {
+  "agent-chat": "Agent chat",
+  agent: "Agent terminal",
+  shell: "Terminal"
+};
+
+/** A full-width value — a path or the command line — with a copy button. */
+const CopyLine: React.FC<{ label: string; value: string | null; placeholder: React.ReactNode }> = ({ label, value, placeholder }) => {
+  const [copied, setCopied] = useState(false);
+  useEffect(() => setCopied(false), [value]);
+  return (
+    <div className="min-w-0">
+      <div className="text-[10px] text-neutral-500">{label}</div>
+      <div className="mt-0.5 flex items-start gap-2 rounded-lg bg-neutral-950/60 px-2.5 py-1.5">
+        {value === null ? (
+          <span className="min-w-0 flex-1 text-[11px] text-neutral-500">{placeholder}</span>
+        ) : (
+          <code className="min-w-0 flex-1 whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed text-neutral-300">
+            {value}
+          </code>
+        )}
+        {value !== null && (
+          <button
+            type="button"
+            onClick={() => {
+              void copyText(value);
+              setCopied(true);
+            }}
+            aria-label={`Copy ${label.toLowerCase()}`}
+            title={`Copy ${label.toLowerCase()}`}
+            className="shrink-0 rounded p-0.5 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
+          >
+            {copied ? <Check size={12} className="text-ok" /> : <Copy size={12} />}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+};
+
+type DetailsState =
+  | { status: "loading" }
+  | { status: "ready"; details: SystemProcessDetailsResponse }
+  | { status: "error" };
+
+/**
+ * The on-demand half of a process' details (exe, cwd, open files, cgroup),
+ * fetched once per opened pid. A reply about a different process than the row
+ * — the pid was recycled in between — reads as gone.
+ */
+function useProcessDetails(proc: SystemProcessInfo): DetailsState {
+  const api = useApi();
+  const [state, setState] = useState<DetailsState>({ status: "loading" });
+  useEffect(() => {
+    const controller = new AbortController();
+    setState({ status: "loading" });
+    api.systemProcessDetails(proc.pid, controller.signal).then(
+      (details) => {
+        const recycled =
+          details.startedAt !== null && proc.startedAt !== undefined && Math.abs(details.startedAt - proc.startedAt) > 1000;
+        setState({ status: "ready", details: recycled ? { ...details, found: false } : details });
+      },
+      () => {
+        if (!controller.signal.aborted) setState({ status: "error" });
+      }
+    );
+    return () => controller.abort();
+  }, [api, proc.pid, proc.startedAt]);
+  return state;
+}
+
+const CHILDREN_SHOWN = 12;
+
+/**
+ * Everything about one process: what it belongs to, where it sits in the
+ * tree, its paths, its numbers and what runs under it. Renders inside the
+ * table under the expanded row, or as a panel below the table when that row is
+ * not on screen (filtered out, or folded inside a group).
+ */
 const ProcessDetails: React.FC<{
   proc: SystemProcessInfo;
+  processes: readonly SystemProcessInfo[];
   daemonPid: number;
-  parent: SystemProcessInfo | undefined;
   ports: SystemPortsResponse | null;
   now: number;
   busy: boolean;
+  /** Inline under its row, which already shows the name, state and PID. */
+  inline: boolean;
   onSelect: (pid: number) => void;
   onStop: (proc: SystemProcessInfo, signal?: KillProcessSignal) => void;
   onClose: () => void;
-}> = ({ proc, daemonPid, parent, ports, now, busy, onSelect, onStop, onClose }) => {
-  const [copied, setCopied] = useState(false);
-  useEffect(() => setCopied(false), [proc.pid]);
+}> = ({ proc, processes, daemonPid, ports, now, busy, inline, onSelect, onStop, onClose }) => {
+  const sessions = useAppStore((s) => s.sessions);
+  const workspaces = useAppStore((s) => s.workspaces);
+  const projects = useAppStore((s) => s.projects);
+  const extra = useProcessDetails(proc);
   const listening = ports?.ports.filter((entry) => entry.pid === proc.pid) ?? [];
   const stoppable = canStop(proc, daemonPid);
+  const ancestors = useMemo(() => ancestorsOf(processes, proc.pid), [processes, proc.pid]);
+  const subtree = useMemo(() => subtreeSummary(processes, proc.pid), [processes, proc.pid]);
+  const owner = proc.sessionId ? resolveSessionOwner(proc.sessionId, sessions, workspaces, projects) : null;
+  const details = extra.status === "ready" && extra.details.found ? extra.details : null;
+  const unread: React.ReactNode =
+    extra.status === "loading"
+      ? "Reading…"
+      : extra.status === "error"
+        ? "This server can't report it yet"
+        : !extra.details.found
+          ? "The process has exited"
+          : "Not readable — only the process' owner may see it";
+
   return (
     <section
       aria-label={`Details for ${processLabel(proc)}`}
       className={cn(
-        "space-y-3 rounded-xl border bg-neutral-900/60 px-4 py-3",
-        proc.role ? "border-info-900/60" : "border-neutral-800"
+        "space-y-3",
+        inline
+          ? "border-l-2 border-neutral-700 bg-neutral-950/40 px-4 py-3"
+          : cn("rounded-xl border bg-neutral-900/60 px-4 py-3", proc.role ? "border-info-900/60" : "border-neutral-800")
       )}
     >
       <div className="flex flex-wrap items-center gap-2">
-        <ProcessIcon proc={proc} size={16} />
-        <h4 className="text-sm font-medium text-neutral-100">{proc.name}</h4>
-        <span className="text-xs tabular-nums text-neutral-500">PID {proc.pid}</span>
-        {proc.role && <Badge tone="info">{ROLE_LABEL[proc.role]}</Badge>}
-        <StatePill state={proc.state} />
-        {proc.sessionId && <SessionChip sessionId={proc.sessionId} />}
+        {!inline && (
+          <>
+            <ProcessIcon proc={proc} size={16} />
+            <h4 className="text-sm font-medium text-neutral-100">{proc.name}</h4>
+            <span className="text-xs tabular-nums text-neutral-500">PID {proc.pid}</span>
+            {proc.role && <Badge tone="info">{ROLE_LABEL[proc.role]}</Badge>}
+            <StatePill state={proc.state} />
+          </>
+        )}
+        {ancestors.length > 0 && (
+          <nav aria-label="Parent processes" className="flex min-w-0 flex-wrap items-center gap-1 text-[11px] text-neutral-500">
+            {ancestors.map((ancestor) => (
+              <React.Fragment key={ancestor.pid}>
+                <button
+                  type="button"
+                  onClick={() => onSelect(ancestor.pid)}
+                  title={ancestor.cmdline}
+                  className="rounded px-1 hover:bg-neutral-800 hover:text-neutral-200"
+                >
+                  {ancestor.name} <span className="tabular-nums text-neutral-600">{ancestor.pid}</span>
+                </button>
+                <ChevronRight size={11} className="shrink-0 text-neutral-700" />
+              </React.Fragment>
+            ))}
+            <span className="px-1 text-neutral-200">
+              {proc.name} <span className="tabular-nums text-neutral-500">{proc.pid}</span>
+            </span>
+          </nav>
+        )}
         <div className="ml-auto flex items-center gap-1.5">
           {stoppable && (
             <button
@@ -496,52 +637,88 @@ const ProcessDetails: React.FC<{
         </div>
       </div>
 
+      {owner && proc.sessionId && (
+        <div className="flex min-w-0 flex-wrap items-center gap-2 text-xs">
+          <span className="text-[10px] text-neutral-500">Belongs to</span>
+          <SessionChip sessionId={proc.sessionId} className="max-w-[24rem] text-[11px]" />
+          <span className="text-neutral-500">
+            {KIND_LABEL[owner.kind] ?? owner.kind} in {owner.project.workspace ? `${owner.project.workspace}/` : ""}
+            {owner.project.name}
+          </span>
+        </div>
+      )}
+
       <dl className="grid grid-cols-2 gap-x-4 gap-y-2.5 sm:grid-cols-4 lg:grid-cols-6">
         <Detail label="CPU">{formatCpu(proc.cpuPercent)}</Detail>
         <Detail label="Memory">{formatBytes(proc.rssBytes)}</Detail>
         <Detail label="Disk read">{formatByteRate(proc.diskReadBps)}</Detail>
         <Detail label="Disk write">{formatByteRate(proc.diskWriteBps)}</Detail>
         <Detail label="Threads">{proc.threads ?? "—"}</Detail>
+        <Detail label="Open files">{details?.openFiles ?? "—"}</Detail>
         <Detail label="User">{proc.user ?? "—"}</Detail>
-        <Detail label="Parent">
-          {parent ? (
-            <button type="button" onClick={() => onSelect(parent.pid)} className="truncate text-left hover:text-info hover:underline">
-              {parent.name} ({parent.pid})
-            </button>
-          ) : (
-            proc.ppid || "—"
-          )}
-        </Detail>
-        <Detail label="Started">
-          {proc.startedAt ? (
-            <span title={new Date(proc.startedAt).toLocaleString()}>{formatDuration((now - proc.startedAt) / 1000)} ago</span>
-          ) : (
-            "—"
-          )}
+        <Detail label="Started" title={proc.startedAt ? new Date(proc.startedAt).toLocaleString() : undefined}>
+          {proc.startedAt ? `${formatDuration((now - proc.startedAt) / 1000)} ago` : "—"}
         </Detail>
         <Detail label="Listening on">
           {listening.length > 0 ? listening.map((entry) => `${entry.address}:${entry.port}`).join(", ") : "—"}
         </Detail>
         <Detail label="Started by Orquester">{isManaged(proc) ? "Yes" : "No — view only"}</Detail>
+        <Detail label="With subprocesses" title="This process plus everything under it">
+          {subtree.descendants > 0
+            ? `${formatCpu(subtree.cpuPercent)} · ${formatBytes(subtree.rssBytes)}`
+            : "—"}
+        </Detail>
+        <Detail label="cgroup" title={details?.cgroup ?? undefined}>
+          {details?.cgroup ?? "—"}
+        </Detail>
       </dl>
 
-      <div className="flex items-start gap-2 rounded-lg bg-neutral-950/60 px-2.5 py-2">
-        <code className="min-w-0 flex-1 whitespace-pre-wrap break-all font-mono text-[11px] leading-relaxed text-neutral-300">
-          {proc.cmdline}
-        </code>
-        <button
-          type="button"
-          onClick={() => {
-            void copyText(proc.cmdline);
-            setCopied(true);
-          }}
-          aria-label="Copy command line"
-          title="Copy command line"
-          className="shrink-0 rounded p-1 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-200"
-        >
-          {copied ? <Check size={12} className="text-ok" /> : <Copy size={12} />}
-        </button>
+      <div className="grid gap-2 lg:grid-cols-2">
+        <CopyLine label="Executable" value={details?.exe ?? null} placeholder={unread} />
+        <CopyLine label="Working directory" value={details?.cwd ?? null} placeholder={unread} />
       </div>
+      <CopyLine label="Command line" value={proc.cmdline} placeholder="—" />
+
+      {subtree.children.length > 0 && (
+        <div className="min-w-0">
+          <div className="text-[10px] text-neutral-500">
+            Subprocesses · {subtree.children.length} direct
+            {subtree.descendants > subtree.children.length ? `, ${subtree.descendants} in all` : ""}
+          </div>
+          <ul className="mt-1 divide-y divide-neutral-800/60 overflow-hidden rounded-lg border border-neutral-800/80">
+            {subtree.children.slice(0, CHILDREN_SHOWN).map((child) => {
+              const under = subtreeSummary(processes, child.pid).descendants;
+              return (
+                <li key={child.pid}>
+                  <button
+                    type="button"
+                    onClick={() => onSelect(child.pid)}
+                    title={child.cmdline}
+                    className="flex w-full min-w-0 items-center gap-2 px-2.5 py-1 text-left hover:bg-neutral-800/50"
+                  >
+                    <ProcessIcon proc={child} />
+                    <span className="shrink-0 text-xs font-medium text-neutral-200">{child.name}</span>
+                    {under > 0 && <span className="shrink-0 text-[10px] tabular-nums text-neutral-500">+{under}</span>}
+                    <span className="min-w-0 flex-1 truncate font-mono text-[10px] text-neutral-500">{child.cmdline}</span>
+                    <span className="w-14 shrink-0 text-right text-[11px] tabular-nums text-neutral-400">
+                      {formatCpu(child.cpuPercent)}
+                    </span>
+                    <span className="w-16 shrink-0 text-right text-[11px] tabular-nums text-neutral-400">
+                      {formatBytes(child.rssBytes)}
+                    </span>
+                    <span className="w-16 shrink-0 text-right text-[11px] tabular-nums text-neutral-500">{child.pid}</span>
+                  </button>
+                </li>
+              );
+            })}
+          </ul>
+          {subtree.children.length > CHILDREN_SHOWN && (
+            <p className="mt-1 text-[10px] text-neutral-500">
+              and {subtree.children.length - CHILDREN_SHOWN} more — the parent → child tree lists them all
+            </p>
+          )}
+        </div>
+      )}
     </section>
   );
 };
@@ -584,15 +761,19 @@ export const TaskManager: React.FC<{
   const rows = useMemo(() => buildRows(visible, grouping, sort, toggled), [visible, grouping, sort, toggled]);
   const byPid = useMemo(() => new Map(snapshot.processes.map((proc) => [proc.pid, proc])), [snapshot.processes]);
   const selected = selectedPid === null ? undefined : byPid.get(selectedPid);
+  // The selected row expands in place; one that is not on screen (filtered out,
+  // folded in a group) shows its details in a panel under the table instead.
+  const selectedInline = selected !== undefined && rows.some((row) => row.kind === "process" && row.proc.pid === selected.pid);
   const now = Date.now();
   const filtered = visible.length !== snapshot.processes.length;
 
-  // A selection made from outside the table (the core cards) scrolls its row
-  // into view when that row is rendered.
+  // Opening a row brings its details into view, then the row itself, so a tall
+  // panel never pushes the row it belongs to out of sight.
   useEffect(() => {
     if (selectedPid === null) return;
-    const row = bodyRef.current?.querySelector<HTMLElement>(`tr[data-pid="${selectedPid}"]`);
-    if (row && document.activeElement !== row) row.scrollIntoView({ block: "nearest" });
+    const body = bodyRef.current;
+    body?.querySelector<HTMLElement>(`tr[data-details-for="${selectedPid}"]`)?.scrollIntoView({ block: "nearest" });
+    body?.querySelector<HTMLElement>(`tr[data-pid="${selectedPid}"]`)?.scrollIntoView({ block: "nearest" });
   }, [selectedPid]);
 
   const toggle = (key: string) =>
@@ -682,23 +863,37 @@ export const TaskManager: React.FC<{
   };
 
   /**
-   * Arrow keys walk the rows, Left/Right fold a tree node, Delete asks to stop
-   * and Shift+Delete to force kill.
+   * Arrow keys walk the rows, Enter opens or folds a row's details,
+   * Left/Right fold a tree node, Delete asks to stop and Shift+Delete to
+   * force kill.
    */
   const onBodyKeyDown = (event: React.KeyboardEvent<HTMLTableSectionElement>) => {
     const row = (event.target as HTMLElement).closest("tr");
-    if (!row) return;
+    // Keys typed inside an expanded details panel belong to its own controls.
+    if (!row || row.dataset.detailsFor !== undefined) return;
     const pid = Number(row.dataset.pid);
     const proc = Number.isInteger(pid) ? byPid.get(pid) : undefined;
     const rowModel = proc ? rows.find((candidate) => candidate.kind === "process" && candidate.proc.pid === pid) : undefined;
+    // The next focusable row, stepping over an expanded details row.
+    const step = (from: Element | null, next: (element: Element) => Element | null): HTMLElement | null => {
+      let cursor = from ? next(from) : null;
+      while (cursor && (cursor as HTMLElement).dataset.detailsFor !== undefined) cursor = next(cursor);
+      return cursor as HTMLElement | null;
+    };
     switch (event.key) {
       case "ArrowDown":
         event.preventDefault();
-        (row.nextElementSibling as HTMLElement | null)?.focus();
+        step(row, (element) => element.nextElementSibling)?.focus();
         break;
       case "ArrowUp":
         event.preventDefault();
-        (row.previousElementSibling as HTMLElement | null)?.focus();
+        step(row, (element) => element.previousElementSibling)?.focus();
+        break;
+      case "Enter":
+        if (proc && event.target === row) {
+          event.preventDefault();
+          onSelect(proc.pid === selectedPid ? null : proc.pid);
+        }
         break;
       case "ArrowRight":
       case "ArrowLeft":
@@ -817,7 +1012,7 @@ export const TaskManager: React.FC<{
             {shownColumns.map((column) => (
               <col key={column} className={COLUMN_META[column].width} />
             ))}
-            <col className="w-9" />
+            <col className="w-16" />
           </colgroup>
           <thead>
             <tr className="border-b border-neutral-800">
@@ -847,18 +1042,37 @@ export const TaskManager: React.FC<{
               row.kind === "group" ? (
                 <GroupRow key={row.key} row={row} columns={shownColumns} memoryTotal={memoryTotal} now={now} onToggle={toggle} />
               ) : (
-                <ProcessRow
-                  key={row.key}
-                  row={row}
-                  columns={shownColumns}
-                  memoryTotal={memoryTotal}
-                  now={now}
-                  selected={row.proc.pid === selectedPid}
-                  busy={row.proc.pid === busyPid}
-                  onSelect={onSelect}
-                  onToggle={toggle}
-                  onMenu={(proc, x, y) => setMenu({ proc, x, y })}
-                />
+                <React.Fragment key={row.key}>
+                  <ProcessRow
+                    row={row}
+                    columns={shownColumns}
+                    memoryTotal={memoryTotal}
+                    now={now}
+                    selected={row.proc.pid === selectedPid}
+                    busy={row.proc.pid === busyPid}
+                    onSelect={onSelect}
+                    onToggle={toggle}
+                    onMenu={(proc, x, y) => setMenu({ proc, x, y })}
+                  />
+                  {row.proc.pid === selectedPid && (
+                    <tr data-details-for={row.proc.pid} className="border-b border-neutral-800/60">
+                      <td colSpan={shownColumns.length + 2} className="p-0">
+                        <ProcessDetails
+                          proc={row.proc}
+                          processes={snapshot.processes}
+                          daemonPid={snapshot.daemonPid}
+                          ports={ports}
+                          now={now}
+                          busy={busyPid === row.proc.pid}
+                          inline
+                          onSelect={onSelect}
+                          onStop={askStop}
+                          onClose={() => onSelect(null)}
+                        />
+                      </td>
+                    </tr>
+                  )}
+                </React.Fragment>
               )
             )}
           </tbody>
@@ -882,14 +1096,15 @@ export const TaskManager: React.FC<{
         )}
       </div>
 
-      {selected && (
+      {selected && !selectedInline && (
         <ProcessDetails
           proc={selected}
+          processes={snapshot.processes}
           daemonPid={snapshot.daemonPid}
-          parent={byPid.get(selected.ppid)}
           ports={ports}
           now={now}
           busy={busyPid === selected.pid}
+          inline={false}
           onSelect={onSelect}
           onStop={askStop}
           onClose={() => onSelect(null)}

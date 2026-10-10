@@ -19,6 +19,7 @@ import {
   isVirtualInterface,
   launchMarkerOf,
   parseBootTime,
+  parseCgroupPath,
   parseCmdline,
   parseCpuSample,
   parseDiskStats,
@@ -319,6 +320,21 @@ test("parsePasswd maps uids to names and skips malformed lines", () => {
 test("parseBootTime reads btime from /proc/stat", () => {
   assert.equal(parseBootTime("cpu  1 2 3 4\nbtime 1700000000\nprocesses 5\n"), 1700000000);
   assert.equal(parseBootTime("cpu  1 2 3 4\n"), null);
+});
+
+test("parseCgroupPath prefers the unified v2 line, then v1's systemd hierarchy", () => {
+  assert.equal(parseCgroupPath("0::/system.slice/orquester.service\n"), "/system.slice/orquester.service");
+  assert.equal(
+    parseCgroupPath("12:cpu,cpuacct:/user.slice\n1:name=systemd:/user.slice/session-3.scope\n0::/\n"),
+    "/"
+  );
+  assert.equal(
+    parseCgroupPath("12:cpu,cpuacct:/user.slice\n1:name=systemd:/user.slice/session-3.scope\n"),
+    "/user.slice/session-3.scope"
+  );
+  assert.equal(parseCgroupPath("4:memory:/docker/abc\n"), "/docker/abc");
+  assert.equal(parseCgroupPath(""), null);
+  assert.equal(parseCgroupPath("garbage"), null);
 });
 
 test("ratePerSecond and processCpuPercent refuse resets and empty intervals", () => {
@@ -705,6 +721,26 @@ test("processes() lists the whole host, marks our tree managed and tags the daem
     child.kill("SIGKILL");
     await allGone(exited, "the sleep exiting");
   }
+});
+
+test("processDetails() resolves our own exe and cwd, refuses a bad pid and reports a gone one", async () => {
+  if (!SYSTEM_STATUS_SUPPORTED) return;
+  const status = service();
+  const self = await status.processDetails(process.pid);
+  assert.equal(self?.found, true);
+  assert.equal(self?.exe, process.execPath);
+  assert.equal(self?.cwd, process.cwd());
+  assert.ok((self?.openFiles ?? 0) >= 3, "stdin, stdout and stderr at least");
+  assert.ok(self?.startedAt && Math.abs(self.startedAt - (Date.now() - process.uptime() * 1000)) < 5_000);
+
+  assert.equal(await status.processDetails(0), null);
+  assert.equal(await status.processDetails(Number.NaN), null);
+
+  const child = spawn("true", [], { stdio: "ignore" });
+  await once(child, "exit");
+  const gone = await status.processDetails(child.pid!);
+  assert.equal(gone?.found, false);
+  assert.equal(gone?.exe, null);
 });
 
 test("resources() reports host rates, load, uptime and identity", async () => {
