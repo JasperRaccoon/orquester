@@ -1,6 +1,7 @@
 import { open, readFile, readdir, stat, writeFile, mkdir, realpath } from "node:fs/promises";
 import { join, dirname } from "node:path";
 import type { UsageTokenRow, UsageTokensResponse } from "@orquester/api";
+import type { SubagentRequest } from "./subagent-cache-ttl.ts";
 
 // USD per 1,000,000 tokens. Update when models ship. Subscription users don't
 // pay per token — this is an "API-equivalent" estimate, labeled as such.
@@ -65,6 +66,9 @@ interface RawRow {
   /** Stable identity for cross-file de-duplication (Claude resume/branch copies
    *  prior turns, each still carrying message.usage). Undefined = always count. */
   dedupId?: string;
+  /** Set on a Claude subagent's request: which subagent, and when (epoch ms). */
+  sub?: string;
+  ts?: number;
 }
 
 function aggregateRows(raw: RawRow[]): UsageTokenRow[] {
@@ -122,8 +126,9 @@ function dayOf(iso: string | undefined, fallbackMs: number): string {
 /** Parse a Claude `projects/**.jsonl` transcript into per-turn rows. Each row
  *  carries a dedupId (message.id + requestId, the fields ccusage hashes) so
  *  turns copied into resumed/branched transcripts are counted only once. */
-function parseClaudeFile(text: string, mtimeMs: number): RawRow[] {
+function parseClaudeFile(text: string, mtimeMs: number, path: string): RawRow[] {
   const rows: RawRow[] = [];
+  const inSubagentsDir = path.split(/[\\/]/).includes("subagents");
   for (const line of text.split("\n")) {
     if (!line.trim()) continue;
     let obj: any;
@@ -145,7 +150,7 @@ function parseClaudeFile(text: string, mtimeMs: number): RawRow[] {
     const requestId = obj?.requestId;
     const dedupId =
       typeof messageId === "string" && typeof requestId === "string" ? `${messageId}:${requestId}` : undefined;
-    rows.push({
+    const row: RawRow = {
       agent: "claude",
       model: obj?.message?.model ?? "unknown",
       day: dayOf(obj?.timestamp, mtimeMs),
@@ -155,7 +160,16 @@ function parseClaudeFile(text: string, mtimeMs: number): RawRow[] {
       cacheWrite,
       cacheWrite1h: u.cache_creation?.ephemeral_1h_input_tokens ?? 0,
       dedupId
-    });
+    };
+    const agentId = typeof obj.agentId === "string" && obj.agentId ? obj.agentId : undefined;
+    if (obj.isSidechain === true || agentId || inSubagentsDir) {
+      const ts = Date.parse(obj.timestamp);
+      if (Number.isFinite(ts)) {
+        row.sub = agentId ?? path;
+        row.ts = ts;
+      }
+    }
+    rows.push(row);
   }
   return rows;
 }
@@ -248,6 +262,8 @@ export class UsageTokensScanner {
    *  so partial rescans stay correct. */
   private fileCache = new Map<string, FileEntry>();
 
+  /** False until one recompute has walked every transcript. */
+  private scanned = false;
   private inflight: Promise<void> | null = null;
   private rerun = false;
   private lastRunMs = 0;
@@ -274,6 +290,20 @@ export class UsageTokensScanner {
   async snapshot(force = false): Promise<UsageTokensResponse> {
     if (force) await this.recompute();
     return this.cache;
+  }
+
+  /**
+   * Claude subagent requests since `sinceMs`, each counted once; null until the
+   * transcripts have been scanned (a daemon that just started knows nothing yet).
+   */
+  subagentRequests(sinceMs: number): SubagentRequest[] | null {
+    if (!this.scanned) return null;
+    const out: SubagentRequest[] = [];
+    for (const r of this.dedupedRows()) {
+      if (r.sub === undefined || r.ts === undefined || r.ts < sinceMs) continue;
+      out.push({ sub: r.sub, ts: r.ts, cacheRead: r.cacheRead, cacheWrite: r.cacheWrite, cacheWrite1h: r.cacheWrite1h });
+    }
+    return out;
   }
 
   /** File-watcher entry point: rate-limited (leading run + one coalesced
@@ -345,8 +375,15 @@ export class UsageTokensScanner {
       await this.updateFile(path, agent, { mtimeMs: st.mtimeMs, size: st.size });
     }
 
-    // Assemble with deterministic cross-file dedup (first file wins by sorted
-    // path) so a partial rescan can't double-count a shared usage identity.
+    this.scanned = true;
+    this.cache = { rows: aggregateRows(this.dedupedRows()), asOf: new Date(this.opts.now()).toISOString() };
+    await mkdir(dirname(this.opts.cacheFile), { recursive: true });
+    await writeFile(this.opts.cacheFile, JSON.stringify(this.cache), { mode: 0o600 });
+  }
+
+  /** Every parsed row, with deterministic cross-file dedup (first file wins by
+   *  sorted path) so a partial rescan can't double-count a shared usage identity. */
+  private dedupedRows(): RawRow[] {
     const raw: RawRow[] = [];
     const seen = new Set<string>();
     for (const path of [...this.fileCache.keys()].sort()) {
@@ -359,10 +396,7 @@ export class UsageTokensScanner {
         raw.push(r);
       }
     }
-
-    this.cache = { rows: aggregateRows(raw), asOf: new Date(this.opts.now()).toISOString() };
-    await mkdir(dirname(this.opts.cacheFile), { recursive: true });
-    await writeFile(this.opts.cacheFile, JSON.stringify(this.cache), { mode: 0o600 });
+    return raw;
   }
 
   /** Parse a changed file into its cache entry. Append-only growth (size grew)
@@ -400,8 +434,8 @@ export class UsageTokensScanner {
     const completeBuf = lastNl >= 0 ? buf.subarray(0, lastNl + 1) : Buffer.alloc(0);
     const tailBuf = lastNl >= 0 ? buf.subarray(lastNl + 1) : buf;
     if (agent === "claude") {
-      entry.rows.push(...parseClaudeFile(completeBuf.toString("utf8"), st.mtimeMs));
-      entry.tailRows = tailBuf.length > 0 ? parseClaudeFile(tailBuf.toString("utf8"), st.mtimeMs) : [];
+      entry.rows.push(...parseClaudeFile(completeBuf.toString("utf8"), st.mtimeMs, path));
+      entry.tailRows = tailBuf.length > 0 ? parseClaudeFile(tailBuf.toString("utf8"), st.mtimeMs, path) : [];
     } else {
       entry.rows.push(...parseCodexFile(completeBuf.toString("utf8"), st.mtimeMs, entry.codexState));
       entry.tailRows =

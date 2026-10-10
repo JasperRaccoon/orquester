@@ -73,6 +73,7 @@ import type {
   UpdateTodoRequest,
   UpdateWorkspaceRequest,
   UsageResponse,
+  SubagentCacheTtlStatus,
   UsageTokensResponse,
   WorkspaceSummary
 } from "@orquester/api";
@@ -1087,6 +1088,10 @@ export class ApiClient {
 
   getUsageTokens(force?: boolean, signal?: AbortSignal): Promise<UsageTokensResponse> {
     return this.send("GET", `/api/usage/tokens${force ? "?refresh=1" : ""}`, { signal });
+  }
+
+  getSubagentCacheTtlStatus(signal?: AbortSignal): Promise<SubagentCacheTtlStatus> {
+    return this.send("GET", "/api/usage/subagent-cache-ttl", { signal });
   }
 
   getAgentAccounts(signal?: AbortSignal): Promise<AgentAccountsResponse> {

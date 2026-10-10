@@ -786,6 +786,28 @@ export interface UsageTokensResponse {
   asOf: string;
 }
 
+/** One auto-mode check of the Claude subagent prompt-cache lifetime. */
+export interface SubagentCacheTtlCheck {
+  at: string;
+  /** `hold`: within the margin, the previous choice stayed. `insufficient`: too few requests to judge. */
+  outcome: "1h" | "5m" | "hold" | "insufficient";
+  /** Subagent requests looked at, over the trailing `windowDays`. */
+  requests: number;
+  windowDays: number;
+  /** Estimated cache cost of 1h relative to 5m, in percent; null when not judged. */
+  changePct: number | null;
+}
+/** `GET /api/usage/subagent-cache-ttl`: the `claudeSubagentCacheTtl` pref as it applies right now. */
+export interface SubagentCacheTtlStatus {
+  mode: "auto" | "1h" | "5m";
+  /** What the next Claude launch gets. */
+  ttl: "1h" | "5m";
+  /** Auto's last check; null before the first one. */
+  lastCheck: SubagentCacheTtlCheck | null;
+  /** When auto checks again; null in a fixed mode or before the first check. */
+  nextCheckAt: string | null;
+}
+
 // Web Push — the PWA subscribes browsers to attention pushes that fire when an
 // agent session rings the terminal bell. The daemon owns a VAPID keypair; only
 // the public key ever crosses the wire (the private key stays in push.json).

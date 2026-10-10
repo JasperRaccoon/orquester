@@ -82,6 +82,7 @@ import type {
   UpdateWorkspaceRequest,
   UsageAccount,
   UsageResponse,
+  SubagentCacheTtlStatus,
   UsageWindow,
   WorkspaceSummary
 } from "@orquester/api";
@@ -141,6 +142,7 @@ import { PushService, isValidPushEndpoint } from "./push";
 import { GitError, GitService, GitWatcher, passesGitEventFilter, workingDiffMaxBytes } from "./git";
 import { UsageService } from "./usage";
 import { UsageTokensScanner } from "./usage-tokens";
+import { SubagentCacheTtlController, type SubagentCacheTtl } from "./subagent-cache-ttl";
 import {
   createClaudeSource,
   createCodexSource,
@@ -214,6 +216,7 @@ import {
   tmuxSocketPath,
   todosIndexPath,
   usageTokensCacheFile,
+  subagentCacheTtlStateFile,
   usageStateFile,
   workspacesMetaPath,
   isValidName
@@ -447,8 +450,33 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     now: () => Date.now(),
     logger: console
   });
+  const usageTokens = new UsageTokensScanner({
+    userhome: resolved.vars.userhome,
+    cacheFile: usageTokensCacheFile(paths.baseDir),
+    now: () => Date.now(),
+    accountHomes: () => [
+      // Token-transcript scanning knows the Claude/Codex session formats only;
+      // grok homes are skipped (Grok Build has no scanner support yet).
+      ...agentAccounts
+        .list()
+        .accounts.filter((a): a is typeof a & { agent: "claude" | "codex" } => a.agent !== "grok")
+        .map((a) => ({ agent: a.agent, home: agentAccounts.homePath(a.agent, a.id) }))
+    ]
+  });
+  // Auto mode of the Claude subagent cache lifetime decides from the requests
+  // the scanner already holds. A daemon that just started has scanned nothing:
+  // ask for a scan and keep the stored decision until it is in.
+  const subagentCacheTtl = new SubagentCacheTtlController({
+    stateFile: subagentCacheTtlStateFile(paths.baseDir),
+    now: () => Date.now(),
+    requests: (sinceMs) => {
+      const requests = usageTokens.subagentRequests(sinceMs);
+      if (!requests) usageTokens.requestRecompute();
+      return requests;
+    }
+  });
   /**
-   * The full launch env for one agent — account home and the Claude timeout.
+   * The full launch env for one agent — account home and the Claude harness options.
    * Lifted out of the
    * session manager's `resolveExtraEnv` seam because a chat thread must get
    * EXACTLY the env a terminal launch gets today (chat spec §3.1 "Launch
@@ -460,10 +488,14 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // launch so a settings change applies to the next session with no daemon
     // restart; readAppConfigFile already falls back to schema defaults on a
     // missing or corrupt file, so this cannot throw.
-    const { claudeTimeoutMinutes } = (await readAppConfigFile(resolved.appConfigFile)).agents;
+    const { claudeTimeoutMinutes, claudeSubagentCacheTtl } = (await readAppConfigFile(resolved.appConfigFile)).agents;
     return buildAgentLaunchEnv(
       entry.id,
-      claudeTimeoutMinutes,
+      {
+        timeoutMinutes: claudeTimeoutMinutes,
+        // Only a Claude launch reads it, and only auto mode has anything to decide.
+        subagentCacheTtl: entry.id === "claude" ? await subagentCacheTtl.resolve(claudeSubagentCacheTtl) : "5m"
+      },
       await agentAccounts.resolveLaunchEnv(entry.id, ctx.accountId)
     );
   };
@@ -750,20 +782,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // saw zero managed accounts, fell back to the System login — expired on a host
   // that only uses managed accounts — and cached "Claude: not logged in" for a
   // full 5-minute tick after every daemon restart.
-  const usageTokens = new UsageTokensScanner({
-    userhome: resolved.vars.userhome,
-    cacheFile: usageTokensCacheFile(paths.baseDir),
-    now: () => Date.now(),
-    accountHomes: () => [
-      // Token-transcript scanning knows the Claude/Codex session formats only;
-      // grok homes are skipped (Grok Build has no scanner support yet).
-      ...agentAccounts
-        .list()
-        .accounts.filter((a): a is typeof a & { agent: "claude" | "codex" } => a.agent !== "grok")
-        .map((a) => ({ agent: a.agent, home: agentAccounts.homePath(a.agent, a.id) }))
-    ]
-  });
   await usageTokens.init();
+  await subagentCacheTtl.init();
   {
     const { watch } = await import("node:fs");
     // With dozens of live agent sessions the watchers fire continuously; keep
@@ -1056,7 +1076,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   });
   grokDeviceLink.events.on("changed", (status) => broadcaster.publish("agent-accounts", "grok-link.changed", status));
   const services: Services = {
-    registry, sessions, grokDeviceLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
+    registry, sessions, grokDeviceLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     desktops, desktopAudio,
     agentProfile,
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
@@ -1211,21 +1231,23 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
 /** One launch-env contribution: env vars, optional unsets, effective account. */
 type LaunchEnv = { env: Record<string, string>; unset?: string[]; accountId?: string };
 
-/** Add Claude timeouts while preserving the managed account and credential removals. */
+/** Add the Claude harness options while preserving the managed account and credential removals. */
 export function buildAgentLaunchEnv(
   entryId: string,
-  claudeTimeoutMinutes: number,
+  claude: { timeoutMinutes: number; subagentCacheTtl: SubagentCacheTtl },
   accountEnv: LaunchEnv | null
 ): LaunchEnv | null {
   const isClaude = entryId === "claude";
   if (!accountEnv && !isClaude) return null;
   const merged: LaunchEnv = { env: { ...accountEnv?.env } };
   if (isClaude) {
-    const ms = String(claudeTimeoutMinutes * 60_000);
+    const ms = String(claude.timeoutMinutes * 60_000);
     Object.assign(merged.env, {
       API_TIMEOUT_MS: ms,
       CLAUDE_STREAM_IDLE_TIMEOUT_MS: ms,
-      CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS: ms
+      CLAUDE_BYTE_STREAM_IDLE_TIMEOUT_MS: ms,
+      // Takes precedence over `subagentPromptCacheTtl` in Claude's own settings.
+      CLAUDE_CODE_SUBAGENT_PROMPT_CACHE_TTL: claude.subagentCacheTtl
     });
   }
   if (accountEnv?.unset?.length) merged.unset = [...accountEnv.unset];
@@ -1276,6 +1298,8 @@ interface Services {
   internalApi: InjectDaemonApi | null;
   usage: UsageService;
   usageTokens: UsageTokensScanner;
+  /** The Claude subagent cache lifetime as it applies now (auto mode's decision). */
+  subagentCacheTtl: SubagentCacheTtlController;
   push: PushService;
   broadcaster: Broadcaster;
   agentAccounts: AgentAccountsService;
@@ -1302,7 +1326,7 @@ export function createServer(
   services: Services,
   options: { authRequired: boolean; mode: "local" | "remote"; serveWeb?: string }
 ): FastifyInstance {
-  const { registry, sessions, accounts, git, todos, recentProjects, usage, usageTokens, push, agentAccounts } = services;
+  const { registry, sessions, accounts, git, todos, recentProjects, usage, usageTokens, subagentCacheTtl, push, agentAccounts } = services;
 
   const app = Fastify({
     // Remote requests arrive via Caddy on loopback (reverse_proxy 127.0.0.1:47831),
@@ -3200,6 +3224,11 @@ export function createServer(
     const force = (request.query as { refresh?: string })?.refresh === "1";
     return usageTokens.snapshot(force);
   });
+
+  // Read fresh, like a launch does: this is what the next Claude session gets.
+  app.get("/api/usage/subagent-cache-ttl", async (): Promise<SubagentCacheTtlStatus> =>
+    subagentCacheTtl.status((await readAppConfigFile(resolved.appConfigFile)).agents.claudeSubagentCacheTtl)
+  );
 
   // Managed agent accounts (Claude/Codex credential homes) — import/list/remove/defaults.
   app.get("/api/agent-accounts", async () => agentAccounts.list());

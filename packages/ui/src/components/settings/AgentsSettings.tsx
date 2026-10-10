@@ -1,11 +1,19 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useCallback, useEffect, useRef, useState } from "react";
 import { Boxes, Download, Loader2, MessageSquare, RefreshCw } from "lucide-react";
-import type { RegistryEntry } from "@orquester/api";
+import type { RegistryEntry, SubagentCacheTtlStatus } from "@orquester/api";
+import type { AgentPrefs } from "@orquester/config";
 import { Button, Input } from "../ui";
 import { getRegistryIcon } from "../../icons";
 import { useRegistry } from "../../hooks";
 import { useAppStore } from "../../store/app";
-import { Badge, EmptyState, SettingRow, SettingsPage, SettingsSection } from "./primitives";
+import { describeSubagentCacheTtl } from "../../lib/subagent-cache-ttl";
+import { Badge, EmptyState, SegmentedControl, SettingRow, SettingsPage, SettingsSection } from "./primitives";
+
+const CACHE_TTL_OPTIONS: { value: AgentPrefs["claudeSubagentCacheTtl"]; label: string; title: string }[] = [
+  { value: "auto", label: "Auto", title: "Pick the cheaper one from recent subagent usage, re-checked every week" },
+  { value: "1h", label: "Always 1h", title: "Subagents always keep their prompt cache for an hour" },
+  { value: "5m", label: "Always 5m", title: "Subagents always keep their prompt cache for 5 minutes" }
+];
 
 const firstLine = (text: string) => text.split("\n").find((l) => l.trim())?.trim().slice(0, 80) ?? "";
 
@@ -55,6 +63,31 @@ export const AgentsSettings: React.FC = () => {
   const persistRef = useRef(persistTimeout);
   persistRef.current = persistTimeout;
   useEffect(() => () => void persistRef.current(), []);
+
+  // What auto mode decided lives on the daemon. Asked on open and after each
+  // change of the picker; only the latest answer is kept. An older daemon has
+  // no such route and simply shows no status line.
+  const api = useAppStore((s) => s.api);
+  const [cacheTtlStatus, setCacheTtlStatus] = useState<SubagentCacheTtlStatus | null>(null);
+  const cacheTtlAsk = useRef(0);
+  const loadCacheTtlStatus = useCallback(async () => {
+    const ask = ++cacheTtlAsk.current;
+    const status = (await api?.getSubagentCacheTtlStatus().catch(() => null)) ?? null;
+    if (ask === cacheTtlAsk.current) setCacheTtlStatus(status);
+  }, [api]);
+  useEffect(() => {
+    void loadCacheTtlStatus();
+    // Drop an answer that lands after the panel closed.
+    return () => void cacheTtlAsk.current++;
+  }, [loadCacheTtlStatus]);
+
+  const setCacheTtl = async (mode: AgentPrefs["claudeSubagentCacheTtl"]) => {
+    if (mode === agentPrefs.claudeSubagentCacheTtl) return;
+    // The daemon answers for the mode it has stored, so ask once the save landed.
+    await updateAgentPrefs({ ...agentPrefs, claudeSubagentCacheTtl: mode });
+    await loadCacheTtlStatus();
+  };
+  const cacheTtlAuto = agentPrefs.claudeSubagentCacheTtl === "auto";
 
   const installed = registry.agents.filter((a) => a.enabled);
   const available = registry.agents.filter((a) => !a.enabled);
@@ -114,6 +147,27 @@ export const AgentsSettings: React.FC = () => {
               min <span className="text-neutral-600">· 1–30</span>
             </span>
           </div>
+        </SettingRow>
+        <SettingRow
+          label="Subagent cache lifetime"
+          description={
+            <>
+              How long Claude subagents keep their prompt cache. 1h costs more on every cache write and only pays
+              off when subagents often wait more than 5 minutes between requests, on long builds or tests. Auto
+              compares both on the last 14 days of subagent usage once a week and uses the cheaper one. Takes effect
+              for newly launched sessions.
+              {cacheTtlAuto && cacheTtlStatus?.mode === "auto" && (
+                <span className="mt-1 block text-neutral-400">{describeSubagentCacheTtl(cacheTtlStatus)}</span>
+              )}
+            </>
+          }
+        >
+          <SegmentedControl
+            ariaLabel="Subagent cache lifetime"
+            value={agentPrefs.claudeSubagentCacheTtl}
+            onChange={(mode) => void setCacheTtl(mode)}
+            options={CACHE_TTL_OPTIONS}
+          />
         </SettingRow>
       </SettingsSection>
     </SettingsPage>

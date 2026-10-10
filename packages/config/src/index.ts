@@ -210,6 +210,11 @@ export function usageStateFile(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "usage-state.json");
 }
 
+/** Auto mode's current subagent prompt-cache decision and when it is next checked; 0600. */
+export function subagentCacheTtlStateFile(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "subagent-cache-ttl.json");
+}
+
 // --- agent chat: the host-owned thread store (spec §5.1) -------------------
 //
 //   <appdir>/daemon/agent/
@@ -492,6 +497,13 @@ export const agentPrefsSchema = z.object({
    */
   claudeTimeoutMinutes: z.number().int().min(1).max(30).default(30),
   /**
+   * Prompt-cache lifetime for Claude subagents, injected at every Claude
+   * launch. A 1h cache write costs 2x input instead of 1.25x, so it only pays
+   * off when subagents sit idle past 5 minutes often enough; `auto` lets the
+   * daemon decide from recent usage (see subagentCacheTtlStateSchema).
+   */
+  claudeSubagentCacheTtl: z.enum(["auto", "1h", "5m"]).default("auto"),
+  /**
    * Agent chat §3.3: after the host restarts, whether a thread whose turn was
    * interrupted is continued from its saved provider resume cursor. Host-wide
    * default, **off** — "pick up where you left off" is wrong for a project
@@ -514,6 +526,35 @@ export type AgentPrefs = z.infer<typeof agentPrefsSchema>;
  */
 export function continueThreadsForProject(prefs: AgentPrefs, projectPath: string): boolean {
   return prefs.continueThreadsByProject[projectPath] ?? prefs.continueThreadsAfterRestart;
+}
+
+export type SubagentCacheTtlMode = AgentPrefs["claudeSubagentCacheTtl"];
+
+// subagent-cache-ttl.json (auto mode's decision; daemon-side)
+
+/**
+ * What auto mode last decided for `claudeSubagentCacheTtl`. Derived from the
+ * transcripts, so a file that cannot be trusted is dropped and decided again.
+ */
+export const subagentCacheTtlStateSchema = z.object({
+  version: z.literal(1),
+  /** The lifetime Claude launches get until the next check. */
+  ttl: z.enum(["1h", "5m"]),
+  /** Epoch ms of the check that produced `ttl`, and of the next one. */
+  checkedAt: z.number().finite(),
+  nextCheckAt: z.number().finite(),
+  /** `hold`: within the margin, the previous choice stayed. `insufficient`: too few requests to judge. */
+  outcome: z.enum(["1h", "5m", "hold", "insufficient"]),
+  /** Subagent requests the check looked at. */
+  requests: z.number().finite(),
+  /** Estimated cache cost of 1h relative to 5m, in percent; null when not judged. */
+  changePct: z.number().finite().nullable()
+});
+export type SubagentCacheTtlState = z.infer<typeof subagentCacheTtlStateSchema>;
+
+export function parseSubagentCacheTtlState(value: unknown): SubagentCacheTtlState | null {
+  const parsed = subagentCacheTtlStateSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
 }
 
 // agent-accounts.json (managed per-agent accounts; daemon-side)

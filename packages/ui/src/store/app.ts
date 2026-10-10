@@ -198,6 +198,7 @@ const DEFAULT_USAGE_PREFS: UsagePrefs = {
 
 const DEFAULT_AGENT_PREFS: AgentPrefs = {
   claudeTimeoutMinutes: 30,
+  claudeSubagentCacheTtl: "auto",
   // Agent chat §3.3: continuing an interrupted turn is opt-in, per project.
   continueThreadsAfterRestart: false,
   continueThreadsByProject: {}

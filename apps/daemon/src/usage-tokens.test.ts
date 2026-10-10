@@ -243,3 +243,57 @@ test("managed-account home transcripts are counted with and without a system hom
   assert.equal(snap.rows.reduce((a, r) => a + r.inputTokens, 0), 13);
   assert.equal(snap.rows.reduce((a, r) => a + r.outputTokens, 0), 3);
 });
+
+test("subagent requests are reported once each, with their time and cache usage, apart from the main thread", async () => {
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const home = await mkdtemp(join(tmpdir(), "orq-utok-sub-"));
+  const sdir = join(home, ".claude", "projects", "p", "sess", "subagents");
+  await mkdir(sdir, { recursive: true });
+  const turn = (id: string, timestamp: string, extra: object, usage: object) =>
+    JSON.stringify({ timestamp, requestId: `req_${id}`, ...extra, message: { id: `msg_${id}`, model: "claude-opus-5", usage } });
+  const sub = { isSidechain: true, agentId: "a1" };
+  await writeFile(
+    join(sdir, "agent-a1.jsonl"),
+    [
+      turn("1", "2026-07-06T00:00:00Z", sub, { cache_creation_input_tokens: 70, cache_read_input_tokens: 5 }),
+      turn("2", "2026-07-06T23:50:00Z", sub, {
+        cache_creation_input_tokens: 50,
+        cache_read_input_tokens: 100,
+        cache_creation: { ephemeral_5m_input_tokens: 20, ephemeral_1h_input_tokens: 30 }
+      }),
+      // A streamed message is logged once per content block, with the same usage.
+      turn("2", "2026-07-06T23:50:01Z", sub, { cache_creation_input_tokens: 50, cache_read_input_tokens: 100 })
+    ].join("\n"),
+    "utf8"
+  );
+  // Older transcripts mark a subagent only by where its file lives.
+  await writeFile(
+    join(sdir, "agent-old.jsonl"),
+    turn("3", "2026-07-06T23:55:00Z", {}, { cache_creation_input_tokens: 9, cache_read_input_tokens: 1 }),
+    "utf8"
+  );
+  await writeFile(
+    join(home, ".claude", "projects", "p", "sess.jsonl"),
+    turn("4", "2026-07-06T23:59:00Z", { isSidechain: false }, { cache_creation_input_tokens: 11, cache_read_input_tokens: 22 }),
+    "utf8"
+  );
+  const scanner = new UsageTokensScanner({ userhome: home, cacheFile: join(home, "c.json"), now: T0 });
+  await scanner.init();
+  await scanner.snapshot(true);
+  const since = Date.parse("2026-07-06T12:00:00Z");
+  assert.deepEqual(scanner.subagentRequests(since), [
+    { sub: "a1", ts: Date.parse("2026-07-06T23:50:00Z"), cacheRead: 100, cacheWrite: 50, cacheWrite1h: 30 },
+    { sub: join(sdir, "agent-old.jsonl"), ts: Date.parse("2026-07-06T23:55:00Z"), cacheRead: 1, cacheWrite: 9, cacheWrite1h: 0 }
+  ]);
+  assert.equal(scanner.subagentRequests(0)?.length, 3);
+});
+
+test("subagent requests are unknown until the transcripts have been scanned once", async () => {
+  delete process.env.CLAUDE_CONFIG_DIR;
+  const home = await mkdtemp(join(tmpdir(), "orq-utok-sub-cold-"));
+  const scanner = new UsageTokensScanner({ userhome: home, cacheFile: join(home, "c.json"), now: T0 });
+  await scanner.init();
+  assert.equal(scanner.subagentRequests(0), null);
+  await scanner.recompute();
+  assert.deepEqual(scanner.subagentRequests(0), []);
+});
