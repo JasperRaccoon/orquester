@@ -41,6 +41,13 @@ export function currentWindow(w: UsageWindow | null, now: number): UsageWindow |
   return Number.isFinite(t) && t <= now ? null : w;
 }
 
+/** The rolling 5h window has no schedule: once its reset passes the quota is
+ *  whole again and nothing runs until the next message, which the endpoint
+ *  itself reports as 0% with no reset. So an expired one reads that, not absent. */
+export function currentSessionWindow(w: UsageWindow | null, now: number): UsageWindow | null {
+  return w && currentWindow(w, now) == null ? { percent: 0 } : w;
+}
+
 /** Still-current scoped windows, or undefined when none survive (so a stale
  *  reading never keeps e.g. a pre-reset Fable 100% alive past its window). */
 export function currentScopedWindows(

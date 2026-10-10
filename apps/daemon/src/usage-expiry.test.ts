@@ -78,3 +78,87 @@ test("expired-token lastGood serves only windows that have not reset yet", async
   assert.equal(served?.weekly, null); // window reset an hour ago → dead reading
   assert.equal(served?.session?.percent, 50); // still inside its window → kept
 });
+
+test("expired-token lastGood serves a refilled 5h window as 0% instead of dropping it", async (t) => {
+  const savedEnv = process.env.CLAUDE_CONFIG_DIR;
+  delete process.env.CLAUDE_CONFIG_DIR;
+  t.after(() => {
+    if (savedEnv === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = savedEnv;
+  });
+
+  const claudeHome = await mkdtemp(join(tmpdir(), "orq-usage-expiry-"));
+  const userhome = await mkdtemp(join(tmpdir(), "orq-usage-expiry-home-"));
+  t.after(async () => {
+    await rm(claudeHome, { recursive: true, force: true });
+    await rm(userhome, { recursive: true, force: true });
+  });
+
+  await writeFile(
+    join(claudeHome, ".credentials.json"),
+    JSON.stringify({ claudeAiOauth: { accessToken: "tok", expiresAt: NOW + 90 * 60_000, subscriptionType: "max" } })
+  );
+
+  let clock = NOW;
+  t.mock.method(globalThis, "fetch", (async () => {
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      // Session window resets 1h after the fetch; the burnt weekly one 3 days after.
+      json: async () => ({
+        five_hour: { utilization: 31, resets_at: new Date(NOW + 3_600_000).toISOString() },
+        seven_day: { utilization: 100, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() }
+      })
+    } as unknown as Response;
+  }) as unknown as typeof fetch);
+  const source = createClaudeSource({ userhome, claudeHome, now: () => clock });
+
+  assert.equal((await source())?.session?.percent, 31);
+
+  // A day later the account sat idle on its burnt week and the token is expired:
+  // the 5h window refilled, so it reads 0% (no reset running), not a missing bar.
+  clock = NOW + 24 * 3_600_000;
+  const served = await source();
+  assert.equal(served?.stale, true);
+  assert.deepEqual(served?.session, { percent: 0 });
+  assert.equal(served?.weekly?.percent, 100);
+});
+
+test("a source that never read a 5h window still serves none", async (t) => {
+  const savedEnv = process.env.CLAUDE_CONFIG_DIR;
+  delete process.env.CLAUDE_CONFIG_DIR;
+  t.after(() => {
+    if (savedEnv === undefined) delete process.env.CLAUDE_CONFIG_DIR;
+    else process.env.CLAUDE_CONFIG_DIR = savedEnv;
+  });
+
+  const claudeHome = await mkdtemp(join(tmpdir(), "orq-usage-expiry-"));
+  const userhome = await mkdtemp(join(tmpdir(), "orq-usage-expiry-home-"));
+  t.after(async () => {
+    await rm(claudeHome, { recursive: true, force: true });
+    await rm(userhome, { recursive: true, force: true });
+  });
+
+  await writeFile(
+    join(claudeHome, ".credentials.json"),
+    JSON.stringify({ claudeAiOauth: { accessToken: "tok", expiresAt: NOW + 90 * 60_000, subscriptionType: "max" } })
+  );
+
+  let clock = NOW;
+  t.mock.method(globalThis, "fetch", (async () => {
+    return {
+      ok: true,
+      status: 200,
+      headers: { get: () => null },
+      json: async () => ({ seven_day: { utilization: 40, resets_at: new Date(NOW + 72 * 3_600_000).toISOString() } })
+    } as unknown as Response;
+  }) as unknown as typeof fetch);
+  const source = createClaudeSource({ userhome, claudeHome, now: () => clock });
+
+  await source();
+  clock = NOW + 24 * 3_600_000;
+  const served = await source();
+  assert.equal(served?.session, null);
+  assert.equal(served?.weekly?.percent, 40);
+});

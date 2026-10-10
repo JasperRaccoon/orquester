@@ -2,7 +2,7 @@ import { readFile, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { AgentUsage, UsageWindow } from "@orquester/api";
 import { type UsagePrefs, parseAppConfig } from "@orquester/config";
-import { claudePlanLabel, currentScopedWindows, currentWindow, findLastCodexTokenCount, parseClaudeUsage, parseCodexUsage, parseCodexWhamUsage, parseGrokBilling } from "./usage-parse";
+import { claudePlanLabel, currentScopedWindows, currentSessionWindow, currentWindow, findLastCodexTokenCount, parseClaudeUsage, parseCodexUsage, parseCodexWhamUsage, parseGrokBilling } from "./usage-parse";
 import { decodeJwtPayload, parseCodexIdentity, parseGrokIdentity } from "./agent-account-identity";
 import { CLAUDE_SESSION_WINDOW_ID, CLAUDE_WEEKLY_WINDOW_ID } from "./agent-host/adapters/claude/usage.ts";
 
@@ -136,6 +136,7 @@ export function createClaudeSource(opts: {
     const expired = typeof oauth.expiresAt === "number" && oauth.expiresAt <= now;
     // Serving last-known numbers: drop any window whose reset has since passed —
     // a frozen pre-reset reading (e.g. weekly 100%) must not outlive its window.
+    // The 5h one refills to 0% instead, so an idle account keeps its bar.
     const serve = (): AgentUsage => {
       const good = record.lastGood;
       if (!good) {
@@ -147,7 +148,7 @@ export function createClaudeSource(opts: {
         ...good,
         plan: good.plan ?? claudePlanLabel(creds),
         stale: record.failed || expired || old,
-        session: currentWindow(good.session, now),
+        session: currentSessionWindow(good.session, now),
         weekly: currentWindow(good.weekly, now),
         scopedWindows: currentScopedWindows(good.scopedWindows, now)
       };
