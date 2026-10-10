@@ -74,6 +74,7 @@ import type {
   SessionUploadRequest,
   SessionUploadResponse,
   SystemPortsResponse,
+  SystemProcessDetailsResponse,
   SystemProcessesResponse,
   SystemResourcesResponse,
   UpdateProjectRequest,
@@ -3106,6 +3107,15 @@ export function createServer(
     "/api/system/processes",
     async (request): Promise<SystemProcessesResponse> =>
       systemStatus.processes(request.query.scope === "host" ? "host" : "tree")
+  );
+
+  // One process' expanded row: exe, cwd, open fds and cgroup, read on demand.
+  app.get<{ Params: { pid: string } }>(
+    "/api/system/processes/:pid",
+    async (request, reply): Promise<SystemProcessDetailsResponse | KillProcessErrorResponse> => {
+      const details = await systemStatus.processDetails(Number(request.params.pid));
+      return details ?? reply.code(400).send({ code: "INVALID_PID", message: "Invalid pid." });
+    }
   );
 
   // Guarded kill: refused for any pid outside this daemon's tree, and for the

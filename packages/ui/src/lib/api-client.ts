@@ -63,6 +63,7 @@ import type {
   SessionUploadResponse,
   SetAgentAccountDefaultsRequest,
   SystemPortsResponse,
+  SystemProcessDetailsResponse,
   SystemProcessesResponse,
   SystemProcessesScope,
   SystemResourcesResponse,
@@ -1401,6 +1402,10 @@ export class ApiClient {
 
   systemProcesses(signal?: AbortSignal, scope: SystemProcessesScope = "tree"): Promise<SystemProcessesResponse> {
     return this.send("GET", scope === "host" ? "/api/system/processes?scope=host" : "/api/system/processes", { signal });
+  }
+
+  systemProcessDetails(pid: number, signal?: AbortSignal): Promise<SystemProcessDetailsResponse> {
+    return this.send("GET", `/api/system/processes/${pid}`, { signal });
   }
 
   systemPorts(signal?: AbortSignal): Promise<SystemPortsResponse> {

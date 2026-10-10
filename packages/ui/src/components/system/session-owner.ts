@@ -3,6 +3,7 @@ import type { ProjectSummary, SessionSummary, WorkspaceSummary } from "../../typ
 
 export interface SessionOwner {
   title: string;
+  kind: SessionSummary["kind"];
   project: ProjectSummary;
 }
 
@@ -24,5 +25,5 @@ export function resolveSessionOwner(
     return null;
   }
   const project = resolveProjectRef(session.projectPath, workspaces, projects);
-  return isProjectRefVisible(project, workspaces) ? { title: session.title, project } : null;
+  return isProjectRefVisible(project, workspaces) ? { title: session.title, kind: session.kind, project } : null;
 }

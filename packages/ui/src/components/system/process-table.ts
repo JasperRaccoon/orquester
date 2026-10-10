@@ -330,26 +330,75 @@ function processRow(
   return { kind: "process", key: processRowKey(proc.pid), proc, metrics, depth, childCount, expanded };
 }
 
-/** Pids under `pid` in the full list (not just the visible rows) — what a Stop signals besides it. */
-export function descendantCount(processes: readonly SystemProcessInfo[], pid: number): number {
-  const children = new Map<number, number[]>();
+/** ppid → child pids of the full list; a process listed as its own parent has none. */
+function childrenByParent(processes: readonly SystemProcessInfo[]): Map<number, SystemProcessInfo[]> {
+  const children = new Map<number, SystemProcessInfo[]>();
   for (const proc of processes) {
     if (proc.ppid === proc.pid) continue;
     const siblings = children.get(proc.ppid);
-    if (siblings) siblings.push(proc.pid);
-    else children.set(proc.ppid, [proc.pid]);
+    if (siblings) siblings.push(proc);
+    else children.set(proc.ppid, [proc]);
   }
+  return children;
+}
+
+/** Every process under `pid` in the full list, breadth-first; cycle-safe. */
+function descendantsOf(processes: readonly SystemProcessInfo[], pid: number): SystemProcessInfo[] {
+  const children = childrenByParent(processes);
   const seen = new Set<number>([pid]);
   const queue = [pid];
+  const out: SystemProcessInfo[] = [];
   while (queue.length > 0) {
     for (const child of children.get(queue.shift()!) ?? []) {
-      if (!seen.has(child)) {
-        seen.add(child);
-        queue.push(child);
+      if (!seen.has(child.pid)) {
+        seen.add(child.pid);
+        out.push(child);
+        queue.push(child.pid);
       }
     }
   }
-  return seen.size - 1;
+  return out;
+}
+
+/** Pids under `pid` in the full list (not just the visible rows) — what a Stop signals besides it. */
+export function descendantCount(processes: readonly SystemProcessInfo[], pid: number): number {
+  return descendantsOf(processes, pid).length;
+}
+
+/**
+ * What an expanded row says about the processes under `pid`: its direct
+ * children (busiest first), how many descendants there are in all, and the
+ * whole subtree's CPU and memory including `pid` itself.
+ */
+export function subtreeSummary(
+  processes: readonly SystemProcessInfo[],
+  pid: number
+): { children: SystemProcessInfo[]; descendants: number; cpuPercent: number | null; rssBytes: number } {
+  const self = processes.find((proc) => proc.pid === pid);
+  const below = descendantsOf(processes, pid);
+  const all = self ? [self, ...below] : below;
+  return {
+    children: below
+      .filter((proc) => proc.ppid === pid)
+      .sort((a, b) => compareRows(processMetrics(a), processMetrics(b), "cpu", "desc")),
+    descendants: below.length,
+    cpuPercent: sumKnown(all.map((proc) => proc.cpuPercent)),
+    rssBytes: all.reduce((sum, proc) => sum + proc.rssBytes, 0)
+  };
+}
+
+/** The listed ancestors of `pid`, outermost first; stops at a missing parent or a cycle. */
+export function ancestorsOf(processes: readonly SystemProcessInfo[], pid: number): SystemProcessInfo[] {
+  const byPid = new Map(processes.map((proc) => [proc.pid, proc]));
+  const seen = new Set<number>([pid]);
+  const chain: SystemProcessInfo[] = [];
+  let parent = byPid.get(byPid.get(pid)?.ppid ?? -1);
+  while (parent && !seen.has(parent.pid) && chain.length < ANCESTOR_WALK_LIMIT) {
+    seen.add(parent.pid);
+    chain.push(parent);
+    parent = byPid.get(parent.ppid);
+  }
+  return chain.reverse();
 }
 
 /** The Orquester infrastructure rows, by role (first match wins). */

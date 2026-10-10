@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import type { SystemProcessInfo } from "@orquester/api";
 import {
   DEFAULT_COLUMNS,
+  ancestorsOf,
   buildRows,
   canStop,
   compareRows,
@@ -15,6 +16,7 @@ import {
   processMetrics,
   processRowKey,
   processUsers,
+  subtreeSummary,
   type ProcessFilter
 } from "./process-table";
 import { formatBitRate, formatCpu, formatDuration } from "./system-format";
@@ -107,6 +109,18 @@ assert.equal(mixed.startedAt, 10);
 assert.equal(descendantCount(host, 10), 2);
 assert.equal(descendantCount(host, 1), 4);
 assert.equal(descendantCount([proc(5, 5)], 5), 0, "a self-parented pid is not its own child");
+const daemonTree = subtreeSummary(host, 10);
+assert.deepEqual(daemonTree.children.map((p) => p.pid), [11, 12], "direct children, busiest first; unknown CPU last");
+assert.equal(daemonTree.descendants, 2);
+assert.equal(daemonTree.cpuPercent, 30, "the subtree total counts the process itself and skips unknowns");
+assert.equal(daemonTree.rssBytes, 7000);
+const initTree = subtreeSummary(host, 1);
+assert.deepEqual(initTree.children.map((p) => p.pid), [20, 10], "grandchildren are counted, not listed");
+assert.equal(initTree.descendants, 4);
+assert.equal(subtreeSummary(host, 12).cpuPercent, null, "nothing measured is unknown, not 0%");
+assert.deepEqual(ancestorsOf(host, 11).map((p) => p.pid), [1, 10], "outermost first");
+assert.deepEqual(ancestorsOf(host, 1), [], "a parent outside the list ends the chain");
+assert.deepEqual(ancestorsOf([proc(40, 41), proc(41, 40)], 40).map((p) => p.pid), [41], "a ppid cycle terminates");
 const core = coreProcesses([...host, proc(30, 1, { role: "agent-host" })], 10);
 assert.equal(core.daemon?.pid, 10);
 assert.equal(core["agent-host"]?.pid, 30);

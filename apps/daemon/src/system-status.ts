@@ -3,6 +3,7 @@ import type {
   KillProcessSignal,
   SystemPortInfo,
   SystemPortsResponse,
+  SystemProcessDetailsResponse,
   SystemProcessInfo,
   SystemProcessRole,
   SystemProcessState,
@@ -456,6 +457,23 @@ export function parseBootTime(content: string): number | null {
   const line = content.split("\n").find((candidate) => candidate.startsWith("btime "));
   const value = Number(line?.slice("btime ".length).trim());
   return line && Number.isFinite(value) && value > 0 ? value : null;
+}
+
+/**
+ * The cgroup a /proc/<pid>/cgroup names: the v2 unified line ("0::<path>")
+ * when present, else v1's systemd hierarchy, else the first line's path.
+ */
+export function parseCgroupPath(content: string): string | null {
+  const paths = new Map<string, string>();
+  for (const line of content.split("\n")) {
+    const first = line.indexOf(":");
+    const second = line.indexOf(":", first + 1);
+    if (first < 0 || second < 0) continue;
+    const key = `${line.slice(0, first)}:${line.slice(first + 1, second)}`;
+    if (!paths.has(key)) paths.set(key, line.slice(second + 1).trim());
+  }
+  const path = paths.get("0:") ?? [...paths].find(([key]) => key.endsWith(":name=systemd"))?.[1] ?? [...paths.values()][0];
+  return path ? path : null;
 }
 
 /** Per-second rate of a cumulative counter, or null when unusable (reset, no time passed). */
@@ -1070,6 +1088,42 @@ export class SystemStatusService {
     }
     processes.sort((left, right) => left.pid - right.pid);
     return { supported: true, daemonPid: process.pid, processes };
+  }
+
+  /**
+   * What one process' expanded row adds to its listing. Null for a pid that
+   * cannot name a process. Each read is independent: a process owned by
+   * another user still reports its start and cgroup.
+   */
+  async processDetails(pid: number): Promise<SystemProcessDetailsResponse | null> {
+    if (!Number.isInteger(pid) || pid <= 0) {
+      return null;
+    }
+    const empty = { pid, startedAt: null, exe: null, cwd: null, openFiles: null, cgroup: null };
+    if (!SYSTEM_STATUS_SUPPORTED) {
+      return { supported: false, found: false, ...empty };
+    }
+    const [identity, bootTime, exe, cwd, fds, cgroup] = await Promise.all([
+      readProcIdentity(pid),
+      readTextFile("/proc/stat").then((raw) => (raw ? parseBootTime(raw) : null)),
+      readlink(`/proc/${pid}/exe`).catch(() => null),
+      readlink(`/proc/${pid}/cwd`).catch(() => null),
+      readdir(`/proc/${pid}/fd`).catch(() => null),
+      readTextFile(`/proc/${pid}/cgroup`)
+    ]);
+    if (identity === null) {
+      return { supported: true, found: false, ...empty };
+    }
+    return {
+      supported: true,
+      found: true,
+      pid,
+      startedAt: bootTime === null ? null : Math.round((bootTime + identity.starttime / USER_HZ) * 1000),
+      exe,
+      cwd,
+      openFiles: fds ? fds.length : null,
+      cgroup: cgroup ? parseCgroupPath(cgroup) : null
+    };
   }
 
   /** The `protectedPids` supplier as a map; a throwing supplier yields nothing. */
