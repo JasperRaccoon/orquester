@@ -155,9 +155,14 @@ const HeatCell: React.FC<{ text: string; percent: number | null; scale: readonly
   );
 };
 
+// The state is the instant of the scan; CPU is the average since the previous
+// one — a busy process that waits on I/O or a lock reads "Sleeping" at 30% CPU.
 const StatePill: React.FC<{ state: SystemProcessState | undefined }> = ({ state }) =>
   state ? (
-    <span className={cn("inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium", STATE_META[state].className)}>
+    <span
+      title="State at the moment of the scan. CPU is the average since the previous scan, so a busy process can read Sleeping."
+      className={cn("inline-flex rounded-full px-2 py-0.5 text-[10px] font-medium", STATE_META[state].className)}
+    >
       {STATE_META[state].label}
     </span>
   ) : (
@@ -726,7 +731,7 @@ const ProcessDetails: React.FC<{
 /**
  * Settings → Host status' process table: every process on the host, sortable
  * by any column, filterable, flat / as a tree / grouped by name, with a details
- * panel and a guarded Stop for the processes the daemon manages. Stop is a
+ * panel and a guarded Stop for the processes the daemon's user owns. Stop is a
  * SIGTERM of the whole subtree, Force kill a SIGKILL of it; both are always
  * confirmed first.
  */
@@ -831,6 +836,16 @@ export const TaskManager: React.FC<{
     }
   };
 
+  // Why a row without a role is not a target. Only a daemon that sends
+  // `stoppable` offers our user's processes outside the tree.
+  const refusalReason = (proc: SystemProcessInfo): string => {
+    if (proc.stoppable === undefined) return "Stop — not started by Orquester";
+    const daemonUser = snapshot.processes.find((candidate) => candidate.pid === snapshot.daemonPid)?.user;
+    return proc.user !== undefined && proc.user !== daemonUser
+      ? `Stop — runs as ${proc.user}`
+      : "Stop — Orquester runs under it";
+  };
+
   const menuItems = (proc: SystemProcessInfo): ContextMenuItem[] => {
     const stoppable = canStop(proc, snapshot.daemonPid);
     return [
@@ -842,7 +857,7 @@ export const TaskManager: React.FC<{
           ? "Stop process… (SIGTERM)"
           : proc.role
             ? `Stop — ${ROLE_LABEL[proc.role].toLowerCase()} is protected`
-            : "Stop — not started by Orquester",
+            : refusalReason(proc),
         icon: <X size={13} />,
         danger: true,
         disabled: !stoppable,
@@ -1132,6 +1147,11 @@ export const TaskManager: React.FC<{
               {pending.signal === "SIGKILL" && (
                 <p className="mt-2 text-xs text-warn/90">
                   SIGKILL can't be caught — the process gets no chance to save or clean up. Try Stop first.
+                </p>
+              )}
+              {!isManaged(pending.proc) && (
+                <p className="mt-2 text-xs text-warn/90">
+                  Orquester didn't start this process — make sure nothing else depends on it.
                 </p>
               )}
               {pending.proc.sessionId && (

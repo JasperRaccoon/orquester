@@ -116,9 +116,9 @@ export function killErrorCode(error: unknown): KillProcessErrorCode | null {
 export function killErrorMessage(code: KillProcessErrorCode | null, label: string): string {
   switch (code) {
     case "PROCESS_PROTECTED":
-      return `${label} is protected — the daemon, the agent host and the tmux server that keeps your sessions alive can't be stopped from here.`;
+      return `${label} is protected — the daemon, the agent host, the tmux server that keeps your sessions alive and anything they run under can't be stopped from here.`;
     case "PROCESS_NOT_MANAGED":
-      return `${label} was not started by Orquester, or has exited since — only Orquester's own processes can be stopped here.`;
+      return `${label} runs as another user, or has exited since — only processes of the user Orquester runs as can be stopped here.`;
     case "INVALID_PID":
       return `${label} is not a valid target. Refresh the list and try again.`;
     case "INVALID_SIGNAL":

@@ -60,6 +60,10 @@ assert.equal(canStop(host[2], 10), true);
 assert.equal(canStop(host[1], 10), false, "the daemon is never offered");
 assert.equal(canStop(host[0], 10), false, "nothing outside our tree is offered");
 assert.equal(canStop(proc(30, 1, { role: "agent-host" }), 10), false, "nor is the agent host");
+// A daemon that sends `stoppable` decides: our user's process outside the tree
+// is a target, a managed process the daemon runs under is not.
+assert.equal(canStop(proc(31, 1, { managed: false, stoppable: true }), 10), true, "our user's own, outside the tree");
+assert.equal(canStop(proc(32, 1, { managed: true, stoppable: false }), 10), false, "the daemon's say wins");
 
 // ── Sorting ──────────────────────────────────────────────────────────────────
 const flat = buildRows(host, "none", { key: "cpu", direction: "desc" }, new Set());

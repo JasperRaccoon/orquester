@@ -1,10 +1,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { execFile, spawn } from "node:child_process";
+import { spawn } from "node:child_process";
 import { once } from "node:events";
 import { tmpdir } from "node:os";
+import { readFile, readdir } from "node:fs/promises";
 import { join } from "node:path";
-import { promisify } from "node:util";
 import { randomUUID } from "node:crypto";
 import { withDeadline } from "./agent-host/support/deadline.ts";
 import { AGENT_LAUNCH_ENV_VAR } from "./agent-host/support/leftover-processes.ts";
@@ -38,10 +38,9 @@ import {
   ratePerSecond,
   readProcIdentity,
   resolveSocketOwners,
+  shieldedPids,
   verifyProcessIdentity
 } from "./system-status.ts";
-
-const exec = promisify(execFile);
 
 /**
  * This test process's environment without the agent host's launch marker: run
@@ -82,6 +81,21 @@ async function orphaned(
   const pids = line.trim().split(/\s+/).map(Number);
   assert.ok(pids.every((pid) => Number.isInteger(pid) && pid > 1), `announced: ${line}`);
   return { pids, gone };
+}
+
+/** A live user-space process of another user, or null when this host shows none (or we are root). */
+async function foreignPid(): Promise<number | null> {
+  const uid = process.getuid?.();
+  if (uid === undefined || uid === 0) return null;
+  for (const entry of await readdir("/proc")) {
+    const pid = Number(entry);
+    if (!Number.isInteger(pid) || pid <= 2) continue;
+    const status = await readFile(`/proc/${pid}/status`, "utf8").catch(() => "");
+    const owner = /^Uid:\s+(\d+)/m.exec(status)?.[1];
+    // A kernel thread has no VmRSS; a user-space one always does.
+    if (owner !== undefined && Number(owner) !== uid && /^VmRSS:/m.test(status)) return pid;
+  }
+  return null;
 }
 
 /** `gone`, bounded: a process that survives fails the test instead of hanging it. */
@@ -237,6 +251,21 @@ test("descendsFromRoot does not loop on a parent cycle", () => {
     [6, { ppid: 5 }]
   ]);
   assert.equal(descendsFromRoot(cyclic, new Set([99]), 5), false);
+});
+
+test("shieldedPids covers each guarded pid and every ancestor up to init, cycle-safe", () => {
+  const procs = new Map<number, { ppid: number }>([
+    [10, { ppid: 1 }],
+    [20, { ppid: 10 }],
+    [30, { ppid: 20 }],
+    [40, { ppid: 10 }],
+    [50, { ppid: 51 }],
+    [51, { ppid: 50 }]
+  ]);
+  assert.deepEqual([...shieldedPids(procs, [30])].sort((a, b) => a - b), [10, 20, 30], "init is never shielded");
+  assert.equal(shieldedPids(procs, [30]).has(40), false, "a sibling is not");
+  assert.deepEqual([...shieldedPids(procs, [50])].sort((a, b) => a - b), [50, 51]);
+  assert.deepEqual([...shieldedPids(procs, [99])], [99], "a guarded pid the snapshot missed is still guarded");
 });
 
 test("parseProcStat survives a comm containing spaces and parentheses", () => {
@@ -475,7 +504,7 @@ test("verifyProcessIdentity rejects a pid whose parent changed under us", async 
   assert.equal(await readProcIdentity(2 ** 22 - 1), null);
 });
 
-test("kill() refuses with a discriminating code and only kills our own subtree", async () => {
+test("kill() refuses with a discriminating code, kills our own user's processes and never another user's", async () => {
   if (!SYSTEM_STATUS_SUPPORTED) {
     return;
   }
@@ -490,23 +519,27 @@ test("kill() refuses with a discriminating code and only kills our own subtree",
   assert.equal((await status.kill(1)).ok, false);
 
   // A live process OUTSIDE the tree: `sh` exits immediately, so its backgrounded
-  // sleep is reparented away from this process and is no longer ours to kill.
-  const { stdout: orphanPid } = await exec("sh", ["-c", "sleep 30 >/dev/null 2>&1 & echo $!"], {
-    env: unmarkedEnv()
-  });
-  const orphan = Number(orphanPid.trim());
-  assert.ok(Number.isInteger(orphan) && orphan > 1);
+  // sleep is reparented away from this process — but it still runs as our user,
+  // who could `kill` it from any terminal tab, so the guard lets it through.
+  const { pids: [orphan], gone: orphanGone } = await orphaned("sleep 30 & echo $!", unmarkedEnv());
+  assert.ok(orphan !== undefined && orphan > 1);
   try {
     const unmanaged = await status.kill(orphan);
-    assert.equal(unmanaged.ok === false && unmanaged.code, "PROCESS_NOT_MANAGED");
-    const { stdout } = await exec("sh", ["-c", `kill -0 ${orphan} 2>/dev/null && echo alive || echo gone`]);
-    assert.equal(stdout.trim(), "alive", "a refused kill must not have signalled anything");
+    assert.equal(unmanaged.ok === true && unmanaged.killed, 1, "our own user's orphan is a target");
+    await allGone(orphanGone, "the orphaned sleep exiting");
   } finally {
     try {
       process.kill(orphan, "SIGKILL");
     } catch {
       // Already gone.
     }
+  }
+
+  // Another user's process is never one: refused before anything is signalled.
+  const foreign = await foreignPid();
+  if (foreign !== null) {
+    const refused = await status.kill(foreign);
+    assert.equal(refused.ok === false && refused.code, "PROCESS_NOT_MANAGED");
   }
 
   // A child of this test process IS in the tree (process.pid is a root). The
@@ -611,7 +644,7 @@ test("a process carrying the agent host's launch marker is managed even as an or
   }
 });
 
-test("a marked process whose parent still runs outside every root is no orphan: listed unmanaged, never killable", async () => {
+test("a marked process whose parent still runs outside every root is no orphan: listed unmanaged, stoppable as our user's", async () => {
   if (!SYSTEM_STATUS_SUPPORTED) {
     return;
   }
@@ -628,11 +661,12 @@ test("a marked process whose parent still runs outside every root is no orphan: 
   try {
     const status = service({ listSessionIds: () => new Set(["chat-1"]) });
     const listed = (await status.processes("host")).processes;
-    assert.equal(listed.find((row) => row.pid === marked)?.managed, false, "the marked child is not ours");
-    assert.equal(listed.find((row) => row.pid === parent)?.managed, false, "nor is its unmarked parent");
-    const refused = await status.kill(marked);
-    assert.equal(refused.ok === false && refused.code, "PROCESS_NOT_MANAGED");
-    assert.doesNotThrow(() => process.kill(marked, 0), "a refused kill signalled nothing");
+    const markedRow = listed.find((row) => row.pid === marked);
+    const parentRow = listed.find((row) => row.pid === parent);
+    assert.equal(markedRow?.managed, false, "the marked child is not Orquester's");
+    assert.equal(parentRow?.managed, false, "nor is its unmarked parent");
+    assert.equal(markedRow?.stoppable, true, "but it runs as our user, so Stop is offered");
+    assert.equal(parentRow?.stoppable, true);
   } finally {
     for (const pid of pids) {
       try {
@@ -645,7 +679,7 @@ test("a marked process whose parent still runs outside every root is no orphan: 
   }
 });
 
-test("kill() refuses a protectedPids entry, directly and inside a subtree", async () => {
+test("kill() refuses a protectedPids entry and every process it runs under", async () => {
   if (!SYSTEM_STATUS_SUPPORTED) return;
   const guarded = spawn("sleep", ["30"], { stdio: "ignore" });
   const started = once(guarded, "spawn");
@@ -665,10 +699,13 @@ test("kill() refuses a protectedPids entry, directly and inside a subtree", asyn
     assert.equal(refused.ok === false && refused.code, "PROCESS_PROTECTED");
     assert.doesNotThrow(() => process.kill(guarded.pid!, 0));
 
+    // The parent of a protected pid is refused outright: a subtree kill would
+    // orphan the protected process at best.
     const sub = service({ protectedPids: () => [{ pid: spared!, label: "the agent host" }] });
-    assert.equal((await sub.kill(parent.pid)).ok, true);
-    await allGone(parentGone, "the selected parent exiting");
-    assert.doesNotThrow(() => process.kill(spared!, 0), "a protected descendant must survive a subtree kill");
+    const parentRefused = await sub.kill(parent.pid);
+    assert.equal(parentRefused.ok === false && parentRefused.code, "PROCESS_PROTECTED");
+    assert.doesNotThrow(() => process.kill(parent.pid!, 0), "a refused kill signalled nothing");
+    assert.doesNotThrow(() => process.kill(spared!, 0));
 
     const throwing = service({ protectedPids: () => { throw new Error("boom"); } });
     assert.equal((await throwing.kill(guarded.pid)).ok, true);
@@ -709,13 +746,22 @@ test("processes() lists the whole host, marks our tree managed and tags the daem
     assert.ok(self?.user && self.user.length > 0);
     assert.ok(self?.startedAt && Math.abs(self.startedAt - (Date.now() - process.uptime() * 1000)) < 5_000, "startedAt is when this process began");
 
+    assert.equal(self?.stoppable, false, "the daemon is never a target");
+    const parent = processes.find((row) => row.pid === process.ppid);
+    if (parent) assert.equal(parent.stoppable, false, "nor is what it runs under");
+
     const sleeper = processes.find((row) => row.pid === child.pid);
     assert.equal(sleeper?.role, "agent-host");
     assert.equal(sleeper?.managed, true);
+    assert.equal(sleeper?.stoppable, false, "nor is the agent host");
     assert.equal(sleeper?.cpuPercent, null, "nothing to diff against on the first scan");
 
     const init = processes.find((row) => row.pid === 1);
     if (init) assert.equal(init.managed, false, "init is listed but never ours");
+    if (init) assert.equal(init.stoppable, false);
+    const foreign = await foreignPid();
+    const other = processes.find((row) => row.pid === foreign);
+    if (other) assert.equal(other.stoppable, false, "another user's process is listed read-only");
     assert.equal(processes.some((row) => row.pid === 2 || row.ppid === 2), false, "kernel threads are left out");
   } finally {
     child.kill("SIGKILL");

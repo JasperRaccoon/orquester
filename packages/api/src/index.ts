@@ -1513,11 +1513,19 @@ export interface SystemProcessInfo {
   /** Session whose tmux pane is the nearest ancestor, when the pid belongs to one. */
   sessionId?: string;
   /**
-   * Inside this daemon's own tree, so `/api/system/processes/kill` may target
-   * it. Daemons that predate whole-host listing omit it (and list only their
-   * own tree, where every row is managed).
+   * Inside this daemon's own tree: started by Orquester. Daemons that predate
+   * whole-host listing omit it (and list only their own tree, where every row
+   * is managed).
    */
   managed?: boolean;
+  /**
+   * `/api/system/processes/kill` would accept it: a process of this daemon's own
+   * tree or of the user the daemon runs as — the same processes that user could
+   * signal from a terminal tab — minus the daemon, the tmux server, the agent
+   * host and every process they run under. Daemons that predate it omit it;
+   * there only a managed row without a `role` is a target.
+   */
+  stoppable?: boolean;
   role?: SystemProcessRole;
   /**
    * Share of the whole host's CPU (every core together = 100) since the previous

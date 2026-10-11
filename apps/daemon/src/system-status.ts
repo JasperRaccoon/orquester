@@ -24,8 +24,11 @@ import { Tmux } from "./tmux";
  * user-space process on the host with the tree that belongs to THIS daemon
  * marked `managed` (its own children plus every tmux session pane and their
  * descendants — and whatever a provider CLI left behind, see `rootPids`), and
- * the TCP ports the managed processes listen on. Only a managed process is
- * ever a kill target; the rest of the host is listed read-only.
+ * the TCP ports the managed processes listen on. A kill target is a managed
+ * process or any other process of the daemon's own user — what that user could
+ * signal from a terminal tab anyway — never the daemon, the tmux server, the
+ * agent host or a process they run under. Other users' processes are listed
+ * read-only.
  *
  * Linux-only by construction — everything here reads `/proc`, which no other
  * platform provides. Off Linux every read returns a `supported: false` payload
@@ -667,6 +670,25 @@ export function descendsFromRoot(
   return false;
 }
 
+/**
+ * `guarded` plus every process each of them runs under, init excepted:
+ * signalling an ancestor of the daemon (the desktop app, a dev shell) or of
+ * the tmux server takes what is below it down with it, so none is a target.
+ */
+export function shieldedPids(procs: Map<number, { ppid: number }>, guarded: Iterable<number>): Set<number> {
+  const shielded = new Set<number>();
+  for (const pid of guarded) {
+    let current = pid;
+    for (let hop = 0; hop <= MAX_DEPTH && current > 1 && !shielded.has(current); hop += 1) {
+      shielded.add(current);
+      const proc = procs.get(current);
+      if (!proc || proc.ppid === current) break;
+      current = proc.ppid;
+    }
+  }
+  return shielded;
+}
+
 /** `pid` plus every pid currently under it (depth-capped, cycle-safe). */
 function collectDescendants(procs: Map<number, { ppid: number }>, pid: number): number[] {
   return [...collectTree(procs, new Map([[pid, undefined]])).keys()];
@@ -1050,6 +1072,9 @@ export class SystemStatusService {
       }
     }
 
+    const shielded = shieldedPids(procs, roles.keys());
+    const uid = process.getuid?.();
+
     const processes: SystemProcessInfo[] = [];
     for (const [pid, proc] of procs) {
       const managed = tree.has(pid);
@@ -1069,6 +1094,7 @@ export class SystemStatusService {
         rssBytes: proc.rssBytes,
         ...(sessionId ? { sessionId } : {}),
         managed,
+        stoppable: pid > 1 && !shielded.has(pid) && (managed || (uid !== undefined && proc.uid === uid)),
         ...(role ? { role } : {}),
         cpuPercent: measured?.cpuPercent ?? null,
         diskReadBps: measured?.diskReadBps ?? null,
@@ -1150,7 +1176,8 @@ export class SystemStatusService {
   /**
    * Signal `pid` and everything under it — SIGTERM unless the caller asks for
    * SIGKILL; any other value is refused. Refused unless `pid` is inside this
-   * daemon's own tree, and refused outright for the daemon itself, for the
+   * daemon's own tree or runs as the daemon's own user, and refused outright
+   * for the daemon itself, for every process it runs under, for the
    * tmux server — the tmux server IS the session-persistence layer, so killing
    * it would take down every terminal on the box, and it is never a legitimate
    * target even though it sits at the top of the session panes — and for
@@ -1201,11 +1228,25 @@ export class SystemStatusService {
     // Never guard a kill on the shared cache: a snapshot up to SNAPSHOT_CACHE_MS
     // old is exactly the window in which a pid can already have been recycled.
     const { procs, roots } = await this.snapshot(true);
-    if (!descendsFromRoot(procs, new Set(roots.keys()), pid)) {
+    const guarded = [process.pid, ...protectedPids.keys(), ...(serverPid !== null ? [serverPid] : [])];
+    const shielded = shieldedPids(procs, guarded);
+    if (shielded.has(pid)) {
+      return {
+        ok: false,
+        code: "PROCESS_PROTECTED",
+        error: "Cannot stop a process the Orquester daemon, tmux server or agent host runs under."
+      };
+    }
+    // Ours by tree, or by uid: the daemon's user may signal its own processes
+    // from any terminal tab, so a container build or a stray `nohup` is no less
+    // theirs for having started outside the tree.
+    const uid = process.getuid?.();
+    const ownUser = uid !== undefined && procs.get(pid)?.uid === uid;
+    if (!ownUser && !descendsFromRoot(procs, new Set(roots.keys()), pid)) {
       return {
         ok: false,
         code: "PROCESS_NOT_MANAGED",
-        error: "Process is not managed by this daemon."
+        error: "Process is neither managed by this daemon nor run as its user."
       };
     }
 
@@ -1224,7 +1265,7 @@ export class SystemStatusService {
       // Same exclusions as the direct-target guards above: killing a subtree
       // must not sweep up the daemon, the tmux server or the protected
       // infrastructure that happens to hang below the pid the user picked.
-      if (target === process.pid || target === serverPid || protectedPids.has(target)) {
+      if (shielded.has(target)) {
         continue;
       }
       const snapshot = procs.get(target);

@@ -40,8 +40,13 @@ export function isManaged(proc: SystemProcessInfo): boolean {
   return proc.managed !== false;
 }
 
-/** Stop is offered for managed rows, minus the infrastructure the daemon refuses anyway. */
+/**
+ * Stop is offered where the daemon says its kill route would accept it. A
+ * daemon that predates `stoppable` accepts only managed rows, minus the
+ * infrastructure it refuses anyway.
+ */
 export function canStop(proc: SystemProcessInfo, daemonPid: number): boolean {
+  if (proc.stoppable !== undefined) return proc.stoppable;
   return isManaged(proc) && proc.pid !== daemonPid && proc.role === undefined;
 }
 
