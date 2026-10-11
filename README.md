@@ -60,7 +60,7 @@ Coding agents are long-running, chatty processes that want your attention at unp
 - Apps survive daemon restarts and redeploys in their own tmux session; the MCP can open desktops and launch apps too.
 
 ### 📁 Files, git & todos
-- File browser + CodeMirror 6 editor with language auto-detect, fuzzy filename search and ripgrep-style content search (regex, globs, whole-word).
+- File browser + CodeMirror 6 editor with language auto-detect, fuzzy filename search and ripgrep-style content search (regex, globs, whole-word) that skip gitignored files unless the search toggle includes them.
 - Rich previews: images, PDF, audio/video, sandboxed HTML, ZIP/RAR/7z/tar listings, and a virtualized sortable **Parquet viewer**.
 - Upload files or whole folders (with conflict resolution), download any file, or download a folder as a server-zipped archive.
 - GitHub-Desktop-style git tab: stage/unstage, diffs, suggested commit messages, branch switcher, ahead/behind counts, fetch/pull/push, paged history.

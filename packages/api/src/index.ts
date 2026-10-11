@@ -297,7 +297,10 @@ export interface FsReadResponse {
   truncated: boolean;
 }
 
-/** One project file returned by GET /api/fs/files (recursive listing for search/quick-open). */
+/**
+ * One project file returned by GET /api/fs/files (recursive listing for search/quick-open).
+ * Gitignored files are left out unless the request sets `includeIgnored=1`.
+ */
 export interface FsProjectFile {
   /** Path relative to the searched root, using forward slashes. */
   path: string;
@@ -349,6 +352,8 @@ export interface FsSearchRequest {
   exclude?: string;
   /** Cap on total matches returned. */
   maxResults?: number;
+  /** Search gitignored files too (`includeIgnored=1`). Defaults to hiding them. */
+  includeIgnored?: boolean;
 }
 
 export interface FsSearchFileResult {

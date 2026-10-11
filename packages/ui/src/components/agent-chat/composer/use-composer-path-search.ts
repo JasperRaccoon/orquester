@@ -75,7 +75,7 @@ export function useComposerPathSearch(
     loadingRootRef.current = root;
     setLoading(true);
     api
-      .listProjectFiles(root, controller.signal)
+      .listProjectFiles(root, {}, controller.signal)
       .then((response) => {
         if (controller.signal.aborted) return;
         cacheRef.current = {

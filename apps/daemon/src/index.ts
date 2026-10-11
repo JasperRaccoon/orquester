@@ -2204,7 +2204,7 @@ export function createServer(
   );
 
   // File browser: recursive file listing for search / quick-open.
-  app.get<{ Querystring: { path?: string; p?: string } }>(
+  app.get<{ Querystring: { path?: string; p?: string; includeIgnored?: string } }>(
     "/api/fs/files",
     async (request, reply): Promise<FsFilesResponse | void> => {
       const path = fsPathFromQuery(request.query);
@@ -2216,7 +2216,10 @@ export function createServer(
       reply.raw.on("close", onClose);
       try {
         const safe = await assertInsideFsRoot(resolved.fsRoot, path);
-        return await listProjectFiles(resolved.fsRoot, safe, { signal: abort.signal });
+        return await listProjectFiles(resolved.fsRoot, safe, {
+          includeIgnored: request.query.includeIgnored === "1",
+          signal: abort.signal
+        });
       } catch (error) {
         if (abort.signal.aborted) return;
         if (error instanceof FsSandboxError) {
@@ -2246,6 +2249,7 @@ export function createServer(
       include?: string;
       exclude?: string;
       maxResults?: string;
+      includeIgnored?: string;
     };
   }>(
     "/api/fs/search",
@@ -2270,6 +2274,7 @@ export function createServer(
           include: request.query.include,
           exclude: request.query.exclude,
           maxResults: request.query.maxResults,
+          includeIgnored: request.query.includeIgnored === "1",
           signal: abort.signal
         });
       } catch (error) {

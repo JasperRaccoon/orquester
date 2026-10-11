@@ -4,8 +4,9 @@
  * "undefined"` guards), swallows storage errors, validates + clamps on load,
  * read-merge-write per project so a commit for one project can't clobber another.
  *
- * The search query text is deliberately NEVER persisted — only the toggles, glob
- * fields, and whether the filter row is expanded, keyed by project rootPath.
+ * The search query text is deliberately NEVER persisted — only the toggles (including
+ * whether gitignored files are searched), glob fields, and whether the filter row is
+ * expanded, keyed by project rootPath.
  */
 
 const SEARCH_OPTIONS_KEY = "orquester:search-options-by-project";
@@ -20,6 +21,8 @@ export interface SearchOptions {
   include: string;
   exclude: string;
   filtersExpanded: boolean;
+  /** Search gitignored files too (file names and contents). Off by default. */
+  includeIgnored: boolean;
 }
 
 export const SEARCH_OPTIONS_DEFAULT: SearchOptions = {
@@ -28,7 +31,8 @@ export const SEARCH_OPTIONS_DEFAULT: SearchOptions = {
   regex: false,
   include: "",
   exclude: "",
-  filtersExpanded: false
+  filtersExpanded: false,
+  includeIgnored: false
 };
 
 /** Coerce an arbitrary stored value into a valid SearchOptions (defaults on miss). */
@@ -47,7 +51,8 @@ function validateSearchOptions(value: unknown): SearchOptions {
     regex: bool("regex"),
     include: str("include"),
     exclude: str("exclude"),
-    filtersExpanded: bool("filtersExpanded")
+    filtersExpanded: bool("filtersExpanded"),
+    includeIgnored: bool("includeIgnored")
   };
 }
 

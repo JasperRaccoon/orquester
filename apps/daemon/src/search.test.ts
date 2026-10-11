@@ -1,27 +1,43 @@
 import { test, before, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp, mkdir, writeFile, symlink, rm } from "node:fs/promises";
+import { execFileSync } from "node:child_process";
+import { mkdtemp, mkdir, writeFile, symlink, rm, rename } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 import type { FsSearchResponse } from "@orquester/api";
 import { onPath } from "./archive.ts";
 import { searchProjectFiles as searchWithInstalledTools, listProjectFiles, FsSearchError } from "./search.ts";
 
 // Each module owns its normal executable-discovery cache. The fallback module
-// probes a PATH with no ripgrep, exactly as it would on a host without the tool.
+// runs with a PATH holding only git (no ripgrep), exactly as on a host without rg.
 const withoutRipgrep = await import(new URL("./search.ts?without-ripgrep", import.meta.url).href) as typeof import("./search.ts");
 
-type SearchOptions = Parameters<typeof searchWithInstalledTools>[2];
-function searchProjectFiles(root: string, path: string, { engine, ...options }: SearchOptions & { engine?: "node" | "rg" }) {
-  if (engine !== "node") return searchWithInstalledTools(root, path, options);
+/** A PATH directory with a link to git and nothing else; set up in before(). */
+let gitOnlyPath = "";
+
+/** Run `call` with ripgrep off PATH (git stays reachable) until it settles. */
+async function withoutRgOnPath<T>(call: () => Promise<T>): Promise<T> {
   const originalPath = process.env.PATH;
-  process.env.PATH = "";
+  process.env.PATH = gitOnlyPath;
   try {
-    return withoutRipgrep.searchProjectFiles(root, path, options);
+    return await call();
   } finally {
     if (originalPath === undefined) delete process.env.PATH;
     else process.env.PATH = originalPath;
   }
+}
+
+type ListOptions = NonNullable<Parameters<typeof listProjectFiles>[2]>;
+function listFiles(root: string, { engine, ...options }: ListOptions & { engine?: "node" | "rg" } = {}) {
+  if (engine !== "node") return listProjectFiles(root, root, options);
+  return withoutRgOnPath(() => withoutRipgrep.listProjectFiles(root, root, options));
+}
+
+type SearchOptions = Parameters<typeof searchWithInstalledTools>[2];
+function searchProjectFiles(root: string, path: string, { engine, ...options }: SearchOptions & { engine?: "node" | "rg" }) {
+  if (engine !== "node") return searchWithInstalledTools(root, path, options);
+  return withoutRgOnPath(() => withoutRipgrep.searchProjectFiles(root, path, options));
 }
 
 // The whole fixture tree lives under `fsRoot`; the searched root is `fsRoot` itself
@@ -32,6 +48,7 @@ let outsideDir = "";
 let outsideFile = "";
 
 const rgAvailable = onPath("rg");
+const gitAvailable = onPath("git");
 const isWin = process.platform === "win32";
 
 async function write(rel: string, content: string): Promise<void> {
@@ -41,6 +58,13 @@ async function write(rel: string, content: string): Promise<void> {
 }
 
 before(async () => {
+  gitOnlyPath = await mkdtemp(join(tmpdir(), "orq-gitonly-"));
+  const gitBinary = (process.env.PATH ?? "")
+    .split(delimiter)
+    .map((dir) => join(dir, "git"))
+    .find((candidate) => existsSync(candidate));
+  if (gitBinary) await symlink(gitBinary, join(gitOnlyPath, "git"));
+
   fsRoot = await mkdtemp(join(tmpdir(), "orq-search-"));
   outsideDir = await mkdtemp(join(tmpdir(), "orq-outside-"));
   outsideFile = join(outsideDir, "secret.txt");
@@ -84,6 +108,7 @@ before(async () => {
 });
 
 after(async () => {
+  await rm(gitOnlyPath, { recursive: true, force: true });
   await rm(fsRoot, { recursive: true, force: true });
   await rm(outsideDir, { recursive: true, force: true });
 });
@@ -399,7 +424,7 @@ test("rg: skips symlink cycles and duplicate directory links", { skip: !rgAvaila
 
 // --- deterministic near-cap aggregation ----------------------------------------
 
-test("both engines: near-cap results select the fixed path-order prefix", async () => {
+test("node: near-cap results select the fixed path-order prefix; rg keeps the budget", async () => {
   // ~40 matching files, a cap small enough to truncate mid-set. With completion-order
   // commit, which files land under the cap raced across the concurrency window; the
   // reorder buffer must make the boundary (files + matches) identical every run.
@@ -415,14 +440,22 @@ test("both engines: near-cap results select the fixed path-order prefix", async 
       ["d00/f0.txt", 2], ["d01/f1.txt", 2], ["d02/f2.txt", 2], ["d03/f3.txt", 2],
       ["d04/f4.txt", 2], ["d05/f5.txt", 2], ["d06/f6.txt", 2], ["d07/f7.txt", 1]
     ];
-    const engines: Array<"node" | "rg"> = rgAvailable ? ["node", "rg"] : ["node"];
-    for (const engine of engines) {
-      for (let run = 0; run < 3; run += 1) {
-        const result = await searchProjectFiles(dir, dir, { query: "marker", engine, maxResults: 15 });
-        assert.equal(result.limitHit, true);
-        assert.equal(result.totalMatches, 15);
-        assert.deepEqual(result.files.map((file) => [file.path, file.matches.length]), expected, `${engine} run ${run}`);
-      }
+    for (let run = 0; run < 3; run += 1) {
+      const result = await searchProjectFiles(dir, dir, { query: "marker", engine: "node", maxResults: 15 });
+      assert.equal(result.limitHit, true);
+      assert.equal(result.totalMatches, 15);
+      assert.deepEqual(result.files.map((file) => [file.path, file.matches.length]), expected, `node run ${run}`);
+    }
+    if (rgAvailable) {
+      // rg walks in parallel, so WHICH files fill the cap may vary; the budget may not.
+      const result = await searchProjectFiles(dir, dir, { query: "marker", engine: "rg", maxResults: 15 });
+      assert.equal(result.limitHit, true);
+      assert.equal(result.totalMatches, 15);
+      assert.equal(result.files.reduce((n, file) => n + file.matches.length, 0), 15);
+      assert.equal(new Set(result.files.map((file) => file.path)).size, result.files.length, "no file twice");
+      assert.ok(result.files.every((file) => /^d\d\d\/f\d+\.txt$/.test(file.path) && file.matches.length <= 2));
+      const paths = result.files.map((file) => file.path);
+      assert.deepEqual(paths, [...paths].sort((a, b) => a.localeCompare(b)), "sorted by path");
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -475,7 +508,7 @@ test("rg: byte offsets become character offsets for a unicode line", { skip: !rg
 
 // --- rg cap determinism + node parity (finding #1) -----------------------------
 
-test("both engines: a capped mixed-case dir selects the IDENTICAL byte-order prefix", async () => {
+test("node: a capped mixed-case dir selects the byte-order prefix; rg keeps the budget", async () => {
   // apple/Banana/cherry/Zebra each match once. Byte order (Banana < Zebra < apple <
   // cherry) differs from localeCompare (apple < Banana < cherry < Zebra), so at a small
   // cap the two orders would pick a DIFFERENT member set. Both walkers now sort by bytes
@@ -490,13 +523,11 @@ test("both engines: a capped mixed-case dir selects the IDENTICAL byte-order pre
     "node caps the byte-order prefix"
   );
   if (rgAvailable) {
+    // rg searches in parallel: the capped members may differ, the budget may not.
     const r = await searchProjectFiles(fsRoot, mixed, { query: "cat", engine: "rg", maxResults: cap });
-    assert.deepEqual(
-      r.files.map((f) => f.path),
-      ["Banana.txt", "Zebra.txt"],
-      "rg and node select the identical capped file set"
-    );
     assert.equal(r.totalMatches, 2);
+    assert.equal(r.limitHit, true);
+    for (const f of r.files) assert.ok(["apple.txt", "Banana.txt", "cherry.txt", "Zebra.txt"].includes(f.path));
   }
 });
 
@@ -512,8 +543,11 @@ test("both engines: a literal [ ] in an include matches a literal filename, not 
     await writeFile(join(dir, "fileX.ts"), "cat other\n");
     const engines: Array<"node" | "rg"> = rgAvailable ? ["node", "rg"] : ["node"];
     for (const engine of engines) {
-      const res = await searchProjectFiles(dir, dir, { query: "cat", engine, include: "file[1].ts" });
-      assert.deepEqual(res.files.map((f) => f.path), ["file[1].ts"], `${engine} matched only the literal`);
+      // includeIgnored hands the include glob to rg itself (escaping); otherwise Node matches it.
+      for (const includeIgnored of [false, true]) {
+        const res = await searchProjectFiles(dir, dir, { query: "cat", engine, include: "file[1].ts", includeIgnored });
+        assert.deepEqual(res.files.map((f) => f.path), ["file[1].ts"], `${engine} matched only the literal`);
+      }
     }
   } finally {
     await rm(dir, { recursive: true, force: true });
@@ -543,4 +577,154 @@ test("rg: a glob the node parser accepts but rg rejects is INVALID_GLOB carrying
       return true;
     }
   );
+});
+
+// --- gitignore: hidden by default, included on request -------------------------
+
+/**
+ * A git work tree with ignored files, a non-ignored node_modules, and a tracked
+ * directory later swapped for a symlink that leads outside the root.
+ */
+async function makeGitFixture(): Promise<{ dir: string; outside: string }> {
+  const dir = await mkdtemp(join(tmpdir(), "orq-gitignore-"));
+  const outside = await mkdtemp(join(tmpdir(), "orq-gitignore-out-"));
+  const put = async (rel: string, content: string) => {
+    await mkdir(join(dir, rel, ".."), { recursive: true });
+    await writeFile(join(dir, rel), content);
+  };
+  await put(".gitignore", "ignored.txt\nbuild/\n");
+  await put("kept.txt", "needle kept\n");
+  await put("sub/deep.txt", "needle deep\n");
+  await put("ignored.txt", "needle ignored\n");
+  await put("build/out.txt", "needle build\n");
+  await put("node_modules/dep/index.txt", "needle vendored\n");
+  await put("swapped/a.txt", "needle swapped\n");
+  await writeFile(join(outside, "a.txt"), "needle outside\n");
+  execFileSync("git", ["init", "-q"], { cwd: dir });
+  execFileSync("git", ["add", "-A"], { cwd: dir });
+  // The index still lists swapped/a.txt, but the directory now leads outside the root.
+  await rename(join(dir, "swapped"), join(dir, "swapped-orig"));
+  await symlink(outside, join(dir, "swapped"));
+  await rm(join(dir, "swapped-orig"), { recursive: true, force: true });
+  return { dir, outside };
+}
+
+const engineList = (): Array<"node" | "rg"> => (rgAvailable ? ["node", "rg"] : ["node"]);
+
+test("both engines: gitignored files are hidden by default and searched with includeIgnored", { skip: !gitAvailable || isWin }, async () => {
+  const { dir, outside } = await makeGitFixture();
+  try {
+    for (const engine of engineList()) {
+      const hidden = await searchProjectFiles(dir, dir, { query: "needle", engine });
+      assert.deepEqual(hidden.files.map((f) => f.path), ["kept.txt", "sub/deep.txt"], `${engine} hides ignored`);
+
+      const all = await searchProjectFiles(dir, dir, { query: "needle", engine, includeIgnored: true });
+      assert.deepEqual(
+        all.files.map((f) => f.path),
+        ["build/out.txt", "ignored.txt", "kept.txt", "sub/deep.txt"],
+        `${engine} includes ignored, never node_modules or the symlinked directory`
+      );
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("both engines: an include glob never re-includes a gitignored file", { skip: !gitAvailable || isWin }, async () => {
+  // rg treats a positive -g as an override of ignore rules; the include must not leak
+  // `ignored.txt` back into a search that hides ignored files.
+  const { dir, outside } = await makeGitFixture();
+  try {
+    for (const engine of engineList()) {
+      const res = await searchProjectFiles(dir, dir, { query: "needle", engine, include: "*.txt" });
+      assert.deepEqual(res.files.map((f) => f.path), ["kept.txt", "sub/deep.txt"], engine);
+      const sub = await searchProjectFiles(dir, dir, { query: "needle", engine, include: "sub", exclude: "kept.txt" });
+      assert.deepEqual(sub.files.map((f) => f.path), ["sub/deep.txt"], engine);
+      const all = await searchProjectFiles(dir, dir, { query: "needle", engine, include: "*.txt", includeIgnored: true });
+      assert.deepEqual(all.files.map((f) => f.path), ["build/out.txt", "ignored.txt", "kept.txt", "sub/deep.txt"], engine);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("both engines: the file listing hides gitignored files unless includeIgnored", { skip: !gitAvailable || isWin }, async () => {
+  const { dir, outside } = await makeGitFixture();
+  try {
+    for (const engine of engineList()) {
+      const hidden = await listFiles(dir, { engine });
+      assert.deepEqual(hidden.files.map((f) => f.path), [".gitignore", "kept.txt", "sub/deep.txt"], `${engine} hides ignored`);
+      assert.equal(hidden.truncated, false);
+      assert.equal(hidden.files.find((f) => f.path === "kept.txt")?.size, "needle kept\n".length);
+
+      const all = await listFiles(dir, { engine, includeIgnored: true });
+      assert.deepEqual(
+        all.files.map((f) => f.path),
+        [".gitignore", "build/out.txt", "ignored.txt", "kept.txt", "sub/deep.txt"],
+        `${engine} lists ignored, never .git, node_modules or the symlinked directory`
+      );
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+    await rm(outside, { recursive: true, force: true });
+  }
+});
+
+test("both engines: a capped listing keeps the shallowest files", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-listcap-"));
+  try {
+    for (const rel of ["z-top.txt", "a/b/c/deep1.txt", "a/b/c/deep2.txt", "mid/m.txt", "b-top.txt", "a/b/two.txt"]) {
+      await mkdir(join(dir, rel, ".."), { recursive: true });
+      await writeFile(join(dir, rel), "x\n");
+    }
+    for (const engine of engineList()) {
+      const res = await listFiles(dir, { engine, maxFiles: 3 });
+      assert.deepEqual(res.files.map((f) => f.path), ["b-top.txt", "mid/m.txt", "z-top.txt"], engine);
+      assert.equal(res.truncated, true, engine);
+
+      const exact = await listFiles(dir, { engine, maxFiles: 6 });
+      assert.equal(exact.files.length, 6, engine);
+      assert.equal(exact.truncated, false, engine);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("both engines: listing skips symlinks, .git and node_modules outside a git repo", { skip: isWin }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-listplain-"));
+  try {
+    await mkdir(join(dir, "src"), { recursive: true });
+    await mkdir(join(dir, ".git"), { recursive: true });
+    await mkdir(join(dir, "node_modules", "dep"), { recursive: true });
+    await writeFile(join(dir, "src", "a.ts"), "a\n");
+    await writeFile(join(dir, ".hidden"), "h\n");
+    await writeFile(join(dir, ".git", "config"), "c\n");
+    await writeFile(join(dir, "node_modules", "dep", "i.js"), "i\n");
+    await symlink(join(dir, "src", "a.ts"), join(dir, "link.ts"));
+    for (const engine of engineList()) {
+      const res = await listFiles(dir, { engine });
+      assert.deepEqual(res.files.map((f) => f.path), [".hidden", "src/a.ts"], engine);
+    }
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("listing: a pre-aborted signal rejects with REQUEST_ABORTED", async () => {
+  const controller = new AbortController();
+  controller.abort();
+  for (const engine of engineList()) {
+    await assert.rejects(
+      () => listFiles(fsRoot, { engine, signal: controller.signal }),
+      (err: unknown) => {
+        assert.ok(err instanceof FsSearchError || err instanceof withoutRipgrep.FsSearchError);
+        assert.equal(err.status, 499);
+        assert.equal(err.code, "REQUEST_ABORTED");
+        return true;
+      }
+    );
+  }
 });

@@ -5,6 +5,7 @@ import {
   ChevronsDownUp,
   ChevronsUpDown,
   Ellipsis,
+  Eye,
   File as FileIcon,
   RefreshCw,
   Search,
@@ -24,9 +25,12 @@ type Prepared = ReturnType<typeof fuzzysort.prepare>;
 
 interface FilesCache {
   root: string;
+  includeIgnored: boolean;
   prepared: Prepared[];
   sizeByPath: Map<string, number>;
   fetchedAt: number;
+  /** The daemon capped the listing; names beyond it can't be found. */
+  truncated: boolean;
 }
 
 interface FileRow {
@@ -102,7 +106,7 @@ export const SearchPanel: React.FC<{
   const api = useApi();
   const [query, setQuery] = useState("");
   const [options, setOptions] = useState<SearchOptions>(() => loadSearchOptions(root));
-  const { caseSensitive, wholeWord, regex, include, exclude, filtersExpanded } = options;
+  const { caseSensitive, wholeWord, regex, include, exclude, filtersExpanded, includeIgnored } = options;
   const [filesVersion, setFilesVersion] = useState(0);
   const [filesError, setFilesError] = useState<string | null>(null);
   const [content, setContent] = useState<FsSearchResponse | null>(null);
@@ -116,9 +120,9 @@ export const SearchPanel: React.FC<{
 
   const filesCacheRef = useRef<FilesCache | null>(null);
   const filesAbortRef = useRef<AbortController | null>(null);
-  // The root a listing is currently in flight for, so a switch mid-listing can't
-  // wedge ensureFiles (the old panel-global boolean stayed true for the new root).
-  const filesLoadingRootRef = useRef<string | null>(null);
+  // The root + gitignore mode a listing is currently in flight for, so a switch
+  // mid-listing can't wedge ensureFiles (a panel-global boolean would stay true).
+  const filesLoadingKeyRef = useRef<string | null>(null);
   const contentAbortRef = useRef<AbortController | null>(null);
   const contentReqRef = useRef(0);
   const debounceRef = useRef<number | undefined>(undefined);
@@ -164,7 +168,7 @@ export const SearchPanel: React.FC<{
     contentReqRef.current += 1; // invalidate any in-flight response for the old root
     filesAbortRef.current?.abort();
     filesAbortRef.current = null;
-    filesLoadingRootRef.current = null;
+    filesLoadingKeyRef.current = null;
     setFilesError(null);
     setOptions(loadSearchOptions(root));
     skipNextPersistRef.current = true;
@@ -191,26 +195,49 @@ export const SearchPanel: React.FC<{
   }, [query]);
 
   // Lazily fetch (and cache) the recursive file listing for fuzzy quick-open the
-  // first time a search session starts; refetch if the cache is stale (>60s).
+  // first time a search session starts; refetch if the cache is stale (>60s) or was
+  // listed with the other gitignore mode.
   const ensureFiles = useCallback(() => {
+    const key = `${includeIgnored ? "all" : "visible"}:${root}`;
     const cache = filesCacheRef.current;
-    if (cache && cache.root === root && Date.now() - cache.fetchedAt < FILES_CACHE_TTL_MS) return;
-    if (filesLoadingRootRef.current === root) return;
+    if (
+      cache &&
+      cache.root === root &&
+      cache.includeIgnored === includeIgnored &&
+      Date.now() - cache.fetchedAt < FILES_CACHE_TTL_MS
+    ) {
+      // The toggle flipped back while the other mode's listing was in flight: drop it,
+      // or its late response would replace this still-fresh cache.
+      if (filesLoadingKeyRef.current !== null && filesLoadingKeyRef.current !== key) {
+        filesAbortRef.current?.abort();
+        filesAbortRef.current = null;
+        filesLoadingKeyRef.current = null;
+      }
+      return;
+    }
+    if (filesLoadingKeyRef.current === key) return;
     filesAbortRef.current?.abort();
     const controller = new AbortController();
     filesAbortRef.current = controller;
-    filesLoadingRootRef.current = root;
+    filesLoadingKeyRef.current = key;
     setFilesError(null);
     api
-      .listProjectFiles(root, controller.signal)
+      .listProjectFiles(root, { includeIgnored }, controller.signal)
       .then((res) => {
-        if (controller.signal.aborted) return;
+        if (controller.signal.aborted || filesLoadingKeyRef.current !== key) return;
         const sizeByPath = new Map<string, number>();
         const prepared = res.files.map((f) => {
           sizeByPath.set(f.path, f.size);
           return fuzzysort.prepare(f.path);
         });
-        filesCacheRef.current = { root, prepared, sizeByPath, fetchedAt: Date.now() };
+        filesCacheRef.current = {
+          root,
+          includeIgnored,
+          prepared,
+          sizeByPath,
+          fetchedAt: Date.now(),
+          truncated: res.truncated
+        };
         setFilesVersion((v) => v + 1);
       })
       .catch(() => {
@@ -218,12 +245,13 @@ export const SearchPanel: React.FC<{
         setFilesError("Could not list files for quick-open.");
       })
       .finally(() => {
-        if (filesLoadingRootRef.current === root) filesLoadingRootRef.current = null;
+        if (filesLoadingKeyRef.current === key) filesLoadingKeyRef.current = null;
       });
-  }, [api, root]);
+  }, [api, root, includeIgnored]);
 
-  // Trigger the fetch only when a search session begins (query empty -> non-empty),
-  // not on every keystroke — so an in-flight listing is never aborted mid-type.
+  // Trigger the fetch only when a search session begins (query empty -> non-empty) or
+  // the gitignore mode changes, not on every keystroke — so an in-flight listing is
+  // never aborted mid-type.
   useEffect(() => {
     if (active) ensureFiles();
   }, [active, ensureFiles]);
@@ -241,7 +269,7 @@ export const SearchPanel: React.FC<{
 
   const fileResults = useMemo<FileRow[]>(() => {
     const cache = filesCacheRef.current;
-    if (!trimmed || !cache || cache.root !== root) return [];
+    if (!trimmed || !cache || cache.root !== root || cache.includeIgnored !== includeIgnored) return [];
     const results = fuzzysort.go(trimmed, cache.prepared, { limit: 30, threshold: 0.3 });
     let rows = results.map((r) => ({
       path: r.target,
@@ -250,7 +278,7 @@ export const SearchPanel: React.FC<{
     }));
     if (fuzzyGlob) rows = rows.filter((r) => matchesGlobList(fuzzyGlob, r.path));
     return rows;
-  }, [trimmed, filesVersion, root, fuzzyGlob]);
+  }, [trimmed, filesVersion, root, includeIgnored, fuzzyGlob]);
 
   const runContentSearch = useCallback(async () => {
     const q = query.trim();
@@ -263,7 +291,7 @@ export const SearchPanel: React.FC<{
     setContentError(null);
     try {
       const res = await api.searchFs(
-        { path: root, q, caseSensitive, wholeWord, regex, include, exclude, maxResults: CONTENT_MAX_RESULTS },
+        { path: root, q, caseSensitive, wholeWord, regex, include, exclude, includeIgnored, maxResults: CONTENT_MAX_RESULTS },
         controller.signal
       );
       if (contentReqRef.current !== reqId || controller.signal.aborted) return; // stale response
@@ -285,7 +313,7 @@ export const SearchPanel: React.FC<{
       }
       setContentBusy(false);
     }
-  }, [api, root, query, caseSensitive, wholeWord, regex, include, exclude]);
+  }, [api, root, query, caseSensitive, wholeWord, regex, include, exclude, includeIgnored]);
 
   // Schedule the content search: immediate for option toggles/Refresh, otherwise a
   // 120ms trailing debounce clamped to a 600ms maxWait.
@@ -339,7 +367,7 @@ export const SearchPanel: React.FC<{
     });
   }, []);
 
-  const toggleOption = (key: "caseSensitive" | "wholeWord" | "regex") => {
+  const toggleOption = (key: "caseSensitive" | "wholeWord" | "regex" | "includeIgnored") => {
     immediateRef.current = true; // option changes re-search immediately
     setOption({ [key]: !options[key] });
   };
@@ -462,7 +490,9 @@ export const SearchPanel: React.FC<{
   const rowFocusRing =
     "focus:outline-none focus-visible:ring-1 focus-visible:ring-inset focus-visible:ring-neutral-500";
 
-  const filesReady = !!filesCacheRef.current && filesCacheRef.current.root === root;
+  const filesCache = filesCacheRef.current;
+  const filesReady = !!filesCache && filesCache.root === root && filesCache.includeIgnored === includeIgnored;
+  const filesTruncated = filesReady && filesCache.truncated;
   const hasFieldError = !!(fieldErrors.include || fieldErrors.exclude);
   // Force the filters row open whenever a glob is invalid: its error message lives inside
   // that row, and both `filtersExpanded=false` and the bad glob persist across reloads, so
@@ -524,6 +554,13 @@ export const SearchPanel: React.FC<{
             .*
           </ToggleButton>
           <ToggleButton
+            active={includeIgnored}
+            onClick={() => toggleOption("includeIgnored")}
+            label="Include gitignored files"
+          >
+            <Eye size={15} />
+          </ToggleButton>
+          <ToggleButton
             active={showFilters}
             onClick={() => setOption({ filtersExpanded: !filtersExpanded })}
             label="Toggle search details"
@@ -566,6 +603,12 @@ export const SearchPanel: React.FC<{
       {active && (
         <div className="min-h-0 flex-1 overflow-y-auto overflow-x-hidden pb-2" aria-busy={contentBusy}>
           {filesError && <p className="px-3 py-1 text-xs text-danger">{filesError}</p>}
+          {filesTruncated && (
+            <p className="px-3 py-1 text-[11px] text-neutral-600">
+              Too many files: names are matched among {filesCache.prepared.length.toLocaleString()} of them,
+              gitignored and deeper ones last.
+            </p>
+          )}
 
           {fileResults.length > 0 && (
             <div className="mb-1">

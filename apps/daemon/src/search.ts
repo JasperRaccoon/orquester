@@ -15,12 +15,21 @@ import {
   parseGlobList
 } from "@orquester/config/glob";
 import { spawn } from "node:child_process";
-import type { Dirent } from "node:fs";
-import { open, readdir, stat } from "node:fs/promises";
+import { lstatSync, type Dirent } from "node:fs";
+import { lstat, open, readdir, stat } from "node:fs/promises";
 import { join, relative, resolve, sep } from "node:path";
 import { onPath } from "./archive";
 
-const FILE_LIST_LIMIT = 5000;
+const FILE_LIST_LIMIT = 20_000;
+// Upper bound on candidate paths gathered before the listing is selected, so a
+// pathological tree (or `includeIgnored` over a huge build output) stays bounded.
+const FILE_LIST_SCAN_CEILING = 200_000;
+// Paths sized per synchronous lstat batch before yielding to the event loop. A sync
+// lstat is several times cheaper than a threadpool round trip; batching keeps each
+// event-loop stall to a few milliseconds.
+const FILE_STAT_BATCH = 512;
+// Concurrent readdir calls per BFS level of the fallback walker.
+const WALK_READDIR_CONCURRENCY = 32;
 const SEARCH_MATCH_DEFAULT_LIMIT = 200;
 const SEARCH_MATCH_MAX_LIMIT = 1000;
 const SEARCH_MATCHES_PER_FILE_LIMIT = 20;
@@ -47,21 +56,74 @@ export class FsSearchError extends Error {
   }
 }
 
+/**
+ * Recursive file listing for quick-open. Gitignored files are left out unless
+ * `includeIgnored` is set; `.git` and `node_modules` are always left out.
+ *
+ * Sources, fastest first: `rg --files`, then (hiding ignored files) `git ls-files`,
+ * then a breadth-first walk. When more than `maxFiles` files exist, non-ignored files
+ * are kept first and then the shallowest ones (byte order within a depth), so a deep
+ * vendored, generated or worktree tree can't crowd the project's own files out.
+ */
 export async function listProjectFiles(
-  fsRoot: string,
+  _fsRoot: string,
   root: string,
-  options: { maxFiles?: number | string; signal?: AbortSignal } = {}
+  options: { maxFiles?: number | string; includeIgnored?: boolean; signal?: AbortSignal } = {}
 ): Promise<FsFilesResponse> {
+  // Probe before the first await, like searchProjectFiles.
+  const useRg = resolveRg();
+  const includeIgnored = Boolean(options.includeIgnored);
+  const { signal, makeAbortError } = searchDeadline(options.signal);
+  const checkAbort = (): void => {
+    if (signal.aborted) throw makeAbortError();
+  };
+  checkAbort();
+
   const rootPath = resolve(root);
   const rootInfo = await stat(rootPath);
   if (!rootInfo.isDirectory()) throw new FsSearchError(400, "FS_ERROR", "Not a directory.");
-
   const maxFiles = clampInt(options.maxFiles, 1, FILE_LIST_LIMIT, FILE_LIST_LIMIT);
-  const files: FsProjectFile[] = [];
-  const state = { truncated: false };
-  await walkProjectFiles(fsRoot, rootPath, rootPath, files, state, maxFiles, options.signal);
+
+  let candidates: CandidatePaths | null = null;
+  // With includeIgnored, the non-ignored files, which win a capped selection.
+  let preferred: CandidatePaths | null = null;
+  // git lists index entries, so a tracked directory that later became a symlink could
+  // lead outside the root; rg and the walker never descend through symlinks.
+  let verifyParent: ParentCheck | null = null;
+  if (useRg) {
+    try {
+      [candidates, preferred] = await Promise.all([
+        listWithRipgrep(rootPath, includeIgnored, signal),
+        includeIgnored ? listWithRipgrep(rootPath, false, signal).catch(() => null) : null
+      ]);
+    } catch (error) {
+      // A spawn or walk failure falls through to the slower sources.
+      if (error instanceof FsSearchError) throw error;
+    }
+  }
+  checkAbort();
+  if (!candidates) {
+    preferred = await listGitVisible(rootPath, signal);
+    checkAbort();
+    if (preferred) verifyParent = createParentCheck(rootPath);
+    candidates = preferred && !includeIgnored ? preferred : await walkCandidates(rootPath, maxFiles, checkAbort);
+  }
+
+  let preferredSet: Set<string> | null = null;
+  if (preferred && includeIgnored) {
+    preferredSet = new Set(preferred.paths);
+    if (candidates.truncated) {
+      // A gather that stopped early (walk depth, scan ceiling) may have missed some.
+      const gathered = new Set(candidates.paths);
+      const missing = preferred.paths.filter((path) => !gathered.has(path));
+      if (missing.length > 0) candidates = { paths: candidates.paths.concat(missing), truncated: true };
+    }
+  }
+  const selected = selectListing(candidates.paths, maxFiles, preferredSet);
+  const files = await statCandidates(rootPath, selected, verifyParent, checkAbort);
+  checkAbort();
   files.sort((a, b) => a.path.localeCompare(b.path));
-  return { root: rootPath, files, truncated: state.truncated };
+  return { root: rootPath, files, truncated: candidates.truncated || candidates.paths.length > maxFiles };
 }
 
 export async function searchProjectFiles(
@@ -75,6 +137,8 @@ export async function searchProjectFiles(
     include?: string;
     exclude?: string;
     maxResults?: number | string;
+    /** Search gitignored files too. `.git` and `node_modules` stay excluded. */
+    includeIgnored?: boolean;
     signal?: AbortSignal;
   }
 ): Promise<FsSearchResponse> {
@@ -88,15 +152,8 @@ export async function searchProjectFiles(
   const maxResults = clampInt(options.maxResults, 1, SEARCH_MATCH_MAX_LIMIT, SEARCH_MATCH_DEFAULT_LIMIT);
   const globs = parseGlobs(options.include, options.exclude);
   const rootPath = resolve(root);
-
-  // Compose a 10s timeout with the caller's signal. AbortSignal.timeout's timer is
-  // unref'd, so a fast search doesn't keep the process alive waiting on it.
-  const timeoutSignal = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
-  const composed = AbortSignal.any(options.signal ? [options.signal, timeoutSignal] : [timeoutSignal]);
-  const makeAbortError = (): FsSearchError =>
-    timeoutSignal.aborted
-      ? new FsSearchError(504, "SEARCH_TIMEOUT", "Search timed out.")
-      : new FsSearchError(499, "REQUEST_ABORTED", "Request aborted.");
+  const includeIgnored = Boolean(options.includeIgnored);
+  const { signal: composed, makeAbortError } = searchDeadline(options.signal);
 
   const useRg = resolveRg();
 
@@ -113,6 +170,7 @@ export async function searchProjectFiles(
         regex: Boolean(options.regex),
         maxResults,
         globs,
+        includeIgnored,
         signal: composed,
         makeAbortError
       });
@@ -139,9 +197,25 @@ export async function searchProjectFiles(
     matcher: createMatcher(options.query, Boolean(options.caseSensitive), Boolean(options.wholeWord)),
     maxResults,
     globs,
+    includeIgnored,
     signal: composed,
     makeAbortError
   });
+}
+
+/**
+ * Compose the 10s search backstop with the caller's signal. AbortSignal.timeout's
+ * timer is unref'd, so a fast search doesn't keep the process alive waiting on it.
+ */
+function searchDeadline(signal?: AbortSignal): { signal: AbortSignal; makeAbortError: () => FsSearchError } {
+  const timeoutSignal = AbortSignal.timeout(SEARCH_TIMEOUT_MS);
+  return {
+    signal: AbortSignal.any(signal ? [signal, timeoutSignal] : [timeoutSignal]),
+    makeAbortError: () =>
+      timeoutSignal.aborted
+        ? new FsSearchError(504, "SEARCH_TIMEOUT", "Search timed out.")
+        : new FsSearchError(499, "REQUEST_ABORTED", "Request aborted.")
+  };
 }
 
 /** Parse the raw include/exclude fields into one matchable list (null when both empty). */
@@ -169,16 +243,25 @@ interface NodeSearchOpts {
   matcher: Matcher;
   maxResults: number;
   globs: CompiledGlobList | null;
+  includeIgnored: boolean;
   signal: AbortSignal;
   makeAbortError: () => FsSearchError;
 }
 
+/** One regular file offered to the node engine, in discovery order. */
+interface NodeFileEntry {
+  relPosix: string;
+  safePath: string;
+  size: number;
+}
+
 /**
- * Pure-Node search. Interleaves a sorted DFS walk with a bounded pool of per-file
- * scans (no full pre-listing) and stops the walk as soon as the committed budget is
- * exhausted.
+ * Pure-Node search. Interleaves file discovery with a bounded pool of per-file scans
+ * and stops discovery as soon as the committed budget is exhausted. Files come from
+ * `git ls-files` (byte path order) when gitignored files are hidden and the root is
+ * in a git work tree, otherwise from a sorted DFS walk.
  *
- * Aggregation is DETERMINISTIC: files are discovered in sorted DFS order, each
+ * Aggregation is DETERMINISTIC: files are discovered in a fixed order, each
  * scheduled scan is stamped with a monotonic sequence number, and completed scans are
  * committed through a reorder buffer strictly in sequence order. Parallel IO is
  * preserved (scans still run concurrently), but the budget (`maxResults`, the per-file
@@ -191,6 +274,7 @@ async function searchWithNode(root: string, opts: NodeSearchOpts): Promise<FsSea
   let limitHit = false;
   let stop = false;
   let firstError: unknown = null;
+  let sourcePartial = false;
 
   const sem = new Semaphore(SEARCH_CONCURRENCY);
   const active = new Set<Promise<void>>();
@@ -284,41 +368,19 @@ async function searchWithNode(root: string, opts: NodeSearchOpts): Promise<FsSea
     }
   };
 
-  const walk = async (dir: string): Promise<void> => {
-    if (stop) return;
+  const discover = async (): Promise<void> => {
     checkAbort();
-    let dirents;
-    try {
-      dirents = await readdir(dir, { withFileTypes: true });
-    } catch {
-      return; // unreadable directory — skip its subtree
-    }
-    // Walk order is BYTE-ordered (not localeCompare) to match rg's `--sort path`, so a
-    // capped search selects the same path-order prefix across both engines. (A residual
-    // divergence remains only when one entry name is a strict prefix of a sibling's, where
-    // node's dirent-name compare and rg's full-path '/' vs '.' compare can disagree — an
-    // acceptable edge.) The final result listing is still sorted by localeCompare below.
-    dirents.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
-
-    for (const dirent of dirents) {
+    const source = await nodeFileEntries(root, opts.includeIgnored, opts.signal, checkAbort);
+    // A listing cut at its ceiling leaves files unsearched: report the limit.
+    if (source.partial) sourcePartial = true;
+    for await (const entry of source.entries) {
       if (stop) return;
       checkAbort();
-
-      const resolved = await resolveDirent(dir, dirent);
-      if (!resolved) continue;
-      if (resolved.kind === "dir") {
-        await walk(resolved.dir);
-        continue;
-      }
-      if (resolved.size > SEARCH_FILE_SIZE_LIMIT) continue;
-
-      const rel = relative(root, resolved.candidate);
-      if (!rel || rel === ".." || rel.startsWith(`..${sep}`)) continue;
-      const relPosix = rel.split(sep).join("/");
-      if (opts.globs && !matchesGlobList(opts.globs, relPosix)) continue;
+      if (entry.size > SEARCH_FILE_SIZE_LIMIT) continue;
+      if (opts.globs && !matchesGlobList(opts.globs, entry.relPosix)) continue;
 
       // Throttle the launch rate to the buffer window BEFORE consuming a permit, so a
-      // stalled head-of-line scan parks the walker here instead of buffering the tree.
+      // stalled head-of-line scan parks discovery here instead of buffering the tree.
       await waitForBuffer();
       if (stop) return;
       await sem.acquire();
@@ -328,14 +390,14 @@ async function searchWithNode(root: string, opts: NodeSearchOpts): Promise<FsSea
       }
       const seq = nextSeq++; // stamp in discovery order BEFORE launching the async scan
       inFlight += 1;
-      const p = scan(seq, relPosix, resolved.safePath, resolved.size);
+      const p = scan(seq, entry.relPosix, entry.safePath, entry.size);
       active.add(p);
       void p.finally(() => active.delete(p));
     }
   };
 
   try {
-    await walk(root);
+    await discover();
   } catch (error) {
     fail(error);
   }
@@ -347,7 +409,7 @@ async function searchWithNode(root: string, opts: NodeSearchOpts): Promise<FsSea
   checkAbort();
 
   results.sort((a, b) => a.path.localeCompare(b.path));
-  return { files: results, totalMatches, limitHit, tool: "node" };
+  return { files: results, totalMatches, limitHit: limitHit || sourcePartial, tool: "node" };
 }
 
 /** Read one file, sniffing for binary content before decoding the remainder. */
@@ -436,6 +498,7 @@ interface RipgrepOpts {
   regex: boolean;
   maxResults: number;
   globs: CompiledGlobList | null;
+  includeIgnored: boolean;
   signal: AbortSignal;
   makeAbortError: () => FsSearchError;
 }
@@ -472,7 +535,21 @@ function rgFieldBytes(field: RgTextField): Buffer {
  * shape matches the node engine, then reuses formatLineMatch() for windowing.
  */
 async function searchWithRipgrep(fsRoot: string, root: string, opts: RipgrepOpts): Promise<FsSearchResponse> {
-  const collected = await runRipgrep(root, opts);
+  // A positive rg glob overrides ignore rules (`-g '*.ts'` also searches a gitignored
+  // `x.ts`). While ignored files are hidden, an include glob therefore needs the set of
+  // visible files (`rg --files` with the same ignore rules, cheap next to the search)
+  // to drop such matches before they count. Without that set (lister failed or hit its
+  // ceiling) the includes are matched in Node instead: correct, but rg then reads every
+  // visible file.
+  let visible: Set<string> | null = null;
+  let includesInNode = false;
+  if (!opts.includeIgnored && opts.globs && opts.globs.include.length > 0) {
+    const listing = await listWithRipgrep(root, false, opts.signal).catch(() => null);
+    if (opts.signal.aborted) throw opts.makeAbortError();
+    if (listing && !listing.truncated) visible = new Set(listing.paths);
+    else includesInNode = true;
+  }
+  const collected = await runRipgrep(root, opts, visible, includesInNode);
 
   // A request aborted/timed-out AFTER runRipgrep resolves (e.g. during the stat loop
   // below) has no other checkpoint — without these the engine would still resolve a
@@ -509,7 +586,9 @@ async function searchWithRipgrep(fsRoot: string, root: string, opts: RipgrepOpts
 
 function runRipgrep(
   root: string,
-  opts: RipgrepOpts
+  opts: RipgrepOpts,
+  visible: Set<string> | null,
+  includesInNode: boolean
 ): Promise<{ files: FsSearchFileResult[]; totalMatches: number; limitHit: boolean }> {
   return new Promise((resolveResult, rejectResult) => {
     if (opts.signal.aborted) {
@@ -520,28 +599,37 @@ function runRipgrep(
     const args = [
       "--json",
       "--hidden",
-      // Match the node fallback's semantics: search everything except .git and
-      // node_modules (below). Without this rg honors .gitignore/.ignore (and
-      // --no-require-git would apply them even outside a git repo), so a gitignored
-      // file would be found by one engine and invisible to the other on the same tree.
-      "--no-ignore",
       "--no-config",
       "--crlf",
-      // Force single-threaded path-order traversal. Without it rg walks in parallel and
-      // stops at the global cap in nondeterministic completion order, so a capped search
-      // returns a different (non-prefix) file subset run to run. `--sort path` makes the
-      // cap a deterministic path-order prefix, matching the node engine's reorder buffer.
-      "--sort",
-      "path",
+      // No `--sort path`: it forces a single-threaded walk (several times slower). rg
+      // still writes each file's matches contiguously, and the result is sorted by
+      // path below; only which files make it under a reached cap can vary run to run.
       "--max-filesize",
       String(SEARCH_FILE_SIZE_LIMIT),
       opts.caseSensitive ? "--case-sensitive" : "--ignore-case"
     ];
+    // Without it rg honors .gitignore/.ignore, which is the default: a gitignored build
+    // or worktree directory would otherwise dominate the search.
+    if (opts.includeIgnored) args.push("--no-ignore");
     if (opts.wholeWord) args.push("-w");
     // Maps each emitted `-g` argument (exactly as rg receives it, `!`/anchor included) to
     // the raw user field it came from, so a glob-parse failure — whose stderr echoes that
     // same argument string — can be attributed back to "include"/"exclude" for the UI.
     const fieldByGlob = new Map<string, "include" | "exclude">();
+    // See searchWithRipgrep: drop matches in files the ignore rules hide, or match the
+    // includes here when they are not handed to rg. Exclusions only remove files, so
+    // they always go to rg.
+    const nodeGlobs = includesInNode ? opts.globs : null;
+    let checkedPath: string | null = null;
+    let checkedAllowed = true;
+    const allowedPath = (path: string): boolean => {
+      if (!visible && !nodeGlobs) return true;
+      if (path !== checkedPath) {
+        checkedPath = path;
+        checkedAllowed = visible ? visible.has(path) : matchesGlobList(nodeGlobs!, path);
+      }
+      return checkedAllowed;
+    };
     // Glob ORDER: user includes, then user excludes, then the built-in `!.git`/
     // `!node_modules` LAST. rg applies "later glob wins", so the built-ins always
     // override any user glob (parity with the node walker, which cannot descend into
@@ -561,7 +649,7 @@ function runRipgrep(
         fieldByGlob.set(glob, pattern.field ?? "include");
         args.push("-g", glob);
       };
-      for (const pattern of opts.globs.include) emit(pattern, false);
+      if (!includesInNode) for (const pattern of opts.globs.include) emit(pattern, false);
       for (const pattern of opts.globs.exclude) emit(pattern, true);
     }
     args.push("-g", "!.git", "-g", "!node_modules");
@@ -618,6 +706,7 @@ function runRipgrep(
 
       const relRaw = decodeRgText(data.path);
       const path = relRaw.startsWith("./") ? relRaw.slice(2) : relRaw;
+      if (!allowedPath(path)) return;
 
       if (!current || current.path !== path) {
         if (current) files.push(current);
@@ -746,48 +835,361 @@ async function resolveDirent(dir: string, dirent: Dirent): Promise<DirentResolut
   return null; // fifo/socket/blockdev/etc.
 }
 
-async function walkProjectFiles(
-  fsRoot: string,
+/** The node engine's files: git's visible files when ignored ones are hidden, else a DFS walk. */
+async function nodeFileEntries(
   root: string,
-  dir: string,
-  files: FsProjectFile[],
-  state: { truncated: boolean },
-  maxFiles: number,
-  signal?: AbortSignal
-): Promise<void> {
-  throwIfAborted(signal);
-  if (state.truncated) return;
+  includeIgnored: boolean,
+  signal: AbortSignal,
+  checkAbort: () => void
+): Promise<{ entries: AsyncIterable<NodeFileEntry>; partial: boolean }> {
+  if (!includeIgnored) {
+    const listed = await listGitVisible(root, signal);
+    checkAbort();
+    if (listed) {
+      const entries = listedFileEntries(root, listed.paths, createParentCheck(root), checkAbort);
+      return { entries, partial: listed.truncated };
+    }
+  }
+  return { entries: walkFileEntries(root, root, checkAbort), partial: false };
+}
 
-  const dirents = await readdir(dir, { withFileTypes: true });
-  // Walk order is BYTE-ordered (not localeCompare) to match rg's `--sort path`, so a
-  // capped listing selects the same path-order prefix across engines. The returned
-  // listing is re-sorted by localeCompare on return, so this only affects cap membership.
-  dirents.sort((a, b) => (a.name < b.name ? -1 : a.name > b.name ? 1 : 0));
+/** Yield listed paths that are still regular files, in byte path order. */
+async function* listedFileEntries(
+  root: string,
+  paths: string[],
+  verifyParent: ParentCheck,
+  checkAbort: () => void
+): AsyncGenerator<NodeFileEntry> {
+  for (const relPosix of [...paths].sort(compareBytes)) {
+    checkAbort();
+    const entry = await statCandidate(root, relPosix, verifyParent);
+    if (entry) yield { relPosix, safePath: entry.abs, size: entry.size };
+  }
+}
 
-  // Resolve (stat) all of a directory's dirents in parallel — the per-file stat is the
-  // walk's dominant cost, and libuv dispatches these across its threadpool. Order is
-  // preserved (results align with the sorted dirents), and the listing is re-sorted by
-  // path on return regardless, so this changes only timing, not output.
-  const resolvedAll = await Promise.all(dirents.map((dirent) => resolveDirent(dir, dirent)));
+/** Depth-first walk of every regular file under `dir`, siblings in byte order. */
+async function* walkFileEntries(root: string, dir: string, checkAbort: () => void): AsyncGenerator<NodeFileEntry> {
+  checkAbort();
+  let dirents;
+  try {
+    dirents = await readdir(dir, { withFileTypes: true });
+  } catch {
+    return; // unreadable directory — skip its subtree
+  }
+  // Byte order (not localeCompare), like the git listing, so a capped search keeps a
+  // stable path-order prefix. The final result listing is sorted by localeCompare.
+  dirents.sort((a, b) => compareBytes(a.name, b.name));
 
-  for (const resolved of resolvedAll) {
-    throwIfAborted(signal);
-    if (state.truncated) return;
-
+  for (const dirent of dirents) {
+    checkAbort();
+    const resolved = await resolveDirent(dir, dirent);
     if (!resolved) continue;
     if (resolved.kind === "dir") {
-      await walkProjectFiles(fsRoot, root, resolved.dir, files, state, maxFiles, signal);
+      yield* walkFileEntries(root, resolved.dir, checkAbort);
       continue;
     }
-    if (files.length >= maxFiles) {
-      state.truncated = true;
-      return;
-    }
-
     const rel = relative(root, resolved.candidate);
     if (!rel || rel === ".." || rel.startsWith(`..${sep}`)) continue;
-    files.push({ path: rel.split(sep).join("/"), size: resolved.size });
+    yield { relPosix: rel.split(sep).join("/"), safePath: resolved.safePath, size: resolved.size };
   }
+}
+
+// --- file listing sources --------------------------------------------------------
+
+/** Root-relative POSIX paths gathered for the listing, before selection and sizing. */
+interface CandidatePaths {
+  paths: string[];
+  /** True when gathering stopped at FILE_LIST_SCAN_CEILING. */
+  truncated: boolean;
+}
+
+/** Resolves true when a listed path's parent directory has no symlink below the root. */
+type ParentCheck = (relPosix: string) => Promise<boolean>;
+
+function compareBytes(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+// An empty, `.` or `..` segment (anything that could escape the root or alias a path)
+// or a SKIP_DIRS segment. One regex test per path is far cheaper than splitting it.
+const UNLISTABLE_SEGMENT = /(?:^|\/)(?:|\.|\.\.|\.git|node_modules)(?:\/|$)/;
+
+/**
+ * Normalize one path printed by rg or git relative to the root, or null when it must
+ * not be listed: anything escaping the root, and anything under `.git`/`node_modules`.
+ */
+function normalizeListedPath(raw: string): string | null {
+  let rel = sep === "/" ? raw : raw.split(sep).join("/");
+  if (rel.startsWith("./")) rel = rel.slice(2);
+  // git prints an untracked nested repository as `dir/`; lstat later drops it.
+  if (rel.endsWith("/")) rel = rel.slice(0, -1);
+  if (!rel || UNLISTABLE_SEGMENT.test(rel)) return null;
+  return rel;
+}
+
+/**
+ * Run a lister that prints NUL-terminated paths relative to `root`, optionally
+ * deduplicating them (git prints an unmerged path once per stage). Stops at
+ * FILE_LIST_SCAN_CEILING with `truncated`. An abort kills the child and resolves with
+ * `code: null`; callers re-check their signal. A spawn failure (missing binary) rejects.
+ */
+function runPathLister(
+  command: string,
+  args: string[],
+  root: string,
+  signal: AbortSignal,
+  dedupe: boolean
+): Promise<{ paths: string[]; truncated: boolean; code: number | null; stderr: string }> {
+  return new Promise((resolveRun, rejectRun) => {
+    if (signal.aborted) {
+      resolveRun({ paths: [], truncated: false, code: null, stderr: "" });
+      return;
+    }
+    const child = spawn(command, args, { cwd: root, stdio: ["ignore", "pipe", "pipe"] });
+    const paths: string[] = [];
+    const seen = dedupe ? new Set<string>() : null;
+    let pending: Buffer = Buffer.alloc(0);
+    let stderr = "";
+    let settled = false;
+
+    const finish = (code: number | null, truncated: boolean): void => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      resolveRun({ paths, truncated, code, stderr });
+    };
+    const onAbort = (): void => {
+      child.kill();
+      finish(null, false);
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+
+    child.stdout.on("data", (chunk: Buffer) => {
+      if (settled) return;
+      const buffer = pending.length > 0 ? Buffer.concat([pending, chunk]) : chunk;
+      // Decode up to the last terminator in one go; a multi-byte character can't
+      // straddle it, and the unterminated tail waits for the next chunk.
+      const end = buffer.lastIndexOf(0);
+      if (end === -1) {
+        pending = buffer;
+        return;
+      }
+      pending = buffer.subarray(end + 1);
+      for (const raw of buffer.toString("utf8", 0, end).split("\0")) {
+        const rel = normalizeListedPath(raw);
+        if (rel === null) continue;
+        if (seen) {
+          if (seen.has(rel)) continue;
+          seen.add(rel);
+        }
+        paths.push(rel);
+        if (paths.length >= FILE_LIST_SCAN_CEILING) {
+          child.kill();
+          finish(0, true);
+          return;
+        }
+      }
+    });
+    child.stderr.setEncoding("utf8");
+    child.stderr.on("data", (chunk: string) => {
+      if (stderr.length < 8192) stderr += chunk;
+    });
+    child.on("error", (error) => {
+      if (settled) return;
+      settled = true;
+      signal.removeEventListener("abort", onAbort);
+      rejectRun(error);
+    });
+    child.on("close", (code) => finish(code, false));
+  });
+}
+
+/**
+ * `rg --files`: honors .gitignore/.ignore unless `includeIgnored`, never follows
+ * symlinks. Exit 2 with some output means a subtree was unreadable — kept, like the
+ * walker skipping it. Any other failure is a plain Error so the caller falls back.
+ */
+async function listWithRipgrep(root: string, includeIgnored: boolean, signal: AbortSignal): Promise<CandidatePaths> {
+  const args = ["--files", "--null", "--hidden", "--no-config"];
+  if (includeIgnored) args.push("--no-ignore");
+  args.push("-g", "!.git", "-g", "!node_modules", ".");
+  const run = await runPathLister("rg", args, root, signal, false);
+  // A null code is our own abort (callers re-check the signal) or an outside kill.
+  if (run.code === null && !signal.aborted) throw new Error("ripgrep was terminated.");
+  if (run.code === null || run.code === 0 || run.code === 1 || (run.code === 2 && run.paths.length > 0)) {
+    return { paths: run.paths, truncated: run.truncated };
+  }
+  throw new Error(run.stderr.trim() || `ripgrep exited with code ${run.code}.`);
+}
+
+/**
+ * Tracked plus untracked-but-not-ignored files under `root` (`git ls-files` limits
+ * itself to the working directory and prints paths relative to it). Null when git is
+ * missing, `root` is not in a work tree, or nothing is listed — the caller then walks.
+ */
+async function listGitVisible(root: string, signal: AbortSignal): Promise<CandidatePaths | null> {
+  try {
+    const run = await runPathLister(
+      "git",
+      ["ls-files", "-z", "--cached", "--others", "--exclude-standard"],
+      root,
+      signal,
+      true
+    );
+    if (run.code !== 0 || run.paths.length === 0) return null;
+    return { paths: run.paths, truncated: run.truncated };
+  } catch {
+    return null;
+  }
+}
+
+/** Breadth-first walk for hosts without rg (or git), stopping after the level that passes `maxFiles`. */
+async function walkCandidates(root: string, maxFiles: number, checkAbort: () => void): Promise<CandidatePaths> {
+  const paths: string[] = [];
+  let level = [root];
+  while (level.length > 0) {
+    const next: string[] = [];
+    for (let i = 0; i < level.length; i += WALK_READDIR_CONCURRENCY) {
+      checkAbort();
+      const batch = level.slice(i, i + WALK_READDIR_CONCURRENCY);
+      const listed = await Promise.all(
+        batch.map((dir) =>
+          readdir(dir, { withFileTypes: true }).catch((error: unknown) => {
+            if (dir === root) throw error;
+            return null; // unreadable directory — skip its subtree
+          })
+        )
+      );
+      for (let j = 0; j < batch.length; j += 1) {
+        const dirents = listed[j];
+        if (!dirents) continue;
+        for (const dirent of dirents) {
+          if (dirent.isSymbolicLink()) continue; // never followed (parity with rg, sandbox, cycles)
+          const abs = join(batch[j], dirent.name);
+          if (dirent.isDirectory()) {
+            if (!SKIP_DIRS.has(dirent.name)) next.push(abs);
+            continue;
+          }
+          if (!dirent.isFile()) continue;
+          paths.push(relative(root, abs).split(sep).join("/"));
+          if (paths.length >= FILE_LIST_SCAN_CEILING) return { paths, truncated: true };
+        }
+      }
+    }
+    // Every file at this depth is in, so the shallowest-first selection is exact.
+    if (paths.length > maxFiles) return { paths, truncated: true };
+    level = next;
+  }
+  return { paths, truncated: false };
+}
+
+/**
+ * Keep every path when they fit. Otherwise keep `preferred` paths first, then fill
+ * the remaining room shallowest-first (byte order within the boundary depth).
+ */
+function selectListing(paths: string[], maxFiles: number, preferred: Set<string> | null): string[] {
+  if (paths.length <= maxFiles) return paths;
+  let tiers = [paths];
+  if (preferred) {
+    const first: string[] = [];
+    const rest: string[] = [];
+    for (const path of paths) (preferred.has(path) ? first : rest).push(path);
+    tiers = [first, rest];
+  }
+  const selected: string[] = [];
+  for (const tier of tiers) {
+    appendShallowest(selected, tier, maxFiles - selected.length);
+    if (selected.length >= maxFiles) break;
+  }
+  return selected;
+}
+
+/** Append up to `room` paths of `paths` to `out`, shallowest first. */
+function appendShallowest(out: string[], paths: string[], room: number): void {
+  if (room <= 0) return;
+  const byDepth = new Map<number, string[]>();
+  for (const path of paths) {
+    let depth = 1;
+    for (let i = 0; i < path.length; i += 1) if (path.charCodeAt(i) === 47) depth += 1; // "/"
+    const bucket = byDepth.get(depth);
+    if (bucket) bucket.push(path);
+    else byDepth.set(depth, [path]);
+  }
+  for (const depth of [...byDepth.keys()].sort((a, b) => a - b)) {
+    const bucket = byDepth.get(depth)!;
+    if (bucket.length > room) {
+      // Only the boundary depth needs a stable order to pick its members.
+      bucket.sort(compareBytes);
+      bucket.length = room;
+    }
+    for (const path of bucket) out.push(path);
+    room -= bucket.length;
+    if (room === 0) return;
+  }
+}
+
+/**
+ * Check that every directory between the root and a listed path is a real directory
+ * (lstat, so a symlinked directory fails), which keeps the path inside the root.
+ * Verdicts are cached per directory.
+ */
+function createParentCheck(root: string): ParentCheck {
+  const verdicts = new Map<string, Promise<boolean>>();
+  const directoryOk = (dir: string): Promise<boolean> => {
+    let verdict = verdicts.get(dir);
+    if (!verdict) {
+      const cut = dir.lastIndexOf("/");
+      const parentOk = cut < 0 ? Promise.resolve(true) : directoryOk(dir.slice(0, cut));
+      verdict = parentOk.then(async (ok) => {
+        if (!ok) return false;
+        const info = await lstat(join(root, ...dir.split("/"))).catch(() => null);
+        return Boolean(info?.isDirectory());
+      });
+      verdicts.set(dir, verdict);
+    }
+    return verdict;
+  };
+  return (relPosix) => {
+    const cut = relPosix.lastIndexOf("/");
+    return cut < 0 ? Promise.resolve(true) : directoryOk(relPosix.slice(0, cut));
+  };
+}
+
+/** lstat one listed path; null unless it is (still) a regular file reachable without symlinks. */
+async function statCandidate(
+  root: string,
+  relPosix: string,
+  verifyParent: ParentCheck | null
+): Promise<{ abs: string; size: number } | null> {
+  if (verifyParent && !(await verifyParent(relPosix))) return null;
+  const abs = join(root, ...relPosix.split("/"));
+  const info = await lstat(abs).catch(() => null);
+  return info?.isFile() ? { abs, size: info.size } : null;
+}
+
+/** Size the selected paths, dropping any that are no longer regular files. */
+async function statCandidates(
+  root: string,
+  paths: string[],
+  verifyParent: ParentCheck | null,
+  checkAbort: () => void
+): Promise<FsProjectFile[]> {
+  const files: FsProjectFile[] = [];
+  for (let start = 0; start < paths.length; start += FILE_STAT_BATCH) {
+    if (start > 0) await new Promise<void>((resume) => setImmediate(resume));
+    checkAbort();
+    for (const path of paths.slice(start, start + FILE_STAT_BATCH)) {
+      if (verifyParent && !(await verifyParent(path))) continue;
+      let info;
+      try {
+        info = lstatSync(join(root, ...path.split("/")), { throwIfNoEntry: false });
+      } catch {
+        continue; // e.g. a parent replaced by a file mid-listing
+      }
+      if (info?.isFile()) files.push({ path, size: info.size });
+    }
+  }
+  return files;
 }
 
 interface Matcher {
@@ -959,8 +1361,4 @@ function clampInt(value: unknown, min: number, max: number, fallback: number): n
   const parsed = typeof value === "number" ? value : typeof value === "string" ? Number.parseInt(value, 10) : NaN;
   if (!Number.isFinite(parsed)) return fallback;
   return Math.min(max, Math.max(min, parsed));
-}
-
-function throwIfAborted(signal?: AbortSignal): void {
-  if (signal?.aborted) throw new FsSearchError(499, "REQUEST_ABORTED", "Request aborted.");
 }

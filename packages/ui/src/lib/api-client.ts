@@ -491,8 +491,15 @@ export class ApiClient {
     });
   }
 
-  listProjectFiles(path: string, signal?: AbortSignal): Promise<FsFilesResponse> {
-    return this.send("GET", "/api/fs/files", { query: fsPathQuery(path), signal });
+  listProjectFiles(
+    path: string,
+    opts: { includeIgnored?: boolean } = {},
+    signal?: AbortSignal
+  ): Promise<FsFilesResponse> {
+    return this.send("GET", "/api/fs/files", {
+      query: { ...fsPathQuery(path), includeIgnored: opts.includeIgnored ? "1" : undefined },
+      signal
+    });
   }
 
   searchFs(params: FsSearchRequest, signal?: AbortSignal): Promise<FsSearchResponse> {
@@ -507,7 +514,8 @@ export class ApiClient {
         // today's unfiltered behavior when they're absent.
         include: params.include && params.include.trim() ? params.include : undefined,
         exclude: params.exclude && params.exclude.trim() ? params.exclude : undefined,
-        maxResults: params.maxResults
+        maxResults: params.maxResults,
+        includeIgnored: params.includeIgnored ? "1" : undefined
       },
       signal
     });
