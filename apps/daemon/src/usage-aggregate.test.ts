@@ -107,6 +107,16 @@ test("windows that all expired leave the head window null", () => {
   assert.equal(head.weekly, null);
 });
 
+test("historical readings stay on account cards without driving current quota aggregates", () => {
+  const lastKnown = { session: { percent: 90, resetsAt: PAST }, weekly: { percent: 100, resetsAt: PAST }, asOf: PAST };
+  const accounts = [acct({ stale: true, lastKnown, needsReauth: true })];
+  const head = aggregateWorstAccountUsage("claude", null, accounts, NOW);
+  assert.equal(head.session, null);
+  assert.equal(head.weekly, null);
+  assert.deepEqual(head.accounts?.[0]?.lastKnown, lastKnown);
+  assert.equal(head.accounts?.[0]?.needsReauth, true);
+});
+
 test("the System base is exposed as a `system` row (expired windows scrubbed)", () => {
   const base: AgentUsage = {
     id: "claude",

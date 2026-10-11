@@ -46,6 +46,19 @@ export function claudeBlobHasTokens(parsed: unknown): boolean {
   return (typeof accessToken === "string" && accessToken !== "") || (typeof refreshToken === "string" && refreshToken !== "");
 }
 
+/** Only safe login metadata leaves the daemon. Access-token expiry is a login
+ * deadline only when there is no refresh token to renew it. */
+export function claudeLoginStatus(parsed: unknown): { loginExpiresAt?: string; needsReauth: boolean } {
+  const oauth = isRecord(parsed) && isRecord(parsed.claudeAiOauth) ? parsed.claudeAiOauth : {};
+  const hasRefresh = typeof oauth.refreshToken === "string" && oauth.refreshToken !== "";
+  const expiry = oauth.refreshTokenExpiresAt ?? (hasRefresh ? undefined : oauth.expiresAt);
+  const validExpiry = typeof expiry === "number" && Number.isFinite(new Date(expiry).getTime());
+  return {
+    ...(validExpiry ? { loginExpiresAt: new Date(expiry).toISOString() } : {}),
+    needsReauth: !claudeBlobHasTokens(parsed)
+  };
+}
+
 export function claudePlanFromBlob(parsed: unknown): string | null {
   if (!isRecord(parsed) || !isRecord(parsed.claudeAiOauth)) return null;
   const t = parsed.claudeAiOauth.subscriptionType;

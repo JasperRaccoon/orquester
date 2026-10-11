@@ -189,6 +189,34 @@ test("ensureFreshForUsage does not refresh an account with a live session", asyn
   assert.equal(called, 0);
 });
 
+test("account login metadata follows CLI credential changes, including live accounts", async (t) => {
+  const { svc, base } = await makeService();
+  t.after(() => rm(base, { recursive: true, force: true }));
+  const expiry = Date.parse("2026-10-19T12:00:00Z");
+  const credentials = (refreshTokenExpiresAt: number, accessToken = "secret", refreshToken = "refresh-secret") =>
+    JSON.stringify({ claudeAiOauth: { accessToken, refreshToken, expiresAt: 1, refreshTokenExpiresAt } });
+  const account = await svc.importAccount({ label: "Work", content: credentials(expiry) });
+  assert.equal(account.loginExpiresAt, new Date(expiry).toISOString());
+  const path = join(svc.homePath("claude", account.id), ".credentials.json");
+  const events: unknown[] = [];
+  svc.events.on("changed", (payload) => events.push(payload));
+  await writeFile(path, credentials(expiry + 86_400_000));
+  await svc.ensureFreshForUsage("claude", account.id, new Set([account.id]));
+  assert.equal(svc.list().accounts[0]?.loginExpiresAt, new Date(expiry + 86_400_000).toISOString());
+  assert.equal(events.length, 1);
+  await svc.refreshLoginStatuses();
+  assert.equal(events.length, 1, "unchanged credentials do not broadcast");
+  await writeFile(path, credentials(expiry, "", ""));
+  await svc.refreshLoginStatuses();
+  assert.equal(svc.list().accounts[0]?.needsReauth, true);
+  await writeFile(path, credentials(expiry + 2 * 86_400_000));
+  await svc.init();
+  assert.equal(svc.list().accounts[0]?.needsReauth, false);
+  assert.equal(svc.list().accounts[0]?.loginExpiresAt, new Date(expiry + 2 * 86_400_000).toISOString());
+  assert.equal(JSON.stringify(events).includes("secret"), false);
+  assert.equal((await readFile(join(base, "agent-accounts.json"), "utf8")).includes("secret"), false);
+});
+
 test("ensureFreshForUsage skips a token that is not near expiry", async (t) => {
   const now = 1_000_000;
   let called = 0;

@@ -184,7 +184,7 @@ const CostTab: React.FC<{ rows: UsageTokenRow[] }> = ({ rows }) => {
 const AccountRow: React.FC<{ agentId: string; account: UsageAccount }> = ({ agentId, account }) => {
   const [resetFormat] = useUsageResetFormat();
   const now = useUsageNow();
-  const windows = normalizeUsageWindows(agentId, account);
+  const windows = normalizeUsageWindows(agentId, account.lastKnown ?? account);
   return (
     <UsageAccountCard
       name={shortAccountLabel(account.label) || account.id}
@@ -193,6 +193,9 @@ const AccountRow: React.FC<{ agentId: string; account: UsageAccount }> = ({ agen
       muted={account.stale || windows.length === 0}
       resetFormat={resetFormat}
       now={now}
+      login={account}
+      lastKnown={account.stale || !!account.lastKnown}
+      asOf={account.lastKnown?.asOf ?? account.asOf}
     />
   );
 };
@@ -213,7 +216,7 @@ const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
   const accounts = agent.accounts ?? [];
   const hasData = hasTimestamp && (agent.session || agent.weekly || agent.scopedWindows?.length || accounts.length > 0);
   const isOld = hasTimestamp && minutesSince(agent.asOf, now) > STALE_MIN;
-  const muted = !hasData || isOld;
+  const muted = !hasData || isOld || agent.stale;
   const label = labelForAgent(agent.id);
 
   return (
@@ -255,10 +258,13 @@ const AgentSection: React.FC<{ agent: AgentUsage }> = ({ agent }) => {
         ) : (
           /* Same card chrome as AccountRow so week-only agents align with Claude/Codex. */
           <UsageAccountCard
-            windows={normalizeUsageWindows(agent.id, agent)}
+            windows={normalizeUsageWindows(agent.id, agent.lastKnown ?? agent)}
             muted={muted}
             resetFormat={resetFormat}
             now={now}
+            login={agent}
+            lastKnown={agent.stale || !!agent.lastKnown}
+            asOf={agent.lastKnown?.asOf ?? agent.asOf}
           />
         )}
       </div>

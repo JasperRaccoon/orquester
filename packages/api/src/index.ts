@@ -730,6 +730,10 @@ export interface UsageAccount {
   /** Model-scoped weekly caps, when the source reports any (Claude: Fable). */
   scopedWindows?: ScopedUsageWindow[];
   asOf?: string;
+  /** Original successful reading, for display only; never a current quota. */
+  lastKnown?: Pick<UsageAccount, "session" | "weekly" | "scopedWindows" | "asOf">;
+  loginExpiresAt?: string;
+  needsReauth?: boolean;
 }
 
 export interface AgentUsage {
@@ -747,6 +751,9 @@ export interface AgentUsage {
   scopedWindows?: ScopedUsageWindow[];
   /** ISO time the reading was actually obtained (for an honest "as of"). */
   asOf?: string;
+  lastKnown?: UsageAccount["lastKnown"];
+  loginExpiresAt?: string;
+  needsReauth?: boolean;
   /** Per-account breakdown when the agent pools multiple accounts. */
   accounts?: UsageAccount[];
   /** The System (daemon-home) login's own reading when managed accounts exist.
@@ -1072,6 +1079,8 @@ export interface AgentAccount {
   email: string | null;
   plan: string | null;
   needsReauth: boolean;
+  /** Known login expiry (ISO), distinct from an automatically renewed access token. */
+  loginExpiresAt?: string;
   createdAt: string;
   importedAt: string;
 }

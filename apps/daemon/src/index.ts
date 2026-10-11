@@ -377,7 +377,10 @@ export function aggregateWorstAccountUsage(
           session: currentWindow(base.session, now),
           weekly: currentWindow(base.weekly, now),
           ...(baseScoped ? { scopedWindows: baseScoped } : {}),
-          asOf: base.asOf
+          asOf: base.asOf,
+          ...(base.lastKnown ? { lastKnown: base.lastKnown } : {}),
+          ...(base.loginExpiresAt ? { loginExpiresAt: base.loginExpiresAt } : {}),
+          ...(base.needsReauth !== undefined ? { needsReauth: base.needsReauth } : {})
         }
       : undefined,
     aggregate: { strategy: "worst-account", accountCount: accounts.length, staleAccountCount }
@@ -730,6 +733,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       // Keep an idle account's token warm so its usage never renders stale.
       await agentAccounts.ensureFreshForUsage(agent, acct.id, live).catch(() => undefined);
       const u = await usageSource(agent, makeSource, agentAccounts.homePath(agent, acct.id))().catch(() => null);
+      const currentAccount = agentAccounts.list().accounts.find((a) => a.id === acct.id) ?? acct;
       accounts.push({
         id: acct.id,
         label: acct.label,
@@ -739,6 +743,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         session: u?.session ?? null,
         weekly: u?.weekly ?? null,
         ...(u?.scopedWindows ? { scopedWindows: u.scopedWindows } : {}),
+        ...(u?.lastKnown ? { lastKnown: u.lastKnown } : {}),
+        loginExpiresAt: currentAccount.loginExpiresAt ?? u?.loginExpiresAt,
+        needsReauth: currentAccount.needsReauth || u?.needsReauth === true,
         asOf: u?.asOf
       });
     }
@@ -3246,7 +3253,10 @@ export function createServer(
   );
 
   // Managed agent accounts (Claude/Codex credential homes) — import/list/remove/defaults.
-  app.get("/api/agent-accounts", async () => agentAccounts.list());
+  app.get("/api/agent-accounts", async () => {
+    await agentAccounts.refreshLoginStatuses();
+    return agentAccounts.list();
+  });
 
   app.post("/api/agent-accounts", async (request, reply) => {
     const body = (request.body ?? {}) as ImportAgentAccountRequest;

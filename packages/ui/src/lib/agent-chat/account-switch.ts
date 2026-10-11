@@ -39,6 +39,7 @@ export interface ChatAccountOption {
   label: string;
   /** The account's credentials went stale; it is offered, but flagged. */
   needsReauth: boolean;
+  loginExpiresAt?: string;
 }
 
 /**
@@ -58,7 +59,8 @@ export function buildChatAccountOptions(input: {
     ...managed.map((account) => ({
       id: account.id,
       label: input.shortLabel(account.label) ?? account.id,
-      needsReauth: account.needsReauth === true
+      needsReauth: account.needsReauth === true,
+      ...(account.loginExpiresAt ? { loginExpiresAt: account.loginExpiresAt } : {})
     }))
   ];
 }

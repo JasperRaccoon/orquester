@@ -9,6 +9,8 @@ import { ApiError } from "../../lib/api-client";
 import { useAppStore } from "../../store/app";
 import { GrokDeviceLink } from "./GrokDeviceLink";
 import { Badge, EmptyState, FormField, Notice, SettingRow, SettingsPage, SettingsSection } from "./primitives";
+import { LoginExpiryWarning } from "../auth/LoginExpiryWarning";
+import { useUsageNow } from "../../hooks/use-usage-display";
 
 const AGENTS: { id: AgentAccountAgent; name: string }[] = [
   { id: "claude", name: "Claude" },
@@ -256,6 +258,7 @@ const AccountRow: React.FC<{
   onMakeDefault: () => void;
   onRemove: () => void;
 }> = ({ account: a, isDefault, busy, onMakeDefault, onRemove }) => {
+  const now = useUsageNow();
   const added = formatDate(a.importedAt);
   const details = [a.email, a.plan, added && `Added ${added}`].filter(Boolean).join(" · ");
   return (
@@ -279,6 +282,7 @@ const AccountRow: React.FC<{
       description={
         <>
           {details && <span className="block truncate">{details}</span>}
+          <LoginExpiryWarning login={a} now={now} className="mt-1" />
           {a.needsReauth && (
             <span className="block text-warn">
               Sign in again, import the fresh credentials file, then remove this one.

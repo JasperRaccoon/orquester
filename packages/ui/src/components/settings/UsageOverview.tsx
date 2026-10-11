@@ -35,7 +35,7 @@ const AccountBlock: React.FC<{
   resetFormat: UsageResetFormat;
   now: number;
 }> = ({ agentId, account, resetFormat, now }) => {
-  const windows = normalizeUsageWindows(agentId, account);
+  const windows = normalizeUsageWindows(agentId, account.lastKnown ?? account);
   return (
     <UsageAccountCard
       name={shortAccountLabel(account.label) || account.id}
@@ -49,6 +49,9 @@ const AccountBlock: React.FC<{
       muted={account.stale || windows.length === 0}
       resetFormat={resetFormat}
       now={now}
+      login={account}
+      lastKnown={account.stale || !!account.lastKnown}
+      asOf={account.lastKnown?.asOf ?? account.asOf}
       long
     />
   );
@@ -63,7 +66,7 @@ const AgentCard: React.FC<{
   liveWindows: readonly ProviderUsageWindow[];
 }> = ({ agent, hidden, resetFormat, now, liveWindows }) => {
   const accounts = agent.accounts ?? [];
-  const pollWindows = normalizeUsageWindows(agent.id, agent);
+  const pollWindows = normalizeUsageWindows(agent.id, agent.lastKnown ?? agent);
   // Windows an open chat thread reported through `account.rate-limits.updated`
   // (§7.7). They merge by window id — already done in the store — and anything
   // the daemon's own poll covers is dropped here rather than printed twice with
@@ -140,7 +143,16 @@ const AgentCard: React.FC<{
             )}
           </>
         ) : ownWindows.length > 0 ? (
-          <UsageAccountCard windows={ownWindows} muted={muted} resetFormat={resetFormat} now={now} long />
+          <UsageAccountCard
+            windows={ownWindows}
+            muted={muted}
+            resetFormat={resetFormat}
+            now={now}
+            long
+            login={agent}
+            lastKnown={agent.stale || !!agent.lastKnown}
+            asOf={agent.lastKnown?.asOf ?? agent.asOf}
+          />
         ) : (
           <p className="py-1 text-center text-[11px] text-neutral-500">No quota windows reported yet.</p>
         )}

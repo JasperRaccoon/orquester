@@ -30,6 +30,7 @@ import {
   detectAgentFromBlob,
   claudePlanFromBlob,
   claudeBlobHasTokens,
+  claudeLoginStatus,
   parseCodexIdentity,
   parseGrokIdentity,
   grokAuthEntry,
@@ -99,6 +100,7 @@ interface AgentAccountsOptions {
 export class AgentAccountsService {
   readonly events = new EventEmitter();
   private index: AgentAccountsIndex = createDefaultAgentAccounts();
+  private loginStatuses = new Map<string, ReturnType<typeof claudeLoginStatus>>();
   private refreshTimer?: ReturnType<typeof setInterval>;
   /** Account ids with an in-flight refresh, so the hourly loop and the usage
    *  path never double-spend one account's single-use refresh token. */
@@ -116,13 +118,40 @@ export class AgentAccountsService {
     } catch {
       this.index = createDefaultAgentAccounts();
     }
+    await this.refreshLoginStatuses();
   }
 
   list(): AgentAccountsResponse {
     return {
-      accounts: this.index.accounts.map(toApi),
+      accounts: this.index.accounts.map((record) => this.accountToApi(record)),
       defaults: { ...this.index.defaults }
     };
+  }
+
+  private accountToApi(record: AgentAccountRecord): AgentAccount {
+    const login = this.loginStatuses.get(record.id);
+    return { ...toApi(record), ...login, needsReauth: record.needsReauth || login?.needsReauth === true };
+  }
+
+  /** Re-read metadata because a running CLI can renew or clear its credentials. */
+  async refreshLoginStatuses(): Promise<void> {
+    for (const account of this.index.accounts) await this.refreshLoginStatus(account.id);
+  }
+
+  private async refreshLoginStatus(id: string): Promise<void> {
+    const record = this.getRecord(id);
+    if (record?.agent !== "claude") return;
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(await readFile(join(this.homePath(record.agent, id), ".credentials.json"), "utf8"));
+    } catch {
+      // An unreadable credential cannot supply a login deadline.
+    }
+    const login = claudeLoginStatus(parsed);
+    const previous = this.loginStatuses.get(id);
+    if (previous?.loginExpiresAt === login.loginExpiresAt && previous?.needsReauth === login.needsReauth) return;
+    this.loginStatuses.set(id, login);
+    this.emitChanged();
   }
 
   getRecord(id: string): AgentAccountRecord | undefined {
@@ -190,10 +219,11 @@ export class AgentAccountsService {
       importedAt: nowIso
     };
     this.index.accounts.push(record);
+    if (agent === "claude") this.loginStatuses.set(id, claudeLoginStatus(parsed));
     if (this.index.defaults[agent] == null) this.index.defaults[agent] = id;
     await this.persist();
     this.emitChanged();
-    return toApi(record);
+    return this.accountToApi(record);
   }
 
   async removeAccount(id: string): Promise<void> {
@@ -206,6 +236,7 @@ export class AgentAccountsService {
     });
     await rm(join(this.opts.accountsDir, record.agent, id), { recursive: true, force: true });
     this.index.accounts = this.index.accounts.filter((a) => a.id !== id);
+    this.loginStatuses.delete(id);
     if (this.index.defaults[record.agent] === id) this.index.defaults[record.agent] = null;
     await this.persist();
     this.emitChanged();
@@ -815,6 +846,7 @@ export class AgentAccountsService {
       }
     } finally {
       this.refreshing.delete(id);
+      await this.refreshLoginStatus(id);
     }
   }
 
@@ -827,6 +859,7 @@ export class AgentAccountsService {
     // The window is sub-second; worst case one side gets invalid_grant and the
     // account is flagged needsReauth (recoverable by re-import), not silent data
     // loss. The intra-daemon `refreshing` guard covers the common case.
+    await this.refreshLoginStatus(id);
     if (live.has(id)) return;
     const record = this.getRecord(id);
     if (!record || record.agent !== agent) return;
@@ -836,6 +869,7 @@ export class AgentAccountsService {
   }
 
   private async refreshIdleAccounts(live: Set<string>): Promise<void> {
+    await this.refreshLoginStatuses();
     const now = this.opts.now();
     const expiries = new Map<string, number | null>();
     for (const a of this.index.accounts) {

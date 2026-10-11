@@ -3,7 +3,9 @@ import { Clock } from "lucide-react";
 import { cn } from "../../lib/cn";
 import type { AgentUsage } from "@orquester/api";
 import type { UsageResetFormat } from "../../lib/usage-display";
-import { barClass, formatReset, formatUsageCapacity, normalizeUsageWindows, type NormalizedUsageWindow } from "./usage-format";
+import { LoginExpiryWarning } from "../auth/LoginExpiryWarning";
+import type { LoginStatus } from "../../lib/login-expiry";
+import { barClass, formatAgo, formatReset, formatUsageCapacity, normalizeUsageWindows, type NormalizedUsageWindow } from "./usage-format";
 
 /**
  * Side-by-side columns per window count, from `sm` up (stacked below). Static
@@ -18,7 +20,7 @@ const GRID_COLS: Record<number, string> = {
 /** The most windows any one card of this agent lays side by side (1–3). */
 export function maxWindowCount(agent: AgentUsage): number {
   const sources = [agent, ...(agent.accounts ?? []), ...(agent.system ? [agent.system] : [])];
-  return Math.max(1, ...sources.map((s) => Math.min(3, normalizeUsageWindows(agent.id, s).length)));
+  return Math.max(1, ...sources.map((s) => Math.min(3, normalizeUsageWindows(agent.id, s.lastKnown ?? s).length)));
 }
 
 const Meter: React.FC<{ pct: number; muted: boolean; className?: string }> = ({ pct, muted, className }) => (
@@ -42,8 +44,9 @@ const WindowCell: React.FC<{
   muted: boolean;
   resetFormat: UsageResetFormat;
   now: number;
-}> = ({ window, long, lone, muted, resetFormat, now }) => {
-  const label = long ? window.longLabel : window.label;
+  historical?: boolean;
+}> = ({ window, long, lone, muted, resetFormat, now, historical }) => {
+  const label = long ? (historical && window.id === "weekly" ? "Weekly" : window.longLabel) : window.label;
   const pct = (
     <span
       className={cn(
@@ -55,7 +58,9 @@ const WindowCell: React.FC<{
     </span>
   );
   const capacity = formatUsageCapacity(window);
-  const reset = formatReset(window.resetsAt, resetFormat, now);
+  const reset = historical && window.resetsAt && Date.parse(window.resetsAt) <= now
+    ? `Reset ${new Date(window.resetsAt).toLocaleString()}`
+    : formatReset(window.resetsAt, resetFormat, now);
   return (
     <div className="min-w-0 border-neutral-800/70 sm:border-l sm:pl-3">
       {lone ? (
@@ -96,7 +101,8 @@ export const UsageWindowGrid: React.FC<{
   now: number;
   /** Spelled-out labels ("Session (5h)") instead of the compact "5h". */
   long?: boolean;
-}> = ({ windows, muted, resetFormat, now, long = false }) => (
+  historical?: boolean;
+}> = ({ windows, muted, resetFormat, now, long = false, historical }) => (
   <div
     className={cn(
       "grid grid-cols-1 gap-x-3 gap-y-3 [&>*:first-child]:border-l-0 [&>*:first-child]:pl-0",
@@ -112,6 +118,7 @@ export const UsageWindowGrid: React.FC<{
         muted={muted}
         resetFormat={resetFormat}
         now={now}
+        historical={historical}
       />
     ))}
   </div>
@@ -131,7 +138,10 @@ export const UsageAccountCard: React.FC<{
   resetFormat: UsageResetFormat;
   now: number;
   long?: boolean;
-}> = ({ name, meta, windows, muted, resetFormat, now, long }) => (
+  login?: LoginStatus;
+  lastKnown?: boolean;
+  asOf?: string;
+}> = ({ name, meta, windows, muted, resetFormat, now, long, login, lastKnown, asOf }) => (
   <div className="rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2.5">
     {name != null && (
       <div className="mb-2.5 flex items-center justify-between gap-2 border-b border-neutral-800/70 pb-2">
@@ -139,8 +149,14 @@ export const UsageAccountCard: React.FC<{
         {meta && <div className="flex shrink-0 items-center gap-1">{meta}</div>}
       </div>
     )}
+    {login && <LoginExpiryWarning login={login} now={now} className="mb-2" />}
+    {lastKnown && windows.length > 0 && (
+      <p className="mb-2 text-[11px] text-warn" title={asOf ? new Date(asOf).toLocaleString() : undefined}>
+        Last known usage{asOf ? ` · ${formatAgo(asOf, now)}` : ""}
+      </p>
+    )}
     {windows.length > 0 ? (
-      <UsageWindowGrid windows={windows} muted={muted} resetFormat={resetFormat} now={now} long={long} />
+      <UsageWindowGrid windows={windows} muted={muted} resetFormat={resetFormat} now={now} long={long} historical={lastKnown} />
     ) : (
       <p className="text-[11px] text-neutral-500">No reading yet.</p>
     )}

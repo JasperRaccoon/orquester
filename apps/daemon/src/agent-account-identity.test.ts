@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { claudeBlobHasTokens, detectAgentFromBlob, parseCodexIdentity, parseGrokIdentity } from "./agent-account-identity.ts";
+import { claudeBlobHasTokens, claudeLoginStatus, detectAgentFromBlob, parseCodexIdentity, parseGrokIdentity } from "./agent-account-identity.ts";
 
 function jwt(payload: Record<string, unknown>): string {
   const b64 = (o: unknown) => Buffer.from(JSON.stringify(o)).toString("base64url");
@@ -19,6 +19,24 @@ test("claude blob needs a non-empty access or refresh token", () => {
   assert.equal(claudeBlobHasTokens({ claudeAiOauth: { accessToken: "", refreshToken: "", expiresAt: 0 } }), false);
   assert.equal(claudeBlobHasTokens({ claudeAiOauth: {} }), false);
   assert.equal(claudeBlobHasTokens({ claudeAiOauth: { accessToken: 1, refreshToken: null } }), false);
+});
+
+test("Claude login expiry uses the refresh lifetime, not routine access-token rotation", () => {
+  const expiresAt = Date.parse("2026-10-12T12:00:00Z");
+  const refreshTokenExpiresAt = Date.parse("2026-10-19T12:00:00Z");
+  const oauth = { accessToken: "secret", refreshToken: "refresh-secret", expiresAt, refreshTokenExpiresAt };
+  assert.deepEqual(claudeLoginStatus({ claudeAiOauth: oauth }), {
+    loginExpiresAt: "2026-10-19T12:00:00.000Z", needsReauth: false
+  });
+  assert.deepEqual(claudeLoginStatus({ claudeAiOauth: { ...oauth, refreshTokenExpiresAt: undefined } }), { needsReauth: false });
+  assert.deepEqual(claudeLoginStatus({ claudeAiOauth: { accessToken: "secret", expiresAt } }), {
+    loginExpiresAt: "2026-10-12T12:00:00.000Z", needsReauth: false
+  });
+  assert.equal(claudeLoginStatus({ claudeAiOauth: { ...oauth, accessToken: "", refreshToken: "" } }).needsReauth, true);
+  for (const expiry of [NaN, Infinity, 1e30, "tomorrow", null]) {
+    assert.equal(claudeLoginStatus({ claudeAiOauth: { accessToken: "secret", expiresAt: expiry } }).loginExpiresAt, undefined);
+  }
+  assert.deepEqual(claudeLoginStatus(null), { needsReauth: true });
 });
 
 test("codex identity from id_token JWT and account_id", () => {

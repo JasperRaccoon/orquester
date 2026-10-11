@@ -10,6 +10,9 @@ import type {
 import { RUNTIME_MODES } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
+import { useUsageNow } from "../../../hooks/use-usage-display";
+import { LoginExpiryWarning } from "../../auth/LoginExpiryWarning";
+import { loginExpiryWarning } from "../../../lib/login-expiry";
 import type { ChatAccountOption } from "../../../lib/agent-chat/account-switch";
 import { Kbd } from "../primitives";
 import { ComposerMenuRow, ComposerPopover } from "./ComposerPopover";
@@ -427,67 +430,76 @@ export function AccountChip({
   onChange,
   returnFocusTo
 }: AccountChipProps): React.ReactElement {
+  const now = useUsageNow();
+  const selected = options?.find((option) => option.id === selectedId);
+  const warning = selected ? <LoginExpiryWarning login={selected} now={now} className="px-2" /> : null;
   if (!onChange || !options || options.length === 0) {
     return (
-      <span
-        title={`Running as ${label}`}
-        className="inline-flex h-7 max-w-40 items-center gap-1 px-2 text-xs text-neutral-500"
-      >
-        <UserRound size={12} aria-hidden className="shrink-0" />
-        <span className="truncate">{label}</span>
-      </span>
+      <>
+        <span
+          title={`Running as ${label}`}
+          className="inline-flex h-7 max-w-40 items-center gap-1 px-2 text-xs text-neutral-500"
+        >
+          <UserRound size={12} aria-hidden className="shrink-0" />
+          <span className="truncate">{label}</span>
+        </span>
+        {warning}
+      </>
     );
   }
   return (
-    <ComposerPopover
-      label="Account"
-      width="w-72"
-      returnFocusTo={returnFocusTo}
-      renderTrigger={(triggerProps) => (
-        <button
-          {...triggerProps}
-          type="button"
-          disabled={!canSwitch}
-          data-composer-shortcut="account"
-          title={
-            canSwitch ? `Running as ${label} — click to switch` : (disabledReason ?? ACCOUNT_BUSY_TITLE)
-          }
-          className={cn(CHIP, "max-w-40")}
-        >
-          {chipContent({
-            icon: <UserRound size={12} aria-hidden />,
-            label: "Account",
-            value: label
-          })}
-        </button>
-      )}
-    >
-      {(close) => (
-        <>
-          <div className="px-2 py-1 text-[11px] text-neutral-500">Account</div>
-          {options.map((option) => (
-            <ComposerMenuRow
-              key={option.id}
-              selected={option.id === selectedId}
-              hint={option.needsReauth ? "Signed out — sign in again to use it" : undefined}
-              trailing={
-                option.id === selectedId ? (
-                  <Check size={13} className="text-info" aria-hidden />
-                ) : undefined
-              }
-              onClick={() => {
-                close();
-                if (option.id !== selectedId) onChange(option.id);
-              }}
-            >
-              {option.label}
-            </ComposerMenuRow>
-          ))}
-          <p className="px-2 pb-1 pt-1.5 text-[11px] leading-snug text-neutral-500">
-            Applies to your next message. The conversation is kept.
-          </p>
-        </>
-      )}
-    </ComposerPopover>
+    <>
+      <ComposerPopover
+        label="Account"
+        width="w-72"
+        returnFocusTo={returnFocusTo}
+        renderTrigger={(triggerProps) => (
+          <button
+            {...triggerProps}
+            type="button"
+            disabled={!canSwitch}
+            data-composer-shortcut="account"
+            title={
+              canSwitch ? `Running as ${label} — click to switch` : (disabledReason ?? ACCOUNT_BUSY_TITLE)
+            }
+            className={cn(CHIP, "max-w-40")}
+          >
+            {chipContent({
+              icon: <UserRound size={12} aria-hidden />,
+              label: "Account",
+              value: label
+            })}
+          </button>
+        )}
+      >
+        {(close) => (
+          <>
+            <div className="px-2 py-1 text-[11px] text-neutral-500">Account</div>
+            {options.map((option) => (
+              <ComposerMenuRow
+                key={option.id}
+                selected={option.id === selectedId}
+                hint={loginExpiryWarning(option, now) ? <LoginExpiryWarning login={option} now={now} /> : undefined}
+                trailing={
+                  option.id === selectedId ? (
+                    <Check size={13} className="text-info" aria-hidden />
+                  ) : undefined
+                }
+                onClick={() => {
+                  close();
+                  if (option.id !== selectedId) onChange(option.id);
+                }}
+              >
+                {option.label}
+              </ComposerMenuRow>
+            ))}
+            <p className="px-2 pb-1 pt-1.5 text-[11px] leading-snug text-neutral-500">
+              Applies to your next message. The conversation is kept.
+            </p>
+          </>
+        )}
+      </ComposerPopover>
+      {warning}
+    </>
   );
 }

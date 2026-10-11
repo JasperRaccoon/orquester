@@ -3,7 +3,7 @@ import { join } from "node:path";
 import type { AgentUsage, UsageWindow } from "@orquester/api";
 import { type UsagePrefs, parseAppConfig } from "@orquester/config";
 import { claudePlanLabel, currentScopedWindows, currentSessionWindow, currentWindow, findLastCodexTokenCount, parseClaudeUsage, parseCodexUsage, parseCodexWhamUsage, parseGrokBilling } from "./usage-parse";
-import { decodeJwtPayload, parseCodexIdentity, parseGrokIdentity } from "./agent-account-identity";
+import { claudeLoginStatus, decodeJwtPayload, parseCodexIdentity, parseGrokIdentity } from "./agent-account-identity";
 import { CLAUDE_SESSION_WINDOW_ID, CLAUDE_WEEKLY_WINDOW_ID } from "./agent-host/adapters/claude/usage.ts";
 
 const CLAUDE_USAGE_URL = "https://api.anthropic.com/api/oauth/usage";
@@ -121,33 +121,46 @@ export function createClaudeSource(opts: {
   };
 
   const source = async (): Promise<AgentUsage | null> => {
+    let parsed: unknown;
     let oauth: { accessToken?: string; expiresAt?: number; subscriptionType?: string; rateLimitTier?: string } | undefined;
     try {
-      oauth = JSON.parse(await readFile(credsFile, "utf8"))?.claudeAiOauth;
+      parsed = JSON.parse(await readFile(credsFile, "utf8"));
+      oauth = (parsed as { claudeAiOauth?: typeof oauth } | null)?.claudeAiOauth;
     } catch {
-      return null; // no credentials file → genuinely not logged in
+      // A login disappearing must not erase the last successful reading.
     }
-    if (!oauth?.accessToken) return null; // genuinely not logged in
+    if (!oauth?.accessToken && !record.lastGood) return null;
+    const login = claudeLoginStatus(parsed);
 
-    // From here the user IS logged in — never return null (that renders as "not
-    // logged in"). Report last-known, or a signed-in "updating" placeholder.
-    const creds = { subscriptionType: oauth.subscriptionType, rateLimitTier: oauth.rateLimitTier };
+    // Keep an account with credentials or saved readings visible. Historical
+    // numbers are separate from the current windows used by quota selection.
+    const creds = { subscriptionType: oauth?.subscriptionType, rateLimitTier: oauth?.rateLimitTier };
     const now = opts.now();
-    const expired = typeof oauth.expiresAt === "number" && oauth.expiresAt <= now;
+    const expired = !oauth?.accessToken || (typeof oauth.expiresAt === "number" && oauth.expiresAt <= now);
     // Serving last-known numbers: drop any window whose reset has since passed —
     // a frozen pre-reset reading (e.g. weekly 100%) must not outlive its window.
     // The 5h one refills to 0% instead, so an idle account keeps its bar.
     const serve = (): AgentUsage => {
       const good = record.lastGood;
       if (!good) {
-        return { id: "claude", available: true, stale: true, plan: claudePlanLabel(creds), session: null, weekly: null };
+        return { id: "claude", available: true, stale: true, ...login, plan: claudePlanLabel(creds), session: null, weekly: null };
       }
       const asOfMs = good.asOf ? Date.parse(good.asOf) : Number.NaN;
       const old = !Number.isFinite(asOfMs) || now - asOfMs > CLAUDE_USAGE_STALE_AFTER_MS;
+      const stale = record.failed || expired || old;
       return {
         ...good,
+        ...login,
         plan: good.plan ?? claudePlanLabel(creds),
-        stale: record.failed || expired || old,
+        stale,
+        ...(stale ? {
+          lastKnown: {
+            session: good.session,
+            weekly: good.weekly,
+            ...(good.scopedWindows ? { scopedWindows: good.scopedWindows } : {}),
+            asOf: good.asOf
+          }
+        } : {}),
         session: currentSessionWindow(good.session, now),
         weekly: currentWindow(good.weekly, now),
         scopedWindows: currentScopedWindows(good.scopedWindows, now)
@@ -163,7 +176,7 @@ export function createClaudeSource(opts: {
     if (sinceFetch >= 0 && sinceFetch < CLAUDE_USAGE_MIN_INTERVAL_MS) return serve();
     if (record.lastGood && sinceLive >= 0 && sinceLive < CLAUDE_LIVE_FRESH_MS) return serve();
     if (now < record.retryAt && record.retryAt - now <= CLAUDE_MAX_RETRY_AFTER_MS) return serve();
-    if (expired) return serve();
+    if (expired || !oauth?.accessToken) return serve();
 
     record = { ...record, lastFetchAt: now };
     try {

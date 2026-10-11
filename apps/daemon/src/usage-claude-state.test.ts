@@ -97,6 +97,55 @@ test("a restart keeps the last reading and waits out the window the previous pro
   assert.equal(api.calls.length, 2);
 });
 
+test("expired or cleared credentials keep historical quotas across restarts and recover on login", async (t) => {
+  const home = await claudeHome(t);
+  const file = join(home, "usage-state.json");
+  const store = new UsageStateFile(file);
+  const api = endpoint(t, [
+    { status: 200, body: { ...usageBody(37, 98), limits: [
+      { kind: "weekly_scoped", percent: 42, resets_at: new Date(NOW + 24 * 60 * MIN).toISOString(), scope: { model: { display_name: "Fable" } } }
+    ] } },
+    { status: 200, body: { five_hour: { utilization: 2 }, seven_day: { utilization: 3 } } }
+  ]);
+  const make = (now: number, state = store) => createClaudeSource({
+    userhome: home, claudeHome: home, now: () => now, state: { store: state, key: "claude:a" }
+  });
+  const fresh = await make(NOW)();
+  assert.equal(fresh?.lastKnown, undefined);
+  await store.flush();
+  const reloaded = new UsageStateFile(file);
+  await reloaded.load();
+  const later = NOW + 10 * 24 * 60 * MIN;
+  const expired = await make(later, reloaded)();
+  const expected = { session: fresh?.session, weekly: fresh?.weekly, scopedWindows: fresh?.scopedWindows, asOf: fresh?.asOf };
+  assert.deepEqual(expired?.lastKnown, expected);
+  assert.equal(expired?.weekly, null, "historical quotas are not used as current limits");
+  assert.equal(expired?.stale, true);
+  assert.equal(api.calls.length, 1);
+
+  await writeFile(join(home, ".credentials.json"), JSON.stringify({ claudeAiOauth: {
+    accessToken: "", refreshToken: "", expiresAt: 0, refreshTokenExpiresAt: NOW
+  } }));
+  const cleared = await make(later, reloaded)();
+  assert.equal(cleared?.available, true);
+  assert.equal(cleared?.needsReauth, true);
+  assert.deepEqual(cleared?.lastKnown, expected);
+
+  await rm(join(home, ".credentials.json"));
+  assert.deepEqual((await make(later, reloaded)())?.lastKnown, expected);
+
+  await writeFile(join(home, ".credentials.json"), JSON.stringify({ claudeAiOauth: {
+    accessToken: "renewed", expiresAt: later + 60 * MIN
+  } }));
+  const recovered = await make(later, reloaded)();
+  assert.equal(recovered?.stale, false);
+  assert.equal(recovered?.needsReauth, false);
+  assert.equal(recovered?.lastKnown, undefined);
+  assert.equal(recovered?.asOf, new Date(later).toISOString());
+  assert.equal(api.calls.length, 2);
+  await reloaded.flush();
+});
+
 test("a 429's Retry-After survives a restart and the last reading is served greyed meanwhile", async (t) => {
   const home = await claudeHome(t);
   const store = new Map<string, ClaudeUsageRecord>();
