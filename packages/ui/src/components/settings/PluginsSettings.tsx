@@ -111,12 +111,15 @@ export const PluginsSettings: React.FC = () => {
   const selected = selectedPlugin(listed, selectedId);
 
   const run = async (plugin: PluginInfo, action: PluginAction, request: () => Promise<PluginInfo | null | void>) => {
+    const requestedOn = useAppStore.getState().api;
     setPending({ pluginId: plugin.id, action });
     setActionError(null);
     try {
       const next = await request();
-      if (next) upsertPlugin(next);
+      // An answer from the previous connection's daemon is not this one's state.
+      if (next && useAppStore.getState().api === requestedOn) upsertPlugin(next);
     } catch (err) {
+      if (useAppStore.getState().api !== requestedOn) return;
       setActionError({ pluginId: plugin.id, title: ACTION_FAILED[action], detail: errorText(err) });
     } finally {
       setPending(null);
