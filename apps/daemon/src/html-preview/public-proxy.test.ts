@@ -311,6 +311,18 @@ describe("name resolution (c-ares, bounded)", () => {
     await dns.close();
   });
 
+  it("closing answers the lookups still waiting for a slot too, at once", async () => {
+    const dns = await dnsServer({}, true);
+    const resolver = createDnsResolver({ servers: [dns.server], timeoutMs: 60_000 });
+    // Four in flight, three waiting for a slot.
+    const pending = Array.from({ length: 7 }, (_, index) => resolver.resolve(`slow-${index}.example`));
+    const started = Date.now();
+    resolver.close();
+    assert.deepEqual(await Promise.all(pending), Array.from({ length: 7 }, () => []));
+    assert.ok(Date.now() - started < 2000, `${Date.now() - started} ms`);
+    await dns.close();
+  });
+
   it("the proxy refuses a name whose lookup times out", async () => {
     const dns = await dnsServer({}, true);
     const proxy = await startPublicProxy({ dnsServers: [dns.server], lookupTimeoutMs: 500 });

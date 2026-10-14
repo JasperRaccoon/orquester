@@ -146,7 +146,8 @@ export function createDnsResolver(options: { servers?: string[]; timeoutMs?: num
   const resolver = new Resolver({ timeout: Math.max(1, Math.ceil(timeoutMs / 2)), tries: 2 });
   if (options.servers) resolver.setServers(options.servers);
   let active = 0;
-  const waiting: Array<() => void> = [];
+  /** Lookups waiting for a slot: `start` runs one, `drop` answers it nothing. */
+  const waiting: Array<{ start: () => void; drop: () => void }> = [];
   let closed = false;
   const lookup = async (host: string): Promise<ResolvedAddress[]> => {
     const answers = await Promise.allSettled([resolver.resolve4(host), resolver.resolve6(host)]);
@@ -166,7 +167,7 @@ export function createDnsResolver(options: { servers?: string[]; timeoutMs?: num
           resolve(addresses);
         };
         const timer = setTimeout(() => {
-          const index = waiting.indexOf(start);
+          const index = waiting.indexOf(entry);
           if (index !== -1) waiting.splice(index, 1);
           finish([]);
         }, timeoutMs);
@@ -176,18 +177,20 @@ export function createDnsResolver(options: { servers?: string[]; timeoutMs?: num
             .catch(() => [] as ResolvedAddress[])
             .then((addresses) => {
               active -= 1;
-              waiting.shift()?.();
+              waiting.shift()?.start();
               finish(addresses);
             });
         };
+        const entry = { start, drop: () => finish([]) };
         if (closed) finish([]);
         else if (active < MAX_CONCURRENT_LOOKUPS) start();
-        else if (waiting.length < MAX_WAITING_LOOKUPS) waiting.push(start);
+        else if (waiting.length < MAX_WAITING_LOOKUPS) waiting.push(entry);
         else finish([]);
       }),
     close: () => {
       closed = true;
-      waiting.length = 0;
+      // Every waiting lookup answers now (and clears its timer): nothing waits past close.
+      for (const entry of waiting.splice(0)) entry.drop();
       resolver.cancel();
     }
   };

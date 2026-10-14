@@ -350,7 +350,51 @@ const DATA_URL_KEEP_CHARS = 1024;
  * such as Grok's joined JSON, stays). Ordinary text has spaces long before.
  */
 export const SESSION_TOOL_BASE64_RUN_MIN_CHARS = 4096;
-const BASE64_RUN = new RegExp(`[A-Za-z0-9+/_-]{${SESSION_TOOL_BASE64_RUN_MIN_CHARS},}={0,2}`, "g");
+
+/** `A-Z a-z 0-9 + / _ -`: the base64 and base64url alphabets. */
+function isBase64Char(code: number): boolean {
+  return (
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    (code >= 48 && code <= 57) ||
+    code === 43 ||
+    code === 47 ||
+    code === 95 ||
+    code === 45
+  );
+}
+
+/**
+ * `value` with every base64 run of {@link SESSION_TOOL_BASE64_RUN_MIN_CHARS}+
+ * characters (and up to two `=` of padding after it) replaced by a marker —
+ * one pass over the string, each character read once, so no input (such as
+ * many runs one character short) can make it slow, as a backtracking
+ * `/[…]{4096,}/` could. Answers `value` itself when nothing is dropped.
+ */
+export function dropBase64Runs(value: string): string {
+  if (value.length < SESSION_TOOL_BASE64_RUN_MIN_CHARS) return value;
+  let parts: string[] | null = null;
+  let kept = 0;
+  let runStart = -1;
+  for (let at = 0; at <= value.length; at += 1) {
+    if (at < value.length && isBase64Char(value.charCodeAt(at))) {
+      if (runStart === -1) runStart = at;
+      continue;
+    }
+    if (runStart !== -1 && at - runStart >= SESSION_TOOL_BASE64_RUN_MIN_CHARS) {
+      let end = at;
+      while (end < value.length && end - at < 2 && value.charCodeAt(end) === 61) end += 1;
+      parts ??= [];
+      parts.push(value.slice(kept, runStart), `[base64 omitted: ${base64Bytes(value.slice(runStart, end))} bytes]`);
+      kept = end;
+      at = end - 1;
+    }
+    runStart = -1;
+  }
+  if (parts === null) return value;
+  parts.push(value.slice(kept));
+  return parts.join("");
+}
 
 /** How deep the walk goes; deeper values are kept as they are. */
 const PERSIST_WALK_MAX_DEPTH = 12;
@@ -373,11 +417,9 @@ function boundString(value: string): string {
     const head = comma > 0 && comma < 200 ? value.slice(5, comma) : "data";
     return `[${head} omitted: ${base64Bytes(value.slice(comma + 1))} bytes]`;
   }
-  if (value.length >= SESSION_TOOL_BASE64_RUN_MIN_CHARS) {
-    const stripped = value.replace(BASE64_RUN, (run) => `[base64 omitted: ${base64Bytes(run)} bytes]`);
-    if (stripped !== value) {
-      return boundString(stripped);
-    }
+  const stripped = dropBase64Runs(value);
+  if (stripped !== value) {
+    return boundString(stripped);
   }
   if (value.length * 3 <= SESSION_TOOL_PERSISTED_STRING_MAX_BYTES) {
     return value;

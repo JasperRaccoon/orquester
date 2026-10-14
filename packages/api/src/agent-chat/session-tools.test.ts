@@ -8,7 +8,9 @@ import test from "node:test";
 
 import {
   boundSessionToolData,
+  dropBase64Runs,
   isSessionToolsServerName,
+  SESSION_TOOL_BASE64_RUN_MIN_CHARS,
   SESSION_TOOL_PERSISTED_STRING_MAX_BYTES,
   parseSessionToolName,
   projectSessionToolData,
@@ -342,4 +344,38 @@ test("a base64 run spelled into text is dropped whole, and the text around it st
   assert.equal(bounded.rawOutput.output.OkayOutput, `[base64 omitted: 225000 bytes]\n${json}`);
   assert.equal(bounded.result, "[base64 omitted: 225000 bytes]");
   assert.equal(bounded.short, "QUJD".repeat(100), "a run below the threshold is kept");
+});
+
+test("base64 runs: exactly the threshold is dropped, one short is kept, padding and base64url included", () => {
+  const n = SESSION_TOOL_BASE64_RUN_MIN_CHARS;
+  const run = (length: number, char = "A") => char.repeat(length);
+  assert.equal(dropBase64Runs(`x ${run(n - 1)} y`), `x ${run(n - 1)} y`);
+  assert.equal(dropBase64Runs(run(n)), `[base64 omitted: ${(n * 3) / 4} bytes]`);
+  // Up to two "=" belong to the run; a third stays.
+  assert.equal(dropBase64Runs(`${run(n)}===!`), `[base64 omitted: ${Math.floor(((n + 2) * 3) / 4)} bytes]=!`);
+  // base64url, at the start, the end, and twice in one string.
+  const url = "-_".repeat(n / 2);
+  assert.equal(
+    dropBase64Runs(`${url} mid ${run(n, "Z")}`),
+    `[base64 omitted: ${(n * 3) / 4} bytes] mid [base64 omitted: ${(n * 3) / 4} bytes]`
+  );
+  const plain = "word ".repeat(2000);
+  assert.equal(dropBase64Runs(plain), plain);
+});
+
+test("base64 runs: adversarial input — many runs one short of the threshold — is one linear pass", () => {
+  // 4 MiB of runs 4095 long: a backtracking /[…]{4096,}/ rescans each run
+  // from every start (≈46 s for 1 MiB on the host); one pass reads each
+  // character once and gives the string back untouched.
+  const nearMiss = `${"A".repeat(SESSION_TOOL_BASE64_RUN_MIN_CHARS - 1)} `;
+  const adversarial = nearMiss.repeat(Math.ceil((4 * 1024 * 1024) / nearMiss.length));
+  const started = performance.now();
+  assert.equal(dropBase64Runs(adversarial), adversarial);
+  // The same size again with every other run long enough: all of those go.
+  const mixed = `${nearMiss}${"B".repeat(SESSION_TOOL_BASE64_RUN_MIN_CHARS)} `.repeat(500);
+  const out = dropBase64Runs(mixed);
+  assert.equal(out.split("[base64 omitted:").length - 1, 500);
+  assert.ok(!out.includes("B"));
+  // Generous: a linear pass takes tens of milliseconds; the old pattern took minutes here.
+  assert.ok(performance.now() - started < 5_000, `${Math.round(performance.now() - started)} ms`);
 });
