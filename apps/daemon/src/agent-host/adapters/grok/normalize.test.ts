@@ -20,7 +20,9 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import type { RuntimeEvent } from "@orquester/api/agent-chat";
+import { htmlRenderReferenceOfActivityPayload, slimActivityPayload, type RuntimeEvent } from "@orquester/api/agent-chat";
+
+import { runtimeEventToActivities } from "../../ingestion/activities.ts";
 
 import type { SessionNotification } from "./acp/_generated/schema.ts";
 import { agentFrames, readCapture } from "./fixtures.ts";
@@ -1315,4 +1317,62 @@ test("a loop's deletion by expiry completes it; a report of a loop never seen cr
   ]);
   const expired = only(scheduler(grok, "scheduled_task_deleted", { reason: "expired" }), "task.completed");
   assert.deepEqual(expired.map((event) => [event.payload.status, event.payload.summary]), [["completed", "Expired"]]);
+});
+
+// ---------------------------------------------------------------------------
+// A session tool called through Grok's `use_tool` meta-tool
+// ---------------------------------------------------------------------------
+
+test("a session tool reached through use_tool is an MCP call from its first frame, marked and rendered at ingestion", () => {
+  // The frame shapes Grok's own session logs show for an MCP call (an
+  // `updates.jsonl` `serena__initial_instructions` call through `use_tool`):
+  // title and `_meta` name `use_tool` with the qualified key in `rawInput`;
+  // an update with the qualified title and `{variant: "UseTool", …}`; the end
+  // with `rawOutput {type: "MCP", …, output: {OkayOutput}}` and ACP content.
+  const ref = { attachmentId: "thread-1-0f8fad5b-d9cb-469f-a165-70867728950e-html", title: "Chart", height: 420 };
+  const text = JSON.stringify({ htmlRender: ref, message: "Shown to the reader above your reply." });
+  const useTool = { "x.ai/tool": { version: 1, name: "use_tool", kind: "use_tool", namespace: "grok_build", read_only: false } };
+  const grok = normalizer();
+  const events = [
+    ...grok.handleSessionUpdate(
+      frame({
+        sessionUpdate: "tool_call",
+        toolCallId: "call-u1",
+        title: "use_tool",
+        rawInput: { tool_name: "orquester__html_render", tool_input: { title: "Chart" } },
+        _meta: useTool
+      })
+    ),
+    ...grok.handleSessionUpdate(
+      frame({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "call-u1",
+        kind: "other",
+        title: "orquester__html_render",
+        rawInput: { variant: "UseTool", tool_name: "orquester__html_render", tool_input: { title: "Chart" } },
+        _meta: useTool
+      })
+    ),
+    ...grok.handleSessionUpdate(
+      frame({
+        sessionUpdate: "tool_call_update",
+        toolCallId: "call-u1",
+        status: "completed",
+        rawOutput: { type: "MCP", tool_name: "html_render", server_name: "orquester", output: { OkayOutput: text } },
+        content: [{ type: "content", content: { type: "text", text } }]
+      })
+    )
+  ];
+  const lifecycle = events.filter((event) => event.type.startsWith("item.") && event.itemId === "call-u1");
+  assert.ok(lifecycle.length >= 2);
+  for (const event of lifecycle) {
+    assert.equal((event.payload as { itemType?: string }).itemType, "mcp_tool_call", event.type);
+  }
+  const completed = only(events, "item.completed").find((event) => event.itemId === "call-u1")!;
+  const [row] = runtimeEventToActivities(completed, { sessionToolNames: new Set(["html_render"]) });
+  assert.deepEqual(htmlRenderReferenceOfActivityPayload(row!.payload), ref);
+  assert.deepEqual(htmlRenderReferenceOfActivityPayload(slimActivityPayload(slimActivityPayload(row!.payload))), ref);
+  // A host without that tool registered marks nothing, so nothing renders.
+  const [unmarked] = runtimeEventToActivities(completed, { sessionToolNames: new Set(["echo"]) });
+  assert.equal(htmlRenderReferenceOfActivityPayload(unmarked!.payload), undefined);
 });

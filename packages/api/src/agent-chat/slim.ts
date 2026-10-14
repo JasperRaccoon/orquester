@@ -20,10 +20,9 @@
  *   appContext, error, durationMs` and nothing else, and its `result` is
  *   reduced to a one-line summary — but a row the host's ingestion marked
  *   as its own session tool's keeps `data.sessionTool` (its bare name, plus
- *   the reference fields of `SESSION_TOOL_REFERENCE_KEYS`, `session-tools.ts`);
- * - a row of the `orquester` server's `html_render` call — any item type, any
- *   provider's layout — keeps its page reference as `data.htmlRender`
- *   (`html-render.ts`), so the timeline renders the page from the slim row;
+ *   the reference fields of `SESSION_TOOL_REFERENCE_KEYS`, `session-tools.ts`
+ *   — e.g. an `html_render` call's page, which the timeline renders from the
+ *   slim row alone), the same after a second slim;
  * - tool text output is summarised to the first meaningful line, elided at
  *   {@link SLIM_SUMMARY_ELIDE_CHARS}, or to `"N lines"` when there is no
  *   single renderable line;
@@ -43,7 +42,6 @@
  * (goals §4.4), so they must reach it whole.
  */
 
-import { htmlRenderReferenceOfActivityPayload } from "./html-render.ts";
 import { projectSessionToolData } from "./session-tools.ts";
 
 /**
@@ -365,7 +363,7 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
   }
   // A session tool's name and the reference fields its UI renders from
   // (`session-tools.ts`, design 2026-10-14 §1.5), in one place for every
-  // provider's spelling.
+  // provider's result layout — and a row slimmed before keeps what it kept.
   const sessionTool = projectSessionToolData(data);
   if (sessionTool) {
     projected.sessionTool = sessionTool;
@@ -536,16 +534,6 @@ export function slimActivityPayload(payload: unknown): unknown {
     if (rawOutput) {
       projectedData.rawOutput = rawOutput;
     }
-  }
-
-  // Agent visuals (spec 2026-10-14 §1.5): an `orquester` `html_render` row
-  // keeps its page's reference whole, whichever provider's result layout it
-  // came in — the allow-list above would reduce the result to one summary
-  // line, and the UI renders the page from the slimmed row alone. A row
-  // slimmed twice (a `tool.updated` is persisted slimmed) keeps the same one.
-  const htmlRender = htmlRenderReferenceOfActivityPayload(record);
-  if (htmlRender !== undefined) {
-    projectedData.htmlRender = "htmlRender" in data ? data.htmlRender : htmlRender;
   }
 
   const next: Record<string, unknown> = { ...restamped, data: projectedData };

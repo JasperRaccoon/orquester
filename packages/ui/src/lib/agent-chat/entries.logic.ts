@@ -372,10 +372,10 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     entry.goal = goalMarkerOf(goalUpdate);
   }
 
-  // Agent visuals (spec 2026-10-14 §2.5): a completed `orquester`
-  // `html_render` call is its page, read from its result through the shared
-  // reader — every provider's layout, the slimmed row included. A failed or
-  // still-running call stays an ordinary tool row.
+  // Agent visuals (spec 2026-10-14 §2.5): a completed session-tool
+  // `html_render` call (the ingestion's `sessionTool` marker) is its page,
+  // read through the shared reader — every provider's layout, the slimmed
+  // row included. A failed or still-running call stays an ordinary tool row.
   if (activity.activityKind === "tool.completed" && entry.toolLifecycleStatus === "completed") {
     const visual = htmlRenderReferenceOfActivityPayload(activity.payload);
     if (visual !== undefined) {

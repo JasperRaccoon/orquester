@@ -78,11 +78,13 @@ test("the reference the publisher answers is what every client reads back from t
       [320, 400]
     ]
   });
+  // As the host's ingestion persists it: the session-tool provenance marker stamped.
   const row = {
     itemType: "mcp_tool_call",
     status: "completed",
     data: {
       toolName: "mcp__orquester__html_render",
+      sessionTool: { name: "html_render" },
       result: { type: "tool_result", content: [{ type: "text", text: JSON.stringify({ htmlRender: reference, message: "m" }) }] }
     }
   };

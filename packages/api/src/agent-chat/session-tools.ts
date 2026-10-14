@@ -11,7 +11,9 @@
  * Each harness spells the tool its own way:
  * - Claude: `mcp__orquester__<tool>` (`data.toolName`);
  * - Codex: `{server: "orquester", tool}` (`data.server` / `data.tool`);
- * - Grok: `orquester__<tool>` (`data.vendorTool`, `_meta["x.ai/tool"].name`);
+ * - Grok: `orquester__<tool>` (`data.vendorTool`, `_meta["x.ai/tool"].name`),
+ *   or — the way it really calls an MCP tool — its `use_tool` meta-tool with
+ *   that qualified catalog key in `data.rawInput.tool_name`;
  * - OpenCode: `orquester-<16 hex>_<tool>` (`data.tool`) — one server per
  *   thread on a project's shared `opencode serve`, keyed by a hash of the
  *   thread id (`adapters/opencode/session-tools.ts`).
@@ -37,6 +39,9 @@ const SPELLINGS: readonly RegExp[] = [
   /^orquester\.([a-z][a-z0-9_]{0,47})$/,
   /^orquester-[0-9a-f]{16}_([a-z][a-z0-9_]{0,47})$/
 ];
+
+/** Grok's meta-tool that calls an MCP tool by its qualified catalog key (`rawInput.tool_name`). */
+export const GROK_USE_TOOL_NAME = "use_tool";
 
 /** The bare tool name a provider-visible spelling names, or null for any other tool. */
 export function parseSessionToolName(name: unknown): string | null {
@@ -96,6 +101,14 @@ export function sessionToolNameFromProviderData(data: unknown): string | null {
         return parsed;
       }
     }
+    // Grok's `use_tool`: the called tool is its argument, never the row's own name.
+    const rawInput = asRecord(holder.rawInput);
+    if (rawInput && (holder.vendorTool === GROK_USE_TOOL_NAME || rawInput.variant === "UseTool")) {
+      const parsed = parseSessionToolName(rawInput.tool_name);
+      if (parsed !== null) {
+        return parsed;
+      }
+    }
   }
   return null;
 }
@@ -138,78 +151,98 @@ export function sessionToolMarkedData(data: unknown, registered: ReadonlySet<str
 /**
  * The structured result fields of a session tool the UI renders from, kept
  * through slimming (§1.5) so a row never fetches its full item to render
- * them. A toolkit whose result carries such a field adds its key here (e.g.
- * the visual-replies toolkit's `htmlRender`); everything else in a result is
- * reduced to the usual one-line summary.
+ * them. A toolkit whose result carries such a field adds its key here;
+ * everything else in a result is reduced to the usual one-line summary.
+ *
+ * - `htmlRender`: the visual-replies toolkit's published page
+ *   (`HtmlRenderReference`, `html-render.ts`, design §2.1), read back with
+ *   `htmlRenderReferenceOfActivityPayload`.
  */
-export const SESSION_TOOL_REFERENCE_KEYS: readonly string[] = [];
+export const SESSION_TOOL_REFERENCE_KEYS: readonly string[] = ["htmlRender"];
 
 /** One kept reference field may take this much JSON; a bigger one is dropped, never cut. */
 export const SESSION_TOOL_REFERENCE_MAX_BYTES = 4 * 1024;
 
-/** Results are only parsed for references below this size. */
+/** Result text is only parsed for references below this size. */
 const REFERENCE_SCAN_MAX_CHARS = 256 * 1024;
+
+/** How deep the result walk goes: wrapper → blocks → block → nested block → parsed text. */
+const REFERENCE_SCAN_MAX_DEPTH = 6;
+
+/**
+ * The fields of a result layout the walk descends into, in order: an MCP
+ * `CallToolResult`'s `structuredContent` (Codex keeps it) and `content`
+ * blocks, a Claude `tool_result`'s `content` (a string or blocks), an ACP
+ * content block's `content` (Grok), a text block's `text`, Grok's `use_tool`
+ * `rawOutput` (`{type: "MCP", output: {OkayOutput}}`) and an `output` string.
+ */
+const RESULT_WRAPPER_KEYS = ["structuredContent", "content", "text", "output", "OkayOutput"] as const;
 
 const utf8 = new TextEncoder();
 
 /**
- * The structured object a session tool's result carries, from whichever shape
- * the provider recorded: an MCP `CallToolResult`'s `structuredContent`, else
- * its first text block parsed as a JSON object (Claude's `tool_result` block
- * and OpenCode's output text carry only the text; the daemon writes the same
- * object as JSON text there, `session-tools/results.ts`), else a bare JSON
- * string.
+ * The structured object a session tool's result carries: the first object,
+ * in whichever layout the provider recorded, that holds one of `keys`. The
+ * daemon writes it both as `structuredContent` and as a JSON text block
+ * (`session-tools/results.ts`); Claude's `tool_result`, OpenCode's output and
+ * Grok's content blocks keep only the text.
  */
-function structuredResultOf(result: unknown): Record<string, unknown> | null {
-  const record = asRecord(result);
-  const structured = asRecord(record?.structuredContent);
-  if (structured) {
-    return structured;
+function structuredResultOf(value: unknown, keys: readonly string[], depth = 0): Record<string, unknown> | null {
+  if (depth > REFERENCE_SCAN_MAX_DEPTH || value === null || value === undefined) {
+    return null;
   }
-  let text: string | null = null;
-  if (typeof result === "string") {
-    text = result;
-  } else if (record && typeof record.content === "string") {
-    text = record.content;
-  } else if (record && Array.isArray(record.content)) {
-    for (const entry of record.content) {
-      const candidate = asRecord(entry)?.text;
-      if (typeof candidate === "string") {
-        text = candidate;
-        break;
-      }
+  if (typeof value === "string") {
+    const text = value.trim();
+    if (!text.startsWith("{") || text.length > REFERENCE_SCAN_MAX_CHARS) {
+      return null;
+    }
+    try {
+      return structuredResultOf(JSON.parse(text), keys, depth + 1);
+    } catch {
+      return null;
     }
   }
-  if (text === null || text.length > REFERENCE_SCAN_MAX_CHARS) {
+  if (Array.isArray(value)) {
+    for (const entry of value) {
+      const found = structuredResultOf(entry, keys, depth + 1);
+      if (found) {
+        return found;
+      }
+    }
     return null;
   }
-  const trimmed = text.trim();
-  if (!trimmed.startsWith("{")) {
+  const record = asRecord(value);
+  if (!record) {
     return null;
   }
-  try {
-    return asRecord(JSON.parse(trimmed));
-  } catch {
-    return null;
+  if (keys.some((key) => Object.hasOwn(record, key))) {
+    return record;
   }
-}
-
-/** The result a provider recorded for a call, wherever its data holds it. */
-function resultOfData(data: Record<string, unknown>): unknown {
-  const item = asRecord(data.item);
-  if (item && item.result !== undefined) {
-    return item.result;
+  for (const key of RESULT_WRAPPER_KEYS) {
+    const found = structuredResultOf(record[key], keys, depth + 1);
+    if (found) {
+      return found;
+    }
   }
-  if (data.result !== undefined) {
-    return data.result;
-  }
-  return data.rawOutput;
+  return null;
 }
 
 /**
- * The reference fields of `keys` a session tool's result carries, each kept
+ * Where each provider records a call's result: Codex `data.item.result` or
+ * `data.result`; Claude and OpenCode `data.result` (OpenCode also
+ * `data.state.output`); Grok `data.rawOutput` and its ACP `data.content`.
+ */
+function resultsOfData(data: Record<string, unknown>): unknown[] {
+  return [asRecord(data.item)?.result, data.result, asRecord(data.state)?.output, data.rawOutput, data.content];
+}
+
+/**
+ * The reference fields of `keys` a session tool's row carries, each kept
  * whole when its JSON is at most {@link SESSION_TOOL_REFERENCE_MAX_BYTES}.
- * Undefined when none survives.
+ * A row slimmed before answers what that slim kept
+ * (`data.sessionTool.references`) — its `result` is a summary by then, and a
+ * `tool.updated` row is persisted slimmed, then slimmed again for the wire;
+ * otherwise the provider's result is read. Undefined when none survives.
  */
 export function sessionToolReferences(
   data: Record<string, unknown>,
@@ -218,22 +251,32 @@ export function sessionToolReferences(
   if (keys.length === 0) {
     return undefined;
   }
-  const structured = structuredResultOf(resultOfData(data));
-  if (!structured) {
-    return undefined;
-  }
-  const kept: Record<string, unknown> = {};
+  const kept = asRecord(asRecord(data.sessionTool)?.references);
+  let structured: Record<string, unknown> | null | undefined;
+  const references: Record<string, unknown> = {};
   for (const key of keys) {
-    const value = structured[key];
+    let value = kept && Object.hasOwn(kept, key) ? kept[key] : undefined;
+    if (value === undefined) {
+      if (structured === undefined) {
+        structured = null;
+        for (const result of resultsOfData(data)) {
+          structured = structuredResultOf(result, keys);
+          if (structured) {
+            break;
+          }
+        }
+      }
+      value = structured?.[key];
+    }
     if (value === undefined) {
       continue;
     }
     const json = JSON.stringify(value);
     if (json !== undefined && utf8.encode(json).length <= SESSION_TOOL_REFERENCE_MAX_BYTES) {
-      kept[key] = value;
+      references[key] = value;
     }
   }
-  return Object.keys(kept).length > 0 ? kept : undefined;
+  return Object.keys(references).length > 0 ? references : undefined;
 }
 
 /** What a slimmed session-tool row carries at `data.sessionTool`. */

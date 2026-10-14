@@ -163,7 +163,7 @@ export function toolCall(
           // kind Grok files it under — sticky, as a later frame may not repeat
           // the `_meta` that named it (nothing else here is an MCP call).
           previous?.itemType === "mcp_tool_call" ||
-            isGrokSessionToolCall({ title: title ?? null, _meta: update._meta ?? null })
+            isGrokSessionToolCall({ title: title ?? null, _meta: update._meta ?? null, rawInput })
           ? "mcp_tool_call"
           : itemTypeFromToolKind(acpKindFromVendorKind(vendor?.kind) ?? kind ?? undefined)),
     spawnsSubagent,

@@ -27,7 +27,7 @@
  *   `/mcp`, `docs/orquester-mcp.md`) is never waved through.
  */
 
-import { parseSessionToolName, SESSION_TOOLS_SERVER_NAME } from "@orquester/api/agent-chat";
+import { GROK_USE_TOOL_NAME, parseSessionToolName, SESSION_TOOLS_SERVER_NAME } from "@orquester/api/agent-chat";
 
 import type { McpServer, ToolCallUpdate } from "./acp/_generated/schema.ts";
 
@@ -72,9 +72,15 @@ interface VendorTool {
  * The bare session-tool name a tool call names, or null. Grok names an MCP
  * tool `server__tool` (its `22-permissions-and-safety.md`, "MCP Rules"); the
  * name is read off `_meta["x.ai/tool"]` and, failing that, the title — each
- * only as an exact spelling, never a substring.
+ * only as an exact spelling, never a substring. The model reaches MCP tools
+ * through Grok's `use_tool` meta-tool (`07-mcp-servers.md`; observed frames:
+ * the first carries title and `_meta` name `use_tool`, `rawInput:
+ * {tool_name: "<server>__<tool>", tool_input}`, a later update the qualified
+ * title), so a `use_tool` call's `rawInput.tool_name` is read too.
  */
-export function grokSessionToolName(toolCall: Pick<ToolCallUpdate, "title" | "_meta"> | null | undefined): string | null {
+export function grokSessionToolName(
+  toolCall: Pick<ToolCallUpdate, "title" | "_meta" | "rawInput"> | null | undefined
+): string | null {
   if (toolCall === null || toolCall === undefined) {
     return null;
   }
@@ -82,6 +88,14 @@ export function grokSessionToolName(toolCall: Pick<ToolCallUpdate, "title" | "_m
   const candidates: unknown[] = [vendor?.name, toolCall.title];
   if (typeof vendor?.namespace === "string" && typeof vendor.name === "string") {
     candidates.push(`${vendor.namespace}__${vendor.name}`);
+  }
+  const rawInput = toolCall.rawInput as Record<string, unknown> | null | undefined;
+  if (
+    rawInput !== null &&
+    typeof rawInput === "object" &&
+    (vendor?.name === GROK_USE_TOOL_NAME || toolCall.title === GROK_USE_TOOL_NAME || rawInput.variant === "UseTool")
+  ) {
+    candidates.push(rawInput.tool_name);
   }
   for (const candidate of candidates) {
     const name = parseSessionToolName(candidate);
@@ -91,6 +105,8 @@ export function grokSessionToolName(toolCall: Pick<ToolCallUpdate, "title" | "_m
 }
 
 /** True when a tool call is a session tool's (any name, for the timeline's classification). */
-export function isGrokSessionToolCall(toolCall: Pick<ToolCallUpdate, "title" | "_meta"> | null | undefined): boolean {
+export function isGrokSessionToolCall(
+  toolCall: Pick<ToolCallUpdate, "title" | "_meta" | "rawInput"> | null | undefined
+): boolean {
   return grokSessionToolName(toolCall) !== null;
 }

@@ -14,6 +14,7 @@ import {
   sessionToolNameFromProviderData,
   sessionToolNameOfData,
   sessionToolReferences,
+  SESSION_TOOL_REFERENCE_KEYS,
   SESSION_TOOL_REFERENCE_MAX_BYTES
 } from "./session-tools.ts";
 import { slimActivityPayload } from "./slim.ts";
@@ -51,6 +52,22 @@ test("the provider spelling is read off each provider's activity data", () => {
   assert.equal(sessionToolNameFromProviderData({ server: "orquester", tool: "echo", arguments: {} }), "echo");
   // Grok
   assert.equal(sessionToolNameFromProviderData({ toolUseId: "c1", vendorTool: "orquester__echo" }), "echo");
+  // Grok's `use_tool` meta-tool, as it really calls an MCP tool (the qualified key is its argument)
+  assert.equal(
+    sessionToolNameFromProviderData({ vendorTool: "use_tool", rawInput: { tool_name: "orquester__echo", tool_input: {} } }),
+    "echo"
+  );
+  assert.equal(sessionToolNameFromProviderData({ rawInput: { variant: "UseTool", tool_name: "orquester__echo" } }), "echo");
+  assert.equal(
+    sessionToolNameFromProviderData({ vendorTool: "use_tool", rawInput: { tool_name: "serena__echo" } }),
+    null,
+    "another server through use_tool"
+  );
+  assert.equal(
+    sessionToolNameFromProviderData({ vendorTool: "read_file", rawInput: { tool_name: "orquester__echo" } }),
+    null,
+    "a tool_name argument of any other tool names nothing"
+  );
   // OpenCode
   assert.equal(sessionToolNameFromProviderData({ tool: "orquester-0123456789abcdef_echo", toolUseId: "c" }), "echo");
   // another server's call — even one whose tool happens to be spelled like ours
@@ -102,6 +119,21 @@ test("reference fields are read from structuredContent or the JSON text block", 
     sessionToolReferences({ tool: "orquester-0123456789abcdef_x", result: JSON.stringify({ htmlRender: ref }) }, keys),
     { htmlRender: ref }
   );
+  // Grok's use_tool: `rawOutput.output.OkayOutput` text, or the ACP content blocks
+  assert.deepEqual(
+    sessionToolReferences(
+      { rawOutput: { type: "MCP", server_name: "orquester", output: { OkayOutput: JSON.stringify({ htmlRender: ref }) } } },
+      keys
+    ),
+    { htmlRender: ref }
+  );
+  assert.deepEqual(
+    sessionToolReferences(
+      { content: [{ type: "content", content: { type: "text", text: JSON.stringify({ htmlRender: ref }) } }] },
+      keys
+    ),
+    { htmlRender: ref }
+  );
   // a key nobody listed is not kept, and an oversized reference is dropped whole
   assert.equal(sessionToolReferences({ result: { structuredContent: { other: 1 } } }, keys), undefined);
   const huge = { htmlRender: { blob: "x".repeat(SESSION_TOOL_REFERENCE_MAX_BYTES) } };
@@ -121,6 +153,40 @@ test("projectSessionToolData keeps the marker and adds its references", () => {
     { name: "echo", references: { x: 1 } }
   );
   assert.equal(projectSessionToolData({ server: "orquester", tool: "echo" }, ["x"]), undefined, "unmarked");
+});
+
+test("a row slimmed before keeps its references: the summary its result became is not re-read", () => {
+  const ref = { attachmentId: "t1-0f8fad5b-d9cb-469f-a165-70867728950e-html", title: "Chart", height: 400 };
+  const slimmedOnce = {
+    server: "orquester",
+    tool: "html_render",
+    result: '{"htmlRender":{"attachmentId":"t1-0f8fad5b-d9cb-469f-a165-7086…',
+    sessionTool: { name: "html_render", references: { htmlRender: ref } }
+  };
+  assert.deepEqual(projectSessionToolData(slimmedOnce), { name: "html_render", references: { htmlRender: ref } });
+  // Only the listed keys, and still under the size cap.
+  assert.equal(projectSessionToolData({ ...slimmedOnce, sessionTool: { name: "html_render", references: { other: 1 } } })?.references, undefined);
+});
+
+test("htmlRender is a kept reference key and survives a double slim through the unified path", () => {
+  assert.ok(SESSION_TOOL_REFERENCE_KEYS.includes("htmlRender"));
+  const ref = { attachmentId: "t1-0f8fad5b-d9cb-469f-a165-70867728950e-html", title: "Chart", height: 400 };
+  const payload = {
+    itemType: "mcp_tool_call",
+    status: "completed",
+    data: sessionToolMarkedData(
+      {
+        toolName: "mcp__orquester__html_render",
+        input: { html: "<p>hi</p>" },
+        result: { type: "tool_result", content: [{ type: "text", text: JSON.stringify({ htmlRender: ref, message: "Shown." }) }] }
+      },
+      new Set(["html_render"])
+    )
+  };
+  const once = slimActivityPayload(payload) as { data: Record<string, unknown> };
+  const twice = slimActivityPayload(once) as { data: Record<string, unknown> };
+  assert.deepEqual(once.data.sessionTool, { name: "html_render", references: { htmlRender: ref } });
+  assert.deepEqual(twice.data.sessionTool, { name: "html_render", references: { htmlRender: ref } });
 });
 
 test("a marked row keeps data.sessionTool through slimming; an unmarked MCP row has none", () => {

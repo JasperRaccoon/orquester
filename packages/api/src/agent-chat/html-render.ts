@@ -13,8 +13,9 @@
  * - the published page is a thread attachment (id suffix `-html`); the
  *   {@link HtmlRenderReference} to it lives only in the tool's result;
  * - {@link htmlRenderReferenceOfActivityPayload} finds that reference in a
- *   tool row of ANY provider's ingested shape — the one place every spelling
- *   of the tool name and every result layout is normalised;
+ *   tool row of ANY provider's ingested shape, slimmed or not — through the
+ *   session tools' provenance marker and reference reader (`session-tools.ts`),
+ *   where every provider's spelling and result layout is normalised;
  * - {@link injectHtmlRenderBootstrap} puts the theme + bridge script at the
  *   head of the page at publish time;
  * - the client hands the page its theme in the URL fragment before first
@@ -23,12 +24,13 @@
  *   parsers below. The method names are MCP Apps' (`ui/…`) where one exists.
  */
 
+import { sessionToolNameOfData, sessionToolReferences } from "./session-tools.ts";
+
 // ---------------------------------------------------------------------------
 // The reference
 // ---------------------------------------------------------------------------
 
-/** The session-tools MCP server's name (spec §1.1). */
-export const ORQUESTER_MCP_SERVER_NAME = "orquester";
+/** The visual-replies toolkit's publishing tool, on the session tools' server (`session-tools.ts`). */
 export const HTML_RENDER_TOOL_NAME = "html_render";
 export const HTML_RENDER_MIN_HEIGHT = 80;
 export const HTML_RENDER_MAX_HEIGHT = 2000;
@@ -182,131 +184,28 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
     : undefined;
 }
 
-function asString(value: unknown): string | undefined {
-  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
-}
+/** The result field the reference travels in, and its slim-kept session-tool reference key (§1.5). */
+const HTML_RENDER_REFERENCE_KEY = "htmlRender";
 
 /**
- * `orquester`'s tool in every spelling a provider writes it:
- * `mcp__orquester__x` (Claude), `orquester__x` (Grok's `use_tool` catalog
- * key), `orquester_x` (OpenCode), `orquester.x` / `orquester: x` (titles),
- * `x (orquester MCP Server)`. A bare `x` is never read as ours: a user's own
- * server may have a tool of the same name.
- */
-const QUALIFIED_TOOL = /^(?:mcp(?:__|::|[._-]))?orquester(?:__|::|[._/-]|:\s*)([a-z0-9][a-z0-9_-]*)$/i;
-const SUFFIXED_TOOL = /^([a-z0-9][a-z0-9_-]*) \(orquester MCP Server\)$/i;
-
-/** The bare tool name when `name` spells one of the `orquester` server's tools. */
-export function orquesterToolNameOf(name: unknown): string | undefined {
-  const text = asString(name);
-  if (text === undefined || text.length > 200) return undefined;
-  const match = QUALIFIED_TOOL.exec(text) ?? SUFFIXED_TOOL.exec(text);
-  return match?.[1]?.toLowerCase();
-}
-
-function serverToolPair(record: Record<string, unknown> | undefined): string | undefined {
-  if (record === undefined) return undefined;
-  const server = asString(record.server) ?? asString(record.serverName);
-  const tool = asString(record.tool) ?? asString(record.toolName) ?? asString(record.tool_name);
-  if (server?.toLowerCase() !== ORQUESTER_MCP_SERVER_NAME || tool === undefined) return undefined;
-  return orquesterToolNameOf(tool) ?? tool.toLowerCase();
-}
-
-/**
- * The `orquester` tool a tool-lifecycle row's payload calls, as each
- * provider's adapter ingests it today (spec §1.5, §2.5):
- *
- * - Claude: `data.toolName` `mcp__orquester__html_render`;
- * - Codex: `data.server` `orquester` + `data.tool` (or the same on `data.item`),
- *   title `orquester: html_render`;
- * - OpenCode: `data.tool` `orquester_html_render`;
- * - Grok: an MCP call goes through its `use_tool` meta-tool with the
- *   qualified catalog key in `data.rawInput.tool_name`
- *   (`orquester__html_render`); its `vendorTool` and title are read too.
- */
-export function orquesterToolOfPayload(payload: unknown): string | undefined {
-  const record = asRecord(payload);
-  if (record === undefined) return undefined;
-  const data = asRecord(record.data);
-  const rawInput = asRecord(data?.rawInput);
-  return (
-    serverToolPair(data) ??
-    serverToolPair(asRecord(data?.item)) ??
-    serverToolPair(rawInput) ??
-    orquesterToolNameOf(data?.toolName) ??
-    orquesterToolNameOf(data?.tool) ??
-    orquesterToolNameOf(rawInput?.tool_name) ??
-    orquesterToolNameOf(rawInput?.toolName) ??
-    orquesterToolNameOf(data?.vendorTool) ??
-    orquesterToolNameOf(record.title)
-  );
-}
-
-/** A tool result's text is parsed for the reference only up to this many characters. */
-const MAX_RESULT_TEXT_CHARS = 64 * 1024;
-
-/** The reference in one result value: a record carrying it, its structured content, or JSON text. */
-function referenceInResult(value: unknown, depth = 0): HtmlRenderReference | undefined {
-  if (depth > 4 || value === undefined || value === null) return undefined;
-  if (typeof value === "string") {
-    const text = value.trim();
-    if (!text.startsWith("{") || text.length > MAX_RESULT_TEXT_CHARS) return undefined;
-    try {
-      return referenceInResult(JSON.parse(text), depth + 1);
-    } catch {
-      return undefined;
-    }
-  }
-  if (Array.isArray(value)) {
-    for (const entry of value) {
-      const found = referenceInResult(entry, depth + 1);
-      if (found !== undefined) return found;
-    }
-    return undefined;
-  }
-  const record = asRecord(value);
-  if (record === undefined) return undefined;
-  if ("htmlRender" in record) return readHtmlRenderReference(record.htmlRender);
-  return (
-    referenceInResult(record.structuredContent, depth + 1) ??
-    // MCP text content (`{type: "text", text}`), an ACP content block
-    // (`{type: "content", content: {type: "text", text}}`), a Claude
-    // `tool_result` block (`content` string or blocks), OpenCode's output.
-    referenceInResult(record.text, depth + 1) ??
-    referenceInResult(record.content, depth + 1) ??
-    referenceInResult(record.output, depth + 1)
-  );
-}
-
-/**
- * The page reference on a tool row of the `orquester` `html_render` call, or
- * undefined. Reads the slimmed row (`data.htmlRender`, which `slim.ts` keeps)
- * and every provider's unslimmed result layout:
- *
- * - Claude: `data.result` — the raw `tool_result` block;
- * - Codex: `data.result` / `data.item.result` — `{content, structuredContent}`;
- * - OpenCode: `data.result` / `data.state.output` — the joined text;
- * - Grok: `data.rawOutput` and `data.content` (ACP content blocks).
+ * The page reference on a tool row of the session tools' `html_render` call,
+ * or undefined. The row must carry the host ingestion's provenance marker
+ * (`data.sessionTool`, `session-tools.ts`), stamped for every provider's
+ * spelling of a REGISTERED tool — so a user's own server that shares the
+ * `orquester` name (or has an `html_render`) never renders a page. The
+ * reference is read with the session tools' one reader
+ * ({@link sessionToolReferences}): what a slim kept
+ * (`data.sessionTool.references.htmlRender`), else the provider's result in
+ * whichever layout it recorded it — Claude's `tool_result` block, Codex's
+ * `{content, structuredContent}`, OpenCode's output text, Grok's `use_tool`
+ * `rawOutput` and ACP content blocks.
  *
  * The status is the caller's to judge: a failed call carries no reference.
  */
 export function htmlRenderReferenceOfActivityPayload(payload: unknown): HtmlRenderReference | undefined {
-  const record = asRecord(payload);
-  const data = asRecord(record?.data);
-  if (record === undefined || data === undefined) return undefined;
-  // The slimmed row: `slim.ts` writes it only after the identity check below,
-  // and the slim may have dropped the fields that check reads.
-  if ("htmlRender" in data) return readHtmlRenderReference(data.htmlRender);
-  if (orquesterToolOfPayload(record) !== HTML_RENDER_TOOL_NAME) return undefined;
-  const item = asRecord(data.item);
-  const state = asRecord(data.state);
-  return (
-    referenceInResult(data.result) ??
-    referenceInResult(item?.result) ??
-    referenceInResult(state?.output) ??
-    referenceInResult(data.rawOutput) ??
-    referenceInResult(data.content)
-  );
+  const data = asRecord(asRecord(payload)?.data);
+  if (data === undefined || sessionToolNameOfData(data) !== HTML_RENDER_TOOL_NAME) return undefined;
+  return readHtmlRenderReference(sessionToolReferences(data, [HTML_RENDER_REFERENCE_KEY])?.[HTML_RENDER_REFERENCE_KEY]);
 }
 
 // ---------------------------------------------------------------------------

@@ -23,8 +23,6 @@ import {
   htmlRenderThemeMessage,
   injectHtmlRenderBootstrap,
   matchesHtmlRenderShortcut,
-  orquesterToolNameOf,
-  orquesterToolOfPayload,
   readHtmlRenderContentHeight,
   readHtmlRenderKeyDown,
   readHtmlRenderLinkRequest,
@@ -32,6 +30,8 @@ import {
   sanitizeHtmlRenderThemeVariables,
   type HtmlRenderReference
 } from "./html-render.ts";
+import { sessionToolMarkedData } from "./session-tools.ts";
+import { slimActivityPayload } from "./slim.ts";
 
 const ID = "thread-1-0f8fad5b-d9cb-469f-a165-70867728950e-html";
 const REF = { attachmentId: ID, title: "Chart", height: 420 };
@@ -101,25 +101,16 @@ test("download names drop characters file systems reject", () => {
   assert.equal(htmlRenderFileName("   "), "Page.html");
 });
 
-test("every provider spelling of the orquester tool normalises to its bare name", () => {
-  for (const name of [
-    "mcp__orquester__html_render",
-    "orquester__html_render",
-    "orquester_html_render",
-    "orquester.html_render",
-    "orquester: html_render",
-    "orquester/html_render",
-    "html_render (orquester MCP Server)"
-  ]) {
-    assert.equal(orquesterToolNameOf(name), "html_render", name);
-  }
-  for (const name of ["html_render", "mcp__other__html_render", "orquesterx_html_render", ""]) {
-    assert.equal(orquesterToolNameOf(name), undefined, name);
-  }
-});
+/** The session tools the host registered, as its ingestion is handed them. */
+const REGISTERED = new Set(["html_render", "html_preview"]);
 
-/** A completed html_render row as each adapter ingests it today. */
-const PROVIDER_ROWS: Record<string, unknown> = {
+/** A row as the host's ingestion persists it: the provenance marker stamped on a registered tool's call. */
+function ingested(row: Record<string, unknown>): Record<string, unknown> {
+  return { ...row, data: sessionToolMarkedData(row.data, REGISTERED) };
+}
+
+/** A completed html_render row as each adapter emits it (before ingestion). */
+const PROVIDER_ROWS: Record<string, Record<string, unknown>> = {
   claude: {
     itemType: "mcp_tool_call",
     status: "completed",
@@ -154,68 +145,90 @@ const PROVIDER_ROWS: Record<string, unknown> = {
     status: "completed",
     data: { server: "orquester", tool: "html_render", result: { content: [], structuredContent: { htmlRender: REF } } }
   },
+  // OpenCode: one `orquester-<16 hex>` server per thread (adapters/opencode/session-tools.ts).
   opencode: {
-    itemType: "dynamic_tool_call",
+    itemType: "mcp_tool_call",
     status: "completed",
     data: {
-      tool: "orquester_html_render",
+      tool: "orquester-0123456789abcdef_html_render",
       toolUseId: "call_1",
-      state: { status: "completed", input: {}, output: RESULT_JSON, title: "", metadata: {} }
+      state: { status: "completed", input: {}, output: RESULT_JSON, title: "", metadata: {} },
+      result: RESULT_JSON
     }
   },
+  // Grok calls an MCP tool through its `use_tool` meta-tool.
   grok: {
-    itemType: "dynamic_tool_call",
+    itemType: "mcp_tool_call",
     status: "completed",
-    title: "use_tool",
+    title: "orquester__html_render",
     data: {
       toolUseId: "call_1",
       vendorTool: "use_tool",
-      rawInput: { tool_name: "orquester__html_render", tool_input: { title: "Chart" } },
+      rawInput: { variant: "UseTool", tool_name: "orquester__html_render", tool_input: { title: "Chart" } },
+      rawOutput: { type: "MCP", tool_name: "html_render", server_name: "orquester", output: { OkayOutput: RESULT_JSON } },
       content: [{ type: "content", content: { type: "text", text: RESULT_JSON } }]
     }
   },
-  "grok (raw output)": {
-    itemType: "dynamic_tool_call",
+  "grok (content blocks only)": {
+    itemType: "mcp_tool_call",
     status: "completed",
     data: {
+      vendorTool: "use_tool",
       rawInput: { tool_name: "orquester__html_render" },
-      rawOutput: { content: [{ type: "text", text: RESULT_JSON }] }
+      content: [{ type: "content", content: { type: "text", text: RESULT_JSON } }]
     }
   }
 };
 
-test("the reference is found in every provider's ingested html_render row", () => {
-  for (const [provider, payload] of Object.entries(PROVIDER_ROWS)) {
-    assert.equal(orquesterToolOfPayload(payload), "html_render", provider);
+test("the reference is found in every provider's ingested html_render row, slimmed once or twice", () => {
+  for (const [provider, row] of Object.entries(PROVIDER_ROWS)) {
+    const payload = ingested(row);
     assert.deepEqual(htmlRenderReferenceOfActivityPayload(payload), REF, provider);
+    const once = slimActivityPayload(payload);
+    assert.deepEqual(htmlRenderReferenceOfActivityPayload(once), REF, `${provider} slimmed`);
+    assert.deepEqual(htmlRenderReferenceOfActivityPayload(slimActivityPayload(once)), REF, `${provider} slimmed twice`);
   }
 });
 
-test("a slimmed row carries the reference on data.htmlRender", () => {
-  assert.deepEqual(htmlRenderReferenceOfActivityPayload({ itemType: "mcp_tool_call", data: { htmlRender: REF } }), REF);
+test("only the ingestion's marker makes a row a page: the spelling alone does not", () => {
+  for (const [provider, row] of Object.entries(PROVIDER_ROWS)) {
+    assert.equal(htmlRenderReferenceOfActivityPayload(row), undefined, provider);
+  }
+  // A host that registered no html_render (or none at all) marks nothing.
+  assert.equal(
+    htmlRenderReferenceOfActivityPayload({ ...PROVIDER_ROWS.claude, data: sessionToolMarkedData(PROVIDER_ROWS.claude!.data, new Set(["echo"])) }),
+    undefined
+  );
 });
 
-test("another server's tool, or a result without a reference, is no visual", () => {
+test("another server's tool, another session tool, or a result without a reference, is no visual", () => {
   assert.equal(
-    htmlRenderReferenceOfActivityPayload({
-      itemType: "mcp_tool_call",
-      data: { toolName: "mcp__other__html_render", result: { content: RESULT_JSON } }
-    }),
+    htmlRenderReferenceOfActivityPayload(
+      ingested({ itemType: "mcp_tool_call", data: { toolName: "mcp__other__html_render", result: { content: RESULT_JSON } } })
+    ),
     undefined
   );
   assert.equal(
-    htmlRenderReferenceOfActivityPayload({
-      itemType: "mcp_tool_call",
-      data: { toolName: "mcp__orquester__html_preview", result: { content: RESULT_JSON } }
-    }),
+    htmlRenderReferenceOfActivityPayload(
+      ingested({ itemType: "mcp_tool_call", data: { toolName: "mcp__orquester__html_preview", result: { content: RESULT_JSON } } })
+    ),
+    undefined
+  );
+  // OpenCode's legacy single-server spelling is no session tool's.
+  assert.equal(
+    htmlRenderReferenceOfActivityPayload(
+      ingested({ itemType: "mcp_tool_call", data: { tool: "orquester_html_render", result: RESULT_JSON } })
+    ),
     undefined
   );
   assert.equal(
-    htmlRenderReferenceOfActivityPayload({
-      itemType: "mcp_tool_call",
-      status: "failed",
-      data: { toolName: "mcp__orquester__html_render", result: { content: "Error: image too large", is_error: true } }
-    }),
+    htmlRenderReferenceOfActivityPayload(
+      ingested({
+        itemType: "mcp_tool_call",
+        status: "failed",
+        data: { toolName: "mcp__orquester__html_render", result: { content: "Error: image too large", is_error: true } }
+      })
+    ),
     undefined
   );
 });

@@ -3,6 +3,7 @@ import { beforeEach,describe,it } from "node:test";
 
 import {
 messageStreamingContext,
+sessionToolMarkedData,
 type MessageStreamingContext,
 type ThreadItem,
 type ThreadMessageItem,
@@ -1347,38 +1348,49 @@ describe("agent visuals — the visual row (spec 2026-10-14 §2.5)", () => {
   const PAGE = "t1-0f8fad5b-d9cb-469f-a165-70867728950e-html";
   const reference = { attachmentId: PAGE, title: "Revenue", height: 360 };
   const resultText = JSON.stringify({ htmlRender: reference, message: "Shown to the reader above your reply." });
-  /** The completed row of an `orquester` `html_render` call, as each adapter ingests it. */
+  /** The host ingestion's provenance marker, as it stamps a registered session tool's row. */
+  const marked = (data: unknown) => sessionToolMarkedData(data, new Set(["html_render"]));
+  /** The completed row of the session tools' `html_render` call, as the host ingests each adapter's. */
   const completedData: Record<string, { itemType: string; data: unknown }> = {
     claude: {
       itemType: "mcp_tool_call",
-      data: {
+      data: marked({
         toolName: "mcp__orquester__html_render",
         input: { title: "Revenue" },
         result: { type: "tool_result", tool_use_id: "call-1", content: [{ type: "text", text: resultText }] }
-      }
+      })
     },
     codex: {
       itemType: "mcp_tool_call",
-      data: {
+      data: marked({
         server: "orquester",
         tool: "html_render",
         arguments: {},
         result: { content: [{ type: "text", text: resultText }], structuredContent: null, _meta: null }
-      }
+      })
     },
     opencode: {
-      itemType: "dynamic_tool_call",
-      data: { tool: "orquester_html_render", toolUseId: "call-1", state: { status: "completed", output: resultText } }
+      itemType: "mcp_tool_call",
+      data: marked({
+        tool: "orquester-0123456789abcdef_html_render",
+        toolUseId: "call-1",
+        state: { status: "completed", output: resultText },
+        result: resultText
+      })
     },
     grok: {
-      itemType: "dynamic_tool_call",
-      data: {
+      itemType: "mcp_tool_call",
+      data: marked({
         toolUseId: "call-1",
-        rawInput: { tool_name: "orquester__html_render", tool_input: {} },
+        vendorTool: "use_tool",
+        rawInput: { variant: "UseTool", tool_name: "orquester__html_render", tool_input: {} },
         content: [{ type: "content", content: { type: "text", text: resultText } }]
-      }
+      })
     },
-    "any provider, slimmed": { itemType: "mcp_tool_call", data: { htmlRender: reference } }
+    "any provider, slimmed": {
+      itemType: "mcp_tool_call",
+      data: { sessionTool: { name: "html_render", references: { htmlRender: reference } } }
+    }
   };
   const call = (
     shape: { itemType: string; data: unknown },
@@ -1434,7 +1446,7 @@ describe("agent visuals — the visual row (spec 2026-10-14 §2.5)", () => {
           ...call(
             {
               itemType: "mcp_tool_call",
-              data: { toolName: "mcp__orquester__html_render", result: { content: "Error: image too large", is_error: true } }
+              data: marked({ toolName: "mcp__orquester__html_render", result: { content: "Error: image too large", is_error: true } })
             },
             1,
             { status: "failed" }

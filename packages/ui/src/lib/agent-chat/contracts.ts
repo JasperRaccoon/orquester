@@ -351,18 +351,20 @@ export interface WorkLogEntry {
     previousAccountId?: string;
   };
   /**
+   * Present on a COMPLETED session-tool `html_render` call (spec 2026-10-14
+   * §2.5) — a row the host's ingestion marked as its own (`sessionTool`):
+   * the page the agent published, read by the shared reader
+   * (`htmlRenderReferenceOfActivityPayload`) from the slim-kept reference or
+   * the result. Such an entry is its own `visual` row — never grouped, never
+   * folded.
+   */
+  visual?: HtmlRenderReference;
+  /**
    * Present on a goal marker (goals §8.4) — a `goal.updated` row that parsed
    * and is not `progress`. The label is the row's own summary; this is what
    * the marker needs beyond it, read off the goal the row is about (the
    * current one, or the one that ended).
    */
-  /**
-   * Present on a COMPLETED `orquester` `html_render` call (spec 2026-10-14
-   * §2.5): the page the agent published, read from the row's result by the
-   * shared reader (`htmlRenderReferenceOfActivityPayload`). Such an entry is
-   * its own `visual` row — never grouped, never folded.
-   */
-  visual?: HtmlRenderReference;
   goal?: {
     change: AgentGoalChange;
     /** The whole objective: the summary cuts it to 200 characters. */

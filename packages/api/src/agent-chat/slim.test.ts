@@ -7,6 +7,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import { parseGoalUpdatedPayload } from "./goal.ts";
+import { sessionToolMarkedData } from "./session-tools.ts";
 import { slimActivityPayload } from "./slim.ts";
 
 function record(value: unknown): Record<string, unknown> {
@@ -270,7 +271,8 @@ test("ACP content blocks are summarised", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Agent visuals (spec 2026-10-14 §1.5): the html_render reference survives
+// Agent visuals (spec 2026-10-14 §1.5): the html_render reference survives as
+// one of the session tools' kept references
 // ---------------------------------------------------------------------------
 
 const VISUAL_REF = {
@@ -279,58 +281,52 @@ const VISUAL_REF = {
   height: 420
 };
 const VISUAL_RESULT = JSON.stringify({ htmlRender: VISUAL_REF, message: "Shown above." });
+const REGISTERED = new Set(["html_render"]);
 
-test("an orquester html_render row keeps its page reference, for every provider's layout", () => {
+test("a session html_render row keeps its page reference, for every provider's layout, slimmed twice", () => {
   const rows: Record<string, Record<string, unknown>> = {
     claude: {
-      itemType: "mcp_tool_call",
-      status: "completed",
-      data: {
-        toolName: "mcp__orquester__html_render",
-        input: { html: `<p>${"x".repeat(40_000)}</p>`, title: "Chart", height: 420 },
-        result: { type: "tool_result", content: [{ type: "text", text: VISUAL_RESULT }] }
-      }
+      toolName: "mcp__orquester__html_render",
+      input: { html: `<p>${"x".repeat(40_000)}</p>`, title: "Chart", height: 420 },
+      result: { type: "tool_result", content: [{ type: "text", text: VISUAL_RESULT }] }
     },
     codex: {
-      itemType: "mcp_tool_call",
-      status: "completed",
-      data: {
-        server: "orquester",
-        tool: "html_render",
-        arguments: { html: "<p>x</p>" },
-        result: { content: [{ type: "text", text: VISUAL_RESULT }], structuredContent: { htmlRender: VISUAL_REF } }
-      }
+      server: "orquester",
+      tool: "html_render",
+      arguments: { html: "<p>x</p>" },
+      result: { content: [{ type: "text", text: VISUAL_RESULT }], structuredContent: { htmlRender: VISUAL_REF } }
     },
     opencode: {
-      itemType: "dynamic_tool_call",
-      status: "completed",
-      data: { tool: "orquester_html_render", state: { status: "completed", output: VISUAL_RESULT } }
+      tool: "orquester-0123456789abcdef_html_render",
+      state: { status: "completed", output: VISUAL_RESULT },
+      result: VISUAL_RESULT
     },
     grok: {
-      itemType: "dynamic_tool_call",
-      status: "completed",
-      data: {
-        rawInput: { tool_name: "orquester__html_render", tool_input: {} },
-        content: [{ type: "content", content: { type: "text", text: VISUAL_RESULT } }]
-      }
+      vendorTool: "use_tool",
+      rawInput: { variant: "UseTool", tool_name: "orquester__html_render", tool_input: {} },
+      rawOutput: { type: "MCP", server_name: "orquester", tool_name: "html_render", output: { OkayOutput: VISUAL_RESULT } },
+      content: [{ type: "content", content: { type: "text", text: VISUAL_RESULT } }]
     }
   };
-  for (const [provider, payload] of Object.entries(rows)) {
+  const expected = { name: "html_render", references: { htmlRender: VISUAL_REF } };
+  for (const [provider, data] of Object.entries(rows)) {
+    const payload = { itemType: "mcp_tool_call", status: "completed", data: sessionToolMarkedData(data, REGISTERED) };
     const once = record(slimActivityPayload(payload));
-    assert.deepEqual(record(once.data).htmlRender, VISUAL_REF, provider);
-    // Slimmed again (a persisted `tool.updated` goes on the wire slimmed twice).
+    assert.deepEqual(record(once.data).sessionTool, expected, provider);
+    // Slimmed again (a persisted `tool.updated` goes on the wire slimmed twice):
+    // the result is a summary by now, the kept reference is not.
     const twice = record(slimActivityPayload(once));
-    assert.deepEqual(record(twice.data).htmlRender, VISUAL_REF, `${provider} twice`);
+    assert.deepEqual(record(twice.data).sessionTool, expected, `${provider} twice`);
   }
 });
 
-test("another server's html_render keeps no reference", () => {
-  const slim = record(
-    slimActivityPayload({
-      itemType: "mcp_tool_call",
-      status: "completed",
-      data: { toolName: "mcp__other__html_render", result: { content: VISUAL_RESULT } }
-    })
-  );
-  assert.equal(record(slim.data).htmlRender, undefined);
+test("another server's html_render, or an unmarked one, keeps no reference", () => {
+  for (const data of [
+    sessionToolMarkedData({ toolName: "mcp__other__html_render", result: { content: VISUAL_RESULT } }, REGISTERED),
+    { toolName: "mcp__orquester__html_render", result: { content: VISUAL_RESULT } }
+  ]) {
+    const slim = record(slimActivityPayload({ itemType: "mcp_tool_call", status: "completed", data }));
+    assert.equal(record(slim.data).sessionTool, undefined);
+    assert.equal(record(slim.data).htmlRender, undefined);
+  }
 });

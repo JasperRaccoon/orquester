@@ -805,7 +805,8 @@ test("a published page stays while any log line names it, past the fold's window
       causationEventId: null,
       metadata: {}
     }) as AppendableDomainEvent;
-  // Claude's shape: the reference is JSON text inside the tool_result block.
+  // Claude's shape, as the host's ingestion persists it (the session-tool
+  // marker stamped): the reference is JSON text inside the tool_result block.
   const result = JSON.stringify({ htmlRender: { attachmentId: page.id, title: "Chart", height: 300 }, message: "Shown." });
   await store.append({
     threadId: "t1",
@@ -816,6 +817,7 @@ test("a published page stays while any log line names it, past the fold's window
         status: "completed",
         data: {
           toolName: "mcp__orquester__html_render",
+          sessionTool: { name: "html_render" },
           result: { type: "tool_result", content: [{ type: "text", text: result }] }
         }
       })
