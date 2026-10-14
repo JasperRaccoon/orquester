@@ -4,6 +4,7 @@ import { ArrowUp, Clock, GitFork, GitMerge, GitPullRequest, Undo2, X } from "luc
 import { isScheduledTaskMessage, type AttachmentRef } from "@orquester/api";
 import {
   parseMergeBackMessage,
+  parseThreadMessage,
   parsePullRequestWatchMessage,
   type ParsedPullRequestWatchMessage
 } from "@orquester/api/agent-chat";
@@ -287,6 +288,9 @@ export const UserMessageRow = React.memo(function UserMessageRow({
   // A fork's result sent back to this thread (spec 2026-10-14 §6): its header
   // becomes a caption, and the bubble holds the result alone.
   const merged = React.useMemo(() => parseMergeBackMessage(text), [text]);
+  // Sent, opened or delegated by another thread through a session tool (design 2026-10-14 §5):
+  // the provenance header the agent read becomes a caption; the bubble holds the message alone.
+  const fromThread = React.useMemo(() => (merged ? null : parseThreadMessage(text)), [merged, text]);
 
   if (automated !== null) return <PullRequestWatchMessageRow row={row} message={automated} />;
 
@@ -299,10 +303,15 @@ export const UserMessageRow = React.memo(function UserMessageRow({
           {merged.relation === "delegate" ? "Result of delegated task" : "Merged back from fork"} “{merged.childTitle}”
         </span>
       ) : null}
+      {fromThread ? (
+        <span className="inline-flex items-center gap-1 pe-1 text-[11px] text-neutral-500" data-from-thread={fromThread.origin}>
+          {fromThread.origin === "delegated" ? "Delegated by" : fromThread.origin === "opened" ? "Opened by" : "Sent by"} “{fromThread.fromTitle}”
+        </span>
+      ) : null}
       <div className="relative max-w-[80%] rounded-2xl bg-neutral-800 p-3 text-neutral-100">
-        <AuthorHeading>{scheduled ? "Scheduled task" : "You"}</AuthorHeading>
+        <AuthorHeading>{scheduled ? "Scheduled task" : fromThread ? "Another chat" : "You"}</AuthorHeading>
         {attachments.length > 0 ? <AttachmentChips attachments={attachments} /> : null}
-        <ClampedBubbleText text={merged ? merged.body : text} showLabel="Show full message" />
+        <ClampedBubbleText text={merged ? merged.body : fromThread ? fromThread.body : text} showLabel="Show full message" />
       </div>
       <div
         className="ac-reveal ac-tabular flex w-full max-w-[80%] items-center justify-end gap-2 pe-1 text-xs"

@@ -15,6 +15,8 @@ import type { AgentChatTimelineRow, WorkLogEntry } from "../../lib/agent-chat/co
 import { useAppStore } from "../../store/app";
 import { TimelineRowContext, type TimelineRowContextValue } from "./timeline/context";
 import { ThreadLink, WorkRow } from "./timeline/rows/ActivityRows";
+import { UserMessageRow } from "./timeline/rows/MessageRows";
+import { buildThreadMessage } from "@orquester/api/agent-chat";
 
 const P = "/w/ws/app";
 const link = { threadId: "c7", title: "stale title from the result", relation: "delegate" as const };
@@ -60,4 +62,17 @@ test("opening a link activates the thread's tab in the project", () => {
   useAppStore.setState({ currentProject: { path: P, name: "app" } as ProjectSummary, sessions: [tab("me"), tab("c7")], activeTabByProject: { [P]: "me" } });
   useAppStore.getState().activateTab("c7");
   assert.equal(useAppStore.getState().activeTabByProject[P], "c7");
+});
+
+test("a message another thread sent shows who sent it as a caption, and the message alone — never as the user's", () => {
+  const text = buildThreadMessage({ origin: "delegated", fromTitle: "Main", text: "Audit the auth module." });
+  const row = { kind: "message", id: "r1", createdAt: "2026-10-14T00:00:00.000Z", message: { kind: "message", id: "m1", role: "user", text, turnId: "t1", streaming: false, createdAt: "t", updatedAt: "t" } };
+  const context = { readOnly: true, canRevert: false, revertBusy: false, startedTurnCount: 1, skills: [], onFork: null } as unknown as TimelineRowContextValue;
+  const html = renderToStaticMarkup(createElement(TimelineRowContext.Provider, { value: context }, createElement(UserMessageRow, { row: row as never })));
+  assert.match(html, /data-from-thread="delegated"/);
+  assert.match(html, /Delegated by “Main”/);
+  assert.match(html, /Audit the auth module\./);
+  assert.match(html, /Another chat/);
+  assert.doesNotMatch(html, /\[Delegated by thread/);
+  assert.doesNotMatch(html, /not from the user/);
 });

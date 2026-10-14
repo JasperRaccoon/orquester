@@ -248,6 +248,28 @@ describe("merge back", () => {
     await cleanup();
   });
 
+  it("a merge from a planning turn reaches the parent in plan mode, sent at once or queued and persisted", async () => {
+    const now = await setup();
+    await now.service.mergeBack("child", { text: "Plan B.", interactionMode: "plan" });
+    assert.equal(now.world.turns[0]!.body.interactionMode, "plan");
+    await assert.rejects(now.service.mergeBack("child", { text: "x", interactionMode: "edit" as never }), /interactionMode/);
+    await now.service.mergeBack("child", { text: "Plain." });
+    assert.equal(now.world.turns.at(-1)!.body.interactionMode, "default");
+    await now.cleanup();
+
+    const busy = await setup({ parentBusy: true });
+    await busy.service.mergeBack("child", { text: "Plan B.", interactionMode: "plan" });
+    await settled(busy.service);
+    const persisted = JSON.parse(await readFile(busy.outboxFile, "utf8")) as { entries: Array<{ interactionMode?: string }> };
+    assert.equal(persisted.entries[0]!.interactionMode, "plan");
+    busy.world.sessions.set("parent", summary("parent", { title: "Parent", chatSessionStatus: "ready" }));
+    busy.world.threads.set("parent", snapshot());
+    busy.world.touch("parent");
+    await settled(busy.service);
+    assert.equal(busy.world.turns[0]!.body.interactionMode, "plan");
+    await busy.cleanup();
+  });
+
   it("sends the user's own summary instead when given one", async () => {
     const { world, service, cleanup } = await setup();
     await service.mergeBack("child", { text: "  Go with B.  " });

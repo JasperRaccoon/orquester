@@ -13,6 +13,7 @@ import { readThread, sendCommand } from "../../mcp/reads.ts";
 import { toSafeToolError } from "../../mcp/result.ts";
 import { MAX_RUNNING_SESSIONS_PER_PROJECT } from "../../mcp/tools/sessions.ts";
 import type { SessionToolContext } from "../contract.ts";
+import { interactionModeFor, turnPolicyCallerFrom, withProvenance } from "../turn-policy.ts";
 import type { ProjectThreads } from "./shared.ts";
 
 export interface NewThread {
@@ -27,6 +28,8 @@ export interface NewThread {
 export interface CreatedThread {
   session: SessionSummary;
   model: string;
+  /** The first turn runs in plan mode: the caller was planning. */
+  planMode: boolean;
 }
 
 /** Refuse once the project already runs as many tabs as the external `/mcp` lets it (`create_session`). */
@@ -45,10 +48,15 @@ export function assertRoomInProject(project: ProjectThreads): void {
 export async function openThread(ctx: SessionToolContext, project: ProjectThreads, input: NewThread): Promise<CreatedThread> {
   assertRoomInProject(project);
   const caller = project.caller;
-  const head = (await readThread(ctx.api, caller.id)).head;
+  const own = await readThread(ctx.api, caller.id);
+  const head = own.head;
   const refId = input.agent ?? caller.refId;
   const agent = findAgent(await loadAgents(ctx.api), refId);
   if (!agent.enabled) throw new ToolError("INVALID_ARGUMENT", `${refId} is not available on this host (not installed or disabled).`);
+  // The turn policy: the new thread runs in the caller's permission mode (never broader), a
+  // planning caller's first turn plans too, and the message says which thread sent it.
+  const policy = turnPolicyCallerFrom(caller, own);
+  const interactionMode = await interactionModeFor(policy, { agent: refId, supportsPlanMode: () => agent.supports.planMode });
   const sameAgent = refId === caller.refId;
   // Same agent: the caller's own model and options unless a model is named (its options carry over
   // where the new model takes them). Another agent: its default model.
@@ -65,8 +73,8 @@ export async function openThread(ctx: SessionToolContext, project: ProjectThread
   const chat: CreateAgentChatSessionFields = {
     ...(accountId ? { accountId } : {}),
     modelSelection: { model: selection.model, options: selection.options },
-    // Never broader than the caller's: a supervised thread must not open an unsupervised one.
-    runtimeMode: head.runtimeMode,
+    // Turn policy (a): never broader than the caller's — the caller's own mode.
+    runtimeMode: policy.runtimeMode,
     ...(input.delegate ? { lineage: { parentThreadId: caller.id, relation: "delegate" as const } } : {})
   };
   const title = input.title?.trim() || (input.delegate ? delegateTitle(input.prompt) : agent.name);
@@ -81,7 +89,10 @@ export async function openThread(ctx: SessionToolContext, project: ProjectThread
   };
   const session = expectOk<SessionSummary>(await ctx.api.request("POST", "/api/sessions", { body }));
   try {
-    await sendCommand(ctx.api, session.id, "turn", { input: input.prompt, interactionMode: "default" });
+    await sendCommand(ctx.api, session.id, "turn", {
+      input: withProvenance(policy, input.delegate ? "delegated" : "opened", input.prompt),
+      interactionMode
+    });
   } catch (error) {
     const failure = toSafeToolError(error).structuredContent;
     throw new ToolError(
@@ -90,7 +101,7 @@ export async function openThread(ctx: SessionToolContext, project: ProjectThread
       { threadId: session.id, created: true }
     );
   }
-  return { session, model: selection.model };
+  return { session, model: selection.model, planMode: interactionMode === "plan" };
 }
 
 /** A delegated task's default tab title: "Task: " and the prompt's first line, cut short. */

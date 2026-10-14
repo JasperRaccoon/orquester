@@ -890,7 +890,10 @@ export const threadLineageRecordSchema = z.object({
     .object({ messageId: lineageIdSchema, turnId: lineageIdSchema })
     .optional()
     .catch(undefined),
-  createdAt: z.string().catch("")
+  createdAt: z.string().catch(""),
+  // Delegate links above and including this thread (`ThreadLineage.delegationDepth`); a bad
+  // value is dropped on its own, never the lineage.
+  delegationDepth: z.number().int().min(0).max(64).optional().catch(undefined)
 });
 export type ThreadLineageRecord = z.infer<typeof threadLineageRecordSchema>;
 
@@ -1092,7 +1095,9 @@ export const mergeOutboxEntrySchema = z
     /** Refused deliveries so far. */
     attempts: z.number().int().nonnegative().catch(0).default(0),
     /** The last refusal, in the parent's words. */
-    error: z.string().max(2_000).optional().catch(undefined)
+    error: z.string().max(2_000).optional().catch(undefined),
+    /** The parent's turn mode (`MergeBackRequest.interactionMode`); absent: default. */
+    interactionMode: z.enum(["default", "plan"]).optional().catch(undefined)
   })
   .passthrough();
 export type MergeOutboxEntry = z.infer<typeof mergeOutboxEntrySchema>;

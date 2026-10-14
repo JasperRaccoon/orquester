@@ -722,7 +722,12 @@ export class AgentChatService {
       }
       // The child's tab groups with its parent's: the parent's own spelling of the path.
       req = { ...req, projectPath: parent.projectPath };
-      lineage = { parentThreadId: parent.id, relation: "delegate", createdAt: new Date().toISOString() };
+      lineage = {
+        parentThreadId: parent.id,
+        relation: "delegate",
+        createdAt: new Date().toISOString(),
+        delegationDepth: this.delegationDepthOf(parent) + 1
+      };
     }
     if (fields.resume && !isUsableConversationId(fields.resume.conversationId)) {
       throw new ChatSessionError(
@@ -832,6 +837,26 @@ export class AgentChatService {
     }
     // The host has the thread: said, so a view waiting on it connects again.
     return this.chat.confirmCreated(id) ?? summary;
+  }
+
+  /**
+   * How many delegate links lie above and including `tab` (spec 2026-10-14 §5 "Delegation"):
+   * its lineage's recorded `delegationDepth`, else — a record from before the field — counted up
+   * through the open tabs its lineage names.
+   */
+  delegationDepthOf(tab: { lineage?: ThreadLineage }): number {
+    let depth = 0;
+    let current: { lineage?: ThreadLineage } | undefined = tab;
+    const seen = new Set<string>();
+    while (current?.lineage) {
+      if (current.lineage.delegationDepth !== undefined) return depth + current.lineage.delegationDepth;
+      if (current.lineage.relation === "delegate") depth += 1;
+      const parentId: string = current.lineage.parentThreadId;
+      if (seen.has(parentId)) break;
+      seen.add(parentId);
+      current = this.chat.get(parentId) ?? undefined;
+    }
+    return depth;
   }
 
   /** Two project paths name one project once resolved (realpath in the sandbox, else `resolve`). */
@@ -998,7 +1023,7 @@ export class AgentChatService {
       accountId: parentAccount,
       home,
       // Provisional until the host answers with the fork point it resolved.
-      lineage: { parentThreadId: parentId, relation: "fork", createdAt: new Date().toISOString() },
+      lineage: withDelegationDepth({ parentThreadId: parentId, relation: "fork", createdAt: new Date().toISOString() }, this.delegationDepthOf(parent)),
       // Recorded for every fork (an unkeyed one too): it tells a keyed repeat from a reuse, and
       // it is the cut a reconcile re-sends (`confirmFork`).
       forkFingerprint: fingerprint ?? forkFingerprint(req),
@@ -1072,8 +1097,10 @@ export class AgentChatService {
       if (error instanceof HostUnavailableError || error instanceof ForkOutcomeUnknown) throw this.hostUnavailable();
       throw new ChatSessionError(error instanceof Error ? error.message : String(error), "HOST_UNAVAILABLE");
     }
-    const forked = this.chat.setLineage(id, result.lineage) ?? summary;
-    return { session: forked, lineage: result.lineage, strategy: result.strategy };
+    // The host resolves the fork point; the depth is the daemon's, from the parent's record.
+    const lineage = withDelegationDepth(result.lineage, this.delegationDepthOf(parent));
+    const forked = this.chat.setLineage(id, lineage) ?? summary;
+    return { session: forked, lineage, strategy: result.strategy };
   }
 
   /** Fork tabs whose host fork this daemon is asking for right now ({@link forkSessionNow}). */
@@ -1179,7 +1206,7 @@ export class AgentChatService {
     // A fork in flight for this tab took over meanwhile: its answer is the one that counts.
     if (this.forkChildrenInFlight.has(id) || !this.chat.has(id)) return;
     if (response.status < 400 && response.value?.head) {
-      this.chat.setLineage(id, response.value.lineage ?? response.value.head.lineage ?? tab.lineage!);
+      this.chat.setLineage(id, withDelegationDepth(response.value.lineage ?? response.value.head.lineage ?? tab.lineage!, tab.lineage?.delegationDepth ?? 0));
       return;
     }
     // Only "no such thread" — the host's own 404, or an older host's route miss — says the child
@@ -1714,3 +1741,9 @@ function isUsableConversationId(value: unknown): boolean {
 }
 
 export { ChatSessionError };
+
+/** `lineage` with a delegation depth stamped, unless it is 0 (a lineage without one reads as 0). */
+function withDelegationDepth(lineage: ThreadLineage, depth: number): ThreadLineage {
+  const { delegationDepth: _dropped, ...rest } = lineage;
+  return depth > 0 ? { ...rest, delegationDepth: depth } : rest;
+}

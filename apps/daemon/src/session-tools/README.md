@@ -35,12 +35,40 @@ provider ──► agent host ──► daemon unix socket ──► handler
 | `registry.ts` | both | `createSessionToolRegistry` (validation, lookup), `composeSessionToolInstructions` |
 | `index.ts` | both | `SESSION_TOOLKITS`, the one list; `sessionToolRegistry()` |
 | `executor.ts`, `route.ts` | daemon | strict argument parse, run, error mapping; the socket-only route |
+| `turn-policy.ts` | both | the turn policy every tool that causes a turn in a thread follows (below) |
 | `testing.ts` | tests | a test-only toolkit (`echo`, `wait_for_cancel`, `pixel`, `fail`) — never in `index.ts` |
 
 **The agent host imports this tree statically** (it advertises the definitions), so a toolkit
 module must not import a daemon service: reach the daemon through `ctx.api` (the daemon's own REST
 API in-process, `../mcp/daemon-api.ts`). Whatever a toolkit imports, the host loads. No dynamic
 `import()` here either.
+
+## The turn policy (`turn-policy.ts`)
+
+Session tools are pre-approved in every permission and interaction mode (§1.3), so a tool that
+causes a turn in a thread — `thread_send`, `thread_create`, `delegate_task`, `thread_merge_back`,
+and next the scheduling toolkit — follows one rule, so a supervised or planning agent cannot get
+unsupervised or editing work done by asking another thread for it:
+
+- **(a) Never broader.** `assertTargetModeNotBroader(caller, {threadId, runtimeMode})` refuses a
+  target whose permission mode (approval-required < auto-accept-edits < auto < full-access) is
+  broader than the caller's (`PERMISSION_DENIED`). A thread a tool opens runs in
+  `caller.runtimeMode`.
+- **(b) Plan carries on.** `interactionModeFor(caller, {agent, supportsPlanMode})` is `"plan"` while
+  the caller's running turn is in plan mode (`Turn.interactionMode`), refusing an agent with no plan
+  mode; else `"default"`. Pass it as the caused turn's `interactionMode` (`MergeBackRequest` and the
+  merge outbox carry it for a merge).
+- **(c) Provenance.** `withProvenance(caller, origin, text)` (`origin`: `sent` / `opened` /
+  `delegated`) prefixes `[Sent by thread "<title>"]` and one sentence saying it is not from the
+  user (`buildThreadMessage`, `@orquester/api`); the GUI shows the header as a caption and the
+  message alone (`parseThreadMessage`). A slash command in such a text is plain text. Keep a tool's
+  input `TURN_PROVENANCE_OVERHEAD_CHARS` under the turn cap. A merge back carries its own header.
+- The caller: `readTurnPolicyCaller(ctx)`, or `turnPolicyCallerFrom(tab, snapshot)` when both are
+  read already → `{threadId, title, runtimeMode, planning}`.
+
+Not under the rule, by design: `thread_interrupt` / `task_cancel` (they stop work, never start it:
+at worst a nuisance, which project scope bounds) and `thread_fork` (the fork starts idle, in the
+caller's own settings).
 
 ## Toolkits
 
@@ -57,19 +85,30 @@ API in-process, `../mcp/daemon-api.ts`). Whatever a toolkit imports, the host lo
   (`TASK_NOT_FOUND` otherwise). A thread bound to no project sees only itself.
 - **Self.** `thread_wait`, `thread_send` and `thread_interrupt` refuse the caller (a wait on
   yourself never ends; an interrupt would cut the very call).
-- **Permission.** `thread_send` refuses a thread whose permission mode is broader than the caller's
-  (`PERMISSION_DENIED`); `thread_create` and `delegate_task` open threads in the caller's own mode.
-- **Caps.** Delegates nest at most `MAX_DELEGATION_DEPTH` (2) deep — counted over every delegate
-  link up the lineage, forks included — a thread has at most `MAX_OPEN_TASKS` (6) unfinished
-  tasks, and every new thread meets the project's open-chat limit (24, the external `/mcp`'s).
+- **Turn policy.** `thread_send`, `thread_create`, `delegate_task` and `thread_merge_back` follow
+  the turn policy above (never broader, plan carries on, provenance).
+- **Wait cycles.** A wait (`thread_wait`, `task_wait`, `thread_send` with `wait`) on a thread that
+  is itself waiting — directly or through others — on the caller is refused at once
+  (`WAIT_CYCLE`), from an in-daemon registry of active waits, instead of both sides running out
+  their timeouts.
+- **Caps.** Delegates nest at most `MAX_DELEGATION_DEPTH` (2) deep — the daemon stamps every
+  lineage with `delegationDepth` at creation (a fork carries its parent's), so neither forking nor
+  closing a thread in the middle resets it — a thread has at most `MAX_OPEN_TASKS` (6) unfinished
+  tasks (a task with no turn yet counts for `NEW_TASK_GRACE_MS`, 60 s), and every new thread meets
+  the project's open-chat limit (24, the external `/mcp`'s). `delegate_task` / `thread_create` have
+  no retry key: their descriptions tell the agent to check `thread_list` after a "restarting" error.
 - **Waits** (`thread_wait`, `task_wait`, `thread_send` with `wait`) ride the daemon bus through
   the external `/mcp`'s turn wait, end at once on `ctx.signal`, and are bounded to 600 s, inside
   the providers' MCP call timeouts once the secrets toolkit's raise them (Codex `tool_timeout_sec`,
-  OpenCode `timeout`: 3 900 s; Claude and Grok are longer by default — without that raise, Codex
-  and OpenCode cut a call at 60 s, which then cancels the wait). A timeout never stops the other
-  thread.
-- **Untrusted content.** A result carrying another thread's words (`thread_read`, a reply, a
-  task's `result`) starts with a `notice` saying it is data, not instructions. What it reads is the
+  OpenCode `timeout`: 3 900 s; Claude's is 1e8 ms; Grok's per-tool fallback `tool_timeout_sec` is
+  6 000 s — the ACP `McpServerHttp` entry has no timeout field, so the fallback applies (grok 1.0.46
+  bundled docs `07-mcp-servers.md`, the same text in the binary). Without the raise, Codex and
+  OpenCode cut a call at 60 s, which then cancels the wait. A timeout never stops the other thread.
+  Grok inlines at most 20 000 bytes of an MCP result (`GROK_MAX_MCP_OUTPUT_BYTES`), spilling the
+  rest to a file under its session folder: a large `thread_read` reaches a Grok agent that way.
+- **Untrusted content.** A result carrying another thread's words (`thread_read`, a reply, a Codex
+  `/goal` answer, a task's `result`, a session's `error`) starts with a `notice` saying it is data,
+  not instructions. What it reads is the
   thread's stored record, with whatever the host masked there.
 - **Timeline.** A result naming one thread carries `threadRef` (`@orquester/api` `thread-tools.ts`,
   a reference key): the row links to that thread's tab. A delegate's own tab shows "Delegated by"

@@ -13,11 +13,9 @@
 import { resolve as resolvePath } from "node:path";
 import type { SessionSummary } from "@orquester/api";
 import {
-  RUNTIME_MODES,
   SETTLED_TURN_STATES,
   startedTurns,
   threadToolReference,
-  type RuntimeMode,
   type ThreadSnapshotPayload,
   type ThreadToolReference,
   type ThreadToolRelation
@@ -119,25 +117,6 @@ export async function scopedThread(
 /** True when a project needs a project: a thread bound to none cannot open another. */
 export function requireProject(ctx: SessionToolContext): void {
   if (ctx.projectPath === "") throw new ToolError("INVALID_ARGUMENT", "This chat thread belongs to no project, so it cannot open other threads.");
-}
-
-/** A permission mode's breadth: approval-required < auto-accept-edits < auto < full-access. */
-function breadth(mode: RuntimeMode): number {
-  const index = RUNTIME_MODES.indexOf(mode);
-  return index === -1 ? RUNTIME_MODES.length : index;
-}
-
-/**
- * A message from this thread may not drive a thread that runs with a broader permission mode than
- * its own: a supervised agent must not get unsupervised work done by asking a full-access one.
- */
-export function assertNotBroader(callerMode: RuntimeMode, target: { id: string; mode: RuntimeMode }): void {
-  if (breadth(target.mode) > breadth(callerMode)) {
-    throw new ToolError(
-      "PERMISSION_DENIED",
-      `Thread "${target.id}" runs in ${target.mode} mode, broader than this thread's ${callerMode}; only the user can send it work.`
-    );
-  }
 }
 
 /** Busy by the tab's summary alone: a turn starting or running, or a goal the provider continues. */
@@ -242,6 +221,14 @@ export async function waitWhileWorking(
   threadId: string,
   timeoutMs: number
 ): Promise<{ report: ThreadReport; timedOut: boolean; cancelled: boolean }> {
+  return asWaiter(ctx.threadId, threadId, () => waitUnregistered(ctx, threadId, timeoutMs));
+}
+
+async function waitUnregistered(
+  ctx: SessionToolContext,
+  threadId: string,
+  timeoutMs: number
+): Promise<{ report: ThreadReport; timedOut: boolean; cancelled: boolean }> {
   const startedAt = ctx.now();
   const startedMono = performance.now();
   const remaining = () => timeoutMs - Math.max(ctx.now() - startedAt, performance.now() - startedMono);
@@ -293,6 +280,51 @@ const STALE_RECHECK_MS = 2_000;
 /** A link to the thread for the caller's timeline row (`threadRef`, `@orquester/api` `thread-tools.ts`). */
 export function referenceTo(s: { id: string; title: string }, relation: ThreadToolRelation): ThreadToolReference {
   return threadToolReference(s.id, s.title, relation);
+}
+
+/**
+ * Who waits on whom right now, in this daemon (`thread_wait`, `task_wait`, `thread_send` with
+ * `wait`): waiter → targets, counted. A wait that would close a cycle — the target is itself
+ * waiting, directly or through others, on the caller — is refused at once instead of both
+ * sides sitting out their timeouts.
+ */
+const activeWaits = new Map<string, Map<string, number>>();
+
+function waitsOn(from: string, to: string): boolean {
+  const seen = new Set<string>();
+  const stack = [from];
+  while (stack.length > 0) {
+    const current = stack.pop()!;
+    if (current === to) return true;
+    if (seen.has(current)) continue;
+    seen.add(current);
+    for (const next of activeWaits.get(current)?.keys() ?? []) stack.push(next);
+  }
+  return false;
+}
+
+/**
+ * Register `waiter` as waiting on `target` for the life of `run` — after refusing a wait that
+ * would close a cycle. The check and the registration happen in one synchronous step.
+ */
+export async function asWaiter<T>(waiter: string, target: string, run: () => Promise<T>): Promise<T> {
+  if (waitsOn(target, waiter)) {
+    throw new ToolError(
+      "WAIT_CYCLE",
+      `Thread "${target}" is itself waiting on this thread, so waiting on it would only run out the clock. Answer it (finish your turn), or read it with thread_read.`
+    );
+  }
+  const targets = activeWaits.get(waiter) ?? new Map<string, number>();
+  activeWaits.set(waiter, targets);
+  targets.set(target, (targets.get(target) ?? 0) + 1);
+  try {
+    return await run();
+  } finally {
+    const left = (targets.get(target) ?? 1) - 1;
+    if (left > 0) targets.set(target, left);
+    else targets.delete(target);
+    if (targets.size === 0) activeWaits.delete(waiter);
+  }
 }
 
 /** Seconds to milliseconds, for the tools' `timeoutSeconds`. */

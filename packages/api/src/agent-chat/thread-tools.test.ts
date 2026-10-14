@@ -8,7 +8,10 @@ import test from "node:test";
 
 import { sessionToolMarkedData, SESSION_TOOL_REFERENCE_KEYS } from "./session-tools.ts";
 import { slimActivityPayload } from "./slim.ts";
+import { parseThreadLineage } from "./lineage.ts";
 import {
+  buildThreadMessage,
+  parseThreadMessage,
   readThreadToolReference,
   THREAD_TOOL_REFERENCE_KEY,
   threadToolReference,
@@ -57,4 +60,23 @@ test("a built reference trims and caps its title", () => {
   const built = threadToolReference("c1", `  ${"t".repeat(300)}  `, "thread");
   assert.equal(built.title.length, 200);
   assert.ok(built.title.endsWith("…"));
+});
+
+test("a message another thread caused round-trips: who, how, and the text alone", () => {
+  for (const origin of ["sent", "opened", "delegated"] as const) {
+    const text = buildThreadMessage({ origin, fromTitle: 'A "quoted"\ntitle', text: "  do X\n\nthen Y  " });
+    assert.deepEqual(parseThreadMessage(text), { origin, fromTitle: 'A "quoted" title', body: "do X\n\nthen Y" });
+  }
+  assert.equal(parseThreadMessage("hello"), null);
+  assert.equal(parseThreadMessage('[Sent by thread "x"] trailing'), null);
+});
+
+test("a lineage's delegation depth is read tolerantly: a bad one is dropped on its own", () => {
+  const base = { parentThreadId: "p", relation: "delegate", createdAt: "t" };
+  assert.equal(parseThreadLineage({ ...base, delegationDepth: 2 })?.delegationDepth, 2);
+  for (const bad of [-1, 1.5, "2", 65]) {
+    const lineage = parseThreadLineage({ ...base, delegationDepth: bad });
+    assert.equal(lineage?.parentThreadId, "p");
+    assert.equal(lineage?.delegationDepth, undefined, String(bad));
+  }
 });

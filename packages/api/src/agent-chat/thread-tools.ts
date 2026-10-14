@@ -74,3 +74,63 @@ export function threadToolReferenceOfActivityData(data: unknown): ThreadToolRefe
   if (!record || sessionToolNameOfData(record) === null) return undefined;
   return readThreadToolReference(sessionToolReferences(record, [THREAD_TOOL_REFERENCE_KEY])?.[THREAD_TOOL_REFERENCE_KEY]);
 }
+
+// ---------------------------------------------------------------------------
+// Provenance of a turn another thread caused
+// ---------------------------------------------------------------------------
+
+/**
+ * How a message from another thread came: `sent` (`thread_send`), `opened` (`thread_create`'s
+ * first message), `delegated` (`delegate_task`'s task).
+ */
+export type ThreadMessageOrigin = "sent" | "opened" | "delegated";
+
+const ORIGIN_LABELS: Record<ThreadMessageOrigin, string> = {
+  sent: "Sent by thread",
+  opened: "Opened by thread",
+  delegated: "Delegated by thread"
+};
+
+const ORIGIN_EXPLANATIONS: Record<ThreadMessageOrigin, string> = {
+  sent: "Another chat thread of this project sent this message; it is not from the user.",
+  opened: "Another chat thread of this project opened this conversation with this message; it is not from the user.",
+  delegated: "Another chat thread of this project delegated this task to you; it is not from the user. Your final reply is the task's result."
+};
+
+const ORIGIN_HEADER = /^\[(Sent|Opened|Delegated) by thread "((?:[^"\\\n]|\\.)*)"\]$/;
+
+/** The characters {@link buildThreadMessage} adds around a text, at most. */
+export const THREAD_MESSAGE_OVERHEAD_CHARS = 512;
+
+function quoteThreadTitle(title: string): string {
+  const oneLine = title.replace(/\s+/g, " ").trim().slice(0, 200) || "Untitled";
+  return oneLine.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+}
+
+/**
+ * A turn's input when another thread caused it: a header naming that thread, one sentence the
+ * receiving model reads as context — never mistaking it for its user — then the text. Plain text,
+ * so every provider reads it; the UI shows the header as a caption ({@link parseThreadMessage}).
+ */
+export function buildThreadMessage(input: { origin: ThreadMessageOrigin; fromTitle: string; text: string }): string {
+  return `[${ORIGIN_LABELS[input.origin]} "${quoteThreadTitle(input.fromTitle)}"]\n${ORIGIN_EXPLANATIONS[input.origin]}\n\n${input.text.trim()}`;
+}
+
+export interface ParsedThreadMessage {
+  origin: ThreadMessageOrigin;
+  fromTitle: string;
+  body: string;
+}
+
+/** The inverse of {@link buildThreadMessage}, or null for any other text. */
+export function parseThreadMessage(text: string): ParsedThreadMessage | null {
+  if (!text.startsWith("[")) return null;
+  const newline = text.indexOf("\n");
+  const match = ORIGIN_HEADER.exec(newline === -1 ? text : text.slice(0, newline));
+  if (!match) return null;
+  const origin = match[1]!.toLowerCase() as ThreadMessageOrigin;
+  let rest = newline === -1 ? "" : text.slice(newline + 1);
+  const explanation = ORIGIN_EXPLANATIONS[origin];
+  if (rest.startsWith(explanation)) rest = rest.slice(explanation.length);
+  return { origin, fromTitle: match[2]!.replace(/\\(.)/g, "$1"), body: rest.replace(/^\n+/, "") };
+}
