@@ -423,7 +423,13 @@ export class PluginsService {
       const root = await realpath(workspacesDir).catch(() => resolve(workspacesDir));
       if (this.preloadRoot !== root && (active.length > 0 || (await isFile(this.preloadPath)))) {
         try {
-          await this.writePreload(this.preloadPath, { statePath: this.configFile, workspacesRoot: root });
+          // Both spellings of a symlinked root: a `tsc` path can go through either.
+          const configured = resolve(workspacesDir);
+          await this.writePreload(this.preloadPath, {
+            statePath: this.configFile,
+            workspacesRoot: root,
+            ...(configured !== root ? { configuredWorkspacesRoot: configured } : {})
+          });
           this.preloadRoot = root;
         } catch (error) {
           this.preloadRoot = null;
