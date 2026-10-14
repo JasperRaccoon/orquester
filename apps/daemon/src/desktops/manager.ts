@@ -28,6 +28,7 @@ import {
   desktopRecordSchema,
   desktopRuntimeDir
 } from "@orquester/config";
+import { sessionNodeOptions } from "../plugins/session-env.ts";
 import { sessionEnvBase, sessionPath } from "../tmux.ts";
 import type { DesktopAudioHub } from "./audio.ts";
 import {
@@ -408,6 +409,10 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
         renderThreads: rt.record.renderThreads,
         user: input.env
       });
+      // An app is a user command like a terminal's: the plugins' NODE_OPTIONS
+      // preload (plugins spec §3.3) goes after the app's own NODE_OPTIONS.
+      const nodeOptions = sessionNodeOptions(env.NODE_OPTIONS);
+      if (nodeOptions !== undefined) env.NODE_OPTIONS = nodeOptions;
       const envFile = appFile(layout, app.id, "env");
       await writeFile(envFile, appEnvFileContent(env, input.cwd, input.command), { mode: 0o600 });
       rt.record.apps.push(app);
