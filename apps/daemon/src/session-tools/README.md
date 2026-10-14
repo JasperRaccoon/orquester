@@ -32,6 +32,7 @@ provider ──► agent host ──► daemon unix socket ──► handler
 | `index.ts` | both | `SESSION_TOOLKITS`, the one list; `sessionToolRegistry()` |
 | `executor.ts`, `route.ts` | daemon | strict argument parse, run, error mapping; the socket-only route |
 | `testing.ts` | tests | a test-only toolkit (`echo`, `wait_for_cancel`, `pixel`, `fail`) — never in `index.ts` |
+| `secrets/` | both | the `secrets` toolkit: `request_secret` (spec §5 "Secrets", below) |
 
 **The agent host imports this tree statically** (it advertises the definitions), so a toolkit
 module must not import a daemon service: reach the daemon through `ctx.api` (the daemon's own REST
@@ -93,16 +94,42 @@ API in-process, `../mcp/daemon-api.ts`). Whatever a toolkit imports, the host lo
 - **Results are small.** `jsonResult` caps at 60 000 bytes. Put large things (pages, files) in
   attachments and return a reference.
 - **Secrets** never in a result, a log or `events.ndjson` unless the tool's whole point is handing
-  one to the requesting agent (and then say where it goes).
+  one to the requesting agent (and then say where it goes): list the result's secret keys in the
+  definition's `secretResultKeys`, and the host masks those values in everything of the thread
+  it persists (`agent-host/session-tools/secret-redaction.ts`).
+- **Long waits end themselves.** Codex and OpenCode are given `SESSION_TOOL_CALL_TIMEOUT_MS`
+  (65 min) per call for the `orquester` server (their defaults are 60 s); a tool that waits
+  (for the user, another thread) ends its own wait well inside it.
+
+## `request_secret` — where the value goes
+
+The agent asks (`name`, `prompt`, `purpose?`); the daemon's `SecretRequestRegistry`
+(`agent-chat/secret-requests.ts`, reached through `ctx.secretRequests`, the one port besides
+`ctx.api`) holds the request **in memory** and publishes `agentChat.secretRequest` (name, prompt,
+purpose — never a value) on the `sessions` bus channel. The user's card (the chat's banner dock)
+answers through `POST /api/sessions/:id/secret-requests/:requestId` (daemon-owned, never proxied,
+response = outcome only). The value goes straight to the waiting call — the only response that
+carries it — and the registry forgets it. The call ends `provided`, `declined`, `cancelled` (the
+provider cancelled, Stop, the session ended — `ctx.signal`) or `timed_out` (10 min).
+
+The result is `{secretRequest: {name, purpose?, outcome}, value?, note}`. On its way back the
+agent host remembers `value` for the thread (`secretResultKeys`) and masks it in every runtime
+event and raw frame of that thread; ingestion also strips `value` from any `secretRequest`
+result by shape (`@orquester/api` `stripSecretRequestValues`), which holds across a host restart.
+The persisted row keeps `secretRequest` as its reference (the card's record). T3 instead keeps
+the value in its secret store under a one-use `secretRef` that only its own tools accept;
+Orquester has no tool that consumes such a ref, so the value goes to the agent — and the
+provider's own transcript (in the thread's account home) and its model API keep the result as
+the agent saw it, outside Orquester's reach.
 
 ## Wiring per provider (§1.2–§1.4)
 
-| Provider | Transport | Credential | Instructions | Pre-approval |
-|---|---|---|---|---|
-| Claude | `createSdkMcpServer`, `mcpServers.orquester` (`type: "sdk"`) | none | system prompt `append` | `allowedTools`: each `mcp__orquester__<tool>` + `canUseTool` |
-| Codex | thread `config["mcp_servers.orquester"]` on `thread/start` and `thread/resume` | env `ORQUESTER_SESSION_TOOLS_TOKEN` via `bearer_token_env_var` | `turn/start` `additionalContext` (`application`) | `default_tools_approval_mode = "approve"` |
-| Grok | ACP `mcpServers` http entry on `session/new` / `session/load` | `Authorization` header in the frame (redacted from `raw.ndjson`) | `_meta.rules` | `allow_once` without a card |
-| OpenCode | `POST /mcp` per thread, server `orquester-<16 hex>` on the shared server | `Authorization` header in the registration (memory only) | per-turn `system` addendum | session ruleset: deny `orquester-*`, allow own |
+| Provider | Transport | Credential | Instructions | Pre-approval | Call timeout |
+|---|---|---|---|---|---|
+| Claude | `createSdkMcpServer`, `mcpServers.orquester` (`type: "sdk"`) | none | system prompt `append` | `allowedTools`: each `mcp__orquester__<tool>` + `canUseTool` | CLI default (`MCP_TOOL_TIMEOUT`, ~27 h in 2.1.285) |
+| Codex | thread `config["mcp_servers.orquester"]` on `thread/start` and `thread/resume` | env `ORQUESTER_SESSION_TOOLS_TOKEN` via `bearer_token_env_var` | `turn/start` `additionalContext` (`application`) | `default_tools_approval_mode = "approve"` | `tool_timeout_sec` = 3 900 |
+| Grok | ACP `mcpServers` http entry on `session/new` / `session/load` | `Authorization` header in the frame (redacted from `raw.ndjson`) | `_meta.rules` | `allow_once` without a card | CLI default (6 000 s) |
+| OpenCode | `POST /mcp` per thread, server `orquester-<16 hex>` on the shared server | `Authorization` header in the registration (memory only) | per-turn `system` addendum | session ruleset: deny `orquester-*`, allow own | registration `timeout` = 3 900 000 ms |
 
 Where each credential lives. Codex: in the `codex app-server` child's env
 (`ORQUESTER_SESSION_TOOLS_TOKEN`). Codex's default `shell_environment_policy` excludes variables

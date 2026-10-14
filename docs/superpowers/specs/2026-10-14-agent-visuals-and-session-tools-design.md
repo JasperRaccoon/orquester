@@ -231,7 +231,10 @@ All operate within the calling thread's **project**. Names (bare):
   types the value (or cancels). The value is never written to `events.ndjson`, logs, or any API
   response other than the tool's result to the requesting agent; the card's persisted record keeps
   name/purpose/outcome only. Port T3's design (`SecretRequestCard`, `request_secret`) and document
-  where the value goes.
+  where the value goes. *Implemented (Task 8):* unlike T3's one-use `secretRef`, the value is held
+  in daemon memory and handed to the waiting call's result only; the agent host masks it (by value
+  and by result shape) in everything of the thread it persists. The provider's own transcript keeps
+  the result. Details: `apps/daemon/src/session-tools/README.md` "`request_secret`".
 - PR watch: `watch_pull_request(url | number)`, `unwatch_pull_request`, `list_pull_request_watches`.
   Persisted watches poll the PR through Orquester's existing git-host providers (GitHub, Bitbucket);
   on a change in checks, reviews/comments, mergeability/conflicts, or state, the daemon sends the
