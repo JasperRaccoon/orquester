@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
-import { describe, it } from "node:test";
+import { afterEach, describe, it } from "node:test";
 import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import { ChatMarkdown } from "./ChatMarkdown.tsx";
 import { MermaidBlock } from "./MermaidBlock.tsx";
+import { setSharedMermaidRenderer } from "./mermaid-engine.ts";
 import type { MermaidRenderer, MermaidRenderResult } from "./mermaid-render.ts";
 
 const SVG = '<svg viewBox="0 0 10 10"><text>Hello diagram</text></svg>';
@@ -44,7 +45,11 @@ describe("MermaidBlock", () => {
     const renderer = fakeRenderer({ status: "rendered", svg: SVG });
     const html = block({ renderer });
     assert.ok(html.includes("Hello diagram"), html);
-    assert.ok(html.includes('aria-label="Expand diagram"'));
+    // One Expand control for the keyboard and assistive tech (the header's);
+    // the diagram itself is a mouse shortcut, hidden from both.
+    assert.equal((html.match(/aria-label="Expand diagram"/g) ?? []).length, 1, html);
+    assert.ok(html.includes('role="img" aria-label="Mermaid diagram"'), html);
+    assert.match(html, /<button[^>]*tabindex="-1"[^>]*aria-hidden="true"/);
     assert.ok(html.includes('aria-label="Show code"'));
     assert.ok(html.includes('aria-label="Copy code"'));
     assert.ok(!html.includes("Wrap lines"), "nothing to wrap in a diagram");
@@ -83,23 +88,51 @@ describe("ChatMarkdown wiring", () => {
   const render = (text: string, streaming = false): string =>
     renderToStaticMarkup(createElement(ChatMarkdown, { text, streaming }));
 
-  it("routes a mermaid fence to the diagram block, which streams as source", () => {
-    const html = render("Here:\n\n```mermaid\ngraph TD\nA-->B\n```\n", true);
-    assert.ok(html.includes('data-language="mermaid"'), html);
-    assert.ok(html.includes("graph"), html);
+  afterEach(() => setSharedMermaidRenderer(null));
+
+  const MERMAID = "Here:\n\n```mermaid\ngraph TD\nA-->B\n```\n";
+
+  it("hands a settled mermaid fence to the diagram block (shared renderer, source as written)", () => {
+    const renderer = fakeRenderer({ status: "rendered", svg: SVG });
+    setSharedMermaidRenderer(renderer);
+    const html = render(MERMAID);
+    // Only MermaidBlock produces a diagram, its controls and a renderer read.
+    assert.ok(html.includes("Hello diagram"), html);
+    assert.ok(html.includes('aria-label="Show code"'), html);
+    assert.equal(renderer.reads.length, 1);
+    assert.ok(renderer.reads[0]?.endsWith(":graph TD\nA-->B"), renderer.reads[0]);
   });
 
-  it("leaves other fences on the plain code block", () => {
+  it("keeps a mermaid fence as source while the message streams", () => {
+    const renderer = fakeRenderer({ status: "rendered", svg: SVG });
+    setSharedMermaidRenderer(renderer);
+    const html = render(MERMAID, true);
+    assert.ok(html.includes('data-language="mermaid"'), html);
+    assert.ok(!html.includes("Hello diagram"), html);
+    assert.deepEqual(renderer.reads, []);
+  });
+
+  it("recognises the fence language case-insensitively", () => {
+    const renderer = fakeRenderer({ status: "rendered", svg: SVG });
+    setSharedMermaidRenderer(renderer);
+    assert.ok(render("```Mermaid\ngraph TD\nA-->B\n```\n").includes("Hello diagram"));
+  });
+
+  it("leaves other fences on the plain code block and never asks the renderer", () => {
+    const renderer = fakeRenderer({ status: "rendered", svg: SVG });
+    setSharedMermaidRenderer(renderer);
     const html = render("```ts\nconst x = 1;\n```\n");
-    assert.ok(html.includes('data-language="ts"') || html.includes("const"), html);
-    assert.ok(!html.includes("Expand diagram"));
+    assert.ok(html.includes('data-language="ts"'), html);
+    assert.ok(html.includes("const"), html);
+    assert.ok(!html.includes("Expand diagram") && !html.includes("Show code"), html);
+    assert.deepEqual(renderer.reads, []);
   });
 
   it("renders math and leaves currency alone in a real message", () => {
-    const html = render("It costs $5 or $10, and $E=mc^2$ holds.\n\n$$\\sum_i x_i$$");
+    const html = render("It costs $5 or $10, and $E=mc^2$ holds.\n\n$$\\sum_i x_i$$\n\n$$\n\\sum_i x_i\n$$");
     assert.ok(html.includes("It costs $5 or $10, and "), html);
-    assert.equal((html.match(/class="katex"/g) ?? []).length, 2, html);
-    assert.ok(html.includes("katex-display"));
+    assert.equal((html.match(/class="katex"/g) ?? []).length, 3, html);
+    assert.equal((html.match(/katex-display/g) ?? []).length, 2);
   });
 
   it("still refuses raw HTML", () => {

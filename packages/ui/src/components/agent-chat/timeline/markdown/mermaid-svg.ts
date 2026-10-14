@@ -62,16 +62,23 @@ export interface SvgDomEnvironment {
  * A rendered diagram as a self-contained SVG document with a fixed size and an
  * opaque background, for the expanded viewer. Mermaid's inline SVG is
  * `width="100%"` with a `max-width` style, which collapses outside its host.
+ *
+ * `svg` is DOMPurify's output, which is **HTML** markup (U+00A0 comes out as
+ * `&nbsp;`, an entity XML does not define), so it is parsed as HTML and the
+ * element re-serialised as XML. Parsing it as XML would turn any non-breaking
+ * space in a label into a parser error and a broken image. Throws when there
+ * is no SVG to serialise.
  */
 export function standaloneSvg(svg: string, env: SvgDomEnvironment, background: string): string {
-  const element = new env.DOMParser().parseFromString(svg, "image/svg+xml").documentElement;
+  const element = new env.DOMParser().parseFromString(svg, "text/html").querySelector("svg");
+  if (!element) throw new Error("The diagram could not be prepared for viewing.");
   const viewBox = element.getAttribute("viewBox")?.trim().split(/\s+/).map(Number);
   if (viewBox?.length === 4 && viewBox.every(Number.isFinite)) {
     element.setAttribute("width", String(viewBox[2]));
     element.setAttribute("height", String(viewBox[3]));
   }
-  element.setAttribute("xmlns", "http://www.w3.org/2000/svg");
   element.setAttribute("style", `max-width:none;background-color:${background}`);
+  // The serialiser supplies the SVG namespace declaration itself.
   return new env.XMLSerializer().serializeToString(element);
 }
 

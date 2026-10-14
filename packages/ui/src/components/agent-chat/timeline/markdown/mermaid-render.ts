@@ -12,8 +12,9 @@
  *     together with different themes would draw each other's colours.
  *  2. **Results are cached by theme + source** in a small LRU, so scrolling a
  *     long thread or re-mounting a row never re-renders. A render that is
- *     still pending is never evicted: a suspended reader must get the same
- *     promise back when React retries.
+ *     still pending, or settled but not yet read, is never evicted: a
+ *     suspended reader must get the same promise (then its result) back when
+ *     React retries. See `evictSettled`.
  *  3. **The engine is configured defensively.** Diagram text is untrusted
  *     model output: `securityLevel: "strict"`, no HTML labels, and a `secure`
  *     list that stops a diagram's own `%%{init: …}%%` directive from undoing
@@ -100,6 +101,8 @@ export function createMermaidRenderer(deps: MermaidRendererDeps): MermaidRendere
   // Map insertion order is the LRU order: a hit is deleted and re-set.
   const cache = new Map<string, Promise<MermaidRenderResult>>();
   const settled = new WeakMap<Promise<MermaidRenderResult>, MermaidRenderResult>();
+  // Settled entries whose result a `read()` has already returned.
+  const claimed = new WeakSet<Promise<MermaidRenderResult>>();
   let queue: Promise<unknown> = Promise.resolve();
   let nextId = 0;
 
@@ -123,10 +126,31 @@ export function createMermaidRenderer(deps: MermaidRendererDeps): MermaidRendere
     }
   }
 
+  /**
+   * Trims the cache to `maxCached` **settled** entries, oldest first. Two
+   * rules keep every suspended reader able to finish:
+   *
+   *  - pending entries do not count toward the cap and are never evicted
+   *    (React must get the same promise back when it retries);
+   *  - a settled entry is only evictable once a `read()` has handed its result
+   *    to a reader. Evicting one that was never read would send its woken
+   *    reader back to render the diagram again, and with more simultaneous
+   *    readers than the cap each re-render evicts the next reader's result:
+   *    an endless render loop.
+   *
+   * It runs when a *new* render is admitted, never as a render settles, so the
+   * cache can exceed the cap while readers are catching up and shrinks on the
+   * next admission.
+   */
   function evictSettled(): void {
+    let settledCount = 0;
+    for (const promise of cache.values()) if (settled.has(promise)) settledCount += 1;
     for (const [key, promise] of cache) {
-      if (cache.size <= maxCached) return;
-      if (settled.has(promise)) cache.delete(key);
+      if (settledCount <= maxCached) return;
+      if (settled.has(promise) && claimed.has(promise)) {
+        cache.delete(key);
+        settledCount -= 1;
+      }
     }
   }
 
@@ -144,7 +168,6 @@ export function createMermaidRenderer(deps: MermaidRendererDeps): MermaidRendere
       .then(() => renderNow(source.trim(), theme))
       .then((result) => {
         settled.set(promise, result);
-        evictSettled();
         return result;
       });
     queue = promise;
@@ -158,7 +181,10 @@ export function createMermaidRenderer(deps: MermaidRendererDeps): MermaidRendere
     read(source, theme) {
       const promise = start(source, theme);
       const result = settled.get(promise);
-      if (result) return result;
+      if (result) {
+        claimed.add(promise);
+        return result;
+      }
       // Suspense protocol: React waits on the thrown promise, then reads again.
       throw promise;
     },

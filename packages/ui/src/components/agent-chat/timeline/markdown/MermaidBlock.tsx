@@ -77,10 +77,14 @@ function ViewToggle({ showingCode, onToggle }: { showingCode: boolean; onToggle:
 
 function DiagramBody({ svg, onExpand }: { svg: string; onExpand: () => void }): React.ReactElement {
   return (
-    <div className="ac-scroll-thin overflow-x-auto px-[0.9rem] pb-[0.8rem] pt-1">
+    // The header's "Expand diagram" is the one control assistive tech and the
+    // keyboard get; the diagram itself is a mouse shortcut for it, so it is
+    // out of the tab order and hidden from the accessibility tree.
+    <div role="img" aria-label="Mermaid diagram" className="ac-scroll-thin overflow-x-auto px-[0.9rem] pb-[0.8rem] pt-1">
       <button
         type="button"
-        aria-label="Expand diagram"
+        tabIndex={-1}
+        aria-hidden="true"
         onClick={onExpand}
         className="flex w-full cursor-zoom-in justify-center rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-neutral-500 [&_svg]:h-auto [&_svg]:max-w-full"
         dangerouslySetInnerHTML={{ __html: svg }}
@@ -90,12 +94,17 @@ function DiagramBody({ svg, onExpand }: { svg: string; onExpand: () => void }): 
 }
 
 function ExpandedDiagram({ svg, onClose }: { svg: string; onClose: () => void }): React.ReactElement {
-  const [url, setUrl] = React.useState<string | null>(null);
+  const [view, setView] = React.useState<{ url: string } | { error: string } | null>(null);
   // Created on open and revoked on close, so a closed viewer holds no blob.
   React.useEffect(() => {
-    const created = createDiagramBlobUrl(svg);
-    setUrl(created);
-    return () => URL.revokeObjectURL(created);
+    try {
+      const created = createDiagramBlobUrl(svg);
+      setView({ url: created });
+      return () => URL.revokeObjectURL(created);
+    } catch (error) {
+      setView({ error: error instanceof Error ? error.message : "The diagram could not be opened." });
+      return undefined;
+    }
   }, [svg]);
   return (
     <Modal open onClose={onClose} className="max-h-[90vh] max-w-6xl">
@@ -105,11 +114,13 @@ function ExpandedDiagram({ svg, onClose }: { svg: string; onClose: () => void })
           <ModalCloseButton onClose={onClose} />
         </div>
         <div className="ac-scroll-thin min-h-0 flex-1 overflow-auto p-3">
-          {url ? (
+          {view !== null && "error" in view ? (
+            <p className="m-0 text-sm text-danger-300">{view.error}</p>
+          ) : view !== null ? (
             // Small diagrams grow to a readable width; wide ones keep their
             // natural size and scroll.
             <img
-              src={url}
+              src={view.url}
               alt="Mermaid diagram"
               className="mx-auto block max-w-none"
               style={{ minWidth: "min(100%, 60rem)" }}

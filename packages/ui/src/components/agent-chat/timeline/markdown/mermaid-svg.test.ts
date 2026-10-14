@@ -68,11 +68,19 @@ describe("mermaid SVG sanitiser", () => {
   });
 });
 
+const env = { DOMParser: win.DOMParser, XMLSerializer: win.XMLSerializer };
+
+/** The expanded image is a standalone XML document: it must parse as one. */
+function parsesAsXml(markup: string): { ok: boolean; doc: Document } {
+  const doc = new win.DOMParser().parseFromString(markup, "image/svg+xml");
+  return { ok: doc.getElementsByTagName("parsererror").length === 0, doc };
+}
+
 describe("standalone SVG for the expanded viewer", () => {
   it("fixes the size from the viewBox and sets an opaque background", () => {
     const markup = standaloneSvg(
       '<svg xmlns="http://www.w3.org/2000/svg" width="100%" viewBox="0 0 320 180" style="max-width: 320px;"><rect/></svg>',
-      { DOMParser: win.DOMParser, XMLSerializer: win.XMLSerializer },
+      env,
       "rgb(10, 10, 10)"
     );
     assert.ok(markup.includes('width="320"'), markup);
@@ -80,5 +88,28 @@ describe("standalone SVG for the expanded viewer", () => {
     assert.ok(markup.includes("background-color:rgb(10, 10, 10)"), markup);
     assert.ok(markup.includes("max-width:none"), markup);
     assert.ok(markup.includes('xmlns="http://www.w3.org/2000/svg"'), markup);
+    assert.equal(parsesAsXml(markup).ok, true, markup);
+  });
+
+  it("survives a non-breaking space in a label (HTML output, XML document)", () => {
+    // DOMPurify serialises U+00A0 as `&nbsp;`, which an XML parser rejects.
+    const sanitized = sanitize(wrap('<text x="1" y="2">a\u00a0b</text>'));
+    assert.ok(sanitized.includes("&nbsp;"), "precondition: the sanitiser emits an HTML entity");
+    const markup = standaloneSvg(sanitized, env, "rgb(0, 0, 0)");
+    const { ok, doc } = parsesAsXml(markup);
+    assert.equal(ok, true, markup);
+    assert.equal(doc.getElementsByTagName("text")[0]?.textContent, "a\u00a0b");
+  });
+
+  it("keeps labels with other HTML-only output well-formed", () => {
+    const sanitized = sanitize(wrap('<style>.n{fill:#fff}</style><text>x &lt; y &amp; z</text><rect width="1" height="1"/>'));
+    const { ok, doc } = parsesAsXml(standaloneSvg(sanitized, env, "#000"));
+    assert.equal(ok, true);
+    assert.equal(doc.getElementsByTagName("text")[0]?.textContent, "x < y & z");
+  });
+
+  it("throws, so the viewer can show an error, when there is no SVG", () => {
+    assert.throws(() => standaloneSvg("<p>not a diagram</p>", env, "#000"), /could not be prepared/);
+    assert.throws(() => standaloneSvg("", env, "#000"), /could not be prepared/);
   });
 });

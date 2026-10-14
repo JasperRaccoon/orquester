@@ -18,6 +18,15 @@
  * "$5 and $10" fails the last rule at the second dollar and "costs $5, then
  * $x$" fails the middle one at the second, leaving `$x$` as the only math.
  * `$$…$$` (two or more dollars) is unambiguous and is never second-guessed.
+ *
+ * Known limit: the rules are about whitespace and digits, not meaning, so a
+ * dollar pair that is tight on both sides still reads as math. Shell or
+ * template text such as `${A}/${B}` or `cost is $a/$b` renders `{A}/` or
+ * `a/` as an equation (put it in backticks, or write `\$`). It is left alone
+ * because the obvious tightening (no letter after the closing dollar) would
+ * break the common "the $n$th term". A rejected candidate also does not
+ * rescan for a later closer in the same run.
+ *
  * The rules sit in a wrapper around `micromark-extension-math`'s own
  * construct, so everything else about its tokenising (escapes, line endings,
  * unterminated runs) is the library's. The wrapper runs the library's
@@ -182,13 +191,17 @@ export function remarkChatMath(this: MathProcessorLike): (tree: MdNode, file: { 
  * and the like, so a formula can neither navigate nor fetch; `strict: "ignore"`
  * keeps unknown LaTeX commands from logging or throwing; `throwOnError: false`
  * renders a bad formula's source in `errorColor` instead of failing the
- * message. `maxExpand` (KaTeX's default, stated) bounds macro blow-up.
+ * message. The formula is untrusted input, so its size is bounded too:
+ * `maxSize` clamps every user-specified length (`\rule{999em}{999em}`,
+ * `\kern`, `\hspace`) to 20em, and `maxExpand` caps macro expansion at 1000
+ * steps (KaTeX's default, stated so it is not silently loosened).
  */
 export const KATEX_OPTIONS = {
   trust: false,
   strict: "ignore",
   throwOnError: false,
   errorColor: "#f87171",
+  maxSize: 20,
   maxExpand: 1000
 } as const;
 

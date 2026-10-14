@@ -147,3 +147,33 @@ describe("one-line display math", () => {
     assert.ok(render("> $$a+b$$").includes("katex-display"));
   });
 });
+
+describe("untrusted size limits", () => {
+  const dimensions = (html: string): number[] =>
+    [...html.matchAll(/(?:width|height):([\d.]+)em/g)].map((match) => Number(match[1]));
+
+  it("clamps user-specified lengths (\\rule) to maxSize", () => {
+    assert.equal(KATEX_OPTIONS.maxSize, 20);
+    const html = render("$\\rule{999em}{999em}$");
+    const sizes = dimensions(html);
+    assert.ok(sizes.length > 0, html);
+    assert.ok(Math.max(...sizes) <= 20, `largest dimension ${Math.max(...sizes)}em in ${html}`);
+  });
+
+  it("bounds macro expansion (maxExpand)", () => {
+    assert.equal(KATEX_OPTIONS.maxExpand, 1000);
+    const html = render("$\\def\\a{\\a\\a}\\a$");
+    assert.ok(html.includes("katex-error"), "a runaway macro is an error span, not a hang");
+  });
+});
+
+describe("known limit: tight dollar pairs that are not math", () => {
+  it("reads ${A}/${B} and $a/$b as math (documented in math.ts)", () => {
+    assert.equal(isMath(render("path ${A}/${B}")), true);
+    assert.equal(isMath(render("cost is $a/$b")), true);
+  });
+
+  it("still reads 'the $n$th term' as math, which is why the rules stop at digits", () => {
+    assert.equal(isMath(render("the $n$th term")), true);
+  });
+});

@@ -6,7 +6,8 @@ import {
   mermaidConfig,
   mermaidRenderKey,
   type MermaidEngine,
-  type MermaidRendererDeps
+  type MermaidRendererDeps,
+  type MermaidRenderResult
 } from "./mermaid-render.ts";
 
 interface Deferred<T> {
@@ -146,43 +147,89 @@ describe("cache", () => {
     assert.equal(log.filter((entry) => entry.startsWith("render:")).length, 2);
   });
 
-  it("evicts the least recently used settled entry past the limit, never a pending one", async () => {
-    const { engine, pending } = controlledEngine();
-    const queue = renderer(engine, { maxCached: 2 });
-    const a = queue.start("A", "dark");
-    const b = queue.start("B", "dark");
-    queue.start("C", "dark");
-    // Nothing has settled, so nothing may be evicted yet.
-    assert.equal(queue.size, 3);
-    await tick();
-    pending[0]!.gate.resolve({ svg: "a" });
-    await a;
-    // A settled and the cache is over its limit: A (oldest settled) goes.
-    assert.equal(queue.size, 2);
-    assert.notEqual(queue.start("A", "dark"), a, "A was evicted, so it renders again");
-    // B and C are still pending and were never candidates.
-    assert.equal(queue.start("B", "dark"), b);
+  /** What `Suspense` does: read, wait on a thrown promise, read again. */
+  async function readLikeSuspense(
+    queue: ReturnType<typeof renderer>,
+    source: string,
+    theme: "light" | "dark" = "dark"
+  ): Promise<{ result: MermaidRenderResult; attempts: number }> {
+    for (let attempts = 1; attempts <= 20; attempts += 1) {
+      try {
+        return { result: queue.read(source, theme), attempts };
+      } catch (thrown) {
+        await thrown;
+      }
+    }
+    throw new Error(`"${source}" never resolved: the cache keeps discarding its result`);
+  }
+
+  const instantEngine = (log: string[] = []): MermaidEngine => ({
+    initialize() {},
+    render(_id, source) {
+      log.push(source);
+      return Promise.resolve({ svg: `<svg>${source}</svg>` });
+    }
   });
 
-  it("promotes a hit so the entry used most recently survives", async () => {
+  it("lets every reader finish when there are more simultaneous readers than the cap", async () => {
+    const log: string[] = [];
+    const queue = renderer(instantEngine(log), { maxCached: 2 });
+    const sources = ["A", "B", "C", "D", "E"];
+    const outcomes = await Promise.all(sources.map((source) => readLikeSuspense(queue, source)));
+    for (const [index, outcome] of outcomes.entries()) {
+      assert.deepEqual(outcome.result, { status: "rendered", svg: `clean(<svg>${sources[index]}</svg>)` });
+      assert.equal(outcome.attempts, 2, "one suspend, one read");
+    }
+    // Each diagram was rendered exactly once: nothing was thrown away unread.
+    assert.deepEqual(log.slice().sort(), sources);
+  });
+
+  it("keeps readers finishing when a new diagram is admitted while others are catching up", async () => {
+    const log: string[] = [];
+    const queue = renderer(instantEngine(log), { maxCached: 2 });
+    const first = ["A", "B", "C"].map((source) => readLikeSuspense(queue, source));
+    // Admitted while A, B and C are settled-but-unread or pending.
+    const late = readLikeSuspense(queue, "D");
+    const outcomes = await Promise.all([...first, late]);
+    assert.ok(outcomes.every((outcome) => outcome.result.status === "rendered"));
+    assert.deepEqual(log.slice().sort(), ["A", "B", "C", "D"]);
+  });
+
+  it("trims settled entries that were read once the next diagram is admitted", async () => {
+    const queue = renderer(instantEngine(), { maxCached: 2 });
+    for (const source of ["A", "B", "C"]) await readLikeSuspense(queue, source);
+    // Over the cap while no one was admitting; nothing was thrown away.
+    assert.equal(queue.size, 3);
+    await readLikeSuspense(queue, "D");
+    // D's admission trimmed the read, settled entries down to the cap.
+    assert.equal(queue.size, 3, "two settled (the newest) plus D");
+  });
+
+  it("never evicts a pending render", async () => {
     const { engine, pending } = controlledEngine();
-    const queue = renderer(engine, { maxCached: 2 });
+    const queue = renderer(engine, { maxCached: 1 });
     const first = queue.start("A", "dark");
-    await tick();
-    pending[0]!.gate.resolve({ svg: "a" });
-    await first;
     const second = queue.start("B", "dark");
-    await tick();
-    pending[1]!.gate.resolve({ svg: "b" });
-    await second;
-    assert.equal(queue.start("A", "dark"), first); // touch A
     const third = queue.start("C", "dark");
+    assert.equal(queue.size, 3);
+    assert.equal(queue.start("A", "dark"), first);
+    assert.equal(queue.start("B", "dark"), second);
+    assert.equal(queue.start("C", "dark"), third);
     await tick();
-    pending[2]!.gate.resolve({ svg: "c" });
-    await third;
-    assert.equal(queue.size, 2);
-    assert.equal(queue.start("A", "dark"), first, "A survived");
-    assert.notEqual(queue.start("B", "dark"), second, "B was the least recently used");
+    assert.equal(pending.length, 1);
+  });
+
+  it("promotes a hit so the entry read most recently survives the trim", async () => {
+    const queue = renderer(instantEngine(), { maxCached: 2 });
+    const a = queue.start("A", "dark");
+    const b = queue.start("B", "dark");
+    await readLikeSuspense(queue, "A");
+    await readLikeSuspense(queue, "B");
+    queue.read("A", "dark"); // touch A: B is now the oldest
+    await readLikeSuspense(queue, "C");
+    await readLikeSuspense(queue, "D"); // admission trims settled entries to two
+    assert.equal(queue.start("A", "dark"), a, "A (touched) survived");
+    assert.notEqual(queue.start("B", "dark"), b, "B was the least recently used");
   });
 
   it("invalidate makes the next read render again", async () => {

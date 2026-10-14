@@ -28,3 +28,8 @@ export function getMermaidRenderer(): MermaidRenderer {
   });
   return shared;
 }
+
+/** Test seam: swaps the shared renderer (pass `null` to restore the real one). */
+export function setSharedMermaidRenderer(renderer: MermaidRenderer | null): void {
+  shared = renderer;
+}
