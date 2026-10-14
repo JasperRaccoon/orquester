@@ -50,6 +50,7 @@ import {
   probeCodex,
   uninstalledCodexSnapshot
 } from "./probe.ts";
+import { issueSessionToolsGrant } from "../../session-tools/index.ts";
 import { CODEX_SESSION_TOOLS_TOKEN_ENV } from "./session-tools.ts";
 import { CodexSession } from "./session.ts";
 import type { RuntimeEventDraft } from "./normalise.ts";
@@ -305,13 +306,14 @@ export const createCodexAdapter: AdapterFactory = async (
     // launch, in the child's env only (`session-tools.ts`); this issue revokes
     // the thread's previous one, and the session revokes this one when its
     // child exits.
-    const grant = await context.sessionTools?.issue(input.threadId);
+    const bin = requireBin();
+    const grant = await issueSessionToolsGrant(context, input.threadId);
     const session = new CodexSession({
       context,
       threadId: input.threadId,
       cwd: input.cwd,
       ...(codexHome !== null ? { codexHome } : {}),
-      bin: requireBin(),
+      bin,
       env: context.buildEnv({
         threadId: input.threadId,
         home: codexHome !== null ? { ...input.home, path: codexHome } : input.home,

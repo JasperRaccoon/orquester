@@ -176,5 +176,29 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   };
 }
 
+/**
+ * An adapter's way to get its grant: the context's service issues one, and
+ * a failure (the endpoint could not bind, the host is stopping) costs the
+ * session its tools — logged — never its start. Undefined without session
+ * tools.
+ */
+export async function issueSessionToolsGrant(
+  context: { sessionTools?: SessionToolsHost; logger: { warn(message: string, detail?: unknown): void } },
+  threadId: string
+): Promise<SessionToolsGrant | undefined> {
+  if (context.sessionTools === undefined) {
+    return undefined;
+  }
+  try {
+    return await context.sessionTools.issue(threadId);
+  } catch (error) {
+    context.logger.warn("session tools: no credential for this session; it runs without them", {
+      threadId,
+      error: error instanceof Error ? error.message : String(error)
+    });
+    return undefined;
+  }
+}
+
 export { SessionToolCredentials } from "./credentials.ts";
 export { createDaemonForwarder } from "./forwarder.ts";

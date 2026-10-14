@@ -53,8 +53,9 @@ test("the name is read off each provider's activity data", () => {
   assert.equal(sessionToolNameOfData({ tool: "orquester-0123456789abcdef_echo", toolUseId: "c" }), "echo");
   // a slimmed row
   assert.equal(sessionToolNameOfData({ sessionTool: { name: "echo" } }), "echo");
-  // another server's call
+  // another server's call — even one whose tool happens to be spelled like ours
   assert.equal(sessionToolNameOfData({ server: "github", tool: "echo" }), null);
+  assert.equal(sessionToolNameOfData({ server: "github", tool: "orquester__echo" }), null);
   assert.equal(sessionToolNameOfData(null), null);
 });
 

@@ -82,10 +82,14 @@ export function sessionToolNameOfData(data: unknown): string | null {
   }
   const item = asRecord(record.item);
   for (const holder of item ? [record, item] : [record]) {
-    if (isSessionToolsServerName(holder.server) && typeof holder.tool === "string") {
-      if (SESSION_TOOL_NAME_PATTERN.test(holder.tool)) {
-        return holder.tool;
+    // Codex names the server apart: then only the server says whose tool it is.
+    if (typeof holder.server === "string") {
+      if (isSessionToolsServerName(holder.server) && typeof holder.tool === "string") {
+        if (SESSION_TOOL_NAME_PATTERN.test(holder.tool)) {
+          return holder.tool;
+        }
       }
+      continue;
     }
     for (const key of ["toolName", "vendorTool", "tool"] as const) {
       const parsed = parseSessionToolName(holder[key]);

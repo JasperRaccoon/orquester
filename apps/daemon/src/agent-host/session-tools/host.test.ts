@@ -20,7 +20,7 @@ import type { SessionToolCallRequest } from "../host-protocol.ts";
 import { DAEMON_UNAVAILABLE_MESSAGE, cancelledResult } from "../../session-tools/results.ts";
 import { testSessionToolRegistry } from "../../session-tools/testing.ts";
 import { createDaemonForwarder } from "./forwarder.ts";
-import { createSessionToolsHost, type SessionToolsGrant, type SessionToolsHost } from "./index.ts";
+import { createSessionToolsHost, issueSessionToolsGrant, type SessionToolsGrant, type SessionToolsHost } from "./index.ts";
 
 interface Recorded {
   call: SessionToolCallRequest;
@@ -222,4 +222,14 @@ test("stop revokes every credential and closes the endpoint", async (t) => {
   await service.stop();
   await assert.rejects(fetch(grant.url, initialize(grant.authorization)));
   await assert.rejects(service.issue("thread-a"), /stopping/);
+});
+
+test("an adapter whose grant cannot be issued starts without session tools, logged", async (t) => {
+  const { host: service } = host(t);
+  await service.stop();
+  const warnings: string[] = [];
+  const grant = await issueSessionToolsGrant({ sessionTools: service, logger: { warn: (message) => warnings.push(message) } }, "thread-a");
+  assert.equal(grant, undefined);
+  assert.equal(warnings.length, 1);
+  assert.equal(await issueSessionToolsGrant({ logger: { warn: () => {} } }, "thread-a"), undefined, "no service, no grant");
 });

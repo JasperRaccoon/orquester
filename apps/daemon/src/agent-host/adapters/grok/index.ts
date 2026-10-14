@@ -65,6 +65,7 @@ import {
   probeGrok,
   probeSkills
 } from "./probe.ts";
+import { issueSessionToolsGrant } from "../../session-tools/index.ts";
 import { GrokSession } from "./session.ts";
 import { recordLeftoverWork, sweepLeftoverWork } from "../../support/leftover-work.ts";
 
@@ -278,7 +279,7 @@ class GrokAdapter implements AgentAdapter {
     // Design 2026-10-14 §1.2: a fresh credential per `grok agent stdio`
     // launch, carried by the ACP `mcpServers` entry (`session-tools.ts`); this
     // issue revokes the thread's previous one, and `onClosed` revokes this.
-    const grant = await this.context.sessionTools?.issue(input.threadId);
+    const grant = await issueSessionToolsGrant(this.context, input.threadId);
 
     const session: GrokSession = new GrokSession({
       ...(grant !== undefined

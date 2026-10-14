@@ -76,6 +76,7 @@ import {
   type OpenCodeInventory
 } from "./snapshot.ts";
 import { openCodeRoutes, type ProviderListResponse } from "./routes.ts";
+import { issueSessionToolsGrant } from "../../session-tools/index.ts";
 import { openCodeSessionToolsServerName } from "./session-tools.ts";
 import { Mutex } from "./util.ts";
 
@@ -721,7 +722,7 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       // Design 2026-10-14 §1.2: the thread's own credential, registered on the
       // shared server under the thread's own name (`session-tools.ts`). This
       // issue revokes the thread's previous one; the session revokes this.
-      const grant = await this.ctx.sessionTools?.issue(input.threadId);
+      const grant = await issueSessionToolsGrant(this.ctx, input.threadId);
       sessionToolsGrant = grant;
       const session = await OpenCodeThreadSession.start(
         {
