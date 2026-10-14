@@ -44,7 +44,13 @@ import { markClaudeProjectTrusted } from "./home-prep.ts";
 import { parseSessionOwner } from "./owner.ts";
 import type { FastifyReply } from "fastify";
 import type { AgentChatRouteDeps } from "./proxy-routes.ts";
-import { AgentChatSummaryService, type SummaryBroadcaster, type SummaryPush, type ThreadUsageReading } from "./summary.ts";
+import {
+  AgentChatSummaryService,
+  type SummaryBroadcaster,
+  type SummaryPush,
+  type SummarySecretRequests,
+  type ThreadUsageReading
+} from "./summary.ts";
 import {
   AgentHostSupervisor,
   buildAgentHostEnv,
@@ -282,6 +288,19 @@ export class AgentChatService {
   /** Where each thread's live account-usage reading goes (`index.ts`: the usage service). */
   setUsageLimitsListener(listener: (reading: ThreadUsageReading) => void): void {
     this.usageLimitsListener = listener;
+  }
+
+  /**
+   * The daemon's `request_secret` cards (`index.ts`): a pending card raises the
+   * thread's attention as a pending question does (design 2026-10-14 §5).
+   */
+  setSecretRequests(source: SummarySecretRequests): void {
+    this.summary.setSecretRequests(source);
+  }
+
+  /** A thread's secret cards opened or closed: its attention follows at once, not at the next poll. */
+  secretRequestsChanged(threadId: string): void {
+    this.summary.secretRequestsChanged(threadId);
   }
 
   /** Persisting is the PTY manager's job; `index.ts` injects the callback. */

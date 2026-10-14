@@ -47,7 +47,7 @@ import { normalizeOpenCodeEvent } from "../adapters/opencode/normalize.ts";
 import { asRawEvent } from "../adapters/opencode/protocol.ts";
 import { createSessionState } from "../adapters/opencode/state.ts";
 import { createSessionToolsHost } from "./index.ts";
-import { SessionSecretRedactor } from "./secret-redaction.ts";
+import { isDistinctiveSecret, SessionSecretRedactor } from "./secret-redaction.ts";
 
 /** Matches no redaction pattern of `support/stderr.ts`: only this feature can mask it. */
 const VALUE = "correct-horse-battery-staple-4711";
@@ -396,15 +396,34 @@ describe("the redactor", () => {
     assert.equal(redactor.redactEvent(clean), clean);
   });
 
-  it("a value shorter than six characters is masked only inside MCP call rows", () => {
+  it("by-value masking outside MCP rows is for distinctive values only; MCP rows mask any value", () => {
+    assert.equal(isDistinctiveSecret("hunter22"), true, "8 characters, two classes");
+    assert.equal(isDistinctiveSecret("password"), false, "a plain word");
+    assert.equal(isDistinctiveSecret("abcdefghijklmnop"), true, "16 characters of any kind");
+    assert.equal(isDistinctiveSecret("Ab1!"), false, "too short");
     const redactor = new SessionSecretRedactor();
-    redactor.remember("a", ["1234"]);
-    const command = event("a", "command_execution", { output: "line 1234" });
-    assert.equal(redactor.redactEvent(command), command, "a short value would shred the transcript");
-    const mcp = event("a", "mcp_tool_call", { result: "pin 1234" });
-    assert.ok(!JSON.stringify(redactor.redactEvent(mcp)).includes("1234"));
-    // Raw frames are diagnostics: masked everywhere.
-    assert.ok(!JSON.stringify(redactor.redactFrame("a", { line: "1234" })).includes("1234"));
+    redactor.remember("a", ["password", "1234"]);
+    const command = event("a", "command_execution", { output: "enter password 1234" });
+    assert.equal(redactor.redactEvent(command), command, "plain words would shred the transcript");
+    const mcp = event("a", "mcp_tool_call", { result: "password 1234" });
+    const masked = JSON.stringify(redactor.redactEvent(mcp));
+    assert.ok(!masked.includes("password") && !masked.includes("1234"));
+    // Raw frames: only distinctive values by value; the shape strip still applies.
+    assert.deepEqual(redactor.redactFrame("a", { line: "password 1234" }), { line: "password 1234" });
+    const result = { secretRequest: { name: "PIN", outcome: "provided" }, value: "1234" };
+    assert.ok(!JSON.stringify(redactor.redactFrame("a", { text: JSON.stringify(result) })).includes("1234"));
+  });
+
+  it("fails closed: an MCP row or a raw frame too deep to check is not kept", () => {
+    const redactor = new SessionSecretRedactor();
+    redactor.remember("a", [VALUE]);
+    let deep: Record<string, unknown> = { leaf: VALUE };
+    for (let i = 0; i < 100; i += 1) deep = { inner: deep };
+    const mcp = redactor.redactEvent(event("a", "mcp_tool_call", deep));
+    assert.equal((mcp.payload as { data: unknown }).data, SECRET_REDACTED_TEXT);
+    assert.equal(redactor.redactFrame("a", deep), SECRET_REDACTED_TEXT);
+    // Without a value to look for, the shape strip still refuses to pass an unwalked tail through.
+    assert.ok(!JSON.stringify(new SessionSecretRedactor().redactFrame("b", deep)).includes(VALUE));
   });
 
   it("a raw frame loses a request_secret result's value by shape alone", () => {

@@ -208,8 +208,11 @@ test("request_secret over the socket: the answer reaches the call; the host's ca
   const answered = forward({ threadId: "thread-a", callId: "c1", name: "request_secret", arguments: args }, new AbortController().signal);
   const card = (await opened).request;
   assert.equal(card.sessionId, "thread-a", "the card is the CALLER's thread's");
-  secretRequests.answer("thread-a", card.requestId, { answer: "provide", value: "v-123456" });
+  const outcome = secretRequests.answer("thread-a", card.requestId, { answer: "provide", value: "v-123456" });
   assert.equal(((await answered).structuredContent as { value?: string }).value, "v-123456");
+  // `provided` only once the route's reply actually went out.
+  assert.equal(await outcome, "provided");
+  assert.equal(events.at(-1)?.outcome, "provided");
 
   // Cancelled on the host (the provider's cancel, a Stop, the session ending): the card closes.
   opened = nextEvent();

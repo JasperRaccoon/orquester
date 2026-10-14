@@ -8,12 +8,15 @@ import { BannerCard } from "../primitives";
 import { CARD_INPUT_CLASS, SECRET_INPUT_ATTRIBUTES } from "./secret-input";
 
 /**
- * The one promise the card makes about the value — exactly what Orquester
- * keeps: the agent that asked receives it (and so does its model provider's
- * own transcript), Orquester's thread never does.
+ * What happens to the value, said plainly: the agent that asked receives it,
+ * and with it the agent's model provider (its own transcript keeps what the
+ * agent read). Orquester never shows it and masks it — and later repeats of
+ * it — in this thread's records.
  */
 export const SECRET_REQUEST_PRIVACY_NOTE =
-  "Sent only to the agent that asked — never shown in the chat or saved in this thread.";
+  "Never shown in the chat. Orquester masks it, and any later repeat of it, in this thread's records.";
+export const SECRET_REQUEST_SHARING_NOTE =
+  "The value goes to the agent that asked, and so to its model provider.";
 
 /** What a failed answer says. Never the server's words or the value: a fixed sentence. */
 export function secretAnswerFailureText(status: number | null): string {
@@ -74,8 +77,8 @@ export function SecretRequestCard({ request, pendingCount, onAnswer }: SecretReq
     }
   };
 
-  const trimmed = value.trim();
-  const canSave = !submitting && trimmed.length > 0 && trimmed.length <= SECRET_VALUE_MAX_CHARS;
+  // Sent exactly as typed: only an all-whitespace value is held back.
+  const canSave = !submitting && value.trim().length > 0 && value.length <= SECRET_VALUE_MAX_CHARS;
 
   return (
     <BannerCard
@@ -91,6 +94,7 @@ export function SecretRequestCard({ request, pendingCount, onAnswer }: SecretReq
         {request.purpose ? (
           <p className="mt-1 break-words text-[11px] text-neutral-500">For: {request.purpose}</p>
         ) : null}
+        <p className="mt-1 break-words text-[11px] text-neutral-500">{SECRET_REQUEST_SHARING_NOTE}</p>
         <div className="mt-2 flex min-w-0 items-center gap-2">
           <input
             id={inputId}
@@ -105,7 +109,7 @@ export function SecretRequestCard({ request, pendingCount, onAnswer }: SecretReq
             onKeyDown={(event) => {
               if (event.key !== "Enter" || event.shiftKey) return;
               event.preventDefault();
-              if (canSave) void send({ answer: "provide", value: trimmed });
+              if (canSave) void send({ answer: "provide", value });
             }}
             className={cn(CARD_INPUT_CLASS, "min-w-0 flex-1")}
           />
@@ -137,7 +141,7 @@ export function SecretRequestCard({ request, pendingCount, onAnswer }: SecretReq
             <button
               type="button"
               disabled={!canSave}
-              onClick={() => void send({ answer: "provide", value: trimmed })}
+              onClick={() => void send({ answer: "provide", value })}
               className={cn(
                 "ac-press inline-flex h-7 items-center rounded-full bg-neutral-200 px-4",
                 "text-xs font-medium text-neutral-900 hover:bg-neutral-50",

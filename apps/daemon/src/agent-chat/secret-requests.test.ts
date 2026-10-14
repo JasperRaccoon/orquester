@@ -45,10 +45,10 @@ describe("secret requests — the wait", () => {
     const { request } = await opened;
     assert.deepEqual(requests.list("t1"), [request]);
     assert.deepEqual(requests.list("other"), []);
-    assert.equal(requests.answer("t1", request.requestId, { answer: "provide", value: VALUE }), true);
+    assert.equal(await requests.answer("t1", request.requestId, { answer: "provide", value: VALUE }), "provided");
     assert.deepEqual(await answer, { outcome: "provided", value: VALUE });
     // Answered once: a second answer finds nothing, and nothing is held.
-    assert.equal(requests.answer("t1", request.requestId, { answer: "provide", value: "again" }), false);
+    assert.equal(await requests.answer("t1", request.requestId, { answer: "provide", value: "again" }), null);
     assert.deepEqual(requests.list("t1"), []);
     assert.deepEqual(
       events.map((event) => [event.open, event.outcome]),
@@ -74,7 +74,7 @@ describe("secret requests — the wait", () => {
     const controller = new AbortController();
     const answer = requests.request("t1", INPUT, controller.signal);
     const { request } = await opened;
-    assert.equal(requests.answer("t2", request.requestId, { answer: "decline" }), false);
+    assert.equal(await requests.answer("t2", request.requestId, { answer: "decline" }), null);
     assert.equal(requests.list("t1").length, 1);
     controller.abort();
     assert.deepEqual(await answer, { outcome: "cancelled" });
@@ -85,7 +85,7 @@ describe("secret requests — the wait", () => {
     // Declined.
     let opened = next();
     const declined = requests.request("t1", INPUT, new AbortController().signal);
-    requests.answer("t1", (await opened).request.requestId, { answer: "decline" });
+    assert.equal(await requests.answer("t1", (await opened).request.requestId, { answer: "decline" }), "declined");
     assert.deepEqual(await declined, { outcome: "declined" });
     // Cancelled: the provider cancelled, the turn was stopped, the session ended.
     const controller = new AbortController();
@@ -109,6 +109,36 @@ describe("secret requests — the wait", () => {
     assert.deepEqual(await short.registry.request("t1", INPUT, new AbortController().signal), { outcome: "timed_out" });
     assert.deepEqual(short.registry.list("t1"), []);
     assert.deepEqual(short.events.map((event) => [event.open, event.outcome]), [[true, undefined], [false, "timed_out"]]);
+  });
+});
+
+describe("secret requests — delivery", () => {
+  it("a provided answer the call can no longer hand over is reported not delivered, and the card closes cancelled", async () => {
+    const { registry: requests, events, next } = registry();
+    let markDelivered!: (delivered: boolean) => void;
+    const delivered = new Promise<boolean>((resolve) => {
+      markDelivered = resolve;
+    });
+    const opened = next();
+    const call = requests.request("t1", INPUT, new AbortController().signal, delivered);
+    const { request } = await opened;
+    const answered = requests.answer("t1", request.requestId, { answer: "provide", value: VALUE });
+    // The handler got it, but its result never left the daemon (the route answered 499).
+    assert.deepEqual(await call, { outcome: "provided", value: VALUE });
+    markDelivered(false);
+    assert.equal(await answered, "not_delivered");
+    assert.deepEqual(events.at(-1)?.open, false);
+    assert.equal(events.at(-1)?.outcome, "cancelled");
+  });
+
+  it("and is reported provided once the route handed the result over", async () => {
+    const { registry: requests, events, next } = registry();
+    const opened = next();
+    const call = requests.request("t1", INPUT, new AbortController().signal, Promise.resolve(true));
+    const { request } = await opened;
+    assert.equal(await requests.answer("t1", request.requestId, { answer: "provide", value: VALUE }), "provided");
+    await call;
+    assert.equal(events.at(-1)?.outcome, "provided");
   });
 });
 
@@ -155,11 +185,11 @@ describe("secret requests — the routes", () => {
     const posted = await server.inject({
       method: "POST",
       url: agentChatRoutes.secretRequest("t1", request.requestId),
-      payload: { answer: "provide", value: `  ${VALUE}\n` }
+      payload: { answer: "provide", value: ` ${VALUE} ` }
     });
     assert.equal(posted.statusCode, 200);
     assert.deepEqual(posted.json(), { ok: true, outcome: "provided" });
-    assert.deepEqual(await answer, { outcome: "provided", value: VALUE }, "trimmed, delivered");
+    assert.deepEqual(await answer, { outcome: "provided", value: ` ${VALUE} ` }, "delivered exactly as typed");
 
     const again = await server.inject({
       method: "POST",
@@ -205,9 +235,27 @@ describe("secret requests — the routes", () => {
     assert.ok(!logs.join("").includes(VALUE), "no log line holds the value");
   });
 
+  it("an answer the agent stopped waiting for is 409 SECRET_NOT_DELIVERED, never echoed", async () => {
+    const { server, requests, next, logs } = await app();
+    const opened = next();
+    void requests.request("t1", INPUT, new AbortController().signal, Promise.resolve(false));
+    const { request } = await opened;
+    const response = await server.inject({
+      method: "POST",
+      url: agentChatRoutes.secretRequest("t1", request.requestId),
+      payload: { answer: "provide", value: VALUE }
+    });
+    assert.equal(response.statusCode, 409);
+    assert.equal(response.json().error.code, "SECRET_NOT_DELIVERED");
+    assert.ok(!response.body.includes(VALUE));
+    await server.close();
+    assert.ok(!logs.join("").includes(VALUE));
+  });
+
   it("parses exactly the two answers", () => {
     assert.deepEqual(parseSecretAnswer({ answer: "decline", value: "ignored" }), { answer: "decline" });
-    assert.deepEqual(parseSecretAnswer({ answer: "provide", value: " v " }), { answer: "provide", value: "v" });
+    assert.deepEqual(parseSecretAnswer({ answer: "provide", value: " v\t" }), { answer: "provide", value: " v\t" }, "never altered");
+    assert.equal(parseSecretAnswer({ answer: "provide", value: " \n\t " }), null, "all whitespace is refused");
     assert.equal(parseSecretAnswer(null), null);
     assert.equal(parseSecretAnswer("provide"), null);
   });

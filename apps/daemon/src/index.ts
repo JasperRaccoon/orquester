@@ -1091,8 +1091,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // `request_secret` cards (design 2026-10-14 §5): in memory only, values
   // handed straight to the waiting session-tool call.
   const secretRequests = new SecretRequestRegistry({
-    publish: (payload) => broadcaster.publish("sessions", SECRET_REQUEST_EVENT_TYPE, payload)
+    publish: (payload) => broadcaster.publish("sessions", SECRET_REQUEST_EVENT_TYPE, payload),
+    // A pending card is a pending question for the tab, the Attention Center and push.
+    onChange: (threadId) => agentChat.secretRequestsChanged(threadId)
   });
+  agentChat.setSecretRequests(secretRequests);
   const services: Services = {
     secretRequests,
     registry, sessions, grokDeviceLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,

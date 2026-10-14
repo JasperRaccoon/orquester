@@ -51,9 +51,10 @@ const WAIT = `${SECRET_REQUEST_TIMEOUT_MS / 60_000} minutes`;
 const NOTES = {
   provided:
     "The user provided the value. Use it only where it is needed (an env var for one command, the config file the user asked for); never print, echo, log or commit it, and never repeat it in chat.",
-  declined: "The user declined. Do not ask again unless the user asks you to; continue without it or explain what is blocked.",
-  cancelled: "The request ended before the user answered (the turn was stopped or the session ended).",
-  timed_out: `The user did not answer within ${WAIT}; the card is closed. Ask again only if it is still needed.`
+  declined: "The user declined; nothing was received. Do not ask again unless the user asks you to; continue without it or explain what is blocked.",
+  cancelled:
+    "The request ended before the user answered (the turn was stopped, the session ended, or this call was cancelled); nothing was received.",
+  timed_out: `No answer within ${WAIT}: the card was closed and nothing was received. Tell the user what this blocks; call request_secret again only if they still want to provide it.`
 } as const;
 
 export const secretsToolkit = defineSessionToolkit({
@@ -65,7 +66,7 @@ export const secretsToolkit = defineSessionToolkit({
       name: SECRET_REQUEST_TOOL_NAME,
       title: "Request a secret",
       description:
-        `Ask the user for a secret — an API key, token, password or signing secret — through a private card in this chat thread, and wait (up to ${WAIT}) for the answer. The user types the value into the card; it is never shown in the chat, and Orquester keeps it out of the thread's saved history. When the user provides it, the result's \`value\` is the secret: use it directly where it is needed (e.g. as an environment variable for one command, or written into the file the user asked for), and never print, echo, log or commit it, or repeat it in a message. \`secretRequest.outcome\` is \`provided\`, \`declined\` (the user chose not to; do not ask again unprompted), \`cancelled\` (the turn or session ended) or \`timed_out\` (no answer in ${WAIT}; ask again only if still needed). Never ask for a secret in chat and never invent one.`,
+        `Ask the user for a secret — an API key, token, password or signing secret — through a private card in this chat thread, and wait for the answer — up to ${WAIT}, Orquester's own deadline for this call (it raises your harness's MCP call timeout above it, so the call ends with an outcome, not a transport error). The user types the value into the card; it is never shown in the chat, and Orquester keeps it out of the thread's saved history. When the user provides it, the result's \`value\` is the secret: use it directly where it is needed (e.g. as an environment variable for one command, or written into the file the user asked for), and never print, echo, log or commit it, or repeat it in a message. \`secretRequest.outcome\` is \`provided\`, \`declined\` (the user chose not to; do not ask again unprompted), \`cancelled\` (the turn or session ended) or \`timed_out\` (no answer in ${WAIT}; ask again only if still needed). Never ask for a secret in chat and never invent one.`,
       input: {
         name: z
           .string()
@@ -97,7 +98,8 @@ export const secretsToolkit = defineSessionToolkit({
         const answer = await ctx.secretRequests.request(
           ctx.threadId,
           { name: args.name, prompt: args.prompt, ...(purpose !== undefined ? { purpose } : {}) },
-          ctx.signal
+          ctx.signal,
+          ctx.delivered
         );
         const record: SecretRequestRecord = {
           name: args.name,

@@ -261,21 +261,45 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   // Daemon-owned and memory-only; the value goes from the card to the answer
   // route and nowhere else on this side.
   const secretRequests = useSecretRequests(sessionId);
+  // An answer the agent had stopped waiting for was discarded: say so, since
+  // the card itself is gone.
+  const [secretNotice, setSecretNotice] = React.useState<string | null>(null);
   const answerSecret = React.useCallback(
     async (requestId: string, answer: SecretRequestAnswer): Promise<void> => {
+      const name = secretRequests.find((request) => request.requestId === requestId)?.name ?? "the secret";
       try {
         await api.answerSecretRequest(sessionId, requestId, answer);
       } catch (error) {
-        if (error instanceof ApiError && error.status === 404) {
-          // Already answered elsewhere, or ended with its turn: nothing to send.
+        if (error instanceof ApiError && (error.status === 404 || error.status === 409)) {
+          // 404: already answered elsewhere, or ended with its turn. 409: the
+          // agent stopped waiting before the answer reached it. Nothing was sent.
           markSecretRequestClosed(sessionId, requestId);
+          if (error.status === 409) {
+            setSecretNotice(`Your answer for ${name} was not sent: the agent had stopped waiting.`);
+          }
           return;
         }
         throw error instanceof ApiError ? error.status : null;
       }
+      setSecretNotice(null);
       markSecretRequestClosed(sessionId, requestId);
     },
-    [api, sessionId]
+    [api, secretRequests, sessionId]
+  );
+  const secretNotices = React.useMemo(
+    () =>
+      secretNotice === null
+        ? undefined
+        : [
+            {
+              id: `secret-notice:${sessionId}`,
+              variant: "warning" as const,
+              title: "Secret not sent",
+              description: secretNotice,
+              onDismiss: () => setSecretNotice(null)
+            }
+          ],
+    [secretNotice, sessionId]
   );
 
   // --- the composer overlay's published height -----------------------------
@@ -1075,6 +1099,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 active={active}
                 entries={paintOnly ? undefined : slice.entries}
                 planTitle={planFollowUp ? proposedPlanTitle(planFollowUp.planMarkdown) : null}
+                notices={paintOnly ? undefined : secretNotices}
                 secretRequests={paintOnly ? undefined : secretRequests}
                 onAnswerSecret={paintOnly ? undefined : answerSecret}
               />

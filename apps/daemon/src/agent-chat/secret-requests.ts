@@ -45,12 +45,27 @@ const ANSWER_BODY_LIMIT = 64 * 1024;
 
 interface Pending {
   readonly summary: SecretRequestSummary;
-  settle(result: SessionSecretRequestResult): void;
+  /** The waiting call's own word on whether its result reached the agent host. */
+  readonly delivered: Promise<boolean> | undefined;
+  /** End the wait. `announce: false` leaves the close event to the caller. */
+  settle(result: SessionSecretRequestResult, announce?: boolean): void;
 }
+
+/**
+ * How long a provided value's call may take to hand its result over before
+ * the answer is reported as not delivered. A safety bound only: the route
+ * resolves `delivered` as soon as its reply finishes or its connection drops.
+ */
+const DELIVERY_BOUND_MS = 30_000;
+
+/** What an answer did: delivered to the waiting call, declined, or arrived after it stopped waiting. */
+export type SecretAnswerOutcome = "provided" | "declined" | "not_delivered";
 
 export interface SecretRequestRegistryOptions {
   /** Publish one bus event (`sessions` channel, {@link SECRET_REQUEST_EVENT_TYPE}). */
   publish(payload: AgentChatSecretRequestEventPayload): void;
+  /** A thread's pending set changed (the summary's attention state follows it). */
+  onChange?(threadId: string): void;
   timeoutMs?: number;
   now?: () => Date;
   newId?: () => string;
@@ -63,11 +78,17 @@ export class SecretRequestRegistry implements SessionSecretRequests {
 
   constructor(private readonly opts: SecretRequestRegistryOptions) {}
 
-  /** Open a card in `threadId` and wait for its answer, `signal`, or the deadline. Never rejects. */
+  /**
+   * Open a card in `threadId` and wait for its answer, `signal`, or the
+   * deadline. Never rejects. `delivered` — the route's — resolves true once
+   * the call's result has been handed to the agent host, false when it was
+   * dropped: a provided answer is only reported `provided` once it is true.
+   */
   request(
     threadId: string,
     input: SessionSecretRequestInput,
-    signal: AbortSignal
+    signal: AbortSignal,
+    delivered?: Promise<boolean>
   ): Promise<SessionSecretRequestResult> {
     if (signal.aborted) {
       return Promise.resolve({ outcome: "cancelled" });
@@ -88,19 +109,21 @@ export class SecretRequestRegistry implements SessionSecretRequests {
       );
       timer.unref?.();
       const onAbort = () => settle({ outcome: "cancelled" });
-      const settle = (result: SessionSecretRequestResult): void => {
+      const settle = (result: SessionSecretRequestResult, announce = true): void => {
         if (settled) return;
         settled = true;
         clearTimeout(timer);
         signal.removeEventListener("abort", onAbort);
         this.pending.delete(summary.requestId);
-        this.publish(summary, false, result.outcome);
+        if (announce) this.publish(summary, false, result.outcome);
+        this.changed(threadId);
         // The value leaves here, once, into the call that asked.
         resolve(result);
       };
-      this.pending.set(summary.requestId, { summary, settle });
+      this.pending.set(summary.requestId, { summary, delivered, settle });
       signal.addEventListener("abort", onAbort, { once: true });
       this.publish(summary, true);
+      this.changed(threadId);
     });
   }
 
@@ -113,18 +136,34 @@ export class SecretRequestRegistry implements SessionSecretRequests {
   }
 
   /**
-   * Answer one of `threadId`'s requests. False when it has none by that id —
-   * already answered, ended, or another thread's.
+   * Answer one of `threadId`'s requests; null when it has none by that id —
+   * already answered, ended, or another thread's. A provided value goes to the
+   * waiting call at once; the outcome (on the bus and to the caller) is
+   * `provided` only once that call's result was handed over, else
+   * `not_delivered` (the card closes `cancelled`): the agent stopped waiting
+   * between the answer and its result leaving the daemon.
    */
-  answer(threadId: string, requestId: string, answer: SecretAnswer): boolean {
+  async answer(threadId: string, requestId: string, answer: SecretAnswer): Promise<SecretAnswerOutcome | null> {
     const entry = this.pending.get(requestId);
     if (entry === undefined || entry.summary.sessionId !== threadId) {
-      return false;
+      return null;
     }
-    entry.settle(
-      answer.answer === "provide" ? { outcome: "provided", value: answer.value } : { outcome: "declined" }
-    );
-    return true;
+    if (answer.answer === "decline") {
+      entry.settle({ outcome: "declined" });
+      return "declined";
+    }
+    entry.settle({ outcome: "provided", value: answer.value }, false);
+    const delivered = await boundedDelivery(entry.delivered);
+    this.publish(entry.summary, false, delivered ? "provided" : "cancelled");
+    return delivered ? "provided" : "not_delivered";
+  }
+
+  private changed(threadId: string): void {
+    try {
+      this.opts.onChange?.(threadId);
+    } catch {
+      // The attention state is a view; it must never strand the waiting call.
+    }
   }
 
   private publish(request: SecretRequestSummary, open: boolean, outcome?: SecretRequestOutcome): void {
@@ -141,6 +180,21 @@ export class SecretRequestRegistry implements SessionSecretRequests {
   }
 }
 
+/** The route's word, or true where no route is involved; false past {@link DELIVERY_BOUND_MS}. */
+async function boundedDelivery(delivered: Promise<boolean> | undefined): Promise<boolean> {
+  if (delivered === undefined) return true;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  const bound = new Promise<boolean>((resolve) => {
+    timer = setTimeout(() => resolve(false), DELIVERY_BOUND_MS);
+    timer.unref?.();
+  });
+  try {
+    return await Promise.race([delivered.catch(() => false), bound]);
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 function refusal(code: SecretRequestErrorCode, message: string): SecretRequestErrorEnvelope {
   return { error: { code, message } };
 }
@@ -148,20 +202,22 @@ function refusal(code: SecretRequestErrorCode, message: string): SecretRequestEr
 const STATUS: Record<SecretRequestErrorCode, number> = {
   THREAD_NOT_FOUND: 404,
   SECRET_REQUEST_NOT_FOUND: 404,
+  SECRET_NOT_DELIVERED: 409,
   INVALID_ARGUMENT: 400
 };
 
 /**
  * The answer body, or null. The value is checked for shape and size only and
- * trimmed (a pasted value's stray newline); no message ever quotes it.
+ * passed on exactly as typed — an all-whitespace value is refused, nothing is
+ * trimmed; no message ever quotes it.
  */
 export function parseSecretAnswer(body: unknown): SecretAnswer | null {
   if (body === null || typeof body !== "object" || Array.isArray(body)) return null;
   const record = body as Record<string, unknown>;
   if (record.answer === "decline") return { answer: "decline" };
   if (record.answer !== "provide" || typeof record.value !== "string") return null;
-  const value = record.value.trim();
-  if (value.length === 0 || value.length > SECRET_VALUE_MAX_CHARS) return null;
+  const value = record.value;
+  if (value.trim().length === 0 || value.length > SECRET_VALUE_MAX_CHARS) return null;
   return { answer: "provide", value };
 }
 
@@ -207,13 +263,17 @@ export function registerSecretRequestRoutes(app: FastifyInstance, deps: SecretRe
           `Send {"answer":"decline"} or {"answer":"provide","value":<1–${SECRET_VALUE_MAX_CHARS} characters>}.`
         );
       }
-      if (!deps.registry.answer(id, requestId, answer)) {
+      const outcome = await deps.registry.answer(id, requestId, answer);
+      if (outcome === null) {
         return send("SECRET_REQUEST_NOT_FOUND", "This request was already answered or has ended.");
       }
-      const response: SecretRequestAnswerResponse = {
-        ok: true,
-        outcome: answer.answer === "provide" ? "provided" : "declined"
-      };
+      if (outcome === "not_delivered") {
+        return send(
+          "SECRET_NOT_DELIVERED",
+          "The agent stopped waiting before your answer reached it; it was discarded, not sent."
+        );
+      }
+      const response: SecretRequestAnswerResponse = { ok: true, outcome };
       return response;
     }
   );

@@ -97,9 +97,12 @@ API in-process, `../mcp/daemon-api.ts`). Whatever a toolkit imports, the host lo
   one to the requesting agent (and then say where it goes): list the result's secret keys in the
   definition's `secretResultKeys`, and the host masks those values in everything of the thread
   it persists (`agent-host/session-tools/secret-redaction.ts`).
-- **Long waits end themselves.** Codex and OpenCode are given `SESSION_TOOL_CALL_TIMEOUT_MS`
-  (65 min) per call for the `orquester` server (their defaults are 60 s); a tool that waits
-  (for the user, another thread) ends its own wait well inside it.
+- **Long waits end themselves.** `SESSION_TOOL_CALL_TIMEOUT_MS` (65 min) is the transport ceiling
+  every provider gets for an `orquester` call (Codex and OpenCode are given it explicitly; their
+  defaults are 60 s). It is not a tool's wait: a tool that waits (for the user, another thread) has
+  its own, shorter deadline, documented in its description, and ends with an outcome the agent can
+  read before the ceiling is reached — `request_secret` waits 10 minutes
+  (`SECRET_REQUEST_TIMEOUT_MS`) and then answers `timed_out`.
 
 ## `request_secret` — where the value goes
 
@@ -112,10 +115,22 @@ response = outcome only). The value goes straight to the waiting call — the on
 carries it — and the registry forgets it. The call ends `provided`, `declined`, `cancelled` (the
 provider cancelled, Stop, the session ended — `ctx.signal`) or `timed_out` (10 min).
 
+The answer is reported `provided` only once the call's result left the daemon (the route's
+`ctx.delivered`); if the agent stopped waiting in between, the answer route says 409
+`SECRET_NOT_DELIVERED` and the card closes `cancelled`. The value is passed on exactly as typed
+(an all-whitespace answer is refused). A pending card is a pending question for the thread's
+attention: `hasPendingUserInput`, the needs-input rung and push, and an `agentChat.pending`
+"question" titled "Secret requested: <name>" (`AgentChatSummaryService.setSecretRequests`).
+
 The result is `{secretRequest: {name, purpose?, outcome}, value?, note}`. On its way back the
-agent host remembers `value` for the thread (`secretResultKeys`) and masks it in every runtime
-event and raw frame of that thread; ingestion also strips `value` from any `secretRequest`
-result by shape (`@orquester/api` `stripSecretRequestValues`), which holds across a host restart.
+agent host remembers `value` for the thread (`secretResultKeys`) and masks it (by value, exact
+occurrences) in every runtime event, raw frame and — after ingestion joins them — streamed
+message and tool-output text of that thread, holding back a tail that could begin the value
+across chunks and flushes. Policy: any value is masked inside MCP call rows; elsewhere only a
+distinctive one (≥ 8 characters of two or more classes, or ≥ 16 of any). Ingestion also strips
+`value` from any `secretRequest` result by shape (`@orquester/api` `stripSecretRequestValues`,
+once or twice serialised), which holds across a host restart. MCP rows and raw frames that cannot
+be walked are replaced, never kept (fail closed).
 The persisted row keeps `secretRequest` as its reference (the card's record). T3 instead keeps
 the value in its secret store under a one-use `secretRef` that only its own tools accept;
 Orquester has no tool that consumes such a ref, so the value goes to the agent — and the

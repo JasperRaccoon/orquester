@@ -81,8 +81,16 @@ export function registerSessionToolsRoute(app: FastifyInstance, deps: SessionToo
     // turn was interrupted, the session ended — cancels the handler. 'close'
     // also fires after a sent reply, where the abort is harmless.
     const controller = new AbortController();
+    // Whether the result reached the host: a tool that hands out something
+    // once (`request_secret`) reports its outcome truthfully by it.
+    let markDelivered!: (delivered: boolean) => void;
+    const delivered = new Promise<boolean>((resolve) => {
+      markDelivered = resolve;
+    });
+    reply.raw.on("finish", () => markDelivered(true));
     reply.raw.on("close", () => {
       if (!reply.raw.writableFinished) controller.abort();
+      markDelivered(reply.raw.writableFinished);
     });
     const result = await executeSessionToolCall(
       deps.registry(),
@@ -96,11 +104,13 @@ export function registerSessionToolsRoute(app: FastifyInstance, deps: SessionToo
         signal: controller.signal,
         api,
         ...(deps.secretRequests !== undefined ? { secretRequests: deps.secretRequests } : {}),
+        delivered,
         now: deps.now ?? Date.now
       }
     );
     if (controller.signal.aborted) {
       // Nobody is left to read it.
+      markDelivered(false);
       return reply.code(499).send();
     }
     return reply.code(200).send(result);

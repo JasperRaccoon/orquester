@@ -681,3 +681,43 @@ test("a thread's live usage reading is handed on once per new reading, with the 
   await h.read("t1", { usageLimits: { ...usageLimits, observedAt: "2026-09-28T14:00:10.000Z" } });
   assert.equal(readings.length, 2);
 });
+
+test("a pending request_secret card is a pending question: tab, attention, agentChat.pending, push (design 2026-10-14 §5)", async (t) => {
+  const h = await harness(t);
+  const cards = new Map<string, Array<{ requestId: string; name: string; prompt: string }>>();
+  h.service.setSecretRequests({ list: (threadId) => cards.get(threadId) ?? [] });
+  seedTab(h.chat, "t1");
+  const working = {
+    chatSessionStatus: "running" as const,
+    latestTurn: { turnId: "a", state: "running" as const, startedAt: "2026-09-21T00:00:00.000Z", completedAt: null }
+  };
+  await h.read("t1", working);
+  assert.equal(h.chat.get("t1")?.activity?.attention ?? null, null, "working, nothing asked yet");
+
+  // The card opens: no poll needed.
+  cards.set("t1", [{ requestId: "r1", name: "DEPLOY_KEY", prompt: "Paste the key sk-not-a-secret" }]);
+  h.service.secretRequestsChanged("t1");
+  assert.equal(h.chat.get("t1")?.hasPendingUserInput, true);
+  assert.equal(h.chat.get("t1")?.activity?.attention, "needs-input");
+  assert.deepEqual(h.pushes, [{ id: "t1", type: "needs-input" }]);
+  const opened = h.published.filter((p) => p.type === "agentChat.pending");
+  assert.deepEqual(opened.map((p) => p.payload), [
+    { id: "t1", requestId: "secret:r1", kind: "question", title: "Secret requested: DEPLOY_KEY", open: true }
+  ]);
+  assert.ok(!JSON.stringify(h.published).includes("sk-not-a-secret"), "the prompt is not broadcast by the summary");
+
+  // A poll while it is open keeps it (the host knows nothing of it).
+  await h.read("t1", working);
+  assert.equal(h.chat.get("t1")?.hasPendingUserInput, true);
+  assert.equal(h.pushes.length, 1, "no second push for the same card");
+
+  // Answered: the attention clears at once.
+  cards.delete("t1");
+  h.service.secretRequestsChanged("t1");
+  assert.ok(!h.chat.get("t1")?.hasPendingUserInput, "the host reports none");
+  assert.notEqual(h.chat.get("t1")?.activity?.attention, "needs-input");
+  assert.deepEqual(
+    h.published.filter((p) => p.type === "agentChat.pending").map((p) => (p.payload as { open: boolean }).open),
+    [true, false]
+  );
+});

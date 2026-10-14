@@ -48,6 +48,27 @@ test("the value is dropped from every provider's record of the result", () => {
   }
 });
 
+test("a doubly serialised copy — a stringified content array — loses the value too", () => {
+  const contentArray = JSON.stringify([{ type: "text", text }]);
+  assert.ok(contentArray.includes("\\\"secretRequest\\\""), "escaped: no quoted marker in it");
+  const shapes = [contentArray, { output: contentArray }, JSON.stringify(contentArray), JSON.stringify({ result: contentArray })];
+  for (const shape of shapes) {
+    assert.ok(holds(shape));
+    const stripped = stripSecretRequestValues(shape);
+    assert.ok(!holds(stripped), JSON.stringify(shape).slice(0, 60));
+    assert.ok(JSON.stringify(stripped).includes("API_KEY"), "parsed and rewritten, not dropped");
+  }
+});
+
+test("past the depth bound nothing is passed through unchecked", () => {
+  let deep: unknown = { secretRequest: record, value: VALUE };
+  for (let i = 0; i < 80; i += 1) deep = { inner: deep };
+  assert.ok(!holds(stripSecretRequestValues(deep)));
+  let deepText: unknown = text;
+  for (let i = 0; i < 80; i += 1) deepText = [deepText];
+  assert.ok(!holds(stripSecretRequestValues(deepText)));
+});
+
 test("a copy that does not parse as the result is dropped whole", () => {
   const cut = text.slice(0, text.length - 5);
   assert.equal(stripSecretRequestValues(cut), SECRET_REDACTED_TEXT);

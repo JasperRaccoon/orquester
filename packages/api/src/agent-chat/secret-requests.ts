@@ -82,6 +82,8 @@ export interface SecretRequestAnswerResponse {
 export type SecretRequestErrorCode =
   | "THREAD_NOT_FOUND"
   | "SECRET_REQUEST_NOT_FOUND"
+  /** 409: the agent stopped waiting between the answer and its result leaving the daemon; nothing was sent. */
+  | "SECRET_NOT_DELIVERED"
   | "INVALID_ARGUMENT";
 
 /** A refusal's body: the agent-chat error envelope's shape. Never quotes the request body. */
@@ -108,8 +110,6 @@ export interface SecretRequestRecord {
   outcome: SecretRequestOutcome;
 }
 
-const MARKER = `"${SECRET_REQUEST_RESULT_KEY}"`;
-
 function isRecord(value: unknown): value is Record<string, unknown> {
   return value !== null && typeof value === "object" && !Array.isArray(value);
 }
@@ -119,35 +119,48 @@ function isSecretRequestResult(value: Record<string, unknown>): boolean {
   return isRecord(value[SECRET_REQUEST_RESULT_KEY]);
 }
 
-function stripString(text: string): string {
-  if (!text.includes(MARKER)) {
+/**
+ * A string that may hold a result: it names both keys, in whatever escaping —
+ * quoted, `\"`-escaped (JSON inside a JSON string), or bare. Unquoted on
+ * purpose: a doubly serialised copy has no `"secretRequest"` in it.
+ */
+function mayHoldResult(text: string): boolean {
+  return text.includes(SECRET_REQUEST_RESULT_KEY) && text.includes(SECRET_REQUEST_VALUE_KEY);
+}
+
+function stripString(text: string, depth: number): string {
+  if (!mayHoldResult(text)) {
     return text;
   }
   const trimmed = text.trim();
-  if (trimmed.startsWith("{")) {
+  if (/^[[{"]/.test(trimmed)) {
     try {
       const parsed: unknown = JSON.parse(trimmed);
-      if (isRecord(parsed)) {
-        const stripped = stripSecretRequestValues(parsed);
-        return stripped === parsed ? text : JSON.stringify(stripped);
+      // A JSON string holding JSON (a content array serialised twice) is
+      // unwrapped and stripped in turn; an object or array is walked.
+      const stripped = strip(parsed, depth + 1);
+      if (stripped === parsed) {
+        return text;
       }
+      return JSON.stringify(stripped);
     } catch {
       // Not whole JSON: a cut or a wrapped copy. Fall through.
     }
   }
-  // The marker in text that does not parse as the result (a provider's cut, a
-  // prefix, a different serialisation): nothing in it can be trusted to be
-  // value-free, so none of it is kept.
+  // Both keys in text that does not parse (a provider's cut, a prefix, a
+  // different serialisation): nothing in it can be trusted to be value-free,
+  // so none of it is kept.
   return SECRET_REDACTED_TEXT;
 }
 
 /**
  * `value` with every `request_secret` result's value removed, wherever it
  * sits: an object carrying {@link SECRET_REQUEST_RESULT_KEY} loses
- * {@link SECRET_REQUEST_VALUE_KEY}, a string holding such a result as JSON is
- * rewritten without it, and a string that names the marker but does not parse
- * is replaced whole. Returns `value` itself (same reference) when nothing
- * changed, so a caller can skip a copy.
+ * {@link SECRET_REQUEST_VALUE_KEY}, a string holding such a result as JSON —
+ * once or twice serialised — is rewritten without it, and a string that names
+ * both keys but does not parse is replaced whole. Fails closed: past the
+ * depth bound a value is replaced, never passed through. Returns `value`
+ * itself (same reference) when nothing changed, so a caller can skip a copy.
  */
 export function stripSecretRequestValues<T>(value: T): T {
   return strip(value, 0) as T;
@@ -156,10 +169,14 @@ export function stripSecretRequestValues<T>(value: T): T {
 const MAX_DEPTH = 64;
 
 function strip(value: unknown, depth: number): unknown {
-  if (typeof value === "string") {
-    return stripString(value);
+  if (depth > MAX_DEPTH) {
+    // Unwalked means unchecked: replace it rather than keep it.
+    return typeof value === "string" || (value !== null && typeof value === "object") ? SECRET_REDACTED_TEXT : value;
   }
-  if (value === null || typeof value !== "object" || depth > MAX_DEPTH) {
+  if (typeof value === "string") {
+    return stripString(value, depth);
+  }
+  if (value === null || typeof value !== "object") {
     return value;
   }
   if (Array.isArray(value)) {

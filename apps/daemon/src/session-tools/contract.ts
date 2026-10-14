@@ -55,6 +55,12 @@ export interface SessionToolContext {
    * cross an API response. Absent where the daemon wires none (tests).
    */
   readonly secretRequests?: SessionSecretRequests;
+  /**
+   * Resolves true once this call's result has been handed to the agent host,
+   * false when it was dropped (the caller went away first). Absent outside
+   * the route (tests).
+   */
+  readonly delivered?: Promise<boolean>;
   now(): number;
 }
 
@@ -80,7 +86,8 @@ export interface SessionSecretRequests {
   request(
     threadId: string,
     input: SessionSecretRequestInput,
-    signal: AbortSignal
+    signal: AbortSignal,
+    delivered?: Promise<boolean>
   ): Promise<SessionSecretRequestResult>;
 }
 
