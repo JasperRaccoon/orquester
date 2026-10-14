@@ -25,6 +25,7 @@ import type {
 
 import { randomUUID } from "node:crypto";
 import { McpAppSessionUnavailableError, type AdapterContext, type AdapterMcpTool } from "../../adapter.ts";
+import { MCP_APP_CAPTURE_TIMEOUT_MS, type McpAppReference } from "@orquester/api/agent-chat";
 
 import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
 import {
@@ -84,11 +85,19 @@ import {
 } from "./permissions.ts";
 import { XAI_EMPTY_PLAN_MARKDOWN, XAI_EXIT_PLAN_FEEDBACK, type PlanPathHost } from "./plan.ts";
 import { GrokWakes, isParentSessionId, type CliPrompt } from "./prompt-queue.ts";
-import { captureMcpApp, McpAppFrameHold } from "../mcp-app-capture.ts";
+import {
+  MCP_APP_READ_CACHE_MS,
+  MCP_APP_TOOLS_CACHE_MS,
+  captureMcpApp,
+  McpAppFrameHold,
+  McpAppSessionCache,
+  type McpAppSnapshotStore
+} from "../mcp-app-capture.ts";
 import {
   GROK_MCP_CALL_METHOD,
   GROK_MCP_LIST_METHOD,
   GROK_MCP_READ_RESOURCE_METHOD,
+  GROK_MCP_TOOLS_CHANGED_METHOD,
   grokCallToolResult,
   grokMcpAppCallOf,
   grokMcpTools,
@@ -182,6 +191,10 @@ interface GrokSessionOptions {
    * `AdapterContext.storeAttachment`). Without it no app is captured.
    */
   storeAttachment?: AdapterContext["storeAttachment"];
+  /** Whether a remembered snapshot is still the thread's (`AdapterContext.resolveAttachmentPath`). */
+  resolveAttachmentPath?: AdapterContext["resolveAttachmentPath"];
+  /** The adapter's stored MCP App snapshots, so an unchanged document is stored once per thread. */
+  mcpAppSnapshots?: McpAppSnapshotStore;
 }
 
 /** An app's tool call or resource read: as long as a tool may take, never unbounded. */
@@ -419,6 +432,10 @@ export class GrokSession {
    * the wake gate as it would have.
    */
   private readonly frames: McpAppFrameHold;
+  /** An app's snapshot by server + URI, reused for a while without pausing the stream again. */
+  private readonly appReads = new McpAppSessionCache<McpAppReference>(MCP_APP_READ_CACHE_MS);
+  /** The CLI's MCP servers and their tools for an app's requests; dropped when the CLI says they changed. */
+  private readonly appTools = new McpAppSessionCache<unknown>(MCP_APP_TOOLS_CACHE_MS);
 
   constructor(options: GrokSessionOptions) {
     this.options = options;
@@ -494,7 +511,12 @@ export class GrokSession {
    * session stopped or before it opened: an app never starts one.
    */
   async mcpListTools(server: string): Promise<AdapterMcpTool[]> {
-    const response = await this.appRequest(GROK_MCP_LIST_METHOD, {}, AGENT_HOST_DEADLINES.probeMs);
+    // One listing answers every server; `tool-info` then `call-tool` read it back to back.
+    let response = this.appTools.get("list");
+    if (response === undefined) {
+      response = await this.appRequest(GROK_MCP_LIST_METHOD, {}, AGENT_HOST_DEADLINES.probeMs);
+      this.appTools.set("list", response);
+    }
     return grokMcpTools(response, server);
   }
 
@@ -798,8 +820,14 @@ export class GrokSession {
     ]) {
       peer.registerExtensionNotification(method, () => {
         this.recordHelpersWhileOpening();
+        this.appTools.clear();
       });
     }
+    // A server's tool catalog changed (CLI 1.0.46; `mcp-apps.ts`): never
+    // surfaced, but an app's next request lists the tools afresh.
+    peer.registerExtensionNotification(GROK_MCP_TOOLS_CHANGED_METHOD, () => {
+      this.appTools.clear();
+    });
 
     peer.registerExtensionNotification(XAI_EXTENSION_NOTIFICATIONS.models_update, (params) => {
       const state = params as { currentModelId?: unknown };
@@ -812,6 +840,7 @@ export class GrokSession {
 
     peer.registerExtensionNotification(XAI_EXTENSION_NOTIFICATIONS.mcp_server_status, held((params) => {
       this.recordHelpersWhileOpening();
+      this.appTools.clear();
       const record = params as { status?: unknown; name?: unknown; sessionId?: unknown };
       const status = record.status;
       // One warning per server and failure until it reports ready again: the
@@ -1278,11 +1307,25 @@ export class GrokSession {
       this.onSessionUpdate(notification);
       return;
     }
+    // Read moments ago in this session: the same snapshot, without a pause.
+    const readKey = `${app.server}\u0000${app.resourceUri}`;
+    const recent = this.appReads.get(readKey);
+    if (recent !== undefined) {
+      this.onSessionUpdate(notification, withGrokMcpApp(app.toolCallId, recent));
+      return;
+    }
     const sessionId = this.acpSessionId;
     this.frames.hold(
       (signal) =>
         captureMcpApp({
-          context: { storeAttachment: this.options.storeAttachment, logger: this.captureLogger() },
+          context: {
+            storeAttachment: this.options.storeAttachment,
+            logger: this.captureLogger(),
+            ...(this.options.resolveAttachmentPath === undefined
+              ? {}
+              : { resolveAttachmentPath: this.options.resolveAttachmentPath })
+          },
+          ...(this.options.mcpAppSnapshots === undefined ? {} : { snapshots: this.options.mcpAppSnapshots }),
           threadId: this.threadId,
           server: app.server,
           tool: app.tool,
@@ -1293,11 +1336,15 @@ export class GrokSession {
               await this.peer().request(
                 GROK_MCP_READ_RESOURCE_METHOD,
                 { sessionId, server: app.server, uri: app.resourceUri },
-                { timeoutMs: AGENT_HOST_DEADLINES.probeMs }
+                // The capture's own deadline bounds the read; the peer's is no shorter.
+                { timeoutMs: MCP_APP_CAPTURE_TIMEOUT_MS }
               )
             )
         }),
       (mcpApp) => {
+        if (mcpApp !== undefined) {
+          this.appReads.set(readKey, mcpApp);
+        }
         this.onSessionUpdate(notification, mcpApp === undefined ? undefined : withGrokMcpApp(app.toolCallId, mcpApp));
       }
     );

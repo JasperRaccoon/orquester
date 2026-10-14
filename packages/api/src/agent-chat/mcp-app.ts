@@ -102,15 +102,72 @@ function asName(value: unknown): string | undefined {
 // widen or break the generated policy, so it is dropped.
 const DOMAIN_PATTERN = /^(?:https?|wss?):\/\/(?:\*\.)?[a-z0-9-]+(?:\.[a-z0-9-]+)*(?::\d{1,5})?$/i;
 
+/** `scheme://[*.]host[:port]` split, lower-cased; undefined when not one. */
+function splitDomain(domain: string): { wildcard: boolean; host: string } | undefined {
+  const match = /^(?:https?|wss?):\/\/(\*\.)?([^:/]+)(?::\d{1,5})?$/i.exec(domain);
+  return match ? { wildcard: match[1] !== undefined, host: match[2]!.toLowerCase() } : undefined;
+}
+
+/**
+ * A host an app's frame must never be let reach: loopback, link-local and
+ * private addresses (the daemon, the user's own network) and `.localhost` /
+ * `.local` names.
+ */
+function isPrivateHost(host: string): boolean {
+  if (host === "localhost" || host.endsWith(".localhost") || host.endsWith(".local")) return true;
+  const ipv4 = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (ipv4 === null) return false;
+  const [a, b] = [Number(ipv4[1]), Number(ipv4[2])];
+  return (
+    a === 0 ||
+    a === 10 ||
+    a === 127 ||
+    (a === 100 && b >= 64 && b <= 127) ||
+    (a === 169 && b === 254) ||
+    (a === 172 && b >= 16 && b <= 31) ||
+    (a === 192 && b === 168)
+  );
+}
+
+function acceptableDomain(domain: unknown): domain is string {
+  if (typeof domain !== "string" || domain.length > MAX_DOMAIN_LENGTH || !DOMAIN_PATTERN.test(domain)) {
+    return false;
+  }
+  const parts = splitDomain(domain);
+  if (parts === undefined || isPrivateHost(parts.host)) return false;
+  // `*.com`: a wildcard over a whole top-level domain is no declaration at all.
+  return !(parts.wildcard && !parts.host.includes("."));
+}
+
 function readDomains(value: unknown): ReadonlyArray<string> | undefined {
   if (!Array.isArray(value)) return undefined;
-  const domains = value
-    .filter(
-      (domain): domain is string =>
-        typeof domain === "string" && domain.length <= MAX_DOMAIN_LENGTH && DOMAIN_PATTERN.test(domain)
-    )
-    .slice(0, MAX_DOMAINS);
+  const domains = value.filter(acceptableDomain).slice(0, MAX_DOMAINS);
   return domains.length === 0 ? undefined : domains;
+}
+
+/**
+ * Whether an app's declared domains would let it reach `origin` — the
+ * Orquester origin its client runs on, or the daemon it talks to. The
+ * snapshot's policy is fixed when it is captured, so a client refuses to
+ * frame such an app rather than hand it a path to its own API. Matched by
+ * host, whatever the scheme or port.
+ */
+export function mcpAppCspReachesOrigin(csp: McpAppCsp | undefined, origin: string): boolean {
+  let host: string;
+  try {
+    host = new URL(origin).hostname.toLowerCase();
+  } catch {
+    return false;
+  }
+  if (host === "") return false;
+  for (const key of CSP_KEYS) {
+    for (const domain of csp?.[key] ?? []) {
+      const parts = splitDomain(domain);
+      if (parts === undefined) continue;
+      if (parts.wildcard ? host.endsWith(`.${parts.host}`) : host === parts.host) return true;
+    }
+  }
+  return false;
 }
 
 const CSP_KEYS = ["connectDomains", "resourceDomains", "frameDomains", "baseUriDomains"] as const;
@@ -267,14 +324,33 @@ function insertAfterPolicy(html: string, script: string): string {
 }
 
 /**
+ * Not MCP Apps: the captured document's own word, from its `pagehide`, that it
+ * is going away. A frame that navigates keeps its window, so a page Orquester
+ * never served could otherwise talk to the bridge before the frame's second
+ * `load` is seen; this arrives first (messages from one window are delivered
+ * in order), and the client stops the bridge on it.
+ */
+export const MCP_APP_UNLOAD_METHOD = "orq/notifications/document-unloaded";
+
+/** Whether a frame's message is the captured document's unload notice. */
+export function isMcpAppUnloadNotice(data: unknown): boolean {
+  const record = asRecord(data);
+  return record?.jsonrpc === "2.0" && record.method === MCP_APP_UNLOAD_METHOD;
+}
+
+/**
  * Installed before vendor scripts so an app that omits its own theme handling
- * still gives its canvas and native controls the host's appearance. The frame
- * has an opaque origin, so messages are authenticated by the parent window.
+ * still gives its canvas and native controls the host's appearance — and so
+ * the document reports its own unload ({@link MCP_APP_UNLOAD_METHOD}) from the
+ * first `pagehide` listener. The frame has an opaque origin, so messages are
+ * authenticated by the parent window.
  */
 export function injectMcpAppThemeBootstrap(html: string): string {
   return insertAfterPolicy(
     html,
-    `<script>(function(){window.addEventListener("message",function(e){if(e.source!==window.parent)return;var m=e.data;if(!m||m.jsonrpc!=="2.0")return;var t=m.method==="ui/notifications/host-context-changed"?m.params&&m.params.theme:(m.id!==undefined&&m.method===undefined&&m.result&&m.result.hostContext?m.result.hostContext.theme:undefined);if(t==="light"||t==="dark")document.documentElement.style.colorScheme=t;});})();</script>`
+    `<script>(function(){window.addEventListener("pagehide",function(){try{window.parent.postMessage({jsonrpc:"2.0",method:${JSON.stringify(
+      MCP_APP_UNLOAD_METHOD
+    )}},"*");}catch(e){}},true);window.addEventListener("message",function(e){if(e.source!==window.parent)return;var m=e.data;if(!m||m.jsonrpc!=="2.0")return;var t=m.method==="ui/notifications/host-context-changed"?m.params&&m.params.theme:(m.id!==undefined&&m.method===undefined&&m.result&&m.result.hostContext?m.result.hostContext.theme:undefined);if(t==="light"||t==="dark")document.documentElement.style.colorScheme=t;});})();</script>`
   );
 }
 

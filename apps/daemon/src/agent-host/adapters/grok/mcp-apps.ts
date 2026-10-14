@@ -24,6 +24,8 @@
  *   annotations, so no tool reads as read-only here: every app call asks.
  * - Only the underscore spelling exists for these three (the bare `x.ai/…`
  *   answers -32601).
+ * - `_x.ai/mcp/tools_changed {sessionId, serverName, tools}` reports a
+ *   server's catalog (with each tool's `_meta`) when it connects or changes.
  */
 
 import {
@@ -40,6 +42,11 @@ import type { SessionNotification } from "./acp/_generated/schema.ts";
 export const GROK_MCP_LIST_METHOD = "_x.ai/mcp/list";
 export const GROK_MCP_CALL_METHOD = "_x.ai/mcp/call";
 export const GROK_MCP_READ_RESOURCE_METHOD = "_x.ai/mcp/read_resource";
+/**
+ * Agent → client: one server's tool catalog changed (`{sessionId, serverName,
+ * tools}`, seen in the 1.0.46 probe). Bare spelling: the peer registers both.
+ */
+export const GROK_MCP_TOOLS_CHANGED_METHOD = "x.ai/mcp/tools_changed";
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)

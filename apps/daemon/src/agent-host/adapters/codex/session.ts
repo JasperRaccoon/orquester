@@ -146,7 +146,14 @@ import {
   type CodexServerRequest
 } from "./protocol.ts";
 import { CodexUsageTracker } from "./usage.ts";
-import { captureMcpApp, McpAppFrameHold } from "../mcp-app-capture.ts";
+import {
+  MCP_APP_READ_CACHE_MS,
+  MCP_APP_TOOLS_CACHE_MS,
+  captureMcpApp,
+  McpAppFrameHold,
+  McpAppSessionCache,
+  type McpAppSnapshotStore
+} from "../mcp-app-capture.ts";
 
 /**
  * What a resumed session persists. Codex's cursor is just `{threadId}` (§4.1),
@@ -213,6 +220,8 @@ export interface CodexSessionOptions {
    * resends an entry only when it changed.
    */
   appContext?: () => ReadonlyMap<string, string>;
+  /** The adapter's stored MCP App snapshots, so an unchanged document is stored once per thread. */
+  mcpAppSnapshots?: McpAppSnapshotStore;
 }
 
 /** What every parked server→client request carries, approval or question. */
@@ -372,6 +381,10 @@ export class CodexSession {
    * its app — keeps its place ahead of the reply and the turn's end.
    */
   private readonly frames: McpAppFrameHold;
+  /** An app's snapshot by server + URI, reused for a while without pausing the stream again. */
+  private readonly appReads = new McpAppSessionCache<McpAppReference>(MCP_APP_READ_CACHE_MS);
+  /** A server's tools for an app's requests; dropped when an MCP server restarts. */
+  private readonly appTools = new McpAppSessionCache<AdapterMcpTool[]>(MCP_APP_TOOLS_CACHE_MS);
   private readonly createdAt: string;
   private updatedAt: string;
 
@@ -1591,10 +1604,18 @@ export class CodexSession {
       this.handleNotification(method, params);
       return;
     }
+    // Read moments ago in this session: the same snapshot, without a pause.
+    const readKey = `${app.server}\u0000${app.resourceUri}`;
+    const recent = this.appReads.get(readKey);
+    if (recent !== undefined) {
+      this.handleNotification(method, params, withMcpApp(app.itemId, recent));
+      return;
+    }
     this.frames.hold(
       (signal) =>
         captureMcpApp({
           context: this.options.context,
+          ...(this.options.mcpAppSnapshots !== undefined ? { snapshots: this.options.mcpAppSnapshots } : {}),
           threadId: this.threadId,
           server: app.server,
           tool: app.tool,
@@ -1604,12 +1625,17 @@ export class CodexSession {
             (
               await this.requirePeer().request("mcpServer/resource/read", {
                 threadId: app.providerThreadId,
+                // The originating call: Codex selects the resource's app by it.
+                originCallId: app.itemId,
                 server: app.server,
                 uri: app.resourceUri
               })
             ).contents
         }),
       (mcpApp) => {
+        if (mcpApp !== undefined) {
+          this.appReads.set(readKey, mcpApp);
+        }
         this.handleNotification(method, params, mcpApp === undefined ? undefined : withMcpApp(app.itemId, mcpApp));
       }
     );
@@ -1756,6 +1782,8 @@ export class CodexSession {
       // one live signal that MCP is configured, which gates the before-turn
       // reload (R3 finding 10).
       this.sawMcpServer = true;
+      // A server (re)started: its tools may have changed.
+      this.appTools.clear();
     }
 
     // A resume snapshot read after the thread opened may have asked for a
@@ -2673,6 +2701,17 @@ export class CodexSession {
 
   /** The server's tools as this session's MCP client lists them. */
   async mcpListTools(server: string): Promise<AdapterMcpTool[]> {
+    // `tool-info` then `call-tool` list the same server back to back.
+    const cached = this.appTools.get(server);
+    if (cached !== undefined) {
+      return cached;
+    }
+    const tools = await this.listServerTools(server);
+    this.appTools.set(server, tools);
+    return tools;
+  }
+
+  private async listServerTools(server: string): Promise<AdapterMcpTool[]> {
     const peer = this.requirePeer();
     const threadId = this.requireProviderThreadId();
     let cursor: string | null = null;
@@ -2784,42 +2823,6 @@ const HOST_CLIENT_VERSION = "1";
  * unwrapped (fixtures README obs. 13). Anything else — a deadline, a closed
  * transport — is already worded by us.
  */
-/** Pages of `mcpServerStatus/list` read looking for one server. */
-const MCP_STATUS_MAX_PAGES = 10;
-/** An app's tool call or resource read: as long as a tool may take, never unbounded. */
-const MCP_APP_REQUEST_MS = 120_000;
-
-/**
- * The completion of call `itemId` with its app: the reference goes on the
- * row's data (`data.mcpApp`, which `slim.ts` and the timeline read). Any
- * other draft passes through.
- */
-function withMcpApp(itemId: string, mcpApp: McpAppReference): (draft: RuntimeEventDraft) => RuntimeEventDraft {
-  return (draft) => {
-    if (draft.type !== "item.completed" || draft.itemId !== itemId || draft.payload.itemType !== "mcp_tool_call") {
-      return draft;
-    }
-    const data = (draft.payload.data ?? {}) as Record<string, unknown>;
-    return { ...draft, payload: { ...draft.payload, data: { ...data, mcpApp } } };
-  };
-}
-
-/** A Codex `Tool` as the host's MCP Apps checks read it. */
-function adapterMcpTool(tool: CodexProtocol.Tool): AdapterMcpTool {
-  const annotations =
-    tool.annotations !== null && typeof tool.annotations === "object" && !Array.isArray(tool.annotations)
-      ? (tool.annotations as Record<string, unknown>)
-      : {};
-  const title = typeof tool.title === "string" ? tool.title : typeof annotations.title === "string" ? annotations.title : undefined;
-  return {
-    name: tool.name,
-    ...(title !== undefined ? { title } : {}),
-    readOnly: annotations.readOnlyHint === true,
-    ...(tool._meta !== undefined ? { meta: tool._meta } : {}),
-    definition: tool
-  };
-}
-
 function goalCommandError(error: unknown): Error {
   if (error instanceof CodexRpcError) {
     return new Error(presentableError(error.providerMessage));
@@ -3088,4 +3091,40 @@ function normaliseAnswer(value: unknown): string[] {
     return value.filter((entry): entry is string => typeof entry === "string" && entry.length > 0);
   }
   return [];
+}
+
+/** Pages of `mcpServerStatus/list` read looking for one server. */
+const MCP_STATUS_MAX_PAGES = 10;
+/** An app's tool call or resource read: as long as a tool may take, never unbounded. */
+const MCP_APP_REQUEST_MS = 120_000;
+
+/**
+ * The completion of call `itemId` with its app: the reference goes on the
+ * row's data (`data.mcpApp`, which `slim.ts` and the timeline read). Any
+ * other draft passes through.
+ */
+function withMcpApp(itemId: string, mcpApp: McpAppReference): (draft: RuntimeEventDraft) => RuntimeEventDraft {
+  return (draft) => {
+    if (draft.type !== "item.completed" || draft.itemId !== itemId || draft.payload.itemType !== "mcp_tool_call") {
+      return draft;
+    }
+    const data = (draft.payload.data ?? {}) as Record<string, unknown>;
+    return { ...draft, payload: { ...draft.payload, data: { ...data, mcpApp } } };
+  };
+}
+
+/** A Codex `Tool` as the host's MCP Apps checks read it. */
+function adapterMcpTool(tool: CodexProtocol.Tool): AdapterMcpTool {
+  const annotations =
+    tool.annotations !== null && typeof tool.annotations === "object" && !Array.isArray(tool.annotations)
+      ? (tool.annotations as Record<string, unknown>)
+      : {};
+  const title = typeof tool.title === "string" ? tool.title : typeof annotations.title === "string" ? annotations.title : undefined;
+  return {
+    name: tool.name,
+    ...(title !== undefined ? { title } : {}),
+    readOnly: annotations.readOnlyHint === true,
+    ...(tool._meta !== undefined ? { meta: tool._meta } : {}),
+    definition: tool
+  };
 }

@@ -53,6 +53,7 @@ import {
   uninstalledCodexSnapshot
 } from "./probe.ts";
 import { CodexSession } from "./session.ts";
+import { McpAppSnapshotStore } from "../mcp-app-capture.ts";
 import type { RuntimeEventDraft } from "./normalise.ts";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
 
@@ -299,6 +300,8 @@ export const createCodexAdapter: AdapterFactory = async (
    * restart forgets it; an app sends it again when it next updates.
    */
   const appContexts = new Map<string, Map<string, string>>();
+  /** Every session's stored app snapshots, so an unchanged document is stored once per thread. */
+  const mcpAppSnapshots = new McpAppSnapshotStore();
 
   /** A thread's live session for an app's request; never started here. */
   const appSession = (threadId: string): CodexSession => {
@@ -367,6 +370,7 @@ export const createCodexAdapter: AdapterFactory = async (
       ...(input.carryGoal === true ? { carryGoal: true } : {}),
       emit: emitFor(input.threadId),
       appContext: () => appContexts.get(input.threadId) ?? new Map<string, string>(),
+      mcpAppSnapshots,
       onClosed: () => {
         if (sessions.get(input.threadId) === session) {
           sessions.delete(input.threadId);

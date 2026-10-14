@@ -68,6 +68,7 @@ import {
   probeSkills
 } from "./probe.ts";
 import { GrokSession } from "./session.ts";
+import { McpAppSnapshotStore } from "../mcp-app-capture.ts";
 import { recordLeftoverWork, sweepLeftoverWork } from "../../support/leftover-work.ts";
 
 /** The registry ids this adapter serves. */
@@ -158,6 +159,8 @@ class GrokAdapter implements AgentAdapter {
 
   private readonly context: AdapterContext;
   private readonly sessions = new Map<string, GrokSession>();
+  /** Every session's stored MCP App snapshots, so an unchanged document is stored once per thread. */
+  private readonly mcpAppSnapshots = new McpAppSnapshotStore();
   /**
    * The leftover sweeps of sessions that already left the map — a CLI that
    * exited on its own — so the host's teardown still waits for them
@@ -319,6 +322,8 @@ class GrokAdapter implements AgentAdapter {
         void sweep.then(() => this.sweeps.delete(sweep));
       },
       ...(this.context.storeAttachment === undefined ? {} : { storeAttachment: this.context.storeAttachment }),
+      resolveAttachmentPath: (threadId, attachmentId) => this.context.resolveAttachmentPath(threadId, attachmentId),
+      mcpAppSnapshots: this.mcpAppSnapshots,
       homeDirs: [input.home.path, env["HOME"]].filter(
         (value): value is string => typeof value === "string" && value.length > 1
       )

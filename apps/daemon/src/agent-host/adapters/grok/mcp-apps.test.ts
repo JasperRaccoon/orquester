@@ -177,6 +177,10 @@ async function rig(scenario: string) {
     stored,
     sent,
     dispose,
+    drain: async () => {
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      await new Promise<void>((resolve) => setImmediate(resolve));
+    },
     waitFor: (predicate: (event: RuntimeEvent) => boolean) =>
       new Promise<RuntimeEvent>((resolve) => {
         const existing = events.find(predicate);
@@ -215,11 +219,30 @@ describe("grok MCP Apps — the adapter", () => {
       resourceUri: "ui://apps/widget.html",
       prefersBorder: true
     });
+    // The mock's reply streams `echo:show it` after the call.
     const reply = r.events.findIndex(
-      (event) => event.type === "content.delta" || (event.type === "item.completed" && event.payload.itemType === "assistant_message")
+      (event) =>
+        event.type === "content.delta" &&
+        (event.payload as { delta?: string }).delta === "echo:show it"
     );
-    assert.ok(reply === -1 || index < reply, "before the reply");
+    assert.ok(reply !== -1, "the reply was emitted");
+    assert.ok(index < reply, "before the reply");
     assert.ok(index < r.events.findIndex((event) => event.type === "turn.completed"), "before the turn's end");
+    await r.dispose();
+  });
+
+  test("a read slower than the 4 s probe deadline is still captured, and a second turn reuses it without reading", async () => {
+    const r = await rig("mcp-app-slow");
+    await r.adapter.sendTurn({ threadId: "t1", input: "show it", attachments: [], interactionMode: "default" });
+    await r.waitFor((event) => event.type === "turn.completed");
+    const first = r.events.find(isAppCompletion) as Extract<RuntimeEvent, { type: "item.completed" }>;
+    assert.equal(((first.payload.data as Record<string, unknown>).mcpApp as { attachmentId?: string })?.attachmentId, STORED_ID);
+    const completions = () => r.events.filter(isAppCompletion).length;
+    await r.adapter.sendTurn({ threadId: "t1", input: "again", attachments: [], interactionMode: "default" });
+    await r.waitFor((event) => event.type === "turn.completed" && r.events.filter((e) => e.type === "turn.completed").length === 2);
+    assert.equal(r.sent.filter((frame) => frame.method === "_x.ai/mcp/read_resource").length, 1, "read once");
+    assert.equal(r.stored.length, 1, "stored once");
+    assert.ok(completions() >= 1);
     await r.dispose();
   });
 
@@ -258,6 +281,18 @@ describe("grok MCP Apps — the adapter", () => {
       arguments: { n: 2 }
     });
     assert.equal((await apps.readResource("t1", { server: "apps", uri: "ui://apps/x" })).contents.length, 1);
+    // One listing serves `tool-info` and `call-tool`; the CLI's `tools_changed`
+    // (sent by the mock on `_x.ai/mcp/call`) drops it, with no warning.
+    await apps.listTools("t1", "apps");
+    const lists = () => r.sent.filter((frame) => frame.method === "_x.ai/mcp/list").length;
+    assert.equal(lists(), 2, "listed again after the call's tools_changed");
+    await apps.listTools("t1", "apps");
+    assert.equal(lists(), 2, "then cached");
+    await r.drain();
+    assert.equal(
+      r.events.some((event) => event.type === "runtime.warning" && JSON.stringify(event.payload).includes("tools_changed")),
+      false
+    );
     await assert.rejects(apps.listTools("nope", "apps"), /session is not running/);
     await r.dispose();
   });

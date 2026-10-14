@@ -1347,9 +1347,10 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       const mcpApp = timelineEntry.entry.mcpApp!;
       rows.push({
         kind: "mcp-app",
-        // Keyed by the snapshot: the frame — and the app's session with its
-        // host — survives every re-derivation.
-        id: `mcp-app:${mcpApp.attachmentId}`,
+        // Keyed by the call's completed row: the frame — and the app's
+        // session with its host — survives every re-derivation. Not by the
+        // snapshot, which two calls of an unchanged app share.
+        id: `mcp-app:${timelineEntry.entry.id}`,
         createdAt: timelineEntry.createdAt,
         turnId: timelineEntry.entry.turnId,
         itemId: timelineEntry.entry.id,

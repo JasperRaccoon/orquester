@@ -53,12 +53,6 @@ export interface ClassifiedItem {
  * built from `item/agentMessage/delta`. Were `item.text` ever forwarded, it
  * would belong in `data.text`, which ingestion always reads as text.
  */
-/** Whether an `mcpToolCall`'s tool names an MCP App (`ui://`) resource, in either field Codex reports it. */
-function namesMcpAppResource(item: Extract<CodexThreadItem, { type: "mcpToolCall" }>): boolean {
-  const uri = item.appContext?.resourceUri ?? item.mcpAppResourceUri;
-  return typeof uri === "string" && uri.startsWith(MCP_APP_RESOURCE_SCHEME);
-}
-
 export function classifyItem(item: CodexThreadItem): ClassifiedItem {
   switch (item.type) {
     case "userMessage":
@@ -300,4 +294,10 @@ function fileChangeTitle(changes: readonly CodexProtocol.v2.FileUpdateChange[]):
 /** `interrupted` has no `RuntimeItemStatus` equivalent; it settles as `failed`. */
 function collabStatus(status: CodexProtocol.v2.CollabAgentToolCallStatus): RuntimeItemStatus {
   return status === "interrupted" ? "failed" : status;
+}
+
+/** Whether an `mcpToolCall`'s tool names an MCP App (`ui://`) resource, in either field Codex reports it. */
+function namesMcpAppResource(item: Extract<CodexThreadItem, { type: "mcpToolCall" }>): boolean {
+  const uri = item.appContext?.resourceUri ?? item.mcpAppResourceUri;
+  return typeof uri === "string" && uri.startsWith(MCP_APP_RESOURCE_SCHEME);
 }

@@ -363,7 +363,9 @@ function handle(frame) {
     if (scenario === "mcp-app-hang") {
       return; // Never answers: a server that hangs on the read.
     }
-    result(id, {
+    // `mcp-app-slow`: a server slower than the 4 s probe deadline, inside the
+    // capture's own 15 s one.
+    const answer = () => result(id, {
       result: {
         contents: [
           {
@@ -375,9 +377,13 @@ function handle(frame) {
         ]
       }
     });
+    if (scenario === "mcp-app-slow") setTimeout(answer, 4500);
+    else answer();
     return;
   }
   if (method === "_x.ai/mcp/call") {
+    // As if the call changed the server's catalog: the CLI's own report of it.
+    notify("_x.ai/mcp/tools_changed", { sessionId, serverName: params.server, tools: [] });
     result(id, { result: { content: [{ type: "text", text: `called ${params.tool}` }] } });
     return;
   }
@@ -1192,7 +1198,7 @@ async function runPrompt(id, params) {
     // …then the turn settles as the happy path does.
   }
 
-  if (scenario === "mcp-app" || scenario === "mcp-app-hang") {
+  if (scenario === "mcp-app" || scenario === "mcp-app-hang" || scenario === "mcp-app-slow") {
     // A `use_tool` call of an MCP Apps tool, as Grok 1.0.46 streams it (the
     // 2026-10-14 probe, spec appendix): its completed update carries the TOOL
     // definition's `_meta` (`ui.resourceUri`) and an MCP `rawOutput`.

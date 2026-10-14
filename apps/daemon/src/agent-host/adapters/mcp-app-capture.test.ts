@@ -8,7 +8,13 @@ import { describe, it } from "node:test";
 
 import { MCP_APP_MAX_HTML_BYTES } from "@orquester/api/agent-chat";
 
-import { captureMcpApp, McpAppFrameHold, type McpAppCaptureInput } from "./mcp-app-capture.ts";
+import {
+  captureMcpApp,
+  McpAppFrameHold,
+  McpAppSessionCache,
+  McpAppSnapshotStore,
+  type McpAppCaptureInput
+} from "./mcp-app-capture.ts";
 
 const STORED_ID = "thread_1-0f8fad5b-d9cb-469f-a165-70867728950e-html";
 
@@ -235,5 +241,81 @@ describe("captureMcpApp", () => {
     read.resolve([{ mimeType: "text/html;profile=mcp-app", text: "<h1>x</h1>" }]);
     assert.equal(await capture, undefined);
     assert.equal(stores, 0);
+  });
+});
+
+describe("McpAppSnapshotStore", () => {
+  it("stores an unchanged document once per thread + server + URI, while the thread still has it", async () => {
+    const snapshots = new McpAppSnapshotStore();
+    const stored: string[] = [];
+    const live = new Set<string>();
+    let next = 0;
+    const context = {
+      storeAttachment: async (threadId: string) => {
+        const id = `${threadId}-snap-${++next}`;
+        stored.push(id);
+        live.add(id);
+        return id;
+      },
+      resolveAttachmentPath: async (_threadId: string, id: string) => {
+        if (!live.has(id)) throw new Error("gone");
+        return `/a/${id}`;
+      }
+    };
+    const input = { threadId: "t1", server: "apps", resourceUri: "ui://apps/w", name: "w.html", html: "<h1>a</h1>" };
+    const first = await snapshots.store(context, input);
+    assert.equal(await snapshots.store(context, input), first, "same bytes: the same attachment");
+    assert.notEqual(await snapshots.store(context, { ...input, html: "<h1>b</h1>" }), first, "changed bytes: a new one");
+    assert.notEqual(await snapshots.store(context, { ...input, threadId: "t2" }), first, "another thread: its own");
+    assert.notEqual(await snapshots.store(context, { ...input, server: "other" }), first, "another server: its own");
+    live.delete(first);
+    const again = await snapshots.store(context, input);
+    assert.notEqual(again, first, "a swept snapshot is stored afresh");
+    assert.equal(await snapshots.store(context, input), again);
+    assert.equal(stored.length, 5);
+  });
+
+  it("capture goes through it when given one", async () => {
+    const snapshots = new McpAppSnapshotStore();
+    let stores = 0;
+    const base: McpAppCaptureInput = {
+      context: {
+        storeAttachment: async () => {
+          stores += 1;
+          return STORED_ID;
+        },
+        resolveAttachmentPath: async () => "/a",
+        logger: { debug() {}, info() {}, warn() {}, error() {} }
+      },
+      snapshots,
+      threadId: "t1",
+      server: "apps",
+      tool: "w",
+      resourceUri: "ui://apps/w",
+      read: async () => [{ mimeType: "text/html;profile=mcp-app", text: "<h1>x</h1>" }],
+      signal: new AbortController().signal
+    };
+    assert.equal((await captureMcpApp(base))?.attachmentId, STORED_ID);
+    assert.equal((await captureMcpApp(base))?.attachmentId, STORED_ID);
+    assert.equal(stores, 1);
+  });
+});
+
+describe("McpAppSessionCache", () => {
+  it("answers within its time-to-live, forgets after it or on clear, and stays bounded", () => {
+    let now = 0;
+    const cache = new McpAppSessionCache<string>(100, () => now, 2);
+    cache.set("a", "1");
+    now = 99;
+    assert.equal(cache.get("a"), "1");
+    now = 100;
+    assert.equal(cache.get("a"), undefined);
+    cache.set("a", "1");
+    cache.set("b", "2");
+    cache.set("c", "3");
+    assert.equal(cache.get("a"), undefined, "the oldest went past the bound");
+    assert.equal(cache.get("c"), "3");
+    cache.clear();
+    assert.equal(cache.get("c"), undefined);
   });
 });

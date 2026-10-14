@@ -104,6 +104,8 @@ const agentMessage = (id: string, text: string) => ({
 
 const threadIdOf = (session: CodexSession) => (session.summary().resumeCursor as { threadId: string }).threadId;
 
+const isCompletionOf = (itemId: string) => (event: RuntimeEvent) => event.type === "item.completed" && event.itemId === itemId;
+
 const completedCall = (events: RuntimeEvent[], itemId = "call-app-1") =>
   events.findIndex((event) => event.type === "item.completed" && event.itemId === itemId);
 
@@ -138,7 +140,8 @@ describe("codex — MCP Apps", () => {
     await r.events.waitFor((event) => event.type === "item.completed" && event.itemId === "msg-after", "the later message");
 
     const read = r.received().find((frame) => frame.method === "mcpServer/resource/read");
-    assert.deepEqual(read?.params, { threadId, server: "apps", uri: "ui://apps/widget.html" });
+    // The originating call names the app Codex reads the resource for.
+    assert.deepEqual(read?.params, { threadId, originCallId: "call-app-1", server: "apps", uri: "ui://apps/widget.html" });
     assert.equal(r.stored.length, 1);
     assert.equal(r.stored[0]!.name, "show_widget.html");
     assert.equal(r.stored[0]!.mimeType, "text/html");
@@ -160,6 +163,26 @@ describe("codex — MCP Apps", () => {
     // The app replays the call's result: it is kept for an app's call.
     assert.deepEqual(data.result, { content: [{ type: "text", text: "shown" }], structuredContent: { n: 1 }, _meta: null });
     assert.ok(index < completedCall(events, "msg-after"), "the call's row keeps its place before the later frame");
+    await r.stop();
+  });
+
+  it("an app called again in the session reuses its snapshot: no second read, no second copy, two rows", async () => {
+    const r = rig({
+      turns: [],
+      mcpApps: { contents: [{ uri: "ui://apps/widget.html", mimeType: "text/html;profile=mcp-app", text: APP_HTML }] }
+    });
+    await r.session.start();
+    const threadId = threadIdOf(r.session);
+    await r.notify("item/completed", { item: appCall(), threadId, turnId: "t", completedAtMs: 1 });
+    await r.events.waitFor(isCompletionOf("call-app-1"), "the first call");
+    await r.notify("item/completed", { item: appCall({ id: "call-app-2" }), threadId, turnId: "t", completedAtMs: 2 });
+    const second = (await r.events.waitFor(isCompletionOf("call-app-2"), "the second call")) as Extract<
+      RuntimeEvent,
+      { type: "item.completed" }
+    >;
+    assert.equal(r.received().filter((frame) => frame.method === "mcpServer/resource/read").length, 1);
+    assert.equal(r.stored.length, 1);
+    assert.equal(((second.payload.data as Record<string, unknown>).mcpApp as { attachmentId: string }).attachmentId, STORED_ID);
     await r.stop();
   });
 
@@ -241,6 +264,9 @@ describe("codex — MCP Apps", () => {
       ]
     );
     assert.deepEqual(await r.session.mcpListTools("other"), []);
+    // `tool-info` then `call-tool` list the same server: the second is the cache's.
+    await r.session.mcpListTools("apps");
+    assert.equal(r.received().filter((frame) => frame.method === "mcpServerStatus/list").length, 2, "apps once, other once");
     const result = await r.session.mcpCallTool({ server: "apps", tool: "reset", arguments: { hard: true } });
     assert.deepEqual(result, { content: [{ type: "text", text: "called reset" }], structuredContent: { arguments: { hard: true } } });
     const call = r.received().find((frame) => frame.method === "mcpServer/tool/call");

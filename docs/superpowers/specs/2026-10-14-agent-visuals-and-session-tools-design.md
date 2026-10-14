@@ -309,7 +309,7 @@ Probed 2026-10-14 on this host, each CLI against a stub stdio MCP server that de
 extension, lists one tool with `_meta.ui {resourceUri: "ui://…", visibility}`, serves the resource as
 `text/html;profile=mcp-app` (with `_meta.ui.csp`/`prefersBorder`) and logs every frame it receives.
 Throwaway HOME / CONFIG dirs, no daemon, no Orquester session. Only Grok needed a model turn (two
-one-call prompts on the Grok account, about $0.03 by the CLI's own usage report) because only it exposes the URI on a live call.
+one-call prompts on the Grok account, about $0.03 by the CLI's own usage report) because only it exposes the URI on a live call; the live Codex check below ran two tiny turns.
 
 | Provider (version) | Declares UI extension to servers | URI of a call's UI resource reaches the client | Host can read the resource | Host can call the server's tools | Additive context channel | Result |
 |---|---|---|---|---|---|---|
@@ -332,6 +332,28 @@ row (`McpAppFrame`) from the agent-visuals signed URL, with the bridge in
 `ui/update-model-context` go `POST /api/sessions/:id/mcp-apps/:itemId/:op` → host
 `/threads/:id/mcp-apps/:op` → the live provider session. Consent (a tool not marked read-only,
 `ui/message`, `ui/download-file`) is asked in the chat's banner dock.
+
+Live Codex check (fix round 1; codex-cli 0.159.0, a scratch `CODEX_HOME` with only a managed
+account's auth file, two tiny turns; fixture `apps/daemon/test/fixtures/codex/16-mcp-app-live.ndjson`,
+README observation 25): the call completes with `mcpAppResourceUri` (and `appContext: null`);
+`mcpServer/resource/read` with `originCallId` answers the document; a host-initiated
+`mcpServer/tool/call` emits no `item/*` notification, so an app's own calls never add tool or app
+rows; and the `untrusted` `additionalContext` value appears in no live notification, no
+`thread/read` item and no `thread/turns/list` item — never as a user message.
+
+Hardening (fix round 1): declared domains drop loopback, link-local and private hosts,
+`.localhost`/`.local` names and bare-TLD wildcards (`*.com`); a client refuses to frame an app whose
+domains reach its own origin or the daemon's (`mcpAppCspReachesOrigin`). Grok's capture read is
+bounded by the capture's own 15 s deadline. A session reuses an app's snapshot reference for 5 minutes
+without reading (and so without pausing its stream); past that, an unchanged document (same thread,
+server, URI and SHA-256) reuses its stored attachment instead of storing another copy. A server's tool
+listing is cached 30 s per session (dropped on Codex's `mcpServer/startupStatus/updated` and Grok's
+`tools_changed` / `servers_updated` / `server_status`). The captured document reports its own
+`pagehide` (`orq/notifications/document-unloaded`, from the first listener the bootstrap installs);
+the client stops the bridge on it, ahead of anything a page it navigated to could post, and still
+on the frame's second `load`; the row then shows "left its page" in place of the frame. Residual:
+an app that never reaches its `pagehide` listener (a crash of the document) is caught only by that
+second `load`.
 
 Known limits: Grok replays a call's result to its app as text only (its CLI folds
 `structuredContent` into `OkayOutput`); a collab child's (Codex) or subagent's (Grok) app call stays a

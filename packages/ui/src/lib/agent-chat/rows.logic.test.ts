@@ -1580,7 +1580,7 @@ describe("MCP Apps — the mcp-app row (spec 2026-10-14 §3)", () => {
       const [app, ...rest] = apps(rows);
       assert.ok(app, `${provider}: an mcp-app row`);
       assert.equal(rest.length, 0, provider);
-      assert.equal(app.id, `mcp-app:${APP}`, `${provider}: keyed by the snapshot`);
+      assert.equal(app.id, "mcp-app:done-1", `${provider}: keyed by the call's row`);
       assert.equal(app.itemId, "done-1", `${provider}: the completed row names the app`);
       assert.deepEqual(app.mcpApp, reference, provider);
       assert.ok(
@@ -1588,6 +1588,29 @@ describe("MCP Apps — the mcp-app row (spec 2026-10-14 §3)", () => {
         `${provider}: no tool row besides it`
       );
     }
+  });
+
+  it("two calls of an unchanged app share its snapshot and are still two rows", () => {
+    const rows = deriveTimelineRowsWithState(
+      baseInput(
+        entriesFrom([
+          ...call(completedData.codex!, 1, { id: "done-1" }),
+          activity(
+            "tool.completed",
+            { itemType: "mcp_tool_call", toolUseId: "call-2", status: "completed", title: "charts: show_chart", data: { mcpApp: reference } },
+            { turnId: "t1", createdAt: stamp(3), status: "completed", id: "done-2" }
+          )
+        ]),
+        running
+      )
+    ).rows;
+    assert.deepEqual(
+      apps(rows).map((row) => [row.id, row.itemId]),
+      [
+        ["mcp-app:done-1", "done-1"],
+        ["mcp-app:done-2", "done-2"]
+      ]
+    );
   });
 
   it("another server's app on a row, or a failed call, stays an ordinary tool row", () => {

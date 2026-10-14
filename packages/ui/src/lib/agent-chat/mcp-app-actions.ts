@@ -42,6 +42,11 @@ export interface McpAppActionDeps {
   readonly ask: (input: { kind: McpAppConsentKind; title: string; detail: string }) => Promise<boolean | undefined>;
   /** Sends a message into the thread as the user, or undefined where none can be sent. */
   readonly sendMessage: ((text: string) => Promise<void>) | undefined;
+  /**
+   * Whether a message may be sent NOW (a read-only timeline sends none) —
+   * read at each request, so a row whose context changed is never stale.
+   */
+  readonly canSendMessage?: () => boolean;
   /** Whether a link may open now: the app's frame is focused and the reader just used it. */
   readonly linkAllowed: () => boolean;
   readonly openLink: (url: string) => void;
@@ -115,7 +120,9 @@ export function mcpAppActions(deps: McpAppActionDeps): McpAppActions {
 
     sendMessage: async (text) => {
       const send = deps.sendMessage;
-      if (send === undefined) throw new McpAppHostRefusal("Messages cannot be sent from here.");
+      if (send === undefined || deps.canSendMessage?.() === false) {
+        throw new McpAppHostRefusal("Messages cannot be sent from here.");
+      }
       await consent(deps, { kind: "message", title: "Send this message?", detail: text });
       try {
         await send(text);

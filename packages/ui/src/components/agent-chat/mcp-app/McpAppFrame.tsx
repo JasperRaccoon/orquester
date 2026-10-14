@@ -20,7 +20,9 @@ import {
   MCP_APP_DEFAULT_HEIGHT,
   MCP_APP_MAX_HEIGHT,
   clampMcpAppHeight,
+  isMcpAppUnloadNotice,
   mcpAppAllowAttribute,
+  mcpAppCspReachesOrigin,
   mcpAppToolCallOfActivityPayload,
   type McpAppReference,
   type McpAppToolCall,
@@ -73,6 +75,15 @@ function saveBlob(file: { name: string; mimeType: string; bytes: Uint8Array }): 
 }
 
 let nextFrameId = 0;
+
+/** Whether the app's declared domains name this page's origin or the daemon's endpoint. */
+function reachesOrquester(app: McpAppReference, endpoint: string): boolean {
+  const origins = [endpoint];
+  if (typeof window !== "undefined" && /^https?:$/.test(window.location.protocol)) {
+    origins.push(window.location.origin);
+  }
+  return origins.some((origin) => mcpAppCspReachesOrigin(app.csp, origin));
+}
 
 export function McpAppFrame(props: {
   sessionId: string;
@@ -278,13 +289,13 @@ export function McpAppFrame(props: {
         flushSync(() => setDisplayMode("inline"));
         return mcpAppConsents.ask(owner, { ...input, sessionId, appName: app.server });
       },
-      sendMessage: latest.current.readOnly
-        ? undefined
-        : async (text) => {
-            const store = peekThreadStore(sessionId);
-            if (store === null) throw new Error("This thread is not open.");
-            await store.getState().actions.sendTurn({ text, generatedPrompt: true });
-          },
+      sendMessage: async (text) => {
+        const store = peekThreadStore(sessionId);
+        if (store === null) throw new Error("This thread is not open.");
+        await store.getState().actions.sendTurn({ text, generatedPrompt: true });
+      },
+      // Read at each request: the row's context may change under a live app.
+      canSendMessage: () => !latest.current.readOnly,
       linkAllowed: () => {
         const frame = frameRef.current;
         return (
@@ -342,7 +353,15 @@ export function McpAppFrame(props: {
     hostRef.current = host;
     const receive = (event: MessageEvent) => {
       // Only messages from this frame's own window reach its host.
-      if (event.source !== null && event.source === target()) host.receive(event.data);
+      if (event.source === null || event.source !== target()) return;
+      // The captured document is going away (`pagehide`): whatever the
+      // window says next is not it, so the bridge stops before it could.
+      if (isMcpAppUnloadNotice(event.data)) {
+        host.dispose();
+        setNavigatedAway(true);
+        return;
+      }
+      host.receive(event.data);
     };
     window.addEventListener("message", receive);
     return () => {
@@ -384,6 +403,16 @@ export function McpAppFrame(props: {
           Show app
         </button>
       </div>
+    );
+  }
+
+  // An app whose declared domains reach Orquester itself — this page's origin,
+  // or the daemon's — is never framed: its policy is fixed in the snapshot.
+  if (reachesOrquester(app, api.connection.endpoint)) {
+    return (
+      <p className="rounded-lg border border-neutral-800 px-3 py-2 text-xs text-neutral-500">
+        The {app.server} app asks to connect to Orquester itself, so it was not loaded.
+      </p>
     );
   }
 

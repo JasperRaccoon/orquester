@@ -131,6 +131,13 @@ test("a message always asks, then is sent as the user", async () => {
   assert.deepEqual(sent, ["Ship it"]);
   const readOnly = setup({ overrides: { sendMessage: undefined } });
   assert.equal(await refusalOf(readOnly.actions.sendMessage("x")), "Messages cannot be sent from here.");
+  // Read at each request: a row that became read-only refuses before anyone is asked.
+  let writable = true;
+  const live = setup({ overrides: { canSendMessage: () => writable } });
+  writable = false;
+  assert.equal(await refusalOf(live.actions.sendMessage("x")), "Messages cannot be sent from here.");
+  assert.equal(live.queue.pending("s1").length, 0);
+  assert.deepEqual(live.sent, []);
 });
 
 test("a download asks, reads a linked file from the app's server, and keeps the size bound", async () => {

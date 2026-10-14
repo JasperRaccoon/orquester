@@ -12,8 +12,10 @@ import {
   MCP_APP_MAX_HTML_BYTES,
   clampMcpAppHeight,
   injectMcpAppCsp,
+  isMcpAppUnloadNotice,
   mcpAppAllowAttribute,
   mcpAppContentSecurityPolicy,
+  mcpAppCspReachesOrigin,
   mcpAppReferenceOfActivityPayload,
   mcpAppReferencesEqual,
   mcpAppToolCallOfActivityPayload,
@@ -77,7 +79,7 @@ test("only scheme-qualified origins survive a declared CSP", () => {
     resourceDomains: "https://not-a-list.example.com",
     frameDomains: []
   });
-  assert.deepEqual(csp, { connectDomains: ["https://ok.example.com", "http://localhost:8080"] });
+  assert.deepEqual(csp, { connectDomains: ["https://ok.example.com"] });
   assert.equal(readMcpAppCsp({ connectDomains: ["'unsafe-eval'"] }), undefined);
   assert.equal(readMcpAppCsp("https://x.example.com"), undefined);
 });
@@ -121,6 +123,11 @@ test("a resource's document is prepared with its policy first, then the bootstra
   assert.ok(metaAt < firstScript, "the policy precedes every script");
   assert.ok(document.html.indexOf("document.cookie") < document.html.indexOf("app()"));
   assert.ok(document.html.indexOf("colorScheme") < document.html.indexOf("app()"));
+  // The document reports its own unload, from a listener installed before the app's.
+  assert.ok(document.html.indexOf('"pagehide"') < document.html.indexOf("app()"));
+  assert.match(document.html, /orq\/notifications\/document-unloaded/);
+  assert.equal(isMcpAppUnloadNotice({ jsonrpc: "2.0", method: "orq/notifications/document-unloaded" }), true);
+  assert.equal(isMcpAppUnloadNotice({ jsonrpc: "2.0", method: "ui/notifications/size-changed" }), false);
 });
 
 test("a base64 blob is decoded and oversized documents are refused before decoding", () => {
@@ -259,4 +266,41 @@ test("the allow attribute names only declared permissions, and heights clamp", (
   assert.equal(clampMcpAppHeight(10), 80);
   assert.equal(clampMcpAppHeight(5000), 2000);
   assert.equal(clampMcpAppHeight(Number.NaN), 320);
+});
+
+test("loopback, private and bare-TLD wildcard domains are dropped", () => {
+  const csp = readMcpAppCsp({
+    connectDomains: [
+      "http://localhost:47831",
+      "https://dev.localhost",
+      "http://printer.local",
+      "http://127.0.0.1:47831",
+      "http://10.0.0.5",
+      "https://172.20.1.1",
+      "https://192.168.1.10",
+      "http://169.254.169.254",
+      "http://100.64.0.1",
+      "http://0.0.0.0",
+      "https://*.com",
+      "wss://*.io",
+      "https://*.example.com",
+      "https://8.8.8.8",
+      "https://172.32.0.1"
+    ]
+  });
+  assert.deepEqual(csp, {
+    connectDomains: ["https://*.example.com", "https://8.8.8.8", "https://172.32.0.1"]
+  });
+});
+
+test("an app whose domains reach Orquester's own origin is recognised", () => {
+  const csp = { connectDomains: ["https://api.example.com"], resourceDomains: ["https://*.orq.example.net"] };
+  assert.equal(mcpAppCspReachesOrigin(csp, "https://api.example.com"), true);
+  assert.equal(mcpAppCspReachesOrigin(csp, "wss://api.example.com:8443"), true);
+  assert.equal(mcpAppCspReachesOrigin(csp, "https://box.orq.example.net"), true);
+  assert.equal(mcpAppCspReachesOrigin(csp, "https://orq.example.net"), false, "a wildcard never covers its own apex");
+  assert.equal(mcpAppCspReachesOrigin(csp, "https://other.example.com"), false);
+  assert.equal(mcpAppCspReachesOrigin(undefined, "https://api.example.com"), false);
+  assert.equal(mcpAppCspReachesOrigin(csp, "unix:///run/daemon.sock"), false);
+  assert.equal(mcpAppCspReachesOrigin(csp, "not a url"), false);
 });

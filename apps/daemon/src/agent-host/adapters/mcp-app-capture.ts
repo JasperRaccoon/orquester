@@ -26,6 +26,8 @@ import {
   type McpAppReference
 } from "@orquester/api/agent-chat";
 
+import { createHash } from "node:crypto";
+
 import type { AdapterContext } from "../adapter.ts";
 import { withDeadline } from "../support/deadline.ts";
 
@@ -142,8 +144,104 @@ export class McpAppFrameHold {
   }
 }
 
+/** How long a session reuses an app's snapshot without reading its resource again. */
+export const MCP_APP_READ_CACHE_MS = 5 * 60_000;
+/** How long a session reuses a server's tool listing for an app's requests. */
+export const MCP_APP_TOOLS_CACHE_MS = 30_000;
+
+/**
+ * A small per-session cache with a time-to-live, bounded: what a session read
+ * recently (an app's snapshot reference by server + URI, a server's tools),
+ * so a burst of app calls neither pauses the stream again nor lists the same
+ * server twice. Dropped with its session; `clear` when the provider says it
+ * changed.
+ */
+export class McpAppSessionCache<T> {
+  private readonly entries = new Map<string, { value: T; at: number }>();
+
+  constructor(
+    private readonly ttlMs: number,
+    private readonly now: () => number = Date.now,
+    private readonly max = 64
+  ) {}
+
+  get(key: string): T | undefined {
+    const entry = this.entries.get(key);
+    if (entry === undefined) return undefined;
+    if (this.now() - entry.at >= this.ttlMs) {
+      this.entries.delete(key);
+      return undefined;
+    }
+    return entry.value;
+  }
+
+  set(key: string, value: T): void {
+    this.entries.delete(key);
+    this.entries.set(key, { value, at: this.now() });
+    while (this.entries.size > this.max) {
+      const oldest = this.entries.keys().next().value;
+      if (oldest === undefined) break;
+      this.entries.delete(oldest);
+    }
+  }
+
+  clear(): void {
+    this.entries.clear();
+  }
+}
+
+/**
+ * The snapshots an adapter already stored, by thread + server + URI + the
+ * prepared document's SHA-256: an app called again with an unchanged
+ * document reuses its attachment rather than storing another copy (≤ 5 MiB
+ * each). A remembered id is reused only while the thread still resolves it —
+ * a revert's sweep may have removed it. Bounded, oldest forgotten first.
+ */
+export class McpAppSnapshotStore {
+  private readonly stored = new Map<string, string>();
+
+  constructor(private readonly max = 256) {}
+
+  async store(
+    context: Pick<AdapterContext, "storeAttachment" | "resolveAttachmentPath">,
+    input: { threadId: string; server: string; resourceUri: string; name: string; html: string }
+  ): Promise<string> {
+    const store = context.storeAttachment;
+    if (store === undefined) throw new Error("no attachment store");
+    const hash = createHash("sha256").update(input.html, "utf8").digest("hex");
+    const key = [input.threadId, input.server, input.resourceUri, hash].join("\u0000");
+    const known = this.stored.get(key);
+    if (known !== undefined) {
+      const live = await context.resolveAttachmentPath(input.threadId, known).then(
+        () => true,
+        () => false
+      );
+      if (live) {
+        this.remember(key, known);
+        return known;
+      }
+      this.stored.delete(key);
+    }
+    const attachmentId = await store(input.threadId, { name: input.name, mimeType: "text/html", bytes: input.html });
+    this.remember(key, attachmentId);
+    return attachmentId;
+  }
+
+  private remember(key: string, attachmentId: string): void {
+    this.stored.delete(key);
+    this.stored.set(key, attachmentId);
+    while (this.stored.size > this.max) {
+      const oldest = this.stored.keys().next().value;
+      if (oldest === undefined) break;
+      this.stored.delete(oldest);
+    }
+  }
+}
+
 export interface McpAppCaptureInput {
-  context: Pick<AdapterContext, "storeAttachment" | "logger">;
+  context: Pick<AdapterContext, "storeAttachment" | "logger"> & Partial<Pick<AdapterContext, "resolveAttachmentPath">>;
+  /** Reuses an unchanged document's attachment; without it every capture stores. */
+  snapshots?: McpAppSnapshotStore;
   threadId: string;
   server: string;
   tool: string;
@@ -194,11 +292,24 @@ export async function captureMcpApp(input: McpAppCaptureInput): Promise<McpAppRe
   }
   let attachmentId: string;
   try {
-    attachmentId = await store(input.threadId, {
-      name: mcpAppFileName(input.tool),
-      mimeType: "text/html",
-      bytes: document.html
-    });
+    const resolveAttachmentPath = input.context.resolveAttachmentPath;
+    attachmentId =
+      input.snapshots !== undefined && resolveAttachmentPath !== undefined
+        ? await input.snapshots.store(
+            { storeAttachment: store, resolveAttachmentPath },
+            {
+              threadId: input.threadId,
+              server: input.server,
+              resourceUri: input.resourceUri,
+              name: mcpAppFileName(input.tool),
+              html: document.html
+            }
+          )
+        : await store(input.threadId, {
+            name: mcpAppFileName(input.tool),
+            mimeType: "text/html",
+            bytes: document.html
+          });
   } catch (error) {
     input.context.logger.warn("agent-host: an MCP app's document could not be stored; showing a plain tool row", {
       ...where,

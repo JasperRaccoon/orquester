@@ -524,7 +524,8 @@ export type AgentChatTimelineRow =
   /**
    * An MCP App (spec 2026-10-14 §3), in place of the tool call that produced
    * it: its captured document framed inline, speaking the MCP Apps bridge.
-   * Never grouped or folded, keyed by the snapshot (`mcp-app:<attachmentId>`)
+   * Never grouped or folded, keyed by the call's completed row
+   * (`mcp-app:<itemId>`; two calls of an unchanged app share one snapshot)
    * so the frame — and the app's own state — survives re-derivation.
    * `itemId` is the call's completed row, which names the app to the daemon.
    */
