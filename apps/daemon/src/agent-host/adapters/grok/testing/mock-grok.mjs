@@ -521,6 +521,18 @@ async function runPrompt(id, params) {
         _meta: { totalTokens: 22540, promptId }
       });
     }
+    // Every captured ask (fixtures 03, 04, 05, 09a, 33) opens its own
+    // interaction just before the request and resolves it once answered —
+    // or cancelled — with `[features] support_permission = true` too.
+    const interaction = (sessionUpdate) =>
+      notify("_x.ai/session_notification", {
+        sessionId,
+        update:
+          sessionUpdate === "pending_interaction"
+            ? { sessionUpdate, tool_call_id: "call-1", kind: "permission" }
+            : { sessionUpdate, tool_call_id: "call-1" }
+      });
+    interaction("pending_interaction");
     const requestId = 9000 + promptSeq;
     pendingPermissionId = requestId;
     send({
@@ -564,6 +576,7 @@ async function runPrompt(id, params) {
     // The real CLI settles a cancel WITHOUT waiting for the pending reply.
     if (scenario === "cancel") {
       await waitFor(() => cancelled);
+      interaction("interaction_resolved");
       notify("_x.ai/session_notification", {
         sessionId,
         update: { sessionUpdate: "turn_completed", prompt_id: promptId, stop_reason: "cancelled" }
@@ -580,6 +593,7 @@ async function runPrompt(id, params) {
     await waitFor(() => permissionAnswer !== null);
     const answer = permissionAnswer;
     permissionAnswer = null;
+    interaction("interaction_resolved");
     notify("session/update", {
       sessionId,
       update: {

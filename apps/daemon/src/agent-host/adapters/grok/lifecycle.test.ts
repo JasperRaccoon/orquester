@@ -1380,6 +1380,38 @@ test("supervised: a CLI resolving its own interactions is told ONCE, not at ever
   await r.dispose();
 });
 
+// A-I1: a request answered without a card is still the CLI asking; the
+// interaction it opens and resolves around that answer (fixtures 09a, 33) is
+// not the `support_permission` symptom.
+for (const [scenario, runtimeMode] of [
+  ["session-tool-permission", "approval-required"],
+  ["session-tool-permission", "auto-accept-edits"],
+  ["permission", "auto-accept-edits"]
+] as const) {
+  test(`${runtimeMode}: a ${scenario} answered without a card raises no support_permission advisory`, async () => {
+    const r = await rig({ scenario, sessionTools: recordingSessionTools() });
+    await start(r, { runtimeMode });
+    await r.adapter.sendTurn({ threadId: "t1", input: "go", attachments: [], interactionMode: "default" });
+    await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+    await r.drain();
+    assert.equal(r.events.some((event) => event.type === "request.opened"), false, "answered without a card");
+    assert.equal(advisories(r.events), 0);
+    await r.dispose();
+  });
+}
+
+test("a carded request the CLI also resolves itself raises no advisory either", async () => {
+  const r = await rig({ scenario: "permission" });
+  await start(r);
+  void r.adapter.sendTurn({ threadId: "t1", input: "write", attachments: [], interactionMode: "default" });
+  const opened = await r.waitFor((event) => event.type === "request.opened", "request.opened");
+  await r.adapter.respondToApproval("t1", opened.requestId!, "accept");
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  await r.drain();
+  assert.equal(advisories(r.events), 0);
+  await r.dispose();
+});
+
 test("a session that dies on its own is removed from the adapter's map", async () => {
   // Q1 #30: a stale entry keeps winning `hasSession` and is reported to the
   // §3.3 reconcile as live.
