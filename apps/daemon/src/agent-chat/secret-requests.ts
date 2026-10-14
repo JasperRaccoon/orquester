@@ -23,6 +23,7 @@ import type { FastifyInstance } from "fastify";
 import {
   agentChatRoutes,
   SECRET_REQUEST_EVENT_TYPE,
+  SECRET_REQUEST_TIMEOUT_MS,
   SECRET_VALUE_MAX_CHARS,
   type AgentChatSecretRequestEventPayload,
   type SecretRequestAnswerResponse,
@@ -38,9 +39,6 @@ import type {
   SessionSecretRequestResult,
   SessionSecretRequests
 } from "../session-tools/contract.ts";
-
-/** How long a card waits for the user (T3's default wait). */
-export const SECRET_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
 
 /** An answer body is a value and a word: anything bigger is refused unread. */
 const ANSWER_BODY_LIMIT = 64 * 1024;

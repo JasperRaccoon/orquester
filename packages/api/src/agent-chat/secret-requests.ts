@@ -42,6 +42,9 @@ export const SECRET_REQUEST_PURPOSE_MAX_CHARS = 500;
 /** 8 Ki chars: even fully JSON-escaped, the result stays under the 60 000-byte result cap. */
 export const SECRET_VALUE_MAX_CHARS = 8 * 1024;
 
+/** How long a card waits for the user before the call ends `timed_out` (T3's default wait). */
+export const SECRET_REQUEST_TIMEOUT_MS = 10 * 60 * 1000;
+
 /** How a request ended. */
 export type SecretRequestOutcome = "provided" | "declined" | "cancelled" | "timed_out";
 
