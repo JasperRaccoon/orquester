@@ -64,8 +64,10 @@ Orquester files each part starts from.
 
 ### 1.2 Per-provider transport (thread identity must be unforgeable)
 
-- **Claude:** in-process SDK server (`createSdkMcpServer` from `@anthropic-ai/claude-agent-sdk`) in
-  `adapters/claude/launch.ts`, bound to the thread at launch. No network, no token. The
+- **Claude:** in-process SDK server in `adapters/claude/launch.ts`, bound to the thread at launch:
+  the host's own `orquester` MCP server instance passed as `mcpServers.orquester = {type: "sdk",
+  name, instance}` (the config shape `createSdkMcpServer` returns, without `tool()`'s zod parse), so
+  the arguments reach the daemon raw and the daemon is the one validator. No network, no token. The
   `mcpServers: {}` comment there changes accordingly. User `.mcp.json`/user-scope servers keep
   loading as today.
 - **Codex, Grok, OpenCode:** the agent host serves an MCP Streamable-HTTP endpoint on

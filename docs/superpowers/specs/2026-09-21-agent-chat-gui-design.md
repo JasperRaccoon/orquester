@@ -360,7 +360,8 @@ registration is added, the server becomes per thread.
 §1.2): chat agents now DO get an MCP server — `orquester`, scoped to their thread — and the
 OpenCode server stays per project. Each thread registers its own `orquester-<16 hex>` server
 (`POST /mcp`, memory only), so none replaces another's, and each thread's session permission
-ruleset denies `orquester-*` and allows only its own, which OpenCode turns into not offering the
+ruleset denies `orquester-????????????????_*` (every thread's per-thread spelling, and no other
+server) and allows only its own, which OpenCode turns into not offering the
 other threads' tools at all (`adapters/opencode/session-tools.ts`, verified against the 1.18.34
 bundle).* Second, OpenCode stores persistent approval
 grants per directory, so an automatic approval issued on behalf of a `full-access` thread must be

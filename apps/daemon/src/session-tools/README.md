@@ -11,8 +11,12 @@ provider ──► agent host ──► daemon unix socket ──► handler
              (thread known)  POST /api/agent-host/session-tools/call
 ```
 
-- **Claude**: an in-process SDK server bound to the thread at launch
-  (`agent-host/adapters/claude/session-tools.ts`). No network, no credential.
+- **Claude**: in process, bound to the thread at launch: the host's own `orquester` MCP server
+  instance (`agent-host/session-tools/mcp-server.ts`) handed to the SDK as
+  `mcpServers.orquester = {type: "sdk", name, instance}`
+  (`agent-host/adapters/claude/session-tools.ts`). It forwards the arguments raw — not
+  `createSdkMcpServer`/`tool()`, whose zod parse would rewrite them first — so the daemon is the
+  one validator on every provider. No network, no credential.
 - **Codex, Grok, OpenCode**: the host's loopback endpoint `http://127.0.0.1:<port>/mcp`
   (`agent-host/session-tools/endpoint.ts`). Each provider session gets its own credential; the
   thread a call acts as is the credential's thread.
@@ -75,10 +79,12 @@ API in-process, `../mcp/daemon-api.ts`). Whatever a toolkit imports, the host lo
 3. **A presentation label** per tool in `packages/ui/src/lib/agent-chat/presentation.logic.ts`
    `SESSION_TOOL_LABELS` (`thread_list: "Listed threads"`). Without one a row reads
    "Orquester: Thread list" — never its raw arguments.
-4. **Reference fields** the UI renders from (e.g. `htmlRender`): add the key to
-   `SESSION_TOOL_REFERENCE_KEYS` in `packages/api/src/agent-chat/session-tools.ts`. Slimming then
-   keeps it at `data.sessionTool.references.<key>` (≤ 4 KiB each) on every provider's row; the
-   rest of a result is summarised as usual.
+4. **Reference fields** the UI renders from: add the key to `SESSION_TOOL_REFERENCE_KEYS` in
+   `packages/api/src/agent-chat/session-tools.ts` (`htmlRender`, the visual replies' page, is the
+   first). Slimming then keeps it at `data.sessionTool.references.<key>` (≤ 4 KiB each) on every
+   provider's row — also through a second slim — and the rest of a result is summarised as usual.
+   Read it back with `sessionToolReferences(data, [key])` on a row whose `sessionTool` marker
+   names your tool (`htmlRenderReferenceOfActivityPayload` is the pattern); never by spelling.
 5. **Tests** beside the toolkit, driving `run` with a fake `ctx` (`testing.ts` shows the shape).
 
 ## The rules a handler owes
@@ -99,10 +105,10 @@ API in-process, `../mcp/daemon-api.ts`). Whatever a toolkit imports, the host lo
 
 | Provider | Transport | Credential | Instructions | Pre-approval |
 |---|---|---|---|---|
-| Claude | `createSdkMcpServer`, `mcpServers.orquester` (`type: "sdk"`) | none | system prompt `append` | `allowedTools`: each `mcp__orquester__<tool>` + `canUseTool` |
+| Claude | the host's `McpServer` instance as `mcpServers.orquester = {type: "sdk", name, instance}`, raw arguments forwarded | none | system prompt `append` | `allowedTools`: each `mcp__orquester__<tool>` + `canUseTool` |
 | Codex | thread `config["mcp_servers.orquester"]` on `thread/start` and `thread/resume` | env `ORQUESTER_SESSION_TOOLS_TOKEN` via `bearer_token_env_var` | `turn/start` `additionalContext` (`application`) | `default_tools_approval_mode = "approve"` |
-| Grok | ACP `mcpServers` http entry on `session/new` / `session/load` | `Authorization` header in the frame (redacted from `raw.ndjson`) | `_meta.rules` | `allow_once` without a card |
-| OpenCode | `POST /mcp` per thread, server `orquester-<16 hex>` on the shared server | `Authorization` header in the registration (memory only) | per-turn `system` addendum | session ruleset: deny `orquester-*`, allow own |
+| Grok | ACP `mcpServers` http entry on `session/new` / `session/load`; the model calls the tools through Grok's `use_tool` (`rawInput.tool_name = "orquester__<tool>"`) | `Authorization` header in the frame (redacted from `raw.ndjson`) | `_meta.rules` | `allow_once` without a card |
+| OpenCode | `POST /mcp` per thread, server `orquester-<16 hex>` on the shared server | `Authorization` header in the registration (memory only) | per-turn `system` addendum | session ruleset: deny `orquester-????????????????_*`, allow `orquester-<own key>_*` |
 
 Where each credential lives. Codex: in the `codex app-server` child's env
 (`ORQUESTER_SESSION_TOOLS_TOKEN`). Codex's default `shell_environment_policy` excludes variables
@@ -117,6 +123,8 @@ users to install Orquester's own full-drive `/mcp` under the same name `orqueste
 server must never be waved through. (Codex's thread override replaces a user's same-named entry
 outright — verified on 0.159.0; Claude's and Grok's precedence between the two is unverified.)
 
-OpenCode isolation: each thread's session ruleset hides every other thread's `orquester-…` tools
-(OpenCode drops a tool whose last matching rule is a `*` deny) and allows its own; subagents
-inherit only the deny, so they get no session tools. See `agent-host/adapters/opencode/session-tools.ts`.
+OpenCode isolation: each thread's session ruleset hides every other thread's `orquester-<key>_…`
+tools (`OPENCODE_SESSION_TOOLS_DENY = "orquester-????????????????_*"`; OpenCode drops a tool whose
+last matching rule is a `*` deny) and allows its own; the deny is sent whenever the host has session
+tools, even for a thread whose own grant failed. Subagents inherit only the deny, so they get no
+session tools. See `agent-host/adapters/opencode/session-tools.ts`.

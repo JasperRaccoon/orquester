@@ -8,8 +8,14 @@
  * `POST /mcp` with its credential in the registration's `headers` — and each
  * thread's session permission ruleset ends with
  *
- *     { permission: "orquester-*",          action: "deny"  }   // every thread's tools…
- *     { permission: "orquester-<own key>_*", action: "allow" }  // …but this thread's own
+ *     { permission: "orquester-????????????????_*", action: "deny"  }  // every thread's tools…
+ *     { permission: "orquester-<own key>_*",        action: "allow" }  // …but this thread's own
+ *
+ * (`OPENCODE_SESSION_TOOLS_DENY`: OpenCode's `?` matches any one character, so
+ * the deny names only the per-thread spelling — 16 characters, then `_` — and
+ * leaves a user's own `orquester…` server alone, see `docs/orquester-mcp.md`.
+ * The deny is sent whenever the host has session tools, the allow only with a
+ * grant of the thread's own.)
  *
  * Why that isolates threads, from OpenCode 1.18.34's own bundle (report
  * `task-1-report.md`): an MCP tool's id is `<server>_<tool>`, each sanitised
