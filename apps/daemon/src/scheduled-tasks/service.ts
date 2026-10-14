@@ -51,7 +51,13 @@ import {
   type SessionSummary,
   type UpdateScheduledTaskRequest
 } from "@orquester/api";
-import { agentChatRoutes, type ThreadReadResponse, type ThreadSnapshotPayload, type TurnCommandBody } from "@orquester/api/agent-chat";
+import {
+  agentChatRoutes,
+  isDeadlineRefusal,
+  type ThreadReadResponse,
+  type ThreadSnapshotPayload,
+  type TurnCommandBody
+} from "@orquester/api/agent-chat";
 import type { ScheduledTaskRecord } from "@orquester/config";
 import { resolveChatActivity, type ChatActivityRung } from "../agent-chat/activity-ladder.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
@@ -616,6 +622,9 @@ export class ScheduledTasksService {
     }
   }
 
+  /** Deadline refusals so far per queued run (`taskId:fireKey`); memory only. */
+  private readonly deadlineRetries = new Map<string, number>();
+
   private async deliverOne(taskId: string): Promise<void> {
     const api = this.api;
     if (api === null) return;
@@ -654,6 +663,20 @@ export class ScheduledTasksService {
       return;
     }
     if (res.status === 502 || res.status === 503) return; // the host is restarting: still queued
+    // The host's post-gate deadline (409 COMMAND_REJECTED marked `detail.reason: "deadline"`, never
+    // recorded as a receipt) is a refusal of the moment: the run stays queued and is tried again on
+    // the next event or retry tick, under the same command id — at most
+    // SCHEDULED_TASK_DEADLINE_RETRIES times before it counts as a refusal (D-M3).
+    const retryKey = `${taskId}:${fireKey}`;
+    if (res.status === 409 && isDeadlineRefusal(daemonErrorBody(res))) {
+      const tries = (this.deadlineRetries.get(retryKey) ?? 0) + 1;
+      if (tries < SCHEDULED_TASK_DEADLINE_RETRIES) {
+        this.deadlineRetries.set(retryKey, tries);
+        this.logger.warn("the thread's host timed out taking the delivery; it stays queued", { taskId, tries });
+        return;
+      }
+    }
+    this.deadlineRetries.delete(retryKey);
     const current = this.store.get(taskId);
     if (!current || current.pending?.fireKey !== fireKey) return; // deleted or replaced meanwhile
     const stamp = this.clock.now().toISOString();
@@ -734,4 +757,13 @@ export class ScheduledTasksService {
       });
     }, delay);
   }
+}
+
+/** How many times a run the host refused with its post-gate deadline is tried before it fails. */
+export const SCHEDULED_TASK_DEADLINE_RETRIES = 3;
+
+/** The `{error}` envelope of a daemon response, for `isDeadlineRefusal`. */
+function daemonErrorBody(res: { body: unknown }): { code?: unknown; message?: unknown; detail?: unknown } | null {
+  const error = (res.body as { error?: unknown } | null)?.error;
+  return error !== null && typeof error === "object" ? (error as { code?: unknown; message?: unknown; detail?: unknown }) : null;
 }

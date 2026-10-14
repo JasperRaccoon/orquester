@@ -10,7 +10,7 @@ import { FakeDaemonApi } from "../mcp/testing.ts";
 import { ManualClock } from "../workflows/testing/manual-trigger-clock.ts";
 import { advance, silentLogger } from "../workflows/triggers/test-support.ts";
 import { MISSED_RUN_GRACE_MINUTES } from "../workflows/triggers/scheduler.ts";
-import { ScheduledTaskError, ScheduledTasksService, SCHEDULED_TASK_RETRY_MS } from "./service.ts";
+import { ScheduledTaskError, ScheduledTasksService, SCHEDULED_TASK_DEADLINE_RETRIES, SCHEDULED_TASK_RETRY_MS } from "./service.ts";
 import { ScheduledTasksStore } from "./store.ts";
 
 const MIN = 60_000;
@@ -32,6 +32,8 @@ interface Rig {
   /** What the host's own snapshot says. */
   snapshot: Busy;
   turnStatus: number;
+  /** A 409 refusal is the host's post-gate deadline (`detail.reason: "deadline"`). */
+  deadline?: boolean;
   turns: { commandId: string; input: string; context?: unknown }[];
   run(ms: number): Promise<void>;
   /** A fresh store + service on the same file, as after a daemon restart. */
@@ -100,7 +102,16 @@ async function rig(t: test.TestContext, start = "2026-10-14T10:07:30.000Z", opts
     if (r.turnStatus < 400) r.turns.push(turn);
     return r.turnStatus < 400
       ? { status: 200, body: { seq: r.turns.length } }
-      : { status: r.turnStatus, body: { error: { code: r.turnStatus === 409 ? "COMMAND_REJECTED" : "HOST_UNAVAILABLE", message: "The thread refused it." } } };
+      : {
+          status: r.turnStatus,
+          body: {
+            error: {
+              code: r.turnStatus === 409 ? "COMMAND_REJECTED" : "HOST_UNAVAILABLE",
+              message: "The thread refused it.",
+              ...(r.deadline === true ? { detail: { reason: "deadline" } } : {})
+            }
+          }
+        };
   });
   const boot = async () => {
     r.store = new ScheduledTasksStore(file, { warn() {}, error() {} });
@@ -335,6 +346,32 @@ test("a refused delivery is recorded as failed, with the host's reason", async (
   assert.equal(after.lastRunStatus, "failed");
   assert.equal(after.lastRunError, "The thread refused it.");
   assert.equal(after.queuedAt, null);
+});
+
+test("the host's deadline refusal keeps the run queued and retries it, a bounded number of times (D-M3)", async (t) => {
+  const r = await rig(t);
+  const task = await cron(r);
+  r.turnStatus = 409;
+  r.deadline = true;
+  await r.run(8 * MIN);
+  let after = r.service.get(task.id)!;
+  assert.equal(after.lastRunStatus, null, "not failed");
+  assert.notEqual(after.queuedAt, null, "still queued");
+  // The next try goes through.
+  r.turnStatus = 200;
+  await r.run(SCHEDULED_TASK_RETRY_MS);
+  after = r.service.get(task.id)!;
+  assert.equal(after.lastRunStatus, "delivered");
+  assert.equal(r.turns.length, 1);
+
+  // A deadline that keeps coming fails the run after the bounded retries.
+  const once = await r.service.create({ threadId: THREAD, prompt: "Once", schedule: { kind: "once", at: "2026-10-14T10:30:00.000Z" }, createdByThreadId: THREAD });
+  r.turnStatus = 409;
+  await r.run(20 * MIN);
+  for (let i = 0; i < SCHEDULED_TASK_DEADLINE_RETRIES; i += 1) await r.run(SCHEDULED_TASK_RETRY_MS);
+  const failed = r.service.get(once.id)!;
+  assert.equal(failed.lastRunStatus, "failed");
+  assert.equal(failed.enabled, false, "a one-shot is paused, as for any refusal");
 });
 
 test("run now delivers at once, even when paused; a second one while queued is refused", async (t) => {
