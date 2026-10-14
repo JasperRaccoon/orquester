@@ -13,7 +13,11 @@
  * string this build does not know, so an older host still renders a newer CLI.
  */
 
-import type { CanonicalItemType, RuntimeItemStatus } from "@orquester/api/agent-chat";
+import {
+  ORQUESTER_MCP_SERVER_NAME,
+  type CanonicalItemType,
+  type RuntimeItemStatus
+} from "@orquester/api/agent-chat";
 
 import type { CodexProtocol } from "./_generated/index.ts";
 
@@ -130,7 +134,12 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
           tool: item.tool,
           arguments: item.arguments,
           readOnlyHint: item.readOnlyHint,
-          durationMs: item.durationMs
+          durationMs: item.durationMs,
+          // Orquester's own session tools answer structured references the
+          // timeline renders from (an `html_render` page, spec 2026-10-14
+          // §1.5), so their result is kept; every other server's stays
+          // dropped, as before, to keep the log lean.
+          ...(item.server === ORQUESTER_MCP_SERVER_NAME && item.result !== null ? { result: item.result } : {})
         }
       };
 

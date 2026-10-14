@@ -43,6 +43,32 @@ describe("item classification — typed on the generated discriminants", () => {
     });
   }
 
+  it("an `orquester` session tool's mcpToolCall keeps its result; any other server's drops it", () => {
+    const result = {
+      content: [{ type: "text", text: '{"htmlRender":{"attachmentId":"t-0f8fad5b-d9cb-469f-a165-70867728950e-html","title":"T","height":200}}' }],
+      structuredContent: null,
+      _meta: null
+    };
+    const call = (server: string): CodexThreadItem => ({
+      type: "mcpToolCall",
+      id: "call_1",
+      server,
+      tool: "html_render",
+      status: "completed",
+      arguments: { title: "T" },
+      appContext: null,
+      pluginId: null,
+      readOnlyHint: false,
+      result,
+      error: null,
+      durationMs: 12
+    });
+    const ours = classifyItem(call("orquester")).data as { result?: unknown };
+    assert.deepEqual(ours.result, result);
+    const theirs = classifyItem(call("serena")).data as { result?: unknown };
+    assert.equal(theirs.result, undefined);
+  });
+
   it("collabAgentToolCall's `interrupted` has no RuntimeItemStatus, so it settles failed", () => {
     const classified = classifyItem({
       type: "collabAgentToolCall",

@@ -32,6 +32,7 @@
  *   snapshot rather than a replay.
  */
 
+import { createReadStream } from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -69,6 +70,8 @@ import {
   applyFullHistoryEvent,
   createEmptyThreadState,
   deserializeFoldState,
+  htmlRenderReferenceOfActivityPayload,
+  isHtmlRenderAttachmentId,
   parseFoldSnapshotFile,
   serializeFoldState
 } from "@orquester/api/agent-chat";
@@ -900,9 +903,80 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         }
       } else {
         visit(item.payload, 0);
+        // An agent's published page (spec 2026-10-14 §2.2): its reference
+        // sits in the tool's result, as JSON text more often than not.
+        const page = htmlRenderReferenceOfActivityPayload(item.payload);
+        if (page !== undefined) {
+          referenced.add(page.attachmentId);
+        }
       }
     }
     return referenced;
+  }
+
+  /**
+   * Which of `ids` the thread's log mentions anywhere — one streamed pass over
+   * `events.ndjson`, no decode. A published page's reference lives only in its
+   * tool's result, and the fold's activity window (500 rows) forgets a row
+   * long before the page stops being part of the conversation, so a page the
+   * fold no longer holds is live while ANY line of the log still names it
+   * (spec 2026-10-14 §2.2). Attachment ids are `[a-z0-9_-]` and never escaped
+   * in JSON, so a byte search is exact; a chunk keeps the previous one's tail
+   * so an id split across two reads is still found.
+   */
+  async function logMentions(threadId: string, ids: ReadonlySet<string>): Promise<Set<string>> {
+    const found = new Set<string>();
+    if (ids.size === 0) {
+      return found;
+    }
+    const longest = Math.max(...[...ids].map((id) => id.length));
+    let carry = "";
+    try {
+      for await (const chunk of createReadStream(threadEventsPath(rootDir, threadId), {
+        highWaterMark: 1024 * 1024
+      })) {
+        const text = carry + (chunk as Buffer).toString("latin1");
+        for (const id of ids) {
+          if (!found.has(id) && text.includes(id)) {
+            found.add(id);
+          }
+        }
+        if (found.size === ids.size) {
+          break;
+        }
+        carry = text.slice(Math.max(0, text.length - (longest - 1)));
+      }
+    } catch {
+      // No log: nothing names them.
+    }
+    return found;
+  }
+
+  /**
+   * The published pages in `entries` the fold does not reference that are past
+   * the unreferenced grace — the only ones the sweep would delete — that the
+   * log still names. Anything younger is kept by the grace anyway, so the log
+   * is read only when a page could actually go.
+   */
+  async function pagesStillNamed(
+    threadId: string,
+    dir: string,
+    entries: readonly string[],
+    referenced: ReadonlySet<string>,
+    nowMs: number
+  ): Promise<Set<string>> {
+    const candidates = new Set<string>();
+    for (const entry of entries) {
+      const attachmentId = parseAttachmentIdFromRelativePath(entry);
+      if (attachmentId === null || !isHtmlRenderAttachmentId(attachmentId) || referenced.has(attachmentId)) {
+        continue;
+      }
+      const stat = await fsp.stat(path.join(dir, entry)).catch(() => null);
+      if (stat !== null && nowMs - stat.mtimeMs > UNREFERENCED_ATTACHMENT_GRACE_MS) {
+        candidates.add(attachmentId);
+      }
+    }
+    return logMentions(threadId, candidates);
   }
 
   async function sweepDirectory(
@@ -1496,6 +1570,11 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
           const referenced = needsVerdict
             ? referencedAttachmentIds(await foldForSweep(threadId))
             : new Set<string>();
+          if (needsVerdict) {
+            for (const id of await pagesStillNamed(threadId, dir, entries, referenced, nowMs)) {
+              referenced.add(id);
+            }
+          }
           await sweepDirectory(dir, nowMs, (id) => referenced.has(id));
         } catch {
           // One unreadable thread never stops the sweep of the others (§5.1).

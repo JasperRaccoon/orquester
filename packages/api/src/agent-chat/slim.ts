@@ -19,6 +19,9 @@
  * - an MCP tool call keeps `type, id, tool, server, status, arguments,
  *   appContext, error, durationMs` and nothing else, and its `result` is
  *   reduced to a one-line summary;
+ * - a row of the `orquester` server's `html_render` call — any item type, any
+ *   provider's layout — keeps its page reference as `data.htmlRender`
+ *   (`html-render.ts`), so the timeline renders the page from the slim row;
  * - tool text output is summarised to the first meaningful line, elided at
  *   {@link SLIM_SUMMARY_ELIDE_CHARS}, or to `"N lines"` when there is no
  *   single renderable line;
@@ -37,6 +40,8 @@
  * (goals §4.3): the client folds the thread's goal off the slimmed row
  * (goals §4.4), so they must reach it whole.
  */
+
+import { htmlRenderReferenceOfActivityPayload } from "./html-render.ts";
 
 /**
  * Any string in an activity payload is capped at this many UTF-8 **bytes** on
@@ -521,6 +526,16 @@ export function slimActivityPayload(payload: unknown): unknown {
     if (rawOutput) {
       projectedData.rawOutput = rawOutput;
     }
+  }
+
+  // Agent visuals (spec 2026-10-14 §1.5): an `orquester` `html_render` row
+  // keeps its page's reference whole, whichever provider's result layout it
+  // came in — the allow-list above would reduce the result to one summary
+  // line, and the UI renders the page from the slimmed row alone. A row
+  // slimmed twice (a `tool.updated` is persisted slimmed) keeps the same one.
+  const htmlRender = htmlRenderReferenceOfActivityPayload(record);
+  if (htmlRender !== undefined) {
+    projectedData.htmlRender = "htmlRender" in data ? data.htmlRender : htmlRender;
   }
 
   const next: Record<string, unknown> = { ...restamped, data: projectedData };
