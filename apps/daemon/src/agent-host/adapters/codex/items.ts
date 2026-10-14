@@ -14,6 +14,7 @@
  */
 
 import type { CanonicalItemType, RuntimeItemStatus } from "@orquester/api/agent-chat";
+import { isSessionToolsServerName } from "@orquester/api/agent-chat";
 
 import type { CodexProtocol } from "./_generated/index.ts";
 
@@ -130,7 +131,13 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
           tool: item.tool,
           arguments: item.arguments,
           readOnlyHint: item.readOnlyHint,
-          durationMs: item.durationMs
+          durationMs: item.durationMs,
+          // A session tool's result carries the reference fields its row
+          // renders from (design 2026-10-14 §1.5); slimming keeps those and
+          // summarises the rest. Other servers' results stay out, as before.
+          ...(item.result !== null && isSessionToolsServerName(item.server)
+            ? { result: item.result }
+            : {})
         }
       };
 

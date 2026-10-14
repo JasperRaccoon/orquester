@@ -12,7 +12,7 @@ import { spawn } from "node:child_process";
 import { availableParallelism, homedir, loadavg } from "node:os";
 import { join } from "node:path";
 import { readCodeStamp } from "../agent-host/support/code-stamp.ts";
-import { randomUUID } from "node:crypto";
+import { randomUUID, timingSafeEqual } from "node:crypto";
 import type {
   AgentAdapterId,
   CreateAgentChatSessionFields,
@@ -25,6 +25,7 @@ import type { AgentChatHome, RuntimePlatform } from "@orquester/config";
 import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
 import {
   AGENT_HOST_HEALTH_INTERVAL_MS,
+  agentHostAuthValue,
   agentHostRoutes,
   type AgentHostHealthResponse,
   type CreateHostThreadRequest,
@@ -116,6 +117,8 @@ export interface ChatLaunchEnv {
 export interface AgentChatServiceOptions {
   /** `<appdir>`. */
   baseDir: string;
+  /** The daemon's own unix socket, handed to the host for session-tool calls (design 2026-10-14 §1.1). */
+  daemonSocketPath?: string;
   daemonDir: string;
   platform: RuntimePlatform;
   /** cwd for the host process (the repo root the daemon runs from). */
@@ -204,7 +207,8 @@ export class AgentChatService {
         home: opts.env.HOME ?? homedir(),
         npmConfigPrefix: opts.env.NPM_CONFIG_PREFIX,
         appdir: opts.baseDir,
-        socketPath
+        socketPath,
+        ...(opts.daemonSocketPath !== undefined ? { daemonSocketPath: opts.daemonSocketPath } : {})
       }),
       nodeBin: process.execPath,
       // The daemon's own commit, read at boot; a surviving host reporting a
@@ -504,6 +508,31 @@ export class AgentChatService {
       }
       this.opts.logger?.warn?.("OpenCode server recycle failed", error);
     }
+  }
+
+  /**
+   * True only for the agent host's own bearer — the gate on the socket-only
+   * session-tool route (design 2026-10-14 §1.1). Constant-time.
+   */
+  authorizeHostRequest(authorization: string | undefined): boolean {
+    const token = this.supervisor.currentToken();
+    if (!token || authorization === undefined) return false;
+    const expected = Buffer.from(agentHostAuthValue(token), "utf8");
+    const actual = Buffer.from(authorization, "utf8");
+    return expected.length === actual.length && timingSafeEqual(expected, actual);
+  }
+
+  /**
+   * What a session-tool call's context says about its thread, from the
+   * thread's own chat tab (never from the call): its project, its cwd and the
+   * adapter it runs on. Null for a thread with no chat tab.
+   */
+  sessionToolThread(threadId: string): { projectPath: string; cwd: string; agentId: AgentAdapterId } | null {
+    const summary = this.chat.get(threadId);
+    if (!summary) return null;
+    const agentId = this.opts.registryEntry(summary.refId)?.chat?.adapter;
+    if (agentId === undefined || !isAgentAdapterId(agentId)) return null;
+    return { projectPath: summary.projectPath, cwd: summary.cwd, agentId };
   }
 
   routeDeps(): AgentChatRouteDeps {

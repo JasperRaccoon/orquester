@@ -18,7 +18,9 @@
  *   place — the size is in the structure, not in one long string;
  * - an MCP tool call keeps `type, id, tool, server, status, arguments,
  *   appContext, error, durationMs` and nothing else, and its `result` is
- *   reduced to a one-line summary;
+ *   reduced to a one-line summary — but a call to an Orquester session tool
+ *   also gains `data.sessionTool` (its bare name and the reference fields of
+ *   `SESSION_TOOL_REFERENCE_KEYS`, `session-tools.ts`);
  * - tool text output is summarised to the first meaningful line, elided at
  *   {@link SLIM_SUMMARY_ELIDE_CHARS}, or to `"N lines"` when there is no
  *   single renderable line;
@@ -37,6 +39,8 @@
  * (goals §4.3): the client folds the thread's goal off the slimmed row
  * (goals §4.4), so they must reach it whole.
  */
+
+import { projectSessionToolData } from "./session-tools.ts";
 
 /**
  * Any string in an activity payload is capped at this many UTF-8 **bytes** on
@@ -354,6 +358,13 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
   }
   if ("kind" in data) {
     projected.kind = data.kind;
+  }
+  // A session tool's name and the reference fields its UI renders from
+  // (`session-tools.ts`, design 2026-10-14 §1.5), in one place for every
+  // provider's spelling.
+  const sessionTool = projectSessionToolData(data);
+  if (sessionTool) {
+    projected.sessionTool = sessionTool;
   }
 
   return projected;

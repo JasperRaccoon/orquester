@@ -59,6 +59,7 @@ import type {
   ThreadSnapshot,
   UserInputQuestion
 } from "@orquester/api/agent-chat";
+import { SESSION_TOOLS_SERVER_NAME } from "@orquester/api/agent-chat";
 
 import type {
   AdapterContext,
@@ -137,6 +138,11 @@ import {
   type CodexServerRequest
 } from "./protocol.ts";
 import { CodexUsageTracker } from "./usage.ts";
+import {
+  codexSessionToolsConfig,
+  codexSessionToolsContext,
+  type CodexSessionToolsLaunch
+} from "./session-tools.ts";
 
 /**
  * What a resumed session persists. Codex's cursor is just `{threadId}` (§4.1),
@@ -195,6 +201,12 @@ export interface CodexSessionOptions {
   emit: (draft: RuntimeEventDraft) => void;
   /** Called once the session has settled for good, so the adapter can forget it. */
   onClosed: () => void;
+  /**
+   * The thread's `orquester` session-tool server (design 2026-10-14 §1.2) —
+   * present only when a toolkit is registered. Its credential is already in
+   * `env`; `revoke` is called once the child is gone.
+   */
+  sessionTools?: CodexSessionToolsLaunch & { revoke(): void };
 }
 
 /** What every parked server→client request carries, approval or question. */
@@ -566,6 +578,7 @@ export class CodexSession {
     const config = runtimeModeToThreadConfig(this.runtimeMode);
     const effort = selectedOptionOf(this.modelSelection, "effort");
     const serviceTier = selectedOptionOf(this.modelSelection, "serviceTier");
+    const sessionToolsContext = codexSessionToolsContext(this.options.sessionTools);
 
     const params: CodexProtocol.v2.TurnStartParams = {
       threadId: providerThreadId,
@@ -584,7 +597,10 @@ export class CodexSession {
       collaborationMode: interactionModeToCollaborationMode(input.interactionMode, {
         model: this.modelSelection.model,
         ...(effort !== undefined ? { effort } : {})
-      })
+      }),
+      // The "Orquester" instruction block (design 2026-10-14 §1.4): additive
+      // application context beside the user's input, never in it.
+      ...(sessionToolsContext !== undefined ? { additionalContext: sessionToolsContext } : {})
     };
 
     // Best-effort, before the turn (§4.5 "Turn"): an MCP server added to
@@ -1408,6 +1424,12 @@ export class CodexSession {
   // Thread open / resume
   // -------------------------------------------------------------------------
 
+  /** `{config}` attaching the `orquester` server to the thread, or nothing. */
+  private sessionToolsThreadConfig(): { config?: NonNullable<CodexProtocol.v2.ThreadStartParams["config"]> } {
+    const tools = this.options.sessionTools;
+    return tools === undefined ? {} : { config: codexSessionToolsConfig(tools) };
+  }
+
   private async openThread(): Promise<void> {
     const peer = this.requirePeer();
     const config = runtimeModeToThreadConfig(this.runtimeMode);
@@ -1424,6 +1446,7 @@ export class CodexSession {
             peer.request("thread/resume", {
               threadId: cursor.threadId,
               cwd: this.options.cwd,
+              ...this.sessionToolsThreadConfig(),
               approvalPolicy: config.approvalPolicy,
               approvalsReviewer: config.approvalsReviewer,
               sandbox: config.sandbox,
@@ -1469,6 +1492,7 @@ export class CodexSession {
       () =>
         peer.request("thread/start", {
           cwd: this.options.cwd,
+          ...this.sessionToolsThreadConfig(),
           approvalPolicy: config.approvalPolicy,
           approvalsReviewer: config.approvalsReviewer,
           sandbox: config.sandbox,
@@ -1630,8 +1654,13 @@ export class CodexSession {
     } else if (method === "mcpServer/startupStatus/updated") {
       // Pure noise on the timeline (190 across the captures), but it is the
       // one live signal that MCP is configured, which gates the before-turn
-      // reload (R3 finding 10).
-      this.sawMcpServer = true;
+      // reload (R3 finding 10). The thread's own `orquester` server is not
+      // the user's config and needs no reload (a reload keeps it — verified
+      // on 0.159.0 — but it would cost every turn a round trip for nothing).
+      const name = (params as { name?: unknown } | null)?.name;
+      if (!(this.options.sessionTools !== undefined && name === SESSION_TOOLS_SERVER_NAME)) {
+        this.sawMcpServer = true;
+      }
     }
 
     // A resume snapshot read after the thread opened may have asked for a
@@ -2114,6 +2143,8 @@ export class CodexSession {
     }
     this.exitHandled = true;
     this.disarmLivenessWatchdog();
+    // The child that held the credential is gone (design 2026-10-14 §1.2).
+    this.options.sessionTools?.revoke();
 
     const outcome = exitOutcome(reason, this.hostInitiatedClose);
     const excerpt = this.stderr.excerpt();

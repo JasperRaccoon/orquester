@@ -16,6 +16,7 @@
 import type { CanUseTool, Options as ClaudeQueryOptions } from "@anthropic-ai/claude-agent-sdk";
 import type { ModelSelection, ProviderModel, RuntimeMode } from "@orquester/api/agent-chat";
 
+import { CLAUDE_SESSION_TOOLS_ALLOW_RULE, type ClaudeSessionToolsLaunch } from "./session-tools.ts";
 import {
   CLAUDE_OPTION_IDS,
   findModel,
@@ -76,6 +77,12 @@ interface BuildClaudeQueryOptionsInput {
   /** A transcript uuid to resume at, set only by a rollback. */
   resumeSessionAt?: string;
   sessionId?: string;
+  /**
+   * The thread's `orquester` session-tool server and its instruction block
+   * (design 2026-10-14 §1.2, §1.4) — present only when a toolkit is
+   * registered. `session-tools.ts`.
+   */
+  sessionTools?: ClaudeSessionToolsLaunch;
 }
 
 interface BuiltClaudeQueryOptions {
@@ -132,6 +139,13 @@ export function buildClaudeQueryOptions(
     extraArgs["thinking-display"] = "summarized";
   }
 
+  // The "Orquester" block rides the same non-user-visible channel as the
+  // runtime instructions: the preset's `append`, never a user message.
+  const append =
+    input.sessionTools !== undefined && input.sessionTools.instructions.length > 0
+      ? `${CLAUDE_RUNTIME_INSTRUCTIONS}\n\n${input.sessionTools.instructions}`
+      : CLAUDE_RUNTIME_INSTRUCTIONS;
+
   const options: ClaudeQueryOptions = {
     cwd: input.cwd,
     ...(modelSlug !== undefined && modelSlug.length > 0 ? { model: modelSlug } : {}),
@@ -139,7 +153,7 @@ export function buildClaudeQueryOptions(
     systemPrompt: {
       type: "preset",
       preset: "claude_code",
-      append: CLAUDE_RUNTIME_INSTRUCTIONS
+      append
     },
     settingSources: ["user", "project", "local"],
     ...(effectiveEffort !== undefined ? { effort: effectiveEffort } : {}),
@@ -172,10 +186,16 @@ export function buildClaudeQueryOptions(
     // turn text names (§4.1), without an approval prompt. It is a leaf
     // directory holding only attachment files.
     additionalDirectories: [input.cwd, input.attachmentsDir],
-    // No SDK-registered MCP server: the daemon's terminal-shaped `/mcp` server
-    // is out of scope (§2). `strictMcpConfig` stays unset so the user's own
-    // `.mcp.json` keeps working.
-    mcpServers: {},
+    // The only SDK-registered MCP server is the thread's own in-process
+    // `orquester` session-tool server (design 2026-10-14 §1.2) — none without
+    // a registered toolkit. The daemon's terminal-shaped `/mcp` server stays
+    // out of scope (§2). `strictMcpConfig` stays unset so the user's own
+    // `.mcp.json` and user-scope servers keep loading as before.
+    mcpServers:
+      input.sessionTools !== undefined ? { [input.sessionTools.server.name]: input.sessionTools.server } : {},
+    // Session tools never raise an approval card (§1.3): the server-wide rule
+    // pre-approves them in every permission mode.
+    ...(input.sessionTools !== undefined ? { allowedTools: [CLAUDE_SESSION_TOOLS_ALLOW_RULE] } : {}),
     ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
     ...(input.stderr !== undefined ? { stderr: input.stderr } : {})
   };

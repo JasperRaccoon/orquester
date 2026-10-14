@@ -31,6 +31,8 @@ import type {
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
 
+import type { SessionToolsHost } from "./session-tools/index.ts";
+
 // ---------------------------------------------------------------------------
 // Operation inputs
 // ---------------------------------------------------------------------------
@@ -519,6 +521,14 @@ export interface AdapterContext {
   leftoverWorkPath?(threadId: string): string;
   /** Aborted when the host is shutting down; every adapter must honour it. */
   signal: AbortSignal;
+  /**
+   * Session tools (design `2026-10-14-agent-visuals-and-session-tools-design.md`
+   * §1): the thread-scoped `orquester` MCP server, its instruction block and
+   * its credentials. Present only when at least one toolkit is registered —
+   * without it an adapter attaches no server, adds no instructions and
+   * changes nothing it sends. `session-tools/index.ts`.
+   */
+  sessionTools?: SessionToolsHost;
 }
 
 /**

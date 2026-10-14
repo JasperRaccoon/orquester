@@ -39,6 +39,12 @@ import { appendAttachmentPathLines } from "../attachment-lines.ts";
 import { AcpConnection } from "./acp/connection.ts";
 import type { AcpFrameDirection } from "./acp/peer.ts";
 import {
+  grokSessionMcpServers,
+  grokSessionMeta,
+  isGrokSessionToolCall,
+  type GrokSessionToolsLaunch
+} from "./session-tools.ts";
+import {
   ACP_ERROR_CODES,
   AcpRpcError,
   acpFailureReason,
@@ -47,6 +53,7 @@ import {
 import type {
   InitializeResponse,
   LoadSessionResponse,
+  McpServer,
   NewSessionResponse,
   PromptResponse,
   RequestPermissionRequest,
@@ -165,6 +172,11 @@ interface GrokSessionOptions {
    * CLI reports new work and at an end that leaves it running. Best-effort.
    */
   persistTaskSessions?(launchId: string, sessions: readonly RecordedSession[]): Promise<void>;
+  /**
+   * The thread's `orquester` session-tool server (design 2026-10-14 §1.2) —
+   * present only when a toolkit is registered. `session-tools.ts`.
+   */
+  sessionTools?: GrokSessionToolsLaunch;
 }
 
 /** Why a session ended without the user: what the closing row of work left running names. */
@@ -610,7 +622,9 @@ export class GrokSession {
       // host has configured — 157 tools in ~3 s, discovered from the user's
       // `~/.claude.json` via Grok's Claude-compat layer. A chat thread does
       // not inherit that fleet by accident.
-      { cwd: this.options.cwd, mcpServers: [] },
+      // The thread's own `orquester` server is the one exception
+      // (`session-tools.ts`), with its instruction block as `_meta.rules`.
+      this.sessionSetupParams({ cwd: this.options.cwd }),
       { timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs }
     );
     this.acpSessionId = response.sessionId;
@@ -634,9 +648,21 @@ export class GrokSession {
     this.normalizer.bindSession(sessionId);
     return await this.peer().request<LoadSessionResponse>(
       "session/load",
-      { sessionId, cwd: this.options.cwd, mcpServers: [] },
+      this.sessionSetupParams({ sessionId, cwd: this.options.cwd }),
       { timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs }
     );
+  }
+
+  /** `session/new` / `session/load` params: `mcpServers` (and `_meta`) per `session-tools.ts`. */
+  private sessionSetupParams<T extends { cwd: string }>(
+    base: T
+  ): T & { mcpServers: McpServer[]; _meta?: { rules: string } } {
+    const meta = grokSessionMeta(this.options.sessionTools);
+    return {
+      ...base,
+      mcpServers: grokSessionMcpServers(this.options.sessionTools),
+      ...(meta !== undefined ? { _meta: meta } : {})
+    };
   }
 
   private peer(): AcpConnection["peer"] {
@@ -768,6 +794,14 @@ export class GrokSession {
   // ------------------------------------------------------------- approvals
 
   private async onPermissionRequest(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
+    // Session tools never raise a card (design 2026-10-14 §1.3): one-shot
+    // `allow_once`, never a grant Grok would remember for anything else.
+    if (this.options.sessionTools !== undefined && isGrokSessionToolCall(params.toolCall)) {
+      const optionId = selectPermissionOptionId(params.options, "accept");
+      if (optionId !== undefined) {
+        return { outcome: { outcome: "selected", optionId } };
+      }
+    }
     const requestType = permissionRequestType(params.toolCall);
     const grantKey = approvalGrantKey(params.toolCall);
 

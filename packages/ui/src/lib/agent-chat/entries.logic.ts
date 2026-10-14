@@ -32,7 +32,8 @@ import {
   isAgentOwnedActivity,
   isCompactionActivity,
   isPlanImplementationMessage,
-  reEmittedAssistantCopies
+  reEmittedAssistantCopies,
+  sessionToolNameOfData
 } from "@orquester/api/agent-chat";
 
 import type { WorkLogEntry, WorkLogToolLifecycleStatus } from "./contracts";
@@ -242,6 +243,12 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
   const itemType = payload?.itemType;
   if (typeof itemType === "string") {
     entry.itemType = itemType as WorkLogEntry["itemType"];
+  }
+  if (itemType === "mcp_tool_call") {
+    const sessionTool = sessionToolNameOfData(data);
+    if (sessionTool !== null) {
+      entry.sessionTool = sessionTool;
+    }
   }
   const requestKind = payload?.requestKind;
   if (typeof requestKind === "string") {

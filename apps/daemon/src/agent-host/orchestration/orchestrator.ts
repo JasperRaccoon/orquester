@@ -290,6 +290,13 @@ interface OrchestratorOptions {
    * search answers `indexed: false`, and nothing else changes.
    */
   index?: ThreadIndex;
+  /**
+   * Told whenever the host interrupts a thread's turn — the user's Stop or
+   * the stall watchdog — just before the adapter is: the session tools'
+   * calls that turn was waiting on are aborted with it (design 2026-10-14
+   * §1.1). Optional; must not throw.
+   */
+  onTurnInterrupt?: (threadId: string) => void;
 }
 
 interface ThreadSubscription {
@@ -2131,6 +2138,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           const head = headOf(runtime);
           const adapter = head ? options.adapters.get(head.adapter) : undefined;
           if (adapter) {
+            options.onTurnInterrupt?.(threadId);
             try {
               await adapter.interruptTurn(threadId, turnId);
             } catch (error) {
@@ -2442,6 +2450,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     turnId: string | undefined
   ): Promise<void> => {
     await settlePendingRequests(runtime);
+    options.onTurnInterrupt?.(runtime.id);
     try {
       await adapter.interruptTurn(runtime.id, turnId);
       runtime.watchdog?.stop();

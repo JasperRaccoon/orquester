@@ -204,6 +204,49 @@ export const agentHostRoutes = {
   recycleIdleOpenCode: "/opencode/recycle-idle"
 } as const;
 
+// ---------------------------------------------------------------------------
+// The other direction: routes the HOST calls on the DAEMON's unix socket
+// ---------------------------------------------------------------------------
+
+/**
+ * Routes the agent host calls on the daemon's own unix socket
+ * (`ORQUESTER_DAEMON_SOCK`, else `defaultSocketPath(appdir)`). Registered ONLY
+ * on the daemon's unix-socket app, never on remote HTTP, and each one checks
+ * the agent-host bearer ({@link agentHostAuthValue}) besides: the socket is
+ * trusted local control, but a session-tool call acts as a thread, and only
+ * the host may say which.
+ *
+ * Additive in both directions — `AGENT_HOST_PROTOCOL_VERSION` did not move:
+ * a daemon that predates a route answers 404, which the host turns into an
+ * error result for the one call; a host that predates it never calls.
+ */
+export const daemonRoutesForHost = {
+  /**
+   * `POST` {@link SessionToolCallRequest} → 200 with the tool's MCP
+   * `CallToolResult` (a tool's own failure is an `isError` result, still
+   * 200); 401 without the host's bearer; 404 `THREAD_NOT_FOUND` for a thread
+   * the daemon has no chat tab for; 503 while the daemon cannot run it. The
+   * call is cancelled when the host drops the connection.
+   */
+  sessionToolCall: "/api/agent-host/session-tools/call"
+} as const;
+
+/** Body of `POST /api/agent-host/session-tools/call` (design 2026-10-14 §1.1). */
+export interface SessionToolCallRequest {
+  /**
+   * The calling thread, as the HOST resolved it — from the credential the
+   * provider presented, or the in-process server the thread was launched
+   * with. Never taken from the tool's arguments.
+   */
+  threadId: string;
+  /** Unique per call (the provider's tool-call id where it sends one). */
+  callId: string;
+  /** Bare tool name. */
+  name: string;
+  /** The tool's arguments as the provider sent them; the daemon validates them. */
+  arguments: unknown;
+}
+
 /** `POST /opencode/recycle-idle` (agent profile §4.8). */
 export interface AgentHostRecycleOpenCodeResponse {
   /** OpenCode servers stopped by this request. */

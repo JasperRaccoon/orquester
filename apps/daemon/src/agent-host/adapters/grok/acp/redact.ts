@@ -46,8 +46,21 @@ interface RedactAcpOptions {
  * Keys whose value is a credential wherever it appears. `value` is NOT in the
  * list — it is far too common — so MCP env is handled structurally below.
  */
-/** Keys whose value is an environment block, in either spelling. */
-const ENV_CONTAINER_KEYS: ReadonlySet<string> = new Set(["env", "environment", "envvars", "env_vars"]);
+/**
+ * Keys whose value is an environment block, in either spelling — or an HTTP
+ * MCP server's `headers`, the same `{name, value}` shape carrying the same
+ * kind of secret (the host's own session-tool credential rides one,
+ * `session-tools.ts`).
+ */
+const ENV_CONTAINER_KEYS: ReadonlySet<string> = new Set([
+  "env",
+  "environment",
+  "envvars",
+  "env_vars",
+  "headers",
+  "http_headers",
+  "httpheaders"
+]);
 
 const SECRET_KEYS = new Set([
   "apikey",
