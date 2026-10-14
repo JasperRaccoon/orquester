@@ -77,7 +77,13 @@ export type AgentChatConnectionState =
   | "connecting"
   | "synchronized"
   | "reconnecting"
-  | "error";
+  | "error"
+  /**
+   * The host holds no such thread (its stream answered `THREAD_NOT_FOUND`):
+   * terminal — the stream stops reconnecting, and the tab says the chat no
+   * longer exists, offering to close it (or to try again).
+   */
+  | "gone";
 
 /**
  * The client's own queue of messages it has not dispatched yet. A **different
@@ -555,6 +561,14 @@ export type AgentChatTimelineRow =
       /** Offered only where `supportsConversationRollback` (§6.3). */
       revertTurnCount?: number;
       /**
+       * A user message "Fork from before this message" is offered on
+       * (thread lineage, spec 2026-10-14 §6): one that opened a started
+       * turn, or a steer into one — the host refuses an unanswered or
+       * queued prompt. Derived by `buildForkableUserMessages` (`rows.logic.ts`),
+       * not the rewind's rule: a fork needs no rollback support.
+       */
+      forkable?: true;
+      /**
        * Set only while the message reads as streaming — `isMessageStreaming`
        * (`@orquester/api/agent-chat`), never its bare flag: the log keeps
        * `streaming: true` for good on words a dead host or an unclosed agent
@@ -730,6 +744,8 @@ export interface AgentChatActions {
    */
   rememberScroll(position: Partial<RememberedTimelinePosition>): void;
   dismissErrorBanner(): void;
+  /** Connect the thread's stream again after it reported the thread `gone`. */
+  retryStream(): void;
   /**
    * Persist what the composer has not sent (§7.4).
    *

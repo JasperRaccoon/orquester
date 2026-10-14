@@ -52,6 +52,7 @@ import type {
   ThreadMessageSentPayload,
   ThreadTurnDiffCompletedPayload
 } from "./domain-events.ts";
+import { parseThreadLineage } from "./lineage.ts";
 import { openWorkOf } from "./open-work.ts";
 import { GOAL_ACTIVITY_KIND, parseGoalUpdatedPayload } from "./goal.ts";
 import type { ThreadGoal } from "./goal.ts";
@@ -1209,6 +1210,10 @@ function reduce(state: ThreadFoldState, event: DomainEvent): Mutation {
         createdAt: event.occurredAt,
         updatedAt: event.occurredAt
       };
+      // Lineage (spec 2026-10-14 §6) is additive: one that does not read is
+      // no lineage, never an unreadable thread.
+      const lineage = parseThreadLineage(payload.lineage);
+      if (lineage !== undefined) head.lineage = lineage;
       return { head };
     }
 

@@ -87,7 +87,8 @@ import type {
  * `seq`; a bumped version makes the next load discard it and fold from byte 0,
  * once.
  */
-export const FOLD_SNAPSHOT_VERSION = 6;
+// 7: `thread.created`'s `lineage` reaches the head (spec 2026-10-14 §6).
+export const FOLD_SNAPSHOT_VERSION = 7;
 
 /**
  * {@link ThreadFoldState} as JSON: without `activities` (rebuilt from
@@ -420,6 +421,8 @@ const isThreadHead = shaped<ThreadHead>({
   // either; only the shape is checked, as for the other marker.
   resumeGoalAfterRestart: optional(isTrue),
   goalHeldForHandover: optional(isTrue),
+  // Spec 2026-10-14 §6: the fold writes it only as `parseThreadLineage` read it.
+  lineage: optional(isRecord),
   createdAt: isString,
   updatedAt: isString
 });

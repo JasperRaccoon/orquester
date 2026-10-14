@@ -51,6 +51,7 @@ import type {
   AdapterContext,
   AdapterFactory,
   AgentAdapter,
+  ForkConversationInput,
   RollbackTarget,
   SendTurnInput,
   SendTurnResult,
@@ -59,7 +60,8 @@ import type {
 import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
 import { spawnProviderChild } from "../../support/spawn.ts";
 import { StderrCapture } from "../../support/stderr.ts";
-import { OpenCodeThreadSession } from "./session.ts";
+import { OpenCodeThreadSession, parseOpenCodeResume } from "./session.ts";
+import { forkOpenCodeSession, OPENCODE_FORK_NO_SESSION } from "./fork.ts";
 import { OpenCodeServerPool, type OpenCodeServerHandle } from "./server.ts";
 import { meetsMinimumOpenCodeVersion, parseSemver } from "./semver.ts";
 import { loadInventoryFromCli } from "./cli-inventory.ts";
@@ -920,6 +922,41 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       }
       return await session.rollbackThread(numTurns, target);
     });
+  }
+
+  /**
+   * Thread lineage (spec 2026-10-14 §6): `POST /session/:id/fork` on the
+   * project's own server (`fork.ts`), which the source shares with the child.
+   * A live source session is only read — its current upstream session and
+   * its rewinds' id map — never re-pointed.
+   */
+  async forkConversation(input: ForkConversationInput): Promise<{ resumeCursor: unknown }> {
+    if (input.home.kind !== "system") {
+      throw new Error(
+        `OpenCode runs one server per project under the system identity, so it cannot bind the '${input.home.kind}' account home.`
+      );
+    }
+    const live = this.sessions.get(input.sourceThreadId);
+    const source = live?.forkSource(input.cut.firstRemovedTurnId) ?? {
+      sessionId: parseOpenCodeResume(input.sourceResumeCursor)?.sessionId ?? null,
+      messageId: input.cut.firstRemovedTurnId
+    };
+    if (source.sessionId === null) {
+      throw new Error(OPENCODE_FORK_NO_SESSION);
+    }
+    const directory = resolvePath(input.cwd);
+    const server = await this.pool.acquire(projectDirFor(input));
+    try {
+      const sessionId = await forkOpenCodeSession({
+        client: server.client(directory),
+        sourceSessionId: source.sessionId,
+        firstRemovedMessageId: source.messageId,
+        directory
+      });
+      return { resumeCursor: { schemaVersion: 1, sessionId } };
+    } finally {
+      server.release();
+    }
   }
 
   async stopSession(threadId: string): Promise<void> {

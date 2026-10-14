@@ -1,8 +1,12 @@
 import React from "react";
-import { ArrowUp, Clock, GitPullRequest, Undo2, X } from "lucide-react";
+import { ArrowUp, Clock, GitFork, GitMerge, GitPullRequest, Undo2, X } from "lucide-react";
 
 import { isScheduledTaskMessage, type AttachmentRef } from "@orquester/api";
-import { parsePullRequestWatchMessage, type ParsedPullRequestWatchMessage } from "@orquester/api/agent-chat";
+import {
+  parseMergeBackMessage,
+  parsePullRequestWatchMessage,
+  type ParsedPullRequestWatchMessage
+} from "@orquester/api/agent-chat";
 
 import { FileTypeIcon } from "../../../../icons/files";
 import { cn } from "../../../../lib/cn";
@@ -169,6 +173,46 @@ function RewindToHereButton({
 }
 
 /**
+ * "Fork from here" (thread lineage, spec 2026-10-14 §6): a new chat tab whose
+ * conversation is this one's up to this message — through its turn for a
+ * reply, just before it for a prompt (whose text the fork offers as its
+ * draft). The host refuses a reply still being written and says so.
+ */
+function ForkFromHereButton({
+  messageId,
+  turnId,
+  role,
+  text
+}: {
+  messageId: string;
+  turnId: string | null;
+  role: "user" | "assistant";
+  text: string;
+}): React.ReactElement | null {
+  const { onFork } = useTimelineRowContext();
+  // One fork per click: held until the daemon answered, so a double click
+  // never opens two tabs (the view also refuses a second fork in flight).
+  const [busy, setBusy] = React.useState(false);
+  if (!onFork) return null;
+  const label = role === "user" ? "Fork from before this message" : "Fork from here";
+  return (
+    <ChatIconButton
+      size="micro"
+      label={label}
+      disabled={busy}
+      aria-busy={busy || undefined}
+      onClick={() => {
+        if (busy) return;
+        setBusy(true);
+        void Promise.resolve(onFork({ messageId, turnId, role, text })).finally(() => setBusy(false));
+      }}
+    >
+      <GitFork size={12} strokeWidth={1.8} aria-hidden />
+    </ChatIconButton>
+  );
+}
+
+/**
  * The text of a bubble, clamped past a few lines with a mask fade and a toggle
  * that names what it reveals (`shouldClampUserMessage`). With `onShowFull` the
  * text it holds is not the whole of it (a prompt the wire cut): it stays
@@ -240,16 +284,25 @@ export const UserMessageRow = React.memo(function UserMessageRow({
   // launch prompt does, rather than passing it off as typed.
   const scheduled = isScheduledTaskMessage(row.message);
   const automated = React.useMemo(() => parsePullRequestWatchMessage(text), [text]);
+  // A fork's result sent back to this thread (spec 2026-10-14 §6): its header
+  // becomes a caption, and the bubble holds the result alone.
+  const merged = React.useMemo(() => parseMergeBackMessage(text), [text]);
 
   if (automated !== null) return <PullRequestWatchMessageRow row={row} message={automated} />;
 
   return (
     <div className="group flex flex-col items-end gap-1" data-scheduled-task={scheduled ? "true" : undefined}>
       {scheduled ? <span className="pe-1 text-[11px] text-neutral-500">Scheduled task</span> : null}
+      {merged ? (
+        <span className="inline-flex items-center gap-1 pe-1 text-[11px] text-neutral-500" data-merged-back="true">
+          <GitMerge size={11} strokeWidth={1.8} aria-hidden />
+          {merged.relation === "delegate" ? "Result of delegated task" : "Merged back from fork"} “{merged.childTitle}”
+        </span>
+      ) : null}
       <div className="relative max-w-[80%] rounded-2xl bg-neutral-800 p-3 text-neutral-100">
         <AuthorHeading>{scheduled ? "Scheduled task" : "You"}</AuthorHeading>
         {attachments.length > 0 ? <AttachmentChips attachments={attachments} /> : null}
-        <ClampedBubbleText text={text} showLabel="Show full message" />
+        <ClampedBubbleText text={merged ? merged.body : text} showLabel="Show full message" />
       </div>
       <div
         className="ac-reveal ac-tabular flex w-full max-w-[80%] items-center justify-end gap-2 pe-1 text-xs"
@@ -266,6 +319,14 @@ export const UserMessageRow = React.memo(function UserMessageRow({
             text={text}
             revertTurnCount={revertTurnCount}
             onOpenChange={setRewindOpen}
+          />
+        ) : null}
+        {!ctx.readOnly && row.forkable === true ? (
+          <ForkFromHereButton
+            messageId={row.message.id}
+            turnId={row.message.turnId}
+            role="user"
+            text={text}
           />
         ) : null}
         {text.length > 0 ? <CopyButton size="micro" value={text} label="Copy message" /> : null}
@@ -425,6 +486,12 @@ export const AssistantMetaRow = React.memo(function AssistantMetaRow({
   return (
     <div className="group/assistant ac-reveal ac-tabular flex items-center gap-2 px-1 text-xs text-neutral-500">
       <span title={formatRowTimestampTooltip(row.createdAt)}>{formatRowTimestamp(row.createdAt)}</span>
+      <ForkFromHereButton
+        messageId={row.message.id}
+        turnId={row.message.turnId}
+        role="assistant"
+        text={row.message.text}
+      />
       <CopyButton size="micro" value={() => row.message.text} label="Copy response" />
     </div>
   );

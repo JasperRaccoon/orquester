@@ -46,17 +46,24 @@ function fakeTransport(): {
   fail(error: unknown, times?: number): void;
   /** Runs inside `command`, after the post is recorded and before it answers. */
   beforeAnswer(run: (() => void) | null): void;
+  /** The stream reports the thread gone (its host answered THREAD_NOT_FOUND). */
+  gone(message: string): void;
+  /** How many times the store asked the stream to connect again. */
+  retries(): number;
 } {
   const posted: Posted[] = [];
   const attempts: Posted[] = [];
   let onFrame: ((frame: AgentChatStreamFrame) => void) | null = null;
+  let onGone: ((info: { message: string }) => void) | null = null;
+  let retries = 0;
   let failures: { error: unknown; times: number } | null = null;
   let beforeAnswer: (() => void) | null = null;
 
   const transport: AgentChatTransport = {
     stream(_sessionId, _options, handlers) {
       onFrame = handlers.onFrame;
-      return { lastSeq: 0, hostInstanceId: null, resetCursor: () => {}, close: () => {} };
+      onGone = handlers.onGone ?? null;
+      return { lastSeq: 0, hostInstanceId: null, resetCursor: () => {}, retry: () => { retries += 1; }, close: () => {} };
     },
     async command(_sessionId, name, body) {
       attempts.push({ name, body: body as unknown as Record<string, unknown> });
@@ -118,7 +125,9 @@ function fakeTransport(): {
     },
     beforeAnswer: (run) => {
       beforeAnswer = run;
-    }
+    },
+    gone: (message) => onGone?.({ message }),
+    retries: () => retries
   };
 }
 
@@ -145,6 +154,20 @@ beforeEach(() => {
 });
 
 describe("the per-thread slice", () => {
+  it("a thread the host does not hold is `gone`, not reconnecting, until the user tries again", async () => {
+    const { api, fake, state } = await store();
+    fake.gone("Thread 's1' was not found.");
+    assert.equal(state().slice.connection, "gone");
+    api.getState().actions.retryStream();
+    assert.equal(fake.retries(), 1);
+    assert.equal(state().slice.connection, "connecting");
+    // Only a gone stream is retried.
+    api.getState().actions.retryStream();
+    assert.equal(fake.retries(), 1);
+    fake.push({ kind: "snapshot", thread: snapshot({ seq: 2 }) });
+    fake.push({ kind: "synchronized", hostInstanceId: "h1" });
+    assert.equal(state().slice.connection, "synchronized");
+  });
 
   it("never counts a live loop or goal as background work — the host treats both as inert", async () => {
     const row = (id: string, kind: "loop" | "goal" | "subagent") => ({

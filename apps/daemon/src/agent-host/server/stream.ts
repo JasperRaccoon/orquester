@@ -20,7 +20,9 @@ import type { ServerResponse } from "node:http";
 import {
   AGENT_CHAT_HEARTBEAT_LINE,
   AGENT_CHAT_HEARTBEAT_MS,
+  AGENT_CHAT_ERROR_CODES,
   AGENT_CHAT_STREAM_BUFFER_LIMIT_BYTES,
+  type AgentChatStreamErrorLine,
   type AgentChatStreamFrame,
   type DomainEvent,
   type HistoryImportProgress
@@ -335,12 +337,17 @@ export function createThreadStream(options: ThreadStreamOptions): ThreadStream {
     try {
       frames = await read();
     } catch (error) {
-      writeLine(
-        JSON.stringify({
-          kind: "error",
-          message: error instanceof Error ? error.message : String(error)
-        })
-      );
+      // The failure's §6.2 code rides along: THREAD_NOT_FOUND tells a client to stop
+      // reconnecting to a thread this host does not hold.
+      const code = (error as { code?: unknown } | null)?.code;
+      const line: AgentChatStreamErrorLine = {
+        kind: "error",
+        ...(typeof code === "string" && (AGENT_CHAT_ERROR_CODES as readonly string[]).includes(code)
+          ? { code: code as AgentChatStreamErrorLine["code"] }
+          : {}),
+        message: error instanceof Error ? error.message : String(error)
+      };
+      writeLine(JSON.stringify(line));
       close("host");
       return;
     }

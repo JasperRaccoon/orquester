@@ -35,6 +35,7 @@ import {
   appConfigPath,
   continueThreadsForProject,
   createDefaultAppConfig,
+  agentChatThreadForkHandoffPath,
   daemonConfigDir,
   daemonConfigPath,
   defaultSocketPath,
@@ -65,6 +66,7 @@ import {
 } from "./index/index.ts";
 import { createIngestion } from "./ingestion/index.ts";
 import { createFileLaunchConfigStore } from "./orchestration/launch-config.ts";
+import { createFileForkHandoffStore } from "./orchestration/fork.ts";
 import { createLivenessRegistry } from "./orchestration/liveness.ts";
 import { createOrchestrator, type Orchestrator } from "./orchestration/orchestrator.ts";
 import {
@@ -293,6 +295,9 @@ export async function startAgentHost(
   // ---- services ----------------------------------------------------------
   const liveness = createLivenessRegistry();
   const launchConfigs = createFileLaunchConfigStore({ rootDir: stateDir });
+  const forkHandoffs = createFileForkHandoffStore((threadId) =>
+    agentChatThreadForkHandoffPath(appdir, threadId)
+  );
   // Exactly ONE checkpoint service for the host: its git permit pool is per
   // instance, so a second one would double the concurrency §5.4 bounds.
   const checkpoints = createCheckpointService({
@@ -569,6 +574,7 @@ export async function startAgentHost(
     continuationEnabled: (projectPath) => continuationEnabledFor(appdir, projectPath, env),
     isThreadClosed: (threadId) => isThreadClosedFor(appdir, threadId),
     launchConfigs,
+    forkHandoffs,
     clock,
     ids,
     index: threadIndex,

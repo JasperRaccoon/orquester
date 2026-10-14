@@ -2063,6 +2063,13 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
       saveDraft(draft) {
         setDraft(draft);
       },
+      retryStream() {
+        if (get().slice.connection !== "gone" || stream === null) {
+          return;
+        }
+        setSlice({ connection: "connecting" });
+        stream.retry();
+      },
       dismissErrorBanner() {
         // §7.3: a dismissal is remembered per `(threadId, message)` for the
         // session, so navigating away and back cannot resurrect a banner the
@@ -2487,7 +2494,9 @@ export function createThreadStore(sessionId: string, deps: ThreadStoreDeps): Thr
             }
           },
           onReconnect: () => setSlice({ connection: "reconnecting" }),
-          onError: () => setSlice({ connection: "error" })
+          onError: () => setSlice({ connection: "error" }),
+          // The host holds no such thread: no reconnect loop, a terminal state the tab shows.
+          onGone: () => setSlice({ connection: "gone" })
         }
       );
     });

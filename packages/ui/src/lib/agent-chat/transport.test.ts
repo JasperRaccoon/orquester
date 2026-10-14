@@ -181,6 +181,57 @@ describe("the stream reader", () => {
     handle.close();
   });
 
+  it("stops reconnecting once the host says the thread does not exist, until retry()", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const gone: string[] = [];
+    const reconnects: string[] = [];
+    const handle = transport.stream("s1", {}, {
+      onFrame: () => {},
+      onGone: (info) => gone.push(info.message),
+      onReconnect: (info) => reconnects.push(info.reason)
+    });
+    const first = transporter.latest;
+    first.handlers.onData(`${JSON.stringify({ kind: "error", code: "THREAD_NOT_FOUND", message: "Thread 's1' was not found." })}\n`);
+    first.handlers.onEnd();
+    mock.timers.tick(60_000);
+    assert.deepEqual(gone, ["Thread 's1' was not found."]);
+    assert.equal(first.closed, true, "the dead stream is dropped");
+    assert.equal(transporter.streams.length, 1, "no reconnect loop");
+    assert.deepEqual(reconnects, []);
+
+    // A host from before the code says it in words only: the same.
+    handle.retry();
+    assert.equal(transporter.streams.length, 2, "retry() connects again");
+    transporter.latest.handlers.onData(`${JSON.stringify({ kind: "error", message: "Thread 's1' was not found." })}\n`);
+    mock.timers.tick(60_000);
+    assert.equal(transporter.streams.length, 2);
+    assert.equal(gone.length, 2);
+
+    // The thread exists now (a fork the daemon confirmed): the stream is live again.
+    handle.retry();
+    transporter.latest.handlers.onData(line({ kind: "synchronized", hostInstanceId: "h1" }));
+    assert.equal(handle.hostInstanceId, "h1");
+    handle.close();
+  });
+
+  it("any other error line still ends in an ordinary reconnect", () => {
+    const transporter = new FakeTransporter();
+    const transport = createAgentChatTransport(transporter);
+    mock.timers.enable({ apis: ["setTimeout"] });
+    const gone: string[] = [];
+    const handle = transport.stream("s1", {}, { onFrame: () => {}, onGone: (info) => gone.push(info.message) });
+    transporter.latest.handlers.onData(`${JSON.stringify({ kind: "error", code: "COMMAND_REJECTED", message: "EIO: read failed" })}\n`);
+    transporter.latest.handlers.onEnd();
+    mock.timers.tick(1_000);
+    assert.deepEqual(gone, []);
+    assert.equal(transporter.streams.length, 2, "an existing thread's stream comes back");
+    handle.retry();
+    assert.equal(transporter.streams.length, 2, "retry() is a no-op on a stream that is not gone");
+    handle.close();
+  });
+
   it("reports the reconnect and stops for good on close", () => {
     const transporter = new FakeTransporter();
     const transport = createAgentChatTransport(transporter);

@@ -43,6 +43,8 @@ export function resolveStatusLine(input: StatusLineInput): StatusLineModel {
   switch (input.connection) {
     case "error":
       return { tone: "danger", label: "Disconnected", live: false, pulse: false, ticking: false };
+    case "gone":
+      return { tone: "danger", label: "This chat no longer exists", live: false, pulse: false, ticking: false };
     case "reconnecting":
       return { tone: "info", label: "Reconnecting…", live: true, pulse: true, ticking: turnActive };
     case "connecting":

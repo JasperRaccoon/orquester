@@ -97,6 +97,7 @@ import { ProjectSetupError } from "../lib/project-setup-error";
 import { invalidateProjectIndex } from "../lib/project-index";
 import type { HttpClient } from "../lib/http-client";
 import type { Transporter } from "../lib/transporter";
+import { ForkRetryKeys } from "../lib/agent-chat/lineage.logic";
 import type {
   AccountSummary,
   AccountTestResult,
@@ -122,6 +123,8 @@ import type {
   DesktopAppSummary,
   DesktopHostStatus,
   DesktopSummary,
+  ForkSessionRequest,
+  ForkSessionResponse,
   GrokDeviceLinkStatus,
   LaunchAppRequest,
   ProviderUsageWindow,
@@ -239,6 +242,9 @@ function dropConversationCache(
  * one promise instead of stampeding the daemon.
  */
 const conversationScans = new Map<string, Promise<AgentConversationSummary[]>>();
+
+/** Fork commands whose outcome is unknown, re-sent on the next fork from the same point (`forkChatTab`). */
+const forkRetryKeys = new ForkRetryKeys();
 
 /**
  * Is this recents row behind the archive curtain? `isArchived` is absent on
@@ -997,6 +1003,13 @@ export interface AppState {
    * api, or a refused resume).
    */
   openTab: (request: OpenTabRequest) => Promise<SessionSummary | undefined>;
+  /**
+   * Thread lineage (spec 2026-10-14 §6): fork a chat tab from a message into a
+   * new tab of the same project, and open it. Rejects with the daemon's
+   * refusal (an `ApiError`) — a reply still being written, a host that needs
+   * its update — for the caller to show.
+   */
+  forkChatTab: (sessionId: string, request: ForkSessionRequest) => Promise<ForkSessionResponse>;
   /** Dismiss the transient refused-resume notice. */
   dismissResumeError: () => void;
   /** Raise the chat provider auth-error toast (§7.7). Replaces any current one. */
@@ -2467,6 +2480,42 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
   },
 
+  forkChatTab: async (sessionId, request) => {
+    const api = get().api;
+    if (!api) {
+      throw new Error("Not connected to Orquester.");
+    }
+    // The idempotency key: a retried POST of this same fork answers the same tab. A fork whose
+    // outcome was unknown (the host unavailable, no answer) leaves its id for the next click on
+    // the same point, so that retry converges on the fork the daemon may already hold.
+    const retryKey = ForkRetryKeys.keyFor(sessionId, request);
+    const commandId =
+      request.commandId ??
+      forkRetryKeys.commandIdFor(
+        retryKey,
+        () =>
+          (globalThis as { crypto?: { randomUUID?: () => string } }).crypto?.randomUUID?.() ??
+          `fork-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+      );
+    let result: ForkSessionResponse;
+    try {
+      result = await api.forkSession(sessionId, { ...request, commandId });
+    } catch (error) {
+      forkRetryKeys.settle(retryKey, commandId, error);
+      throw error;
+    }
+    forkRetryKeys.settle(retryKey, commandId, null);
+    const session = result.session;
+    set((state) => ({
+      sessions: upsertSession(state.sessions, session),
+      activeTabByProject:
+        state.currentProject?.path === session.projectPath
+          ? { ...state.activeTabByProject, [session.projectPath]: session.id }
+          : state.activeTabByProject
+    }));
+    return result;
+  },
+
   dismissResumeError: () => set({ resumeError: null }),
 
   startFreshFromResumeError: async () => {
@@ -2741,6 +2790,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     const session = get().sessions.find((s) => s.id === id);
     const isSession = Boolean(session);
+    // A fork tab the user closes (a stray one included) frees the fork ids kept for its point.
+    if (session) forkRetryKeys.forgetTab(session);
     const isBrowser = !isSession && get().browsers.some((b) => b.id === id);
     set((state) => {
       const next = isSession
@@ -3320,6 +3371,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
     } else if (event.type === "session.closed") {
       const { id } = event.payload as { id: string };
+      const closed = get().sessions.find((s) => s.id === id);
+      if (closed) forkRetryKeys.forgetTab(closed);
       set((state) => removeSession(state, id));
     }
   }

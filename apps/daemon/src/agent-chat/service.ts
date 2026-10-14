@@ -10,17 +10,20 @@
 
 import { spawn } from "node:child_process";
 import { availableParallelism, homedir, loadavg } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { readCodeStamp } from "../agent-host/support/code-stamp.ts";
-import { randomUUID, timingSafeEqual } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import type {
   AgentAdapterId,
   CreateAgentChatSessionFields,
   CreateSessionRequest,
+  ForkSessionRequest,
+  ForkSessionResponse,
   RegistryEntry,
-  SessionSummary, AgentAccount } from "@orquester/api";
+  SessionSummary, AgentAccount,
+  ThreadLineage } from "@orquester/api";
 import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
-import { CONVERSATION_ALREADY_OPEN } from "@orquester/api/agent-chat";
+import { CONVERSATION_ALREADY_OPEN, forkTitle } from "@orquester/api/agent-chat";
 import type { AgentChatHome, RuntimePlatform } from "@orquester/config";
 import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
 import {
@@ -29,6 +32,8 @@ import {
   agentHostRoutes,
   type AgentHostHealthResponse,
   type CreateHostThreadRequest,
+  type ForkHostThreadRequest,
+  type ForkHostThreadResponse,
   type SetThreadIdentityRequest
 } from "../agent-host/host-protocol.ts";
 import { Readable, Transform } from "node:stream";
@@ -182,8 +187,80 @@ function chatFields(req: CreateAgentChatRequest): Partial<CreateAgentChatSession
     ...(req.modelSelection !== undefined ? { modelSelection: req.modelSelection } : {}),
     ...(req.runtimeMode !== undefined ? { runtimeMode: req.runtimeMode } : {}),
     ...(req.resume !== undefined ? { resume: req.resume } : {}),
+    ...(req.lineage !== undefined ? { lineage: req.lineage } : {}),
     ...(req.chat ?? {})
   };
+}
+
+/**
+ * The fork tab's id a `commandId` names on a parent: a UUID-shaped digest, so a repeat of the
+ * same fork — even after a daemon restart forgot the first — lands on the same tab and thread.
+ */
+export function forkIdFor(parentId: string, commandId: string): string {
+  const hex = createHash("sha256").update(`fork\u0000${parentId}\u0000${commandId}`).digest("hex");
+  // RFC 4122 layout, version nibble 5 and the variant bits, as a name-based UUID has.
+  const variant = ((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
+}
+
+/** The host never answered a fork: whether it created the child is unknown. */
+class ForkOutcomeUnknown extends Error {
+  constructor() {
+    super("The agent host did not answer the fork.");
+  }
+}
+
+/** How many fork keys {@link AgentChatService.forkSession} remembers. */
+const FORK_RECORDS = 512;
+
+/** A fork request's cut, for telling a repeat from a reuse of its key. */
+function forkFingerprint(req: ForkSessionRequest): string {
+  const body = (req ?? {}) as Record<string, unknown>;
+  return JSON.stringify([body.messageId ?? null, body.turnId ?? null, body.role ?? null]);
+}
+
+/** The fork point a recorded {@link forkFingerprint} names, for re-sending the fork. */
+function forkTargetOf(fingerprint: string | undefined): ForkHostThreadRequest["fork"] {
+  try {
+    const [messageId, turnId, role] = JSON.parse(fingerprint ?? "[]") as unknown[];
+    return {
+      ...(typeof messageId === "string" ? { messageId } : {}),
+      ...(typeof turnId === "string" ? { turnId } : {}),
+      ...(role === "user" || role === "assistant" ? { role } : {})
+    };
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * After a restart, with only the tab left to go by: does its recorded fork point match the
+ * request's? A message names it; else a turn; else "the latest finished turn", which records none.
+ */
+function sameForkPoint(tab: SessionSummary, recorded: string | undefined, req: ForkSessionRequest): boolean {
+  // The tab records what its key asked for: compared exactly — message, turn, role, or "latest".
+  if (recorded !== undefined) return recorded === forkFingerprint(req);
+  // A tab from before that record: its resolved fork point is all there is.
+  const point = tab.lineage?.forkedFrom;
+  if (typeof req.messageId === "string") return point?.messageId === req.messageId;
+  if (typeof req.turnId === "string") return point === undefined || point.turnId === req.turnId;
+  return point === undefined;
+}
+
+function forkConflict(what: string): ChatSessionError {
+  return new ChatSessionError(
+    `That commandId ${what}: send a new commandId to fork again.`,
+    "COMMAND_ID_CONFLICT"
+  );
+}
+
+/** A fork request's optional strings: absent, or a non-blank string of at most `max` characters. */
+function optionalField(value: unknown, name: string, max: number): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || value.length > max || !/\S/.test(value)) {
+    throw new ChatSessionError(`${name} must be a non-empty string of at most ${max} characters.`, "INVALID_COMMAND");
+  }
+  return value;
 }
 
 export class AgentChatService {
@@ -201,6 +278,14 @@ export class AgentChatService {
   constructor(private readonly opts: AgentChatServiceOptions) {
     const socketPath = agentHostSocketPath(opts.baseDir, opts.platform);
     this.chat = new ChatSessionManager({ requestPersist: () => this.requestPersist() });
+    // A closed fork's key never answers with it again (`forkSession`).
+    this.chat.lifecycle.on("closed", ({ id, rolledBack }: { id: string; rolledBack?: boolean }) => {
+      // A fork's own rollback is no close of the user's: its key may fork again.
+      if (rolledBack) return;
+      for (const record of this.forkRecords.values()) {
+        if (record.childId === id) record.closed = true;
+      }
+    });
     this.client = new AgentHostClient({
       socketPath,
       token: () => this.supervisor.currentToken()
@@ -328,9 +413,12 @@ export class AgentChatService {
     // Clear the durable delete queue as soon as a host is adopted, and again on
     // every later adoption (a respawn or the drain-restart).
     await this.replayPendingThreadDeletes();
+    // …and settle every fork tab whose host answer was lost (`reconcileForks`) the same way.
+    await this.reconcileForks();
     this.supervisor.onChange((status) => {
       if (status.state === "healthy") {
         void this.replayPendingThreadDeletes();
+        void this.reconcileForks();
       }
     });
     this.summary.start();
@@ -341,12 +429,19 @@ export class AgentChatService {
     this.healthTimer = setInterval(() => {
       this.supervisor
         .checkHealth()
-        .catch((error) => this.opts.logger?.error?.("agent host health check failed", error));
+        .catch((error) => this.opts.logger?.error?.("agent host health check failed", error))
+        // A host that stayed healthy but answered a fork too late gets no "healthy" change:
+        // its unconfirmed fork tabs are settled on the next tick. No I/O when there are none.
+        .then(() => this.reconcileForks());
     }, AGENT_HOST_HEALTH_INTERVAL_MS);
     this.healthTimer.unref?.();
   }
 
+  /** Set by {@link stop}: a health tick or status change after it reconciles nothing. */
+  private stopped = false;
+
   async stop(): Promise<void> {
+    this.stopped = true;
     if (this.healthTimer) {
       clearInterval(this.healthTimer);
       this.healthTimer = null;
@@ -608,6 +703,27 @@ export class AgentChatService {
     if (!owner.ok) {
       throw new ChatSessionError(owner.message, owner.code);
     }
+    // Spec 2026-10-14 §6: a delegate names its parent — a chat tab of the same project. A fork
+    // carries the parent's conversation and is created by `forkSession`, never here.
+    let lineage: ThreadLineage | undefined;
+    if (fields.lineage !== undefined) {
+      const parentId = fields.lineage?.parentThreadId;
+      const parent = typeof parentId === "string" ? this.chat.get(parentId) : undefined;
+      if (fields.lineage?.relation !== "delegate" || !parent) {
+        throw new ChatSessionError(
+          "lineage must name a chat session as parent, with relation \"delegate\".",
+          "INVALID_LINEAGE"
+        );
+      }
+      // Compared as the daemon resolves a project everywhere else — realpath inside the
+      // workspaces sandbox, else a plain resolve — so `/w/p/` and `/w/./p` are one project.
+      if (!(await this.sameProject(parent.projectPath, req.projectPath ?? ""))) {
+        throw new ChatSessionError("A delegated session opens in its parent's project.", "INVALID_LINEAGE");
+      }
+      // The child's tab groups with its parent's: the parent's own spelling of the path.
+      req = { ...req, projectPath: parent.projectPath };
+      lineage = { parentThreadId: parent.id, relation: "delegate", createdAt: new Date().toISOString() };
+    }
     if (fields.resume && !isUsableConversationId(fields.resume.conversationId)) {
       throw new ChatSessionError(
         "That conversation cannot be resumed with this agent.",
@@ -658,7 +774,11 @@ export class AgentChatService {
       order,
       accountId,
       home,
-      ...(owner.owner ? { owner: owner.owner } : {})
+      ...(owner.owner ? { owner: owner.owner } : {}),
+      ...(lineage ? { lineage } : {}),
+      // Announced before the host has the thread: a view that opens its stream now must show
+      // it as starting, not as gone (`SessionSummary.chatPending`).
+      pending: true
     });
 
     const body: CreateHostThreadRequest = {
@@ -677,7 +797,8 @@ export class AgentChatService {
       launchEnv,
       ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
       ...(homePath ? { homePath } : {}),
-      ...(fields.resume ? { resume: fields.resume } : {})
+      ...(fields.resume ? { resume: fields.resume } : {}),
+      ...(lineage ? { lineage } : {})
     };
     try {
       const response = await this.client.json<{
@@ -709,8 +830,375 @@ export class AgentChatService {
       }
       throw new ChatSessionError(error instanceof Error ? error.message : String(error));
     }
-    return summary;
+    // The host has the thread: said, so a view waiting on it connects again.
+    return this.chat.confirmCreated(id) ?? summary;
   }
+
+  /** Two project paths name one project once resolved (realpath in the sandbox, else `resolve`). */
+  private async sameProject(a: string, b: string): Promise<boolean> {
+    if (a.length === 0 || b.length === 0) return a === b;
+    const canonical = async (path: string): Promise<string> =>
+      (await this.opts.resolveTrustedProjectDir(path).catch(() => null)) ?? resolvePath(path);
+    const [left, right] = await Promise.all([canonical(a), canonical(b)]);
+    return left === right;
+  }
+
+  /**
+   * Thread lineage (spec 2026-10-14 §6): a new chat tab in the parent's project, with the
+   * parent's agent, account, model and options, whose conversation is the parent's up to a
+   * message. The order mirrors {@link createSession}: everything that can refuse first, then the
+   * tab record, then the host's `POST /threads/:parentId/fork` — and a refusal rolls the tab back.
+   *
+   * The account is the PARENT's, pinned (the system identity included): a provider's resume
+   * identity stays in the home that created it, so a parent whose account is gone is refused
+   * rather than forked into another home.
+   */
+  async forkSession(parentId: string, req: ForkSessionRequest, order: number): Promise<ForkSessionResponse> {
+    const commandId = optionalField((req as Record<string, unknown> | undefined)?.commandId, "commandId", 200);
+    if (commandId === undefined) return this.forkSessionNow(parentId, req, order, randomUUID());
+    const fingerprint = forkFingerprint(req);
+    const key = `${parentId}\u0000${commandId}`;
+    const id = forkIdFor(parentId, commandId);
+    // COMMAND_ID_CONFLICT, as a §6.2 command answers a reused id: the same key with another fork
+    // point, or a key whose fork was closed meanwhile — never the first fork in its place, and
+    // never a closed one back.
+    const record = this.forkRecords.get(key);
+    if (record) {
+      if (record.fingerprint !== fingerprint) throw forkConflict("names another fork point");
+      if (record.closed) throw forkConflict("opened a fork that was closed since");
+    } else {
+      if (this.chat.pendingThreadDeletes().includes(id)) throw forkConflict("opened a fork that was closed since");
+      const existing = this.chat.get(id);
+      if (existing && !sameForkPoint(existing, this.chat.forkFingerprint(id), req)) {
+        throw forkConflict("names another fork point");
+      }
+    }
+    // Idempotent by `commandId` (the receipts pattern): a repeat while the first is in flight
+    // shares its answer, and a repeat after it landed — a daemon restart included — finds the
+    // tab under the id the key names and has the host answer for it again (the host's fork of
+    // an existing child is idempotent), so a double submit never opens a second fork.
+    const running = this.forksInFlight.get(key);
+    if (running) return running;
+    // A reconcile of this very tab is asking the host: its outcome (confirmed, or taken back)
+    // decides what this repeat finds, so it is waited for and the request read afresh.
+    const confirming = this.forksConfirming.get(id);
+    if (confirming) {
+      await confirming;
+      return this.forkSession(parentId, req, order);
+    }
+    this.rememberFork(key, { fingerprint, childId: id, closed: false });
+    const run = this.forkSessionNow(parentId, req, order, id, fingerprint)
+      .catch((error: unknown) => {
+        // A fork that never landed leaves the key free for a retry.
+        if (!this.chat.has(id)) this.forkRecords.delete(key);
+        throw error;
+      })
+      .finally(() => {
+        this.forksInFlight.delete(key);
+      });
+    this.forksInFlight.set(key, run);
+    return run;
+  }
+
+  /**
+   * Fork keys this daemon has seen (`parent\0commandId` → its fork point and tab), so a reused
+   * key is answered truthfully: the same fork, or COMMAND_ID_CONFLICT. Bounded; after a restart
+   * the tab's own lineage and the pending deletes stand in for it.
+   */
+  private readonly forkRecords = new Map<string, { fingerprint: string; childId: string; closed: boolean }>();
+
+  private rememberFork(key: string, record: { fingerprint: string; childId: string; closed: boolean }): void {
+    this.forkRecords.delete(key);
+    this.forkRecords.set(key, record);
+    if (this.forkRecords.size > FORK_RECORDS) {
+      this.forkRecords.delete(this.forkRecords.keys().next().value as string);
+    }
+  }
+
+  /** Forks in flight by `parentId\0commandId`, for {@link forkSession}'s idempotency. */
+  private readonly forksInFlight = new Map<string, Promise<ForkSessionResponse>>();
+
+  private async forkSessionNow(
+    parentId: string,
+    req: ForkSessionRequest,
+    order: number,
+    id: string,
+    /** A keyed fork's fork point, recorded on its tab; absent for an unkeyed fork. */
+    fingerprint?: string
+  ): Promise<ForkSessionResponse> {
+    // Marked from the first moment, so a reconcile never asks about (or takes back) this tab
+    // while its own fork decides it.
+    this.forkChildrenInFlight.add(id);
+    try {
+      return await this.forkSessionAttempt(parentId, req, order, id, fingerprint);
+    } finally {
+      this.forkChildrenInFlight.delete(id);
+    }
+  }
+
+  private async forkSessionAttempt(
+    parentId: string,
+    req: ForkSessionRequest,
+    order: number,
+    id: string,
+    fingerprint: string | undefined
+  ): Promise<ForkSessionResponse> {
+    const keyed = fingerprint !== undefined;
+    const parent = this.chat.get(parentId);
+    if (!parent) {
+      throw new ChatSessionError("No chat session with that id.", "THREAD_NOT_FOUND");
+    }
+    const body = (req ?? {}) as Record<string, unknown>;
+    const messageId = optionalField(body.messageId, "messageId", 200);
+    const turnId = optionalField(body.turnId, "turnId", 200);
+    const role = body.role === undefined || body.role === null ? undefined : body.role;
+    if (role !== undefined && role !== "user" && role !== "assistant") {
+      throw new ChatSessionError('role must be "user" or "assistant".', "INVALID_COMMAND");
+    }
+    const title = optionalField(body.title, "title", 200)?.trim();
+    const entry = this.opts.registryEntry(parent.refId);
+    if (!entry?.resolvedBin || !entry.enabled || !entry.chat?.adapter) {
+      throw new ChatSessionError(`Registry entry "${parent.refId}" is not available.`);
+    }
+    const adapter = entry.chat.adapter;
+    if (!this.supervisor.isHealthy()) {
+      throw this.hostUnavailable();
+    }
+    const parentAccount = parent.accountId ?? "";
+    let launch: ChatLaunchEnv | null = null;
+    try {
+      launch = await this.opts.resolveLaunchEnv(entry, { accountId: parentAccount || SYSTEM_ACCOUNT_ID });
+    } catch (error) {
+      throw error instanceof ChatSessionError
+        ? error
+        : new ChatSessionError(error instanceof Error ? error.message : String(error));
+    }
+    if ((launch?.accountId ?? "") !== parentAccount) {
+      throw new ChatSessionError(
+        "The account this conversation runs under is no longer available, so it cannot be forked.",
+        "SESSION_UNAVAILABLE"
+      );
+    }
+    const home = resolveHomeKind(parentAccount);
+    const launchEnv: Record<string, string> = { ...entry.env, ...(launch?.env ?? {}) };
+    const homePath = launchEnv[ACCOUNT_HOME_ENV_VAR[adapter]];
+    await this.prepareHome(adapter, launchEnv, parent.projectPath);
+
+    const existing = this.chat.get(id);
+    if (existing && existing.lineage?.parentThreadId !== parentId) {
+      throw forkConflict("already names another session");
+    }
+    const summary = existing ?? this.chat.create({
+      id,
+      refId: parent.refId,
+      title: title || forkTitle(parent.title),
+      projectPath: parent.projectPath,
+      cwd: parent.cwd,
+      order,
+      accountId: parentAccount,
+      home,
+      // Provisional until the host answers with the fork point it resolved.
+      lineage: { parentThreadId: parentId, relation: "fork", createdAt: new Date().toISOString() },
+      // Recorded for every fork (an unkeyed one too): it tells a keyed repeat from a reuse, and
+      // it is the cut a reconcile re-sends (`confirmFork`).
+      forkFingerprint: fingerprint ?? forkFingerprint(req),
+      // Until the host's answer is in: a daemon gone before it, or an answer lost, leaves the
+      // tab for `reconcileForks` to settle with the host.
+      forkUnconfirmed: true
+    });
+    const request: ForkHostThreadRequest = {
+      threadId: id,
+      projectPath: summary.projectPath,
+      cwd: summary.cwd,
+      title: summary.title,
+      refId: parent.refId,
+      accountId: parentAccount,
+      home,
+      // The parent's, chosen by the host from its head.
+      modelSelection: undefined,
+      runtimeMode: undefined,
+      launchEnv,
+      ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
+      ...(homePath ? { homePath } : {}),
+      fork: {
+        ...(messageId !== undefined ? { messageId } : {}),
+        ...(turnId !== undefined ? { turnId } : {}),
+        ...(role !== undefined ? { role } : {})
+      }
+    };
+    let result: ForkHostThreadResponse;
+    try {
+      const response = await this.client.json<
+        ForkHostThreadResponse & { error?: { code: string; message: string } }
+      >("POST", agentHostRoutes.forkThread(parentId), request);
+      if (response.status >= 500 || (response.status < 400 && !response.value?.head)) {
+        // The host could not answer — or answered a success without the child's head: whether
+        // it forked is unknown (a success says it may well hold the child), never a refusal.
+        throw new ForkOutcomeUnknown();
+      }
+      if (response.status >= 400) {
+        const message = response.value?.error?.message ?? "The agent host refused the fork.";
+        // A host from before forks answers its generic route miss until its drain-restart.
+        if (response.status === 404 && message.startsWith("No route for")) {
+          throw new ChatSessionError(
+            "Forking needs the updated agent host, which starts once no turn is running. Try again then.",
+            "COMMAND_REJECTED"
+          );
+        }
+        const code = response.value?.error?.code;
+        throw new ChatSessionError(
+          message,
+          code === "THREAD_NOT_FOUND" || code === "INVALID_COMMAND" || code === "COMMAND_REJECTED"
+            ? code
+            : "SESSION_UNAVAILABLE"
+        );
+      }
+      result = response.value!;
+    } catch (error) {
+      // Only a tab this call created is rolled back — a repeat leaves the first one's as it was —
+      // and how depends on what the host did:
+      // - it refused (a 4xx: nothing was created): the tab goes without a host delete, and as no
+      //   close of the user's, so a retry under the same key forks afresh;
+      // - its answer never came (unknown outcome: it may hold the child): under a key the tab
+      //   STAYS, so the caller's retry converges on it — the host answers an existing child —
+      //   and no queued delete can later kill a child that retry then returns; without a key
+      //   nothing can retry, so the tab goes everywhere, host thread included.
+      const definite = error instanceof ChatSessionError;
+      if (!existing) {
+        if (definite) this.chat.discard(id);
+        else if (!keyed) this.chat.close(id);
+      }
+      if (definite) throw error;
+      if (error instanceof HostUnavailableError || error instanceof ForkOutcomeUnknown) throw this.hostUnavailable();
+      throw new ChatSessionError(error instanceof Error ? error.message : String(error), "HOST_UNAVAILABLE");
+    }
+    const forked = this.chat.setLineage(id, result.lineage) ?? summary;
+    return { session: forked, lineage: result.lineage, strategy: result.strategy };
+  }
+
+  /** Fork tabs whose host fork this daemon is asking for right now ({@link forkSessionNow}). */
+  private readonly forkChildrenInFlight = new Set<string>();
+  /** Fork tabs a {@link reconcileForks} is confirming with the host right now. */
+  private readonly forksConfirming = new Map<string, Promise<void>>();
+  private reconciling: Promise<void> | null = null;
+
+  /**
+   * Settle every fork tab the host has not answered for (`forkUnconfirmed`): its answer was
+   * lost (the socket went, a 5xx, a timeout) or the daemon went before it came. The host is
+   * asked — `confirmOnly`, so nothing is created now — whether it holds the child:
+   * - it does (or its fork finishes meanwhile): the tab is confirmed and takes the lineage the
+   *   host resolved, fork point included;
+   * - it refuses (no such child, never created): the tab is taken back as a rollback — no host
+   *   delete (there is nothing to delete, and no queued delete may later kill a child a retry
+   *   creates), and the fork key may fork again;
+   * - no answer again: the tab stays unconfirmed for the next attempt.
+   * Run at host adoption, on every return to healthy and on each health tick; a fork in flight
+   * in this daemon is left to its own answer.
+   */
+  reconcileForks(): Promise<void> {
+    if (this.stopped) return Promise.resolve();
+    if (this.reconciling) return this.reconciling;
+    const run = (async () => {
+      if (!this.supervisor.isHealthy()) return;
+      for (const id of this.chat.unconfirmedForks()) {
+        if (this.stopped) return;
+        if (this.forkChildrenInFlight.has(id) || this.forksConfirming.has(id)) continue;
+        const confirm = this.confirmFork(id).finally(() => this.forksConfirming.delete(id));
+        this.forksConfirming.set(id, confirm);
+        await confirm;
+      }
+    })()
+      // Never a rejection: callers fire this from timers and status changes.
+      .catch((error: unknown) => this.opts.logger?.warn?.("agent chat: fork reconcile failed; will retry", error))
+      .finally(() => {
+        this.reconciling = null;
+      });
+    this.reconciling = run;
+    return run;
+  }
+
+  /** One unconfirmed fork tab, asked of the host ({@link reconcileForks}). Never throws. */
+  private async confirmFork(id: string): Promise<void> {
+    const tab = this.chat.get(id);
+    const parentId = tab?.lineage?.relation === "fork" ? tab.lineage.parentThreadId : undefined;
+    if (!tab || parentId === undefined) return;
+    // The WHOLE original request — its cut and its launch environment, recomposed as the fork
+    // composed them — with `confirmOnly`. A host that knows `confirmOnly` creates nothing; one
+    // that does not (only builds of this feature before it) forks exactly as the lost request
+    // asked, which converges just as the same key's retry does.
+    const accountId = tab.accountId ?? "";
+    let launchFields: Pick<ForkHostThreadRequest, "launchEnv" | "unsetEnv" | "homePath"> = {};
+    try {
+      const entry = this.opts.registryEntry(tab.refId);
+      const adapter = entry?.chat?.adapter;
+      if (entry && adapter) {
+        const launch = await this.opts.resolveLaunchEnv(entry, { accountId: accountId || SYSTEM_ACCOUNT_ID });
+        if ((launch?.accountId ?? "") === accountId) {
+          const launchEnv: Record<string, string> = { ...entry.env, ...(launch?.env ?? {}) };
+          const homePath = launchEnv[ACCOUNT_HOME_ENV_VAR[adapter]];
+          await this.prepareHome(adapter, launchEnv, tab.projectPath);
+          launchFields = {
+            launchEnv,
+            ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
+            ...(homePath ? { homePath } : {})
+          };
+        }
+      }
+    } catch (error) {
+      // The account went: a host that knows `confirmOnly` needs none of it to answer.
+      this.opts.logger?.warn?.(`agent chat: no launch environment for fork ${id}'s reconcile`, error);
+    }
+    const request: ForkHostThreadRequest = {
+      threadId: id,
+      projectPath: tab.projectPath,
+      cwd: tab.cwd,
+      title: tab.title,
+      refId: tab.refId,
+      accountId,
+      home: resolveHomeKind(accountId),
+      modelSelection: undefined,
+      runtimeMode: undefined,
+      ...launchFields,
+      fork: forkTargetOf(this.chat.forkFingerprint(id)),
+      confirmOnly: true
+    };
+    let response: {
+      status: number;
+      value: (ForkHostThreadResponse & { error?: { code?: string; message?: string } }) | null;
+    };
+    try {
+      response = await this.client.json<ForkHostThreadResponse & { error?: { code?: string; message?: string } }>(
+        "POST",
+        agentHostRoutes.forkThread(parentId),
+        request
+      );
+    } catch (error) {
+      this.opts.logger?.warn?.(`agent chat: could not confirm fork ${id} with the host; will retry`, error);
+      return;
+    }
+    // A fork in flight for this tab took over meanwhile: its answer is the one that counts.
+    if (this.forkChildrenInFlight.has(id) || !this.chat.has(id)) return;
+    if (response.status < 400 && response.value?.head) {
+      this.chat.setLineage(id, response.value.lineage ?? response.value.head.lineage ?? tab.lineage!);
+      return;
+    }
+    // Only "no such thread" — the host's own 404, or an older host's route miss — says the child
+    // was never created. Any other refusal (a child still being deleted, a body it would not
+    // take) says nothing of the kind: the tab stays unconfirmed for a later reconcile.
+    if (response.status === 404 && response.value?.error?.code === "THREAD_NOT_FOUND") {
+      this.opts.logger?.warn?.(
+        `agent chat: the host holds no fork ${id} (${response.value.error.message ?? "not found"}); its tab is taken back`
+      );
+      this.chat.discard(id);
+      return;
+    }
+    if (response.status < 500) {
+      this.opts.logger?.warn?.(
+        `agent chat: the host would not confirm fork ${id} (${response.status} ${response.value?.error?.message ?? ""}); will retry`
+      );
+    }
+  }
+
 
   /**
    * Re-point an existing chat thread at another managed account (§3.4's

@@ -8,6 +8,7 @@ import { ContextMenu, type ContextMenuItem } from "../ui/context-menu";
 import { SessionStatusDot } from "../ui/session-status-dot";
 import { isLegacyAgentTerminal } from "../../lib/session-kind";
 import { WorkflowChip } from "../workflows/WorkflowChip";
+import { LineageMark } from "../agent-chat/LineageMark";
 import { desktopTabTitle } from "../../lib/desktop-state";
 import {
   isSessionTab,
@@ -27,6 +28,19 @@ import {
  *
  * Its own component so only this tab re-renders when the mark flips.
  */
+/**
+ * A forked or delegated chat's mark (thread lineage, spec 2026-10-14 §6),
+ * titled with its parent's current title. Its own component, so only this tab
+ * re-renders when a title changes.
+ */
+const TabLineageMark: React.FC<{ session: ReturnType<typeof tabSession> }> = ({ session }) => {
+  const lineage = session?.lineage;
+  const parentTitle = useAppStore((s) =>
+    lineage ? s.sessions.find((candidate) => candidate.id === lineage.parentThreadId)?.title : undefined
+  );
+  return <LineageMark lineage={lineage} parentTitle={parentTitle} className="mr-0.5" />;
+};
+
 const TabUnreadMark: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   const unread = useThreadUnread(sessionId);
   if (!unread) {
@@ -222,6 +236,7 @@ export const TabStrip: React.FC = () => {
             )}
           >
             <span className="text-neutral-500">{icon}</span>
+            {tab.type === "agent-chat" ? <TabLineageMark session={session} /> : null}
             {tab.type === "agent-chat" ? <TabUnreadMark sessionId={tab.id} /> : null}
             {editing ? (
               <TabRenameInput

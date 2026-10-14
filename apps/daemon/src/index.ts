@@ -111,6 +111,8 @@ import { AgentChatService, ChatSessionError, type CreateAgentChatRequest } from 
 import { INVALID_OWNER, parseSessionOwner } from "./agent-chat/owner.ts";
 import { ChatAwareSessionManager } from "./agent-chat/session-router.ts";
 import { AGENT_VISUAL_ROUTE_PATTERN, registerAgentChatRoutes } from "./agent-chat/proxy-routes.ts";
+import { LineageService } from "./agent-chat/lineage.ts";
+import { registerLineageRoutes } from "./agent-chat/lineage-routes.ts";
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { RecentProjectsService, describeProjectPath } from "./recent-projects";
@@ -237,7 +239,8 @@ import {
   usageStateFile,
   workspacesMetaPath,
   pullRequestWatchesPath,
-  isValidName
+  isValidName,
+  agentChatMergeOutboxFile
 } from "@orquester/config";
 import { CHROMIUM_FAMILY_IDS, TEMPLATES } from "@orquester/registry";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
@@ -618,6 +621,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       onRename: (id, title, opts) => agentChat.renameThread(id, title, opts)
     }
   );
+  // Thread lineage (spec 2026-10-14 §6): the merge-back queue survives a restart; its delivery
+  // starts once the daemon's own API exists (`attachApi` below).
+  const lineage = new LineageService({
+    sessions: agentChat.chat,
+    outboxFile: agentChatMergeOutboxFile(paths.baseDir),
+    logger: console,
+    // Both tabs of a merge show it while the parent has not taken it (GUI and MCP).
+    setPendingMerges: (sessionId, merges) => agentChat.chat.setPendingMerges(sessionId, merges)
+  });
+  await lineage.load();
   const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);
   const git = new GitService();
   const todos = new TodoListManager(resolved.todosIndexFile, console);
@@ -911,7 +924,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     void removeSessionUploads(resolved.daemonDir, s.id);
   });
   sessions.lifecycle.on("closed", (payload: { id: string }) => {
-    broadcaster.publish("sessions", "session.closed", payload);
+    // `{id}` only, as the wire's `session.closed` names it: the chat manager's internal
+    // `rolledBack` (a fork's own rollback) is the daemon's business, not a client's.
+    broadcaster.publish("sessions", "session.closed", { id: payload.id });
     void removeSessionUploads(resolved.daemonDir, payload.id);
   });
   sessions.lifecycle.on("updated", (s: SessionSummary) =>
@@ -1126,6 +1141,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     agentProfile,
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
     scheduledTasks,
+    lineage,
     workflowProjects: workflowDaemon.runtime.projects,
     workflowCatalogReady: () => workflowDaemon.validationCatalog.ready()
   };
@@ -1164,6 +1180,8 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     fsRoot: () => resolved.fsRoot,
     workspacesDir: () => resolved.workspacesDir
   });
+
+  lineage.attachApi(services.internalApi);
 
   /**
    * Attach the workflow engine: after `agentChat.init()` (above — a resumed agent block re-enters
@@ -1280,6 +1298,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     sessions.shutdown();
     // Stops supervising only: under tmux the agent host is deliberately left
     // running so in-flight turns survive the deploy (chat spec §3.1).
+    await lineage.stop();
     await agentChat.stop();
     await browsers.shutdown();
     // Desktops keep running in tmux; only their watchers, window trackers and
@@ -1393,6 +1412,11 @@ interface Services {
    * the §6.2/§6.3 proxy routes (chat design spec §3.1, §5.2, §6).
    */
   agentChat: AgentChatService;
+  /**
+   * Thread lineage (spec 2026-10-14 §6): parents, children and the merge-back queue. Optional:
+   * route-level tests build a partial `services`.
+   */
+  lineage?: LineageService;
   /** Restart the HTTP transport (set in main once the lifecycle exists). */
   reloadHttp?: () => Promise<void>;
 }
@@ -3445,6 +3469,20 @@ export function createServer(
   const agentChatDeps = services.agentChat?.routeDeps();
   if (agentChatDeps) {
     registerAgentChatRoutes(app, agentChatDeps);
+    // Thread lineage (spec 2026-10-14 §6): fork, merge back, the lineage read.
+    registerLineageRoutes(app, {
+      lineage: () => services.lineage ?? null,
+      isChatSession: (id) => services.agentChat.chat.has(id),
+      // A fork opens after every tab of its parent's project, as a new chat tab does.
+      fork: (parentId, body) => {
+        const projectPath = services.agentChat.chat.get(parentId)?.projectPath ?? "";
+        return services.agentChat.forkSession(
+          parentId,
+          body,
+          sessions.list(projectPath).reduce((max, s) => Math.max(max, s.order), -1) + 1
+        );
+      }
+    });
   }
 
   // Sessions (PTYs and chat tabs — one list, one per-project order)

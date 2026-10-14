@@ -18,6 +18,18 @@ import type { FullOutputSource } from "../../../lib/agent-chat/full-output";
  * clock on this context would re-render every row once a second.
  * *T3: `MessagesTimeline.tsx:267-272`.*
  */
+/**
+ * "Fork from here" on a message (thread lineage, spec 2026-10-14 §6): which
+ * message, its turn and author — the host cuts at that turn — and its text,
+ * which a fork taken before a prompt offers back as the fork's draft.
+ */
+export interface TimelineForkInput {
+  messageId: string;
+  turnId: string | null;
+  role: "user" | "assistant";
+  text: string;
+}
+
 export interface TimelineRowContextValue {
   /**
    * The chat session (thread) the rows belong to — an agent's published page
@@ -65,6 +77,8 @@ export interface TimelineRowContextValue {
 
   /** A confirmed "Rewind to here" (§5.5). Conversation only; files stay. */
   onRevert: (input: { messageId: string; targetTurnCount: number }) => void;
+  /** "Fork from here" (spec 2026-10-14 §6); null where no fork is offered (the drill-in). */
+  onFork: ((input: TimelineForkInput) => Promise<unknown> | void) | null;
   onOpenTurnDiff: (turnCount: number) => void;
   onOpenFile: (path: string) => void;
   /**
@@ -140,6 +154,7 @@ const FALLBACK: TimelineRowContextValue = {
   toolOutputOffset: () => 0,
   setToolOutputOffset: NOOP,
   onRevert: NOOP,
+  onFork: null,
   onOpenTurnDiff: NOOP,
   onOpenFile: NOOP,
   onLoadFullOutput: NOOP,

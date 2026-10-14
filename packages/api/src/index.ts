@@ -6,6 +6,9 @@ import type {
   BackgroundLiveness as AgentChatBackgroundLiveness,
   CreateAgentChatSessionFields,
   LatestTurnSummary as AgentChatLatestTurnSummary,
+  PendingMergeBack,
+  ThreadForkStrategy,
+  ThreadLineage,
   ThreadSessionStatus as AgentChatThreadSessionStatus
 } from "./agent-chat/index.ts";
 
@@ -1207,6 +1210,64 @@ export interface SessionSummary {
    * Workflow chip linking to the run, and the workflow tab sweeper may close it.
    */
   owner?: WorkflowSessionOwner;
+  /**
+   * Agent-chat tabs only: the thread this one was forked from or delegated by (spec 2026-10-14
+   * §6). Persisted on the tab record; a parent's children are the tabs naming it here.
+   */
+  lineage?: ThreadLineage;
+  /**
+   * Agent-chat tabs only, never persisted: the merges this tab sent that its parent has not
+   * taken yet, and those addressed to it (spec 2026-10-14 §6). Absent when there are none.
+   */
+  pendingMerges?: PendingMergeBack[];
+  /**
+   * Agent-chat tabs only: the agent host has not created this tab's thread yet — its create
+   * or fork is in flight, or a fork's answer was lost and the daemon has not reconciled it.
+   * A client shows such a tab as starting, never as a chat that no longer exists, even when
+   * its stream answers `THREAD_NOT_FOUND`. Cleared with an explicit `false` in a
+   * `session.updated` once the host has the thread (a client merges summaries field-wise).
+   */
+  chatPending?: boolean;
+}
+
+// --- Thread lineage (spec 2026-10-14 §6) ------------------------------------
+
+/** `POST /api/sessions/:id/fork`. */
+export interface ForkSessionResponse {
+  /** The new fork tab, in the parent's project. */
+  session: SessionSummary;
+  lineage: ThreadLineage;
+  strategy: ThreadForkStrategy;
+}
+
+/** A thread named by a lineage, as the daemon knows it now. */
+export interface LineageSessionRef {
+  sessionId: string;
+  /** The tab's title; the id when the tab is gone. */
+  title: string;
+  /** False when the tab was closed (its thread deleted). */
+  exists: boolean;
+}
+
+/** One child of a thread: a tab whose lineage names it. */
+export interface LineageChild extends LineageSessionRef {
+  relation: ThreadLineage["relation"];
+  createdAt: string;
+  forkedFrom?: ThreadLineage["forkedFrom"];
+  /** The child's own §6.4 status, for the children list. */
+  chatSessionStatus?: AgentChatThreadSessionStatus;
+  latestTurnState?: AgentChatLatestTurnSummary["state"];
+}
+
+/** `GET /api/sessions/:id/lineage`. */
+export interface SessionLineageResponse {
+  sessionId: string;
+  lineage: ThreadLineage | null;
+  parent: LineageSessionRef | null;
+  /** Oldest first. */
+  children: LineageChild[];
+  /** Merges waiting for a busy parent: this thread's own, and those addressed to it. */
+  pendingMerges: PendingMergeBack[];
 }
 
 export interface CreateSessionRequest {

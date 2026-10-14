@@ -152,6 +152,15 @@ import type {
 import { agentChatRoutes, type AgentVisualUrlResponse, type McpAppOperation } from "@orquester/api/agent-chat";
 import { desktopVisualScheme, visualFrameSrc, type VisualFrameUrl } from "./agent-chat/visual-frame";
 import type {
+  ForkSessionRequest,
+  ForkSessionResponse,
+  MergeBackActionRequest,
+  MergeBackActionResponse,
+  MergeBackRequest,
+  MergeBackResponse,
+  SessionLineageResponse
+} from "@orquester/api";
+import type {
   DeletePullRequestWatchResponse,
   PullRequestWatchListResponse,
   ThreadItemOutputResponse,
@@ -1222,6 +1231,28 @@ export class ApiClient {
 
   closeSession(id: string): Promise<void> {
     return this.send("DELETE", `/api/sessions/${encodeURIComponent(id)}`);
+  }
+
+  // Thread lineage (spec 2026-10-14 §6) — daemon-owned chat routes.
+
+  /** A new chat tab whose conversation is this one's up to a message. */
+  forkSession(id: string, req: ForkSessionRequest): Promise<ForkSessionResponse> {
+    return this.send("POST", agentChatRoutes.fork(id), { body: req });
+  }
+
+  /** Send a fork's result to its parent; queued by the daemon while the parent is busy. */
+  mergeBackSession(id: string, req: MergeBackRequest): Promise<MergeBackResponse> {
+    return this.send("POST", agentChatRoutes.mergeBack(id), { body: req });
+  }
+
+  /** Deliver now, or discard, a merge the parent has not taken (from the fork or the parent). */
+  mergeBackAction(id: string, mergeId: string, req: MergeBackActionRequest): Promise<MergeBackActionResponse> {
+    return this.send("POST", agentChatRoutes.mergeBackItem(id, mergeId), { body: req });
+  }
+
+  /** The session's parent, its children and the merges waiting on either. */
+  sessionLineage(id: string, signal?: AbortSignal): Promise<SessionLineageResponse> {
+    return this.send("GET", agentChatRoutes.lineage(id), { signal });
   }
 
   /**

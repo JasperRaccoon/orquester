@@ -13,7 +13,9 @@
 import { EventEmitter } from "node:events";
 import type {
   AgentChatSessionSummaryFields,
+  PendingMergeBack,
   SessionSummary,
+  ThreadLineage,
   WorkflowSessionOwner
 } from "@orquester/api";
 import type { AgentChatHome, SessionRecord } from "@orquester/config";
@@ -43,12 +45,27 @@ export interface ChatSessionCreateInput {
   createdAt?: string;
   /** The workflow run that started this tab (workflows spec §5.10), already validated by the route. */
   owner?: WorkflowSessionOwner;
+  /** The thread this one was forked from or delegated by (spec 2026-10-14 §6), already checked. */
+  lineage?: ThreadLineage;
+  /** A keyed fork's requested fork point (`AgentChatService.forkSession`), persisted with the tab. */
+  forkFingerprint?: string;
+  /** A fork tab the host has not answered for yet (`AgentChatService.reconcileForks`). */
+  forkUnconfirmed?: boolean;
+  /** The host has not created the thread yet (`SessionSummary.chatPending`); see {@link confirmCreated}. */
+  pending?: boolean;
 }
 
 interface ChatSession {
   summary: SessionSummary;
   /** The §5.2 block persisted into `sessions.json`. */
-  chat: { threadId: string; accountId: string; home: AgentChatHome; lastSeq: number };
+  chat: {
+    threadId: string;
+    accountId: string;
+    home: AgentChatHome;
+    lastSeq: number;
+    forkFingerprint?: string;
+    forkUnconfirmed?: true;
+  };
 }
 
 /**
@@ -77,6 +94,16 @@ export class ChatSessionManager {
       .filter((s) => projectPath === undefined || s.summary.projectPath === projectPath)
       .map((s) => ({ ...s.summary }));
     return rows;
+  }
+
+  /** A keyed fork tab's requested fork point, if it was opened as one (spec 2026-10-14 §6). */
+  forkFingerprint(id: string): string | undefined {
+    return this.sessions.get(id)?.chat.forkFingerprint;
+  }
+
+  /** Fork tabs the host has not answered for yet: their fork is in flight, or its answer was lost. */
+  unconfirmedForks(): string[] {
+    return [...this.sessions.values()].filter((s) => s.chat.forkUnconfirmed === true).map((s) => s.summary.id);
   }
 
   /** The last sequence this tab was rendered at, for a §6.3 reconnect. */
@@ -129,11 +156,20 @@ export class ChatSessionManager {
       status: "running",
       order: input.order,
       createdAt: input.createdAt ?? new Date().toISOString(),
-      ...(input.owner ? { owner: { ...input.owner } } : {})
+      ...(input.owner ? { owner: { ...input.owner } } : {}),
+      ...(input.lineage ? { lineage: cloneLineage(input.lineage) } : {}),
+      ...(input.pending === true || input.forkUnconfirmed === true ? { chatPending: true } : {})
     };
     this.sessions.set(input.id, {
       summary,
-      chat: { threadId: input.id, accountId: input.accountId, home: input.home, lastSeq: 0 }
+      chat: {
+        threadId: input.id,
+        accountId: input.accountId,
+        home: input.home,
+        lastSeq: 0,
+        ...(input.forkFingerprint !== undefined ? { forkFingerprint: input.forkFingerprint } : {}),
+        ...(input.forkUnconfirmed === true ? { forkUnconfirmed: true as const } : {})
+      }
     });
     this.lifecycle.emit("created", { ...summary });
     this.options.requestPersist();
@@ -164,6 +200,18 @@ export class ChatSessionManager {
     // tokens spent for a tab nobody is looking at.
     this.pendingDeletes.add(id);
     this.lifecycle.emit("closed", { id });
+    this.options.requestPersist();
+    return true;
+  }
+
+  /**
+   * Take back a tab its own create never finished — the host refused the thread, so there is
+   * nothing to delete there. Unlike {@link close} no host delete is queued, and the "closed"
+   * event says `rolledBack`, so nothing reads it as the user closing a tab.
+   */
+  discard(id: string): boolean {
+    if (!this.sessions.delete(id)) return false;
+    this.lifecycle.emit("closed", { id, rolledBack: true });
     this.options.requestPersist();
     return true;
   }
@@ -209,6 +257,55 @@ export class ChatSessionManager {
     session.summary.accountId = input.accountId || undefined;
     this.lifecycle.emit("updated", { ...session.summary });
     this.options.requestPersist();
+    return { ...session.summary };
+  }
+
+  /**
+   * Record the lineage the host resolved for a fork (spec 2026-10-14 §6): its fork point is
+   * only known once the host has cut the parent's conversation.
+   */
+  setLineage(id: string, lineage: ThreadLineage): SessionSummary | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    session.summary.lineage = cloneLineage(lineage);
+    // The host's answer is in: the fork is confirmed, its thread exists.
+    delete session.chat.forkUnconfirmed;
+    if (session.summary.chatPending === true) session.summary.chatPending = false;
+    this.lifecycle.emit("updated", { ...session.summary });
+    this.options.requestPersist();
+    return { ...session.summary };
+  }
+
+  /**
+   * The host created the tab's thread: `chatPending` goes to `false` (explicitly — a client
+   * merges summaries field by field), announced so a view that met `THREAD_NOT_FOUND` while it
+   * was being created connects again. Nothing is announced for a tab that was not pending.
+   */
+  confirmCreated(id: string): SessionSummary | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    if (session.summary.chatPending !== true) return { ...session.summary };
+    session.summary.chatPending = false;
+    if (session.chat.forkUnconfirmed === true) {
+      delete session.chat.forkUnconfirmed;
+      this.options.requestPersist();
+    }
+    this.lifecycle.emit("updated", { ...session.summary });
+    return { ...session.summary };
+  }
+
+  /**
+   * The merges a tab sent or is owed that the parent has not taken (spec 2026-10-14 §6),
+   * published by the lineage service. Derived, never persisted; "updated" only on a change.
+   */
+  setPendingMerges(id: string, merges: readonly PendingMergeBack[]): SessionSummary | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    if (JSON.stringify(session.summary.pendingMerges ?? []) === JSON.stringify(merges)) return null;
+    // Cleared as `[]`, never by dropping the key: a client merges a summary into the one it
+    // holds field by field, and a missing key would leave its last list (and its buttons) up.
+    session.summary.pendingMerges = merges.map((merge) => ({ ...merge }));
+    this.lifecycle.emit("updated", { ...session.summary });
     return { ...session.summary };
   }
 
@@ -270,7 +367,9 @@ export class ChatSessionManager {
       accountId: s.summary.accountId,
       chat: { ...s.chat },
       // workflows §5.10: persisted so the Workflow chip and the tab sweeper survive a restart.
-      ...(s.summary.owner ? { owner: { ...s.summary.owner } } : {})
+      ...(s.summary.owner ? { owner: { ...s.summary.owner } } : {}),
+      // Spec 2026-10-14 §6: a parent's children are the tabs naming it here.
+      ...(s.summary.lineage ? { lineage: cloneLineage(s.summary.lineage) } : {})
     }));
   }
 
@@ -299,7 +398,11 @@ export class ChatSessionManager {
         order: record.order,
         createdAt: record.createdAt,
         // The tolerant parse already dropped a malformed owner (never the record).
-        ...(record.owner ? { owner: { ...record.owner } } : {})
+        ...(record.owner ? { owner: { ...record.owner } } : {}),
+        // …and a malformed lineage, or a fork point that did not read on its own.
+        ...(record.lineage ? { lineage: lineageFromRecord(record.lineage) } : {}),
+        // A fork whose host answer never came: still being reconciled.
+        ...(record.chat.forkUnconfirmed === true ? { chatPending: true } : {})
       };
       this.sessions.set(record.id, {
         summary,
@@ -307,11 +410,33 @@ export class ChatSessionManager {
           threadId: record.chat.threadId,
           accountId: record.chat.accountId,
           home: record.chat.home,
-          lastSeq: record.chat.lastSeq
+          lastSeq: record.chat.lastSeq,
+          ...(record.chat.forkFingerprint !== undefined
+            ? { forkFingerprint: record.chat.forkFingerprint }
+            : {}),
+          ...(record.chat.forkUnconfirmed === true ? { forkUnconfirmed: true as const } : {})
         }
       });
     }
   }
+}
+
+function cloneLineage(lineage: ThreadLineage): ThreadLineage {
+  return {
+    parentThreadId: lineage.parentThreadId,
+    relation: lineage.relation,
+    ...(lineage.forkedFrom ? { forkedFrom: { ...lineage.forkedFrom } } : {}),
+    createdAt: lineage.createdAt
+  };
+}
+
+function lineageFromRecord(record: NonNullable<SessionRecord["lineage"]>): ThreadLineage {
+  return {
+    parentThreadId: record.parentThreadId,
+    relation: record.relation,
+    ...(record.forkedFrom ? { forkedFrom: { ...record.forkedFrom } } : {}),
+    createdAt: record.createdAt
+  };
 }
 
 /** Only the derived §6.4 fields are compared — never `activity`, which is derived from them. */

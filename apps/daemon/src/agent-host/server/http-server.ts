@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 
 import {
   AGENT_CHAT_COMMAND_NAMES,
+  DEADLINE_REFUSAL_REASON,
   MAX_TURN_FILE_BYTES,
   THREAD_HISTORY_DEFAULT_TURNS,
   THREAD_HISTORY_MAX_TURNS,
@@ -56,6 +57,8 @@ import {
   type AgentHostRecycleOpenCodeResponse,
   type AgentHostResumeGoalSessionsResponse,
   type CreateHostThreadRequest,
+  type ForkHostThreadRequest,
+  type ForkHostThreadResponse,
   type SetThreadIdentityRequest
 } from "../host-protocol.ts";
 import type { ThreadStore } from "../services.ts";
@@ -197,7 +200,12 @@ function sendError(
   if (error instanceof DeadlineExceededError) {
     const code = hostReady() ? "COMMAND_REJECTED" : "HOST_UNAVAILABLE";
     sendJson(response, statusForCode(code), {
-      error: { code, message: redact(error.message) }
+      error: {
+        code,
+        message: redact(error.message),
+        // Marked, so a client tells this refusal of the moment from the thread's own.
+        ...(code === "COMMAND_REJECTED" ? { detail: { reason: DEADLINE_REFUSAL_REASON } } : {})
+      }
     });
     return;
   }
@@ -597,6 +605,22 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
     // §3.4's account switch. Not in `COMMAND_NAMES`: the daemon owns the
     // client-facing route and calls this with an identity it has already
     // resolved, so nothing here re-reads the accounts store.
+    // Thread lineage (spec 2026-10-14 §6): `threadId` is the PARENT; the body
+    // names the child and the fork point.
+    if (rest === "/fork" && method === "POST") {
+      const body = (await readJsonBody(request)) as ForkHostThreadRequest;
+      // The child's id becomes a directory name, as the parent's does.
+      if (typeof body?.threadId !== "string" || !isSafeThreadId(body.threadId)) {
+        sendJson(response, 400, {
+          error: { code: "INVALID_COMMAND", message: "Malformed thread id." }
+        });
+        return;
+      }
+      const result: ForkHostThreadResponse = await orchestrator.forkThread(threadId, body);
+      sendJson(response, 200, result);
+      return;
+    }
+
     if (rest === "/identity" && method === "POST") {
       const body = (await readJsonBody(request)) as SetThreadIdentityRequest;
       const receipt = await orchestrator.setIdentity(threadId, body);

@@ -44,6 +44,14 @@ const RETRIES = 3;
  */
 export async function sendCommand(api: DaemonApi, sessionId: string, name: AgentChatCommandName | "account", body: Record<string, unknown>, opts?: { retryDelayMs?: (attempt: number) => number; commandId?: string }): Promise<{ seq: number }> {
   const path = name === "account" ? agentChatRoutes.account(sessionId) : agentChatCommandPath(sessionId, name);
+  return postIdempotent<{ seq: number }>(api, path, body, opts);
+}
+
+/**
+ * POST a body carrying a fresh `commandId` to any route that is idempotent by it (a §6.2 command, a fork, a merge back),
+ * retrying 503 HOST_UNAVAILABLE and a thrown transport error with the SAME id up to 3 times — sendCommand's rule.
+ */
+export async function postIdempotent<T>(api: DaemonApi, path: string, body: Record<string, unknown>, opts?: { retryDelayMs?: (attempt: number) => number; commandId?: string }): Promise<T> {
   const delay = opts?.retryDelayMs ?? defaultRetryDelay;
   const payload = { ...body, commandId: opts?.commandId ?? randomUUID() };
   // Every attempt returns or throws by the last one, so the loop needs no exit and nothing follows it.
@@ -57,7 +65,7 @@ export async function sendCommand(api: DaemonApi, sessionId: string, name: Agent
       // The exception text can carry a host path: log it here, never hand it to the caller.
       console.error("[mcp] daemon call failed", error);
     }
-    if (res && res.status < 400) return res.body as { seq: number };
+    if (res && res.status < 400) return res.body as T;
     const failure = res ? daemonError(res) : new ToolError("HOST_UNAVAILABLE", "The daemon call failed.");
     if (failure.code !== "HOST_UNAVAILABLE" || attempt === RETRIES) throw failure;
   }

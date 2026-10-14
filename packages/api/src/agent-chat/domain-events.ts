@@ -25,6 +25,7 @@ import type {
   ModelSelection,
   RuntimeMode
 } from "./adapter-types.ts";
+import type { ThreadLineage } from "./lineage.ts";
 import type { ApprovalDecision, TurnTokenUsage } from "./runtime-events.ts";
 import type {
   CheckpointFile,
@@ -82,6 +83,12 @@ export interface ThreadCreatedPayload {
   home: AccountHomeKind;
   modelSelection: ModelSelection;
   runtimeMode: RuntimeMode;
+  /**
+   * The thread this one was forked from or delegated by (spec 2026-10-14 §6).
+   * Additive (§8 rollback boundary): an older build ignores it, and a value
+   * that does not read ({@link parseThreadLineage}) is no lineage.
+   */
+  lineage?: ThreadLineage;
 }
 
 /**

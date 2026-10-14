@@ -145,7 +145,7 @@ export function isCompactingThread(input: {
  * self-ticking leaf, never a prop pushed down the row tree (§7.6).
  */
 export function resolveActivityLabel(input: {
-  connection: "idle" | "connecting" | "synchronized" | "reconnecting" | "error";
+  connection: "idle" | "connecting" | "synchronized" | "reconnecting" | "error" | "gone";
   sessionStatus: ThreadSessionStatus | null;
   turnStatus: TurnState | null;
   backgroundLiveness: BackgroundLiveness | null;
@@ -160,6 +160,9 @@ export function resolveActivityLabel(input: {
   }
   if (input.connection === "error") {
     return "Disconnected";
+  }
+  if (input.connection === "gone") {
+    return "This chat no longer exists";
   }
   if (input.pendingApprovals > 0) {
     return input.pendingApprovals === 1 ? "Waiting for approval" : `${input.pendingApprovals} approvals`;
@@ -231,4 +234,52 @@ export function latestContextWindowActivity(
     return { usage, updatedAt: activity.createdAt };
   }
   return null;
+}
+
+// ---------------------------------------------------------------------------
+// A thread the host does not hold (`connection: "gone"`)
+// ---------------------------------------------------------------------------
+
+/**
+ * What a tab's view remembers between renders to tell a thread that is gone
+ * from one still being created: whether its record said `chatPending` since
+ * its stream last synchronized, and the record it last saw.
+ */
+export interface GoneWatch {
+  sawPending: boolean;
+  record: unknown;
+}
+
+export function initialGoneWatch(input: { pending: boolean; record: unknown }): GoneWatch {
+  return { sawPending: input.pending, record: input.record };
+}
+
+/**
+ * How a tab whose stream answered `THREAD_NOT_FOUND` is shown. A tab whose
+ * record is — or was, since its stream last synchronized — `chatPending` is
+ * being created (a grid cell opens its stream on `session.created`, before
+ * the host has the thread): `starting`, never `gone`.
+ */
+export function goneDisplay(input: { gone: boolean; pending: boolean; watch: GoneWatch }): "live" | "starting" | "gone" {
+  if (!input.gone) return "live";
+  return input.pending || input.watch.sawPending ? "starting" : "gone";
+}
+
+/**
+ * The next {@link GoneWatch}, and whether the stream should connect again: a
+ * gone tab whose record stopped being pending (the host created the thread —
+ * before or after the stream met the miss) retries once by itself, and so does
+ * one whose record changed (a fork the daemon confirmed); a pending one waits
+ * for its record to change.
+ */
+export function nextGoneWatch(
+  watch: GoneWatch,
+  input: { connection: string; pending: boolean; record: unknown }
+): { watch: GoneWatch; retry: boolean } {
+  const { connection, pending, record } = input;
+  if (connection === "synchronized") return { watch: { sawPending: pending, record }, retry: false };
+  if (connection !== "gone") return { watch: { sawPending: watch.sawPending || pending, record }, retry: false };
+  if (pending) return { watch: { sawPending: true, record }, retry: false };
+  if (watch.sawPending) return { watch: { sawPending: false, record }, retry: true };
+  return { watch: { sawPending: false, record }, retry: record !== watch.record };
 }

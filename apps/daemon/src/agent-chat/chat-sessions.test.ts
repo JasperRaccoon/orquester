@@ -397,3 +397,62 @@ test("switching to the system identity drops the summary's account id", () => {
   assert.deepEqual([...chat.liveAccountIds()], []);
   assert.equal(chat.records()[0].chat?.home, "system");
 });
+
+test("a child tab's lineage round-trips through sessions.json; an old record has none", () => {
+  const chat = chatManager();
+  seed(chat, "parent", 0);
+  chat.create({
+    id: "child",
+    refId: "claude",
+    title: "child",
+    projectPath: "/w/p",
+    cwd: "/w/p",
+    order: 1,
+    accountId: "acc-1",
+    home: "account",
+    lineage: { parentThreadId: "parent", relation: "fork", createdAt: "2026-10-14T00:00:00.000Z" }
+  });
+  let persisted = 0;
+  const forked = new ChatSessionManager({ requestPersist: () => (persisted += 1) });
+  forked.adopt(chat.records());
+  assert.equal(forked.get("parent")?.lineage, undefined);
+  assert.deepEqual(forked.get("child")?.lineage, {
+    parentThreadId: "parent",
+    relation: "fork",
+    createdAt: "2026-10-14T00:00:00.000Z"
+  });
+  // The host's resolved fork point lands later, and is persisted.
+  forked.setLineage("child", {
+    parentThreadId: "parent",
+    relation: "fork",
+    forkedFrom: { messageId: "m", turnId: "t" },
+    createdAt: "2026-10-14T00:00:01.000Z"
+  });
+  assert.equal(persisted, 1);
+  const reread = parseSessionsConfig({ version: 1, sessions: forked.records() });
+  const again = chatManager();
+  again.adopt(reread.sessions);
+  assert.deepEqual(again.get("child")?.lineage?.forkedFrom, { messageId: "m", turnId: "t" });
+});
+
+test("pending merges ride the summary, announced only on a change and never persisted", () => {
+  const chat = chatManager();
+  seed(chat, "p", 0);
+  const updates: unknown[] = [];
+  chat.lifecycle.on("updated", (summary) => updates.push(summary));
+  const merge = { mergeId: "m", parentSessionId: "p", childSessionId: "c", queuedAt: "t", state: "queued" as const, preview: "x", attempts: 0 };
+  chat.setPendingMerges("p", [merge]);
+  chat.setPendingMerges("p", [merge]);
+  assert.equal(updates.length, 1);
+  assert.deepEqual(chat.get("p")?.pendingMerges, [merge]);
+  assert.equal("pendingMerges" in (chat.records()[0] as object), false);
+  chat.setPendingMerges("p", []);
+  assert.deepEqual(chat.get("p")?.pendingMerges, []);
+  assert.equal(updates.length, 2);
+  // The broadcast that clears it names the empty list: a client merging field-wise must drop its own.
+  assert.deepEqual((updates[1] as { pendingMerges?: unknown }).pendingMerges, []);
+  // A tab that never had one announces nothing.
+  seed(chat, "q", 1);
+  chat.setPendingMerges("q", []);
+  assert.equal(updates.length, 2);
+});

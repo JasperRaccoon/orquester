@@ -28,6 +28,7 @@ import {
 import {
   clearComposerInbox,
   composerTextForDelivery,
+  deliverToComposerDraft,
   subscribeComposerInbox,
   takeComposerDeliveries,
   type ComposerDelivery
@@ -101,6 +102,16 @@ import { ChatStatusLine } from "./status/ChatStatusLine";
 import { PullRequestWatchStrip } from "./status/PullRequestWatchStrip";
 import { GOAL_ACTION_TEXT, goalActions, goalActionsNote } from "./status/goal-chip";
 import { ChatTimeline } from "./timeline/ChatTimeline";
+import type { TimelineForkInput } from "./timeline/context";
+import { ThreadLineageBar, type LineageNotice } from "./ThreadLineageBar";
+import { ThreadGoneNotice } from "./ThreadGoneNotice";
+import {
+  goneDisplay,
+  initialGoneWatch,
+  nextGoneWatch,
+  type GoneWatch
+} from "../../lib/agent-chat/status.logic";
+import { defaultMergeBackText } from "../../lib/agent-chat/lineage.logic";
 import { resolveMarkdownImageSource } from "./timeline/markdown/local-image";
 import { TurnDiffModal, type TurnDiffRequest } from "./timeline/TurnDiffModal";
 import {
@@ -115,6 +126,12 @@ import type { AgentChatViewProps, AgentRosterMainRow } from "./contracts";
 const NO_APPROVALS: never[] = [];
 const NO_REQUEST_IDS: readonly string[] = [];
 const NO_REWIND_TARGETS: readonly RewindTarget[] = [];
+
+/** A fork's or a merge's refusal, in the daemon's words where it gave some. */
+function lineageErrorText(error: unknown): string {
+  if (error instanceof ApiError) return error.serverMessage ?? `the daemon answered ${error.status}.`;
+  return error instanceof Error ? error.message : String(error);
+}
 
 /** Every row callback is a no-op while the paint hold is in effect (§7.1). */
 const noop = (): void => {};
@@ -501,6 +518,104 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     [rewindTo]
   );
 
+  // --- thread lineage (spec 2026-10-14 §6) ----------------------------------
+  // "Fork from here" opens the fork as a new tab of this project (the store
+  // switches to it); a fork taken before a prompt gets that prompt back as its
+  // draft, to send differently. A refusal — a reply still being written, a
+  // host that needs its update — is said in the lineage bar, as is a merge's
+  // outcome. Parent and children are read off the tab records.
+  const projectSessions = useAppStore((s) => s.sessions);
+  const forkChatTab = useAppStore((s) => s.forkChatTab);
+  const activateTab = useAppStore((s) => s.activateTab);
+  const closeTab = useAppStore((s) => s.closeTab);
+  // The host holds no such thread (its stream said THREAD_NOT_FOUND). A tab whose record is,
+  // or just was, `chatPending` is only being created — a grid cell opens its stream on
+  // `session.created` — and shows as starting; it connects again once its record says the
+  // host has the thread. Otherwise the tab says the chat is gone and offers to close; a change
+  // to its record (a fork the daemon confirmed later) is still worth one more look.
+  const gone = slice.connection === "gone";
+  const chatPending = session.chatPending === true;
+  const retryStream = actions.retryStream;
+  const goneWatch = React.useRef<GoneWatch>(initialGoneWatch({ pending: chatPending, record: session }));
+  const goneShown = goneDisplay({ gone, pending: chatPending, watch: goneWatch.current }) === "gone";
+  React.useEffect(() => {
+    const next = nextGoneWatch(goneWatch.current, {
+      connection: slice.connection,
+      pending: chatPending,
+      record: session
+    });
+    goneWatch.current = next.watch;
+    if (next.retry) retryStream();
+  }, [slice.connection, chatPending, session, retryStream]);
+  const [lineageNotice, setLineageNotice] = React.useState<LineageNotice | null>(null);
+  React.useEffect(() => setLineageNotice(null), [sessionId]);
+  // One fork at a time from this view: a second click while the first is on
+  // its way is dropped, never a second tab.
+  const forkInFlight = React.useRef(false);
+  const forkFrom = React.useCallback(
+    (input: TimelineForkInput): Promise<void> => {
+      if (forkInFlight.current) return Promise.resolve();
+      forkInFlight.current = true;
+      setLineageNotice(null);
+      return forkChatTab(sessionId, {
+        messageId: input.messageId,
+        ...(input.turnId !== null ? { turnId: input.turnId } : {}),
+        role: input.role
+      })
+        .then((result) => {
+          if (input.role === "user" && input.text.trim().length > 0) {
+            deliverToComposerDraft(result.session.id, { text: input.text, attachments: [] });
+          }
+        })
+        .catch((error: unknown) => {
+          setLineageNotice({ tone: "error", text: `Could not fork: ${lineageErrorText(error)}` });
+        })
+        .finally(() => {
+          forkInFlight.current = false;
+        });
+    },
+    [forkChatTab, sessionId]
+  );
+  const mergeBack = React.useCallback(
+    async (text: string) => {
+      setLineageNotice(null);
+      try {
+        const result = await api.mergeBackSession(sessionId, { text });
+        const parentTitle =
+          useAppStore.getState().sessions.find((s) => s.id === result.parentSessionId)?.title ??
+          "the original chat";
+        setLineageNotice({
+          tone: "info",
+          text:
+            result.delivery === "sent"
+              ? `Sent to “${parentTitle}”.`
+              : `Queued: “${parentTitle}” is busy, and gets it once it is idle.`
+        });
+      } catch (error) {
+        setLineageNotice({ tone: "error", text: `Could not merge back: ${lineageErrorText(error)}` });
+        throw error;
+      }
+    },
+    [api, sessionId]
+  );
+  const actOnMerge = React.useCallback(
+    async (mergeId: string, action: "deliver" | "discard") => {
+      setLineageNotice(null);
+      try {
+        const result = await api.mergeBackAction(sessionId, mergeId, { action });
+        setLineageNotice({ tone: "info", text: result.outcome === "sent" ? "Merge delivered." : "Merge discarded." });
+      } catch (error) {
+        setLineageNotice({
+          tone: "error",
+          text: `Could not ${action === "deliver" ? "deliver" : "discard"} the merge: ${lineageErrorText(error)}`
+        });
+        throw error;
+      }
+    },
+    [api, sessionId]
+  );
+  const mergeText = React.useMemo(() => defaultMergeBackText(slice.entries), [slice.entries]);
+
   // --- older history and the palette's reveal (design 2026-09-23) ----------
   // The "Load older turns" row pages the indexed log in ABOVE the window; the
   // rows it brings are already in `rows` (the store merges them), so this is
@@ -879,6 +994,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           }
         />
       ) : null}
+      {goneShown ? (
+        <ThreadGoneNotice onClose={() => void closeTab(sessionId)} onRetry={retryStream} />
+      ) : null}
       {/* Its "Try again" also leaves an open drill-in: the fallback replaced the
           Back button and the roster, and a child row that threw would throw
           again. A child's own crash is caught below, around the drill-in. */}
@@ -917,6 +1035,19 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               />
             </DrillInErrorBoundary>
           ) : (
+            <>
+            {paintOnly ? null : (
+              <ThreadLineageBar
+                session={session}
+                sessions={projectSessions}
+                defaultMergeText={mergeText}
+                notice={lineageNotice}
+                onDismissNotice={() => setLineageNotice(null)}
+                onOpenSession={activateTab}
+                onMergeBack={mergeBack}
+                onMergeAction={actOnMerge}
+              />
+            )}
             <ChatTimeline
               sessionId={displayed.displaySessionId}
               rows={displayed.rows as AgentChatTimelineRow[]}
@@ -929,6 +1060,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               // "Rewind to here", confirmed in the row's own popover: the whole
               // §5.5 flow, ending with the message back in the composer.
               onRevert={paintOnly ? noop : rewindTo}
+              onFork={paintOnly ? undefined : forkFrom}
               revertBusy={revertBusy}
               startedTurnCount={startedTurnCount}
               onOpenTurnDiff={paintOnly ? noop : openTurnDiff}
@@ -973,6 +1105,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               revealRequest={paintOnly ? null : reveal}
               onRevealHandled={actions.acknowledgeReveal}
             />
+            </>
           )}
 
           {/*
@@ -995,7 +1128,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
             <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
               <ChatStatusLine
                 sessionId={sessionId}
-                connection={status.connection}
+                // A thread still being created reads as connecting, never as gone.
+                connection={gone && !goneShown ? "connecting" : status.connection}
                 turnStartedAt={paintOnly ? null : status.turnStartedAt}
                 activityLabel={paintOnly ? null : status.activityLabel}
                 tokensUsed={slice.contextWindow?.usedTokens ?? null}

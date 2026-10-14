@@ -52,6 +52,8 @@ interface GoalView { objective: string; status: AgentGoalStatus; continuing: boo
 interface GoalDetailView extends GoalView { phase?: string; rounds?: number; lastCheck?: string; tokensUsed?: number; tokenBudget?: number | null; elapsedMs?: number; setAt?: string; updatedAt: string }
 export interface SessionView { id: string; kind: "chat" | "terminal"; agent: string; adapter?: AgentAdapterId; title: string; project: ProjectRef; cwd: string; createdAt: string; order: number;
   status: "working" | "waiting" | "idle"; attention: "needs-input" | "finished" | "bell" | null; needsAttentionAt: string | null; reason: SessionReason | null;
+  /** The chat session this one was forked from or delegated by (spec 2026-10-14 §6); get_session_lineage lists children. */
+  lineage?: { parentSessionId: string; relation: "fork" | "delegate"; forkedFromTurnId?: string };
   chat?: { sessionStatus: ThreadSessionStatus; accountId: string; latestTurn: LatestTurnSummary | null; pending: { approvals: boolean; questions: boolean }; planReady: boolean; backgroundLiveness: "working" | "monitoring" | null; goal: GoalView | null };
   terminal?: { status: "running" | "exited"; exitCode?: number; legacyAgent?: boolean } }
 interface PendingApprovalView { requestId: string; kind: ProviderRequestKind; createdAt: string; detail?: string; appName?: string; tool?: { name: string; input: unknown }; decisions: { decision: ApprovalDecision; label: string; warning?: string }[] }
@@ -145,6 +147,9 @@ export function sessionView(s: SessionSummary, ctx: ViewContext): SessionView {
     status: s.activity?.state ?? "idle", attention: s.activity?.attention ?? null, needsAttentionAt: s.activity?.needsAttentionAt ?? null,
     reason: sessionReason(s)
   };
+  if (s.lineage) {
+    view.lineage = { parentSessionId: s.lineage.parentThreadId, relation: s.lineage.relation, ...(s.lineage.forkedFrom ? { forkedFromTurnId: s.lineage.forkedFrom.turnId } : {}) };
+  }
   if (isChat) {
     const adapter = ctx.adapterByRefId.get(s.refId);
     if (adapter) view.adapter = adapter;

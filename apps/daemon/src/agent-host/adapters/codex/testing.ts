@@ -192,6 +192,10 @@ export interface MockConfig {
   firstTurnSeq?: number;
   /** `thread/resume` answers an error, exercising the fresh-thread fallback. */
   failResume?: boolean;
+  /** The id `thread/fork` answers (thread lineage). */
+  forkThreadId?: string;
+  /** `thread/fork` answers an error. */
+  failFork?: boolean;
   /**
    * `turn/interrupt` answers THIS error instead of acting, whatever the turn
    * id — so a test can drive a failure that is NOT the benign "no active turn"
@@ -689,6 +693,11 @@ function handle(frame) {
     case "thread/start":
       send({ id, result: threadResponse() });
       send({ method: "thread/started", params: { thread: threadObject() } });
+      return;
+    case "thread/fork":
+      // Thread lineage (spec 2026-10-14 §6): a new thread forked from params.threadId.
+      if (config.failFork) { send({ id, error: { code: -32600, message: "no rollout found for thread id " + params.threadId } }); return; }
+      send({ id, result: { ...threadResponse(), thread: { ...threadObject(), id: config.forkThreadId ?? "thread-mock-fork", forkedFromId: params.threadId } } });
       return;
     case "thread/resume":
       if (config.failResume) { send({ id, error: { code: -32600, message: "thread not found" } }); return; }

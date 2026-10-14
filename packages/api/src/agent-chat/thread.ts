@@ -20,6 +20,7 @@ import type {
   RuntimeMode
 } from "./adapter-types.ts";
 import type { AgentGoal, AgentGoalChange, ThreadGoal } from "./goal.ts";
+import type { ThreadLineage } from "./lineage.ts";
 import type {
   ApprovalOption,
   CanonicalRequestType,
@@ -137,6 +138,12 @@ export interface ThreadHead {
    * written for it): the goal stays paused until the user resumes it.
    */
   goalHeldForHandover?: true;
+  /**
+   * The thread this one was forked from or delegated by (spec 2026-10-14 §6),
+   * as `thread.created` recorded it. Absent for a thread with no parent and
+   * from a build that predates lineage.
+   */
+  lineage?: ThreadLineage;
   createdAt: string;
   updatedAt: string;
 }

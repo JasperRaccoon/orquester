@@ -38,6 +38,7 @@ import {
 } from "@orquester/api/agent-chat";
 
 import { stripAttachmentPathLines } from "../attachment-lines.ts";
+import { stripForkHandoff } from "../../orchestration/fork.ts";
 import { goalCommandFromReminder } from "./goal.ts";
 import { isGrokSessionToolCall } from "./session-tools.ts";
 import { GROK_TOOL_NAMESPACE, SPAWN_SUBAGENT_TOOL } from "./subagents.ts";
@@ -175,7 +176,9 @@ function projectTurn(turn: ProviderThreadTurnSnapshot, deps: ProjectHistoryDeps)
         // can straddle two. A goal's message is replayed as the CLI's ~6 KB
         // goal `<system-reminder>`, never the `/goal …` that was typed, so it
         // reads as that command instead (goals §6.3 item 5).
-        const text = stripAttachmentPathLines(goalCommandFromReminder(item.text) ?? item.text);
+        const text = stripAttachmentPathLines(
+          stripForkHandoff(goalCommandFromReminder(item.text) ?? item.text)
+        );
         events.push(
           event(
             "item.completed",

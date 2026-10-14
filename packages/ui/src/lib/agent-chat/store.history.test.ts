@@ -93,7 +93,7 @@ function fakeTransport() {
   const transport: AgentChatTransport = {
     stream(_sessionId, _options, handlers) {
       onFrame = handlers.onFrame;
-      return { lastSeq: 0, hostInstanceId: null, resetCursor: () => {}, close: () => {} };
+      return { lastSeq: 0, hostInstanceId: null, resetCursor: () => {}, retry: () => {}, close: () => {} };
     },
     async command(_sessionId, name, body) {
       posted.push({ name, body: body as unknown as Record<string, unknown> });

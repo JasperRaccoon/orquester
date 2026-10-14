@@ -91,7 +91,7 @@ function fakeHost() {
   const transport: AgentChatTransport = {
     stream(_sessionId, _options, handlers) {
       onFrame = handlers.onFrame;
-      return { lastSeq: 0, hostInstanceId: null, resetCursor: () => {}, close: () => {} };
+      return { lastSeq: 0, hostInstanceId: null, resetCursor: () => {}, retry: () => {}, close: () => {} };
     },
     command(_sessionId, name, body) {
       const record = body as unknown as Record<string, unknown>;

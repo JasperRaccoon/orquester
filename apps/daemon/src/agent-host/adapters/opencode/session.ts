@@ -133,7 +133,7 @@ interface OpenCodeResumeCursor {
   sessionId: string;
 }
 
-function parseOpenCodeResume(raw: unknown): { sessionId: string } | undefined {
+export function parseOpenCodeResume(raw: unknown): { sessionId: string } | undefined {
   if (!isRecord(raw)) {
     return undefined;
   }
@@ -2577,6 +2577,18 @@ export class OpenCodeThreadSession {
           }))
       };
     });
+  }
+
+  /**
+   * Thread lineage (spec 2026-10-14 §6): what another thread's fork of this
+   * one needs — the upstream session the thread points at now, and a fold
+   * turn id as this session's own rewinds re-minted it (`forkedMessageIds`).
+   */
+  forkSource(turnId: string | null): { sessionId: string; messageId: string | null } {
+    return {
+      sessionId: this.state.openCodeSessionId,
+      messageId: turnId === null ? null : (this.forkedMessageIds.get(turnId) ?? turnId)
+    };
   }
 
   private async listMessages(sessionId: string): Promise<OpenCodeMessageWithParts[]> {

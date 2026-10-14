@@ -12,6 +12,8 @@
 
 import {
   AGENT_CHAT_HEARTBEAT_MS,
+  AGENT_CHAT_ERROR_CODES,
+  type AgentChatStreamErrorLine,
   type AgentChatStreamFrame
 } from "@orquester/api/agent-chat";
 
@@ -49,6 +51,8 @@ export type StreamLine =
   | { kind: "frame"; frame: AgentChatStreamFrame }
   | { kind: "heartbeat" }
   | { kind: "blank" }
+  /** The host could not serve the stream (`AgentChatStreamErrorLine`); it closes after it. */
+  | { kind: "error"; error: AgentChatStreamErrorLine }
   | { kind: "malformed"; line: string };
 
 const isRecord = (value: unknown): value is Record<string, unknown> =>
@@ -115,6 +119,16 @@ export function parseStreamLine(line: string): StreamLine {
         return { kind: "malformed", line };
       }
       return { kind: "frame", frame: decoded as unknown as AgentChatStreamFrame };
+    }
+    case "error": {
+      if (typeof decoded.message !== "string") {
+        return { kind: "malformed", line };
+      }
+      const code =
+        typeof decoded.code === "string" && (AGENT_CHAT_ERROR_CODES as readonly string[]).includes(decoded.code)
+          ? (decoded.code as AgentChatStreamErrorLine["code"])
+          : undefined;
+      return { kind: "error", error: { kind: "error", ...(code ? { code } : {}), message: decoded.message } };
     }
     default:
       return { kind: "malformed", line };

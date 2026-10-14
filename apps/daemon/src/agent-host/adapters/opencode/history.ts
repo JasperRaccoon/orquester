@@ -37,6 +37,7 @@ import type {
 } from "@orquester/api/agent-chat";
 
 import { stripAttachmentPathLines } from "../attachment-lines.ts";
+import { stripForkHandoff } from "../../orchestration/fork.ts";
 import { toToolLifecycleItemType } from "./normalize.ts";
 import { isRecord, type OpenCodeMessageInfo, type OpenCodePart } from "./protocol.ts";
 
@@ -220,7 +221,7 @@ function projectPart(
     // `Attached files:` block it appended (`attachment-lines.ts`): provider
     // input, not the user's own text. The agent's text was never the
     // adapter's and stays as it is.
-    const shown = role === "user" ? stripAttachmentPathLines(text) : text;
+    const shown = role === "user" ? stripAttachmentPathLines(stripForkHandoff(text)) : text;
     // A user part carries the prompt; anything else is the assistant's answer.
     const itemType: CanonicalItemType = role === "user" ? "user_message" : "assistant_message";
     return {

@@ -40,6 +40,18 @@ describe("parseStreamLine", () => {
     assert.equal(parseStreamLine(frame(null)).kind, "malformed");
   });
 
+  it("decodes the host's error line, its code kept only when it is a known one", () => {
+    assert.deepEqual(parseStreamLine(JSON.stringify({ kind: "error", code: "THREAD_NOT_FOUND", message: "gone" })), {
+      kind: "error",
+      error: { kind: "error", code: "THREAD_NOT_FOUND", message: "gone" }
+    });
+    assert.deepEqual(parseStreamLine(JSON.stringify({ kind: "error", code: "NEW_CODE", message: "x" })), {
+      kind: "error",
+      error: { kind: "error", message: "x" }
+    });
+    assert.equal(parseStreamLine(JSON.stringify({ kind: "error" })).kind, "malformed");
+  });
+
   it("accepts an event whose payload carries fields this bundle does not know", () => {
     const line = JSON.stringify({
       kind: "event",
