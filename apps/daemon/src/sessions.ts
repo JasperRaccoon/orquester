@@ -847,6 +847,9 @@ export class SessionManager implements ISessionManager {
     }
 
     await this.persistIndex();
+    // What was reattachable is reattached; the caller still learns that the tab records did not
+    // load, so nothing takes a missing tab for a deleted thread this run (D-M2).
+    if (!indexLoaded) throw new SessionsIndexUnreadableError();
   }
 
   /** Map a live session to its persisted record shape. */
@@ -1320,6 +1323,8 @@ export class LocalSessionManager implements ISessionManager {
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
         console.error("Failed to read sessions index for agent-chat tabs", error);
+        // The tab records did not load: nothing may take a missing tab for a deleted thread (D-M2).
+        throw new SessionsIndexUnreadableError();
       }
     }
   }
@@ -1343,5 +1348,17 @@ export class LocalSessionManager implements ISessionManager {
     }
     // Same atomic, uniquely-named, serialised write as the tmux backend.
     void writeSessionsIndex(indexPath, records, contributor.pendingThreadDeletes?.() ?? []);
+  }
+}
+
+/**
+ * `reattach()` could not read the sessions index (unreadable or corrupt): the tab records are not
+ * loaded, so a tab missing from the list may still exist. Callers must not treat a missing tab as
+ * a deleted thread this run (pull request watches, scheduled tasks).
+ */
+export class SessionsIndexUnreadableError extends Error {
+  constructor() {
+    super("The sessions index could not be read; the tab records are not loaded.");
+    this.name = "SessionsIndexUnreadableError";
   }
 }

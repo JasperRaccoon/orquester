@@ -675,8 +675,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // the daemon's own client exists (below), so nothing is delivered before the agent host is up.
   const scheduledTasksStore = new ScheduledTasksStore(resolved.scheduledTasksFile);
   await scheduledTasksStore.load();
+  // Whether the tab records loaded (set by the reattach below): until then a pull request watch or
+  // a scheduled task never takes a missing tab for a deleted thread.
+  let sessionsReattached = false;
   const scheduledTasks = new ScheduledTasksService({
     store: scheduledTasksStore,
+    sessionsLoaded: () => sessionsReattached,
     publish: (type, payload) => broadcaster.publish(SCHEDULED_TASKS_CHANNEL, type, payload)
   });
   // Automated workflows (workflows spec §3, §5.7, §5.8): definitions, secrets, runs and runtime
@@ -893,9 +897,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // Reattach to any tmux sessions that outlived a previous daemon process
   // (KillMode=process keeps the tmux server alive across restarts). No-op on the
   // local backend. Best-effort: a tmux/socket error must not block startup.
-  // Whether the tab records loaded: until then a pull request watch never takes a missing tab for
-  // a deleted thread.
-  let sessionsReattached = false;
   await sessions
     .reattach()
     .then(() => {

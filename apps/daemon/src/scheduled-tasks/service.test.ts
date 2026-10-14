@@ -38,6 +38,8 @@ interface Rig {
   run(ms: number): Promise<void>;
   /** A fresh store + service on the same file, as after a daemon restart. */
   restart(): Promise<void>;
+  /** Whether the daemon's tab records loaded (`sessionsLoaded`). Default true. */
+  sessionsLoaded?: boolean;
 }
 
 function summaryOf(state: Busy, id = THREAD): SessionSummary {
@@ -122,6 +124,7 @@ async function rig(t: test.TestContext, start = "2026-10-14T10:07:30.000Z", opts
       clock,
       logger: silentLogger,
       mintId: () => `task-${(n += 1)}`,
+      sessionsLoaded: () => r.sessionsLoaded !== false,
       publish: (type, payload) => r.events.push({ type, payload })
     });
     await r.service.start(api);
@@ -335,6 +338,22 @@ test("closing the thread removes its tasks; so does a thread gone while the daem
   assert.equal(r.service.list().length, 0);
   const onDisk = JSON.parse(await readFile(r.file, "utf8")) as { tasks: unknown[] };
   assert.equal(onDisk.tasks.length, 0);
+});
+
+test("while the tab records did not load, a thread missing from the list keeps its tasks (D-M2)", async (t) => {
+  const r = await rig(t);
+  await cron(r);
+  r.summary = null;
+  r.sessionsLoaded = false;
+  await r.restart();
+  assert.equal(r.service.list().length, 1, "not removed at boot");
+  await r.run(20 * MIN);
+  assert.equal(r.service.list().length, 1, "not removed at delivery time either");
+  assert.equal(r.turns.length, 0);
+  // Once the records are known to have loaded, a missing thread is gone.
+  r.sessionsLoaded = true;
+  await r.restart();
+  assert.equal(r.service.list().length, 0);
 });
 
 test("a refused delivery is recorded as failed, with the host's reason", async (t) => {

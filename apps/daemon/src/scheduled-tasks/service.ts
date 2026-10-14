@@ -96,6 +96,12 @@ export interface ScheduledTasksServiceOptions {
   clock?: Clock;
   logger?: WorkflowLogger;
   mintId?: () => string;
+  /**
+   * Whether the daemon's tab records loaded (`sessions.reattach()` succeeded). Until they have, a
+   * thread missing from the session list may still exist, so its tasks are never removed for it
+   * (D-M2). Default: loaded.
+   */
+  sessionsLoaded?: () => boolean;
 }
 
 const consoleLogger: WorkflowLogger = {
@@ -200,6 +206,10 @@ export class ScheduledTasksService {
     this.clock = options.clock ?? systemTriggerClock;
     this.logger = options.logger ?? consoleLogger;
     this.mintId = options.mintId ?? randomUUID;
+  }
+
+  private sessionsLoaded(): boolean {
+    return this.options.sessionsLoaded?.() ?? true;
   }
 
   // ---- lifecycle -------------------------------------------------------------------------------
@@ -539,6 +549,10 @@ export class ScheduledTasksService {
   /** At boot: the tasks of a thread the session list no longer has (closed while the daemon was down) go. */
   private async reconcileThreads(): Promise<void> {
     if (this.store.size === 0) return;
+    if (!this.sessionsLoaded()) {
+      this.logger.warn("the tab records did not load: no task is removed for a thread missing from the list");
+      return;
+    }
     let sessions: SessionSummary[];
     try {
       sessions = await this.sessions();
@@ -613,7 +627,8 @@ export class ScheduledTasksService {
       if (this.stopped) return;
       const session = byId.get(threadId);
       if (!session || session.kind !== "agent-chat") {
-        await this.removeThreadTasks(threadId);
+        // Only a thread the loaded tab records no longer have is gone (D-M2).
+        if (this.sessionsLoaded()) await this.removeThreadTasks(threadId);
         continue;
       }
       if (BUSY_RUNGS.has(resolveChatActivity(session).rung)) continue;

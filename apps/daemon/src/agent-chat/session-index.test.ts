@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { SessionRecord } from "@orquester/config";
-import { SessionManager, drainSessionIndexWrites } from "../sessions.ts";
+import { LocalSessionManager, SessionManager, SessionsIndexUnreadableError, drainSessionIndexWrites } from "../sessions.ts";
 import type { RegistryService } from "../registry.ts";
 import type { Tmux } from "../tmux.ts";
 import { ChatSessionManager } from "./chat-sessions.ts";
@@ -191,4 +191,39 @@ test("concurrent writes retain the latest complete session index", async () => {
     h.manager.closeAll();
     await h.cleanup();
   }
+});
+
+test("an unreadable sessions index fails reattach, so nothing takes a missing tab for a deleted thread (D-M2)", async () => {
+  const h = await harness([], []);
+  await writeFile(h.indexPath, "{ torn", "utf8");
+  const errors: unknown[] = [];
+  const original = console.error;
+  console.error = (...args: unknown[]) => void errors.push(args);
+  try {
+    await assert.rejects(h.manager.reattach(), (error: unknown) => error instanceof SessionsIndexUnreadableError);
+  } finally {
+    console.error = original;
+  }
+  assert.ok(errors.length > 0, "logged");
+  h.manager.closeAll();
+  await h.cleanup();
+});
+
+test("the direct-PTY backend's reattach also fails on an unreadable index, and not on a missing one (D-M2)", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-session-index-local-"));
+  const indexPath = join(dir, "sessions.json");
+  const chat = new ChatSessionManager({ requestPersist: () => undefined });
+  const contributor = { records: () => chat.records(), adopt: (rows: SessionRecord[]) => chat.adopt(rows), owns: (record: SessionRecord) => record.kind === "agent-chat" };
+  const missing = new LocalSessionManager(REGISTRY, { indexContributor: contributor }, indexPath);
+  await missing.reattach();
+  await writeFile(indexPath, "{ torn", "utf8");
+  const torn = new LocalSessionManager(REGISTRY, { indexContributor: contributor }, indexPath);
+  const original = console.error;
+  console.error = () => undefined;
+  try {
+    await assert.rejects(torn.reattach(), (error: unknown) => error instanceof SessionsIndexUnreadableError);
+  } finally {
+    console.error = original;
+  }
+  await rm(dir, { recursive: true, force: true });
 });
