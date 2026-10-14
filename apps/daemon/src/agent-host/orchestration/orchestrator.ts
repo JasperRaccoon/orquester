@@ -262,7 +262,7 @@ export type HostThreadStore = ThreadStore & {
   ): Promise<ThreadItemOutputWindowResponse | null>;
 };
 
-interface OrchestratorOptions {
+export interface OrchestratorOptions {
   store: HostThreadStore;
   ingestion: Ingestion;
   checkpoints: CheckpointService;

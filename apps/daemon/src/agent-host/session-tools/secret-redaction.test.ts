@@ -377,7 +377,8 @@ describe("secrets × the other agent-visuals tasks", () => {
     const threadId = await host.createThread({ threadId: "bounded" });
     redactor.remember(threadId, [VALUE]);
     // A session tool's result string past the 64 KiB cut, the value straddling the cut.
-    const text = `${"a".repeat(64 * 1024 - 10)}${VALUE} and more`;
+    // (Words, not one long run: a base64-looking run would be dropped whole.)
+    const text = `${"lorem ipsum ".repeat(6000).slice(0, 64 * 1024 - 20)}${VALUE} and more`;
     const item = {
       type: "mcpToolCall",
       id: "call_big",
@@ -392,7 +393,7 @@ describe("secrets × the other agent-visuals tasks", () => {
       readOnlyHint: true
     } as unknown as CodexThreadItem;
     await ingestion.ingest({
-      eventId: "big-1",
+      eventId: "call_big",
       threadId,
       createdAt: "2026-10-14T10:00:00.000Z",
       type: "item.completed",
@@ -402,11 +403,17 @@ describe("secrets × the other agent-visuals tasks", () => {
     } as unknown as RuntimeEvent);
     await ingestion.drain();
     await host.settle();
-    const row = JSON.stringify(await host.orchestrator.readItem(threadId, "call_big"));
-    assert.ok(row.includes('"html_preview"') && row.includes("aaaa"), "the row was written");
-    assert.ok(!row.includes(VALUE.slice(0, 12)), "no part of the value survives the cut");
+    const snapshot = await host.orchestrator.readThread(threadId);
+    assert.ok(snapshot.kind === "snapshot");
+    const wire = snapshot.thread.items.find(
+      (entry) => entry.kind === "activity" && (entry.payload as { toolUseId?: string }).toolUseId === "call_big"
+    );
+    assert.ok(wire, "the call's row is in the snapshot");
+    const row = JSON.stringify(await host.orchestrator.readItem(threadId, wire.id));
+    assert.ok(row.includes('"html_preview"') && row.includes("lorem ipsum"), "the row was written");
+    assert.ok(!row.includes(VALUE.slice(0, 16)), "no part of the value survives the cut");
     for (const file of await filesUnder(root)) {
-      assert.ok(!(await readFile(file, "utf8")).includes(VALUE.slice(0, 12)), file);
+      assert.ok(!(await readFile(file, "utf8")).includes(VALUE.slice(0, 16)), file);
     }
   });
 

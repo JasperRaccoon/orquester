@@ -24,8 +24,7 @@ import {
 } from "@orquester/api/agent-chat";
 
 import type { ForkConversationInput } from "../adapter.ts";
-import type { AgentThreadStore } from "../services.ts";
-import { createThreadStore } from "../store/index.ts";
+import { createThreadStore, type AgentThreadStore } from "../store/index.ts";
 import { isAgentChatCommandError } from "./errors.ts";
 import {
   buildForkTranscript,
@@ -403,7 +402,7 @@ describe("forkThread", () => {
 
   it("links the child to its parent's secrets before its first event, native or transcript — never more", async () => {
     const links: Array<{ threadId: string; parentThreadId: string; childEventsBefore: number }> = [];
-    let host: ReturnType<typeof createTestHost> | undefined;
+    let host: TestHost | undefined;
     const secrets = {
       link: (threadId: string, parentThreadId: string) => {
         links.push({
@@ -421,7 +420,7 @@ describe("forkThread", () => {
       projectHistory: () => replayOf("child")
     });
     const grok = createScriptedAdapter({ id: "grok" });
-    host = createTestHost({ adapters: { claude, grok }, secrets });
+    host = createTestHost({ adapters: { claude, grok }, secrets }) as TestHost;
     const parentId = await host.createThread({ threadId: "parent" });
     const first = await runTurn(host, claude, parentId, "first", "one");
     await host.orchestrator.forkThread(parentId, forkRequest("child", "claude", { messageId: first.replyId }));
@@ -737,7 +736,7 @@ describe("a fork's child and its parent's pages", () => {
 
       // It loads in the child — the child's own copy — and only the kept turn's.
       const path = await store.resolveAttachment("child", kept.attachmentId);
-      assert.ok(path.startsWith(join(root, "threads", "child")), path);
+      assert.ok(path.includes(join("child", "attachments")) && !path.includes(join("parent", "attachments")), path);
       assert.equal(await readFile(path, "utf8"), "<p>Kept</p>");
       await assert.rejects(store.resolveAttachment("child", dropped.attachmentId), /not found/);
       // A thread that holds no copy still cannot read another thread's page.
