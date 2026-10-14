@@ -885,3 +885,42 @@ test("a signed page whose file is gone, or whose host is down, is refused plainl
     await h.close();
   }
 });
+
+test("an MCP App's request is forwarded to the host with its row, and refused before the host when it cannot be one", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  h.host.handler = (_req, res) =>
+    res.writeHead(200, { "content-type": "application/json" }).end('{"content":[{"type":"text","text":"ok"}]}');
+  const response = await h.app.inject({
+    method: "POST",
+    url: agentChatRoutes.mcpApp("t1", "item 1", "call-tool"),
+    // A body naming another row is overridden by the route's own.
+    payload: { name: "reset", arguments: { hard: true }, itemId: "forged" }
+  });
+  assert.equal(response.statusCode, 200);
+  assert.deepEqual(response.json(), { content: [{ type: "text", text: "ok" }] });
+  const forwarded = h.host.requests.at(-1)!;
+  assert.equal(forwarded.method, "POST");
+  assert.equal(forwarded.url, "/threads/t1/mcp-apps/call-tool");
+  assert.equal(forwarded.auth, "Bearer tok");
+  assert.deepEqual(JSON.parse(forwarded.body), { name: "reset", arguments: { hard: true }, itemId: "item 1" });
+
+  // The host's refusal reaches the client as it is: its message is what the app shows.
+  h.host.handler = (_req, res) =>
+    res
+      .writeHead(409, { "content-type": "application/json" })
+      .end(JSON.stringify({ error: { code: "COMMAND_REJECTED", message: "This app cannot call that tool." } }));
+  const refused = await h.app.inject({ method: "POST", url: agentChatRoutes.mcpApp("t1", "i", "call-tool"), payload: {} });
+  assert.equal(refused.statusCode, 409);
+  assert.equal(refused.json().error.message, "This app cannot call that tool.");
+
+  const before = h.host.requests.length;
+  const unknownOperation = await h.app.inject({ method: "POST", url: "/api/sessions/t1/mcp-apps/i/delete", payload: {} });
+  assert.equal(unknownOperation.statusCode, 404);
+  const ghost = await h.app.inject({ method: "POST", url: agentChatRoutes.mcpApp("ghost", "i", "tool-info"), payload: {} });
+  assert.equal(ghost.statusCode, 404);
+  h.healthy = false;
+  const down = await h.app.inject({ method: "POST", url: agentChatRoutes.mcpApp("t1", "i", "tool-info"), payload: {} });
+  assert.equal(down.statusCode, 503);
+  assert.equal(h.host.requests.length, before, "none of them reached the host");
+  await h.close();
+});

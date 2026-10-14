@@ -507,9 +507,9 @@ class GrokAdapter implements AgentAdapter {
    */
   readonly mcpApps: AdapterMcpApps = {
     modelContext: false,
-    listTools: (threadId, server) => this.appSession(threadId).mcpListTools(server),
-    callTool: (threadId, input) => this.appSession(threadId).mcpCallTool(input),
-    readResource: (threadId, input) => this.appSession(threadId).mcpReadResource(input)
+    listTools: async (threadId, server) => await this.appSession(threadId).mcpListTools(server),
+    callTool: async (threadId, input) => await this.appSession(threadId).mcpCallTool(input),
+    readResource: async (threadId, input) => await this.appSession(threadId).mcpReadResource(input)
   };
 
   private appSession(threadId: string): GrokSession {

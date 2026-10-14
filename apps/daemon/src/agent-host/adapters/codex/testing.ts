@@ -250,6 +250,13 @@ export interface MockConfig {
    * still carries the goal as it was when the request was read.
    */
   goalMovesDuringGet?: string;
+  /**
+   * MCP Apps (spec 2026-10-14 §3): what `mcpServer/resource/read` answers as
+   * its `contents` — `"hang"` never answers — and the tools
+   * `mcpServerStatus/list` lists for the server `apps`. `mcpServer/tool/call`
+   * echoes the tool and its arguments.
+   */
+  mcpApps?: { contents?: unknown[] | "hang"; tools?: Record<string, unknown> };
   /** Everything the mock received, appended as NDJSON. */
   logPath: string;
 }
@@ -846,6 +853,16 @@ function handle(frame) {
       return;
     case "account/rateLimits/read":
       send({ id, result: { ordinaryUsageAllowed: true, rateLimits: { limitId: "codex", limitName: null, normalModelSlug: null, primary: { usedPercent: 30, windowDurationMins: 10080, resetsAt: 1790220221 }, secondary: null, credits: null, individualLimit: null, spendControlReached: false, planType: "pro", rateLimitReachedType: null }, rateLimitsByLimitId: null, rateLimitResetCredits: null, accountId: null, rateLimitUpsell: null } });
+      return;
+    case "mcpServer/resource/read":
+      if (config.mcpApps?.contents === "hang") return;
+      send({ id, result: { contents: config.mcpApps?.contents ?? [], originCallId: null } });
+      return;
+    case "mcpServer/tool/call":
+      send({ id, result: { content: [{ type: "text", text: "called " + params.tool }], structuredContent: { arguments: params.arguments ?? null }, _meta: null } });
+      return;
+    case "mcpServerStatus/list":
+      send({ id, result: { data: [{ name: "apps", runtimeStatus: "connected", pluginId: null, serverInfo: null, tools: config.mcpApps?.tools ?? {}, toolsError: null, resources: [], resourceTemplates: [], authStatus: "unsupported" }], nextCursor: null } });
       return;
     default:
       send({ id, error: { code: -32600, message: "Invalid request: unknown variant \`" + method + "\`" } });

@@ -356,6 +356,59 @@ function handle(frame) {
     cancelled = true;
     return;
   }
+  // MCP Apps (spec 2026-10-14 §3): the CLI's own MCP client, reached by the
+  // client→agent extension requests Grok 1.0.46 answers (probed 2026-10-14,
+  // `adapters/grok/mcp-apps.ts`): every answer wrapped in `{result: …}`.
+  if (method === "_x.ai/mcp/read_resource") {
+    if (scenario === "mcp-app-hang") {
+      return; // Never answers: a server that hangs on the read.
+    }
+    result(id, {
+      result: {
+        contents: [
+          {
+            uri: params.uri,
+            mimeType: "text/html;profile=mcp-app",
+            text: "<!doctype html><h1>widget</h1>",
+            _meta: { ui: { prefersBorder: true } }
+          }
+        ]
+      }
+    });
+    return;
+  }
+  if (method === "_x.ai/mcp/call") {
+    result(id, { result: { content: [{ type: "text", text: `called ${params.tool}` }] } });
+    return;
+  }
+  if (method === "_x.ai/mcp/list") {
+    result(id, {
+      result: {
+        servers: [
+          {
+            name: "apps",
+            source: "local",
+            type: "stdio",
+            command: "",
+            session: {
+              enabled: true,
+              status: "ready",
+              tools: [
+                {
+                  name: "show_widget",
+                  description: "Shows a widget",
+                  _meta: { ui: { resourceUri: "ui://apps/widget.html", visibility: ["model", "app"] } },
+                  enabled: true
+                }
+              ]
+            }
+          }
+        ],
+        sessionMcpResolved: true
+      }
+    });
+    return;
+  }
   if (method === "session/prompt") {
     void runPrompt(id, params);
     return;
@@ -1137,6 +1190,50 @@ async function runPrompt(id, params) {
       });
     }
     // …then the turn settles as the happy path does.
+  }
+
+  if (scenario === "mcp-app" || scenario === "mcp-app-hang") {
+    // A `use_tool` call of an MCP Apps tool, as Grok 1.0.46 streams it (the
+    // 2026-10-14 probe, spec appendix): its completed update carries the TOOL
+    // definition's `_meta` (`ui.resourceUri`) and an MCP `rawOutput`.
+    const vendor = {
+      "x.ai/tool": { version: 1, name: "use_tool", kind: "use_tool", namespace: "grok_build", label: "Use Tool", read_only: false }
+    };
+    notify("session/update", {
+      sessionId,
+      update: {
+        sessionUpdate: "tool_call",
+        toolCallId: "call-app-1",
+        title: "use_tool",
+        rawInput: { tool_name: "apps__show_widget", tool_input: { n: 1 } },
+        _meta: vendor
+      },
+      _meta: { totalTokens: 1690, promptId }
+    });
+    notify("session/update", {
+      sessionId,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "call-app-1",
+        kind: "other",
+        title: "apps__show_widget",
+        locations: [],
+        rawInput: { variant: "UseTool", tool_name: "apps__show_widget", tool_input: { n: 1 } },
+        _meta: vendor
+      },
+      _meta: { totalTokens: 1690, promptId }
+    });
+    notify("session/update", {
+      sessionId,
+      update: {
+        sessionUpdate: "tool_call_update",
+        toolCallId: "call-app-1",
+        status: "completed",
+        rawOutput: { type: "MCP", tool_name: "show_widget", server_name: "apps", output: { OkayOutput: 'widget shown\n{"n":1}' } },
+        _meta: { ui: { resourceUri: "ui://apps/widget.html", visibility: ["model", "app"] }, "ui/resourceUri": "ui://apps/widget.html" }
+      },
+      _meta: { totalTokens: 1695, promptId }
+    });
   }
 
   notify("session/update", {

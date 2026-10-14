@@ -311,9 +311,9 @@ export const createCodexAdapter: AdapterFactory = async (
 
   const mcpApps: AdapterMcpApps = {
     modelContext: true,
-    listTools: (threadId, server) => appSession(threadId).mcpListTools(server),
-    callTool: (threadId, input) => appSession(threadId).mcpCallTool(input),
-    readResource: (threadId, input) => appSession(threadId).mcpReadResource(input),
+    listTools: async (threadId, server) => await appSession(threadId).mcpListTools(server),
+    callTool: async (threadId, input) => await appSession(threadId).mcpCallTool(input),
+    readResource: async (threadId, input) => await appSession(threadId).mcpReadResource(input),
     setModelContext(threadId, key, context) {
       const entries = appContexts.get(threadId) ?? new Map<string, string>();
       if (context === null || context.text.trim() === "") {
