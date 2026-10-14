@@ -75,7 +75,13 @@ export type AgentChatConnectionState =
   | "connecting"
   | "synchronized"
   | "reconnecting"
-  | "error";
+  | "error"
+  /**
+   * The host holds no such thread (its stream answered `THREAD_NOT_FOUND`):
+   * terminal — the stream stops reconnecting, and the tab says the chat no
+   * longer exists, offering to close it (or to try again).
+   */
+  | "gone";
 
 /**
  * The client's own queue of messages it has not dispatched yet. A **different
@@ -681,6 +687,8 @@ export interface AgentChatActions {
    */
   rememberScroll(position: Partial<RememberedTimelinePosition>): void;
   dismissErrorBanner(): void;
+  /** Connect the thread's stream again after it reported the thread `gone`. */
+  retryStream(): void;
   /**
    * Persist what the composer has not sent (§7.4).
    *

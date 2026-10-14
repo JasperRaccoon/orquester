@@ -20,6 +20,7 @@ import { dirname, join } from "node:path";
 
 import {
   AGENT_CHAT_COMMAND_NAMES,
+  DEADLINE_REFUSAL_REASON,
   MAX_TURN_FILE_BYTES,
   THREAD_HISTORY_DEFAULT_TURNS,
   THREAD_HISTORY_MAX_TURNS,
@@ -198,7 +199,12 @@ function sendError(
   if (error instanceof DeadlineExceededError) {
     const code = hostReady() ? "COMMAND_REJECTED" : "HOST_UNAVAILABLE";
     sendJson(response, statusForCode(code), {
-      error: { code, message: redact(error.message) }
+      error: {
+        code,
+        message: redact(error.message),
+        // Marked, so a client tells this refusal of the moment from the thread's own.
+        ...(code === "COMMAND_REJECTED" ? { detail: { reason: DEADLINE_REFUSAL_REASON } } : {})
+      }
     });
     return;
   }

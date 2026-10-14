@@ -887,7 +887,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     void removeSessionUploads(resolved.daemonDir, s.id);
   });
   sessions.lifecycle.on("closed", (payload: { id: string }) => {
-    broadcaster.publish("sessions", "session.closed", payload);
+    // `{id}` only, as the wire's `session.closed` names it: the chat manager's internal
+    // `rolledBack` (a fork's own rollback) is the daemon's business, not a client's.
+    broadcaster.publish("sessions", "session.closed", { id: payload.id });
     void removeSessionUploads(resolved.daemonDir, payload.id);
   });
   sessions.lifecycle.on("updated", (s: SessionSummary) =>

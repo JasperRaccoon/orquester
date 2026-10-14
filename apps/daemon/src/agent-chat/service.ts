@@ -387,9 +387,12 @@ export class AgentChatService {
     // Clear the durable delete queue as soon as a host is adopted, and again on
     // every later adoption (a respawn or the drain-restart).
     await this.replayPendingThreadDeletes();
+    // …and settle every fork tab whose host answer was lost (`reconcileForks`) the same way.
+    await this.reconcileForks();
     this.supervisor.onChange((status) => {
       if (status.state === "healthy") {
         void this.replayPendingThreadDeletes();
+        void this.reconcileForks();
       }
     });
     this.summary.start();
@@ -400,7 +403,10 @@ export class AgentChatService {
     this.healthTimer = setInterval(() => {
       this.supervisor
         .checkHealth()
-        .catch((error) => this.opts.logger?.error?.("agent host health check failed", error));
+        .catch((error) => this.opts.logger?.error?.("agent host health check failed", error))
+        // A host that stayed healthy but answered a fork too late gets no "healthy" change:
+        // its unconfirmed fork tabs are settled on the next tick. No I/O when there are none.
+        .then(() => this.reconcileForks());
     }, AGENT_HOST_HEALTH_INTERVAL_MS);
     this.healthTimer.unref?.();
   }
@@ -813,6 +819,13 @@ export class AgentChatService {
     // an existing child is idempotent), so a double submit never opens a second fork.
     const running = this.forksInFlight.get(key);
     if (running) return running;
+    // A reconcile of this very tab is asking the host: its outcome (confirmed, or taken back)
+    // decides what this repeat finds, so it is waited for and the request read afresh.
+    const confirming = this.forksConfirming.get(id);
+    if (confirming) {
+      await confirming;
+      return this.forkSession(parentId, req, order);
+    }
     this.rememberFork(key, { fingerprint, childId: id, closed: false });
     const run = this.forkSessionNow(parentId, req, order, id, fingerprint)
       .catch((error: unknown) => {
@@ -852,6 +865,23 @@ export class AgentChatService {
     id: string,
     /** A keyed fork's fork point, recorded on its tab; absent for an unkeyed fork. */
     fingerprint?: string
+  ): Promise<ForkSessionResponse> {
+    // Marked from the first moment, so a reconcile never asks about (or takes back) this tab
+    // while its own fork decides it.
+    this.forkChildrenInFlight.add(id);
+    try {
+      return await this.forkSessionAttempt(parentId, req, order, id, fingerprint);
+    } finally {
+      this.forkChildrenInFlight.delete(id);
+    }
+  }
+
+  private async forkSessionAttempt(
+    parentId: string,
+    req: ForkSessionRequest,
+    order: number,
+    id: string,
+    fingerprint: string | undefined
   ): Promise<ForkSessionResponse> {
     const keyed = fingerprint !== undefined;
     const parent = this.chat.get(parentId);
@@ -909,7 +939,10 @@ export class AgentChatService {
       home,
       // Provisional until the host answers with the fork point it resolved.
       lineage: { parentThreadId: parentId, relation: "fork", createdAt: new Date().toISOString() },
-      ...(fingerprint !== undefined ? { forkFingerprint: fingerprint } : {})
+      ...(fingerprint !== undefined ? { forkFingerprint: fingerprint } : {}),
+      // Until the host's answer is in: a daemon gone before it, or an answer lost, leaves the
+      // tab for `reconcileForks` to settle with the host.
+      forkUnconfirmed: true
     });
     const request: ForkHostThreadRequest = {
       threadId: id,
@@ -936,11 +969,12 @@ export class AgentChatService {
       const response = await this.client.json<
         ForkHostThreadResponse & { error?: { code: string; message: string } }
       >("POST", agentHostRoutes.forkThread(parentId), request);
-      if (response.status >= 500) {
-        // The host could not answer: whether it forked is unknown.
+      if (response.status >= 500 || (response.status < 400 && !response.value?.head)) {
+        // The host could not answer — or answered a success without the child's head: whether
+        // it forked is unknown (a success says it may well hold the child), never a refusal.
         throw new ForkOutcomeUnknown();
       }
-      if (response.status >= 400 || !response.value?.head) {
+      if (response.status >= 400) {
         const message = response.value?.error?.message ?? "The agent host refused the fork.";
         // A host from before forks answers its generic route miss until its drain-restart.
         if (response.status === 404 && message.startsWith("No route for")) {
@@ -957,7 +991,7 @@ export class AgentChatService {
             : "SESSION_UNAVAILABLE"
         );
       }
-      result = response.value;
+      result = response.value!;
     } catch (error) {
       // Only a tab this call created is rolled back — a repeat leaves the first one's as it was —
       // and how depends on what the host did:
@@ -978,6 +1012,88 @@ export class AgentChatService {
     }
     const forked = this.chat.setLineage(id, result.lineage) ?? summary;
     return { session: forked, lineage: result.lineage, strategy: result.strategy };
+  }
+
+  /** Fork tabs whose host fork this daemon is asking for right now ({@link forkSessionNow}). */
+  private readonly forkChildrenInFlight = new Set<string>();
+  /** Fork tabs a {@link reconcileForks} is confirming with the host right now. */
+  private readonly forksConfirming = new Map<string, Promise<void>>();
+  private reconciling: Promise<void> | null = null;
+
+  /**
+   * Settle every fork tab the host has not answered for (`forkUnconfirmed`): its answer was
+   * lost (the socket went, a 5xx, a timeout) or the daemon went before it came. The host is
+   * asked — `confirmOnly`, so nothing is created now — whether it holds the child:
+   * - it does (or its fork finishes meanwhile): the tab is confirmed and takes the lineage the
+   *   host resolved, fork point included;
+   * - it refuses (no such child, never created): the tab is taken back as a rollback — no host
+   *   delete (there is nothing to delete, and no queued delete may later kill a child a retry
+   *   creates), and the fork key may fork again;
+   * - no answer again: the tab stays unconfirmed for the next attempt.
+   * Run at host adoption, on every return to healthy and on each health tick; a fork in flight
+   * in this daemon is left to its own answer.
+   */
+  reconcileForks(): Promise<void> {
+    if (this.reconciling) return this.reconciling;
+    const run = (async () => {
+      if (!this.supervisor.isHealthy()) return;
+      for (const id of this.chat.unconfirmedForks()) {
+        if (this.forkChildrenInFlight.has(id) || this.forksConfirming.has(id)) continue;
+        const confirm = this.confirmFork(id).finally(() => this.forksConfirming.delete(id));
+        this.forksConfirming.set(id, confirm);
+        await confirm;
+      }
+    })()
+      // Never a rejection: callers fire this from timers and status changes.
+      .catch((error: unknown) => this.opts.logger?.warn?.("agent chat: fork reconcile failed; will retry", error))
+      .finally(() => {
+        this.reconciling = null;
+      });
+    this.reconciling = run;
+    return run;
+  }
+
+  /** One unconfirmed fork tab, asked of the host ({@link reconcileForks}). Never throws. */
+  private async confirmFork(id: string): Promise<void> {
+    const tab = this.chat.get(id);
+    const parentId = tab?.lineage?.relation === "fork" ? tab.lineage.parentThreadId : undefined;
+    if (!tab || parentId === undefined) return;
+    const request: ForkHostThreadRequest = {
+      threadId: id,
+      projectPath: tab.projectPath,
+      cwd: tab.cwd,
+      title: tab.title,
+      refId: tab.refId,
+      accountId: tab.accountId ?? "",
+      home: resolveHomeKind(tab.accountId ?? ""),
+      modelSelection: undefined,
+      runtimeMode: undefined,
+      fork: {},
+      confirmOnly: true
+    };
+    let response: { status: number; value: (ForkHostThreadResponse & { error?: { message?: string } }) | null };
+    try {
+      response = await this.client.json<ForkHostThreadResponse & { error?: { message?: string } }>(
+        "POST",
+        agentHostRoutes.forkThread(parentId),
+        request
+      );
+    } catch (error) {
+      this.opts.logger?.warn?.(`agent chat: could not confirm fork ${id} with the host; will retry`, error);
+      return;
+    }
+    // A fork in flight for this tab took over meanwhile: its answer is the one that counts.
+    if (this.forkChildrenInFlight.has(id) || !this.chat.has(id)) return;
+    if (response.status < 400 && response.value?.head) {
+      this.chat.setLineage(id, response.value.lineage ?? response.value.head.lineage ?? tab.lineage!);
+      return;
+    }
+    if (response.status >= 400 && response.status < 500) {
+      this.opts.logger?.warn?.(
+        `agent chat: the host holds no fork ${id} (${response.value?.error?.message ?? response.status}); its tab is taken back`
+      );
+      this.chat.discard(id);
+    }
   }
 
   /**

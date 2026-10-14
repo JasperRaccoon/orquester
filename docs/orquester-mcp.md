@@ -596,7 +596,9 @@ and its default model (the flagged one, else the first) are never shed.
   over. A parent whose managed account was removed is refused (`COMMAND_REJECTED`, "The account
   this conversation runs under is no longer available"): a conversation is only readable from the
   home that created it. Each call mints a command id the daemon forks by, re-sent unchanged on a
-  `HOST_UNAVAILABLE` retry, so a retry never opens a second fork. (On the daemon route, the same
+  `HOST_UNAVAILABLE` retry, so a retry never opens a second fork; a fork tab whose answer was lost
+  and that nobody retries is settled by the daemon once the host answers — kept (its `forkedFrom`
+  filled in) when the host holds the child, closed when it never created one. (On the daemon route, the same
   `commandId` with another fork point, or once the fork it opened was closed, answers
   `COMMAND_ID_CONFLICT` rather than that fork.) The result's `session` is the
   fork's `SessionDetail`.
@@ -609,17 +611,20 @@ and its default model (the flagged one, else the first) are never shed.
   first, one per idle point, never one steering into another. The queue is kept across daemon
   restarts and delivers each merge exactly once (its first `/turn` goes out under the `mergeId`, a
   retry after a refusal as `<mergeId>:<n>` — the host replays a recorded rejection for an id it has
-  seen — and a passing refusal is retried only once the parent's log has moved on). Nothing
-  queued disappears: a parent that refuses a merge (a passing refusal is tried again at its next
-  idle points, up to 3 times) or is closed leaves it in `pendingMerges` with `state: "failed"` and
-  the reason in `error`, on both tabs, until `resolve_merge_back` delivers or discards it — which
-  is also the way past a parent a continuing goal keeps busy (`deliver` sends it now, as a message
-  that steers the running turn). Only a refusal that passes by itself (`COMPACTION_UNAVAILABLE`)
-  is retried; a `COMMAND_REJECTED` — the thread's own state, such as an unreadable log or a
-  session in error — fails the merge at once; a queued merge refused before shows its last `error`
-  and `attempts`. Refused (`COMMAND_REJECTED`) for a session with no parent, a closed parent, or a
-  fork with no finished reply; a merge an idle parent refuses at once is refused to the caller
-  then and not queued. (On the daemon route, a caller-chosen merge `commandId` must be 1–180
+  seen). Nothing queued disappears: a parent that refuses a merge or is closed leaves it in
+  `pendingMerges` with `state: "failed"` and the reason in `error`, on both tabs, until
+  `resolve_merge_back` delivers or discards it — which is also the way past a parent a continuing
+  goal keeps busy (`deliver` sends it now, as a message that steers the running turn). The one
+  refusal that is retried is the host's deadline — a step of the `/turn` ran out of time after the
+  host was up: `COMMAND_REJECTED` with `detail.reason: "deadline"` (a message ending "timed out
+  after <n>ms" from an older host) — tried again under the next id once a retry delay has passed,
+  up to 3 attempts, the merge staying queued meanwhile with its last `error` and `attempts`. Any
+  other refusal of the parent's `/turn` is the thread's own state (an unreadable log, a session in
+  error, an invalid message) and fails the merge at once. (A merge never meets
+  `COMPACTION_UNAVAILABLE`: the host queues a message sent during a compaction.) Refused
+  (`COMMAND_REJECTED`) for a session with no parent, a closed parent, or a fork with no finished
+  reply; a merge an idle parent refuses at once is refused to the caller then and not queued —
+  unless that refusal is the deadline, which queues it. (On the daemon route, a caller-chosen merge `commandId` must be 1–180
   characters without `:`, else `INVALID_COMMAND`; a merge refused at once under such an id cannot
   be sent again with it — the parent replays its rejection — so a resend needs a new id.
   `merge_back_session` mints a fresh id per call.)

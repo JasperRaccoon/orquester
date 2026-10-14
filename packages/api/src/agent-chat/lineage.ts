@@ -166,7 +166,9 @@ export interface MergeBackRequest {
    * since the host replays a recorded rejection for an id it has seen. So a
    * merge sent at once and refused at once (the caller hears the refusal;
    * nothing is queued) cannot be sent again under the same id — the parent
-   * would answer the same rejection: send it with a new id.
+   * would answer the same rejection: send it with a new id. The one refusal
+   * that is retried is the host's deadline (`isDeadlineRefusal`): a merge it
+   * meets is queued (or stays queued) and tried again after a delay.
    */
   commandId?: string;
 }

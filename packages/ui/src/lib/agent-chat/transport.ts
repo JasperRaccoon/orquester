@@ -14,6 +14,7 @@
  */
 
 import {
+  isThreadGoneStreamError,
   agentChatCommandPath,
   agentChatRoutes,
   isThreadItemOutputWindow,
@@ -70,6 +71,11 @@ export interface AgentChatStreamHandlers {
   onReconnect?(info: { attempt: number; delayMs: number; reason: string }): void;
   /** The stream was closed by the caller, or gave up. */
   onClose?(): void;
+  /**
+   * The host holds no such thread (its stream answered `THREAD_NOT_FOUND`):
+   * terminal — no reconnect is scheduled until {@link AgentChatStreamHandle.retry}.
+   */
+  onGone?(info: { message: string }): void;
   onError?(error: unknown): void;
 }
 
@@ -89,6 +95,12 @@ export interface AgentChatStreamHandle extends StreamHandle {
   readonly lastSeq: number;
   /** The last `synchronized` instance id, or null before the first one. */
   readonly hostInstanceId: string | null;
+  /**
+   * Connect again after {@link AgentChatStreamHandlers.onGone} — the user's
+   * "Try again", or the tab's record changing (a fork the daemon confirmed).
+   * A no-op on a stream that is not gone.
+   */
+  retry(): void;
   /**
    * Drop the sequence floor and ask for a snapshot on the next connection.
    *
@@ -569,6 +581,8 @@ function openAgentChatStream(
   handlers: AgentChatStreamHandlers
 ): AgentChatStreamHandle {
   let closed = false;
+  /** The host said the thread does not exist: no reconnect until `retry()`. */
+  let gone = false;
   let attempt = 0;
   let lastSeq = options.after ?? 0;
   let hostInstanceId: string | null = options.hostInstanceId ?? null;
@@ -602,7 +616,7 @@ function openAgentChatStream(
   };
 
   const scheduleReconnect = (reason: string): void => {
-    if (closed || retryTimer !== null) {
+    if (closed || gone || retryTimer !== null) {
       return;
     }
     clearStall();
@@ -643,6 +657,21 @@ function openAgentChatStream(
         const frames: AgentChatStreamFrame[] = [];
         for (const line of lines.push(chunk)) {
           const parsed = parseStreamLine(line);
+          if (parsed.kind === "error" && isThreadGoneStreamError(parsed.error)) {
+            // The host holds no such thread — a fork whose create never landed, a thread
+            // deleted there. Reconnecting would read the same miss forever: stop, and say so.
+            gone = true;
+            clearStall();
+            const dropped = inner;
+            inner = null;
+            dropped?.close();
+            if (frames.length > 0) {
+              if (handlers.onFrames) handlers.onFrames(frames);
+              else for (const frame of frames) handlers.onFrame(frame);
+            }
+            handlers.onGone?.({ message: parsed.error.message });
+            return;
+          }
           if (parsed.kind !== "frame") {
             // A heartbeat, a blank line, or a line an older bundle cannot
             // decode. None of them may abort the stream — a malformed frame
@@ -675,14 +704,14 @@ function openAgentChatStream(
         }
       },
       onEnd: () => {
-        if (closed) {
+        if (closed || gone) {
           return;
         }
         inner = null;
         scheduleReconnect("ended");
       },
       onError: (error) => {
-        if (closed) {
+        if (closed || gone) {
           return;
         }
         handlers.onError?.(error);
@@ -703,6 +732,14 @@ function openAgentChatStream(
     resetCursor() {
       lastSeq = 0;
       knownHostInstanceId = hostInstanceId;
+    },
+    retry() {
+      if (closed || !gone) {
+        return;
+      }
+      gone = false;
+      attempt = 0;
+      connect();
     },
     close() {
       if (closed) {

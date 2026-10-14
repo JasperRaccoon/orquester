@@ -12,6 +12,9 @@ import { describe, it } from "node:test";
 import Database from "better-sqlite3";
 
 import {
+  isDeadlineRefusal,
+  isThreadGoneStreamError,
+  type AgentChatStreamErrorLine,
   type AgentChatStreamFrame,
   type RuntimeEvent,
   type ThreadPromptsResponse,
@@ -661,6 +664,22 @@ describe("agent host server — the event stream (§6.3)", () => {
   });
 
 
+  it("a thread the host does not hold answers one THREAD_NOT_FOUND error line and closes", async () => {
+    const h = await harness();
+    const live = await h.stream(agentHostRoutes.events("never-created"));
+    await live.closed;
+    const lines = live.raw.filter((line) => line.length > 0 && !line.startsWith(":"));
+    assert.equal(lines.length, 1);
+    const line = JSON.parse(lines[0]!) as AgentChatStreamErrorLine;
+    assert.equal(line.kind, "error");
+    assert.equal(line.code, "THREAD_NOT_FOUND");
+    assert.equal(isThreadGoneStreamError(line), true, "a client stops reconnecting on it");
+    // A host from before the code: its wording alone still says so; another failure does not.
+    assert.equal(isThreadGoneStreamError({ kind: "error", message: line.message }), true);
+    assert.equal(isThreadGoneStreamError({ kind: "error", message: "EIO: read failed" }), false);
+    await h.stop();
+  });
+
   it("closes every open stream when the host stops", { timeout: 10_000 }, async () => {
     const h = await harness();
     const threadId = await h.host.createThread();
@@ -722,6 +741,9 @@ describe("agent host server - a deadline answers its specified status (E9)", () 
     const envelope = answer.body as { error: { code: string; message: string } };
     assert.equal(envelope.error.code, "COMMAND_REJECTED");
     assert.match(envelope.error.message, /timed out/);
+    // Marked as the refusal of a moment, which a merge back retries (`isDeadlineRefusal`).
+    assert.deepEqual((envelope.error as { detail?: unknown }).detail, { reason: "deadline" });
+    assert.equal(isDeadlineRefusal(envelope.error), true);
     await h.stop();
   });
 
@@ -1300,6 +1322,44 @@ describe("agent host server — thread lineage's fork route (spec 2026-10-14 §6
     assert.equal(malformed.status, 400);
     const missing = await h.call("POST", agentHostRoutes.forkThread("nope"), { ...body, threadId: "fork-child-2" });
     assert.equal(missing.status, 404);
+    await h.stop();
+  });
+
+  it("confirmOnly answers a child the host holds and never creates one", async () => {
+    const h = await harness();
+    const parentId = await h.host.createThread();
+    const body = {
+      threadId: "fork-child-3",
+      projectPath: "/work/project",
+      cwd: "/work/project",
+      title: "Fork",
+      refId: "claude",
+      accountId: "acc1",
+      home: "account",
+      modelSelection: undefined,
+      runtimeMode: undefined,
+      fork: {}
+    };
+    const absent = await h.call("POST", agentHostRoutes.forkThread(parentId), { ...body, confirmOnly: true });
+    assert.equal(absent.status, 404);
+    assert.equal((absent.body as { error: { code: string } }).error.code, "THREAD_NOT_FOUND");
+    assert.equal((await h.call("GET", agentHostRoutes.read("fork-child-3"))).status, 404, "nothing was created");
+
+    // Two forks of one child at once: one `thread.created`, both answered with it.
+    const [one, two] = await Promise.all([
+      h.call("POST", agentHostRoutes.forkThread(parentId), body),
+      h.call("POST", agentHostRoutes.forkThread(parentId), body)
+    ]);
+    assert.deepEqual([one.status, two.status], [200, 200]);
+    const read = await h.call("GET", agentHostRoutes.read("fork-child-3"));
+    const { thread } = read.body as { thread: { head: { lineage?: { parentThreadId: string } } } };
+    assert.equal(thread.head.lineage?.parentThreadId, parentId);
+    const confirmed = await h.call("POST", agentHostRoutes.forkThread(parentId), { ...body, confirmOnly: true });
+    assert.equal(confirmed.status, 200);
+    const result = confirmed.body as { head: { id: string }; lineage: { parentThreadId: string }; strategy: string };
+    assert.equal(result.head.id, "fork-child-3");
+    assert.equal(result.lineage.parentThreadId, parentId);
+    assert.equal(result.strategy, "empty");
     await h.stop();
   });
 });

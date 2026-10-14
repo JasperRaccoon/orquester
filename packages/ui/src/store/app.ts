@@ -95,6 +95,7 @@ import { ProjectSetupError } from "../lib/project-setup-error";
 import { invalidateProjectIndex } from "../lib/project-index";
 import type { HttpClient } from "../lib/http-client";
 import type { Transporter } from "../lib/transporter";
+import { ForkRetryKeys } from "../lib/agent-chat/lineage.logic";
 import type {
   AccountSummary,
   AccountTestResult,
@@ -239,6 +240,9 @@ function dropConversationCache(
  * one promise instead of stampeding the daemon.
  */
 const conversationScans = new Map<string, Promise<AgentConversationSummary[]>>();
+
+/** Fork commands whose outcome is unknown, re-sent on the next fork from the same point (`forkChatTab`). */
+const forkRetryKeys = new ForkRetryKeys();
 
 /**
  * Is this recents row behind the archive curtain? `isArchived` is absent on
@@ -2477,12 +2481,26 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!api) {
       throw new Error("Not connected to Orquester.");
     }
-    // The idempotency key: a retried POST of this same fork answers the same tab.
+    // The idempotency key: a retried POST of this same fork answers the same tab. A fork whose
+    // outcome was unknown (the host unavailable, no answer) leaves its id for the next click on
+    // the same point, so that retry converges on the fork the daemon may already hold.
+    const retryKey = ForkRetryKeys.keyFor(sessionId, request);
     const commandId =
       request.commandId ??
-      (globalThis as { crypto?: { randomUUID?: () => string } }).crypto?.randomUUID?.() ??
-      `fork-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
-    const result = await api.forkSession(sessionId, { ...request, commandId });
+      forkRetryKeys.commandIdFor(
+        retryKey,
+        () =>
+          (globalThis as { crypto?: { randomUUID?: () => string } }).crypto?.randomUUID?.() ??
+          `fork-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`
+      );
+    let result: ForkSessionResponse;
+    try {
+      result = await api.forkSession(sessionId, { ...request, commandId });
+    } catch (error) {
+      forkRetryKeys.settle(retryKey, commandId, error);
+      throw error;
+    }
+    forkRetryKeys.settle(retryKey, commandId, null);
     const session = result.session;
     set((state) => ({
       sessions: upsertSession(state.sessions, session),

@@ -79,6 +79,7 @@ function fakeWorld() {
   const listeners = new Set<(event: EventMessage) => void>();
   let turnStatus = 200;
   let turnCode = "HOST_UNAVAILABLE";
+  let turnRefusal: { message?: string; detail?: unknown } = {};
   /**
    * The host's receipts: a command id it accepted or REJECTED is answered the same way
    * again (orchestration `replayRecordedRejection`); a 503 records nothing.
@@ -102,7 +103,10 @@ function fakeWorld() {
         const answer: DaemonResponse =
           turnStatus < 400
             ? { status: 200, body: { seq: 9 } }
-            : { status: turnStatus, body: { error: { code: turnCode, message: `refused: ${turnCode}` } } };
+            : {
+                status: turnStatus,
+                body: { error: { code: turnCode, message: turnRefusal.message ?? `refused: ${turnCode}`, ...("detail" in turnRefusal ? { detail: turnRefusal.detail } : {}) } }
+              };
         if (answer.status !== 503) receipts.set(body.commandId as string, answer);
         return answer;
       }
@@ -121,9 +125,19 @@ function fakeWorld() {
     sessions,
     threads,
     turns,
-    setTurnStatus: (status: number, code = "HOST_UNAVAILABLE") => {
+    setTurnStatus: (status: number, code = "HOST_UNAVAILABLE", refusal: { message?: string; detail?: unknown } = {}) => {
       turnStatus = status;
       turnCode = code;
+      turnRefusal = refusal;
+    },
+    /** The host's post-gate deadline refusal of a `/turn` (`http-server.ts` `sendError`), as a real host words it. */
+    refuseWithDeadline(marked = true): void {
+      turnStatus = 409;
+      turnCode = "COMMAND_REJECTED";
+      turnRefusal = {
+        message: "codex thread/start timed out after 30000ms",
+        ...(marked ? { detail: { reason: "deadline" } } : {})
+      };
     },
     /** The parent's tab changed: the bus event the summary service raises. */
     touch(id: string): void {
@@ -163,14 +177,16 @@ async function setup(options: { parentBusy?: boolean; outbox?: string } = {}) {
   }
   let ids = 0;
   const published = new Map<string, PendingMergeBack[]>();
+  let nowMs = Date.parse("2026-10-14T02:00:00.000Z");
   const make = () =>
     new LineageService({
       sessions: world.listing,
       outboxFile,
       recheckMs: 0,
+      retryDelayMs: 1_000,
       setPendingMerges: (id, merges) => published.set(id, merges),
       newId: () => `merge-${(ids += 1)}`,
-      now: () => new Date("2026-10-14T02:00:00.000Z")
+      now: () => new Date(nowMs)
     });
   const service = make();
   await service.load();
@@ -181,6 +197,10 @@ async function setup(options: { parentBusy?: boolean; outbox?: string } = {}) {
     make,
     outboxFile,
     published,
+    /** Move the service's clock on: a deadline refusal's retry delay passes. */
+    advance: (ms: number) => {
+      nowMs += ms;
+    },
     cleanup: async () => {
       await service.stop();
       await rm(dir, { recursive: true, force: true });
@@ -321,30 +341,27 @@ describe("merge back", () => {
     await cleanup();
   });
 
-  it("a passing refusal (COMPACTION_UNAVAILABLE) is retried under a NEW command id, only at the parent's next idle point", async () => {
-    const { world, service, cleanup } = await setup({ parentBusy: true });
+  it("the host's deadline refusal is retried under a NEW command id, once its retry delay has passed", async () => {
+    const { world, service, advance, cleanup } = await setup({ parentBusy: true });
     await service.mergeBack("child", { commandId: "m1" });
-    const idleAt = (seq: number) => {
-      world.sessions.set("parent", summary("parent", { title: "Parent" }));
-      world.threads.set("parent", { ...snapshot(), seq });
-    };
-    idleAt(5);
-    world.setTurnStatus(409, "COMPACTION_UNAVAILABLE");
+    world.sessions.set("parent", summary("parent", { title: "Parent" }));
+    world.threads.set("parent", snapshot());
+    world.refuseWithDeadline();
     world.touch("parent");
     await settled(service);
     assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["m1"]);
-    assert.equal(service.pending()[0]!.attempts, 1);
+    assert.deepEqual([service.pending()[0]!.state, service.pending()[0]!.attempts], ["queued", 1]);
 
-    // Its own tab update, and any event while the parent's log has not moved: no new attempt.
+    // Its own tab update, and any event before the delay has passed: no new attempt.
     world.touch("parent");
     world.touch("parent");
     await settled(service);
     assert.equal(world.turns.length, 1, "never back to back");
 
-    // The parent moved on (the compaction ended, say): the retry is a new command, which the
-    // host does not answer from the first one's recorded rejection.
+    // The delay passed: the retry is a new command (the host records no receipt for a
+    // deadline, but a retry is a new attempt all the same).
     world.setTurnStatus(200);
-    idleAt(6);
+    advance(1_000);
     world.touch("parent");
     await settled(service);
     assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["m1", "m1:1"]);
@@ -352,20 +369,20 @@ describe("merge back", () => {
     await cleanup();
   });
 
-  it("three passing refusals at three idle points fail it; Retry then delivers under a fresh id", async () => {
-    const { world, service, published, cleanup } = await setup({ parentBusy: true });
+  it("three deadline refusals a delay apart fail it; Retry then delivers under a fresh id", async () => {
+    const { world, service, published, advance, cleanup } = await setup({ parentBusy: true });
     await service.mergeBack("child", { commandId: "m1" });
-    world.setTurnStatus(409, "COMPACTION_UNAVAILABLE");
+    world.sessions.set("parent", summary("parent", { title: "Parent" }));
+    world.threads.set("parent", snapshot());
+    world.refuseWithDeadline();
     for (let attempt = 1; attempt <= 3; attempt += 1) {
-      world.sessions.set("parent", summary("parent", { title: "Parent" }));
-      world.threads.set("parent", { ...snapshot(), seq: 10 + attempt });
       world.touch("parent");
       await settled(service);
       assert.equal(service.pending()[0]!.attempts, attempt);
+      advance(1_000);
     }
     assert.equal(service.pending()[0]!.state, "failed", "failed after the third refusal of the moment");
     assert.equal(published.get("parent")?.[0]?.state, "failed", "the parent's tab shows it too");
-    world.threads.set("parent", { ...snapshot(), seq: 20 });
     world.touch("parent");
     await settled(service);
     assert.equal(service.pending()[0]!.attempts, 3, "a failed merge waits for the user");
@@ -375,6 +392,23 @@ describe("merge back", () => {
     assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["m1", "m1:1", "m1:2", "m1:3"]);
     assert.equal(service.pending().length, 0);
     assert.deepEqual(published.get("child"), []);
+    await cleanup();
+  });
+
+  it("a deadline refusal of a merge sent at once queues it rather than refusing the caller", async () => {
+    const { world, service, advance, cleanup } = await setup();
+    // A host from before the `detail` marker words it the same way: still the refusal of a moment.
+    world.refuseWithDeadline(false);
+    const result = await service.mergeBack("child", { commandId: "m7" });
+    assert.equal(result.delivery, "queued");
+    const [merge] = service.pending();
+    assert.deepEqual([merge!.state, merge!.attempts, merge!.error], ["queued", 1, "codex thread/start timed out after 30000ms"]);
+    world.setTurnStatus(200);
+    advance(1_000);
+    world.touch("parent");
+    await settled(service);
+    assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["m7", "m7:1"]);
+    assert.equal(service.pending().length, 0);
     await cleanup();
   });
 
@@ -392,17 +426,22 @@ describe("merge back", () => {
     await cleanup();
   });
 
-  it("a queued merge refused by a passing refusal stays queued, showing its last error", async () => {
-    const { world, service, cleanup } = await setup({ parentBusy: true });
-    await service.mergeBack("child", { commandId: "m8" });
-    world.sessions.set("parent", summary("parent", { title: "Parent" }));
-    world.threads.set("parent", snapshot());
-    world.setTurnStatus(409, "COMPACTION_UNAVAILABLE");
-    world.touch("parent");
-    await settled(service);
-    const [merge] = service.pending();
-    assert.deepEqual([merge!.state, merge!.attempts, merge!.error], ["queued", 1, "refused: COMPACTION_UNAVAILABLE"]);
-    await cleanup();
+  it("only the deadline is a refusal of the moment: any other COMMAND_REJECTED, or COMPACTION_UNAVAILABLE, fails at once", async () => {
+    for (const [code, message] of [
+      ["COMMAND_REJECTED", "This thread's session is in an error state. Stop the session or rewind to continue."],
+      ["COMPACTION_UNAVAILABLE", "refused: COMPACTION_UNAVAILABLE"]
+    ] as const) {
+      const { world, service, cleanup } = await setup({ parentBusy: true });
+      await service.mergeBack("child", { commandId: "m8" });
+      world.sessions.set("parent", summary("parent", { title: "Parent" }));
+      world.threads.set("parent", snapshot());
+      world.setTurnStatus(409, code, { message });
+      world.touch("parent");
+      await settled(service);
+      const [merge] = service.pending();
+      assert.deepEqual([merge!.state, merge!.attempts, merge!.error], ["failed", 1, message], code);
+      await cleanup();
+    }
   });
 
   it("a caller's merge id is refused, never replaced: too long, blank, or holding the retry separator", async () => {

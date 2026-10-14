@@ -17,7 +17,8 @@
  * delivery to a parent runs in that parent's lane, oldest merge first.
  *
  * Nothing a caller was told is "queued" disappears silently: a parent that
- * refuses it (after a few tries for a refusal of the moment) or is closed
+ * refuses it (after a few tries for the one refusal of the moment, the host's
+ * post-gate deadline — `isDeadlineRefusal`) or is closed
  * leaves it `failed`, shown on both tabs (`SessionSummary.pendingMerges`) for
  * the user to deliver anyway or discard.
  */
@@ -44,6 +45,7 @@ import {
   MERGE_PREVIEW_CHARS,
   parseMergeBackMessage,
   SETTLED_TURN_STATES,
+  isDeadlineRefusal,
   type ThreadReadResponse,
   type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
@@ -78,6 +80,8 @@ export interface LineageServiceOptions {
   newId?: () => string;
   /** The safety re-check while something is queued; 0 disables it (tests). */
   recheckMs?: number;
+  /** How long after a deadline refusal a merge is tried again (default: the safety re-check's). */
+  retryDelayMs?: number;
   /** Publish a tab's pending merges (`SessionSummary.pendingMerges`, never persisted). */
   setPendingMerges?: (sessionId: string, merges: PendingMergeBack[]) => void;
 }
@@ -277,8 +281,10 @@ export class LineageService {
           // Never queued, so no later deliver/discard can name it: nothing to remember.
           return { parentSessionId: parent.id, delivery: "sent", mergeId, seq: sent.seq };
         }
-        // The caller hears a refusal at once; nothing was queued for it.
-        if (sent.kind === "refused") throw new LineageError(sent.message, "COMMAND_REJECTED");
+        // The caller hears a refusal at once; nothing was queued for it — unless it is the
+        // host's deadline, a refusal of the moment: then it is queued, tried again later.
+        if (sent.kind === "refused" && !sent.retryable) throw new LineageError(sent.message, "COMMAND_REJECTED");
+        if (sent.kind === "refused") this.noteRetry(entry, sent.message);
         // Unavailable (the host restarting): queued like a busy parent's.
       }
       this.outbox.entries.push(entry);
@@ -321,7 +327,7 @@ export class LineageService {
         const current = find();
         if (!current) return this.settledOutcome(mergeId);
         this.outbox.entries = this.outbox.entries.filter((other) => other.mergeId !== mergeId);
-        this.retryAfterSeq.delete(mergeId);
+        this.retryAt.delete(mergeId);
         await this.persist([current.parentSessionId, current.childSessionId]);
         return { mergeId, outcome: "discarded" };
       });
@@ -358,7 +364,7 @@ export class LineageService {
   /** A merge the parent took: off the queue, and remembered as delivered for a late action on it. */
   private settle(entry: MergeOutboxEntry, seq: number): void {
     this.outbox.entries = this.outbox.entries.filter((other) => other.mergeId !== entry.mergeId);
-    this.retryAfterSeq.delete(entry.mergeId);
+    this.retryAt.delete(entry.mergeId);
     this.delivered.set(entry.mergeId, seq);
     if (this.delivered.size > DELIVERED_MEMORY) {
       this.delivered.delete(this.delivered.keys().next().value as string);
@@ -424,11 +430,13 @@ export class LineageService {
       return {
         kind: "refused",
         message: error?.message ?? `The parent refused the message (${res.status}).`,
-        // Only a refusal that passes by itself is retried: COMPACTION_UNAVAILABLE (a
-        // compaction runs; it ends). A `/turn`'s COMMAND_REJECTED is the thread's own state —
-        // an unreadable log, a session in error the user must stop — and does not pass by
-        // waiting: failed at once, its reason shown, for the user to retry or discard.
-        retryable: res.status === 409 && error?.code === "COMPACTION_UNAVAILABLE"
+        // Only the refusal of a moment is retried: the host's post-gate deadline (409
+        // COMMAND_REJECTED marked `detail.reason: "deadline"`; never recorded as a receipt).
+        // Any other refusal of a `/turn` is the thread's own state — an unreadable log, a session
+        // in error the user must stop, an invalid body — and does not pass by waiting: failed at
+        // once, its reason shown, for the user to retry or discard. (A `/turn` during a
+        // compaction is queued by the host, never refused, and a merge is never `/compact`.)
+        retryable: res.status === 409 && isDeadlineRefusal(error)
       };
     } catch {
       return { kind: "unavailable" };
@@ -441,8 +449,19 @@ export class LineageService {
     entry.error = message.slice(0, 2_000);
   }
 
-  /** The parent's thread `seq` at a merge's last passing refusal: it is retried only past it. */
-  private readonly retryAfterSeq = new Map<string, number>();
+  /** When a merge refused by a deadline may be tried again (epoch ms): never back to back. */
+  private readonly retryAt = new Map<string, number>();
+
+  private nowMs(): number {
+    return (this.opts.now?.() ?? new Date()).getTime();
+  }
+
+  /** A deadline refusal: counted, said, and tried again once the retry delay has passed. */
+  private noteRetry(entry: MergeOutboxEntry, message: string): void {
+    entry.attempts = (entry.attempts ?? 0) + 1;
+    entry.error = message.slice(0, 2_000);
+    this.retryAt.set(entry.mergeId, this.nowMs() + (this.opts.retryDelayMs ?? this.opts.recheckMs ?? DEFAULT_RECHECK_MS));
+  }
   /** Merges delivered lately and the parent's seq then, for an action that arrives after. */
   private readonly delivered = new Map<string, number>();
 
@@ -478,20 +497,19 @@ export class LineageService {
       await this.persist(this.involved(parentId));
       return;
     }
+    // A retry after a deadline refusal waits out its delay: our own persist's tab update (and
+    // any other event meanwhile) is no reason to try again at once, so attempts never run back
+    // to back. The safety re-check brings it round once the delay has passed.
+    const due = this.retryAt.get(entry.mergeId);
+    if (due !== undefined && this.nowMs() < due) return;
     const snap = await this.idleParent(api, parentId);
     if (snap === null) return;
-    // A retry after a passing refusal waits for a genuine next idle point: the parent's
-    // log must have moved past the refusal (the refused /turn wrote nothing to it). Our
-    // own persist's tab update is no such point, so the attempts never run back to back.
-    const refusedAt = this.retryAfterSeq.get(entry.mergeId);
-    if (refusedAt !== undefined && snap.seq <= refusedAt) return;
     const sent = await this.deliver(api, entry);
     if (sent.kind === "unavailable") return;
     if (sent.kind === "refused") {
-      entry.attempts = (entry.attempts ?? 0) + 1;
-      entry.error = sent.message.slice(0, 2_000);
-      this.retryAfterSeq.set(entry.mergeId, snap.seq);
-      if (!sent.retryable || entry.attempts >= MAX_DRAIN_ATTEMPTS) {
+      this.noteRetry(entry, sent.message);
+      if (!sent.retryable || (entry.attempts ?? 0) >= MAX_DRAIN_ATTEMPTS) {
+        this.retryAt.delete(entry.mergeId);
         entry.state = "failed";
         this.opts.logger?.warn?.("[lineage] the parent refused a queued merge; kept as failed", {
           parentId,
@@ -577,9 +595,9 @@ type Delivery =
   | { kind: "refused"; message: string; retryable: boolean };
 
 /**
- * How often a parent's passing refusal (a compaction running, a session
- * starting) is tried again at its idle points before the merge is marked
- * failed for the user to deliver or discard.
+ * How many times a merge the host refused for a deadline (`isDeadlineRefusal`)
+ * is tried, a retry delay apart, before it is marked failed for the user to
+ * deliver or discard.
  */
 export const MAX_DRAIN_ATTEMPTS = 3;
 

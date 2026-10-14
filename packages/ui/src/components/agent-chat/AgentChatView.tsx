@@ -103,6 +103,7 @@ import { GOAL_ACTION_TEXT, goalActions, goalActionsNote } from "./status/goal-ch
 import { ChatTimeline } from "./timeline/ChatTimeline";
 import type { TimelineForkInput } from "./timeline/context";
 import { ThreadLineageBar, type LineageNotice } from "./ThreadLineageBar";
+import { ThreadGoneNotice } from "./ThreadGoneNotice";
 import { defaultMergeBackText } from "../../lib/agent-chat/lineage.logic";
 import { resolveMarkdownImageSource } from "./timeline/markdown/local-image";
 import { TurnDiffModal, type TurnDiffRequest } from "./timeline/TurnDiffModal";
@@ -519,6 +520,23 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const projectSessions = useAppStore((s) => s.sessions);
   const forkChatTab = useAppStore((s) => s.forkChatTab);
   const activateTab = useAppStore((s) => s.activateTab);
+  const closeTab = useAppStore((s) => s.closeTab);
+  // The host holds no such thread (its stream said THREAD_NOT_FOUND). The stream stops; the
+  // tab offers to close. A change to the tab's record — a fork the daemon confirmed with the
+  // host after its answer was lost — is worth one more look, so it connects again then.
+  const gone = slice.connection === "gone";
+  const retryStream = actions.retryStream;
+  const goneRecord = React.useRef(session);
+  React.useEffect(() => {
+    if (!gone) {
+      goneRecord.current = session;
+      return;
+    }
+    if (goneRecord.current !== session) {
+      goneRecord.current = session;
+      retryStream();
+    }
+  }, [gone, session, retryStream]);
   const [lineageNotice, setLineageNotice] = React.useState<LineageNotice | null>(null);
   React.useEffect(() => setLineageNotice(null), [sessionId]);
   // One fork at a time from this view: a second click while the first is on
@@ -965,6 +983,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               : { kind: "reading" }
           }
         />
+      ) : null}
+      {gone ? (
+        <ThreadGoneNotice onClose={() => void closeTab(sessionId)} onRetry={retryStream} />
       ) : null}
       {/* Its "Try again" also leaves an open drill-in: the fallback replaced the
           Back button and the roster, and a child row that threw would throw

@@ -21,7 +21,7 @@ const transport: AgentChatTransport = {
   stream(_sessionId, _options, handlers) {
     push = handlers.onFrame;
     opened();
-    return { lastSeq: 0, hostInstanceId: null, resetCursor() {}, close() {} };
+    return { lastSeq: 0, hostInstanceId: null, resetCursor() {}, retry() {}, close() {} };
   },
   command: unused,
   switchAccount: unused,

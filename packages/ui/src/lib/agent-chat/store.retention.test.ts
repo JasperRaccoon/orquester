@@ -44,7 +44,7 @@ function fakeTransport(): {
     stream(_sessionId, options, handlers) {
       opened.push(options);
       onFrame = handlers.onFrame;
-      return { lastSeq: 0, hostInstanceId: null, resetCursor: () => {}, close: () => {} };
+      return { lastSeq: 0, hostInstanceId: null, resetCursor: () => {}, retry: () => {}, close: () => {} };
     },
     async command() {
       return { seq: 1 };

@@ -3932,139 +3932,176 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       if (typeof threadId !== "string" || threadId.length === 0 || threadId === parentThreadId) {
         throw invalidCommand("threadId is required and must name a new thread.");
       }
-      const adapterId = options.adapterForRefId(request.refId);
-      if (!adapterId) {
-        throw invalidCommand(`Registry entry '${request.refId}' has no chat adapter.`);
+      // One fork per child at a time: a repeat (the daemon's retry of an answer it lost, or its
+      // reconcile) that arrives while the first is still cutting waits for it and gets its
+      // answer, never a second `thread.created` racing the first.
+      for (let running = forksInFlight.get(threadId); running; running = forksInFlight.get(threadId)) {
+        await running.catch(() => undefined);
       }
-      const parent = await loadRuntime(parentThreadId);
-      const parentHead = headOf(parent);
-      if (parentHead === null || parent.deleted) {
-        throw threadNotFound(parentThreadId);
-      }
-      if (parentHead.adapter !== adapterId) {
-        throw invalidCommand("A fork runs on its parent's agent.");
-      }
-      const runtime = await loadRuntime(threadId);
-      // A child being deleted (or deleted, its log's last word `thread.deleted`) is never handed
-      // back for a repeated fork: refused while it goes. Once it is gone its id is free — the
-      // daemon, which knows the tab was closed, refuses such a repeat before it gets here.
-      if (runtime.deleted || runtime.state.deleted) {
-        throw invalidCommand(`Thread '${threadId}' was deleted.`);
-      }
-      const existing = headOf(runtime);
-      if (existing) {
-        // The daemon's repeat of a fork it already asked for (its `commandId` names
-        // the child): the same answer, never a second fork. Anything else is refused.
-        if (existing.lineage?.relation === "fork" && existing.lineage.parentThreadId === parentThreadId) {
+      if (request.confirmOnly === true) {
+        const runtime = await loadRuntime(threadId);
+        const existing = headOf(runtime);
+        if (
+          existing &&
+          !runtime.deleted &&
+          !runtime.state.deleted &&
+          existing.lineage?.relation === "fork" &&
+          existing.lineage.parentThreadId === parentThreadId
+        ) {
           return { head: existing, lineage: existing.lineage, strategy: recordedForkStrategy(runtime) };
         }
-        throw invalidCommand(`Thread '${threadId}' already exists.`);
+        throw threadNotFound(threadId);
       }
-      let cut: ResolvedForkCut;
+      const run = forkThreadNow(parentThreadId, request, threadId);
+      forksInFlight.set(threadId, run);
       try {
-        cut = resolveForkCut(parent.state, request.fork ?? {});
-      } catch (error) {
-        if (error instanceof ForkRefusal) throw commandRejected(error.message);
-        throw error;
+        return await run;
+      } finally {
+        if (forksInFlight.get(threadId) === run) forksInFlight.delete(threadId);
       }
-      const modelSelection =
-        request.modelSelection === undefined
-          ? parentHead.modelSelection
-          : parseModelSelection(request.modelSelection);
-      const runtimeMode =
-        request.runtimeMode === undefined
-          ? parentHead.runtimeMode
-          : parseRuntimeMode(request.runtimeMode);
-      const lineage: ThreadLineage = {
-        parentThreadId,
-        relation: "fork",
-        ...(cut.forkedFrom !== undefined ? { forkedFrom: cut.forkedFrom } : {}),
-        createdAt: clock.nowIso()
-      };
+    });
 
-      let strategy: ThreadForkStrategy = "empty";
-      let resumeCursor: unknown;
-      let nativeFailure: string | null = null;
-      if (cut.retained.length > 0) {
-        const adapter = options.adapters.get(adapterId);
-        const sourceCursor = persistedResumeCursor(parent, parentHead);
-        if (adapter?.forkConversation !== undefined && sourceCursor !== undefined) {
-          try {
-            const home = await options.resolveHome({
-              threadId: parentThreadId,
-              adapter: parentHead.adapter,
-              refId: parentHead.refId,
-              accountId: parentHead.accountId,
-              home: parentHead.home
-            });
-            const forked = await adapter.forkConversation({
-              sourceThreadId: parentThreadId,
-              sourceResumeCursor: sourceCursor,
-              threadId,
-              projectPath: request.projectPath,
-              cwd: request.cwd,
-              home,
-              cut: {
-                retainedTurnIds: cut.retained.map((turn) => turn.turnId),
-                firstRemovedTurnId: cut.firstRemovedTurnId
-              }
-            });
-            resumeCursor = forked.resumeCursor;
-            strategy = "native";
-          } catch (error) {
-            nativeFailure = describeFailure(error);
-            logger.warn("agent-host: native fork failed; handing the conversation over as a transcript", {
-              threadId,
-              parentThreadId,
-              error: nativeFailure
-            });
-          }
-        }
-      }
-      let transcript: string | null = null;
-      if (strategy !== "native" && cut.retained.length > 0) {
-        transcript = buildForkTranscript({
-          items: parent.state.items,
-          retained: cut.retained,
-          parentTitle: parentHead.title
-        });
-        strategy = transcript !== null ? "transcript" : "unavailable";
-      }
+  /** The forks being cut, by child id ({@link forkThread}). */
+  const forksInFlight = new Map<string, Promise<ForkHostThreadResponse>>();
 
-      const head = await createThreadNow(runtime, request, {
-        adapterId,
-        modelSelection,
-        runtimeMode,
-        home: parentHead.home,
-        resumeCursor,
-        lineage,
-        afterCreate: async () => {
-          if (transcript !== null) {
-            await forkHandoffs.save(threadId, {
-              version: 1,
-              parentThreadId,
-              transcript,
-              createdAt: lineage.createdAt
-            });
-          }
-          if (strategy === "native") return;
-          await appendActivity(runtime, {
-            kind: "thread.forked",
-            tone: "info",
-            turnId: null,
-            summary: `Forked from "${parentHead.title}"`,
-            detail:
-              strategy === "transcript"
-                ? `${nativeFailure !== null ? `The agent could not fork the conversation itself (${nativeFailure}), so the` : "This agent has no fork of its own, so the"} conversation so far is handed to it with your first message.`
-                : strategy === "unavailable"
-                  ? `The conversation before this point could not be carried over${nativeFailure !== null ? ` (${nativeFailure})` : ""}: its messages are no longer held here, so the agent starts fresh.`
-                  : "Forked before the first message: the agent starts fresh.",
-            payload: { parentThreadId, strategy }
+  const forkThreadNow = async (
+    parentThreadId: string,
+    request: ForkHostThreadRequest,
+    threadId: string
+  ): Promise<ForkHostThreadResponse> => {
+    const adapterId = options.adapterForRefId(request.refId);
+    if (!adapterId) {
+      throw invalidCommand(`Registry entry '${request.refId}' has no chat adapter.`);
+    }
+    const parent = await loadRuntime(parentThreadId);
+    const parentHead = headOf(parent);
+    if (parentHead === null || parent.deleted) {
+      throw threadNotFound(parentThreadId);
+    }
+    if (parentHead.adapter !== adapterId) {
+      throw invalidCommand("A fork runs on its parent's agent.");
+    }
+    const runtime = await loadRuntime(threadId);
+    // A child being deleted (or deleted, its log's last word `thread.deleted`) is never handed
+    // back for a repeated fork: refused while it goes. Once it is gone its id is free — the
+    // daemon, which knows the tab was closed, refuses such a repeat before it gets here.
+    if (runtime.deleted || runtime.state.deleted) {
+      throw invalidCommand(`Thread '${threadId}' was deleted.`);
+    }
+    const existing = headOf(runtime);
+    if (existing) {
+      // The daemon's repeat of a fork it already asked for (its `commandId` names
+      // the child): the same answer, never a second fork. Anything else is refused.
+      if (existing.lineage?.relation === "fork" && existing.lineage.parentThreadId === parentThreadId) {
+        return { head: existing, lineage: existing.lineage, strategy: recordedForkStrategy(runtime) };
+      }
+      throw invalidCommand(`Thread '${threadId}' already exists.`);
+    }
+    let cut: ResolvedForkCut;
+    try {
+      cut = resolveForkCut(parent.state, request.fork ?? {});
+    } catch (error) {
+      if (error instanceof ForkRefusal) throw commandRejected(error.message);
+      throw error;
+    }
+    const modelSelection =
+      request.modelSelection === undefined
+        ? parentHead.modelSelection
+        : parseModelSelection(request.modelSelection);
+    const runtimeMode =
+      request.runtimeMode === undefined
+        ? parentHead.runtimeMode
+        : parseRuntimeMode(request.runtimeMode);
+    const lineage: ThreadLineage = {
+      parentThreadId,
+      relation: "fork",
+      ...(cut.forkedFrom !== undefined ? { forkedFrom: cut.forkedFrom } : {}),
+      createdAt: clock.nowIso()
+    };
+
+    let strategy: ThreadForkStrategy = "empty";
+    let resumeCursor: unknown;
+    let nativeFailure: string | null = null;
+    if (cut.retained.length > 0) {
+      const adapter = options.adapters.get(adapterId);
+      const sourceCursor = persistedResumeCursor(parent, parentHead);
+      if (adapter?.forkConversation !== undefined && sourceCursor !== undefined) {
+        try {
+          const home = await options.resolveHome({
+            threadId: parentThreadId,
+            adapter: parentHead.adapter,
+            refId: parentHead.refId,
+            accountId: parentHead.accountId,
+            home: parentHead.home
+          });
+          const forked = await adapter.forkConversation({
+            sourceThreadId: parentThreadId,
+            sourceResumeCursor: sourceCursor,
+            threadId,
+            projectPath: request.projectPath,
+            cwd: request.cwd,
+            home,
+            cut: {
+              retainedTurnIds: cut.retained.map((turn) => turn.turnId),
+              firstRemovedTurnId: cut.firstRemovedTurnId
+            }
+          });
+          resumeCursor = forked.resumeCursor;
+          strategy = "native";
+        } catch (error) {
+          nativeFailure = describeFailure(error);
+          logger.warn("agent-host: native fork failed; handing the conversation over as a transcript", {
+            threadId,
+            parentThreadId,
+            error: nativeFailure
           });
         }
+      }
+    }
+    let transcript: string | null = null;
+    if (strategy !== "native" && cut.retained.length > 0) {
+      transcript = buildForkTranscript({
+        items: parent.state.items,
+        retained: cut.retained,
+        parentTitle: parentHead.title
       });
-      return { head, strategy, lineage };
+      strategy = transcript !== null ? "transcript" : "unavailable";
+    }
+
+    const head = await createThreadNow(runtime, request, {
+      adapterId,
+      modelSelection,
+      runtimeMode,
+      home: parentHead.home,
+      resumeCursor,
+      lineage,
+      afterCreate: async () => {
+        if (transcript !== null) {
+          await forkHandoffs.save(threadId, {
+            version: 1,
+            parentThreadId,
+            transcript,
+            createdAt: lineage.createdAt
+          });
+        }
+        if (strategy === "native") return;
+        await appendActivity(runtime, {
+          kind: "thread.forked",
+          tone: "info",
+          turnId: null,
+          summary: `Forked from "${parentHead.title}"`,
+          detail:
+            strategy === "transcript"
+              ? `${nativeFailure !== null ? `The agent could not fork the conversation itself (${nativeFailure}), so the` : "This agent has no fork of its own, so the"} conversation so far is handed to it with your first message.`
+              : strategy === "unavailable"
+                ? `The conversation before this point could not be carried over${nativeFailure !== null ? ` (${nativeFailure})` : ""}: its messages are no longer held here, so the agent starts fresh.`
+                : "Forked before the first message: the agent starts fresh.",
+          payload: { parentThreadId, strategy }
+        });
+      }
     });
+    return { head, strategy, lineage };
+  };
 
   /**
    * How an existing fork was carried over, for a repeated fork request: the

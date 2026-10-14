@@ -656,6 +656,27 @@ export interface AgentChatErrorEnvelope {
 }
 
 /**
+ * `detail.reason` of the one refusal that is a moment's, not the thread's: a
+ * step of the command ran out of time after the host's command gate opened
+ * (a 409 `COMMAND_REJECTED`, never recorded as a receipt). It may pass; a
+ * client may retry it as a new command.
+ */
+export const DEADLINE_REFUSAL_REASON = "deadline";
+
+/** The host's own wording of a deadline (`DeadlineExceededError`), for an answer with no `detail`. */
+const DEADLINE_MESSAGE = /timed out after \d+ms$/;
+
+/** Whether a §6.2 error is the host's post-gate deadline refusal ({@link DEADLINE_REFUSAL_REASON}). */
+export function isDeadlineRefusal(error: { code?: unknown; message?: unknown; detail?: unknown } | null | undefined): boolean {
+  if (error?.code !== "COMMAND_REJECTED") return false;
+  const detail = error.detail;
+  if (typeof detail === "object" && detail !== null && (detail as { reason?: unknown }).reason === DEADLINE_REFUSAL_REASON) {
+    return true;
+  }
+  return typeof error.message === "string" && DEADLINE_MESSAGE.test(error.message);
+}
+
+/**
  * Commands answered with 409 for a thread in `error`, **except**
  * `session/stop` and `revert` (§6.2) — without that carve-out a session wedged
  * in `starting` or `error` would be unrecoverable. A `turn` is let through as
@@ -694,6 +715,29 @@ export type AgentChatStreamFrame =
       hostInstanceId: string;
     }
   | HistoryImportFrame;
+
+/**
+ * The stream's last line when it cannot be served at all — the thread read
+ * failed. Not a frame: never sequenced, and the host closes the stream after
+ * it. `code` is the failure's §6.2 code (additive: a host from before it sends
+ * `message` alone). `THREAD_NOT_FOUND` means the host holds no such thread —
+ * a fork whose create never landed, a thread deleted there — and is terminal:
+ * reconnecting would only read the same miss again.
+ */
+export interface AgentChatStreamErrorLine {
+  kind: "error";
+  code?: AgentChatErrorCode;
+  message: string;
+}
+
+/** The host's own wording of a missing thread (`threadNotFound`), for a line with no `code`. */
+const THREAD_NOT_FOUND_MESSAGE = /^Thread '.+' was not found\.$/;
+
+/** Whether a stream's error line says the thread does not exist on the host. */
+export function isThreadGoneStreamError(line: AgentChatStreamErrorLine): boolean {
+  if (line.code !== undefined) return line.code === "THREAD_NOT_FOUND";
+  return THREAD_NOT_FOUND_MESSAGE.test(line.message);
+}
 
 /**
  * Where a resumed conversation's history replay stands (E6), so a client can

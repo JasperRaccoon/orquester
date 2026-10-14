@@ -46,7 +46,7 @@ function render(element: ReactElement): string {
 
 /** A chat transport that never answers anything this render could ask. */
 const transport = {
-  stream: () => ({ lastSeq: 0, hostInstanceId: null, resetCursor: () => {}, close: () => {} }),
+  stream: () => ({ lastSeq: 0, hostInstanceId: null, resetCursor: () => {}, retry: () => {}, close: () => {} }),
   command: () => new Promise<never>(() => {}),
   providers: async () => ({ providers: [], hostInstanceId: "h" })
 };

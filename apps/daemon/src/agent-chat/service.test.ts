@@ -97,6 +97,10 @@ interface Fixture {
   forkAnswer: { status: number; body: unknown } | null;
   /** Drop the next fork's connection after the host took it (a lost answer), once. */
   dropForkAnswer: boolean;
+  /** Drop the next fork's connection before the host created anything, once. */
+  dropForkUncreated: boolean;
+  /** The fork children the fake host holds, by id, with the lineage it resolved. */
+  forkChildren: Map<string, unknown>;
   requests: EventEmitter;
   broadcasts: EventEmitter;
   cleanup(): Promise<void>;
@@ -173,6 +177,8 @@ async function makeFixture(
     forks: [],
     forkAnswer: null,
     dropForkAnswer: false,
+    dropForkUncreated: false,
+    forkChildren: new Map(),
     requests: new EventEmitter(),
     broadcasts: new EventEmitter(),
     service: null as unknown as AgentChatService,
@@ -286,24 +292,37 @@ async function makeFixture(
       if (fork && req.method === "POST") {
         const request = JSON.parse(body) as ForkHostThreadRequest;
         state.forks.push({ parentId: decodeURIComponent(fork[1]!), body: request });
+        if (state.dropForkUncreated) {
+          state.dropForkUncreated = false;
+          req.socket.destroy();
+          return;
+        }
+        const held = state.forkChildren.get(request.threadId);
+        if (request.confirmOnly) {
+          const confirmed = held
+            ? { status: 200, body: { head: { id: request.threadId, lineage: held }, strategy: "native", lineage: held } }
+            : { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: `Thread '${request.threadId}' was not found.` } } };
+          res.writeHead(confirmed.status, { "content-type": "application/json" }).end(JSON.stringify(confirmed.body));
+          return;
+        }
+        const lineage = held ?? {
+          parentThreadId: decodeURIComponent(fork[1]!),
+          relation: "fork",
+          forkedFrom: { messageId: request.fork.messageId ?? "m", turnId: "t1" },
+          createdAt: "2026-10-14T00:00:00.000Z"
+        };
+        const answer = state.forkAnswer ?? {
+          status: 200,
+          body: { head: { id: request.threadId, lineage }, strategy: "native", lineage }
+        };
+        if (answer.status < 400 && (answer.body as { head?: unknown } | null)?.head !== undefined || state.dropForkAnswer) {
+          state.forkChildren.set(request.threadId, lineage);
+        }
         if (state.dropForkAnswer) {
           state.dropForkAnswer = false;
           req.socket.destroy();
           return;
         }
-        const answer = state.forkAnswer ?? {
-          status: 200,
-          body: {
-            head: { id: request.threadId },
-            strategy: "native",
-            lineage: {
-              parentThreadId: decodeURIComponent(fork[1]!),
-              relation: "fork",
-              forkedFrom: { messageId: request.fork.messageId ?? "m", turnId: "t1" },
-              createdAt: "2026-10-14T00:00:00.000Z"
-            }
-          }
-        };
         res.writeHead(answer.status, { "content-type": "application/json" }).end(JSON.stringify(answer.body));
         return;
       }
@@ -1513,6 +1532,81 @@ test("a fork whose answer was lost keeps its tab, and the same key's retry conve
   const unkeyed = f.forks.at(-1)!.body.threadId;
   assert.equal(f.service.chat.has(unkeyed), false);
   assert.equal(f.service.chat.pendingThreadDeletes().includes(unkeyed), true);
+  await f.cleanup();
+});
+
+test("a 200 fork answer without the child's head is an unknown outcome, never a refusal", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  f.forkAnswer = { status: 200, body: {} };
+  const unavailable = (error: unknown) => error instanceof ChatSessionError && error.code === "HOST_UNAVAILABLE";
+  // Keyed: the host may hold the child, so the tab stays for the retry to converge on.
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1), unavailable);
+  const keyed = forkIdFor(parent.id, "k");
+  assert.equal(f.service.chat.has(keyed), true);
+  assert.equal(f.service.chat.pendingThreadDeletes().includes(keyed), false);
+  assert.deepEqual(f.service.chat.unconfirmedForks(), [keyed]);
+  // Unkeyed: nothing can retry, so the tab goes and the host's child is deleted with it.
+  await assert.rejects(f.service.forkSession(parent.id, { messageId: "m" }, 2), unavailable);
+  const unkeyed = f.forks.at(-1)!.body.threadId;
+  assert.equal(f.service.chat.has(unkeyed), false);
+  assert.equal(f.service.chat.pendingThreadDeletes().includes(unkeyed), true, "no orphan left on the host");
+  await f.cleanup();
+});
+
+test("a fork tab whose answer was lost is confirmed once the host answers, its fork point set", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  f.dropForkAnswer = true;
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "msg-4" }, 1));
+  const id = forkIdFor(parent.id, "k");
+  assert.equal(f.service.chat.get(id)?.lineage?.forkedFrom, undefined, "provisional: no fork point yet");
+  await f.service.reconcileForks();
+  const confirm = f.forks.at(-1)!.body;
+  assert.equal(confirm.confirmOnly, true, "the reconcile never asks the host to create anything");
+  assert.equal(confirm.threadId, id);
+  assert.deepEqual(f.service.chat.get(id)?.lineage?.forkedFrom, { messageId: "msg-4", turnId: "t1" });
+  assert.deepEqual(f.service.chat.unconfirmedForks(), []);
+  // Confirmed for good: it survives sessions.json without the mark.
+  const reread = parseSessionsConfig({ version: 1, sessions: f.service.chat.records() });
+  assert.equal(reread.sessions.find((record) => record.id === id)?.chat?.forkUnconfirmed, undefined);
+  await f.cleanup();
+});
+
+test("a fork tab the host never created is taken back by the reconcile, and its key forks again", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  f.dropForkUncreated = true;
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1));
+  const id = forkIdFor(parent.id, "k");
+  assert.equal(f.service.chat.has(id), true, "unknown yet: kept");
+  // The flag rides sessions.json, so a daemon restart still reconciles it.
+  const reread = parseSessionsConfig({ version: 1, sessions: f.service.chat.records() });
+  assert.equal(reread.sessions.find((record) => record.id === id)?.chat?.forkUnconfirmed, true);
+  const closed: Array<{ id: string; rolledBack?: boolean }> = [];
+  f.service.chat.lifecycle.on("closed", (payload: { id: string; rolledBack?: boolean }) => closed.push(payload));
+  await f.service.reconcileForks();
+  assert.equal(f.service.chat.has(id), false, "the stray tab is gone");
+  assert.deepEqual(closed, [{ id, rolledBack: true }]);
+  assert.equal(f.service.chat.pendingThreadDeletes().includes(id), false, "nothing to delete on the host");
+  // A retry of the same key (the GUI re-sends it) forks afresh — no COMMAND_ID_CONFLICT.
+  const again = await f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1);
+  assert.equal(again.session.id, id);
+  assert.deepEqual(again.session.lineage?.forkedFrom, { messageId: "m", turnId: "t1" });
+  await f.cleanup();
+});
+
+test("the reconcile never deletes a child the host did create, and leaves a fork in flight alone", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  f.dropForkAnswer = true;
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1));
+  const id = forkIdFor(parent.id, "k");
+  // The GUI's retry of the same key and a reconcile at once: one tab, confirmed, no delete.
+  await Promise.all([f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1), f.service.reconcileForks()]);
+  assert.equal(f.service.chat.has(id), true);
+  assert.deepEqual(f.service.chat.unconfirmedForks(), []);
+  assert.equal(f.service.chat.pendingThreadDeletes().includes(id), false);
   await f.cleanup();
 });
 

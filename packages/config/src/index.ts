@@ -839,7 +839,13 @@ export const sessionChatRecordSchema = z.object({
    * for, so a repeat after a restart is told from a reuse exactly. Opaque to everything else;
    * one that does not read is none.
    */
-  forkFingerprint: z.string().max(2_000).optional().catch(undefined)
+  forkFingerprint: z.string().max(2_000).optional().catch(undefined),
+  /**
+   * A fork tab whose host fork has not answered yet — in flight, or its answer lost. The daemon
+   * reconciles it with the host once it can (the child confirmed, or the tab taken back when the
+   * host never created it); cleared once the host's answer is in. Anything else reads as absent.
+   */
+  forkUnconfirmed: z.literal(true).optional().catch(undefined)
 });
 export type SessionChatRecord = z.infer<typeof sessionChatRecordSchema>;
 

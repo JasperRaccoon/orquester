@@ -344,6 +344,13 @@ export interface CreateHostThreadRequest {
  */
 export interface ForkHostThreadRequest extends CreateHostThreadRequest {
   fork: ThreadForkTarget;
+  /**
+   * The daemon's reconcile of a fork whose answer it lost: answer the child
+   * `threadId` names if this host holds it (or once the fork creating it is
+   * done), and never create one — 404 `THREAD_NOT_FOUND` when there is none.
+   * Additive: a host from before it forks as asked, which converges as well.
+   */
+  confirmOnly?: boolean;
 }
 
 export interface ForkHostThreadResponse {

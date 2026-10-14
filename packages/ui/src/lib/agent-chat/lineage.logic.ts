@@ -67,3 +67,47 @@ export function defaultMergeBackText(entries: readonly ThreadItem[]): string {
   }
   return "";
 }
+
+/**
+ * Whether a fork request's failure leaves its outcome unknown — the daemon
+ * answered `HOST_UNAVAILABLE` (the agent host may hold the child) or nothing
+ * came back at all — rather than a refusal. Read structurally off an
+ * `ApiError` (`status`, `body`), so this stays free of the client.
+ */
+export function isForkOutcomeUnknown(error: unknown): boolean {
+  const status = (error as { status?: unknown } | null)?.status;
+  // No HTTP answer at all (the connection went): the daemon may have forked.
+  if (typeof status !== "number") return true;
+  if (status >= 500) return true;
+  const body = (error as { body?: unknown }).body as { code?: unknown; error?: { code?: unknown } } | null | undefined;
+  return (body?.error?.code ?? body?.code) === "HOST_UNAVAILABLE";
+}
+
+/**
+ * The fork commands whose outcome is unknown, by tab and fork point, so the
+ * next "Fork from here" on the same message re-sends the SAME `commandId`:
+ * the daemon then answers the fork it may already have opened (its tab and the
+ * host's child converge on one), instead of opening a second beside a stray
+ * one. A fork that answered — opened or refused — frees its point.
+ */
+export class ForkRetryKeys {
+  private readonly pending = new Map<string, string>();
+
+  static keyFor(
+    sessionId: string,
+    request: { messageId?: string | null; turnId?: string | null; role?: string | null }
+  ): string {
+    return JSON.stringify([sessionId, request.messageId ?? null, request.turnId ?? null, request.role ?? null]);
+  }
+
+  /** The id to send: the one an unknown outcome left for this point, else a fresh one. */
+  commandIdFor(key: string, mint: () => string): string {
+    return this.pending.get(key) ?? mint();
+  }
+
+  /** Record how the fork sent under `commandId` ended: kept only while its outcome is unknown. */
+  settle(key: string, commandId: string, error: unknown | null): void {
+    if (error !== null && isForkOutcomeUnknown(error)) this.pending.set(key, commandId);
+    else this.pending.delete(key);
+  }
+}

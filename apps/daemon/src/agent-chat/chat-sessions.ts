@@ -49,6 +49,8 @@ export interface ChatSessionCreateInput {
   lineage?: ThreadLineage;
   /** A keyed fork's requested fork point (`AgentChatService.forkSession`), persisted with the tab. */
   forkFingerprint?: string;
+  /** A fork tab the host has not answered for yet (`AgentChatService.reconcileForks`). */
+  forkUnconfirmed?: boolean;
 }
 
 interface ChatSession {
@@ -60,6 +62,7 @@ interface ChatSession {
     home: AgentChatHome;
     lastSeq: number;
     forkFingerprint?: string;
+    forkUnconfirmed?: true;
   };
 }
 
@@ -94,6 +97,11 @@ export class ChatSessionManager {
   /** A keyed fork tab's requested fork point, if it was opened as one (spec 2026-10-14 §6). */
   forkFingerprint(id: string): string | undefined {
     return this.sessions.get(id)?.chat.forkFingerprint;
+  }
+
+  /** Fork tabs the host has not answered for yet: their fork is in flight, or its answer was lost. */
+  unconfirmedForks(): string[] {
+    return [...this.sessions.values()].filter((s) => s.chat.forkUnconfirmed === true).map((s) => s.summary.id);
   }
 
   /** The last sequence this tab was rendered at, for a §6.3 reconnect. */
@@ -156,7 +164,8 @@ export class ChatSessionManager {
         accountId: input.accountId,
         home: input.home,
         lastSeq: 0,
-        ...(input.forkFingerprint !== undefined ? { forkFingerprint: input.forkFingerprint } : {})
+        ...(input.forkFingerprint !== undefined ? { forkFingerprint: input.forkFingerprint } : {}),
+        ...(input.forkUnconfirmed === true ? { forkUnconfirmed: true as const } : {})
       }
     });
     this.lifecycle.emit("created", { ...summary });
@@ -256,6 +265,8 @@ export class ChatSessionManager {
     const session = this.sessions.get(id);
     if (!session) return null;
     session.summary.lineage = cloneLineage(lineage);
+    // The host's answer is in: the fork is confirmed.
+    delete session.chat.forkUnconfirmed;
     this.lifecycle.emit("updated", { ...session.summary });
     this.options.requestPersist();
     return { ...session.summary };
@@ -378,7 +389,8 @@ export class ChatSessionManager {
           lastSeq: record.chat.lastSeq,
           ...(record.chat.forkFingerprint !== undefined
             ? { forkFingerprint: record.chat.forkFingerprint }
-            : {})
+            : {}),
+          ...(record.chat.forkUnconfirmed === true ? { forkUnconfirmed: true as const } : {})
         }
       });
     }

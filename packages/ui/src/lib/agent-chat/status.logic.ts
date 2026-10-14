@@ -145,7 +145,7 @@ export function isCompactingThread(input: {
  * self-ticking leaf, never a prop pushed down the row tree (§7.6).
  */
 export function resolveActivityLabel(input: {
-  connection: "idle" | "connecting" | "synchronized" | "reconnecting" | "error";
+  connection: "idle" | "connecting" | "synchronized" | "reconnecting" | "error" | "gone";
   sessionStatus: ThreadSessionStatus | null;
   turnStatus: TurnState | null;
   backgroundLiveness: BackgroundLiveness | null;
@@ -160,6 +160,9 @@ export function resolveActivityLabel(input: {
   }
   if (input.connection === "error") {
     return "Disconnected";
+  }
+  if (input.connection === "gone") {
+    return "This chat no longer exists";
   }
   if (input.pendingApprovals > 0) {
     return input.pendingApprovals === 1 ? "Waiting for approval" : `${input.pendingApprovals} approvals`;

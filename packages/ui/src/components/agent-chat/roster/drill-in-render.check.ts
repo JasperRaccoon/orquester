@@ -47,7 +47,7 @@ const unused = async (): Promise<never> => {
 const transport: AgentChatTransport = {
   stream(sessionId, _options, handlers) {
     frameHandlers.set(sessionId, handlers.onFrame);
-    return { lastSeq: 0, hostInstanceId: null, resetCursor: () => {}, close: () => {} };
+    return { lastSeq: 0, hostInstanceId: null, resetCursor: () => {}, retry: () => {}, close: () => {} };
   },
   command: unused,
   switchAccount: unused,
