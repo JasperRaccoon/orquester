@@ -1470,7 +1470,10 @@ async function wakeUntilCancelled() {
  * 303` it "never had". So the shell says `shell` only once each child's
  * `/proc/<pid>/stat` names `sleep` (comm changes at the `exec`; the pids are
  * kept: neither `setsid`, not a group leader here, nor `sh -c 'exec …'`
- * forks). A spin on that condition, read with builtins only — no timing.
+ * forks) AND its `/proc/<pid>/cmdline` — what the tests classify by — is no
+ * longer empty: the kernel names the new image in `stat` a moment before its
+ * argv is readable. A spin on that condition, read with builtins only — no
+ * timing.
  */
 function startLeftoverShell() {
   const shell = spawn(
@@ -1479,7 +1482,9 @@ function startLeftoverShell() {
       "-c",
       'sleep 302 & m=$!; setsid sh -c "exec sleep 303" & d=$!; ' +
         'until read -r a < /proc/$m/stat && read -r b < /proc/$d/stat && ' +
-        'case "$a $b" in *"(sleep) "*"(sleep) "*) true ;; *) false ;; esac; do :; done 2>/dev/null; ' +
+        'case "$a $b" in *"(sleep) "*"(sleep) "*) true ;; *) false ;; esac && ' +
+        '{ read -r c < /proc/$m/cmdline; [ -n "$c" ]; } && { read -r e < /proc/$d/cmdline; [ -n "$e" ]; }; ' +
+        "do :; done 2>/dev/null; " +
         "echo shell; wait"
     ],
     { detached: true, stdio: ["ignore", "pipe", "ignore"] }
