@@ -86,17 +86,18 @@ export function isForkOutcomeUnknown(error: unknown): boolean {
 }
 
 /**
- * Whether a kept fork key names the point a fork child was taken from. A message names its point
- * on its own (the host's fold may record a turn the client did not send); without one, the key is
- * a whole-thread fork (no turn either: the child has no point) or a cut by turn, which a child
- * without a recorded point may also be — an unknown match is forgotten, since a kept id that
+ * Whether a kept fork key may name the point a fork child was taken from. A message names its
+ * point on its own (the host's fold may record a turn the client did not send); a key without
+ * one is a cut by turn, or the whole thread. A child with no recorded point — a whole-thread fork, or a lineage whose
+ * point did not read — may be any of its parent's forks, so it matches them all: a kept id that
  * would now conflict is worse than a fresh fork.
  */
 function forkPointMatches(key: string, point: ThreadLineage["forkedFrom"]): boolean {
+  if (point === undefined) return true;
   const [, messageId, turnId] = JSON.parse(key) as [string, string | null, string | null];
-  if (messageId !== null) return point?.messageId === messageId;
-  if (turnId === null) return point === undefined;
-  return point === undefined || point.turnId === turnId;
+  if (messageId !== null) return point.messageId === messageId;
+  // A whole-thread key (no turn either) is not a fork taken at a point.
+  return turnId !== null && point.turnId === turnId;
 }
 
 /**
@@ -130,8 +131,8 @@ export class ForkRetryKeys {
 
   /**
    * A tab closed. Closing a parent drops every kept id of forks from it. Closing a fork drops
-   * only the kept id of the point it was forked from (its `forkedFrom` message and turn, or the
-   * whole thread when it has none): that fork may be the very one a kept id would converge on —
+   * only the kept id of the point it was forked from (its `forkedFrom` message, or every point
+   * of its parent when it records none): that fork may be the very one a kept id would converge on —
    * a stray one the user closed, or one the daemon took back — and its key now answers
    * COMMAND_ID_CONFLICT, so the next fork from that point is a new command. Kept ids of the
    * parent's other points stay, so their retries still converge.

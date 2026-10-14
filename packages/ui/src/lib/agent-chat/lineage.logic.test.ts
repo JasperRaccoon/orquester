@@ -88,15 +88,17 @@ describe("lineage in the client", () => {
       assert.equal(keys.commandIdFor(whole, () => "fresh"), "cmd-p-whole");
     });
 
-    it("closing a whole-thread fork forgets only the whole-thread point; a delegate forgets nothing of its parent", () => {
+    it("a fork with no recorded point forgets every kept id of its parent; a delegate forgets none", () => {
       const keys = new ForkRetryKeys();
       const fromM1 = keep(keys, "p", { messageId: "m1", turnId: "t1" });
       const whole = keep(keys, "p", {});
+      const other = keep(keys, "q", {});
       keys.forgetTab({ id: "task", lineage: { parentThreadId: "p", relation: "delegate", createdAt: "x" } });
       assert.equal(keys.commandIdFor(whole, () => "fresh"), "cmd-p-whole");
       keys.forgetTab({ id: "child", lineage: { parentThreadId: "p", relation: "fork", createdAt: "x" } });
       assert.equal(keys.commandIdFor(whole, () => "fresh"), "fresh");
-      assert.equal(keys.commandIdFor(fromM1, () => "fresh"), "cmd-p-m1");
+      assert.equal(keys.commandIdFor(fromM1, () => "fresh"), "fresh");
+      assert.equal(keys.commandIdFor(other, () => "fresh"), "cmd-q-whole");
     });
 
     it("closing the parent forgets every kept id taken from it", () => {
