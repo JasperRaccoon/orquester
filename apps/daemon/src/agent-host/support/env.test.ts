@@ -1,7 +1,12 @@
 import assert from "node:assert/strict";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join } from "node:path";
 import test from "node:test";
 
-import { buildProviderEnv } from "./env.ts";
+import { pluginsConfigPath, tsRustPreloadPath } from "@orquester/config";
+
+import { buildProviderEnv, providerNodePreload } from "./env.ts";
 
 const base = {
   sessionPath: "/usr/local/bin:/usr/bin:/home/orq/.local/bin",
@@ -105,4 +110,50 @@ test("every adapter's launch carries its own launch marker, which no launcher en
     });
     assert.equal(env["ORQUESTER_AGENT_LAUNCH"], `launch-of-${adapter}`, adapter);
   }
+});
+
+test("the plugins' preload is appended after a launcher NODE_OPTIONS, and absent without one", () => {
+  const preload = "/srv/orq/daemon/plugins/ts-rust/preload.cjs";
+  assert.equal("NODE_OPTIONS" in buildProviderEnv({ adapter: "claude", ...base }), false);
+  assert.equal(
+    buildProviderEnv({ adapter: "claude", ...base, extraEnv: { NODE_OPTIONS: "--no-warnings" } }).NODE_OPTIONS,
+    "--no-warnings"
+  );
+  assert.equal(
+    buildProviderEnv({ adapter: "codex", ...base, nodePreloadPath: preload }).NODE_OPTIONS,
+    `--require ${JSON.stringify(preload)}`
+  );
+  assert.equal(
+    buildProviderEnv({ adapter: "codex", ...base, nodePreloadPath: preload, extraEnv: { NODE_OPTIONS: "--no-warnings" } })
+      .NODE_OPTIONS,
+    `--no-warnings --require ${JSON.stringify(preload)}`
+  );
+});
+
+test("providerNodePreload: only an existing preload with tsc-rs enabled somewhere", async (t) => {
+  const appdir = await mkdtemp(join(tmpdir(), "orq-provider-preload-"));
+  t.after(() => rm(appdir, { recursive: true, force: true }));
+  const preload = tsRustPreloadPath(appdir);
+  const state = (enabledWorkspaces: unknown): string =>
+    JSON.stringify({ version: 1, plugins: { "ts-rust": { enabledWorkspaces }, other: { kept: true } } });
+
+  assert.equal(providerNodePreload(appdir), undefined, "nothing on disk");
+  await mkdir(dirname(pluginsConfigPath(appdir)), { recursive: true });
+  await writeFile(pluginsConfigPath(appdir), state(["jaso"]));
+  assert.equal(providerNodePreload(appdir), undefined, "enabled, but no preload file yet");
+
+  await mkdir(dirname(preload), { recursive: true });
+  await writeFile(preload, "// preload\n");
+  assert.equal(providerNodePreload(appdir), preload);
+
+  await writeFile(pluginsConfigPath(appdir), state([]));
+  assert.equal(providerNodePreload(appdir), undefined, "enabled nowhere");
+  await writeFile(pluginsConfigPath(appdir), JSON.stringify({ version: 1, plugins: {} }));
+  assert.equal(providerNodePreload(appdir), undefined, "no ts-rust record");
+  await writeFile(pluginsConfigPath(appdir), state("jaso"));
+  assert.equal(providerNodePreload(appdir), undefined, "a malformed record");
+  await writeFile(pluginsConfigPath(appdir), "{ not json");
+  assert.equal(providerNodePreload(appdir), undefined, "a corrupt file");
+  await rm(pluginsConfigPath(appdir));
+  assert.equal(providerNodePreload(appdir), undefined, "no plugins.json");
 });
