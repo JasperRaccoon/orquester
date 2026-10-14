@@ -492,6 +492,31 @@ describe("html preview browser: slots, queue and cancellation", () => {
     assert.deepEqual(await readdir(scratch), []);
   });
 
+  it("launches Chromium with every connection through the proxy, loopback and QUIC included (S-M3)", async (t) => {
+    const dir = await mkdtemp(join(tmpdir(), "orq-args-chromium-"));
+    t.after(() => rm(dir, { recursive: true, force: true }));
+    const argsFile = join(dir, "args");
+    const executable = join(dir, "chromium");
+    await writeFile(executable, `#!/bin/sh\nprintf '%s\\n' "$@" > "${argsFile}.tmp"\nmv "${argsFile}.tmp" "${argsFile}"\nexec sleep 300\n`, { mode: 0o755 });
+    const own = await mkdtemp(join(tmpdir(), "orq-html-preview-args-"));
+    t.after(() => rm(own, { recursive: true, force: true }));
+    const browser = new HtmlPreviewBrowser({ resolveChromium: () => executable, tmpDir: own, captureTimeoutMs: 60_000 });
+    const cancel = new AbortController();
+    const running = browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: cancel.signal });
+    running.catch(() => undefined);
+    const watcher = watch(dir);
+    t.after(() => watcher.close());
+    const changed = on(watcher, "change");
+    while (!existsSync(argsFile)) await changed.next();
+    const args = readFileSync(argsFile, "utf8").split("\n");
+    cancel.abort();
+    await assert.rejects(running);
+    assert.ok(args.includes("--disable-quic"), args.join(" "));
+    assert.ok(args.includes("--proxy-bypass-list=<-loopback>"));
+    assert.ok(args.some((arg) => arg.startsWith("--proxy-server=socks5://127.0.0.1:")));
+    assert.ok(args.includes("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"));
+  });
+
   it("the daemon's stop kills a preview in flight, removes its profile, and refuses any after it (D-M4)", async (t) => {
     const fake = await hangingChromium();
     t.after(() => fake.cleanup());

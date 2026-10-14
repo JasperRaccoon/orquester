@@ -12,6 +12,16 @@
  * to a public address for the check and to a private one a moment later (DNS
  * rebinding) still never reaches this machine or its networks. It carries
  * bytes only: HTTP, TLS and WebSockets pass through unchanged.
+ *
+ * Limit (S-M3): "this machine" is the local ranges below plus the addresses
+ * its interfaces hold. A host whose public address is NOT on an interface —
+ * behind NAT, or with a cloud provider's elastic/floating IP — is reachable
+ * by a preview through that public address like any public server: a page can
+ * reach the host's own public listeners (its reverse proxy, e.g. Caddy), and
+ * through them only what they serve without authentication (the daemon's
+ * routes behind it require the bearer). Such an operator who wants the public
+ * address refused too can firewall the host from itself, or keep previews
+ * off (no Chromium-family browser enabled).
  */
 
 import { Resolver } from "node:dns/promises";

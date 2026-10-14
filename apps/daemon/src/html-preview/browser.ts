@@ -500,6 +500,9 @@ export class HtmlPreviewBrowser {
           "--proxy-bypass-list=<-loopback>",
           // WebRTC would otherwise send UDP, which no proxy carries.
           "--force-webrtc-ip-handling-policy=disable_non_proxied_udp",
+          // QUIC is UDP, which no SOCKS proxy here carries: TCP only, as every
+          // other connection (S-M3 hardening; HTTP/3 falls back to HTTP/2).
+          "--disable-quic",
           ...(sandboxed ? [] : ["--no-sandbox"])
         ]
       });
