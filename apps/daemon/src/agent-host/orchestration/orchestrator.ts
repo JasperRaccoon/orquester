@@ -2269,7 +2269,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return runtime.forkHandoff;
   };
 
-  /** Record the handoff as owed again (`deliveredTurnId` gone), on disk first. */
+  /** Keep the handoff record (delivered or owed again) in memory and on disk. */
   const saveForkHandoff = async (runtime: ThreadRuntime, record: ForkHandoffRecord): Promise<void> => {
     runtime.forkHandoff = record;
     await forkHandoffs.save(runtime.id, record).catch((error: unknown) => {
