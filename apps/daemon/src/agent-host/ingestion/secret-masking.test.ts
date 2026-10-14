@@ -147,14 +147,33 @@ describe("streamed text is masked after it is joined", () => {
     assert.equal(outputText(sink, "call-2"), "last bytes Zq7-t", "released, nothing lost");
   });
 
+  it("a value split across two stream kinds of one call is still one value", async () => {
+    const { ingestion, sink, advance } = harness();
+    const call = { turnId: "turn-1", itemId: "call-two-kinds" };
+    await ingestion.ingest(runtimeEvent("item.started", { itemType: "command_execution", status: "inProgress", data: {} }, call));
+    await ingestion.ingest(runtimeEvent("content.delta", { streamKind: "command_output", delta: `TOKEN=${VALUE.slice(0, 7)}` }, call));
+    advance(250);
+    await settle();
+    await ingestion.ingest(runtimeEvent("content.delta", { streamKind: "file_change_output", delta: `${VALUE.slice(7)}\n` }, call));
+    advance(250);
+    await settle();
+    await ingestion.ingest(runtimeEvent("item.completed", { itemType: "command_execution", status: "completed", data: {} }, call));
+    await ingestion.drain();
+    assert.equal(outputText(sink, call.itemId), `TOKEN=${SECRET_REDACTED_TEXT}\n`);
+    assert.ok(!JSON.stringify(sink.batches).includes(VALUE.slice(7)), "neither half went out in clear");
+  });
+
   // A running call's own rows land between its output chunks: OpenCode sends
   // an `item.updated` per running frame, Codex a `patchUpdated` (file change)
-  // update, Grok `item.updated` plus `tool.progress`. None of them ends the
-  // stream, so none may release the held tail.
+  // update, Grok an `item.updated` per running `tool_call_update`, and a
+  // Claude subagent's call a `tool.progress` heartbeat (`tool_progress`, its
+  // `taskId` the owning agent — the only progress ingestion writes a row
+  // for). None of them ends the stream, so none may release the held tail.
   const interleavings = [
     { provider: "opencode", itemType: "command_execution" as const, streamKind: "command_output" as const, progress: false },
     { provider: "codex", itemType: "file_change" as const, streamKind: "file_change_output" as const, progress: false },
-    { provider: "grok", itemType: "command_execution" as const, streamKind: "command_output" as const, progress: true }
+    { provider: "grok", itemType: "command_execution" as const, streamKind: "command_output" as const, progress: false },
+    { provider: "claude", itemType: "command_execution" as const, streamKind: "command_output" as const, progress: true }
   ];
   for (const shape of interleavings) {
     it(`${shape.provider}: running-call rows between two chunks do not release the tail`, async () => {
@@ -167,7 +186,9 @@ describe("streamed text is masked after it is joined", () => {
       // The running row reaches the outbox at once; the chunk waits in the 250 ms buffer.
       await ingestion.ingest(running());
       if (shape.progress) {
-        await ingestion.ingest(runtimeEvent("tool.progress", { toolUseId: call.itemId, toolName: "run", elapsedSeconds: 1 }, call));
+        await ingestion.ingest(
+          runtimeEvent("tool.progress", { toolUseId: call.itemId, toolName: "Bash", elapsedSeconds: 1, taskId: "agent-1" }, call)
+        );
       }
       advance(250);
       await settle();
@@ -180,6 +201,12 @@ describe("streamed text is masked after it is joined", () => {
       await ingestion.drain();
       assert.ok(!JSON.stringify(sink.batches).includes(VALUE), "the value never went out in clear");
       assert.equal(outputText(sink, call.itemId), `TOKEN=${SECRET_REDACTED_TEXT}\n`);
+      if (shape.progress) {
+        assert.ok(
+          sink.activities().some((event) => event.payload.activity.activityKind === "tool.progress"),
+          "the heartbeat row was written between the chunks"
+        );
+      }
     });
   }
 
