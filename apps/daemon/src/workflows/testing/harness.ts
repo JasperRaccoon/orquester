@@ -25,6 +25,8 @@ export interface PublishedEvent {
 const nullDaemonApi: DaemonApi = {
   request: async () => ({ status: 503, body: { code: "HOST_UNAVAILABLE", message: "no daemon in tests" } }),
   uploadAttachment: async () => ({ status: 503, value: null }),
+  publishHtmlRender: async () => ({ ok: false, code: "UNAVAILABLE", message: "no pages in tests" }),
+  previewHtmlRender: async () => ({ ok: false, code: "UNAVAILABLE", message: "no pages in tests" }),
   subscribe: () => () => undefined,
   fsRoot: "/w",
   workspacesDir: "/w"

@@ -60,6 +60,10 @@ export const HTML_RENDER_MEASURE_WIDTHS = [320, 375, 430, 520, 640, 728, 860, 10
  */
 export const HTML_RENDER_COLUMN_WIDTH = 728;
 
+/** `html_preview`'s viewport width bounds, in CSS pixels. */
+export const HTML_PREVIEW_MIN_WIDTH = 240;
+export const HTML_PREVIEW_MAX_WIDTH = 1600;
+
 const MAX_MEASURED_HEIGHTS = 24;
 /** `<thread segment>-<uuid>-html`: the attachment store's id shape, html only. */
 const HTML_ATTACHMENT_ID = /^[a-z0-9_]+(?:-[a-z0-9_]+)*-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}-html$/i;

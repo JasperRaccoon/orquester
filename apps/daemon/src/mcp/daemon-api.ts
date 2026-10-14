@@ -1,12 +1,38 @@
 import type { FastifyInstance } from "fastify";
 import type { Readable } from "node:stream";
 import type { EventMessage } from "@orquester/api";
+import type { HtmlRenderAppearance, HtmlRenderReference } from "@orquester/api/agent-chat";
 import type { Broadcaster } from "../broadcaster.ts";
 import type { AgentChatService } from "../agent-chat/service.ts";
+import { HtmlRenderPublishError } from "../agent-chat/html-render-publish.ts";
+import { HtmlPreviewError, type HtmlPreview } from "../html-preview/index.ts";
 import { isUploadTooLarge, UploadTooLargeError } from "../upload-stream.ts";
 
 export type DaemonMethod = "GET" | "POST" | "PUT" | "DELETE";
 export interface DaemonResponse { status: number; body: unknown }
+
+/** An answer or a refusal whose message is written for the agent; never a throw. */
+export type DaemonOutcome<T> = { ok: true; value: T } | { ok: false; code: string; message: string };
+
+/** `html_render` (design 2026-10-14 §2.1): a page for the calling thread. */
+export interface HtmlRenderPublishRequest {
+  threadId: string;
+  html: string;
+  title: string;
+  height: number;
+  signal?: AbortSignal;
+}
+
+/** `html_preview` (design 2026-10-14 §2.1). */
+export interface HtmlPreviewRequest {
+  threadId: string;
+  html: string;
+  width?: number;
+  appearance?: HtmlRenderAppearance;
+  signal?: AbortSignal;
+}
+
+export type { HtmlPreview };
 
 /**
  * The one seam between the MCP tools and the daemon (spec §4.2). Production
@@ -18,11 +44,38 @@ export interface DaemonApi {
   /** Owns `bytes`: reads it or destroys it. InjectDaemonApi never throws here — a failed upload is an answer (§4.5 codes), as over HTTP. */
   uploadAttachment(sessionId: string, meta: { name: string; type?: string }, bytes: Readable): Promise<{ status: number; value: unknown }>;
   subscribe(listener: (event: EventMessage) => void): () => void;
+  /** Publish a visual page into `threadId` (its project's images inlined, heights measured). */
+  publishHtmlRender(request: HtmlRenderPublishRequest): Promise<DaemonOutcome<HtmlRenderReference>>;
+  /** Screenshot a page in headless Chromium, as `threadId`'s reader would see it. */
+  previewHtmlRender(request: HtmlPreviewRequest): Promise<DaemonOutcome<HtmlPreview>>;
   readonly fsRoot: string;
   readonly workspacesDir: string;
 }
 
-type ChatUploads = Pick<AgentChatService, "uploadAttachment">;
+type ChatUploads = Pick<AgentChatService, "uploadAttachment" | "publishHtmlRender" | "previewHtmlRender">;
+
+const HOST_RESTARTING: DaemonOutcome<never> = { ok: false, code: "HOST_UNAVAILABLE", message: "The agent host is restarting." };
+
+/**
+ * A visual page's refusal, as the agent reads it. The publisher's and the
+ * preview's own messages are written for the agent and pass through; a failed
+ * store's cause (the host's own text) is logged, never echoed.
+ */
+function visualRefusal(error: unknown): DaemonOutcome<never> {
+  if (error instanceof HtmlRenderPublishError) {
+    if (error.code === "store-failed") {
+      console.error("[session-tools] an html_render page could not be stored", error);
+      return { ok: false, code: "UNAVAILABLE", message: "The page could not be saved. Try again in a few seconds." };
+    }
+    return { ok: false, code: "INVALID_ARGUMENT", message: error.message };
+  }
+  if (error instanceof HtmlPreviewError) {
+    const code = error.code === "timeout" ? "TIMEOUT" : error.code === "cancelled" ? "CANCELLED" : "UNAVAILABLE";
+    return { ok: false, code, message: error.message };
+  }
+  console.error("[session-tools] an html page failed", error);
+  return { ok: false, code: "INTERNAL", message: "The page could not be rendered." };
+}
 
 /** A path the client reads: fixed, or read at every use (a long-lived client follows `PUT /api/config/daemon`). */
 export type LivePath = string | (() => string);
@@ -77,6 +130,24 @@ export class InjectDaemonApi implements DaemonApi {
       if (isUploadTooLarge(error)) return { status: 413, value: { code: "UPLOAD_TOO_LARGE", message: new UploadTooLargeError().message } };
       console.error("[mcp] attachment upload failed", error);
       return { status: 503, value: { code: "HOST_UNAVAILABLE", message: "The attachment upload failed." } };
+    }
+  }
+
+  async publishHtmlRender(request: HtmlRenderPublishRequest): Promise<DaemonOutcome<HtmlRenderReference>> {
+    if (!this.opts.agentChat) return HOST_RESTARTING;
+    try {
+      return { ok: true, value: await this.opts.agentChat.publishHtmlRender(request) };
+    } catch (error) {
+      return visualRefusal(error);
+    }
+  }
+
+  async previewHtmlRender(request: HtmlPreviewRequest): Promise<DaemonOutcome<HtmlPreview>> {
+    if (!this.opts.agentChat) return HOST_RESTARTING;
+    try {
+      return { ok: true, value: await this.opts.agentChat.previewHtmlRender(request) };
+    } catch (error) {
+      return visualRefusal(error);
     }
   }
 

@@ -27,6 +27,8 @@ test("a provider change re-judges the rows: the problem goes out, and comes back
   const api: DaemonApi = {
     request: (method, path, opts) => host.request(method, path, opts),
     uploadAttachment: () => host.uploadAttachment(),
+    publishHtmlRender: (request) => host.publishHtmlRender(request),
+    previewHtmlRender: (request) => host.previewHtmlRender(request),
     subscribe: (listener) => {
       const off = host.subscribe(listener);
       registryBus.add(listener);

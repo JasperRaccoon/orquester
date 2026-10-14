@@ -31,7 +31,7 @@ export class BrowserError extends Error {
 // setuid sandbox aborting the zygote surfaces as "Target closed" / "Protocol
 // error" / "Connection closed"). The retry is bounded (one attempt) and flags
 // the browser as unsandboxed, so a false match at worst costs one extra launch.
-function isRetryableSandboxFailure(error: unknown): boolean {
+export function isRetryableSandboxFailure(error: unknown): boolean {
   const msg = error instanceof Error ? error.message : String(error);
   return /sandbox|target closed|protocol error|connection closed/i.test(msg);
 }

@@ -7,6 +7,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Readable } from "node:stream";
 import { HostUnavailableError } from "../agent-chat/host-client.ts";
+import { HtmlRenderPublishError } from "../agent-chat/html-render-publish.ts";
+import { HtmlPreviewError } from "../html-preview/index.ts";
 import { Broadcaster } from "../broadcaster.ts";
 import { UploadTooLargeError } from "../upload-stream.ts";
 import { uploadInlineAttachments } from "./attachments.ts";
@@ -122,4 +124,52 @@ test("a throwing subscriber stays subscribed and cannot block delivery to other 
   broadcaster.publish("sessions", "session.updated", { id: "s1" });
   broadcaster.publish("sessions", "session.closed", { id: "s1" });
   assert.deepEqual(seen, ["thrower:session.updated", "next:session.updated", "thrower:session.closed", "next:session.closed"]);
+});
+
+test("visual pages answer outcomes: the publisher's and preview's messages pass, a store failure's cause and anything unexpected never do", async (t) => {
+  const errors = t.mock.method(console, "error", () => undefined);
+  const reference = { attachmentId: "t-0f8fad5b-d9cb-469f-a165-70867728950e-html", title: "T", height: 200 };
+  let next: () => Promise<unknown> = async () => reference;
+  const agentChat = {
+    uploadAttachment: async () => ({ status: 200, value: null }),
+    publishHtmlRender: async () => next(),
+    previewHtmlRender: async () => next()
+  } as unknown as ConstructorParameters<typeof InjectDaemonApi>[0]["agentChat"];
+  const api = new InjectDaemonApi({ app: Fastify(), authorization: undefined, agentChat, broadcaster: new Broadcaster(), fsRoot: "/r", workspacesDir: "/r" });
+  const publish = () => api.publishHtmlRender({ threadId: "t", html: "<p>x</p>", title: "T", height: 200 });
+  const preview = () => api.previewHtmlRender({ threadId: "t", html: "<p>x</p>" });
+
+  assert.deepEqual(await publish(), { ok: true, value: reference });
+  next = async () => {
+    throw new HtmlRenderPublishError("images-not-found", "These local images could not be read: /w/a.png.");
+  };
+  assert.deepEqual(await publish(), { ok: false, code: "INVALID_ARGUMENT", message: "These local images could not be read: /w/a.png." });
+  next = async () => {
+    throw new HtmlRenderPublishError("store-failed", "The page could not be saved: EIO /var/lib/orquester/daemon/agent/threads/t");
+  };
+  const stored = await publish();
+  assert.deepEqual(stored, { ok: false, code: "UNAVAILABLE", message: "The page could not be saved. Try again in a few seconds." });
+  for (const [code, expected] of [
+    ["timeout", "TIMEOUT"],
+    ["cancelled", "CANCELLED"],
+    ["browser-unavailable", "UNAVAILABLE"],
+    ["browser-failed", "UNAVAILABLE"]
+  ] as const) {
+    next = async () => {
+      throw new HtmlPreviewError(code, `preview ${code}`);
+    };
+    assert.deepEqual(await preview(), { ok: false, code: expected, message: `preview ${code}` });
+  }
+  next = async () => {
+    throw new Error("ENOENT: /secret/path");
+  };
+  assert.deepEqual(await preview(), { ok: false, code: "INTERNAL", message: "The page could not be rendered." });
+  assert.equal(errors.mock.callCount(), 2, "the store failure and the unexpected error are logged");
+
+  const restarting = new InjectDaemonApi({ app: Fastify(), authorization: undefined, agentChat: null, broadcaster: new Broadcaster(), fsRoot: "/r", workspacesDir: "/r" });
+  assert.deepEqual(await restarting.previewHtmlRender({ threadId: "t", html: "x" }), {
+    ok: false,
+    code: "HOST_UNAVAILABLE",
+    message: "The agent host is restarting."
+  });
 });
