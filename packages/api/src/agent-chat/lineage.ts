@@ -158,11 +158,15 @@ export interface MergeBackRequest {
    */
   text?: string;
   /**
-   * Idempotency key (≤ 180 characters) — the merge's id. A repeat with the
-   * same id is the same merge: answered from the queue, or by the parent's
-   * receipt. Its first `/turn` goes out under this id; a retry after the
-   * parent refused it goes out as `<id>:<n>`, a new command, since the host
-   * replays a recorded rejection for an id it has seen.
+   * Idempotency key — the merge's id: 1 to 180 characters, no `:` (refused
+   * with INVALID_COMMAND otherwise, never replaced). A repeat with the same
+   * id is the same merge: answered from the queue, or by the parent's
+   * receipt. Its first `/turn` goes out under this id; a retry of a QUEUED
+   * merge after the parent refused it goes out as `<id>:<n>`, a new command,
+   * since the host replays a recorded rejection for an id it has seen. So a
+   * merge sent at once and refused at once (the caller hears the refusal;
+   * nothing is queued) cannot be sent again under the same id — the parent
+   * would answer the same rejection: send it with a new id.
    */
   commandId?: string;
 }

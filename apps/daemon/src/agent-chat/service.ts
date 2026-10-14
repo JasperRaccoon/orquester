@@ -197,6 +197,13 @@ export function forkIdFor(parentId: string, commandId: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
+/** The host never answered a fork: whether it created the child is unknown. */
+class ForkOutcomeUnknown extends Error {
+  constructor() {
+    super("The agent host did not answer the fork.");
+  }
+}
+
 /** How many fork keys {@link AgentChatService.forkSession} remembers. */
 const FORK_RECORDS = 512;
 
@@ -210,7 +217,10 @@ function forkFingerprint(req: ForkSessionRequest): string {
  * After a restart, with only the tab left to go by: does its recorded fork point match the
  * request's? A message names it; else a turn; else "the latest finished turn", which records none.
  */
-function sameForkPoint(tab: SessionSummary, req: ForkSessionRequest): boolean {
+function sameForkPoint(tab: SessionSummary, recorded: string | undefined, req: ForkSessionRequest): boolean {
+  // The tab records what its key asked for: compared exactly — message, turn, role, or "latest".
+  if (recorded !== undefined) return recorded === forkFingerprint(req);
+  // A tab from before that record: its resolved fork point is all there is.
   const point = tab.lineage?.forkedFrom;
   if (typeof req.messageId === "string") return point?.messageId === req.messageId;
   if (typeof req.turnId === "string") return point === undefined || point.turnId === req.turnId;
@@ -244,7 +254,9 @@ export class AgentChatService {
     const socketPath = agentHostSocketPath(opts.baseDir, opts.platform);
     this.chat = new ChatSessionManager({ requestPersist: () => this.requestPersist() });
     // A closed fork's key never answers with it again (`forkSession`).
-    this.chat.lifecycle.on("closed", ({ id }: { id: string }) => {
+    this.chat.lifecycle.on("closed", ({ id, rolledBack }: { id: string; rolledBack?: boolean }) => {
+      // A fork's own rollback is no close of the user's: its key may fork again.
+      if (rolledBack) return;
       for (const record of this.forkRecords.values()) {
         if (record.childId === id) record.closed = true;
       }
@@ -791,7 +803,9 @@ export class AgentChatService {
     } else {
       if (this.chat.pendingThreadDeletes().includes(id)) throw forkConflict("opened a fork that was closed since");
       const existing = this.chat.get(id);
-      if (existing && !sameForkPoint(existing, req)) throw forkConflict("names another fork point");
+      if (existing && !sameForkPoint(existing, this.chat.forkFingerprint(id), req)) {
+        throw forkConflict("names another fork point");
+      }
     }
     // Idempotent by `commandId` (the receipts pattern): a repeat while the first is in flight
     // shares its answer, and a repeat after it landed — a daemon restart included — finds the
@@ -800,7 +814,7 @@ export class AgentChatService {
     const running = this.forksInFlight.get(key);
     if (running) return running;
     this.rememberFork(key, { fingerprint, childId: id, closed: false });
-    const run = this.forkSessionNow(parentId, req, order, id)
+    const run = this.forkSessionNow(parentId, req, order, id, fingerprint)
       .catch((error: unknown) => {
         // A fork that never landed leaves the key free for a retry.
         if (!this.chat.has(id)) this.forkRecords.delete(key);
@@ -835,8 +849,11 @@ export class AgentChatService {
     parentId: string,
     req: ForkSessionRequest,
     order: number,
-    id: string
+    id: string,
+    /** A keyed fork's fork point, recorded on its tab; absent for an unkeyed fork. */
+    fingerprint?: string
   ): Promise<ForkSessionResponse> {
+    const keyed = fingerprint !== undefined;
     const parent = this.chat.get(parentId);
     if (!parent) {
       throw new ChatSessionError("No chat session with that id.", "THREAD_NOT_FOUND");
@@ -891,7 +908,8 @@ export class AgentChatService {
       accountId: parentAccount,
       home,
       // Provisional until the host answers with the fork point it resolved.
-      lineage: { parentThreadId: parentId, relation: "fork", createdAt: new Date().toISOString() }
+      lineage: { parentThreadId: parentId, relation: "fork", createdAt: new Date().toISOString() },
+      ...(fingerprint !== undefined ? { forkFingerprint: fingerprint } : {})
     });
     const request: ForkHostThreadRequest = {
       threadId: id,
@@ -918,6 +936,10 @@ export class AgentChatService {
       const response = await this.client.json<
         ForkHostThreadResponse & { error?: { code: string; message: string } }
       >("POST", agentHostRoutes.forkThread(parentId), request);
+      if (response.status >= 500) {
+        // The host could not answer: whether it forked is unknown.
+        throw new ForkOutcomeUnknown();
+      }
       if (response.status >= 400 || !response.value?.head) {
         const message = response.value?.error?.message ?? "The agent host refused the fork.";
         // A host from before forks answers its generic route miss until its drain-restart.
@@ -937,11 +959,22 @@ export class AgentChatService {
       }
       result = response.value;
     } catch (error) {
-      // Only a tab this call created goes: a repeat leaves the first one's tab as it was.
-      if (!existing) this.chat.close(id);
-      if (error instanceof ChatSessionError) throw error;
-      if (error instanceof HostUnavailableError) throw this.hostUnavailable();
-      throw new ChatSessionError(error instanceof Error ? error.message : String(error));
+      // Only a tab this call created is rolled back — a repeat leaves the first one's as it was —
+      // and how depends on what the host did:
+      // - it refused (a 4xx: nothing was created): the tab goes without a host delete, and as no
+      //   close of the user's, so a retry under the same key forks afresh;
+      // - its answer never came (unknown outcome: it may hold the child): under a key the tab
+      //   STAYS, so the caller's retry converges on it — the host answers an existing child —
+      //   and no queued delete can later kill a child that retry then returns; without a key
+      //   nothing can retry, so the tab goes everywhere, host thread included.
+      const definite = error instanceof ChatSessionError;
+      if (!existing) {
+        if (definite) this.chat.discard(id);
+        else if (!keyed) this.chat.close(id);
+      }
+      if (definite) throw error;
+      if (error instanceof HostUnavailableError || error instanceof ForkOutcomeUnknown) throw this.hostUnavailable();
+      throw new ChatSessionError(error instanceof Error ? error.message : String(error), "HOST_UNAVAILABLE");
     }
     const forked = this.chat.setLineage(id, result.lineage) ?? summary;
     return { session: forked, lineage: result.lineage, strategy: result.strategy };

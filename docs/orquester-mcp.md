@@ -614,8 +614,15 @@ and its default model (the flagged one, else the first) are never shed.
   idle points, up to 3 times) or is closed leaves it in `pendingMerges` with `state: "failed"` and
   the reason in `error`, on both tabs, until `resolve_merge_back` delivers or discards it — which
   is also the way past a parent a continuing goal keeps busy (`deliver` sends it now, as a message
-  that steers the running turn). Refused (`COMMAND_REJECTED`) for a session with no parent, a
-  closed parent, or a fork with no finished reply.
+  that steers the running turn). Only a refusal that passes by itself (`COMPACTION_UNAVAILABLE`)
+  is retried; a `COMMAND_REJECTED` — the thread's own state, such as an unreadable log or a
+  session in error — fails the merge at once; a queued merge refused before shows its last `error`
+  and `attempts`. Refused (`COMMAND_REJECTED`) for a session with no parent, a closed parent, or a
+  fork with no finished reply; a merge an idle parent refuses at once is refused to the caller
+  then and not queued. (On the daemon route, a caller-chosen merge `commandId` must be 1–180
+  characters without `:`, else `INVALID_COMMAND`; a merge refused at once under such an id cannot
+  be sent again with it — the parent replays its rejection — so a resend needs a new id.
+  `merge_back_session` mints a fresh id per call.)
 - **`get_session_lineage`** — `lineage` is the session's own (`{parentThreadId, relation,
   forkedFrom?: {messageId, turnId}, createdAt}` or `null`); `parent` is `{sessionId, title, exists}`
   (`exists: false` once that tab is closed); `children` are the tabs forked from or delegated by

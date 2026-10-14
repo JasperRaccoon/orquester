@@ -199,13 +199,17 @@ export function ThreadLineageBar({
                 data-merge-state={merge.state}
               >
                 <GitMerge size={12} strokeWidth={1.8} className="shrink-0" aria-hidden />
-                <span className="min-w-0 flex-1 truncate" title={failed && merge.error ? merge.error : merge.preview}>
+                <span className="min-w-0 flex-1 truncate" title={merge.error ?? merge.preview}>
                   {outgoing ? `Merge to “${other}”` : `Merge from “${other}”`}{" "}
                   {failed
                     ? `failed${merge.error ? `: ${merge.error}` : ""}`
                     : outgoing
                       ? "is queued until it is idle"
                       : "is waiting until this chat is idle"}
+                  {/* A queued merge that was refused before says why it is still waiting. */}
+                  {!failed && merge.attempts > 0 && merge.error
+                    ? ` (tried ${merge.attempts}×: ${merge.error})`
+                    : null}
                 </span>
                 <button
                   type="button"

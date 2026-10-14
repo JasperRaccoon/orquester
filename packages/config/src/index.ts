@@ -833,7 +833,13 @@ export const sessionChatRecordSchema = z.object({
   accountId: z.string(),
   home: agentChatHomeSchema,
   /** Last sequence this tab is known to have been rendered at. */
-  lastSeq: z.number().int().nonnegative().default(0)
+  lastSeq: z.number().int().nonnegative().default(0),
+  /**
+   * A fork tab opened under a `commandId` (spec 2026-10-14 §6): the fork point that key asked
+   * for, so a repeat after a restart is told from a reuse exactly. Opaque to everything else;
+   * one that does not read is none.
+   */
+  forkFingerprint: z.string().max(2_000).optional().catch(undefined)
 });
 export type SessionChatRecord = z.infer<typeof sessionChatRecordSchema>;
 

@@ -235,7 +235,7 @@ export class LineageService {
       throw new LineageError("The session this one came from was closed.", "COMMAND_REJECTED");
     }
     const body = (request ?? {}) as Record<string, unknown>;
-    const mergeId = optionalId(body.commandId) ?? (this.opts.newId ?? randomUUID)();
+    const mergeId = callerMergeId(body.commandId) ?? (this.opts.newId ?? randomUUID)();
     const known = this.outbox.entries.find((entry) => entry.mergeId === mergeId);
     if (known) {
       return { parentSessionId: known.parentSessionId, delivery: "queued", mergeId };
@@ -274,7 +274,7 @@ export class LineageService {
       if (this.queuedFor(parent.id).length === 0 && (await this.isIdle(api, parent.id))) {
         const sent = await this.deliver(api, entry);
         if (sent.kind === "sent") {
-          this.delivered.set(mergeId, sent.seq);
+          // Never queued, so no later deliver/discard can name it: nothing to remember.
           return { parentSessionId: parent.id, delivery: "sent", mergeId, seq: sent.seq };
         }
         // The caller hears a refusal at once; nothing was queued for it.
@@ -424,9 +424,11 @@ export class LineageService {
       return {
         kind: "refused",
         message: error?.message ?? `The parent refused the message (${res.status}).`,
-        // A host refusal of the moment (compaction running, a session starting) may pass;
-        // a malformed command, a thread gone or an id clash will not.
-        retryable: res.status === 409 && (error?.code === "COMMAND_REJECTED" || error?.code === "COMPACTION_UNAVAILABLE")
+        // Only a refusal that passes by itself is retried: COMPACTION_UNAVAILABLE (a
+        // compaction runs; it ends). A `/turn`'s COMMAND_REJECTED is the thread's own state —
+        // an unreadable log, a session in error the user must stop — and does not pass by
+        // waiting: failed at once, its reason shown, for the user to retry or discard.
+        retryable: res.status === 409 && error?.code === "COMPACTION_UNAVAILABLE"
       };
     } catch {
       return { kind: "unavailable" };
@@ -627,8 +629,24 @@ function pendingOf(entry: MergeOutboxEntry): PendingMergeBack {
   };
 }
 
-function optionalId(value: unknown): string | undefined {
-  if (typeof value !== "string") return undefined;
-  const trimmed = value.trim();
-  return trimmed.length > 0 && trimmed.length <= MAX_MERGE_ID_CHARS ? trimmed : undefined;
+/**
+ * A caller's merge id (`MergeBackRequest.commandId`): absent → the service mints one; else 1 to
+ * {@link MAX_MERGE_ID_CHARS} characters without `:` — the separator of the retry ids
+ * {@link attemptCommandId} derives, which a caller's own id must never collide with. Anything
+ * else is refused, never silently replaced (that would lose the caller's idempotency).
+ */
+function callerMergeId(value: unknown): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (
+    typeof value !== "string" ||
+    value.trim().length === 0 ||
+    value.length > MAX_MERGE_ID_CHARS ||
+    value.includes(":")
+  ) {
+    throw new LineageError(
+      `commandId must be 1 to ${MAX_MERGE_ID_CHARS} characters, without ":".`,
+      "INVALID_COMMAND"
+    );
+  }
+  return value;
 }

@@ -129,6 +129,8 @@ test("pending merges show on both tabs, with deliver and discard; a failed one s
   const onParent = bar({ ...parent, pendingMerges: [{ ...queued, state: "failed", error: "refused: no", attempts: 3 }] }, [parent, fork]);
   assert.match(onParent, /Merge from “Plan the API \(fork\)” failed: refused: no/);
   assert.match(onParent, /Retry/);
+  const retried = bar({ ...fork, pendingMerges: [{ ...queued, attempts: 1, error: "refused: compaction" }] }, [parent, fork]);
+  assert.match(retried, /is queued until it is idle \(tried 1×: refused: compaction\)/, "a queued merge refused before says why");
 });
 
 test("a merged-back message shows where it came from, and the result alone", () => {

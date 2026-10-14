@@ -95,6 +95,8 @@ interface Fixture {
   forks: Array<{ parentId: string; body: ForkHostThreadRequest }>;
   /** What the fake host answers a fork; built from the request when null. */
   forkAnswer: { status: number; body: unknown } | null;
+  /** Drop the next fork's connection after the host took it (a lost answer), once. */
+  dropForkAnswer: boolean;
   requests: EventEmitter;
   broadcasts: EventEmitter;
   cleanup(): Promise<void>;
@@ -170,6 +172,7 @@ async function makeFixture(
     recycleAnswer: { status: 200, body: { recycled: 0, deferred: 0 } },
     forks: [],
     forkAnswer: null,
+    dropForkAnswer: false,
     requests: new EventEmitter(),
     broadcasts: new EventEmitter(),
     service: null as unknown as AgentChatService,
@@ -283,6 +286,11 @@ async function makeFixture(
       if (fork && req.method === "POST") {
         const request = JSON.parse(body) as ForkHostThreadRequest;
         state.forks.push({ parentId: decodeURIComponent(fork[1]!), body: request });
+        if (state.dropForkAnswer) {
+          state.dropForkAnswer = false;
+          req.socket.destroy();
+          return;
+        }
         const answer = state.forkAnswer ?? {
           status: 200,
           body: {
@@ -1464,5 +1472,72 @@ test("a reused fork commandId with another fork point, or after its fork was clo
     "after a restart, the queued delete of that tab still says it was closed"
   );
   assert.equal(f.service.chat.has(first.session.id), false);
+  await f.cleanup();
+});
+
+test("a fork the host refused rolls its tab back without a host delete, so the same key forks again", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  f.forkAnswer = { status: 409, body: { error: { code: "COMMAND_REJECTED", message: "That reply is still being written." } } };
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1), /still being written/);
+  const id = forkIdFor(parent.id, "k");
+  assert.equal(f.service.chat.has(id), false, "the tab is rolled back");
+  assert.equal(f.service.chat.pendingThreadDeletes().includes(id), false, "nothing to delete on the host");
+  // The turn finished: the same key (a route caller's retry) now forks, no COMMAND_ID_CONFLICT.
+  f.forkAnswer = null;
+  const forked = await f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1);
+  assert.equal(forked.session.id, id);
+  await f.cleanup();
+});
+
+test("a fork whose answer was lost keeps its tab, and the same key's retry converges on it", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  f.dropForkAnswer = true;
+  await assert.rejects(
+    f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1),
+    (error: unknown) => error instanceof ChatSessionError && error.code === "HOST_UNAVAILABLE"
+  );
+  const id = forkIdFor(parent.id, "k");
+  assert.equal(f.service.chat.has(id), true, "the host may hold the child: the tab stays");
+  assert.equal(f.service.chat.pendingThreadDeletes().includes(id), false, "no delete that could kill it later");
+  // The retry (MCP's HOST_UNAVAILABLE re-post) — the host answers for the child it has.
+  const again = await f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1);
+  assert.equal(again.session.id, id);
+  assert.deepEqual(f.forks.map((fork) => fork.body.threadId), [id, id]);
+  assert.equal(f.service.chat.list("/w/p").filter((tab) => tab.id === id).length, 1, "one live tab");
+
+  // Without a key nothing can retry: a lost answer takes the tab down everywhere.
+  f.dropForkAnswer = true;
+  await assert.rejects(f.service.forkSession(parent.id, { messageId: "m" }, 2));
+  const unkeyed = f.forks.at(-1)!.body.threadId;
+  assert.equal(f.service.chat.has(unkeyed), false);
+  assert.equal(f.service.chat.pendingThreadDeletes().includes(unkeyed), true);
+  await f.cleanup();
+});
+
+test("after a restart, a keyed fork's recorded request tells a repeat from a reuse exactly", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  const conflict = (error: unknown) => error instanceof ChatSessionError && error.code === "COMMAND_ID_CONFLICT";
+  const forget = () => (f.service as unknown as { forkRecords: Map<string, unknown> }).forkRecords.clear();
+  // The fake host resolves no fork point for a turn-only request: only the recorded request can tell.
+  f.forkAnswer = {
+    status: 200,
+    body: { head: { id: "x" }, strategy: "native", lineage: { parentThreadId: parent.id, relation: "fork", createdAt: "t" } }
+  };
+  await f.service.forkSession(parent.id, { commandId: "t", turnId: "t1", role: "assistant" }, 1);
+  await f.service.forkSession(parent.id, { commandId: "latest" }, 2);
+  forget();
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "t", turnId: "t1", role: "user" }, 3), conflict, "another role");
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "t", turnId: "t2", role: "assistant" }, 3), conflict, "another turn");
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "t" }, 3), conflict, "latest is another point");
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "latest", turnId: "t1" }, 3), conflict);
+  await f.service.forkSession(parent.id, { commandId: "t", turnId: "t1", role: "assistant" }, 3);
+  await f.service.forkSession(parent.id, { commandId: "latest" }, 3);
+  // It survives the record's round trip through sessions.json.
+  const reread = parseSessionsConfig({ version: 1, sessions: f.service.chat.records() });
+  const tab = reread.sessions.find((record) => record.id === forkIdFor(parent.id, "t"));
+  assert.equal(typeof tab?.chat?.forkFingerprint, "string");
   await f.cleanup();
 });

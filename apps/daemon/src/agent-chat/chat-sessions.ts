@@ -47,12 +47,20 @@ export interface ChatSessionCreateInput {
   owner?: WorkflowSessionOwner;
   /** The thread this one was forked from or delegated by (spec 2026-10-14 §6), already checked. */
   lineage?: ThreadLineage;
+  /** A keyed fork's requested fork point (`AgentChatService.forkSession`), persisted with the tab. */
+  forkFingerprint?: string;
 }
 
 interface ChatSession {
   summary: SessionSummary;
   /** The §5.2 block persisted into `sessions.json`. */
-  chat: { threadId: string; accountId: string; home: AgentChatHome; lastSeq: number };
+  chat: {
+    threadId: string;
+    accountId: string;
+    home: AgentChatHome;
+    lastSeq: number;
+    forkFingerprint?: string;
+  };
 }
 
 /**
@@ -81,6 +89,11 @@ export class ChatSessionManager {
       .filter((s) => projectPath === undefined || s.summary.projectPath === projectPath)
       .map((s) => ({ ...s.summary }));
     return rows;
+  }
+
+  /** A keyed fork tab's requested fork point, if it was opened as one (spec 2026-10-14 §6). */
+  forkFingerprint(id: string): string | undefined {
+    return this.sessions.get(id)?.chat.forkFingerprint;
   }
 
   /** The last sequence this tab was rendered at, for a §6.3 reconnect. */
@@ -138,7 +151,13 @@ export class ChatSessionManager {
     };
     this.sessions.set(input.id, {
       summary,
-      chat: { threadId: input.id, accountId: input.accountId, home: input.home, lastSeq: 0 }
+      chat: {
+        threadId: input.id,
+        accountId: input.accountId,
+        home: input.home,
+        lastSeq: 0,
+        ...(input.forkFingerprint !== undefined ? { forkFingerprint: input.forkFingerprint } : {})
+      }
     });
     this.lifecycle.emit("created", { ...summary });
     this.options.requestPersist();
@@ -169,6 +188,18 @@ export class ChatSessionManager {
     // tokens spent for a tab nobody is looking at.
     this.pendingDeletes.add(id);
     this.lifecycle.emit("closed", { id });
+    this.options.requestPersist();
+    return true;
+  }
+
+  /**
+   * Take back a tab its own create never finished — the host refused the thread, so there is
+   * nothing to delete there. Unlike {@link close} no host delete is queued, and the "closed"
+   * event says `rolledBack`, so nothing reads it as the user closing a tab.
+   */
+  discard(id: string): boolean {
+    if (!this.sessions.delete(id)) return false;
+    this.lifecycle.emit("closed", { id, rolledBack: true });
     this.options.requestPersist();
     return true;
   }
@@ -344,7 +375,10 @@ export class ChatSessionManager {
           threadId: record.chat.threadId,
           accountId: record.chat.accountId,
           home: record.chat.home,
-          lastSeq: record.chat.lastSeq
+          lastSeq: record.chat.lastSeq,
+          ...(record.chat.forkFingerprint !== undefined
+            ? { forkFingerprint: record.chat.forkFingerprint }
+            : {})
         }
       });
     }

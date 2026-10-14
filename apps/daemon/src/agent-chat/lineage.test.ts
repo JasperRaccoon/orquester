@@ -321,7 +321,7 @@ describe("merge back", () => {
     await cleanup();
   });
 
-  it("a passing refusal is retried under a NEW command id, only at the parent's next idle point", async () => {
+  it("a passing refusal (COMPACTION_UNAVAILABLE) is retried under a NEW command id, only at the parent's next idle point", async () => {
     const { world, service, cleanup } = await setup({ parentBusy: true });
     await service.mergeBack("child", { commandId: "m1" });
     const idleAt = (seq: number) => {
@@ -329,7 +329,7 @@ describe("merge back", () => {
       world.threads.set("parent", { ...snapshot(), seq });
     };
     idleAt(5);
-    world.setTurnStatus(409, "COMMAND_REJECTED");
+    world.setTurnStatus(409, "COMPACTION_UNAVAILABLE");
     world.touch("parent");
     await settled(service);
     assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["m1"]);
@@ -355,7 +355,7 @@ describe("merge back", () => {
   it("three passing refusals at three idle points fail it; Retry then delivers under a fresh id", async () => {
     const { world, service, published, cleanup } = await setup({ parentBusy: true });
     await service.mergeBack("child", { commandId: "m1" });
-    world.setTurnStatus(409, "COMMAND_REJECTED");
+    world.setTurnStatus(409, "COMPACTION_UNAVAILABLE");
     for (let attempt = 1; attempt <= 3; attempt += 1) {
       world.sessions.set("parent", summary("parent", { title: "Parent" }));
       world.threads.set("parent", { ...snapshot(), seq: 10 + attempt });
@@ -375,6 +375,48 @@ describe("merge back", () => {
     assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["m1", "m1:1", "m1:2", "m1:3"]);
     assert.equal(service.pending().length, 0);
     assert.deepEqual(published.get("child"), []);
+    await cleanup();
+  });
+
+  it("a COMMAND_REJECTED (the thread's own state) fails a queued merge at once, its reason shown", async () => {
+    const { world, service, published, cleanup } = await setup({ parentBusy: true });
+    await service.mergeBack("child", { commandId: "m9" });
+    world.sessions.set("parent", summary("parent", { title: "Parent" }));
+    world.threads.set("parent", snapshot());
+    world.setTurnStatus(409, "COMMAND_REJECTED");
+    world.touch("parent");
+    await settled(service);
+    const [merge] = service.pending();
+    assert.deepEqual([merge!.state, merge!.attempts, merge!.error], ["failed", 1, "refused: COMMAND_REJECTED"]);
+    assert.equal(published.get("child")?.[0]?.error, "refused: COMMAND_REJECTED");
+    await cleanup();
+  });
+
+  it("a queued merge refused by a passing refusal stays queued, showing its last error", async () => {
+    const { world, service, cleanup } = await setup({ parentBusy: true });
+    await service.mergeBack("child", { commandId: "m8" });
+    world.sessions.set("parent", summary("parent", { title: "Parent" }));
+    world.threads.set("parent", snapshot());
+    world.setTurnStatus(409, "COMPACTION_UNAVAILABLE");
+    world.touch("parent");
+    await settled(service);
+    const [merge] = service.pending();
+    assert.deepEqual([merge!.state, merge!.attempts, merge!.error], ["queued", 1, "refused: COMPACTION_UNAVAILABLE"]);
+    await cleanup();
+  });
+
+  it("a caller's merge id is refused, never replaced: too long, blank, or holding the retry separator", async () => {
+    const { service, world, cleanup } = await setup();
+    for (const commandId of ["x".repeat(181), " ", "a:1", 7]) {
+      await assert.rejects(
+        service.mergeBack("child", { commandId } as never),
+        (error: unknown) => error instanceof LineageError && error.code === "INVALID_COMMAND"
+      );
+    }
+    assert.equal(world.turns.length, 0);
+    // A merge sent at once is never queued, so nothing remembers it.
+    await service.mergeBack("child", { commandId: "x".repeat(180) });
+    assert.equal((service as unknown as { delivered: Map<string, number> }).delivered.size, 0);
     await cleanup();
   });
 
