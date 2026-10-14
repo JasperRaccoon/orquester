@@ -859,7 +859,13 @@ export const pluginStateSchema = z
 export const pluginsConfigSchema = z
   .object({
     version: z.literal(1).default(1),
-    plugins: z.record(z.string(), pluginStateSchema).default({})
+    /**
+     * Keyed by plugin id. Entries are NOT validated here: a record another app
+     * version wrote for a plugin this one does not know is kept verbatim, whatever
+     * its shape. A known plugin's record is validated where it is read, by
+     * `pluginStateOf`.
+     */
+    plugins: z.record(z.string(), z.unknown()).default({})
   })
   .passthrough();
 
@@ -876,9 +882,14 @@ export function parsePluginsConfig(value: unknown): PluginsConfig {
   return pluginsConfigSchema.parse(value);
 }
 
-/** A plugin's state, or the empty default when the file has no record for it. */
+/**
+ * A plugin's state, validated, or the empty default when the file has no record
+ * for it. Throws (a ZodError) when the record is malformed: the caller must
+ * treat that plugin's state as unreadable and never write over it. The result
+ * is a fresh object; unknown fields of the record are kept.
+ */
 export function pluginStateOf(config: PluginsConfig, id: string): PluginState {
-  return config.plugins[id] ?? pluginStateSchema.parse({});
+  return pluginStateSchema.parse(config.plugins[id] ?? {});
 }
 
 // sessions.json — the daemon's index of live tmux-backed sessions, used to
