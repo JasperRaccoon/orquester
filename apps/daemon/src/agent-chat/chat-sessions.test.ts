@@ -447,6 +447,12 @@ test("pending merges ride the summary, announced only on a change and never pers
   assert.deepEqual(chat.get("p")?.pendingMerges, [merge]);
   assert.equal("pendingMerges" in (chat.records()[0] as object), false);
   chat.setPendingMerges("p", []);
-  assert.equal(chat.get("p")?.pendingMerges, undefined);
+  assert.deepEqual(chat.get("p")?.pendingMerges, []);
+  assert.equal(updates.length, 2);
+  // The broadcast that clears it names the empty list: a client merging field-wise must drop its own.
+  assert.deepEqual((updates[1] as { pendingMerges?: unknown }).pendingMerges, []);
+  // A tab that never had one announces nothing.
+  seed(chat, "q", 1);
+  chat.setPendingMerges("q", []);
   assert.equal(updates.length, 2);
 });

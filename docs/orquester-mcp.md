@@ -596,7 +596,9 @@ and its default model (the flagged one, else the first) are never shed.
   over. A parent whose managed account was removed is refused (`COMMAND_REJECTED`, "The account
   this conversation runs under is no longer available"): a conversation is only readable from the
   home that created it. Each call mints a command id the daemon forks by, re-sent unchanged on a
-  `HOST_UNAVAILABLE` retry, so a retry never opens a second fork. The result's `session` is the
+  `HOST_UNAVAILABLE` retry, so a retry never opens a second fork. (On the daemon route, the same
+  `commandId` with another fork point, or once the fork it opened was closed, answers
+  `COMMAND_ID_CONFLICT` rather than that fork.) The result's `session` is the
   fork's `SessionDetail`.
 - **`merge_back_session`** — sends the fork's result to the session it came from (its `lineage`
   names it) as an ordinary message that starts `[Merged back from fork "<title>"]`: `text`, or the
@@ -605,7 +607,9 @@ and its default model (the flagged one, else the first) are never shed.
   or question open, a Codex goal continuing — gets it once it is idle (`delivery: "queued"`); so
   does one sent while an older merge for that parent still waits: merges reach a parent oldest
   first, one per idle point, never one steering into another. The queue is kept across daemon
-  restarts and delivers each merge exactly once (its `mergeId` is the turn's command id). Nothing
+  restarts and delivers each merge exactly once (its first `/turn` goes out under the `mergeId`, a
+  retry after a refusal as `<mergeId>:<n>` — the host replays a recorded rejection for an id it has
+  seen — and a passing refusal is retried only once the parent's log has moved on). Nothing
   queued disappears: a parent that refuses a merge (a passing refusal is tried again at its next
   idle points, up to 3 times) or is closed leaves it in `pendingMerges` with `state: "failed"` and
   the reason in `error`, on both tabs, until `resolve_merge_back` delivers or discards it — which

@@ -274,6 +274,7 @@ export class LineageService {
       if (this.queuedFor(parent.id).length === 0 && (await this.isIdle(api, parent.id))) {
         const sent = await this.deliver(api, entry);
         if (sent.kind === "sent") {
+          this.delivered.set(mergeId, sent.seq);
           return { parentSessionId: parent.id, delivery: "sent", mergeId, seq: sent.seq };
         }
         // The caller hears a refusal at once; nothing was queued for it.
@@ -314,10 +315,15 @@ export class LineageService {
     const entry = find();
     if (!entry) throw new LineageError("No pending merge with that id for this session.", "THREAD_NOT_FOUND");
     if (action === "discard") {
-      return this.lane(entry.parentSessionId, async () => {
+      return this.lane(entry.parentSessionId, async (): Promise<MergeBackActionResponse> => {
+        // Looked up again in the lane: a drain may have delivered it meanwhile, and the
+        // answer is what happened to it, never "discarded" for a message the parent has.
+        const current = find();
+        if (!current) return this.settledOutcome(mergeId);
         this.outbox.entries = this.outbox.entries.filter((other) => other.mergeId !== mergeId);
-        await this.persist([entry.parentSessionId, entry.childSessionId]);
-        return { mergeId, outcome: "discarded" as const };
+        this.retryAfterSeq.delete(mergeId);
+        await this.persist([current.parentSessionId, current.childSessionId]);
+        return { mergeId, outcome: "discarded" };
       });
     }
     const api = this.requireApi();
@@ -326,7 +332,7 @@ export class LineageService {
     }
     return this.lane(entry.parentSessionId, async (): Promise<MergeBackActionResponse> => {
       const current = find();
-      if (!current) throw new LineageError("That merge was already delivered or discarded.", "THREAD_NOT_FOUND");
+      if (!current) return this.settledOutcome(mergeId);
       const sent = await this.deliver(api, current);
       if (sent.kind === "unavailable") {
         throw new LineageError("The agent host is restarting; the merge stays queued.", "HOST_UNAVAILABLE");
@@ -336,10 +342,27 @@ export class LineageService {
         await this.persist([current.parentSessionId, current.childSessionId]);
         throw new LineageError(sent.message, "COMMAND_REJECTED");
       }
-      this.outbox.entries = this.outbox.entries.filter((other) => other.mergeId !== mergeId);
+      this.settle(current, sent.seq);
       await this.persist([current.parentSessionId, current.childSessionId]);
       return { mergeId, outcome: "sent", seq: sent.seq };
     });
+  }
+
+  /** What happened to a merge no longer pending: delivered (said with its seq), else not found. */
+  private settledOutcome(mergeId: string): MergeBackActionResponse {
+    const seq = this.delivered.get(mergeId);
+    if (seq !== undefined) return { mergeId, outcome: "sent", seq };
+    throw new LineageError("That merge was already delivered or discarded.", "THREAD_NOT_FOUND");
+  }
+
+  /** A merge the parent took: off the queue, and remembered as delivered for a late action on it. */
+  private settle(entry: MergeOutboxEntry, seq: number): void {
+    this.outbox.entries = this.outbox.entries.filter((other) => other.mergeId !== entry.mergeId);
+    this.retryAfterSeq.delete(entry.mergeId);
+    this.delivered.set(entry.mergeId, seq);
+    if (this.delivered.size > DELIVERED_MEMORY) {
+      this.delivered.delete(this.delivered.keys().next().value as string);
+    }
   }
 
   // -------------------------------------------------------------------------
@@ -375,19 +398,25 @@ export class LineageService {
   }
 
   private async isIdle(api: DaemonApi, parentId: string): Promise<boolean> {
+    return (await this.idleParent(api, parentId)) !== null;
+  }
+
+  /** The parent's thread when it can take a message now, else null. */
+  private async idleParent(api: DaemonApi, parentId: string): Promise<ThreadSnapshotPayload | null> {
     const summary = this.opts.sessions.get(parentId);
-    if (!summary) return false;
+    if (!summary) return null;
     try {
-      return acceptsMessage(summary, await this.readThread(api, parentId));
+      const snap = await this.readThread(api, parentId);
+      return acceptsMessage(summary, snap) ? snap : null;
     } catch {
-      return false;
+      return null;
     }
   }
 
   private async deliver(api: DaemonApi, entry: MergeOutboxEntry): Promise<Delivery> {
     try {
       const res = await api.request("POST", agentChatCommandPath(entry.parentSessionId, "turn"), {
-        body: { commandId: entry.mergeId, input: entry.input, interactionMode: "default" }
+        body: { commandId: attemptCommandId(entry), input: entry.input, interactionMode: "default" }
       });
       if (res.status < 400) return { kind: "sent", seq: (res.body as { seq?: number } | null)?.seq ?? 0 };
       const error = (res.body as { error?: { code?: string; message?: string } } | null)?.error;
@@ -409,6 +438,11 @@ export class LineageService {
     entry.attempts = (entry.attempts ?? 0) + 1;
     entry.error = message.slice(0, 2_000);
   }
+
+  /** The parent's thread `seq` at a merge's last passing refusal: it is retried only past it. */
+  private readonly retryAfterSeq = new Map<string, number>();
+  /** Merges delivered lately and the parent's seq then, for an action that arrives after. */
+  private readonly delivered = new Map<string, number>();
 
   private drainAll(): void {
     for (const parentId of new Set(this.outbox.entries.map((entry) => entry.parentSessionId))) {
@@ -442,12 +476,19 @@ export class LineageService {
       await this.persist(this.involved(parentId));
       return;
     }
-    if (!(await this.isIdle(api, parentId))) return;
+    const snap = await this.idleParent(api, parentId);
+    if (snap === null) return;
+    // A retry after a passing refusal waits for a genuine next idle point: the parent's
+    // log must have moved past the refusal (the refused /turn wrote nothing to it). Our
+    // own persist's tab update is no such point, so the attempts never run back to back.
+    const refusedAt = this.retryAfterSeq.get(entry.mergeId);
+    if (refusedAt !== undefined && snap.seq <= refusedAt) return;
     const sent = await this.deliver(api, entry);
     if (sent.kind === "unavailable") return;
     if (sent.kind === "refused") {
       entry.attempts = (entry.attempts ?? 0) + 1;
       entry.error = sent.message.slice(0, 2_000);
+      this.retryAfterSeq.set(entry.mergeId, snap.seq);
       if (!sent.retryable || entry.attempts >= MAX_DRAIN_ATTEMPTS) {
         entry.state = "failed";
         this.opts.logger?.warn?.("[lineage] the parent refused a queued merge; kept as failed", {
@@ -460,7 +501,7 @@ export class LineageService {
       await this.persist([parentId, entry.childSessionId]);
       return;
     }
-    this.outbox.entries = this.outbox.entries.filter((candidate) => candidate.mergeId !== entry.mergeId);
+    this.settle(entry, sent.seq);
     await this.persist([parentId, entry.childSessionId]);
   }
 
@@ -540,6 +581,25 @@ type Delivery =
  */
 export const MAX_DRAIN_ATTEMPTS = 3;
 
+/** How many delivered merges are remembered for a late deliver/discard on them. */
+const DELIVERED_MEMORY = 256;
+
+/** The longest merge id a caller may choose: room is left for an attempt suffix. */
+export const MAX_MERGE_ID_CHARS = 180;
+
+/**
+ * The `/turn` command id of a merge's current attempt. The host keeps a receipt
+ * per command id and REPLAYS a recorded rejection for the same id, so a retry
+ * after a refusal must be a new command: the first attempt is the merge's own id
+ * and each refused attempt moves it on (`<mergeId>:<n>`). A re-post after a 503
+ * (nothing was recorded) keeps the id it had, and so does a re-post after a
+ * crash between the send and the queue's write — the host's receipt answers it.
+ */
+export function attemptCommandId(entry: Pick<MergeOutboxEntry, "mergeId" | "attempts">): string {
+  const attempts = entry.attempts ?? 0;
+  return attempts === 0 ? entry.mergeId : `${entry.mergeId}:${attempts}`;
+}
+
 /** 0600, tmp + rename: a crash leaves the old queue or the new one, never half of one. */
 async function writeAtomic(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -570,5 +630,5 @@ function pendingOf(entry: MergeOutboxEntry): PendingMergeBack {
 function optionalId(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
   const trimmed = value.trim();
-  return trimmed.length > 0 && trimmed.length <= 200 ? trimmed : undefined;
+  return trimmed.length > 0 && trimmed.length <= MAX_MERGE_ID_CHARS ? trimmed : undefined;
 }

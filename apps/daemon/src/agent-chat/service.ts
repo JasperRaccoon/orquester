@@ -197,6 +197,33 @@ export function forkIdFor(parentId: string, commandId: string): string {
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
+/** How many fork keys {@link AgentChatService.forkSession} remembers. */
+const FORK_RECORDS = 512;
+
+/** A fork request's cut, for telling a repeat from a reuse of its key. */
+function forkFingerprint(req: ForkSessionRequest): string {
+  const body = (req ?? {}) as Record<string, unknown>;
+  return JSON.stringify([body.messageId ?? null, body.turnId ?? null, body.role ?? null]);
+}
+
+/**
+ * After a restart, with only the tab left to go by: does its recorded fork point match the
+ * request's? A message names it; else a turn; else "the latest finished turn", which records none.
+ */
+function sameForkPoint(tab: SessionSummary, req: ForkSessionRequest): boolean {
+  const point = tab.lineage?.forkedFrom;
+  if (typeof req.messageId === "string") return point?.messageId === req.messageId;
+  if (typeof req.turnId === "string") return point === undefined || point.turnId === req.turnId;
+  return point === undefined;
+}
+
+function forkConflict(what: string): ChatSessionError {
+  return new ChatSessionError(
+    `That commandId ${what}: send a new commandId to fork again.`,
+    "COMMAND_ID_CONFLICT"
+  );
+}
+
 /** A fork request's optional strings: absent, or a non-blank string of at most `max` characters. */
 function optionalField(value: unknown, name: string, max: number): string | undefined {
   if (value === undefined || value === null) return undefined;
@@ -216,6 +243,12 @@ export class AgentChatService {
   constructor(private readonly opts: AgentChatServiceOptions) {
     const socketPath = agentHostSocketPath(opts.baseDir, opts.platform);
     this.chat = new ChatSessionManager({ requestPersist: () => this.requestPersist() });
+    // A closed fork's key never answers with it again (`forkSession`).
+    this.chat.lifecycle.on("closed", ({ id }: { id: string }) => {
+      for (const record of this.forkRecords.values()) {
+        if (record.childId === id) record.closed = true;
+      }
+    });
     this.client = new AgentHostClient({
       socketPath,
       token: () => this.supervisor.currentToken()
@@ -745,18 +778,54 @@ export class AgentChatService {
   async forkSession(parentId: string, req: ForkSessionRequest, order: number): Promise<ForkSessionResponse> {
     const commandId = optionalField((req as Record<string, unknown> | undefined)?.commandId, "commandId", 200);
     if (commandId === undefined) return this.forkSessionNow(parentId, req, order, randomUUID());
+    const fingerprint = forkFingerprint(req);
+    const key = `${parentId}\u0000${commandId}`;
+    const id = forkIdFor(parentId, commandId);
+    // COMMAND_ID_CONFLICT, as a §6.2 command answers a reused id: the same key with another fork
+    // point, or a key whose fork was closed meanwhile — never the first fork in its place, and
+    // never a closed one back.
+    const record = this.forkRecords.get(key);
+    if (record) {
+      if (record.fingerprint !== fingerprint) throw forkConflict("names another fork point");
+      if (record.closed) throw forkConflict("opened a fork that was closed since");
+    } else {
+      if (this.chat.pendingThreadDeletes().includes(id)) throw forkConflict("opened a fork that was closed since");
+      const existing = this.chat.get(id);
+      if (existing && !sameForkPoint(existing, req)) throw forkConflict("names another fork point");
+    }
     // Idempotent by `commandId` (the receipts pattern): a repeat while the first is in flight
     // shares its answer, and a repeat after it landed — a daemon restart included — finds the
     // tab under the id the key names and has the host answer for it again (the host's fork of
     // an existing child is idempotent), so a double submit never opens a second fork.
-    const key = `${parentId}\u0000${commandId}`;
     const running = this.forksInFlight.get(key);
     if (running) return running;
-    const run = this.forkSessionNow(parentId, req, order, forkIdFor(parentId, commandId)).finally(() => {
-      this.forksInFlight.delete(key);
-    });
+    this.rememberFork(key, { fingerprint, childId: id, closed: false });
+    const run = this.forkSessionNow(parentId, req, order, id)
+      .catch((error: unknown) => {
+        // A fork that never landed leaves the key free for a retry.
+        if (!this.chat.has(id)) this.forkRecords.delete(key);
+        throw error;
+      })
+      .finally(() => {
+        this.forksInFlight.delete(key);
+      });
     this.forksInFlight.set(key, run);
     return run;
+  }
+
+  /**
+   * Fork keys this daemon has seen (`parent\0commandId` → its fork point and tab), so a reused
+   * key is answered truthfully: the same fork, or COMMAND_ID_CONFLICT. Bounded; after a restart
+   * the tab's own lineage and the pending deletes stand in for it.
+   */
+  private readonly forkRecords = new Map<string, { fingerprint: string; childId: string; closed: boolean }>();
+
+  private rememberFork(key: string, record: { fingerprint: string; childId: string; closed: boolean }): void {
+    this.forkRecords.delete(key);
+    this.forkRecords.set(key, record);
+    if (this.forkRecords.size > FORK_RECORDS) {
+      this.forkRecords.delete(this.forkRecords.keys().next().value as string);
+    }
   }
 
   /** Forks in flight by `parentId\0commandId`, for {@link forkSession}'s idempotency. */
@@ -810,7 +879,7 @@ export class AgentChatService {
 
     const existing = this.chat.get(id);
     if (existing && existing.lineage?.parentThreadId !== parentId) {
-      throw new ChatSessionError("That commandId already names another session.", "COMMAND_REJECTED");
+      throw forkConflict("already names another session");
     }
     const summary = existing ?? this.chat.create({
       id,

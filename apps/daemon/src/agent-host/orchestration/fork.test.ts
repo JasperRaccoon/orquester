@@ -198,6 +198,26 @@ describe("the transcript handoff", () => {
     assert.match(transcript, /third/);
   });
 
+  it("does not count a provider-started turn with no prompt or reply as lost", () => {
+    const continuation = turn("t2", "completed");
+    const transcript = buildForkTranscript({
+      items: [message("u1", "user", "t1", "first"), message("a1", "assistant", "t1", "answer")],
+      retained: [turn("t1", "completed", "u1"), continuation] as never,
+      parentTitle: "P"
+    })!;
+    assert.doesNotMatch(transcript, /no longer available/);
+    // …while one whose recorded reply is gone does count.
+    const replied = { ...turn("t3", "completed"), assistantMessageId: "gone" };
+    assert.match(
+      buildForkTranscript({
+        items: [message("u1", "user", "t1", "first")],
+        retained: [turn("t1", "completed", "u1"), replied] as never,
+        parentTitle: "P"
+      })!,
+      /1 earlier exchange is no longer available/
+    );
+  });
+
   it("is null when the kept turns hold no message", () => {
     assert.equal(
       buildForkTranscript({ items: [], retained: [turn("t1", "completed") as never], parentTitle: "P" }),
@@ -493,6 +513,30 @@ describe("forkThread", () => {
     const row = activitiesOf(host, "child-2").find((activity) => activity.activityKind === "thread.forked");
     assert.match(JSON.stringify(row?.payload), /could not be carried over/);
     assert.doesNotMatch(JSON.stringify(row?.payload), /before the first message/);
+    await host.stop();
+  });
+
+  it("never hands back a deleted fork child for a repeated fork", async () => {
+    const grok = createScriptedAdapter({ id: "grok" });
+    const host = createTestHost({ adapters: { grok } });
+    const parentId = await host.createThread({ threadId: "parent", refId: "grok" });
+    const first = await runTurn(host, grok, parentId, "q", "a");
+    await host.orchestrator.forkThread(parentId, forkRequest("child", "grok", { messageId: first.replyId }));
+    await host.orchestrator.ingestionSink("child", [
+      domainEvent("child", host, "thread.message-sent", { messageId: "c1", role: "user", text: "child's own words", streaming: false, turnId: null })
+    ]);
+    await host.settle();
+    await host.orchestrator.deleteThread("child");
+    // Gone: the id is free, and a repeat starts a NEW thread — the old log is not resurrected.
+    const again = await host.orchestrator.forkThread(parentId, forkRequest("child", "grok", { messageId: first.replyId }));
+    await host.settle();
+    assert.equal(again.head.seq < 5, true);
+    const created = logOf(host, "child").filter((event) => event.type === "thread.created");
+    assert.equal(created.length, 1);
+    assert.equal(
+      logOf(host, "child").some((event) => event.type === "thread.message-sent" && JSON.stringify(event.payload).includes("child's own words")),
+      false
+    );
     await host.stop();
   });
 

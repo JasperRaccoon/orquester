@@ -79,6 +79,11 @@ function fakeWorld() {
   const listeners = new Set<(event: EventMessage) => void>();
   let turnStatus = 200;
   let turnCode = "HOST_UNAVAILABLE";
+  /**
+   * The host's receipts: a command id it accepted or REJECTED is answered the same way
+   * again (orchestration `replayRecordedRejection`); a 503 records nothing.
+   */
+  const receipts = new Map<string, DaemonResponse>();
   const api: DaemonApi = {
     fsRoot: "/",
     workspacesDir: "/w",
@@ -90,10 +95,16 @@ function fakeWorld() {
       }
       const post = /^\/api\/sessions\/([^/]+)\/turn$/.exec(path);
       if (method === "POST" && post) {
-        turns.push({ sessionId: decodeURIComponent(post[1]!), body: opts?.body as Record<string, unknown> });
-        return turnStatus < 400
-          ? { status: 200, body: { seq: 9 } }
-          : { status: turnStatus, body: { error: { code: turnCode, message: `refused: ${turnCode}` } } };
+        const body = opts?.body as Record<string, unknown>;
+        const recorded = receipts.get(body.commandId as string);
+        if (recorded) return recorded;
+        turns.push({ sessionId: decodeURIComponent(post[1]!), body });
+        const answer: DaemonResponse =
+          turnStatus < 400
+            ? { status: 200, body: { seq: 9 } }
+            : { status: turnStatus, body: { error: { code: turnCode, message: `refused: ${turnCode}` } } };
+        if (answer.status !== 503) receipts.set(body.commandId as string, answer);
+        return answer;
       }
       return { status: 404, body: null };
     },
@@ -310,38 +321,90 @@ describe("merge back", () => {
     await cleanup();
   });
 
-  it("a refusal at drain time keeps the merge: retried at idle points while passing, then failed", async () => {
+  it("a passing refusal is retried under a NEW command id, only at the parent's next idle point", async () => {
+    const { world, service, cleanup } = await setup({ parentBusy: true });
+    await service.mergeBack("child", { commandId: "m1" });
+    const idleAt = (seq: number) => {
+      world.sessions.set("parent", summary("parent", { title: "Parent" }));
+      world.threads.set("parent", { ...snapshot(), seq });
+    };
+    idleAt(5);
+    world.setTurnStatus(409, "COMMAND_REJECTED");
+    world.touch("parent");
+    await settled(service);
+    assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["m1"]);
+    assert.equal(service.pending()[0]!.attempts, 1);
+
+    // Its own tab update, and any event while the parent's log has not moved: no new attempt.
+    world.touch("parent");
+    world.touch("parent");
+    await settled(service);
+    assert.equal(world.turns.length, 1, "never back to back");
+
+    // The parent moved on (the compaction ended, say): the retry is a new command, which the
+    // host does not answer from the first one's recorded rejection.
+    world.setTurnStatus(200);
+    idleAt(6);
+    world.touch("parent");
+    await settled(service);
+    assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["m1", "m1:1"]);
+    assert.equal(service.pending().length, 0, "delivered on the retry");
+    await cleanup();
+  });
+
+  it("three passing refusals at three idle points fail it; Retry then delivers under a fresh id", async () => {
     const { world, service, published, cleanup } = await setup({ parentBusy: true });
     await service.mergeBack("child", { commandId: "m1" });
-    world.sessions.set("parent", summary("parent", { title: "Parent" }));
-    world.threads.set("parent", snapshot());
     world.setTurnStatus(409, "COMMAND_REJECTED");
     for (let attempt = 1; attempt <= 3; attempt += 1) {
+      world.sessions.set("parent", summary("parent", { title: "Parent" }));
+      world.threads.set("parent", { ...snapshot(), seq: 10 + attempt });
       world.touch("parent");
       await settled(service);
       assert.equal(service.pending()[0]!.attempts, attempt);
     }
     assert.equal(service.pending()[0]!.state, "failed", "failed after the third refusal of the moment");
     assert.equal(published.get("parent")?.[0]?.state, "failed", "the parent's tab shows it too");
+    world.threads.set("parent", { ...snapshot(), seq: 20 });
     world.touch("parent");
     await settled(service);
     assert.equal(service.pending()[0]!.attempts, 3, "a failed merge waits for the user");
 
-    // A non-passing refusal fails it at once.
-    await service.actOnMerge("child", "m1", { action: "discard" });
-    world.sessions.set("parent", summary("parent", { title: "Parent", chatSessionStatus: "running" }));
+    world.setTurnStatus(200);
+    assert.equal((await service.actOnMerge("parent", "m1", { action: "deliver" })).outcome, "sent");
+    assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["m1", "m1:1", "m1:2", "m1:3"]);
+    assert.equal(service.pending().length, 0);
+    assert.deepEqual(published.get("child"), []);
+    await cleanup();
+  });
+
+  it("a refusal that will not pass fails it at once; a 503 re-posts the SAME id", async () => {
+    const { world, service, cleanup } = await setup({ parentBusy: true });
     await service.mergeBack("child", { commandId: "m2" });
     world.sessions.set("parent", summary("parent", { title: "Parent" }));
+    world.threads.set("parent", snapshot());
+    world.setTurnStatus(503);
+    world.touch("parent");
+    await settled(service);
     world.setTurnStatus(400, "INVALID_COMMAND");
     world.touch("parent");
     await settled(service);
+    assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["m2", "m2"]);
     assert.deepEqual([service.pending()[0]!.state, service.pending()[0]!.attempts], ["failed", 1]);
+    await cleanup();
+  });
 
-    // Retry: delivered now, and gone from both tabs.
-    world.setTurnStatus(200);
-    assert.equal((await service.actOnMerge("parent", "m2", { action: "deliver" })).outcome, "sent");
-    assert.equal(service.pending().length, 0);
-    assert.deepEqual(published.get("child"), []);
+  it("a discard that races a delivery answers what happened: sent", async () => {
+    const { world, service, cleanup } = await setup({ parentBusy: true });
+    await service.mergeBack("child", { commandId: "m3" });
+    world.sessions.set("parent", summary("parent", { title: "Parent" }));
+    world.threads.set("parent", snapshot());
+    // The drain gets into the lane first; the discard asked in the meantime runs after it.
+    world.touch("parent");
+    const discard = service.actOnMerge("child", "m3", { action: "discard" });
+    await settled(service);
+    assert.deepEqual(await discard, { mergeId: "m3", outcome: "sent", seq: 9 });
+    await assert.rejects(service.actOnMerge("child", "nope", { action: "discard" }), /No pending merge/);
     await cleanup();
   });
 

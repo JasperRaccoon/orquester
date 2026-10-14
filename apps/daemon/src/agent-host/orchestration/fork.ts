@@ -180,9 +180,16 @@ export function buildForkTranscript(input: {
     blocks.push(`[${item.role === "user" ? "User" : "Assistant"}]\n${clip(text, FORK_TRANSCRIPT_MESSAGE_MAX_CHARS)}`);
   }
   if (blocks.length === 0) return null;
-  // Kept turns the fold's window no longer holds a word of (retention evicted
-  // them, or they never had text): said, never passed off as the whole story.
-  const lostTurns = input.retained.filter((turn) => !turnsWithText.has(turn.turnId)).length;
+  // Kept exchanges the fold's window no longer holds a word of (retention
+  // evicted them): said, never passed off as the whole story. Only a turn that
+  // had words to lose counts — a prompt or a recorded reply; a turn the
+  // provider started itself with neither (a goal's continuation, a background
+  // wake-up) lost nothing.
+  const lostTurns = input.retained.filter(
+    (turn) =>
+      !turnsWithText.has(turn.turnId) &&
+      (turn.userMessageId !== undefined || turn.assistantMessageId !== null)
+  ).length;
   let used = 0;
   let first = blocks.length;
   while (first > 0 && used + blocks[first - 1]!.length + 2 <= FORK_TRANSCRIPT_MAX_CHARS) {

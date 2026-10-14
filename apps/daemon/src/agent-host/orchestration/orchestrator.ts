@@ -3945,6 +3945,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         throw invalidCommand("A fork runs on its parent's agent.");
       }
       const runtime = await loadRuntime(threadId);
+      // A child being deleted (or deleted, its log's last word `thread.deleted`) is never handed
+      // back for a repeated fork: refused while it goes. Once it is gone its id is free — the
+      // daemon, which knows the tab was closed, refuses such a repeat before it gets here.
+      if (runtime.deleted || runtime.state.deleted) {
+        throw invalidCommand(`Thread '${threadId}' was deleted.`);
+      }
       const existing = headOf(runtime);
       if (existing) {
         // The daemon's repeat of a fork it already asked for (its `commandId` names

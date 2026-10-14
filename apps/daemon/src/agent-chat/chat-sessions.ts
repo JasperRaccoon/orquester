@@ -237,10 +237,10 @@ export class ChatSessionManager {
   setPendingMerges(id: string, merges: readonly PendingMergeBack[]): SessionSummary | null {
     const session = this.sessions.get(id);
     if (!session) return null;
-    const next = merges.length > 0 ? merges.map((merge) => ({ ...merge })) : undefined;
-    if (JSON.stringify(session.summary.pendingMerges ?? null) === JSON.stringify(next ?? null)) return null;
-    if (next) session.summary.pendingMerges = next;
-    else delete session.summary.pendingMerges;
+    if (JSON.stringify(session.summary.pendingMerges ?? []) === JSON.stringify(merges)) return null;
+    // Cleared as `[]`, never by dropping the key: a client merges a summary into the one it
+    // holds field by field, and a missing key would leave its last list (and its buttons) up.
+    session.summary.pendingMerges = merges.map((merge) => ({ ...merge }));
     this.lifecycle.emit("updated", { ...session.summary });
     return { ...session.summary };
   }

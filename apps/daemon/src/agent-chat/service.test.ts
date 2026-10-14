@@ -1439,3 +1439,30 @@ test("a delegate's project is compared resolved, and the child groups under the 
   assert.equal(child.lineage?.relation, "delegate");
   await f.cleanup();
 });
+
+test("a reused fork commandId with another fork point, or after its fork was closed, is COMMAND_ID_CONFLICT", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  const first = await f.service.forkSession(parent.id, { commandId: "k", messageId: "msg-1" }, 1);
+  const conflict = (error: unknown) => error instanceof ChatSessionError && error.code === "COMMAND_ID_CONFLICT";
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "msg-2" }, 2), conflict);
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "k" }, 2), conflict);
+  assert.equal(f.forks.length, 1, "nothing reached the host");
+
+  // After a restart forgot the key, the tab's own fork point still tells them apart.
+  (f.service as unknown as { forkRecords: Map<string, unknown> }).forkRecords.clear();
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "msg-2" }, 2), conflict);
+  assert.equal((await f.service.forkSession(parent.id, { commandId: "k", messageId: "msg-1" }, 2)).session.id, first.session.id);
+
+  // The user closes the fork: its key never brings it (or a stand-in) back.
+  f.service.chat.close(first.session.id);
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "msg-1" }, 2), conflict);
+  (f.service as unknown as { forkRecords: Map<string, unknown> }).forkRecords.clear();
+  await assert.rejects(
+    f.service.forkSession(parent.id, { commandId: "k", messageId: "msg-1" }, 2),
+    conflict,
+    "after a restart, the queued delete of that tab still says it was closed"
+  );
+  assert.equal(f.service.chat.has(first.session.id), false);
+  await f.cleanup();
+});
