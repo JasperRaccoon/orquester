@@ -28,6 +28,7 @@
  */
 
 import {
+  GROK_USE_TOOL_NAME,
   HISTORICAL_RAW_SOURCE,
   type ProviderThreadTurnSnapshot,
   type RuntimeEvent,
@@ -38,6 +39,7 @@ import {
 
 import { stripAttachmentPathLines } from "../attachment-lines.ts";
 import { goalCommandFromReminder } from "./goal.ts";
+import { isGrokSessionToolCall } from "./session-tools.ts";
 import { GROK_TOOL_NAMESPACE, SPAWN_SUBAGENT_TOOL } from "./subagents.ts";
 import {
   acpKindFromVendorKind,
@@ -232,9 +234,22 @@ function projectTurn(turn: ProviderThreadTurnSnapshot, deps: ProjectHistoryDeps)
  */
 function toolCallPayload(item: GrokHistoryToolCall): Record<string, unknown> {
   const spawnsSubagent = item.vendor?.name === SPAWN_SUBAGENT_TOOL && item.vendor.namespace === GROK_TOOL_NAMESPACE;
+  // A session tool is an MCP call, as the live path files it (`tool-calls.ts`):
+  // by its qualified name, or — reached through `use_tool`, the vendor block
+  // remembered across the call's frames — by `rawInput.tool_name`.
+  const sessionTool = isGrokSessionToolCall(
+    {
+      title: item.title ?? null,
+      _meta: item.vendor === undefined ? null : { "x.ai/tool": { name: item.vendor.name, namespace: item.vendor.namespace } },
+      rawInput: item.rawInput
+    },
+    { usesTool: item.vendor?.name === GROK_USE_TOOL_NAME && item.vendor.namespace === GROK_TOOL_NAMESPACE }
+  );
   const itemType: ToolLifecycleItemType = spawnsSubagent
     ? "collab_agent_tool_call"
-    : itemTypeFromToolKind(acpKindFromVendorKind(item.vendor?.kind) ?? item.toolKind);
+    : sessionTool
+      ? "mcp_tool_call"
+      : itemTypeFromToolKind(acpKindFromVendorKind(item.vendor?.kind) ?? item.toolKind);
   const status = item.status === "completed" ? "completed" : "failed";
   const command = extractToolCommand(item.rawInput, item.title);
   const contentText = toolContentText(item.content);

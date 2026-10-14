@@ -12,7 +12,15 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { HISTORICAL_RAW_SOURCE, type RuntimeEvent, type ThreadSnapshot } from "@orquester/api/agent-chat";
+import {
+  HISTORICAL_RAW_SOURCE,
+  htmlRenderReferenceOfActivityPayload,
+  slimActivityPayload,
+  type RuntimeEvent,
+  type ThreadSnapshot
+} from "@orquester/api/agent-chat";
+
+import { runtimeEventToActivities } from "../../ingestion/activities.ts";
 
 import { agentFrames, readCapture, type JsonRpcFrame } from "./fixtures.ts";
 import {
@@ -516,4 +524,63 @@ test("a call id seen in an earlier turn opens a new row in the next one", () => 
       ["p2", ["b"]]
     ]
   );
+});
+
+// ---------------------------------------------------------------------------
+// A session tool reached through `use_tool`, re-projected (fixture 32)
+// ---------------------------------------------------------------------------
+
+const USE_TOOL_CALL = "call-a0c1eb77-5628-4b27-8ca9-1061c28e4d33-1";
+
+/** Fixture 32's call frames, as `session/load` replays them (the `session/update` bodies). */
+function useToolUpdates(rename?: { okayOutput: string }): Array<Record<string, unknown>> {
+  return agentFrames(readCapture("32-mcp-use-tool-call.ndjson"))
+    .filter((frame) => frame.method === "session/update")
+    .map((frame) => {
+      const update = (frame.params as { update: Record<string, unknown> }).update;
+      if (rename === undefined) {
+        return update;
+      }
+      const renamed = JSON.parse(JSON.stringify(update).replaceAll("apps__show_widget", "orquester__html_render")) as {
+        rawOutput?: Record<string, unknown>;
+      };
+      if (renamed.rawOutput !== undefined) {
+        renamed.rawOutput = { type: "MCP", tool_name: "html_render", server_name: "orquester", output: { OkayOutput: rename.okayOutput } };
+      }
+      return renamed as Record<string, unknown>;
+    });
+}
+
+function projectedCall(updates: Array<Record<string, unknown>>): Extract<RuntimeEvent, { type: "item.completed" }> {
+  const collector = new GrokHistoryCollector();
+  collector.observeAcpUpdate({ sessionUpdate: "user_message_chunk", content: { type: "text", text: "chart it" } });
+  for (const update of updates) {
+    collector.observeAcpUpdate(update);
+  }
+  collector.observeXaiUpdate({ sessionUpdate: "turn_completed", prompt_id: "p1" });
+  const row = projectGrokHistory({ threadId: "t1", turns: collector.snapshotTurns() }, { threadId: "t1", ...stamps() }).find(
+    (event): event is Extract<RuntimeEvent, { type: "item.completed" }> =>
+      event.type === "item.completed" && event.itemId === USE_TOOL_CALL
+  );
+  assert.ok(row, "the call projects one row");
+  return row;
+}
+
+test("a replayed session tool reached through use_tool is an MCP row the ingestion marks, its page found", () => {
+  const ref = { attachmentId: "t1-0f8fad5b-d9cb-469f-a165-70867728950e-html", title: "Chart", height: 420 };
+  const json = JSON.stringify({ htmlRender: ref, message: "Shown to the reader above your reply." });
+  const row = projectedCall(useToolUpdates({ okayOutput: `${json}\n${json}` }));
+  assert.equal(row.payload.itemType, "mcp_tool_call");
+  assert.equal((row.payload.data as { vendorTool?: string }).vendorTool, "use_tool");
+  const [activity] = runtimeEventToActivities(row, { sessionToolNames: new Set(["html_render"]) });
+  assert.deepEqual((activity!.payload as { data: { sessionTool?: unknown } }).data.sessionTool, { name: "html_render" });
+  assert.deepEqual(htmlRenderReferenceOfActivityPayload(activity!.payload), ref);
+  assert.deepEqual(htmlRenderReferenceOfActivityPayload(slimActivityPayload(slimActivityPayload(activity!.payload))), ref);
+});
+
+test("a replayed use_tool call of another server stays the row it was", () => {
+  const row = projectedCall(useToolUpdates());
+  assert.notEqual(row.payload.itemType, "mcp_tool_call");
+  const [activity] = runtimeEventToActivities(row, { sessionToolNames: new Set(["html_render", "show_widget"]) });
+  assert.equal((activity!.payload as { data: { sessionTool?: unknown } }).data.sessionTool, undefined);
 });
