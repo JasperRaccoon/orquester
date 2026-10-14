@@ -20,8 +20,8 @@
 
 import {
   buildThreadMessage,
+  currentInteractionMode,
   RUNTIME_MODES,
-  SETTLED_TURN_STATES,
   THREAD_MESSAGE_OVERHEAD_CHARS,
   type InteractionMode,
   type RuntimeMode,
@@ -47,16 +47,12 @@ export interface TurnPolicyCaller {
 export const TURN_PROVENANCE_OVERHEAD_CHARS = THREAD_MESSAGE_OVERHEAD_CHARS;
 
 /**
- * Whether a thread's running turn is in plan mode (`Turn.interactionMode`): the active turn, else
- * the latest unsettled one, else the latest.
+ * Whether a thread's running turn is in plan mode: `currentInteractionMode` — the active turn (else
+ * the latest unsettled one, else the latest), and a steer of it that recorded another mode wins
+ * (T6-M2: a default turn steered into plan plans).
  */
 export function runningTurnPlans(snap: ThreadSnapshotPayload): boolean {
-  const active = snap.head.session.activeTurnId;
-  const turn =
-    (active !== null ? snap.turns.find((t) => t.turnId === active) : undefined) ??
-    [...snap.turns].reverse().find((t) => !SETTLED_TURN_STATES.has(t.state)) ??
-    snap.turns.at(-1);
-  return turn?.interactionMode === "plan";
+  return currentInteractionMode(snap) === "plan";
 }
 
 /** The caller from its tab and its thread, already read. */

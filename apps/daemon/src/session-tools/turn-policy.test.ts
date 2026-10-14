@@ -41,6 +41,14 @@ test("(b) the running turn's plan mode: active turn first, else the latest unset
   assert.equal(runningTurnPlans(snapshot({ turns: [] })), false);
 });
 
+test("(b) a default turn the user steered into plan mode plans (T6-M2)", () => {
+  const running = turn({ turnId: "t2", state: "running", completedAt: null, interactionMode: "default" });
+  const steer = { kind: "message", id: "u2", role: "user", text: "plan it first", turnId: "t2", streaming: false, createdAt: "t", updatedAt: "t", interactionMode: "plan" };
+  const snap = snapshot({ head: head({ session: { status: "running", activeTurnId: "t2" } }), turns: [running] });
+  assert.equal(runningTurnPlans(snap), false);
+  assert.equal(runningTurnPlans({ ...snap, items: [...snap.items, steer] } as typeof snap), true);
+});
+
 test("(b) a planning caller's turn plans, and an agent with no plan mode is refused; plan support is asked only then", async () => {
   let asked = 0;
   const supports = (value: boolean) => () => { asked += 1; return value; };
