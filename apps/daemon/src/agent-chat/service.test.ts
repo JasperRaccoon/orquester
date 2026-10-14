@@ -1812,6 +1812,8 @@ test("a fork the host keeps refusing to confirm is asked with a doubling backoff
   }
   assert.equal(f.service.chat.has(id), false, "taken back");
   assert.deepEqual(f.service.chat.unconfirmedForks(), []);
+  // Deliberately no host delete: a child the host may hold is left on the host, tabless.
+  assert.equal(f.service.chat.pendingThreadDeletes().includes(id), false);
   await f.cleanup();
 });
 

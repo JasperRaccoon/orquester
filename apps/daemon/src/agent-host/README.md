@@ -42,7 +42,7 @@ companion spec, `docs/superpowers/specs/2026-09-23-thread-index-and-lazy-boot-de
 The daemon-side half — proxying `/api/sessions/:id/*` onto the socket, spawning and adopting the
 host, the kill guard, the tab records — is **W10** and lives in `apps/daemon/src/agent-chat/**`,
 not here. So does thread lineage's daemon half (AV-T4): `service.ts`'s `forkSession` (the fork tab
-under the parent's pinned account; `reconcileForks` settles a tab whose host answer was lost),
+under the parent's pinned account; `reconcileForks` settles a tab whose host answer was lost — a host that keeps refusing to confirm one (other than "no such thread") is asked with a doubling backoff and, after `FORK_CONFIRM_MAX_REFUSALS`, the tab is taken back WITHOUT a host delete: a child the host does hold is deliberately left on the host, tabless, never deleted by this),
 `lineage.ts` (the lineage read and the merge back, with its
 persisted `agent-merge-outbox.json` delivered on the parent's next idle point) and
 `lineage-routes.ts`. **TI-x** is task x of `docs/superpowers/plans/2026-09-23-thread-index-and-lazy-boot.md`, **AV-x** task x of

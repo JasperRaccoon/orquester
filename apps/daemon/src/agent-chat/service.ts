@@ -1270,6 +1270,10 @@ export class AgentChatService {
       const count = (this.forkRefusals.get(id)?.count ?? 0) + 1;
       const reason = `${response.status} ${response.value?.error?.message ?? ""}`.trim();
       if (count >= FORK_CONFIRM_MAX_REFUSALS) {
+        // Deliberate: the tab goes, but a child thread the host DOES hold stays on the host,
+        // tabless (nothing deletes it — a delete queued here could kill a child a retry under the
+        // same key would converge on). It keeps only the forked conversation and starts nothing
+        // by itself; the user loses only a tab that never confirmed.
         this.opts.logger?.warn?.(`agent chat: the host refused to confirm fork ${id} ${count} times (${reason}); its tab is taken back`);
         this.forkRefusals.delete(id);
         this.chat.discard(id);
