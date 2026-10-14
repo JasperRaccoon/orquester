@@ -131,6 +131,8 @@ test("reference fields are read from structuredContent or the JSON text block", 
     sessionToolReferences({ rawOutput: { type: "MCP", server_name: "orquester", output: { OkayOutput: `${json}\n${json}` } } }, keys),
     { htmlRender: ref }
   );
+  // fixture 33: a text block equal to the structuredContent's JSON gave one line
+  assert.deepEqual(sessionToolReferences({ rawOutput: { type: "MCP", output: { OkayOutput: json } } }, keys), { htmlRender: ref });
   assert.deepEqual(
     sessionToolReferences({ rawOutput: { type: "MCP", output: { OkayOutput: `Published.\n${json}` } } }, keys),
     { htmlRender: ref }

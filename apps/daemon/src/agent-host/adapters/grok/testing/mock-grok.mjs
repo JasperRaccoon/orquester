@@ -423,24 +423,45 @@ async function runPrompt(id, params) {
     scenario === "session-tool-permission"
   ) {
     // `session-tool-permission`: the same ask for a tool of the host's own
-    // `orquester` MCP server, named as Grok names an MCP tool (`server__tool`,
-    // its permissions guide) — no capture of one exists yet.
+    // `orquester` MCP server, as fixture 33 (`33-mcp-use-tool-permission.ndjson`,
+    // grok 1.0.46) captured it: the call goes through the `use_tool`
+    // meta-tool, is retitled with the qualified name, and the request's
+    // `toolCall` carries that title, `rawInput {variant: "UseTool",
+    // tool_name, tool_input}` and the `use_tool` vendor block.
     const sessionTool = scenario === "session-tool-permission";
+    const useToolMeta = { version: 1, name: "use_tool", kind: "use_tool", namespace: "grok_build", label: "Use Tool", read_only: false };
     notify("session/update", {
       sessionId,
       update: {
         sessionUpdate: "tool_call",
         toolCallId: "call-1",
-        title: sessionTool ? "orquester__echo" : "write",
-        rawInput: sessionTool ? { text: "hi" } : { file_path: "/tmp/notes.txt", content: "hello\n" },
+        title: sessionTool ? "use_tool" : "write",
+        rawInput: sessionTool
+          ? { tool_name: "orquester__echo", tool_input: { text: "hi" } }
+          : { file_path: "/tmp/notes.txt", content: "hello\n" },
         _meta: {
           "x.ai/tool": sessionTool
-            ? { version: 1, name: "orquester__echo", kind: "other", namespace: "mcp", label: "echo", read_only: true }
+            ? useToolMeta
             : { version: 1, name: "write", kind: "write", namespace: "opencode", label: "Write", read_only: false }
         }
       },
       _meta: { totalTokens: 22540, promptId }
     });
+    if (sessionTool) {
+      notify("session/update", {
+        sessionId,
+        update: {
+          sessionUpdate: "tool_call_update",
+          toolCallId: "call-1",
+          kind: "other",
+          title: "orquester__echo",
+          locations: [],
+          rawInput: { variant: "UseTool", tool_name: "orquester__echo", tool_input: { text: "hi" } },
+          _meta: { "x.ai/tool": useToolMeta }
+        },
+        _meta: { totalTokens: 22540, promptId }
+      });
+    }
     const requestId = 9000 + promptSeq;
     pendingPermissionId = requestId;
     send({
@@ -453,9 +474,9 @@ async function runPrompt(id, params) {
           ? {
               toolCallId: "call-1",
               kind: "other",
-              title: "orquester__echo",
-              rawInput: { text: "hi" },
-              _meta: { "x.ai/tool": { version: 1, name: "orquester__echo", kind: "other", namespace: "mcp", read_only: true } }
+              title: process.env.GROK_MOCK_PERMISSION_UNTITLED === "1" ? "use_tool" : "orquester__echo",
+              rawInput: { variant: "UseTool", tool_name: "orquester__echo", tool_input: { text: "hi" } },
+              _meta: { "x.ai/tool": useToolMeta }
             }
           : {
               toolCallId: "call-1",
@@ -463,11 +484,17 @@ async function runPrompt(id, params) {
               title: "Write `/tmp/notes.txt`",
               rawInput: { variant: "Write", file_path: "/tmp/notes.txt", content: "hello\n" }
             },
-        options: [
-          { optionId: "allow-edits-session", name: "Yes, allow all edits during this session", kind: "allow_always" },
-          { optionId: "allow-once", name: "Yes", kind: "allow_once" },
-          { optionId: "reject-once", name: "No, and tell Grok what to do differently", kind: "reject_once" }
-        ]
+        options: sessionTool
+          ? [
+              { optionId: "always-allow", name: "always allow", kind: "allow_always" },
+              { optionId: "allow-once", name: "allow once", kind: "allow_once" },
+              { optionId: "reject-once", name: "reject once", kind: "reject_once" }
+            ]
+          : [
+              { optionId: "allow-edits-session", name: "Yes, allow all edits during this session", kind: "allow_always" },
+              { optionId: "allow-once", name: "Yes", kind: "allow_once" },
+              { optionId: "reject-once", name: "No, and tell Grok what to do differently", kind: "reject_once" }
+            ]
       }
     });
     // The process dies with the card open: the adapter settles it itself.

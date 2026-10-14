@@ -2199,6 +2199,25 @@ test("session tools: the server rides session/new with its credential redacted f
   await r.dispose();
 });
 
+test("session tools: a use_tool permission request titled use_tool still needs no card, by its tool_name", async () => {
+  const tools = recordingSessionTools();
+  const r = await rig({
+    scenario: "session-tool-permission",
+    sessionTools: tools,
+    env: { GROK_MOCK_PERMISSION_UNTITLED: "1" }
+  });
+  await start(r);
+  await r.adapter.sendTurn({ threadId: "t1", input: "use the tool", attachments: [], interactionMode: "default" });
+  const completed = (await r.waitFor((event) => event.type === "turn.completed", "turn.completed")) as Extract<
+    RuntimeEvent,
+    { type: "turn.completed" }
+  >;
+  assert.equal(completed.payload.state, "completed");
+  await r.drain();
+  assert.equal(r.events.some((event) => event.type === "request.opened"), false, "no approval card");
+  await r.dispose();
+});
+
 test("session tools: without a registered toolkit, session/new carries no server and an orquester-named call still asks", async () => {
   const rawFrames: unknown[] = [];
   const r = await rig({ scenario: "session-tool-permission", rawFrames });

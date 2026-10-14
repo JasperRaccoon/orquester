@@ -1410,3 +1410,19 @@ test("a native tool whose arguments hold variant and tool_name is never taken fo
     assert.equal((row!.payload as { data?: { sessionTool?: unknown } }).data?.sessionTool, undefined, event.type);
   }
 });
+
+test("fixture 33: the captured use_tool call of an orquester tool is an MCP row the ingestion marks", () => {
+  const call = "call-c531d9cf-2c02-43f3-8ef1-0e9af738e2c1-1";
+  const grok = normalizer();
+  const events = capturedCall("33-mcp-use-tool-permission.ndjson", call).flatMap((params) => grok.handleSessionUpdate(params));
+  const lifecycle = events.filter((event) => event.type.startsWith("item.") && event.itemId === call);
+  assert.ok(lifecycle.length >= 2);
+  for (const event of lifecycle) {
+    assert.equal((event.payload as { itemType?: string }).itemType, "mcp_tool_call", event.type);
+  }
+  const completed = only(events, "item.completed").find((event) => event.itemId === call)!;
+  const [row] = runtimeEventToActivities(completed, { sessionToolNames: new Set(["echo"]) });
+  const data = row!.payload as { data: { sessionTool?: unknown; rawOutput?: { output?: { OkayOutput?: string } } } };
+  assert.deepEqual(data.data.sessionTool, { name: "echo" });
+  assert.equal(data.data.rawOutput?.output?.OkayOutput, '{"echoed":"hi"}', "one line, as captured");
+});

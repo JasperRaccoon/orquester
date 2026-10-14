@@ -128,6 +128,9 @@ Pre-approval is always by registered tool name, never server-wide: `docs/orquest
 users to install Orquester's own full-drive `/mcp` under the same name `orquester`, and such a
 server must never be waved through. (Codex's thread override replaces a user's same-named entry
 outright — verified on 0.159.0; Claude's and Grok's precedence between the two is unverified.)
+Grok's `session/request_permission` for a session tool carries the qualified title
+`orquester__<tool>`, `rawInput.tool_name` and the `use_tool` vendor block (fixture 33, grok 1.0.46),
+so the by-name match answers it `allow_once` without a card.
 
 OpenCode isolation: each thread's session ruleset hides every other thread's `orquester-<key>_…`
 tools (`OPENCODE_SESSION_TOOLS_DENY = "orquester-????????????????_*"`; OpenCode drops a tool whose
