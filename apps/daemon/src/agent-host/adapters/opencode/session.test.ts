@@ -4445,7 +4445,9 @@ test("session tools: the thread's own server is registered before its session, i
       url: launch.url,
       headers: { Authorization: launch.authorization },
       oauth: false,
-      enabled: true
+      enabled: true,
+      // A call may wait for the user (`request_secret`): past the MCP SDK's 60 s default.
+      timeout: 65 * 60 * 1000
     }
   });
   assert.ok(harness.fake.indexOf("POST", "/mcp") < harness.fake.indexOf("POST", "/session"), "registered first");

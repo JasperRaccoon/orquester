@@ -142,7 +142,10 @@ export function sessionToolMarkedData(data: unknown, registered: ReadonlySet<str
  * the visual-replies toolkit's `htmlRender`); everything else in a result is
  * reduced to the usual one-line summary.
  */
-export const SESSION_TOOL_REFERENCE_KEYS: readonly string[] = [];
+export const SESSION_TOOL_REFERENCE_KEYS: readonly string[] = [
+  // `request_secret`: name, purpose and outcome — the card's record, never the value (`secret-requests.ts`).
+  "secretRequest"
+];
 
 /** One kept reference field may take this much JSON; a bigger one is dropped, never cut. */
 export const SESSION_TOOL_REFERENCE_MAX_BYTES = 4 * 1024;
@@ -172,13 +175,10 @@ function structuredResultOf(result: unknown): Record<string, unknown> | null {
   } else if (record && typeof record.content === "string") {
     text = record.content;
   } else if (record && Array.isArray(record.content)) {
-    for (const entry of record.content) {
-      const candidate = asRecord(entry)?.text;
-      if (typeof candidate === "string") {
-        text = candidate;
-        break;
-      }
-    }
+    text = firstTextBlock(record.content);
+  } else if (Array.isArray(result)) {
+    // Grok's ACP `content`: `[{type: "content", content: {type: "text", text}}]`.
+    text = firstTextBlock(result);
   }
   if (text === null || text.length > REFERENCE_SCAN_MAX_CHARS) {
     return null;
@@ -194,6 +194,18 @@ function structuredResultOf(result: unknown): Record<string, unknown> | null {
   }
 }
 
+/** The first text of an MCP content array, or of ACP's `{type: "content", content}` wrappers. */
+function firstTextBlock(blocks: readonly unknown[]): string | null {
+  for (const entry of blocks) {
+    const block = asRecord(entry);
+    const candidate = block?.text ?? asRecord(block?.content)?.text;
+    if (typeof candidate === "string") {
+      return candidate;
+    }
+  }
+  return null;
+}
+
 /** The result a provider recorded for a call, wherever its data holds it. */
 function resultOfData(data: Record<string, unknown>): unknown {
   const item = asRecord(data.item);
@@ -202,6 +214,11 @@ function resultOfData(data: Record<string, unknown>): unknown {
   }
   if (data.result !== undefined) {
     return data.result;
+  }
+  // Grok: the ACP `content` the model read, before `rawOutput`, whose shape
+  // for an MCP call is the CLI's own.
+  if (Array.isArray(data.content)) {
+    return data.content;
   }
   return data.rawOutput;
 }

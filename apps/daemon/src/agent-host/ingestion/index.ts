@@ -125,6 +125,17 @@ export interface IngestionOptions {
    * slimming and the UI read. Absent: no session tools, nothing stamped.
    */
   sessionToolNames?: ReadonlySet<string>;
+  /**
+   * Session-tool secrets (design 2026-10-14 §5 "Secrets",
+   * `session-tools/secret-redaction.ts`): every runtime event passes
+   * `redactEvent` before anything else reads it, so no value a tool handed the
+   * thread reaches a row, a log line or the index; `forget` drops a released
+   * thread's values.
+   */
+  secrets?: {
+    redactEvent(event: RuntimeEvent): RuntimeEvent;
+    forget(threadId: string): void;
+  };
 }
 
 interface SegmentState {
@@ -1018,7 +1029,9 @@ export function createIngestion(options: IngestionOptions): Ingestion {
   // The public surface
   // -------------------------------------------------------------------------
 
-  async function ingest(event: RuntimeEvent): Promise<void> {
+  async function ingest(incoming: RuntimeEvent): Promise<void> {
+    // First, before a warning could quote it: a secret never goes further.
+    const event = options.secrets ? options.secrets.redactEvent(incoming) : incoming;
     let state: ThreadState | null = null;
     try {
       if (
@@ -1977,6 +1990,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
   }
 
   async function forget(threadId: string): Promise<void> {
+    options.secrets?.forget(threadId);
     const state = threads.get(threadId);
     if (state === undefined) {
       return;

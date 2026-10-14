@@ -76,6 +76,18 @@ export const agentChatRoutes = {
    * owns the route and calls the host itself.
    */
   account: (sessionId: string): string => `${sessionBase(sessionId)}/account`,
+  /**
+   * The thread's pending `request_secret` cards (`GET`,
+   * `SecretRequestListResponse`) — daemon-owned like `account`: the
+   * daemon holds the requests, in memory, and never forwards them to the host.
+   */
+  secretRequests: (sessionId: string): string => `${sessionBase(sessionId)}/secret-requests`,
+  /**
+   * Answer one (`POST`, `SecretRequestAnswerRequest`): the value goes in
+   * the body, never the URL, and the response never echoes it.
+   */
+  secretRequest: (sessionId: string, requestId: string): string =>
+    `${sessionBase(sessionId)}/secret-requests/${encodeURIComponent(requestId)}`,
 
   // §6.3 reads
   thread: (sessionId: string): string => `${sessionBase(sessionId)}/thread`,
@@ -936,6 +948,7 @@ export interface AgentProvidersChangedPayload {
 export type AgentChatEventType =
   | "agentChat.turn"
   | "agentChat.pending"
+  | "agentChat.secretRequest"
   | "agent.providers.changed";
 
 // ---------------------------------------------------------------------------

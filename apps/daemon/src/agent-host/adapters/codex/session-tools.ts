@@ -26,6 +26,7 @@
 
 import { SESSION_TOOLS_SERVER_NAME } from "@orquester/api/agent-chat";
 
+import { SESSION_TOOL_CALL_TIMEOUT_MS } from "../../../session-tools/contract.ts";
 import type { CodexProtocol } from "./_generated/index.ts";
 
 /** The child env var the credential rides in. Its `_TOKEN` suffix also gets it masked in stderr. */
@@ -51,7 +52,10 @@ export function codexSessionToolsConfig(launch: CodexSessionToolsLaunch): Thread
     [`mcp_servers.${SESSION_TOOLS_SERVER_NAME}`]: {
       url: launch.url,
       bearer_token_env_var: CODEX_SESSION_TOOLS_TOKEN_ENV,
-      default_tools_approval_mode: "approve"
+      default_tools_approval_mode: "approve",
+      // Codex gives up on an MCP call after 60 s by default; a session tool
+      // that waits for the user (`request_secret`) ends its own wait first.
+      tool_timeout_sec: SESSION_TOOL_CALL_TIMEOUT_MS / 1000
     }
   };
 }

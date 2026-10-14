@@ -37,9 +37,21 @@ const toolkit = (id: string, names: string[], instructions?: string): SessionToo
     )
   });
 
-test("production ships no toolkit, so no provider is given a server", () => {
-  assert.deepEqual(SESSION_TOOLKITS, []);
+test("production registers its toolkits, within the instruction budget", () => {
+  assert.deepEqual(
+    SESSION_TOOLKITS.map((entry) => entry.id),
+    ["secrets"]
+  );
   const registry = sessionToolRegistry();
+  assert.equal(registry.enabled, true);
+  assert.ok(registry.get("request_secret"));
+  assert.match(registry.instructions, /^## Orquester\n/);
+  assert.ok(registry.instructions.includes("`request_secret`"));
+  assert.ok(Buffer.byteLength(registry.instructions) <= SESSION_TOOL_INSTRUCTIONS_MAX_BYTES);
+});
+
+test("an empty toolkit list attaches no server", () => {
+  const registry = createSessionToolRegistry([]);
   assert.equal(registry.enabled, false);
   assert.equal(registry.instructions, "");
   assert.equal(registry.tools.length, 0);

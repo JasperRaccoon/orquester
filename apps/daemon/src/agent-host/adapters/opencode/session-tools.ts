@@ -37,6 +37,7 @@ import { createHash } from "node:crypto";
 
 import { OPENCODE_SESSION_TOOLS_SERVER_PATTERN } from "@orquester/api/agent-chat";
 
+import { SESSION_TOOL_CALL_TIMEOUT_MS } from "../../../session-tools/contract.ts";
 import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
 import type { OpenCodeClient } from "./http.ts";
 import type { OpenCodePermissionRuleset } from "./ruleset.ts";
@@ -112,7 +113,12 @@ export async function registerOpenCodeSessionTools(
         headers: { Authorization: launch.authorization },
         // Never probe the loopback endpoint for OAuth: the bearer is the auth.
         oauth: false,
-        enabled: true
+        enabled: true,
+        // Per-request timeout, tool calls included (OpenCode 1.18.34: the
+        // server's own `timeout`, else `experimental.mcp_timeout`, else the
+        // MCP SDK's 60 s). A session tool that waits for the user
+        // (`request_secret`) ends its own wait first.
+        timeout: SESSION_TOOL_CALL_TIMEOUT_MS
       }
     }
   });

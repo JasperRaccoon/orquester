@@ -170,16 +170,20 @@ export function showBackgroundLivenessBanner(input: {
 // ---------------------------------------------------------------------------
 
 /**
- * The dock's fixed priority order: approval, then pending question, then the
- * plan-ready prompt, then the mobile-collapsed question. One request at a time.
+ * The dock's fixed priority order: approval, then pending question, then an
+ * agent's request for a secret (`request_secret`, design 2026-10-14 §5 — the
+ * agent waits on it as on a question, on mobile too), then the plan-ready
+ * prompt, then the mobile-collapsed question. One request at a time.
  *
- * *T3: `ChatComposer.tsx:6152-6265` — the four-branch if-chain.*
+ * *T3: `ChatComposer.tsx:6152-6265` — the four-branch if-chain; T3 shows the
+ * secret card in the timeline instead.*
  */
-export type DockCard = "approval" | "question" | "plan-ready" | "question-mobile" | null;
+export type DockCard = "approval" | "question" | "secret" | "plan-ready" | "question-mobile" | null;
 
 export function resolveDockCard(input: {
   hasApproval: boolean;
   hasUserInput: boolean;
+  hasSecretRequest?: boolean;
   hasActionableProposedPlan: boolean;
   isComposerCollapsedMobile: boolean;
 }): DockCard {
@@ -187,6 +191,7 @@ export function resolveDockCard(input: {
   if (input.hasUserInput) {
     return input.isComposerCollapsedMobile ? "question-mobile" : "question";
   }
+  if (input.hasSecretRequest === true) return "secret";
   if (input.hasActionableProposedPlan && !input.isComposerCollapsedMobile) return "plan-ready";
   return null;
 }

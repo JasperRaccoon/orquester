@@ -24,6 +24,7 @@ import {
   togglePendingUserInputOptionSelection,
   type PendingAnswerDraft
 } from "./pending-answer";
+import { CARD_INPUT_CLASS, SECRET_INPUT_ATTRIBUTES } from "./secret-input";
 
 /** A file staged against one question, with the upload's own state. */
 export interface QuestionAttachment {
@@ -383,11 +384,9 @@ export function QuestionCard({
               ) : (
                 <input
                   ref={customAnswerRef as React.RefObject<HTMLInputElement>}
-                  type={secret ? "password" : "text"}
+                  {...(secret ? SECRET_INPUT_ATTRIBUTES : { type: "text" })}
                   value={mergedProgress.customAnswer}
                   disabled={isResponding}
-                  autoComplete={secret ? "off" : undefined}
-                  spellCheck={secret ? false : undefined}
                   placeholder={secret ? "Enter the value (hidden)" : "Write a custom answer"}
                   aria-label={secret ? "Custom answer (hidden)" : "Custom answer"}
                   onChange={(event) =>
@@ -406,12 +405,7 @@ export function QuestionCard({
                     if (mergedProgress.isLastQuestion) submit();
                     else advance();
                   }}
-                  className={cn(
-                    "w-full rounded-lg border border-neutral-800 bg-neutral-900/60 px-3 py-2 text-sm",
-                    "text-neutral-100 placeholder:text-neutral-600",
-                    "focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500",
-                    "disabled:opacity-50"
-                  )}
+                  className={CARD_INPUT_CLASS}
                 />
               )}
             </div>

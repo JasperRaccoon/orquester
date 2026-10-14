@@ -94,6 +94,9 @@ import { useRegistry } from "../../hooks";
 /** Per-device: the roster folded to its summary line. */
 const ROSTER_COLLAPSED_KEY = "orquester.chat.roster-collapsed";
 import { ChatBannerDock } from "./banners/ChatBannerDock";
+import type { SecretRequestAnswer } from "./banners/SecretRequestCard";
+import { useSecretRequests } from "./banners/use-secret-requests";
+import { markSecretRequestClosed } from "../../lib/agent-chat/secret-requests";
 import { ChatComposer } from "./composer/ChatComposer";
 import { ChatErrorBoundary } from "./ChatErrorBoundary";
 import { FullOutputPane } from "./FullOutputPane";
@@ -253,6 +256,27 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   });
   heldRef.current = nextHeldTimeline(heldRef.current, displayed);
   const paintOnly = displayed.paintOnly;
+
+  // --- `request_secret` cards (design 2026-10-14 §5) ------------------------
+  // Daemon-owned and memory-only; the value goes from the card to the answer
+  // route and nowhere else on this side.
+  const secretRequests = useSecretRequests(sessionId);
+  const answerSecret = React.useCallback(
+    async (requestId: string, answer: SecretRequestAnswer): Promise<void> => {
+      try {
+        await api.answerSecretRequest(sessionId, requestId, answer);
+      } catch (error) {
+        if (error instanceof ApiError && error.status === 404) {
+          // Already answered elsewhere, or ended with its turn: nothing to send.
+          markSecretRequestClosed(sessionId, requestId);
+          return;
+        }
+        throw error instanceof ApiError ? error.status : null;
+      }
+      markSecretRequestClosed(sessionId, requestId);
+    },
+    [api, sessionId]
+  );
 
   // --- the composer overlay's published height -----------------------------
   const [overlay, setOverlay] = React.useState<HTMLDivElement | null>(null);
@@ -1051,6 +1075,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 active={active}
                 entries={paintOnly ? undefined : slice.entries}
                 planTitle={planFollowUp ? proposedPlanTitle(planFollowUp.planMarkdown) : null}
+                secretRequests={paintOnly ? undefined : secretRequests}
+                onAnswerSecret={paintOnly ? undefined : answerSecret}
               />
             </div>
             <div className="pointer-events-auto relative z-10 mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">

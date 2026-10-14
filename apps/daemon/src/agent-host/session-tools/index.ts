@@ -74,6 +74,25 @@ export interface CreateSessionToolsHostOptions {
   forward: ForwardSessionToolCall;
   credentials?: SessionToolCredentials;
   logger?: { warn(message: string, detail?: unknown): void };
+  /**
+   * Handed the secret values a tool's result carries (its definition's
+   * `secretResultKeys`) BEFORE the result goes back to the provider, so the
+   * host can mask them in everything of the thread it persists
+   * (`secret-redaction.ts`).
+   */
+  onSecretValues?: (threadId: string, values: string[]) => void;
+}
+
+/** The string values at a tool's `secretResultKeys` in a result's `structuredContent`. */
+export function secretValuesOf(tool: SessionToolDefinition | undefined, result: CallToolResult): string[] {
+  const keys = tool?.secretResultKeys;
+  const structured = result.structuredContent;
+  if (keys === undefined || keys.length === 0 || structured === null || typeof structured !== "object") {
+    return [];
+  }
+  return keys
+    .map((key) => (structured as Record<string, unknown>)[key])
+    .filter((value): value is string => typeof value === "string" && value.length > 0);
 }
 
 interface InFlightCall {
@@ -96,7 +115,8 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
   credentials.onRevoke((scope) => abortWhere((call) => call.grantId === scope.grantId));
 
   const run = async (input: SessionToolsCallInput, grantId: string | undefined): Promise<CallToolResult> => {
-    if (options.registry.get(input.name) === undefined) {
+    const tool = options.registry.get(input.name);
+    if (tool === undefined) {
       return errorResult("NOT_FOUND", `Session tool ${input.name.slice(0, 100)} not found.`);
     }
     const controller = new AbortController();
@@ -106,7 +126,7 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
     input.signal?.addEventListener("abort", abort, { once: true });
     inFlight.add(entry);
     try {
-      return await options.forward(
+      const result = await options.forward(
         {
           threadId: input.threadId,
           callId: input.callId ?? `call-${randomUUID()}`,
@@ -115,6 +135,11 @@ export function createSessionToolsHost(options: CreateSessionToolsHostOptions): 
         },
         controller.signal
       );
+      const secrets = secretValuesOf(tool, result);
+      if (secrets.length > 0) {
+        options.onSecretValues?.(input.threadId, secrets);
+      }
+      return result;
     } finally {
       inFlight.delete(entry);
       input.signal?.removeEventListener("abort", abort);

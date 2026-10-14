@@ -490,7 +490,16 @@ export function shortenPath(path: string, workspaceRoot?: string): string {
  * calls them. A toolkit adds a line per tool here (its README); a tool with
  * none still reads "Orquester: <its name in words>", never its raw arguments.
  */
-export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {};
+export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
+  request_secret: "Requested a secret"
+};
+
+const SECRET_OUTCOME_WORDS = {
+  provided: "provided",
+  declined: "declined",
+  cancelled: "cancelled",
+  timed_out: "no answer"
+} as const;
 
 /** `thread_wait` → `Thread wait`. */
 function humanizeToolName(name: string): string {
@@ -503,10 +512,23 @@ export function sessionToolLabel(name: string): string {
   return SESSION_TOOL_LABELS[name] ?? `Orquester: ${humanizeToolName(name)}`;
 }
 
+/**
+ * A session tool row's label: its tool's, and for `request_secret` the
+ * secret's name and how the request ended (never the value, which the row
+ * does not hold).
+ */
+export function sessionToolEntryLabel(entry: WorkLogEntry & { sessionTool: string }): string {
+  const secret = entry.secretRequest;
+  if (secret !== undefined) {
+    return `Requested a secret: ${secret.name} · ${SECRET_OUTCOME_WORDS[secret.outcome]}`;
+  }
+  return sessionToolLabel(entry.sessionTool);
+}
+
 /** The label a settled single-tool row shows. *T3: `MessagesTimeline.logic.ts:46-53`.* */
 export function singleToolCallLabel(entry: WorkLogEntry): string {
   if (entry.sessionTool !== undefined) {
-    return sessionToolLabel(entry.sessionTool);
+    return sessionToolEntryLabel({ ...entry, sessionTool: entry.sessionTool });
   }
   const command = entry.command?.trim();
   if (command) {
@@ -525,7 +547,7 @@ export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot?: strin
   // A session tool's detail is its raw arguments (Claude's `tool: {…}`): its
   // own label reads better (design 2026-10-14 §1.5).
   if (entry.sessionTool !== undefined) {
-    return sessionToolLabel(entry.sessionTool);
+    return sessionToolEntryLabel({ ...entry, sessionTool: entry.sessionTool });
   }
   if (entry.command) {
     return entry.command;

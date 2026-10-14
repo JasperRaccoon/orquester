@@ -6,16 +6,17 @@
  * that survived a deploy keeps the list it booted with until its
  * drain-restart, and the daemon refuses a tool it does not have).
  *
- * The list is empty until the first toolkit lands: the framework ships with a
- * test-only toolkit (`testing.ts`), never registered here, and an empty
- * registry attaches no `orquester` server to any provider.
+ * The framework's own test toolkit (`testing.ts`) is never registered here;
+ * an empty registry would attach no `orquester` server to any provider.
  */
 
 import type { SessionToolkit } from "./contract.ts";
 import { createSessionToolRegistry, type SessionToolRegistry } from "./registry.ts";
+import { secretsToolkit } from "./secrets/index.ts";
 
 export const SESSION_TOOLKITS: readonly SessionToolkit[] = [
   // One line per toolkit, e.g. `htmlToolkit,` (from `./html/index.ts`).
+  secretsToolkit
 ];
 
 /** The production registry, built once per process. */
