@@ -24,6 +24,7 @@ import { TONE_TEXT } from "../primitives/tone";
 import { ContextMeter } from "./ContextMeter";
 import { deriveContextMeter, formatContextTokens } from "./context-meter";
 import { GoalChip } from "./GoalChip";
+import { ScheduledTasksChip } from "./ScheduledTasksChip";
 import type { GoalActionModel } from "./goal-chip";
 import { formatPlanProgress, planIsRunning, resolveStatusLine } from "./status-line";
 
@@ -50,7 +51,8 @@ export function ChatStatusLine({
   goalHeldForUpdate = false,
   goalActions = NO_GOAL_ACTIONS,
   goalActionsNote = null,
-  onGoalAction = noGoalAction
+  onGoalAction = noGoalAction,
+  showScheduledTasks = false
 }: ChatStatusLineProps): React.ReactElement {
   const status = resolveStatusLine({ connection, turnStartedAt, activityLabel });
   const meter = React.useMemo(
@@ -111,6 +113,9 @@ export function ChatStatusLine({
             onAction={onGoalAction}
           />
         ) : null}
+
+        {/* The thread's scheduled prompts (session tools §5): nothing until it has one. */}
+        {showScheduledTasks ? <ScheduledTasksChip sessionId={sessionId} /> : null}
 
         {planProgress ? (
           <span

@@ -1,7 +1,7 @@
 import React from "react";
 import { ArrowUp, Clock, Undo2, X } from "lucide-react";
 
-import type { AttachmentRef } from "@orquester/api";
+import { isScheduledTaskMessage, type AttachmentRef } from "@orquester/api";
 
 import { FileTypeIcon } from "../../../../icons/files";
 import { cn } from "../../../../lib/cn";
@@ -235,11 +235,15 @@ export const UserMessageRow = React.memo(function UserMessageRow({
   const text = row.message.text;
   const attachments = row.message.attachments ?? [];
   const revertTurnCount = row.revertTurnCount;
+  // Sent by the daemon's scheduler on the thread's behalf (session tools §5): say so, as an agent's
+  // launch prompt does, rather than passing it off as typed.
+  const scheduled = isScheduledTaskMessage(row.message);
 
   return (
-    <div className="group flex flex-col items-end gap-1">
+    <div className="group flex flex-col items-end gap-1" data-scheduled-task={scheduled ? "true" : undefined}>
+      {scheduled ? <span className="pe-1 text-[11px] text-neutral-500">Scheduled task</span> : null}
       <div className="relative max-w-[80%] rounded-2xl bg-neutral-800 p-3 text-neutral-100">
-        <AuthorHeading>You</AuthorHeading>
+        <AuthorHeading>{scheduled ? "Scheduled task" : "You"}</AuthorHeading>
         {attachments.length > 0 ? <AttachmentChips attachments={attachments} /> : null}
         <ClampedBubbleText text={text} showLabel="Show full message" />
       </div>

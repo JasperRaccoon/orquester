@@ -128,6 +128,18 @@ export type ScheduledTaskErrorCode =
   | "ALREADY_QUEUED"
   | "SCHEDULER_UNAVAILABLE";
 
+/**
+ * The context chip a delivered prompt's user message carries (`TurnCommandBody.context`, for
+ * re-render only — the host never shows it to the agent): `{kind, label: "Scheduled task", ref:
+ * taskId}`. The timeline captions such a message "Scheduled task" instead of passing it off as typed.
+ */
+export const SCHEDULED_TASK_CONTEXT_KIND = "scheduled-task";
+
+/** Whether a user message was sent by the scheduler. */
+export function isScheduledTaskMessage(message: { context?: readonly { kind: string }[] | undefined }): boolean {
+  return Array.isArray(message.context) && message.context.some((record) => record?.kind === SCHEDULED_TASK_CONTEXT_KIND);
+}
+
 // ---------------------------------------------------------------------------
 // Events
 // ---------------------------------------------------------------------------
@@ -169,10 +181,4 @@ export function firstScheduledTaskRun(schedule: ScheduledTaskSchedule, from: Dat
     return Number.isNaN(at) ? null : new Date(at).toISOString();
   }
   return nextScheduleRun(schedule.cron, schedule.timezone, from);
-}
-
-/** "Once" / "Cron 0 9 * * 1-5 (Europe/Berlin)". */
-export function describeScheduledTaskSchedule(schedule: ScheduledTaskSchedule): string {
-  if (schedule.kind === "once") return "Once";
-  return `Cron ${schedule.cron.trim().split(/\s+/).join(" ")} (${schedule.timezone})`;
 }

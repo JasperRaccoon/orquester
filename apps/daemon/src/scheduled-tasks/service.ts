@@ -34,6 +34,7 @@ import { randomUUID } from "node:crypto";
 import {
   firstScheduledTaskRun,
   nextScheduleRun,
+  SCHEDULED_TASK_CONTEXT_KIND,
   SCHEDULED_TASK_PROMPT_MAX,
   SCHEDULED_TASKS_MAX,
   SCHEDULED_TASKS_PER_THREAD_MAX,
@@ -65,9 +66,6 @@ export const SCHEDULED_TASK_RETRY_MS = 30_000;
 
 /** The ladder rungs during which a thread is not ready for a new message. */
 const BUSY_RUNGS: ReadonlySet<ChatActivityRung> = new Set<ChatActivityRung>(["approval", "question", "starting", "running", "goal-continuing"]);
-
-/** The context chip a delivered message carries (re-render only; the host never shows it to the agent). */
-export const SCHEDULED_TASK_CONTEXT_KIND = "scheduled-task";
 
 const RUN_STATUSES: ReadonlySet<string> = new Set<ScheduledTaskRunStatus>(["delivered", "missed", "failed"]);
 

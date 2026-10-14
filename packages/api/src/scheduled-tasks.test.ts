@@ -2,7 +2,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 
 import {
-  describeScheduledTaskSchedule,
+  isScheduledTaskMessage,
   firstScheduledTaskRun,
   scheduledTaskScheduleProblem
 } from "./scheduled-tasks.ts";
@@ -38,7 +38,8 @@ test("schedule problems", () => {
   assert.match(scheduledTaskScheduleProblem({ kind: "cron", cron: "*/5 * * * * *", timezone: "UTC" }, now)!, /a task runs at most once a minute/);
 });
 
-test("descriptions", () => {
-  assert.equal(describeScheduledTaskSchedule({ kind: "once", at: "2026-10-14T11:00:00.000Z" }), "Once");
-  assert.equal(describeScheduledTaskSchedule({ kind: "cron", cron: " 0  9 * * 1-5", timezone: "UTC" }), "Cron 0 9 * * 1-5 (UTC)");
+test("a scheduler-sent message is recognised by its context chip", () => {
+  assert.equal(isScheduledTaskMessage({ context: [{ kind: "scheduled-task" }] }), true);
+  assert.equal(isScheduledTaskMessage({ context: [{ kind: "file" }] }), false);
+  assert.equal(isScheduledTaskMessage({}), false);
 });
