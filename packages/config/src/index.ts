@@ -858,7 +858,14 @@ export const sessionChatRecordSchema = z.object({
    * reconciles it with the host once it can (the child confirmed, or the tab taken back when the
    * host never created it); cleared once the host's answer is in. Anything else reads as absent.
    */
-  forkUnconfirmed: z.literal(true).optional().catch(undefined)
+  forkUnconfirmed: z.literal(true).optional().catch(undefined),
+  /**
+   * A plain chat tab whose host create has not answered yet. Persisted so a daemon restart in
+   * between still shows it as starting (not gone) until the daemon reconciles it with the host:
+   * confirmed when the host holds the thread, taken back when it never got it. Anything else
+   * reads as absent.
+   */
+  createUnconfirmed: z.literal(true).optional().catch(undefined)
 });
 export type SessionChatRecord = z.infer<typeof sessionChatRecordSchema>;
 

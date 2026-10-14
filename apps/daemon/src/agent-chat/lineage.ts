@@ -84,6 +84,11 @@ export interface LineageServiceOptions {
   retryDelayMs?: number;
   /** Publish a tab's pending merges (`SessionSummary.pendingMerges`, never persisted). */
   setPendingMerges?: (sessionId: string, merges: PendingMergeBack[]) => void;
+  /**
+   * Whether the daemon's tab records loaded. Until they have, a tab missing from `sessions` may
+   * still exist, so no merge is dropped for it (`pruneOrphans`). Default: loaded.
+   */
+  sessionsLoaded?: () => boolean;
 }
 
 const DEFAULT_RECHECK_MS = 30_000;
@@ -187,6 +192,7 @@ export class LineageService {
     this.unsubscribe?.();
     this.unsubscribe = api.subscribe((event) => {
       if (event.channel !== "sessions") return;
+      if (event.type === "session.closed") void this.pruneOrphans();
       const id = (event.payload as { id?: unknown } | null)?.id;
       if (typeof id === "string" && this.queuedFor(id).length > 0) {
         void this.drain(id);
@@ -194,7 +200,26 @@ export class LineageService {
     });
     this.publish();
     this.armRecheck();
+    void this.pruneOrphans();
     this.drainAll();
+  }
+
+  /**
+   * Merges whose parent AND fork tabs are both closed: nobody can deliver or discard them any more,
+   * so they leave the outbox instead of staying in it forever (D-T2). Only once the tab records
+   * are known to have loaded.
+   */
+  pruneOrphans(): Promise<void> {
+    if (this.stopped || !(this.opts.sessionsLoaded?.() ?? true)) return Promise.resolve();
+    const gone = (id: string) => this.opts.sessions.get(id) === undefined;
+    const orphans = this.outbox.entries.filter((entry) => gone(entry.parentSessionId) && gone(entry.childSessionId));
+    if (orphans.length === 0) return Promise.resolve();
+    this.outbox.entries = this.outbox.entries.filter((entry) => !orphans.includes(entry));
+    for (const entry of orphans) this.retryAt.delete(entry.mergeId);
+    this.opts.logger?.warn?.("[lineage] merges whose parent and fork are both closed were dropped", {
+      mergeIds: orphans.map((entry) => entry.mergeId)
+    });
+    return this.persist(orphans.flatMap((entry) => [entry.parentSessionId, entry.childSessionId])).then(() => undefined);
   }
 
   stop(): Promise<void> {
@@ -581,6 +606,7 @@ export class LineageService {
     const ms = this.opts.recheckMs ?? DEFAULT_RECHECK_MS;
     if (ms <= 0 || this.stopped || this.recheck || this.outbox.entries.length === 0 || !this.api) return;
     this.recheck = setInterval(() => {
+      void this.pruneOrphans();
       if (!this.outbox.entries.some((entry) => entry.state !== "failed")) {
         if (this.recheck) clearInterval(this.recheck);
         this.recheck = null;

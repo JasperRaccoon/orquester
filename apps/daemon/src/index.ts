@@ -644,12 +644,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   );
   // Thread lineage (spec 2026-10-14 §6): the merge-back queue survives a restart; its delivery
   // starts once the daemon's own API exists (`attachApi` below).
+  // Whether the tab records loaded (set by the reattach below): until then a pull request watch, a
+  // scheduled task or a queued merge never takes a missing tab for a deleted thread.
+  let sessionsReattached = false;
   const lineage = new LineageService({
     sessions: agentChat.chat,
     outboxFile: agentChatMergeOutboxFile(paths.baseDir),
     logger: console,
     // Both tabs of a merge show it while the parent has not taken it (GUI and MCP).
-    setPendingMerges: (sessionId, merges) => agentChat.chat.setPendingMerges(sessionId, merges)
+    setPendingMerges: (sessionId, merges) => agentChat.chat.setPendingMerges(sessionId, merges),
+    sessionsLoaded: () => sessionsReattached
   });
   await lineage.load();
   const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);
@@ -680,9 +684,6 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // the daemon's own client exists (below), so nothing is delivered before the agent host is up.
   const scheduledTasksStore = new ScheduledTasksStore(resolved.scheduledTasksFile);
   await scheduledTasksStore.load();
-  // Whether the tab records loaded (set by the reattach below): until then a pull request watch or
-  // a scheduled task never takes a missing tab for a deleted thread.
-  let sessionsReattached = false;
   const scheduledTasks = new ScheduledTasksService({
     store: scheduledTasksStore,
     sessionsLoaded: () => sessionsReattached,

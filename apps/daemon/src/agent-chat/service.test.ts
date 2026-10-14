@@ -25,7 +25,7 @@ import {
   type ForkHostThreadRequest,
   type SetThreadIdentityRequest
 } from "../agent-host/host-protocol.ts";
-import { AgentChatService, forkIdFor } from "./service.ts";
+import { AgentChatService, FORK_CONFIRM_MAX_BACKOFF_MS, FORK_CONFIRM_MAX_REFUSALS, forkIdFor } from "./service.ts";
 import { ChatSessionError, ChatSessionManager } from "./chat-sessions.ts";
 import { HostUnavailableError } from "./host-client.ts";
 import { UploadTooLargeError } from "../upload-stream.ts";
@@ -155,6 +155,8 @@ async function makeFixture(
     holdAnswer?: { status: number; body: unknown };
     /** The agent pages' browser (design 2026-10-14 §2.1); none by default. */
     htmlPreview?: HtmlPageRenderer;
+    /** The service's clock (a fork reconcile's backoff). */
+    now?: () => number;
   } = {}
 ): Promise<Fixture> {
   const appdir = await mkdtemp(join(tmpdir(), "orq-chat-service-"));
@@ -367,6 +369,7 @@ async function makeFixture(
   await new Promise<void>((resolve) => host.listen(socketPath, resolve));
 
   state.service = new AgentChatService({
+    ...(options.now !== undefined ? { now: options.now } : {}),
     baseDir: appdir,
     daemonDir: join(appdir, "daemon"),
     platform: "linux",
@@ -1721,6 +1724,27 @@ test("a fork whose answer was lost stays pending, also across a restart, until t
   await f.cleanup();
 });
 
+test("a plain create a daemon restart interrupted stays pending, then is confirmed or taken back (D-T2)", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const made = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  // While its create is in flight the record says so, persisted; once confirmed it does not.
+  assert.equal(f.service.chat.records().find((record) => record.id === made.id)?.chat?.createUnconfirmed, undefined);
+  const template = f.service.chat.records().find((record) => record.id === made.id)!;
+  // Two tabs a restart left mid-create: the host got one of them, not the other.
+  const interrupted = (id: string) => ({ ...template, id, chat: { ...template.chat!, threadId: id, createUnconfirmed: true as const } });
+  const reloaded = parseSessionsConfig({ version: 1, sessions: [interrupted("held-1"), interrupted("lost-1")] }).sessions;
+  f.service.chat.adopt(reloaded);
+  assert.equal(f.service.chat.get("held-1")?.chatPending, true, "starting, never gone, after the restart");
+  assert.equal(f.service.chat.get("lost-1")?.chatPending, true);
+  f.snapshots["held-1"] = { status: 200, body: { kind: "snapshot", thread: {} } };
+  f.snapshots["lost-1"] = { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: "Thread 'lost-1' was not found." } } };
+  await f.service.reconcileForks();
+  assert.equal(f.service.chat.get("held-1")?.chatPending, false, "confirmed");
+  assert.equal(f.service.chat.records().find((record) => record.id === "held-1")?.chat?.createUnconfirmed, undefined);
+  assert.equal(f.service.chat.has("lost-1"), false, "taken back");
+  await f.cleanup();
+});
+
 test("the reconcile re-sends the lost fork's whole request — cut and launch environment — with confirmOnly", async () => {
   const f = await makeFixture(CLAUDE, { env: { CLAUDE_CONFIG_DIR: "/homes/acc-1" }, unset: ["ANTHROPIC_API_KEY"], accountId: "acc-1" });
   const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
@@ -1751,14 +1775,43 @@ test("only the host's 'no such thread' takes a stray fork tab back; any other re
     { status: 500, body: { error: { code: "COMMAND_REJECTED", message: "boom" } } }
   ]) {
     f.confirmAnswer = refusal;
+    // Each answer asked fresh: the refusal backoff has its own test.
+    (f.service as unknown as { forkRefusals: Map<string, unknown> }).forkRefusals.clear();
     await f.service.reconcileForks();
     assert.equal(f.service.chat.has(id), true, `${refusal.status}: kept`);
     assert.deepEqual(f.service.chat.unconfirmedForks(), [id], `${refusal.status}: still to reconcile`);
   }
   // An older host's route miss is a "no such thread" too: it never had a fork route to create one.
+  (f.service as unknown as { forkRefusals: Map<string, unknown> }).forkRefusals.clear();
   f.confirmAnswer = { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: "No route for POST /threads/x/fork." } } };
   await f.service.reconcileForks();
   assert.equal(f.service.chat.has(id), false);
+  await f.cleanup();
+});
+
+test("a fork the host keeps refusing to confirm is asked with a doubling backoff, then taken back (D-T2)", async () => {
+  let now = 1_000_000;
+  const f = await makeFixture(CLAUDE, null, { now: () => now });
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  f.dropForkUncreated = true;
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1));
+  const id = forkIdFor(parent.id, "k");
+  f.confirmAnswer = { status: 409, body: { error: { code: "COMMAND_REJECTED", message: "still being deleted" } } };
+  const asked = () => f.forks.filter((fork) => fork.body.confirmOnly === true).length;
+  await f.service.reconcileForks();
+  assert.equal(asked(), 1);
+  // The next tick is too soon: not asked.
+  now += 5_000;
+  await f.service.reconcileForks();
+  assert.equal(asked(), 1, "backed off");
+  // Past each doubling backoff it is asked again, until it gives up.
+  for (let refusal = 2; refusal <= FORK_CONFIRM_MAX_REFUSALS; refusal += 1) {
+    now += FORK_CONFIRM_MAX_BACKOFF_MS;
+    await f.service.reconcileForks();
+    assert.equal(asked(), refusal);
+  }
+  assert.equal(f.service.chat.has(id), false, "taken back");
+  assert.deepEqual(f.service.chat.unconfirmedForks(), []);
   await f.cleanup();
 });
 

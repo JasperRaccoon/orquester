@@ -65,6 +65,8 @@ interface ChatSession {
     lastSeq: number;
     forkFingerprint?: string;
     forkUnconfirmed?: true;
+    /** A plain create the host has not answered yet; persisted ({@link confirmCreated}). */
+    createUnconfirmed?: true;
   };
 }
 
@@ -104,6 +106,11 @@ export class ChatSessionManager {
   /** Fork tabs the host has not answered for yet: their fork is in flight, or its answer was lost. */
   unconfirmedForks(): string[] {
     return [...this.sessions.values()].filter((s) => s.chat.forkUnconfirmed === true).map((s) => s.summary.id);
+  }
+
+  /** Plain chat tabs whose host create never answered (a daemon restart in between): to reconcile. */
+  unconfirmedCreates(): string[] {
+    return [...this.sessions.values()].filter((s) => s.chat.createUnconfirmed === true).map((s) => s.summary.id);
   }
 
   /** The last sequence this tab was rendered at, for a §6.3 reconnect. */
@@ -168,7 +175,8 @@ export class ChatSessionManager {
         home: input.home,
         lastSeq: 0,
         ...(input.forkFingerprint !== undefined ? { forkFingerprint: input.forkFingerprint } : {}),
-        ...(input.forkUnconfirmed === true ? { forkUnconfirmed: true as const } : {})
+        ...(input.forkUnconfirmed === true ? { forkUnconfirmed: true as const } : {}),
+        ...(input.pending === true && input.forkUnconfirmed !== true ? { createUnconfirmed: true as const } : {})
       }
     });
     this.lifecycle.emit("created", { ...summary });
@@ -286,8 +294,9 @@ export class ChatSessionManager {
     if (!session) return null;
     if (session.summary.chatPending !== true) return { ...session.summary };
     session.summary.chatPending = false;
-    if (session.chat.forkUnconfirmed === true) {
+    if (session.chat.forkUnconfirmed === true || session.chat.createUnconfirmed === true) {
       delete session.chat.forkUnconfirmed;
+      delete session.chat.createUnconfirmed;
       this.options.requestPersist();
     }
     this.lifecycle.emit("updated", { ...session.summary });
@@ -401,8 +410,8 @@ export class ChatSessionManager {
         ...(record.owner ? { owner: { ...record.owner } } : {}),
         // …and a malformed lineage, or a fork point that did not read on its own.
         ...(record.lineage ? { lineage: lineageFromRecord(record.lineage) } : {}),
-        // A fork whose host answer never came: still being reconciled.
-        ...(record.chat.forkUnconfirmed === true ? { chatPending: true } : {})
+        // A fork or a create whose host answer never came: still being reconciled.
+        ...(record.chat.forkUnconfirmed === true || record.chat.createUnconfirmed === true ? { chatPending: true } : {})
       };
       this.sessions.set(record.id, {
         summary,
@@ -414,7 +423,8 @@ export class ChatSessionManager {
           ...(record.chat.forkFingerprint !== undefined
             ? { forkFingerprint: record.chat.forkFingerprint }
             : {}),
-          ...(record.chat.forkUnconfirmed === true ? { forkUnconfirmed: true as const } : {})
+          ...(record.chat.forkUnconfirmed === true ? { forkUnconfirmed: true as const } : {}),
+          ...(record.chat.createUnconfirmed === true ? { createUnconfirmed: true as const } : {})
         }
       });
     }

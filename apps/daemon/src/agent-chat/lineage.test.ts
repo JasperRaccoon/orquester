@@ -349,6 +349,24 @@ describe("merge back", () => {
     await cleanup();
   });
 
+  it("drops a merge once its parent and its fork are both closed — never while either is open (D-T2)", async () => {
+    const { world, service, outboxFile, cleanup } = await setup({ parentBusy: true });
+    await service.mergeBack("child", { commandId: "orphan" });
+    await settled(service);
+    // Only the parent closed: kept (failed, for the fork to see and discard).
+    world.sessions.delete("parent");
+    await service.pruneOrphans();
+    assert.equal(service.pending().length, 1);
+    // Both closed: nobody can deliver or discard it any more.
+    world.sessions.delete("child");
+    await service.pruneOrphans();
+    assert.deepEqual(service.pending(), []);
+    await settled(service);
+    const disk = JSON.parse(await readFile(outboxFile, "utf8")) as { entries: unknown[] };
+    assert.deepEqual(disk.entries, []);
+    await cleanup();
+  });
+
   it("sends the user's own summary instead when given one", async () => {
     const { world, service, cleanup } = await setup();
     await service.mergeBack("child", { text: "  Go with B.  " });

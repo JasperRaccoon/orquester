@@ -132,6 +132,8 @@ export interface ChatLaunchEnv {
 export interface AgentChatServiceOptions {
   /** `<appdir>`. */
   baseDir: string;
+  /** The clock a fork reconcile's backoff reads (tests); `Date.now` by default. */
+  now?: () => number;
   /** The daemon's own unix socket, handed to the host for session-tool calls (design 2026-10-14 §1.1). */
   daemonSocketPath?: string;
   daemonDir: string;
@@ -796,6 +798,7 @@ export class AgentChatService {
     // Prepare Claude trust before the thread exists so its first turn sees the project settings.
     await this.prepareHome(adapter, launchEnv, req.projectPath ?? "");
 
+    this.createsInFlight.add(id);
     const summary = this.chat.create({
       id,
       refId: entry.id,
@@ -860,6 +863,8 @@ export class AgentChatService {
         throw this.hostUnavailable();
       }
       throw new ChatSessionError(error instanceof Error ? error.message : String(error));
+    } finally {
+      this.createsInFlight.delete(id);
     }
     // The host has the thread: said, so a view waiting on it connects again.
     return this.chat.confirmCreated(id) ?? summary;
@@ -1133,6 +1138,14 @@ export class AgentChatService {
   private readonly forkChildrenInFlight = new Set<string>();
   /** Fork tabs a {@link reconcileForks} is confirming with the host right now. */
   private readonly forksConfirming = new Map<string, Promise<void>>();
+  /**
+   * Fork tabs the host keeps refusing to confirm with something other than "no such thread" (a
+   * child still being deleted, a body it will not take): how often, and when to ask next. Backs
+   * off from one reconcile tick, doubling, and gives up after FORK_CONFIRM_MAX_REFUSALS (D-T2).
+   */
+  private readonly forkRefusals = new Map<string, { count: number; retryAt: number }>();
+  /** Plain creates waiting for the host's answer in this process ({@link reconcileCreates}). */
+  private readonly createsInFlight = new Set<string>();
   private reconciling: Promise<void> | null = null;
 
   /**
@@ -1153,9 +1166,11 @@ export class AgentChatService {
     if (this.reconciling) return this.reconciling;
     const run = (async () => {
       if (!this.supervisor.isHealthy()) return;
+      await this.reconcileCreates();
       for (const id of this.chat.unconfirmedForks()) {
         if (this.stopped) return;
         if (this.forkChildrenInFlight.has(id) || this.forksConfirming.has(id)) continue;
+        if ((this.forkRefusals.get(id)?.retryAt ?? 0) > (this.opts.now ?? Date.now)()) continue;
         const confirm = this.confirmFork(id).finally(() => this.forksConfirming.delete(id));
         this.forksConfirming.set(id, confirm);
         await confirm;
@@ -1232,6 +1247,7 @@ export class AgentChatService {
     // A fork in flight for this tab took over meanwhile: its answer is the one that counts.
     if (this.forkChildrenInFlight.has(id) || !this.chat.has(id)) return;
     if (response.status < 400 && response.value?.head) {
+      this.forkRefusals.delete(id);
       this.chat.setLineage(id, withDelegationDepth(response.value.lineage ?? response.value.head.lineage ?? tab.lineage!, tab.lineage?.delegationDepth ?? 0));
       return;
     }
@@ -1242,13 +1258,56 @@ export class AgentChatService {
       this.opts.logger?.warn?.(
         `agent chat: the host holds no fork ${id} (${response.value.error.message ?? "not found"}); its tab is taken back`
       );
+      this.forkRefusals.delete(id);
       this.chat.discard(id);
       return;
     }
     if (response.status < 500) {
-      this.opts.logger?.warn?.(
-        `agent chat: the host would not confirm fork ${id} (${response.status} ${response.value?.error?.message ?? ""}); will retry`
-      );
+      // Not "no such thread", but not a confirmation either: asked again with a doubling backoff
+      // (never every tick, never forever, and the launch environment recomposed only then); after
+      // FORK_CONFIRM_MAX_REFUSALS the tab is taken back like a fork the host never created — no
+      // host delete is queued, so a child the host does hold is never deleted by this (D-T2).
+      const count = (this.forkRefusals.get(id)?.count ?? 0) + 1;
+      const reason = `${response.status} ${response.value?.error?.message ?? ""}`.trim();
+      if (count >= FORK_CONFIRM_MAX_REFUSALS) {
+        this.opts.logger?.warn?.(`agent chat: the host refused to confirm fork ${id} ${count} times (${reason}); its tab is taken back`);
+        this.forkRefusals.delete(id);
+        this.chat.discard(id);
+        return;
+      }
+      const delay = Math.min(FORK_CONFIRM_MAX_BACKOFF_MS, FORK_CONFIRM_FIRST_BACKOFF_MS * 2 ** (count - 1));
+      this.forkRefusals.set(id, { count, retryAt: (this.opts.now ?? Date.now)() + delay });
+      if (count === 1) {
+        this.opts.logger?.warn?.(`agent chat: the host would not confirm fork ${id} (${reason}); asking again with backoff`);
+      }
+    }
+  }
+
+  /**
+   * Plain chat tabs whose host create never answered because the daemon restarted in between
+   * (`chat.createUnconfirmed`, persisted; the tab reads as starting meanwhile): the host holds the
+   * thread → confirmed; the host never got it ("no such thread") → the tab is taken back, as a
+   * fork the host never created is (D-T2). Anything else leaves it for a later reconcile. Never
+   * throws.
+   */
+  private async reconcileCreates(): Promise<void> {
+    for (const id of this.chat.unconfirmedCreates()) {
+      if (this.stopped) return;
+      if (this.createsInFlight.has(id)) continue;
+      let response: { status: number; value: { error?: { code?: string; message?: string } } | null };
+      try {
+        response = await this.client.json<{ error?: { code?: string; message?: string } }>("GET", agentHostRoutes.read(id));
+      } catch (error) {
+        this.opts.logger?.warn?.(`agent chat: could not ask the host about tab ${id}; will retry`, error);
+        continue;
+      }
+      if (this.createsInFlight.has(id) || !this.chat.has(id)) continue;
+      if (response.status < 400) {
+        this.chat.confirmCreated(id);
+      } else if (response.status === 404 && response.value?.error?.code === "THREAD_NOT_FOUND") {
+        this.opts.logger?.warn?.(`agent chat: the host never got chat ${id} (the daemon restarted mid-create); its tab is taken back`);
+        this.chat.discard(id);
+      }
     }
   }
 
@@ -1807,3 +1866,10 @@ function withDelegationDepth(lineage: ThreadLineage, depth: number): ThreadLinea
   const { delegationDepth: _dropped, ...rest } = lineage;
   return depth > 0 ? { ...rest, delegationDepth: depth } : rest;
 }
+
+/** A fork the host keeps refusing to confirm (other than "no such thread") is asked again after this, doubling. */
+export const FORK_CONFIRM_FIRST_BACKOFF_MS = 15_000;
+/** …never waiting longer than this between two asks. */
+export const FORK_CONFIRM_MAX_BACKOFF_MS = 10 * 60_000;
+/** …and taken back after this many refusals (about half an hour of asking). */
+export const FORK_CONFIRM_MAX_REFUSALS = 8;
