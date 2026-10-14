@@ -80,7 +80,7 @@ What Grok asks before an MCP tool runs, for the session tools' card-free pre-app
 | CLI | `grok 1.0.46` |
 | Capture date | 2026-10-14 |
 | argv | `--reasoning-effort low --permission-mode default agent stdio` (supervised: it asks) |
-| Environment | only `PATH`, `HOME`, `TMPDIR`, `LANG`, `GROK_HOME` and `GROK_CONFIG_PATH` → an overlay with `[features] support_permission = true` and `[cli] auto_update = false`; a scratch directory (mode 0700, written `<scratch>`) holding the home, the sandbox (`git init`, empty) and the overlay, removed after the run |
+| Environment | only `PATH`, `HOME`, `TMPDIR`, `LANG`, `GROK_HOME` and `GROK_CONFIG_PATH` → an overlay with `[features] support_permission = true` and `[cli] auto_update = false`; a scratch directory (mode 0700, written `<scratch>`) holding the home, the sandbox (`git init`, empty) and the overlay, removed after the run. The sandbox — the CLI's cwd — is `<scratch>/sandbox`; the capture's own spawn note writes it `<sandbox>` |
 | Account | `GROK_HOME` held only a copy of one managed account's `auth.json` (`authenticate {methodId: "cached_token"}`); its hash was unchanged after the run |
 | MCP server | a throwaway loopback Streamable-HTTP server (`127.0.0.1:<ephemeral>/mcp`, stateless JSON, bearer-checked) named `orquester` with one tool `echo` answering `{echoed}` as a JSON text block + the same object as `structuredContent` — the session tools' own result shape; given as an ACP `http` entry with an `Authorization` header, as the adapter does |
 | Prompt | "Call the echo tool of the `orquester` MCP server once with text \"hi\". Then reply with the single word: done." — answered `allow-once`; one model turn |
@@ -129,6 +129,8 @@ the committed files (see the note below the list):
   to every file that held one (03b, 07, 11, 15–22), and nothing else in them changed. The
   adapter's own redactor (`support/stderr.ts`, which `raw.ndjson` and every stderr line go
   through) collapses both spellings as well
+- the 2026-10-14 capture (33) only: its scratch directory → `<scratch>`, and the CLI's cwd inside
+  it (`<scratch>/sandbox`) → `<sandbox>` where the capture's notes name it alone
 - e-mail addresses → `<redacted-email>`
 - API tokens (Atlassian `ATATT3…`, `ghp_`/`gho_`, `xox?-`, `sk-`, `xai-`, JWTs) → `<redacted-token>`
 - the hostname → `<host>`

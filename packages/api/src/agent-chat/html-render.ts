@@ -204,7 +204,7 @@ const HTML_RENDER_REFERENCE_KEY = "htmlRender";
  * (`data.sessionTool.references.htmlRender`), else the provider's result in
  * whichever layout it recorded it — Claude's `tool_result` block, Codex's
  * `{content, structuredContent}`, OpenCode's output text, Grok's `use_tool`
- * `rawOutput` and ACP content blocks.
+ * `rawOutput` (`output.OkayOutput`, the result's text).
  *
  * The status is the caller's to judge: a failed call carries no reference.
  */
