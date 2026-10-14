@@ -170,23 +170,27 @@ export function showBackgroundLivenessBanner(input: {
 // ---------------------------------------------------------------------------
 
 /**
- * The dock's fixed priority order: approval, then pending question, then the
- * plan-ready prompt, then the mobile-collapsed question. One request at a time.
+ * The dock's fixed priority order: approval, then pending question, then an
+ * MCP App's consent request (spec 2026-10-14 §3 — the agent's own requests
+ * come first: an app waits, a turn is blocked), then the plan-ready prompt,
+ * then the mobile-collapsed question. One request at a time.
  *
  * *T3: `ChatComposer.tsx:6152-6265` — the four-branch if-chain.*
  */
-export type DockCard = "approval" | "question" | "plan-ready" | "question-mobile" | null;
+export type DockCard = "approval" | "question" | "app-consent" | "plan-ready" | "question-mobile" | null;
 
 export function resolveDockCard(input: {
   hasApproval: boolean;
   hasUserInput: boolean;
   hasActionableProposedPlan: boolean;
   isComposerCollapsedMobile: boolean;
+  hasAppConsent?: boolean;
 }): DockCard {
   if (input.hasApproval) return "approval";
   if (input.hasUserInput) {
     return input.isComposerCollapsedMobile ? "question-mobile" : "question";
   }
+  if (input.hasAppConsent === true) return "app-consent";
   if (input.hasActionableProposedPlan && !input.isComposerCollapsedMobile) return "plan-ready";
   return null;
 }

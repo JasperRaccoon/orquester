@@ -13,8 +13,12 @@
  * string this build does not know, so an older host still renders a newer CLI.
  */
 
-import type { CanonicalItemType, RuntimeItemStatus } from "@orquester/api/agent-chat";
-import { isSessionToolsServerName } from "@orquester/api/agent-chat";
+import {
+  MCP_APP_RESOURCE_SCHEME,
+  isSessionToolsServerName,
+  type CanonicalItemType,
+  type RuntimeItemStatus
+} from "@orquester/api/agent-chat";
 
 import type { CodexProtocol } from "./_generated/index.ts";
 
@@ -133,9 +137,11 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
           readOnlyHint: item.readOnlyHint,
           durationMs: item.durationMs,
           // A session tool's result carries the reference fields its row
-          // renders from (design 2026-10-14 §1.5); slimming keeps those and
+          // renders from (design 2026-10-14 §1.5), and a call whose tool
+          // names an MCP App resource (§3) replays its result into the app,
+          // so those results are kept; slimming keeps the references and
           // summarises the rest. Other servers' results stay out, as before.
-          ...(item.result !== null && isSessionToolsServerName(item.server)
+          ...(item.result !== null && (isSessionToolsServerName(item.server) || namesMcpAppResource(item))
             ? { result: item.result }
             : {})
         }
@@ -288,4 +294,10 @@ function fileChangeTitle(changes: readonly CodexProtocol.v2.FileUpdateChange[]):
 /** `interrupted` has no `RuntimeItemStatus` equivalent; it settles as `failed`. */
 function collabStatus(status: CodexProtocol.v2.CollabAgentToolCallStatus): RuntimeItemStatus {
   return status === "interrupted" ? "failed" : status;
+}
+
+/** Whether an `mcpToolCall`'s tool names an MCP App (`ui://`) resource, in either field Codex reports it. */
+function namesMcpAppResource(item: Extract<CodexThreadItem, { type: "mcpToolCall" }>): boolean {
+  const uri = item.appContext?.resourceUri ?? item.mcpAppResourceUri;
+  return typeof uri === "string" && uri.startsWith(MCP_APP_RESOURCE_SCHEME);
 }

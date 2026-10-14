@@ -63,6 +63,23 @@ test("the dock shows one card at a time, in a fixed priority order", () => {
     resolveDockCard({ ...all, hasApproval: false, hasUserInput: false }),
     "plan-ready"
   );
+  // An MCP App's consent waits behind the agent's own requests, ahead of the plan prompt.
+  assert.equal(resolveDockCard({ ...all, hasAppConsent: true }), "approval");
+  assert.equal(resolveDockCard({ ...all, hasApproval: false, hasAppConsent: true }), "question");
+  assert.equal(
+    resolveDockCard({ ...all, hasApproval: false, hasUserInput: false, hasAppConsent: true }),
+    "app-consent"
+  );
+  assert.equal(
+    resolveDockCard({
+      hasApproval: false,
+      hasUserInput: false,
+      hasActionableProposedPlan: false,
+      isComposerCollapsedMobile: true,
+      hasAppConsent: true
+    }),
+    "app-consent"
+  );
   assert.equal(
     resolveDockCard({
       hasApproval: false,

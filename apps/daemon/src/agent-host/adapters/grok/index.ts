@@ -44,14 +44,16 @@ import type {
   WorkspaceSnapshot
 } from "@orquester/api/agent-chat";
 
-import type {
-  AdapterContext,
-  AdapterFactory,
-  AgentAdapter,
-  RollbackTarget,
-  SendTurnInput,
-  SendTurnResult,
-  StartSessionInput
+import {
+  McpAppSessionUnavailableError,
+  type AdapterContext,
+  type AdapterFactory,
+  type AdapterMcpApps,
+  type AgentAdapter,
+  type RollbackTarget,
+  type SendTurnInput,
+  type SendTurnResult,
+  type StartSessionInput
 } from "../../adapter.ts";
 import { join } from "node:path";
 
@@ -67,6 +69,7 @@ import {
 } from "./probe.ts";
 import { issueSessionToolsGrant } from "../../session-tools/index.ts";
 import { GrokSession } from "./session.ts";
+import { McpAppSnapshotStore } from "../mcp-app-capture.ts";
 import { recordLeftoverWork, sweepLeftoverWork } from "../../support/leftover-work.ts";
 
 /** The registry ids this adapter serves. */
@@ -157,6 +160,8 @@ class GrokAdapter implements AgentAdapter {
 
   private readonly context: AdapterContext;
   private readonly sessions = new Map<string, GrokSession>();
+  /** Every session's stored MCP App snapshots, so an unchanged document is stored once per thread. */
+  private readonly mcpAppSnapshots = new McpAppSnapshotStore();
   /**
    * The leftover sweeps of sessions that already left the map — a CLI that
    * exited on its own — so the host's teardown still waits for them
@@ -333,6 +338,9 @@ class GrokAdapter implements AgentAdapter {
         this.sweeps.add(sweep);
         void sweep.then(() => this.sweeps.delete(sweep));
       },
+      ...(this.context.storeAttachment === undefined ? {} : { storeAttachment: this.context.storeAttachment }),
+      resolveAttachmentPath: (threadId, attachmentId) => this.context.resolveAttachmentPath(threadId, attachmentId),
+      mcpAppSnapshots: this.mcpAppSnapshots,
       homeDirs: [input.home.path, env["HOME"]].filter(
         (value): value is string => typeof value === "string" && value.length > 1
       )
@@ -512,6 +520,27 @@ class GrokAdapter implements AgentAdapter {
 
   hasSession(threadId: string): boolean {
     return this.sessions.has(threadId);
+  }
+
+  /**
+   * MCP Apps (spec 2026-10-14 §3), through the thread's live session. Grok
+   * has no additive context channel for a turn (ACP's `session/prompt` takes
+   * content blocks only, which would read as the user's own words), so an
+   * app's `ui/update-model-context` is not offered.
+   */
+  readonly mcpApps: AdapterMcpApps = {
+    modelContext: false,
+    listTools: async (threadId, server) => await this.appSession(threadId).mcpListTools(server),
+    callTool: async (threadId, input) => await this.appSession(threadId).mcpCallTool(input),
+    readResource: async (threadId, input) => await this.appSession(threadId).mcpReadResource(input)
+  };
+
+  private appSession(threadId: string): GrokSession {
+    const session = this.sessions.get(threadId);
+    if (session === undefined || session.isStopped) {
+      throw new McpAppSessionUnavailableError();
+    }
+    return session;
   }
 
   async stopSession(threadId: string, options?: { endedByUser?: boolean }): Promise<void> {

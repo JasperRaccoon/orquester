@@ -35,8 +35,11 @@ function cacheFor(api: ApiClient): VisualUrlCache {
   return cache;
 }
 
-/** A usable URL for the page: a cached one with life left, else a fresh mint. */
-async function pageUrl(api: ApiClient, sessionId: string, attachmentId: string): Promise<VisualFrameUrl> {
+/**
+ * A usable URL for a thread's framed document (an agent page, an MCP App's
+ * snapshot): a cached one with life left, else a fresh mint.
+ */
+export async function visualPageUrl(api: ApiClient, sessionId: string, attachmentId: string): Promise<VisualFrameUrl> {
   const cache = cacheFor(api);
   const key = `${sessionId}\n${attachmentId}`;
   const cached = cache.usable(key, Date.now());
@@ -77,7 +80,7 @@ export function VisualFrame(props: { sessionId: string; htmlRender: HtmlRenderRe
   const [failed, setFailed] = React.useState(false);
   React.useEffect(() => {
     let cancelled = false;
-    pageUrl(api, sessionId, attachmentId).then(
+    visualPageUrl(api, sessionId, attachmentId).then(
       (url) => {
         if (!cancelled) setSrc(url.src);
       },
@@ -94,7 +97,7 @@ export function VisualFrame(props: { sessionId: string; htmlRender: HtmlRenderRe
   const [expandFailed, setExpandFailed] = React.useState(false);
   const expand = React.useCallback(() => {
     setExpandFailed(false);
-    pageUrl(api, sessionId, attachmentId).then(
+    visualPageUrl(api, sessionId, attachmentId).then(
       (url) => setExpandedSrc(url.src),
       () => setExpandFailed(true)
     );

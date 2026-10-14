@@ -12,6 +12,7 @@
 export * from "./runtime-events.ts";
 export * from "./goal.ts";
 export * from "./html-render.ts";
+export * from "./mcp-app.ts";
 export * from "./adapter-types.ts";
 export * from "./domain-events.ts";
 export * from "./thread.ts";

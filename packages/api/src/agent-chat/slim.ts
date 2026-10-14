@@ -23,6 +23,9 @@
  *   the reference fields of `SESSION_TOOL_REFERENCE_KEYS`, `session-tools.ts`
  *   — e.g. an `html_render` call's page, which the timeline renders from the
  *   slim row alone), the same after a second slim;
+ * - a completed MCP call whose app the adapter captured keeps `data.mcpApp`
+ *   (`mcp-app.ts`) — only once it names the row's own server and tool — the
+ *   same after a second slim;
  * - tool text output is summarised to the first meaningful line, elided at
  *   {@link SLIM_SUMMARY_ELIDE_CHARS}, or to `"N lines"` when there is no
  *   single renderable line;
@@ -42,6 +45,7 @@
  * (goals §4.4), so they must reach it whole.
  */
 
+import { mcpAppReferenceOfActivityPayload } from "./mcp-app.ts";
 import { projectSessionToolData } from "./session-tools.ts";
 
 /**
@@ -534,6 +538,14 @@ export function slimActivityPayload(payload: unknown): unknown {
     if (rawOutput) {
       projectedData.rawOutput = rawOutput;
     }
+  }
+
+  // MCP Apps (spec 2026-10-14 §3): the app a call produced, kept whole so
+  // the timeline frames it from the slim row. Checked against the call's own
+  // server and tool here, on the full row, where that identity still is.
+  const mcpApp = mcpAppReferenceOfActivityPayload(record);
+  if (mcpApp !== undefined) {
+    projectedData.mcpApp = mcpApp;
   }
 
   const next: Record<string, unknown> = { ...restamped, data: projectedData };

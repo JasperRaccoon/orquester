@@ -92,7 +92,8 @@ import {
   AGENT_CHAT_REPLAY_PAYLOAD_BUDGET_BYTES
 } from "@orquester/api/agent-chat";
 
-import type { AccountHome, HistoryImportProgress } from "@orquester/api/agent-chat";
+import type { AccountHome, HistoryImportProgress, McpAppOperation } from "@orquester/api/agent-chat";
+import { runMcpAppRequest } from "../mcp-apps.ts";
 
 import { stat } from "node:fs/promises";
 
@@ -637,6 +638,12 @@ export interface Orchestrator {
    */
   readPromptText(threadId: string, messageId: string): Promise<ThreadPromptTextResponse | null>;
   readItem(threadId: string, itemId: string): Promise<ThreadItem | null>;
+  /**
+   * `POST …/mcp-apps/:operation` (spec 2026-10-14 §3): one request of the MCP
+   * App a completed tool row of this thread carries, through the thread's
+   * live provider session (`mcp-apps.ts`). Throws `AgentChatCommandError`s.
+   */
+  mcpAppRequest(threadId: string, operation: McpAppOperation, body: unknown): Promise<unknown>;
   /**
    * `GET …/items/:itemId/output`: the streamed output of the tool call the item
    * belongs to, joined from the log; null when the item names no call.
@@ -4697,6 +4704,21 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     return replay;
   };
 
+  const mcpAppRequest = (threadId: string, operation: McpAppOperation, body: unknown): Promise<unknown> =>
+    whenReady(async () => {
+      const runtime = await loadRuntime(threadId);
+      const head = requireHead(runtime);
+      return runMcpAppRequest(
+        {
+          threadId: runtime.id,
+          adapter: options.adapters.get(head.adapter),
+          readItem: (itemId) => readItem(threadId, itemId)
+        },
+        operation,
+        body
+      );
+    });
+
   const readItem = async (threadId: string, itemId: string): Promise<ThreadItem | null> =>
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
@@ -6812,6 +6834,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     readPrompts,
     readPromptText,
     readItem,
+    mcpAppRequest,
     readToolOutput,
     readToolOutputWindow,
     readTurnDiff,

@@ -149,7 +149,7 @@ import type {
   WorkflowProblem,
   WorkflowWriteResponse
 } from "@orquester/api";
-import { agentChatRoutes, type AgentVisualUrlResponse } from "@orquester/api/agent-chat";
+import { agentChatRoutes, type AgentVisualUrlResponse, type McpAppOperation } from "@orquester/api/agent-chat";
 import { desktopVisualScheme, visualFrameSrc, type VisualFrameUrl } from "./agent-chat/visual-frame";
 import type {
   DeletePullRequestWatchResponse,
@@ -1307,6 +1307,28 @@ export class ApiClient {
       throw new Error("Pages cannot be shown on this connection.");
     }
     return { src, expiresAt };
+  }
+
+  /**
+   * One request of the MCP App a completed tool row carries (spec 2026-10-14
+   * §3): `operation` with its body, answered by the daemon through the
+   * thread's live provider session. Rejects with the daemon's own message,
+   * which is what the app is told.
+   */
+  async mcpAppRequest<T>(
+    id: string,
+    itemId: string,
+    operation: McpAppOperation,
+    body: Record<string, unknown>
+  ): Promise<T> {
+    try {
+      return await this.send<T>("POST", agentChatRoutes.mcpApp(id, itemId, operation), { body });
+    } catch (error) {
+      if (error instanceof ApiError) {
+        throw new Error(error.serverMessage ?? `The request failed (${error.status}).`);
+      }
+      throw error;
+    }
   }
 
   sendSessionInput(id: string, data: string): Promise<void> {

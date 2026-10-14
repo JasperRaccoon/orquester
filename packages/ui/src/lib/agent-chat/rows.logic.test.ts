@@ -1533,3 +1533,139 @@ describe("agent visuals — the visual row (spec 2026-10-14 §2.5)", () => {
     assert.equal(after, before, "the same row object, so the memoised frame never re-renders");
   });
 });
+
+describe("MCP Apps — the mcp-app row (spec 2026-10-14 §3)", () => {
+  const APP = "t1-1f8fad5b-d9cb-469f-a165-70867728950e-html";
+  const reference = { attachmentId: APP, server: "charts", tool: "show_chart", resourceUri: "ui://charts/view" };
+  /** The completed row of an MCP call whose app the adapter captured, per exposing provider. */
+  const completedData: Record<string, { itemType: string; data: unknown; title?: string }> = {
+    codex: {
+      itemType: "mcp_tool_call",
+      title: "charts: show_chart",
+      data: { server: "charts", tool: "show_chart", arguments: {}, result: { content: [] }, mcpApp: reference }
+    },
+    grok: {
+      itemType: "dynamic_tool_call",
+      title: "charts__show_chart",
+      data: {
+        toolUseId: "call-1",
+        rawInput: { tool_name: "charts__show_chart", tool_input: {} },
+        rawOutput: { type: "MCP", server_name: "charts", tool_name: "show_chart", output: { OkayOutput: "ok" } },
+        mcpApp: reference
+      }
+    },
+    "any provider, slimmed": { itemType: "mcp_tool_call", title: "charts: show_chart", data: { mcpApp: reference } }
+  };
+  const call = (
+    shape: { itemType: string; data: unknown; title?: string },
+    at: number,
+    options: { status?: "completed" | "failed"; id?: string } = {}
+  ) => [
+    activity("tool.started", { itemType: shape.itemType, toolUseId: "call-1", status: "inProgress" }, {
+      turnId: "t1",
+      createdAt: stamp(at)
+    }),
+    activity(
+      "tool.completed",
+      {
+        itemType: shape.itemType,
+        toolUseId: "call-1",
+        status: options.status ?? "completed",
+        ...(shape.title === undefined ? {} : { title: shape.title }),
+        data: shape.data
+      },
+      {
+        turnId: "t1",
+        createdAt: stamp(at + 0.5),
+        status: options.status ?? "completed",
+        ...(options.id === undefined ? {} : { id: options.id })
+      }
+    )
+  ];
+  const running = { isWorking: true, runningTurnId: "t1", activeTurnStartedAt: stamp(1) } as const;
+  const apps = (rows: readonly AgentChatTimelineRow[]) => rows.flatMap((row) => (row.kind === "mcp-app" ? [row] : []));
+
+  it("a completed call with a captured app is one mcp-app row in place of its tool row, named by its completed row", () => {
+    for (const [provider, shape] of Object.entries(completedData)) {
+      const rows = deriveTimelineRowsWithState(
+        baseInput(entriesFrom([message("user", "chart it", { createdAt: stamp(0) }), ...call(shape, 1, { id: "done-1" })]), running)
+      ).rows;
+      const [app, ...rest] = apps(rows);
+      assert.ok(app, `${provider}: an mcp-app row`);
+      assert.equal(rest.length, 0, provider);
+      assert.equal(app.id, "mcp-app:done-1", `${provider}: keyed by the call's row`);
+      assert.equal(app.itemId, "done-1", `${provider}: the completed row names the app`);
+      assert.deepEqual(app.mcpApp, reference, provider);
+      assert.ok(
+        !rows.some((row) => row.kind === "work" || row.kind === "work-live" || row.kind === "activity-group"),
+        `${provider}: no tool row besides it`
+      );
+    }
+  });
+
+  it("two calls of an unchanged app share its snapshot and are still two rows", () => {
+    const rows = deriveTimelineRowsWithState(
+      baseInput(
+        entriesFrom([
+          ...call(completedData.codex!, 1, { id: "done-1" }),
+          activity(
+            "tool.completed",
+            { itemType: "mcp_tool_call", toolUseId: "call-2", status: "completed", title: "charts: show_chart", data: { mcpApp: reference } },
+            { turnId: "t1", createdAt: stamp(3), status: "completed", id: "done-2" }
+          )
+        ]),
+        running
+      )
+    ).rows;
+    assert.deepEqual(
+      apps(rows).map((row) => [row.id, row.itemId]),
+      [
+        ["mcp-app:done-1", "done-1"],
+        ["mcp-app:done-2", "done-2"]
+      ]
+    );
+  });
+
+  it("another server's app on a row, or a failed call, stays an ordinary tool row", () => {
+    const foreign = deriveTimelineRowsWithState(
+      baseInput(
+        entriesFrom(
+          call(
+            {
+              itemType: "mcp_tool_call",
+              data: { server: "evil", tool: "show_chart", arguments: {}, mcpApp: reference }
+            },
+            1
+          )
+        ),
+        running
+      )
+    ).rows;
+    assert.equal(apps(foreign).length, 0);
+    const failed = deriveTimelineRowsWithState(
+      baseInput(entriesFrom(call(completedData.codex!, 1, { status: "failed" })), { expandedTurnIds: new Set(["t1"]) })
+    ).rows;
+    assert.equal(apps(failed).length, 0);
+    assert.ok(failed.some((row) => row.kind === "work"));
+  });
+
+  it("a settled turn's fold never hides its app, and an unchanged app keeps its row object", () => {
+    const items = [
+      message("user", "go", { createdAt: stamp(0) }),
+      ...call(completedData.codex!, 1),
+      message("assistant", "Here it is.", { turnId: "t1", createdAt: stamp(3) })
+    ];
+    const settled = { latestTurn: { turnId: "t1", state: "completed", startedAt: stamp(1), completedAt: stamp(4) } } as const;
+    const first = deriveTimelineRowsWithState(baseInput(entriesFrom(items), settled)).rows;
+    assert.equal(apps(first).length, 1, "the app stays");
+    const second = deriveTimelineRowsWithState(
+      baseInput(entriesFrom([...items, message("user", "thanks", { createdAt: stamp(5) })]), settled)
+    ).rows;
+    const stableFirst = computeStableRows(first, EMPTY_STABLE_ROWS);
+    const stableSecond = computeStableRows(second, stableFirst);
+    const before = stableFirst.result.find((row) => row.kind === "mcp-app");
+    const after = stableSecond.result.find((row) => row.kind === "mcp-app");
+    assert.ok(before && after);
+    assert.equal(after, before, "the same row object, so the memoised frame never re-renders");
+  });
+});

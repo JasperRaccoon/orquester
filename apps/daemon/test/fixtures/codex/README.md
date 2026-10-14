@@ -974,3 +974,24 @@ the second copy come first. Every `subAgentActivity` record is now written once 
 a child's `turn/completed` after its run's end record adds no status, and the child's last
 finished `agentMessage` (its `final_answer`, ~30 ms before the end record) is the `completed`
 end's `summary`: the agent's result, as Claude's is.
+
+## 25. MCP Apps on the wire — captured on 0.159.0 (`16-mcp-app-live.ndjson`)
+
+Captured 2026-10-14 for the agent-visuals spec's appendix A (MCP Apps), from a scratch
+`CODEX_HOME` holding only a managed account's auth file and a config naming a stub MCP Apps server
+(`apps`: one tool `show_widget` whose `_meta.ui.resourceUri` is `ui://stub/widget.html`). Redacted
+as above — `remoteControl/status/changed`'s `serverName` → `<redacted-hostname>`, every credit
+`balance` → `"0"`, `installationId` → all-zero UUID — and the scratch home is `~/codex-home`, the
+probe dir `~/tmp/mcp-apps-probe`.
+
+- With `initialize.capabilities.extensions["io.modelcontextprotocol/ui"]` declared, the model's call
+  completes as `mcpToolCall {appContext: null, mcpAppResourceUri: "ui://stub/widget.html"}` — the
+  deprecated field carries it on 0.159.0; `appContext` is for connector apps. `result._meta` is the
+  server's result `_meta`, verbatim.
+- `mcpServer/resource/read {threadId, originCallId, server, uri}` answers the contents with each
+  content's `_meta`, and `originCallId: null` for a server that applies no app scoping.
+- A host-initiated `mcpServer/tool/call` answers `{content, structuredContent, _meta}` and emits no
+  `item/*` notification (none within 5 s): an app's own tool call is never a timeline row.
+- `turn/start.additionalContext {"mcp-app:probe": {kind: "untrusted", value}}`: the value appears in
+  no live notification and in neither `thread/read {includeTurns}` nor `thread/turns/list` — no
+  `userMessage` item carries it.

@@ -29,6 +29,7 @@ import {
   commandDisplayDetail,
   compactionMarkerState,
   htmlRenderReferenceOfActivityPayload,
+  mcpAppReferenceOfActivityPayload,
   IDENTITY_CHANGED_ACTIVITY_KIND,
   isAgentOwnedActivity,
   isCompactionActivity,
@@ -380,6 +381,12 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     const visual = htmlRenderReferenceOfActivityPayload(activity.payload);
     if (visual !== undefined) {
       entry.visual = visual;
+    }
+    // MCP Apps (spec 2026-10-14 §3): the app the adapter captured for this
+    // call, only when it names the call's own server and tool.
+    const mcpApp = mcpAppReferenceOfActivityPayload(activity.payload);
+    if (mcpApp !== undefined) {
+      entry.mcpApp = mcpApp;
     }
   }
 

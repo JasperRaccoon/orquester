@@ -20,6 +20,7 @@ import { overlayManagedAccountAuth } from "./provider-auth-overlay.ts";
 import {
   AGENT_CHAT_COMMAND_NAMES,
   AGENT_CHAT_ERROR_CODES,
+  MCP_APP_OPERATIONS,
   THREAD_SEARCH_MAX_QUERY_CHARS,
   agentChatCommandPath,
   agentChatRoutes,
@@ -27,9 +28,11 @@ import {
   type AgentChatCommandName,
   type AgentChatErrorCode,
   type AgentChatErrorEnvelope,
+  type McpAppOperation,
   type ThreadSearchResponse
 } from "@orquester/api/agent-chat";
 import { agentHostRoutes } from "../agent-host/host-protocol.ts";
+import { agentHostExtraRoutes } from "../agent-host/server/extra-routes.ts";
 import { AgentHostClient, HostUnavailableError } from "./host-client.ts";
 import { VISUAL_PAGE_HEADERS, type VisualUrlSigner } from "./visual-urls.ts";
 
@@ -91,6 +94,12 @@ export interface AgentChatRouteDeps {
   visualUrls: VisualUrlSigner;
   logger?: { warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
 }
+
+/**
+ * How long an MCP App's request may wait on the host: the host bounds the
+ * provider call itself at two minutes; this lets that answer through.
+ */
+const MCP_APP_PROXY_TIMEOUT_MS = 130_000;
 
 /** The §6.2 envelope, built in one place so no route invents a shape. */
 function chatError(code: AgentChatErrorCode, message: string): AgentChatErrorEnvelope {
@@ -536,6 +545,35 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
     }
   );
 
+  // MCP Apps (spec 2026-10-14 §3): one request of the app a completed tool row
+  // carries. Forwarded with the row's id in the body; the host resolves the
+  // app from the stored row and runs the request through the thread's live
+  // provider session — the daemon never reaches the MCP server itself. A tool
+  // call may take as long as the tool does, so the wait outlasts the host's
+  // own two-minute bound on it.
+  app.post<{ Params: { id: string; itemId: string; operation: string }; Body: unknown }>(
+    pattern(agentChatRoutes.mcpApp(":id", ":itemId", ":operation" as McpAppOperation)),
+    async (request, reply) => {
+      const { id, itemId, operation } = request.params;
+      if (!deps.chatSession(id)) return reply.code(404).send(THREAD_NOT_FOUND);
+      if (!(MCP_APP_OPERATIONS as readonly string[]).includes(operation)) {
+        return reply.code(404).send(chatError("ITEM_NOT_FOUND", "No such MCP app request."));
+      }
+      if (!deps.isHostHealthy()) return reply.code(503).send(HOST_UNAVAILABLE);
+      const body = request.body !== null && typeof request.body === "object" && !Array.isArray(request.body)
+        ? (request.body as Record<string, unknown>)
+        : {};
+      return forwardJson(
+        deps,
+        reply,
+        "POST",
+        agentHostExtraRoutes.mcpApp(id, operation as McpAppOperation),
+        { ...body, itemId },
+        { timeoutMs: MCP_APP_PROXY_TIMEOUT_MS }
+      );
+    }
+  );
+
   // The intentional host stop of §3.3/§6.3: the host writes every continuation
   // marker for a running thread with a usable cursor, then drains and stops.
   // The supervisor then brings a replacement up and holds §8's deadline on it.
@@ -635,10 +673,17 @@ async function forwardJson(
      * reason alone — it predates the route (see the search route).
      */
     notFound?: () => unknown;
+    /** Overrides the host client's default bound on the answer's headers. */
+    timeoutMs?: number;
   } = {}
 ): Promise<unknown> {
   try {
-    const response = await deps.client.json<unknown>(method, path, body);
+    const response = await deps.client.json<unknown>(
+      method,
+      path,
+      body,
+      options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }
+    );
     if (response.status === 404 && options.notFound) {
       void reply.code(200);
       return options.notFound();

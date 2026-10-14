@@ -24,6 +24,8 @@ import type {
 } from "@orquester/api/agent-chat";
 
 import { randomUUID } from "node:crypto";
+import { McpAppSessionUnavailableError, type AdapterContext, type AdapterMcpTool } from "../../adapter.ts";
+import { MCP_APP_CAPTURE_TIMEOUT_MS, type McpAppReference } from "@orquester/api/agent-chat";
 
 import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
 import {
@@ -90,6 +92,26 @@ import {
 } from "./permissions.ts";
 import { XAI_EMPTY_PLAN_MARKDOWN, XAI_EXIT_PLAN_FEEDBACK, type PlanPathHost } from "./plan.ts";
 import { GrokWakes, isParentSessionId, type CliPrompt } from "./prompt-queue.ts";
+import {
+  MCP_APP_READ_CACHE_MS,
+  MCP_APP_TOOLS_CACHE_MS,
+  captureMcpApp,
+  mcpAppReferenceForCall,
+  McpAppFrameHold,
+  McpAppSessionCache,
+  type McpAppSnapshotStore
+} from "../mcp-app-capture.ts";
+import {
+  GROK_MCP_CALL_METHOD,
+  GROK_MCP_LIST_METHOD,
+  GROK_MCP_READ_RESOURCE_METHOD,
+  GROK_MCP_TOOLS_CHANGED_METHOD,
+  grokCallToolResult,
+  grokMcpAppCallOf,
+  grokMcpTools,
+  grokResourceContents,
+  withGrokMcpApp
+} from "./mcp-apps.ts";
 import { answersToXaiResponse } from "./questions.ts";
 import { parsePromptResultUsage, parseXaiUsage } from "./usage.ts";
 import { agentVersionOf, contextWindowFromModelState, modelStateOf, promptIdOf } from "./xai-meta.ts";
@@ -177,7 +199,19 @@ interface GrokSessionOptions {
    * present only when a toolkit is registered. `session-tools.ts`.
    */
   sessionTools?: GrokSessionToolsLaunch;
+  /**
+   * Stores an MCP App's snapshot as a thread attachment (spec 2026-10-14 §3,
+   * `AdapterContext.storeAttachment`). Without it no app is captured.
+   */
+  storeAttachment?: AdapterContext["storeAttachment"];
+  /** Whether a remembered snapshot is still the thread's (`AdapterContext.resolveAttachmentPath`). */
+  resolveAttachmentPath?: AdapterContext["resolveAttachmentPath"];
+  /** The adapter's stored MCP App snapshots, so an unchanged document is stored once per thread. */
+  mcpAppSnapshots?: McpAppSnapshotStore;
 }
+
+/** An app's tool call or resource read: as long as a tool may take, never unbounded. */
+const MCP_APP_REQUEST_MS = 120_000;
 
 /** Why a session ended without the user: what the closing row of work left running names. */
 type GrokSessionEndCause = "restart" | "host";
@@ -403,9 +437,25 @@ export class GrokSession {
   /** A serial queue: one mutating command at a time per thread (§3.1). */
   private lock: Promise<unknown> = Promise.resolve();
 
+  /**
+   * MCP Apps (spec 2026-10-14 §3): while an app's resource is read for a
+   * completed call, every later frame — and the prompt's own answer — waits
+   * here, so the call's row, with its app, keeps its place ahead of the reply
+   * and the turn's end. Outside {@link wakes}: a frame it replays goes through
+   * the wake gate as it would have.
+   */
+  private readonly frames: McpAppFrameHold;
+  /** An app's snapshot by server + URI, reused for a while without pausing the stream again. */
+  private readonly appReads = new McpAppSessionCache<McpAppReference>(MCP_APP_READ_CACHE_MS);
+  /** The CLI's MCP servers and their tools for an app's requests; dropped when the CLI says they changed. */
+  private readonly appTools = new McpAppSessionCache<unknown>(MCP_APP_TOOLS_CACHE_MS);
+
   constructor(options: GrokSessionOptions) {
     this.options = options;
     this.threadId = options.threadId;
+    this.frames = new McpAppFrameHold((error) => {
+      options.logger.error("grok: a held frame failed", error);
+    });
     this.createdAt = options.stamp().createdAt;
     this.updatedAt = this.createdAt;
     this.normalizer = new GrokNormalizer(
@@ -464,6 +514,48 @@ export class GrokSession {
 
   get slashCommands(): ReadonlyArray<{ name: string; description?: string; input?: { hint: string } }> {
     return this.normalizer.slashCommands;
+  }
+
+  // -------------------------------------------------------------- MCP Apps
+
+  /**
+   * An app's requests (spec 2026-10-14 §3), through the CLI's own MCP client
+   * (`mcp-apps.ts` has the evidence for each method). Refused once the
+   * session stopped or before it opened: an app never starts one.
+   */
+  async mcpListTools(server: string): Promise<AdapterMcpTool[]> {
+    // One listing answers every server; `tool-info` then `call-tool` read it back to back.
+    let response = this.appTools.get("list");
+    if (response === undefined) {
+      response = await this.appRequest(GROK_MCP_LIST_METHOD, {}, AGENT_HOST_DEADLINES.probeMs);
+      this.appTools.set("list", response);
+    }
+    return grokMcpTools(response, server);
+  }
+
+  async mcpCallTool(input: { server: string; tool: string; arguments: Record<string, unknown> }) {
+    const response = await this.appRequest(
+      GROK_MCP_CALL_METHOD,
+      { server: input.server, tool: input.tool, arguments: input.arguments },
+      MCP_APP_REQUEST_MS
+    );
+    return grokCallToolResult(response);
+  }
+
+  async mcpReadResource(input: { server: string; uri: string }): Promise<{ contents: unknown[] }> {
+    const response = await this.appRequest(
+      GROK_MCP_READ_RESOURCE_METHOD,
+      { server: input.server, uri: input.uri },
+      MCP_APP_REQUEST_MS
+    );
+    return { contents: grokResourceContents(response) };
+  }
+
+  private appRequest(method: string, params: Record<string, unknown>, timeoutMs: number): Promise<unknown> {
+    if (this.stopped || !this.announced || this.connection === null) {
+      return Promise.reject(new McpAppSessionUnavailableError());
+    }
+    return this.peer().request(method, { sessionId: this.acpSessionId, ...params }, { timeoutMs });
   }
 
   get isStopped(): boolean {
@@ -677,8 +769,21 @@ export class GrokSession {
 
   private registerHandlers(connection: AcpConnection): void {
     const peer = connection.peer;
+    // Every frame that writes rows goes through the MCP App hold first
+    // ({@link frames}): while an app's resource is read it waits, in order.
+    const held =
+      <A extends unknown[]>(handler: (...args: A) => void) =>
+      (...args: A): void => {
+        if (!this.frames.offer(() => handler(...args))) {
+          handler(...args);
+        }
+      };
+    const heldRequest =
+      <A extends unknown[], R>(handler: (...args: A) => Promise<R>) =>
+      (...args: A): Promise<R> =>
+        this.frames.offerAsync(() => handler(...args));
 
-    peer.onNotification("session/update", (params) => this.onSessionUpdate(params as SessionNotification));
+    peer.onNotification("session/update", (params) => this.receiveSessionUpdate(params as SessionNotification));
 
     // BOTH private channels. An adapter that registers only the live one
     // silently loses every replayed row on `session/load`.
@@ -686,7 +791,10 @@ export class GrokSession {
       XAI_EXTENSION_NOTIFICATIONS.session_notification,
       XAI_EXTENSION_NOTIFICATIONS.session_update
     ]) {
-      peer.registerExtensionNotification(method, (params) => this.onPrivateChannel(method, params));
+      peer.registerExtensionNotification(
+        method,
+        held((params) => this.onPrivateChannel(method, params))
+      );
     }
 
     // Background work reported by methods of their own: a task started, a
@@ -701,16 +809,25 @@ export class GrokSession {
       XAI_EXTENSION_NOTIFICATIONS.scheduled_task_fired,
       XAI_EXTENSION_NOTIFICATIONS.scheduled_task_deleted
     ]) {
-      peer.registerExtensionNotification(method, (params) => this.onBackgroundFrame(method, params));
+      peer.registerExtensionNotification(
+        method,
+        held((params) => this.onBackgroundFrame(method, params))
+      );
     }
 
-    peer.registerExtensionNotification(XAI_EXTENSION_NOTIFICATIONS.prompt_complete, (params) => {
-      this.onPromptComplete(params as XaiPromptCompleteParams);
-    });
+    peer.registerExtensionNotification(
+      XAI_EXTENSION_NOTIFICATIONS.prompt_complete,
+      held((params) => {
+        this.onPromptComplete(params as XaiPromptCompleteParams);
+      })
+    );
 
-    peer.registerExtensionNotification(XAI_EXTENSION_NOTIFICATIONS.queue_changed, (params) => {
-      this.onQueueChanged(params);
-    });
+    peer.registerExtensionNotification(
+      XAI_EXTENSION_NOTIFICATIONS.queue_changed,
+      held((params) => {
+        this.onQueueChanged(params);
+      })
+    );
 
     // Product payloads. Registered so they do not raise an unknown-method
     // warning on every session, and deliberately never surfaced.
@@ -730,8 +847,14 @@ export class GrokSession {
     ]) {
       peer.registerExtensionNotification(method, () => {
         this.recordHelpersWhileOpening();
+        this.appTools.clear();
       });
     }
+    // A server's tool catalog changed (CLI 1.0.46; `mcp-apps.ts`): never
+    // surfaced, but an app's next request lists the tools afresh.
+    peer.registerExtensionNotification(GROK_MCP_TOOLS_CHANGED_METHOD, () => {
+      this.appTools.clear();
+    });
 
     peer.registerExtensionNotification(XAI_EXTENSION_NOTIFICATIONS.models_update, (params) => {
       const state = params as { currentModelId?: unknown };
@@ -742,8 +865,9 @@ export class GrokSession {
       }
     });
 
-    peer.registerExtensionNotification(XAI_EXTENSION_NOTIFICATIONS.mcp_server_status, (params) => {
+    peer.registerExtensionNotification(XAI_EXTENSION_NOTIFICATIONS.mcp_server_status, held((params) => {
       this.recordHelpersWhileOpening();
+      this.appTools.clear();
       const record = params as { status?: unknown; name?: unknown; sessionId?: unknown };
       const status = record.status;
       // One warning per server and failure until it reports ready again: the
@@ -776,18 +900,21 @@ export class GrokSession {
           })
         );
       }
-    });
+    }));
 
-    peer.onRequest("session/request_permission", async (params) =>
-      await this.onPermissionRequest(params as RequestPermissionRequest)
+    peer.onRequest(
+      "session/request_permission",
+      heldRequest(async (params) => await this.onPermissionRequest(params as RequestPermissionRequest))
     );
 
-    peer.registerExtension(XAI_EXTENSION_REQUESTS.ask_user_question, async (params) =>
-      await this.onAskUserQuestion(params as XaiAskUserQuestionParams)
+    peer.registerExtension(
+      XAI_EXTENSION_REQUESTS.ask_user_question,
+      heldRequest(async (params) => await this.onAskUserQuestion(params as XaiAskUserQuestionParams))
     );
 
-    peer.registerExtension(XAI_EXTENSION_REQUESTS.exit_plan_mode, async (params) =>
-      await this.onExitPlanMode(params as XaiExitPlanModeParams)
+    peer.registerExtension(
+      XAI_EXTENSION_REQUESTS.exit_plan_mode,
+      heldRequest(async (params) => await this.onExitPlanMode(params as XaiExitPlanModeParams))
     );
   }
 
@@ -1101,8 +1228,15 @@ export class GrokSession {
   }
 
   private trackPrompt(turnId: string, epoch: number, promise: Promise<PromptResponse>): void {
+    // The prompt's answer settles the turn: it waits behind an MCP App's
+    // capture like any frame, so the call's row is written first.
+    const afterHeld = (run: () => void): void => {
+      if (!this.frames.offer(run)) {
+        run();
+      }
+    };
     void promise.then(
-      (response) => {
+      (response) => afterHeld(() => {
         void this.serialize(async () => {
           await Promise.resolve();
           // The RPC result is the RICHEST source (README 18): it is the only
@@ -1126,8 +1260,8 @@ export class GrokSession {
               : { contextTokens: fromResult.contextTokens })
           });
         });
-      },
-      (error: unknown) => {
+      }),
+      (error: unknown) => afterHeld(() => {
         void this.serialize(async () => {
           await Promise.resolve();
           if (this.activeTurn?.interrupted === true) {
@@ -1157,7 +1291,7 @@ export class GrokSession {
             })
           );
         });
-      }
+      })
     );
   }
 
@@ -1188,9 +1322,84 @@ export class GrokSession {
     return isParentSessionId(this.acpSessionId, sessionId);
   }
 
+  /**
+   * One `session/update`, through the MCP App hold. A completed MCP call of
+   * the parent session whose tool names a `ui://` resource is read first
+   * (bounded), and its completion written with the app; every frame behind
+   * it waits meanwhile ({@link frames}).
+   */
+  private receiveSessionUpdate(notification: SessionNotification): void {
+    if (this.frames.offer(() => this.receiveSessionUpdate(notification))) {
+      return;
+    }
+    const app =
+      this.announced &&
+      this.frames.canCapture &&
+      this.options.storeAttachment !== undefined &&
+      this.isParentSession(notification.sessionId)
+        ? grokMcpAppCallOf(notification)
+        : null;
+    if (app === null) {
+      this.onSessionUpdate(notification);
+      return;
+    }
+    // Read moments ago in this session: the same snapshot, without a pause.
+    const readKey = `${app.server}\u0000${app.resourceUri}`;
+    const recent = this.appReads.get(readKey);
+    if (recent !== undefined) {
+      this.onSessionUpdate(notification, withGrokMcpApp(app.toolCallId, mcpAppReferenceForCall(recent, app)));
+      return;
+    }
+    const sessionId = this.acpSessionId;
+    this.frames.hold(
+      (signal) =>
+        captureMcpApp({
+          context: {
+            storeAttachment: this.options.storeAttachment,
+            logger: this.captureLogger(),
+            ...(this.options.resolveAttachmentPath === undefined
+              ? {}
+              : { resolveAttachmentPath: this.options.resolveAttachmentPath })
+          },
+          ...(this.options.mcpAppSnapshots === undefined ? {} : { snapshots: this.options.mcpAppSnapshots }),
+          threadId: this.threadId,
+          server: app.server,
+          tool: app.tool,
+          resourceUri: app.resourceUri,
+          signal,
+          read: async () =>
+            grokResourceContents(
+              await this.peer().request(
+                GROK_MCP_READ_RESOURCE_METHOD,
+                { sessionId, server: app.server, uri: app.resourceUri },
+                // The capture's own deadline bounds the read; the peer's is no shorter.
+                { timeoutMs: MCP_APP_CAPTURE_TIMEOUT_MS }
+              )
+            )
+        }),
+      (mcpApp) => {
+        if (mcpApp !== undefined) {
+          this.appReads.set(readKey, mcpApp);
+        }
+        this.onSessionUpdate(notification, mcpApp === undefined ? undefined : withGrokMcpApp(app.toolCallId, mcpApp));
+      }
+    );
+  }
+
+  /** The capture's logger: the session's own, with `info` folded into `debug`. */
+  private captureLogger(): AdapterContext["logger"] {
+    const logger = this.options.logger;
+    return {
+      debug: (message, detail) => logger.debug(message, detail),
+      info: (message, detail) => logger.debug(message, detail),
+      warn: (message, detail) => logger.warn(message, detail),
+      error: (message, detail) => logger.error(message, detail)
+    };
+  }
+
   /** One `session/update`, through the wake gate ({@link GrokWakes.offer}). */
-  private onSessionUpdate(notification: SessionNotification): void {
-    if (this.wakes.offer(notification, () => this.onSessionUpdate(notification))) {
+  private onSessionUpdate(notification: SessionNotification, patch?: (event: RuntimeEvent) => RuntimeEvent): void {
+    if (this.wakes.offer(notification, () => this.onSessionUpdate(notification, patch))) {
       return;
     }
     // A subagent's child session streams under its own id (fixture 15): its
@@ -1198,7 +1407,8 @@ export class GrokSession {
     if (this.isParentSession(notification.sessionId)) {
       this.notePromptId(promptIdOf(notification._meta));
     }
-    this.emitAll(this.normalizer.handleSessionUpdate(notification));
+    const events = this.normalizer.handleSessionUpdate(notification);
+    this.emitAll(patch === undefined ? events : events.map(patch));
   }
 
   /** One private-channel frame, through the gate; the live one may settle a CLI prompt's turn. */
@@ -1805,6 +2015,9 @@ export class GrokSession {
    * parked request is failed — all BEFORE `session.exited`.
    */
   private settleEverythingForExit(reason: ChildExitReason, stderrTail: string): void {
+    // A capture in flight lets go — its call completes without its app — and
+    // every frame that waited for it is handled now, in order.
+    this.frames.close();
     // What the CLI streamed for its own prompts still waiting for a turn is
     // kept: it joins the open turn, in order, before that turn settles.
     this.wakes.drop("the agent process exited");
@@ -2049,7 +2262,9 @@ export class GrokSession {
       await Promise.all([this.stopLeftovers(), endedByUser ? this.stopTaskLeftovers() : this.persistTaskSessions()]);
       return;
     }
-    // Kept, as at an exit: held frames join the open turn before it settles.
+    // Kept, as at an exit: held frames join the open turn before it settles —
+    // the MCP App hold's first, then the wake gate's.
+    this.frames.close();
     this.wakes.drop("the session stops");
     this.stopped = true;
     this.hostInitiatedStop = true;
