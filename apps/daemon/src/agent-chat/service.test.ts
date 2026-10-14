@@ -29,6 +29,14 @@ import { AgentChatService, forkIdFor } from "./service.ts";
 import { ChatSessionError, ChatSessionManager } from "./chat-sessions.ts";
 import { HostUnavailableError } from "./host-client.ts";
 import { UploadTooLargeError } from "../upload-stream.ts";
+import {
+  HTML_RENDER_COLUMN_WIDTH,
+  HTML_RENDER_MEASURE_FONTS,
+  HTML_RENDER_MEASURE_WIDTHS,
+  htmlRenderStockTheme,
+  htmlRenderThemeFragment
+} from "@orquester/api/agent-chat";
+import { HtmlPreviewError, type HtmlPageRenderer } from "../html-preview/index.ts";
 
 // §6.1 thread creation: the tab record first, then the host thread, and the
 // launch environment a chat thread gets must be EXACTLY what a terminal launch
@@ -145,6 +153,8 @@ async function makeFixture(
     /** Set before boot adoption, which is the first thing to read `/health`. */
     health?: Record<string, unknown>;
     holdAnswer?: { status: number; body: unknown };
+    /** The agent pages' browser (design 2026-10-14 §2.1); none by default. */
+    htmlPreview?: HtmlPageRenderer;
   } = {}
 ): Promise<Fixture> {
   const appdir = await mkdtemp(join(tmpdir(), "orq-chat-service-"));
@@ -381,7 +391,8 @@ async function makeFixture(
       const resolvedPath = resolve(projectPath);
       return resolvedPath === root || resolvedPath.startsWith(root + sep) ? resolvedPath : null;
     },
-    sendAttachment: async (reply) => reply
+    sendAttachment: async (reply) => reply,
+    ...(options.htmlPreview ? { htmlPreview: options.htmlPreview } : {})
   });
   // `adopt: false` is a daemon that has not found its host yet: no token, so
   // every host call is refused before anything is sent.
@@ -1761,4 +1772,89 @@ test("after a restart, a keyed fork's recorded request tells a repeat from a reu
   const tab = reread.sessions.find((record) => record.id === forkIdFor(parent.id, "t"));
   assert.equal(typeof tab?.chat?.forkFingerprint, "string");
   await f.cleanup();
+});
+
+const SHOT = { data: "iVBORw0KGgo=", mimeType: "image/png" as const, width: 728, height: 120 };
+
+/** A page renderer that records what it is asked and answers what it is told. */
+function fakeRenderer(answers: { heights?: Array<[number, number]> } = {}) {
+  const calls: { measure: Array<{ html: string; widths: readonly number[]; urlFragment: string; signal?: AbortSignal }>; capture: Array<{ html: string; width: number; urlFragment: string }> } = {
+    measure: [],
+    capture: []
+  };
+  const renderer: HtmlPageRenderer = {
+    available: () => true,
+    measure: async (input) => {
+      calls.measure.push(input);
+      return answers.heights;
+    },
+    capture: async (input) => {
+      // As the real browser: the page is made only once it has its slot.
+      const html = typeof input.html === "string" ? input.html : await input.html();
+      calls.capture.push({ ...input, html });
+      return { screenshot: SHOT, contentHeight: 120, capturedHeight: 120, consoleMessages: [{ level: "log", text: "hi" }] };
+    }
+  };
+  return { renderer, calls };
+}
+
+test("publishHtmlRender measures the PREPARED page at every client width and publishes the heights", async (t) => {
+  const { renderer, calls } = fakeRenderer({ heights: [[1144, 200], [320, 480]] });
+  const f = await makeFixture(CLAUDE, { env: {} }, { htmlPreview: renderer });
+  t.after(() => f.cleanup());
+  const id = "thread-1-0f8fad5b-d9cb-469f-a165-70867728950e-html";
+  f.refuseUploadAfterBody = { status: 200, body: { type: "file", id, name: "Chart.html", sizeBytes: 1 } };
+  const controller = new AbortController();
+  const reference = await f.service.publishHtmlRender({
+    threadId: "thread-1",
+    html: "<p>chart</p>",
+    title: "Chart",
+    height: 300,
+    signal: controller.signal
+  });
+  // Ascending, through the shared reader.
+  assert.deepEqual(reference, { attachmentId: id, title: "Chart", height: 300, heights: [[320, 480], [1144, 200]] });
+  assert.equal(calls.measure.length, 1);
+  const measured = calls.measure[0]!;
+  assert.ok(measured.html.includes('<style id="orq-theme">') && measured.html.endsWith("<p>chart</p>"), "the page as stored");
+  assert.deepEqual(measured.widths, HTML_RENDER_MEASURE_WIDTHS);
+  assert.ok(measured.urlFragment.startsWith("#orq-theme="));
+  assert.equal(measured.signal, controller.signal);
+});
+
+test("publishHtmlRender publishes without heights when nothing could measure", async (t) => {
+  const { renderer } = fakeRenderer({});
+  const f = await makeFixture(CLAUDE, { env: {} }, { htmlPreview: renderer });
+  t.after(() => f.cleanup());
+  const id = "thread-1-0f8fad5b-d9cb-469f-a165-70867728950e-html";
+  f.refuseUploadAfterBody = { status: 200, body: { type: "file", id, name: "Chart.html", sizeBytes: 1 } };
+  const reference = await f.service.publishHtmlRender({ threadId: "thread-1", html: "<p>x</p>", title: "Chart", height: 300 });
+  assert.deepEqual(reference, { attachmentId: id, title: "Chart", height: 300 });
+});
+
+test("previewHtmlRender screenshots the bootstrapped page with the stock theme of the appearance asked", async (t) => {
+  const { renderer, calls } = fakeRenderer();
+  const f = await makeFixture(CLAUDE, { env: {} }, { htmlPreview: renderer });
+  t.after(() => f.cleanup());
+  const preview = await f.service.previewHtmlRender({ threadId: "thread-1", html: "<p>x</p>", appearance: "light" });
+  assert.deepEqual(preview, {
+    screenshot: SHOT,
+    width: HTML_RENDER_COLUMN_WIDTH,
+    contentHeight: 120,
+    capturedHeight: 120,
+    consoleMessages: [{ level: "log", text: "hi" }]
+  });
+  const captured = calls.capture[0]!;
+  assert.ok(captured.html.includes('<style id="orq-theme">'));
+  assert.equal(captured.width, HTML_RENDER_COLUMN_WIDTH);
+  assert.equal(captured.urlFragment, htmlRenderThemeFragment(htmlRenderStockTheme("light", HTML_RENDER_MEASURE_FONTS)));
+});
+
+test("previewHtmlRender without a page browser says so", async (t) => {
+  const f = await makeFixture(CLAUDE, { env: {} });
+  t.after(() => f.cleanup());
+  await assert.rejects(
+    f.service.previewHtmlRender({ threadId: "thread-1", html: "<p>x</p>" }),
+    (error: unknown) => error instanceof HtmlPreviewError && error.code === "browser-unavailable"
+  );
 });

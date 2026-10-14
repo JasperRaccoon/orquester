@@ -33,7 +33,7 @@ import {
   type Turn,
   type UserInputQuestion
 } from "@orquester/api/agent-chat";
-import type { DaemonApi, DaemonMethod, DaemonResponse } from "../../../mcp/daemon-api.ts";
+import type { DaemonApi, DaemonMethod, DaemonOutcome, DaemonResponse, HtmlPreviewRequest, HtmlRenderPublishRequest } from "../../../mcp/daemon-api.ts";
 import type { FakeClock } from "./fake-clock.ts";
 
 // ---------------------------------------------------------------------------
@@ -226,6 +226,14 @@ export class FakeChatHost implements DaemonApi {
 
   async uploadAttachment(): Promise<{ status: number; value: unknown }> {
     return { status: 503, value: { code: "HOST_UNAVAILABLE", message: "uploads are not simulated" } };
+  }
+
+  async publishHtmlRender(_request: HtmlRenderPublishRequest): Promise<DaemonOutcome<never>> {
+    return { ok: false, code: "UNAVAILABLE", message: "pages are not simulated" };
+  }
+
+  async previewHtmlRender(_request: HtmlPreviewRequest): Promise<DaemonOutcome<never>> {
+    return { ok: false, code: "UNAVAILABLE", message: "pages are not simulated" };
   }
 
   async request(method: DaemonMethod, path: string, opts?: { query?: Record<string, string>; body?: unknown }): Promise<DaemonResponse> {

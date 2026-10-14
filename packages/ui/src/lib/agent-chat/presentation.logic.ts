@@ -491,6 +491,10 @@ export function shortenPath(path: string, workspaceRoot?: string): string {
  * none still reads "Orquester: <its name in words>", never its raw arguments.
  */
 export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
+  // Visual replies (§2.1). A published page shows as its `visual` row; this
+  // label is the row while it runs or when it failed.
+  html_preview: "Previewed HTML",
+  html_render: "Rendered HTML",
   // Scheduling (design 2026-10-14 §5).
   schedule_task: "Scheduled a task",
   list_scheduled_tasks: "Listed scheduled tasks",

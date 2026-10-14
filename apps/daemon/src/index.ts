@@ -163,6 +163,7 @@ import { ParquetRequestError, readParquetWindow } from "./parquet";
 import { resolveZipTool, spawnDirZip } from "./zip";
 import { FsSearchError, listProjectFiles, searchProjectFiles } from "./search";
 import { InjectDaemonApi } from "./mcp/daemon-api.ts";
+import { HtmlPreviewBrowser } from "./html-preview/index.ts";
 import { FsTools } from "./mcp/fs-tools.ts";
 import { registerMcp } from "./mcp/server.ts";
 import { sessionToolRegistry } from "./session-tools/index.ts";
@@ -534,6 +535,13 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const push = new PushService(resolved.pushConfigFile, console);
   const broadcaster = new Broadcaster();
 
+  // Chromium resolves through the registry's probed browser entries; no
+  // bundled download. Only CDP-speaking (Chromium-family) browsers can drive
+  // puppeteer-core — see CHROMIUM_FAMILY_IDS. The browser tabs and the agent
+  // pages' preview browser (each a process of its own) both launch it.
+  const resolveChromium = (): string | undefined =>
+    registry.list().browsers.find((b) => CHROMIUM_FAMILY_IDS.has(b.id) && b.enabled && b.resolvedBin)?.resolvedBin;
+
   // The supervised agent host (chat spec §3.1). `init()` runs after
   // `sessions.reattach()`, so the chat tab records are already loaded.
   const agentChatTmux = tmuxAvailable() && tmuxVersionOk() ? tmux : null;
@@ -550,6 +558,12 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     push,
     registryEntry: (refId) => registry.get(refId),
     resolveLaunchEnv: (entry, ctx) => resolveAgentLaunchEnv(entry, ctx),
+    // Agent pages (design 2026-10-14 §2.1): previews and publish-time heights,
+    // in a browser of their own per call, never the browser tabs' process.
+    htmlPreview: new HtmlPreviewBrowser({
+      resolveChromium,
+      log: (message, error) => console.warn(message, error ?? "")
+    }),
     // §7.7: "sign in again" only when NO account of the family is valid — the
     // host probes under the daemon user's own login, which may well be stale
     // while every managed account is fine.
@@ -1086,14 +1100,11 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     summarize: (workflow) => workflowDaemon.summarize(workflow)
   });
 
-  // Server-side browser tabs (Design Mode). Chromium resolves through the
-  // registry's probed browser entries; no bundled download. Only CDP-speaking
-  // (Chromium-family) browsers can drive puppeteer-core — see CHROMIUM_FAMILY_IDS.
+  // Server-side browser tabs (Design Mode), on `resolveChromium` (above).
   const browsers = new BrowserManager({
     indexFile: resolved.browsersIndexFile,
     profilesDir: resolved.browserProfilesDir,
-    resolveChromium: () =>
-      registry.list().browsers.find((b) => CHROMIUM_FAMILY_IDS.has(b.id) && b.enabled && b.resolvedBin)?.resolvedBin
+    resolveChromium
   });
   await browsers.load();
   browsers.lifecycle.on("created", (b) => broadcaster.publish("browser", "browser.created", b));

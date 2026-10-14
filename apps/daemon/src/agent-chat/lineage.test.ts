@@ -115,6 +115,12 @@ function fakeWorld() {
     async uploadAttachment() {
       return { status: 503, value: null };
     },
+    async publishHtmlRender() {
+      return { ok: false, code: "UNAVAILABLE", message: "no pages in tests" };
+    },
+    async previewHtmlRender() {
+      return { ok: false, code: "UNAVAILABLE", message: "no pages in tests" };
+    },
     subscribe(listener) {
       listeners.add(listener);
       return () => listeners.delete(listener);

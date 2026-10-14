@@ -44,6 +44,8 @@ function hostApi(host: TestHost): DaemonApi {
       return wire(404, { error: { code: "NOT_FOUND", message: `${method} ${path}` } });
     },
     async uploadAttachment() { throw new Error("not a route these tests read"); },
+    async publishHtmlRender() { throw new Error("not a route these tests read"); },
+    async previewHtmlRender() { throw new Error("not a route these tests read"); },
     subscribe: () => () => {}
   };
 }

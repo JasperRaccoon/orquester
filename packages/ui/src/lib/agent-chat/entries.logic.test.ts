@@ -680,6 +680,25 @@ describe("session tools (design 2026-10-14 §1.5)", () => {
     }
   });
 
+  it("labels the visual-replies tools in words: a preview, and a render while it runs or when it failed", () => {
+    for (const [name, label, status] of [
+      ["html_preview", "Previewed HTML", "completed"],
+      ["html_render", "Rendered HTML", "failed"]
+    ] as const) {
+      const entry = workLogEntryFromActivity(
+        activity("tool.completed", {
+          itemType: "mcp_tool_call",
+          status,
+          title: "MCP tool call",
+          detail: `mcp__orquester__${name}: {"html":"<!doctype html>…"}`,
+          data: { toolName: `mcp__orquester__${name}`, sessionTool: { name } }
+        })
+      );
+      assert.equal(entry.sessionTool, name);
+      assert.equal(workEntryDisplayLabel(entry), label);
+    }
+  });
+
   it("labels the scheduling tools in words, never their arguments", () => {
     const entry = workLogEntryFromActivity(
       activity("tool.completed", {

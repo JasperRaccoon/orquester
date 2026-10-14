@@ -51,6 +51,7 @@ import type { FastifyReply } from "fastify";
 import type { AgentChatRouteDeps } from "./proxy-routes.ts";
 import type { HtmlRenderReference } from "@orquester/api/agent-chat";
 import { publishHtmlRender, type PublishHtmlRenderInput } from "./html-render-publish.ts";
+import { HtmlPreviewError, measureHtmlPage, previewHtmlPage, type HtmlPageRenderer, type HtmlPreview, type HtmlPreviewInput } from "../html-preview/index.ts";
 import { createVisualUrlSigner, type VisualUrlSigner } from "./visual-urls.ts";
 import { AgentChatSummaryService, type SummaryBroadcaster, type SummaryPush, type ThreadUsageReading } from "./summary.ts";
 import {
@@ -163,6 +164,12 @@ export interface AgentChatServiceOptions {
    * the other download routes.
    */
   sendAttachment(reply: FastifyReply, path: string): Promise<unknown>;
+  /**
+   * Headless Chromium for agent pages (design 2026-10-14 §2.1, §2.2):
+   * `html_preview` screenshots and the heights `html_render` publishes with.
+   * Absent: previews are unavailable and pages publish without heights.
+   */
+  htmlPreview?: HtmlPageRenderer;
   /** Managed accounts + family defaults, for the §7.7 auth overlay (see `provider-auth-overlay.ts`). */
   listManagedAccounts?(): { accounts: AgentAccount[]; defaults?: Partial<Record<AgentAccount["agent"], string | null>> };
   logger?: {
@@ -1451,11 +1458,15 @@ export class AgentChatService {
    * Publish an agent's HTML page into its thread (spec 2026-10-14 §2.1,
    * §2.2): the `orquester` server's `html_render` handler calls this. The
    * page is prepared here (bootstrap, local images inlined from inside the
-   * thread's project only) and stored through the host's attachment upload,
-   * like any chat attachment; the answer is the reference the tool returns.
-   * Refusals throw `HtmlRenderPublishError` with an agent-facing message.
+   * thread's project only), measured at every client width when a browser is
+   * there (`htmlPreview`; never waited for past its budget), and stored
+   * through the host's attachment upload, like any chat attachment; the
+   * answer is the reference the tool returns. Refusals throw
+   * `HtmlRenderPublishError` with an agent-facing message.
    */
-  async publishHtmlRender(input: PublishHtmlRenderInput): Promise<HtmlRenderReference> {
+  async publishHtmlRender(input: Omit<PublishHtmlRenderInput, "measure">): Promise<HtmlRenderReference> {
+    const { signal, ...page } = input;
+    const browser = this.opts.htmlPreview;
     return publishHtmlRender(
       {
         storeAttachment: async (threadId, fileName, bytes) => {
@@ -1471,13 +1482,43 @@ export class AgentChatService {
           }
           return id;
         },
-        sandboxRoot: async (threadId) => {
-          const projectPath = this.chat.get(threadId)?.projectPath;
-          return projectPath ? this.opts.resolveTrustedProjectDir(projectPath) : null;
-        }
+        sandboxRoot: (threadId) => this.htmlRenderSandboxRoot(threadId)
       },
-      input
+      {
+        ...page,
+        ...(signal ? { signal } : {}),
+        ...(browser && page.heights === undefined
+          ? { measure: (prepared: string) => measureHtmlPage(browser, prepared, signal) }
+          : {})
+      }
     );
+  }
+
+  /**
+   * Screenshot an agent's page as a reader would see it (`html_preview`,
+   * spec 2026-10-14 §2.1), local images inlined from the thread's project
+   * only. Throws `HtmlPreviewError` (no browser, timeout, cancelled) or
+   * `HtmlRenderPublishError` (an image or the page too large), both with
+   * agent-facing messages.
+   */
+  async previewHtmlRender(
+    input: Omit<HtmlPreviewInput, "sandboxRoot"> & { threadId: string }
+  ): Promise<HtmlPreview> {
+    const browser = this.opts.htmlPreview;
+    if (!browser) {
+      throw new HtmlPreviewError("browser-unavailable", "This Orquester cannot render pages.");
+    }
+    const { threadId, ...rest } = input;
+    return previewHtmlPage(browser, { ...rest, sandboxRoot: await this.htmlRenderSandboxRoot(threadId) });
+  }
+
+  /**
+   * The directory a thread's page may inline local images from: its
+   * project, confined to the workspaces root and realpath'd, or null.
+   */
+  private async htmlRenderSandboxRoot(threadId: string): Promise<string | null> {
+    const projectPath = this.chat.get(threadId)?.projectPath;
+    return projectPath ? this.opts.resolveTrustedProjectDir(projectPath) : null;
   }
 
   /**

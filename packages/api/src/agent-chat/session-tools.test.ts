@@ -7,7 +7,11 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  boundSessionToolData,
+  dropBase64Runs,
   isSessionToolsServerName,
+  SESSION_TOOL_BASE64_RUN_MIN_CHARS,
+  SESSION_TOOL_PERSISTED_STRING_MAX_BYTES,
   parseSessionToolName,
   projectSessionToolData,
   sessionToolMarkedData,
@@ -215,4 +219,163 @@ test("a marked row keeps data.sessionTool through slimming; an unmarked MCP row 
     };
     assert.equal(other.data.sessionTool, undefined, "no marker, no session tool");
   }
+});
+
+// ---------------------------------------------------------------------------
+// What a session tool's row persists (an html_preview screenshot must not)
+// ---------------------------------------------------------------------------
+
+const PNG_BASE64 = "iVBORw0KGgo".padEnd(400_000, "A");
+const PREVIEW_JSON = JSON.stringify({ width: 728, contentHeight: 300, capturedHeight: 300, consoleMessages: [] });
+
+test("image bytes leave every provider's recorded result; the rest stays", () => {
+  const cases: Array<[string, Record<string, unknown>]> = [
+    // Codex: the MCP CallToolResult as the server answered it.
+    [
+      "codex",
+      {
+        server: "orquester",
+        tool: "html_preview",
+        arguments: { html: "<p>x</p>" },
+        result: {
+          content: [{ type: "image", data: PNG_BASE64, mimeType: "image/png" }, { type: "text", text: PREVIEW_JSON }],
+          structuredContent: JSON.parse(PREVIEW_JSON)
+        }
+      }
+    ],
+    // Claude: the CLI's tool_result block, the image as a base64 source.
+    [
+      "claude",
+      {
+        toolName: "mcp__orquester__html_preview",
+        input: { html: "<p>x</p>" },
+        result: {
+          type: "tool_result",
+          tool_use_id: "toolu_1",
+          content: [
+            { type: "image", source: { type: "base64", media_type: "image/png", data: PNG_BASE64 } },
+            { type: "text", text: PREVIEW_JSON }
+          ]
+        }
+      }
+    ],
+    // OpenCode: images become data-URL attachments on the part's state.
+    [
+      "opencode",
+      {
+        tool: "orquester-0123456789abcdef_html_preview",
+        state: {
+          status: "completed",
+          input: { html: "<p>x</p>" },
+          output: PREVIEW_JSON,
+          attachments: [{ type: "file", mime: "image/png", url: `data:image/png;base64,${PNG_BASE64}` }]
+        },
+        result: PREVIEW_JSON
+      }
+    ],
+    // Grok: ACP content blocks.
+    [
+      "grok",
+      {
+        vendorTool: "use_tool",
+        rawInput: { tool_name: "orquester__html_preview", tool_input: { html: "<p>x</p>" } },
+        content: [{ type: "content", content: { type: "image", data: PNG_BASE64, mimeType: "image/png" } }],
+        rawOutput: { type: "MCP", tool_name: "html_preview", server_name: "orquester", output: { OkayOutput: PREVIEW_JSON } }
+      }
+    ]
+  ];
+  for (const [provider, data] of cases) {
+    const bounded = boundSessionToolData({ ...data, sessionTool: { name: "html_preview" } }) as Record<string, unknown>;
+    const json = JSON.stringify(bounded);
+    assert.ok(!json.includes(PNG_BASE64.slice(0, 2000)), `${provider}: no image bytes`);
+    assert.ok(json.length < 4_000, `${provider}: ${json.length} bytes`);
+    assert.ok(json.includes("omitted"), provider);
+    assert.ok(json.includes('\\"contentHeight\\":300') || json.includes('"contentHeight":300'), provider);
+    assert.deepEqual(bounded.sessionTool, { name: "html_preview" });
+  }
+});
+
+test("a string blob is cut at the cap; arguments, small values and untouched data keep their identity", () => {
+  const big = "word ".repeat((SESSION_TOOL_PERSISTED_STRING_MAX_BYTES + 5_000) / 5);
+  const data = {
+    toolName: "mcp__orquester__echo",
+    input: { html: big },
+    result: { type: "tool_result", content: big },
+    sessionTool: { name: "echo" }
+  };
+  const bounded = boundSessionToolData(data) as typeof data;
+  assert.equal(bounded.input, data.input, "the agent's arguments are kept as written");
+  assert.ok(bounded.result.content.length < SESSION_TOOL_PERSISTED_STRING_MAX_BYTES + 100);
+  assert.match(bounded.result.content, /… \[\d+ bytes omitted\]$/);
+  // Multi-byte text is cut on a whole character.
+  const wide = boundSessionToolData({ result: "é".repeat(SESSION_TOOL_PERSISTED_STRING_MAX_BYTES) }) as { result: string };
+  assert.match(wide.result, /^é+… \[\d+ bytes omitted\]$/);
+  const small = { toolName: "mcp__orquester__echo", result: { content: [{ type: "text", text: "{}" }] }, sessionTool: { name: "echo" } };
+  assert.equal(boundSessionToolData(small), small);
+});
+
+test("an html_render result keeps its reference through bounding and both slims", () => {
+  const ref = { attachmentId: "thread_1-0f8fad5b-d9cb-469f-a165-70867728950e-html", title: "Chart", height: 420 };
+  const text = JSON.stringify({ htmlRender: ref, message: "Shown to the reader above your reply." });
+  const data = {
+    server: "orquester",
+    tool: "html_render",
+    arguments: { html: "<p>" + "x".repeat(200_000) + "</p>", title: "Chart", height: 420 },
+    result: { content: [{ type: "text", text }], structuredContent: JSON.parse(text) },
+    sessionTool: { name: "html_render" }
+  };
+  const bounded = boundSessionToolData(data) as Record<string, unknown>;
+  assert.equal(bounded, data, "nothing in an html_render result is a blob");
+  assert.deepEqual(sessionToolReferences(bounded), { htmlRender: ref });
+  const slim = slimActivityPayload(slimActivityPayload({ itemType: "mcp_tool_call", status: "completed", data: bounded })) as {
+    data: Record<string, unknown>;
+  };
+  assert.deepEqual(slim.data.sessionTool, { name: "html_render", references: { htmlRender: ref } });
+});
+
+test("a base64 run spelled into text is dropped whole, and the text around it stays", () => {
+  const blob = "iVBORw0KGgo".padEnd(300_000, "Ab9+/");
+  const json = JSON.stringify({ width: 728, contentHeight: 300 });
+  const bounded = boundSessionToolData({
+    rawOutput: { output: { OkayOutput: `${blob}\n${json}` } },
+    result: blob,
+    short: "QUJD".repeat(100)
+  }) as { rawOutput: { output: { OkayOutput: string } }; result: string; short: string };
+  assert.equal(bounded.rawOutput.output.OkayOutput, `[base64 omitted: 225000 bytes]\n${json}`);
+  assert.equal(bounded.result, "[base64 omitted: 225000 bytes]");
+  assert.equal(bounded.short, "QUJD".repeat(100), "a run below the threshold is kept");
+});
+
+test("base64 runs: exactly the threshold is dropped, one short is kept, padding and base64url included", () => {
+  const n = SESSION_TOOL_BASE64_RUN_MIN_CHARS;
+  const run = (length: number, char = "A") => char.repeat(length);
+  assert.equal(dropBase64Runs(`x ${run(n - 1)} y`), `x ${run(n - 1)} y`);
+  assert.equal(dropBase64Runs(run(n)), `[base64 omitted: ${(n * 3) / 4} bytes]`);
+  // Up to two "=" belong to the run; a third stays.
+  assert.equal(dropBase64Runs(`${run(n)}===!`), `[base64 omitted: ${Math.floor(((n + 2) * 3) / 4)} bytes]=!`);
+  // base64url, at the start, the end, and twice in one string.
+  const url = "-_".repeat(n / 2);
+  assert.equal(
+    dropBase64Runs(`${url} mid ${run(n, "Z")}`),
+    `[base64 omitted: ${(n * 3) / 4} bytes] mid [base64 omitted: ${(n * 3) / 4} bytes]`
+  );
+  const plain = "word ".repeat(2000);
+  assert.equal(dropBase64Runs(plain), plain);
+});
+
+test("base64 runs: adversarial input — many runs one short of the threshold — is one linear pass", () => {
+  // 4 MiB of runs 4095 long: a backtracking /[…]{4096,}/ rescans each run
+  // from every start (≈46 s for 1 MiB on the host); one pass reads each
+  // character once and gives the string back untouched.
+  const nearMiss = `${"A".repeat(SESSION_TOOL_BASE64_RUN_MIN_CHARS - 1)} `;
+  const adversarial = nearMiss.repeat(Math.ceil((4 * 1024 * 1024) / nearMiss.length));
+  const started = performance.now();
+  assert.equal(dropBase64Runs(adversarial), adversarial);
+  // The same size again with every other run long enough: all of those go.
+  const mixed = `${nearMiss}${"B".repeat(SESSION_TOOL_BASE64_RUN_MIN_CHARS)} `.repeat(500);
+  const out = dropBase64Runs(mixed);
+  assert.equal(out.split("[base64 omitted:").length - 1, 500);
+  assert.ok(!out.includes("B"));
+  // Generous: a linear pass takes tens of milliseconds; the old pattern took minutes here.
+  assert.ok(performance.now() - started < 5_000, `${Math.round(performance.now() - started)} ms`);
 });

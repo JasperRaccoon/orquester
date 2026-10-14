@@ -12,12 +12,14 @@
  */
 
 import type { SessionToolkit } from "./contract.ts";
+import { htmlToolkit } from "./html/index.ts";
 import { pullRequestsToolkit } from "./pull-requests/index.ts";
 import { createSessionToolRegistry, type SessionToolRegistry } from "./registry.ts";
 import { schedulingToolkit } from "./scheduling/index.ts";
 
 export const SESSION_TOOLKITS: readonly SessionToolkit[] = [
-  // One line per toolkit, e.g. `htmlToolkit,` (from `./html/index.ts`).
+  // One line per toolkit.
+  htmlToolkit,
   schedulingToolkit,
   pullRequestsToolkit
 ];

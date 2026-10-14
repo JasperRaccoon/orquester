@@ -39,6 +39,8 @@ function fakeApi(handler: (method: DaemonMethod, path: string, body?: unknown) =
       return handler(method, path, opts?.body);
     },
     uploadAttachment: async () => ({ status: 503, value: null }),
+    publishHtmlRender: async () => ({ ok: false, code: "UNAVAILABLE", message: "no pages in tests" }),
+    previewHtmlRender: async () => ({ ok: false, code: "UNAVAILABLE", message: "no pages in tests" }),
     subscribe: () => () => undefined,
     ...dirs
   };

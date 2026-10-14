@@ -28,8 +28,8 @@ interface InternalDaemonApiOptions {
    */
   app: FastifyInstance;
   broadcaster: Broadcaster;
-  /** For attachment uploads; `null` answers 503 `HOST_UNAVAILABLE`, as the MCP does. */
-  agentChat: Pick<AgentChatService, "uploadAttachment"> | null;
+  /** For attachment uploads and visual pages; `null` answers `HOST_UNAVAILABLE`, as the MCP does. */
+  agentChat: Pick<AgentChatService, "uploadAttachment" | "publishHtmlRender" | "previewHtmlRender"> | null;
   /** Getters for a long-lived client: `PUT /api/config/daemon` moves both in place. */
   fsRoot: LivePath;
   workspacesDir: LivePath;

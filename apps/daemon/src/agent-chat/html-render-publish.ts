@@ -20,6 +20,7 @@ import { open, readlink, realpath, stat, type FileHandle } from "node:fs/promise
 import * as path from "node:path";
 
 import {
+  HTML_RENDER_MAX_HTML_CHARS,
   HTML_RENDER_MAX_TITLE_LENGTH,
   clampHtmlRenderHeight,
   htmlRenderFileName,
@@ -34,8 +35,6 @@ const MIB = 1024 * 1024;
 export const HTML_RENDER_MAX_IMAGE_BYTES = 10 * MIB;
 /** The whole stored page, images inlined (spec §2.1). */
 export const HTML_RENDER_MAX_PAGE_BYTES = 25 * MIB;
-/** The tool's `html` bound (spec §2.1); the publisher refuses past it too. */
-export const HTML_RENDER_MAX_HTML_CHARS = 512_000;
 
 const formatMib = (bytes: number): string => `${(bytes / MIB).toFixed(1)} MiB`;
 
@@ -45,7 +44,8 @@ export type HtmlRenderPublishErrorCode =
   | "images-outside-project"
   | "image-too-large"
   | "page-too-large"
-  | "store-failed";
+  | "store-failed"
+  | "cancelled";
 
 /** A refusal the tool handler answers as an MCP error result, message verbatim. */
 export class HtmlRenderPublishError extends Error {
@@ -89,6 +89,8 @@ export interface PublishHtmlRenderInput {
    * absent; a throw publishes without heights.
    */
   measure?: (preparedHtml: string) => Promise<HtmlRenderHeights | undefined>;
+  /** The call's own: once aborted, nothing is stored (no page nobody will reference). */
+  signal?: AbortSignal;
 }
 
 // ---------------------------------------------------------------------------
@@ -411,6 +413,9 @@ export async function publishHtmlRender(
   let heights = input.heights;
   if (heights === undefined && input.measure !== undefined) {
     heights = await input.measure(html).catch(() => undefined);
+  }
+  if (input.signal?.aborted) {
+    throw new HtmlRenderPublishError("cancelled", "The call was cancelled.");
   }
   let attachmentId: string;
   try {

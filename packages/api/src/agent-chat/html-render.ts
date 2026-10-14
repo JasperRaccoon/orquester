@@ -35,6 +35,8 @@ export const HTML_RENDER_TOOL_NAME = "html_render";
 export const HTML_RENDER_MIN_HEIGHT = 80;
 export const HTML_RENDER_MAX_HEIGHT = 2000;
 export const HTML_RENDER_MAX_TITLE_LENGTH = 200;
+/** A page's `html` bound, in characters (both tools' argument, and the publisher's own refusal). */
+export const HTML_RENDER_MAX_HTML_CHARS = 512_000;
 
 /** What the `html_render` tool result carries so a client can show the page. */
 export interface HtmlRenderReference {
@@ -59,6 +61,10 @@ export const HTML_RENDER_MEASURE_WIDTHS = [320, 375, 430, 520, 640, 728, 860, 10
  * measured height when a client cannot know its width.
  */
 export const HTML_RENDER_COLUMN_WIDTH = 728;
+
+/** `html_preview`'s viewport width bounds, in CSS pixels. */
+export const HTML_PREVIEW_MIN_WIDTH = 240;
+export const HTML_PREVIEW_MAX_WIDTH = 1600;
 
 const MAX_MEASURED_HEIGHTS = 24;
 /** `<thread segment>-<uuid>-html`: the attachment store's id shape, html only. */

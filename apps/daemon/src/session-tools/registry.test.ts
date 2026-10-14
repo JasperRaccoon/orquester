@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { z } from "zod";
 
 import { defineSessionTool, defineSessionToolkit, SESSION_TOOL_READ_ONLY, type SessionToolkit } from "./contract.ts";
+import { pullRequestsToolkit } from "./pull-requests/index.ts";
 import { schedulingToolkit } from "./scheduling/index.ts";
 import { SESSION_TOOLKITS, sessionToolRegistry } from "./index.ts";
 import {
@@ -42,17 +43,28 @@ test("the production registry carries every listed toolkit's tools, within the i
   const registry = sessionToolRegistry();
   assert.equal(registry.enabled, true);
   assert.deepEqual(
+    SESSION_TOOLKITS.map((toolkit) => toolkit.id),
+    ["html", schedulingToolkit.id, pullRequestsToolkit.id]
+  );
+  assert.deepEqual(
     registry.tools.map((tool) => tool.name),
     SESSION_TOOLKITS.flatMap((toolkit) => toolkit.tools.map((tool) => tool.name))
   );
-  for (const name of ["watch_pull_request", "unwatch_pull_request", "list_pull_request_watches"]) {
-    assert.ok(registry.get(name), name);
+  for (const name of [
+    "html_preview",
+    "html_render",
+    ...schedulingToolkit.tools.map((tool) => tool.name),
+    "watch_pull_request",
+    "unwatch_pull_request",
+    "list_pull_request_watches"
+  ]) {
+    assert.equal(registry.get(name)?.name, name);
   }
-  assert.ok(Buffer.byteLength(registry.instructions, "utf8") <= SESSION_TOOL_INSTRUCTIONS_MAX_BYTES);
+  assert.match(registry.instructions, /^## Orquester\n/);
+  assert.ok(registry.instructions.includes("### Showing visuals"));
   assert.match(registry.instructions, /watch_pull_request/);
-  assert.ok(SESSION_TOOLKITS.includes(schedulingToolkit));
-  for (const tool of schedulingToolkit.tools) assert.equal(registry.get(tool.name)?.name, tool.name);
   assert.ok(registry.instructions.includes("`schedule_task`"));
+  assert.ok(Buffer.byteLength(registry.instructions) <= SESSION_TOOL_INSTRUCTIONS_MAX_BYTES);
 });
 
 test("the test toolkit registers and composes its paragraph after the header", () => {

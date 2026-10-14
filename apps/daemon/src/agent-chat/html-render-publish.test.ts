@@ -122,6 +122,26 @@ test("measure runs on the prepared page when no heights were given; a throw publ
   assert.equal(without.heights, undefined);
 });
 
+test("a call cancelled while its page was measured stores nothing", async (t) => {
+  const { deps, stored } = await fixture(t);
+  const controller = new AbortController();
+  await assert.rejects(
+    publishHtmlRender(deps, {
+      threadId: "t1",
+      html: "<p>x</p>",
+      title: "T",
+      height: 300,
+      signal: controller.signal,
+      measure: async () => {
+        controller.abort();
+        return undefined;
+      }
+    }),
+    (error: unknown) => error instanceof HtmlRenderPublishError && error.code === "cancelled"
+  );
+  assert.equal(stored.length, 0);
+});
+
 test("a local image inside the project is inlined as a data URI", async (t) => {
   const { project, stored, deps } = await fixture(t);
   const image = join(project, "chart.png");

@@ -1,6 +1,15 @@
 import type { Readable } from "node:stream";
 import type { EventMessage } from "@orquester/api";
-import type { DaemonApi, DaemonMethod, DaemonResponse } from "./daemon-api.ts";
+import type { HtmlRenderReference } from "@orquester/api/agent-chat";
+import type {
+  DaemonApi,
+  DaemonMethod,
+  DaemonOutcome,
+  DaemonResponse,
+  HtmlPreview,
+  HtmlPreviewRequest,
+  HtmlRenderPublishRequest
+} from "./daemon-api.ts";
 
 type Call = { method: DaemonMethod; path: string; query?: Record<string, string>; body?: unknown };
 type Responder = DaemonResponse | ((call: { query?: Record<string, string>; body?: unknown }) => DaemonResponse);
@@ -69,6 +78,30 @@ export class FakeDaemonApi implements DaemonApi {
     if (this.uploadHandler) return this.uploadHandler(sessionId, meta, buf);
     const image = /^image\//.test(meta.type ?? "");
     return { status: 200, value: { type: image ? "image" : "file", id: `${sessionId}-att-${this.uploads.length}`, name: meta.name, mimeType: meta.type, sizeBytes: buf.length } };
+  }
+  /** `html_render` publishes, as the toolkit asked for them; answered by {@link onPublishHtml}. */
+  publishes: HtmlRenderPublishRequest[] = [];
+  /** `html_preview` requests; answered by {@link onPreviewHtml}. */
+  previews: HtmlPreviewRequest[] = [];
+  private publishHandler: (request: HtmlRenderPublishRequest) => DaemonOutcome<HtmlRenderReference> | Promise<DaemonOutcome<HtmlRenderReference>> =
+    () => ({ ok: false, code: "UNAVAILABLE", message: "no fake publish" });
+  private previewHandler: (request: HtmlPreviewRequest) => DaemonOutcome<HtmlPreview> | Promise<DaemonOutcome<HtmlPreview>> =
+    () => ({ ok: false, code: "UNAVAILABLE", message: "no fake preview" });
+  onPublishHtml(handler: FakeDaemonApi["publishHandler"]): this {
+    this.publishHandler = handler;
+    return this;
+  }
+  onPreviewHtml(handler: FakeDaemonApi["previewHandler"]): this {
+    this.previewHandler = handler;
+    return this;
+  }
+  async publishHtmlRender(request: HtmlRenderPublishRequest): Promise<DaemonOutcome<HtmlRenderReference>> {
+    this.publishes.push(request);
+    return this.publishHandler(request);
+  }
+  async previewHtmlRender(request: HtmlPreviewRequest): Promise<DaemonOutcome<HtmlPreview>> {
+    this.previews.push(request);
+    return this.previewHandler(request);
   }
   subscribe(listener: (event: EventMessage) => void): () => void {
     const entry = { listener };

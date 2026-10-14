@@ -35,6 +35,8 @@ async function setup(): Promise<{ h: Harness; app: FastifyInstance; call: (name:
       return { status: res.statusCode, body: res.body ? (JSON.parse(res.body) as unknown) : null };
     },
     uploadAttachment: async () => ({ status: 503, value: null }),
+    publishHtmlRender: async () => ({ ok: false, code: "UNAVAILABLE", message: "no pages in tests" }),
+    previewHtmlRender: async () => ({ ok: false, code: "UNAVAILABLE", message: "no pages in tests" }),
     subscribe: () => () => undefined,
     fsRoot: "/",
     workspacesDir: "/ws"
