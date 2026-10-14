@@ -12,9 +12,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import type { McpAppReference, ThreadActivityItem } from "@orquester/api/agent-chat";
+import { SECRET_REDACTED_TEXT, type McpAppReference, type ThreadActivityItem } from "@orquester/api/agent-chat";
 
 import type { AdapterMcpApps } from "../adapter.ts";
+import type { OrchestratorOptions } from "../orchestration/orchestrator.ts";
+import { SessionSecretRedactor } from "../session-tools/secret-redaction.ts";
 import { createTestHost, type TestHost } from "../orchestration/testing/index.ts";
 import { agentHostExtraRoutes } from "./extra-routes.ts";
 import { createAgentHostServer } from "./http-server.ts";
@@ -54,17 +56,17 @@ async function pushActivity(host: TestHost, threadId: string, activity: Partial<
   ]);
 }
 
-async function setup() {
+async function setup(options: { secrets?: OrchestratorOptions["secrets"]; answer?: string } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "agent-host-mcp-apps-"));
   const socketPath = join(dir, "agent-host.sock");
-  const host = createTestHost({ openGate: true });
+  const host = createTestHost({ openGate: true, ...(options.secrets ? { secrets: options.secrets } : {}) });
   const calls: unknown[] = [];
   const mcpApps: AdapterMcpApps = {
     modelContext: false,
     listTools: async () => [{ name: "reset", readOnly: false, definition: { name: "reset" } }],
     callTool: async (threadId, input) => {
       calls.push({ threadId, ...input });
-      return { content: [{ type: "text", text: "reset" }] };
+      return { content: [{ type: "text", text: options.answer ?? "reset" }] };
     },
     readResource: async () => ({ contents: [] })
   };
@@ -164,6 +166,40 @@ describe("the host's MCP App route", () => {
       const unknown = await h.call(`/threads/${threadId}/mcp-apps/delete`, { itemId: "tool-1" });
       assert.equal(unknown.status, 400);
       assert.equal(h.calls.length, 1);
+    } finally {
+      await h.stop();
+    }
+  });
+
+  it("an app's answer never carries a secret the thread was handed (masked, as its rows are)", async () => {
+    const secret = "S3cret-Deploy-Key-4711";
+    const redactor = new SessionSecretRedactor();
+    const h = await setup({
+      secrets: {
+        link: (threadId, parentThreadId) => redactor.link(threadId, parentThreadId),
+        maskValue: (threadId, value) => redactor.maskValue(threadId, value)
+      },
+      answer: `deployed with ${secret}`
+    });
+    try {
+      const threadId = await h.host.createThread();
+      redactor.remember(threadId, [secret]);
+      await pushActivity(h.host, threadId, {
+        id: "tool-1",
+        payload: {
+          itemType: "mcp_tool_call",
+          status: "completed",
+          data: { server: "charts", tool: "show_chart", arguments: {}, mcpApp: reference }
+        }
+      });
+      await h.host.settle();
+      const answer = await h.call(agentHostExtraRoutes.mcpApp(threadId, "call-tool"), {
+        itemId: "tool-1",
+        name: "reset",
+        arguments: {}
+      });
+      assert.equal(answer.status, 200);
+      assert.deepEqual(answer.body, { content: [{ type: "text", text: `deployed with ${SECRET_REDACTED_TEXT}` }] });
     } finally {
       await h.stop();
     }

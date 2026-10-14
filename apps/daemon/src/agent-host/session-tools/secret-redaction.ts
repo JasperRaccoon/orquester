@@ -36,6 +36,19 @@
  *
  * Every path fails closed: an MCP call row or a raw frame that cannot be
  * walked is replaced by {@link SECRET_REDACTED_TEXT}, never kept.
+ *
+ * An MCP call is any MCP tool's row — `mcp_tool_call`, and a Grok `use_tool`
+ * call of a third-party server (`data.vendorTool: "use_tool"`, `rawOutput.type
+ * "MCP"`), which is where an MCP App's call lands. An MCP App's snapshot
+ * ({@link SessionSecretRedactor.maskText}) and its proxied requests' answers
+ * ({@link SessionSecretRedactor.maskValue}) are masked too.
+ *
+ * Thread lineage (spec §6): a fork's child is LINKED to its parent
+ * ({@link SessionSecretRedactor.link}): it never holds the parent's values
+ * itself, but its rows are masked with the parent's while the host holds
+ * them, so the conversation it carries over (a native fork replays the
+ * parent's turns from the provider's own transcript) reads as the parent's
+ * masked records do.
  */
 
 import {
@@ -118,10 +131,14 @@ function mask(value: unknown, values: readonly string[], depth: number): unknown
 }
 
 function isMcpCallEvent(event: RuntimeEvent): boolean {
-  return (
-    (event.type === "item.started" || event.type === "item.updated" || event.type === "item.completed") &&
-    event.payload?.itemType === "mcp_tool_call"
-  );
+  if (event.type !== "item.started" && event.type !== "item.updated" && event.type !== "item.completed") {
+    return false;
+  }
+  if (event.payload?.itemType === "mcp_tool_call") return true;
+  // Grok reaches every MCP tool through `use_tool`; a third-party server's
+  // call (an MCP App's included) keeps its vendor kind, not `mcp_tool_call`.
+  const data = event.payload?.data as { vendorTool?: unknown; rawOutput?: { type?: unknown } } | undefined;
+  return data?.vendorTool === "use_tool" || data?.rawOutput?.type === "MCP";
 }
 
 /** One stream's held-back tail and the last row it came in, to release it as. */
@@ -185,6 +202,8 @@ function closedPayload(payload: unknown, values: readonly string[]): unknown {
 export class SessionSecretRedactor {
   private readonly byThread = new Map<string, Set<string>>();
   private readonly carries = new Map<string, Map<string, Carry>>();
+  /** A fork's child → its parent ({@link link}). */
+  private readonly parents = new Map<string, string>();
 
   /** Remember values handed to `threadId` — call BEFORE the provider can see them. */
   remember(threadId: string, values: readonly string[]): void {
@@ -203,24 +222,62 @@ export class SessionSecretRedactor {
     }
   }
 
-  /** Drop what `threadId` holds (the thread was released or deleted), held-back tails included. */
+  /** Drop what `threadId` holds (the thread was released or deleted), held-back tails and its link included. */
   forget(threadId: string): void {
     this.byThread.delete(threadId);
     this.carries.delete(threadId);
+    this.parents.delete(threadId);
   }
 
-  /** True while `threadId` has a value to mask (tests). */
+  /**
+   * `threadId` is a fork of `parentThreadId`: its rows are masked with the
+   * parent's values (and its ancestors'), read live — never copied into the
+   * child, which holds only what a tool hands it. Call before the child's
+   * first event (its history replay).
+   */
+  link(threadId: string, parentThreadId: string): void {
+    if (threadId !== parentThreadId) this.parents.set(threadId, parentThreadId);
+  }
+
+  /** True while `threadId` itself has a value to mask (tests). */
   holds(threadId: string): boolean {
     return (this.byThread.get(threadId)?.size ?? 0) > 0;
   }
 
   private valuesFor(threadId: string, everyValue: boolean): string[] {
-    const set = this.byThread.get(threadId);
-    if (set === undefined) return [];
+    const all = new Set<string>();
+    const seen = new Set<string>();
+    // The thread's own values, then each ancestor's (a cycle or a long chain stops the walk).
+    for (let id: string | undefined = threadId; id !== undefined && !seen.has(id) && seen.size < 32; id = this.parents.get(id)) {
+      seen.add(id);
+      for (const value of this.byThread.get(id) ?? []) all.add(value);
+    }
+    if (all.size === 0) return [];
     // Longest first, so a value that contains another is masked whole.
-    return [...set]
+    return [...all]
       .filter((value) => everyValue || isDistinctiveSecret(value))
       .sort((a, b) => b.length - a.length);
+  }
+
+  /**
+   * An MCP answer bound for one of the thread's MCP Apps (a proxied tool call
+   * or resource read): every value masked, as in an MCP call row, and a
+   * `request_secret` result stripped. Never throws; fails closed.
+   */
+  maskValue(threadId: string, value: unknown): unknown {
+    try {
+      return stripSecretRequestValues(maskSecretValues(value, this.valuesFor(threadId, true)));
+    } catch {
+      return SECRET_REDACTED_TEXT;
+    }
+  }
+
+  /**
+   * A document the thread stores outside its events (an MCP App's snapshot):
+   * its distinctive values masked, as in a raw frame. Never throws.
+   */
+  maskText(threadId: string, text: string): string {
+    return replaceAll(text, this.valuesFor(threadId, false));
   }
 
   /** A runtime event as ingestion may see it. Never throws; the same reference when nothing changed. */

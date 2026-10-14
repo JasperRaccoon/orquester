@@ -393,6 +393,46 @@ describe("forkThread", () => {
     await host.stop();
   });
 
+  it("links the child to its parent's secrets before its first event, native or transcript — never more", async () => {
+    const links: Array<{ threadId: string; parentThreadId: string; childEventsBefore: number }> = [];
+    let host: ReturnType<typeof createTestHost> | undefined;
+    const secrets = {
+      link: (threadId: string, parentThreadId: string) => {
+        links.push({
+          threadId,
+          parentThreadId,
+          childEventsBefore: host!.ingestion.ingested.filter((event) => event.threadId === threadId).length
+        });
+      },
+      maskValue: (_threadId: string, value: unknown) => value
+    };
+    const claude = createScriptedAdapter({
+      id: "claude",
+      forkConversation: async (input) => ({ resumeCursor: { threadId: input.threadId, resume: "forked-session" } }),
+      history: { threadId: "child", turns: [{ id: "turn-1", items: [] }] },
+      projectHistory: () => replayOf("child")
+    });
+    const grok = createScriptedAdapter({ id: "grok" });
+    host = createTestHost({ adapters: { claude, grok }, secrets });
+    const parentId = await host.createThread({ threadId: "parent" });
+    const first = await runTurn(host, claude, parentId, "first", "one");
+    await host.orchestrator.forkThread(parentId, forkRequest("child", "claude", { messageId: first.replyId }));
+    await host.settle();
+    assert.ok(
+      host.ingestion.ingested.some((event) => event.threadId === "child" && event.raw?.source === HISTORICAL_RAW_SOURCE),
+      "the replay came after the link"
+    );
+    const grokParent = await host.createThread({ threadId: "grok-parent", refId: "grok" });
+    const said = await runTurn(host, grok, grokParent, "hello", "hi");
+    await host.orchestrator.forkThread(grokParent, forkRequest("grok-child", "grok", { messageId: said.replyId }));
+    await host.settle();
+    assert.deepEqual(links, [
+      { threadId: "child", parentThreadId: parentId, childEventsBefore: 0 },
+      { threadId: "grok-child", parentThreadId: grokParent, childEventsBefore: 0 }
+    ]);
+    await host.stop();
+  });
+
   it("transcript: an adapter without a fork gets the conversation with the child's first message", async () => {
     const grok = createScriptedAdapter({ id: "grok" });
     const host = createTestHost({ adapters: { grok } });

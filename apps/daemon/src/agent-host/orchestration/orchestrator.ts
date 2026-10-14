@@ -318,6 +318,16 @@ interface OrchestratorOptions {
    * §1.1). Optional; must not throw.
    */
   onTurnInterrupt?: (threadId: string) => void;
+  /**
+   * Session-tool secrets (design 2026-10-14 §5, `session-tools/secret-redaction.ts`)
+   * beyond ingestion's: `link` — a fork's child is masked with its parent's
+   * values (called before the child's history replay); `maskValue` — an MCP
+   * App's proxied answer, masked before it leaves for the client. Optional.
+   */
+  secrets?: {
+    link(threadId: string, parentThreadId: string): void;
+    maskValue(threadId: string, value: unknown): unknown;
+  };
 }
 
 interface ThreadSubscription {
@@ -4084,6 +4094,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       strategy = transcript !== null ? "transcript" : "unavailable";
     }
 
+    // The child's rows — the parent's turns its history replay carries over
+    // first — are masked with the parent's secrets, never given them.
+    options.secrets?.link(threadId, parentThreadId);
     const head = await createThreadNow(runtime, request, {
       adapterId,
       modelSelection,
@@ -5011,7 +5024,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     whenReady(async () => {
       const runtime = await loadRuntime(threadId);
       const head = requireHead(runtime);
-      return runMcpAppRequest(
+      const answer = await runMcpAppRequest(
         {
           threadId: runtime.id,
           adapter: options.adapters.get(head.adapter),
@@ -5020,6 +5033,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         operation,
         body
       );
+      // A remembered secret never reaches an app through its own server's answer.
+      return options.secrets ? options.secrets.maskValue(runtime.id, answer) : answer;
     });
 
   const readItem = async (threadId: string, itemId: string): Promise<ThreadItem | null> =>

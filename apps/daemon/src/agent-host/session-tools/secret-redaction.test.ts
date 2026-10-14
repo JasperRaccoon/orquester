@@ -23,6 +23,7 @@ import { describe, it, type TestContext } from "node:test";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import {
+  HISTORICAL_RAW_SOURCE,
   SECRET_REDACTED_TEXT,
   type AgentChatSecretRequestEventPayload,
   type RuntimeEvent
@@ -370,6 +371,77 @@ describe("request_secret — the value reaches the call and nothing the host kee
   });
 });
 
+describe("secrets × the other agent-visuals tasks", () => {
+  it("the secret is masked BEFORE a session tool's result is bounded: a cut never keeps part of a value", async (t) => {
+    const { host, redactor, ingestion, root } = await pipeline(t);
+    const threadId = await host.createThread({ threadId: "bounded" });
+    redactor.remember(threadId, [VALUE]);
+    // A session tool's result string past the 64 KiB cut, the value straddling the cut.
+    const text = `${"a".repeat(64 * 1024 - 10)}${VALUE} and more`;
+    const item = {
+      type: "mcpToolCall",
+      id: "call_big",
+      server: "orquester",
+      tool: "html_preview",
+      status: "completed",
+      arguments: { html: "<p>x</p>" },
+      appContext: null,
+      result: { content: [{ type: "text", text }], structuredContent: null, _meta: null },
+      error: null,
+      durationMs: 5,
+      readOnlyHint: true
+    } as unknown as CodexThreadItem;
+    await ingestion.ingest({
+      eventId: "big-1",
+      threadId,
+      createdAt: "2026-10-14T10:00:00.000Z",
+      type: "item.completed",
+      itemId: "call_big",
+      turnId: "turn-1",
+      payload: classifyItem(item)
+    } as unknown as RuntimeEvent);
+    await ingestion.drain();
+    await host.settle();
+    const row = JSON.stringify(await host.orchestrator.readItem(threadId, "call_big"));
+    assert.ok(row.includes('"html_preview"') && row.includes("aaaa"), "the row was written");
+    assert.ok(!row.includes(VALUE.slice(0, 12)), "no part of the value survives the cut");
+    for (const file of await filesUnder(root)) {
+      assert.ok(!(await readFile(file, "utf8")).includes(VALUE.slice(0, 12)), file);
+    }
+  });
+
+  it("a fork's child: the parent's turns its replay carries over are stored masked, the child given nothing", async (t) => {
+    const { host, redactor, ingestion, root } = await pipeline(t);
+    const parent = await host.createThread({ threadId: "parent" });
+    const child = await host.createThread({ threadId: "child" });
+    redactor.remember(parent, [VALUE]);
+    redactor.link(child, parent);
+    await ingestion.ingest({
+      eventId: "replay-1",
+      threadId: child,
+      createdAt: "2026-10-14T10:00:00.000Z",
+      type: "item.completed",
+      itemId: "cmd-1",
+      turnId: "turn-1",
+      raw: { source: HISTORICAL_RAW_SOURCE, method: "history", payload: {} },
+      payload: {
+        itemType: "command_execution",
+        status: "completed",
+        title: "curl",
+        data: { command: `curl -H "Authorization: Token ${VALUE}" https://example.test`, output: `token=${VALUE}\n` }
+      }
+    } as unknown as RuntimeEvent);
+    await ingestion.drain();
+    await host.settle();
+    assert.equal(redactor.holds(child), false);
+    const snapshot = await host.orchestrator.readThread(child);
+    assert.ok(!JSON.stringify(snapshot).includes(VALUE));
+    for (const file of await filesUnder(join(root, "threads"))) {
+      assert.ok(!(await readFile(file, "utf8")).includes(VALUE), file);
+    }
+  });
+});
+
 describe("the redactor", () => {
   const event = (threadId: string, itemType: string, data: unknown) =>
     ({
@@ -449,6 +521,50 @@ describe("the redactor", () => {
     const redactor = new SessionSecretRedactor();
     const frame = { method: "item/completed", params: { item: { result: { structuredContent: { secretRequest: { name: "K", outcome: "provided" }, value: VALUE } } } } };
     assert.ok(!JSON.stringify(redactor.redactFrame("a", frame)).includes(VALUE));
+  });
+
+  it("a fork's child is masked with its parent's values, read live — never given them", () => {
+    const redactor = new SessionSecretRedactor();
+    redactor.remember("parent", [VALUE]);
+    redactor.link("child", "parent");
+    redactor.link("grandchild", "child");
+    for (const threadId of ["child", "grandchild"]) {
+      const replayed = event(threadId, "agent_message", { text: `the key is ${VALUE}` });
+      assert.ok(!JSON.stringify(redactor.redactEvent(replayed)).includes(VALUE), threadId);
+      assert.equal(redactor.holds(threadId), false, `${threadId} holds nothing of its own`);
+    }
+    // A sibling, and a link onto itself, change nothing.
+    const sibling = event("other", "agent_message", { text: VALUE });
+    assert.equal(redactor.redactEvent(sibling), sibling);
+    redactor.link("parent", "parent");
+    redactor.link("parent", "grandchild"); // a cycle: the walk still ends
+    assert.ok(!JSON.stringify(redactor.redactEvent(event("parent", "agent_message", { text: VALUE }))).includes(VALUE));
+    // A forgotten child loses its link with the rest.
+    redactor.forget("child");
+    const after = event("child", "agent_message", { text: VALUE });
+    assert.equal(redactor.redactEvent(after), after);
+  });
+
+  it("an MCP App's call through Grok's use_tool is an MCP row: any value masked; its snapshot and proxied answers too", () => {
+    const redactor = new SessionSecretRedactor();
+    redactor.remember("a", ["1234"]);
+    redactor.remember("a", [VALUE]);
+    const grokApp = event("a", "dynamic_tool_call", {
+      vendorTool: "use_tool",
+      rawInput: { variant: "UseTool", tool_name: "apps__show_widget", tool_input: { pin: "1234" } },
+      rawOutput: { type: "MCP", server_name: "apps", tool_name: "show_widget", output: { OkayOutput: `pin 1234 ${VALUE}` } }
+    });
+    const masked = JSON.stringify(redactor.redactEvent(grokApp));
+    assert.ok(!masked.includes("1234") && !masked.includes(VALUE));
+    // The snapshot document: distinctive values only, as a raw frame.
+    assert.equal(redactor.maskText("a", `<p>${VALUE}</p><p>1234</p>`), `<p>${SECRET_REDACTED_TEXT}</p><p>1234</p>`);
+    // A proxied answer bound for the app: as an MCP row.
+    assert.deepEqual(redactor.maskValue("a", { content: [{ type: "text", text: `pin 1234` }] }), {
+      content: [{ type: "text", text: `pin ${SECRET_REDACTED_TEXT}` }]
+    });
+    assert.deepEqual(redactor.maskValue("b", { content: [{ type: "text", text: "pin 1234" }] }), {
+      content: [{ type: "text", text: "pin 1234" }]
+    });
   });
 
   it("forgets a released thread's values", async (t) => {

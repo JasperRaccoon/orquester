@@ -392,7 +392,8 @@ export async function startAgentHost(
       await mkdir(stagingDir, { recursive: true });
       const staged = join(stagingDir, `adapter-${randomUUID()}.part`);
       try {
-        await writeFile(staged, input.bytes, { encoding: "utf8", mode: 0o600 });
+        // An MCP App's snapshot: a remembered secret is masked here too (§5).
+        await writeFile(staged, secretRedactor.maskText(threadId, input.bytes), { encoding: "utf8", mode: 0o600 });
         const ref = await store.putAttachment({
           threadId,
           name: input.name,
@@ -587,7 +588,12 @@ export async function startAgentHost(
     // An interrupted turn ends the session-tool calls it was waiting on.
     ...(sessionTools !== undefined
       ? { onTurnInterrupt: (threadId: string) => sessionTools.abortThreadCalls(threadId) }
-      : {})
+      : {}),
+    // A fork's child masked with its parent's secrets; an MCP App's answers masked (§5).
+    secrets: {
+      link: (threadId, parentThreadId) => secretRedactor.link(threadId, parentThreadId),
+      maskValue: (threadId, value) => secretRedactor.maskValue(threadId, value)
+    }
   });
   const host = orchestrator;
 

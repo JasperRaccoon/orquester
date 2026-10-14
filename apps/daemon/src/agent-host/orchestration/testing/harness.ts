@@ -24,7 +24,8 @@ import { createLivenessRegistry } from "../liveness.ts";
 import {
   createOrchestrator,
   type HostThreadStore,
-  type Orchestrator
+  type Orchestrator,
+  type OrchestratorOptions
 } from "../orchestrator.ts";
 import {
   createFakeCheckpointService,
@@ -65,6 +66,8 @@ export interface TestHostOptions<S extends HostThreadStore = FakeThreadStore> {
   index?: ThreadIndex;
   /** Told on every host-initiated interrupt (session tools, design 2026-10-14 §1.1). */
   onTurnInterrupt?: (threadId: string) => void;
+  /** The orchestrator's `secrets` option (fork links, MCP App answers). */
+  secrets?: OrchestratorOptions["secrets"];
 }
 
 export interface TestHost<S extends HostThreadStore = FakeThreadStore> {
@@ -176,6 +179,7 @@ export function createTestHost<S extends HostThreadStore = FakeThreadStore>(
     ...(options.isThreadClosed ? { isThreadClosed: options.isThreadClosed } : {}),
     ...(options.index ? { index: options.index } : {}),
     ...(options.onTurnInterrupt ? { onTurnInterrupt: options.onTurnInterrupt } : {}),
+    ...(options.secrets ? { secrets: options.secrets } : {}),
     launchConfigs,
     clock,
     ids

@@ -21,6 +21,7 @@ import {
   SESSION_TOOL_REFERENCE_KEYS,
   SESSION_TOOL_REFERENCE_MAX_BYTES
 } from "./session-tools.ts";
+import { stripSecretRequestValues } from "./secret-requests.ts";
 import { slimActivityPayload } from "./slim.ts";
 
 test("every provider's spelling parses to the bare name", () => {
@@ -199,6 +200,33 @@ test("htmlRender is a kept reference key and survives a double slim through the 
   const twice = slimActivityPayload(once) as { data: Record<string, unknown> };
   assert.deepEqual(once.data.sessionTool, { name: "html_render", references: { htmlRender: ref } });
   assert.deepEqual(twice.data.sessionTool, { name: "html_render", references: { htmlRender: ref } });
+});
+
+test("secretRequest is a kept reference key beside htmlRender: the record survives a double slim, the value never", () => {
+  assert.deepEqual([...SESSION_TOOL_REFERENCE_KEYS], ["htmlRender", "secretRequest"]);
+  const record = { name: "DEPLOY_KEY", purpose: "Push the release", outcome: "provided" };
+  const value = "correct-horse-battery-staple-4711";
+  // As ingestion stores it: the value stripped by shape first, then marked.
+  const stored = stripSecretRequestValues({
+    toolName: "mcp__orquester__request_secret",
+    input: { name: "DEPLOY_KEY", prompt: "Paste it." },
+    result: {
+      type: "tool_result",
+      content: [{ type: "text", text: JSON.stringify({ secretRequest: record, value, note: "Do not print it." }) }]
+    }
+  });
+  assert.ok(!JSON.stringify(stored).includes(value));
+  const payload = {
+    itemType: "mcp_tool_call",
+    status: "completed",
+    data: sessionToolMarkedData(stored, new Set(["request_secret"]))
+  };
+  const once = slimActivityPayload(payload) as { data: Record<string, unknown> };
+  const twice = slimActivityPayload(once) as { data: Record<string, unknown> };
+  for (const slim of [once, twice]) {
+    assert.deepEqual(slim.data.sessionTool, { name: "request_secret", references: { secretRequest: record } });
+    assert.ok(!JSON.stringify(slim).includes(value));
+  }
 });
 
 test("a marked row keeps data.sessionTool through slimming; an unmarked MCP row has none", () => {
