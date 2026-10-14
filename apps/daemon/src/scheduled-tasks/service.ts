@@ -178,15 +178,22 @@ function readAuthor(value: unknown): { threadId: string; title: string; runtimeM
 /**
  * Why an agent's task may not be delivered now (S-I1, the turn policy's rule (a) at delivery):
  * the target thread runs in a permission mode broader than the scheduling thread did. Null when
- * it may — and always for a user's task, or one whose modes are not known.
+ * it may, and always for a user's task. Fails CLOSED, as `turn-policy.ts` does: a scheduling
+ * thread whose mode is not recorded (a task from before the turn policy) or not recognised counts
+ * as the NARROWEST mode, and a target whose mode is unknown or not recognised as the BROADEST.
  */
 export function deliveryRefusal(task: ScheduledTaskRecord, thread: ThreadSnapshotPayload): string | null {
-  if (task.createdByThreadId === null || task.creatorRuntimeMode === null) return null;
-  const breadth = (mode: string) => (RUNTIME_MODES as readonly string[]).indexOf(mode);
+  if (task.createdByThreadId === null) return null;
+  const modes = RUNTIME_MODES as readonly string[];
+  const creatorIndex = task.creatorRuntimeMode === null ? -1 : modes.indexOf(task.creatorRuntimeMode);
+  const creator = creatorIndex === -1 ? 0 : creatorIndex;
   const target = (thread.head as { runtimeMode?: RuntimeMode } | undefined)?.runtimeMode;
-  if (target === undefined || breadth(target) === -1 || breadth(task.creatorRuntimeMode) === -1) return null;
-  if (breadth(target) <= breadth(task.creatorRuntimeMode)) return null;
-  return `The thread now runs in ${target} mode, broader than the ${task.creatorRuntimeMode} mode of the thread that scheduled this task; only the user can give it this work.`;
+  const targetIndex = typeof target === "string" ? modes.indexOf(target) : -1;
+  const reach = targetIndex === -1 ? modes.length : targetIndex;
+  if (reach <= creator) return null;
+  const creatorLabel = creatorIndex === -1 ? `${modes[0]} (assumed: the scheduling thread's mode is not known)` : modes[creatorIndex];
+  const targetLabel = targetIndex === -1 ? "an unknown" : target;
+  return `The thread now runs in ${targetLabel} mode, broader than the ${creatorLabel} mode of the thread that scheduled this task; only the user can give it this work.`;
 }
 
 function invalid(message: string): ScheduledTaskError {
@@ -382,6 +389,15 @@ export class ScheduledTasksService {
       const next: ScheduledTaskRecord = { ...current, updatedAt: now.toISOString() };
       if (body.prompt !== undefined) next.prompt = readPrompt(body.prompt);
       if (body.enabled !== undefined && typeof body.enabled !== "boolean") throw invalid("enabled must be a boolean.");
+      if (body.prompt !== undefined && body.author === undefined) {
+        // The USER rewrote the prompt (the routes without an agent's author): it is the user's own
+        // words from now — delivered as written, never as "[Scheduled by thread …] … not from the
+        // user" — and the task falls under the user-owned rule (agents may not change it).
+        next.createdByThreadId = null;
+        next.createdByTitle = null;
+        next.creatorRuntimeMode = null;
+        next.interactionMode = null;
+      }
       if (body.author !== undefined) {
         // An agent's change (S-I1): the task is that thread's from now, in its modes.
         const author = readAuthor(body.author);

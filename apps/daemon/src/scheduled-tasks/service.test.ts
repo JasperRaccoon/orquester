@@ -5,12 +5,13 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SCHEDULED_TASK_MISSED_GRACE_MINUTES, type ScheduledTask, type ScheduledTaskDeletedPayload, type SessionSummary } from "@orquester/api";
-import { agentChatRoutes, buildThreadMessage, stripThreadProvenance, threadMessageContext } from "@orquester/api/agent-chat";
+import { agentChatRoutes, buildThreadMessage, stripThreadProvenance, threadMessageContext, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import type { ScheduledTaskRecord } from "@orquester/config";
 import { FakeDaemonApi } from "../mcp/testing.ts";
 import { ManualClock } from "../workflows/testing/manual-trigger-clock.ts";
 import { advance, silentLogger } from "../workflows/triggers/test-support.ts";
 import { MISSED_RUN_GRACE_MINUTES } from "../workflows/triggers/scheduler.ts";
-import { ScheduledTaskError, ScheduledTasksService, SCHEDULED_TASK_DEADLINE_RETRIES, SCHEDULED_TASK_RETRY_MS } from "./service.ts";
+import { deliveryRefusal, ScheduledTaskError, ScheduledTasksService, SCHEDULED_TASK_DEADLINE_RETRIES, SCHEDULED_TASK_RETRY_MS } from "./service.ts";
 import { ScheduledTasksStore } from "./store.ts";
 
 const MIN = 60_000;
@@ -66,7 +67,8 @@ function snapshotOf(state: Busy) {
   return {
     kind: "snapshot",
     thread: {
-      head: { session: { status: state === "running" ? "running" : "ready", activeTurnId: state === "running" ? "t1" : null } },
+      // The narrowest mode: an agent's task with no recorded mode may still reach it (fail closed elsewhere).
+      head: { runtimeMode: "approval-required", session: { status: state === "running" ? "running" : "ready", activeTurnId: state === "running" ? "t1" : null } },
       items: [],
       turns: [{ turnId: "t0", state: state === "running" ? "running" : "completed" }],
       checkpoints: [],
@@ -663,4 +665,43 @@ test("an agent's task the target outgrew in permission mode is refused at delive
   assert.equal(after.lastRunStatus, "failed");
   assert.match(after.lastRunError ?? "", /auto mode, broader than the approval-required mode/);
   assert.equal(after.enabled, false, "a one-shot is paused");
+});
+
+test("the delivery check fails closed: an unrecorded or unknown scheduling mode is the narrowest, an unknown target the broadest", () => {
+  const record = (over: Partial<ScheduledTaskRecord>) =>
+    ({ id: "t", threadId: THREAD, createdByThreadId: "agent", creatorRuntimeMode: null, ...over }) as ScheduledTaskRecord;
+  const thread = (runtimeMode?: string) => ({ head: runtimeMode === undefined ? {} : { runtimeMode } }) as unknown as ThreadSnapshotPayload;
+  // A task from before the turn policy (no recorded mode): only the narrowest target.
+  assert.equal(deliveryRefusal(record({}), thread("approval-required")), null);
+  assert.match(deliveryRefusal(record({}), thread("auto")) ?? "", /assumed/);
+  assert.notEqual(deliveryRefusal(record({ creatorRuntimeMode: "warp-speed" }), thread("auto-accept-edits")), null);
+  // A target whose mode is unknown is refused even to the broadest scheduler.
+  assert.notEqual(deliveryRefusal(record({ creatorRuntimeMode: "full-access" }), thread()), null);
+  assert.notEqual(deliveryRefusal(record({ creatorRuntimeMode: "full-access" }), thread("future-mode")), null);
+  assert.equal(deliveryRefusal(record({ creatorRuntimeMode: "full-access" }), thread("full-access")), null);
+  // A user's task is never refused by it.
+  assert.equal(deliveryRefusal(record({ createdByThreadId: null }), thread()), null);
+});
+
+test("the user rewriting an agent's prompt makes the task the user's: delivered as written, no provenance", async (t) => {
+  const r = await rig(t);
+  const task = await r.service.create({
+    threadId: THREAD,
+    prompt: "Agent's words",
+    schedule: { kind: "once", at: "2026-10-14T10:10:00.000Z" },
+    createdByThreadId: "other",
+    createdByTitle: "Planner",
+    creatorRuntimeMode: "approval-required",
+    interactionMode: "default"
+  });
+  // Toggling it keeps the agent's authorship…
+  const paused = await r.service.update(task.id, { enabled: false });
+  assert.equal(paused.createdByThreadId, "other");
+  // …rewriting the prompt does not.
+  const mine = await r.service.update(task.id, { prompt: "My own words", enabled: true, schedule: { kind: "once", at: "2026-10-14T10:20:00.000Z" } });
+  assert.equal(mine.createdByThreadId, null);
+  assert.equal(mine.createdByTitle, null);
+  await r.run(15 * MIN);
+  assert.equal(r.turns.at(-1)!.input, "My own words");
+  assert.deepEqual(r.turns.at(-1)!.context, [{ kind: "scheduled-task", label: "Scheduled task", ref: task.id }]);
 });
