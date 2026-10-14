@@ -112,15 +112,18 @@ export function smokeTestEnv(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 // The version becomes a directory name under versions/: a plain semver only.
 const VERSION_PATTERN = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
 
-/** Ask the registry for the latest tsc-rs and its platform package's tarball. */
+/**
+ * Ask the registry for the platform package's tarball of `pinned`, or by
+ * default of the latest tsc-rs (`tsc-rs/latest`).
+ */
 export async function resolveTsRustRelease(
   platformPackage: string,
   deps: Pick<TsRustInstallerDeps, "fetchJson">,
-  signal: AbortSignal
+  signal: AbortSignal,
+  pinned?: string
 ): Promise<TsRustRelease> {
   return step("registry", REGISTRY_TIMEOUT_MS, signal, async (bounded) => {
-    const latest = await deps.fetchJson(`${NPM_REGISTRY}/tsc-rs/latest`, bounded);
-    const version = field(latest, "version");
+    const version = pinned ?? field(await deps.fetchJson(`${NPM_REGISTRY}/tsc-rs/latest`, bounded), "version");
     if (typeof version !== "string" || !VERSION_PATTERN.test(version)) {
       throw new Error("the registry returned no valid tsc-rs version");
     }

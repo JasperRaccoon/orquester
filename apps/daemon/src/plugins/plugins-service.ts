@@ -92,7 +92,7 @@ export class PluginsError extends Error {
 export interface PluginsServiceOptions {
   /** The appdir base; plugins.json and the plugin dirs come from the `packages/config` helpers. */
   baseDir: string;
-  /** A getter: PUT /api/config/daemon can move it at runtime (then call `workspacesDirChanged`). */
+  /** A getter: PUT /api/config/daemon can move it at runtime (then call `workspacesChanged`). */
   workspacesDir: () => string;
   /** Atomic JSON write (the daemon's `writeJsonFile`). */
   writeJson: (file: string, value: unknown) => Promise<void>;
@@ -140,9 +140,13 @@ export class PluginsService {
   private runtimeQueue: Promise<unknown> = Promise.resolve();
   /** The workspaces root the preload on disk was written with by this process; null if not (yet). */
   private preloadRoot: string | null = null;
+  /** The enabled existing workspaces at the last runtime refresh, as JSON; null before the first. */
+  private activeKey: string | null = null;
   private timer: ReturnType<typeof setInterval> | null = null;
 
   private emitQueue: Promise<unknown> = Promise.resolve();
+  /** Background refreshes in flight (`workspacesChanged`), for `settled()`. */
+  private readonly inflight = new Set<Promise<void>>();
   private stopped = false;
 
   constructor(private readonly options: PluginsServiceOptions) {
@@ -179,20 +183,36 @@ export class PluginsService {
     await Promise.all([this.jobQueue, this.fileQueue, this.runtimeQueue]).catch(() => undefined);
   }
 
-  /** The workspaces dir moved: rewrite the preload for the new root and re-evaluate the rest. */
-  async workspacesDirChanged(): Promise<void> {
-    await this.refreshRuntime();
-    this.emitChanged();
+  /**
+   * A workspace was created, renamed or deleted, or the workspaces dir moved:
+   * rewrite the preload for a new root, re-decide the session preload and the
+   * timer, broadcast when the visible enabled workspaces changed, and queue an
+   * install when a re-appeared enabled workspace has nothing usable installed.
+   */
+  workspacesChanged(): Promise<void> {
+    return this.track(async () => {
+      if (await this.refreshRuntime()) this.emitChanged();
+      await this.requestInstallIfMissing();
+    });
   }
 
   /** Every queued job, state refresh and change event has run (for tests and shutdown). */
   async settled(): Promise<void> {
     for (;;) {
-      const queues = [this.jobQueue, this.fileQueue, this.runtimeQueue, this.emitQueue];
+      const queues = [this.jobQueue, this.fileQueue, this.runtimeQueue, this.emitQueue, ...this.inflight];
       await Promise.all(queues).catch(() => undefined);
-      const after = [this.jobQueue, this.fileQueue, this.runtimeQueue, this.emitQueue];
-      if (after.every((queue, index) => queue === queues[index])) return;
+      const after = [this.jobQueue, this.fileQueue, this.runtimeQueue, this.emitQueue, ...this.inflight];
+      if (after.length === queues.length && after.every((queue, index) => queue === queues[index])) return;
     }
+  }
+
+  /** Run `task` as a tracked background step that `settled()` waits for; never rejects. */
+  private track(task: () => Promise<void>): Promise<void> {
+    const run: Promise<void> = task()
+      .catch((error) => this.logger.error("Plugin state refresh failed", error))
+      .finally(() => this.inflight.delete(run));
+    this.inflight.add(run);
+    return run;
   }
 
   async list(): Promise<PluginsResponse> {
@@ -233,8 +253,8 @@ export class PluginsService {
     });
     this.emitChanged();
     await this.refreshRuntime();
-    if (enabled && !this.state(id).current) {
-      this.requestCheck(false);
+    if (enabled) {
+      await this.requestInstallIfMissing();
     }
     return this.get(id);
   }
@@ -315,6 +335,22 @@ export class PluginsService {
     );
   }
 
+  /**
+   * Queue a check when nothing usable is installed: no current version, or its
+   * binary is gone. The check itself runs only while a workspace is enabled.
+   */
+  private async requestInstallIfMissing(): Promise<void> {
+    if (this.config === null || this.readError !== null) return;
+    const current = this.state(TS_RUST_PLUGIN_ID).current;
+    if (!current || !(await this.binaryExists(current.version))) {
+      this.requestCheck(false);
+    }
+  }
+
+  private binaryExists(version: string): Promise<boolean> {
+    return isFile(tsRustBinaryPath(this.pluginDir, version, this.platform));
+  }
+
   private async runCheck(queued: QueuedCheck): Promise<void> {
     if (this.queuedCheck === queued) this.queuedCheck = null;
     const platformPackage = this.platformPackage;
@@ -327,9 +363,18 @@ export class PluginsService {
     try {
       let installed: PluginInstalledVersion;
       try {
-        const release = await resolveTsRustRelease(platformPackage, this.installer, abort.signal);
         const state = this.state(TS_RUST_PLUGIN_ID);
-        if (release.version === state.current?.version || release.version === state.skippedVersion) {
+        // A current version whose binary is gone (deleted from outside) is repaired: every tsc
+        // would otherwise print "tsc-rs failed to start" until the downloads were removed.
+        const currentMissing = state.current !== undefined && !(await this.binaryExists(state.current.version));
+        let release = await resolveTsRustRelease(platformPackage, this.installer, abort.signal);
+        if (release.version === state.skippedVersion && currentMissing && state.current) {
+          // Latest is the version rolled back from: reinstall the one rolled back to instead.
+          release = await resolveTsRustRelease(platformPackage, this.installer, abort.signal, state.current.version);
+        } else if (
+          !currentMissing &&
+          (release.version === state.current?.version || release.version === state.skippedVersion)
+        ) {
           await this.recordCheck(null);
           return;
         }
@@ -344,12 +389,16 @@ export class PluginsService {
         return;
       }
       const at = this.installer.now().toISOString();
-      const state = await this.mutate((config) => {
+      const state = await this.mutate(async (config) => {
         const next = stateIn(config, TS_RUST_PLUGIN_ID);
-        if (next.current) next.previous = next.current;
+        if (next.current?.version !== installed.version) {
+          // A current version whose files are gone is no rollback target: the old previous stays.
+          if (next.current && (await this.binaryExists(next.current.version))) next.previous = next.current;
+          // Only a version other than the skipped one gets here.
+          delete next.skippedVersion;
+        }
+        // A repair of the current version keeps previous and the skip as they were.
         next.current = installed;
-        // Only a version past the skipped one gets here.
-        delete next.skippedVersion;
         delete next.lastError;
         next.lastCheckAt = at;
         return next;
@@ -408,17 +457,21 @@ export class PluginsService {
   /**
    * Bring the runtime in line with the state: the preload written for the
    * current workspaces root, new sessions told whether to load it, and the
-   * hourly timer armed while any workspace is enabled. Serialized.
+   * hourly timer armed while any workspace is enabled. Serialized. Resolves
+   * whether the enabled existing workspaces changed since the last refresh.
    */
-  private refreshRuntime(): Promise<void> {
-    const run = this.runtimeQueue.then(async () => {
+  private refreshRuntime(): Promise<boolean> {
+    const run = this.runtimeQueue.then(async (): Promise<boolean> => {
       if (this.platformPackage === null || this.stopped) {
         this.setSessionPreload(null);
         this.disarm();
-        return;
+        return false;
       }
       const state = this.config === null ? null : this.state(TS_RUST_PLUGIN_ID);
       const active = state === null ? [] : await this.activeWorkspaces(state);
+      const activeKey = JSON.stringify(active);
+      const changed = activeKey !== this.activeKey;
+      this.activeKey = activeKey;
       const workspacesDir = this.options.workspacesDir();
       const root = await realpath(workspacesDir).catch(() => resolve(workspacesDir));
       if (this.preloadRoot !== root && (active.length > 0 || (await isFile(this.preloadPath)))) {
@@ -431,23 +484,28 @@ export class PluginsService {
         }
       }
       this.setSessionPreload(active.length > 0 && this.preloadRoot === root ? this.preloadPath : null);
-      // Armed for any listed name, existing or not: each tick re-reads the workspaces, so a
-      // re-created workspace picks the plugin up again within the hour.
+      // Armed for any listed name, existing or not. The daemon's workspace routes call
+      // `workspacesChanged`; each tick re-reads the workspaces too, so a workspace re-created
+      // behind the daemon's back picks the plugin up again within the hour.
       if (state !== null && state.enabledWorkspaces.length > 0) {
         this.arm();
       } else {
         this.disarm();
       }
+      return changed;
     });
     this.runtimeQueue = run.catch((error) => this.logger.error("Failed to refresh the plugin runtime", error));
-    return run.catch(() => undefined);
+    return run.catch(() => false);
   }
 
   private arm(): void {
     if (this.timer !== null || this.stopped) return;
     this.timer = setInterval(() => {
-      void this.refreshRuntime();
-      this.requestCheck(false);
+      void this.track(async () => {
+        if (await this.refreshRuntime()) this.emitChanged();
+        // The check repairs a missing binary too, and runs only while a workspace is enabled.
+        this.requestCheck(false);
+      });
     }, PLUGIN_CHECK_INTERVAL_MS);
     this.timer.unref?.();
   }
@@ -460,10 +518,17 @@ export class PluginsService {
 
   // ---- plugins.json --------------------------------------------------------------------------
 
+  /**
+   * Re-read a plugins.json that did not read before. Once it reads again
+   * (repaired by hand), the runtime catches up: preload, session preload, timer,
+   * a broadcast, and the install a broken file held back.
+   */
   private async ensureReadable(): Promise<void> {
-    if (this.config === null || this.readError !== null) {
-      await this.reload();
-    }
+    if (this.config !== null && this.readError === null) return;
+    await this.reload();
+    await this.refreshRuntime();
+    this.emitChanged();
+    await this.requestInstallIfMissing();
   }
 
   /** Re-read plugins.json in the file queue; throws `PLUGINS_UNREADABLE` when it does not read. */
@@ -510,13 +575,23 @@ export class PluginsService {
       }
       throw this.unreadable(`plugins.json could not be read (${(error as NodeJS.ErrnoException).code ?? "error"})`);
     }
+    let config: PluginsConfig;
     try {
-      const config = parsePluginsConfig(JSON.parse(raw));
-      this.readError = null;
-      return config;
+      config = parsePluginsConfig(JSON.parse(raw));
     } catch {
       throw this.unreadable("plugins.json is not valid plugin state");
     }
+    // Records of plugins this build does not know are kept as they are; a malformed record of a
+    // built-in plugin makes the file unreadable for this daemon, so it is never written over.
+    for (const entry of BUILT_IN_PLUGINS) {
+      try {
+        pluginStateOf(config, entry.id);
+      } catch {
+        throw this.unreadable(`plugins.json has a malformed "${entry.id}" record`);
+      }
+    }
+    this.readError = null;
+    return config;
   }
 
   private unreadable(reason: string): PluginsError {

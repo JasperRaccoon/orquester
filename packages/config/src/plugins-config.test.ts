@@ -51,10 +51,24 @@ test("unknown fields and unknown plugin ids written by other versions are kept",
   assert.deepEqual(roundTripped.plugins["other-plugin"], { enabledWorkspaces: ["w"], extra: true });
 });
 
+test("an unknown plugin id with any shape does not make the file unreadable, and round-trips verbatim", () => {
+  const other = { enabledWorkspaces: "all", nested: [1, { deep: true }] };
+  const parsed = parsePluginsConfig({ version: 1, plugins: { "future-plugin": other, "flag-plugin": true } });
+  assert.deepEqual(JSON.parse(JSON.stringify(parsed)).plugins, { "future-plugin": other, "flag-plugin": true });
+  assert.deepEqual(pluginStateOf(parsed, "ts-rust"), { enabledWorkspaces: [] });
+});
+
 test("a malformed plugins.json is rejected rather than read as empty", () => {
   assert.throws(() => parsePluginsConfig({ version: 2 }));
-  assert.throws(() => parsePluginsConfig({ plugins: { "ts-rust": { enabledWorkspaces: "jaspersito" } } }));
-  assert.throws(() => parsePluginsConfig({ plugins: { "ts-rust": { current: { version: "" } } } }));
+  assert.throws(() => parsePluginsConfig({ version: 1, plugins: ["ts-rust"] }));
+});
+
+test("a known plugin's malformed record is rejected where it is read", () => {
+  const wrongType = parsePluginsConfig({ plugins: { "ts-rust": { enabledWorkspaces: "jaspersito" } } });
+  assert.throws(() => pluginStateOf(wrongType, "ts-rust"));
+  const emptyVersion = parsePluginsConfig({ plugins: { "ts-rust": { current: { version: "" } } } });
+  assert.throws(() => pluginStateOf(emptyVersion, "ts-rust"));
+  assert.throws(() => pluginStateOf(parsePluginsConfig({ plugins: { "ts-rust": "on" } }), "ts-rust"));
 });
 
 test("the preload is appended to NODE_OPTIONS without replacing it", () => {

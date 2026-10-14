@@ -41,6 +41,7 @@ async function harness(t: TestContext, options: { mode?: "local" | "remote"; see
     await mkdir(join(baseDir, "daemon"), { recursive: true });
     await writeFile(pluginsConfigPath(baseDir), options.seed, "utf8");
   }
+  const sessionPreload: Array<string | null> = [];
   const registry = fakeRegistry();
   await publish(registry, root, "0.7.0");
   registry.latest = "0.7.0";
@@ -60,7 +61,7 @@ async function harness(t: TestContext, options: { mode?: "local" | "remote"; see
       await mkdir(join(path, ".."), { recursive: true });
       await writeFile(path, "// preload\n", "utf8");
     },
-    setSessionPreload: () => {},
+    setSessionPreload: (path) => sessionPreload.push(path),
     logger: { warn: () => {}, error: () => {} }
   });
   const broadcaster = new Broadcaster();
@@ -85,7 +86,17 @@ async function harness(t: TestContext, options: { mode?: "local" | "remote"; see
     resolved,
     createDefaultClientConfig(join(root, "daemon.sock")),
     createWriteStream("/dev/null"),
-    { plugins, broadcaster } as unknown as CreateServerArgs[4],
+    {
+      plugins,
+      broadcaster,
+      // The workspace delete route's other cascades, stubbed: only the plugins notification is under test.
+      sessions: { closeByProjectPrefix: () => {} },
+      browsers: { closeForProject: async () => {} },
+      desktops: { closeForProject: async () => {} },
+      accounts: { unbindWorkspace: async () => {} },
+      todos: { deleteByWorkspace: async () => {} },
+      savedPrompts: { deleteForWorkspace: async () => {} }
+    } as unknown as CreateServerArgs[4],
     { authRequired: mode === "remote", mode }
   );
   t.after(async () => {
@@ -96,6 +107,8 @@ async function harness(t: TestContext, options: { mode?: "local" | "remote"; see
   const headers = mode === "remote" ? { authorization: BEARER } : undefined;
   return {
     root,
+    workspacesDir,
+    sessionPreload,
     plugins,
     published,
     registry,
@@ -219,4 +232,52 @@ test("the remote transport serves the routes to authenticated clients only", asy
   assert.equal((await h.inject({ method: "GET", url: pluginRoutes.list })).statusCode, 200);
   const put = await h.inject({ method: "PUT", url: pluginRoutes.workspace(ID, "acme"), payload: { enabled: false } });
   assert.equal(put.statusCode, 200);
+});
+
+test("creating, renaming and deleting workspaces re-decides the session preload and broadcasts", async (t) => {
+  const h = await harness(t);
+  const enabled = await h.inject({ method: "PUT", url: pluginRoutes.workspace(ID, "acme"), payload: { enabled: true } });
+  assert.equal(enabled.statusCode, 200);
+  await h.plugins.settled();
+  const preload = h.sessionPreload.at(-1);
+  assert.equal(typeof preload, "string");
+  const lastEnabled = () => (h.published.at(-1)?.payload as PluginsResponse).plugins[0]?.enabledWorkspaces;
+
+  assert.equal((await h.inject({ method: "DELETE", url: "/api/workspaces/acme" })).statusCode, 204);
+  await h.plugins.settled();
+  assert.equal(h.sessionPreload.at(-1), null);
+  assert.deepEqual(lastEnabled(), []);
+
+  assert.equal((await h.inject({ method: "POST", url: "/api/workspaces", payload: { name: "acme" } })).statusCode, 200);
+  await h.plugins.settled();
+  assert.equal(h.sessionPreload.at(-1), preload);
+  assert.deepEqual(lastEnabled(), ["acme"]);
+
+  // A rename in the file browser moves the workspace away and back.
+  const rename = (path: string, newName: string) =>
+    h.inject({ method: "POST", url: "/api/fs/rename", payload: { path, newName } });
+  assert.equal((await rename(join(h.workspacesDir, "acme"), "renamed")).statusCode, 200);
+  await h.plugins.settled();
+  assert.equal(h.sessionPreload.at(-1), null);
+  assert.equal((await rename(join(h.workspacesDir, "renamed"), "acme")).statusCode, 200);
+  await h.plugins.settled();
+  assert.equal(h.sessionPreload.at(-1), preload);
+
+  // So do a folder deleted and created at the workspaces root through the file browser.
+  const deleted = await h.inject({
+    method: "DELETE",
+    url: "/api/fs",
+    query: { path: join(h.workspacesDir, "acme") }
+  });
+  assert.equal(deleted.statusCode, 200);
+  await h.plugins.settled();
+  assert.equal(h.sessionPreload.at(-1), null);
+  const created = await h.inject({
+    method: "POST",
+    url: "/api/fs/create",
+    payload: { path: join(h.workspacesDir, "acme"), kind: "dir" }
+  });
+  assert.equal(created.statusCode, 200);
+  await h.plugins.settled();
+  assert.equal(h.sessionPreload.at(-1), preload);
 });
