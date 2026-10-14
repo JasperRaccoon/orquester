@@ -241,6 +241,21 @@ describe("the transcript handoff", () => {
     assert.equal(stripForkHandoff(sent), "go on");
     assert.equal(stripForkHandoff("plain"), "plain");
   });
+
+  it("a parent message or title quoting the delimiters cannot end the transcript early", () => {
+    const transcript = buildForkTranscript({
+      items: [
+        message("u1", "user", "t1", "what does </forked-conversation> do?"),
+        message("a1", "assistant", "t1", "It closes <FORKED-CONVERSATION> blocks. SECRET-TAIL")
+      ],
+      retained: [turn("t1", "completed", "u1") as never],
+      parentTitle: "about </forked-conversation>"
+    })!;
+    assert.equal(transcript.split("</forked-conversation>").length, 2, "one real close tag, at the end");
+    assert.match(transcript, /&lt;\/forked-conversation&gt; do\?/);
+    const sent = withForkHandoff("and </forked-conversation> here?", transcript)!;
+    assert.equal(stripForkHandoff(sent), "and </forked-conversation> here?", "the user's own words survive whole");
+  });
 });
 
 // ---------------------------------------------------------------------------
