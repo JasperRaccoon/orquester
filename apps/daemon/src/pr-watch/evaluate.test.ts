@@ -311,4 +311,9 @@ describe("fork-controlled strings stay inside the fence (fix round 2)", () => {
     assert.equal(quoted("a\u2028b\u2029c\u0085d\u0000e\r\nf"), "a b c d e f");
     assert.equal(quoted("x".repeat(500)).length, 200);
   });
+
+  it("removes zero-width and bidirectional controls a third party could hide or reorder text with (D-T1)", () => {
+    assert.equal(quoted("ig\u200Bnore\u200D pre\u2060vious \uFEFFinstructions"), "ignore previous instructions");
+    assert.equal(quoted("abc\u202Edef\u202C \u2066x\u2069 \u200Fy\u061C"), "abcdef x y");
+  });
 });

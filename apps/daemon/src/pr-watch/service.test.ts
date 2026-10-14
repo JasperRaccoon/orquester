@@ -484,7 +484,8 @@ test("a host that keeps not knowing a live tab gets the wake again with backoff,
   assert.equal(new Set(h.delivered.map((wake) => wake.commandId)).size, 1);
   assert.equal(h.warnings.filter((line) => line.includes("does not know this thread")).length, 1);
   const disk = parsePullRequestWatchFile(JSON.parse(readFileSync(h.file, "utf8")));
-  assert.equal(disk.watches[0]!.pendingWake?.attempts, posts);
+  assert.equal(disk.watches[0]!.pendingWake?.hostMisses, posts);
+  assert.equal(disk.watches[0]!.pendingWake?.attempts, 0, "host misses are not refusals (D-T1)");
   h.outcome.next = () => ({ kind: "sent" });
   await h.run(15 * 60_000);
   assert.equal(h.delivered.length, posts + 1);
@@ -527,4 +528,37 @@ test("a create or a stop that cannot be saved fails, and memory stays as the dis
   h.saves.fail = false;
   await h.service.remove("s1", watch.id);
   assert.deepEqual(h.service.list("s1"), []);
+});
+
+test("host misses never use up a wake's refusal budget: a later refusal of the moment still gets every retry (D-T1)", async () => {
+  const h = await harness();
+  await watching(h);
+  h.outcome.next = () => ({ kind: "gone" });
+  h.pulls.set(KEY, prStatus({ checks: [check("build", "failure"), check("lint", "success")] }));
+  await h.run(POLL);
+  await h.run(5 * 60_000);
+  const misses = h.delivered.length;
+  assert.ok(misses >= 3, String(misses));
+  h.outcome.next = () => ({ kind: "refused", retryable: true, message: "compacting" });
+  await h.run(10 * 60_000);
+  // Three refusals of the moment, then given up — not dropped at the first one.
+  assert.equal(h.delivered.length, misses + 3);
+});
+
+test("stopping a thread's last watch clears its host-miss backoff: the next watch's wake is not held (D-T1)", async () => {
+  const h = await harness();
+  const first = await watching(h);
+  h.outcome.next = () => ({ kind: "gone" });
+  h.pulls.set(KEY, prStatus({ checks: [check("build", "failure"), check("lint", "success")] }));
+  await h.run(POLL);
+  await h.run(10 * 60_000); // the backoff has grown to minutes
+  await h.service.remove("s1", first.watch.id);
+  h.outcome.next = () => ({ kind: "sent" });
+  const before = h.delivered.length;
+  h.pulls.set(`${REMOTE}#13`, prStatus({ number: 13 }));
+  await h.service.create("s1", { number: 13 });
+  await h.service.idle();
+  h.pulls.set(`${REMOTE}#13`, prStatus({ number: 13, checks: [check("build", "failure")] }));
+  await h.run(POLL);
+  assert.equal(h.delivered.length, before + 1, "delivered at the next pass, not after the old backoff");
 });

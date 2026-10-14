@@ -67,8 +67,10 @@ export const pullRequestWatchWakeSchema = z
     /** The whole `/turn` input. */
     input: z.string().min(1),
     createdAt: z.string(),
-    /** Refused deliveries so far. */
+    /** Refused deliveries so far (the thread's own refusals; host misses are counted apart). */
     attempts: z.number().int().nonnegative().catch(0).default(0),
+    /** Times the agent host did not know the thread (a host-side miss on a live tab); never refusals. */
+    hostMisses: z.number().int().nonnegative().catch(0).default(0),
     /**
      * Set (and saved) before the first post: the host may hold it, so its text can no longer
      * change. An unposted wake is rewritten when one of its watches stops.

@@ -171,11 +171,20 @@ const DASHES = "-\u2010\u2011\u2012\u2013\u2014\u2015\u2212\u2E3A\u2E3B\uFE58\uF
 const DASH_RUN = new RegExp(`[${DASHES}](?:\\s*[${DASHES}]){2,}`, "g");
 
 /**
+ * Invisible format characters a third party can hide text with: zero-width spaces and joiners,
+ * word joiners and invisible operators, the BOM, and every bidirectional control (embeddings,
+ * overrides, isolates, marks) that can make a line read in another order than it is.
+ */
+const INVISIBLE = /[\u200B-\u200F\u202A-\u202E\u2060-\u2064\u2066-\u2069\uFEFF\u061C\u180E]/g;
+
+/**
  * One line of third-party text: comment markup out, every line break (incl. U+0085, U+2028,
- * U+2029) and control character a space, dash runs (any lookalike, spaces between) one "—", bounded.
+ * U+2029) and control character a space, zero-width and bidi controls removed, dash runs (any
+ * lookalike, spaces between) one "—", bounded.
  */
 export function quoted(text: string, max = SNIPPET_LENGTH): string {
   const flat = text
+    .replaceAll(INVISIBLE, "")
     .replaceAll(/<!--[\s\S]*?-->/g, " ")
     .replaceAll(/[\u0000-\u001f\u007f-\u009f\u2028\u2029]/g, " ")
     .replaceAll(/\s+/g, " ")

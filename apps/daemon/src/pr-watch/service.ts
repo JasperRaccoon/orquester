@@ -377,6 +377,7 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
     for (const watch of gone) forget(watch.id);
     file = { ...file, watches: file.watches.filter((watch) => watch.sessionId !== sessionId) };
     sentTurn.delete(sessionId);
+    deliveryHolds.delete(sessionId);
     logger.info("pr watch: thread deleted, its watches ended", { sessionId, count: gone.length });
     await persist();
     publish(sessionId);
@@ -468,7 +469,7 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
       return;
     }
     const parts = sections.map(renderWakeSection);
-    const wake = { commandId: `pr-watch:${mintId()}`, input: composeWake(parts), createdAt: at, attempts: 0, posted: false };
+    const wake = { commandId: `pr-watch:${mintId()}`, input: composeWake(parts), createdAt: at, attempts: 0, hostMisses: 0, posted: false };
     for (const step of apply) step();
     involved.forEach((watch, index) => {
       watch.pendingWake = { ...wake, part: parts[index]! };
@@ -504,7 +505,8 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
       if (failures === 1) {
         logger.warn("pr watch: the agent host does not know this thread; the wake waits and is retried with backoff", { sessionId, commandId });
       }
-      for (const watch of holders()) watch.pendingWake = { ...watch.pendingWake!, attempts: watch.pendingWake!.attempts + 1 };
+      // Counted apart from refusals (D-T1): a host miss never uses up the wake's refusal budget.
+      for (const watch of holders()) watch.pendingWake = { ...watch.pendingWake!, hostMisses: watch.pendingWake!.hostMisses + 1 };
       await persist();
       publish(sessionId);
       return;
@@ -890,6 +892,10 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
       throw new PullRequestWatchError(503, "UNAVAILABLE", "Orquester could not save the change; the pull request is still watched. Try again in a moment.");
     }
     forget(watch.id);
+    // Nothing of this thread waits to be delivered any more: its host-miss backoff goes too (D-T1).
+    if (!file.watches.some((candidate) => candidate.sessionId === sessionId && candidate.pendingWake !== null)) {
+      deliveryHolds.delete(sessionId);
+    }
     publish(sessionId);
     logger.info("pr watch: stopped", { sessionId, repository: watch.repository, number: watch.number });
   }
@@ -906,7 +912,7 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
     if (others.length === 0) return;
     const parts = others.map((watch) => watch.pendingWake!.part);
     if (parts.some((part) => part === undefined)) return;
-    const next = { commandId: `pr-watch:${mintId()}`, input: composeWake(parts as PullRequestWakePart[]), createdAt: wake.createdAt, attempts: 0, posted: false };
+    const next = { commandId: `pr-watch:${mintId()}`, input: composeWake(parts as PullRequestWakePart[]), createdAt: wake.createdAt, attempts: 0, hostMisses: 0, posted: false };
     for (const watch of others) watch.pendingWake = { ...next, part: watch.pendingWake!.part };
   }
 
