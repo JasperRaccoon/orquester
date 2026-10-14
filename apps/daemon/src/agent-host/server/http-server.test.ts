@@ -1272,3 +1272,34 @@ describe("agent host server — goals §5.7, the deploy's goal hold", () => {
     }
   });
 });
+
+describe("agent host server — thread lineage's fork route (spec 2026-10-14 §6)", () => {
+  it("creates the child as a fork of the thread in the path, and refuses a malformed child id", async () => {
+    const h = await harness();
+    const parentId = await h.host.createThread();
+    const body = {
+      threadId: "fork-child-1",
+      projectPath: "/work/project",
+      cwd: "/work/project",
+      title: "Fork",
+      refId: "claude",
+      accountId: "acc1",
+      home: "account",
+      modelSelection: undefined,
+      runtimeMode: undefined,
+      fork: {}
+    };
+    const created = await h.call("POST", agentHostRoutes.forkThread(parentId), body);
+    assert.equal(created.status, 200);
+    const result = created.body as { head: { id: string; lineage?: { parentThreadId: string } }; strategy: string };
+    assert.equal(result.head.id, "fork-child-1");
+    assert.equal(result.head.lineage?.parentThreadId, parentId);
+    assert.equal(result.strategy, "empty", "nothing to carry over from an empty parent");
+
+    const malformed = await h.call("POST", agentHostRoutes.forkThread(parentId), { ...body, threadId: "../x" });
+    assert.equal(malformed.status, 400);
+    const missing = await h.call("POST", agentHostRoutes.forkThread("nope"), { ...body, threadId: "fork-child-2" });
+    assert.equal(missing.status, 404);
+    await h.stop();
+  });
+});

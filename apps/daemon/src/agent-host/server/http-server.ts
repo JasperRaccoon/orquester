@@ -602,6 +602,13 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
     // names the child and the fork point.
     if (rest === "/fork" && method === "POST") {
       const body = (await readJsonBody(request)) as ForkHostThreadRequest;
+      // The child's id becomes a directory name, as the parent's does.
+      if (typeof body?.threadId !== "string" || !isSafeThreadId(body.threadId)) {
+        sendJson(response, 400, {
+          error: { code: "INVALID_COMMAND", message: "Malformed thread id." }
+        });
+        return;
+      }
       const result: ForkHostThreadResponse = await orchestrator.forkThread(threadId, body);
       sendJson(response, 200, result);
       return;
