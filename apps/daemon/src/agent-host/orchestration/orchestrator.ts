@@ -6755,7 +6755,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   // Lifecycle
   // -------------------------------------------------------------------------
 
-  const drain = async (): Promise<void> => {
+  const drain = async (final = false): Promise<void> => {
     await goalResumes;
     for (const runtime of [...runtimes.values()]) {
       await runtime.commands.drain();
@@ -6763,7 +6763,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       await runtime.captures.drain();
       await runtime.commands.drain();
     }
-    await ingestion.drain();
+    // The teardown's drain is final: ingestion also releases what it held back.
+    await ingestion.drain(final ? { final: true } : undefined);
     await store.drain();
     for (const runtime of [...runtimes.values()]) {
       await runtime.captures.drain();
@@ -6790,7 +6791,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     for (const runtime of runtimes.values()) {
       runtime.watchdog?.stop();
     }
-    await drain();
+    await drain(true);
     for (const runtime of runtimes.values()) {
       await saveHeadNow(runtime);
     }
@@ -6855,7 +6856,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     clearContinuationMarkers,
     reconcile,
     consume,
-    drain,
+    drain: () => drain(),
     stop,
     // The sink `createIngestion({sink})` is wired to in `main.ts`.
     ingestionSink

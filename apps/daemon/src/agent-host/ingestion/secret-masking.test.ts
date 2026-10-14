@@ -147,6 +147,54 @@ describe("streamed text is masked after it is joined", () => {
     assert.equal(outputText(sink, "call-2"), "last bytes Zq7-t", "released, nothing lost");
   });
 
+  // A running call's own rows land between its output chunks: OpenCode sends
+  // an `item.updated` per running frame, Codex a `patchUpdated` (file change)
+  // update, Grok `item.updated` plus `tool.progress`. None of them ends the
+  // stream, so none may release the held tail.
+  const interleavings = [
+    { provider: "opencode", itemType: "command_execution" as const, streamKind: "command_output" as const, progress: false },
+    { provider: "codex", itemType: "file_change" as const, streamKind: "file_change_output" as const, progress: false },
+    { provider: "grok", itemType: "command_execution" as const, streamKind: "command_output" as const, progress: true }
+  ];
+  for (const shape of interleavings) {
+    it(`${shape.provider}: running-call rows between two chunks do not release the tail`, async () => {
+      const { ingestion, sink, advance } = harness();
+      const call = { turnId: "turn-1", itemId: `call-${shape.provider}` };
+      const running = () =>
+        runtimeEvent("item.updated", { itemType: shape.itemType, status: "inProgress", data: { note: "running" } }, call);
+      await ingestion.ingest(runtimeEvent("item.started", { itemType: shape.itemType, status: "inProgress", data: {} }, call));
+      await ingestion.ingest(runtimeEvent("content.delta", { streamKind: shape.streamKind, delta: `TOKEN=${VALUE.slice(0, 6)}` }, call));
+      // The running row reaches the outbox at once; the chunk waits in the 250 ms buffer.
+      await ingestion.ingest(running());
+      if (shape.progress) {
+        await ingestion.ingest(runtimeEvent("tool.progress", { toolUseId: call.itemId, toolName: "run", elapsedSeconds: 1 }, call));
+      }
+      advance(250);
+      await settle();
+      await ingestion.ingest(running());
+      await ingestion.ingest(runtimeEvent("content.delta", { streamKind: shape.streamKind, delta: `${VALUE.slice(6)}\n` }, call));
+      advance(250);
+      await settle();
+      await ingestion.ingest(running());
+      await ingestion.ingest(runtimeEvent("item.completed", { itemType: shape.itemType, status: "completed", data: {} }, call));
+      await ingestion.drain();
+      assert.ok(!JSON.stringify(sink.batches).includes(VALUE), "the value never went out in clear");
+      assert.equal(outputText(sink, call.itemId), `TOKEN=${SECRET_REDACTED_TEXT}\n`);
+    });
+  }
+
+  it("the host's teardown (a final drain) releases a held tail; an ordinary drain does not", async () => {
+    const { ingestion, sink, advance } = harness();
+    const call = { turnId: "turn-1", itemId: "call-t" };
+    await ingestion.ingest(runtimeEvent("content.delta", { streamKind: "command_output", delta: "end Zq7-ta" }, call));
+    advance(250);
+    await settle();
+    await ingestion.drain();
+    assert.equal(outputText(sink, "call-t"), "end ", "a mid-turn drain is a sync point, not the stream's end");
+    await ingestion.drain({ final: true });
+    assert.equal(outputText(sink, "call-t"), "end Zq7-ta");
+  });
+
   it("a thread without a remembered value streams untouched", async () => {
     const { ingestion, sink, redactor } = harness();
     redactor.forget("t1");

@@ -72,10 +72,14 @@ export type SecretRequestAnswerRequest =
   | { answer: "provide"; value: string }
   | { answer: "decline" };
 
-/** The answer's response: the outcome only, never the value. */
+/**
+ * The answer's response: the outcome only, never the value. `unconfirmed`:
+ * the waiting call received the value, but its result had not left the
+ * daemon in time — the agent may not have received it.
+ */
 export interface SecretRequestAnswerResponse {
   ok: true;
-  outcome: "provided" | "declined";
+  outcome: "provided" | "declined" | "unconfirmed";
 }
 
 /** The answer route's refusals. */
@@ -120,12 +124,16 @@ function isSecretRequestResult(value: Record<string, unknown>): boolean {
 }
 
 /**
- * A string that may hold a result: it names both keys, in whatever escaping —
- * quoted, `\"`-escaped (JSON inside a JSON string), or bare. Unquoted on
- * purpose: a doubly serialised copy has no `"secretRequest"` in it.
+ * A string that structurally looks like it holds a result: the
+ * `"secretRequest"` KEY with an object value, in any escaping — quoted, or
+ * `\"`-escaped any number of times (JSON inside a JSON string). Prose or
+ * source code that merely mentions the words (`{ secretRequest: record,
+ * value }`) does not match and is left alone.
  */
+const RESULT_SHAPE = new RegExp(`\\\\*"${SECRET_REQUEST_RESULT_KEY}\\\\*"\\s*:\\s*\\{`);
+
 function mayHoldResult(text: string): boolean {
-  return text.includes(SECRET_REQUEST_RESULT_KEY) && text.includes(SECRET_REQUEST_VALUE_KEY);
+  return text.includes(SECRET_REQUEST_RESULT_KEY) && RESULT_SHAPE.test(text);
 }
 
 function stripString(text: string, depth: number): string {
@@ -147,9 +155,9 @@ function stripString(text: string, depth: number): string {
       // Not whole JSON: a cut or a wrapped copy. Fall through.
     }
   }
-  // Both keys in text that does not parse (a provider's cut, a prefix, a
-  // different serialisation): nothing in it can be trusted to be value-free,
-  // so none of it is kept.
+  // A result's shape in text that does not parse (a provider's cut, a
+  // prefix, a different serialisation): nothing in it can be trusted to be
+  // value-free, so none of it is kept.
   return SECRET_REDACTED_TEXT;
 }
 

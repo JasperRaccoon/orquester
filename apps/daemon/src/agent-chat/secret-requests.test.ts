@@ -142,6 +142,28 @@ describe("secret requests — delivery", () => {
   });
 });
 
+describe("secret requests — an unconfirmed delivery", () => {
+  it("a result that has not left the daemon within the bound is reported unconfirmed, never not-delivered", async () => {
+    const events: AgentChatSecretRequestEventPayload[] = [];
+    const waiters: Array<() => void> = [];
+    const requests = new SecretRequestRegistry({
+      publish: (payload) => {
+        events.push(payload);
+        for (const waiter of waiters.splice(0)) waiter();
+      },
+      deliveryBoundMs: 5
+    });
+    const opened = new Promise<void>((resolve) => waiters.push(resolve));
+    // The route never says either way (a stalled socket).
+    const call = requests.request("t1", INPUT, new AbortController().signal, new Promise<boolean>(() => {}));
+    await opened;
+    const outcome = await requests.answer("t1", events[0]!.request.requestId, { answer: "provide", value: VALUE });
+    assert.equal(outcome, "unconfirmed");
+    assert.deepEqual(await call, { outcome: "provided", value: VALUE }, "the call did receive it");
+    assert.equal(events.at(-1)?.outcome, "provided", "handed to the call");
+  });
+});
+
 describe("secret requests — the routes", () => {
   async function app() {
     const logs: string[] = [];

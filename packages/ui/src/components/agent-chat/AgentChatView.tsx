@@ -267,21 +267,26 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const answerSecret = React.useCallback(
     async (requestId: string, answer: SecretRequestAnswer): Promise<void> => {
       const name = secretRequests.find((request) => request.requestId === requestId)?.name ?? "the secret";
+      let outcome: string;
       try {
-        await api.answerSecretRequest(sessionId, requestId, answer);
+        outcome = (await api.answerSecretRequest(sessionId, requestId, answer)).outcome;
       } catch (error) {
         if (error instanceof ApiError && (error.status === 404 || error.status === 409)) {
           // 404: already answered elsewhere, or ended with its turn. 409: the
           // agent stopped waiting before the answer reached it. Nothing was sent.
           markSecretRequestClosed(sessionId, requestId);
           if (error.status === 409) {
-            setSecretNotice(`Your answer for ${name} was not sent: the agent had stopped waiting.`);
+            setSecretNotice(`Your answer for ${name} was not delivered: the agent had stopped waiting.`);
           }
           return;
         }
         throw error instanceof ApiError ? error.status : null;
       }
-      setSecretNotice(null);
+      setSecretNotice(
+        outcome === "unconfirmed"
+          ? `Your answer for ${name} reached the agent's request, but its delivery could not be confirmed: the agent may not have received it.`
+          : null
+      );
       markSecretRequestClosed(sessionId, requestId);
     },
     [api, secretRequests, sessionId]
@@ -294,7 +299,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
             {
               id: `secret-notice:${sessionId}`,
               variant: "warning" as const,
-              title: "Secret not sent",
+              title: "Secret request",
               description: secretNotice,
               onDismiss: () => setSecretNotice(null)
             }

@@ -8,13 +8,15 @@ import { BannerCard } from "../primitives";
 import { CARD_INPUT_CLASS, SECRET_INPUT_ATTRIBUTES } from "./secret-input";
 
 /**
- * What happens to the value, said plainly: the agent that asked receives it,
- * and with it the agent's model provider (its own transcript keeps what the
- * agent read). Orquester never shows it and masks it — and later repeats of
- * it — in this thread's records.
+ * What happens to the value, said as the code does it: the agent that asked
+ * receives it, and with it the agent's model provider (its own transcript
+ * keeps what the agent read). Orquester never shows it and keeps it out of
+ * this thread's records; a later repeat by the agent is masked while the
+ * chat stays loaded in the agent host, and only for a distinctive value
+ * (`isDistinctiveSecret`: 8+ characters of mixed kinds, or 16+).
  */
 export const SECRET_REQUEST_PRIVACY_NOTE =
-  "Never shown in the chat. Orquester masks it, and any later repeat of it, in this thread's records.";
+  "Never shown in the chat or kept in Orquester's records of it. Later repeats are masked while this chat stays loaded, for values of 8+ mixed characters.";
 export const SECRET_REQUEST_SHARING_NOTE =
   "The value goes to the agent that asked, and so to its model provider.";
 

@@ -90,7 +90,7 @@ try {
   assert.match(secretDock, /For: Push the release/);
   // Where the value goes, said on the card: the agent and its model provider; masked in Orquester's records.
   assert.match(secretDock, /to its model provider/);
-  assert.match(secretDock, /masks it, and any later repeat of it/);
+  assert.match(secretDock, /Later repeats are masked while this chat stays loaded/);
   assert.match(secretDock, />1\/2</, "the counter says another is behind it");
   assert.match(secretDock, /<input\b[^>]*type="password"/);
   assert.match(secretDock, /<input\b[^>]*autocomplete="off"/i);

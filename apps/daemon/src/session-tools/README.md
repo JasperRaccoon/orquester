@@ -117,7 +117,9 @@ provider cancelled, Stop, the session ended — `ctx.signal`) or `timed_out` (10
 
 The answer is reported `provided` only once the call's result left the daemon (the route's
 `ctx.delivered`); if the agent stopped waiting in between, the answer route says 409
-`SECRET_NOT_DELIVERED` and the card closes `cancelled`. The value is passed on exactly as typed
+`SECRET_NOT_DELIVERED` and the card closes `cancelled`; if the route says nothing within 30 s
+(a stalled socket) the answer is `unconfirmed` (200; the call received it, the agent may not have),
+which the UI says in those words. The value is passed on exactly as typed
 (an all-whitespace answer is refused). A pending card is a pending question for the thread's
 attention: `hasPendingUserInput`, the needs-input rung and push, and an `agentChat.pending`
 "question" titled "Secret requested: <name>" (`AgentChatSummaryService.setSecretRequests`).
@@ -126,7 +128,8 @@ The result is `{secretRequest: {name, purpose?, outcome}, value?, note}`. On its
 agent host remembers `value` for the thread (`secretResultKeys`) and masks it (by value, exact
 occurrences) in every runtime event, raw frame and — after ingestion joins them — streamed
 message and tool-output text of that thread, holding back a tail that could begin the value
-across chunks and flushes. Policy: any value is masked inside MCP call rows; elsewhere only a
+across chunks and flushes, released only when the stream ends (a terminal row, the thread's flush,
+the host's teardown). Policy: any value is masked inside MCP call rows; elsewhere only a
 distinctive one (≥ 8 characters of two or more classes, or ≥ 16 of any). Ingestion also strips
 `value` from any `secretRequest` result by shape (`@orquester/api` `stripSecretRequestValues`,
 once or twice serialised), which holds across a host restart. MCP rows and raw frames that cannot

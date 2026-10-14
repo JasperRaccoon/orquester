@@ -58,14 +58,21 @@ interface Pending {
  */
 const DELIVERY_BOUND_MS = 30_000;
 
-/** What an answer did: delivered to the waiting call, declined, or arrived after it stopped waiting. */
-export type SecretAnswerOutcome = "provided" | "declined" | "not_delivered";
+/**
+ * What an answer did: delivered (the call's result left the daemon), declined,
+ * not delivered (the call stopped waiting first), or unconfirmed (handed to
+ * the call, whose result had not left the daemon within the bound — it may
+ * or may not reach the agent).
+ */
+export type SecretAnswerOutcome = "provided" | "declined" | "not_delivered" | "unconfirmed";
 
 export interface SecretRequestRegistryOptions {
   /** Publish one bus event (`sessions` channel, {@link SECRET_REQUEST_EVENT_TYPE}). */
   publish(payload: AgentChatSecretRequestEventPayload): void;
   /** A thread's pending set changed (the summary's attention state follows it). */
   onChange?(threadId: string): void;
+  /** How long a provided answer waits for its call's result to leave (tests shorten it). */
+  deliveryBoundMs?: number;
   timeoutMs?: number;
   now?: () => Date;
   newId?: () => string;
@@ -153,9 +160,10 @@ export class SecretRequestRegistry implements SessionSecretRequests {
       return "declined";
     }
     entry.settle({ outcome: "provided", value: answer.value }, false);
-    const delivered = await boundedDelivery(entry.delivered);
-    this.publish(entry.summary, false, delivered ? "provided" : "cancelled");
-    return delivered ? "provided" : "not_delivered";
+    const delivery = await boundedDelivery(entry.delivered, this.opts.deliveryBoundMs);
+    // Unconfirmed: the call did receive it; whether its result got out is unknown.
+    this.publish(entry.summary, false, delivery === "dropped" ? "cancelled" : "provided");
+    return delivery === "delivered" ? "provided" : delivery === "dropped" ? "not_delivered" : "unconfirmed";
   }
 
   private changed(threadId: string): void {
@@ -180,16 +188,25 @@ export class SecretRequestRegistry implements SessionSecretRequests {
   }
 }
 
-/** The route's word, or true where no route is involved; false past {@link DELIVERY_BOUND_MS}. */
-async function boundedDelivery(delivered: Promise<boolean> | undefined): Promise<boolean> {
-  if (delivered === undefined) return true;
+/** The route's word ("delivered" where no route is involved), or "unconfirmed" past {@link DELIVERY_BOUND_MS}. */
+async function boundedDelivery(
+  delivered: Promise<boolean> | undefined,
+  boundMs = DELIVERY_BOUND_MS
+): Promise<"delivered" | "dropped" | "unconfirmed"> {
+  if (delivered === undefined) return "delivered";
   let timer: ReturnType<typeof setTimeout> | undefined;
-  const bound = new Promise<boolean>((resolve) => {
-    timer = setTimeout(() => resolve(false), DELIVERY_BOUND_MS);
-    timer.unref?.();
+  const bound = new Promise<"unconfirmed">((resolve) => {
+    // Not unref'd: an answer is in flight and the route awaits it.
+    timer = setTimeout(() => resolve("unconfirmed"), boundMs);
   });
   try {
-    return await Promise.race([delivered.catch(() => false), bound]);
+    return await Promise.race([
+      delivered.then(
+        (ok) => (ok ? ("delivered" as const) : ("dropped" as const)),
+        () => "dropped" as const
+      ),
+      bound
+    ]);
   } finally {
     clearTimeout(timer);
   }

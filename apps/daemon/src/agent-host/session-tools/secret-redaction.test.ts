@@ -426,6 +426,25 @@ describe("the redactor", () => {
     assert.ok(!JSON.stringify(new SessionSecretRedactor().redactFrame("b", deep)).includes(VALUE));
   });
 
+  it("a pasted value's stray spaces: the trimmed value is masked too", () => {
+    const redactor = new SessionSecretRedactor();
+    redactor.remember("a", [`  ${VALUE}\t`]);
+    const echoed = event("a", "command_execution", { output: `export K=${VALUE}` });
+    assert.ok(!JSON.stringify(redactor.redactEvent(echoed)).includes(VALUE));
+  });
+
+  it("fails closed for any event of a thread holding a value when it is too deep to check", () => {
+    const redactor = new SessionSecretRedactor();
+    redactor.remember("a", [VALUE]);
+    let deep: Record<string, unknown> = { leaf: VALUE };
+    for (let i = 0; i < 100; i += 1) deep = { inner: deep };
+    const command = redactor.redactEvent(event("a", "command_execution", deep));
+    const payload = command.payload as { itemType: string; data: unknown };
+    assert.equal(payload.itemType, "command_execution", "identity kept");
+    assert.equal(payload.data, SECRET_REDACTED_TEXT, "nothing nested kept");
+    assert.ok(!JSON.stringify(command).includes(VALUE));
+  });
+
   it("a raw frame loses a request_secret result's value by shape alone", () => {
     const redactor = new SessionSecretRedactor();
     const frame = { method: "item/completed", params: { item: { result: { structuredContent: { secretRequest: { name: "K", outcome: "provided" }, value: VALUE } } } } };
@@ -437,5 +456,21 @@ describe("the redactor", () => {
     redactor.remember("gone", [VALUE]);
     await ingestion.forget("gone");
     assert.equal(redactor.holds("gone"), false);
+  });
+});
+
+describe("the host's teardown", () => {
+  it("drains ingestion with `final`, so held tails are released (masked) before the stop; an ordinary drain is not final", async () => {
+    const host = createTestHost();
+    const calls: Array<{ final?: boolean } | undefined> = [];
+    const drain = host.ingestion.drain.bind(host.ingestion);
+    host.ingestion.drain = async (options?: { final?: boolean }) => {
+      calls.push(options);
+      await drain();
+    };
+    await host.orchestrator.drain();
+    assert.deepEqual(calls, [undefined]);
+    await host.stop();
+    assert.deepEqual(calls.at(-1), { final: true });
   });
 });

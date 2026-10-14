@@ -2030,7 +2030,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     await state.chain;
   }
 
-  async function drain(): Promise<void> {
+  async function drain(options: { final?: boolean } = {}): Promise<void> {
     // Deliver everything buffered without closing any message: a drain is a
     // synchronisation point, not a turn end.
     for (const [threadId, state] of [...threads]) {
@@ -2059,7 +2059,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
         emitBufferedPlan(threadId, state, planId, null);
       }
       closeCoalesceWindow(threadId, state);
-      await commit(threadId, state);
+      await commit(threadId, state, options.final === true);
     }
     // A sink may itself have enqueued nothing; awaiting each chain twice is
     // cheap and covers a commit that landed while an earlier chain was awaited.

@@ -145,6 +145,43 @@ function toolUseIdOf(activity: ThreadActivityItem): string | null {
   return typeof id === "string" ? id : null;
 }
 
+const TERMINAL_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "declined"]);
+
+/**
+ * The row that ENDS a call's output stream: its `tool.completed`, a denial,
+ * or any lifecycle row carrying a terminal status. A running call's
+ * `tool.updated` / `tool.progress` rows interleave with its output chunks
+ * (OpenCode sends one per running frame, Codex a `patchUpdated`, Grok an
+ * `item.updated`) and must NOT release the held tail: the next chunk may
+ * complete the value.
+ */
+function endsToolStream(activity: ThreadActivityItem): boolean {
+  if (activity.activityKind === "tool.completed" || activity.activityKind === "tool.denied") return true;
+  if (!activity.activityKind.startsWith("tool.")) return false;
+  const status = (activity.payload as { status?: unknown } | null)?.status;
+  return typeof status === "string" && TERMINAL_STATUSES.has(status);
+}
+
+/**
+ * Fail closed for an event too deep to walk: top-level text is masked, every
+ * nested value is replaced — nothing unchecked is kept.
+ */
+function closedPayload(payload: unknown, values: readonly string[]): unknown {
+  if (payload === null || typeof payload !== "object" || Array.isArray(payload)) {
+    return SECRET_REDACTED_TEXT;
+  }
+  return Object.fromEntries(
+    Object.entries(payload as Record<string, unknown>).map(([key, entry]) => [
+      key,
+      typeof entry === "string"
+        ? replaceAll(entry, values)
+        : entry !== null && typeof entry === "object"
+          ? SECRET_REDACTED_TEXT
+          : entry
+    ])
+  );
+}
+
 export class SessionSecretRedactor {
   private readonly byThread = new Map<string, Set<string>>();
   private readonly carries = new Map<string, Map<string, Carry>>();
@@ -158,7 +195,12 @@ export class SessionSecretRedactor {
       set = new Set();
       this.byThread.set(threadId, set);
     }
-    for (const value of kept) set.add(value);
+    for (const value of kept) {
+      set.add(value);
+      // A pasted value may carry stray spaces the agent will not repeat.
+      const trimmed = value.trim();
+      if (trimmed !== value) set.add(trimmed);
+    }
   }
 
   /** Drop what `threadId` holds (the thread was released or deleted), held-back tails included. */
@@ -187,18 +229,18 @@ export class SessionSecretRedactor {
       return event;
     }
     const mcpCall = isMcpCallEvent(event);
+    const values = this.valuesFor(event.threadId, mcpCall);
     try {
-      let out = maskSecretValues(event, this.valuesFor(event.threadId, mcpCall));
+      let out = maskSecretValues(event, values);
       if (mcpCall) {
         out = stripSecretRequestValues(out);
       }
       return out;
     } catch {
-      if (mcpCall) {
-        // Fail closed: a call row that cannot be checked keeps its identity only.
-        return { ...event, payload: { ...event.payload, data: SECRET_REDACTED_TEXT } } as RuntimeEvent;
-      }
-      return event;
+      // Fail closed: an event that cannot be checked — any event of a thread
+      // holding a value (masking is the only walk that throws) or an MCP row —
+      // keeps its identity and top-level text, masked; nothing nested.
+      return { ...event, payload: closedPayload(event.payload, values) } as RuntimeEvent;
     }
   }
 
@@ -309,7 +351,7 @@ export class SessionSecretRedactor {
             continue;
           }
           const toolUseId = toolUseIdOf(activity);
-          if (toolUseId !== null) {
+          if (toolUseId !== null && endsToolStream(activity)) {
             for (const heldKey of [...held.keys()]) {
               if (heldKey.startsWith(`o:${toolUseId}:`)) release(heldKey);
             }

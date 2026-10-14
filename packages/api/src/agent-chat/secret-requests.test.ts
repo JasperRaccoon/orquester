@@ -75,6 +75,20 @@ test("a copy that does not parse as the result is dropped whole", () => {
   assert.equal(stripSecretRequestValues(`Result: ${text}`), SECRET_REDACTED_TEXT);
 });
 
+test("text that only mentions the words — this module's own source, prose — is left alone", () => {
+  const source = [
+    'const result = { secretRequest: record, value: VALUE, note: "x" };',
+    "if (isSecretRequestResult(record) && SECRET_REQUEST_VALUE_KEY in record) { delete out.value; }",
+    "The result carries `value` beside a `secretRequest` record.",
+    'grep -n "secretRequest" src/*.ts | head  # value'
+  ].join("\n");
+  assert.equal(stripSecretRequestValues(source), source);
+  assert.equal(stripSecretRequestValues({ output: source }).output, source);
+  // …while a cut copy of a real result, escaped or not, is still dropped.
+  const escaped = JSON.stringify(text).slice(0, -10);
+  assert.equal(stripSecretRequestValues(`log: ${escaped}`), SECRET_REDACTED_TEXT);
+});
+
 test("nothing else changes, and an untouched value is the same reference", () => {
   const plain = { command: "ls", output: "a\nb", nested: [{ text: '{"other":1}' }] };
   assert.equal(stripSecretRequestValues(plain), plain);
