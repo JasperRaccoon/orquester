@@ -42,6 +42,20 @@ describe("FileTail", () => {
     assert.equal(three.text, "second\n", "only the appended bytes, never the whole file again");
   });
 
+  it("two reads started together (a poll and a drain) are serialised: each byte comes out once, in order", async () => {
+    const path = nodePath.join(dir, "concurrent.log");
+    await writeFile(path, "line one\n", "utf8");
+    const tail = new FileTail({ path });
+    const first = tail.read();
+    const second = tail.read();
+    assert.deepEqual(await first, { text: "line one\n", done: false });
+    assert.deepEqual(await second, { text: "", done: false }, "the second starts where the first left off");
+    await appendFile(path, "line two\n", "utf8");
+    const [a, b, c] = await Promise.all([tail.read(), tail.read(), tail.read()]);
+    assert.equal(a!.text + b!.text + c!.text, "line two\n");
+    assert.equal(tail.bytesRead, Buffer.byteLength("line one\nline two\n"));
+  });
+
   it("a multibyte character split across two reads decodes once, whole", async () => {
     const path = nodePath.join(dir, "utf8.log");
     // "é" is two bytes; a 64 KiB read window puts its first byte at the end of

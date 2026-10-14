@@ -49,6 +49,8 @@ export class FileTail {
   private offset = 0;
   private consumed = 0;
   private done = false;
+  /** The read in progress: the next one starts after it, from where it left off. */
+  private reading: Promise<FileTailRead> | undefined;
 
   constructor(options: FileTailOptions) {
     this.path = options.path;
@@ -59,8 +61,21 @@ export class FileTail {
     return this.consumed;
   }
 
-  /** One bounded read. Never throws; a failure comes back as `{done: true}`. */
-  async read(): Promise<FileTailRead> {
+  /**
+   * One bounded read. Never throws; a failure comes back as `{done: true}`.
+   * Reads are serialised: two started together (a poll and a drain) would
+   * both read from the same offset and emit the same bytes twice.
+   */
+  read(): Promise<FileTailRead> {
+    const previous = this.reading;
+    const next = (previous === undefined ? this.readNow() : previous.then(() => this.readNow())).finally(() => {
+      if (this.reading === next) this.reading = undefined;
+    });
+    this.reading = next;
+    return next;
+  }
+
+  private async readNow(): Promise<FileTailRead> {
     if (this.done) {
       return { text: "", done: true };
     }

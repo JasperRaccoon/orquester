@@ -190,6 +190,10 @@ interface BackgroundShellTail {
   tail: FileTail;
   timer: NodeJS.Timeout | undefined;
   stopped: boolean;
+  /** A poll's read in flight: a drain waits for it, so its bytes land before the completion. */
+  polling: Promise<boolean> | undefined;
+  /** Set by a drain: no poll is scheduled any more. */
+  draining: boolean;
 }
 
 /** One workflow agent attempt's transcript, tailed into its member's drill-in. */
@@ -721,14 +725,16 @@ export class ClaudeSession {
     const entry: BackgroundShellTail = {
       tail: new FileTail({ path }),
       timer: undefined,
-      stopped: false
+      stopped: false,
+      polling: undefined,
+      draining: false
     };
     this.backgroundShells.set(change.taskId, entry);
     this.scheduleBackgroundShellPoll(change.taskId, entry);
   }
 
   private scheduleBackgroundShellPoll(taskId: string, entry: BackgroundShellTail): void {
-    if (entry.stopped || this.closed) {
+    if (entry.stopped || entry.draining || this.closed) {
       return;
     }
     entry.timer = setTimeout(() => {
@@ -743,10 +749,21 @@ export class ClaudeSession {
 
   private async pollBackgroundShell(taskId: string): Promise<void> {
     const entry = this.backgroundShells.get(taskId);
-    if (entry === undefined || entry.stopped || this.closed) {
+    if (entry === undefined || entry.stopped || entry.draining || this.closed) {
       return;
     }
-    const done = await this.readBackgroundShell(taskId, entry);
+    const polling = this.readBackgroundShell(taskId, entry);
+    entry.polling = polling;
+    let done: boolean;
+    try {
+      done = await polling;
+    } finally {
+      if (entry.polling === polling) entry.polling = undefined;
+    }
+    // A drain that began meanwhile owns the rest (and the stop).
+    if (entry.draining) {
+      return;
+    }
     if (done) {
       this.stopBackgroundShell(taskId);
       return;
@@ -771,7 +788,9 @@ export class ClaudeSession {
       );
       return true;
     }
-    if (result.text.length > 0) {
+    // A tail stopped while this read was in flight (the session's end) is
+    // over: nothing of it may land after the shell's terminal rows.
+    if (result.text.length > 0 && !entry.stopped) {
       this.emit(this.normalizer.backgroundShellOutput(taskId, result.text));
     }
     return result.done;
@@ -788,9 +807,19 @@ export class ClaudeSession {
     if (entry === undefined || entry.stopped) {
       return;
     }
+    entry.draining = true;
     if (entry.timer !== undefined) {
       clearTimeout(entry.timer);
       entry.timer = undefined;
+    }
+    // A poll whose read is in flight lands its bytes first, in file order —
+    // never after the completion frame this drain precedes.
+    if (entry.polling !== undefined) {
+      const done = await entry.polling.catch(() => true);
+      if (done) {
+        this.stopBackgroundShell(taskId);
+        return;
+      }
     }
     for (let read = 0; read < BACKGROUND_SHELL_DRAIN_MAX_READS; read += 1) {
       const before = entry.tail.bytesRead;
