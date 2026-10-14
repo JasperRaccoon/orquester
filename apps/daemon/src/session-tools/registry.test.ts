@@ -15,6 +15,8 @@ import {
   createSessionToolRegistry,
   SESSION_TOOL_INSTRUCTIONS_MAX_BYTES
 } from "./registry.ts";
+import { EXTERNAL_MCP_TOOL_NAMES } from "../mcp/tool-names.ts";
+import { externalMcpToolNames } from "../mcp/server.ts";
 import { jsonResult } from "./results.ts";
 import { TEST_TOOLKIT_INSTRUCTIONS, testSessionToolkit, testSessionToolRegistry } from "./testing.ts";
 
@@ -75,4 +77,13 @@ test("bad and duplicate names, and bad toolkit ids, are refused at build", () =>
 test("an instruction block over the cap is refused, never cut", () => {
   const long = "x".repeat(SESSION_TOOL_INSTRUCTIONS_MAX_BYTES);
   assert.throws(() => createSessionToolRegistry([toolkit("a", ["one"], long)]), /over the 1536-byte cap/);
+});
+
+test("a session tool may not take an external /mcp tool's name", () => {
+  assert.throws(() => createSessionToolRegistry([toolkit("a", ["send_message"])]), /external \/mcp tool's name/);
+  assert.throws(() => createSessionToolRegistry([toolkit("a", ["list_sessions"])]), /external \/mcp tool's name/);
+});
+
+test("the reserved list is exactly the external /mcp catalogue", () => {
+  assert.deepEqual([...EXTERNAL_MCP_TOOL_NAMES].sort(), externalMcpToolNames().sort());
 });

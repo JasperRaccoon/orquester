@@ -16,6 +16,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
+import { EXTERNAL_MCP_TOOL_NAMES } from "../../../mcp/tool-names.ts";
 import { buildOpenCodePermissionRules, type OpenCodePermissionRuleset } from "./ruleset.ts";
 import { openCodeSessionToolsServerName, withSessionToolInstructions, withSessionToolRules } from "./session-tools.ts";
 
@@ -47,6 +48,9 @@ function disabled(tools: readonly string[], ruleset: OpenCodePermissionRuleset):
   );
 }
 
+/** The name `docs/orquester-mcp.md` suggests for the external `/mcp` inside a chat-capable CLI. */
+const SUGGESTED_EXTERNAL_NAME = "orquester_remote";
+
 /** OpenCode's MCP tool id: `<server>_<tool>`, each sanitised. */
 const toolId = (server: string, tool: string): string =>
   `${server.replace(/[^a-zA-Z0-9_-]/g, "_")}_${tool.replace(/[^a-zA-Z0-9_-]/g, "_")}`;
@@ -77,7 +81,7 @@ for (const mode of ["approval-required", "full-access"] as const) {
       "bash",
       "read"
     ];
-    const sessionA = withSessionToolRules(buildOpenCodePermissionRules(mode), { serverName: serverA });
+    const sessionA = withSessionToolRules(buildOpenCodePermissionRules(mode), { isolate: true, own: { serverName: serverA } });
     const hiddenFromA = disabled(tools, [...AGENT_RULES, ...sessionA]);
     assert.deepEqual([...hiddenFromA].sort(), [toolId(serverB, "echo"), toolId(serverB, "task_status")].sort());
 
@@ -94,6 +98,28 @@ for (const mode of ["approval-required", "full-access"] as const) {
   });
 }
 
+test("a thread whose own grant failed is still kept off every co-tenant's tools", () => {
+  const serverA = openCodeSessionToolsServerName("thread-a");
+  const tools = [toolId(serverA, "echo"), "bash"];
+  const sessionC = withSessionToolRules(buildOpenCodePermissionRules("full-access"), { isolate: true });
+  const hidden = disabled(tools, [...AGENT_RULES, ...sessionC]);
+  assert.deepEqual([...hidden], [toolId(serverA, "echo")]);
+});
+
+test("the external /mcp under the name docs/orquester-mcp.md suggests keeps every tool", () => {
+  const serverA = openCodeSessionToolsServerName("thread-a");
+  const session = withSessionToolRules(buildOpenCodePermissionRules("full-access"), { isolate: true, own: { serverName: serverA } });
+  const offered = (server: string) =>
+    disabled(EXTERNAL_MCP_TOOL_NAMES.map((tool) => toolId(server, tool)), [...AGENT_RULES, ...session]);
+  // The suggested name, and the guide's own `orquester`, can never meet the
+  // deny's literal `orquester-` prefix.
+  assert.deepEqual([...offered(SUGGESTED_EXTERNAL_NAME)], []);
+  assert.deepEqual([...offered("orquester")], []);
+  // Why the guide does not suggest `orquester-remote`: the deny's 16 `?` can
+  // land on a `_` inside such a server's tool names (documented limitation).
+  assert.ok(offered("orquester-remote").size > 0);
+});
+
 test("no thread's allow can reach another's server, whatever their hashes share", () => {
   // Brute force: across many thread ids, A's allow pattern never matches B's tools.
   const names = Array.from({ length: 300 }, (_, index) => openCodeSessionToolsServerName(`thread-${index}`));
@@ -108,6 +134,6 @@ test("no thread's allow can reach another's server, whatever their hashes share"
 
 test("without session tools, the ruleset and the system addendum are untouched", () => {
   const rules = buildOpenCodePermissionRules("approval-required");
-  assert.equal(withSessionToolRules(rules, undefined), rules);
+  assert.equal(withSessionToolRules(rules, { isolate: false }), rules);
   assert.equal(withSessionToolInstructions("<runtime_info/>", undefined), "<runtime_info/>");
 });

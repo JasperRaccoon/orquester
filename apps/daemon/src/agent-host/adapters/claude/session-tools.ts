@@ -2,11 +2,19 @@
  * Claude adapter — the `orquester` session-tool server (design 2026-10-14
  * §1.2, §1.3).
  *
- * An in-process SDK server (`createSdkMcpServer`), bound to its thread when
- * the session launches: no network and no credential. SDK 0.3.278 serialises
- * `mcpServers` into `--mcp-config` argv for every server type but this one,
- * which crosses as `{type: "sdk", name}` and is served over the SDK's control
- * channel — so nothing secret could reach argv even if there were a secret.
+ * An in-process SDK server — `mcpServers.orquester = {type: "sdk", name,
+ * instance}`, the very config `createSdkMcpServer` returns — bound to its
+ * thread when the session launches: no network and no credential. SDK
+ * 0.3.278 serialises `mcpServers` into `--mcp-config` argv for every server
+ * type but this one, which crosses as `{type: "sdk", name}` and is served over
+ * the SDK's control channel.
+ *
+ * The instance is the host's own `orquester` server (`../../session-tools/
+ * mcp-server.ts`), not one built from the SDK's `tool()`: `tool()` zod-parses
+ * the arguments first (stripping unknown keys, applying defaults), so a call
+ * would reach the daemon already rewritten and be refused — or not — in
+ * other words than on every other provider. This one advertises the same JSON
+ * schema and forwards the arguments raw; the daemon is the one validator.
  *
  * Pre-approved in every permission mode: `allowedTools` names each registered
  * tool (`mcp__orquester__<tool>`), so the CLI never asks, and `canUseTool`
@@ -17,15 +25,11 @@
  * its tools too wherever it shadowed this one.
  */
 
-import {
-  createSdkMcpServer,
-  tool,
-  type McpSdkServerConfigWithInstance
-} from "@anthropic-ai/claude-agent-sdk";
+import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
 import { SESSION_TOOLS_SERVER_NAME } from "@orquester/api/agent-chat";
 
 import type { SessionToolsHost } from "../../session-tools/index.ts";
-import { callIdFromMeta, SESSION_TOOLS_SERVER_VERSION } from "../../session-tools/mcp-server.ts";
+import { buildSessionToolsMcpServer } from "../../session-tools/mcp-server.ts";
 
 const TOOL_PREFIX = `mcp__${SESSION_TOOLS_SERVER_NAME}__`;
 
@@ -48,12 +52,6 @@ export interface ClaudeSessionToolsLaunch {
   allowedTools: string[];
 }
 
-/** The `extra` the SDK's MCP server hands a tool handler: only these fields are read. */
-interface HandlerExtra {
-  signal?: AbortSignal;
-  _meta?: unknown;
-}
-
 /**
  * The server for one thread's session. `signal` is the session's own life: a
  * stopped session aborts every call it still has in flight, besides the
@@ -64,32 +62,17 @@ export function createClaudeSessionToolsLaunch(input: {
   threadId: string;
   signal: AbortSignal;
 }): ClaudeSessionToolsLaunch {
-  const tools = input.sessionTools.tools.map((definition) =>
-    tool(
-      definition.name,
-      definition.description,
-      definition.input,
-      async (args, extra) => {
-        const { signal, _meta } = (extra ?? {}) as HandlerExtra;
-        const callSignal = signal === undefined ? input.signal : AbortSignal.any([signal, input.signal]);
-        const callId = callIdFromMeta(_meta);
-        return input.sessionTools.call({
-          threadId: input.threadId,
-          name: definition.name,
-          arguments: args,
-          ...(callId !== undefined ? { callId } : {}),
-          signal: callSignal
-        });
-      },
-      { annotations: definition.annotations }
-    )
+  const instance = buildSessionToolsMcpServer(input.sessionTools.tools, (invocation) =>
+    input.sessionTools.call({
+      threadId: input.threadId,
+      name: invocation.name,
+      arguments: invocation.arguments,
+      ...(invocation.callId !== undefined ? { callId: invocation.callId } : {}),
+      signal: AbortSignal.any([invocation.signal, input.signal])
+    })
   );
   return {
-    server: createSdkMcpServer({
-      name: SESSION_TOOLS_SERVER_NAME,
-      version: SESSION_TOOLS_SERVER_VERSION,
-      tools
-    }),
+    server: { type: "sdk", name: SESSION_TOOLS_SERVER_NAME, instance },
     instructions: input.sessionTools.instructions,
     allowedTools: input.sessionTools.tools.map((definition) => claudeSessionToolName(definition.name))
   };

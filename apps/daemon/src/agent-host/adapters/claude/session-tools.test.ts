@@ -13,11 +13,31 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 
+import { z } from "zod";
+
+import type { DaemonApi } from "../../../mcp/daemon-api.ts";
+import { defineSessionTool, defineSessionToolkit, SESSION_TOOL_READ_ONLY, type SessionToolContext } from "../../../session-tools/contract.ts";
+import { executeSessionToolCall } from "../../../session-tools/executor.ts";
+import { createSessionToolRegistry } from "../../../session-tools/registry.ts";
+import { jsonResult } from "../../../session-tools/results.ts";
 import { TEST_TOOLKIT_INSTRUCTIONS } from "../../../session-tools/testing.ts";
 import { recordingSessionTools } from "../../session-tools/testing.ts";
 import { buildClaudeQueryOptions } from "./launch.ts";
 import { toProviderModels } from "./models.ts";
 import { createClaudeSessionToolsLaunch, isClaudeSessionTool } from "./session-tools.ts";
+
+function fakeContext(): SessionToolContext {
+  return {
+    threadId: "thread-1",
+    projectPath: "/p",
+    cwd: "/p",
+    agentId: "claude",
+    callId: "c",
+    signal: new AbortController().signal,
+    api: {} as DaemonApi,
+    now: Date.now
+  };
+}
 
 async function connectInProcess(instance: unknown): Promise<Client> {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
@@ -57,15 +77,46 @@ describe("Claude in-process session-tool server", () => {
     await client.close();
   });
 
+  it("forwards the arguments raw: an unknown key survives and no default is applied", async () => {
+    const registry = createSessionToolRegistry([
+      defineSessionToolkit({
+        id: "defaults",
+        tools: [
+          defineSessionTool({
+            name: "paged",
+            title: "Paged",
+            description: "Has a default.",
+            input: { limit: z.number().int().default(20), text: z.string().optional() },
+            annotations: SESSION_TOOL_READ_ONLY,
+            resultKind: "json",
+            run: async () => jsonResult({})
+          })
+        ]
+      })
+    ]);
+    const tools = recordingSessionTools(registry);
+    const launch = createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "thread-1", signal: new AbortController().signal });
+    const client = await connectInProcess(launch.server.instance);
+    // The schema is still advertised in full.
+    const listed = await client.listTools();
+    assert.deepEqual(Object.keys(listed.tools[0]!.inputSchema.properties ?? {}), ["limit", "text"]);
+    await client.callTool({ name: "paged", arguments: { text: "x", bogus: true } });
+    assert.deepEqual(tools.calls[0]!.arguments, { text: "x", bogus: true }, "the daemon sees what the model sent");
+    // …so its refusal is the same one every provider gets.
+    const refused = await executeSessionToolCall(registry, { name: "paged", arguments: tools.calls[0]!.arguments }, fakeContext());
+    assert.equal(refused.isError, true);
+    assert.match((refused.content[0] as { text: string }).text, /^INVALID_ARGUMENT: Invalid arguments for paged: arguments: Unrecognized key\(s\) in object: 'bogus'/);
+    await client.close();
+  });
+
   it("ending the session aborts a call still in flight", async () => {
     const tools = recordingSessionTools();
     const life = new AbortController();
     const launch = createClaudeSessionToolsLaunch({ sessionTools: tools, threadId: "thread-1", signal: life.signal });
     const client = await connectInProcess(launch.server.instance);
+    const called = tools.nextCall();
     const pending = client.callTool({ name: "wait_for_cancel", arguments: {} });
-    while (tools.calls.length === 0) {
-      await new Promise((resolve) => setImmediate(resolve));
-    }
+    await called;
     life.abort();
     const result = (await pending) as CallToolResult;
     assert.equal(result.isError, true);

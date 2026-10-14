@@ -12,9 +12,13 @@ import {
   SESSION_TOOLS_SERVER_NAME
 } from "@orquester/api/agent-chat";
 
+import { EXTERNAL_MCP_TOOL_NAMES } from "../mcp/tool-names.ts";
 import type { SessionTool, SessionToolkit } from "./contract.ts";
 
 const TOOLKIT_ID_PATTERN = /^[a-z][a-z0-9-]*$/;
+
+/** The external `/mcp` server's names (`../mcp/tool-names.ts`): never a session tool's. */
+const RESERVED_NAMES: ReadonlySet<string> = new Set(EXTERNAL_MCP_TOOL_NAMES);
 
 /**
  * The whole instruction block's ceiling (§1.4, "under ~1.5 KB"). A
@@ -50,7 +54,10 @@ export interface SessionToolRegistry {
   get(name: string): SessionTool | undefined;
 }
 
-/** Validate and index a toolkit list. Throws on a bad id, a bad or duplicate name, or an oversized block. */
+/**
+ * Validate and index a toolkit list. Throws on a bad id, a bad, duplicate or
+ * reserved (external `/mcp`) name, or an oversized block.
+ */
 export function createSessionToolRegistry(toolkits: readonly SessionToolkit[]): SessionToolRegistry {
   const byName = new Map<string, SessionTool>();
   const ids = new Set<string>();
@@ -62,6 +69,11 @@ export function createSessionToolRegistry(toolkits: readonly SessionToolkit[]): 
     for (const tool of toolkit.tools) {
       if (!SESSION_TOOL_NAME_PATTERN.test(tool.name)) {
         throw new Error(`session-tools: bad tool name ${JSON.stringify(tool.name)} in ${toolkit.id}`);
+      }
+      if (RESERVED_NAMES.has(tool.name)) {
+        throw new Error(
+          `session-tools: ${tool.name} in ${toolkit.id} is an external /mcp tool's name; a session tool must not read as one`
+        );
       }
       if (byName.has(tool.name)) {
         throw new Error(`session-tools: duplicate tool name ${tool.name} in ${toolkit.id}`);

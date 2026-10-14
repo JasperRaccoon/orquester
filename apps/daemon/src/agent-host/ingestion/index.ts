@@ -119,6 +119,12 @@ export interface IngestionOptions {
     event: Extract<RuntimeEvent, { type: "auth.status" | "account.rate-limits.updated" }>
   ) => void;
   logger?: IngestionLogger;
+  /**
+   * The host's registered session-tool names (design 2026-10-14 §1.5): an MCP
+   * call naming one is stamped `data.sessionTool`, the provenance marker
+   * slimming and the UI read. Absent: no session tools, nothing stamped.
+   */
+  sessionToolNames?: ReadonlySet<string>;
 }
 
 interface SegmentState {
@@ -1345,10 +1351,10 @@ export function createIngestion(options: IngestionOptions): Ingestion {
       // map was only ever cleared when the whole thread was forgotten.
       state.taskTitles.delete(event.payload.taskId);
     }
-    const activities = runtimeEventToActivities(
-      event,
-      taskTitle !== undefined ? { taskTitle } : {}
-    );
+    const activities = runtimeEventToActivities(event, {
+      ...(taskTitle !== undefined ? { taskTitle } : {}),
+      ...(options.sessionToolNames !== undefined ? { sessionToolNames: options.sessionToolNames } : {})
+    });
     for (const activity of activities) {
       emitActivity(state, threadId, event, maybeSlim(activity));
     }
@@ -1500,7 +1506,10 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     state: ThreadState,
     event: RuntimeEvent
   ): void {
-    for (const activity of runtimeEventToActivities(event)) {
+    for (const activity of runtimeEventToActivities(
+      event,
+      options.sessionToolNames !== undefined ? { sessionToolNames: options.sessionToolNames } : {}
+    )) {
       emitActivity(state, threadId, event, maybeSlim(activity));
     }
   }

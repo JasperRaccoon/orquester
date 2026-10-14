@@ -18,9 +18,9 @@
  *   place — the size is in the structure, not in one long string;
  * - an MCP tool call keeps `type, id, tool, server, status, arguments,
  *   appContext, error, durationMs` and nothing else, and its `result` is
- *   reduced to a one-line summary — but a call to an Orquester session tool
- *   also gains `data.sessionTool` (its bare name and the reference fields of
- *   `SESSION_TOOL_REFERENCE_KEYS`, `session-tools.ts`);
+ *   reduced to a one-line summary — but a row the host's ingestion marked
+ *   as its own session tool's keeps `data.sessionTool` (its bare name, plus
+ *   the reference fields of `SESSION_TOOL_REFERENCE_KEYS`, `session-tools.ts`);
  * - tool text output is summarised to the first meaningful line, elided at
  *   {@link SLIM_SUMMARY_ELIDE_CHARS}, or to `"N lines"` when there is no
  *   single renderable line;

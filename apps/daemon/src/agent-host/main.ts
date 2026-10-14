@@ -510,7 +510,11 @@ export async function startAgentHost(
         turnId: input.turnId
       }) ?? null,
     onAccountEvent: (event) => orchestrator?.onAccountEvent(event),
-    logger: { warn: (message, detail) => logger.warn(message, detail) }
+    logger: { warn: (message, detail) => logger.warn(message, detail) },
+    // The provenance of a session-tool row (design 2026-10-14 §1.5).
+    ...(sessionTools !== undefined
+      ? { sessionToolNames: new Set(sessionTools.tools.map((tool) => tool.name)) }
+      : {})
   });
 
   orchestrator = createOrchestrator({

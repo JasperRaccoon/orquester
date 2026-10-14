@@ -743,6 +743,9 @@ class OpenCodeAdapterImpl implements AgentAdapter {
           ...(input.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
           contextLimits,
           server,
+          // The isolation rules whenever the host has session tools — this
+          // thread's own grant may have failed, its co-tenants' did not.
+          isolateSessionTools: this.ctx.sessionTools !== undefined,
           ...(grant !== undefined
             ? {
                 sessionTools: {

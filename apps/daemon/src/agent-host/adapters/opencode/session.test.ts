@@ -389,6 +389,8 @@ async function startSession(
     delay?: (ms: number, signal: AbortSignal) => Promise<void>;
     /** The thread's session-tool server (design 2026-10-14 §1.2). */
     sessionTools?: OpenCodeSessionToolsLaunch;
+    /** The host has session tools (this thread's grant may still have failed). */
+    isolateSessionTools?: boolean;
   } = {}
 ): Promise<OpenCodeThreadSession> {
   return await OpenCodeThreadSession.start(
@@ -405,7 +407,8 @@ async function startSession(
       runtimeMode: options.runtimeMode ?? "approval-required",
       ...(options.resumeCursor !== undefined ? { resumeCursor: options.resumeCursor } : {}),
       server: harness.server,
-      ...(options.sessionTools !== undefined ? { sessionTools: options.sessionTools } : {})
+      ...(options.sessionTools !== undefined ? { sessionTools: options.sessionTools } : {}),
+      ...(options.isolateSessionTools !== undefined ? { isolateSessionTools: options.isolateSessionTools } : {})
     }
   );
 }
@@ -4449,7 +4452,7 @@ test("session tools: the thread's own server is registered before its session, i
 
   const create = harness.fake.find("POST", "/session")?.body as { permission: Array<{ permission: string; action: string }> };
   assert.deepEqual(create.permission.slice(-2), [
-    { permission: "orquester-*", pattern: "*", action: "deny" },
+    { permission: "orquester-????????????????_*", pattern: "*", action: "deny" },
     { permission: `${launch.serverName}_*`, pattern: "*", action: "allow" }
   ]);
 
@@ -4478,7 +4481,7 @@ test("session tools: a resumed session gets the isolation rules re-asserted", as
   const patch = harness.fake.find("PATCH", "/session/ses_old")?.body as { permission: Array<{ permission: string }> };
   assert.deepEqual(
     patch.permission.slice(-2).map((rule) => rule.permission),
-    ["orquester-*", `${launch.serverName}_*`]
+    ["orquester-????????????????_*", `${launch.serverName}_*`]
   );
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
@@ -4490,6 +4493,46 @@ test("session tools: a failed registration costs the tools, never the thread", a
   const session = await startSession(harness, { sessionTools: sessionToolsLaunch() });
   assert.ok(harness.fake.find("POST", "/session"), "the session still opened");
   await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("session tools: a thread whose grant failed still sends the deny, and no allow", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness, { isolateSessionTools: true });
+  assert.equal(harness.fake.find("POST", "/mcp"), undefined, "nothing of its own to register");
+  const create = harness.fake.find("POST", "/session")?.body as { permission: Array<{ permission: string; action: string }> };
+  assert.deepEqual(create.permission.at(-1), { permission: "orquester-????????????????_*", pattern: "*", action: "deny" });
+  assert.equal(create.permission.some((rule) => rule.action === "allow" && rule.permission.startsWith("orquester-")), false);
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("session tools: a relaunch registers only after the stopped session's disconnect", async () => {
+  const harness = makeHarness();
+  harness.fake.overrides.set("POST /mcp", () => json({}));
+  const name = openCodeSessionToolsServerName("thread-1");
+  const release = deferred<void>();
+  harness.fake.overrides.set(`POST /mcp/${name}/disconnect`, async () => {
+    await release.promise;
+    return json(true);
+  });
+  const first = await startSession(harness, { sessionTools: sessionToolsLaunch() });
+  let stopped = false;
+  const stopping = first.stop({ reason: "restart", hostInitiated: true }).then(() => {
+    stopped = true;
+  });
+  await harness.fake.waitForRequest("POST", `/mcp/${name}/disconnect`);
+  assert.equal(stopped, false, "the stop waits for its disconnect");
+  release.resolve();
+  await stopping;
+  const second = await startSession(harness, { sessionTools: sessionToolsLaunch() });
+  const disconnectAt = harness.fake.indexOf("POST", `/mcp/${name}/disconnect`);
+  const registrations = harness.fake.requests
+    .map((request, index) => ({ request, index }))
+    .filter(({ request }) => request.method === "POST" && request.path === "/mcp");
+  assert.equal(registrations.length, 2);
+  assert.ok(registrations[1]!.index > disconnectAt, "the fresh registration lands after the old disconnect");
+  await second.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });
 

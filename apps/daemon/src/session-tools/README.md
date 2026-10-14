@@ -104,6 +104,14 @@ API in-process, `../mcp/daemon-api.ts`). Whatever a toolkit imports, the host lo
 | Grok | ACP `mcpServers` http entry on `session/new` / `session/load` | `Authorization` header in the frame (redacted from `raw.ndjson`) | `_meta.rules` | `allow_once` without a card |
 | OpenCode | `POST /mcp` per thread, server `orquester-<16 hex>` on the shared server | `Authorization` header in the registration (memory only) | per-turn `system` addendum | session ruleset: deny `orquester-*`, allow own |
 
+Where each credential lives. Codex: in the `codex app-server` child's env
+(`ORQUESTER_SESSION_TOOLS_TOKEN`). Codex's default `shell_environment_policy` excludes variables
+matching `*TOKEN*` from the commands its agent runs, so agent shells do not see it; a user policy
+that passes it through exposes it to that thread's own shells only — it acts as that same thread
+and nothing more, and dies with the app-server. Grok: in the ACP `session/new`/`session/load`
+frame (masked in `raw.ndjson`). OpenCode: in the shared server's memory (`POST /mcp`). None in
+argv or on disk.
+
 Pre-approval is always by registered tool name, never server-wide: `docs/orquester-mcp.md` tells
 users to install Orquester's own full-drive `/mcp` under the same name `orquester`, and such a
 server must never be waved through. (Codex's thread override replaces a user's same-named entry

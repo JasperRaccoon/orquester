@@ -106,8 +106,9 @@ Replace `<URL>` with your endpoint and `<CREDENTIAL>` with the `base64(...)` val
 > separate, thread-scoped MCP server also named `orquester` (session tools,
 > `apps/daemon/src/session-tools/README.md`); this endpoint is for agents and clients *outside*
 > Orquester. If you install it into a CLI whose chats you also run inside Orquester, give it another
-> name (e.g. `orquester-remote`) so neither shadows the other there. Orquester pre-approves only its
-> own session tools, by name, never this server's tools.
+> name — `orquester_remote` (underscore) — so neither shadows the other there. Avoid names starting
+> with `orquester-` (hyphen): OpenCode chats hide the per-thread session-tool servers by that
+> prefix. Orquester pre-approves only its own session tools, by name, never this server's tools.
 
 ### Claude Code (CLI)
 

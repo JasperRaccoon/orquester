@@ -44,6 +44,11 @@ const SERVER_INSTRUCTIONS = `Orquester MCP drives Orquester's agent chat session
 /** Every tool, in tools/list order. */
 const ALL_TOOLS: ToolDef[] = [...catalogTools, ...sessionTools, ...searchTools, ...messageTools, ...outputTools, ...requestTools, ...watchTools, ...usageTools, ...fileTools, ...todoTools, ...workflowTools, ...agentProfileTools, ...desktopTools];
 
+/** Every tool name this server serves, in tools/list order (the session tools' reserved names check against it). */
+export function externalMcpToolNames(): string[] {
+  return ALL_TOOLS.map((tool) => tool.name);
+}
+
 /** How many refused fields an INVALID_ARGUMENT names before "…". */
 const MAX_NAMED_ISSUES = 5;
 /**

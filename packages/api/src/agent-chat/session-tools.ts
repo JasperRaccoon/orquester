@@ -67,18 +67,17 @@ function asRecord(value: unknown): Record<string, unknown> | null {
 }
 
 /**
- * The bare session-tool name an activity's `data` names, under any provider's
- * shape — or the `sessionTool.name` a slimmed payload already carries. Null
- * for every other call.
+ * The bare session-tool name a PROVIDER's activity data spells, under any
+ * provider's shape — spelling only, no provenance: a user's own server that
+ * shares the `orquester` name spells its tools the same way. The host's
+ * ingestion uses it, together with the names it actually registered, to
+ * stamp {@link SessionToolMarker} on the rows that are really its own;
+ * nothing downstream reads the spelling.
  */
-export function sessionToolNameOfData(data: unknown): string | null {
+export function sessionToolNameFromProviderData(data: unknown): string | null {
   const record = asRecord(data);
   if (!record) {
     return null;
-  }
-  const slimmed = asRecord(record.sessionTool)?.name;
-  if (typeof slimmed === "string" && SESSION_TOOL_NAME_PATTERN.test(slimmed)) {
-    return slimmed;
   }
   const item = asRecord(record.item);
   for (const holder of item ? [record, item] : [record]) {
@@ -99,6 +98,41 @@ export function sessionToolNameOfData(data: unknown): string | null {
     }
   }
   return null;
+}
+
+/** What the host's ingestion stamps at `data.sessionTool` on its own session tools' rows. */
+export interface SessionToolMarker {
+  /** The bare tool name. */
+  name: string;
+}
+
+/**
+ * The bare session-tool name of a row — read ONLY from the provenance marker
+ * the host's ingestion stamped (`data.sessionTool`, `sessionToolMarkedData`),
+ * never inferred from the spelling. Null for every other call, a same-named
+ * user server's included.
+ */
+export function sessionToolNameOfData(data: unknown): string | null {
+  const name = asRecord(asRecord(data)?.sessionTool)?.name;
+  return typeof name === "string" && SESSION_TOOL_NAME_PATTERN.test(name) ? name : null;
+}
+
+/**
+ * `data` with the provenance marker stamped when it names one of the tools the
+ * host registered (`registered`), else `data` unchanged. The registered names
+ * never include an external `/mcp` tool's (the registry refuses those), so a
+ * user's same-named server's calls are never marked.
+ */
+export function sessionToolMarkedData(data: unknown, registered: ReadonlySet<string>): unknown {
+  const record = asRecord(data);
+  if (!record || registered.size === 0) {
+    return data;
+  }
+  const name = sessionToolNameFromProviderData(record);
+  if (name === null || !registered.has(name)) {
+    return data;
+  }
+  return { ...record, sessionTool: { name } satisfies SessionToolMarker };
 }
 
 /**

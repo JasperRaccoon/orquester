@@ -10,6 +10,8 @@ import {
   isSessionToolsServerName,
   parseSessionToolName,
   projectSessionToolData,
+  sessionToolMarkedData,
+  sessionToolNameFromProviderData,
   sessionToolNameOfData,
   sessionToolReferences,
   SESSION_TOOL_REFERENCE_MAX_BYTES
@@ -42,21 +44,35 @@ test("anything else is not a session tool", () => {
   assert.equal(isSessionToolsServerName("orquester-x"), false);
 });
 
-test("the name is read off each provider's activity data", () => {
+test("the provider spelling is read off each provider's activity data", () => {
   // Claude
-  assert.equal(sessionToolNameOfData({ toolName: "mcp__orquester__echo", input: {} }), "echo");
+  assert.equal(sessionToolNameFromProviderData({ toolName: "mcp__orquester__echo", input: {} }), "echo");
   // Codex
-  assert.equal(sessionToolNameOfData({ server: "orquester", tool: "echo", arguments: {} }), "echo");
+  assert.equal(sessionToolNameFromProviderData({ server: "orquester", tool: "echo", arguments: {} }), "echo");
   // Grok
-  assert.equal(sessionToolNameOfData({ toolUseId: "c1", vendorTool: "orquester__echo" }), "echo");
+  assert.equal(sessionToolNameFromProviderData({ toolUseId: "c1", vendorTool: "orquester__echo" }), "echo");
   // OpenCode
-  assert.equal(sessionToolNameOfData({ tool: "orquester-0123456789abcdef_echo", toolUseId: "c" }), "echo");
-  // a slimmed row
-  assert.equal(sessionToolNameOfData({ sessionTool: { name: "echo" } }), "echo");
+  assert.equal(sessionToolNameFromProviderData({ tool: "orquester-0123456789abcdef_echo", toolUseId: "c" }), "echo");
   // another server's call — even one whose tool happens to be spelled like ours
-  assert.equal(sessionToolNameOfData({ server: "github", tool: "echo" }), null);
-  assert.equal(sessionToolNameOfData({ server: "github", tool: "orquester__echo" }), null);
-  assert.equal(sessionToolNameOfData(null), null);
+  assert.equal(sessionToolNameFromProviderData({ server: "github", tool: "echo" }), null);
+  assert.equal(sessionToolNameFromProviderData({ server: "github", tool: "orquester__echo" }), null);
+  assert.equal(sessionToolNameFromProviderData(null), null);
+});
+
+test("a row is a session tool's only by the ingestion's marker, never by its spelling", () => {
+  const registered = new Set(["echo"]);
+  // The host's own tool: marked.
+  const marked = sessionToolMarkedData({ toolName: "mcp__orquester__echo", input: {} }, registered);
+  assert.deepEqual(marked, { toolName: "mcp__orquester__echo", input: {}, sessionTool: { name: "echo" } });
+  assert.equal(sessionToolNameOfData(marked), "echo");
+  // A user's same-named external /mcp server: spelled alike, never marked, never read as ours.
+  const external = { toolName: "mcp__orquester__send_message", input: {} };
+  assert.equal(sessionToolMarkedData(external, registered), external);
+  assert.equal(sessionToolNameOfData(external), null);
+  assert.equal(sessionToolNameOfData({ toolName: "mcp__orquester__echo" }), null, "spelling alone is not provenance");
+  // No session tools: nothing marked.
+  const plain = { server: "orquester", tool: "echo" };
+  assert.equal(sessionToolMarkedData(plain, new Set()), plain);
 });
 
 test("reference fields are read from structuredContent or the JSON text block", () => {
@@ -95,26 +111,34 @@ test("reference fields are read from structuredContent or the JSON text block", 
   assert.equal(sessionToolReferences({ result: { structuredContent: { htmlRender: ref } } }, []), undefined);
 });
 
-test("projectSessionToolData names the tool and keeps its references", () => {
-  assert.deepEqual(projectSessionToolData({ server: "orquester", tool: "echo" }, ["x"]), { name: "echo" });
+test("projectSessionToolData keeps the marker and adds its references", () => {
+  assert.deepEqual(projectSessionToolData({ server: "orquester", tool: "echo", sessionTool: { name: "echo" } }, ["x"]), { name: "echo" });
   assert.deepEqual(
-    projectSessionToolData({ server: "orquester", tool: "echo", result: { structuredContent: { x: 1 } } }, ["x"]),
+    projectSessionToolData(
+      { server: "orquester", tool: "echo", sessionTool: { name: "echo" }, result: { structuredContent: { x: 1 } } },
+      ["x"]
+    ),
     { name: "echo", references: { x: 1 } }
   );
-  assert.equal(projectSessionToolData({ server: "github", tool: "echo" }, ["x"]), undefined);
+  assert.equal(projectSessionToolData({ server: "orquester", tool: "echo" }, ["x"]), undefined, "unmarked");
 });
 
-test("a slimmed session-tool row carries data.sessionTool; another MCP row does not", () => {
+test("a marked row keeps data.sessionTool through slimming; an unmarked MCP row has none", () => {
   const slim = slimActivityPayload({
     itemType: "mcp_tool_call",
     status: "completed",
-    data: { toolName: "mcp__orquester__echo", input: { text: "hi" }, result: { content: [{ type: "text", text: "{}" }] } }
+    data: {
+      toolName: "mcp__orquester__echo",
+      input: { text: "hi" },
+      result: { content: [{ type: "text", text: "{}" }] },
+      sessionTool: { name: "echo" }
+    }
   }) as { data: Record<string, unknown> };
   assert.deepEqual(slim.data.sessionTool, { name: "echo" });
-  const other = slimActivityPayload({
-    itemType: "mcp_tool_call",
-    status: "completed",
-    data: { toolName: "mcp__github__list", input: {} }
-  }) as { data: Record<string, unknown> };
-  assert.equal(other.data.sessionTool, undefined);
+  for (const data of [{ toolName: "mcp__github__list", input: {} }, { toolName: "mcp__orquester__send_message", input: {} }]) {
+    const other = slimActivityPayload({ itemType: "mcp_tool_call", status: "completed", data }) as {
+      data: Record<string, unknown>;
+    };
+    assert.equal(other.data.sessionTool, undefined, "no marker, no session tool");
+  }
 });

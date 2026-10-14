@@ -26,7 +26,8 @@
  * config; verified: no header on disk, `GET /config` does not show it). It is
  * made on every session start — a recycled or restarted server starts empty
  * — and re-registering the same name replaces the old credential. A session
- * that ends revokes its credential and disconnects its server, best-effort.
+ * that ends revokes its credential and disconnects its server, best-effort
+ * but awaited, so the thread's next start registers after it.
  *
  * Instructions ride the per-turn `system` addendum (`session.ts`), which
  * OpenCode keeps on the message's `system` field, never in its parts.
@@ -63,20 +64,36 @@ export function openCodeSessionToolsServerName(threadId: string): string {
 }
 
 /**
- * `ruleset` with the isolation rules appended (last, so they win). Without
- * session tools the ruleset is returned untouched.
+ * The deny that hides every thread's session tools: exactly the per-thread
+ * naming, `orquester-` + 16 characters + `_` + the tool (OpenCode's wildcard
+ * maps `?` to ONE character of any kind; it has no character classes). A
+ * user's own server whose name merely starts with `orquester-` keeps every
+ * tool whose id does not put a `_` exactly there — which some may; so
+ * `docs/orquester-mcp.md` suggests `orquester_remote` for the external `/mcp`,
+ * a name the literal `orquester-` prefix can never match.
+ */
+export const OPENCODE_SESSION_TOOLS_DENY = `orquester-${"?".repeat(16)}_*`;
+
+/**
+ * `ruleset` with the isolation rules appended (last, so they win): the deny
+ * whenever the host HAS session tools — a thread whose own grant failed must
+ * still be kept off its co-tenants' servers — and the allow of the thread's
+ * own server when it has one. Without session tools at all (`isolate`
+ * false and no server), the ruleset is returned untouched.
  */
 export function withSessionToolRules(
   ruleset: OpenCodePermissionRuleset,
-  launch: Pick<OpenCodeSessionToolsLaunch, "serverName"> | undefined
+  isolation: { isolate: boolean; own?: Pick<OpenCodeSessionToolsLaunch, "serverName"> }
 ): OpenCodePermissionRuleset {
-  if (launch === undefined) {
+  if (!isolation.isolate && isolation.own === undefined) {
     return ruleset;
   }
   return [
     ...ruleset,
-    { permission: "orquester-*", pattern: "*", action: "deny" },
-    { permission: `${launch.serverName}_*`, pattern: "*", action: "allow" }
+    { permission: OPENCODE_SESSION_TOOLS_DENY, pattern: "*", action: "deny" },
+    ...(isolation.own !== undefined
+      ? [{ permission: `${isolation.own.serverName}_*`, pattern: "*", action: "allow" as const }]
+      : [])
   ];
 }
 
@@ -101,7 +118,12 @@ export async function registerOpenCodeSessionTools(
   });
 }
 
-/** `POST /mcp/{name}/disconnect` — best-effort, bounded, never throws. */
+/**
+ * `POST /mcp/{name}/disconnect` — best-effort, bounded, never throws. Awaited
+ * by the session's stop: a relaunch of the thread re-registers the SAME name,
+ * and only the ordering (stop, then start) keeps a late disconnect from
+ * disabling the fresh registration.
+ */
 export async function disconnectOpenCodeSessionTools(client: OpenCodeClient, serverName: string): Promise<void> {
   try {
     await client.post<unknown>(openCodeRoutes.mcpDisconnect(serverName), {

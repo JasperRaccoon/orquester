@@ -7,13 +7,18 @@
  *   `McpServerHttp`; Grok advertises `mcpCapabilities: {http: true}`, fixture
  *   `01-initialize.ndjson`). The credential rides the entry's `headers` — a
  *   protocol frame, never argv or a file; the raw-frame redaction masks every
- *   `headers` value structurally (`acp/redact.ts`). Grok 1.0.46 in a scratch
- *   home took this shape through `mcp_merge` and wrote no header to disk
- *   (report `task-1-report.md`). The `GROK_CONFIG_PATH` overlay cannot carry
- *   MCP (`launch.ts`), so the protocol is the only way in.
+ *   `headers` value structurally (`acp/redact.ts`). Verified against grok
+ *   1.0.46 with an authenticated scratch `GROK_HOME` (initialize →
+ *   authenticate → `session/new` → `session/load`, no prompt; report
+ *   `task-1-report.md`): it reached the endpoint with exactly this header
+ *   (4 of 4 requests), advertised the tools as `orquester__<tool>`, and wrote
+ *   the credential to no file of its home. The `GROK_CONFIG_PATH` overlay
+ *   cannot carry MCP (`launch.ts`), so the protocol is the only way in.
  * - **Instructions.** `session/new`'s `_meta.rules` — "extra rules appended
  *   to the system prompt" (Grok's own `15-agent-mode.md`, "Session `_meta`
- *   options"). Also sent on `session/load`, where a CLI that keeps the
+ *   options"). Verified: stored in the session's `system_prompt.txt` and as
+ *   its history's `type: "system"` entry, and a `session/load` replays no
+ *   frame carrying it. Also sent on `session/load`, where a CLI that keeps the
  *   session's first system prompt may ignore it; the tool descriptions carry
  *   the full guidance either way.
  * - **Approvals.** A `session/request_permission` for one of the REGISTERED

@@ -81,6 +81,9 @@ export function createDaemonForwarder(options: DaemonForwarderOptions): ForwardS
       const req = httpRequest(
         {
           socketPath: options.socketPath(),
+          // No keep-alive pool: a socket pooled from a daemon that has since
+          // restarted would fail the next call as "restarting" for nothing.
+          agent: false,
           path: daemonRoutesForHost.sessionToolCall,
           method: "POST",
           headers: {

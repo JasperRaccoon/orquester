@@ -244,9 +244,15 @@ interface StartOpenCodeSessionInput {
   server: OpenCodeServerHandle;
   /**
    * The thread's own session-tool server (design 2026-10-14 §1.2) — present
-   * only when a toolkit is registered. `session-tools.ts`.
+   * only when a toolkit is registered and its credential was issued.
+   * `session-tools.ts`.
    */
   sessionTools?: OpenCodeSessionToolsLaunch;
+  /**
+   * The host has session tools at all: the ruleset hides every thread's
+   * session-tool servers even when this thread got none of its own.
+   */
+  isolateSessionTools?: boolean;
 }
 
 export class OpenCodeThreadSession {
@@ -293,6 +299,8 @@ export class OpenCodeThreadSession {
   private forkedMessageIds = new Map<string, string>();
   /** The thread's session-tool server, revoked when this session ends. */
   private readonly sessionTools: OpenCodeSessionToolsLaunch | undefined;
+  /** Every ruleset this session sends carries the session-tool isolation rules. */
+  private readonly isolateSessionTools: boolean;
 
   private constructor(input: {
     deps: OpenCodeThreadSessionDeps;
@@ -303,8 +311,10 @@ export class OpenCodeThreadSession {
     modelSlug: string;
     contextLimits: ReadonlyMap<string, number>;
     sessionTools: OpenCodeSessionToolsLaunch | undefined;
+    isolateSessionTools: boolean;
   }) {
     this.sessionTools = input.sessionTools;
+    this.isolateSessionTools = input.isolateSessionTools;
     this.deps = input.deps;
     this.server = input.server;
     this.client = input.client;
@@ -330,7 +340,11 @@ export class OpenCodeThreadSession {
     const client = input.server.client(input.cwd);
     // The session-tool isolation rules ride every ruleset this session sends
     // (`session-tools.ts`); none without session tools.
-    const ruleset = withSessionToolRules(buildOpenCodePermissionRules(input.runtimeMode), input.sessionTools);
+    const isolateSessionTools = input.isolateSessionTools === true || input.sessionTools !== undefined;
+    const ruleset = withSessionToolRules(buildOpenCodePermissionRules(input.runtimeMode), {
+      isolate: isolateSessionTools,
+      ...(input.sessionTools !== undefined ? { own: input.sessionTools } : {})
+    });
     const resume = parseOpenCodeResume(input.resumeCursor);
     if (input.sessionTools !== undefined) {
       // Before the session exists, so its first prompt is offered the tools.
@@ -440,7 +454,8 @@ export class OpenCodeThreadSession {
       record,
       modelSlug: input.modelSelection.model,
       contextLimits,
-      sessionTools: input.sessionTools
+      sessionTools: input.sessionTools,
+      isolateSessionTools
     });
 
     session.emit({
@@ -2355,10 +2370,11 @@ export class OpenCodeThreadSession {
     this.pumpAbort.abort();
     if (this.sessionTools !== undefined) {
       // Revoked at once — the endpoint refuses it from here on. The
-      // disconnect only tidies the shared server, so it never holds the stop.
+      // disconnect is awaited (bounded, never throwing): the thread's next
+      // start re-registers the same name, and must come after it.
       this.sessionTools.revoke();
       if (!this.server.hasExited()) {
-        void disconnectOpenCodeSessionTools(this.client, this.sessionTools.serverName);
+        await disconnectOpenCodeSessionTools(this.client, this.sessionTools.serverName);
       }
     }
     this.updateRecord(
@@ -2506,7 +2522,10 @@ export class OpenCodeThreadSession {
       await this.client.patch<unknown>(openCodeRoutes.session(fork.id), {
         timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs,
         body: {
-          permission: withSessionToolRules(buildOpenCodePermissionRules(this.state.runtimeMode), this.sessionTools)
+          permission: withSessionToolRules(buildOpenCodePermissionRules(this.state.runtimeMode), {
+            isolate: this.isolateSessionTools,
+            ...(this.sessionTools !== undefined ? { own: this.sessionTools } : {})
+          })
         } satisfies UpdateSessionBody
       });
 
