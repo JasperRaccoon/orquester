@@ -625,3 +625,13 @@ test("a stored goal that is neither null nor a valid ThreadGoal rejects the snap
     assert.equal(deserializeFoldState(copy), null, JSON.stringify(value));
   }
 });
+
+test("a user message's own interaction mode is folded and survives the snapshot (T6-M2)", () => {
+  const state = foldThread([
+    created(),
+    ev("thread.message-sent", { messageId: "u1", role: "user", text: "plan this", streaming: false, turnId: "t1", interactionMode: "plan" })
+  ]);
+  const message = state.items.find((item) => item.kind === "message" && item.id === "u1");
+  assert.equal(message?.kind === "message" ? message.interactionMode : undefined, "plan");
+  assert.deepEqual(throughDisk(state), state);
+});

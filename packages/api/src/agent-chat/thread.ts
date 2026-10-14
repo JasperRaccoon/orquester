@@ -260,6 +260,11 @@ export interface ThreadMessageItem {
    * (`isCommentaryAssistantMessage` in the UI's `rows.logic.ts`).
    */
   messageKind?: "answer" | "commentary";
+  /**
+   * Only on a `user` message that steered a running turn into another interaction mode: the mode
+   * it asked for (`currentInteractionMode`). Absent: the turn's own mode stands.
+   */
+  interactionMode?: import("./adapter-types.ts").InteractionMode;
   streaming: boolean;
   createdAt: string;
   updatedAt: string;

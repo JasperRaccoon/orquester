@@ -144,6 +144,8 @@ export interface ThreadMessageSentPayload {
    */
   reasoningKind?: "text" | "summary";
   messageKind?: "answer" | "commentary";
+  /** `ThreadMessageItem.interactionMode`: a user message's own interaction mode, when the host records it. */
+  interactionMode?: InteractionMode;
 }
 
 export interface ThreadTurnStartRequestedPayload {
