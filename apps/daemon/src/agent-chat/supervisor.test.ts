@@ -1274,9 +1274,12 @@ test("the launch environment is built explicitly, never from process.env", (t) =
     home: "/var/lib/orquester",
     npmConfigPrefix: "/var/lib/orquester/.npm-global",
     appdir: "/var/lib/orquester",
-    socketPath: "/var/lib/orquester/daemon/agent-host.sock"
+    socketPath: "/var/lib/orquester/daemon/agent-host.sock",
+    daemonSocketPath: "/var/lib/orquester/daemon/daemon.sock"
   });
   assert.equal(env.PATH, "/home/u/.local/bin:/usr/bin");
+  // The socket the host calls back on for session tools.
+  assert.equal(env.ORQUESTER_DAEMON_SOCK, "/var/lib/orquester/daemon/daemon.sock");
   assert.equal(env.TMPDIR, "/var/lib/orquester/tmp");
   assert.equal(env.HOME, "/var/lib/orquester");
   assert.equal(env.NPM_CONFIG_PREFIX, "/var/lib/orquester/.npm-global");
@@ -1291,4 +1294,5 @@ test("the launch environment is built explicitly, never from process.env", (t) =
   });
   assert.equal(optional.TMPDIR, undefined);
   assert.equal(optional.HOME, undefined);
+  assert.equal(optional.ORQUESTER_DAEMON_SOCK, undefined);
 });

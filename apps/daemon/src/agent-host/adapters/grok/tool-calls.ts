@@ -44,6 +44,7 @@ import {
   type ToolCallSnapshot
 } from "./tool-output.ts";
 import { xaiToolMeta } from "./xai-meta.ts";
+import { isGrokSessionToolCall } from "./session-tools.ts";
 
 export interface ToolTrack extends ToolCallSnapshot {
   readonly toolCallId: string;
@@ -158,7 +159,13 @@ export function toolCall(
       finished?.itemType ??
       (spawnsSubagent
         ? "collab_agent_tool_call"
-        : itemTypeFromToolKind(acpKindFromVendorKind(vendor?.kind) ?? kind ?? undefined)),
+        : // A session tool is an MCP call (design 2026-10-14 §1.5), whatever
+          // kind Grok files it under — sticky, as a later frame may not repeat
+          // the `_meta` that named it (nothing else here is an MCP call).
+          previous?.itemType === "mcp_tool_call" ||
+            isGrokSessionToolCall({ title: title ?? null, _meta: update._meta ?? null })
+          ? "mcp_tool_call"
+          : itemTypeFromToolKind(acpKindFromVendorKind(vendor?.kind) ?? kind ?? undefined)),
     spawnsSubagent,
     ...(previous?.owned !== undefined
       ? { owned: previous.owned }

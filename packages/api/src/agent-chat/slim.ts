@@ -18,7 +18,9 @@
  *   place — the size is in the structure, not in one long string;
  * - an MCP tool call keeps `type, id, tool, server, status, arguments,
  *   appContext, error, durationMs` and nothing else, and its `result` is
- *   reduced to a one-line summary;
+ *   reduced to a one-line summary — but a row the host's ingestion marked
+ *   as its own session tool's keeps `data.sessionTool` (its bare name, plus
+ *   the reference fields of `SESSION_TOOL_REFERENCE_KEYS`, `session-tools.ts`);
  * - a row of the `orquester` server's `html_render` call — any item type, any
  *   provider's layout — keeps its page reference as `data.htmlRender`
  *   (`html-render.ts`), so the timeline renders the page from the slim row;
@@ -42,6 +44,7 @@
  */
 
 import { htmlRenderReferenceOfActivityPayload } from "./html-render.ts";
+import { projectSessionToolData } from "./session-tools.ts";
 
 /**
  * Any string in an activity payload is capped at this many UTF-8 **bytes** on
@@ -359,6 +362,13 @@ function projectMcpToolCallData(data: Record<string, unknown>): Record<string, u
   }
   if ("kind" in data) {
     projected.kind = data.kind;
+  }
+  // A session tool's name and the reference fields its UI renders from
+  // (`session-tools.ts`, design 2026-10-14 §1.5), in one place for every
+  // provider's spelling.
+  const sessionTool = projectSessionToolData(data);
+  if (sessionTool) {
+    projected.sessionTool = sessionTool;
   }
 
   return projected;

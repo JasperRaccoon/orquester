@@ -1261,12 +1261,19 @@ export function buildAgentHostEnv(input: {
   npmConfigPrefix?: string;
   appdir: string;
   socketPath: string;
+  /**
+   * The DAEMON's own unix socket, which the host calls back on for session
+   * tools (design 2026-10-14 §1.1). Without it the host falls back to the
+   * appdir's default socket path.
+   */
+  daemonSocketPath?: string;
 }): Record<string, string> {
   const env: Record<string, string> = {
     PATH: input.sessionPath,
     ORQUESTER_APPDIR: input.appdir,
     ORQUESTER_AGENT_HOST: "1",
     ORQUESTER_AGENT_HOST_SOCK: input.socketPath,
+    ...(input.daemonSocketPath !== undefined ? { ORQUESTER_DAEMON_SOCK: input.daemonSocketPath } : {}),
     // tsx writes its transpile cache to TMPDIR and `/tmp` is unavailable under
     // ProtectSystem=strict — the same reason the unit sets it for the daemon.
     NODE_ENV: "production"

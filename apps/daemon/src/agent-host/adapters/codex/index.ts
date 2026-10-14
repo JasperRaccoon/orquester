@@ -50,6 +50,8 @@ import {
   probeCodex,
   uninstalledCodexSnapshot
 } from "./probe.ts";
+import { issueSessionToolsGrant } from "../../session-tools/index.ts";
+import { CODEX_SESSION_TOOLS_TOKEN_ENV } from "./session-tools.ts";
 import { CodexSession } from "./session.ts";
 import type { RuntimeEventDraft } from "./normalise.ts";
 import type { RuntimeEvent } from "@orquester/api/agent-chat";
@@ -300,16 +302,32 @@ export const createCodexAdapter: AdapterFactory = async (
     await assertVersionSupported();
 
     const codexHome = resolveCodexHome(input.home.path);
+    // Design 2026-10-14 §1.2: a fresh credential per `codex app-server`
+    // launch, in the child's env only (`session-tools.ts`); this issue revokes
+    // the thread's previous one, and the session revokes this one when its
+    // child exits.
+    const bin = requireBin();
+    const grant = await issueSessionToolsGrant(context, input.threadId);
     const session = new CodexSession({
       context,
       threadId: input.threadId,
       cwd: input.cwd,
       ...(codexHome !== null ? { codexHome } : {}),
-      bin: requireBin(),
+      bin,
       env: context.buildEnv({
         threadId: input.threadId,
-        home: codexHome !== null ? { ...input.home, path: codexHome } : input.home
+        home: codexHome !== null ? { ...input.home, path: codexHome } : input.home,
+        ...(grant !== undefined ? { extraEnv: { [CODEX_SESSION_TOOLS_TOKEN_ENV]: grant.token } } : {})
       }),
+      ...(grant !== undefined
+        ? {
+            sessionTools: {
+              url: grant.url,
+              instructions: context.sessionTools?.instructions ?? "",
+              revoke: grant.revoke
+            }
+          }
+        : {}),
       runtimeMode: input.runtimeMode,
       modelSelection: input.modelSelection,
       ...(input.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
@@ -333,6 +351,7 @@ export const createCodexAdapter: AdapterFactory = async (
       return summary;
     } catch (error) {
       await session.stop().catch(() => {});
+      grant?.revoke();
       sessions.delete(input.threadId);
       throw error;
     }

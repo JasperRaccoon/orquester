@@ -262,6 +262,12 @@ export interface WorkLogEntry {
   /** The originating activity kind (e.g. `user-input.requested`), for row chrome. */
   sourceActivityKind?: string;
   /**
+   * The bare name of the Orquester session tool this MCP call ran (design
+   * 2026-10-14 §1.5), under any provider's spelling — what the row's label is
+   * read from instead of the call's raw arguments.
+   */
+  sessionTool?: string;
+  /**
    * True when §5.6's slimming dropped something and `GET …/items/:itemId`
    * genuinely holds more, so the expanded row may offer "load full output".
    * Mirrors `ThreadActivityPayloadFields.truncated`.

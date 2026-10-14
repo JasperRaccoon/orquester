@@ -65,6 +65,7 @@ import {
   probeGrok,
   probeSkills
 } from "./probe.ts";
+import { issueSessionToolsGrant } from "../../session-tools/index.ts";
 import { GrokSession } from "./session.ts";
 import { recordLeftoverWork, sweepLeftoverWork } from "../../support/leftover-work.ts";
 
@@ -275,7 +276,22 @@ class GrokAdapter implements AgentAdapter {
       extraEnv: GROK_EXTRA_ENV
     });
 
+    // Design 2026-10-14 §1.2: a fresh credential per `grok agent stdio`
+    // launch, carried by the ACP `mcpServers` entry (`session-tools.ts`); this
+    // issue revokes the thread's previous one, and `onClosed` revokes this.
+    const grant = await issueSessionToolsGrant(this.context, input.threadId);
+
     const session: GrokSession = new GrokSession({
+      ...(grant !== undefined
+        ? {
+            sessionTools: {
+              url: grant.url,
+              authorization: grant.authorization,
+              instructions: this.context.sessionTools?.instructions ?? "",
+              toolNames: new Set(this.context.sessionTools?.tools.map((tool) => tool.name) ?? [])
+            }
+          }
+        : {}),
       threadId: input.threadId,
       cwd: input.cwd,
       home: input.home,
@@ -309,6 +325,7 @@ class GrokAdapter implements AgentAdapter {
         }
       },
       onClosed: (threadId) => {
+        grant?.revoke();
         if (this.sessions.get(threadId) === session) {
           this.sessions.delete(threadId);
         }
@@ -326,6 +343,7 @@ class GrokAdapter implements AgentAdapter {
     try {
       await session.start();
     } catch (error) {
+      grant?.revoke();
       this.sessions.delete(input.threadId);
       throw error;
     }

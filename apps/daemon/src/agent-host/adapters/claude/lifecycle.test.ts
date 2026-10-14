@@ -35,6 +35,7 @@ import { AsyncEventQueue, createDeferred } from "./async-queue.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
 import { countingIds, readClaudeFixture } from "./fixtures.ts";
 import { createClaudeAdapterWith } from "./index.ts";
+import { recordingSessionTools } from "../../session-tools/testing.ts";
 
 // Delay native filesystem operations for real transcript races; every operation
 // still uses the real file and returns its actual result.
@@ -350,6 +351,8 @@ interface HarnessOptions {
   signal?: AbortSignal;
   /** Where an attachment id lives, for a test that needs the bytes read for real. */
   resolveAttachmentPath?: AdapterContext["resolveAttachmentPath"];
+  /** The host's session-tool service (design 2026-10-14 §1); absent = none registered. */
+  sessionTools?: AdapterContext["sessionTools"];
 }
 
 async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
@@ -393,7 +396,8 @@ async function makeHarness(options: HarnessOptions = {}): Promise<Harness> {
       options.binaryPath === undefined ? "/usr/local/bin/claude" : options.binaryPath,
     sessionPath: () => "/usr/bin",
     tmpDir: () => "/tmp",
-    signal: options.signal ?? new AbortController().signal
+    signal: options.signal ?? new AbortController().signal,
+    ...(options.sessionTools !== undefined ? { sessionTools: options.sessionTools } : {})
   };
 
   const deps: ClaudeAdapterDeps = {
@@ -3487,6 +3491,83 @@ describe("claude adapter — workflow agents' transcripts", () => {
       assert.equal(harness.events.some((event) => event.type === "item.started" && event.itemId === "toolu_outside"), false);
     } finally {
       await rm(outside, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("Claude adapter — session tools (design 2026-10-14 §1)", () => {
+  it("a session tool is pre-approved in Supervised mode: no card, no event", async () => {
+    const harness = await makeHarness({ sessionTools: recordingSessionTools() });
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.drain();
+    const before = harness.events.length;
+    const toolInput = { text: "hi" };
+    const decision = await peer.canUseTool!("mcp__orquester__echo", toolInput, {
+      signal: new AbortController().signal,
+      toolUseID: "toolu_st",
+      requestId: "req-st"
+    } as unknown as Parameters<CanUseTool>[2]);
+    await harness.drain();
+    assert.deepEqual(decision, { behavior: "allow", updatedInput: toolInput });
+    assert.deepEqual(harness.events.slice(before), []);
+    // The launch carried the server and its server-wide allow rule.
+    const options = harness.queryOptions.find((entry) => entry.persistSession !== false)!;
+    assert.deepEqual(Object.keys(options.mcpServers ?? {}), ["orquester"]);
+    assert.ok(options.allowedTools?.includes("mcp__orquester__echo"));
+    assert.equal(options.allowedTools?.includes("mcp__orquester"), false, "never the server-wide rule");
+  });
+
+  it("a same-named server's OTHER tool is still asked about", async () => {
+    const harness = await makeHarness({ sessionTools: recordingSessionTools() });
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.drain();
+    void peer.canUseTool!("mcp__orquester__send_message", { sessionId: "s" }, {
+      signal: new AbortController().signal,
+      toolUseID: "toolu_ext",
+      requestId: "req-ext"
+    } as unknown as Parameters<CanUseTool>[2]);
+    assert.ok(await harness.waitFor("request.opened"));
+  });
+
+  it("without a registered toolkit, an `orquester` tool is no session tool and is asked about", async () => {
+    const harness = await makeHarness();
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.drain();
+    void peer.canUseTool!("mcp__orquester__echo", { text: "hi" }, {
+      signal: new AbortController().signal,
+      toolUseID: "toolu_user",
+      requestId: "req-user"
+    } as unknown as Parameters<CanUseTool>[2]);
+    const opened = await harness.waitFor("request.opened");
+    assert.ok(opened);
+    const options = harness.queryOptions.find((entry) => entry.persistSession !== false)!;
+    assert.deepEqual(options.mcpServers, {});
+  });
+
+  it("the instruction block rides the system prompt, never the user's turn", async () => {
+    const tools = recordingSessionTools();
+    const harness = await makeHarness({ sessionTools: tools });
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({
+      threadId: START.threadId,
+      input: "hello",
+      attachments: [],
+      interactionMode: "default"
+    });
+    await peer.nextTurn();
+    const options = harness.queryOptions.find((entry) => entry.persistSession !== false)!;
+    assert.ok((options.systemPrompt as { append: string }).append.includes(tools.instructions));
+    const sent = JSON.stringify(peer.received[0]?.message.content);
+    assert.ok(!sent.includes("## Orquester"), "the provider's user message holds the user's text alone");
+    const userMessages = harness.events.filter(
+      (event) => event.type === "item.completed" && event.payload.itemType === "user_message"
+    );
+    for (const event of userMessages) {
+      assert.ok(!JSON.stringify(event).includes("## Orquester"), "no user bubble carries the block");
     }
   });
 });

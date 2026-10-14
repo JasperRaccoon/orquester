@@ -1,0 +1,79 @@
+/**
+ * Claude adapter — the `orquester` session-tool server (design 2026-10-14
+ * §1.2, §1.3).
+ *
+ * An in-process SDK server — `mcpServers.orquester = {type: "sdk", name,
+ * instance}`, the very config `createSdkMcpServer` returns — bound to its
+ * thread when the session launches: no network and no credential. SDK
+ * 0.3.278 serialises `mcpServers` into `--mcp-config` argv for every server
+ * type but this one, which crosses as `{type: "sdk", name}` and is served over
+ * the SDK's control channel.
+ *
+ * The instance is the host's own `orquester` server (`../../session-tools/
+ * mcp-server.ts`), not one built from the SDK's `tool()`: `tool()` zod-parses
+ * the arguments first (stripping unknown keys, applying defaults), so a call
+ * would reach the daemon already rewritten and be refused — or not — in
+ * other words than on every other provider. This one advertises the same JSON
+ * schema and forwards the arguments raw; the daemon is the one validator.
+ *
+ * Pre-approved in every permission mode: `allowedTools` names each registered
+ * tool (`mcp__orquester__<tool>`), so the CLI never asks, and `canUseTool`
+ * short-circuits the same names should it ask anyway (`session.ts`). Each
+ * tool, never the server-wide `mcp__orquester` rule: the external-MCP guide
+ * (`docs/orquester-mcp.md`) installs Orquester's own full-drive `/mcp` under
+ * that very name at user scope, and a server-wide rule would pre-approve
+ * its tools too wherever it shadowed this one.
+ */
+
+import type { McpSdkServerConfigWithInstance } from "@anthropic-ai/claude-agent-sdk";
+import { SESSION_TOOLS_SERVER_NAME } from "@orquester/api/agent-chat";
+
+import type { SessionToolsHost } from "../../session-tools/index.ts";
+import { buildSessionToolsMcpServer } from "../../session-tools/mcp-server.ts";
+
+const TOOL_PREFIX = `mcp__${SESSION_TOOLS_SERVER_NAME}__`;
+
+/** A session tool as Claude names it: `mcp__orquester__<tool>`. */
+export function claudeSessionToolName(name: string): string {
+  return `${TOOL_PREFIX}${name}`;
+}
+
+/** True for one of `names` (bare) as Claude names it. */
+export function isClaudeSessionTool(toolName: string, names: ReadonlySet<string>): boolean {
+  return toolName.startsWith(TOOL_PREFIX) && names.has(toolName.slice(TOOL_PREFIX.length));
+}
+
+/** What `buildClaudeQueryOptions` attaches. */
+export interface ClaudeSessionToolsLaunch {
+  server: McpSdkServerConfigWithInstance;
+  /** The "Orquester" instruction block, appended to the system prompt. */
+  instructions: string;
+  /** `allowedTools`: each registered tool by its Claude name. */
+  allowedTools: string[];
+}
+
+/**
+ * The server for one thread's session. `signal` is the session's own life: a
+ * stopped session aborts every call it still has in flight, besides the
+ * per-call cancel the CLI sends on an interrupt.
+ */
+export function createClaudeSessionToolsLaunch(input: {
+  sessionTools: SessionToolsHost;
+  threadId: string;
+  signal: AbortSignal;
+}): ClaudeSessionToolsLaunch {
+  const instance = buildSessionToolsMcpServer(input.sessionTools.tools, (invocation) =>
+    input.sessionTools.call({
+      threadId: input.threadId,
+      name: invocation.name,
+      arguments: invocation.arguments,
+      ...(invocation.callId !== undefined ? { callId: invocation.callId } : {}),
+      signal: AbortSignal.any([invocation.signal, input.signal])
+    })
+  );
+  return {
+    server: { type: "sdk", name: SESSION_TOOLS_SERVER_NAME, instance },
+    instructions: input.sessionTools.instructions,
+    allowedTools: input.sessionTools.tools.map((definition) => claudeSessionToolName(definition.name))
+  };
+}

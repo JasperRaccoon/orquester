@@ -162,6 +162,8 @@ import { FsSearchError, listProjectFiles, searchProjectFiles } from "./search";
 import { InjectDaemonApi } from "./mcp/daemon-api.ts";
 import { FsTools } from "./mcp/fs-tools.ts";
 import { registerMcp } from "./mcp/server.ts";
+import { sessionToolRegistry } from "./session-tools/index.ts";
+import { registerSessionToolsRoute } from "./session-tools/route.ts";
 import { TodoTools } from "./mcp/todo-tools.ts";
 import {
   UploadTooLargeError,
@@ -516,6 +518,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const agentChatTmux = tmuxAvailable() && tmuxVersionOk() ? tmux : null;
   const agentChat = new AgentChatService({
     baseDir: paths.baseDir,
+    daemonSocketPath: paths.socketPath,
     daemonDir: resolved.daemonDir,
     platform: runtimePlatform,
     cwd,
@@ -4363,6 +4366,20 @@ export function createServer(
           })();
         }
       );
+    });
+  }
+
+  // Session tools (design 2026-10-14 §1.1) — the agent host's call-back
+  // route, SOCKET-ONLY: never on remote HTTP. It also requires the host's
+  // own bearer, and derives the caller's project, cwd and provider from the
+  // thread's tab record. Handlers reach the daemon through the unix app's
+  // in-process client, as the workflow engine does.
+  if (options.mode === "local") {
+    registerSessionToolsRoute(app, {
+      authorizeHost: (authorization) => services.agentChat?.authorizeHostRequest(authorization) ?? false,
+      resolveThread: (threadId) => services.agentChat?.sessionToolThread(threadId) ?? null,
+      api: () => services.internalApi,
+      registry: sessionToolRegistry
     });
   }
 

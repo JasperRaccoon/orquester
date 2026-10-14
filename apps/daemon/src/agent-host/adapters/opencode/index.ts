@@ -76,6 +76,8 @@ import {
   type OpenCodeInventory
 } from "./snapshot.ts";
 import { openCodeRoutes, type ProviderListResponse } from "./routes.ts";
+import { issueSessionToolsGrant } from "../../session-tools/index.ts";
+import { openCodeSessionToolsServerName } from "./session-tools.ts";
 import { Mutex } from "./util.ts";
 
 const ADAPTER_ID: AgentAdapterId = "opencode";
@@ -710,12 +712,18 @@ class OpenCodeAdapterImpl implements AgentAdapter {
     // while still scoping every call to itself.
     const server = await this.pool.acquire(projectDirFor(input));
     this.servers.set(input.threadId, server);
+    let sessionToolsGrant: { revoke(): void } | undefined;
     try {
       // Resolved BEFORE the session starts so the meter has its denominator
       // from the first `step-finish`: a window that arrives late is exactly the
       // on/off flicker §7.6 forbids, because the client keeps only the latest
       // reading.
       const contextLimits = await this.modelContextLimits(server, cwd);
+      // Design 2026-10-14 §1.2: the thread's own credential, registered on the
+      // shared server under the thread's own name (`session-tools.ts`). This
+      // issue revokes the thread's previous one; the session revokes this.
+      const grant = await issueSessionToolsGrant(this.ctx, input.threadId);
+      sessionToolsGrant = grant;
       const session = await OpenCodeThreadSession.start(
         {
           ctx: this.ctx,
@@ -734,7 +742,21 @@ class OpenCodeAdapterImpl implements AgentAdapter {
           runtimeMode: input.runtimeMode,
           ...(input.resumeCursor !== undefined ? { resumeCursor: input.resumeCursor } : {}),
           contextLimits,
-          server
+          server,
+          // The isolation rules whenever the host has session tools — this
+          // thread's own grant may have failed, its co-tenants' did not.
+          isolateSessionTools: this.ctx.sessionTools !== undefined,
+          ...(grant !== undefined
+            ? {
+                sessionTools: {
+                  serverName: openCodeSessionToolsServerName(input.threadId),
+                  url: grant.url,
+                  authorization: grant.authorization,
+                  instructions: this.ctx.sessionTools?.instructions ?? "",
+                  revoke: grant.revoke
+                }
+              }
+            : {})
         }
       );
       this.sessions.set(input.threadId, session);
@@ -744,6 +766,7 @@ class OpenCodeAdapterImpl implements AgentAdapter {
       void this.refreshSnapshot({ cwd }).catch(() => undefined);
       return session;
     } catch (error) {
+      sessionToolsGrant?.revoke();
       server.release();
       this.servers.delete(input.threadId);
       throw error;

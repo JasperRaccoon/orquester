@@ -43,6 +43,7 @@ import {
   isHiddenGoalChange,
   isHistoricalRuntimeEvent,
   isToolLifecycleItemType,
+  sessionToolMarkedData,
   TASK_PROMPT_MAX_CHARS,
   type ProviderRequestKind,
   type RuntimeEvent,
@@ -249,16 +250,24 @@ function withdrawnRequestActivity(
  * resolver groups on and what the §5.6 coalescer keys on.
  */
 function toolLifecyclePayload(
-  event: Extract<RuntimeEvent, { type: "item.started" | "item.updated" | "item.completed" }>
+  event: Extract<RuntimeEvent, { type: "item.started" | "item.updated" | "item.completed" }>,
+  sessionToolNames: ReadonlySet<string> | undefined
 ): Record<string, unknown> {
   const p = event.payload;
+  // A call to one of the host's own session tools carries the provenance
+  // marker `data.sessionTool` (design 2026-10-14 §1.5) — persisted, and the
+  // only thing slimming and the UI trust.
+  const data =
+    p.itemType === "mcp_tool_call" && p.data !== undefined && sessionToolNames !== undefined
+      ? sessionToolMarkedData(p.data, sessionToolNames)
+      : p.data;
   return {
     itemType: p.itemType,
     ...(event.itemId !== undefined ? { toolUseId: event.itemId } : {}),
     ...(p.status !== undefined ? { status: p.status } : {}),
     ...(p.title !== undefined ? { title: p.title } : {}),
     ...(p.detail !== undefined ? { detail: truncateDetail(p.detail) } : {}),
-    ...(p.data !== undefined ? { data: p.data } : {}),
+    ...(data !== undefined ? { data } : {}),
     ...(p.agentId !== undefined ? { agentId: p.agentId } : {}),
     ...(p.parentToolUseId !== undefined ? { parentToolUseId: p.parentToolUseId } : {}),
     // The item's data holds only part of its output (Codex's bounded
@@ -277,7 +286,11 @@ function toolLifecyclePayload(
  */
 export function runtimeEventToActivities(
   event: RuntimeEvent,
-  options: { readonly taskTitle?: string } = {}
+  options: {
+    readonly taskTitle?: string;
+    /** The host's registered session-tool names (design 2026-10-14 §1.5); absent = none. */
+    readonly sessionToolNames?: ReadonlySet<string>;
+  } = {}
 ): ThreadActivityItem[] {
   switch (event.type) {
     case "request.opened": {
@@ -844,7 +857,7 @@ export function runtimeEventToActivities(
           tone: "tool",
           activityKind: "tool.started",
           summary: `${event.payload.title ?? "Tool"} started`,
-          payload: toolLifecyclePayload(event),
+          payload: toolLifecyclePayload(event, options.sessionToolNames),
           ...(event.payload.agentId !== undefined
             ? { agentId: event.payload.agentId }
             : event.agentId !== undefined
@@ -872,7 +885,7 @@ export function runtimeEventToActivities(
           tone: "tool",
           activityKind: "tool.updated",
           summary: event.payload.title ?? "Tool updated",
-          payload: toolLifecyclePayload(event),
+          payload: toolLifecyclePayload(event, options.sessionToolNames),
           ...(event.payload.agentId !== undefined
             ? { agentId: event.payload.agentId }
             : event.agentId !== undefined
@@ -896,7 +909,7 @@ export function runtimeEventToActivities(
           tone: "tool",
           activityKind: "tool.completed",
           summary: event.payload.title ?? "Tool",
-          payload: toolLifecyclePayload(event),
+          payload: toolLifecyclePayload(event, options.sessionToolNames),
           ...(event.payload.agentId !== undefined
             ? { agentId: event.payload.agentId }
             : event.agentId !== undefined

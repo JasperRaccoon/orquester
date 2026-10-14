@@ -37,6 +37,7 @@ import {
   createDefaultAppConfig,
   daemonConfigDir,
   daemonConfigPath,
+  defaultSocketPath,
   expandVars,
   parseAppConfig,
   parseDaemonConfig,
@@ -74,6 +75,12 @@ import { systemClock, systemIdGen } from "./orchestration/runtime-seams.ts";
 import { createAgentHostServer, type AgentHostServer } from "./server/index.ts";
 import { createThreadStore } from "./store/index.ts";
 import { buildProviderEnv } from "./support/env.ts";
+import { sessionToolRegistry, type SessionToolRegistry } from "../session-tools/index.ts";
+import {
+  createDaemonForwarder,
+  createSessionToolsHost,
+  type SessionToolsHost
+} from "./session-tools/index.ts";
 
 /**
  * How long a host teardown lets the consumers read what the adapters'
@@ -236,6 +243,11 @@ interface StartAgentHostOptions {
    * hold a handle to wind down on its own.
    */
   onStopped?: () => void;
+  /**
+   * The session-tool registry (design 2026-10-14 §1). Production uses the
+   * statically imported `SESSION_TOOLKITS`; a test passes its own.
+   */
+  sessionTools?: SessionToolRegistry;
 }
 
 export async function startAgentHost(
@@ -260,6 +272,23 @@ export async function startAgentHost(
 
   const token = await readOrCreateToken(agentHostTokenPath(appdir));
   const socketPath = agentHostSocketPath(appdir, process.platform === "win32" ? "win32" : "linux");
+
+  // ---- session tools (design 2026-10-14 §1) -------------------------------
+  // Only when a toolkit is registered: with none, no adapter is handed the
+  // service, and nothing a provider is sent changes. Calls go to the DAEMON's
+  // socket — the path the daemon passed (`ORQUESTER_DAEMON_SOCK`), else the
+  // appdir's default — authenticated with this host's own token.
+  const toolRegistry = options.sessionTools ?? sessionToolRegistry();
+  const daemonSocketPath =
+    env.ORQUESTER_DAEMON_SOCK ??
+    defaultSocketPath(appdir, process.platform === "win32" ? "win32" : "linux");
+  const sessionTools: SessionToolsHost | undefined = toolRegistry.enabled
+    ? createSessionToolsHost({
+        registry: toolRegistry,
+        forward: createDaemonForwarder({ socketPath: () => daemonSocketPath, token }),
+        logger
+      })
+    : undefined;
 
   // ---- services ----------------------------------------------------------
   const liveness = createLivenessRegistry();
@@ -400,7 +429,8 @@ export async function startAgentHost(
     },
     sessionPath: () => sessionPath,
     tmpDir: () => tmpDir,
-    signal: shutdown.signal
+    signal: shutdown.signal,
+    ...(sessionTools !== undefined ? { sessionTools } : {})
   });
 
   // ---- provider snapshots ------------------------------------------------
@@ -480,7 +510,11 @@ export async function startAgentHost(
         turnId: input.turnId
       }) ?? null,
     onAccountEvent: (event) => orchestrator?.onAccountEvent(event),
-    logger: { warn: (message, detail) => logger.warn(message, detail) }
+    logger: { warn: (message, detail) => logger.warn(message, detail) },
+    // The provenance of a session-tool row (design 2026-10-14 §1.5).
+    ...(sessionTools !== undefined
+      ? { sessionToolNames: new Set(sessionTools.tools.map((tool) => tool.name)) }
+      : {})
   });
 
   orchestrator = createOrchestrator({
@@ -516,7 +550,11 @@ export async function startAgentHost(
     launchConfigs,
     clock,
     ids,
-    index: threadIndex
+    index: threadIndex,
+    // An interrupted turn ends the session-tool calls it was waiting on.
+    ...(sessionTools !== undefined
+      ? { onTurnInterrupt: (threadId: string) => sessionTools.abortThreadCalls(threadId) }
+      : {})
   });
   const host = orchestrator;
 
@@ -663,6 +701,10 @@ export async function startAgentHost(
         logger.warn(`agent-host: ${adapter.id} stopAll failed`, error);
       });
     }
+    // Every provider session is gone: no credential is left to honour.
+    await sessionTools?.stop().catch((error: unknown) => {
+      logger.warn("agent-host: session tools did not stop cleanly", error);
+    });
     // Every adapter ends its event stream once its sessions are stopped, and
     // a stop writes its last rows at its very end — Codex's whole teardown
     // (the turn's settle, each live task's `stopped`, the `session.exited`)

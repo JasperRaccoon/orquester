@@ -69,6 +69,7 @@ import { claudeConfigDir } from "./config-dir.ts";
 import { ClaudeGoalTranscript, locateClaudeTranscript } from "./goal-transcript.ts";
 import { createClaudeHistoryReader, type ClaudeHistoryReader } from "./history.ts";
 import { buildClaudeQueryOptions } from "./launch.ts";
+import { createClaudeSessionToolsLaunch, isClaudeSessionTool } from "./session-tools.ts";
 import { CLAUDE_OPTION_IDS, findModel, resolveEffortLevel, selectionStringOption } from "./models.ts";
 import {
   ClaudeNormalizer,
@@ -267,6 +268,13 @@ export class ClaudeSession {
   private query: Query | undefined;
   private record: ProviderSession;
   private closed = false;
+  /**
+   * The session's life, for its session-tool calls: a teardown aborts every
+   * call still in flight (design 2026-10-14 §1.1).
+   */
+  private readonly sessionToolsLife = new AbortController();
+  /** The bare names of the session tools this session launched with (none without the server). */
+  private sessionToolNames: ReadonlySet<string> = new Set();
   /** One debug line per session for an unavailable context-usage request. */
   private contextUsageUnavailableLogged = false;
   private hostInitiatedStop = false;
@@ -414,7 +422,18 @@ export class ClaudeSession {
       messages.catch(() => undefined);
       this.historyPrefetch = { sessionId: this.resumeSessionId, messages };
     }
+    const sessionTools = this.options.context.sessionTools;
+    this.sessionToolNames = new Set(sessionTools?.tools.map((tool) => tool.name) ?? []);
     const built = buildClaudeQueryOptions({
+      ...(sessionTools !== undefined
+        ? {
+            sessionTools: createClaudeSessionToolsLaunch({
+              sessionTools,
+              threadId: this.threadId,
+              signal: this.sessionToolsLife.signal
+            })
+          }
+        : {}),
       cwd: this.options.cwd,
       executablePath: this.options.executablePath,
       env: this.options.env,
@@ -1375,6 +1394,7 @@ export class ClaudeSession {
     // Synchronous up to the first await: `closed` is set before `teardown`
     // returns its promise.
     this.closed = true;
+    this.sessionToolsLife.abort();
     // Every step is guarded: one that throws (a normaliser bug, a callback) is
     // logged and the rest still runs. A teardown that stopped half-way left a
     // session that never exited, an `onClosed` that never ran, and a thread no
@@ -1512,6 +1532,14 @@ export class ClaudeSession {
 
     if (toolName === "AskUserQuestion") {
       return this.handleAskUserQuestion(toolInput, callbackOptions);
+    }
+
+    // Session tools are pre-approved in every mode (design 2026-10-14 §1.3):
+    // `allowedTools` already covers them, this is the belt to its braces. Only
+    // the tools this session attached — never a user's own server's that
+    // happen to share its name.
+    if (isClaudeSessionTool(toolName, this.sessionToolNames)) {
+      return { behavior: "allow", updatedInput: toolInput };
     }
 
     if (toolName === "ExitPlanMode") {

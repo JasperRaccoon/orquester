@@ -321,3 +321,16 @@ test("fixture 6: reasoning replays as its own item and an aborted tool call is f
   assert.equal(types.has("request.opened"), false);
   assert.equal(types.has("content.delta"), false);
 });
+
+test("fixture 10: the per-turn system addendum — session-tool instructions included — never replays", async () => {
+  // OpenCode stores a prompt's `system` on its user message info, beside the
+  // parts (design 2026-10-14 §1.4): the "Orquester" block must stay there.
+  const messages = structuredClone(historyFor(FIXTURE_10, ROOT_SESSION));
+  const user = messages.find((message) => message.info.role === "user");
+  assert.ok(user !== undefined);
+  (user.info as unknown as Record<string, unknown>).system =
+    "<runtime_info>…</runtime_info>\n\n## Orquester\n\nYou are running inside Orquester's agent chat.";
+  const projected = await project("thread-1", messages);
+  assert.ok(projected.length > 0);
+  assert.ok(!JSON.stringify(projected).includes("## Orquester"), "no projected event carries the block");
+});

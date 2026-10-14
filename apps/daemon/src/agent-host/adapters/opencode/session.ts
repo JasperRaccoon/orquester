@@ -77,6 +77,13 @@ import {
   type UpdateSessionBody
 } from "./routes.ts";
 import { buildOpenCodePermissionRules, toOpenCodePermissionReply } from "./ruleset.ts";
+import {
+  disconnectOpenCodeSessionTools,
+  registerOpenCodeSessionTools,
+  withSessionToolInstructions,
+  withSessionToolRules,
+  type OpenCodeSessionToolsLaunch
+} from "./session-tools.ts";
 import type { OpenCodeServerHandle } from "./server.ts";
 import { readSseFrames } from "./sse.ts";
 import {
@@ -235,6 +242,17 @@ interface StartOpenCodeSessionInput {
    */
   contextLimits?: ReadonlyMap<string, number>;
   server: OpenCodeServerHandle;
+  /**
+   * The thread's own session-tool server (design 2026-10-14 §1.2) — present
+   * only when a toolkit is registered and its credential was issued.
+   * `session-tools.ts`.
+   */
+  sessionTools?: OpenCodeSessionToolsLaunch;
+  /**
+   * The host has session tools at all: the ruleset hides every thread's
+   * session-tool servers even when this thread got none of its own.
+   */
+  isolateSessionTools?: boolean;
 }
 
 export class OpenCodeThreadSession {
@@ -279,6 +297,10 @@ export class OpenCodeThreadSession {
    * restart such a rewind refuses rather than guesses.
    */
   private forkedMessageIds = new Map<string, string>();
+  /** The thread's session-tool server, revoked when this session ends. */
+  private readonly sessionTools: OpenCodeSessionToolsLaunch | undefined;
+  /** Every ruleset this session sends carries the session-tool isolation rules. */
+  private readonly isolateSessionTools: boolean;
 
   private constructor(input: {
     deps: OpenCodeThreadSessionDeps;
@@ -288,7 +310,11 @@ export class OpenCodeThreadSession {
     record: ProviderSession;
     modelSlug: string;
     contextLimits: ReadonlyMap<string, number>;
+    sessionTools: OpenCodeSessionToolsLaunch | undefined;
+    isolateSessionTools: boolean;
   }) {
+    this.sessionTools = input.sessionTools;
+    this.isolateSessionTools = input.isolateSessionTools;
     this.deps = input.deps;
     this.server = input.server;
     this.client = input.client;
@@ -312,8 +338,26 @@ export class OpenCodeThreadSession {
     input: StartOpenCodeSessionInput
   ): Promise<OpenCodeThreadSession> {
     const client = input.server.client(input.cwd);
-    const ruleset = buildOpenCodePermissionRules(input.runtimeMode);
+    // The session-tool isolation rules ride every ruleset this session sends
+    // (`session-tools.ts`); none without session tools.
+    const isolateSessionTools = input.isolateSessionTools === true || input.sessionTools !== undefined;
+    const ruleset = withSessionToolRules(buildOpenCodePermissionRules(input.runtimeMode), {
+      isolate: isolateSessionTools,
+      ...(input.sessionTools !== undefined ? { own: input.sessionTools } : {})
+    });
     const resume = parseOpenCodeResume(input.resumeCursor);
+    if (input.sessionTools !== undefined) {
+      // Before the session exists, so its first prompt is offered the tools.
+      // A failed registration costs the tools, never the thread.
+      try {
+        await registerOpenCodeSessionTools(client, input.sessionTools);
+      } catch (error) {
+        deps.ctx.logger.warn("opencode: could not register the session-tool server", {
+          threadId: input.threadId,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      }
+    }
 
     let adopted: OpenCodeSessionInfo | undefined;
     if (resume !== undefined) {
@@ -409,7 +453,9 @@ export class OpenCodeThreadSession {
       state,
       record,
       modelSlug: input.modelSelection.model,
-      contextLimits
+      contextLimits,
+      sessionTools: input.sessionTools,
+      isolateSessionTools
     });
 
     session.emit({
@@ -644,6 +690,9 @@ export class OpenCodeThreadSession {
     this.closed$.resolve();
     this.cancelIdleReconciliation();
     this.pumpAbort.abort();
+    // The server is about to be recycled with its registrations; the next
+    // start registers afresh under a new credential.
+    this.sessionTools?.revoke();
     this.server.release();
     this.deps.onClosed(this.state.threadId);
     return true;
@@ -1882,7 +1931,12 @@ export class OpenCodeThreadSession {
       ...(input.agent !== undefined ? { agent: input.agent } : {}),
       ...(input.variant !== undefined ? { variant: input.variant } : {}),
       // OpenCode appends this after its own agent/provider prompts.
-      system: buildRuntimeInstructions(`${input.model.providerID}/${input.model.modelID}`),
+      // The "Orquester" block (design 2026-10-14 §1.4) rides the same field:
+      // OpenCode keeps it on the message's `system`, never in its parts.
+      system: withSessionToolInstructions(
+        buildRuntimeInstructions(`${input.model.providerID}/${input.model.modelID}`),
+        this.sessionTools
+      ),
       parts: [
         ...(input.text.length > 0 ? [{ type: "text" as const, text: input.text }] : []),
         ...input.parts
@@ -2314,6 +2368,15 @@ export class OpenCodeThreadSession {
     }
 
     this.pumpAbort.abort();
+    if (this.sessionTools !== undefined) {
+      // Revoked at once — the endpoint refuses it from here on. The
+      // disconnect is awaited (bounded, never throwing): the thread's next
+      // start re-registers the same name, and must come after it.
+      this.sessionTools.revoke();
+      if (!this.server.hasExited()) {
+        await disconnectOpenCodeSessionTools(this.client, this.sessionTools.serverName);
+      }
+    }
     this.updateRecord(
       {
         status: input.hostInitiated ? "stopped" : "error",
@@ -2459,7 +2522,10 @@ export class OpenCodeThreadSession {
       await this.client.patch<unknown>(openCodeRoutes.session(fork.id), {
         timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs,
         body: {
-          permission: buildOpenCodePermissionRules(this.state.runtimeMode)
+          permission: withSessionToolRules(buildOpenCodePermissionRules(this.state.runtimeMode), {
+            isolate: this.isolateSessionTools,
+            ...(this.sessionTools !== undefined ? { own: this.sessionTools } : {})
+          })
         } satisfies UpdateSessionBody
       });
 

@@ -41,6 +41,7 @@ import {
 import { resumeCursorFor } from "../../orchestration/resume.ts";
 import { readLeftoverWork } from "../../support/leftover-work.ts";
 import { createGrokAdapter } from "./index.ts";
+import { recordingSessionTools } from "../../session-tools/testing.ts";
 
 const MOCK = join(dirname(fileURLToPath(import.meta.url)), "testing/mock-grok.mjs");
 
@@ -81,6 +82,10 @@ async function rig(
     env?: Record<string, string>;
     /** Share another rig's `leftover-work.json`: a later host of the same thread. */
     leftoverWork?: string;
+    /** The host's session-tool service (design 2026-10-14 §1); absent = none registered. */
+    sessionTools?: AdapterContext["sessionTools"];
+    /** Every raw frame, as the adapter logs it (already redacted). */
+    rawFrames?: unknown[];
   } = {}
 ): Promise<Rig> {
   const cwd = await mkdtemp(join(tmpdir(), "grok-lifecycle-"));
@@ -114,7 +119,10 @@ async function rig(
     },
     resolveAttachmentPath: async () => await Promise.resolve(cwd),
     attachmentsDir: () => cwd,
-    logRawFrame: () => {},
+    logRawFrame: (_threadId, frame) => {
+      options.rawFrames?.push(frame);
+    },
+    ...(options.sessionTools !== undefined ? { sessionTools: options.sessionTools } : {}),
     buildEnv: () => ({
       PATH: process.env["PATH"] ?? "",
       HOME: cwd,
@@ -2139,3 +2147,73 @@ for (const [message, reason] of [
     await r.dispose();
   });
 }
+
+// ---------------------------------------------------------------------------
+// Session tools (design 2026-10-14 §1)
+// ---------------------------------------------------------------------------
+
+test("session tools: the server rides session/new with its credential redacted from the log, and its call needs no card", async () => {
+  const tools = recordingSessionTools();
+  const rawFrames: unknown[] = [];
+  const r = await rig({ scenario: "session-tool-permission", sessionTools: tools, rawFrames });
+  await start(r);
+  assert.equal(tools.grants.length, 1);
+  const grant = tools.grants[0]!;
+
+  // The session/new the adapter sent, as the raw log has it.
+  const sent = rawFrames
+    .map((entry) => (entry as { direction: string; frame: { method?: string; params?: Record<string, unknown> } }))
+    .find((entry) => entry.direction === "send" && entry.frame.method === "session/new");
+  assert.ok(sent !== undefined);
+  const params = sent.frame.params as {
+    mcpServers: Array<{ type: string; name: string; url: string; headers: unknown }>;
+    _meta?: { rules?: string };
+  };
+  assert.equal(params.mcpServers.length, 1);
+  assert.equal(params.mcpServers[0]!.type, "http");
+  assert.equal(params.mcpServers[0]!.name, "orquester");
+  assert.equal(params.mcpServers[0]!.url, grant.url);
+  assert.equal(params._meta?.rules, tools.instructions, "the instruction block is session rules");
+  assert.ok(!JSON.stringify(rawFrames).includes(grant.token), "the raw log never holds the credential");
+
+  await r.adapter.sendTurn({ threadId: "t1", input: "use the tool", attachments: [], interactionMode: "default" });
+  const completed = (await r.waitFor((event) => event.type === "turn.completed", "turn.completed")) as Extract<
+    RuntimeEvent,
+    { type: "turn.completed" }
+  >;
+  assert.equal(completed.payload.state, "completed", "the agent got its allow without a card");
+  await r.drain();
+  assert.equal(r.events.some((event) => event.type === "request.opened"), false, "no approval card");
+  const toolRow = r.events.find((event) => event.type === "item.completed" && event.itemId === "call-1") as
+    | Extract<RuntimeEvent, { type: "item.completed" }>
+    | undefined;
+  assert.equal(toolRow?.payload.itemType, "mcp_tool_call");
+  // The prompt the agent got is the user's text alone.
+  const prompt = rawFrames
+    .map((entry) => entry as { direction: string; frame: { method?: string; params?: unknown } })
+    .find((entry) => entry.direction === "send" && entry.frame.method === "session/prompt");
+  assert.ok(!JSON.stringify(prompt?.frame.params).includes("## Orquester"));
+
+  await r.adapter.stopSession("t1");
+  assert.equal(grant.revoked, true, "the credential dies with its session");
+  await r.dispose();
+});
+
+test("session tools: without a registered toolkit, session/new carries no server and an orquester-named call still asks", async () => {
+  const rawFrames: unknown[] = [];
+  const r = await rig({ scenario: "session-tool-permission", rawFrames });
+  await start(r);
+  const sent = rawFrames
+    .map((entry) => entry as { direction: string; frame: { method?: string; params?: Record<string, unknown> } })
+    .find((entry) => entry.direction === "send" && entry.frame.method === "session/new");
+  assert.deepEqual(sent?.frame.params?.mcpServers, []);
+  assert.equal(sent?.frame.params?._meta, undefined);
+  void r.adapter.sendTurn({ threadId: "t1", input: "use the tool", attachments: [], interactionMode: "default" });
+  const opened = (await r.waitFor((event) => event.type === "request.opened", "request.opened")) as Extract<
+    RuntimeEvent,
+    { type: "request.opened" }
+  >;
+  await r.adapter.respondToApproval("t1", opened.requestId!, "accept");
+  await r.waitFor((event) => event.type === "turn.completed", "turn.completed");
+  await r.dispose();
+});

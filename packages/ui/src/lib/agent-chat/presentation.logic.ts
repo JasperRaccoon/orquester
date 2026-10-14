@@ -484,8 +484,30 @@ export function shortenPath(path: string, workspaceRoot?: string): string {
   return `…/${segments.slice(-2).join("/")}`;
 }
 
+/**
+ * Readable labels for the Orquester session tools (design 2026-10-14 §1.5),
+ * by bare name — the `orquester` MCP server's tools, whatever the harness
+ * calls them. A toolkit adds a line per tool here (its README); a tool with
+ * none still reads "Orquester: <its name in words>", never its raw arguments.
+ */
+export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {};
+
+/** `thread_wait` → `Thread wait`. */
+function humanizeToolName(name: string): string {
+  const words = name.replace(/_+/g, " ").trim();
+  return words.length > 0 ? capitalize(words) : name;
+}
+
+/** The label of a session tool's row. */
+export function sessionToolLabel(name: string): string {
+  return SESSION_TOOL_LABELS[name] ?? `Orquester: ${humanizeToolName(name)}`;
+}
+
 /** The label a settled single-tool row shows. *T3: `MessagesTimeline.logic.ts:46-53`.* */
 export function singleToolCallLabel(entry: WorkLogEntry): string {
+  if (entry.sessionTool !== undefined) {
+    return sessionToolLabel(entry.sessionTool);
+  }
   const command = entry.command?.trim();
   if (command) {
     return command;
@@ -500,6 +522,11 @@ export function singleToolCallLabel(entry: WorkLogEntry): string {
  * summary, "Tool output".*
  */
 export function workEntryDisplayLabel(entry: WorkLogEntry, workspaceRoot?: string): string {
+  // A session tool's detail is its raw arguments (Claude's `tool: {…}`): its
+  // own label reads better (design 2026-10-14 §1.5).
+  if (entry.sessionTool !== undefined) {
+    return sessionToolLabel(entry.sessionTool);
+  }
   if (entry.command) {
     return entry.command;
   }

@@ -416,15 +416,28 @@ async function runPrompt(id, params) {
     return;
   }
 
-  if (scenario === "permission" || scenario === "cancel" || scenario === "permission-exit") {
+  if (
+    scenario === "permission" ||
+    scenario === "cancel" ||
+    scenario === "permission-exit" ||
+    scenario === "session-tool-permission"
+  ) {
+    // `session-tool-permission`: the same ask for a tool of the host's own
+    // `orquester` MCP server, named as Grok names an MCP tool (`server__tool`,
+    // its permissions guide) — no capture of one exists yet.
+    const sessionTool = scenario === "session-tool-permission";
     notify("session/update", {
       sessionId,
       update: {
         sessionUpdate: "tool_call",
         toolCallId: "call-1",
-        title: "write",
-        rawInput: { file_path: "/tmp/notes.txt", content: "hello\n" },
-        _meta: { "x.ai/tool": { version: 1, name: "write", kind: "write", namespace: "opencode", label: "Write", read_only: false } }
+        title: sessionTool ? "orquester__echo" : "write",
+        rawInput: sessionTool ? { text: "hi" } : { file_path: "/tmp/notes.txt", content: "hello\n" },
+        _meta: {
+          "x.ai/tool": sessionTool
+            ? { version: 1, name: "orquester__echo", kind: "other", namespace: "mcp", label: "echo", read_only: true }
+            : { version: 1, name: "write", kind: "write", namespace: "opencode", label: "Write", read_only: false }
+        }
       },
       _meta: { totalTokens: 22540, promptId }
     });
@@ -436,12 +449,20 @@ async function runPrompt(id, params) {
       method: "session/request_permission",
       params: {
         sessionId,
-        toolCall: {
-          toolCallId: "call-1",
-          kind: "edit",
-          title: "Write `/tmp/notes.txt`",
-          rawInput: { variant: "Write", file_path: "/tmp/notes.txt", content: "hello\n" }
-        },
+        toolCall: sessionTool
+          ? {
+              toolCallId: "call-1",
+              kind: "other",
+              title: "orquester__echo",
+              rawInput: { text: "hi" },
+              _meta: { "x.ai/tool": { version: 1, name: "orquester__echo", kind: "other", namespace: "mcp", read_only: true } }
+            }
+          : {
+              toolCallId: "call-1",
+              kind: "edit",
+              title: "Write `/tmp/notes.txt`",
+              rawInput: { variant: "Write", file_path: "/tmp/notes.txt", content: "hello\n" }
+            },
         options: [
           { optionId: "allow-edits-session", name: "Yes, allow all edits during this session", kind: "allow_always" },
           { optionId: "allow-once", name: "Yes", kind: "allow_once" },

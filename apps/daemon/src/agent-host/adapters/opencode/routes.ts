@@ -41,7 +41,10 @@ export const openCodeRoutes = {
   permissionReply: (requestId: string) => `/permission/${requestId}/reply`,
   questionReply: (requestId: string) => `/question/${requestId}/reply`,
   /** The route T3 never calls; §6.2's `/dismiss` uses it. */
-  questionReject: (requestId: string) => `/question/${requestId}/reject`
+  questionReject: (requestId: string) => `/question/${requestId}/reject`,
+  /** `POST {name, config}`: add an MCP server to the directory's instance, in memory (`session-tools.ts`). */
+  mcp: "/mcp",
+  mcpDisconnect: (name: string) => `/mcp/${encodeURIComponent(name)}/disconnect`
 } as const;
 
 // ---------------------------------------------------------------------------

@@ -704,6 +704,23 @@ describe("orchestrator — a turn the provider started sweeps no watch loop (§3
 });
 
 describe("orchestrator — interrupt (§4.1, §6.2)", () => {
+  it("ends the thread's session-tool calls before the adapter is interrupted", async () => {
+    const order: string[] = [];
+    const host = createTestHost({ onTurnInterrupt: (threadId) => order.push(`tools:${threadId}`) });
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go" });
+    await host.settle();
+    await host.orchestrator.command(threadId, "interrupt", {
+      commandId: cmd(),
+      turnId: host.adapter.turnIds[0]
+    });
+    await host.settle();
+    const interrupt = host.adapter.calls.findIndex((call) => call.kind === "interruptTurn");
+    assert.ok(interrupt >= 0);
+    assert.deepEqual(order, [`tools:${threadId}`]);
+    await host.stop();
+  });
+
   it("settles every pending request as cancel BEFORE interrupting", async () => {
     const host = createTestHost();
     const threadId = await host.createThread();

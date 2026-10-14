@@ -653,3 +653,43 @@ describe("a re-emitted assistant message in an old log (§7.3)", () => {
   });
 
 });
+
+describe("session tools (design 2026-10-14 §1.5)", () => {
+  it("labels a row the host marked as its own session tool's, under every provider's shape", () => {
+    const marker = { sessionTool: { name: "thread_wait" } };
+    const rows = [
+      // Claude: its own detail is the raw arguments.
+      activity("tool.completed", {
+        itemType: "mcp_tool_call",
+        title: "MCP tool call",
+        detail: 'mcp__orquester__thread_wait: {"timeoutSeconds":30}',
+        data: { toolName: "mcp__orquester__thread_wait", ...marker }
+      }),
+      activity("tool.completed", { itemType: "mcp_tool_call", title: "orquester: thread_wait", data: { server: "orquester", tool: "thread_wait", ...marker } }),
+      activity("tool.completed", { itemType: "mcp_tool_call", title: "orquester__thread_wait", data: { vendorTool: "orquester__thread_wait", ...marker } }),
+      activity("tool.completed", {
+        itemType: "mcp_tool_call",
+        title: "orquester-0123456789abcdef_thread_wait",
+        data: { tool: "orquester-0123456789abcdef_thread_wait", ...marker }
+      })
+    ];
+    for (const row of rows) {
+      const entry = workLogEntryFromActivity(row);
+      assert.equal(entry.sessionTool, "thread_wait");
+      assert.equal(workEntryDisplayLabel(entry), "Orquester: Thread wait");
+    }
+  });
+
+  it("leaves every unmarked MCP call alone — a user's same-named external server's included", () => {
+    for (const [data, detail] of [
+      [{ server: "github", tool: "list_issues" }, "list_issues: {}"],
+      [{ toolName: "mcp__orquester__send_message" }, 'mcp__orquester__send_message: {"sessionId":"s"}']
+    ] as const) {
+      const entry = workLogEntryFromActivity(
+        activity("tool.completed", { itemType: "mcp_tool_call", title: "MCP tool call", detail, data })
+      );
+      assert.equal(entry.sessionTool, undefined);
+      assert.equal(workEntryDisplayLabel(entry), detail);
+    }
+  });
+});

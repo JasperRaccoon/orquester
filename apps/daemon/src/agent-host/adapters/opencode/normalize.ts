@@ -41,6 +41,7 @@ import type {
   ToolLifecycleItemType,
   UserInputQuestion
 } from "@orquester/api/agent-chat";
+import { parseSessionToolName } from "@orquester/api/agent-chat";
 
 import {
   KNOWN_IGNORED_EVENT_TYPES,
@@ -153,6 +154,11 @@ export interface NormalizeContext {
 
 /** *T3: `OpenCodeAdapter.ts:506-539`.* */
 export function toToolLifecycleItemType(toolName: string): ToolLifecycleItemType {
+  // A session tool (`orquester-<key>_<tool>`, design 2026-10-14 §1.5) is an
+  // MCP call whatever words its name holds: `task_status` is no subagent.
+  if (parseSessionToolName(toolName) !== null) {
+    return "mcp_tool_call";
+  }
   const normalized = toolName.toLowerCase();
   if (normalized === "todowrite" || normalized === "todoread") {
     return "dynamic_tool_call";

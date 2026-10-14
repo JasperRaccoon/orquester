@@ -44,6 +44,11 @@ const SERVER_INSTRUCTIONS = `Orquester MCP drives Orquester's agent chat session
 /** Every tool, in tools/list order. */
 const ALL_TOOLS: ToolDef[] = [...catalogTools, ...sessionTools, ...searchTools, ...messageTools, ...outputTools, ...requestTools, ...watchTools, ...usageTools, ...fileTools, ...todoTools, ...workflowTools, ...agentProfileTools, ...desktopTools];
 
+/** Every tool name this server serves, in tools/list order (the session tools' reserved names check against it). */
+export function externalMcpToolNames(): string[] {
+  return ALL_TOOLS.map((tool) => tool.name);
+}
+
 /** How many refused fields an INVALID_ARGUMENT names before "…". */
 const MAX_NAMED_ISSUES = 5;
 /**
@@ -55,7 +60,7 @@ const MAX_ISSUE_CHARS = 200;
 const MAX_ISSUE_PATH_CHARS = 100;
 
 /** The one line an argument the schema refuses answers with: each bad field and why, as zod words it, each capped. */
-function argumentProblems(toolName: string, error: z.ZodError): string {
+export function argumentProblems(toolName: string, error: z.ZodError): string {
   const oneLine = (text: string) => text.replace(/\s+/g, " ");
   const named = error.issues.slice(0, MAX_NAMED_ISSUES).map((issue) => {
     const path = issue.path.length ? clipText(oneLine(issue.path.join(".")), MAX_ISSUE_PATH_CHARS) : "arguments";

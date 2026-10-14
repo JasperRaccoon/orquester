@@ -102,6 +102,14 @@ node compute-bearer.mjs https://your-domain.com admin 'your-password'
 
 Replace `<URL>` with your endpoint and `<CREDENTIAL>` with the `base64(...)` value from §3.
 
+> **Not the chat agents' `orquester` server.** Every agent chatting inside Orquester already gets a
+> separate, thread-scoped MCP server also named `orquester` (session tools,
+> `apps/daemon/src/session-tools/README.md`); this endpoint is for agents and clients *outside*
+> Orquester. If you install it into a CLI whose chats you also run inside Orquester, give it another
+> name — `orquester_remote` (underscore) — so neither shadows the other there. Avoid names starting
+> with `orquester-` (hyphen): OpenCode chats hide the per-thread session-tool servers by that
+> prefix. Orquester pre-approves only its own session tools, by name, never this server's tools.
+
 ### Claude Code (CLI)
 
 ```sh

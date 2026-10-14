@@ -652,3 +652,31 @@ describe("goals (goals §4.3)", () => {
     );
   });
 });
+
+describe("session-tool provenance (design 2026-10-14 §1.5)", () => {
+  const registered = new Set(["echo"]);
+  const dataOf = (data: Record<string, unknown>, names?: ReadonlySet<string>) =>
+    payloadOf(
+      runtimeEventToActivities(
+        runtimeEvent("item.completed", { itemType: "mcp_tool_call", status: "completed", data }, { itemId: "call-1" }),
+        names !== undefined ? { sessionToolNames: names } : {}
+      )[0]!
+    ).data as Record<string, unknown>;
+
+  it("marks a call to a tool the host registered, in every provider's spelling", () => {
+    for (const data of [
+      { toolName: "mcp__orquester__echo" },
+      { server: "orquester", tool: "echo" },
+      { vendorTool: "orquester__echo" },
+      { tool: "orquester-0123456789abcdef_echo" }
+    ]) {
+      assert.deepEqual(dataOf(data, registered).sessionTool, { name: "echo" });
+    }
+  });
+
+  it("never marks a same-named server's other tools, nor anything without session tools", () => {
+    assert.equal(dataOf({ toolName: "mcp__orquester__send_message" }, registered).sessionTool, undefined);
+    assert.equal(dataOf({ toolName: "mcp__orquester__echo" }).sessionTool, undefined);
+    assert.equal(dataOf({ toolName: "mcp__github__echo" }, registered).sessionTool, undefined);
+  });
+});
