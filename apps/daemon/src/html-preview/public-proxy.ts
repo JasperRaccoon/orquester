@@ -14,7 +14,7 @@
  * bytes only: HTTP, TLS and WebSockets pass through unchanged.
  */
 
-import { lookup as dnsLookup } from "node:dns/promises";
+import { Resolver } from "node:dns/promises";
 import * as net from "node:net";
 import { networkInterfaces } from "node:os";
 
@@ -109,14 +109,95 @@ export function isLocalAddress(address: string, family: number): boolean {
 }
 
 export interface PublicProxyOptions {
-  /** Name resolution; the system resolver by default (tests inject one). */
+  /** Name resolution; c-ares (see {@link createDnsResolver}) by default. Tests inject one. */
   resolve?: (host: string) => Promise<ResolvedAddress[]>;
   /** Whether an address is off limits; {@link isLocalAddress} by default. */
   blocked?: (address: string, family: number) => boolean;
+  /** The DNS servers the default resolver asks (`host[:port]`); the system's by default. For tests. */
+  dnsServers?: string[];
+  /** A name answers within this, or not at all (default 5 s, the wait for a lookup slot included). */
+  lookupTimeoutMs?: number;
 }
 
-const systemResolve = (host: string): Promise<ResolvedAddress[]> =>
-  dnsLookup(host, { all: true, verbatim: true });
+const LOOKUP_TIMEOUT_MS = 5_000;
+/** At most this many lookups of one proxy in flight; the rest wait their turn. */
+const MAX_CONCURRENT_LOOKUPS = 4;
+/** And at most this many waiting; past it a name is refused outright. */
+const MAX_WAITING_LOOKUPS = 64;
+
+export interface DnsResolver {
+  resolve(host: string): Promise<ResolvedAddress[]>;
+  /** Cancels every query still in flight (each answers nothing). */
+  close(): void;
+}
+
+/**
+ * Name resolution on c-ares (`dns.promises.Resolver`), never `dns.lookup`:
+ * getaddrinfo runs on libuv's shared four-thread pool and cannot be
+ * cancelled, so a page naming many hosts behind a slow resolver would stall
+ * every file operation of the daemon. c-ares is asynchronous on the event
+ * loop. It reads no hosts file — harmless, since the proxy connects only to
+ * addresses it checked, and a name a hosts file maps is local more often than
+ * not. Bounded: {@link MAX_CONCURRENT_LOOKUPS} at once, a per-lookup timeout,
+ * all cancelled on close.
+ */
+export function createDnsResolver(options: { servers?: string[]; timeoutMs?: number } = {}): DnsResolver {
+  const timeoutMs = options.timeoutMs ?? LOOKUP_TIMEOUT_MS;
+  const resolver = new Resolver({ timeout: Math.max(1, Math.ceil(timeoutMs / 2)), tries: 2 });
+  if (options.servers) resolver.setServers(options.servers);
+  let active = 0;
+  const waiting: Array<() => void> = [];
+  let closed = false;
+  const lookup = async (host: string): Promise<ResolvedAddress[]> => {
+    const answers = await Promise.allSettled([resolver.resolve4(host), resolver.resolve6(host)]);
+    return [
+      ...(answers[0].status === "fulfilled" ? answers[0].value.map((address) => ({ address, family: 4 })) : []),
+      ...(answers[1].status === "fulfilled" ? answers[1].value.map((address) => ({ address, family: 6 })) : [])
+    ];
+  };
+  return {
+    resolve: (host) =>
+      new Promise<ResolvedAddress[]>((resolve) => {
+        let settled = false;
+        const finish = (addresses: ResolvedAddress[]): void => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          resolve(addresses);
+        };
+        const timer = setTimeout(() => {
+          const index = waiting.indexOf(start);
+          if (index !== -1) waiting.splice(index, 1);
+          finish([]);
+        }, timeoutMs);
+        const start = (): void => {
+          active += 1;
+          lookup(host)
+            .catch(() => [] as ResolvedAddress[])
+            .then((addresses) => {
+              active -= 1;
+              waiting.shift()?.();
+              finish(addresses);
+            });
+        };
+        if (closed) finish([]);
+        else if (active < MAX_CONCURRENT_LOOKUPS) start();
+        else if (waiting.length < MAX_WAITING_LOOKUPS) waiting.push(start);
+        else finish([]);
+      }),
+    close: () => {
+      closed = true;
+      waiting.length = 0;
+      resolver.cancel();
+    }
+  };
+}
+
+/** Names that are this machine by definition (RFC 6761), refused unresolved. */
+function isLocalhostName(host: string): boolean {
+  const name = host.toLowerCase().replace(/\.$/, "");
+  return name === "localhost" || name.endsWith(".localhost");
+}
 
 /**
  * The addresses to connect to for `host`, or undefined when it resolves to
@@ -128,11 +209,16 @@ export async function publicAddresses(
   options: PublicProxyOptions = {}
 ): Promise<ResolvedAddress[] | undefined> {
   const blocked = options.blocked ?? isLocalAddress;
-  const family = net.isIP(host);
+  // A bracketed or zone-scoped IPv6 literal is still a literal.
+  const literal = host.replace(/^\[(.*)\]$/, "$1");
+  const family = net.isIP(literal);
+  if (family === 0 && isLocalhostName(host)) return undefined;
   const addresses =
     family !== 0
-      ? [{ address: host, family }]
-      : await (options.resolve ?? systemResolve)(host).catch(() => [] as ResolvedAddress[]);
+      ? [{ address: literal, family }]
+      : options.resolve
+        ? await options.resolve(host).catch(() => [] as ResolvedAddress[])
+        : [];
   if (addresses.length === 0) return undefined;
   return addresses.some(({ address, family: addressFamily }) => blocked(address, addressFamily)) ? undefined : addresses;
 }
@@ -180,6 +266,13 @@ export interface PublicProxy {
  * nothing misses this.
  */
 export function startPublicProxy(options: PublicProxyOptions = {}): Promise<PublicProxy> {
+  const dns = options.resolve
+    ? null
+    : createDnsResolver({
+        ...(options.dnsServers ? { servers: options.dnsServers } : {}),
+        ...(options.lookupTimeoutMs !== undefined ? { timeoutMs: options.lookupTimeoutMs } : {})
+      });
+  const checks: PublicProxyOptions = { ...options, resolve: options.resolve ?? dns!.resolve };
   const sockets = new Set<net.Socket>();
   const track = (socket: net.Socket): net.Socket => {
     sockets.add(socket);
@@ -228,7 +321,7 @@ export function startPublicProxy(options: PublicProxyOptions = {}): Promise<Publ
         early.push(chunk);
       };
       client.on("data", holdEarly);
-      void publicAddresses(request.host, options).then((addresses) => {
+      void publicAddresses(request.host, checks).then((addresses) => {
         if (client.destroyed) return;
         client.off("data", holdEarly);
         if (addresses === undefined) {
@@ -277,7 +370,10 @@ export function startPublicProxy(options: PublicProxyOptions = {}): Promise<Publ
     // A failure to listen fails this preview; once listening, a server error
     // must not reach Node as an unhandled event either.
     server.on("error", (error) => {
-      if (!listening) reject(error);
+      if (!listening) {
+        dns?.close();
+        reject(error);
+      }
     });
     server.listen(0, "127.0.0.1", () => {
       listening = true;
@@ -286,6 +382,7 @@ export function startPublicProxy(options: PublicProxyOptions = {}): Promise<Publ
         port: typeof address === "object" && address !== null ? address.port : 0,
         close: () =>
           new Promise<void>((done) => {
+            dns?.close();
             for (const socket of sockets) socket.destroy();
             server.close(() => done());
           })

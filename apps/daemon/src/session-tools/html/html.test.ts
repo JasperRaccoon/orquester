@@ -9,17 +9,17 @@ import { describe, it } from "node:test";
 import {
   HTML_RENDER_COLUMN_WIDTH,
   HTML_RENDER_LAYOUT_GUIDE,
+  HTML_RENDER_MAX_HTML_CHARS,
   HTML_RENDER_THEME_GUIDE,
   HTML_RENDER_THEME_TOKENS,
   type HtmlRenderReference
 } from "@orquester/api/agent-chat";
 
-import { HTML_RENDER_MAX_HTML_CHARS } from "../../agent-chat/html-render-publish.ts";
 import { FakeDaemonApi } from "../../mcp/testing.ts";
 import type { SessionToolContext } from "../contract.ts";
 import { executeSessionToolCall } from "../executor.ts";
 import { sessionToolRegistry } from "../index.ts";
-import { HTML_PAGE_MAX_CHARS, HTML_RENDER_SHOWN_MESSAGE, HTML_TOOLKIT_INSTRUCTIONS, htmlToolkit } from "./index.ts";
+import { HTML_RENDER_SHOWN_MESSAGE, HTML_TOOLKIT_INSTRUCTIONS, htmlToolkit } from "./index.ts";
 
 const THREAD = "thread-1";
 const REFERENCE: HtmlRenderReference = {
@@ -60,7 +60,7 @@ describe("html toolkit definitions", () => {
   it("ports T3's guidance with Orquester's widths and theme tokens", () => {
     for (const fragment of [
       "headless browser",
-      "PNG screenshot",
+      "screenshot of its top (at most 4000px; PNG, or JPEG scaled down when a PNG would pass 3 MiB",
       "contentHeight",
       "stack traces pointing into page.html",
       "before html_render",
@@ -102,16 +102,13 @@ describe("html toolkit definitions", () => {
     assert.ok(sessionToolRegistry().instructions.includes(HTML_TOOLKIT_INSTRUCTIONS));
   });
 
-  it("bounds the page as the publisher does", () => {
-    assert.equal(HTML_PAGE_MAX_CHARS, HTML_RENDER_MAX_HTML_CHARS);
-  });
 });
 
 describe("html toolkit argument bounds", () => {
   const page = "<p>hi</p>";
   const refused: Array<[string, Record<string, unknown>, RegExp]> = [
     ["html_preview", { html: "" }, /html/],
-    ["html_preview", { html: "x".repeat(HTML_PAGE_MAX_CHARS + 1) }, /html/],
+    ["html_preview", { html: "x".repeat(HTML_RENDER_MAX_HTML_CHARS + 1) }, /html/],
     ["html_preview", { html: page, width: 239 }, /width/],
     ["html_preview", { html: page, width: 1601 }, /width/],
     ["html_preview", { html: page, width: 400.5 }, /width/],
@@ -141,10 +138,10 @@ describe("html toolkit argument bounds", () => {
       .onPublishHtml(() => ({ ok: true, value: REFERENCE }))
       .onPreviewHtml((request) => ({
         ok: true,
-        value: { png: "AAAA", width: request.width ?? HTML_RENDER_COLUMN_WIDTH, contentHeight: 1, capturedHeight: 1, consoleMessages: [] }
+        value: { screenshot: { data: "AAAA", mimeType: "image/png", width: 1, height: 1 }, width: request.width ?? HTML_RENDER_COLUMN_WIDTH, contentHeight: 1, capturedHeight: 1, consoleMessages: [] }
       }));
     for (const [name, args] of [
-      ["html_preview", { html: "x".repeat(HTML_PAGE_MAX_CHARS), width: 240, appearance: "light" }],
+      ["html_preview", { html: "x".repeat(HTML_RENDER_MAX_HTML_CHARS), width: 240, appearance: "light" }],
       ["html_preview", { html: "x", width: 1600 }],
       ["html_render", { html: "x", title: "t".repeat(200), height: 80 }],
       ["html_render", { html: "x", title: "T", height: 2000 }]
@@ -191,11 +188,11 @@ describe("html_render", () => {
 });
 
 describe("html_preview", () => {
-  it("answers the screenshot as MCP image content first, then the measurements as JSON", async () => {
+  it("answers the screenshot as MCP image content first (its own type), then the measurements as JSON", async () => {
     const api = new FakeDaemonApi().onPreviewHtml(() => ({
       ok: true,
       value: {
-        png: "iVBORw0KGgo=",
+        screenshot: { data: "/9j/4AAQ", mimeType: "image/jpeg", width: 195, height: 450 },
         width: 390,
         contentHeight: 900,
         capturedHeight: 900,
@@ -209,8 +206,9 @@ describe("html_preview", () => {
     assert.equal(request.threadId, THREAD);
     assert.equal(request.width, 390);
     assert.equal(request.appearance, "light");
-    assert.deepEqual(result.content[0], { type: "image", data: "iVBORw0KGgo=", mimeType: "image/png" });
+    assert.deepEqual(result.content[0], { type: "image", data: "/9j/4AAQ", mimeType: "image/jpeg" });
     const expected = {
+      screenshot: { mimeType: "image/jpeg", width: 195, height: 450 },
       width: 390,
       contentHeight: 900,
       capturedHeight: 900,

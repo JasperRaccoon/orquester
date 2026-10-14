@@ -294,7 +294,7 @@ test("image bytes leave every provider's recorded result; the rest stays", () =>
 });
 
 test("a string blob is cut at the cap; arguments, small values and untouched data keep their identity", () => {
-  const big = "x".repeat(SESSION_TOOL_PERSISTED_STRING_MAX_BYTES + 5_000);
+  const big = "word ".repeat((SESSION_TOOL_PERSISTED_STRING_MAX_BYTES + 5_000) / 5);
   const data = {
     toolName: "mcp__orquester__echo",
     input: { html: big },
@@ -304,7 +304,7 @@ test("a string blob is cut at the cap; arguments, small values and untouched dat
   const bounded = boundSessionToolData(data) as typeof data;
   assert.equal(bounded.input, data.input, "the agent's arguments are kept as written");
   assert.ok(bounded.result.content.length < SESSION_TOOL_PERSISTED_STRING_MAX_BYTES + 100);
-  assert.match(bounded.result.content, /… \[5000 bytes omitted\]$/);
+  assert.match(bounded.result.content, /… \[\d+ bytes omitted\]$/);
   // Multi-byte text is cut on a whole character.
   const wide = boundSessionToolData({ result: "é".repeat(SESSION_TOOL_PERSISTED_STRING_MAX_BYTES) }) as { result: string };
   assert.match(wide.result, /^é+… \[\d+ bytes omitted\]$/);
@@ -329,4 +329,17 @@ test("an html_render result keeps its reference through bounding and both slims"
     data: Record<string, unknown>;
   };
   assert.deepEqual(slim.data.sessionTool, { name: "html_render", references: { htmlRender: ref } });
+});
+
+test("a base64 run spelled into text is dropped whole, and the text around it stays", () => {
+  const blob = "iVBORw0KGgo".padEnd(300_000, "Ab9+/");
+  const json = JSON.stringify({ width: 728, contentHeight: 300 });
+  const bounded = boundSessionToolData({
+    rawOutput: { output: { OkayOutput: `${blob}\n${json}` } },
+    result: blob,
+    short: "QUJD".repeat(100)
+  }) as { rawOutput: { output: { OkayOutput: string } }; result: string; short: string };
+  assert.equal(bounded.rawOutput.output.OkayOutput, `[base64 omitted: 225000 bytes]\n${json}`);
+  assert.equal(bounded.result, "[base64 omitted: 225000 bytes]");
+  assert.equal(bounded.short, "QUJD".repeat(100), "a run below the threshold is kept");
 });

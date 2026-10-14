@@ -344,6 +344,14 @@ export const SESSION_TOOL_PERSISTED_STRING_MAX_BYTES = 64 * 1024;
 /** A data: URL longer than this loses its bytes. */
 const DATA_URL_KEEP_CHARS = 1024;
 
+/**
+ * A run of base64 at least this long — an image or file a provider spelled
+ * into text — is dropped whole wherever it sits in a string (what follows it,
+ * such as Grok's joined JSON, stays). Ordinary text has spaces long before.
+ */
+export const SESSION_TOOL_BASE64_RUN_MIN_CHARS = 4096;
+const BASE64_RUN = new RegExp(`[A-Za-z0-9+/_-]{${SESSION_TOOL_BASE64_RUN_MIN_CHARS},}={0,2}`, "g");
+
 /** How deep the walk goes; deeper values are kept as they are. */
 const PERSIST_WALK_MAX_DEPTH = 12;
 
@@ -364,6 +372,12 @@ function boundString(value: string): string {
     const comma = value.indexOf(",");
     const head = comma > 0 && comma < 200 ? value.slice(5, comma) : "data";
     return `[${head} omitted: ${base64Bytes(value.slice(comma + 1))} bytes]`;
+  }
+  if (value.length >= SESSION_TOOL_BASE64_RUN_MIN_CHARS) {
+    const stripped = value.replace(BASE64_RUN, (run) => `[base64 omitted: ${base64Bytes(run)} bytes]`);
+    if (stripped !== value) {
+      return boundString(stripped);
+    }
   }
   if (value.length * 3 <= SESSION_TOOL_PERSISTED_STRING_MAX_BYTES) {
     return value;
@@ -420,8 +434,10 @@ function boundValue(value: unknown, depth: number): unknown {
 /**
  * A session tool's row data as the host persists it (`events.ndjson`): the
  * bytes of every image in its result dropped — MCP/ACP image content,
- * Claude's base64 image source, OpenCode's data-URL attachments — and any
- * other string past {@link SESSION_TOOL_PERSISTED_STRING_MAX_BYTES} cut. The
+ * Claude's base64 image source, OpenCode's data-URL attachments, and any
+ * base64 run of {@link SESSION_TOOL_BASE64_RUN_MIN_CHARS}+ characters inside
+ * a string — and any other string past
+ * {@link SESSION_TOOL_PERSISTED_STRING_MAX_BYTES} cut. The
  * model got the full result already; the timeline renders a session tool
  * from its reference fields and labels, which stay whole. The call's
  * arguments are kept as written. Answers `data` itself when nothing changed.

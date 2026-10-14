@@ -35,6 +35,8 @@ export const HTML_RENDER_TOOL_NAME = "html_render";
 export const HTML_RENDER_MIN_HEIGHT = 80;
 export const HTML_RENDER_MAX_HEIGHT = 2000;
 export const HTML_RENDER_MAX_TITLE_LENGTH = 200;
+/** A page's `html` bound, in characters (both tools' argument, and the publisher's own refusal). */
+export const HTML_RENDER_MAX_HTML_CHARS = 512_000;
 
 /** What the `html_render` tool result carries so a client can show the page. */
 export interface HtmlRenderReference {

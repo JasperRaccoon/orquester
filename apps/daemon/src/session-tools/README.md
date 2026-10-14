@@ -99,8 +99,8 @@ API in-process, `../mcp/daemon-api.ts`). Whatever a toolkit imports, the host lo
   Anything else thrown is `INTERNAL`, logged, never echoed.
 - **Results are small.** `jsonResult` caps at 60 000 bytes. Put large things (pages, files) in
   attachments and return a reference. The model gets an image result whole, but the thread's log
-  does not: ingestion drops a session tool's image bytes and cuts any other result string past
-  64 KiB (`boundSessionToolData`), so never put what the timeline needs in one.
+  does not: ingestion drops a session tool's image bytes (image blocks, data: URLs, base64 runs
+  in text) and cuts any other result string past 64 KiB (`boundSessionToolData`), so never put what the timeline needs in one.
 - **Secrets** never in a result, a log or `events.ndjson` unless the tool's whole point is handing
   one to the requesting agent (and then say where it goes).
 

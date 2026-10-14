@@ -5,7 +5,8 @@
  */
 
 import assert from "node:assert/strict";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync, watch } from "node:fs";
+import { on } from "node:events";
 import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
 import * as http from "node:http";
 import { tmpdir } from "node:os";
@@ -14,7 +15,16 @@ import { after, before, describe, it } from "node:test";
 
 import { HTML_RENDER_COLUMN_WIDTH, htmlRenderStockTheme } from "@orquester/api/agent-chat";
 
-import { Gate, HtmlPreviewBrowser, HtmlPreviewError, MAX_CONSOLE_MESSAGES, MAX_CONSOLE_TEXT_CHARS } from "./browser.ts";
+import {
+  Gate,
+  HtmlPreviewBrowser,
+  HtmlPreviewError,
+  MAX_CONSOLE_MESSAGES,
+  MAX_CONSOLE_TEXT_CHARS,
+  MAX_SCREENSHOT_BASE64_CHARS,
+  MAX_WAITING_CALLS,
+  PREVIEWS_BUSY_MESSAGE
+} from "./browser.ts";
 import { measureHtmlPage, previewHtmlPage } from "./index.ts";
 
 function findChromium(): string | undefined {
@@ -57,7 +67,8 @@ describe("html preview browser", { skip }, () => {
     const capture = await browser.capture({ html: FIXED(300), width: 400, urlFragment: "" });
     assert.equal(capture.contentHeight, 300);
     assert.equal(capture.capturedHeight, 300);
-    assert.deepEqual(pngSize(capture.png), { width: 400, height: 300 });
+    assert.deepEqual(pngSize(capture.screenshot.data), { width: 400, height: 300 });
+    assert.deepEqual(capture.screenshot, { data: capture.screenshot.data, mimeType: "image/png", width: 400, height: 300 });
     assert.deepEqual(capture.consoleMessages, []);
   });
 
@@ -65,7 +76,7 @@ describe("html preview browser", { skip }, () => {
     const capture = await browser.capture({ html: FIXED(5000), width: 320, urlFragment: "" });
     assert.equal(capture.contentHeight, 5000);
     assert.equal(capture.capturedHeight, 4000);
-    assert.equal(pngSize(capture.png).height, 4000);
+    assert.equal(pngSize(capture.screenshot.data).height, 4000);
   });
 
   it("captures the console — levels, uncaught exceptions with page.html stacks — bounded", async () => {
@@ -104,38 +115,77 @@ describe("html preview browser", { skip }, () => {
     assert.deepEqual(noisy.consoleMessages.at(-1), { level: "warning", text: "10 more console messages were omitted." });
   });
 
-  it("never reaches this machine: fetch, images, frames, sockets, beacons and navigation to loopback are refused", async () => {
+  it("never reaches this machine: every attempt at loopback, v4 or v6, is refused before any server sees it", async (t) => {
     const requests: string[] = [];
-    const server = http.createServer((request, response) => {
-      requests.push(request.url ?? "");
-      response.end("ok");
-    });
-    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
-    const port = (server.address() as { port: number }).port;
+    const servers: http.Server[] = [];
+    const listen = async (host: string): Promise<number | undefined> => {
+      const server = http.createServer((request, response) => {
+        requests.push(`${host} ${request.url ?? ""}`);
+        response.end("ok");
+      });
+      // A WebSocket upgrade is a request too.
+      server.on("upgrade", (request, socket) => {
+        requests.push(`${host} upgrade ${request.url ?? ""}`);
+        socket.destroy();
+      });
+      const port = await new Promise<number | undefined>((resolve) => {
+        server.once("error", () => resolve(undefined));
+        server.listen(0, host, () => resolve((server.address() as { port: number }).port));
+      });
+      if (port !== undefined) servers.push(server);
+      return port;
+    };
+    const v4 = await listen("127.0.0.1");
+    const v6 = await listen("::1");
+    assert.ok(v4 !== undefined);
     try {
-      const html = `<!doctype html><body><p id="mine">mine</p>
-        <img src="http://127.0.0.1:${port}/img.png">
-        <img src="http://localhost:${port}/img2.png">
-        <iframe src="http://127.0.0.1:${port}/frame"></iframe>
-        <link rel="stylesheet" href="http://[::1]:${port}/style.css">
-        <script>
-          fetch("http://127.0.0.1:${port}/fetch").catch(() => console.log("fetch refused"));
-          try { new WebSocket("ws://127.0.0.1:${port}/socket"); } catch {}
-          navigator.sendBeacon("http://127.0.0.1:${port}/beacon", "x");
-          setTimeout(() => { location.href = "http://127.0.0.1:${port}/navigate"; });
-        </script></body>`;
+      const targets: Array<[string, string]> = [
+        ["v4", `127.0.0.1:${v4}`],
+        ["localhost", `localhost:${v4}`],
+        ...(v6 !== undefined ? ([["v6", `[::1]:${v6}`]] as Array<[string, string]>) : [])
+      ];
+      // Every attempt is awaited to its end and logged, and the capture waits
+      // for all of them (the settle step awaits document.fonts.ready).
+      const attempts = targets
+        .map(
+          ([name, target]) => `
+          fetch("http://${target}/fetch").then(() => "${name} fetch reached", () => "${name} fetch refused"),
+          fetch("http://${target}/keepalive", { method: "POST", body: "x", keepalive: true }).then(() => "${name} keepalive reached", () => "${name} keepalive refused"),
+          new Promise((resolve) => { const img = new Image(); img.onload = () => resolve("${name} img reached"); img.onerror = () => resolve("${name} img refused"); img.src = "http://${target}/img.png"; }),
+          new Promise((resolve) => { const ws = new WebSocket("ws://${target}/socket"); ws.onopen = () => resolve("${name} ws reached"); ws.onclose = () => resolve("${name} ws refused"); }),
+          new Promise((resolve) => { const frame = document.createElement("iframe"); frame.onload = () => resolve("${name} frame settled"); frame.src = "http://${target}/frame"; document.body.append(frame); })`
+        )
+        .join(",");
+      const html = `<!doctype html><body><script>
+        const done = Promise.all([${attempts}]).then((results) => console.log(JSON.stringify(results)));
+        Object.defineProperty(document.fonts, "ready", { get: () => done.then(() => document.fonts) });
+      </script></body>`;
       const capture = await browser.capture({ html, width: 320, urlFragment: "" });
-      assert.ok(capture.contentHeight > 0);
+      const logged = capture.consoleMessages.find((message) => message.level === "log" && message.text.startsWith("["));
+      assert.ok(logged, JSON.stringify(capture.consoleMessages));
+      assert.deepEqual(
+        JSON.parse(logged.text),
+        targets.flatMap(([name]) => [
+          `${name} fetch refused`,
+          `${name} keepalive refused`,
+          `${name} img refused`,
+          `${name} ws refused`,
+          `${name} frame settled`
+        ])
+      );
       assert.deepEqual(requests, []);
+      if (v6 === undefined) t.diagnostic("no IPv6 loopback on this host: the [::1] case was not run");
     } finally {
-      await new Promise<void>((resolve) => server.close(() => resolve()));
+      for (const server of servers) await new Promise<void>((resolve) => server.close(() => resolve()));
     }
   });
 
   it("keeps the main frame on the page", async () => {
-    const html = `${FIXED(120)}<script>location.replace("http://example.invalid/elsewhere")</script>`;
-    const capture = await browser.capture({ html, width: 320, urlFragment: "" });
-    assert.equal(capture.contentHeight, 120);
+    for (const target of ["http://example.invalid/elsewhere", "http://127.0.0.1:9/elsewhere"]) {
+      const html = `${FIXED(120)}<script>location.replace(${JSON.stringify(target)})</script>`;
+      const capture = await browser.capture({ html, width: 320, urlFragment: "" });
+      assert.equal(capture.contentHeight, 120, target);
+    }
   });
 
   it("gives every preview a fresh profile: nothing one page stores is seen by the next", async () => {
@@ -193,6 +243,50 @@ describe("html preview browser", { skip }, () => {
     assert.equal(await hurried.measure({ html: "<script>while (true) {}</script>", widths: [320], urlFragment: "" }), undefined);
     assert.deepEqual(await readdir(scratch), []);
   });
+
+  it("keeps a screenshot under the size cap: a PNG too large comes back as JPEG, scaled down as needed", async () => {
+    // Noise does not compress: 1600×4000 of it is far over the cap as PNG.
+    const html = `<!doctype html><style>html,body{margin:0}</style><canvas id="c" width="1600" height="4000" style="display:block"></canvas><script>
+      const context = c.getContext("2d");
+      const image = context.createImageData(1600, 4000);
+      for (let i = 0; i < image.data.length; i++) image.data[i] = (Math.random() * 256) | 0;
+      context.putImageData(image, 0, 0);
+    </script>`;
+    const capture = await browser.capture({ html, width: 1600, urlFragment: "" });
+    assert.equal(capture.capturedHeight, 4000);
+    const { screenshot } = capture;
+    assert.equal(screenshot.mimeType, "image/jpeg");
+    assert.ok(screenshot.data.length <= MAX_SCREENSHOT_BASE64_CHARS, `${screenshot.data.length}`);
+    const bytes = Buffer.from(screenshot.data, "base64");
+    assert.deepEqual([...bytes.subarray(0, 3)], [0xff, 0xd8, 0xff]);
+    assert.ok(screenshot.width <= 1600 && screenshot.height <= 4000);
+    assert.equal(screenshot.width / screenshot.height, 1600 / 4000);
+  });
+
+  it("runs the page source only once it has a slot, and passes its refusal through as it is", async () => {
+    let made = 0;
+    const capture = await browser.capture({
+      html: async () => {
+        made += 1;
+        return FIXED(50);
+      },
+      width: 320,
+      urlFragment: ""
+    });
+    assert.equal(made, 1);
+    assert.equal(capture.contentHeight, 50);
+    class Refusal extends Error {}
+    await assert.rejects(
+      browser.capture({
+        html: async () => {
+          throw new Refusal("too large");
+        },
+        width: 320,
+        urlFragment: ""
+      }),
+      (error: unknown) => error instanceof Refusal
+    );
+  });
 });
 
 describe("html preview: as a reader sees it", { skip }, () => {
@@ -211,7 +305,7 @@ describe("html preview: as a reader sees it", { skip }, () => {
     assert.equal((await previewHtmlPage(browser, { html, sandboxRoot: null })).width, HTML_RENDER_COLUMN_WIDTH);
     const narrow = await previewHtmlPage(browser, { html, width: 100, sandboxRoot: null });
     assert.equal(narrow.width, 240);
-    assert.equal(pngSize(narrow.png).width, 240);
+    assert.equal(pngSize(narrow.screenshot.data).width, 240);
     assert.equal((await previewHtmlPage(browser, { html, width: 4000, sandboxRoot: null })).width, 1600);
   });
 
@@ -312,5 +406,137 @@ describe("the browser gate", () => {
     releaseFourth();
     // Both slots free again.
     (await gate.enter(live))();
+  });
+});
+
+/**
+ * A "Chromium" that starts and then never answers: it marks its start with a
+ * file named after its pid, then sleeps. What a hung or slow launch looks like.
+ */
+async function hangingChromium(): Promise<{
+  executable: string;
+  started(count: number): Promise<number[]>;
+  cleanup(): Promise<void>;
+}> {
+  const dir = await mkdtemp(join(tmpdir(), "orq-hanging-chromium-"));
+  const marks = join(dir, "marks");
+  await mkdir(marks);
+  const executable = join(dir, "chromium");
+  await writeFile(executable, `#!/bin/sh\ntouch "${marks}/$$"\nexec sleep 300\n`, { mode: 0o755 });
+  const watcher = watch(marks);
+  const pids = async (): Promise<number[]> => (await readdir(marks)).map(Number);
+  return {
+    executable,
+    started: async (count) => {
+      // Wait on the directory's own events, never a timer.
+      const changed = on(watcher, "change");
+      while ((await pids()).length < count) await changed.next();
+      return pids();
+    },
+    cleanup: async () => {
+      watcher.close();
+      for (const pid of await pids()) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch {
+          /* gone */
+        }
+      }
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
+}
+
+/** Gone, or a zombie awaiting its reap: either way no longer running. */
+function notRunning(pid: number): boolean {
+  try {
+    return readFileSync(`/proc/${pid}/stat`, "utf8").split(" ")[2] === "Z";
+  } catch {
+    return true;
+  }
+}
+
+describe("html preview browser: slots, queue and cancellation", () => {
+  it("a cancel kills a launch that hangs at once, and frees its slot", async (t) => {
+    const fake = await hangingChromium();
+    t.after(() => fake.cleanup());
+    const browser = new HtmlPreviewBrowser({ resolveChromium: () => fake.executable, tmpDir: scratch, captureTimeoutMs: 60_000 });
+    const first = new AbortController();
+    const second = new AbortController();
+    const one = browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: first.signal });
+    const two = browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: second.signal });
+    const [pidOne, pidTwo] = await fake.started(2);
+    const cancelledAt = Date.now();
+    first.abort();
+    second.abort();
+    for (const pending of [one, two]) {
+      await assert.rejects(pending, (error: unknown) => error instanceof HtmlPreviewError && error.code === "cancelled");
+    }
+    assert.ok(Date.now() - cancelledAt < 5_000, `${Date.now() - cancelledAt} ms`);
+    assert.ok(notRunning(pidOne!) && notRunning(pidTwo!));
+    // Both slots are free again: a third launch starts at once.
+    const third = new AbortController();
+    const three = browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: third.signal });
+    assert.equal((await fake.started(3)).length, 3);
+    third.abort();
+    await assert.rejects(three);
+    assert.deepEqual(await readdir(scratch), []);
+  });
+
+  it("a call waiting for a slot is told previews are busy — at its own bound, or at once past the waiting cap", async (t) => {
+    const fake = await hangingChromium();
+    t.after(() => fake.cleanup());
+    const browser = new HtmlPreviewBrowser({
+      resolveChromium: () => fake.executable,
+      tmpDir: scratch,
+      captureTimeoutMs: 60_000,
+      queueTimeoutMs: 500
+    });
+    const holders = [new AbortController(), new AbortController()];
+    const held = holders.map((holder) => browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: holder.signal }));
+    await fake.started(2);
+    let made = 0;
+    const source = async (): Promise<string> => {
+      made += 1;
+      return FIXED(1);
+    };
+    // Waits its bound, never starts its source, and says why.
+    await assert.rejects(
+      browser.capture({ html: source, width: 320, urlFragment: "" }),
+      (error: unknown) => error instanceof HtmlPreviewError && error.code === "busy" && error.message === PREVIEWS_BUSY_MESSAGE
+    );
+    assert.equal(made, 0, "a waiting call made no page");
+    // A measurement behind them publishes without heights.
+    assert.equal(await browser.measure({ html: FIXED(1), widths: [320], urlFragment: "" }), undefined);
+    // Past the waiting cap: refused at once.
+    const patient = new HtmlPreviewBrowser({ resolveChromium: () => fake.executable, tmpDir: scratch, captureTimeoutMs: 60_000 });
+    const patientHolders = Array.from({ length: 2 + MAX_WAITING_CALLS }, () => new AbortController());
+    const queued = patientHolders.map((holder) => patient.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: holder.signal }));
+    for (const pending of queued) pending.catch(() => undefined);
+    await assert.rejects(
+      patient.capture({ html: FIXED(1), width: 320, urlFragment: "" }),
+      (error: unknown) => error instanceof HtmlPreviewError && error.code === "busy"
+    );
+    for (const holder of [...holders, ...patientHolders]) holder.abort();
+    await Promise.allSettled([...held, ...queued]);
+    assert.deepEqual(await readdir(scratch), []);
+  });
+
+  it("the deadline runs from the slot's start, not from the queue", async (t) => {
+    const fake = await hangingChromium();
+    t.after(() => fake.cleanup());
+    const deadline = 1_500;
+    const browser = new HtmlPreviewBrowser({ resolveChromium: () => fake.executable, tmpDir: scratch, captureTimeoutMs: deadline });
+    const started = Date.now();
+    const calls = [0, 1, 2].map(() => browser.capture({ html: FIXED(1), width: 320, urlFragment: "" }));
+    const settled = await Promise.allSettled(calls);
+    for (const outcome of settled) {
+      assert.equal(outcome.status, "rejected");
+      const error = (outcome as PromiseRejectedResult).reason;
+      assert.ok(error instanceof HtmlPreviewError && error.code === "timeout", String(error));
+    }
+    // The third waited for a slot (one deadline) and then had its own whole one.
+    assert.ok(Date.now() - started >= 2 * deadline - 100, `${Date.now() - started} ms`);
+    assert.deepEqual(await readdir(scratch), []);
   });
 });

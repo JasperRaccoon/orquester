@@ -23,10 +23,10 @@ import {
 } from "@orquester/api/agent-chat";
 
 import { inlineLocalImages, type HtmlRenderHeights } from "../agent-chat/html-render-publish.ts";
-import type { HtmlConsoleMessage, HtmlPageRenderer } from "./browser.ts";
+import type { HtmlConsoleMessage, HtmlPageRenderer, HtmlScreenshot } from "./browser.ts";
 
 export { HtmlPreviewBrowser, HtmlPreviewError } from "./browser.ts";
-export type { HtmlConsoleMessage, HtmlPageRenderer } from "./browser.ts";
+export type { HtmlConsoleMessage, HtmlPageRenderer, HtmlScreenshot } from "./browser.ts";
 
 export interface HtmlPreviewInput {
   html: string;
@@ -40,8 +40,8 @@ export interface HtmlPreviewInput {
 }
 
 export interface HtmlPreview {
-  /** Base64 PNG of the top `capturedHeight` pixels. */
-  png: string;
+  /** The top `capturedHeight` pixels: PNG, or JPEG (possibly scaled down) when a PNG would be too large. */
+  screenshot: HtmlScreenshot;
   width: number;
   contentHeight: number;
   capturedHeight: number;
@@ -63,23 +63,30 @@ export async function previewHtmlPage(browser: HtmlPageRenderer, input: HtmlPrev
     HTML_PREVIEW_MAX_WIDTH,
     Math.max(HTML_PREVIEW_MIN_WIDTH, Math.round(input.width ?? HTML_RENDER_COLUMN_WIDTH))
   );
-  // The bootstrap goes in first, so its head scan never runs over inlined image data.
-  const inlined = await inlineLocalImages(injectHtmlRenderBootstrap(input.html), input.sandboxRoot);
   const theme = htmlRenderStockTheme(input.appearance ?? "dark", HTML_RENDER_MEASURE_FONTS);
+  let missing: string[] = [];
+  let outside: string[] = [];
   const capture = await browser.capture({
-    html: inlined.html,
+    // Inlined only once the call has its browser slot, so waiting calls hold
+    // no inlined pages. The bootstrap goes in first, so its head scan never
+    // runs over inlined image data.
+    html: async () => {
+      const inlined = await inlineLocalImages(injectHtmlRenderBootstrap(input.html), input.sandboxRoot);
+      ({ missing, outside } = inlined);
+      return inlined.html;
+    },
     width,
     urlFragment: htmlRenderThemeFragment(theme),
     ...(input.signal ? { signal: input.signal } : {})
   });
   return {
-    png: capture.png,
+    screenshot: capture.screenshot,
     width,
     contentHeight: capture.contentHeight,
     capturedHeight: capture.capturedHeight,
     consoleMessages: capture.consoleMessages,
-    ...(inlined.missing.length > 0 ? { missingImages: inlined.missing } : {}),
-    ...(inlined.outside.length > 0 ? { imagesOutsideProject: inlined.outside } : {})
+    ...(missing.length > 0 ? { missingImages: missing } : {}),
+    ...(outside.length > 0 ? { imagesOutsideProject: outside } : {})
   };
 }
 

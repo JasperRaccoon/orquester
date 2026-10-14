@@ -20,8 +20,8 @@
  *   tool part lifecycle, the tool `orquester-<16 hex>_…` with OpenCode's MCP
  *   result mapping (text joined into `output`, images as data-URL
  *   `attachments`, from the 1.18.34 bundle);
- * - Grok: no fixture holds an MCP call; the frames are the shapes recorded
- *   live on this host — `use_tool` start, the `UseTool` update, and the end
+ * - Grok: `test/fixtures/grok/32-mcp-use-tool-call.ndjson`'s `use_tool`
+ *   call — `use_tool` start, the `UseTool` update, and the end
  *   `rawOutput {type: "MCP", output: {OkayOutput}}` with NO ACP `content`,
  *   `OkayOutput` being the result text, a newline, and the structured JSON.
  */
@@ -35,7 +35,6 @@ import { describe, it } from "node:test";
 import type { SDKMessage } from "@anthropic-ai/claude-agent-sdk";
 import {
   htmlRenderReferenceOfActivityPayload,
-  SESSION_TOOL_PERSISTED_STRING_MAX_BYTES,
   sessionToolNameOfData,
   slimActivityPayload,
   type HtmlRenderReference,
@@ -47,6 +46,7 @@ import { ClaudeNormalizer } from "../../agent-host/adapters/claude/normalize.ts"
 import { CodexNormaliser } from "../../agent-host/adapters/codex/normalise.ts";
 import { CodexUsageTracker } from "../../agent-host/adapters/codex/usage.ts";
 import type { SessionNotification } from "../../agent-host/adapters/grok/acp/_generated/schema.ts";
+import { agentFrames, readCapture } from "../../agent-host/adapters/grok/fixtures.ts";
 import { GrokNormalizer } from "../../agent-host/adapters/grok/normalize.ts";
 import { normalizeOpenCodeEvent } from "../../agent-host/adapters/opencode/normalize.ts";
 import { asRawEvent } from "../../agent-host/adapters/opencode/protocol.ts";
@@ -83,7 +83,7 @@ async function toolResults(): Promise<{ render: SessionToolResult; preview: Sess
     .onPublishHtml(() => ({ ok: true, value: REFERENCE }))
     .onPreviewHtml(() => ({
       ok: true,
-      value: { png: PNG, width: 728, contentHeight: 300, capturedHeight: 300, consoleMessages: [{ level: "log", text: "ready" }] }
+      value: { screenshot: { data: PNG, mimeType: "image/png", width: 728, height: 300 }, width: 728, contentHeight: 300, capturedHeight: 300, consoleMessages: [{ level: "log", text: "ready" }] }
     }));
   const ctx = {
     threadId: THREAD,
@@ -142,25 +142,15 @@ function assertVisual(rows: Awaited<ReturnType<typeof ingest>>): void {
   assert.deepEqual(htmlRenderReferenceOfActivityPayload(slimActivityPayload(wire)), REFERENCE);
 }
 
-/**
- * No persisted preview row holds the screenshot, and every one stays small —
- * or, for bytes hidden in plain text, at most the persisted-string cap.
- */
-function assertNoScreenshot(rows: Awaited<ReturnType<typeof ingest>>, mode: "stripped" | "bounded" = "stripped"): void {
+/** No persisted preview row holds the screenshot, every one stays small, and the measurements stay. */
+function assertNoScreenshot(rows: Awaited<ReturnType<typeof ingest>>): void {
   for (const row of rows.rows) {
     const json = JSON.stringify(row.payload);
-    if (mode === "stripped") {
-      assert.ok(!json.includes(PNG.slice(0, 1000)), `${row.activityKind} persisted the PNG`);
-      assert.ok(json.length < 20_000, `${row.activityKind}: ${json.length} bytes`);
-    } else {
-      assert.ok(json.length < SESSION_TOOL_PERSISTED_STRING_MAX_BYTES + 20_000, `${row.activityKind}: ${json.length} bytes`);
-      assert.ok(!json.includes(PNG), `${row.activityKind} persisted the whole PNG`);
-    }
+    assert.ok(!json.includes(PNG.slice(0, 1000)), `${row.activityKind} persisted the PNG`);
+    assert.ok(json.length < 20_000, `${row.activityKind}: ${json.length} bytes`);
     assert.equal(sessionToolNameOfData((row.payload as { data?: unknown }).data), "html_preview");
   }
-  if (mode === "stripped") {
-    assert.ok(JSON.stringify(rows.completed.payload).includes("contentHeight"), "the measurements stay");
-  }
+  assert.ok(JSON.stringify(rows.completed.payload).includes("contentHeight"), "the measurements stay");
 }
 
 // ---------------------------------------------------------------------------
@@ -304,7 +294,7 @@ function openCodeEvents(tool: string, args: Record<string, unknown>, result: Ses
 // Grok
 // ---------------------------------------------------------------------------
 
-const GROK_SESSION = "01a0c1a7-1185-7171-9447-3aa38569088c";
+const GROK_CALL = "call-a0c1eb77-5628-4b27-8ca9-1061c28e4d33-1";
 
 /** Grok's `OkayOutput` for an MCP result, as recorded: the text, a newline, the structured JSON. */
 function grokOkayOutput(result: SessionToolResult): string {
@@ -313,6 +303,16 @@ function grokOkayOutput(result: SessionToolResult): string {
 }
 
 function grokEvents(tool: string, args: Record<string, unknown>, result: SessionToolResult): RuntimeEvent[] {
+  // Fixture 32's call (an `apps__show_widget` call through `use_tool`, grok
+  // 1.0.46): the same frames, the tool and its arguments swapped in, the
+  // output joined as the CLI joins it. The captured call carried an MCP
+  // Apps `_meta.ui`, which the session tools' results never do.
+  const frames = agentFrames(readCapture("32-mcp-use-tool-call.ndjson"))
+    .filter((entry) => entry.method === "session/update")
+    .map((entry) => entry.params as SessionNotification)
+    .filter((params) => (params.update as { toolCallId?: string }).toolCallId === GROK_CALL);
+  assert.equal(frames.length, 3, "tool_call, the retitling update, the end");
+  const sessionId = (frames[0] as unknown as { sessionId: string }).sessionId;
   let counter = 0;
   const normalizer = new GrokNormalizer(
     {
@@ -323,37 +323,24 @@ function grokEvents(tool: string, args: Record<string, unknown>, result: Session
       planHost: { platform: "linux", env: { GROK_HOME: "~/home" } },
       launchNonce: "launch-1"
     },
-    GROK_SESSION
+    sessionId
   );
   normalizer.beginTurn();
-  const frame = (update: Record<string, unknown>): SessionNotification =>
-    ({ sessionId: GROK_SESSION, update, _meta: { promptId: "prompt-1" } }) as unknown as SessionNotification;
-  const useTool = { "x.ai/tool": { version: 1, name: "use_tool", kind: "use_tool", namespace: "grok_build", label: "Use Tool", read_only: false } };
-  const id = "call-0f92eff2-9f45-4bc7-81e9-90f39758f6de-3";
-  return [
-    ...normalizer.handleSessionUpdate(
-      frame({ sessionUpdate: "tool_call", toolCallId: id, title: "use_tool", rawInput: { tool_name: `orquester__${tool}`, tool_input: args }, _meta: useTool })
-    ),
-    ...normalizer.handleSessionUpdate(
-      frame({
-        sessionUpdate: "tool_call_update",
-        toolCallId: id,
-        kind: "other",
-        title: `orquester__${tool}`,
-        locations: [],
-        rawInput: { variant: "UseTool", tool_name: `orquester__${tool}`, tool_input: args },
-        _meta: useTool
-      })
-    ),
-    ...normalizer.handleSessionUpdate(
-      frame({
-        sessionUpdate: "tool_call_update",
-        toolCallId: id,
-        status: "completed",
-        rawOutput: { type: "MCP", tool_name: tool, server_name: "orquester", output: { OkayOutput: grokOkayOutput(result) } }
-      })
-    )
-  ];
+  return frames.flatMap((params) => {
+    const frame = JSON.parse(JSON.stringify(params).replaceAll("apps__show_widget", `orquester__${tool}`)) as {
+      update: Record<string, any>;
+    };
+    const update = frame.update;
+    if (update.rawInput) update.rawInput.tool_input = args;
+    if (update.rawOutput) {
+      assert.equal(update.rawOutput.output?.OkayOutput, 'widget shown\n{"n":1}', "the captured join");
+      update.rawOutput.tool_name = tool;
+      update.rawOutput.server_name = "orquester";
+      update.rawOutput.output = { OkayOutput: grokOkayOutput(result) };
+      delete update._meta;
+    }
+    return normalizer.handleSessionUpdate(frame as unknown as SessionNotification);
+  });
 }
 
 // ---------------------------------------------------------------------------
@@ -374,21 +361,14 @@ describe("html_render lands as a visual row on every provider", () => {
     assertVisual(await ingest(openCodeEvents("html_render", RENDER_ARGS, render), "tool_bash_hUFbWmc0v5dvHJZ6lgfR"));
   });
 
-  it(
-    "Grok",
-    {
-      todo:
-        "the shared reader cannot parse Grok's recorded OkayOutput (text, newline, structured JSON); the fix lands with feat/agent-visuals (integration), not on this branch"
-    },
-    async () => {
-      const { render } = await toolResults();
-      assertVisual(await ingest(grokEvents("html_render", RENDER_ARGS, render), "call-0f92eff2-9f45-4bc7-81e9-90f39758f6de-3"));
-    }
-  );
+  it("Grok", async () => {
+    const { render } = await toolResults();
+    assertVisual(await ingest(grokEvents("html_render", RENDER_ARGS, render), GROK_CALL));
+  });
 
   it("Grok: the row is the session tool's MCP call from its first frame, whatever the reader finds", async () => {
     const { render } = await toolResults();
-    const rows = await ingest(grokEvents("html_render", RENDER_ARGS, render), "call-0f92eff2-9f45-4bc7-81e9-90f39758f6de-3");
+    const rows = await ingest(grokEvents("html_render", RENDER_ARGS, render), GROK_CALL);
     for (const row of rows.rows) {
       assert.equal((row.payload as { itemType?: unknown }).itemType, "mcp_tool_call", row.activityKind);
       assert.equal(sessionToolNameOfData((row.payload as { data?: unknown }).data), "html_render", row.activityKind);
@@ -412,15 +392,12 @@ describe("html_preview's screenshot never reaches events.ndjson", () => {
     assertNoScreenshot(await ingest(openCodeEvents("html_preview", PREVIEW_ARGS, preview), "tool_bash_hUFbWmc0v5dvHJZ6lgfR"));
   });
 
-  it("Grok, cut to the cap even were its output text to carry the image bytes", async () => {
+  it("Grok, even were its output text to carry the image bytes", async () => {
     const { preview } = await toolResults();
     // How Grok renders an MCP image into `OkayOutput` is unrecorded; a text
-    // that carried the base64 is the worst case, and is cut.
+    // that carried the base64 is the worst case: the run is dropped whole.
     const withBytes: SessionToolResult = { ...preview, content: [{ type: "text", text: PNG }, ...preview.content.slice(1)] };
-    assertNoScreenshot(
-      await ingest(grokEvents("html_preview", PREVIEW_ARGS, withBytes), "call-0f92eff2-9f45-4bc7-81e9-90f39758f6de-3"),
-      "bounded"
-    );
+    assertNoScreenshot(await ingest(grokEvents("html_preview", PREVIEW_ARGS, withBytes), GROK_CALL));
   });
 
   it("a user's own MCP server keeps its result as before (no session tool, no bounding)", async () => {

@@ -18,6 +18,7 @@ import {
   HTML_RENDER_COLUMN_WIDTH,
   HTML_RENDER_LAYOUT_GUIDE,
   HTML_RENDER_MAX_HEIGHT,
+  HTML_RENDER_MAX_HTML_CHARS,
   HTML_RENDER_MAX_TITLE_LENGTH,
   HTML_RENDER_MIN_HEIGHT,
   HTML_RENDER_THEME_GUIDE,
@@ -30,8 +31,6 @@ import { defineSessionTool, defineSessionToolkit } from "../contract.ts";
 import { imageResult, jsonResult, ToolError } from "../results.ts";
 
 export const HTML_PREVIEW_TOOL_NAME = "html_preview";
-/** The `html` bound (spec §2.1), the publisher's own. */
-export const HTML_PAGE_MAX_CHARS = 512_000;
 
 /** What `html_render` tells the agent once the page is shown (spec §2.1). */
 export const HTML_RENDER_SHOWN_MESSAGE =
@@ -45,7 +44,7 @@ export const HTML_TOOLKIT_INSTRUCTIONS = `### Showing visuals
 
 When a chart, table, diagram, image collage, or mockup would say more than prose, build a self-contained HTML page, check it with \`${HTML_PREVIEW_TOOL_NAME}\`, then publish it with \`${HTML_RENDER_TOOL_NAME}\` before your final reply. The reader sees the page above that reply, so don't announce or restate it; add only what it doesn't say.`;
 
-const html = z.string().min(1).max(HTML_PAGE_MAX_CHARS).describe("A complete, self-contained HTML document.");
+const html = z.string().min(1).max(HTML_RENDER_MAX_HTML_CHARS).describe("A complete, self-contained HTML document.");
 
 export const htmlToolkit = defineSessionToolkit({
   id: "html",
@@ -54,7 +53,7 @@ export const htmlToolkit = defineSessionToolkit({
     defineSessionTool({
       name: HTML_PREVIEW_TOOL_NAME,
       title: "Preview HTML",
-      description: `Render an HTML page in Orquester's headless browser and get back a PNG screenshot, contentHeight (the height the page needs at this width), and its console output: log, info, warning, error, and uncaught exceptions, with stack traces pointing into page.html. console.log is a fine way to report your own checks. Use it to check and iterate on a page before ${HTML_RENDER_TOOL_NAME}. The preview cannot reach this machine or its local network, only public addresses. If the machine has no browser to render with, the call says so; ${HTML_RENDER_TOOL_NAME} still works without a preview. ${PAGE_RULES} The page gets the theme variables and layout described in ${HTML_RENDER_TOOL_NAME}.`,
+      description: `Render an HTML page in Orquester's headless browser and get back a screenshot of its top (at most 4000px; PNG, or JPEG scaled down when a PNG would pass 3 MiB — its size is in screenshot), contentHeight (the height the page needs at this width), and its console output: log, info, warning, error, and uncaught exceptions, with stack traces pointing into page.html. console.log is a fine way to report your own checks. Use it to check and iterate on a page before ${HTML_RENDER_TOOL_NAME}. The preview cannot reach this machine or its local network, only public addresses. If the machine has no browser to render with, the call says so; ${HTML_RENDER_TOOL_NAME} still works without a preview. ${PAGE_RULES} The page gets the theme variables and layout described in ${HTML_RENDER_TOOL_NAME}.`,
       input: {
         html,
         width: z
@@ -81,8 +80,9 @@ export const htmlToolkit = defineSessionToolkit({
           signal: ctx.signal
         });
         if (!outcome.ok) throw new ToolError(outcome.code, outcome.message);
-        const { png, ...preview } = outcome.value;
-        return imageResult({ data: png, mimeType: "image/png" }, { ...preview });
+        const { screenshot, ...preview } = outcome.value;
+        const { data, ...shot } = screenshot;
+        return imageResult({ data, mimeType: screenshot.mimeType }, { ...preview, screenshot: shot });
       }
     }),
     defineSessionTool({

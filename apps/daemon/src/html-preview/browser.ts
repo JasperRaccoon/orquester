@@ -30,7 +30,7 @@ import puppeteer, { type Browser, type ConsoleMessage as PuppeteerConsoleMessage
 import { isRetryableSandboxFailure } from "../browsers.ts";
 import { startPublicProxy, type PublicProxyOptions } from "./public-proxy.ts";
 
-export type HtmlPreviewErrorCode = "browser-unavailable" | "browser-failed" | "timeout" | "cancelled";
+export type HtmlPreviewErrorCode = "browser-unavailable" | "browser-failed" | "busy" | "timeout" | "cancelled";
 
 /** A failure whose message is written for the agent. */
 export class HtmlPreviewError extends Error {
@@ -48,9 +48,18 @@ export interface HtmlConsoleMessage {
   readonly text: string;
 }
 
+/** The screenshot: base64, at most {@link MAX_SCREENSHOT_BASE64_CHARS}. */
+export interface HtmlScreenshot {
+  readonly data: string;
+  readonly mimeType: "image/png" | "image/jpeg";
+  /** Its pixel size: the captured area, or less when it had to be scaled down to fit. */
+  readonly width: number;
+  readonly height: number;
+}
+
 export interface HtmlCapture {
-  /** Base64 PNG of the top `capturedHeight` pixels. */
-  readonly png: string;
+  /** The top `capturedHeight` pixels of the page. */
+  readonly screenshot: HtmlScreenshot;
   /** The height the page needs to show without scrolling. */
   readonly contentHeight: number;
   readonly capturedHeight: number;
@@ -61,11 +70,24 @@ export const MAX_CONSOLE_MESSAGES = 20;
 export const MAX_CONSOLE_TEXT_CHARS = 500;
 const VIEWPORT_HEIGHT = 800;
 export const MAX_CAPTURE_HEIGHT = 4000;
+/**
+ * A screenshot stays under this much base64 (3 MiB of image): within what
+ * every provider takes inline (Anthropic's API refuses an image over 5 MB).
+ * A PNG over it is retaken as JPEG, then scaled down until it fits.
+ */
+export const MAX_SCREENSHOT_BASE64_CHARS = 4 * 1024 * 1024;
+/** From a slot's start: loading, settling and the screenshot. */
 export const CAPTURE_TIMEOUT_MS = 20_000;
-/** Publishing waits this long at most for heights, then publishes without them. */
+/** Publishing measures for this long at most, then publishes without heights. */
 export const MEASURE_TIMEOUT_MS = 6_000;
+/** How long a preview waits for a free browser slot before it is told previews are busy. */
+export const CAPTURE_QUEUE_TIMEOUT_MS = 30_000;
+/** How long a publish waits for a slot to measure before it publishes without heights. */
+export const MEASURE_QUEUE_TIMEOUT_MS = 10_000;
 // Each preview or measurement runs its own browser; more at once mostly costs memory.
 const MAX_CONCURRENT_BROWSERS = 2;
+/** Calls waiting for a slot; past it a call is refused as busy at once. */
+export const MAX_WAITING_CALLS = 8;
 // Each measuring load is its own page in the one browser.
 const MEASURE_CONCURRENCY = 3;
 const CLOSE_GRACE_MS = 2_000;
@@ -111,6 +133,7 @@ export interface HtmlPreviewBrowserOptions {
   /** For tests. */
   captureTimeoutMs?: number;
   measureTimeoutMs?: number;
+  queueTimeoutMs?: number;
   /** Where temporary profiles go; the OS temp dir by default. */
   tmpDir?: string;
   log?: (message: string, error?: unknown) => void;
@@ -159,18 +182,28 @@ function killBrowser(browser: Browser): void {
   }
 }
 
-/** A counting semaphore whose waits honour an abort signal; a freed slot passes straight to the next waiter. */
+export const PREVIEWS_BUSY_MESSAGE = "Previews are busy right now; try again in a few seconds.";
+
+/**
+ * A counting semaphore: a freed slot passes straight to the next waiter,
+ * waits honour an abort signal, and at most `maxWaiting` wait — past that a
+ * call is refused as busy at once.
+ */
 export class Gate {
   private active = 0;
   private readonly waiters: Array<() => void> = [];
 
-  constructor(private readonly limit: number) {}
+  constructor(
+    private readonly limit: number,
+    private readonly maxWaiting = Number.POSITIVE_INFINITY
+  ) {}
 
   async enter(signal: AbortSignal): Promise<() => void> {
     signal.throwIfAborted();
     if (this.active < this.limit) {
       this.active += 1;
     } else {
+      if (this.waiters.length >= this.maxWaiting) throw new HtmlPreviewError("busy", PREVIEWS_BUSY_MESSAGE);
       await new Promise<void>((resolve, reject) => {
         const onAbort = (): void => {
           const index = this.waiters.indexOf(handOver);
@@ -199,8 +232,16 @@ export class Gate {
 /** What previewing and measuring need of a browser (tests pass a fake). */
 export type HtmlPageRenderer = Pick<HtmlPreviewBrowser, "available" | "capture" | "measure">;
 
+/** A page, or what makes it — run only once the call has its browser slot, so a queue holds no inlined pages. */
+export type HtmlSource = string | (() => Promise<string>);
+
+/** Thrown by an {@link HtmlSource}: rethrown as it is, never as a browser failure. */
+class SourceFailure {
+  constructor(readonly cause: unknown) {}
+}
+
 export class HtmlPreviewBrowser {
-  private readonly gate = new Gate(MAX_CONCURRENT_BROWSERS);
+  private readonly gate = new Gate(MAX_CONCURRENT_BROWSERS, MAX_WAITING_CALLS);
   /** Learnt once per daemon: false after the sandbox failed to start here. */
   private sandboxWorks = true;
 
@@ -211,29 +252,31 @@ export class HtmlPreviewBrowser {
     return this.opts.resolveChromium() !== undefined;
   }
 
-  /** Loads `html` at `width` and screenshots the top of it. */
-  capture(input: { html: string; width: number; urlFragment: string; signal?: AbortSignal }): Promise<HtmlCapture> {
-    const timeoutMs = this.opts.captureTimeoutMs ?? CAPTURE_TIMEOUT_MS;
-    return this.withBrowser(input.signal, timeoutMs, async (browser) => {
-      const log = new ConsoleLog();
-      const page = await openPage(browser, input.width, input.html, log);
-      const contentHeight = await load(page, input.urlFragment);
-      const capturedHeight = Math.max(1, Math.min(contentHeight, MAX_CAPTURE_HEIGHT));
-      const png = await page.screenshot({
-        type: "png",
-        encoding: "base64",
-        captureBeyondViewport: true,
-        clip: { x: 0, y: 0, width: input.width, height: capturedHeight }
-      });
-      return { png, contentHeight, capturedHeight, consoleMessages: log.list() };
-    });
+  /** Loads the page at `width` and screenshots the top of it. */
+  capture(input: { html: HtmlSource; width: number; urlFragment: string; signal?: AbortSignal }): Promise<HtmlCapture> {
+    return this.withBrowser(
+      input.signal,
+      {
+        timeoutMs: this.opts.captureTimeoutMs ?? CAPTURE_TIMEOUT_MS,
+        queueTimeoutMs: this.opts.queueTimeoutMs ?? CAPTURE_QUEUE_TIMEOUT_MS
+      },
+      input.html,
+      async (browser, html) => {
+        const log = new ConsoleLog();
+        const page = await openPage(browser, input.width, html, log);
+        const contentHeight = await load(page, input.urlFragment);
+        const capturedHeight = Math.max(1, Math.min(contentHeight, MAX_CAPTURE_HEIGHT));
+        const screenshot = await screenshotWithinCap(page, input.width, capturedHeight);
+        return { screenshot, contentHeight, capturedHeight, consoleMessages: log.list() };
+      }
+    );
   }
 
   /**
    * The page's content height at each width, each from a fresh load (pages
    * often lay themselves out from the width once, at load), ascending by
-   * width. Never installs or waits for a browser: undefined when there is
-   * none, it fails, or it takes longer than the measuring budget.
+   * width. Never installs or waits long for a browser: undefined when there
+   * is none, no slot frees up in time, it fails, or it outlives its budget.
    */
   async measure(input: {
     html: string;
@@ -242,24 +285,31 @@ export class HtmlPreviewBrowser {
     signal?: AbortSignal;
   }): Promise<Array<[number, number]> | undefined> {
     if (!this.available()) return undefined;
-    const timeoutMs = this.opts.measureTimeoutMs ?? MEASURE_TIMEOUT_MS;
     try {
-      const heights = await this.withBrowser(input.signal, timeoutMs, async (browser) => {
-        const queue = [...input.widths];
-        const measured: Array<[number, number]> = [];
-        const worker = async (): Promise<void> => {
-          for (let width = queue.shift(); width !== undefined; width = queue.shift()) {
-            const page = await openPage(browser, width, input.html);
-            try {
-              measured.push([width, await load(page, input.urlFragment)]);
-            } finally {
-              await page.close().catch(() => undefined);
+      const heights = await this.withBrowser(
+        input.signal,
+        {
+          timeoutMs: this.opts.measureTimeoutMs ?? MEASURE_TIMEOUT_MS,
+          queueTimeoutMs: this.opts.queueTimeoutMs ?? MEASURE_QUEUE_TIMEOUT_MS
+        },
+        input.html,
+        async (browser, html) => {
+          const queue = [...input.widths];
+          const measured: Array<[number, number]> = [];
+          const worker = async (): Promise<void> => {
+            for (let width = queue.shift(); width !== undefined; width = queue.shift()) {
+              const page = await openPage(browser, width, html);
+              try {
+                measured.push([width, await load(page, input.urlFragment)]);
+              } finally {
+                await page.close().catch(() => undefined);
+              }
             }
-          }
-        };
-        await Promise.all(Array.from({ length: Math.min(MEASURE_CONCURRENCY, queue.length) }, worker));
-        return measured;
-      });
+          };
+          await Promise.all(Array.from({ length: Math.min(MEASURE_CONCURRENCY, queue.length) }, worker));
+          return measured;
+        }
+      );
       return heights.sort(([left], [right]) => left - right);
     } catch (error) {
       this.opts.log?.("[html-preview] could not measure a page; publishing it without heights", error);
@@ -268,14 +318,17 @@ export class HtmlPreviewBrowser {
   }
 
   /**
-   * Runs `work` against a browser of its own, behind the concurrency gate and
-   * a hard deadline. On the deadline or an abort the browser's processes are
-   * killed at once; the profile and the proxy go with it either way.
+   * Runs `work` against a browser of its own. First a browser slot (at most
+   * `queueTimeoutMs` of waiting, else "busy"); then, from the slot's start, a
+   * hard deadline of `timeoutMs`. On the deadline or a cancellation the
+   * browser — even one still starting — is killed at once and the slot is
+   * freed; the profile and the proxy go with it either way.
    */
   private async withBrowser<T>(
     signal: AbortSignal | undefined,
-    timeoutMs: number,
-    work: (browser: Browser) => Promise<T>
+    bounds: { timeoutMs: number; queueTimeoutMs: number },
+    source: HtmlSource,
+    work: (browser: Browser, html: string) => Promise<T>
   ): Promise<T> {
     const executable = this.opts.resolveChromium();
     if (executable === undefined) {
@@ -285,16 +338,13 @@ export class HtmlPreviewBrowser {
       );
     }
     const controller = new AbortController();
-    const onAbort = (): void => controller.abort(new HtmlPreviewError("cancelled", "The preview was cancelled."));
+    const stop = (reason: HtmlPreviewError): void => {
+      if (!controller.signal.aborted) controller.abort(reason);
+    };
+    const onAbort = (): void => stop(new HtmlPreviewError("cancelled", "The preview was cancelled."));
     if (signal?.aborted) onAbort();
     signal?.addEventListener("abort", onAbort, { once: true });
-    const timer = setTimeout(
-      () =>
-        controller.abort(
-          new HtmlPreviewError("timeout", `The page did not finish loading within ${Math.round(timeoutMs / 1000)} seconds.`)
-        ),
-      timeoutMs
-    );
+    const timers: NodeJS.Timeout[] = [];
     const stopped = new Promise<never>((_, reject) => {
       if (controller.signal.aborted) reject(controller.signal.reason);
       controller.signal.addEventListener("abort", () => reject(controller.signal.reason), { once: true });
@@ -305,27 +355,57 @@ export class HtmlPreviewBrowser {
     let proxy: Awaited<ReturnType<typeof startPublicProxy>> | undefined;
     let release: (() => void) | undefined;
     const run = (async (): Promise<T> => {
+      timers.push(setTimeout(() => stop(new HtmlPreviewError("busy", PREVIEWS_BUSY_MESSAGE)), bounds.queueTimeoutMs));
       release = await this.gate.enter(controller.signal);
+      clearTimeout(timers.pop());
+      // The deadline runs from the slot's start, not from the queue.
+      timers.push(
+        setTimeout(
+          () =>
+            stop(
+              new HtmlPreviewError(
+                "timeout",
+                `The page did not finish loading within ${Math.round(bounds.timeoutMs / 1000)} seconds.`
+              )
+            ),
+          bounds.timeoutMs
+        )
+      );
+      let html: string;
+      try {
+        html = typeof source === "string" ? source : await source();
+      } catch (error) {
+        throw new SourceFailure(error);
+      }
       controller.signal.throwIfAborted();
       proxy = await startPublicProxy(this.opts.proxy);
       profile = await mkdtemp(join(this.opts.tmpDir ?? tmpdir(), "orq-html-preview-"));
       controller.signal.throwIfAborted();
-      browser = await this.launch(executable, profile, proxy.port, controller.signal, timeoutMs);
+      browser = await this.launch(executable, profile, proxy.port, controller.signal, bounds.timeoutMs);
       // Killed at once if the deadline passed while it was starting.
       if (controller.signal.aborted) killBrowser(browser);
-      return await work(browser);
+      return await work(browser, html);
     })();
     run.catch(() => undefined);
+    let done = false;
     try {
-      return await Promise.race([run, stopped]);
+      const result = await Promise.race([run, stopped]);
+      done = true;
+      return result;
     } catch (error) {
+      if (error instanceof SourceFailure) throw error.cause;
       if (error instanceof HtmlPreviewError) throw error;
       this.opts.log?.("[html-preview] the browser failed", error);
       throw new HtmlPreviewError("browser-failed", "Headless Chromium could not render the page.");
     } finally {
-      clearTimeout(timer);
+      for (const timer of timers) clearTimeout(timer);
       signal?.removeEventListener("abort", onAbort);
-      if (controller.signal.aborted && browser) killBrowser(browser);
+      if (!done) {
+        // Stop whatever still runs: a launch in progress is killed by
+        // puppeteer on this abort (its `signal`), a launched browser here.
+        stop(new HtmlPreviewError("cancelled", "The preview was cancelled."));
+        if (browser) killBrowser(browser);
+      }
       // Wait for the work to settle, so nothing below races it: a killed
       // browser fails it promptly.
       await run.catch(() => undefined);
@@ -348,8 +428,9 @@ export class HtmlPreviewBrowser {
       const browser = await puppeteer.launch({
         executablePath: executable,
         userDataDir: profile,
-        // The caller's deadline kills a launch that outlives it.
+        // The deadline or a cancellation kills the launching process at once.
         timeout: launchTimeoutMs,
+        signal,
         headless: true,
         pipe: true,
         defaultViewport: null,
@@ -463,6 +544,36 @@ async function route(page: Page, request: HTTPRequest, html: string): Promise<vo
   } catch {
     // The page or browser went away mid-request.
   }
+}
+
+/**
+ * The top `height` pixels at `width`, as PNG when that fits
+ * {@link MAX_SCREENSHOT_BASE64_CHARS}, else as JPEG, scaled down by halves
+ * until it does.
+ */
+async function screenshotWithinCap(page: Page, width: number, height: number): Promise<HtmlScreenshot> {
+  const shoot = (type: "png" | "jpeg", scale: number) =>
+    page.screenshot({
+      type,
+      encoding: "base64",
+      captureBeyondViewport: true,
+      ...(type === "jpeg" ? { quality: 80 } : {}),
+      clip: { x: 0, y: 0, width, height, scale }
+    });
+  const png = await shoot("png", 1);
+  if (png.length <= MAX_SCREENSHOT_BASE64_CHARS) return { data: png, mimeType: "image/png", width, height };
+  for (let scale = 1; scale >= 1 / 16; scale /= 2) {
+    const jpeg = await shoot("jpeg", scale);
+    if (jpeg.length <= MAX_SCREENSHOT_BASE64_CHARS || scale <= 1 / 16) {
+      return {
+        data: jpeg,
+        mimeType: "image/jpeg",
+        width: Math.max(1, Math.round(width * scale)),
+        height: Math.max(1, Math.round(height * scale))
+      };
+    }
+  }
+  throw new Error("unreachable");
 }
 
 /** Navigates to the page with `urlFragment` (its theme) and answers its settled content height. */

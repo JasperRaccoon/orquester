@@ -1302,6 +1302,8 @@ test("publishHtmlRender stores the prepared page through the host's upload and a
   );
 });
 
+const SHOT = { data: "iVBORw0KGgo=", mimeType: "image/png" as const, width: 728, height: 120 };
+
 /** A page renderer that records what it is asked and answers what it is told. */
 function fakeRenderer(answers: { heights?: Array<[number, number]> } = {}) {
   const calls: { measure: Array<{ html: string; widths: readonly number[]; urlFragment: string; signal?: AbortSignal }>; capture: Array<{ html: string; width: number; urlFragment: string }> } = {
@@ -1315,8 +1317,10 @@ function fakeRenderer(answers: { heights?: Array<[number, number]> } = {}) {
       return answers.heights;
     },
     capture: async (input) => {
-      calls.capture.push(input);
-      return { png: "iVBORw0KGgo=", contentHeight: 120, capturedHeight: 120, consoleMessages: [{ level: "log", text: "hi" }] };
+      // As the real browser: the page is made only once it has its slot.
+      const html = typeof input.html === "string" ? input.html : await input.html();
+      calls.capture.push({ ...input, html });
+      return { screenshot: SHOT, contentHeight: 120, capturedHeight: 120, consoleMessages: [{ level: "log", text: "hi" }] };
     }
   };
   return { renderer, calls };
@@ -1362,7 +1366,7 @@ test("previewHtmlRender screenshots the bootstrapped page with the stock theme o
   t.after(() => f.cleanup());
   const preview = await f.service.previewHtmlRender({ threadId: "thread-1", html: "<p>x</p>", appearance: "light" });
   assert.deepEqual(preview, {
-    png: "iVBORw0KGgo=",
+    screenshot: SHOT,
     width: HTML_RENDER_COLUMN_WIDTH,
     contentHeight: 120,
     capturedHeight: 120,

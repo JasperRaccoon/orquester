@@ -20,6 +20,7 @@ import { open, readlink, realpath, stat, type FileHandle } from "node:fs/promise
 import * as path from "node:path";
 
 import {
+  HTML_RENDER_MAX_HTML_CHARS,
   HTML_RENDER_MAX_TITLE_LENGTH,
   clampHtmlRenderHeight,
   htmlRenderFileName,
@@ -34,8 +35,6 @@ const MIB = 1024 * 1024;
 export const HTML_RENDER_MAX_IMAGE_BYTES = 10 * MIB;
 /** The whole stored page, images inlined (spec §2.1). */
 export const HTML_RENDER_MAX_PAGE_BYTES = 25 * MIB;
-/** The tool's `html` bound (spec §2.1); the publisher refuses past it too. */
-export const HTML_RENDER_MAX_HTML_CHARS = 512_000;
 
 const formatMib = (bytes: number): string => `${(bytes / MIB).toFixed(1)} MiB`;
 
