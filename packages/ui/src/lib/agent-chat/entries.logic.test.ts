@@ -653,3 +653,53 @@ describe("a re-emitted assistant message in an old log (§7.3)", () => {
   });
 
 });
+
+describe("session tools (design 2026-10-14 §1.5)", () => {
+  it("names the session tool of an MCP call under every provider's spelling, and labels it readably", () => {
+    const rows = [
+      // Claude, slimmed: `data.sessionTool` and Claude's own detail (the raw arguments).
+      activity("tool.completed", {
+        itemType: "mcp_tool_call",
+        title: "MCP tool call",
+        detail: 'mcp__orquester__thread_wait: {"timeoutSeconds":30}',
+        data: { toolName: "mcp__orquester__thread_wait", sessionTool: { name: "thread_wait" } }
+      }),
+      // Codex
+      activity("tool.completed", {
+        itemType: "mcp_tool_call",
+        title: "orquester: thread_wait",
+        data: { server: "orquester", tool: "thread_wait" }
+      }),
+      // Grok
+      activity("tool.completed", {
+        itemType: "mcp_tool_call",
+        title: "orquester__thread_wait",
+        data: { vendorTool: "orquester__thread_wait" }
+      }),
+      // OpenCode
+      activity("tool.completed", {
+        itemType: "mcp_tool_call",
+        title: "orquester-0123456789abcdef_thread_wait",
+        data: { tool: "orquester-0123456789abcdef_thread_wait" }
+      })
+    ];
+    for (const row of rows) {
+      const entry = workLogEntryFromActivity(row);
+      assert.equal(entry.sessionTool, "thread_wait");
+      assert.equal(workEntryDisplayLabel(entry), "Orquester: Thread wait");
+    }
+  });
+
+  it("leaves every other MCP call alone", () => {
+    const entry = workLogEntryFromActivity(
+      activity("tool.completed", {
+        itemType: "mcp_tool_call",
+        title: "github: list_issues",
+        detail: "list_issues: {}",
+        data: { server: "github", tool: "list_issues" }
+      })
+    );
+    assert.equal(entry.sessionTool, undefined);
+    assert.equal(workEntryDisplayLabel(entry), "list_issues: {}");
+  });
+});

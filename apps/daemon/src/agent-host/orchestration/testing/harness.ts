@@ -63,6 +63,8 @@ export interface TestHostOptions<S extends HostThreadStore = FakeThreadStore> {
   launchConfigs?: LaunchConfigStore & { readonly entries: Map<string, ThreadLaunchConfig> };
   /** The production thread-index interface (design 2026-09-23, C). */
   index?: ThreadIndex;
+  /** Told on every host-initiated interrupt (session tools, design 2026-10-14 §1.1). */
+  onTurnInterrupt?: (threadId: string) => void;
 }
 
 export interface TestHost<S extends HostThreadStore = FakeThreadStore> {
@@ -173,6 +175,7 @@ export function createTestHost<S extends HostThreadStore = FakeThreadStore>(
     ...(options.continuationEnabled ? { continuationEnabled: options.continuationEnabled } : {}),
     ...(options.isThreadClosed ? { isThreadClosed: options.isThreadClosed } : {}),
     ...(options.index ? { index: options.index } : {}),
+    ...(options.onTurnInterrupt ? { onTurnInterrupt: options.onTurnInterrupt } : {}),
     launchConfigs,
     clock,
     ids

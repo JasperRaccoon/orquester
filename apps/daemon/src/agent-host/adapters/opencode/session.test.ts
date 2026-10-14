@@ -35,6 +35,7 @@ import {
   wokenReply
 } from "./testing/woken.ts";
 import { deferred } from "./util.ts";
+import { openCodeSessionToolsServerName, type OpenCodeSessionToolsLaunch } from "./session-tools.ts";
 
 // ---------------------------------------------------------------------------
 // The fake server
@@ -386,6 +387,8 @@ async function startSession(
     cwd?: string;
     /** The session's wait between attempts; a real timer when absent. */
     delay?: (ms: number, signal: AbortSignal) => Promise<void>;
+    /** The thread's session-tool server (design 2026-10-14 §1.2). */
+    sessionTools?: OpenCodeSessionToolsLaunch;
   } = {}
 ): Promise<OpenCodeThreadSession> {
   return await OpenCodeThreadSession.start(
@@ -401,7 +404,8 @@ async function startSession(
       modelSelection: { model: "openrouter/google/gemini-2.5-flash-lite" },
       runtimeMode: options.runtimeMode ?? "approval-required",
       ...(options.resumeCursor !== undefined ? { resumeCursor: options.resumeCursor } : {}),
-      server: harness.server
+      server: harness.server,
+      ...(options.sessionTools !== undefined ? { sessionTools: options.sessionTools } : {})
     }
   );
 }
@@ -4403,5 +4407,100 @@ test("the user's own answers are never withdrawn — and the server's echo adds 
   const question = closingsOf(harness, "que_1");
   assert.equal(question.length, 1);
   assert.deepEqual(question[0]?.payload, { answers: {} });
+  harness.dispose();
+});
+
+// ---------------------------------------------------------------------------
+// Session tools (design 2026-10-14 §1)
+// ---------------------------------------------------------------------------
+
+function sessionToolsLaunch(): OpenCodeSessionToolsLaunch & { revoked: boolean } {
+  const launch = {
+    serverName: openCodeSessionToolsServerName("thread-1"),
+    url: "http://127.0.0.1:4711/mcp",
+    authorization: "Bearer cred-thread-1-0123456789",
+    instructions: "## Orquester\n\nTest toolkit.",
+    revoked: false,
+    revoke: () => {
+      launch.revoked = true;
+    }
+  };
+  return launch;
+}
+
+test("session tools: the thread's own server is registered before its session, isolated by its ruleset", async () => {
+  const harness = makeHarness();
+  harness.fake.overrides.set("POST /mcp", () => json({ [openCodeSessionToolsServerName("thread-1")]: { status: "connected" } }));
+  const launch = sessionToolsLaunch();
+  const session = await startSession(harness, { sessionTools: launch });
+
+  const register = harness.fake.find("POST", "/mcp");
+  assert.deepEqual(register?.body, {
+    name: launch.serverName,
+    config: {
+      type: "remote",
+      url: launch.url,
+      headers: { Authorization: launch.authorization },
+      oauth: false,
+      enabled: true
+    }
+  });
+  assert.ok(harness.fake.indexOf("POST", "/mcp") < harness.fake.indexOf("POST", "/session"), "registered first");
+
+  const create = harness.fake.find("POST", "/session")?.body as { permission: Array<{ permission: string; action: string }> };
+  assert.deepEqual(create.permission.slice(-2), [
+    { permission: "orquester-*", pattern: "*", action: "deny" },
+    { permission: `${launch.serverName}_*`, pattern: "*", action: "allow" }
+  ]);
+
+  await session.sendTurn({ threadId: "thread-1", input: "hello", attachments: [], interactionMode: "default" });
+  const submit = harness.fake.find("POST", "/prompt_async")?.body as { system?: string; parts: unknown[] };
+  assert.ok(submit.system?.endsWith(launch.instructions), "the block rides the per-turn system addendum");
+  assert.deepEqual(submit.parts, [{ type: "text", text: "hello" }], "never the user's parts");
+
+  harness.fake.overrides.set(`POST /mcp/${launch.serverName}/disconnect`, () => json(true));
+  await session.stop({ reason: "test", hostInitiated: true });
+  assert.equal(launch.revoked, true, "the credential dies with the session");
+  assert.ok(harness.fake.find("POST", `/mcp/${launch.serverName}/disconnect`), "and its server is disconnected");
+  harness.dispose();
+});
+
+test("session tools: a resumed session gets the isolation rules re-asserted", async () => {
+  const harness = makeHarness();
+  harness.fake.overrides.set("POST /mcp", () => json({}));
+  harness.fake.sessions.set("ses_old", { id: "ses_old", directory: "/repo" });
+  const launch = sessionToolsLaunch();
+  const session = await startSession(harness, {
+    resumeCursor: { schemaVersion: 1, sessionId: "ses_old" },
+    sessionTools: launch
+  });
+  const patch = harness.fake.find("PATCH", "/session/ses_old")?.body as { permission: Array<{ permission: string }> };
+  assert.deepEqual(
+    patch.permission.slice(-2).map((rule) => rule.permission),
+    ["orquester-*", `${launch.serverName}_*`]
+  );
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("session tools: a failed registration costs the tools, never the thread", async () => {
+  const harness = makeHarness();
+  harness.fake.overrides.set("POST /mcp", () => json({ name: "BadRequest" }, 400));
+  const session = await startSession(harness, { sessionTools: sessionToolsLaunch() });
+  assert.ok(harness.fake.find("POST", "/session"), "the session still opened");
+  await session.stop({ reason: "test", hostInitiated: true });
+  harness.dispose();
+});
+
+test("without session tools nothing is registered and the ruleset is unchanged", async () => {
+  const harness = makeHarness();
+  const session = await startSession(harness);
+  assert.equal(harness.fake.find("POST", "/mcp"), undefined);
+  const create = harness.fake.find("POST", "/session")?.body as { permission: Array<{ permission: string }> };
+  assert.equal(create.permission.some((rule) => rule.permission.startsWith("orquester")), false);
+  await session.sendTurn({ threadId: "thread-1", input: "hello", attachments: [], interactionMode: "default" });
+  const submit = harness.fake.find("POST", "/prompt_async")?.body as { system?: string };
+  assert.ok(!String(submit.system).includes("## Orquester"));
+  await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });

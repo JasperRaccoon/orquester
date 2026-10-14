@@ -1,0 +1,181 @@
+/**
+ * The daemon's socket-only session-tool route, driven by the agent host's own
+ * forwarder over a real unix socket (design 2026-10-14 §1.1): the context is
+ * derived server-side, the host's bearer is required, a cancelled call aborts
+ * its handler, and a daemon that is gone is an error result — never a throw
+ * or a hang.
+ */
+
+import assert from "node:assert/strict";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+
+import Fastify, { type FastifyInstance } from "fastify";
+
+import { agentHostAuthValue } from "../agent-host/host-protocol.ts";
+import { createDaemonForwarder } from "../agent-host/session-tools/forwarder.ts";
+import type { DaemonApi } from "../mcp/daemon-api.ts";
+import { defineSessionTool, defineSessionToolkit, SESSION_TOOL_READ_ONLY } from "./contract.ts";
+import { createSessionToolRegistry, type SessionToolRegistry } from "./registry.ts";
+import { DAEMON_UNAVAILABLE_MESSAGE, jsonResult } from "./results.ts";
+import { registerSessionToolsRoute, type SessionToolThread } from "./route.ts";
+import { TEST_PNG_BASE64, testSessionToolkit } from "./testing.ts";
+
+const TOKEN = "host-token-0123456789";
+const THREADS: Record<string, SessionToolThread> = {
+  "thread-a": { projectPath: "/ws/w/proj-a", cwd: "/ws/w/proj-a/sub", agentId: "codex" }
+};
+const fakeApi = {} as DaemonApi;
+
+/** A tool that parks until its call is cancelled, and says when the handler saw the abort. */
+function holdingToolkit() {
+  let sawAbort!: () => void;
+  const aborted = new Promise<void>((resolve) => {
+    sawAbort = resolve;
+  });
+  let started!: () => void;
+  const running = new Promise<void>((resolve) => {
+    started = resolve;
+  });
+  const toolkit = defineSessionToolkit({
+    id: "hold",
+    tools: [
+      defineSessionTool({
+        name: "hold",
+        title: "Hold",
+        description: "Parks until cancelled.",
+        input: {},
+        annotations: SESSION_TOOL_READ_ONLY,
+        resultKind: "json",
+        run: (_args, ctx) =>
+          new Promise((resolve) => {
+            started();
+            ctx.signal.addEventListener("abort", () => {
+              sawAbort();
+              resolve(jsonResult({ late: true }));
+            });
+          })
+      })
+    ]
+  });
+  return { toolkit, aborted, running };
+}
+
+async function daemon(t: { after(fn: () => Promise<void>): void }, registry: SessionToolRegistry, api: DaemonApi | null = fakeApi) {
+  const dir = await mkdtemp(join(tmpdir(), "st-route-"));
+  const socketPath = join(dir, "d.sock");
+  const app: FastifyInstance = Fastify();
+  registerSessionToolsRoute(app, {
+    authorizeHost: (authorization) => authorization === agentHostAuthValue(TOKEN),
+    resolveThread: (threadId) => THREADS[threadId] ?? null,
+    api: () => api,
+    registry: () => registry
+  });
+  await app.listen({ path: socketPath });
+  t.after(async () => {
+    await app.close();
+    await rm(dir, { recursive: true, force: true });
+  });
+  return { app, socketPath };
+}
+
+const forwarderFor = (socketPath: string, token = TOKEN) => createDaemonForwarder({ socketPath: () => socketPath, token });
+const textOf = (result: { content: unknown[] }) => (result.content[0] as { text?: string }).text ?? "";
+
+test("a call runs with the context the daemon derived — thread record, not arguments", async (t) => {
+  const { socketPath } = await daemon(t, createSessionToolRegistry([testSessionToolkit]));
+  const forward = forwarderFor(socketPath);
+  const result = await forward(
+    { threadId: "thread-a", callId: "toolu_1", name: "echo", arguments: { text: "hi" } },
+    new AbortController().signal
+  );
+  assert.equal(result.isError, undefined);
+  assert.deepEqual(result.structuredContent, {
+    text: "hi",
+    threadId: "thread-a",
+    projectPath: "/ws/w/proj-a",
+    cwd: "/ws/w/proj-a/sub",
+    agentId: "codex",
+    callId: "toolu_1"
+  });
+  // A caller cannot smuggle an identity in as an argument: arguments are strict.
+  const smuggled = await forward(
+    { threadId: "thread-a", callId: "c", name: "echo", arguments: { text: "hi", threadId: "thread-b" } },
+    new AbortController().signal
+  );
+  assert.equal(smuggled.isError, true);
+  assert.match(textOf(smuggled), /^INVALID_ARGUMENT: .*threadId/);
+});
+
+test("results: image content, a coded handler error, an unknown tool", async (t) => {
+  const { socketPath } = await daemon(t, createSessionToolRegistry([testSessionToolkit]));
+  const forward = forwarderFor(socketPath);
+  const signal = new AbortController().signal;
+  const pixel = await forward({ threadId: "thread-a", callId: "c", name: "pixel", arguments: {} }, signal);
+  assert.deepEqual(pixel.content[0], { type: "image", data: TEST_PNG_BASE64, mimeType: "image/png" });
+  assert.deepEqual(pixel.structuredContent, { width: 1, height: 1 });
+  const failed = await forward({ threadId: "thread-a", callId: "c", name: "fail", arguments: {} }, signal);
+  assert.equal(failed.isError, true);
+  assert.equal(textOf(failed), "CONFLICT: This tool always fails.");
+  const unknown = await forward({ threadId: "thread-a", callId: "c", name: "nope", arguments: {} }, signal);
+  assert.equal(unknown.isError, true);
+  assert.match(textOf(unknown), /^NOT_FOUND/);
+});
+
+test("only the host's bearer is honoured, and only for a thread the daemon knows", async (t) => {
+  const { app, socketPath } = await daemon(t, createSessionToolRegistry([testSessionToolkit]));
+  const signal = new AbortController().signal;
+  const wrong = await forwarderFor(socketPath, "not-the-token")(
+    { threadId: "thread-a", callId: "c", name: "echo", arguments: { text: "x" } },
+    signal
+  );
+  assert.equal(wrong.isError, true);
+  assert.match(textOf(wrong), /^UNAUTHORIZED/);
+  const bare = await app.inject({ method: "POST", url: "/api/agent-host/session-tools/call", payload: { threadId: "thread-a", name: "echo" } });
+  assert.equal(bare.statusCode, 401);
+  const unknownThread = await forwarderFor(socketPath)(
+    { threadId: "thread-zzz", callId: "c", name: "echo", arguments: { text: "x" } },
+    signal
+  );
+  assert.equal(unknownThread.isError, true);
+  assert.match(textOf(unknownThread), /^THREAD_NOT_FOUND/);
+});
+
+test("a daemon that cannot serve yet, or is not there at all, answers the restart message", async (t) => {
+  const { socketPath } = await daemon(t, createSessionToolRegistry([testSessionToolkit]), null);
+  const signal = new AbortController().signal;
+  const starting = await forwarderFor(socketPath)({ threadId: "thread-a", callId: "c", name: "echo", arguments: { text: "x" } }, signal);
+  assert.deepEqual(starting, { content: [{ type: "text", text: DAEMON_UNAVAILABLE_MESSAGE }], isError: true });
+  const gone = await forwarderFor(join(tmpdir(), "no-such-orquester-daemon.sock"))(
+    { threadId: "thread-a", callId: "c", name: "echo", arguments: { text: "x" } },
+    signal
+  );
+  assert.deepEqual(gone, { content: [{ type: "text", text: DAEMON_UNAVAILABLE_MESSAGE }], isError: true });
+});
+
+test("a daemon that dies mid-call answers the restart message", async (t) => {
+  const hold = holdingToolkit();
+  const { app, socketPath } = await daemon(t, createSessionToolRegistry([hold.toolkit]));
+  const pending = forwarderFor(socketPath)({ threadId: "thread-a", callId: "c", name: "hold", arguments: {} }, new AbortController().signal);
+  await hold.running;
+  app.server.closeAllConnections();
+  const result = await pending;
+  assert.deepEqual(result, { content: [{ type: "text", text: DAEMON_UNAVAILABLE_MESSAGE }], isError: true });
+  // …and the handler was cancelled with the connection.
+  await hold.aborted;
+});
+
+test("cancelling the call on the host aborts the daemon-side handler", async (t) => {
+  const hold = holdingToolkit();
+  const { socketPath } = await daemon(t, createSessionToolRegistry([hold.toolkit]));
+  const controller = new AbortController();
+  const pending = forwarderFor(socketPath)({ threadId: "thread-a", callId: "c", name: "hold", arguments: {} }, controller.signal);
+  await hold.running;
+  controller.abort();
+  const result = await pending;
+  assert.equal(result.isError, true);
+  assert.match(textOf(result), /^CANCELLED/);
+  await hold.aborted;
+});

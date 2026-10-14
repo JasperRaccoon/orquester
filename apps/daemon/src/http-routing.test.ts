@@ -95,3 +95,49 @@ test("agent profile item routes match ids longer than the router's default 100-c
     await app.close();
   }
 });
+
+test("the session-tool call route is socket-only, and the socket still requires the agent host's bearer", async () => {
+  const route = "/api/agent-host/session-tools/call";
+  const body = { threadId: "t", callId: "c", name: "echo", arguments: {} };
+  // Remote HTTP: not mounted at all, even for an authenticated caller.
+  const remote = remoteApp({});
+  try {
+    const res = await remote.inject({ method: "POST", url: route, headers: { authorization: BEARER }, payload: body });
+    assert.equal(res.statusCode, 404);
+  } finally {
+    await remote.close();
+  }
+  // The unix socket: mounted, but only the host's own token passes.
+  const config = createDefaultDaemonConfig({ env: {} });
+  const root = "/nonexistent-orquester-auth-path-test";
+  const resolved = { daemonDir: root, baseDir: root, workspacesDir: root, workspacesMetaFile: `${root}/workspaces.json`, fsRoot: root } as unknown as CreateServerArgs[1];
+  const seen: Array<string | undefined> = [];
+  const local = createServer(
+    config,
+    resolved,
+    createDefaultClientConfig(`${root}/daemon.sock`),
+    createWriteStream("/dev/null"),
+    {
+      agentChat: {
+        authorizeHostRequest: (authorization: string | undefined) => {
+          seen.push(authorization);
+          return authorization === "Bearer host-token";
+        },
+        sessionToolThread: () => null,
+        // `createServer` mounts the chat routes off these; none is called here.
+        routeDeps: () => undefined,
+        protectedPids: () => []
+      }
+    } as unknown as CreateServerArgs[4],
+    { authRequired: false, mode: "local" }
+  );
+  try {
+    const anonymous = await local.inject({ method: "POST", url: route, payload: body });
+    assert.equal(anonymous.statusCode, 401);
+    const host = await local.inject({ method: "POST", url: route, headers: { authorization: "Bearer host-token" }, payload: body });
+    assert.equal(host.statusCode, 404, "past the gate: the thread is unknown");
+    assert.deepEqual(seen, [undefined, "Bearer host-token"]);
+  } finally {
+    await local.close();
+  }
+});
