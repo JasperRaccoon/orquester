@@ -326,3 +326,32 @@ test("direct PTY: the same — never written over when unreadable, unknown recor
   assert.deepEqual(written.sessions.find((record) => record.id === "future-1"), future);
   await rm(dir, { recursive: true, force: true });
 });
+
+test("tmux: panes that survived a corrupt index are kept known, never reaped by a later boot, until they end", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-session-index-unclaimed-"));
+  const indexPath = join(dir, "sessions.json");
+  await writeFile(indexPath, '{"version":1,"sessions":[{"id":"bash-1"', "utf8");
+  const killed: string[] = [];
+  const boot = (live: string[]) =>
+    new SessionManager(REGISTRY, { ...fakeTmux(live), killSession: async (id: string) => void killed.push(id) } as unknown as Tmux, indexPath, {});
+  // The corrupt index is moved aside; the surviving pane has no record, so it is written as unclaimed.
+  const first = boot(["bash-1"]);
+  await quietly(() => assert.rejects(first.reattach(), SessionsIndexUnreadableError));
+  await drainSessionIndexWrites(indexPath);
+  assert.deepEqual((JSON.parse(await readFile(indexPath, "utf8")) as { unclaimedPanes?: string[] }).unclaimedPanes, ["bash-1"]);
+  first.closeAll();
+  // The next boot reads the fresh index: the pane is not reaped, and stays listed while it lives.
+  const second = boot(["bash-1", "orphan-2"]);
+  await second.reattach();
+  assert.deepEqual(killed, ["orphan-2"], "only a genuine orphan is reaped");
+  await drainSessionIndexWrites(indexPath);
+  assert.deepEqual((JSON.parse(await readFile(indexPath, "utf8")) as { unclaimedPanes?: string[] }).unclaimedPanes, ["bash-1"]);
+  second.closeAll();
+  // Once it has ended, it leaves the list.
+  const third = boot([]);
+  await third.reattach();
+  await drainSessionIndexWrites(indexPath);
+  assert.equal((JSON.parse(await readFile(indexPath, "utf8")) as { unclaimedPanes?: string[] }).unclaimedPanes, undefined);
+  third.closeAll();
+  await rm(dir, { recursive: true, force: true });
+});

@@ -844,6 +844,11 @@ export class SessionManager implements ISessionManager {
       this.attach(session);
     }
 
+    // Panes an earlier index that could not be read left unclaimed (below): still known while
+    // they live, so a later boot never reaps them as orphans.
+    const carried = unclaimedPanesOf(this.indexPreserved).filter((id) => live.has(id));
+    for (const id of carried) known.add(id);
+
     // Reap orphan tmux sessions (alive but unknown to the index) — but only when
     // the index was read successfully. With an unreadable index every live
     // session looks "unknown", so reaping would wipe them all; stay hands-off.
@@ -854,6 +859,12 @@ export class SessionManager implements ISessionManager {
         }
       }
     }
+    // With a corrupt index moved aside, the fresh index this run writes would not know the panes
+    // that survived the restart, and the NEXT boot would reap them as orphans: they are written
+    // as `unclaimedPanes` instead (their records are in the moved-aside file), kept — never
+    // attached, never reaped — for as long as they live.
+    const unclaimed = indexLoaded ? carried : [...live].filter((id) => !known.has(id));
+    this.indexPreserved = withUnclaimedPanes(this.indexPreserved, unclaimed);
 
     await this.persistIndex();
     // What was reattachable is reattached; the caller still learns that the tab records did not
@@ -1434,4 +1445,17 @@ function warnBlockedIndexOnce(indexPath: string, reason: string): void {
   if (warnedBlockedIndexes.has(indexPath)) return;
   warnedBlockedIndexes.add(indexPath);
   console.error(`sessions.json is not written this run: ${reason} (${indexPath})`);
+}
+
+/** The `sessions.json` key that keeps panes an unreadable index left without a record (see reattach). */
+const UNCLAIMED_PANES_KEY = "unclaimedPanes";
+
+function unclaimedPanesOf(preserved: SessionsIndexPreserved): string[] {
+  const value = preserved.extra[UNCLAIMED_PANES_KEY];
+  return Array.isArray(value) ? value.filter((id): id is string => typeof id === "string" && id.length > 0) : [];
+}
+
+function withUnclaimedPanes(preserved: SessionsIndexPreserved, panes: readonly string[]): SessionsIndexPreserved {
+  const extra = Object.fromEntries(Object.entries(preserved.extra).filter(([key]) => key !== UNCLAIMED_PANES_KEY));
+  return { rejected: preserved.rejected, extra: panes.length > 0 ? { ...extra, [UNCLAIMED_PANES_KEY]: [...panes] } : extra };
 }
