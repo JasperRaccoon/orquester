@@ -302,3 +302,40 @@ Orquester:
   ~1367, `/mcp` mount ~4361), `apps/desktop/src/main.ts` (~642), `apps/desktop/preload.cjs`.
 - Workflows/git providers: `apps/daemon/src/workflows/**` (triggers, `git-poller.ts`),
   `apps/daemon/src/providers/*`.
+
+## Appendix A — MCP Apps per provider (§3, Task 10 evidence)
+
+Probed 2026-10-14 on this host, each CLI against a stub stdio MCP server that declares the UI
+extension, lists one tool with `_meta.ui {resourceUri: "ui://…", visibility}`, serves the resource as
+`text/html;profile=mcp-app` (with `_meta.ui.csp`/`prefersBorder`) and logs every frame it receives.
+Throwaway HOME / CONFIG dirs, no daemon, no Orquester session. Only Grok needed a model turn (two
+one-call prompts on the Grok account, about $0.03 by the CLI's own usage report) because only it exposes the URI on a live call.
+
+| Provider (version) | Declares UI extension to servers | URI of a call's UI resource reaches the client | Host can read the resource | Host can call the server's tools | Additive context channel | Result |
+|---|---|---|---|---|---|---|
+| Codex app-server (bindings 0.154.0; probed 0.159.0) | only when the app-server client declares `capabilities.extensions["io.modelcontextprotocol/ui"]` (stub saw it with, not without) | `mcpToolCall.appContext.resourceUri` / deprecated `mcpAppResourceUri` (bindings `v2/ThreadItem.ts`) | `mcpServer/resource/read {threadId, server, uri}` → `{contents}` (`_meta` intact) | `mcpServer/tool/call` → `{content, structuredContent, _meta}`; `mcpServerStatus/list` lists tools with `_meta` and `annotations` | `turn/start.additionalContext` (`kind: "untrusted"`) | **Supported** |
+| Grok CLI 1.0.46 (`grok agent stdio`) | always (client name `grok-shell-apps`), whatever the ACP client declares (six variants probed) | the completed `use_tool` `tool_call_update` carries the TOOL definition's `_meta` (`ui.resourceUri`, `ui.visibility`) and `rawOutput {type:"MCP", server_name, tool_name, output:{OkayOutput}}` — same with or without a client declaration | `_x.ai/mcp/read_resource {sessionId, server, uri}` → `{result:{contents}}` | `_x.ai/mcp/call {sessionId, server, tool, arguments}` → `{result:{content}}` (no `structuredContent`/`_meta`); `_x.ai/mcp/list {sessionId}` lists tools with `_meta`, no `annotations`. Bare `x.ai/mcp/*` spellings answer -32601 | none (ACP `session/prompt` takes content blocks only, which would read as the user's words) | **Supported**, no model context; every app tool call asks consent (no read-only hint) |
+| Claude Code 2.1.210 (installed) and 2.1.278 (SDK-bundled) | no: client capabilities `{roots, elicitation}` only | no: `mcpServerStatus()` tools carry `name` + `annotations` only; the CLI binary holds no `resourceUri`/`ui://` string; `tool_use_result` spreads the RESULT's `_meta`/`structuredContent` (`mcpMeta`), not the tool definition's | no: `mcp_read_resource`/`read_mcp_resource`/`mcp_resource_read` control requests answer "Unsupported control request subtype"; resources are read only by the model's `ReadMcpResource` tool | yes, `mcp_call` control request (not exposed by `Query`) | n/a | **Not exposed** — ordinary tool row |
+| OpenCode 1.18.34 (`opencode serve`) | no: client capabilities `{roots}` only | no: a tool part keeps `metadata`, `output` (text), `attachments`, `content`; the result's `_meta` and the tool definition's `_meta` are never surfaced | no HTTP route: MCP routes are `/mcp` status/add/auth/connect/disconnect; `/experimental/resource` lists resources, nothing reads one for the client | no HTTP route | n/a | **Not exposed** — ordinary tool row |
+
+Reading the resource from the daemon itself for Claude/OpenCode was considered and rejected: neither
+exposes the URI of a call's UI resource in the first place, and connecting to the user's MCP servers
+from the daemon would duplicate their stdio processes and credentials (OAuth tokens live in each
+CLI's own store).
+
+What runs where (as built): the exposing adapter captures the resource behind a frame hold
+(`adapters/mcp-app-capture.ts`, ≤ 15 s, then the call stays a plain row) and writes
+`data.mcpApp {attachmentId, server, tool, resourceUri, csp?, permissions?, prefersBorder?}` on the
+completed tool row; `slim.ts` keeps it after the own-server+tool check; the UI renders an `mcp-app`
+row (`McpAppFrame`) from the agent-visuals signed URL, with the bridge in
+`packages/ui/src/lib/agent-chat/mcp-app-host.ts`; `tools/call`, `resources/read`,
+`ui/update-model-context` go `POST /api/sessions/:id/mcp-apps/:itemId/:op` → host
+`/threads/:id/mcp-apps/:op` → the live provider session. Consent (a tool not marked read-only,
+`ui/message`, `ui/download-file`) is asked in the chat's banner dock.
+
+Known limits: Grok replays a call's result to its app as text only (its CLI folds
+`structuredContent` into `OkayOutput`); a collab child's (Codex) or subagent's (Grok) app call stays a
+plain row; app model context lives in the host's memory (a host restart forgets it until the app
+updates it again); on the web, the production `Permissions-Policy` (`camera=(), microphone=(),
+geolocation=()`) keeps an app's declared camera/microphone/geolocation off whatever the frame's
+`allow` attribute says.
