@@ -1,9 +1,10 @@
-import { useMemo } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 import type { SessionActivity } from "@orquester/api";
 import type { ProjectIndex } from "../../lib/project-index";
 import { isProjectRefVisible, jumpToProject, resolveProjectRef } from "../../lib/session-nav";
 import { isAgentLikeSession } from "../../lib/session-kind";
 import { useAppStore } from "../../store/app";
+import { mcpAppConsents, withConsentAttention } from "../../lib/agent-chat/mcp-app-consent";
 import type { ProjectSummary, SessionSummary, WorkspaceSummary } from "../../types";
 
 export { resolveProjectRef } from "../../lib/session-nav";
@@ -143,22 +144,29 @@ export function verifiedAgentSessions(
   return entries.filter((entry) => index.visible.has(entry.session.projectPath));
 }
 
-/** React binding for {@link deriveAgentSessions}; re-derives on `session.activity` events. */
+const subscribeConsents = (listener: () => void) => mcpAppConsents.subscribe(listener);
+const waitingConsents = () => mcpAppConsents.waiting();
+
+/**
+ * React binding for {@link deriveAgentSessions}; re-derives on `session.activity` events
+ * and when an MCP App consent starts or stops waiting (it reads as needing input).
+ */
 export function useAgentSessions(): AgentSessionEntry[] {
   const sessions = useAppStore((s) => s.sessions);
   const workspaces = useAppStore((s) => s.workspaces);
   const activityById = useAppStore((s) => s.activityById);
   const projects = useAppStore((s) => s.projects);
+  const waiting = useSyncExternalStore(subscribeConsents, waitingConsents);
   return useMemo(
-    () => deriveAgentSessions(sessions, workspaces, activityById, projects),
-    [sessions, workspaces, activityById, projects]
+    () => deriveAgentSessions(sessions, workspaces, withConsentAttention(activityById, waiting), projects),
+    [sessions, workspaces, activityById, waiting, projects]
   );
 }
 
 /** Snapshot of the same list from outside React (the global shortcut). */
 export function agentSessionsSnapshot(): AgentSessionEntry[] {
   const { sessions, workspaces, activityById, projects } = useAppStore.getState();
-  return deriveAgentSessions(sessions, workspaces, activityById, projects);
+  return deriveAgentSessions(sessions, workspaces, withConsentAttention(activityById, mcpAppConsents.waiting()), projects);
 }
 
 /** Navigate to a session's tab (shared with the command palette's rows). */

@@ -63,11 +63,17 @@ after(async () => {
   await rm(scratch, { recursive: true, force: true });
 });
 
+/**
+ * Each test's bound: generous for real Chromium on a loaded machine, but a hung
+ * launch or wait fails its test instead of stalling the whole suite.
+ */
+const TEST_TIMEOUT_MS = 120_000;
+
 const FIXED = (height: number): string =>
   `<!doctype html><html><head><style>html,body{margin:0}</style></head><body><div style="height:${height}px"></div></body></html>`;
 
 describe("html preview browser", { skip }, () => {
-  it("screenshots the page at the width asked, measuring its content height", async () => {
+  it("screenshots the page at the width asked, measuring its content height", { timeout: TEST_TIMEOUT_MS }, async () => {
     const capture = await browser.capture({ html: FIXED(300), width: 400, urlFragment: "" });
     assert.equal(capture.contentHeight, 300);
     assert.equal(capture.capturedHeight, 300);
@@ -76,14 +82,14 @@ describe("html preview browser", { skip }, () => {
     assert.deepEqual(capture.consoleMessages, []);
   });
 
-  it("caps the capture at 4000px while reporting the whole height", async () => {
+  it("caps the capture at 4000px while reporting the whole height", { timeout: TEST_TIMEOUT_MS }, async () => {
     const capture = await browser.capture({ html: FIXED(5000), width: 320, urlFragment: "" });
     assert.equal(capture.contentHeight, 5000);
     assert.equal(capture.capturedHeight, 4000);
     assert.equal(pngSize(capture.screenshot.data).height, 4000);
   });
 
-  it("captures the console — levels, uncaught exceptions with page.html stacks — bounded", async () => {
+  it("captures the console — levels, uncaught exceptions with page.html stacks — bounded", { timeout: TEST_TIMEOUT_MS }, async () => {
     const html = `<!doctype html><body><script>
       console.log("checked", 3);
       console.info("info");
@@ -119,7 +125,7 @@ describe("html preview browser", { skip }, () => {
     assert.deepEqual(noisy.consoleMessages.at(-1), { level: "warning", text: "10 more console messages were omitted." });
   });
 
-  it("never reaches this machine: every attempt at loopback, v4 or v6, is refused before any server sees it", async (t) => {
+  it("never reaches this machine: every attempt at loopback, v4 or v6, is refused before any server sees it", { timeout: TEST_TIMEOUT_MS }, async (t) => {
     const requests: string[] = [];
     const servers: http.Server[] = [];
     const listen = async (host: string): Promise<number | undefined> => {
@@ -184,7 +190,7 @@ describe("html preview browser", { skip }, () => {
     }
   });
 
-  it("keeps the main frame on the page", async () => {
+  it("keeps the main frame on the page", { timeout: TEST_TIMEOUT_MS }, async () => {
     for (const target of ["http://example.invalid/elsewhere", "http://127.0.0.1:9/elsewhere"]) {
       const html = `${FIXED(120)}<script>location.replace(${JSON.stringify(target)})</script>`;
       const capture = await browser.capture({ html, width: 320, urlFragment: "" });
@@ -192,7 +198,7 @@ describe("html preview browser", { skip }, () => {
     }
   });
 
-  it("gives every preview a fresh profile: nothing one page stores is seen by the next", async () => {
+  it("gives every preview a fresh profile: nothing one page stores is seen by the next", { timeout: TEST_TIMEOUT_MS }, async () => {
     await browser.capture({
       html: `<script>localStorage.setItem("seen", "1"); document.cookie = "seen=1; max-age=999"; indexedDB.open("seen");</script>`,
       width: 320,
@@ -208,7 +214,7 @@ describe("html preview browser", { skip }, () => {
     assert.deepEqual(await readdir(scratch), []);
   });
 
-  it("gives up at the deadline, killing the browser and removing its profile", async () => {
+  it("gives up at the deadline, killing the browser and removing its profile", { timeout: TEST_TIMEOUT_MS }, async () => {
     const hurried = new HtmlPreviewBrowser({ resolveChromium: () => CHROMIUM, tmpDir: scratch, captureTimeoutMs: 2000 });
     const started = Date.now();
     await assert.rejects(
@@ -219,7 +225,7 @@ describe("html preview browser", { skip }, () => {
     assert.deepEqual(await readdir(scratch), []);
   });
 
-  it("stops when the call is cancelled", async () => {
+  it("stops when the call is cancelled", { timeout: TEST_TIMEOUT_MS }, async () => {
     const controller = new AbortController();
     const html = `<script>console.log("started"); while (true) {}</script>`;
     const pending = browser.capture({ html, width: 320, urlFragment: "", signal: controller.signal });
@@ -228,7 +234,7 @@ describe("html preview browser", { skip }, () => {
     assert.deepEqual(await readdir(scratch), []);
   });
 
-  it("measures a page at each width, ascending, each from a fresh load", async () => {
+  it("measures a page at each width, ascending, each from a fresh load", { timeout: TEST_TIMEOUT_MS }, async () => {
     const text = `<!doctype html><style>html,body{margin:0}</style><p style="margin:0">${"word ".repeat(400)}</p>`;
     const heights = await browser.measure({ html: text, widths: [1144, 320, 728], urlFragment: "" });
     assert.ok(heights);
@@ -242,13 +248,13 @@ describe("html preview browser", { skip }, () => {
     ]);
   });
 
-  it("answers no heights when measuring outlives its budget", async () => {
+  it("answers no heights when measuring outlives its budget", { timeout: TEST_TIMEOUT_MS }, async () => {
     const hurried = new HtmlPreviewBrowser({ resolveChromium: () => CHROMIUM, tmpDir: scratch, measureTimeoutMs: 1500 });
     assert.equal(await hurried.measure({ html: "<script>while (true) {}</script>", widths: [320], urlFragment: "" }), undefined);
     assert.deepEqual(await readdir(scratch), []);
   });
 
-  it("keeps a screenshot under the size cap: a PNG too large comes back as JPEG, scaled down as needed", async () => {
+  it("keeps a screenshot under the size cap: a PNG too large comes back as JPEG, scaled down as needed", { timeout: TEST_TIMEOUT_MS }, async () => {
     // Noise does not compress: 1600×4000 of it is far over the cap as PNG.
     const html = `<!doctype html><style>html,body{margin:0}</style><canvas id="c" width="1600" height="4000" style="display:block"></canvas><script>
       const context = c.getContext("2d");
@@ -267,7 +273,7 @@ describe("html preview browser", { skip }, () => {
     assert.equal(screenshot.width / screenshot.height, 1600 / 4000);
   });
 
-  it("runs the page source only once it has a slot, and passes its refusal through as it is", async () => {
+  it("runs the page source only once it has a slot, and passes its refusal through as it is", { timeout: TEST_TIMEOUT_MS }, async () => {
     let made = 0;
     const capture = await browser.capture({
       html: async () => {
@@ -296,7 +302,7 @@ describe("html preview browser", { skip }, () => {
 describe("html preview: as a reader sees it", { skip }, () => {
   const backgroundProbe = `<!doctype html><body><script>console.log(getComputedStyle(document.documentElement).getPropertyValue("--background").trim())</script></body>`;
 
-  it("themes the page with the stock palette of the appearance asked, dark by default", async () => {
+  it("themes the page with the stock palette of the appearance asked, dark by default", { timeout: TEST_TIMEOUT_MS }, async () => {
     const dark = await previewHtmlPage(browser, { html: backgroundProbe, sandboxRoot: null });
     assert.equal(dark.consoleMessages[0]?.text, htmlRenderStockTheme("dark").variables["--background"]);
     const light = await previewHtmlPage(browser, { html: backgroundProbe, appearance: "light", sandboxRoot: null });
@@ -304,7 +310,7 @@ describe("html preview: as a reader sees it", { skip }, () => {
     assert.notEqual(dark.consoleMessages[0]?.text, light.consoleMessages[0]?.text);
   });
 
-  it("previews at the reply column's width by default, the width clamped to 240..1600", async () => {
+  it("previews at the reply column's width by default, the width clamped to 240..1600", { timeout: TEST_TIMEOUT_MS }, async () => {
     const html = FIXED(100);
     assert.equal((await previewHtmlPage(browser, { html, sandboxRoot: null })).width, HTML_RENDER_COLUMN_WIDTH);
     const narrow = await previewHtmlPage(browser, { html, width: 100, sandboxRoot: null });
@@ -313,7 +319,7 @@ describe("html preview: as a reader sees it", { skip }, () => {
     assert.equal((await previewHtmlPage(browser, { html, width: 4000, sandboxRoot: null })).width, 1600);
   });
 
-  it("inlines the project's images and reports the ones it cannot show", async () => {
+  it("inlines the project's images and reports the ones it cannot show", { timeout: TEST_TIMEOUT_MS }, async () => {
     const project = await mkdtemp(join(tmpdir(), "orq-html-preview-project-"));
     const outside = await mkdtemp(join(tmpdir(), "orq-html-preview-outside-"));
     try {
@@ -344,7 +350,7 @@ describe("html preview: as a reader sees it", { skip }, () => {
     }
   });
 
-  it("measures a prepared page at every client width", async () => {
+  it("measures a prepared page at every client width", { timeout: TEST_TIMEOUT_MS }, async () => {
     const heights = await measureHtmlPage(browser, FIXED(240));
     assert.ok(heights);
     assert.deepEqual(
@@ -358,7 +364,7 @@ describe("html preview: as a reader sees it", { skip }, () => {
 describe("html preview without a browser", () => {
   const none = new HtmlPreviewBrowser({ resolveChromium: () => undefined });
 
-  it("says no browser is available yet, and that html_render still works", async () => {
+  it("says no browser is available yet, and that html_render still works", { timeout: TEST_TIMEOUT_MS }, async () => {
     assert.equal(none.available(), false);
     await assert.rejects(
       previewHtmlPage(none, { html: FIXED(10), sandboxRoot: null }),
@@ -370,13 +376,13 @@ describe("html preview without a browser", () => {
     );
   });
 
-  it("measures nothing, so a page publishes without heights", async () => {
+  it("measures nothing, so a page publishes without heights", { timeout: TEST_TIMEOUT_MS }, async () => {
     assert.equal(await measureHtmlPage(none, FIXED(10)), undefined);
   });
 });
 
 describe("the browser gate", () => {
-  it("lets two in, hands a freed slot to the next waiter, and drops a waiter whose call was cancelled", async () => {
+  it("lets two in, hands a freed slot to the next waiter, and drops a waiter whose call was cancelled", { timeout: TEST_TIMEOUT_MS }, async () => {
     const gate = new Gate(2);
     const live = new AbortController().signal;
     const first = await gate.enter(live);
@@ -432,8 +438,9 @@ async function hangingChromium(): Promise<{
   return {
     executable,
     started: async (count) => {
-      // Wait on the directory's own events, never a timer.
-      const changed = on(watcher, "change");
+      // Wait on the directory's own events; the signal only bounds a launch
+      // that never comes, so it fails here rather than hanging the suite.
+      const changed = on(watcher, "change", { signal: AbortSignal.timeout(TEST_TIMEOUT_MS / 2) });
       while ((await pids()).length < count) await changed.next();
       return pids();
     },
@@ -461,7 +468,7 @@ function notRunning(pid: number): boolean {
 }
 
 describe("html preview browser: slots, queue and cancellation", () => {
-  it("a cancel kills a launch that hangs at once, and frees its slot", async (t) => {
+  it("a cancel kills a launch that hangs at once, and frees its slot", { timeout: TEST_TIMEOUT_MS }, async (t) => {
     const fake = await hangingChromium();
     t.after(() => fake.cleanup());
     const browser = new HtmlPreviewBrowser({ resolveChromium: () => fake.executable, tmpDir: scratch, captureTimeoutMs: 60_000 });
@@ -492,7 +499,7 @@ describe("html preview browser: slots, queue and cancellation", () => {
     assert.deepEqual(await readdir(scratch), []);
   });
 
-  it("launches Chromium with every connection through the proxy, loopback and QUIC included (S-M3)", async (t) => {
+  it("launches Chromium with every connection through the proxy, loopback and QUIC included (S-M3)", { timeout: TEST_TIMEOUT_MS }, async (t) => {
     const dir = await mkdtemp(join(tmpdir(), "orq-args-chromium-"));
     t.after(() => rm(dir, { recursive: true, force: true }));
     const argsFile = join(dir, "args");
@@ -517,7 +524,7 @@ describe("html preview browser: slots, queue and cancellation", () => {
     assert.ok(args.includes("--force-webrtc-ip-handling-policy=disable_non_proxied_udp"));
   });
 
-  it("the daemon's stop kills a preview in flight, removes its profile, and refuses any after it (D-M4)", async (t) => {
+  it("the daemon's stop kills a preview in flight, removes its profile, and refuses any after it (D-M4)", { timeout: TEST_TIMEOUT_MS }, async (t) => {
     const fake = await hangingChromium();
     t.after(() => fake.cleanup());
     const own = await mkdtemp(join(tmpdir(), "orq-html-preview-stop-"));
@@ -536,7 +543,7 @@ describe("html preview browser: slots, queue and cancellation", () => {
     );
   });
 
-  it("at boot, sweeps the stale preview profiles a dead daemon left, never a young one or another name (D-M4)", async (t) => {
+  it("at boot, sweeps the stale preview profiles a dead daemon left, never a young one or another name (D-M4)", { timeout: TEST_TIMEOUT_MS }, async (t) => {
     const own = await mkdtemp(join(tmpdir(), "orq-html-preview-sweep-"));
     t.after(() => rm(own, { recursive: true, force: true }));
     await mkdir(join(own, `${PREVIEW_PROFILE_PREFIX}old`));
@@ -552,7 +559,7 @@ describe("html preview browser: slots, queue and cancellation", () => {
     assert.deepEqual((await readdir(own)).sort(), [`${PREVIEW_PROFILE_PREFIX}young`, "someone-elses"]);
   });
 
-  it("a call waiting for a slot is told previews are busy — at its own bound, or at once past the waiting cap", async (t) => {
+  it("a call waiting for a slot is told previews are busy — at its own bound, or at once past the waiting cap", { timeout: TEST_TIMEOUT_MS }, async (t) => {
     const fake = await hangingChromium();
     t.after(() => fake.cleanup());
     const browser = new HtmlPreviewBrowser({
@@ -592,7 +599,7 @@ describe("html preview browser: slots, queue and cancellation", () => {
     assert.deepEqual(await readdir(scratch), []);
   });
 
-  it("the deadline runs from the slot's start, not from the queue", async (t) => {
+  it("the deadline runs from the slot's start, not from the queue", { timeout: TEST_TIMEOUT_MS }, async (t) => {
     const fake = await hangingChromium();
     t.after(() => fake.cleanup());
     const deadline = 1_500;

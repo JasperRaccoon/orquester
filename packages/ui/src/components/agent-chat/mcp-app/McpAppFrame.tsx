@@ -17,6 +17,7 @@ import { flushSync } from "react-dom";
 import { Minimize2 } from "lucide-react";
 
 import {
+  HTML_RENDER_COLUMN_WIDTH,
   MCP_APP_DEFAULT_HEIGHT,
   MCP_APP_MAX_HEIGHT,
   clampMcpAppHeight,
@@ -24,6 +25,8 @@ import {
   mcpAppAllowAttribute,
   mcpAppCspReachesOrigin,
   mcpAppToolCallOfActivityPayload,
+  htmlRenderShortcutsMessage,
+  readHtmlRenderKeyDown,
   type McpAppReference,
   type McpAppToolCall,
   type McpAppToolInfoResponse
@@ -42,7 +45,13 @@ import {
   type McpAppHost,
   type McpAppHostContext
 } from "../../../lib/agent-chat/mcp-app-host";
-import { openVisualLink, visualRequestAllowed } from "../../../lib/agent-chat/visual-frame";
+import {
+  VISUAL_FRAME_SHORTCUTS,
+  VISUAL_VIEWER_SHORTCUTS,
+  isAllowedVisualKey,
+  openVisualLink,
+  visualRequestAllowed
+} from "../../../lib/agent-chat/visual-frame";
 import { ChatIconButton } from "../primitives";
 import { visualPageUrl } from "../visual/VisualFrame";
 import { useVisualTheme } from "../visual/use-visual-theme";
@@ -95,11 +104,19 @@ export function McpAppFrame(props: {
 }): React.ReactElement {
   const { sessionId, itemId, app } = props;
   const api = useApi();
+  // A reconnect swaps the API client; a live app keeps its host and session
+  // across it, so requests read the current client rather than rebuild on it.
+  const apiRef = React.useRef(api);
+  apiRef.current = api;
+  // An app whose declared domains reach Orquester itself — this page's origin,
+  // or the daemon's — is never framed: its policy is fixed in the snapshot.
+  // Decided first, so nothing is minted, read or built for it.
+  const refused = reachesOrquester(app, api.connection.endpoint);
   const theme = useVisualTheme();
   const frameRef = React.useRef<HTMLIFrameElement>(null);
   const boxRef = React.useRef<HTMLDivElement>(null);
   const [owner] = React.useState(() => `mcp-app-frame-${++nextFrameId}`);
-  const [width, setWidth] = React.useState(0);
+  const [width, setWidth] = React.useState(HTML_RENDER_COLUMN_WIDTH);
   const [height, setHeight] = React.useState(MCP_APP_DEFAULT_HEIGHT);
   const [navigatedAway, setNavigatedAway] = React.useState(false);
   const [displayMode, setDisplayMode] = React.useState<McpAppDisplayMode>("inline");
@@ -117,10 +134,12 @@ export function McpAppFrame(props: {
   React.useLayoutEffect(() => {
     const box = boxRef.current;
     if (!box) return undefined;
-    setWidth(box.clientWidth);
+    // A hidden tab lays out at zero width: the app keeps the last real width
+    // (or the column's) rather than being told it has no room.
+    if (box.clientWidth > 0) setWidth(box.clientWidth);
     if (typeof ResizeObserver === "undefined") return undefined;
     const observer = new ResizeObserver(([entry]) => {
-      if (entry) setWidth(Math.round(entry.contentRect.width));
+      if (entry && entry.contentRect.width > 0) setWidth(Math.round(entry.contentRect.width));
     });
     observer.observe(box);
     return () => observer.disconnect();
@@ -131,9 +150,9 @@ export function McpAppFrame(props: {
   const [src, setSrc] = React.useState<string | null>(null);
   const [mintFailed, setMintFailed] = React.useState(false);
   React.useEffect(() => {
-    if (src !== null) return undefined;
+    if (src !== null || refused) return undefined;
     let cancelled = false;
-    visualPageUrl(api, sessionId, app.attachmentId).then(
+    visualPageUrl(apiRef.current, sessionId, app.attachmentId).then(
       (url) => {
         if (!cancelled) setSrc(url.src);
       },
@@ -144,7 +163,7 @@ export function McpAppFrame(props: {
     return () => {
       cancelled = true;
     };
-  }, [api, sessionId, app.attachmentId, src]);
+  }, [sessionId, app.attachmentId, src, refused]);
 
   // The tool's definition (the app's `toolInfo`) and whether the agent can
   // take model context, read once per app before the frame loads, so the
@@ -154,8 +173,9 @@ export function McpAppFrame(props: {
     modelContext: false
   });
   React.useEffect(() => {
+    if (refused) return undefined;
     let cancelled = false;
-    api.mcpAppRequest<McpAppToolInfoResponse>(sessionId, itemId, "tool-info", { name: app.tool }).then(
+    apiRef.current.mcpAppRequest<McpAppToolInfoResponse>(sessionId, itemId, "tool-info", { name: app.tool }).then(
       (value) => {
         if (!cancelled) {
           setInfo({
@@ -172,14 +192,15 @@ export function McpAppFrame(props: {
     return () => {
       cancelled = true;
     };
-  }, [api, sessionId, itemId, app.tool]);
+  }, [sessionId, itemId, app.tool, refused]);
 
   // The wire row is slimmed; the app replays the call's own arguments and
   // result, read from the stored row.
   const [toolCall, setToolCall] = React.useState<McpAppToolCall>();
   React.useEffect(() => {
+    if (refused) return undefined;
     let cancelled = false;
-    api.agentChatItem(sessionId, itemId).then(
+    apiRef.current.agentChatItem(sessionId, itemId).then(
       (response) => {
         if (!cancelled && response.item.kind === "activity") {
           setToolCall(mcpAppToolCallOfActivityPayload(response.item.payload));
@@ -190,11 +211,14 @@ export function McpAppFrame(props: {
     return () => {
       cancelled = true;
     };
-  }, [api, sessionId, itemId]);
+  }, [sessionId, itemId, refused]);
 
   // Read by the host on every message, so it sees current values without
   // being rebuilt (which would drop the app's session).
-  const live = { theme, width, displayMode, info, awaitingUser, readOnly: props.readOnly };
+  // The chords the document passes on: the inline set, or in full screen the
+  // viewer's (the palette, and Escape, which returns the app inline).
+  const shortcuts = displayMode === "fullscreen" ? VISUAL_VIEWER_SHORTCUTS : VISUAL_FRAME_SHORTCUTS;
+  const live = { theme, width, displayMode, info, awaitingUser, readOnly: props.readOnly, shortcuts };
   const latest = React.useRef(live);
   latest.current = live;
   const hostRef = React.useRef<McpAppHost | null>(null);
@@ -250,10 +274,17 @@ export function McpAppFrame(props: {
     }
   };
 
-  const ready = src !== null && info.settled;
+  const ready = !refused && src !== null && info.settled;
   React.useEffect(() => {
     if (!ready) return undefined;
-    const target = () => frameRef.current?.contentWindow ?? null;
+    // The frame's window, kept once seen: on unmount the ref is detached
+    // before this effect's cleanup runs, and the teardown must still go out.
+    let frameWindow: Window | null = frameRef.current?.contentWindow ?? null;
+    const target = () => {
+      const current = frameRef.current?.contentWindow ?? null;
+      if (current !== null) frameWindow = current;
+      return current ?? frameWindow;
+    };
     const hostContext = (): McpAppHostContext => {
       const current = latest.current;
       return {
@@ -282,7 +313,7 @@ export function McpAppFrame(props: {
     };
     const actions = mcpAppActions({
       app,
-      request: (operation, body) => api.mcpAppRequest(sessionId, itemId, operation, body),
+      request: (operation, body) => apiRef.current.mcpAppRequest(sessionId, itemId, operation, body),
       // The dock renders beneath a full-screen app's top layer: the app
       // returns inline before anyone is asked.
       ask: async (input) => {
@@ -361,6 +392,27 @@ export function McpAppFrame(props: {
         setNavigatedAway(true);
         return;
       }
+      // An app chord the document passed on (its bootstrap was told which):
+      // replayed on the frame element, so it bubbles to the app's own
+      // listeners as if typed outside — only while the frame has focus and
+      // the reader has just used it, as an agent page's are.
+      const key = readHtmlRenderKeyDown(event.data);
+      if (key !== undefined) {
+        const frame = frameRef.current;
+        if (
+          frame !== null &&
+          isAllowedVisualKey(key, latest.current.shortcuts) &&
+          visualRequestAllowed({
+            fromFrame: true,
+            frameFocused: document.activeElement === frame,
+            userActive: userActive(),
+            escape: key.key === "Escape"
+          })
+        ) {
+          frame.dispatchEvent(new KeyboardEvent("keydown", { ...key, bubbles: true, cancelable: true }));
+        }
+        return;
+      }
       host.receive(event.data);
     };
     window.addEventListener("message", receive);
@@ -371,12 +423,17 @@ export function McpAppFrame(props: {
       hostRef.current = null;
       mcpAppConsents.withdraw(owner);
     };
-  }, [ready, app, api, sessionId, itemId, owner, documentGeneration]);
+  }, [ready, app, sessionId, itemId, owner, documentGeneration]);
 
   // The host reads the context through `latest`; these only say when to resend.
   React.useEffect(() => {
     hostRef.current?.updateHostContext();
   }, [theme, width, displayMode, info]);
+
+  // The document's bootstrap learns which chords to pass on.
+  React.useEffect(() => {
+    frameRef.current?.contentWindow?.postMessage(htmlRenderShortcutsMessage(shortcuts), "*");
+  }, [shortcuts, ready, documentGeneration]);
 
   // A new document gets a new host, which needs the call again.
   React.useEffect(() => {
@@ -406,9 +463,7 @@ export function McpAppFrame(props: {
     );
   }
 
-  // An app whose declared domains reach Orquester itself — this page's origin,
-  // or the daemon's — is never framed: its policy is fixed in the snapshot.
-  if (reachesOrquester(app, api.connection.endpoint)) {
+  if (refused) {
     return (
       <p className="rounded-lg border border-neutral-800 px-3 py-2 text-xs text-neutral-500">
         The {app.server} app asks to connect to Orquester itself, so it was not loaded.
@@ -458,7 +513,11 @@ export function McpAppFrame(props: {
             sandbox="allow-scripts allow-forms"
             allow={mcpAppAllowAttribute(app.permissions)}
             referrerPolicy="no-referrer"
-            onLoad={onFrameLoad}
+            onLoad={() => {
+              onFrameLoad();
+              // Covers the shortcut list a document that was still loading missed.
+              frameRef.current?.contentWindow?.postMessage(htmlRenderShortcutsMessage(latest.current.shortcuts), "*");
+            }}
             className={cn("block w-full border-0 bg-transparent", fullscreen ? "min-h-0 flex-1" : "h-full")}
             style={{ colorScheme: theme.appearance }}
           />

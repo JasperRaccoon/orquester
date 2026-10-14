@@ -29,6 +29,7 @@ export function LineageMark({
   return (
     <span
       className={cn("inline-flex shrink-0 items-center text-neutral-500", className)}
+      role="img"
       title={label}
       aria-label={label}
       data-lineage={lineage.relation}

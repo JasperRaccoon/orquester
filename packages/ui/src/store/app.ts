@@ -1,4 +1,4 @@
-import { useMemo } from "react";
+import { useMemo, useSyncExternalStore } from "react";
 import { create, type StoreApi } from "zustand";
 import { ApiClient, ApiError } from "../lib/api-client";
 import { createTransporter } from "../lib/transporters";
@@ -10,6 +10,7 @@ import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/s
 import { applyScheduledTaskEvent, resetScheduledTasks } from "../lib/scheduled-tasks/store";
 import { applyPullRequestWatchesEvent, resetPullRequestWatches } from "../lib/pr-watches/store";
 import { applySecretRequestEvent, resetSecretRequests } from "../lib/agent-chat/secret-requests";
+import { consentActivity, mcpAppConsents } from "../lib/agent-chat/mcp-app-consent";
 import { SECRET_REQUEST_EVENT_TYPE } from "@orquester/api/agent-chat";
 import { applyAgentProfileEvent, resetAgentProfile } from "../lib/agent-profile/store";
 import { applyWorkflowsEvent, resetWorkflows, workflowsStore } from "../lib/workflows/store";
@@ -3832,13 +3833,19 @@ export function useGridTracks(): GridTracks | null {
   );
 }
 
+const subscribeConsents = (listener: () => void) => mcpAppConsents.subscribe(listener);
+
 /**
  * Subscribe to a single session's activity slice. Only the dot for the session
  * that transitioned re-renders (other entries keep their object identity across
  * an `activityById` update), so this stays cheap on a chatty output stream.
+ * An MCP App consent waiting in the session reads as needing input
+ * (`consentActivity`), as a question does.
  */
 export function useSessionActivity(id: string): SessionActivity | undefined {
-  return useAppStore((s) => s.activityById[id]);
+  const activity = useAppStore((s) => s.activityById[id]);
+  const askedAt = useSyncExternalStore(subscribeConsents, () => mcpAppConsents.waiting().get(id));
+  return useMemo(() => consentActivity(activity, askedAt), [activity, askedAt]);
 }
 
 /**

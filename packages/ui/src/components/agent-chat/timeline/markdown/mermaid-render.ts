@@ -138,6 +138,12 @@ export function createMermaidRenderer(deps: MermaidRendererDeps): MermaidRendere
    *    readers than the cap each re-render evicts the next reader's result:
    *    an endless render loop.
    *
+   * Past twice the cap, the oldest settled entries go whether read or not: a
+   * reader that abandoned its render (its row unmounted mid-render) never
+   * reads it, and without this hard cap such entries would pile up for good.
+   * At twice the cap a live reader's result is far from the oldest, so the
+   * loop above cannot form.
+   *
    * It runs when a *new* render is admitted, never as a render settles, so the
    * cache can exceed the cap while readers are catching up and shrinks on the
    * next admission.
@@ -148,6 +154,13 @@ export function createMermaidRenderer(deps: MermaidRendererDeps): MermaidRendere
     for (const [key, promise] of cache) {
       if (settledCount <= maxCached) return;
       if (settled.has(promise) && claimed.has(promise)) {
+        cache.delete(key);
+        settledCount -= 1;
+      }
+    }
+    for (const [key, promise] of cache) {
+      if (settledCount <= maxCached * 2) return;
+      if (settled.has(promise)) {
         cache.delete(key);
         settledCount -= 1;
       }

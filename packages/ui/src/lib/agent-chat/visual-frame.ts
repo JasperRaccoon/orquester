@@ -49,8 +49,12 @@ export function visualFrameSrc(path: string, host: VisualFrameHost): string | nu
       return `${host.desktopScheme}://local${path}`;
     }
     if (host.kind === "http") {
+      // The endpoint's origin and its sub-path, as the web frames from: a
+      // daemon served under `https://host/orq` serves its pages there too.
       try {
-        return `${host.desktopScheme}://remote/${base64Url(new URL(host.endpoint).origin)}${path}`;
+        const endpoint = new URL(host.endpoint);
+        const base = `${endpoint.origin}${endpoint.pathname.replace(/\/+$/, "")}`;
+        return `${host.desktopScheme}://remote/${base64Url(base)}${path}`;
       } catch {
         return null;
       }

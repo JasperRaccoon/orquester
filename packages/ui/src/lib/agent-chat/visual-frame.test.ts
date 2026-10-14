@@ -31,8 +31,12 @@ test("the desktop frames a page through its page scheme, local or remote", () =>
   const remote = visualFrameSrc(PATH, { kind: "http", endpoint: "https://vps.example.com:8443/base", desktopScheme: "orq-visual" });
   assert.ok(remote?.startsWith("orq-visual://remote/"));
   const encoded = remote!.slice("orq-visual://remote/".length, remote!.indexOf("/api/"));
-  assert.equal(Buffer.from(encoded, "base64url").toString("utf8"), "https://vps.example.com:8443");
+  // The sub-path is kept, as the web keeps it: the daemon serves its pages under it.
+  assert.equal(Buffer.from(encoded, "base64url").toString("utf8"), "https://vps.example.com:8443/base");
   assert.ok(remote!.endsWith(PATH));
+  const root = visualFrameSrc(PATH, { kind: "http", endpoint: "https://vps.example.com/", desktopScheme: "orq-visual" });
+  const rootEncoded = root!.slice("orq-visual://remote/".length, root!.indexOf("/api/"));
+  assert.equal(Buffer.from(rootEncoded, "base64url").toString("utf8"), "https://vps.example.com");
 });
 
 test("no frame where the connection cannot carry one, or for a path that is no page", () => {

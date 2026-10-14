@@ -66,10 +66,10 @@ test("a parent's bar counts its forks and tasks; a thread with neither shows not
 });
 
 test("the tab mark is titled with the relation and the parent", () => {
-  assert.match(
-    renderToStaticMarkup(createElement(LineageMark, { lineage: task.lineage, parentTitle: "Plan the API" })),
-    /Delegated by “Plan the API”/
-  );
+  const mark = renderToStaticMarkup(createElement(LineageMark, { lineage: task.lineage, parentTitle: "Plan the API" }));
+  assert.match(mark, /Delegated by “Plan the API”/);
+  // A labelled span is only announced with a role.
+  assert.match(mark, /role="img"/);
   assert.equal(renderToStaticMarkup(createElement(LineageMark, { lineage: undefined })), "");
 });
 

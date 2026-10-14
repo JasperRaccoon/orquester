@@ -1,7 +1,7 @@
 import React from "react";
 import { flushSync } from "react-dom";
 
-import { DEFAULT_RUNTIME_MODE, SETTLED_TURN_STATES, startedTurns } from "@orquester/api/agent-chat";
+import { DEFAULT_RUNTIME_MODE, SETTLED_TURN_STATES, messageStreamingContext, startedTurns } from "@orquester/api/agent-chat";
 import type { GoalAction } from "@orquester/api/agent-chat";
 
 import { shortAccountLabel } from "../../lib/account-label";
@@ -110,9 +110,8 @@ import { ThreadLineageBar, type LineageNotice } from "./ThreadLineageBar";
 import { ThreadGoneNotice } from "./ThreadGoneNotice";
 import {
   goneDisplay,
-  initialGoneWatch,
-  nextGoneWatch,
-  type GoneWatch
+  GoneWatches,
+  nextGoneWatch
 } from "../../lib/agent-chat/status.logic";
 import { defaultMergeBackText } from "../../lib/agent-chat/lineage.logic";
 import { resolveMarkdownImageSource } from "./timeline/markdown/local-image";
@@ -127,6 +126,8 @@ import type { AgentChatViewProps, AgentRosterMainRow } from "./contracts";
 
 /** Stable empty arrays, so a neutralised render never churns child props. */
 const NO_APPROVALS: never[] = [];
+/** Each live slice's gone watch, across its views' mounts. */
+const goneWatches = new GoneWatches();
 const NO_REQUEST_IDS: readonly string[] = [];
 const NO_REWIND_TARGETS: readonly RewindTarget[] = [];
 
@@ -589,17 +590,20 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const gone = slice.connection === "gone";
   const chatPending = session.chatPending === true;
   const retryStream = actions.retryStream;
-  const goneWatch = React.useRef<GoneWatch>(initialGoneWatch({ pending: chatPending, record: session }));
-  const goneShown = goneDisplay({ gone, pending: chatPending, watch: goneWatch.current }) === "gone";
+  // Kept with the slice, not the view: a view remounted within the slice's dispose grace
+  // carries on from what the last one saw (a record that stopped being pending, or changed,
+  // while no view watched still gets its one look).
+  const goneWatch = goneWatches.watchFor(actions, { pending: chatPending, record: session });
+  const goneShown = goneDisplay({ gone, pending: chatPending, record: session, watch: goneWatch }) === "gone";
   React.useEffect(() => {
-    const next = nextGoneWatch(goneWatch.current, {
+    const next = nextGoneWatch(goneWatches.watchFor(actions, { pending: chatPending, record: session }), {
       connection: slice.connection,
       pending: chatPending,
       record: session
     });
-    goneWatch.current = next.watch;
+    goneWatches.remember(actions, next.watch);
     if (next.retry) retryStream();
-  }, [slice.connection, chatPending, session, retryStream]);
+  }, [slice.connection, chatPending, session, retryStream, actions]);
   const [lineageNotice, setLineageNotice] = React.useState<LineageNotice | null>(null);
   React.useEffect(() => setLineageNotice(null), [sessionId]);
   // One fork at a time from this view: a second click while the first is on
@@ -667,7 +671,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
     },
     [api, sessionId]
   );
-  const mergeText = React.useMemo(() => defaultMergeBackText(slice.entries), [slice.entries]);
+  const mergeStreaming = messageStreamingContext(slice);
+  const mergeText = React.useMemo(
+    () => defaultMergeBackText(slice.entries, mergeStreaming),
+    [slice.entries, mergeStreaming]
+  );
 
   // --- older history and the palette's reveal (design 2026-09-23) ----------
   // The "Load older turns" row pages the indexed log in ABOVE the window; the

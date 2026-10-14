@@ -7,6 +7,7 @@
  */
 
 import type { SessionSummary, ThreadItem, ThreadLineage } from "@orquester/api";
+import { isMessageStreaming, type MessageStreamingContext } from "@orquester/api/agent-chat";
 
 /** The chip's verb: what the child is to its parent. */
 export function lineageVerb(lineage: Pick<ThreadLineage, "relation">): string {
@@ -49,16 +50,17 @@ export function lineageChildStatus(session: SessionSummary): string {
  * What "Merge back" offers to send by default: the thread's last finished
  * answer — its newest settled assistant message of the main conversation
  * (never a subagent's words, never a reply still being written). "" when there
- * is none yet.
+ * is none yet. Whether a reply is still being written is `isMessageStreaming`'s
+ * rule, never the bare flag a dead host or an unclosed turn leaves `true`.
  */
-export function defaultMergeBackText(entries: readonly ThreadItem[]): string {
+export function defaultMergeBackText(entries: readonly ThreadItem[], streaming: MessageStreamingContext): string {
   for (let index = entries.length - 1; index >= 0; index -= 1) {
     const item = entries[index]!;
     if (
       item.kind === "message" &&
       item.role === "assistant" &&
       item.agentId === undefined &&
-      !item.streaming &&
+      !isMessageStreaming(item, streaming) &&
       item.messageKind !== "commentary" &&
       item.text.trim().length > 0
     ) {
@@ -81,6 +83,21 @@ export function isForkOutcomeUnknown(error: unknown): boolean {
   if (status >= 500) return true;
   const body = (error as { body?: unknown }).body as { code?: unknown; error?: { code?: unknown } } | null | undefined;
   return (body?.error?.code ?? body?.code) === "HOST_UNAVAILABLE";
+}
+
+/**
+ * Whether a kept fork key may name the point a fork child was taken from. A message names its
+ * point on its own (the host's fold may record a turn the client did not send); a key without
+ * one is a cut by turn, or the whole thread. A child with no recorded point — a whole-thread fork, or a lineage whose
+ * point did not read — may be any of its parent's forks, so it matches them all: a kept id that
+ * would now conflict is worse than a fresh fork.
+ */
+function forkPointMatches(key: string, point: ThreadLineage["forkedFrom"]): boolean {
+  if (point === undefined) return true;
+  const [, messageId, turnId] = JSON.parse(key) as [string, string | null, string | null];
+  if (messageId !== null) return point.messageId === messageId;
+  // A whole-thread key (no turn either) is not a fork taken at a point.
+  return turnId !== null && point.turnId === turnId;
 }
 
 /**
@@ -113,15 +130,22 @@ export class ForkRetryKeys {
   }
 
   /**
-   * A tab closed: the kept ids of forks from it, or from the parent of a fork tab that closed,
-   * are dropped. The tab that went may be the very fork a kept id would converge on — a stray
-   * one the user closed, or one the daemon took back — and its key now answers
-   * COMMAND_ID_CONFLICT, so the next fork from that point is a new command.
+   * A tab closed. Closing a parent drops every kept id of forks from it. Closing a fork drops
+   * only the kept id of the point it was forked from (its `forkedFrom` message, or every point
+   * of its parent when it records none): that fork may be the very one a kept id would converge on —
+   * a stray one the user closed, or one the daemon took back — and its key now answers
+   * COMMAND_ID_CONFLICT, so the next fork from that point is a new command. Kept ids of the
+   * parent's other points stay, so their retries still converge.
    */
   forgetTab(closed: Pick<SessionSummary, "id" | "lineage">): void {
-    const parentId = closed.lineage?.relation === "fork" ? closed.lineage.parentThreadId : null;
+    const lineage = closed.lineage?.relation === "fork" ? closed.lineage : null;
     for (const [key, entry] of this.pending) {
-      if (entry.sessionId === closed.id || entry.sessionId === parentId) this.pending.delete(key);
+      if (entry.sessionId === closed.id) {
+        this.pending.delete(key);
+        continue;
+      }
+      if (lineage === null || entry.sessionId !== lineage.parentThreadId) continue;
+      if (forkPointMatches(key, lineage.forkedFrom)) this.pending.delete(key);
     }
   }
 }

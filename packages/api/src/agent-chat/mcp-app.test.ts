@@ -7,6 +7,7 @@
 
 import assert from "node:assert/strict";
 import test from "node:test";
+import vm from "node:vm";
 
 import {
   MCP_APP_MAX_HTML_BYTES,
@@ -24,6 +25,7 @@ import {
   normalizeMcpAppToolResult,
   readMcpAppCsp,
   readMcpAppDocument,
+  injectMcpAppThemeBootstrap,
   readMcpAppReference,
   readMcpAppResourceUri,
   type McpAppReference
@@ -344,4 +346,94 @@ test("the unload notice goes to the parent seen at install, and not for a page k
   assert.deepEqual(posted, [], "a page kept in the back-forward cache says nothing");
   listeners.get("pagehide")!({ persisted: false });
   assert.deepEqual(posted, [{ to: "parent", message: { jsonrpc: "2.0", method: "orq/notifications/document-unloaded" } }]);
+});
+
+/**
+ * Runs the document bootstrap against a minimal window: listeners by type and
+ * phase, a parent that records what it is sent, and timers run on demand.
+ */
+function bootstrapWindow() {
+  type Listener = (event: unknown) => void;
+  const listeners: Array<{ type: string; listener: Listener; capture: boolean }> = [];
+  const sent: unknown[] = [];
+  const timers: Array<() => void> = [];
+  const parent = { postMessage: (message: unknown) => sent.push(message) };
+  const window = {
+    parent,
+    addEventListener: (type: string, listener: Listener, capture?: boolean) =>
+      listeners.push({ type, listener, capture: capture === true }),
+    removeEventListener: (type: string, listener: Listener) => {
+      const index = listeners.findIndex((entry) => entry.type === type && entry.listener === listener);
+      if (index >= 0) listeners.splice(index, 1);
+    }
+  };
+  const script = /<script>([\s\S]*?)<\/script>/.exec(injectMcpAppThemeBootstrap("<!doctype html><p>app</p>"))![1]!;
+  vm.runInNewContext(script, {
+    window,
+    document: { documentElement: { style: {} } },
+    setTimeout: (run: () => void) => timers.push(run)
+  });
+  const dispatch = (type: string, event: Record<string, unknown>) => {
+    // Capture listeners first, then bubbling ones (the app's own, and the bootstrap's late check).
+    for (const capture of [true, false]) {
+      for (const entry of listeners.filter((candidate) => candidate.type === type && candidate.capture === capture)) {
+        entry.listener(event);
+      }
+    }
+  };
+  const key = (init: Record<string, unknown>, onPrevent?: () => void) => {
+    const event: Record<string, unknown> = {
+      isTrusted: true,
+      isComposing: false,
+      metaKey: false,
+      ctrlKey: false,
+      shiftKey: false,
+      altKey: false,
+      repeat: false,
+      code: "",
+      target: { tagName: "DIV", isContentEditable: false },
+      defaultPrevented: false,
+      ...init
+    };
+    event.composedPath = () => [event.target];
+    event.preventDefault = () => {
+      event.defaultPrevented = true;
+      onPrevent?.();
+    };
+    return event;
+  };
+  return { parent, sent, timers, dispatch, key };
+}
+
+test("an app document passes on only the shortcuts its host names", () => {
+  const frame = bootstrapWindow();
+  const palette = { key: "k", code: "KeyK", ctrlKey: true, metaKey: false, shiftKey: false, altKey: false };
+  frame.dispatch("keydown", frame.key({ key: "k", code: "KeyK", ctrlKey: true }));
+  assert.equal(frame.sent.length, 0, "nothing named yet");
+  // A stranger cannot name shortcuts; the parent can.
+  frame.dispatch("message", { source: {}, data: { jsonrpc: "2.0", method: "orq/notifications/shortcuts", params: { shortcuts: [palette] } } });
+  frame.dispatch("keydown", frame.key({ key: "k", code: "KeyK", ctrlKey: true }));
+  assert.equal(frame.sent.length, 0);
+  frame.dispatch("message", { source: frame.parent, data: { jsonrpc: "2.0", method: "orq/notifications/shortcuts", params: { shortcuts: [palette] } } });
+  frame.dispatch("keydown", frame.key({ key: "k", code: "KeyK", ctrlKey: true }));
+  // Built in the document's realm: compared as data.
+  assert.deepEqual(JSON.parse(JSON.stringify(frame.sent)), [
+    {
+      jsonrpc: "2.0",
+      method: "orq/notifications/keydown",
+      params: { key: "k", code: "KeyK", metaKey: false, ctrlKey: true, shiftKey: false, altKey: false, repeat: false }
+    }
+  ]);
+});
+
+test("an app document keeps keys typed into its fields, ones it handled, and untrusted ones", () => {
+  const frame = bootstrapWindow();
+  const palette = { key: "k", code: "KeyK", ctrlKey: true, metaKey: false, shiftKey: false, altKey: false };
+  frame.dispatch("message", { source: frame.parent, data: { jsonrpc: "2.0", method: "orq/notifications/shortcuts", params: { shortcuts: [palette] } } });
+  frame.dispatch("keydown", frame.key({ key: "k", code: "KeyK", ctrlKey: true, target: { tagName: "INPUT" } }));
+  frame.dispatch("keydown", frame.key({ key: "k", code: "KeyK", ctrlKey: true, isTrusted: false }));
+  frame.dispatch("keydown", frame.key({ key: "j", code: "KeyJ", ctrlKey: true }));
+  const handled = frame.key({ key: "k", code: "KeyK", ctrlKey: true, defaultPrevented: true });
+  frame.dispatch("keydown", handled);
+  assert.equal(frame.sent.length, 0);
 });

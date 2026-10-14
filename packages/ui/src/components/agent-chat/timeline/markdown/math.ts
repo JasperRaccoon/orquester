@@ -191,7 +191,8 @@ export function remarkChatMath(this: MathProcessorLike): (tree: MdNode, file: { 
  * and the like, so a formula can neither navigate nor fetch; `strict: "ignore"`
  * keeps unknown LaTeX commands from logging or throwing; `throwOnError: false`
  * renders a bad formula's source in `errorColor` instead of failing the
- * message. The formula is untrusted input, so its size is bounded too:
+ * message — the theme's danger colour (`text-danger`'s variable), so it
+ * stays readable in light mode. The formula is untrusted input, so its size is bounded too:
  * `maxSize` clamps every user-specified length (`\rule{999em}{999em}`,
  * `\kern`, `\hspace`) to 20em, and `maxExpand` caps macro expansion at 1000
  * steps (KaTeX's default, stated so it is not silently loosened).
@@ -200,7 +201,7 @@ export const KATEX_OPTIONS = {
   trust: false,
   strict: "ignore",
   throwOnError: false,
-  errorColor: "#f87171",
+  errorColor: "rgb(var(--sem-danger-400))",
   maxSize: 20,
   maxExpand: 1000
 } as const;

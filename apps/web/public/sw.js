@@ -3,7 +3,8 @@
  *
  * Cache strategy:
  *   - navigations: network-first, offline fallback to cached /index.html
- *   - /assets/* (content-hashed): cache-first, trimmed to ~60 entries
+ *   - /assets/* (content-hashed): cache-first, trimmed to ~200 entries, never
+ *     evicting the assets the cached shell (/index.html) loads itself
  *   - root static files (icons, manifest): network-first, cache on success
  * Never-intercepted surfaces: non-GET requests and paths under /api, /events,
  * /ws, /health, /mcp, /devtools-frontend, /ws-devtools reach the network
@@ -17,7 +18,9 @@ var VERSION = "v6";
 var SHELL_CACHE = "orq-shell-" + VERSION;
 var ASSET_CACHE = "orq-assets-" + VERSION;
 var CURRENT_CACHES = [SHELL_CACHE, ASSET_CACHE];
-var ASSET_CACHE_LIMIT = 60;
+// Lazy chunks add up (Mermaid alone is ~36, KaTeX's fonts ~20 more), so the
+// cap leaves room for them beside the app's own bundle.
+var ASSET_CACHE_LIMIT = 200;
 
 // Paths whose GETs must always hit the network directly (no respondWith).
 // /devtools-frontend serves Chrome's own DevTools bundle (proxied) and must
@@ -87,17 +90,51 @@ function isBypassed(url) {
   return false;
 }
 
+// The /assets/ paths a shell document loads itself: its entry script, its
+// stylesheet and its modulepreloads.
+function shellAssetPaths(html) {
+  var paths = {};
+  var pattern = /\/assets\/[^"'\s?#()<>]+/g;
+  var match;
+  while ((match = pattern.exec(html)) !== null) {
+    paths[match[0]] = true;
+  }
+  return paths;
+}
+
+// What trimming must keep: the assets the cached /index.html loads. An
+// offline start serves that document, and without its entry chunk the app is
+// blank — so they are never the "oldest" an overflow evicts.
+function pinnedAssetPaths() {
+  return caches
+    .open(SHELL_CACHE)
+    .then(function (cache) {
+      return cache.match("/index.html");
+    })
+    .then(function (response) {
+      return response ? response.text() : "";
+    })
+    .then(shellAssetPaths, function () {
+      return {};
+    });
+}
+
 function trimCache(cacheName, limit) {
   return caches.open(cacheName).then(function (cache) {
     return cache.keys().then(function (keys) {
+      // Under the limit (the usual case) the shell is not read at all.
       if (keys.length <= limit) return undefined;
-      // Delete oldest entries (keys() is insertion-ordered) until under limit.
-      var overflow = keys.length - limit;
-      var deletions = [];
-      for (var i = 0; i < overflow; i++) {
-        deletions.push(cache.delete(keys[i]));
-      }
-      return Promise.all(deletions);
+      return pinnedAssetPaths().then(function (pinned) {
+        // Delete the oldest unpinned entries (keys() is insertion-ordered)
+        // until under the limit.
+        var overflow = keys.length - limit;
+        var deletions = [];
+        for (var i = 0; i < keys.length && deletions.length < overflow; i++) {
+          if (pinned[new URL(keys[i].url).pathname]) continue;
+          deletions.push(cache.delete(keys[i]));
+        }
+        return Promise.all(deletions);
+      });
     });
   });
 }

@@ -169,7 +169,7 @@ export function ThreadLineageBar({
             role={notice.tone === "error" ? "alert" : "status"}
             className={cn(
               "ml-auto inline-flex min-w-0 items-center gap-1",
-              notice.tone === "error" ? "text-red-300" : "text-neutral-300"
+              notice.tone === "error" ? "text-danger-300" : "text-neutral-300"
             )}
           >
             <span className="min-w-0 truncate" title={notice.text}>
@@ -195,7 +195,7 @@ export function ThreadLineageBar({
             return (
               <li
                 key={merge.mergeId}
-                className={cn("flex min-w-0 items-center gap-2", failed ? "text-red-300" : "text-neutral-400")}
+                className={cn("flex min-w-0 items-center gap-2", failed ? "text-danger-300" : "text-neutral-400")}
                 data-merge-state={merge.state}
               >
                 <GitMerge size={12} strokeWidth={1.8} className="shrink-0" aria-hidden />

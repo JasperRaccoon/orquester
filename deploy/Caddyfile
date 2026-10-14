@@ -31,6 +31,16 @@ orquester.example.com {
     # page's own inline scripts and X-Frame-Options DENY the frame, so this path
     # gets its own block: the same sandbox the daemon sends, plus
     # frame-ancestors 'self' so only the app may frame it.
+    #
+    # MCP Apps are served from this path too. An app may declare camera,
+    # microphone or geolocation, and the client passes that on in the frame's
+    # `allow` attribute — but behind this Caddyfile those stay off: the app
+    # page's (@app) Permissions-Policy disables them for the whole frame tree,
+    # and a frame can never be granted a feature its parent lacks, so relaxing
+    # only this block would change nothing. That is deliberate (no app gets
+    # the device); a deployment that wants declared device access must relax
+    # camera/microphone/geolocation on the @app block as well, knowingly.
+    # clipboard-write is not restricted here, so a declared one is delegated.
     @visuals path /api/agent-visuals/*
     header @visuals {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
