@@ -259,11 +259,14 @@ distinctive one (≥ 8 characters of two or more classes, or ≥ 16 of any). Ing
 once or twice serialised), which holds across a host restart. MCP rows and raw frames that cannot
 be walked are replaced, never kept (fail closed).
 
-What a host restart loses (S-M5): the remembered values live in the agent host's memory only —
-never on disk, by design. After a restart, a deploy, or the thread's release, the result row is
-still clean by shape, but a later echo of the value by the agent (a command, a message) is no
-longer masked. A fork's child is masked with its parent's values while both are held (`link`),
-under the same limit.
+Only that shape strip outlives the agent host process (S-M5). The by-value masking — the remembered
+values, and a fork child's link to its parent's (`SessionSecretRedactor.link`, which masks the
+child's replay of the parent's turns with the parent's values) — lives in the host's memory alone,
+never on disk, so the value is never persisted to protect itself. It ends when the host restarts
+(a deploy's handover included), and when the thread — or, for a child, its parent — is released
+or deleted (`SessionSecretRedactor.forget`). After that, a value the agent echoes in new output,
+or a child's history replayed for the first time (a restart before its eager start replayed it),
+is written unmasked; the `request_secret` result itself is still stripped by shape.
 The persisted row keeps `secretRequest` as its reference (the card's record). T3 instead keeps
 the value in its secret store under a one-use `secretRef` that only its own tools accept;
 Orquester has no tool that consumes such a ref, so the value goes to the agent — and the
@@ -295,14 +298,23 @@ boundary between agents of one OS user is not a security boundary, and Orquester
 one.
 
 Grok's file-backed `use_tool` forms (`{"file": …}`, `{"tool_name": …, "tool_input_file": …}`,
-its `07-mcp-servers.md`) may not occur over ACP at all — those docs say ACP client filesystems
-reject file mode without an agent-local fallback — but the `{file}` form carries no `tool_name`: such a call names no session tool, so it is neither
-pre-approved (the user gets an approval card — fail closed) nor marked, and its row is an ordinary
-tool row.
+its `07-mcp-servers.md`) may never occur over ACP: those docs say an ACP client's filesystem
+rejects file mode unless the agent has a local fallback. Should one occur, the `{file}` form
+carries no `tool_name`, so the call names no session tool: it is neither pre-approved (the user
+gets an approval card — fail closed) nor marked, and its row is an ordinary tool row.
 
-Pre-approval is always by registered tool name, never server-wide: `docs/orquester-mcp.md` tells
-users to install Orquester's own full-drive `/mcp` under the same name `orquester`, and such a
-server must never be waved through. (Codex's thread override replaces a user's same-named entry
+Grok's shapes in shared code are deliberate. The provider-neutral readers — `@orquester/api`
+`session-tools.ts` (`sessionToolNameFromProviderData`, the result walk through `rawOutput` /
+`OkayOutput`) and the host's `secret-redaction.ts` (`isMcpCallEvent`: a `use_tool` row of a
+third-party server is an MCP call) — know Grok's `use_tool` layout because that is the layout
+Grok's rows are persisted in, and every consumer (slimming, the timeline, the index, masking)
+reads persisted rows. Normalising them in the adapter instead would change the row shape of
+every thread already on disk.
+
+Pre-approval is always by registered tool name, never server-wide: a user may have installed
+Orquester's own full-drive `/mcp` under the same name `orquester` (`docs/orquester-mcp.md` now
+says `orquester_remote`, but older installs keep the name), and such a server must never be waved
+through. (Codex's thread override replaces a user's same-named entry
 outright — verified on 0.159.0; Claude's and Grok's precedence between the two is unverified.)
 Grok's `session/request_permission` for a session tool carries the qualified title
 `orquester__<tool>`, `rawInput.tool_name` and the `use_tool` vendor block (fixture 33, grok 1.0.46),

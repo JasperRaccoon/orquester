@@ -19,6 +19,7 @@ import test, { after, describe } from "node:test";
 import { mcpAppReferenceOfActivityPayload, type RuntimeEvent } from "@orquester/api/agent-chat";
 
 import type { AdapterContext } from "../../adapter.ts";
+import { AGENT_HOST_DEADLINES } from "../../support/deadline.ts";
 import type { SessionNotification } from "./acp/_generated/schema.ts";
 import { createGrokAdapter } from "./index.ts";
 import { grokCallToolResult, grokMcpAppCallOf, grokMcpTools, grokResourceContents, withGrokMcpApp } from "./mcp-apps.ts";
@@ -231,11 +232,19 @@ describe("grok MCP Apps — the adapter", () => {
     await r.dispose();
   });
 
-  test("a read slower than the 4 s probe deadline is still captured, and a second turn reuses it without reading", async () => {
+  test("a read slower than the 4 s probe deadline is still captured, and a second turn reuses it without reading", async (t) => {
     // The second turn calls ANOTHER tool of the server that shares the resource.
     const r = await rig("mcp-app-slow", { GROK_MOCK_SECOND_TOOL: "edit_widget" });
+    // The read's deadline runs on a mocked clock: 4.5 s pass at once, and the
+    // mock answers the read only when the next `_x.ai/mcp/list` arrives.
+    t.mock.timers.enable({ apis: ["setTimeout"] });
     await r.adapter.sendTurn({ threadId: "t1", input: "show it", attachments: [], interactionMode: "default" });
+    await r.waitForSent("_x.ai/mcp/read_resource");
+    t.mock.timers.tick(AGENT_HOST_DEADLINES.probeMs + 500);
+    const listed = r.adapter.mcpApps!.listTools("t1", "apps");
     await r.waitFor((event) => event.type === "turn.completed");
+    t.mock.timers.reset();
+    await listed;
     const first = r.events.find(isAppCompletion) as Extract<RuntimeEvent, { type: "item.completed" }>;
     assert.equal(((first.payload.data as Record<string, unknown>).mcpApp as { attachmentId?: string })?.attachmentId, STORED_ID);
     await r.adapter.sendTurn({ threadId: "t1", input: "again", attachments: [], interactionMode: "default" });

@@ -1246,6 +1246,15 @@ test("rollback refuses when the fork did not preserve the boundary", async () =>
   const before = session.sessionId;
   await assert.rejects(session.rollbackThread(1), /did not preserve the requested rewind/);
   assert.equal(session.sessionId, before, "a failed rollback must not re-point the thread");
+  const forkedId = harness.fake.requests
+    .map((request) => /^\/session\/(ses_fork_[^/]+)\/message$/.exec(request.path)?.[1])
+    .find((id) => id !== undefined);
+  assert.ok(forkedId !== undefined);
+  assert.deepEqual(
+    harness.fake.requests.filter((request) => request.method === "DELETE").map((request) => request.path),
+    [`/session/${forkedId}`],
+    "the unusable fork is deleted, never the thread's own session"
+  );
   await session.stop({ reason: "test", hostInitiated: true });
   harness.dispose();
 });

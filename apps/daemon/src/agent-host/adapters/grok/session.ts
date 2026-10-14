@@ -921,6 +921,10 @@ export class GrokSession {
   // ------------------------------------------------------------- approvals
 
   private async onPermissionRequest(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
+    // Asked at all, the CLI is not resolving approvals itself — even where
+    // the answer below needs no card (A-I1: fixture 33's session-tool call
+    // still opens and resolves its own interaction around our answer).
+    this.normalizer.noteRequestAsked();
     // Session tools never raise a card (design 2026-10-14 §1.3): one-shot
     // `allow_once`, never a grant Grok would remember for anything else.
     const sessionTool = grokSessionToolName(params.toolCall);

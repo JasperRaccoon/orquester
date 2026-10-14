@@ -11,7 +11,7 @@
  * refuses one by contract, and the others would copy half a reply).
  */
 
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import {
@@ -143,6 +143,16 @@ export const FORK_TRANSCRIPT_MESSAGE_MAX_CHARS = 8_000;
 const OPEN_TAG = "<forked-conversation>";
 const CLOSE_TAG = "</forked-conversation>";
 
+/**
+ * The parent's own words with the delimiters spelled as entities: a message
+ * (or title) that quotes `</forked-conversation>` must not end the block
+ * early, or {@link stripForkHandoff} would show the rest of the transcript
+ * as the user's message.
+ */
+function escapeHandoffTags(text: string): string {
+  return text.replace(/<(\/?)(forked-conversation)>/gi, "&lt;$1$2&gt;");
+}
+
 function clip(text: string, max: number): string {
   if (text.length <= max) return text;
   const half = Math.floor((max - 40) / 2);
@@ -177,7 +187,9 @@ export function buildForkTranscript(input: {
     for (const turn of input.retained) {
       if (turn.userMessageId === item.id) turnsWithText.add(turn.turnId);
     }
-    blocks.push(`[${item.role === "user" ? "User" : "Assistant"}]\n${clip(text, FORK_TRANSCRIPT_MESSAGE_MAX_CHARS)}`);
+    blocks.push(
+      `[${item.role === "user" ? "User" : "Assistant"}]\n${escapeHandoffTags(clip(text, FORK_TRANSCRIPT_MESSAGE_MAX_CHARS))}`
+    );
   }
   if (blocks.length === 0) return null;
   // Kept exchanges the fold's window no longer holds a word of (retention
@@ -197,7 +209,7 @@ export function buildForkTranscript(input: {
     used += blocks[first]!.length + 2;
   }
   const omitted = first;
-  const title = input.parentTitle.replace(/\s+/g, " ").trim() || "the original conversation";
+  const title = escapeHandoffTags(input.parentTitle.replace(/\s+/g, " ").trim()) || "the original conversation";
   const preamble =
     `This conversation is a fork of "${title}". The user branched it off at the point below, so ` +
     "treat the transcript as what was said before their next message and continue from there." +
@@ -218,7 +230,12 @@ export function withForkHandoff(input: string, transcript: string): string | nul
   return `${transcript}\n\n${input}`;
 }
 
-/** Strip a handoff transcript from a replayed prompt, so a resumed history shows what the user typed. */
+/**
+ * Strip a handoff transcript from a replayed prompt, so a resumed history
+ * shows what the user typed. The first close tag ends it: the transcript's
+ * own text never holds one ({@link escapeHandoffTags}), while the user's
+ * message after it may.
+ */
 export function stripForkHandoff(text: string): string {
   if (!text.startsWith(OPEN_TAG)) return text;
   const end = text.indexOf(CLOSE_TAG);
@@ -232,7 +249,6 @@ export function stripForkHandoff(text: string): string {
 export interface ForkHandoffStore {
   load(threadId: string): Promise<ForkHandoffRecord | null>;
   save(threadId: string, record: ForkHandoffRecord): Promise<void>;
-  remove(threadId: string): Promise<void>;
 }
 
 /** `fork-handoff.json` beside `meta.json`: 0600, written atomically, read tolerantly. */
@@ -251,9 +267,6 @@ export function createFileForkHandoffStore(pathFor: (threadId: string) => string
       const tmp = `${path}.tmp`;
       await writeFile(tmp, JSON.stringify(record), { encoding: "utf8", mode: 0o600 });
       await rename(tmp, path);
-    },
-    async remove(threadId) {
-      await rm(pathFor(threadId), { force: true });
     }
   };
 }
@@ -267,9 +280,6 @@ export function createMemoryForkHandoffStore(): ForkHandoffStore {
     },
     async save(threadId, record) {
       records.set(threadId, record);
-    },
-    async remove(threadId) {
-      records.delete(threadId);
     }
   };
 }

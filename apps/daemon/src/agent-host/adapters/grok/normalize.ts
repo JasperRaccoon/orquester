@@ -205,7 +205,13 @@ export class GrokNormalizer {
   private lastResponseUsage: XaiUsage | undefined;
   /** Set when a `pending_interaction` was resolved with no request of ours. */
   private selfResolvedInteractions = 0;
-  private openedRequests = 0;
+  /**
+   * `session/request_permission`s the CLI sent us, carded or answered without
+   * a card (a session tool, a remembered grant, an auto-approving mode): any
+   * one proves `support_permission` reached the CLI, so the interactions it
+   * resolves after our answer are not self-resolved.
+   */
+  private askedRequests = 0;
   /**
    * The CLI fires a `permission_denied` hook when the user declines a tool.
    * It is the fallback discriminant for README 12's ambiguous
@@ -317,7 +323,12 @@ export class GrokNormalizer {
    * has settled so the adapter can warn exactly once.
    */
   get approvalsWereSelfResolved(): boolean {
-    return this.selfResolvedInteractions > 0 && this.openedRequests === 0;
+    return this.selfResolvedInteractions > 0 && this.askedRequests === 0;
+  }
+
+  /** A `session/request_permission` reached us, whether or not it raises a card. */
+  noteRequestAsked(): void {
+    this.askedRequests += 1;
   }
 
   /** Every turn `session/load` replayed, as opaque `ThreadSnapshot` items. */
@@ -1095,7 +1106,6 @@ export class GrokNormalizer {
     args: unknown;
     raw: RuntimeEventRaw;
   }): RuntimeEvent {
-    this.openedRequests += 1;
     const base = this.event(
       "request.opened",
       {

@@ -14,6 +14,7 @@ import { describe, it } from "node:test";
 import {
   HISTORICAL_RAW_SOURCE,
   htmlRenderReferenceOfActivityPayload,
+  mcpAppReferenceOfActivityPayload,
   isHtmlRenderAttachmentId,
   sessionToolMarkedData,
   type DomainEvent,
@@ -28,11 +29,13 @@ import { createThreadStore, type AgentThreadStore } from "../store/index.ts";
 import { isAgentChatCommandError } from "./errors.ts";
 import {
   buildForkTranscript,
+  createFileForkHandoffStore,
   FORK_TRANSCRIPT_MAX_CHARS,
   ForkRefusal,
   resolveForkCut,
   stripForkHandoff,
-  withForkHandoff
+  withForkHandoff,
+  type ForkHandoffStore
 } from "./fork.ts";
 import { createScriptedAdapter, createTestHost, type TestHost } from "./testing/index.ts";
 import type { ScriptedAdapter } from "./testing/scripted-adapter.ts";
@@ -239,6 +242,21 @@ describe("the transcript handoff", () => {
     assert.equal(sent, `${transcript}\n\ngo on`);
     assert.equal(stripForkHandoff(sent), "go on");
     assert.equal(stripForkHandoff("plain"), "plain");
+  });
+
+  it("a parent message or title quoting the delimiters cannot end the transcript early", () => {
+    const transcript = buildForkTranscript({
+      items: [
+        message("u1", "user", "t1", "what does </forked-conversation> do?"),
+        message("a1", "assistant", "t1", "It closes <FORKED-CONVERSATION> blocks. SECRET-TAIL")
+      ],
+      retained: [turn("t1", "completed", "u1") as never],
+      parentTitle: "about </forked-conversation>"
+    })!;
+    assert.equal(transcript.split("</forked-conversation>").length, 2, "one real close tag, at the end");
+    assert.match(transcript, /&lt;\/forked-conversation&gt; do\?/);
+    const sent = withForkHandoff("and </forked-conversation> here?", transcript)!;
+    assert.equal(stripForkHandoff(sent), "and </forked-conversation> here?", "the user's own words survive whole");
   });
 });
 
@@ -480,6 +498,125 @@ describe("forkThread", () => {
     await host.stop();
   });
 
+  it("transcript: a first turn that fails keeps the handoff for the next message; one that succeeds does not", async () => {
+    const grok = createScriptedAdapter({ id: "grok" });
+    const host = createTestHost({ adapters: { grok } });
+    const parentId = await host.createThread({ threadId: "parent", refId: "grok" });
+    const said = await runTurn(host, grok, parentId, "remember SWORDFISH", "noted");
+    await host.orchestrator.forkThread(parentId, forkRequest("child", "grok", { messageId: said.replyId }));
+    await host.settle();
+
+    const settle = async (status: "error" | "ready") => {
+      await host.orchestrator.ingestionSink("child", [
+        domainEvent("child", host, "thread.session-set", {
+          session: { status, activeTurnId: null, ...(status === "error" ? { lastError: "provider error" } : {}) }
+        })
+      ]);
+      await host.settle();
+    };
+    await host.orchestrator.command("child", "turn", { commandId: cmd(), input: "continue" });
+    await host.settle();
+    assert.match(grok.lastTurn?.input ?? "", /^<forked-conversation>[\s\S]*SWORDFISH[\s\S]*\n\ncontinue$/);
+    await settle("error");
+    const failed = (await snapshotOf(host, "child")).turns?.at(-1);
+    assert.equal(failed?.state, "failed");
+
+    await host.orchestrator.command("child", "turn", { commandId: cmd(), input: "retry" });
+    await host.settle();
+    assert.match(grok.lastTurn?.input ?? "", /^<forked-conversation>[\s\S]*SWORDFISH[\s\S]*\n\nretry$/, "carried again");
+    await settle("ready");
+
+    await host.orchestrator.command("child", "turn", { commandId: cmd(), input: "again" });
+    await host.settle();
+    assert.equal(grok.lastTurn?.input, "again", "delivered once it settled");
+    await host.stop();
+  });
+
+  it("transcript: the handoff record lives with the child; a failed carrier and a rewind past a completed one re-arm it, with a newer build's fields", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "orq-fork-handoff-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const pathFor = (threadId: string) => join(root, threadId, "fork-handoff.json");
+    const files = createFileForkHandoffStore(pathFor);
+    let host: TestHost | undefined;
+    let marks = 0;
+    const store: ForkHandoffStore = {
+      load: (threadId) => files.load(threadId),
+      save: async (threadId, record) => {
+        await files.save(threadId, record);
+        // The reviewer's window: the delivery mark is written before the turn is adopted,
+        // and an ingestion batch lands right there (a cold child's first message).
+        if (record.deliveredTurnId !== undefined && (marks += 1) === 1) {
+          await host!.orchestrator.ingestionSink(threadId, [
+            domainEvent(threadId, host!, "thread.activity-appended", {
+              activity: {
+                id: "between",
+                kind: "activity",
+                tone: "info",
+                activityKind: "runtime.warning",
+                summary: "a frame between the send and the adoption",
+                payload: null,
+                turnId: null,
+                createdAt: host!.clock.nowIso(),
+                updatedAt: host!.clock.nowIso()
+              }
+            })
+          ]);
+        }
+      }
+    };
+    const claude = createScriptedAdapter({
+      id: "claude",
+      forkConversation: async () => {
+        throw new Error("compacted after that turn");
+      }
+    });
+    host = createTestHost({ adapters: { claude }, forkHandoffs: store });
+    const parentId = await host.createThread({ threadId: "parent" });
+    const said = await runTurn(host, claude, parentId, "remember SWORDFISH", "noted");
+    assert.equal(
+      (await host.orchestrator.forkThread(parentId, forkRequest("child", "claude", { messageId: said.replyId }))).strategy,
+      "transcript"
+    );
+    await host.settle();
+    // A newer build's field on the record: every rewrite keeps it.
+    const written = JSON.parse(await readFile(pathFor("child"), "utf8")) as Record<string, unknown>;
+    await writeFile(pathFor("child"), JSON.stringify({ ...written, fromNewerBuild: { kept: true } }));
+    const onDisk = async () => JSON.parse(await readFile(pathFor("child"), "utf8")) as Record<string, unknown>;
+
+    // The first message carries it, a batch lands before the turn is adopted, and the turn fails.
+    await host.orchestrator.command("child", "turn", { commandId: cmd(), input: "continue" });
+    await host.settle();
+    assert.equal(marks, 1);
+    assert.match(claude.lastTurn?.input ?? "", /SWORDFISH/);
+    const carrier = claude.turnIds.at(-1)!;
+    assert.equal((await onDisk()).deliveredTurnId, carrier);
+    assert.deepEqual((await onDisk()).fromNewerBuild, { kept: true }, "an unknown field survives the delivery mark");
+    await host.orchestrator.ingestionSink("child", [
+      domainEvent("child", host, "thread.session-set", { session: { status: "error", activeTurnId: null, lastError: "boom" } })
+    ]);
+    await host.settle();
+
+    // The retry carries it again, and completes.
+    await runTurn(host, claude, "child", "retry", "ok");
+    assert.match(claude.lastTurn?.input ?? "", /^<forked-conversation>[\s\S]*SWORDFISH[\s\S]*\n\nretry$/, "the retry carries the transcript");
+    await runTurn(host, claude, "child", "next", "ok");
+    assert.equal(claude.lastTurn?.input, "next", "delivered once its carrier completed");
+    const delivered = await onDisk();
+    assert.equal(typeof delivered.deliveredTurnId, "string", "kept for the child's lifetime");
+    assert.deepEqual(delivered.fromNewerBuild, { kept: true });
+
+    // A rewind past the completed carrier: the provider no longer has the parent's conversation.
+    await host.orchestrator.command("child", "revert", { commandId: cmd(), targetTurnCount: 0 });
+    await host.settle();
+    assert.ok(claude.calls.some((call) => call.kind === "rollbackThread"));
+    const rearmed = await onDisk();
+    assert.equal(rearmed.deliveredTurnId, undefined);
+    assert.deepEqual(rearmed.fromNewerBuild, { kept: true }, "and survives the re-arm");
+    await runTurn(host, claude, "child", "from the top", "ok");
+    assert.match(claude.lastTurn?.input ?? "", /^<forked-conversation>[\s\S]*SWORDFISH[\s\S]*\n\nfrom the top$/);
+    await host.stop();
+  });
+
   it("falls back to the transcript when the native fork refuses, and says why", async () => {
     const claude = createScriptedAdapter({
       id: "claude",
@@ -561,6 +698,53 @@ describe("forkThread", () => {
     assert.match(JSON.stringify(row?.payload), /could not be carried over/);
     assert.doesNotMatch(JSON.stringify(row?.payload), /before the first message/);
     await host.stop();
+  });
+
+  it("a repeated fork answers the strategy the head recorded, after the window dropped its row and a restart", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "orq-fork-strategy-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const store = createThreadStore({ rootDir: join(root, "threads") });
+    t.after(() => store.close());
+    const grok = createScriptedAdapter({ id: "grok" });
+    const host = createTestHost({ adapters: { grok }, store });
+    const parentId = await host.createThread({ threadId: "parent", refId: "grok" });
+    const said = await runTurn(host as unknown as TestHost, grok, parentId, "q", "a");
+    const request = forkRequest("child", "grok", { messageId: said.replyId });
+    assert.equal((await host.orchestrator.forkThread(parentId, request)).strategy, "transcript");
+    await host.settle();
+
+    // A long child: its `thread.forked` row leaves the fold's activity window.
+    const rows = Array.from({ length: 600 }, (_, index) =>
+      domainEvent("child", host as unknown as TestHost, "thread.activity-appended", {
+        activity: {
+          id: `row-${index}`,
+          kind: "activity",
+          tone: "info",
+          activityKind: "runtime.warning",
+          summary: `row ${index}`,
+          payload: null,
+          turnId: null,
+          createdAt: host.clock.nowIso(),
+          updatedAt: host.clock.nowIso()
+        }
+      })
+    );
+    await host.orchestrator.ingestionSink("child", rows);
+    await host.settle();
+    const child = await snapshotOf(host as unknown as TestHost, "child");
+    assert.equal(
+      child.items.some((item) => item.kind === "activity" && item.activityKind === "thread.forked"),
+      false,
+      "the row is out of the window"
+    );
+    assert.equal(child.head.forkStrategy, "transcript");
+    assert.equal((await host.orchestrator.forkThread(parentId, request)).strategy, "transcript");
+    await host.stop();
+
+    const next = createTestHost({ adapters: { grok: createScriptedAdapter({ id: "grok" }) }, store });
+    t.after(() => next.stop());
+    assert.equal((await next.orchestrator.forkThread(parentId, { ...request, confirmOnly: true })).strategy, "transcript");
+    assert.equal((await next.orchestrator.forkThread(parentId, request)).strategy, "transcript");
   });
 
   it("never hands back a deleted fork child for a repeated fork", async () => {
@@ -748,6 +932,66 @@ describe("a fork's child and its parent's pages", () => {
       assert.equal(await readFile(await store.resolveAttachment("child", kept.attachmentId), "utf8"), "<p>Kept</p>");
     });
   }
+
+  it("codex (native): a replayed MCP App call gets its parent row's app, naming the child's own snapshot, which its sweep keeps", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "orq-fork-apps-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const store = createThreadStore({ rootDir: join(root, "threads") });
+    t.after(() => store.close());
+    // The provider's history names the call, never its app (Codex `thread/read`'s `mcpToolCall`).
+    const call = { server: "apps", tool: "show_widget", arguments: {}, result: { content: [{ type: "text", text: "ok" }] } };
+    const replayed = (threadId: string): RuntimeEvent[] => {
+      const raw = { source: HISTORICAL_RAW_SOURCE, payload: null };
+      const base = { threadId, createdAt: "1970-01-01T00:00:00.000Z", turnId: "turn-1", raw };
+      return [
+        { ...base, eventId: "h-start", type: "turn.started", payload: {} },
+        {
+          ...base,
+          eventId: "h-app",
+          itemId: "call-app",
+          type: "item.completed",
+          payload: { itemType: "mcp_tool_call", status: "completed", title: "apps: show_widget", data: call }
+        },
+        { ...base, eventId: "h-other", itemId: "call-other", type: "item.completed", payload: { itemType: "mcp_tool_call", status: "completed", data: call } },
+        { ...base, eventId: "h-end", type: "turn.completed", payload: { state: "completed", tokenUsage: { usageStatus: "unavailable" } } }
+      ] as unknown as RuntimeEvent[];
+    };
+    const codex = createScriptedAdapter({
+      id: "codex",
+      forkConversation: async (input) => ({ resumeCursor: { threadId: input.threadId, resume: "forked" } }),
+      history: { threadId: "child", turns: [{ id: "turn-1", items: [] }] },
+      projectHistory: () => replayed("child")
+    });
+    const host = createTestHost({ adapters: { codex }, store });
+    t.after(() => host.stop());
+    const parentId = await host.createThread({ threadId: "parent", refId: "codex" });
+    const first = await runTurn(host as unknown as TestHost, codex, parentId, "show it", "here");
+    const source = join(root, "widget.html");
+    await writeFile(source, "<h1>widget</h1>");
+    const snapshot = await store.putAttachment({ threadId: parentId, name: "show_widget.html", mimeType: "text/html", sourcePath: source });
+    const app = { attachmentId: snapshot.id, server: "apps", tool: "show_widget", resourceUri: "ui://apps/widget.html" };
+    await pushPageRow(host, parentId, first.turnId, "call-app", { ...call, mcpApp: app });
+
+    const result = await host.orchestrator.forkThread(parentId, forkRequest("child", "codex", { messageId: first.replyId }));
+    await host.settle();
+    assert.equal(result.strategy, "native");
+
+    const ingested = (itemId: string) =>
+      host.ingestion.ingested.find((event) => event.threadId === "child" && event.type === "item.completed" && event.itemId === itemId);
+    const appCall = ingested("call-app");
+    assert.deepEqual(mcpAppReferenceOfActivityPayload(appCall?.payload), app, "the replayed call renders its app");
+    const other = ingested("call-other");
+    assert.ok(other !== undefined);
+    assert.equal(mcpAppReferenceOfActivityPayload(other.payload), undefined, "a call the parent showed no app for gets none");
+    // The row ingestion writes from it (the fake ingestion writes none).
+    await pushPageRow(host, "child", "child-turn-1", "call-app", (appCall!.payload as { data: unknown }).data);
+
+    const path = await store.resolveAttachment("child", snapshot.id);
+    assert.ok(path.includes(join("child", "attachments")), path);
+    await store.deleteThread(parentId);
+    await store.pruneAttachments({ threadId: "child", now: new Date(Date.now() + 365 * 24 * 3600_000) });
+    assert.equal(await readFile(await store.resolveAttachment("child", snapshot.id), "utf8"), "<h1>widget</h1>");
+  });
 
   it("grok (transcript): no row of the parent is replayed, so no page is copied", async (t) => {
     const root = await mkdtemp(join(tmpdir(), "orq-fork-pages-"));

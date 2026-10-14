@@ -2489,6 +2489,70 @@ describe("claude adapter — background shells", () => {
     }
   });
 
+  it("a poll whose read is in flight when the shell completes lands its bytes before the completion, once", async () => {
+    const dir = await mkdtemp(nodePath.join(tmpdir(), "orq-bgshell-"));
+    try {
+      const outputFile = nodePath.join(dir, `${SHELL_TASK}.output`);
+      await writeFile(outputFile, "", "utf8");
+      const harness = await makeHarness();
+      await harness.adapter.startSession(START);
+      const peer = harness.peers[0]!;
+      await harness.adapter.sendTurn({
+        threadId: START.threadId,
+        input: "run the suites in the background",
+        attachments: [],
+        interactionMode: "default"
+      });
+      await peer.nextTurn();
+      peer.emit(bashToolUse("pnpm -r test"));
+      peer.emit(backgroundTaskStarted());
+      await harness.waitFor("task.started");
+      peer.emit(launchPlaceholder(outputFile));
+      await harness.drain();
+
+      // The poll has read the last lines and is closing the file when the
+      // completion frame arrives: held there, its answer still owed.
+      await appendFile(outputFile, "# pass 2\n", "utf8");
+      const gate = holdTranscript(outputFile, 1, "close");
+      harness.advance(750);
+      await gate.parked;
+      const seen = harness.events.length;
+      peer.emit({
+        type: "system",
+        subtype: "task_notification",
+        task_id: SHELL_TASK,
+        tool_use_id: SHELL_TOOL_USE,
+        status: "completed",
+        output_file: outputFile,
+        summary: 'Background command "Run the suites" completed (exit code 0)',
+        session_id: "sess-1",
+        uuid: "u-note"
+      } as unknown as SDKMessage);
+      // The message loop runs on meanwhile — the drain must not finish the shell under the poll.
+      for (let turn = 0; turn < 10; turn += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+      gate.release();
+      await harness.waitFor("task.completed", seen);
+      await harness.drain();
+
+      const tail = harness.events.slice(seen);
+      const types = tail.map((event) => event.type);
+      const deltas = tail.filter(
+        (event): event is EventOf<"content.delta"> => event.type === "content.delta" && event.itemId === `bgshell:${SHELL_TASK}`
+      );
+      assert.deepEqual(
+        deltas.map((event) => event.payload.delta),
+        ["# pass 2\n"],
+        "once — never read twice from one offset"
+      );
+      assert.ok(
+        types.lastIndexOf("content.delta") < types.indexOf("item.completed"),
+        `no chunk after the shell's bookend: ${types.join(", ")}`
+      );
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  });
+
   it("an unreadable output file says so once and stops, rather than polling forever", async () => {
     const dir = await mkdtemp(nodePath.join(tmpdir(), "orq-bgshell-"));
     try {

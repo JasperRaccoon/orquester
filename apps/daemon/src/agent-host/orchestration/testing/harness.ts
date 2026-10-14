@@ -68,6 +68,8 @@ export interface TestHostOptions<S extends HostThreadStore = FakeThreadStore> {
   onTurnInterrupt?: (threadId: string) => void;
   /** The orchestrator's `secrets` option (fork links, MCP App answers). */
   secrets?: OrchestratorOptions["secrets"];
+  /** Where a transcript fork's handoff waits (default: in memory). */
+  forkHandoffs?: OrchestratorOptions["forkHandoffs"];
 }
 
 export interface TestHost<S extends HostThreadStore = FakeThreadStore> {
@@ -180,6 +182,7 @@ export function createTestHost<S extends HostThreadStore = FakeThreadStore>(
     ...(options.index ? { index: options.index } : {}),
     ...(options.onTurnInterrupt ? { onTurnInterrupt: options.onTurnInterrupt } : {}),
     ...(options.secrets ? { secrets: options.secrets } : {}),
+    ...(options.forkHandoffs ? { forkHandoffs: options.forkHandoffs } : {}),
     launchConfigs,
     clock,
     ids

@@ -185,8 +185,10 @@ const REFERENCE_SCAN_MAX_DEPTH = 6;
  * The fields of a result layout the walk descends into, in order: an MCP
  * `CallToolResult`'s `structuredContent` (Codex keeps it) and `content`
  * blocks, a Claude `tool_result`'s `content` (a string or blocks), an ACP
- * content block's `content` (Grok), a text block's `text`, Grok's `use_tool`
- * `rawOutput` (`{type: "MCP", output: {OkayOutput}}`) and an `output` string.
+ * content block's `content` wrapper, a text block's `text`, Grok's
+ * `use_tool` `rawOutput` (`{type: "MCP", output: {OkayOutput}}` — where Grok
+ * 1.0.46 puts an MCP call's result, the text alone: fixtures 32, 33) and an
+ * `output` string (OpenCode).
  */
 const RESULT_WRAPPER_KEYS = ["structuredContent", "content", "text", "output", "OkayOutput"] as const;
 
@@ -206,7 +208,7 @@ function parsedObjectOf(text: string): Record<string, unknown> | undefined {
  * in whichever layout the provider recorded, that holds one of `keys`. The
  * daemon writes it both as `structuredContent` and as a JSON text block
  * (`session-tools/results.ts`); Claude's `tool_result`, OpenCode's output and
- * Grok's content blocks keep only the text.
+ * Grok's `rawOutput.output.OkayOutput` keep only the text.
  */
 function structuredResultOf(value: unknown, keys: readonly string[], depth = 0): Record<string, unknown> | null {
   if (depth > REFERENCE_SCAN_MAX_DEPTH || value === null || value === undefined) {

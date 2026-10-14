@@ -113,12 +113,12 @@ Replace `<URL>` with your endpoint and `<CREDENTIAL>` with the `base64(...)` val
 ### Claude Code (CLI)
 
 ```sh
-claude mcp add --transport http --scope user orquester <URL> \
+claude mcp add --transport http --scope user orquester_remote <URL> \
   --header "Authorization: Bearer <CREDENTIAL>"
 ```
 
-Verify: `claude mcp list` → `orquester` shows ✓ connected. The tools appear as
-`mcp__orquester__list_sessions`, etc.
+Verify: `claude mcp list` → `orquester_remote` shows ✓ connected. The tools appear as
+`mcp__orquester_remote__list_sessions`, etc.
 
 ### Claude Desktop
 

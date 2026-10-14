@@ -5,9 +5,11 @@
  * planning thread out of plan mode — and a session tool's turn policy must see a caller that plans.
  *
  * The mode is the running turn's (else the latest unsettled one's, else the latest turn's), as the
- * turn recorded it when it started (a turn that recorded none: the latest earlier one that did) — unless a user message steered that turn since: a steer may
+ * turn recorded it when it started — unless a user message steered that turn since: a steer may
  * switch the live session's mode (Claude's `setPermissionMode` on a running turn), and a message
- * that records its own `interactionMode` (`ThreadMessageItem.interactionMode`) is the latest word.
+ * that records its own `interactionMode` (`ThreadMessageItem.interactionMode`, which the host
+ * stamps on every steer) is the latest word. A turn that recorded no mode and was never steered
+ * (a provider-started continuation, an older log) reads as the latest earlier turn that did.
  */
 
 import type { InteractionMode } from "./adapter-types.ts";

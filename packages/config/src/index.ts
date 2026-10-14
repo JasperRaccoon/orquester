@@ -1060,6 +1060,9 @@ export const agentThreadHeadSchema = z.object({
   // Spec 2026-10-14 §6, as `thread.created` recorded it. Must be listed (zod strips unknown
   // keys); a malformed one reads as none, never as a head nothing can read.
   lineage: threadLineageRecordSchema.optional().catch(undefined),
+  // How a fork was carried over; head-only. Unreadable reads as none: the host then falls
+  // back to the `thread.forked` row the fold still holds.
+  forkStrategy: z.enum(["native", "transcript", "empty", "unavailable"]).optional().catch(undefined),
   createdAt: z.string(),
   updatedAt: z.string()
 });
@@ -1068,14 +1071,21 @@ export type AgentThreadHead = z.infer<typeof agentThreadHeadSchema>;
 /**
  * `fork-handoff.json` (spec 2026-10-14 §6): the conversation a transcript-handoff fork owes
  * its provider with the first message. `null` for anything that does not read — the fork then
- * runs without it, which the host reports rather than guessing.
+ * runs without it, which the host reports rather than guessing. Unknown fields a newer build
+ * wrote survive a rewrite (`passthrough`).
  */
 export const forkHandoffSchema = z.object({
   version: z.literal(1),
   parentThreadId: z.string().min(1),
   transcript: z.string().min(1),
-  createdAt: z.string()
-});
+  createdAt: z.string(),
+  /**
+   * The turn that carried the transcript. The record is kept for the child's lifetime: that
+   * turn failing, or a rewind dropping it, re-arms the handoff for the next message. A value
+   * that does not read is no delivery — the transcript is sent again rather than lost.
+   */
+  deliveredTurnId: z.string().min(1).optional().catch(undefined)
+}).passthrough();
 export type ForkHandoffRecord = z.infer<typeof forkHandoffSchema>;
 
 export function parseForkHandoff(value: unknown): ForkHandoffRecord | null {

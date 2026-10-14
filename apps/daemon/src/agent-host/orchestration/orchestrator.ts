@@ -95,7 +95,7 @@ import {
   AGENT_CHAT_REPLAY_PAYLOAD_BUDGET_BYTES
 } from "@orquester/api/agent-chat";
 
-import type { AccountHome, HistoryImportProgress, McpAppOperation } from "@orquester/api/agent-chat";
+import type { AccountHome, HistoryImportProgress, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
 import { htmlRenderReferenceOfActivityPayload, mcpAppReferenceOfActivityPayload } from "@orquester/api/agent-chat";
 import { runMcpAppRequest } from "../mcp-apps.ts";
 
@@ -224,6 +224,7 @@ import {
   type ForkHandoffStore,
   type ResolvedForkCut
 } from "./fork.ts";
+import type { ForkHandoffRecord } from "@orquester/config";
 
 // ---------------------------------------------------------------------------
 // Dependencies
@@ -386,6 +387,8 @@ interface ThreadRuntime {
    * over. The goal reads `continuing` while it is set.
    */
   goalHeldForHandover: true | undefined;
+  /** Head-only like {@link continueAfterRestart}: how this fork was carried over (`forkThread`). */
+  forkStrategy: ThreadForkStrategy | undefined;
   /**
    * When this host last started a provider session for the thread (epoch ms),
    * or null. A (re)started session is an idle point a provider continues its
@@ -507,11 +510,11 @@ interface ThreadRuntime {
    */
   hostClosedRequests: Set<string>;
   /**
-   * A transcript-handoff fork's pending conversation (spec 2026-10-14 §6):
-   * `undefined` until `fork-handoff.json` was read for this runtime, `null`
-   * once there is none (never was, or delivered).
+   * A transcript-handoff fork's conversation (spec 2026-10-14 §6), as
+   * `fork-handoff.json` holds it: `undefined` until read for this runtime,
+   * `null` when there is none. Delivered once `deliveredTurnId` is set.
    */
-  forkHandoff: string | null | undefined;
+  forkHandoff: ForkHandoffRecord | null | undefined;
 }
 
 /**
@@ -1104,6 +1107,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       continueAfterRestart: persistedHead?.continueAfterRestart,
       resumeGoalAfterRestart: persistedHead?.resumeGoalAfterRestart === true ? true : undefined,
       goalHeldForHandover: persistedHead?.goalHeldForHandover === true ? true : undefined,
+      forkStrategy: persistedHead?.forkStrategy,
       sessionStartedAt: null,
       goalResumedAt: null,
       binding,
@@ -1155,13 +1159,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   /**
-   * The three head-only markers, merged onto a projected head (§3.3, goals
-   * §5.5, §5.7) — so every head rewrite, whoever triggers it, carries them.
+   * The head-only state, merged onto a projected head (§3.3, goals §5.5,
+   * §5.7, a fork's strategy) — so every head rewrite, whoever triggers it,
+   * carries it.
    */
   const withHeadOnlyState = (runtime: ThreadRuntime, head: ThreadHead): ThreadHead =>
     runtime.continueAfterRestart === undefined &&
     runtime.resumeGoalAfterRestart === undefined &&
-    runtime.goalHeldForHandover === undefined
+    runtime.goalHeldForHandover === undefined &&
+    runtime.forkStrategy === undefined
       ? head
       : {
           ...head,
@@ -1169,7 +1175,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             ? { continueAfterRestart: runtime.continueAfterRestart }
             : {}),
           ...(runtime.resumeGoalAfterRestart === true ? { resumeGoalAfterRestart: true } : {}),
-          ...(runtime.goalHeldForHandover === true ? { goalHeldForHandover: true } : {})
+          ...(runtime.goalHeldForHandover === true ? { goalHeldForHandover: true } : {}),
+          ...(runtime.forkStrategy !== undefined ? { forkStrategy: runtime.forkStrategy } : {})
         };
 
   const requireHead = (runtime: ThreadRuntime): ThreadHead => {
@@ -1903,6 +1910,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         return;
       }
       const total = events.length;
+      const forkedApps = await forkedMcpApps(head);
       reportHistoryImport(runtime, { phase: "importing", done: 0, total });
       runtime.historyBuffer = [];
       try {
@@ -1916,7 +1924,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               type: event.type
             });
           }
-          await ingestion.ingest(event);
+          await ingestion.ingest(withForkedMcpApp(event, forkedApps));
         }
         await ingestion.flushThread(runtime.id);
       } finally {
@@ -1933,6 +1941,38 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         detail: describeFailure(error)
       });
     }
+  };
+
+  /**
+   * A native fork's child replays its MCP App calls from the provider's
+   * history, which never names the app: the reference (`data.mcpApp`) is the
+   * adapter's, attached live. So the parent's rows lend theirs, by call id —
+   * the provider's fork keeps its item ids — and the snapshot they name is
+   * the child's own copy (`copyRetainedPages` copied every retained turn's),
+   * which the child's sweep then keeps because a row names it. Read from the
+   * parent's fold at replay time: a parent deleted before the child's first
+   * start, or a row its window no longer holds, lends nothing and the call
+   * replays as a plain tool row.
+   */
+  const forkedMcpApps = async (head: ThreadHead): Promise<ReadonlyMap<string, McpAppReference>> => {
+    const apps = new Map<string, McpAppReference>();
+    if (head.lineage?.relation !== "fork") return apps;
+    try {
+      const parent = await loadRuntime(head.lineage.parentThreadId);
+      if (parent.deleted || parent.state.deleted) return apps;
+      for (const activity of parent.state.activities) {
+        const reference = mcpAppReferenceOfActivityPayload(activity.payload);
+        const callId = (activity.payload as { toolUseId?: unknown } | null)?.toolUseId;
+        if (reference !== undefined && typeof callId === "string") apps.set(callId, reference);
+      }
+    } catch (error) {
+      logger.warn("agent-host: a fork's parent could not lend its MCP App rows", {
+        threadId: head.id,
+        parentThreadId: head.lineage.parentThreadId,
+        error: describeFailure(error)
+      });
+    }
+    return apps;
   };
 
   /**
@@ -2220,20 +2260,58 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         logger.error(`agent-host: effect failed for ${runtime.id}`, error);
       });
 
+  /** A transcript-handoff fork's record, read once per runtime ({@link ThreadRuntime.forkHandoff}). */
+  const forkHandoffOf = async (runtime: ThreadRuntime, head: ThreadHead): Promise<ForkHandoffRecord | null> => {
+    if (head.lineage?.relation !== "fork") return null;
+    if (runtime.forkHandoff === undefined) {
+      runtime.forkHandoff = await forkHandoffs.load(runtime.id);
+    }
+    return runtime.forkHandoff;
+  };
+
+  /** Keep the handoff record (delivered or owed again) in memory and on disk. */
+  const saveForkHandoff = async (runtime: ThreadRuntime, record: ForkHandoffRecord): Promise<void> => {
+    runtime.forkHandoff = record;
+    await forkHandoffs.save(runtime.id, record).catch((error: unknown) => {
+      logger.warn(`agent-host: could not record the fork handoff of ${runtime.id}`, error);
+    });
+  };
+
   /**
-   * The conversation a transcript-handoff fork still owes its provider, read
-   * once per runtime. Only a fork the host could not fork natively has one
-   * (`forkThread`), and it is removed once a turn carried it.
+   * The conversation a transcript-handoff fork still owes its provider. Only
+   * a fork the host could not fork natively has one (`forkThread`). A turn
+   * that carried it marks it delivered — kept for the child's lifetime, not
+   * deleted (it lives in the child's own thread directory and goes with it):
+   * when that turn FAILED the provider may never have taken it in, so the
+   * next message carries it again (a Stop's turn did reach the provider, and
+   * is not resent); a rewind that drops the turn re-arms it
+   * ({@link rearmRewoundForkHandoff}).
    */
   const pendingForkHandoff = async (
     runtime: ThreadRuntime,
     head: ThreadHead
   ): Promise<string | null> => {
-    if (head.lineage?.relation !== "fork") return null;
-    if (runtime.forkHandoff === undefined) {
-      runtime.forkHandoff = (await forkHandoffs.load(runtime.id))?.transcript ?? null;
-    }
-    return runtime.forkHandoff;
+    const record = await forkHandoffOf(runtime, head);
+    if (record === null) return null;
+    const delivered = record.deliveredTurnId;
+    if (delivered === undefined) return record.transcript;
+    const carrier = (runtime.state.turns ?? []).find((turn) => turn.turnId === delivered);
+    if (carrier?.state !== "failed") return null;
+    const { deliveredTurnId: _failed, ...owed } = record;
+    await saveForkHandoff(runtime, owed);
+    return owed.transcript;
+  };
+
+  /** A rewind dropped the turn that carried the handoff: the provider no longer has it. */
+  const rearmRewoundForkHandoff = async (
+    runtime: ThreadRuntime,
+    head: ThreadHead,
+    droppedTurnIds: ReadonlySet<string>
+  ): Promise<void> => {
+    const record = await forkHandoffOf(runtime, head);
+    if (record?.deliveredTurnId === undefined || !droppedTurnIds.has(record.deliveredTurnId)) return;
+    const { deliveredTurnId: _dropped, ...owed } = record;
+    await saveForkHandoff(runtime, owed);
   };
 
   const sendTurnEffect = async (runtime: ThreadRuntime, turn: QueuedTurn): Promise<void> => {
@@ -2304,12 +2382,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         ...(turn.modelSelection !== undefined ? { modelSelection: turn.modelSelection } : {}),
         interactionMode: turn.interactionMode
       });
-      if (input !== null) {
-        // The provider has it now: never sent twice.
-        runtime.forkHandoff = null;
-        await forkHandoffs.remove(runtime.id).catch((error: unknown) => {
-          logger.warn(`agent-host: could not remove the fork handoff of ${runtime.id}`, error);
-        });
+      if (input !== null && runtime.forkHandoff) {
+        // The provider has it now: not sent again unless this turn fails or
+        // a rewind drops it (`pendingForkHandoff`).
+        await saveForkHandoff(runtime, { ...runtime.forkHandoff, deliveredTurnId: result.turnId });
       }
       if (runtime.bound) {
         runtime.bound = {
@@ -2846,6 +2922,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         });
       }
       const droppedIds = new Set(droppedTurnIds);
+      await rearmRewoundForkHandoff(runtime, head, droppedIds);
       const droppedTurnCounts = [
         ...new Set(
           (runtime.state.checkpoints ?? [])
@@ -3145,7 +3222,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               streaming: false,
               turnId: session.activeTurnId,
               ...(attachments.length > 0 ? { attachments } : {}),
-              ...(context !== undefined ? { context } : {})
+              ...(context !== undefined ? { context } : {}),
+              // A steer carries its own mode: every adapter applies it to the
+              // running turn (Claude/Grok switch the live session, Codex and
+              // OpenCode send it with the steered prompt), so a default turn
+              // steered into plan now plans — `currentInteractionMode` reads
+              // it off this message (T6-M2). A new turn's mode is on its
+              // `turn-start-requested` instead.
+              ...(session.activeTurnId !== null ? { interactionMode } : {})
             },
             { commandId, occurredAt }
           )
@@ -4098,6 +4182,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // The child's rows — the parent's turns its history replay carries over
     // first — are masked with the parent's secrets, never given them.
     options.secrets?.link(threadId, parentThreadId);
+    // On the head from its first save, so a repeated request answers it
+    // however long the child's timeline grows (`recordedForkStrategy`).
+    runtime.forkStrategy = strategy;
     const head = await createThreadNow(runtime, request, {
       adapterId,
       modelSelection,
@@ -4184,10 +4271,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   /**
    * How an existing fork was carried over, for a repeated fork request: the
-   * strategy its `thread.forked` row recorded, else `native` — the one
-   * strategy that writes no row (its history replay says it all).
+   * strategy its head recorded; for a head an older build wrote, the one its
+   * `thread.forked` row recorded while the fold still holds it, else `native`
+   * — the one strategy that writes no row (its history replay says it all).
    */
   const recordedForkStrategy = (runtime: ThreadRuntime): ThreadForkStrategy => {
+    if (runtime.forkStrategy !== undefined) return runtime.forkStrategy;
     for (const item of runtime.state.activities) {
       if (item.activityKind !== "thread.forked") continue;
       const strategy = (item.payload as { strategy?: unknown } | null)?.strategy;
@@ -8061,4 +8150,15 @@ function stampHistoryTimes<TEvent extends { createdAt?: string }>(
     }
     return { ...event, createdAt: new Date(anchorMs - (events.length - index)).toISOString() };
   });
+}
+
+/** A replayed call's completion with the app its parent row named ({@link forkedMcpApps}); else as it was. */
+function withForkedMcpApp(event: RuntimeEvent, apps: ReadonlyMap<string, McpAppReference>): RuntimeEvent {
+  if (apps.size === 0 || event.type !== "item.completed" || event.itemId === undefined) return event;
+  const mcpApp = apps.get(event.itemId);
+  if (mcpApp === undefined) return event;
+  const data = event.payload.data;
+  const record = data !== null && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
+  if ("mcpApp" in record) return event;
+  return { ...event, payload: { ...event.payload, data: { ...record, mcpApp } } };
 }

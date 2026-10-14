@@ -8,6 +8,7 @@ import {
   ACTIVITY_RETENTION_LIMIT,
   ACTIVITY_RETENTION_SLACK,
   createEmptyThreadState,
+  currentInteractionMode,
   decodeHistoryCursor,
   encodeHistoryCursor,
   type AttachmentRef,
@@ -182,6 +183,54 @@ describe("orchestrator — commands", () => {
     const sends = host.adapter.calls.filter((call) => call.kind === "sendTurn");
     assert.equal(sends.length, 2);
     assert.equal(host.adapter.calls.filter((call) => call.kind === "startSession").length, 1);
+    await host.stop();
+  });
+
+  it("a steer records its own interaction mode on its message: a default turn steered into plan plans", async () => {
+    const host = createTestHost();
+    // A real adapter answers a steer with the turn it steers (§4.1); the scripted one mints a new id.
+    const send = host.adapter.sendTurn.bind(host.adapter);
+    let steered: string | undefined;
+    host.adapter.sendTurn = async (input) => {
+      const result = await send(input);
+      steered ??= result.turnId;
+      return { ...result, turnId: steered };
+    };
+    const threadId = await host.createThread();
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "first" });
+    await host.settle();
+    const snapshot = async () => {
+      const read = await host.orchestrator.readThread(threadId);
+      assert.ok(read.kind === "snapshot");
+      return read.thread;
+    };
+    assert.equal(currentInteractionMode(await snapshot()), "default");
+
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "now plan it", interactionMode: "plan" });
+    await host.settle();
+    const userMessages = (host.store.logs.get(threadId) ?? [])
+      .filter((event) => event.type === "thread.message-sent")
+      .map((event) => event.payload as { text: string; role: string; interactionMode?: string })
+      .filter((payload) => payload.role === "user");
+    assert.deepEqual(
+      userMessages.map((payload) => [payload.text, payload.interactionMode]),
+      [
+        ["first", undefined],
+        ["now plan it", "plan"]
+      ],
+      "a new turn's mode stays on its turn-start-requested; the steer's is on its message"
+    );
+    const sends = host.adapter.calls.filter((call) => call.kind === "sendTurn");
+    assert.equal((sends[1]?.detail as { interactionMode?: string }).interactionMode, "plan", "the adapter got the steer's mode");
+    const planning = await snapshot();
+    assert.equal(planning.turns.length, 1, "still the one turn");
+    assert.equal(planning.turns[0]!.interactionMode, "default", "the turn itself started in default");
+    assert.equal(currentInteractionMode(planning), "plan", "read as planning");
+
+    // Steered back: the latest word wins.
+    await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "go ahead", interactionMode: "default" });
+    await host.settle();
+    assert.equal(currentInteractionMode(await snapshot()), "default");
     await host.stop();
   });
 

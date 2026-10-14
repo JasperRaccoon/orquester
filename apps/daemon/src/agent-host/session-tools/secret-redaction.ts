@@ -150,11 +150,21 @@ interface Carry {
 type MessageEvent = Extract<AppendableDomainEvent, { type: "thread.message-sent" }>;
 type ActivityEvent = Extract<AppendableDomainEvent, { type: "thread.activity-appended" }>;
 
+/**
+ * A call's output stream, by its call alone: a call whose output arrives
+ * under two stream kinds (a command's output and its file-change output, say)
+ * can split one value across them, so the held tail joins whichever chunk of
+ * the call comes next, and is released as that chunk's row.
+ */
 function outputKey(activity: ThreadActivityItem): string | null {
   if (activity.activityKind !== "tool.output") return null;
-  const payload = activity.payload as { toolUseId?: unknown; streamKind?: unknown; delta?: unknown };
+  const payload = activity.payload as { toolUseId?: unknown; delta?: unknown };
   if (typeof payload.delta !== "string" || typeof payload.toolUseId !== "string") return null;
-  return `o:${payload.toolUseId}:${String(payload.streamKind ?? "")}`;
+  return outputKeyOf(payload.toolUseId);
+}
+
+function outputKeyOf(toolUseId: string): string {
+  return `o:${toolUseId}`;
 }
 
 function toolUseIdOf(activity: ThreadActivityItem): string | null {
@@ -409,9 +419,7 @@ export class SessionSecretRedactor {
           }
           const toolUseId = toolUseIdOf(activity);
           if (toolUseId !== null && endsToolStream(activity)) {
-            for (const heldKey of [...held.keys()]) {
-              if (heldKey.startsWith(`o:${toolUseId}:`)) release(heldKey);
-            }
+            release(outputKeyOf(toolUseId));
           }
         }
         out.push(event);

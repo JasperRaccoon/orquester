@@ -423,6 +423,8 @@ const isThreadHead = shaped<ThreadHead>({
   goalHeldForHandover: optional(isTrue),
   // Spec 2026-10-14 §6: the fold writes it only as `parseThreadLineage` read it.
   lineage: optional(isRecord),
+  // Head-only too (a fork's strategy): a fold's own head never holds it.
+  forkStrategy: optional(isString),
   createdAt: isString,
   updatedAt: isString
 });

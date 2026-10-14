@@ -144,11 +144,15 @@ export class SecretRequestRegistry implements SessionSecretRequests {
 
   /**
    * Answer one of `threadId`'s requests; null when it has none by that id —
-   * already answered, ended, or another thread's. A provided value goes to the
-   * waiting call at once; the outcome (on the bus and to the caller) is
-   * `provided` only once that call's result was handed over, else
-   * `not_delivered` (the card closes `cancelled`): the agent stopped waiting
-   * between the answer and its result leaving the daemon.
+   * already answered, ended, or another thread's. A declined one settles at
+   * once (`declined`). A provided value goes to the waiting call at once, and
+   * the card's close waits for that call's word on its result
+   * ({@link boundedDelivery}): `provided` once the result was handed to the
+   * agent host; `not_delivered` when it was dropped — the agent stopped
+   * waiting between the answer and its result leaving the daemon — and the
+   * card closes `cancelled`; `unconfirmed` when no word came within the
+   * delivery bound — the call did receive the value, so the card closes
+   * `provided`, but whether the agent got it is unknown.
    */
   async answer(threadId: string, requestId: string, answer: SecretAnswer): Promise<SecretAnswerOutcome | null> {
     const entry = this.pending.get(requestId);

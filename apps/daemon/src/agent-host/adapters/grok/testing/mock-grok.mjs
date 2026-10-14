@@ -364,7 +364,8 @@ function handle(frame) {
       return; // Never answers: a server that hangs on the read.
     }
     // `mcp-app-slow`: a server slower than the 4 s probe deadline, inside the
-    // capture's own 15 s one.
+    // capture's own 15 s one. Deterministic: the answer waits for the test's
+    // next `_x.ai/mcp/list`, sent once its mocked clock has passed 4 s.
     const answer = () => result(id, {
       result: {
         contents: [
@@ -377,7 +378,7 @@ function handle(frame) {
         ]
       }
     });
-    if (scenario === "mcp-app-slow") setTimeout(answer, 4500);
+    if (scenario === "mcp-app-slow") heldReadAnswer = answer;
     else answer();
     return;
   }
@@ -388,6 +389,12 @@ function handle(frame) {
     return;
   }
   if (method === "_x.ai/mcp/list") {
+    // `mcp-app-slow`'s held read is answered first, as a slow server would.
+    if (heldReadAnswer !== null) {
+      const held = heldReadAnswer;
+      heldReadAnswer = null;
+      held();
+    }
     result(id, {
       result: {
         servers: [
@@ -426,6 +433,8 @@ function handle(frame) {
 
 let cancelled = false;
 let firstPromptAnswered = false;
+/** `mcp-app-slow`: the `_x.ai/mcp/read_resource` answer waiting for its trigger. */
+let heldReadAnswer = null;
 let pendingPermissionId = null;
 let permissionAnswer = null;
 
@@ -521,6 +530,18 @@ async function runPrompt(id, params) {
         _meta: { totalTokens: 22540, promptId }
       });
     }
+    // Every captured ask (fixtures 03, 04, 05, 09a, 33) opens its own
+    // interaction just before the request and resolves it once answered —
+    // or cancelled — with `[features] support_permission = true` too.
+    const interaction = (sessionUpdate) =>
+      notify("_x.ai/session_notification", {
+        sessionId,
+        update:
+          sessionUpdate === "pending_interaction"
+            ? { sessionUpdate, tool_call_id: "call-1", kind: "permission" }
+            : { sessionUpdate, tool_call_id: "call-1" }
+      });
+    interaction("pending_interaction");
     const requestId = 9000 + promptSeq;
     pendingPermissionId = requestId;
     send({
@@ -564,6 +585,7 @@ async function runPrompt(id, params) {
     // The real CLI settles a cancel WITHOUT waiting for the pending reply.
     if (scenario === "cancel") {
       await waitFor(() => cancelled);
+      interaction("interaction_resolved");
       notify("_x.ai/session_notification", {
         sessionId,
         update: { sessionUpdate: "turn_completed", prompt_id: promptId, stop_reason: "cancelled" }
@@ -580,6 +602,7 @@ async function runPrompt(id, params) {
     await waitFor(() => permissionAnswer !== null);
     const answer = permissionAnswer;
     permissionAnswer = null;
+    interaction("interaction_resolved");
     notify("session/update", {
       sessionId,
       update: {
@@ -1447,7 +1470,10 @@ async function wakeUntilCancelled() {
  * 303` it "never had". So the shell says `shell` only once each child's
  * `/proc/<pid>/stat` names `sleep` (comm changes at the `exec`; the pids are
  * kept: neither `setsid`, not a group leader here, nor `sh -c 'exec …'`
- * forks). A spin on that condition, read with builtins only — no timing.
+ * forks) AND its `/proc/<pid>/cmdline` — what the tests classify by — is no
+ * longer empty: the kernel names the new image in `stat` a moment before its
+ * argv is readable. A spin on that condition, read with builtins only — no
+ * timing.
  */
 function startLeftoverShell() {
   const shell = spawn(
@@ -1456,7 +1482,9 @@ function startLeftoverShell() {
       "-c",
       'sleep 302 & m=$!; setsid sh -c "exec sleep 303" & d=$!; ' +
         'until read -r a < /proc/$m/stat && read -r b < /proc/$d/stat && ' +
-        'case "$a $b" in *"(sleep) "*"(sleep) "*) true ;; *) false ;; esac; do :; done 2>/dev/null; ' +
+        'case "$a $b" in *"(sleep) "*"(sleep) "*) true ;; *) false ;; esac && ' +
+        '{ read -r c < /proc/$m/cmdline; [ -n "$c" ]; } && { read -r e < /proc/$d/cmdline; [ -n "$e" ]; }; ' +
+        "do :; done 2>/dev/null; " +
         "echo shell; wait"
     ],
     { detached: true, stdio: ["ignore", "pipe", "ignore"] }
