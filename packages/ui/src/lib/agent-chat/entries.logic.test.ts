@@ -10,7 +10,7 @@ EMPTY_TIMELINE_PROJECTION,
 itemsForAgent,
 workLogEntryFromActivity
 } from "./entries.logic";
-import { workEntryDisplayLabel } from "./presentation.logic";
+import { singleToolCallLabel, workEntryDisplayLabel } from "./presentation.logic";
 import { activity,CLAUDE_WORKFLOW_ID,claudeWorkflow,message,resetBuilders,stamp } from "./test-helpers";
 
 beforeEach(() => {
@@ -678,6 +678,19 @@ describe("session tools (design 2026-10-14 §1.5)", () => {
       assert.equal(entry.sessionTool, "thread_wait");
       assert.equal(workEntryDisplayLabel(entry), "Orquester: Thread wait");
     }
+  });
+
+  it("labels the scheduling tools in words, never their arguments", () => {
+    const entry = workLogEntryFromActivity(
+      activity("tool.completed", {
+        itemType: "mcp_tool_call",
+        title: "MCP tool call",
+        detail: 'mcp__orquester__schedule_task: {"prompt":"Check CI","inMinutes":30}',
+        data: { toolName: "mcp__orquester__schedule_task", sessionTool: { name: "schedule_task" } }
+      })
+    );
+    assert.equal(workEntryDisplayLabel(entry), "Scheduled a task");
+    assert.equal(singleToolCallLabel(entry), "Scheduled a task");
   });
 
   it("leaves every unmarked MCP call alone — a user's same-named external server's included", () => {

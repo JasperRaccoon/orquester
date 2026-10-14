@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { z } from "zod";
 
 import { defineSessionTool, defineSessionToolkit, SESSION_TOOL_READ_ONLY, type SessionToolkit } from "./contract.ts";
+import { schedulingToolkit } from "./scheduling/index.ts";
 import { SESSION_TOOLKITS, sessionToolRegistry } from "./index.ts";
 import {
   composeSessionToolInstructions,
@@ -37,12 +38,13 @@ const toolkit = (id: string, names: string[], instructions?: string): SessionToo
     )
   });
 
-test("production ships no toolkit, so no provider is given a server", () => {
-  assert.deepEqual(SESSION_TOOLKITS, []);
+test("the production registry builds: valid names, instructions within the budget", () => {
+  // Building validates every name and throws past SESSION_TOOL_INSTRUCTIONS_MAX_BYTES.
   const registry = sessionToolRegistry();
-  assert.equal(registry.enabled, false);
-  assert.equal(registry.instructions, "");
-  assert.equal(registry.tools.length, 0);
+  assert.equal(registry.enabled, true);
+  assert.ok(SESSION_TOOLKITS.includes(schedulingToolkit));
+  for (const tool of schedulingToolkit.tools) assert.equal(registry.get(tool.name)?.name, tool.name);
+  assert.ok(registry.instructions.includes("`schedule_task`"));
 });
 
 test("the test toolkit registers and composes its paragraph after the header", () => {

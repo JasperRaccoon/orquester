@@ -490,7 +490,14 @@ export function shortenPath(path: string, workspaceRoot?: string): string {
  * calls them. A toolkit adds a line per tool here (its README); a tool with
  * none still reads "Orquester: <its name in words>", never its raw arguments.
  */
-export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {};
+export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
+  // Scheduling (design 2026-10-14 §5).
+  schedule_task: "Scheduled a task",
+  list_scheduled_tasks: "Listed scheduled tasks",
+  update_scheduled_task: "Updated a scheduled task",
+  delete_scheduled_task: "Deleted a scheduled task",
+  run_scheduled_task_now: "Ran a scheduled task now"
+};
 
 /** `thread_wait` → `Thread wait`. */
 function humanizeToolName(name: string): string {
