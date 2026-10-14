@@ -73,6 +73,7 @@ describe("math renders", () => {
   it("renders a bad formula as marked source, not an exception", () => {
     const html = render("bad $\\foo{$ done");
     assert.ok(html.includes('class="katex-error"'), html);
+    assert.ok(html.includes("color:rgb(var(--sem-danger-400))"), "in the theme's danger colour, not a fixed one");
     assert.ok(html.includes("done"));
   });
 

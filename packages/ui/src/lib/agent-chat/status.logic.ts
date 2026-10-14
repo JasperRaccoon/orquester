@@ -255,14 +255,42 @@ export function initialGoneWatch(input: { pending: boolean; record: unknown }): 
 }
 
 /**
+ * The watches of the threads' live slices, kept past a view's unmount: a
+ * slice lingers for a short grace after its last view goes, still `gone`,
+ * and a view remounted within it must carry on from what the last one saw —
+ * a record that stopped being pending, or changed, while no view watched
+ * still earns its one look. Keyed by the slice (its `actions`), so a slice
+ * the registry disposed takes its watch with it and a new one starts fresh.
+ */
+export class GoneWatches {
+  private readonly watches = new WeakMap<object, GoneWatch>();
+
+  /** The watch a view mounting on `slice` starts from: the last view's, else a fresh one. */
+  watchFor(slice: object, input: { pending: boolean; record: unknown }): GoneWatch {
+    return this.watches.get(slice) ?? initialGoneWatch(input);
+  }
+
+  remember(slice: object, watch: GoneWatch): void {
+    this.watches.set(slice, watch);
+  }
+}
+
+/**
  * How a tab whose stream answered `THREAD_NOT_FOUND` is shown. A tab whose
  * record is — or was, since its stream last synchronized — `chatPending` is
  * being created (a grid cell opens its stream on `session.created`, before
- * the host has the thread): `starting`, never `gone`.
+ * the host has the thread): `starting`, never `gone`. So is one whose record
+ * changed since the watch last saw it: {@link nextGoneWatch} connects it
+ * again on this very render, so it is not said to be gone before that look.
  */
-export function goneDisplay(input: { gone: boolean; pending: boolean; watch: GoneWatch }): "live" | "starting" | "gone" {
+export function goneDisplay(input: {
+  gone: boolean;
+  pending: boolean;
+  record: unknown;
+  watch: GoneWatch;
+}): "live" | "starting" | "gone" {
   if (!input.gone) return "live";
-  return input.pending || input.watch.sawPending ? "starting" : "gone";
+  return input.pending || input.watch.sawPending || input.record !== input.watch.record ? "starting" : "gone";
 }
 
 /**

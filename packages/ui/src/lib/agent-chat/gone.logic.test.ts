@@ -8,18 +8,24 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-import { goneDisplay, initialGoneWatch, nextGoneWatch, type GoneWatch } from "./status.logic";
+import { GoneWatches, goneDisplay, nextGoneWatch } from "./status.logic";
 
-/** A view's renders: each step is (connection, record) as the store and the tab list say. */
-function mount(record: { chatPending?: boolean }) {
-  let watch: GoneWatch = initialGoneWatch({ pending: record.chatPending === true, record });
+/**
+ * A view's renders over one thread slice: each step is (connection, record) as
+ * the store and the tab list say. Views mounted on the same slice share its
+ * watch, as `AgentChatView` keeps it.
+ */
+function mount(record: { chatPending?: boolean }, slice: object = {}, watches = new GoneWatches()) {
+  // The view's first render sees the record it mounted with.
+  watches.remember(slice, watches.watchFor(slice, { pending: record.chatPending === true, record }));
   let retries = 0;
   return {
     render(connection: string, current: { chatPending?: boolean }): "live" | "starting" | "gone" {
       const pending = current.chatPending === true;
-      const shown = goneDisplay({ gone: connection === "gone", pending, watch });
+      const watch = watches.watchFor(slice, { pending, record: current });
+      const shown = goneDisplay({ gone: connection === "gone", pending, record: current, watch });
       const next = nextGoneWatch(watch, { connection, pending, record: current });
-      watch = next.watch;
+      watches.remember(slice, next.watch);
       if (next.retry) retries += 1;
       return shown;
     },
@@ -71,5 +77,49 @@ describe("a chat being created, mounted at once (grid view)", () => {
     assert.equal(view.retries(), 0);
     view.render("gone", { lineage: "confirmed" } as never);
     assert.equal(view.retries(), 1);
+  });
+});
+
+describe("a view remounted on a slice that is still gone (within its dispose grace)", () => {
+  it("the record stopped being pending while no view watched: starting, and one retry", () => {
+    const slice = {};
+    const watches = new GoneWatches();
+    const created = { chatPending: true };
+    const first = mount(created, slice, watches);
+    first.render("connecting", created);
+    assert.equal(first.render("gone", created), "starting");
+    // Unmounted; the daemon confirms the thread meanwhile.
+    const confirmed = { chatPending: false };
+    const second = mount(confirmed, slice, watches);
+    assert.equal(second.render("gone", confirmed), "starting", "never gone before the look");
+    assert.equal(second.retries(), 1);
+  });
+
+  it("an old tab's record changed while no view watched: starting, and one retry", () => {
+    const slice = {};
+    const watches = new GoneWatches();
+    const record = {};
+    const first = mount(record, slice, watches);
+    first.render("synchronized", record);
+    assert.equal(first.render("gone", record), "gone");
+    const changed = { chatPending: false };
+    const second = mount(changed, slice, watches);
+    assert.equal(second.render("gone", changed), "starting");
+    assert.equal(second.retries(), 1);
+    second.render("connecting", changed);
+    assert.equal(second.render("gone", changed), "gone", "really gone after that look");
+    assert.equal(second.retries(), 1);
+  });
+
+  it("nothing changed while unmounted: still gone, no retry", () => {
+    const slice = {};
+    const watches = new GoneWatches();
+    const record = {};
+    const first = mount(record, slice, watches);
+    first.render("synchronized", record);
+    first.render("gone", record);
+    const second = mount(record, slice, watches);
+    assert.equal(second.render("gone", record), "gone");
+    assert.equal(second.retries(), 0);
   });
 });

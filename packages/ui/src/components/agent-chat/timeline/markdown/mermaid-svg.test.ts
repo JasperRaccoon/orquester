@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import { JSDOM } from "jsdom";
-import { createMermaidSvgSanitizer, standaloneSvg } from "./mermaid-svg.ts";
+import { createMermaidSvgSanitizer, standaloneSvg, uniquifySvgIds } from "./mermaid-svg.ts";
 
 const dom = new JSDOM("<!doctype html><body></body>");
 const win = dom.window as unknown as Window & typeof globalThis;
@@ -111,5 +111,43 @@ describe("standalone SVG for the expanded viewer", () => {
   it("throws, so the viewer can show an error, when there is no SVG", () => {
     assert.throws(() => standaloneSvg("<p>not a diagram</p>", env, "#000"), /could not be prepared/);
     assert.throws(() => standaloneSvg("", env, "#000"), /could not be prepared/);
+  });
+});
+
+describe("one mount's copy of a cached diagram", () => {
+  const diagram = sanitize(
+    `<svg id="mermaid-diagram-1" aria-labelledby="chart-title-mermaid-diagram-1" xmlns="http://www.w3.org/2000/svg">` +
+      `<style>#mermaid-diagram-1 .edge{stroke:#333;fill:#fff}#mermaid-diagram-1 .label{color:#abc}</style>` +
+      `<title id="chart-title-mermaid-diagram-1">Flow</title>` +
+      `<defs><marker id="mermaid-diagram-1_flowchart-v2-pointEnd"><path d="M0,0"/></marker>` +
+      `<marker id="arrowhead"><path d="M0,0"/></marker></defs>` +
+      `<path class="edge" marker-end="url(#mermaid-diagram-1_flowchart-v2-pointEnd)"/>` +
+      `<path style="marker-start:url(#arrowhead)"/><text>Issue #12 and C#</text></svg>`
+  );
+
+  it("renames every id and every reference to it together", () => {
+    const out = uniquifySvgIds(diagram, "m7");
+    assert.match(out, /id="mermaid-diagram-1-m7"/);
+    assert.match(out, /#mermaid-diagram-1-m7 \.edge/);
+    assert.match(out, /url\(#mermaid-diagram-1_flowchart-v2-pointEnd-m7\)/);
+    assert.match(out, /id="mermaid-diagram-1_flowchart-v2-pointEnd-m7"/);
+    assert.match(out, /url\(#arrowhead-m7\)/);
+    assert.match(out, /id="arrowhead-m7"/);
+    assert.match(out, /aria-labelledby="chart-title-mermaid-diagram-1-m7"/);
+    // Every id is renamed, so no reference is left pointing at the shared copy.
+    for (const [, id] of out.matchAll(/\sid="([^"]+)"/g)) assert.ok(id!.endsWith("-m7"), id);
+  });
+
+  it("leaves colours, label text and other markup alone", () => {
+    const out = uniquifySvgIds(diagram, "m7");
+    assert.match(out, /stroke:#333;fill:#fff/);
+    assert.match(out, /color:#abc/);
+    assert.match(out, /Issue #12 and C#/);
+  });
+
+  it("gives two mounts ids that never collide", () => {
+    const ids = (svg: string) => [...svg.matchAll(/\sid="([^"]+)"/g)].map((match) => match[1]);
+    const first = new Set(ids(uniquifySvgIds(diagram, "m1")));
+    for (const id of ids(uniquifySvgIds(diagram, "m2"))) assert.ok(!first.has(id), id);
   });
 });

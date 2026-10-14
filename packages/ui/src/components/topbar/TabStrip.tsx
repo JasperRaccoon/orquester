@@ -21,14 +21,6 @@ import {
 } from "../../store/app";
 
 /**
- * The unread mark: this client has not looked at the tab since its latest turn
- * finished (§7.7). Deliberately separate from the status dot — needs-attention
- * is the daemon's ladder and is spent on three colours; unread is a private
- * reading mark and gets none of them.
- *
- * Its own component so only this tab re-renders when the mark flips.
- */
-/**
  * A forked or delegated chat's mark (thread lineage, spec 2026-10-14 §6),
  * titled with its parent's current title. Its own component, so only this tab
  * re-renders when a title changes.
@@ -41,6 +33,14 @@ const TabLineageMark: React.FC<{ session: ReturnType<typeof tabSession> }> = ({ 
   return <LineageMark lineage={lineage} parentTitle={parentTitle} className="mr-0.5" />;
 };
 
+/**
+ * The unread mark: this client has not looked at the tab since its latest turn
+ * finished (§7.7). Deliberately separate from the status dot — needs-attention
+ * is the daemon's ladder and is spent on three colours; unread is a private
+ * reading mark and gets none of them.
+ *
+ * Its own component so only this tab re-renders when the mark flips.
+ */
 const TabUnreadMark: React.FC<{ sessionId: string }> = ({ sessionId }) => {
   const unread = useThreadUnread(sessionId);
   if (!unread) {

@@ -52,6 +52,35 @@ export function createMermaidSvgSanitizer(win: Window & typeof globalThis): (svg
   };
 }
 
+/** An id this module can rename and find again in a reference: Mermaid's are all of this shape. */
+const RENAMABLE_ID = /^[A-Za-z_][\w-]*$/;
+
+/**
+ * One mount's copy of a cached diagram, every element id suffixed. The cache
+ * hands the same SVG to each row that shows the diagram, and ids are
+ * document-wide: two copies (a repeated fence, a kept-alive tab) would share
+ * marker and style ids, so a `url(#…)` arrowhead or an `#id` style in one
+ * copy would resolve to the other — broken, or gone with it when that copy is
+ * hidden. The ids and every reference to them — `url(#id)`, an `#id` selector
+ * in the diagram's `<style>`, `aria-labelledby`/`aria-describedby` — are
+ * renamed together; `href` never survives sanitising, so there is no other.
+ */
+export function uniquifySvgIds(svg: string, suffix: string): string {
+  const ids = new Set<string>();
+  for (const match of svg.matchAll(/\sid="([^"]+)"/g)) {
+    if (RENAMABLE_ID.test(match[1]!)) ids.add(match[1]!);
+  }
+  if (ids.size === 0) return svg;
+  const renamed = (id: string) => (ids.has(id) ? `${id}-${suffix}` : id);
+  return svg
+    .replace(/(\sid=")([^"]+)(")/g, (_all, open: string, id: string, close: string) => `${open}${renamed(id)}${close}`)
+    .replace(/#([A-Za-z_][\w-]*)/g, (all, id: string) => (ids.has(id) ? `#${renamed(id)}` : all))
+    .replace(
+      /(\saria-(?:labelledby|describedby)=")([^"]*)(")/g,
+      (_all, open: string, list: string, close: string) => `${open}${list.split(/\s+/).map(renamed).join(" ")}${close}`
+    );
+}
+
 /** The DOM constructors `standaloneSvg` needs; a browser `window` satisfies it. */
 export interface SvgDomEnvironment {
   DOMParser: typeof DOMParser;

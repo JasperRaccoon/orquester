@@ -205,6 +205,27 @@ describe("cache", () => {
     assert.equal(queue.size, 3, "two settled (the newest) plus D");
   });
 
+  it("drops abandoned (settled, never read) entries past twice the cap, oldest first", async () => {
+    const queue = renderer(instantEngine(), { maxCached: 2 });
+    // Started and left: their readers unmounted before the render finished.
+    for (const source of ["A", "B", "C", "D", "E"]) await queue.start(source, "dark");
+    assert.equal(queue.size, 5, "admitted while unread, nothing evictable yet");
+    await queue.start("F", "dark");
+    // F's admission found five settled, unread entries: past 2 × 2, the oldest went.
+    assert.equal(queue.size, 5, "four settled plus F (settled by now)");
+    await queue.start("G", "dark");
+    assert.equal(queue.size, 5);
+    const log: string[] = [];
+    const again = renderer(instantEngine(log), { maxCached: 2 });
+    for (const source of ["A", "B", "C", "D", "E", "F"]) await again.start(source, "dark");
+    log.length = 0;
+    await again.start("A", "dark");
+    assert.deepEqual(log, ["A"], "the oldest abandoned entry was the one dropped");
+    log.length = 0;
+    await again.start("F", "dark");
+    assert.deepEqual(log, [], "a recent one is still cached");
+  });
+
   it("never evicts a pending render", async () => {
     const { engine, pending } = controlledEngine();
     const queue = renderer(engine, { maxCached: 1 });

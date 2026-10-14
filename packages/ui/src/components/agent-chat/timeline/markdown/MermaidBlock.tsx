@@ -9,7 +9,7 @@ import { ChatIconButton } from "../../primitives";
 import { CodeBlock } from "./CodeBlock";
 import { getMermaidRenderer } from "./mermaid-engine";
 import type { MermaidRenderer, MermaidTheme } from "./mermaid-render";
-import { createDiagramBlobUrl } from "./mermaid-svg";
+import { createDiagramBlobUrl, uniquifySvgIds } from "./mermaid-svg";
 
 /**
  * A ` ```mermaid ` fence (spec §4): a diagram once the message settles, the
@@ -75,7 +75,12 @@ function ViewToggle({ showingCode, onToggle }: { showingCode: boolean; onToggle:
   );
 }
 
+let diagramMounts = 0;
+
 function DiagramBody({ svg, onExpand }: { svg: string; onExpand: () => void }): React.ReactElement {
+  // The cached SVG is shared by every mount of this diagram; its ids are made this mount's own.
+  const [mount] = React.useState(() => ++diagramMounts);
+  const html = React.useMemo(() => uniquifySvgIds(svg, `m${mount}`), [svg, mount]);
   return (
     // The header's "Expand diagram" is the one control assistive tech and the
     // keyboard get; the diagram itself is a mouse shortcut for it, so it is
@@ -87,7 +92,7 @@ function DiagramBody({ svg, onExpand }: { svg: string; onExpand: () => void }): 
         aria-hidden="true"
         onClick={onExpand}
         className="flex w-full cursor-zoom-in justify-center rounded-md focus-visible:outline focus-visible:outline-2 focus-visible:outline-neutral-500 [&_svg]:h-auto [&_svg]:max-w-full"
-        dangerouslySetInnerHTML={{ __html: svg }}
+        dangerouslySetInnerHTML={{ __html: html }}
       />
     </div>
   );
