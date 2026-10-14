@@ -38,6 +38,12 @@ module must not import a daemon service: reach the daemon through `ctx.api` (the
 API in-process, `../mcp/daemon-api.ts`). Whatever a toolkit imports, the host loads. No dynamic
 `import()` here either.
 
+## Toolkits
+
+| Directory | Tools | Daemon side |
+|---|---|---|
+| `pull-requests/` | `watch_pull_request`, `unwatch_pull_request`, `list_pull_request_watches` | `../pr-watch/` (service, routes `agentChatRoutes.prWatches`/`prWatch`, change detection); store `pr-watches.json` (`@orquester/config`) |
+
 ## Adding a toolkit
 
 1. **A directory** `session-tools/<toolkit>/index.ts` exporting one `SessionToolkit`:

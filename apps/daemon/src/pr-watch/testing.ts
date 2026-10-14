@@ -63,6 +63,10 @@ export interface Harness {
   sessions: Map<string, SessionSummary>;
   /** What the fake host answers for `<repoUrl>#<number>`. */
   pulls: Map<string, PullRequestStatus | Error>;
+  /** Keys whose reads never answer. */
+  hang: Set<string>;
+  /** Resolves when the next read starts. */
+  nextRead(): Promise<void>;
   reads: Array<{ accountId: string | null; repoUrl: string; number: number; remarksSince?: string }>;
   delivered: Array<{ sessionId: string; commandId: string; input: string; fileHadIt: boolean }>;
   published: PullRequestWatchesChangedEvent[];
@@ -80,6 +84,8 @@ export async function harness(opts: { viewer?: string[] } = {}): Promise<Harness
   const clock = new ManualClock(START);
   const sessions = new Map<string, SessionSummary>([["s1", chat("s1")]]);
   const pulls = new Map<string, PullRequestStatus | Error>();
+  const hang = new Set<string>();
+  const readWaiters: Array<() => void> = [];
   const reads: Harness["reads"] = [];
   const delivered: Harness["delivered"] = [];
   const published: PullRequestWatchesChangedEvent[] = [];
@@ -91,6 +97,8 @@ export async function harness(opts: { viewer?: string[] } = {}): Promise<Harness
       file,
       read: async (input): Promise<PullRequestWatchRead> => {
         reads.push(input);
+        for (const wake of readWaiters.splice(0)) wake();
+        if (hang.has(`${input.repoUrl}#${input.number}`)) return new Promise<never>(() => undefined);
         const answer = pulls.get(`${input.repoUrl}#${input.number}`);
         if (!answer) throw new GitRemoteError(404, "not found", "not_found", 404);
         if (answer instanceof Error) throw answer;
@@ -119,6 +127,8 @@ export async function harness(opts: { viewer?: string[] } = {}): Promise<Harness
     file,
     sessions,
     pulls,
+    hang,
+    nextRead: () => new Promise<void>((resolve) => readWaiters.push(resolve)),
     reads,
     delivered,
     published,

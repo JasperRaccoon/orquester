@@ -78,6 +78,11 @@ const TICK_MS = 30_000;
 const FIRST_TICK_MS = 5_000;
 /** Reads run at most this many at a time. */
 const READ_CONCURRENCY = 4;
+/**
+ * A read that has not answered by then counts as a timed-out read: the provider fetches carry no
+ * deadline of their own, and one hung read must not hold every later pass.
+ */
+const READ_TIMEOUT_MS = 90_000;
 /** A wake refused this many times (for a passing reason) is given up. */
 const MAX_WAKE_ATTEMPTS = 3;
 /** After a send, the next wake waits for the thread's latest turn to move on — or this long. */
@@ -456,6 +461,22 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
 
   const jitter = (ms: number) => Math.round(ms * (1 + (random() * 2 - 1) * POLL_JITTER));
 
+  function readWithDeadline(input: Parameters<PullRequestWatchServiceDeps["read"]>[0]): Promise<PullRequestWatchRead> {
+    return new Promise((resolve, reject) => {
+      const timer = clock.setTimeout(() => reject(Object.assign(new Error("The read timed out."), { kind: "timeout" })), READ_TIMEOUT_MS);
+      deps.read(input).then(
+        (value) => {
+          timer.cancel();
+          resolve(value);
+        },
+        (error: unknown) => {
+          timer.cancel();
+          reject(error);
+        }
+      );
+    });
+  }
+
   async function accountOf(projectPath: string, cache: Map<string, Promise<string | null>>): Promise<string | null> {
     let pending = cache.get(projectPath);
     if (!pending) {
@@ -471,7 +492,7 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
     const interval = intervalFor(head.repoUrl, accountId);
     let read: PullRequestWatchRead;
     try {
-      read = await deps.read({ accountId, repoUrl: head.repoUrl, number: head.number, ...(since ? { remarksSince: since } : {}) });
+      read = await readWithDeadline({ accountId, repoUrl: head.repoUrl, number: head.number, ...(since ? { remarksSince: since } : {}) });
     } catch (error) {
       const reason = describeReadError(error);
       const rateLimited = (error as { kind?: unknown } | null)?.kind === "rate_limited";
@@ -664,13 +685,17 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
     let read: PullRequestWatchRead | null = null;
     let note: string | undefined;
     try {
-      read = await deps.read({ accountId, repoUrl: target.repoUrl, number: target.number, remarksSince: startedAt });
+      read = await readWithDeadline({ accountId, repoUrl: target.repoUrl, number: target.number, remarksSince: startedAt });
     } catch (error) {
       const kind = (error as { kind?: unknown } | null)?.kind;
       if (kind === "not_found") {
         throw new PullRequestWatchError(404, "PULL_REQUEST_NOT_FOUND", `Pull request #${target.number} was not found in ${target.repository} (or this project's git account cannot see it).`);
       }
-      if (kind === "auth" || kind === "missing_scope" || kind === "unsupported") {
+      const status = (error as { status?: unknown } | null)?.status;
+      // A refusal that will not pass by itself: the token, its scope, a host the account does not
+      // cover — or an account error without a kind (the workspace names a deleted account).
+      const lasting = kind === undefined && typeof status === "number" && status >= 400 && status < 500 && status !== 429;
+      if (kind === "auth" || kind === "missing_scope" || kind === "unsupported" || lasting) {
         throw new PullRequestWatchError(400, "PULL_REQUEST_UNREADABLE", `Orquester cannot read pull request #${target.number} in ${target.repository}: ${describeReadError(error)}.`);
       }
       // A passing failure (rate limit, timeout, the host down): watch without a baseline.

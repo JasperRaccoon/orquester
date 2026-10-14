@@ -9,6 +9,7 @@ import type { SessionSummary } from "@orquester/api";
 import { parsePullRequestWatchMessage } from "@orquester/api/agent-chat";
 import { parsePullRequestWatchFile } from "@orquester/config";
 
+import { AccountError } from "../account-error.ts";
 import { GitRemoteError, type PullRequestRemark, type PullRequestStatus } from "../providers/types.ts";
 import { PullRequestWatchError } from "./service.ts";
 import { chat, check, cleanupHarnesses, harness, prStatus, REMOTE, sessionEvent, START, type Harness } from "./testing.ts";
@@ -248,6 +249,26 @@ test("a rate limit waits as long as the host asks and never counts as a failure"
   assert.equal(h.service.list("s1")[0]?.lastError, null);
 });
 
+test("a read that never answers times out and does not hold later passes", async () => {
+  const h = await harness();
+  await watching(h);
+  h.hang.add(KEY);
+  // Driven by hand: the harness's `run` waits for the service to be idle, which a hung read is not.
+  h.clock.jump(Date.parse(START) + POLL);
+  const started = h.nextRead();
+  const ticking = h.service.tick();
+  await started;
+  assert.equal(h.service.list("s1")[0]?.lastError, null);
+  h.clock.advance(90_000);
+  await ticking;
+  assert.equal(h.service.list("s1")[0]?.lastError, "timed out");
+  const reads = h.reads.length;
+  h.hang.delete(KEY);
+  await h.run(10 * 60_000);
+  assert.ok(h.reads.length > reads);
+  assert.equal(h.service.list("s1")[0]?.lastError, null);
+});
+
 test("eight failed reads in a row end the watch and tell the thread", async () => {
   const h = await harness();
   await watching(h);
@@ -290,6 +311,8 @@ test("creating: duplicates, the per-thread cap, closed pull requests, unreadable
   await refused({ number: 13 }, "PULL_REQUEST_NOT_OPEN");
   h.pulls.set(`${REMOTE}#14`, new GitRemoteError(400, "bad token", "auth", 401));
   await refused({ number: 14 }, "PULL_REQUEST_UNREADABLE");
+  h.pulls.set(`${REMOTE}#16`, new AccountError(404, "Account not found."));
+  await refused({ number: 16 }, "PULL_REQUEST_UNREADABLE");
   await assert.rejects(h.service.create("nope", { number: 12 }), (error: unknown) => error instanceof PullRequestWatchError && error.code === "THREAD_NOT_FOUND");
 
   h.pulls.set(`${REMOTE}#15`, new GitRemoteError(502, "GitHub GET → 502", "upstream", 502));
