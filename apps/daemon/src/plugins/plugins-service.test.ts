@@ -430,7 +430,7 @@ test("the session preload stays off when the preload could not be written", asyn
 
   // The next refresh (here: the workspaces dir moving) retries the write.
   h.failPreload.value = false;
-  await h.service.workspacesDirChanged();
+  await h.service.workspacesChanged();
   assert.equal(h.sessionPreload.at(-1), tsRustPreloadPath(h.baseDir));
 });
 
@@ -441,7 +441,7 @@ test("a moved workspaces dir rewrites the preload with the new root", async (t) 
   const moved = join(h.root, "elsewhere");
   await mkdir(join(moved, "acme"), { recursive: true });
   h.workspacesDir.current = moved;
-  await h.service.workspacesDirChanged();
+  await h.service.workspacesChanged();
   assert.deepEqual(
     h.preloadWrites.map((write) => write.options.workspacesRoot),
     [await realpath(join(h.root, "workspaces")), await realpath(moved)]
@@ -551,4 +551,127 @@ test("an unsupported platform: no toggles, no checks, no network", async (t) => 
   assert.deepEqual(h.preloadWrites, []);
   // Turning off stays possible (a plugins.json carried over from a supported host).
   await h.service.setWorkspaceEnabled(ID, "acme", false);
+});
+
+test("a deleted and re-created enabled workspace is picked up at once, across a restart", async (t) => {
+  const h = await harness(t);
+  await publish(h.registry, h.root, "0.7.0");
+  h.registry.latest = "0.7.0";
+  await enable(h);
+  const preload = tsRustPreloadPath(h.baseDir);
+  assert.equal(h.sessionPreload.at(-1), preload);
+
+  // Nothing changed: no broadcast.
+  const quiet = h.events.length;
+  await h.service.workspacesChanged();
+  await h.service.settled();
+  assert.equal(h.events.length, quiet);
+
+  await rm(join(h.workspacesDir.current, "acme"), { recursive: true });
+  await h.service.workspacesChanged();
+  await h.service.settled();
+  assert.equal(h.sessionPreload.at(-1), null);
+  assert.deepEqual(h.events.at(-1)?.plugins[0]?.enabledWorkspaces, []);
+
+  await h.restart();
+  assert.equal(h.sessionPreload.at(-1), null);
+  await mkdir(join(h.workspacesDir.current, "acme"));
+  await h.service.workspacesChanged();
+  await h.service.settled();
+  assert.equal(h.sessionPreload.at(-1), preload);
+  assert.deepEqual(h.events.at(-1)?.plugins[0]?.enabledWorkspaces, ["acme"]);
+  assert.deepEqual((await onDisk(h)).plugins[ID].enabledWorkspaces, ["acme"]);
+});
+
+test("a plugins.json repaired by hand brings the runtime back: preload, timer and the held-back install", async (t) => {
+  t.mock.timers.enable({ apis: ["setInterval"] });
+  const h = await harness(t, { seed: "{ broken" });
+  await publish(h.registry, h.root, "0.7.0");
+  h.registry.latest = "0.7.0";
+  assert.equal(h.sessionPreload.at(-1), null);
+  t.mock.timers.tick(PLUGIN_CHECK_INTERVAL_MS);
+  await h.service.settled();
+  assert.equal(h.registry.calls.latest, 0, "no timer while the file is unreadable");
+
+  await writeFile(h.file, JSON.stringify({ version: 1, plugins: { [ID]: { enabledWorkspaces: ["acme"] } } }), "utf8");
+  const info = await plugin(h);
+  assert.deepEqual(info.enabledWorkspaces, ["acme"]);
+  await h.service.settled();
+  assert.equal(h.sessionPreload.at(-1), tsRustPreloadPath(h.baseDir));
+  assert.equal((await plugin(h)).current?.version, "0.7.0");
+  assert.equal(h.events.at(-1)?.plugins[0]?.current?.version, "0.7.0");
+
+  t.mock.timers.tick(PLUGIN_CHECK_INTERVAL_MS);
+  await h.service.settled();
+  assert.equal(h.registry.calls.latest, 2, "the hourly check is armed again");
+});
+
+test("a malformed ts-rust record is unreadable and kept; another plugin's record of any shape is not", async (t) => {
+  const malformed = JSON.stringify({ version: 1, plugins: { [ID]: { enabledWorkspaces: "acme" } } });
+  const h = await harness(t, { seed: malformed });
+  await assert.rejects(h.service.list(), (error: unknown) => {
+    assert.ok(error instanceof PluginsError);
+    assert.equal(error.code, "PLUGINS_UNREADABLE");
+    assert.match(error.message, /malformed "ts-rust" record/);
+    return true;
+  });
+  await refusal(h.service.setWorkspaceEnabled(ID, "acme", false), 500, "PLUGINS_UNREADABLE");
+  assert.equal(await readFile(h.file, "utf8"), malformed);
+
+  const other = { enabledWorkspaces: 7, nested: [{ a: null }] };
+  await writeFile(h.file, JSON.stringify({ version: 1, plugins: { "future-plugin": other, odd: "x" } }), "utf8");
+  h.registry.latest = "9.9.9";
+  await enable(h);
+  const stored = await onDisk(h);
+  assert.deepEqual(stored.plugins["future-plugin"], other);
+  assert.equal(stored.plugins.odd, "x");
+  assert.deepEqual(stored.plugins[ID].enabledWorkspaces, ["acme"]);
+});
+
+test("a current version whose binary is gone is reinstalled by the next check, previous untouched", async (t) => {
+  const h = await harness(t);
+  for (const version of ["0.7.0", "0.8.0"]) await publish(h.registry, h.root, version);
+  h.registry.latest = "0.7.0";
+  await enable(h);
+  h.registry.latest = "0.8.0";
+  await check(h);
+
+  await rm(join(h.pluginDir, "versions", "0.8.0"), { recursive: true });
+  await check(h);
+  const info = await plugin(h);
+  assert.equal(info.current?.version, "0.8.0");
+  assert.equal(info.previous?.version, "0.7.0");
+  assert.equal(info.lastError, null);
+  assert.deepEqual(await versions(h), ["0.7.0", "0.8.0"]);
+  assert.equal(h.registry.calls.tarballs.length, 3);
+});
+
+test("a missing current is repaired at start, keeping a rollback's skip; a newer release is not paired with it", async (t) => {
+  const h = await harness(t);
+  for (const version of ["0.7.0", "0.8.0", "0.9.0"]) await publish(h.registry, h.root, version);
+  h.registry.latest = "0.7.0";
+  await enable(h);
+  h.registry.latest = "0.8.0";
+  await check(h);
+  await h.service.rollback(ID); // current 0.7.0, previous 0.8.0, skipping 0.8.0
+
+  // latest is still the skipped 0.8.0: the start-up check reinstalls the rolled-back-to 0.7.0.
+  await rm(join(h.pluginDir, "versions", "0.7.0"), { recursive: true });
+  await h.restart();
+  let info = await plugin(h);
+  assert.equal(info.current?.version, "0.7.0");
+  assert.equal(info.previous?.version, "0.8.0");
+  assert.equal(info.skippedVersion, "0.8.0");
+  assert.deepEqual(await versions(h), ["0.7.0", "0.8.0"]);
+
+  // Missing again, and a newer release is out: it becomes current, and the missing one is not
+  // made the rollback target.
+  await rm(join(h.pluginDir, "versions", "0.7.0"), { recursive: true });
+  h.registry.latest = "0.9.0";
+  await check(h);
+  info = await plugin(h);
+  assert.equal(info.current?.version, "0.9.0");
+  assert.equal(info.previous?.version, "0.8.0");
+  assert.equal(info.skippedVersion, null);
+  assert.deepEqual(await versions(h), ["0.8.0", "0.9.0"]);
 });

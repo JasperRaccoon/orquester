@@ -629,7 +629,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // preload; its update checks run in the background.
   const plugins = new PluginsService({
     baseDir: paths.baseDir,
-    // A getter: PUT /api/config/daemon moves it, then calls `workspacesDirChanged`.
+    // A getter: PUT /api/config/daemon moves it, then calls `workspacesChanged`.
     workspacesDir: () => resolved.workspacesDir,
     writeJson: writeJsonFile,
     env,
@@ -1569,7 +1569,7 @@ export function createServer(
     resolved.logsDir = expandVars(merged.logsDir, resolved.vars);
     await mkdir(resolved.workspacesDir, { recursive: true }).catch(() => undefined);
     // The tsc-rs preload has the workspaces root baked in: rewrite it for the new one.
-    void services.plugins.workspacesDirChanged();
+    void services.plugins.workspacesChanged();
     void services.reloadHttp?.();
 
     return sanitizeDaemonConfig(config);
@@ -1642,6 +1642,17 @@ export function createServer(
     });
   }
 
+  // A directory created, renamed or deleted directly under the workspaces root is a workspace
+  // change: the plugins service re-decides which of its enabled workspaces exist (the session
+  // preload, its timer, a first install, a broadcast). `parentDir` is a realpath. Optional
+  // chaining here and in the workspace routes: their route tests stub `services` without plugins.
+  const notifyWorkspacesChanged = async (parentDir: string): Promise<void> => {
+    const root = await realpath(resolved.workspacesDir).catch(() => resolve(resolved.workspacesDir));
+    if (parentDir === root) {
+      void services.plugins?.workspacesChanged();
+    }
+  };
+
   // Filesystem-backed workspaces & projects:
   //   (workspacesDir)/<workspace>           -> a workspace
   //   (workspacesDir)/<workspace>/<project> -> a project
@@ -1688,6 +1699,7 @@ export function createServer(
         app.log.error({ err: error }, "git account binding failed");
       });
     }
+    void services.plugins?.workspacesChanged();
 
     return {
       name,
@@ -2045,6 +2057,7 @@ export function createServer(
       // its /private/tmp realpath differ — a post-rm fallback wouldn't match).
       await services.accounts.unbindWorkspace(target).catch(() => undefined);
       await rm(safe, { recursive: true, force: true });
+      void services.plugins?.workspacesChanged();
       // Only now that the tree is gone: cascade-delete the workspace's own to-do
       // lists AND every list under a project inside it (`workspace` = name
       // refKey; `target` = raw-join path), and the saved prompts of every
@@ -2588,6 +2601,7 @@ export function createServer(
       const safe = await assertInsideFsRoot(resolved.fsRoot, body.path);
       if (body.kind === "dir") {
         await mkdir(safe, { recursive: true });
+        await notifyWorkspacesChanged(dirname(safe));
       } else {
         await mkdir(dirname(safe), { recursive: true });
         await writeFile(safe, "", { flag: "wx" });
@@ -2649,6 +2663,7 @@ export function createServer(
           .send({ code: "FS_EXISTS", message: `A file or folder named "${newName}" already exists.` });
       }
       await rename(source, target);
+      await notifyWorkspacesChanged(parent);
       return { ok: true };
     } catch (error) {
       if (error instanceof FsSandboxError) {
@@ -2802,6 +2817,7 @@ export function createServer(
         await services.browsers.closeForProject(safe, resolve(path));
         await services.desktops.closeForProject(safe);
         await rm(safe, { recursive: true, force: false });
+        await notifyWorkspacesChanged(dirname(safe));
         return { ok: true };
       } catch (error) {
         if (error instanceof FsSandboxError) {
