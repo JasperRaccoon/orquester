@@ -22,6 +22,7 @@ import type {
 } from "./adapter-types.ts";
 import type { DomainEvent } from "./domain-events.ts";
 import type { AgentGoalStatus } from "./goal.ts";
+import type { ForkSessionRequest, MergeBackRequest, MergeBackResponse } from "./lineage.ts";
 import type { ApprovalDecision, TurnTokenUsage } from "./runtime-events.ts";
 import type {
   Checkpoint,
@@ -133,7 +134,23 @@ export const agentChatRoutes = {
    * when the thread has no such user prompt.
    */
   promptText: (sessionId: string, messageId: string): string =>
-    `${sessionBase(sessionId)}/prompts/${encodeURIComponent(messageId)}`
+    `${sessionBase(sessionId)}/prompts/${encodeURIComponent(messageId)}`,
+
+  // Thread lineage (spec 2026-10-14 §6). Daemon-owned, like `account`: none is
+  // a proxied §6.2 command.
+  /**
+   * `POST` {@link ForkSessionRequest} → `ForkSessionResponse`: a new chat tab
+   * in the same project, same agent, model and options, whose conversation is
+   * this one's up to a message.
+   */
+  fork: (sessionId: string): string => `${sessionBase(sessionId)}/fork`,
+  /**
+   * `POST` {@link MergeBackRequest} → {@link MergeBackResponse}, on the CHILD:
+   * send its result to the parent, queued while the parent is busy.
+   */
+  mergeBack: (sessionId: string): string => `${sessionBase(sessionId)}/merge-back`,
+  /** `GET` → `SessionLineageResponse`: parent, children and pending merges. */
+  lineage: (sessionId: string): string => `${sessionBase(sessionId)}/lineage`
 } as const;
 
 // ---------------------------------------------------------------------------
@@ -386,6 +403,13 @@ export interface CreateAgentChatSessionFields {
    * code; no §6.2 command does.
    */
   resume?: { home: AccountHomeKind; conversationId: string };
+  /**
+   * Create the thread as a child of another chat tab in the same project
+   * (spec 2026-10-14 §6) — `relation: "delegate"` only: a fork carries the
+   * parent's conversation and is created by `POST …/fork`. The daemon checks
+   * the parent and stamps `createdAt` itself.
+   */
+  lineage?: { parentThreadId: string; relation: "delegate" };
 }
 
 /** §6.1's create-time refusal code. Deliberately not in {@link AgentChatErrorCode}. */

@@ -42,6 +42,7 @@ import { describeExit, spawnProviderChild } from "../../support/spawn.ts";
 import { CODEX_ADAPTER_CAPABILITIES } from "./capabilities.ts";
 import { AsyncEventQueue } from "./event-queue.ts";
 import { projectCodexHistory } from "./history.ts";
+import { CODEX_FORK_NO_THREAD, codexThreadIdOf, forkCodexThread } from "./fork.ts";
 import { CodexPeer } from "./protocol.ts";
 import {
   MINIMUM_CODEX_VERSION,
@@ -419,6 +420,36 @@ export const createCodexAdapter: AdapterFactory = async (
      */
     projectHistory(snapshot: ThreadSnapshot): RuntimeEvent[] {
       return projectCodexHistory(snapshot).map((draft) => stamp(snapshot.threadId, draft));
+    },
+
+    /**
+     * Thread lineage (spec 2026-10-14 §6): `thread/fork` through the last
+     * kept turn, inclusive, on a short-lived app-server under the source's
+     * `CODEX_HOME` (`fork.ts`). A live source session is only read — its
+     * provider thread wins over the persisted cursor — never stopped.
+     */
+    async forkConversation(input) {
+      await assertVersionSupported();
+      const sourceCodexThreadId =
+        codexThreadIdOf(sessions.get(input.sourceThreadId)?.summary().resumeCursor) ??
+        codexThreadIdOf(input.sourceResumeCursor);
+      const lastTurnId = input.cut.retainedTurnIds.at(-1);
+      if (sourceCodexThreadId === null || lastTurnId === undefined) {
+        throw new Error(CODEX_FORK_NO_THREAD);
+      }
+      const codexHome = resolveCodexHome(input.home.path);
+      const forkedId = await forkCodexThread({
+        bin: requireBin(),
+        env: context.buildEnv({
+          threadId: input.sourceThreadId,
+          home: codexHome !== null ? { ...input.home, path: codexHome } : input.home
+        }),
+        cwd: input.cwd,
+        sourceCodexThreadId,
+        lastTurnId,
+        logger: context.logger
+      });
+      return { resumeCursor: { threadId: forkedId } };
     },
 
     listSessions(): ProviderSession[] {

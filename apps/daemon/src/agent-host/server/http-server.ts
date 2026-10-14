@@ -56,6 +56,8 @@ import {
   type AgentHostRecycleOpenCodeResponse,
   type AgentHostResumeGoalSessionsResponse,
   type CreateHostThreadRequest,
+  type ForkHostThreadRequest,
+  type ForkHostThreadResponse,
   type SetThreadIdentityRequest
 } from "../host-protocol.ts";
 import type { ThreadStore } from "../services.ts";
@@ -596,6 +598,15 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
     // §3.4's account switch. Not in `COMMAND_NAMES`: the daemon owns the
     // client-facing route and calls this with an identity it has already
     // resolved, so nothing here re-reads the accounts store.
+    // Thread lineage (spec 2026-10-14 §6): `threadId` is the PARENT; the body
+    // names the child and the fork point.
+    if (rest === "/fork" && method === "POST") {
+      const body = (await readJsonBody(request)) as ForkHostThreadRequest;
+      const result: ForkHostThreadResponse = await orchestrator.forkThread(threadId, body);
+      sendJson(response, 200, result);
+      return;
+    }
+
     if (rest === "/identity" && method === "POST") {
       const body = (await readJsonBody(request)) as SetThreadIdentityRequest;
       const receipt = await orchestrator.setIdentity(threadId, body);

@@ -197,6 +197,15 @@ export function pushConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "push.json");
 }
 
+/**
+ * Merge-backs waiting for a busy parent thread (spec 2026-10-14 §6): each is
+ * delivered as an ordinary `/turn` once the parent is idle. 0600, the daemon's
+ * own file, read tolerantly ({@link parseMergeOutbox}).
+ */
+export function agentChatMergeOutboxFile(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "agent-merge-outbox.json");
+}
+
 /** Cached token/cost scan (Claude JSONL + Codex sessions); 0600. */
 export function usageTokensCacheFile(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "usage-tokens.json");
@@ -267,6 +276,16 @@ export function agentChatThreadAttachmentsDir(baseDir: string, threadId: string)
  */
 export function agentChatThreadLeftoverWorkPath(baseDir: string, threadId: string): string {
   return joinPath(agentChatThreadDir(baseDir, threadId), "leftover-work.json");
+}
+
+/**
+ * A transcript-handoff fork's pending context (spec 2026-10-14 §6): the
+ * parent's conversation up to the fork point, which the host hands the
+ * provider together with the child's first message and then deletes. 0600,
+ * written atomically; only a provider without a native fork has one.
+ */
+export function agentChatThreadForkHandoffPath(baseDir: string, threadId: string): string {
+  return joinPath(agentChatThreadDir(baseDir, threadId), "fork-handoff.json");
 }
 
 /**
@@ -832,6 +851,24 @@ export const workflowSessionOwnerSchema = z.object({
 });
 export type WorkflowSessionOwnerRecord = z.infer<typeof workflowSessionOwnerSchema>;
 
+/**
+ * A chat thread's parent (spec 2026-10-14 §6). Mirrors `ThreadLineage` in
+ * `@orquester/api` (`parseThreadLineage`, the same rules). Read with `.catch`
+ * wherever it is persisted: a lineage that does not parse is dropped, never
+ * the record that carries it.
+ */
+const lineageIdSchema = z.string().min(1).max(200).regex(/\S/, "must not be blank");
+export const threadLineageRecordSchema = z.object({
+  parentThreadId: lineageIdSchema,
+  relation: z.enum(["fork", "delegate"]),
+  forkedFrom: z
+    .object({ messageId: lineageIdSchema, turnId: lineageIdSchema })
+    .optional()
+    .catch(undefined),
+  createdAt: z.string().catch("")
+});
+export type ThreadLineageRecord = z.infer<typeof threadLineageRecordSchema>;
+
 export const sessionRecordSchema = z.object({
   id: z.string().min(1),
   title: z.string(),
@@ -862,7 +899,11 @@ export const sessionRecordSchema = z.object({
   // Tolerant: a malformed owner — a newer shape, a hand edit — is DROPPED, never the record
   // (`.catch`), so a bad owner can't cost the user a tab. An older daemon strips the key on
   // rollback, which only loses the Workflow chip.
-  owner: workflowSessionOwnerSchema.optional().catch(undefined)
+  owner: workflowSessionOwnerSchema.optional().catch(undefined),
+  // Agent-chat tabs: the thread this one was forked from or delegated by (spec 2026-10-14 §6).
+  // Tolerant like `owner`: a malformed lineage is dropped, never the record; an older daemon
+  // strips the key, which only loses the lineage chip.
+  lineage: threadLineageRecordSchema.optional().catch(undefined)
 });
 
 export const sessionsConfigSchema = z.object({
@@ -981,10 +1022,70 @@ export const agentThreadHeadSchema = z.object({
     .optional(),
   resumeGoalAfterRestart: z.literal(true).optional().catch(undefined),
   goalHeldForHandover: z.literal(true).optional().catch(undefined),
+  // Spec 2026-10-14 §6, as `thread.created` recorded it. Must be listed (zod strips unknown
+  // keys); a malformed one reads as none, never as a head nothing can read.
+  lineage: threadLineageRecordSchema.optional().catch(undefined),
   createdAt: z.string(),
   updatedAt: z.string()
 });
 export type AgentThreadHead = z.infer<typeof agentThreadHeadSchema>;
+
+/**
+ * `fork-handoff.json` (spec 2026-10-14 §6): the conversation a transcript-handoff fork owes
+ * its provider with the first message. `null` for anything that does not read — the fork then
+ * runs without it, which the host reports rather than guessing.
+ */
+export const forkHandoffSchema = z.object({
+  version: z.literal(1),
+  parentThreadId: z.string().min(1),
+  transcript: z.string().min(1),
+  createdAt: z.string()
+});
+export type ForkHandoffRecord = z.infer<typeof forkHandoffSchema>;
+
+export function parseForkHandoff(value: unknown): ForkHandoffRecord | null {
+  const parsed = forkHandoffSchema.safeParse(value);
+  return parsed.success ? parsed.data : null;
+}
+
+/**
+ * `agent-merge-outbox.json` (spec 2026-10-14 §6): merge-backs queued for a busy parent. Entries
+ * are read one by one: a malformed entry is kept aside as it was (`unreadable`) and written back
+ * unchanged, never dropped, and unknown fields of a good entry survive a rewrite (`passthrough`),
+ * so a newer daemon's queue outlives a rollback.
+ */
+export const mergeOutboxEntrySchema = z
+  .object({
+    mergeId: z.string().min(1).max(200),
+    parentSessionId: z.string().min(1),
+    childSessionId: z.string().min(1),
+    /** The whole `/turn` input, header included. */
+    input: z.string().min(1),
+    queuedAt: z.string()
+  })
+  .passthrough();
+export type MergeOutboxEntry = z.infer<typeof mergeOutboxEntrySchema>;
+
+export interface MergeOutbox {
+  entries: MergeOutboxEntry[];
+  /** Entries this build cannot read, kept verbatim for the next rewrite. */
+  unreadable: unknown[];
+}
+
+export function parseMergeOutbox(value: unknown): MergeOutbox {
+  const raw =
+    value !== null && typeof value === "object" && Array.isArray((value as { entries?: unknown }).entries)
+      ? ((value as { entries: unknown[] }).entries)
+      : [];
+  const entries: MergeOutboxEntry[] = [];
+  const unreadable: unknown[] = [];
+  for (const entry of raw) {
+    const parsed = mergeOutboxEntrySchema.safeParse(entry);
+    if (parsed.success) entries.push(parsed.data);
+    else unreadable.push(entry);
+  }
+  return { entries, unreadable };
+}
 
 /**
  * A thread directory that fails to parse marks THAT thread `error` with the

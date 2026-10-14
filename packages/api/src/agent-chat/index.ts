@@ -22,6 +22,7 @@ export * from "./wire.ts";
 export * from "./fold.ts";
 export * from "./fold-snapshot.ts";
 export * from "./history-cursor.ts";
+export * from "./lineage.ts";
 export * from "./message-liveness.ts";
 export * from "./open-work.ts";
 export * from "./pending.ts";

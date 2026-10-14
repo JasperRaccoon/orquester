@@ -10,6 +10,12 @@
  */
 
 import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
+import type {
+  ThreadForkStrategy,
+  ThreadForkTarget,
+  ThreadHead,
+  ThreadLineage
+} from "@orquester/api/agent-chat";
 
 /**
  * Re-exported so the daemon and the host resolve the socket and the token from
@@ -95,6 +101,16 @@ export const agentHostRoutes = {
    * would have to look up.
    */
   setThreadIdentity: (threadId: string): string => `${thread(threadId)}/identity`,
+  /**
+   * Thread lineage (spec 2026-10-14 §6): `POST` {@link ForkHostThreadRequest}
+   * on the PARENT → {@link ForkHostThreadResponse}. Creates the child thread
+   * as `createThread` does, its conversation the parent's up to the fork
+   * point. Additive: a host that predates it answers its generic route-miss
+   * 404 `THREAD_NOT_FOUND` ("No route for …") until its drain-restart, which
+   * the daemon reports as "needs the host update" — `AGENT_HOST_PROTOCOL_VERSION`
+   * did not move for it.
+   */
+  forkThread: (parentThreadId: string): string => `${thread(parentThreadId)}/fork`,
 
   // §6.2 commands, one route per command.
   turn: (threadId: string): string => `${thread(threadId)}/turn`,
@@ -309,6 +325,31 @@ export interface CreateHostThreadRequest {
   unsetEnv?: string[];
   /** Absolute home dir for `home`, resolved daemon-side. Never on a client wire. */
   homePath?: string;
+  /**
+   * The thread's parent (spec 2026-10-14 §6), recorded on `thread.created`.
+   * Additive: an older host ignores it, and the daemon's tab record still
+   * carries the lineage.
+   */
+  lineage?: ThreadLineage;
+}
+
+/**
+ * Body of `POST /threads/:parentId/fork` (spec 2026-10-14 §6). The create
+ * fields are the child's; `modelSelection` / `runtimeMode` left out are the
+ * parent's (a fork runs "with the same agent/model/options"), and
+ * `projectPath`, `cwd`, the account and the launch environment are the
+ * parent's as the daemon resolved them — a provider's resume identity stays
+ * in the home that created it. `resume` and `lineage` are ignored: the host
+ * builds both.
+ */
+export interface ForkHostThreadRequest extends CreateHostThreadRequest {
+  fork: ThreadForkTarget;
+}
+
+export interface ForkHostThreadResponse {
+  head: ThreadHead;
+  strategy: ThreadForkStrategy;
+  lineage: ThreadLineage;
 }
 
 /**

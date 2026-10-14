@@ -25,6 +25,7 @@ import type {
 
 import type {
   AgentAdapter,
+  ForkConversationInput,
   GoalCommandOptions,
   GoalCommandResult,
   HostGoalCommand,
@@ -48,6 +49,7 @@ export interface ScriptedCall {
     | "readThread"
     | "projectHistory"
     | "rollbackThread"
+    | "forkConversation"
     | "stopSession"
     | "prepareUserEnd"
     | "sweepEndedSession"
@@ -82,6 +84,12 @@ export interface ScriptedAdapterOptions {
     command: HostGoalCommand,
     options?: GoalCommandOptions
   ) => Promise<GoalCommandResult>;
+  /**
+   * Thread lineage's native fork (spec 2026-10-14 §6). Omit to model an
+   * adapter with no fork of its own (Grok). Every call is recorded, as
+   * `forkConversation` with the input as its detail, before this runs.
+   */
+  forkConversation?: (input: ForkConversationInput) => Promise<{ resumeCursor: unknown }>;
 }
 
 export interface ScriptedAdapter extends AgentAdapter {
@@ -285,6 +293,15 @@ export function createScriptedAdapter(options: ScriptedAdapterOptions = {}): Scr
             calls.push({ kind: "goalCommand", threadId, detail: command });
             goalCommandOptions.push(commandOptions);
             return options.goalCommand!(threadId, command, commandOptions);
+          }
+        }
+      : {}),
+
+    ...(options.forkConversation
+      ? {
+          async forkConversation(input: ForkConversationInput): Promise<{ resumeCursor: unknown }> {
+            calls.push({ kind: "forkConversation", threadId: input.threadId, detail: input });
+            return options.forkConversation!(input);
           }
         }
       : {}),

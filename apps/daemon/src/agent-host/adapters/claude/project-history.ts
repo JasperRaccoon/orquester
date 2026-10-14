@@ -28,6 +28,7 @@ import { HISTORICAL_RAW_SOURCE } from "@orquester/api/agent-chat";
 
 import type { Clock, IdGen } from "../../adapter.ts";
 import { isAttachmentPathBlock, stripAttachmentPathLines } from "../attachment-lines.ts";
+import { stripForkHandoff } from "../../orchestration/fork.ts";
 import {
   classifyToolItemType,
   cliDenialReason,
@@ -453,7 +454,8 @@ export function projectClaudeHistory(
             // `Attached files:` block it appended (`attachment-lines.ts`):
             // provider input, not the user's own text. The agent's text was
             // never the adapter's and stays as it is.
-            const shown = message.role === "user" ? stripAttachmentPathLines(text) : text;
+            const shown =
+              message.role === "user" ? stripAttachmentPathLines(stripForkHandoff(text)) : text;
             const itemId = deps.ids.messageId("msg");
             if (message.role === "assistant") {
               // The same shape the live path produces, so a consumer that

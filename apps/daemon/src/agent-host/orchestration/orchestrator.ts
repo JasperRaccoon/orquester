@@ -44,6 +44,7 @@ import {
   isHistoricalRuntimeEvent,
   isPlanImplementationMessage,
   isUnfinishedGoal,
+  parseThreadLineage,
   recallablePromptText,
   SETTLED_TURN_STATES,
   TASK_STOP_FAILED_ACTIVITY_KIND,
@@ -72,7 +73,9 @@ import {
   type RuntimeMode,
   type ThreadActivityItem,
   type ThreadFoldState,
+  type ThreadForkStrategy,
   type ThreadHead,
+  type ThreadLineage,
   type ThreadHistoryBounds,
   type ThreadHistoryPage,
   type ThreadHistoryTurn,
@@ -109,6 +112,8 @@ import {
   CONTINUATION_SEND_FAILED_MESSAGE,
   COMPACTION_FAILED_MESSAGE,
   type CreateHostThreadRequest,
+  type ForkHostThreadRequest,
+  type ForkHostThreadResponse,
   type SetThreadIdentityRequest
 } from "../host-protocol.ts";
 import type {
@@ -208,6 +213,15 @@ import {
   requireCommandId
 } from "./validate.ts";
 import { isUsableConversationId, resumeCursorFor } from "./resume.ts";
+import {
+  buildForkTranscript,
+  createMemoryForkHandoffStore,
+  ForkRefusal,
+  resolveForkCut,
+  withForkHandoff,
+  type ForkHandoffStore,
+  type ResolvedForkCut
+} from "./fork.ts";
 
 // ---------------------------------------------------------------------------
 // Dependencies
@@ -281,6 +295,12 @@ interface OrchestratorOptions {
    * lazy recovery or by the reconcile, so they must survive a host restart.
    */
   launchConfigs: LaunchConfigStore;
+  /**
+   * Where a transcript-handoff fork's conversation waits for the child's
+   * first message (`fork-handoff.json`, spec 2026-10-14 §6). In memory when
+   * absent (tests).
+   */
+  forkHandoffs?: ForkHandoffStore;
   clock?: Clock;
   ids?: IdGen;
   /**
@@ -467,6 +487,12 @@ interface ThreadRuntime {
    * {@link HOST_CLOSED_REQUESTS_LIMIT}.
    */
   hostClosedRequests: Set<string>;
+  /**
+   * A transcript-handoff fork's pending conversation (spec 2026-10-14 §6):
+   * `undefined` until `fork-handoff.json` was read for this runtime, `null`
+   * once there is none (never was, or delivered).
+   */
+  forkHandoff: string | null | undefined;
 }
 
 /**
@@ -576,6 +602,8 @@ export interface Orchestrator {
   whenReady<T>(task: () => Promise<T>): Promise<T>;
 
   createThread(request: CreateHostThreadRequest): Promise<ThreadHead>;
+  /** Thread lineage (spec 2026-10-14 §6): `POST /threads/:parentId/fork`. */
+  forkThread(parentThreadId: string, request: ForkHostThreadRequest): Promise<ForkHostThreadResponse>;
   /**
    * `input.seed` marks a client auto-seeded title (§7.7): it is written like
    * any other, but leaves `titleManual` false so a provider retitle may still
@@ -765,6 +793,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   const ids = options.ids ?? systemIdGen;
   const buildEvent: BuildEvent = createEventBuilder({ clock, ids });
   const launchConfigs = options.launchConfigs;
+  const forkHandoffs = options.forkHandoffs ?? createMemoryForkHandoffStore();
   const { store, ingestion, checkpoints, liveness, snapshots, logger } = options;
 
   const runtimes = new Map<string, ThreadRuntime>();
@@ -1078,7 +1107,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       titleManual: loaded.derived.titleManual,
       checkpointsUnavailable: false,
       deleted: state.deleted,
-      hostClosedRequests: new Set()
+      hostClosedRequests: new Set(),
+      forkHandoff: undefined
     };
     // A long fold is paid once: the next load of this thread starts from here,
     // even if it is never written to again — an idle open tab would otherwise
@@ -2164,6 +2194,22 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         logger.error(`agent-host: effect failed for ${runtime.id}`, error);
       });
 
+  /**
+   * The conversation a transcript-handoff fork still owes its provider, read
+   * once per runtime. Only a fork the host could not fork natively has one
+   * (`forkThread`), and it is removed once a turn carried it.
+   */
+  const pendingForkHandoff = async (
+    runtime: ThreadRuntime,
+    head: ThreadHead
+  ): Promise<string | null> => {
+    if (head.lineage?.relation !== "fork") return null;
+    if (runtime.forkHandoff === undefined) {
+      runtime.forkHandoff = (await forkHandoffs.load(runtime.id))?.transcript ?? null;
+    }
+    return runtime.forkHandoff;
+  };
+
   const sendTurnEffect = async (runtime: ThreadRuntime, turn: QueuedTurn): Promise<void> => {
     const head = headOf(runtime);
     if (!head) return;
@@ -2217,16 +2263,28 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     }
 
     const adapter = adapterFor(head.adapter);
+    // Spec 2026-10-14 §6: a transcript-handoff fork hands the provider the
+    // parent's conversation with its first ordinary message — on the wire
+    // only: the timeline's message is what the user typed.
+    const handoff = await pendingForkHandoff(runtime, head);
+    const input = handoff === null ? null : withForkHandoff(turn.input, handoff);
     try {
       const result = await adapter.sendTurn({
         threadId: runtime.id,
-        input: turn.input,
+        input: input ?? turn.input,
         // Each carries the STAT'd size; the adapter names in an
         // `Attached files:` block whatever it does not ingest natively (§4.1).
         attachments,
         ...(turn.modelSelection !== undefined ? { modelSelection: turn.modelSelection } : {}),
         interactionMode: turn.interactionMode
       });
+      if (input !== null) {
+        // The provider has it now: never sent twice.
+        runtime.forkHandoff = null;
+        await forkHandoffs.remove(runtime.id).catch((error: unknown) => {
+          logger.warn(`agent-host: could not remove the fork handoff of ${runtime.id}`, error);
+        });
+      }
       if (runtime.bound) {
         runtime.bound = {
           ...runtime.bound,
@@ -3722,96 +3780,276 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         resumeCursor = resumeCursorFor(adapterId, threadId, request.resume.conversationId);
       }
 
-      const occurredAt = clock.nowIso();
-      const events: AppendableDomainEvent[] = [
+      return createThreadNow(runtime, request, {
+        adapterId,
+        modelSelection,
+        runtimeMode,
+        home,
+        resumeCursor,
+        // A delegate's parent, as the daemon checked it (spec 2026-10-14 §6).
+        lineage: parseThreadLineage(request.lineage)
+      });
+    });
+
+  /**
+   * The create itself, once everything that can refuse has run (§6.1): the
+   * `thread.created` (+ a resume's `session-set`), the launch config, the
+   * binding a resume seeds, and a resume's eager session start with its
+   * history replay. Shared by {@link createThread} and {@link forkThread} —
+   * a native fork IS a create-time resume of the forked conversation.
+   */
+  const createThreadNow = async (
+    runtime: ThreadRuntime,
+    request: CreateHostThreadRequest,
+    input: {
+      adapterId: AgentAdapterId;
+      modelSelection: ModelSelection;
+      runtimeMode: RuntimeMode;
+      home: "system" | "account";
+      resumeCursor: unknown;
+      lineage: ThreadLineage | undefined;
+      /** Runs after the create commits and before the eager session starts. */
+      afterCreate?: () => Promise<void>;
+    }
+  ): Promise<ThreadHead> => {
+    const threadId = runtime.id;
+    const { adapterId, modelSelection, runtimeMode, home, resumeCursor } = input;
+    const occurredAt = clock.nowIso();
+    const events: AppendableDomainEvent[] = [
+      buildEvent(
+        threadId,
+        "thread.created",
+        {
+          projectPath: request.projectPath,
+          cwd: request.cwd,
+          title: request.title,
+          adapter: adapterId,
+          refId: request.refId,
+          accountId: request.accountId,
+          home,
+          modelSelection,
+          runtimeMode,
+          ...(input.lineage !== undefined ? { lineage: input.lineage } : {})
+        },
+        { occurredAt }
+      )
+    ];
+    if (resumeCursor !== undefined) {
+      events.push(
         buildEvent(
           threadId,
-          "thread.created",
-          {
-            projectPath: request.projectPath,
-            cwd: request.cwd,
-            title: request.title,
-            adapter: adapterId,
-            refId: request.refId,
-            accountId: request.accountId,
-            home,
-            modelSelection,
-            runtimeMode
-          },
+          "thread.session-set",
+          { session: { status: "idle", activeTurnId: null, resumeCursor } },
           { occurredAt }
         )
-      ];
-      if (resumeCursor !== undefined) {
-        events.push(
-          buildEvent(
-            threadId,
-            "thread.session-set",
-            { session: { status: "idle", activeTurnId: null, resumeCursor } },
-            { occurredAt }
-          )
-        );
-      }
-      // Persisted BEFORE the thread exists on the wire: the very first turn
-      // may start a session, and it must already see the launcher env.
-      const launch = launchConfigFromRequest(request);
-      runtime.launch = launch;
-      await launchConfigs.save(threadId, launch).catch((error: unknown) => {
-        logger.warn(`agent-host: failed to persist the launch config for ${threadId}`, error);
+      );
+    }
+    // Persisted BEFORE the thread exists on the wire: the very first turn
+    // may start a session, and it must already see the launcher env.
+    const launch = launchConfigFromRequest(request);
+    runtime.launch = launch;
+    await launchConfigs.save(threadId, launch).catch((error: unknown) => {
+      logger.warn(`agent-host: failed to persist the launch config for ${threadId}`, error);
+    });
+    await runtime.commands.run(() => commit(runtime, events));
+    runtime.historyPending = resumeCursor !== undefined;
+    await saveHeadNow(runtime);
+    await input.afterCreate?.();
+    if (resumeCursor !== undefined) {
+      // §6.1 create-time resume: the binding is seeded here, not at the first
+      // session start, so a host that dies before the eager start still has
+      // the cursor the tab was opened with.
+      await upsertBinding(runtime, {
+        adapter: adapterId,
+        adapterKey: request.refId,
+        runtimeMode,
+        providerInstanceId: `${home}:${request.accountId}`,
+        status: "stopped",
+        resumeCursor
       });
-      await runtime.commands.run(() => commit(runtime, events));
-      runtime.historyPending = resumeCursor !== undefined;
-      await saveHeadNow(runtime);
-      if (resumeCursor !== undefined) {
-        // §6.1 create-time resume: the binding is seeded here, not at the first
-        // session start, so a host that dies before the eager start still has
-        // the cursor the tab was opened with.
-        await upsertBinding(runtime, {
-          adapter: adapterId,
-          adapterKey: request.refId,
-          runtimeMode,
-          providerInstanceId: `${home}:${request.accountId}`,
-          status: "stopped",
-          resumeCursor
-        });
-      }
-      if (resumeCursor !== undefined) {
-        // E2E R2-2: open the session NOW rather than on the first turn. History
-        // can only be read through a live provider session, so a lazy start
-        // left a resumed tab blank until the user typed — and then replayed the
-        // old conversation UNDER the new prompt, because the `/turn` had
-        // already committed its message. Queued on `effects`, so it neither
-        // delays this response nor races a later turn's session start.
-        //
-        // The tab's loading screen starts now, before this answers, so the
-        // client's first stream already shows it rather than an empty thread.
-        reportHistoryImport(runtime, { phase: "reading", done: 0, total: null });
-        void runtime.effects
-          .run(() => ensureSession(runtime))
-          .catch(async (error: unknown) => {
-            // A resume that cannot open its session is reported by the turn
-            // that needs it; opening early is an optimisation, not a contract.
-            logger.info("agent-host: eager resume session did not open", {
-              threadId,
-              error: describeFailure(error)
-            });
-            // But the tab must say so: without a row it showed an empty
-            // thread, as if the conversation had never existed (a signed-out
-            // account's "Authentication required" was only in this log).
-            await appendActivity(runtime, {
-              kind: "runtime.warning",
-              tone: "info",
-              summary: "This conversation could not be opened",
-              detail: describeFailure(error)
-            }).catch(() => undefined);
-          })
-          .finally(() => {
-            // However the eager start went, the loading screen ends with it.
-            if (runtime.historyImport !== null) {
-              reportHistoryImport(runtime, { phase: "done", done: 0, total: 0 });
-            }
+    }
+    if (resumeCursor !== undefined) {
+      // E2E R2-2: open the session NOW rather than on the first turn. History
+      // can only be read through a live provider session, so a lazy start
+      // left a resumed tab blank until the user typed — and then replayed the
+      // old conversation UNDER the new prompt, because the `/turn` had
+      // already committed its message. Queued on `effects`, so it neither
+      // delays this response nor races a later turn's session start.
+      //
+      // The tab's loading screen starts now, before this answers, so the
+      // client's first stream already shows it rather than an empty thread.
+      reportHistoryImport(runtime, { phase: "reading", done: 0, total: null });
+      void runtime.effects
+        .run(() => ensureSession(runtime))
+        .catch(async (error: unknown) => {
+          // A resume that cannot open its session is reported by the turn
+          // that needs it; opening early is an optimisation, not a contract.
+          logger.info("agent-host: eager resume session did not open", {
+            threadId,
+            error: describeFailure(error)
           });
+          // But the tab must say so: without a row it showed an empty
+          // thread, as if the conversation had never existed (a signed-out
+          // account's "Authentication required" was only in this log).
+          await appendActivity(runtime, {
+            kind: "runtime.warning",
+            tone: "info",
+            summary: "This conversation could not be opened",
+            detail: describeFailure(error)
+          }).catch(() => undefined);
+        })
+        .finally(() => {
+          // However the eager start went, the loading screen ends with it.
+          if (runtime.historyImport !== null) {
+            reportHistoryImport(runtime, { phase: "done", done: 0, total: 0 });
+          }
+        });
+    }
+    return requireHead(runtime);
+  };
+
+  /**
+   * Thread lineage (spec 2026-10-14 §6): create `request.threadId` as a fork
+   * of `parentThreadId`, its conversation the parent's up to the fork point
+   * (`resolveForkCut`). The parent is only read — its session, cursor and log
+   * stay as they are.
+   *
+   * - The adapter's native fork (`forkConversation`) answers a cursor the
+   *   child resumes exactly as a §6.1 create-time resume, so the eager start
+   *   replays the inherited history into the child's timeline.
+   * - Without one (Grok), or when it refuses (a cut a compaction made
+   *   unreachable, an id the provider cannot place), the child starts fresh
+   *   and the parent's conversation waits in `fork-handoff.json` for the
+   *   child's first message (`sendTurnEffect`); a row says so.
+   * - Nothing before the fork point: a fresh child with the lineage alone.
+   */
+  const forkThread = async (
+    parentThreadId: string,
+    request: ForkHostThreadRequest
+  ): Promise<ForkHostThreadResponse> =>
+    whenReady(async () => {
+      const threadId = request.threadId;
+      if (typeof threadId !== "string" || threadId.length === 0 || threadId === parentThreadId) {
+        throw invalidCommand("threadId is required and must name a new thread.");
       }
-      return requireHead(runtime);
+      const adapterId = options.adapterForRefId(request.refId);
+      if (!adapterId) {
+        throw invalidCommand(`Registry entry '${request.refId}' has no chat adapter.`);
+      }
+      const parent = await loadRuntime(parentThreadId);
+      const parentHead = headOf(parent);
+      if (parentHead === null || parent.deleted) {
+        throw threadNotFound(parentThreadId);
+      }
+      if (parentHead.adapter !== adapterId) {
+        throw invalidCommand("A fork runs on its parent's agent.");
+      }
+      const runtime = await loadRuntime(threadId);
+      if (runtime.state.head) {
+        throw invalidCommand(`Thread '${threadId}' already exists.`);
+      }
+      let cut: ResolvedForkCut;
+      try {
+        cut = resolveForkCut(parent.state, request.fork ?? {});
+      } catch (error) {
+        if (error instanceof ForkRefusal) throw commandRejected(error.message);
+        throw error;
+      }
+      const modelSelection =
+        request.modelSelection === undefined
+          ? parentHead.modelSelection
+          : parseModelSelection(request.modelSelection);
+      const runtimeMode =
+        request.runtimeMode === undefined
+          ? parentHead.runtimeMode
+          : parseRuntimeMode(request.runtimeMode);
+      const lineage: ThreadLineage = {
+        parentThreadId,
+        relation: "fork",
+        ...(cut.forkedFrom !== undefined ? { forkedFrom: cut.forkedFrom } : {}),
+        createdAt: clock.nowIso()
+      };
+
+      let strategy: ThreadForkStrategy = "empty";
+      let resumeCursor: unknown;
+      let nativeFailure: string | null = null;
+      if (cut.retained.length > 0) {
+        const adapter = options.adapters.get(adapterId);
+        const sourceCursor = persistedResumeCursor(parent, parentHead);
+        if (adapter?.forkConversation !== undefined && sourceCursor !== undefined) {
+          try {
+            const home = await options.resolveHome({
+              threadId: parentThreadId,
+              adapter: parentHead.adapter,
+              refId: parentHead.refId,
+              accountId: parentHead.accountId,
+              home: parentHead.home
+            });
+            const forked = await adapter.forkConversation({
+              sourceThreadId: parentThreadId,
+              sourceResumeCursor: sourceCursor,
+              threadId,
+              projectPath: request.projectPath,
+              cwd: request.cwd,
+              home,
+              cut: {
+                retainedTurnIds: cut.retained.map((turn) => turn.turnId),
+                firstRemovedTurnId: cut.firstRemovedTurnId
+              }
+            });
+            resumeCursor = forked.resumeCursor;
+            strategy = "native";
+          } catch (error) {
+            nativeFailure = describeFailure(error);
+            logger.warn("agent-host: native fork failed; handing the conversation over as a transcript", {
+              threadId,
+              parentThreadId,
+              error: nativeFailure
+            });
+          }
+        }
+      }
+      let transcript: string | null = null;
+      if (strategy !== "native" && cut.retained.length > 0) {
+        transcript = buildForkTranscript({
+          items: parent.state.items,
+          retained: cut.retained,
+          parentTitle: parentHead.title
+        });
+        if (transcript !== null) strategy = "transcript";
+      }
+
+      const head = await createThreadNow(runtime, request, {
+        adapterId,
+        modelSelection,
+        runtimeMode,
+        home: parentHead.home,
+        resumeCursor,
+        lineage,
+        afterCreate: async () => {
+          if (transcript !== null) {
+            await forkHandoffs.save(threadId, {
+              version: 1,
+              parentThreadId,
+              transcript,
+              createdAt: lineage.createdAt
+            });
+          }
+          if (strategy === "native") return;
+          await appendActivity(runtime, {
+            kind: "thread.forked",
+            tone: "info",
+            turnId: null,
+            summary: `Forked from "${parentHead.title}"`,
+            detail:
+              strategy === "transcript"
+                ? `${nativeFailure !== null ? `The agent could not fork the conversation itself (${nativeFailure}), so the` : "This agent has no fork of its own, so the"} conversation so far is handed to it with your first message.`
+                : "Forked before the first message: the agent starts fresh.",
+            payload: { parentThreadId, strategy }
+          });
+        }
+      });
+      return { head, strategy, lineage };
     });
 
   const updateThread = async (
@@ -6793,6 +7031,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     failGate,
     whenReady,
     createThread,
+    forkThread,
     updateThread,
     setIdentity,
     deleteThread,

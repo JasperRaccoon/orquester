@@ -38,6 +38,8 @@ import { AsyncEventQueue } from "./async-queue.ts";
 import { claudeConfigDir } from "./config-dir.ts";
 import { readClaudeResumeCursor, type ClaudeResumeCursor } from "./cursor.ts";
 import { defaultClaudeAdapterDeps, type ClaudeAdapterDeps } from "./deps.ts";
+import { CLAUDE_FORK_EMPTY_HISTORY, forkClaudeConversation } from "./fork.ts";
+import { createClaudeHistoryReader } from "./history.ts";
 import {
   claudeVersionGateMessage,
   meetsMinimumClaudeVersion,
@@ -512,6 +514,40 @@ export async function createClaudeAdapterWith(
       next.seedTurns(plan.retainedTurns);
       starts.set(threadId, { input, cursor: plan.cursor });
       return next.readThread();
+    },
+
+    /**
+     * Thread lineage (spec 2026-10-14 §6): the SDK's `forkSession`, cut by
+     * turn id (`fork.ts`). A live source session's own cursor wins over the
+     * persisted one — Claude's moves with every assistant message — and its
+     * compaction record decides whether the cut is still reachable. The fork
+     * is written under the source's config dir, the home the child runs in.
+     */
+    async forkConversation(input) {
+      const live = sessions.get(input.sourceThreadId);
+      const cursor =
+        (live?.isAlive === true ? live.currentCursor() : undefined) ??
+        readClaudeResumeCursor(input.sourceResumeCursor, input.sourceThreadId);
+      if (cursor === undefined) {
+        throw new Error(CLAUDE_FORK_EMPTY_HISTORY);
+      }
+      const history = createClaudeHistoryReader({
+        env: context.buildEnv({ threadId: input.sourceThreadId, home: input.home }),
+        cwd: input.cwd,
+        hostConfigDir: deps.hostConfigDir,
+        spawn: deps.spawn,
+        nodePath: deps.nodePath
+      });
+      const resumeCursor = await forkClaudeConversation({
+        history,
+        cursor,
+        threadId: input.threadId,
+        cwd: input.cwd,
+        firstRemovedTurnId: input.cut.firstRemovedTurnId,
+        preservedUuids:
+          live?.isAlive === true ? live.normalizer.preservedMessageUuids : undefined
+      });
+      return { resumeCursor };
     },
 
     listSessions() {

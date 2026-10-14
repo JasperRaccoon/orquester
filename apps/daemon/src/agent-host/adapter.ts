@@ -235,6 +235,38 @@ export interface RollbackTarget {
   retainedTurnIds: readonly string[];
 }
 
+/**
+ * Thread lineage (spec 2026-10-14 §6): which turns of the SOURCE thread a fork
+ * keeps, in the source fold's turn ids — the provider's own (§5.1), as for a
+ * {@link RollbackTarget}. `retainedTurnIds` is never empty (a fork that keeps
+ * nothing is a fresh thread, and the host never asks for one);
+ * `firstRemovedTurnId` is the first started turn after them, or `null` when
+ * the fork keeps the whole conversation.
+ */
+export interface ForkCut {
+  retainedTurnIds: readonly string[];
+  firstRemovedTurnId: string | null;
+}
+
+/** {@link AgentAdapter.forkConversation}'s input. */
+export interface ForkConversationInput {
+  /** The thread whose conversation is copied. Its live session, if any, is never touched. */
+  sourceThreadId: string;
+  /** The SOURCE's resume cursor — its binding's, else its head's. */
+  sourceResumeCursor: unknown;
+  /** The new thread the fork is for; the answered cursor belongs to it. */
+  threadId: string;
+  /** The project root, for an adapter that pools by project (OpenCode). */
+  projectPath: string;
+  cwd: string;
+  /**
+   * The SOURCE's account home. A provider's resume identity stays in the home
+   * that created it, so the fork is written there and the child runs there.
+   */
+  home: AccountHome;
+  cut: ForkCut;
+}
+
 export interface AgentAdapter {
   readonly id: AgentAdapterId;
   readonly capabilities: AdapterCapabilities;
@@ -341,6 +373,21 @@ export interface AgentAdapter {
     numTurns: number,
     target?: RollbackTarget
   ): Promise<ThreadSnapshot>;
+
+  /**
+   * Thread lineage (spec 2026-10-14 §6): copy a thread's provider conversation,
+   * through `input.cut`, into a NEW provider conversation and answer the
+   * resume cursor the child thread starts from — the host then creates the
+   * child exactly as a §6.1 create-time resume, history replay included.
+   *
+   * Never moves the source: its session, cursor and binding stay as they are,
+   * and a source mid-turn is fine as long as the cut keeps only settled turns
+   * (the host checks). A refusal throws before anything is written where the
+   * provider allows it. Present only where the provider has a native fork
+   * (Claude `forkSession`, Codex `thread/fork`, OpenCode `session.fork`); the
+   * host hands the conversation over as a transcript otherwise (Grok).
+   */
+  forkConversation?(input: ForkConversationInput): Promise<{ resumeCursor: unknown }>;
 
   listSessions(): ProviderSession[];
   hasSession(threadId: string): boolean;

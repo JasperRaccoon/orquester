@@ -24,6 +24,7 @@ import type {
 import { HISTORICAL_RAW_SOURCE, isToolLifecycleItemType } from "@orquester/api/agent-chat";
 
 import { stripAttachmentPathLines } from "../attachment-lines.ts";
+import { stripForkHandoff } from "../../orchestration/fork.ts";
 import type { CodexProtocol } from "./_generated/index.ts";
 import { classifyItem, type CodexThreadItem } from "./items.ts";
 import type { RuntimeEventDraft } from "./normalise.ts";
@@ -200,6 +201,6 @@ function userMessageText(content: readonly CodexProtocol.v2.UserInput[]): string
       parts.push(entry.text);
     }
   }
-  const text = stripAttachmentPathLines(parts.join("\n").trim());
+  const text = stripAttachmentPathLines(stripForkHandoff(parts.join("\n").trim()));
   return text.length > 0 ? text : null;
 }
