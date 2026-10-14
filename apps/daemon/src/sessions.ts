@@ -17,6 +17,7 @@ import {
   tmuxAvailable,
   tmuxVersionOk
 } from "./tmux";
+import { sessionNodeOptions, sessionNodePreload } from "./plugins/session-env.ts";
 import { ActivityTracker } from "./ansi-activity.ts";
 import { classifyAgentEvent } from "./agent-status.ts";
 
@@ -384,16 +385,40 @@ export class SessionManager implements ISessionManager {
 
     // 1) Spawn the command INSIDE tmux (detached), 2) attach a streaming PTY to
     // it. tmux owns the process group, so a daemon restart leaves it running.
-    // The pane inherits the new-session CLIENT's environment (Tmux.run uses
-    // sessionEnvBase() — the daemon's env minus ORQUESTER_* secrets — and sets
-    // the session PATH there). Registry env is non-secret and can use tmux -e;
-    // addon env may contain launch credentials, so the tmux backend injects it
-    // through a private one-shot wrapper script instead of argv-visible -e.
+    // The pane inherits the tmux server's global environment (seeded from
+    // sessionEnvBase() — the daemon's env minus ORQUESTER_* secrets — by the
+    // client that started the server) plus the session's `-e` vars, and its
+    // PATH from the new-session client (Tmux.run sets the session PATH there).
+    // Registry env is non-secret and can use tmux -e; addon env may contain
+    // launch credentials, so the tmux backend injects it through a private
+    // one-shot wrapper script instead of argv-visible -e.
     const env = {
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
       ...entry.env
     } as Record<string, string>;
+
+    // The plugins' NODE_OPTIONS preload (plugins spec §3.3), appended to the
+    // value the command would otherwise get: the addon wrapper's when it sets
+    // one (its exports run last), else the entry's `-e` one, else the server's
+    // global one. The result goes where that value came from — the wrapper, or
+    // this session's own `-e`; never the global env, which every session on
+    // the server shares.
+    let addonEnv = extraEnv;
+    if (sessionNodePreload() !== null) {
+      const fromWrapper = extraEnv.NODE_OPTIONS !== undefined;
+      const existing = fromWrapper
+        ? extraEnv.NODE_OPTIONS
+        : (env.NODE_OPTIONS ?? (await this.tmux.inheritedEnvValue("NODE_OPTIONS")));
+      const nodeOptions = sessionNodeOptions(existing);
+      if (nodeOptions !== undefined) {
+        if (fromWrapper) {
+          addonEnv = { ...extraEnv, NODE_OPTIONS: nodeOptions };
+        } else {
+          env.NODE_OPTIONS = nodeOptions;
+        }
+      }
+    }
 
     if (entry.kind === "agent") {
       env.ORQUESTER_SESSION_ID = id;
@@ -421,7 +446,7 @@ export class SessionManager implements ISessionManager {
       tmux: true,
       resumeArgs: resumeLaunchArgs(entry, req.resumeConversationId)
     });
-    const wrapped = await writeAddonEnvLaunchScript(baseLaunch, extraEnv, unsetEnv);
+    const wrapped = await writeAddonEnvLaunchScript(baseLaunch, addonEnv, unsetEnv);
     try {
       await this.tmux.newSession({ id, cols, rows, cwd, env, bin: wrapped.bin, args: wrapped.args });
     } catch (error) {
@@ -1044,6 +1069,10 @@ export class LocalSessionManager implements ISessionManager {
     // The direct node-pty backend has no launch wrapper, so honor `unset` by
     // removing those keys from the child's environment before spawning.
     for (const key of unsetEnv) delete env[key];
+    // The plugins' NODE_OPTIONS preload (plugins spec §3.3), appended to whatever
+    // NODE_OPTIONS the child would otherwise get.
+    const nodeOptions = sessionNodeOptions(env.NODE_OPTIONS);
+    if (nodeOptions !== undefined) env.NODE_OPTIONS = nodeOptions;
 
     if (entry.kind === "agent") {
       env.ORQUESTER_SESSION_ID = id;
