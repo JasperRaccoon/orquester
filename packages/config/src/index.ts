@@ -162,6 +162,11 @@ export function workflowStatePath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "workflow-state.json");
 }
 
+/** Scheduled tasks: prompts delivered to an agent-chat thread later (session tools §5). */
+export function scheduledTasksPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "scheduled-tasks.json");
+}
+
 /** Workflow secret values; 0600 — values never leave the daemon (§5.7). */
 export function workflowSecretsPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "workflow-secrets.json");
@@ -1635,3 +1640,4 @@ export function isValidName(name: string | undefined): name is string {
 // assertInsideFsRoot / FsSandboxError moved to ./fs.ts (node-only; see that file).
 
 export * from "./workflows.ts";
+export * from "./scheduled-tasks.ts";
