@@ -147,6 +147,8 @@ import type {
 } from "@orquester/api";
 import { agentChatRoutes } from "@orquester/api/agent-chat";
 import type {
+  DeletePullRequestWatchResponse,
+  PullRequestWatchListResponse,
   ThreadItemOutputResponse,
   ThreadItemResponse,
   ThreadPromptsQuery,
@@ -636,6 +638,16 @@ export class ApiClient {
 
   deleteTodo(id: string): Promise<void> {
     return this.send("DELETE", `/api/todos/${encodeURIComponent(id)}`);
+  }
+
+  // --- Pull request watches (a chat thread's; spec 2026-10-14 §5) ----------
+
+  listPullRequestWatches(sessionId: string, signal?: AbortSignal): Promise<PullRequestWatchListResponse> {
+    return this.send("GET", agentChatRoutes.prWatches(sessionId), { signal });
+  }
+
+  stopPullRequestWatch(sessionId: string, watchId: string): Promise<DeletePullRequestWatchResponse> {
+    return this.send("DELETE", agentChatRoutes.prWatch(sessionId, watchId));
   }
 
   // --- Saved prompts (the right rail; daemon-persisted, shared) ------------
