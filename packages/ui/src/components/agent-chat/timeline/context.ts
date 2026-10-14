@@ -19,6 +19,12 @@ import type { FullOutputSource } from "../../../lib/agent-chat/full-output";
  * *T3: `MessagesTimeline.tsx:267-272`.*
  */
 export interface TimelineRowContextValue {
+  /**
+   * The chat session (thread) the rows belong to — an agent's published page
+   * mints its frame URL against it (spec 2026-10-14 §2.2). Absent outside a
+   * timeline, where a page renders no frame.
+   */
+  sessionId?: string;
   /** The project directory, so a changed-file path renders workspace-relative. */
   workspaceRoot: string | undefined;
   /** The drill-in dispatches no commands; every affordance below is withheld. */

@@ -9,6 +9,13 @@
  * WHICH pair of attributes to stamp on `<html>`; the stylesheet does the rest.
  */
 
+import {
+  HTML_RENDER_DEFAULT_FONTS,
+  htmlRenderThemeFromPalette,
+  type HtmlRenderPaletteVariable,
+  type HtmlRenderTheme
+} from "@orquester/api/agent-chat";
+
 export type ColorScheme = "mono" | "warm" | "slate" | "rose" | "matcha" | "dune" | "amethyst";
 
 /** The four settable modes. Only "light"/"dark" ever reach the CSS. */
@@ -100,6 +107,28 @@ export function applyTheme(scheme: ColorScheme, mode: ResolvedMode): void {
 function baseSurfaceTriple(root: HTMLElement): string | null {
   const triple = getComputedStyle(root).getPropertyValue("--n-950").trim();
   return /^\d{1,3} \d{1,3} \d{1,3}$/.test(triple) ? triple : null;
+}
+
+/**
+ * Agent visuals (spec 2026-10-14 §2.3): the live theme as the tokens an
+ * agent-published page styles against — T3's names, as hex — mapped from
+ * this scheme's `--n-*` and the mode's `--sem-*` / `--lane-*` triples (the
+ * mapping is `@orquester/api`'s, which the daemon's bootstrap shares for its
+ * stock fallback). `read` defaults to the document root's computed style, so
+ * it answers what `applyTheme` painted; a test hands it each stylesheet block.
+ */
+export function htmlRenderThemeTokens(
+  mode: ResolvedMode,
+  read: (variable: HtmlRenderPaletteVariable) => string | undefined = readRootVariable
+): HtmlRenderTheme {
+  return htmlRenderThemeFromPalette(read, mode, HTML_RENDER_DEFAULT_FONTS);
+}
+
+function readRootVariable(variable: string): string | undefined {
+  if (typeof document === "undefined") {
+    return undefined;
+  }
+  return getComputedStyle(document.documentElement).getPropertyValue(variable).trim() || undefined;
 }
 
 function tripleToHex(triple: string): string {

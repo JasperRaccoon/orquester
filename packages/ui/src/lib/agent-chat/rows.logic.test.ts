@@ -1342,3 +1342,181 @@ describe("a settled turn always shows the text it ended on", () => {
     });
   });
 });
+
+describe("agent visuals — the visual row (spec 2026-10-14 §2.5)", () => {
+  const PAGE = "t1-0f8fad5b-d9cb-469f-a165-70867728950e-html";
+  const reference = { attachmentId: PAGE, title: "Revenue", height: 360 };
+  const resultText = JSON.stringify({ htmlRender: reference, message: "Shown to the reader above your reply." });
+  /** The completed row of an `orquester` `html_render` call, as each adapter ingests it. */
+  const completedData: Record<string, { itemType: string; data: unknown }> = {
+    claude: {
+      itemType: "mcp_tool_call",
+      data: {
+        toolName: "mcp__orquester__html_render",
+        input: { title: "Revenue" },
+        result: { type: "tool_result", tool_use_id: "call-1", content: [{ type: "text", text: resultText }] }
+      }
+    },
+    codex: {
+      itemType: "mcp_tool_call",
+      data: {
+        server: "orquester",
+        tool: "html_render",
+        arguments: {},
+        result: { content: [{ type: "text", text: resultText }], structuredContent: null, _meta: null }
+      }
+    },
+    opencode: {
+      itemType: "dynamic_tool_call",
+      data: { tool: "orquester_html_render", toolUseId: "call-1", state: { status: "completed", output: resultText } }
+    },
+    grok: {
+      itemType: "dynamic_tool_call",
+      data: {
+        toolUseId: "call-1",
+        rawInput: { tool_name: "orquester__html_render", tool_input: {} },
+        content: [{ type: "content", content: { type: "text", text: resultText } }]
+      }
+    },
+    "any provider, slimmed": { itemType: "mcp_tool_call", data: { htmlRender: reference } }
+  };
+  const call = (
+    shape: { itemType: string; data: unknown },
+    at: number,
+    options: { status?: "completed" | "failed"; turnId?: string; toolUseId?: string } = {}
+  ) => [
+    activity("tool.started", { itemType: shape.itemType, toolUseId: options.toolUseId ?? "call-1", status: "inProgress" }, {
+      turnId: options.turnId ?? "t1",
+      createdAt: stamp(at)
+    }),
+    activity(
+      "tool.completed",
+      {
+        itemType: shape.itemType,
+        toolUseId: options.toolUseId ?? "call-1",
+        status: options.status ?? "completed",
+        data: shape.data
+      },
+      { turnId: options.turnId ?? "t1", createdAt: stamp(at + 0.5), status: options.status ?? "completed" }
+    )
+  ];
+  const tool = (command: string, at: number) =>
+    activity("tool.completed", { itemType: "command_execution", command, status: "completed" }, {
+      turnId: "t1",
+      createdAt: stamp(at)
+    });
+  const running = { isWorking: true, runningTurnId: "t1", activeTurnStartedAt: stamp(1) } as const;
+  const visuals = (rows: readonly AgentChatTimelineRow[]) =>
+    rows.flatMap((row) => (row.kind === "visual" ? [row] : []));
+
+  it("a completed html_render call is one visual row in place of its tool row, for every provider", () => {
+    for (const [provider, shape] of Object.entries(completedData)) {
+      const rows = deriveTimelineRowsWithState(
+        baseInput(entriesFrom([message("user", "chart it", { createdAt: stamp(0) }), ...call(shape, 1)]), running)
+      ).rows;
+      const [visual, ...rest] = visuals(rows);
+      assert.ok(visual, `${provider}: a visual row`);
+      assert.equal(rest.length, 0, provider);
+      assert.equal(visual.id, `visual:${PAGE}`, `${provider}: keyed by the page`);
+      assert.deepEqual(visual.htmlRender, reference, provider);
+      assert.equal(visual.turnId, "t1");
+      assert.ok(
+        !rows.some((row) => row.kind === "work" || row.kind === "work-live" || row.kind === "activity-group"),
+        `${provider}: no tool row besides it`
+      );
+    }
+  });
+
+  it("a failed or still-running html_render call stays an ordinary tool row", () => {
+    const failed = deriveTimelineRowsWithState(
+      baseInput(
+        entriesFrom([
+          ...call(
+            {
+              itemType: "mcp_tool_call",
+              data: { toolName: "mcp__orquester__html_render", result: { content: "Error: image too large", is_error: true } }
+            },
+            1,
+            { status: "failed" }
+          )
+        ]),
+        // The settled turn unfolded, so its tool rows are on screen.
+        { expandedTurnIds: new Set(["t1"]) }
+      )
+    ).rows;
+    assert.equal(visuals(failed).length, 0);
+    assert.ok(failed.some((row) => row.kind === "work"), `the failure is a tool row: ${JSON.stringify(kinds(failed))}`);
+
+    const started = deriveTimelineRowsWithState(
+      baseInput(
+        entriesFrom([
+          activity("tool.started", { itemType: "mcp_tool_call", toolUseId: "call-9", status: "inProgress", data: { toolName: "mcp__orquester__html_render" } }, {
+            turnId: "t1",
+            createdAt: stamp(1)
+          })
+        ]),
+        running
+      )
+    ).rows;
+    assert.equal(visuals(started).length, 0);
+  });
+
+  it("a page is never swallowed by an activity group, a tool group or the live tool row", () => {
+    const rows = deriveTimelineRowsWithState(
+      baseInput(
+        entriesFrom([
+          message("user", "go", { createdAt: stamp(0) }),
+          message("reasoning", "thinking", { turnId: "t1", createdAt: stamp(1) }),
+          tool("ls", 2),
+          ...call(completedData.claude!, 3),
+          tool("npm test", 4)
+        ]),
+        running
+      )
+    ).rows;
+    assert.equal(visuals(rows).length, 1);
+    for (const row of rows) {
+      const grouped =
+        row.kind === "activity-group"
+          ? row.entries
+          : row.kind === "work" || row.kind === "work-live"
+            ? row.groupedEntries
+            : [];
+      assert.ok(grouped.every((entry) => entry.visual === undefined), `${row.kind} swallowed the page`);
+    }
+    const order = kinds(rows);
+    assert.ok(order.indexOf("visual") > order.indexOf("activity-group"), "in log order");
+  });
+
+  it("a settled turn's fold hides its work but never its page, and the page changes nothing else that folds", () => {
+    const rows = deriveTimelineRowsWithState(
+      baseInput(
+        entriesFrom([
+          message("user", "go", { createdAt: stamp(0) }),
+          tool("npm test", 1),
+          ...call(completedData.codex!, 2),
+          message("assistant", "Here is the chart.", { turnId: "t1", createdAt: stamp(3) }),
+          tool("git status", 4)
+        ]),
+        { latestTurn: { turnId: "t1", state: "completed", startedAt: stamp(1), completedAt: stamp(4) } }
+      )
+    ).rows;
+    assert.ok(kinds(rows).includes("turn-fold"), "the turn folds");
+    assert.ok(!rows.some((row) => row.kind === "work" || row.kind === "work-toggle"), "its tool calls fold away");
+    assert.equal(visuals(rows).length, 1, "the page stays");
+  });
+
+  it("an unchanged page keeps its row object through a re-derivation", () => {
+    const items = [message("user", "go", { createdAt: stamp(0) }), ...call(completedData.claude!, 1)];
+    const first = deriveTimelineRowsWithState(baseInput(entriesFrom(items))).rows;
+    const second = deriveTimelineRowsWithState(
+      baseInput(entriesFrom([...items, message("assistant", "Done.", { turnId: "t1", createdAt: stamp(3) })]))
+    ).rows;
+    const stableFirst = computeStableRows(first, EMPTY_STABLE_ROWS);
+    const stableSecond = computeStableRows(second, stableFirst);
+    const before = stableFirst.result.find((row) => row.kind === "visual");
+    const after = stableSecond.result.find((row) => row.kind === "visual");
+    assert.ok(before && after);
+    assert.equal(after, before, "the same row object, so the memoised frame never re-renders");
+  });
+});

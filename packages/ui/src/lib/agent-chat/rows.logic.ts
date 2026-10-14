@@ -10,8 +10,9 @@
  * **Activity-group boundaries are mechanical** (§7.3): a group starts at the
  * first reasoning row or plain tool row of a turn and runs until a non-grouping
  * entry, a turn-id change, or a row the user collapsed out. Errors, answered
- * questions, subagent-spawn rows, compaction markers and a goal's own rows
- * (goals §8.4) are hoisted out as their own rows — an error must never hide
+ * questions, subagent-spawn rows, compaction markers, a goal's own rows
+ * (goals §8.4) and an agent's published pages (`visual`, spec 2026-10-14
+ * §2.5) are hoisted out as their own rows — an error must never hide
  * inside a collapsed summary line — and a run with no reasoning row is a plain
  * tool group, not an activity group.
  *
@@ -37,6 +38,7 @@
 
 import {
   GOAL_STATUS_ACTIVITY_KIND,
+  htmlRenderReferencesEqual,
   isMessageStreaming,
   isProviderInternalUserText,
   isSettledTurnState,
@@ -236,7 +238,8 @@ function isGroupingEntry(entry: TimelineEntry): boolean {
     entry.entry.sourceActivityKind !== "context-compaction" &&
     entry.entry.sourceActivityKind !== "thread.state.changed" &&
     entry.entry.tone !== "error" &&
-    !isGoalEntry(entry)
+    !isGoalEntry(entry) &&
+    !isVisualEntry(entry)
   );
 }
 
@@ -245,6 +248,19 @@ function isCompactionEntry(entry: TimelineEntry): boolean {
     entry.kind === "work" &&
     (entry.entry.sourceActivityKind === "context-compaction" ||
       entry.entry.sourceActivityKind === "thread.state.changed")
+  );
+}
+
+/**
+ * An agent's published page (spec 2026-10-14 §2.5): a completed `orquester`
+ * `html_render` call, its own `visual` row. Never grouped, never folded — the
+ * page is part of the reply — and never the live tool row.
+ */
+function isVisualEntry(entry: TimelineEntry): boolean {
+  return (
+    entry.kind === "work" &&
+    entry.entry.visual !== undefined &&
+    entry.entry.toolLifecycleStatus === "completed"
   );
 }
 
@@ -689,13 +705,14 @@ function deriveTurnFolds(input: {
       ? group.entries.findIndex((entry) => entry.id === group.terminalEntry?.id)
       : group.entries.length;
     // Thinking blocks do not count towards "one trailing activity", and
-    // neither does a goal marker: it is never folded, so it must not change
-    // what else is.
+    // neither does a goal marker or a published page: neither is ever
+    // folded, so it must not change what else is.
     const trailingEntryCount = group.entries.filter(
       (candidate, candidateIndex) =>
         candidateIndex > terminalIndex &&
         !(candidate.kind === "message" && isGroupMessage(candidate.message)) &&
-        !isGoalMarkerEntry(candidate)
+        !isGoalMarkerEntry(candidate) &&
+        !isVisualEntry(candidate)
     ).length;
 
     for (const [index, entry] of group.entries.entries()) {
@@ -713,12 +730,14 @@ function deriveTurnFolds(input: {
       }
       // User input and subagent batches stay visible after their turn settles,
       // and so do a goal's markers (goals §8.4): the story of the goal — set,
-      // checked, achieved — outlives the work it drove.
+      // checked, achieved — outlives the work it drove. So does a published
+      // page (spec 2026-10-14 §2.5): it is what the reply shows.
       if (
         entry.kind === "work" &&
         (entry.entry.questionAnswer !== undefined ||
           entry.entry.agentSpawn !== undefined ||
-          entry.entry.goal !== undefined)
+          entry.entry.goal !== undefined ||
+          isVisualEntry(entry))
       ) {
         continue;
       }
@@ -1083,6 +1102,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       entry.entry.questionAnswer !== undefined ||
       isCompactionEntry(entry) ||
       isGoalEntry(entry) ||
+      isVisualEntry(entry) ||
       entry.entry.tone === "error"
     ) {
       break;
@@ -1319,6 +1339,21 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       continue;
     }
 
+    // ── Published page (spec 2026-10-14 §2.5) ─────────────────────────────
+    if (timelineEntry.kind === "work" && isVisualEntry(timelineEntry)) {
+      const htmlRender = timelineEntry.entry.visual!;
+      rows.push({
+        kind: "visual",
+        // Keyed by the page: the frame — and the page's own state — survives
+        // every re-derivation, a fold toggle and a history page included.
+        id: `visual:${htmlRender.attachmentId}`,
+        createdAt: timelineEntry.createdAt,
+        turnId: timelineEntry.entry.turnId,
+        htmlRender
+      });
+      continue;
+    }
+
     // ── Work rows ─────────────────────────────────────────────────────────
     if (timelineEntry.kind === "work") {
       // Hoisted: an error, an answered question, a spawn row and a host
@@ -1357,6 +1392,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
           nextEntry.entry.questionAnswer !== undefined ||
           isCompactionEntry(nextEntry) ||
           isGoalEntry(nextEntry) ||
+          isVisualEntry(nextEntry) ||
           nextEntry.entry.tone === "error" ||
           activeWorkEntryIds.has(nextEntry.id) ||
           collapsedEntryIds.has(nextEntry.id) ||
@@ -1928,6 +1964,14 @@ function isRowUnchanged(a: AgentChatTimelineRow, b: AgentChatTimelineRow): boole
         a.rounds === other.rounds &&
         a.elapsedMs === other.elapsedMs &&
         a.tokensUsed === other.tokensUsed
+      );
+    }
+    case "visual": {
+      const other = b as typeof a;
+      return (
+        a.createdAt === other.createdAt &&
+        a.turnId === other.turnId &&
+        htmlRenderReferencesEqual(a.htmlRender, other.htmlRender)
       );
     }
     case "turn-diff": {

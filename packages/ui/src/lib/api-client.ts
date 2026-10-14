@@ -145,7 +145,8 @@ import type {
   WorkflowProblem,
   WorkflowWriteResponse
 } from "@orquester/api";
-import { agentChatRoutes } from "@orquester/api/agent-chat";
+import { agentChatRoutes, type AgentVisualUrlResponse } from "@orquester/api/agent-chat";
+import { desktopVisualScheme, visualFrameSrc, type VisualFrameUrl } from "./agent-chat/visual-frame";
 import type {
   ThreadItemOutputResponse,
   ThreadItemResponse,
@@ -1245,6 +1246,31 @@ export class ApiClient {
     signal?: AbortSignal
   ): Promise<ThreadPromptTextResponse> {
     return this.send("GET", agentChatRoutes.promptText(id, messageId), { signal });
+  }
+
+  /**
+   * A frameable URL for an agent's published page (spec 2026-10-14 §2.2):
+   * the daemon mints a short-lived signed path over this authenticated
+   * transport, and the frame loads it — from this connection's endpoint on
+   * the web, through the desktop's page scheme on the desktop. Rejects when
+   * the daemon refuses, or this connection cannot frame a page at all.
+   */
+  async agentVisualUrl(id: string, attachmentId: string): Promise<VisualFrameUrl> {
+    const minted = await this.send<AgentVisualUrlResponse>("POST", agentChatRoutes.visualUrl(id, attachmentId), {
+      body: {}
+    });
+    const path = typeof minted?.path === "string" ? minted.path : "";
+    const expiresAt = typeof minted?.expiresAt === "number" && Number.isFinite(minted.expiresAt) ? minted.expiresAt : 0;
+    const desktopScheme = desktopVisualScheme();
+    const src = visualFrameSrc(path, {
+      kind: this.transportKind,
+      endpoint: this.connection.endpoint,
+      ...(desktopScheme !== undefined ? { desktopScheme } : {})
+    });
+    if (src === null) {
+      throw new Error("Pages cannot be shown on this connection.");
+    }
+    return { src, expiresAt };
   }
 
   sendSessionInput(id: string, data: string): Promise<void> {

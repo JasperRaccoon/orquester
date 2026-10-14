@@ -32,7 +32,8 @@ import type {
   ToolLifecycleItemType,
   Turn,
   TurnState,
-  HistoryImportProgress
+  HistoryImportProgress,
+  HtmlRenderReference
 } from "@orquester/api/agent-chat";
 import type { ComposerDraft } from "./composer.logic";
 
@@ -349,6 +350,13 @@ export interface WorkLogEntry {
    * the marker needs beyond it, read off the goal the row is about (the
    * current one, or the one that ended).
    */
+  /**
+   * Present on a COMPLETED `orquester` `html_render` call (spec 2026-10-14
+   * §2.5): the page the agent published, read from the row's result by the
+   * shared reader (`htmlRenderReferenceOfActivityPayload`). Such an entry is
+   * its own `visual` row — never grouped, never folded.
+   */
+  visual?: HtmlRenderReference;
   goal?: {
     change: AgentGoalChange;
     /** The whole objective: the summary cuts it to 200 characters. */
@@ -377,7 +385,8 @@ export type ToolGroupSummaryKind = "read" | "edit" | "command" | "search" | "oth
  * (`apps/web/src/components/chat/MessagesTimeline.logic.ts:329-442`), with
  * `worktree-setup` dropped (per-thread worktrees are a non-goal, §2) and
  * `turn-diff` added for the changed-files card §7.3 names — and, with agent
- * goals, `goal-marker` for a goal's landmarks (goals §8.4).
+ * goals, `goal-marker` for a goal's landmarks (goals §8.4), and with agent
+ * visuals, `visual` for a published page (spec 2026-10-14 §2.5).
  */
 export type AgentChatTimelineRow =
   | {
@@ -487,6 +496,21 @@ export type AgentChatTimelineRow =
       rounds?: number;
       elapsedMs?: number;
       tokensUsed?: number;
+    }
+  /**
+   * An agent's published HTML page (spec 2026-10-14 §2.5), in place of its
+   * `html_render` tool row: framed inline, sandboxed, in the live theme. Its
+   * own row like a goal marker — never grouped, never folded into a settled
+   * turn — and keyed by the page (`visual:<attachmentId>`), so it keeps its
+   * frame (and the page its state) through every re-derivation. A failed
+   * call stays an ordinary failed tool row.
+   */
+  | {
+      kind: "visual";
+      id: string;
+      createdAt: string;
+      turnId: string | null;
+      htmlRender: HtmlRenderReference;
     }
   | {
       kind: "message";
