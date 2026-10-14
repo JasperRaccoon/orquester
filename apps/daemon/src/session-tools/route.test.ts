@@ -22,6 +22,9 @@ import { createSessionToolRegistry, type SessionToolRegistry } from "./registry.
 import { DAEMON_UNAVAILABLE_MESSAGE, jsonResult } from "./results.ts";
 import { registerSessionToolsRoute, type SessionToolThread } from "./route.ts";
 import { TEST_PNG_BASE64, testSessionToolkit } from "./testing.ts";
+import { SecretRequestRegistry } from "../agent-chat/secret-requests.ts";
+import type { AgentChatSecretRequestEventPayload } from "@orquester/api/agent-chat";
+import { secretsToolkit } from "./secrets/index.ts";
 
 const TOKEN = "host-token-0123456789";
 const THREADS: Record<string, SessionToolThread> = {
@@ -63,7 +66,12 @@ function holdingToolkit() {
   return { toolkit, aborted, running };
 }
 
-async function daemon(t: { after(fn: () => Promise<void>): void }, registry: SessionToolRegistry, api: DaemonApi | null = fakeApi) {
+async function daemon(
+  t: { after(fn: () => Promise<void>): void },
+  registry: SessionToolRegistry,
+  api: DaemonApi | null = fakeApi,
+  secretRequests?: SecretRequestRegistry
+) {
   const dir = await mkdtemp(join(tmpdir(), "st-route-"));
   const socketPath = join(dir, "d.sock");
   const app: FastifyInstance = Fastify();
@@ -71,7 +79,8 @@ async function daemon(t: { after(fn: () => Promise<void>): void }, registry: Ses
     authorizeHost: (authorization) => authorization === agentHostAuthValue(TOKEN),
     resolveThread: (threadId) => THREADS[threadId] ?? null,
     api: () => api,
-    registry: () => registry
+    registry: () => registry,
+    ...(secretRequests !== undefined ? { secretRequests } : {})
   });
   await app.listen({ path: socketPath });
   t.after(async () => {
@@ -178,4 +187,38 @@ test("cancelling the call on the host aborts the daemon-side handler", async (t)
   assert.equal(result.isError, true);
   assert.match(textOf(result), /^CANCELLED/);
   await hold.aborted;
+});
+
+test("request_secret over the socket: the answer reaches the call; the host's cancel closes the card", async (t) => {
+  const events: AgentChatSecretRequestEventPayload[] = [];
+  const waiters: Array<(payload: AgentChatSecretRequestEventPayload) => void> = [];
+  const secretRequests = new SecretRequestRegistry({
+    publish: (payload) => {
+      events.push(payload);
+      for (const waiter of waiters.splice(0)) waiter(payload);
+    }
+  });
+  const nextEvent = () => new Promise<AgentChatSecretRequestEventPayload>((resolve) => waiters.push(resolve));
+  const { socketPath } = await daemon(t, createSessionToolRegistry([secretsToolkit]), fakeApi, secretRequests);
+  const forward = forwarderFor(socketPath);
+  const args = { name: "API_KEY", prompt: "Paste it." };
+
+  // Answered: the value comes back in this call's result, as the route's 200.
+  let opened = nextEvent();
+  const answered = forward({ threadId: "thread-a", callId: "c1", name: "request_secret", arguments: args }, new AbortController().signal);
+  const card = (await opened).request;
+  assert.equal(card.sessionId, "thread-a", "the card is the CALLER's thread's");
+  secretRequests.answer("thread-a", card.requestId, { answer: "provide", value: "v-123456" });
+  assert.equal(((await answered).structuredContent as { value?: string }).value, "v-123456");
+
+  // Cancelled on the host (the provider's cancel, a Stop, the session ending): the card closes.
+  opened = nextEvent();
+  const controller = new AbortController();
+  const cancelled = forward({ threadId: "thread-a", callId: "c2", name: "request_secret", arguments: args }, controller.signal);
+  await opened;
+  const closed = nextEvent();
+  controller.abort();
+  assert.deepEqual([(await closed).open, (await closed).outcome], [false, "cancelled"]);
+  assert.equal((await cancelled).isError, true);
+  assert.deepEqual(secretRequests.list("thread-a"), []);
 });

@@ -7,9 +7,13 @@ import { cn } from "../../../lib/cn";
 import { BannerCard } from "../primitives";
 import { CARD_INPUT_CLASS, SECRET_INPUT_ATTRIBUTES } from "./secret-input";
 
-/** The one promise the card makes about the value. */
+/**
+ * The one promise the card makes about the value — exactly what Orquester
+ * keeps: the agent that asked receives it (and so does its model provider's
+ * own transcript), Orquester's thread never does.
+ */
 export const SECRET_REQUEST_PRIVACY_NOTE =
-  "Goes only to the agent that asked — never shown in the chat or kept in its history.";
+  "Sent only to the agent that asked — never shown in the chat or saved in this thread.";
 
 /** What a failed answer says. Never the server's words or the value: a fixed sentence. */
 export function secretAnswerFailureText(status: number | null): string {

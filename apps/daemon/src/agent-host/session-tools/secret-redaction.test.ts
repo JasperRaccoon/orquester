@@ -369,3 +369,54 @@ describe("request_secret — the value reaches the call and nothing the host kee
     store.close();
   });
 });
+
+describe("the redactor", () => {
+  const event = (threadId: string, itemType: string, data: unknown) =>
+    ({
+      eventId: "e",
+      threadId,
+      createdAt: "2026-10-14T10:00:00.000Z",
+      type: "item.completed",
+      itemId: "i",
+      payload: { itemType, status: "completed", data }
+    }) as unknown as RuntimeEvent;
+
+  it("masks a thread's values in that thread only, and returns untouched events as they were", () => {
+    const redactor = new SessionSecretRedactor();
+    redactor.remember("a", [VALUE]);
+    const leaked = event("a", "command_execution", { output: `x${VALUE}y`, nested: [VALUE] });
+    assert.deepEqual((redactor.redactEvent(leaked).payload as { data: unknown }).data, {
+      output: `x${SECRET_REDACTED_TEXT}y`,
+      nested: [SECRET_REDACTED_TEXT]
+    });
+    assert.ok(JSON.stringify(leaked).includes(VALUE), "the input is not mutated");
+    const other = event("b", "command_execution", { output: VALUE });
+    assert.equal(redactor.redactEvent(other), other, "another thread's events are not touched");
+    const clean = event("a", "command_execution", { output: "nothing here" });
+    assert.equal(redactor.redactEvent(clean), clean);
+  });
+
+  it("a value shorter than six characters is masked only inside MCP call rows", () => {
+    const redactor = new SessionSecretRedactor();
+    redactor.remember("a", ["1234"]);
+    const command = event("a", "command_execution", { output: "line 1234" });
+    assert.equal(redactor.redactEvent(command), command, "a short value would shred the transcript");
+    const mcp = event("a", "mcp_tool_call", { result: "pin 1234" });
+    assert.ok(!JSON.stringify(redactor.redactEvent(mcp)).includes("1234"));
+    // Raw frames are diagnostics: masked everywhere.
+    assert.ok(!JSON.stringify(redactor.redactFrame("a", { line: "1234" })).includes("1234"));
+  });
+
+  it("a raw frame loses a request_secret result's value by shape alone", () => {
+    const redactor = new SessionSecretRedactor();
+    const frame = { method: "item/completed", params: { item: { result: { structuredContent: { secretRequest: { name: "K", outcome: "provided" }, value: VALUE } } } } };
+    assert.ok(!JSON.stringify(redactor.redactFrame("a", frame)).includes(VALUE));
+  });
+
+  it("forgets a released thread's values", async (t) => {
+    const { redactor, ingestion } = await pipeline(t);
+    redactor.remember("gone", [VALUE]);
+    await ingestion.forget("gone");
+    assert.equal(redactor.holds("gone"), false);
+  });
+});

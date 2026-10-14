@@ -15,6 +15,7 @@ import { createWriteStream } from "node:fs";
 import { test } from "node:test";
 import { agentProfileRoutes } from "@orquester/api";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
+import { SecretRequestRegistry } from "./agent-chat/secret-requests.ts";
 import { createServer } from "./index.ts";
 
 type CreateServerArgs = Parameters<typeof createServer>;
@@ -139,5 +140,28 @@ test("the session-tool call route is socket-only, and the socket still requires 
     assert.deepEqual(seen, [undefined, "Bearer host-token"]);
   } finally {
     await local.close();
+  }
+});
+
+test("the request_secret routes are mounted on remote HTTP behind its bearer, never echoing an answer", async () => {
+  const secretRequests = new SecretRequestRegistry({ publish: () => {} });
+  const chatSession = (id: string) => (id === "t1" ? { id } : undefined);
+  const app = remoteApp({
+    secretRequests,
+    agentChat: { routeDeps: () => ({ chatSession, isHostHealthy: () => true }), protectedPids: () => [] }
+  });
+  try {
+    const list = "/api/sessions/t1/secret-requests";
+    const answer = "/api/sessions/t1/secret-requests/r1";
+    const payload = { answer: "provide", value: "never-echoed-value" };
+    assert.equal((await app.inject({ method: "GET", url: list })).statusCode, 401);
+    const anonymous = await app.inject({ method: "POST", url: answer, payload });
+    assert.equal(anonymous.statusCode, 401);
+    assert.equal((await app.inject({ method: "GET", url: list, headers: { authorization: BEARER } })).statusCode, 200);
+    const unknown = await app.inject({ method: "POST", url: answer, headers: { authorization: BEARER }, payload });
+    assert.equal(unknown.statusCode, 404, "past the gate: no such request");
+    assert.ok(!unknown.body.includes("never-echoed-value"));
+  } finally {
+    await app.close();
   }
 });
