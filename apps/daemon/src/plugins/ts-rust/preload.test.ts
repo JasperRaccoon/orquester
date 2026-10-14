@@ -4,7 +4,9 @@
 // prints "real tsc".
 
 import assert from "node:assert/strict";
-import { spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { spawn, spawnSync, type SpawnSyncReturns } from "node:child_process";
+import { once } from "node:events";
+import { existsSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
@@ -29,24 +31,43 @@ let disabledProject = "";
 let pnpmProject = "";
 /** A typescript package outside the workspaces root (an npx cache). */
 let outsideTypescript = "";
+/** `<ws>/enabled/ts7-app`: typescript 7 (an ES module bin/tsc upstream, so never skipped). */
+let ts7Project = "";
+/** A symlink to the workspaces root: the root as configured, when it is not the real path. */
+let linkedWorkspaces = "";
 
+// STUB_BLOCK=<file>: wait until SIGTERM, record it in <file>, then die by it.
 const STUB_TSC_RS = `#!/bin/sh
 printf 'tsc-rs %s\\n' "$*"
 printf 'cwd %s\\n' "$PWD"
 printf 'node-options %s\\n' "$NODE_OPTIONS"
 if [ -n "$STUB_SIGNAL" ]; then kill -"$STUB_SIGNAL" $$; fi
+if [ -n "$STUB_BLOCK" ]; then
+  trap 'printf term > "$STUB_BLOCK"; kill "$sleeper"; trap - TERM; kill -TERM $$' TERM
+  sleep 1000 &
+  sleeper=$!
+  printf 'ready %s\\n' "$$"
+  wait "$sleeper"
+fi
 exit "\${STUB_EXIT:-0}"
 `;
 
-/** A fake `typescript` package: bin/tsc → lib/tsc.js prints "real tsc <args>"; main exports its name. */
-async function writeTypescriptPackage(dir: string): Promise<void> {
+/**
+ * A fake `typescript` package: bin/tsc → lib/tsc.js prints "real tsc <args>" (and
+ * writes $REAL_TSC_MARKER when set); main exports its version.
+ */
+async function writeTypescriptPackage(dir: string, version = "5.9.3"): Promise<void> {
   await mkdir(join(dir, "bin"), { recursive: true });
   await mkdir(join(dir, "lib"), { recursive: true });
-  await writeFile(join(dir, "package.json"), JSON.stringify({ name: "typescript", version: "5.9.3", main: "lib/typescript.js" }));
-  await writeFile(join(dir, "lib", "typescript.js"), 'module.exports = { version: "5.9.3" };\n');
+  await writeFile(join(dir, "package.json"), JSON.stringify({ name: "typescript", version, main: "lib/typescript.js" }));
+  await writeFile(join(dir, "lib", "typescript.js"), `module.exports = { version: ${JSON.stringify(version)} };\n`);
   await writeFile(
     join(dir, "lib", "tsc.js"),
-    'process.stdout.write("real tsc " + process.argv.slice(2).join(" ") + "\\n");\n'
+    [
+      'if (process.env.REAL_TSC_MARKER) require("fs").writeFileSync(process.env.REAL_TSC_MARKER, "ran");',
+      'process.stdout.write("real tsc " + process.argv.slice(2).join(" ") + "\\n");',
+      ""
+    ].join("\n")
   );
   await writeFile(join(dir, "bin", "tsc"), '#!/usr/bin/env node\nrequire("../lib/tsc.js");\n', { mode: 0o755 });
 }
@@ -85,18 +106,22 @@ function enabledState(overrides: Record<string, unknown> = {}): unknown {
 function runNode(
   script: string,
   args: string[] = [],
-  options: { cwd?: string; env?: Record<string, string>; nodeOptions?: string } = {}
+  options: { cwd?: string; env?: Record<string, string>; nodeOptions?: string; preload?: string } = {}
 ): SpawnSyncReturns<string> {
   return spawnSync(process.execPath, [script, ...args], {
     cwd: options.cwd ?? root,
     encoding: "utf8",
-    env: {
-      PATH: process.env.PATH ?? "",
-      HOME: process.env.HOME ?? root,
-      NODE_OPTIONS: appendNodeRequireOption(options.nodeOptions, preload),
-      ...options.env
-    }
+    env: childEnv(options)
   });
+}
+
+function childEnv(options: { env?: Record<string, string>; nodeOptions?: string; preload?: string }): Record<string, string> {
+  return {
+    PATH: process.env.PATH ?? "",
+    HOME: process.env.HOME ?? root,
+    NODE_OPTIONS: appendNodeRequireOption(options.nodeOptions, options.preload ?? preload),
+    ...options.env
+  };
 }
 
 function assertRedirected(result: SpawnSyncReturns<string>, args: string): void {
@@ -121,6 +146,8 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
     disabledProject = join(workspaces, "disabled", "app");
     pnpmProject = join(workspaces, "enabled", "pnpm-app");
     outsideTypescript = join(root, "npx-cache", "node_modules", "typescript");
+    ts7Project = join(workspaces, "enabled", "ts7-app");
+    linkedWorkspaces = join(root, "workspaces-link");
 
     await mkdir(dirname(pluginsConfigPath(appdir)), { recursive: true });
     const binary = join(tsRustPluginDir(appdir), "versions", VERSION, "tsc");
@@ -136,6 +163,8 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
     await mkdir(join(pnpmProject, "node_modules"), { recursive: true });
     await symlink(store, join(pnpmProject, "node_modules", "typescript"));
     await writeTypescriptPackage(outsideTypescript);
+    await writeTypescriptPackage(join(ts7Project, "node_modules", "typescript"), "7.1.0");
+    await symlink(workspaces, linkedWorkspaces);
 
     await writeTsRustPreload(preload, { statePath: pluginsConfigPath(appdir), workspacesRoot: workspaces });
     await writeState(enabledState());
@@ -214,6 +243,105 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
     assert.doesNotMatch(result.stdout, /real tsc/);
   });
 
+  test("a SIGTERM to the node process ends tsc-rs too, and the real tsc never runs", async () => {
+    for (const script of [
+      join(enabledProject, "node_modules", "typescript", "bin", "tsc"),
+      join(enabledProject, "node_modules", "typescript", "lib", "tsc.js")
+    ]) {
+      const marker = join(root, `blocked-${script.endsWith(".js") ? "lib" : "bin"}`);
+      const realMarker = `${marker}.real`;
+      const child = spawn(process.execPath, [script, "--watch"], {
+        cwd: enabledProject,
+        env: childEnv({ env: { STUB_BLOCK: marker, REAL_TSC_MARKER: realMarker } }),
+        stdio: ["ignore", "pipe", "pipe"]
+      });
+      const exited = once(child, "exit");
+      let stdout = "";
+      let stderr = "";
+      child.stderr.on("data", (chunk: Buffer) => {
+        stderr += chunk.toString();
+      });
+      // tsc-rs says it is ready (with its pid) once its SIGTERM trap is set.
+      const stubPid = await new Promise<number>((resolve, reject) => {
+        child.stdout.on("data", (chunk: Buffer) => {
+          stdout += chunk.toString();
+          const ready = /\nready (\d+)\n/.exec(stdout);
+          if (ready) resolve(Number(ready[1]));
+        });
+        child.once("exit", () => reject(new Error(`exited before tsc-rs was ready: ${stdout} ${stderr}`)));
+      });
+      process.kill(child.pid!, "SIGTERM");
+      const [code, signal] = await exited;
+      try {
+        assert.equal(signal, "SIGTERM", `exit ${code}, stderr ${stderr}`);
+        assert.equal(await readFile(marker, "utf8"), "term", "tsc-rs got the SIGTERM");
+        assert.throws(() => process.kill(stubPid, 0), { code: "ESRCH" }, "tsc-rs is gone, not orphaned");
+        assert.equal(existsSync(realMarker), false, "the real tsc did not run");
+        assert.match(stdout, /^tsc-rs --watch\n/);
+        assert.equal(stderr, "");
+      } finally {
+        // On a failure, an orphaned tsc-rs would hold the pipes (and this file) open.
+        try {
+          process.kill(stubPid, "SIGTERM");
+        } catch {
+          // Gone, as it should be.
+        }
+        child.stdout.destroy();
+        child.stderr.destroy();
+      }
+    }
+  });
+
+  test("a native tsc-rs replaces the node process where Node has execve, else runs as its child", async (t) => {
+    const shell = ["/bin/sh", "/usr/bin/sh"].find((candidate) => existsSync(candidate));
+    if (!shell) return t.skip("no /bin/sh");
+    // A native executable standing in for tsc-rs: the shell, whose `-c` the arguments supply.
+    const binary = join(tsRustPluginDir(appdir), "versions", "0.0.3", "tsc");
+    await mkdir(dirname(binary), { recursive: true });
+    await symlink(shell, binary);
+    await writeState(enabledState({ current: { version: "0.0.3", integrity: "sha512-x", installedAt: "x" } }));
+    try {
+      const script = join(enabledProject, "node_modules", "typescript", "bin", "tsc");
+      const result = runNode(script, ["-c", 'printf "native %s\\n" "$$"; exit 4'], { cwd: enabledProject });
+      assert.equal(result.stderr, "");
+      assert.equal(result.status, 4);
+      const pid = Number(/^native (\d+)\n$/.exec(result.stdout)?.[1]);
+      if (typeof (process as { execve?: unknown }).execve === "function") {
+        assert.equal(pid, result.pid, "execve: tsc-rs runs as the node process itself");
+      } else {
+        assert.notEqual(pid, result.pid, "no execve: tsc-rs runs as a child");
+      }
+    } finally {
+      await writeState(enabledState());
+    }
+  });
+
+  test("typescript 7's tsc (not skippable from a preload) is redirected and passes the exit code", () => {
+    const script = join(ts7Project, "node_modules", "typescript", "bin", "tsc");
+    assertRedirected(runNode(script, ["--noEmit"], { cwd: ts7Project }), "--noEmit");
+    const failing = runNode(script, ["--noEmit"], { cwd: ts7Project, env: { STUB_EXIT: "2" } });
+    assert.equal(failing.status, 2);
+    assert.doesNotMatch(failing.stdout, /real tsc/);
+  });
+
+  test("a tsc reached through a symlinked workspaces root matches the configured root too", async () => {
+    const aliased = join(root, "aliased-preload.cjs");
+    await writeTsRustPreload(aliased, {
+      statePath: pluginsConfigPath(appdir),
+      workspacesRoot: workspaces,
+      configuredWorkspacesRoot: linkedWorkspaces
+    });
+    // The real path is in the pnpm store, outside both roots; the cwd is in the disabled workspace.
+    const script = join(linkedWorkspaces, "enabled", "pnpm-app", "node_modules", "typescript", "bin", "tsc");
+    assertRedirected(runNode(script, ["--noEmit"], { cwd: disabledProject, preload: aliased }), "--noEmit");
+    assertRealTsc(runNode(script, ["--noEmit"], { cwd: disabledProject }), "--noEmit");
+    // The same root twice is baked once.
+    assert.equal(
+      renderTsRustPreload({ statePath: pluginsConfigPath(appdir), workspacesRoot: workspaces, configuredWorkspacesRoot: workspaces }),
+      renderTsRustPreload({ statePath: pluginsConfigPath(appdir), workspacesRoot: workspaces })
+    );
+  });
+
   test("an existing NODE_OPTIONS keeps working beside the preload and reaches tsc-rs", async () => {
     const other = join(root, "other-preload.cjs");
     await writeFile(other, 'process.stderr.write("other preload\\n");\n');
@@ -250,6 +378,19 @@ describe("tsc-rs preload", { skip: posix ? false : "the stand-in tsc-rs is a she
       const result = runNode(script(), ["--noEmit"], { cwd: enabledProject });
       assert.equal(result.stderr, "orquester: tsc-rs failed to start (EACCES); running tsc\n");
       assertRealTsc(result, "--noEmit");
+    });
+
+    test("when tsc-rs passes the pre-check but fails to start, from bin/tsc and lib/tsc.js", async () => {
+      // Executable, but its interpreter does not exist: only the spawn itself fails.
+      const binary = join(tsRustPluginDir(appdir), "versions", "0.0.2", "tsc");
+      await mkdir(dirname(binary), { recursive: true });
+      await writeFile(binary, "#!/nonexistent/interpreter\n", { mode: 0o755 });
+      await writeState(enabledState({ current: { version: "0.0.2", integrity: "sha512-x", installedAt: "x" } }));
+      for (const entry of [script(), join(enabledProject, "node_modules", "typescript", "lib", "tsc.js")]) {
+        const result = runNode(entry, ["--noEmit"], { cwd: enabledProject });
+        assert.equal(result.stderr, "orquester: tsc-rs failed to start (ENOENT); running tsc\n", entry);
+        assertRealTsc(result, "--noEmit");
+      }
     });
 
     test("when nothing is installed yet", async () => {
