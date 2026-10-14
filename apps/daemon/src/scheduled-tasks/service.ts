@@ -63,6 +63,8 @@ import type { ScheduledTasksStore } from "./store.ts";
 
 /** How often a queued delivery is looked at again when no bus event about its thread arrives. */
 export const SCHEDULED_TASK_RETRY_MS = 30_000;
+/** While a delivery waits, the liveness marker is re-stamped at most this often (on the timer). */
+export const SCHEDULED_TASK_HEARTBEAT_MS = 60_000;
 
 /** The ladder rungs during which a thread is not ready for a new message. */
 const BUSY_RUNGS: ReadonlySet<ChatActivityRung> = new Set<ChatActivityRung>(["approval", "question", "starting", "running", "goal-continuing"]);
@@ -184,6 +186,8 @@ export class ScheduledTasksService {
   private retryAt: number | null = null;
   /** After a scheduler write failed, no timer step before this (no hot loop while the disk is bad). */
   private backoffUntil: number | null = null;
+  /** The liveness marker as the file had it at boot: when the previous run was last known alive. */
+  private bootAliveAt: string | null = null;
 
   constructor(private readonly options: ScheduledTasksServiceOptions) {
     this.store = options.store;
@@ -203,6 +207,7 @@ export class ScheduledTasksService {
     if (this.started || this.stopped) return this.chain;
     this.started = true;
     this.api = api;
+    this.bootAliveAt = this.store.aliveAt;
     this.unsubscribe = api.subscribe((event) => this.onEvent(event));
     return this.enqueue(async () => {
       await this.reconcileThreads();
@@ -214,6 +219,12 @@ export class ScheduledTasksService {
 
   /** Cancels the timer and the bus subscription; work in flight finishes, nothing new starts. */
   stop(): void {
+    // A clean shutdown records when it happened, so the next boot measures the real downtime
+    // (`startDaemon` flushes the store right after). Only matters while a delivery waits.
+    if (this.started && !this.stopped && this.store.blockedReason === null && this.store.all().some((task) => task.pending !== null)) {
+      this.store.aliveAt = this.clock.now().toISOString();
+      void this.store.persist().catch(() => undefined);
+    }
     this.stopped = true;
     this.timer?.cancel();
     this.timer = null;
@@ -410,6 +421,8 @@ export class ScheduledTasksService {
     for (const id of deletes) before.set(id, this.store.get(id));
     for (const record of upserts) this.store.put(record);
     for (const id of deletes) this.store.delete(id);
+    // Every write doubles as the liveness marker.
+    this.store.aliveAt = this.clock.now().toISOString();
     try {
       await this.store.persist();
     } catch {
@@ -444,30 +457,42 @@ export class ScheduledTasksService {
   }
 
   /**
-   * At boot: a scheduled (not Run now) delivery that has waited past the missed-run grace — the
-   * daemon was down while it waited — is not sent that late; it is recorded as missed, like a run
-   * that came due during the downtime (a one-shot task is paused).
+   * At boot: a scheduled (not Run now) delivery still waiting is not sent if Orquester was DOWN for
+   * longer than the missed-run grace while it waited — the part of its lateness that fell inside the
+   * downtime (`now − max(lastAlive, scheduledFor)`, the marker from the previous run) is what counts.
+   * Time it spent waiting for a busy thread while the daemon ran never makes it missed; a brief
+   * restart (a deploy) keeps it queued. A file without a marker (written before it existed) counts
+   * the whole lateness. Missed → recorded with the downtime it fell into; a one-shot is paused.
    */
   private async expireStaleDeliveries(): Promise<void> {
     const now = this.clock.now();
     const graceMs = MISSED_RUN_GRACE_MINUTES * 60_000;
     const stamp = now.toISOString();
-    const stale = this.store
-      .all()
-      .filter((task) => task.pending !== null && !task.pending.manual && now.getTime() - Date.parse(task.pending.scheduledFor) > graceMs);
+    const lastAlive = this.bootAliveAt === null ? Number.NaN : Date.parse(this.bootAliveAt);
+    const stale = this.store.all().filter((task) => {
+      if (task.pending === null || task.pending.manual) return false;
+      const scheduledFor = Date.parse(task.pending.scheduledFor);
+      const downSince = Number.isNaN(lastAlive) ? scheduledFor : Math.max(lastAlive, scheduledFor);
+      return now.getTime() - downSince > graceMs;
+    });
     if (stale.length === 0) return;
+    const since = this.bootAliveAt === null ? null : this.bootAliveAt;
     await this.commitQuietly(
       stale.map((task) => ({
         ...task,
         pending: null,
         updatedAt: stamp,
         lastRunStatus: "missed",
-        lastRunError: `Missed the run due at ${task.pending!.scheduledFor}: Orquester was not running.`,
+        lastRunError:
+          since === null
+            ? `Missed the run due at ${task.pending!.scheduledFor}: it was still waiting when Orquester stopped, and it restarted more than ${MISSED_RUN_GRACE_MINUTES} minutes later.`
+            : `Missed the run due at ${task.pending!.scheduledFor}: Orquester was not running from ${since} to ${stamp}.`,
         ...(task.schedule.kind === "once" ? { enabled: false, nextRunAt: null } : {})
       })),
       []
     );
   }
+
 
   private async sessions(): Promise<SessionSummary[]> {
     if (this.api === null) throw new ScheduledTaskError(503, "SCHEDULER_UNAVAILABLE", "The scheduler is starting; try again in a few seconds.");
@@ -663,6 +688,14 @@ export class ScheduledTasksService {
     );
   }
 
+  /** While a delivery waits, keep the liveness marker within a minute of now (see `expireStaleDeliveries`). */
+  private async heartbeat(): Promise<void> {
+    if (!this.store.all().some((task) => task.pending !== null)) return;
+    const last = this.store.aliveAt === null ? Number.NaN : Date.parse(this.store.aliveAt);
+    if (!Number.isNaN(last) && this.clock.now().getTime() - last < SCHEDULED_TASK_HEARTBEAT_MS) return;
+    await this.commitQuietly([], []);
+  }
+
   /**
    * One timer: the earliest due time, or the anchored retry while a delivery waits — never more
    * than a minute away, and never before the back-off after a failed write.
@@ -695,6 +728,7 @@ export class ScheduledTasksService {
       // This step is the retry: the next one is anchored afresh when the timer is re-armed.
       this.retryAt = null;
       void this.enqueue(async () => {
+        await this.heartbeat();
         await this.tick();
         await this.deliverQueued(null);
       });

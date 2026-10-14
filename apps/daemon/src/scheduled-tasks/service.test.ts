@@ -496,6 +496,74 @@ test("at boot a scheduled delivery that waited past the grace is recorded missed
   assert.equal(a.enabled, true);
   const b = r.service.get(once.id)!;
   assert.equal(b.lastRunStatus, "missed");
+  assert.equal(b.lastRunError, "Missed the run due at 2026-10-14T10:20:00.000Z: Orquester was not running from 2026-10-14T10:20:30.000Z to 2026-10-14T12:30:00.000Z.");
   assert.equal(b.enabled, false);
   assert.deepEqual(r.turns.map((turn) => turn.input), ["Manual"]);
+});
+
+// ---- fix round 2 -------------------------------------------------------------------------------
+
+test("a delivery that waited 30 min for a busy thread survives a 1-minute restart and goes out at idle", async (t) => {
+  const r = await rig(t);
+  const task = await cron(r, "0 12 * * *"); // next 12:00 — out of the way
+  r.summary = "running";
+  r.snapshot = "running";
+  const queued = await r.service.runNow(task.id); // a manual one is unaffected anyway…
+  assert.equal(queued.delivered, false);
+  // …so queue a SCHEDULED one: a one-shot due at 10:10, waiting for the busy thread.
+  const once = await r.service.create({ threadId: THREAD, prompt: "Ping", schedule: { kind: "once", at: "2026-10-14T10:10:00.000Z" } });
+  await r.run(3 * MIN);
+  assert.notEqual(r.service.get(once.id)!.queuedAt, null);
+  await r.run(30 * MIN); // the daemon runs; the thread stays busy until 10:40:30
+  // A deploy: down for one minute.
+  r.service.stop();
+  await r.store.flush();
+  r.clock.jump(r.clock.now().getTime() + MIN);
+  await r.restart();
+  const waiting = r.service.get(once.id)!;
+  assert.notEqual(waiting.queuedAt, null, "still queued: only one minute of downtime");
+  assert.equal(waiting.lastRunStatus, null);
+  r.summary = "idle";
+  r.snapshot = "idle";
+  await r.run(SCHEDULED_TASK_RETRY_MS);
+  await r.run(SCHEDULED_TASK_RETRY_MS);
+  assert.deepEqual(r.turns.map((turn) => turn.input).sort(), ["Check the deploy", "Ping"]);
+});
+
+test("after a crash the heartbeat bounds the measured downtime", async (t) => {
+  const r = await rig(t);
+  const once = await r.service.create({ threadId: THREAD, prompt: "Ping", schedule: { kind: "once", at: "2026-10-14T10:10:00.000Z" } });
+  r.summary = "running";
+  r.snapshot = "running";
+  await r.run(40 * MIN); // waiting since 10:10, the marker kept fresh by the heartbeat
+  assert.notEqual(r.service.get(once.id)!.queuedAt, null);
+  const marker = (JSON.parse(readFileSync(r.file, "utf8")) as { aliveAt: string }).aliveAt;
+  assert.ok(r.clock.now().getTime() - Date.parse(marker) <= SCHEDULED_TASK_RETRY_MS * 2 + MIN, `marker ${marker} is recent`);
+  // A crash: no clean-shutdown stamp (the file keeps the heartbeat's) — then 5 minutes down.
+  const beforeCrash = readFileSync(r.file, "utf8");
+  r.clock.jump(r.clock.now().getTime() + 5 * MIN);
+  r.service.stop();
+  await r.store.flush();
+  await writeFile(r.file, beforeCrash);
+  await r.restart();
+  assert.notEqual(r.service.get(once.id)!.queuedAt, null, "5 min (plus the heartbeat's lag) is within the grace");
+});
+
+test("a waiting delivery whose downtime exceeded the grace after a crash is missed, with the downtime named", async (t) => {
+  const r = await rig(t);
+  const once = await r.service.create({ threadId: THREAD, prompt: "Ping", schedule: { kind: "once", at: "2026-10-14T10:10:00.000Z" } });
+  r.summary = "running";
+  r.snapshot = "running";
+  await r.run(10 * MIN);
+  const beforeCrash = readFileSync(r.file, "utf8");
+  const marker = (JSON.parse(beforeCrash) as { aliveAt: string }).aliveAt;
+  r.clock.jump(r.clock.now().getTime() + 2 * 60 * MIN);
+  r.service.stop();
+  await r.store.flush();
+  await writeFile(r.file, beforeCrash);
+  await r.restart();
+  const task = r.service.get(once.id)!;
+  assert.equal(task.lastRunStatus, "missed");
+  assert.equal(task.lastRunError, `Missed the run due at 2026-10-14T10:10:00.000Z: Orquester was not running from ${marker} to ${r.clock.now().toISOString()}.`);
+  assert.equal(r.turns.length, 0);
 });

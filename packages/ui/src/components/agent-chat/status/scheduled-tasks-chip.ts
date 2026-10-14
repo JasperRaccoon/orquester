@@ -7,7 +7,7 @@
  * Cancel. No React import.
  */
 
-import type { ScheduledTask } from "@orquester/api";
+import { scheduledTaskTimeOrder as instant, type ScheduledTask } from "@orquester/api";
 
 export type ScheduledChipTone = "neutral" | "info" | "warn";
 
@@ -28,12 +28,6 @@ export interface ScheduledTaskRowModel {
 export interface TimeFormatOptions {
   locale?: string;
   timeZone?: string;
-}
-
-/** An ISO time as a number for sorting; none (or unreadable) sorts last. */
-function instant(iso: string | null): number {
-  const ms = iso === null ? Number.NaN : Date.parse(iso);
-  return Number.isNaN(ms) ? Number.MAX_SAFE_INTEGER : ms;
 }
 
 /** Soonest first; paused and finished ones (no next run) last, oldest first among them. */

@@ -3,6 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   isScheduledTaskMessage,
+  scheduledTaskTimeOrder,
   firstScheduledTaskRun,
   scheduledTaskScheduleProblem
 } from "./scheduled-tasks.ts";
@@ -42,4 +43,10 @@ test("a scheduler-sent message is recognised by its context chip", () => {
   assert.equal(isScheduledTaskMessage({ context: [{ kind: "scheduled-task" }] }), true);
   assert.equal(isScheduledTaskMessage({ context: [{ kind: "file" }] }), false);
   assert.equal(isScheduledTaskMessage({}), false);
+});
+
+test("time order: numeric, offsets respected, missing last", () => {
+  assert.ok(scheduledTaskTimeOrder("2026-10-14T12:00:00+02:00") < scheduledTaskTimeOrder("2026-10-14T10:30:00Z"));
+  assert.equal(scheduledTaskTimeOrder(null), Number.MAX_SAFE_INTEGER);
+  assert.equal(scheduledTaskTimeOrder("nope"), Number.MAX_SAFE_INTEGER);
 });

@@ -74,14 +74,20 @@ export type ScheduledTaskRecord = z.infer<typeof scheduledTaskRecordSchema>;
 export interface ScheduledTasksFile {
   version: 1;
   tasks: ScheduledTaskRecord[];
+  /**
+   * The daemon's liveness marker: last moment the scheduler is known to have been running (stamped
+   * by every write, a heartbeat while a delivery waits, and shutdown). At boot, `now - aliveAt` is
+   * the downtime the missed-run grace is measured against. Null in a file that has none.
+   */
+  aliveAt: string | null;
   /** `tasks` entries not in `tasks`, exactly as found: schema failures and repeated ids. */
   rejected: unknown[];
-  /** Every top-level key but `version` and `tasks`, exactly as found. */
+  /** Every top-level key but `version`, `tasks` and `aliveAt`, exactly as found. */
   extra: Record<string, unknown>;
 }
 
 export function createDefaultScheduledTasksFile(): ScheduledTasksFile {
-  return { version: 1, tasks: [], rejected: [], extra: {} };
+  return { version: 1, tasks: [], aliveAt: null, rejected: [], extra: {} };
 }
 
 /**
@@ -112,12 +118,17 @@ export function parseScheduledTasksFile(raw: unknown): ScheduledTasksFile {
   }
   // `fromEntries`, not assignment: a key such as `__proto__` stays an own key.
   const extra = Object.fromEntries(
-    Object.entries(raw as Record<string, unknown>).filter(([key]) => key !== "version" && key !== "tasks")
+    Object.entries(raw as Record<string, unknown>).filter(([key]) => key !== "version" && key !== "tasks" && key !== "aliveAt")
   );
-  return { version: 1, tasks, rejected, extra };
+  const alive = isoDateTime.safeParse((raw as Record<string, unknown>).aliveAt);
+  return { version: 1, tasks, aliveAt: alive.success ? alive.data : null, rejected, extra };
 }
 
-/** The file as written: unknown top-level keys first, then the version and every task, the rejected ones last. */
+/** The file as written: unknown top-level keys first, then the version, the marker and every task, the rejected ones last. */
 export function serializeScheduledTasksFile(file: Omit<ScheduledTasksFile, "version">): string {
-  return `${JSON.stringify({ ...file.extra, version: 1, tasks: [...file.tasks, ...file.rejected] }, null, 2)}\n`;
+  return `${JSON.stringify(
+    { ...file.extra, version: 1, ...(file.aliveAt !== null ? { aliveAt: file.aliveAt } : {}), tasks: [...file.tasks, ...file.rejected] },
+    null,
+    2
+  )}\n`;
 }

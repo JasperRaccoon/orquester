@@ -16,6 +16,7 @@ import {
   SCHEDULED_TASK_MISSED_GRACE_MINUTES,
   SCHEDULED_TASK_PROMPT_MAX,
   scheduledTaskRoutes,
+  scheduledTaskTimeOrder as instant,
   type RunScheduledTaskResponse,
   type ScheduledTask,
   type ScheduledTaskListResponse,
@@ -70,12 +71,6 @@ function view(task: ScheduledTask, opts: { clip?: boolean } = {}) {
     ...(task.lastRunError !== null ? { lastRunError: task.lastRunError } : {}),
     runCount: task.runCount
   };
-}
-
-/** An ISO time as a number for sorting; none (or unreadable) sorts last. */
-function instant(iso: string | null): number {
-  const ms = iso === null ? Number.NaN : Date.parse(iso);
-  return Number.isNaN(ms) ? Number.MAX_SAFE_INTEGER : ms;
 }
 
 function hostTimeZone(): string {

@@ -177,6 +177,12 @@ export function scheduledTaskScheduleProblem(schedule: ScheduledTaskSchedule, no
   return problem === null ? null : problem.replace("a workflow runs", "a task runs");
 }
 
+/** An ISO time as a number for ordering tasks (no `localeCompare`); none or unreadable sorts last. */
+export function scheduledTaskTimeOrder(iso: string | null): number {
+  const ms = iso === null ? Number.NaN : Date.parse(iso);
+  return Number.isNaN(ms) ? Number.MAX_SAFE_INTEGER : ms;
+}
+
 /** The first due time of `schedule` after `from` (a one-shot's own time), or null. */
 export function firstScheduledTaskRun(schedule: ScheduledTaskSchedule, from: Date): string | null {
   if (schedule.kind === "once") {

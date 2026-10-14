@@ -29,6 +29,8 @@ export class ScheduledTasksStore {
   private readonly records = new Map<string, ScheduledTaskRecord>();
   private rejected: unknown[] = [];
   private extra: Record<string, unknown> = {};
+  /** The liveness marker as read at load, then as last stamped (see `ScheduledTasksFile.aliveAt`). */
+  aliveAt: string | null = null;
   /** Why the file may not be written this run, or null. */
   blockedReason: string | null = null;
   private writing: Promise<void> = Promise.resolve();
@@ -46,6 +48,7 @@ export class ScheduledTasksStore {
     this.records.clear();
     this.rejected = [];
     this.extra = {};
+    this.aliveAt = null;
     this.blockedReason = null;
     let text: string;
     try {
@@ -62,6 +65,7 @@ export class ScheduledTasksStore {
       for (const record of file.tasks) this.records.set(record.id, record);
       this.rejected = file.rejected;
       this.extra = file.extra;
+      this.aliveAt = file.aliveAt;
       if (this.rejected.length > 0) {
         this.logger.warn(
           `scheduled-tasks.json: ${this.rejected.length} task(s) this build cannot read are not scheduled; they stay in the file untouched.`
@@ -108,7 +112,7 @@ export class ScheduledTasksStore {
       .catch(() => undefined)
       .then(async () => {
         this.queued = null;
-        const content = serializeScheduledTasksFile({ tasks: this.all(), rejected: this.rejected, extra: this.extra });
+        const content = serializeScheduledTasksFile({ tasks: this.all(), aliveAt: this.aliveAt, rejected: this.rejected, extra: this.extra });
         try {
           await writeFileAtomic(this.path, content, 0o600, false);
         } catch (error) {

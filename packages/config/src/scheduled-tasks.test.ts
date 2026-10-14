@@ -59,3 +59,12 @@ test("another version or a broken outer shape throws (the daemon moves the file 
   assert.throws(() => parseScheduledTasksFile({ version: 1, tasks: "nope" }), /version-1/);
   assert.throws(() => parseScheduledTasksFile(null), /version-1/);
 });
+
+test("the liveness marker round-trips and is not an unknown key", () => {
+  const file = parseScheduledTasksFile({ version: 1, aliveAt: "2026-10-14T10:00:00.000Z", tasks: [] });
+  assert.equal(file.aliveAt, "2026-10-14T10:00:00.000Z");
+  assert.deepEqual(file.extra, {});
+  assert.equal((JSON.parse(serializeScheduledTasksFile(file)) as { aliveAt: string }).aliveAt, "2026-10-14T10:00:00.000Z");
+  assert.equal(parseScheduledTasksFile({ version: 1, aliveAt: "yesterday", tasks: [] }).aliveAt, null);
+  assert.equal(parseScheduledTasksFile({ version: 1, tasks: [] }).aliveAt, null);
+});
