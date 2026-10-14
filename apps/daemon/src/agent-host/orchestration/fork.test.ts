@@ -188,6 +188,16 @@ describe("the transcript handoff", () => {
     assert.match(transcript, /oldest messages were left out/);
   });
 
+  it("says how many kept exchanges the window no longer holds a word of", () => {
+    const transcript = buildForkTranscript({
+      items: [message("u3", "user", "t3", "third"), message("a3", "assistant", "t3", "answer")],
+      retained: [turn("t1", "completed", "u1"), turn("t2", "completed", "u2"), turn("t3", "completed", "u3")] as never,
+      parentTitle: "P"
+    })!;
+    assert.match(transcript, /2 earlier exchanges are no longer available/);
+    assert.match(transcript, /third/);
+  });
+
   it("is null when the kept turns hold no message", () => {
     assert.equal(
       buildForkTranscript({ items: [], retained: [turn("t1", "completed") as never], parentTitle: "P" }),
@@ -451,6 +461,38 @@ describe("forkThread", () => {
     assert.equal(result.strategy, "empty");
     assert.equal(calls.length, 0);
     assert.equal(result.head.lineage?.forkedFrom?.messageId, prompt.id);
+    await host.stop();
+  });
+
+  it("a repeat of the same fork answers the existing child; turns with no words left are `unavailable`", async () => {
+    const grok = createScriptedAdapter({ id: "grok" });
+    const host = createTestHost({ adapters: { grok } });
+    const parentId = await host.createThread({ threadId: "parent", refId: "grok" });
+    const first = await runTurn(host, grok, parentId, "q", "a");
+    const fork = await host.orchestrator.forkThread(parentId, forkRequest("child", "grok", { messageId: first.replyId }));
+    const repeat = await host.orchestrator.forkThread(parentId, forkRequest("child", "grok", { messageId: first.replyId }));
+    assert.equal(repeat.strategy, fork.strategy);
+    assert.equal(repeat.strategy, "transcript");
+    assert.equal(logOf(host, "child").filter((event) => event.type === "thread.created").length, 1);
+
+    // A settled turn with no words in the window (its messages long evicted, here never
+    // written): the conversation cannot be carried — `unavailable`, never "before the first message".
+    const wordless = await host.createThread({ threadId: "wordless", refId: "grok" });
+    await host.orchestrator.ingestionSink(wordless, [
+      domainEvent(wordless, host, "thread.turn-start-requested", {
+        turnId: "old-turn",
+        messageId: "evicted-prompt",
+        interactionMode: "default",
+        settled: { state: "completed", completedAt: host.clock.nowIso() }
+      })
+    ]);
+    await host.settle();
+    const lost = await host.orchestrator.forkThread(wordless, forkRequest("child-2", "grok", {}));
+    await host.settle();
+    assert.equal(lost.strategy, "unavailable");
+    const row = activitiesOf(host, "child-2").find((activity) => activity.activityKind === "thread.forked");
+    assert.match(JSON.stringify(row?.payload), /could not be carried over/);
+    assert.doesNotMatch(JSON.stringify(row?.payload), /before the first message/);
     await host.stop();
   });
 

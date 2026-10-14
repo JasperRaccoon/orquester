@@ -72,7 +72,7 @@ export interface TimelineRowContextValue {
   /** A confirmed "Rewind to here" (§5.5). Conversation only; files stay. */
   onRevert: (input: { messageId: string; targetTurnCount: number }) => void;
   /** "Fork from here" (spec 2026-10-14 §6); null where no fork is offered (the drill-in). */
-  onFork: ((input: TimelineForkInput) => void) | null;
+  onFork: ((input: TimelineForkInput) => Promise<unknown> | void) | null;
   onOpenTurnDiff: (turnCount: number) => void;
   onOpenFile: (path: string) => void;
   /**

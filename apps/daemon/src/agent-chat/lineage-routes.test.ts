@@ -23,6 +23,8 @@ function app(overrides: { fork?: () => Promise<unknown>; lineage?: Partial<Linea
         : ({
             view: (id: string) => ({ sessionId: id, lineage: null, parent: null, children: [], pendingMerges: [] }),
             mergeBack: async () => ({ parentSessionId: "p", delivery: "queued", mergeId: "m" }),
+            actOnMerge: async (_id: string, mergeId: string, body: { action: string }) =>
+              ({ mergeId, outcome: body.action === "deliver" ? "sent" : "discarded" }) as never,
             ...overrides.lineage
           } as LineageService),
     fork: (overrides.fork ?? (async () => ({ ok: true }))) as never
@@ -75,4 +77,32 @@ test("refusals keep their code and words; anything else is a generic rejection",
   const starting = app({ lineage: null });
   const early = await starting.inject({ method: "POST", url: agentChatRoutes.mergeBack("chat-1"), payload: {} });
   assert.equal(early.statusCode, 503);
+});
+
+test("a pending merge is acted on by its id, from a tab that may already be closed", async () => {
+  const server = app();
+  const res = await server.inject({ method: "POST", url: agentChatRoutes.mergeBackItem("closed-fork", "m 1"), payload: { action: "discard" } });
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.json(), { mergeId: "m 1", outcome: "discarded" });
+  const refused = app({
+    lineage: {
+      actOnMerge: async () => {
+        throw new LineageError("No pending merge with that id for this session.", "THREAD_NOT_FOUND");
+      }
+    }
+  });
+  const missing = await refused.inject({ method: "POST", url: agentChatRoutes.mergeBackItem("x", "m"), payload: { action: "deliver" } });
+  assert.equal(missing.statusCode, 404);
+});
+
+test("a refusal whose code is not on the wire list (SESSION_UNAVAILABLE) answers 409 COMMAND_REJECTED, as documented", async () => {
+  const server = app({
+    fork: async () => {
+      throw new ChatSessionError("The account this conversation runs under is no longer available, so it cannot be forked.", "SESSION_UNAVAILABLE");
+    }
+  });
+  const res = await server.inject({ method: "POST", url: agentChatRoutes.fork("chat-1"), payload: {} });
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.json().error.code, "COMMAND_REJECTED");
+  assert.match(res.json().error.message, /no longer available/);
 });

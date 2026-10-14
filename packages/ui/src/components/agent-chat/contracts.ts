@@ -84,7 +84,7 @@ export interface ChatTimelineProps {
    * §6): a new chat tab whose conversation is this one's up to it. Absent:
    * no fork is offered.
    */
-  onFork?: ((input: TimelineForkInput) => void) | undefined;
+  onFork?: ((input: TimelineForkInput) => Promise<unknown> | void) | undefined;
   /**
    * A turn is running or a revert is in flight: the rewind button is shown
    * but disabled ("Available when the agent is idle"). Absent means idle.

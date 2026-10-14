@@ -149,6 +149,13 @@ export const agentChatRoutes = {
    * send its result to the parent, queued while the parent is busy.
    */
   mergeBack: (sessionId: string): string => `${sessionBase(sessionId)}/merge-back`,
+  /**
+   * `POST` `MergeBackActionRequest` → `MergeBackActionResponse`: deliver now,
+   * or discard, one pending merge — from the fork that sent it or the parent
+   * it is addressed to.
+   */
+  mergeBackItem: (sessionId: string, mergeId: string): string =>
+    `${sessionBase(sessionId)}/merge-back/${encodeURIComponent(mergeId)}`,
   /** `GET` → `SessionLineageResponse`: parent, children and pending merges. */
   lineage: (sessionId: string): string => `${sessionBase(sessionId)}/lineage`
 } as const;

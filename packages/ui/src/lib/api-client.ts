@@ -149,6 +149,8 @@ import { agentChatRoutes } from "@orquester/api/agent-chat";
 import type {
   ForkSessionRequest,
   ForkSessionResponse,
+  MergeBackActionRequest,
+  MergeBackActionResponse,
   MergeBackRequest,
   MergeBackResponse,
   SessionLineageResponse
@@ -1204,6 +1206,11 @@ export class ApiClient {
   /** Send a fork's result to its parent; queued by the daemon while the parent is busy. */
   mergeBackSession(id: string, req: MergeBackRequest): Promise<MergeBackResponse> {
     return this.send("POST", agentChatRoutes.mergeBack(id), { body: req });
+  }
+
+  /** Deliver now, or discard, a merge the parent has not taken (from the fork or the parent). */
+  mergeBackAction(id: string, mergeId: string, req: MergeBackActionRequest): Promise<MergeBackActionResponse> {
+    return this.send("POST", agentChatRoutes.mergeBackItem(id, mergeId), { body: req });
   }
 
   /** The session's parent, its children and the merges waiting on either. */

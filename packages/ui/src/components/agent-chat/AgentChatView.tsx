@@ -521,10 +521,15 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const activateTab = useAppStore((s) => s.activateTab);
   const [lineageNotice, setLineageNotice] = React.useState<LineageNotice | null>(null);
   React.useEffect(() => setLineageNotice(null), [sessionId]);
+  // One fork at a time from this view: a second click while the first is on
+  // its way is dropped, never a second tab.
+  const forkInFlight = React.useRef(false);
   const forkFrom = React.useCallback(
-    (input: TimelineForkInput) => {
+    (input: TimelineForkInput): Promise<void> => {
+      if (forkInFlight.current) return Promise.resolve();
+      forkInFlight.current = true;
       setLineageNotice(null);
-      void forkChatTab(sessionId, {
+      return forkChatTab(sessionId, {
         messageId: input.messageId,
         ...(input.turnId !== null ? { turnId: input.turnId } : {}),
         role: input.role
@@ -536,6 +541,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
         })
         .catch((error: unknown) => {
           setLineageNotice({ tone: "error", text: `Could not fork: ${lineageErrorText(error)}` });
+        })
+        .finally(() => {
+          forkInFlight.current = false;
         });
     },
     [forkChatTab, sessionId]
@@ -557,6 +565,22 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
         });
       } catch (error) {
         setLineageNotice({ tone: "error", text: `Could not merge back: ${lineageErrorText(error)}` });
+        throw error;
+      }
+    },
+    [api, sessionId]
+  );
+  const actOnMerge = React.useCallback(
+    async (mergeId: string, action: "deliver" | "discard") => {
+      setLineageNotice(null);
+      try {
+        const result = await api.mergeBackAction(sessionId, mergeId, { action });
+        setLineageNotice({ tone: "info", text: result.outcome === "sent" ? "Merge delivered." : "Merge discarded." });
+      } catch (error) {
+        setLineageNotice({
+          tone: "error",
+          text: `Could not ${action === "deliver" ? "deliver" : "discard"} the merge: ${lineageErrorText(error)}`
+        });
         throw error;
       }
     },
@@ -990,6 +1014,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 onDismissNotice={() => setLineageNotice(null)}
                 onOpenSession={activateTab}
                 onMergeBack={mergeBack}
+                onMergeAction={actOnMerge}
               />
             )}
             <ChatTimeline

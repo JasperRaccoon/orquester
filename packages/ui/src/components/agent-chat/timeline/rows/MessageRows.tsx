@@ -186,13 +186,22 @@ function ForkFromHereButton({
   text: string;
 }): React.ReactElement | null {
   const { onFork } = useTimelineRowContext();
+  // One fork per click: held until the daemon answered, so a double click
+  // never opens two tabs (the view also refuses a second fork in flight).
+  const [busy, setBusy] = React.useState(false);
   if (!onFork) return null;
   const label = role === "user" ? "Fork from before this message" : "Fork from here";
   return (
     <ChatIconButton
       size="micro"
       label={label}
-      onClick={() => onFork({ messageId, turnId, role, text })}
+      disabled={busy}
+      aria-busy={busy || undefined}
+      onClick={() => {
+        if (busy) return;
+        setBusy(true);
+        void Promise.resolve(onFork({ messageId, turnId, role, text })).finally(() => setBusy(false));
+      }}
     >
       <GitFork size={12} strokeWidth={1.8} aria-hidden />
     </ChatIconButton>
@@ -301,7 +310,7 @@ export const UserMessageRow = React.memo(function UserMessageRow({
             onOpenChange={setRewindOpen}
           />
         ) : null}
-        {!ctx.readOnly ? (
+        {!ctx.readOnly && row.forkable === true ? (
           <ForkFromHereButton
             messageId={row.message.id}
             turnId={row.message.turnId}

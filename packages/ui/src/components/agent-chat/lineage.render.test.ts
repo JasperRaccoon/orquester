@@ -41,7 +41,8 @@ const bar = (session: SessionSummary, sessions: SessionSummary[]) =>
       notice: null,
       onDismissNotice: () => undefined,
       onOpenSession: () => undefined,
-      onMergeBack: async () => undefined
+      onMergeBack: async () => undefined,
+      onMergeAction: async () => undefined
     })
   );
 
@@ -82,9 +83,15 @@ const context = (overrides: Partial<TimelineRowContextValue>): TimelineRowContex
     ...overrides
   }) as unknown as TimelineRowContextValue;
 
-const messageRow = (role: "user" | "assistant", text: string, kind: "message" | "assistant-meta" = "message") =>
+const messageRow = (
+  role: "user" | "assistant",
+  text: string,
+  kind: "message" | "assistant-meta" = "message",
+  forkable = true
+) =>
   ({
     kind,
+    ...(forkable ? { forkable: true } : {}),
     id: `row-${role}`,
     createdAt: "2026-10-14T00:00:00.000Z",
     message: { kind: "message", id: `m-${role}`, role, text, turnId: "t1", streaming: false, createdAt: "t", updatedAt: "t" }
@@ -106,6 +113,22 @@ test("a prompt and a reply offer Fork from here; a read-only timeline does not",
     context({ readOnly: true, onFork: null })
   );
   assert.doesNotMatch(readOnly, /Fork from/);
+  const unanswered = render(
+    createElement(UserMessageRow, { row: messageRow("user", "hi", "message", false) as never }),
+    context({})
+  );
+  assert.doesNotMatch(unanswered, /Fork from/, "a prompt the host would refuse is not offered");
+});
+
+test("pending merges show on both tabs, with deliver and discard; a failed one says why", () => {
+  const queued = { mergeId: "m1", parentSessionId: "parent", childSessionId: "fork", queuedAt: "t", state: "queued" as const, preview: "B works", attempts: 0 };
+  const onFork = bar({ ...fork, pendingMerges: [queued] }, [parent, fork]);
+  assert.match(onFork, /Merge to “Plan the API” is queued until it is idle/);
+  assert.match(onFork, /Deliver now/);
+  assert.match(onFork, /Discard/);
+  const onParent = bar({ ...parent, pendingMerges: [{ ...queued, state: "failed", error: "refused: no", attempts: 3 }] }, [parent, fork]);
+  assert.match(onParent, /Merge from “Plan the API \(fork\)” failed: refused: no/);
+  assert.match(onParent, /Retry/);
 });
 
 test("a merged-back message shows where it came from, and the result alone", () => {

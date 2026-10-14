@@ -98,8 +98,12 @@ export function parseThreadLineage(value: unknown): ThreadLineage | undefined {
  *   with the child's first message.
  * - `empty` — nothing preceded the fork point (forked before the first
  *   message): a fresh session with the lineage alone.
+ * - `unavailable` — turns preceded the fork point, but neither the provider
+ *   could fork them nor does the host still hold any of their words (the
+ *   parent's window evicted them): a fresh session, and its first row says
+ *   the earlier conversation could not be carried over.
  */
-export type ThreadForkStrategy = "native" | "transcript" | "empty";
+export type ThreadForkStrategy = "native" | "transcript" | "empty" | "unavailable";
 
 /**
  * Which part of the parent a fork keeps, by message (§6 "conversation up to
@@ -128,6 +132,12 @@ export interface ThreadForkTarget {
 export interface ForkSessionRequest extends ThreadForkTarget {
   /** The fork's tab title. Defaults to the parent's title with " (fork)". */
   title?: string;
+  /**
+   * Idempotency key (≤ 200 characters). The same key on the same parent is the
+   * same fork: a repeat — in flight or after it landed, across a daemon
+   * restart too — answers the tab the first created, never a second one.
+   */
+  commandId?: string;
 }
 
 /** The fork tab's default title. */
@@ -166,12 +176,44 @@ export interface MergeBackResponse {
   seq?: number;
 }
 
-/** One merge waiting for its parent to be idle. */
+/**
+ * One merge the parent has not taken yet: `queued` — waiting for the parent
+ * to be idle (or for the host, when it was restarting); `failed` — the parent
+ * refused it (`error` says why), and it stays here, delivered again only by
+ * the user (`deliver`) or dropped by them (`discard`) — never silently.
+ */
 export interface PendingMergeBack {
   mergeId: string;
   parentSessionId: string;
   childSessionId: string;
   queuedAt: string;
+  state: "queued" | "failed";
+  /** The result as the parent will read it, cut to {@link MERGE_PREVIEW_CHARS}. */
+  preview: string;
+  /** Refused deliveries so far. */
+  attempts: number;
+  /** The last refusal, in the parent's words. */
+  error?: string;
+}
+
+/** How much of a pending merge's text the lineage views show. */
+export const MERGE_PREVIEW_CHARS = 200;
+
+/** `POST …/merge-back/:mergeId` — act on a pending merge, from the fork or its parent. */
+export interface MergeBackActionRequest {
+  /**
+   * `deliver`: send it now, whatever the parent is doing — an ordinary
+   * `/turn`, so a running turn is steered (Claude, Codex) as any message sent
+   * then would be, and a refused one is retried from scratch. `discard`: drop it.
+   */
+  action: "deliver" | "discard";
+}
+
+export interface MergeBackActionResponse {
+  mergeId: string;
+  outcome: "sent" | "discarded";
+  /** The parent's sequence after a `sent`. */
+  seq?: number;
 }
 
 const MERGE_BACK_HEADER = /^\[Merged back from (fork|delegated task) "((?:[^"\\\n]|\\.)*)"\]$/;

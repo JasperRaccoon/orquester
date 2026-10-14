@@ -498,6 +498,14 @@ export type AgentChatTimelineRow =
       /** Offered only where `supportsConversationRollback` (§6.3). */
       revertTurnCount?: number;
       /**
+       * A user message "Fork from before this message" is offered on
+       * (thread lineage, spec 2026-10-14 §6): one that opened a started
+       * turn, or a steer into one — the host refuses an unanswered or
+       * queued prompt. Derived by `buildForkableUserMessages` (`rows.logic.ts`),
+       * not the rewind's rule: a fork needs no rollback support.
+       */
+      forkable?: true;
+      /**
        * Set only while the message reads as streaming — `isMessageStreaming`
        * (`@orquester/api/agent-chat`), never its bare flag: the log keeps
        * `streaming: true` for good on words a dead host or an unclosed agent

@@ -605,7 +605,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   const lineage = new LineageService({
     sessions: agentChat.chat,
     outboxFile: agentChatMergeOutboxFile(paths.baseDir),
-    logger: console
+    logger: console,
+    // Both tabs of a merge show it while the parent has not taken it (GUI and MCP).
+    setPendingMerges: (sessionId, merges) => agentChat.chat.setPendingMerges(sessionId, merges)
   });
   await lineage.load();
   const accounts = new AccountsService(resolved.accountsFile, resolved.keysDir);

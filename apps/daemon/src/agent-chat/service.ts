@@ -10,9 +10,9 @@
 
 import { spawn } from "node:child_process";
 import { availableParallelism, homedir, loadavg } from "node:os";
-import { join } from "node:path";
+import { join, resolve as resolvePath } from "node:path";
 import { readCodeStamp } from "../agent-host/support/code-stamp.ts";
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type {
   AgentAdapterId,
   CreateAgentChatSessionFields,
@@ -184,6 +184,17 @@ function chatFields(req: CreateAgentChatRequest): Partial<CreateAgentChatSession
     ...(req.lineage !== undefined ? { lineage: req.lineage } : {}),
     ...(req.chat ?? {})
   };
+}
+
+/**
+ * The fork tab's id a `commandId` names on a parent: a UUID-shaped digest, so a repeat of the
+ * same fork — even after a daemon restart forgot the first — lands on the same tab and thread.
+ */
+export function forkIdFor(parentId: string, commandId: string): string {
+  const hex = createHash("sha256").update(`fork\u0000${parentId}\u0000${commandId}`).digest("hex");
+  // RFC 4122 layout, version nibble 5 and the variant bits, as a name-based UUID has.
+  const variant = ((Number.parseInt(hex[16]!, 16) & 0x3) | 0x8).toString(16);
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-5${hex.slice(13, 16)}-${variant}${hex.slice(17, 20)}-${hex.slice(20, 32)}`;
 }
 
 /** A fork request's optional strings: absent, or a non-blank string of at most `max` characters. */
@@ -597,9 +608,13 @@ export class AgentChatService {
           "INVALID_LINEAGE"
         );
       }
-      if (parent.projectPath !== (req.projectPath ?? "")) {
+      // Compared as the daemon resolves a project everywhere else — realpath inside the
+      // workspaces sandbox, else a plain resolve — so `/w/p/` and `/w/./p` are one project.
+      if (!(await this.sameProject(parent.projectPath, req.projectPath ?? ""))) {
         throw new ChatSessionError("A delegated session opens in its parent's project.", "INVALID_LINEAGE");
       }
+      // The child's tab groups with its parent's: the parent's own spelling of the path.
+      req = { ...req, projectPath: parent.projectPath };
       lineage = { parentThreadId: parent.id, relation: "delegate", createdAt: new Date().toISOString() };
     }
     if (fields.resume && !isUsableConversationId(fields.resume.conversationId)) {
@@ -708,6 +723,15 @@ export class AgentChatService {
     return summary;
   }
 
+  /** Two project paths name one project once resolved (realpath in the sandbox, else `resolve`). */
+  private async sameProject(a: string, b: string): Promise<boolean> {
+    if (a.length === 0 || b.length === 0) return a === b;
+    const canonical = async (path: string): Promise<string> =>
+      (await this.opts.resolveTrustedProjectDir(path).catch(() => null)) ?? resolvePath(path);
+    const [left, right] = await Promise.all([canonical(a), canonical(b)]);
+    return left === right;
+  }
+
   /**
    * Thread lineage (spec 2026-10-14 §6): a new chat tab in the parent's project, with the
    * parent's agent, account, model and options, whose conversation is the parent's up to a
@@ -719,6 +743,31 @@ export class AgentChatService {
    * rather than forked into another home.
    */
   async forkSession(parentId: string, req: ForkSessionRequest, order: number): Promise<ForkSessionResponse> {
+    const commandId = optionalField((req as Record<string, unknown> | undefined)?.commandId, "commandId", 200);
+    if (commandId === undefined) return this.forkSessionNow(parentId, req, order, randomUUID());
+    // Idempotent by `commandId` (the receipts pattern): a repeat while the first is in flight
+    // shares its answer, and a repeat after it landed — a daemon restart included — finds the
+    // tab under the id the key names and has the host answer for it again (the host's fork of
+    // an existing child is idempotent), so a double submit never opens a second fork.
+    const key = `${parentId}\u0000${commandId}`;
+    const running = this.forksInFlight.get(key);
+    if (running) return running;
+    const run = this.forkSessionNow(parentId, req, order, forkIdFor(parentId, commandId)).finally(() => {
+      this.forksInFlight.delete(key);
+    });
+    this.forksInFlight.set(key, run);
+    return run;
+  }
+
+  /** Forks in flight by `parentId\0commandId`, for {@link forkSession}'s idempotency. */
+  private readonly forksInFlight = new Map<string, Promise<ForkSessionResponse>>();
+
+  private async forkSessionNow(
+    parentId: string,
+    req: ForkSessionRequest,
+    order: number,
+    id: string
+  ): Promise<ForkSessionResponse> {
     const parent = this.chat.get(parentId);
     if (!parent) {
       throw new ChatSessionError("No chat session with that id.", "THREAD_NOT_FOUND");
@@ -759,8 +808,11 @@ export class AgentChatService {
     const homePath = launchEnv[ACCOUNT_HOME_ENV_VAR[adapter]];
     await this.prepareHome(adapter, launchEnv, parent.projectPath);
 
-    const id = randomUUID();
-    const summary = this.chat.create({
+    const existing = this.chat.get(id);
+    if (existing && existing.lineage?.parentThreadId !== parentId) {
+      throw new ChatSessionError("That commandId already names another session.", "COMMAND_REJECTED");
+    }
+    const summary = existing ?? this.chat.create({
       id,
       refId: parent.refId,
       title: title || forkTitle(parent.title),
@@ -816,7 +868,8 @@ export class AgentChatService {
       }
       result = response.value;
     } catch (error) {
-      this.chat.close(id);
+      // Only a tab this call created goes: a repeat leaves the first one's tab as it was.
+      if (!existing) this.chat.close(id);
       if (error instanceof ChatSessionError) throw error;
       if (error instanceof HostUnavailableError) throw this.hostUnavailable();
       throw new ChatSessionError(error instanceof Error ? error.message : String(error));

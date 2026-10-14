@@ -13,7 +13,13 @@
  * Delivery waits on the bus, never on a sleep: every `sessions` event about a
  * parent with a queued merge re-checks it, one merge per idle point (the
  * merge's own turn makes the parent busy again). A slow safety re-check runs
- * only while something is queued, for an event that never came.
+ * only while something is queued, for an event that never came. Every
+ * delivery to a parent runs in that parent's lane, oldest merge first.
+ *
+ * Nothing a caller was told is "queued" disappears silently: a parent that
+ * refuses it (after a few tries for a refusal of the moment) or is closed
+ * leaves it `failed`, shown on both tabs (`SessionSummary.pendingMerges`) for
+ * the user to deliver anyway or discard.
  */
 
 import { randomUUID } from "node:crypto";
@@ -21,6 +27,8 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type {
+  MergeBackActionRequest,
+  MergeBackActionResponse,
   MergeBackRequest,
   MergeBackResponse,
   PendingMergeBack,
@@ -33,6 +41,8 @@ import {
   buildMergeBackMessage,
   MAX_TURN_INPUT_CHARS,
   MERGE_BACK_OVERHEAD_CHARS,
+  MERGE_PREVIEW_CHARS,
+  parseMergeBackMessage,
   SETTLED_TURN_STATES,
   type ThreadReadResponse,
   type ThreadSnapshotPayload
@@ -68,6 +78,8 @@ export interface LineageServiceOptions {
   newId?: () => string;
   /** The safety re-check while something is queued; 0 disables it (tests). */
   recheckMs?: number;
+  /** Publish a tab's pending merges (`SessionSummary.pendingMerges`, never persisted). */
+  setPendingMerges?: (sessionId: string, merges: PendingMergeBack[]) => void;
 }
 
 const DEFAULT_RECHECK_MS = 30_000;
@@ -109,12 +121,18 @@ export class LineageService {
   private outbox: MergeOutbox = { entries: [], unreadable: [] };
   private unsubscribe: (() => void) | null = null;
   private recheck: ReturnType<typeof setInterval> | null = null;
-  /** Per-parent delivery, one at a time. */
-  private readonly draining = new Map<string, Promise<void>>();
-  /** A parent that got another event while its delivery ran: look again once it ends. */
-  private readonly dirty = new Set<string>();
+  /**
+   * One lane per parent: every delivery to a parent — a merge sent at once, a
+   * queued one drained, a "deliver now" — runs in it, one after another, so a
+   * newer merge never overtakes (or steers into) an older one.
+   */
+  private readonly lanes = new Map<string, Promise<unknown>>();
+  /** Parents with a drain already waiting in their lane: one is enough. */
+  private readonly drainWaiting = new Set<string>();
   private writes: Promise<void> = Promise.resolve();
   private stopped = false;
+  /** Sessions whose pending merges were last published as non-empty. */
+  private published = new Set<string>();
 
   constructor(private readonly opts: LineageServiceOptions) {}
 
@@ -137,10 +155,11 @@ export class LineageService {
     this.unsubscribe = api.subscribe((event) => {
       if (event.channel !== "sessions") return;
       const id = (event.payload as { id?: unknown } | null)?.id;
-      if (typeof id === "string" && this.outbox.entries.some((entry) => entry.parentSessionId === id)) {
+      if (typeof id === "string" && this.queuedFor(id).length > 0) {
         void this.drain(id);
       }
     });
+    this.publish();
     this.armRecheck();
     this.drainAll();
   }
@@ -154,9 +173,16 @@ export class LineageService {
     return this.writes;
   }
 
-  /** Every merge waiting, for tests and the lineage read. */
+  /** Every merge the parents have not taken, for tests and the lineage read. */
   pending(): PendingMergeBack[] {
     return this.outbox.entries.map(pendingOf);
+  }
+
+  /** The merges a session sent that are still pending, and those addressed to it. */
+  pendingFor(sessionId: string): PendingMergeBack[] {
+    return this.outbox.entries
+      .filter((entry) => entry.parentSessionId === sessionId || entry.childSessionId === sessionId)
+      .map(pendingOf);
   }
 
   /** `GET …/lineage`: the session's parent, children (oldest first) and the merges waiting on or for it. */
@@ -187,20 +213,14 @@ export class LineageService {
         ...(child.chatSessionStatus ? { chatSessionStatus: child.chatSessionStatus } : {}),
         ...(child.latestTurn ? { latestTurnState: child.latestTurn.state } : {})
       }));
-    return {
-      sessionId,
-      lineage,
-      parent,
-      children,
-      pendingMerges: this.outbox.entries
-        .filter((entry) => entry.parentSessionId === sessionId || entry.childSessionId === sessionId)
-        .map(pendingOf)
-    };
+    return { sessionId, lineage, parent, children, pendingMerges: this.pendingFor(sessionId) };
   }
 
   /**
    * `POST …/merge-back` on the CHILD: send its result — `text`, else its final
-   * reply — to the parent, now when the parent is idle, else once it is.
+   * reply — to the parent, now when the parent is idle and nothing older waits
+   * for it, else once it is. Runs in the parent's lane, so it is ordered with
+   * every other delivery to that parent.
    */
   async mergeBack(childId: string, request: MergeBackRequest): Promise<MergeBackResponse> {
     const api = this.requireApi();
@@ -216,9 +236,9 @@ export class LineageService {
     }
     const body = (request ?? {}) as Record<string, unknown>;
     const mergeId = optionalId(body.commandId) ?? (this.opts.newId ?? randomUUID)();
-    const queued = this.outbox.entries.find((entry) => entry.mergeId === mergeId);
-    if (queued) {
-      return { parentSessionId: queued.parentSessionId, delivery: "queued", mergeId };
+    const known = this.outbox.entries.find((entry) => entry.mergeId === mergeId);
+    if (known) {
+      return { parentSessionId: known.parentSessionId, delivery: "queued", mergeId };
     }
     let text: string;
     if (body.text !== undefined && body.text !== null) {
@@ -241,22 +261,85 @@ export class LineageService {
       parentSessionId: parent.id,
       childSessionId: childId,
       input: buildMergeBackMessage({ childTitle: child.title, relation: lineage.relation, text }),
-      queuedAt: (this.opts.now?.() ?? new Date()).toISOString()
+      queuedAt: (this.opts.now?.() ?? new Date()).toISOString(),
+      state: "queued",
+      attempts: 0
     };
-    if (await this.isIdle(api, parent.id)) {
-      const sent = await this.deliver(api, entry);
-      if (sent.kind === "sent") {
-        return { parentSessionId: parent.id, delivery: "sent", mergeId, seq: sent.seq };
+    const response = await this.lane(parent.id, async (): Promise<MergeBackResponse> => {
+      // A repeat that raced the first into the lane is the same merge.
+      if (this.outbox.entries.some((other) => other.mergeId === mergeId)) {
+        return { parentSessionId: parent.id, delivery: "queued", mergeId };
       }
-      if (sent.kind === "refused") throw new LineageError(sent.message, "COMMAND_REJECTED");
-      // Unavailable: queued like a busy parent's.
+      // Only with nothing older waiting for this parent: a newer merge never overtakes one.
+      if (this.queuedFor(parent.id).length === 0 && (await this.isIdle(api, parent.id))) {
+        const sent = await this.deliver(api, entry);
+        if (sent.kind === "sent") {
+          return { parentSessionId: parent.id, delivery: "sent", mergeId, seq: sent.seq };
+        }
+        // The caller hears a refusal at once; nothing was queued for it.
+        if (sent.kind === "refused") throw new LineageError(sent.message, "COMMAND_REJECTED");
+        // Unavailable (the host restarting): queued like a busy parent's.
+      }
+      this.outbox.entries.push(entry);
+      await this.persist([parent.id, childId]);
+      this.armRecheck();
+      return { parentSessionId: parent.id, delivery: "queued", mergeId };
+    });
+    if (response.delivery === "queued") void this.drain(parent.id);
+    return response;
+  }
+
+  /**
+   * `POST …/merge-back/:mergeId` from the fork that sent a pending merge or
+   * the parent it is addressed to: `deliver` sends it now, whatever the parent
+   * is doing — an ordinary `/turn`, so a running turn is steered, as any
+   * message sent then would be (the one way past a parent whose goal keeps it
+   * busy); a failed merge is tried afresh. `discard` drops it.
+   */
+  async actOnMerge(
+    sessionId: string,
+    mergeId: string,
+    request: MergeBackActionRequest
+  ): Promise<MergeBackActionResponse> {
+    const action = (request as { action?: unknown } | undefined)?.action;
+    if (action !== "deliver" && action !== "discard") {
+      throw new LineageError('action must be "deliver" or "discard".', "INVALID_COMMAND");
     }
-    this.outbox.entries.push(entry);
-    await this.persist();
-    this.armRecheck();
-    // An idle point may have passed while this was written.
-    void this.drain(parent.id);
-    return { parentSessionId: parent.id, delivery: "queued", mergeId };
+    const find = (): MergeOutboxEntry | undefined =>
+      this.outbox.entries.find(
+        (entry) =>
+          entry.mergeId === mergeId &&
+          (entry.parentSessionId === sessionId || entry.childSessionId === sessionId)
+      );
+    const entry = find();
+    if (!entry) throw new LineageError("No pending merge with that id for this session.", "THREAD_NOT_FOUND");
+    if (action === "discard") {
+      return this.lane(entry.parentSessionId, async () => {
+        this.outbox.entries = this.outbox.entries.filter((other) => other.mergeId !== mergeId);
+        await this.persist([entry.parentSessionId, entry.childSessionId]);
+        return { mergeId, outcome: "discarded" as const };
+      });
+    }
+    const api = this.requireApi();
+    if (!this.opts.sessions.get(entry.parentSessionId)) {
+      throw new LineageError("The session this merge is for was closed. Discard it instead.", "COMMAND_REJECTED");
+    }
+    return this.lane(entry.parentSessionId, async (): Promise<MergeBackActionResponse> => {
+      const current = find();
+      if (!current) throw new LineageError("That merge was already delivered or discarded.", "THREAD_NOT_FOUND");
+      const sent = await this.deliver(api, current);
+      if (sent.kind === "unavailable") {
+        throw new LineageError("The agent host is restarting; the merge stays queued.", "HOST_UNAVAILABLE");
+      }
+      if (sent.kind === "refused") {
+        this.markFailed(current, sent.message);
+        await this.persist([current.parentSessionId, current.childSessionId]);
+        throw new LineageError(sent.message, "COMMAND_REJECTED");
+      }
+      this.outbox.entries = this.outbox.entries.filter((other) => other.mergeId !== mergeId);
+      await this.persist([current.parentSessionId, current.childSessionId]);
+      return { mergeId, outcome: "sent", seq: sent.seq };
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -264,6 +347,22 @@ export class LineageService {
   private requireApi(): DaemonApi {
     if (!this.api) throw new LineageError("Orquester is still starting. Try again in a moment.", "HOST_UNAVAILABLE");
     return this.api;
+  }
+
+  /** The parent's merges still waiting to be delivered (a failed one waits for the user), oldest first. */
+  private queuedFor(parentId: string): MergeOutboxEntry[] {
+    return this.outbox.entries.filter((entry) => entry.parentSessionId === parentId && entry.state !== "failed");
+  }
+
+  private lane<T>(parentId: string, task: () => Promise<T>): Promise<T> {
+    const before = this.lanes.get(parentId) ?? Promise.resolve();
+    const run = before.then(task, task);
+    const tail = run.catch(() => undefined);
+    this.lanes.set(parentId, tail);
+    void tail.then(() => {
+      if (this.lanes.get(parentId) === tail) this.lanes.delete(parentId);
+    });
+    return run;
   }
 
   private async readThread(api: DaemonApi, sessionId: string): Promise<ThreadSnapshotPayload> {
@@ -285,10 +384,7 @@ export class LineageService {
     }
   }
 
-  private async deliver(
-    api: DaemonApi,
-    entry: MergeOutboxEntry
-  ): Promise<{ kind: "sent"; seq: number } | { kind: "unavailable" } | { kind: "refused"; message: string }> {
+  private async deliver(api: DaemonApi, entry: MergeOutboxEntry): Promise<Delivery> {
     try {
       const res = await api.request("POST", agentChatCommandPath(entry.parentSessionId, "turn"), {
         body: { commandId: entry.mergeId, input: entry.input, interactionMode: "default" }
@@ -296,10 +392,22 @@ export class LineageService {
       if (res.status < 400) return { kind: "sent", seq: (res.body as { seq?: number } | null)?.seq ?? 0 };
       const error = (res.body as { error?: { code?: string; message?: string } } | null)?.error;
       if (res.status === 503 || error?.code === "HOST_UNAVAILABLE") return { kind: "unavailable" };
-      return { kind: "refused", message: error?.message ?? `The parent refused the message (${res.status}).` };
+      return {
+        kind: "refused",
+        message: error?.message ?? `The parent refused the message (${res.status}).`,
+        // A host refusal of the moment (compaction running, a session starting) may pass;
+        // a malformed command, a thread gone or an id clash will not.
+        retryable: res.status === 409 && (error?.code === "COMMAND_REJECTED" || error?.code === "COMPACTION_UNAVAILABLE")
+      };
     } catch {
       return { kind: "unavailable" };
     }
+  }
+
+  private markFailed(entry: MergeOutboxEntry, message: string): void {
+    entry.state = "failed";
+    entry.attempts = (entry.attempts ?? 0) + 1;
+    entry.error = message.slice(0, 2_000);
   }
 
   private drainAll(): void {
@@ -310,50 +418,65 @@ export class LineageService {
 
   /** Deliver the parent's oldest queued merge if the parent is idle — one, then wait for the next idle point. */
   private drain(parentId: string): Promise<void> {
-    const running = this.draining.get(parentId);
-    if (running) {
-      this.dirty.add(parentId);
-      return running;
-    }
-    const run = this.drainOnce(parentId).finally(() => {
-      this.draining.delete(parentId);
-      if (this.dirty.delete(parentId) && !this.stopped) void this.drain(parentId);
+    if (this.drainWaiting.has(parentId)) return Promise.resolve();
+    this.drainWaiting.add(parentId);
+    return this.lane(parentId, async () => {
+      this.drainWaiting.delete(parentId);
+      await this.drainOnce(parentId);
     });
-    this.draining.set(parentId, run);
-    return run;
   }
 
   private async drainOnce(parentId: string): Promise<void> {
     const api = this.api;
     if (!api || this.stopped) return;
-    const entry = this.outbox.entries.find((candidate) => candidate.parentSessionId === parentId);
+    const entry = this.queuedFor(parentId)[0];
     if (!entry) return;
     if (!this.opts.sessions.get(parentId)) {
-      // The parent tab was closed: nothing will ever take these.
-      this.opts.logger?.warn?.("[lineage] dropping merges for a closed parent", { parentId });
-      this.outbox.entries = this.outbox.entries.filter((candidate) => candidate.parentSessionId !== parentId);
-      await this.persist();
+      // The parent tab was closed: nothing will take these. Kept, failed and said so, for
+      // the fork to see and discard — never dropped behind a caller told "queued".
+      for (const queued of this.queuedFor(parentId)) {
+        queued.state = "failed";
+        queued.error = "The session this merge was for was closed.";
+      }
+      this.opts.logger?.warn?.("[lineage] merges for a closed parent marked failed", { parentId });
+      await this.persist(this.involved(parentId));
       return;
     }
     if (!(await this.isIdle(api, parentId))) return;
     const sent = await this.deliver(api, entry);
     if (sent.kind === "unavailable") return;
     if (sent.kind === "refused") {
-      this.opts.logger?.warn?.("[lineage] the parent refused a queued merge; dropping it", {
-        parentId,
-        mergeId: entry.mergeId,
-        reason: sent.message
-      });
+      entry.attempts = (entry.attempts ?? 0) + 1;
+      entry.error = sent.message.slice(0, 2_000);
+      if (!sent.retryable || entry.attempts >= MAX_DRAIN_ATTEMPTS) {
+        entry.state = "failed";
+        this.opts.logger?.warn?.("[lineage] the parent refused a queued merge; kept as failed", {
+          parentId,
+          mergeId: entry.mergeId,
+          attempts: entry.attempts,
+          reason: sent.message
+        });
+      }
+      await this.persist([parentId, entry.childSessionId]);
+      return;
     }
     this.outbox.entries = this.outbox.entries.filter((candidate) => candidate.mergeId !== entry.mergeId);
-    await this.persist();
+    await this.persist([parentId, entry.childSessionId]);
+  }
+
+  /** Every session with a merge to or from `parentId`'s queue. */
+  private involved(parentId: string): string[] {
+    return [
+      parentId,
+      ...this.outbox.entries.filter((entry) => entry.parentSessionId === parentId).map((entry) => entry.childSessionId)
+    ];
   }
 
   private armRecheck(): void {
     const ms = this.opts.recheckMs ?? DEFAULT_RECHECK_MS;
     if (ms <= 0 || this.stopped || this.recheck || this.outbox.entries.length === 0 || !this.api) return;
     this.recheck = setInterval(() => {
-      if (this.outbox.entries.length === 0) {
+      if (!this.outbox.entries.some((entry) => entry.state !== "failed")) {
         if (this.recheck) clearInterval(this.recheck);
         this.recheck = null;
         return;
@@ -363,8 +486,33 @@ export class LineageService {
     this.recheck.unref?.();
   }
 
+  /**
+   * Tell the tabs what is pending for them (`SessionSummary.pendingMerges`):
+   * the ones `touched`, or — with none — every tab with something pending and
+   * every one that had something before.
+   */
+  private publish(touched?: readonly string[]): void {
+    const set = this.opts.setPendingMerges;
+    if (!set) return;
+    const ids = new Set(touched ?? []);
+    if (touched === undefined) {
+      for (const entry of this.outbox.entries) {
+        ids.add(entry.parentSessionId);
+        ids.add(entry.childSessionId);
+      }
+      for (const id of this.published) ids.add(id);
+    }
+    for (const id of ids) {
+      const merges = this.pendingFor(id);
+      if (merges.length > 0) this.published.add(id);
+      else this.published.delete(id);
+      set(id, merges);
+    }
+  }
+
   /** Written in order, the latest state each time; unreadable entries go back as they came. */
-  private persist(): Promise<void> {
+  private persist(touched: readonly string[]): Promise<void> {
+    this.publish(touched);
     const snapshot = JSON.stringify(
       { version: 1, entries: [...this.outbox.entries, ...this.outbox.unreadable] },
       null,
@@ -380,6 +528,18 @@ export class LineageService {
   }
 }
 
+type Delivery =
+  | { kind: "sent"; seq: number }
+  | { kind: "unavailable" }
+  | { kind: "refused"; message: string; retryable: boolean };
+
+/**
+ * How often a parent's passing refusal (a compaction running, a session
+ * starting) is tried again at its idle points before the merge is marked
+ * failed for the user to deliver or discard.
+ */
+export const MAX_DRAIN_ATTEMPTS = 3;
+
 /** 0600, tmp + rename: a crash leaves the old queue or the new one, never half of one. */
 async function writeAtomic(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -394,11 +554,16 @@ async function writeAtomic(path: string, content: string): Promise<void> {
 }
 
 function pendingOf(entry: MergeOutboxEntry): PendingMergeBack {
+  const body = parseMergeBackMessage(entry.input)?.body ?? entry.input;
   return {
     mergeId: entry.mergeId,
     parentSessionId: entry.parentSessionId,
     childSessionId: entry.childSessionId,
-    queuedAt: entry.queuedAt
+    queuedAt: entry.queuedAt,
+    state: entry.state === "failed" ? "failed" : "queued",
+    preview: body.length > MERGE_PREVIEW_CHARS ? `${body.slice(0, MERGE_PREVIEW_CHARS - 1)}…` : body,
+    attempts: entry.attempts ?? 0,
+    ...(entry.error ? { error: entry.error } : {})
   };
 }
 

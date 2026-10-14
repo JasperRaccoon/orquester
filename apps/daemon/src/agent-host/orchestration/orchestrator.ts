@@ -3945,7 +3945,13 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         throw invalidCommand("A fork runs on its parent's agent.");
       }
       const runtime = await loadRuntime(threadId);
-      if (runtime.state.head) {
+      const existing = headOf(runtime);
+      if (existing) {
+        // The daemon's repeat of a fork it already asked for (its `commandId` names
+        // the child): the same answer, never a second fork. Anything else is refused.
+        if (existing.lineage?.relation === "fork" && existing.lineage.parentThreadId === parentThreadId) {
+          return { head: existing, lineage: existing.lineage, strategy: recordedForkStrategy(runtime) };
+        }
         throw invalidCommand(`Thread '${threadId}' already exists.`);
       }
       let cut: ResolvedForkCut;
@@ -4016,7 +4022,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
           retained: cut.retained,
           parentTitle: parentHead.title
         });
-        if (transcript !== null) strategy = "transcript";
+        strategy = transcript !== null ? "transcript" : "unavailable";
       }
 
       const head = await createThreadNow(runtime, request, {
@@ -4044,13 +4050,29 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             detail:
               strategy === "transcript"
                 ? `${nativeFailure !== null ? `The agent could not fork the conversation itself (${nativeFailure}), so the` : "This agent has no fork of its own, so the"} conversation so far is handed to it with your first message.`
-                : "Forked before the first message: the agent starts fresh.",
+                : strategy === "unavailable"
+                  ? `The conversation before this point could not be carried over${nativeFailure !== null ? ` (${nativeFailure})` : ""}: its messages are no longer held here, so the agent starts fresh.`
+                  : "Forked before the first message: the agent starts fresh.",
             payload: { parentThreadId, strategy }
           });
         }
       });
       return { head, strategy, lineage };
     });
+
+  /**
+   * How an existing fork was carried over, for a repeated fork request: the
+   * strategy its `thread.forked` row recorded, else `native` — the one
+   * strategy that writes no row (its history replay says it all).
+   */
+  const recordedForkStrategy = (runtime: ThreadRuntime): ThreadForkStrategy => {
+    for (const item of runtime.state.activities) {
+      if (item.activityKind !== "thread.forked") continue;
+      const strategy = (item.payload as { strategy?: unknown } | null)?.strategy;
+      if (strategy === "transcript" || strategy === "empty" || strategy === "unavailable") return strategy;
+    }
+    return "native";
+  };
 
   const updateThread = async (
     threadId: string,

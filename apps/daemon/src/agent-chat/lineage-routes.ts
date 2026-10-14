@@ -13,6 +13,8 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import type {
   ForkSessionRequest,
   ForkSessionResponse,
+  MergeBackActionRequest,
+  MergeBackActionResponse,
   MergeBackRequest,
   MergeBackResponse,
   SessionLineageResponse
@@ -101,6 +103,24 @@ export function registerLineageRoutes(app: FastifyInstance, deps: LineageRouteDe
         return await lineage.mergeBack(id, request.body ?? {});
       } catch (error) {
         return refuse(reply, error, "Could not merge back.");
+      }
+    }
+  );
+
+  app.post<{ Params: { id: string; mergeId: string }; Body: MergeBackActionRequest | undefined }>(
+    pattern(agentChatRoutes.mergeBackItem(":id", ":mergeId")),
+    async (request, reply): Promise<MergeBackActionResponse | FastifyReply> => {
+      const { id, mergeId } = request.params;
+      const lineage = deps.lineage();
+      // A pending merge outlives its fork's tab: the route serves any id the queue names,
+      // and the service checks the merge belongs to it.
+      if (!lineage) {
+        return reply.code(503).send(envelope("HOST_UNAVAILABLE", "Orquester is still starting. Try again in a moment."));
+      }
+      try {
+        return await lineage.actOnMerge(id, mergeId, request.body ?? ({} as MergeBackActionRequest));
+      } catch (error) {
+        return refuse(reply, error, "Could not act on the merge.");
       }
     }
   );

@@ -1,8 +1,8 @@
 import { z } from "zod";
-import type { ForkSessionRequest, ForkSessionResponse, MergeBackResponse, SessionLineageResponse } from "@orquester/api";
+import type { ForkSessionRequest, ForkSessionResponse, MergeBackActionResponse, MergeBackResponse, SessionLineageResponse } from "@orquester/api";
 import { agentChatRoutes, startedTurns } from "@orquester/api/agent-chat";
 import { ToolError, expectOk } from "../errors.ts";
-import { readThread, requireChatSession } from "../reads.ts";
+import { postIdempotent, readThread, requireChatSession } from "../reads.ts";
 import { toSafeToolError } from "../result.ts";
 import { defineTool, MUTATING, READ_ONLY, type ToolDef } from "../tool.ts";
 import { chatDetail } from "../views.ts";
@@ -37,7 +37,8 @@ const forkSession = defineTool({
       body.turnId = args.throughTurn === 0 ? started[0]!.turnId : started[args.throughTurn - 1]!.turnId;
       body.role = args.throughTurn === 0 ? "user" : "assistant";
     }
-    const result = expectOk<ForkSessionResponse>(await api.request("POST", agentChatRoutes.fork(args.sessionId), { body }));
+    // A fresh commandId, re-sent unchanged on a 503: a retry lands on the same fork, never a second one.
+    const result = await postIdempotent<ForkSessionResponse>(api, agentChatRoutes.fork(args.sessionId), { ...body });
     try {
       return { strategy: result.strategy, lineage: result.lineage, session: await chatDetail(api, result.session.id) };
     } catch (error) {
@@ -59,7 +60,8 @@ const mergeBackSession = defineTool({
   annotations: MUTATING,
   async run(args, { api }) {
     await requireChatSession(api, args.sessionId);
-    const result = expectOk<MergeBackResponse>(await api.request("POST", agentChatRoutes.mergeBack(args.sessionId), { body: args.text !== undefined ? { text: args.text } : {} }));
+    // A fresh commandId (the merge's id), re-sent unchanged on a 503: a retry is the same merge.
+    const result = await postIdempotent<MergeBackResponse>(api, agentChatRoutes.mergeBack(args.sessionId), args.text !== undefined ? { text: args.text } : {});
     return { ...result };
   }
 });
@@ -76,4 +78,19 @@ const getSessionLineage = defineTool({
   }
 });
 
-export const lineageTools: ToolDef[] = [forkSession, mergeBackSession, getSessionLineage];
+const resolveMergeBack = defineTool({
+  name: "resolve_merge_back",
+  title: "Deliver or discard a pending merge",
+  description: "Act on a merge that merge_back_session queued and the parent has not taken (get_session_lineage's pendingMerges, from the fork or the parent): `deliver` sends it now whatever the parent is doing — an ordinary message, so a running turn is steered (the way past a parent a continuing goal keeps busy) — and retries a `failed` one; `discard` drops it. Answers {mergeId, outcome: \"sent\" | \"discarded\", seq?}.",
+  input: {
+    sessionId: sessionIdField.describe("The fork's or the parent's session id."),
+    mergeId: z.string().min(1).max(200).describe("pendingMerges[].mergeId from get_session_lineage."),
+    action: z.enum(["deliver", "discard"])
+  },
+  annotations: MUTATING,
+  async run(args, { api }) {
+    return { ...expectOk<MergeBackActionResponse>(await api.request("POST", agentChatRoutes.mergeBackItem(args.sessionId, args.mergeId), { body: { action: args.action } })) };
+  }
+});
+
+export const lineageTools: ToolDef[] = [forkSession, mergeBackSession, resolveMergeBack, getSessionLineage];

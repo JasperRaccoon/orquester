@@ -861,6 +861,27 @@ function buildRevertTurnCountByUserMessageId(input: {
   return byUserMessageId;
 }
 
+/**
+ * Which user messages a fork can be taken before (thread lineage, spec
+ * 2026-10-14 §6) — the host's own rule (`resolveForkCut`): a prompt that
+ * opened a STARTED turn (`Turn.userMessageId`), or a steer carrying a started
+ * turn's id. A prompt still unanswered or queued has no turn the host could
+ * cut at, so it is not offered rather than refused.
+ */
+function buildForkableUserMessages(
+  turns: readonly Turn[]
+): (message: ThreadMessageItem) => boolean {
+  const started = startedTurns(turns);
+  const prompts = new Set<string>();
+  const turnIds = new Set<string>();
+  for (const turn of started) {
+    turnIds.add(turn.turnId);
+    if (turn.userMessageId !== undefined) prompts.add(turn.userMessageId);
+  }
+  return (message) =>
+    prompts.has(message.id) || (message.turnId !== null && turnIds.has(message.turnId));
+}
+
 // ---------------------------------------------------------------------------
 // Layer 2
 // ---------------------------------------------------------------------------
@@ -987,6 +1008,7 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
     entries,
     turns: input.turns ?? []
   });
+  const forkableUserMessage = buildForkableUserMessages(input.turns ?? []);
 
   const streamingContext = input.messageStreaming ?? NOTHING_STREAMS;
   const isStreaming = (message: ThreadMessageItem): boolean =>
@@ -1486,6 +1508,11 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       showAssistantMeta,
       ...(message.role === "user" && revertTurnCountByUserMessageId.has(message.id)
         ? { revertTurnCount: revertTurnCountByUserMessageId.get(message.id) }
+        : {}),
+      ...(message.role === "user" &&
+      !isProviderInternalUserMessage(message) &&
+      forkableUserMessage(message)
+        ? { forkable: true as const }
         : {}),
       ...(isStreaming(message) ? { streaming: true } : {})
     });
@@ -1993,6 +2020,7 @@ function isRowUnchanged(a: AgentChatTimelineRow, b: AgentChatTimelineRow): boole
         a.durationStart === other.durationStart &&
         a.showAssistantMeta === other.showAssistantMeta &&
         a.revertTurnCount === other.revertTurnCount &&
+        a.forkable === other.forkable &&
         a.streaming === other.streaming
       );
     }

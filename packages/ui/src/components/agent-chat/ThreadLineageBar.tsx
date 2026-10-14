@@ -33,7 +33,8 @@ export function ThreadLineageBar({
   notice,
   onDismissNotice,
   onOpenSession,
-  onMergeBack
+  onMergeBack,
+  onMergeAction
 }: {
   session: SessionSummary;
   /** Every tab the store holds (the project's): parents and children are read from their records. */
@@ -45,8 +46,22 @@ export function ThreadLineageBar({
   onOpenSession: (sessionId: string) => void;
   /** Resolves once the daemon took the merge (sent or queued); rejects with its refusal. */
   onMergeBack: (text: string) => Promise<void>;
+  /** Deliver now (a failed one: retry) or discard a pending merge; the view says how it went. */
+  onMergeAction: (mergeId: string, action: "deliver" | "discard") => Promise<void>;
 }): React.ReactElement | null {
   const lineage = session.lineage;
+  const pendingMerges = session.pendingMerges ?? [];
+  const [acting, setActing] = React.useState<string | null>(null);
+  const act = (mergeId: string, action: "deliver" | "discard"): void => {
+    if (acting !== null) return;
+    setActing(mergeId);
+    onMergeAction(mergeId, action)
+      .catch(() => {
+        /* the view says why, in the notice */
+      })
+      .finally(() => setActing(null));
+  };
+  const titleOf = (id: string): string => sessions.find((candidate) => candidate.id === id)?.title ?? "a closed chat";
   const parent = lineageParent(sessions, lineage);
   const children = React.useMemo(() => lineageChildren(sessions, session.id), [sessions, session.id]);
   const [composing, setComposing] = React.useState(false);
@@ -59,7 +74,7 @@ export function ThreadLineageBar({
     setSending(false);
   }, [session.id]);
 
-  if (!lineage && children.length === 0 && notice === null) return null;
+  if (!lineage && children.length === 0 && notice === null && pendingMerges.length === 0) return null;
 
   const openComposer = (): void => {
     setDraft(defaultMergeText);
@@ -171,6 +186,49 @@ export function ThreadLineageBar({
           </span>
         ) : null}
       </div>
+      {pendingMerges.length > 0 ? (
+        <ul className="mx-auto flex w-full min-w-0 max-w-3xl flex-col gap-1 px-3 pb-1.5 text-xs sm:px-5" aria-label="Pending merges">
+          {pendingMerges.map((merge) => {
+            const outgoing = merge.childSessionId === session.id;
+            const other = titleOf(outgoing ? merge.parentSessionId : merge.childSessionId);
+            const failed = merge.state === "failed";
+            return (
+              <li
+                key={merge.mergeId}
+                className={cn("flex min-w-0 items-center gap-2", failed ? "text-red-300" : "text-neutral-400")}
+                data-merge-state={merge.state}
+              >
+                <GitMerge size={12} strokeWidth={1.8} className="shrink-0" aria-hidden />
+                <span className="min-w-0 flex-1 truncate" title={failed && merge.error ? merge.error : merge.preview}>
+                  {outgoing ? `Merge to “${other}”` : `Merge from “${other}”`}{" "}
+                  {failed
+                    ? `failed${merge.error ? `: ${merge.error}` : ""}`
+                    : outgoing
+                      ? "is queued until it is idle"
+                      : "is waiting until this chat is idle"}
+                </span>
+                <button
+                  type="button"
+                  disabled={acting !== null}
+                  onClick={() => act(merge.mergeId, "deliver")}
+                  className="shrink-0 rounded px-1.5 py-0.5 text-neutral-300 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-40 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+                  title="Send it now: a running turn takes it as a message sent mid-turn"
+                >
+                  {failed ? "Retry" : "Deliver now"}
+                </button>
+                <button
+                  type="button"
+                  disabled={acting !== null}
+                  onClick={() => act(merge.mergeId, "discard")}
+                  className="shrink-0 rounded px-1.5 py-0.5 text-neutral-500 hover:bg-neutral-800 hover:text-neutral-100 disabled:opacity-40 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+                >
+                  Discard
+                </button>
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
       {composing && parent ? (
         <div className="mx-auto w-full min-w-0 max-w-3xl px-3 pb-2 sm:px-5">
           <label className="mb-1 block text-xs text-neutral-500" htmlFor={`merge-back-${session.id}`}>

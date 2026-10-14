@@ -1061,7 +1061,13 @@ export const mergeOutboxEntrySchema = z
     childSessionId: z.string().min(1),
     /** The whole `/turn` input, header included. */
     input: z.string().min(1),
-    queuedAt: z.string()
+    queuedAt: z.string(),
+    /** `failed`: the parent refused it; it waits for the user's deliver or discard. */
+    state: z.enum(["queued", "failed"]).catch("queued").default("queued"),
+    /** Refused deliveries so far. */
+    attempts: z.number().int().nonnegative().catch(0).default(0),
+    /** The last refusal, in the parent's words. */
+    error: z.string().max(2_000).optional().catch(undefined)
   })
   .passthrough();
 export type MergeOutboxEntry = z.infer<typeof mergeOutboxEntrySchema>;

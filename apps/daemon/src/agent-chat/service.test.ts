@@ -25,7 +25,7 @@ import {
   type ForkHostThreadRequest,
   type SetThreadIdentityRequest
 } from "../agent-host/host-protocol.ts";
-import { AgentChatService } from "./service.ts";
+import { AgentChatService, forkIdFor } from "./service.ts";
 import { ChatSessionError, ChatSessionManager } from "./chat-sessions.ts";
 import { HostUnavailableError } from "./host-client.ts";
 import { UploadTooLargeError } from "../upload-stream.ts";
@@ -1396,5 +1396,46 @@ test("a delegate names a parent in its own project; anything else is refused", a
     ),
     /relation "delegate"/
   );
+  await f.cleanup();
+});
+
+test("a fork's commandId makes it idempotent: a double submit, or a repeat after a restart, is one tab", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  const [one, two] = await Promise.all([
+    f.service.forkSession(parent.id, { commandId: "click-1" }, 1),
+    f.service.forkSession(parent.id, { commandId: "click-1" }, 1)
+  ]);
+  assert.equal(one.session.id, two.session.id);
+  assert.equal(one.session.id, forkIdFor(parent.id, "click-1"));
+  assert.equal(f.forks.length, 1, "the in-flight repeat shares the first answer");
+  // After the first landed (a restart forgot it): the same tab, the host asked again for its answer.
+  const again = await f.service.forkSession(parent.id, { commandId: "click-1" }, 2);
+  assert.equal(again.session.id, one.session.id);
+  assert.equal(f.service.chat.list("/w/p").length, 2, "parent + one fork");
+  assert.equal(f.forks.at(-1)!.body.threadId, one.session.id);
+  // Another key is another fork.
+  const other = await f.service.forkSession(parent.id, { commandId: "click-2" }, 3);
+  assert.notEqual(other.session.id, one.session.id);
+  assert.match(one.session.id, /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/);
+  await f.cleanup();
+});
+
+test("a delegate's project is compared resolved, and the child groups under the parent's spelling", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const projectPath = join(f.appdir, "ws", "proj");
+  await mkdir(projectPath, { recursive: true });
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath }, 0);
+  const child = await f.service.createSession(
+    {
+      kind: "agent-chat",
+      refId: "claude",
+      projectPath: `${f.appdir}/ws/./proj/`,
+      chat: { modelSelection: { model: "" }, lineage: { parentThreadId: parent.id, relation: "delegate" } }
+    },
+    1
+  );
+  assert.equal(child.projectPath, parent.projectPath);
+  assert.equal(child.lineage?.relation, "delegate");
   await f.cleanup();
 });

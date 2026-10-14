@@ -13,6 +13,7 @@
 import { EventEmitter } from "node:events";
 import type {
   AgentChatSessionSummaryFields,
+  PendingMergeBack,
   SessionSummary,
   ThreadLineage,
   WorkflowSessionOwner
@@ -226,6 +227,21 @@ export class ChatSessionManager {
     session.summary.lineage = cloneLineage(lineage);
     this.lifecycle.emit("updated", { ...session.summary });
     this.options.requestPersist();
+    return { ...session.summary };
+  }
+
+  /**
+   * The merges a tab sent or is owed that the parent has not taken (spec 2026-10-14 §6),
+   * published by the lineage service. Derived, never persisted; "updated" only on a change.
+   */
+  setPendingMerges(id: string, merges: readonly PendingMergeBack[]): SessionSummary | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    const next = merges.length > 0 ? merges.map((merge) => ({ ...merge })) : undefined;
+    if (JSON.stringify(session.summary.pendingMerges ?? null) === JSON.stringify(next ?? null)) return null;
+    if (next) session.summary.pendingMerges = next;
+    else delete session.summary.pendingMerges;
+    this.lifecycle.emit("updated", { ...session.summary });
     return { ...session.summary };
   }
 

@@ -434,3 +434,19 @@ test("a child tab's lineage round-trips through sessions.json; an old record has
   again.adopt(reread.sessions);
   assert.deepEqual(again.get("child")?.lineage?.forkedFrom, { messageId: "m", turnId: "t" });
 });
+
+test("pending merges ride the summary, announced only on a change and never persisted", () => {
+  const chat = chatManager();
+  seed(chat, "p", 0);
+  const updates: unknown[] = [];
+  chat.lifecycle.on("updated", (summary) => updates.push(summary));
+  const merge = { mergeId: "m", parentSessionId: "p", childSessionId: "c", queuedAt: "t", state: "queued" as const, preview: "x", attempts: 0 };
+  chat.setPendingMerges("p", [merge]);
+  chat.setPendingMerges("p", [merge]);
+  assert.equal(updates.length, 1);
+  assert.deepEqual(chat.get("p")?.pendingMerges, [merge]);
+  assert.equal("pendingMerges" in (chat.records()[0] as object), false);
+  chat.setPendingMerges("p", []);
+  assert.equal(chat.get("p")?.pendingMerges, undefined);
+  assert.equal(updates.length, 2);
+});

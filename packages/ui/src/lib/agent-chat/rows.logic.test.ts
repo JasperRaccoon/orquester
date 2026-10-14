@@ -340,6 +340,25 @@ describe("compaction and changed-files rows", () => {
     assert.deepEqual(revertCounts(with_), { um1: 0 });
   });
 
+  it("offers a fork before a prompt only once its turn started (spec 2026-10-14 §6)", () => {
+    const items = [
+      message("user", "answered", { id: "um1", createdAt: stamp(1) }),
+      message("assistant", "done", { id: "am1", turnId: "t1", createdAt: stamp(2) }),
+      message("user", "steer", { id: "um2", turnId: "t1", createdAt: stamp(3) }),
+      message("user", "not yet", { id: "um3", createdAt: stamp(4) })
+    ];
+    // um3 opened a turn the provider has not started (pending): the host would refuse it.
+    const turns = [turn("t1", "um1"), turn(null, "um3")];
+    const forkable = Object.fromEntries(
+      deriveTimelineRowsWithState(baseInput(entriesFrom(items), { turns, supportsConversationRollback: false }))
+        .rows.flatMap((row) =>
+          row.kind === "message" && row.message.role === "user" ? [[row.message.id, row.forkable === true]] : []
+        )
+    );
+    // No rollback support needed: a fork is not a rewind.
+    assert.deepEqual(forkable, { um1: true, um2: true, um3: false });
+  });
+
   it("no longer reads the rewind off the checkpoint list", () => {
     // The old rule: a checkpoint keyed to the assistant reply after a user
     // message numbered that message. With no turn naming the prompt there is

@@ -100,6 +100,11 @@ test("the merge outbox keeps unreadable entries and unknown fields for the next 
   const parsed = parseMergeOutbox({ version: 1, entries: [good, { mergeId: 3 }, "junk"] });
   assert.equal(parsed.entries.length, 1);
   assert.equal((parsed.entries[0] as Record<string, unknown>).fromNewerBuild, 7);
+  // An entry from before the failure state reads as queued, untried; a bad state as queued.
+  assert.equal(parsed.entries[0]!.state, "queued");
+  assert.equal(parsed.entries[0]!.attempts, 0);
+  const failed = parseMergeOutbox({ entries: [{ ...good, state: "failed", attempts: 2, error: "no" }, { ...good, mergeId: "m2", state: "weird" }] });
+  assert.deepEqual(failed.entries.map((entry) => [entry.state, entry.attempts, entry.error]), [["failed", 2, "no"], ["queued", 0, undefined]]);
   assert.deepEqual(parsed.unreadable, [{ mergeId: 3 }, "junk"]);
   assert.deepEqual(parseMergeOutbox("garbage"), { entries: [], unreadable: [] });
 });

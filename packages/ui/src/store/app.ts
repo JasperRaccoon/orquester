@@ -2477,7 +2477,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (!api) {
       throw new Error("Not connected to Orquester.");
     }
-    const result = await api.forkSession(sessionId, request);
+    // The idempotency key: a retried POST of this same fork answers the same tab.
+    const commandId =
+      request.commandId ??
+      (globalThis as { crypto?: { randomUUID?: () => string } }).crypto?.randomUUID?.() ??
+      `fork-${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+    const result = await api.forkSession(sessionId, { ...request, commandId });
     const session = result.session;
     set((state) => ({
       sessions: upsertSession(state.sessions, session),

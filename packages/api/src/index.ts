@@ -1214,6 +1214,11 @@ export interface SessionSummary {
    * §6). Persisted on the tab record; a parent's children are the tabs naming it here.
    */
   lineage?: ThreadLineage;
+  /**
+   * Agent-chat tabs only, never persisted: the merges this tab sent that its parent has not
+   * taken yet, and those addressed to it (spec 2026-10-14 §6). Absent when there are none.
+   */
+  pendingMerges?: PendingMergeBack[];
 }
 
 // --- Thread lineage (spec 2026-10-14 §6) ------------------------------------

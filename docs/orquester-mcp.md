@@ -216,7 +216,8 @@ of every parameter. The annotations: `readOnlyHint` on every tool that only read
 on `close_session`, `revert_session` and `delete_todo`; `idempotentHint` on every tool but
 `create_session`, `interrupt_session` (a retry after the turn has stopped goes on to stop the
 background work), `compact_session` (a retry compacts again), `fork_session` and
-`merge_back_session` (a retry forks, or merges, again), `send_message`, `implement_plan`,
+`merge_back_session` (a new call forks, or merges, again; each call's own retries reuse its command id),
+`resolve_merge_back`, `send_message`, `implement_plan`,
 the three request tools, `create_todo` and `toggle_todo_item`; `openWorldHint: false` on reads,
 waits, usage and the todo and file tools, which touch only the daemon's own state (a tool that
 drives an agent keeps the default).
@@ -465,6 +466,7 @@ and its default model (the flagged one, else the first) are never shed.
 | `compact_session` | `sessionId` | `{seq, session}` | "Compact context" |
 | `fork_session` | `sessionId`, `throughTurn?` (default: the latest finished turn), `title?` | `{strategy, lineage, session}` | "Fork from here" on a message |
 | `merge_back_session` | `sessionId` (the fork), `text?` (default: the fork's final reply) | `{parentSessionId, delivery: "sent" \| "queued", mergeId, seq?}` | The fork's "Merge back" |
+| `resolve_merge_back` | `sessionId` (the fork or the parent), `mergeId`, `action` (`"deliver"` \| `"discard"`) | `{mergeId, outcome: "sent" \| "discarded", seq?}` | A pending merge's "Deliver now" / "Retry" / "Discard" |
 | `get_session_lineage` | `sessionId` | `{sessionId, lineage, parent, children, pendingMerges}` | The fork chip and the forks list in the chat header |
 
 - **`list_sessions`** — ordered by project, then tab order. With `attention: true`, only the
@@ -587,23 +589,37 @@ and its default model (the flagged one, else the first) are never shed.
   `"transcript"` — Grok has no fork of its own (and a native fork that refuses, e.g. a cut a
   compaction made unreachable, falls back to this), so the fork starts fresh, its transcript opens
   with a "Forked from …" row, and the conversation so far reaches the agent together with the
-  fork's first message (not a `/command`); `"empty"` — nothing preceded the fork point. A parent
-  whose managed account was removed is refused (`SESSION_UNAVAILABLE`): a conversation is only
-  readable from the home that created it. The result's `session` is the fork's `SessionDetail`.
+  fork's first message (not a `/command`) — a transcript that says how many earlier exchanges the
+  host no longer holds; `"empty"` — nothing preceded the fork point; `"unavailable"` — turns
+  preceded it, but neither could the agent fork them nor does the host still hold any of their
+  words, so the fork starts fresh and its first row says the conversation could not be carried
+  over. A parent whose managed account was removed is refused (`COMMAND_REJECTED`, "The account
+  this conversation runs under is no longer available"): a conversation is only readable from the
+  home that created it. Each call mints a command id the daemon forks by, re-sent unchanged on a
+  `HOST_UNAVAILABLE` retry, so a retry never opens a second fork. The result's `session` is the
+  fork's `SessionDetail`.
 - **`merge_back_session`** — sends the fork's result to the session it came from (its `lineage`
   names it) as an ordinary message that starts `[Merged back from fork "<title>"]`: `text`, or the
   fork's final reply (the latest finished turn's answer). An idle parent takes it at once
   (`delivery: "sent"`, with the parent's `seq`); a busy one — a turn running or starting, an approval
-  or question open, a Codex goal continuing — gets it once it is idle (`delivery: "queued"`). The
-  queue is kept across daemon restarts and delivers each merge exactly once (its `mergeId` is the
-  turn's command id), one per idle point; a merge for a parent that is closed meanwhile is dropped.
-  Refused (`COMMAND_REJECTED`) for a session with no parent, a closed parent, or a fork with no
-  finished reply.
+  or question open, a Codex goal continuing — gets it once it is idle (`delivery: "queued"`); so
+  does one sent while an older merge for that parent still waits: merges reach a parent oldest
+  first, one per idle point, never one steering into another. The queue is kept across daemon
+  restarts and delivers each merge exactly once (its `mergeId` is the turn's command id). Nothing
+  queued disappears: a parent that refuses a merge (a passing refusal is tried again at its next
+  idle points, up to 3 times) or is closed leaves it in `pendingMerges` with `state: "failed"` and
+  the reason in `error`, on both tabs, until `resolve_merge_back` delivers or discards it — which
+  is also the way past a parent a continuing goal keeps busy (`deliver` sends it now, as a message
+  that steers the running turn). Refused (`COMMAND_REJECTED`) for a session with no parent, a
+  closed parent, or a fork with no finished reply.
 - **`get_session_lineage`** — `lineage` is the session's own (`{parentThreadId, relation,
   forkedFrom?: {messageId, turnId}, createdAt}` or `null`); `parent` is `{sessionId, title, exists}`
   (`exists: false` once that tab is closed); `children` are the tabs forked from or delegated by
   this one, oldest first, each with `relation`, `createdAt`, `forkedFrom?`, `chatSessionStatus?` and
-  `latestTurnState?`; `pendingMerges` are the queued merges to or from this session.
+  `latestTurnState?`; `pendingMerges` are the merges to or from this session the parent has not
+  taken: `{mergeId, parentSessionId, childSessionId, queuedAt, state: "queued" | "failed", preview,
+  attempts, error?}` (`preview`: the result's first 200 characters). The same list rides each
+  chat's `SessionSummary` as `pendingMerges`, which is how the GUI shows them.
 
 ### Search
 

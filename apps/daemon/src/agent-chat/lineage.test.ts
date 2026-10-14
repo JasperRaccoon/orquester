@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
 
-import type { EventMessage, SessionSummary } from "@orquester/api";
+import type { EventMessage, PendingMergeBack, SessionSummary } from "@orquester/api";
 import { parseMergeBackMessage, type ThreadSnapshotPayload, type Turn } from "@orquester/api/agent-chat";
 
 import type { DaemonApi, DaemonResponse } from "../mcp/daemon-api.ts";
@@ -78,6 +78,7 @@ function fakeWorld() {
   const turns: Array<{ sessionId: string; body: Record<string, unknown> }> = [];
   const listeners = new Set<(event: EventMessage) => void>();
   let turnStatus = 200;
+  let turnCode = "HOST_UNAVAILABLE";
   const api: DaemonApi = {
     fsRoot: "/",
     workspacesDir: "/w",
@@ -92,7 +93,7 @@ function fakeWorld() {
         turns.push({ sessionId: decodeURIComponent(post[1]!), body: opts?.body as Record<string, unknown> });
         return turnStatus < 400
           ? { status: 200, body: { seq: 9 } }
-          : { status: turnStatus, body: { error: { code: "HOST_UNAVAILABLE", message: "restarting" } } };
+          : { status: turnStatus, body: { error: { code: turnCode, message: `refused: ${turnCode}` } } };
       }
       return { status: 404, body: null };
     },
@@ -109,8 +110,9 @@ function fakeWorld() {
     sessions,
     threads,
     turns,
-    setTurnStatus: (status: number) => {
+    setTurnStatus: (status: number, code = "HOST_UNAVAILABLE") => {
       turnStatus = status;
+      turnCode = code;
     },
     /** The parent's tab changed: the bus event the summary service raises. */
     touch(id: string): void {
@@ -149,11 +151,13 @@ async function setup(options: { parentBusy?: boolean; outbox?: string } = {}) {
     world.sessions.set("parent", summary("parent", { title: "Parent", chatSessionStatus: "running" }));
   }
   let ids = 0;
+  const published = new Map<string, PendingMergeBack[]>();
   const make = () =>
     new LineageService({
       sessions: world.listing,
       outboxFile,
       recheckMs: 0,
+      setPendingMerges: (id, merges) => published.set(id, merges),
       newId: () => `merge-${(ids += 1)}`,
       now: () => new Date("2026-10-14T02:00:00.000Z")
     });
@@ -165,6 +169,7 @@ async function setup(options: { parentBusy?: boolean; outbox?: string } = {}) {
     service,
     make,
     outboxFile,
+    published,
     cleanup: async () => {
       await service.stop();
       await rm(dir, { recursive: true, force: true });
@@ -172,12 +177,13 @@ async function setup(options: { parentBusy?: boolean; outbox?: string } = {}) {
   };
 }
 
-/** Let the service's delivery chain settle: its per-parent run, then its write. */
+/** Let the service's delivery chain settle: every parent's lane, then its write. */
 async function settled(service: LineageService): Promise<void> {
-  for (let i = 0; i < 5; i += 1) await new Promise((resolve) => setImmediate(resolve));
-  await (service as unknown as { writes: Promise<void> }).writes;
-  for (const run of (service as unknown as { draining: Map<string, Promise<void>> }).draining.values()) {
-    await run;
+  const internals = service as unknown as { writes: Promise<void>; lanes: Map<string, Promise<unknown>> };
+  for (let round = 0; round < 5; round += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+    await Promise.all([...internals.lanes.values()]);
+    await internals.writes;
   }
 }
 
@@ -219,7 +225,7 @@ describe("merge back", () => {
   });
 
   it("queues for a busy parent, persists it, and delivers it on the parent's next idle point", async () => {
-    const { world, service, outboxFile, cleanup } = await setup({ parentBusy: true });
+    const { world, service, outboxFile, published, cleanup } = await setup({ parentBusy: true });
     const result = await service.mergeBack("child", { commandId: "fixed-id" });
     assert.equal(result.delivery, "queued");
     assert.equal(result.mergeId, "fixed-id");
@@ -228,6 +234,9 @@ describe("merge back", () => {
     const persisted = JSON.parse(await readFile(outboxFile, "utf8")) as { entries: Array<{ mergeId: string }> };
     assert.deepEqual(persisted.entries.map((entry) => entry.mergeId), ["fixed-id"]);
     assert.deepEqual(service.view("parent").pendingMerges.map((entry) => entry.childSessionId), ["child"]);
+    // Both tabs show it, with what it says.
+    assert.equal(published.get("parent")?.[0]?.preview, "B works; A does not.");
+    assert.equal(published.get("child")?.[0]?.state, "queued");
 
     // The same merge again is the same merge.
     assert.equal((await service.mergeBack("child", { commandId: "fixed-id" })).delivery, "queued");
@@ -276,8 +285,8 @@ describe("merge back", () => {
     await first.cleanup();
   });
 
-  it("drops a queued merge whose parent was closed, and keeps entries it cannot read", async () => {
-    const { world, service, outboxFile, cleanup } = await setup({
+  it("keeps a merge whose parent was closed as failed — said, never dropped — and entries it cannot read", async () => {
+    const { world, service, outboxFile, published, cleanup } = await setup({
       outbox: JSON.stringify({
         version: 1,
         entries: [
@@ -288,9 +297,109 @@ describe("merge back", () => {
     });
     await settled(service);
     assert.equal(world.turns.length, 0);
+    assert.deepEqual(service.pending().map((merge) => [merge.mergeId, merge.state]), [["old", "failed"]]);
+    assert.match(service.pending()[0]!.error ?? "", /closed/);
+    assert.equal(published.get("child")?.[0]?.state, "failed", "the fork's tab shows it");
+    const persisted = JSON.parse(await readFile(outboxFile, "utf8")) as { entries: Array<Record<string, unknown>> };
+    assert.equal(persisted.entries[0]!.state, "failed");
+    assert.deepEqual(persisted.entries[1], { from: "a newer build" });
+    // Discarding it is the user's call.
+    assert.deepEqual(await service.actOnMerge("child", "old", { action: "discard" }), { mergeId: "old", outcome: "discarded" });
     assert.equal(service.pending().length, 0);
-    const persisted = JSON.parse(await readFile(outboxFile, "utf8")) as { entries: unknown[] };
-    assert.deepEqual(persisted.entries, [{ from: "a newer build" }]);
+    assert.deepEqual(published.get("child"), []);
+    await cleanup();
+  });
+
+  it("a refusal at drain time keeps the merge: retried at idle points while passing, then failed", async () => {
+    const { world, service, published, cleanup } = await setup({ parentBusy: true });
+    await service.mergeBack("child", { commandId: "m1" });
+    world.sessions.set("parent", summary("parent", { title: "Parent" }));
+    world.threads.set("parent", snapshot());
+    world.setTurnStatus(409, "COMMAND_REJECTED");
+    for (let attempt = 1; attempt <= 3; attempt += 1) {
+      world.touch("parent");
+      await settled(service);
+      assert.equal(service.pending()[0]!.attempts, attempt);
+    }
+    assert.equal(service.pending()[0]!.state, "failed", "failed after the third refusal of the moment");
+    assert.equal(published.get("parent")?.[0]?.state, "failed", "the parent's tab shows it too");
+    world.touch("parent");
+    await settled(service);
+    assert.equal(service.pending()[0]!.attempts, 3, "a failed merge waits for the user");
+
+    // A non-passing refusal fails it at once.
+    await service.actOnMerge("child", "m1", { action: "discard" });
+    world.sessions.set("parent", summary("parent", { title: "Parent", chatSessionStatus: "running" }));
+    await service.mergeBack("child", { commandId: "m2" });
+    world.sessions.set("parent", summary("parent", { title: "Parent" }));
+    world.setTurnStatus(400, "INVALID_COMMAND");
+    world.touch("parent");
+    await settled(service);
+    assert.deepEqual([service.pending()[0]!.state, service.pending()[0]!.attempts], ["failed", 1]);
+
+    // Retry: delivered now, and gone from both tabs.
+    world.setTurnStatus(200);
+    assert.equal((await service.actOnMerge("parent", "m2", { action: "deliver" })).outcome, "sent");
+    assert.equal(service.pending().length, 0);
+    assert.deepEqual(published.get("child"), []);
+    await cleanup();
+  });
+
+  it("delivers now, past a parent a continuing goal keeps busy — one message, steering the turn", async () => {
+    const { world, service, cleanup } = await setup({ parentBusy: true });
+    world.sessions.set(
+      "parent",
+      summary("parent", { title: "Parent", goal: { objective: "x", status: "active", continuing: true } } as Partial<SessionSummary>)
+    );
+    await service.mergeBack("child", { commandId: "m1" });
+    world.touch("parent");
+    await settled(service);
+    assert.equal(world.turns.length, 0, "the goal keeps it queued");
+    const result = await service.actOnMerge("child", "m1", { action: "deliver" });
+    assert.deepEqual(result, { mergeId: "m1", outcome: "sent", seq: 9 });
+    assert.equal(world.turns.length, 1);
+    assert.equal(world.turns[0]!.body.commandId, "m1");
+    await assert.rejects(service.actOnMerge("child", "m1", { action: "deliver" }), /No pending merge/);
+    await assert.rejects(service.actOnMerge("child", "m1", { action: "nope" } as never), /action must be/);
+    await cleanup();
+  });
+
+  it("a merge to an idle parent with an older one queued waits behind it, oldest delivered first", async () => {
+    const { world, service, cleanup } = await setup({ parentBusy: true });
+    await service.mergeBack("child", { commandId: "older", text: "first" });
+    // The parent goes idle; the bus event that would drain has not come yet.
+    world.sessions.set("parent", summary("parent", { title: "Parent" }));
+    world.threads.set("parent", snapshot());
+    const newer = await service.mergeBack("child", { commandId: "newer", text: "second" });
+    await settled(service);
+    assert.equal(newer.delivery, "queued", "never overtakes the older one");
+    assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["older"], "the older one went first");
+    // The parent is busy with it now; at its next idle point the newer one follows.
+    world.touch("parent");
+    await settled(service);
+    assert.deepEqual(world.turns.map((turn) => turn.body.commandId), ["older", "newer"]);
+    assert.equal(service.pending().length, 0);
+    await cleanup();
+  });
+
+  it("serializes concurrent merges to one idle parent, so neither steers into the other", async () => {
+    const { world, service, cleanup } = await setup();
+    // The fake parent goes busy the moment it takes a turn, as a real one does.
+    const api = world.api;
+    const request = api.request.bind(api);
+    api.request = async (method, path, opts) => {
+      const res = await request(method, path, opts);
+      if (method === "POST" && path.endsWith("/turn")) {
+        world.threads.set("parent", snapshot({ busy: true }));
+      }
+      return res;
+    };
+    const [a, b] = await Promise.all([
+      service.mergeBack("child", { commandId: "a", text: "one" }),
+      service.mergeBack("child", { commandId: "b", text: "two" })
+    ]);
+    assert.deepEqual([a.delivery, b.delivery], ["sent", "queued"]);
+    assert.equal(world.turns.length, 1);
     await cleanup();
   });
 

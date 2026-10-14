@@ -38,6 +38,7 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   // Thread lineage (spec 2026-10-14 §6): a retry forks again, and merges again.
   fork_session: { required: ["sessionId"], annotations: WRITE },
   merge_back_session: { required: ["sessionId"], annotations: WRITE },
+  resolve_merge_back: { required: ["sessionId", "mergeId", "action"], annotations: WRITE },
   get_session_lineage: { required: ["sessionId"], annotations: READ },
   search_sessions: { required: ["query"], annotations: READ },
   send_message: { required: ["sessionId"], annotations: WRITE },

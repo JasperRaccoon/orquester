@@ -29,7 +29,8 @@ describe("forkCodexThread", () => {
       threadId: "source-1",
       lastTurnId: "turn-2",
       cwd: tmpdir(),
-      excludeTurns: true
+      excludeTurns: true,
+      deferGoalContinuation: true
     });
     // Only the handshake and the fork: the source thread is never resumed.
     assert.deepEqual(

@@ -166,14 +166,23 @@ export function buildForkTranscript(input: {
     input.retained.flatMap((turn) => (turn.userMessageId !== undefined ? [turn.userMessageId] : []))
   );
   const blocks: string[] = [];
+  /** Kept turns with at least one message still in the fold's window. */
+  const turnsWithText = new Set<string>();
   for (const item of input.items) {
     if (item.kind !== "message" || item.agentId !== undefined || item.role === "reasoning") continue;
     const kept = prompts.has(item.id) || (item.turnId !== null && turnIds.has(item.turnId));
     const text = item.text.trim();
     if (!kept || text.length === 0) continue;
+    if (item.turnId !== null && turnIds.has(item.turnId)) turnsWithText.add(item.turnId);
+    for (const turn of input.retained) {
+      if (turn.userMessageId === item.id) turnsWithText.add(turn.turnId);
+    }
     blocks.push(`[${item.role === "user" ? "User" : "Assistant"}]\n${clip(text, FORK_TRANSCRIPT_MESSAGE_MAX_CHARS)}`);
   }
   if (blocks.length === 0) return null;
+  // Kept turns the fold's window no longer holds a word of (retention evicted
+  // them, or they never had text): said, never passed off as the whole story.
+  const lostTurns = input.retained.filter((turn) => !turnsWithText.has(turn.turnId)).length;
   let used = 0;
   let first = blocks.length;
   while (first > 0 && used + blocks[first - 1]!.length + 2 <= FORK_TRANSCRIPT_MAX_CHARS) {
@@ -185,6 +194,9 @@ export function buildForkTranscript(input: {
   const preamble =
     `This conversation is a fork of "${title}". The user branched it off at the point below, so ` +
     "treat the transcript as what was said before their next message and continue from there." +
+    (lostTurns > 0
+      ? ` ${lostTurns} earlier exchange${lostTurns === 1 ? " is" : "s are"} no longer available and ${lostTurns === 1 ? "is" : "are"} missing from it.`
+      : "") +
     (omitted > 0 ? ` The ${omitted} oldest message${omitted === 1 ? " was" : "s were"} left out for length.` : "");
   return `${OPEN_TAG}\n${preamble}\n\n${blocks.slice(first).join("\n\n")}\n${CLOSE_TAG}`;
 }
