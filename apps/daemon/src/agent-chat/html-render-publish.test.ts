@@ -15,6 +15,7 @@ import {
   HTML_RENDER_MAX_IMAGE_BYTES,
   HtmlRenderPublishError,
   isImageBytes,
+  openInsideRoot,
   publishHtmlRender,
   type HtmlRenderPublishDeps
 } from "./html-render-publish.ts";
@@ -231,4 +232,27 @@ test("image sniffing reads magic bytes and SVG roots, not names", () => {
   assert.ok(isImageBytes(Buffer.from('<?xml version="1.0"?><!-- c --><svg xmlns="x"></svg>')));
   assert.ok(!isImageBytes(Buffer.from("<html><svg></svg></html>")));
   assert.ok(!isImageBytes(Buffer.from("plain text")));
+});
+
+test("an image path swapped for a symlink after its realpath was checked cannot be read", async (t) => {
+  // `openInsideRoot` is what runs after the realpath check: hand it the paths
+  // a swap would leave behind and it must refuse every one of them.
+  const { project, outside } = await fixture(t);
+  const inside = join(project, "ok.png");
+  await writeFile(inside, PNG);
+  const secret = join(outside, "secret.png");
+  await writeFile(secret, PNG);
+  const ok = await openInsideRoot(inside, project);
+  assert.ok(ok, "a real file inside the project opens");
+  await ok.close();
+  // The last component swapped for a symlink out of the project.
+  const swappedFile = join(project, "swapped.png");
+  await symlink(secret, swappedFile);
+  assert.equal(await openInsideRoot(swappedFile, project), null);
+  // A directory on the way swapped for a symlink out of the project.
+  const swappedDir = join(project, "assets");
+  await symlink(outside, swappedDir);
+  assert.equal(await openInsideRoot(join(swappedDir, "secret.png"), project), null);
+  // Plainly outside.
+  assert.equal(await openInsideRoot(secret, project), null);
 });

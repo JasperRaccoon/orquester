@@ -130,8 +130,30 @@ test("an agent page's signed route passes the bearer hook on its signature alone
     assert.deepEqual(resolved, [page]);
     // Without a valid signature the route itself refuses.
     assert.equal((await app.inject({ method: "GET", url: agentChatRoutes.visual("t1", page) })).statusCode, 403);
-    // A percent-encoded spelling of a gated sibling path is not let through.
+    // The bare prefix is no page route: gated like any other /api path.
     assert.equal((await app.inject({ method: "GET", url: "/api/agent-visuals" })).statusCode, 401);
+    // Percent-encoded spellings: the router decodes them onto the page route,
+    // whose own signature check still refuses an unsigned request — and with a
+    // valid signature they reach the same handler, never a gated one.
+    assert.equal((await app.inject({ method: "GET", url: `/api/agent%2Dvisuals/t1/${page}` })).statusCode, 403);
+    assert.equal((await app.inject({ method: "GET", url: `/%61pi/agent-visuals/t1/${page}` })).statusCode, 403);
+    const encodedSigned = path.replace("/api/agent-visuals/", "/api/agent%2Dvisuals/");
+    assert.equal((await app.inject({ method: "GET", url: encodedSigned })).statusCode, 404, "past the hook, to a gone file");
+    // An encoded traversal stays a page-route parameter, refused by the signature.
+    for (const url of [
+      `/api/agent-visuals/t1/..%2F..%2Fsessions`,
+      `/api/agent-visuals/..%2Fsessions/x`,
+      `/api/agent-visuals/t1/${page}%2F..%2F..%2F..%2Fagent-profile`
+    ]) {
+      const res = await app.inject({ method: "GET", url });
+      assert.ok(res.statusCode === 403 || res.statusCode === 404 || res.statusCode === 401, `${url} answered ${res.statusCode}`);
+    }
+    // The mint route stays gated in any spelling.
+    assert.equal(
+      (await app.inject({ method: "POST", url: `/%61pi/sessions/t1/visuals/${page}/url` })).statusCode,
+      401
+    );
+    assert.deepEqual(resolved, [page, page], "only signed requests ever reached the host");
   } finally {
     await app.close();
   }

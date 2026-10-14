@@ -129,14 +129,15 @@ export const VISUAL_FRAME_SHORTCUTS: readonly HtmlRenderShortcut[] = [
 ];
 
 /**
- * In the full-screen viewer: the palette and attention cycle, and Escape,
- * which closes the viewer. Never inline: a bare Escape there is the chat's
+ * In the full-screen viewer: the palette (which opens over a modal) and
+ * Escape, which closes the viewer. Not the attention cycle or scroll-to-end:
+ * both stand down while a modal is up, so passing them on would do nothing.
+ * Escape is never forwarded inline: a bare Escape there is the chat's
  * interrupt, which a page must not be able to send.
  */
 export const VISUAL_VIEWER_SHORTCUTS: readonly HtmlRenderShortcut[] = [
   chord("k", { code: "KeyK", ctrlKey: true }),
   chord("k", { code: "KeyK", metaKey: true }),
-  chord("a", { ctrlKey: true, shiftKey: true }),
   chord("escape", { code: "Escape" })
 ];
 

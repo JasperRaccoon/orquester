@@ -6,6 +6,9 @@
 
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
+import fsSync from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { Readable } from "node:stream";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
@@ -831,6 +834,29 @@ test("a published page stays while any log line names it, past the fold's window
   }
   await store.drain();
   await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(96) });
+  await store.resolveAttachment("t1", page.id);
+
+  // A log read that fails partway (EIO) never reads as "nothing names it":
+  // the sweep skips the thread instead of deleting the page.
+  const realCreateReadStream = fsSync.createReadStream;
+  const failing = ((file: fsSync.PathLike, options?: unknown) => {
+    if (String(file).endsWith("events.ndjson")) {
+      return new Readable({
+        read() {
+          this.destroy(Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" }));
+        }
+      });
+    }
+    return realCreateReadStream(file, options as Parameters<typeof realCreateReadStream>[1]);
+  }) as typeof fsSync.createReadStream;
+  (fsSync as { createReadStream: typeof fsSync.createReadStream }).createReadStream = failing;
+  syncBuiltinESMExports();
+  try {
+    await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(144) });
+  } finally {
+    (fsSync as { createReadStream: typeof fsSync.createReadStream }).createReadStream = realCreateReadStream;
+    syncBuiltinESMExports();
+  }
   await store.resolveAttachment("t1", page.id);
 });
 

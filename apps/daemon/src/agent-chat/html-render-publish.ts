@@ -15,7 +15,8 @@
  * only record of it — the tool's result carries it into the thread's log.
  */
 
-import { open, realpath, stat } from "node:fs/promises";
+import { constants } from "node:fs";
+import { open, readlink, realpath, stat, type FileHandle } from "node:fs/promises";
 import * as path from "node:path";
 
 import {
@@ -208,9 +209,39 @@ function isInside(root: string, child: string): boolean {
   return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-/** At most `limit + 1` bytes of a file: one past the limit tells "too large" from "exactly". */
-async function readBounded(file: string, limit: number): Promise<Buffer> {
-  const handle = await open(file, "r");
+/**
+ * Open `real` — a realpath already checked to sit inside `root` — for reading,
+ * and prove the descriptor is still that file inside `root`. Between the
+ * realpath and the open, a component of the path can be swapped for a
+ * symlink out of the project; so the last component is opened with
+ * `O_NOFOLLOW`, and the descriptor's own path (`/proc/self/fd`, where there is
+ * one) must still resolve inside `root`. Elsewhere, the path is resolved again
+ * and must name the very file the descriptor holds (same device and inode).
+ * Null when it does not: the image is then treated as outside the project.
+ */
+export async function openInsideRoot(real: string, root: string): Promise<FileHandle | null> {
+  const handle = await open(real, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)).catch(() => null);
+  if (handle === null) return null;
+  try {
+    const info = await handle.stat();
+    if (!info.isFile()) throw new Error("not a file");
+    const fdPath = await readlink(`/proc/self/fd/${handle.fd}`).catch(() => null);
+    if (fdPath !== null) {
+      if (!isInside(root, fdPath)) throw new Error("escaped");
+    } else {
+      const again = await realpath(real);
+      const now = await stat(again);
+      if (!isInside(root, again) || now.dev !== info.dev || now.ino !== info.ino) throw new Error("escaped");
+    }
+    return handle;
+  } catch {
+    await handle.close().catch(() => undefined);
+    return null;
+  }
+}
+
+/** At most `limit + 1` bytes from an open file: one past the limit tells "too large" from "exactly". */
+async function readBounded(handle: FileHandle, limit: number): Promise<Buffer> {
   try {
     const buffer = Buffer.alloc(limit + 1);
     let total = 0;
@@ -278,7 +309,12 @@ export async function inlineLocalImages(html: string, sandboxRoot: string | null
   const dataUris = new Map<string, string>();
   let readBytes = 0;
   for (const file of files) {
-    const bytes = await readBounded(file.real, HTML_RENDER_MAX_IMAGE_BYTES).catch(() => null);
+    const handle = sandboxRoot === null ? null : await openInsideRoot(file.real, sandboxRoot);
+    if (handle === null) {
+      outside.push(file.path);
+      continue;
+    }
+    const bytes = await readBounded(handle, HTML_RENDER_MAX_IMAGE_BYTES).catch(() => null);
     if (bytes === null || !isImageBytes(bytes)) {
       missing.push(file.path);
       continue;

@@ -60,6 +60,9 @@ test("only the allowed app chords are replayed from a page", () => {
   // Inline, a bare Escape is the chat's interrupt: never a page's to send.
   assert.ok(!isAllowedVisualKey(keydown({ key: "Escape", code: "Escape" }), VISUAL_FRAME_SHORTCUTS));
   assert.ok(isAllowedVisualKey(keydown({ key: "Escape", code: "Escape" }), VISUAL_VIEWER_SHORTCUTS));
+  assert.ok(isAllowedVisualKey(keydown({ key: "k", code: "KeyK", metaKey: true }), VISUAL_VIEWER_SHORTCUTS));
+  // The attention cycle stands down under a modal: the viewer does not pass it on.
+  assert.ok(!isAllowedVisualKey(keydown({ key: "A", code: "KeyA", ctrlKey: true, shiftKey: true }), VISUAL_VIEWER_SHORTCUTS));
   // A thread-changing chord, a held key, a printable key: refused.
   assert.ok(!isAllowedVisualKey(keydown({ key: "Enter", code: "Enter", ctrlKey: true, shiftKey: true }), VISUAL_FRAME_SHORTCUTS));
   assert.ok(!isAllowedVisualKey(keydown({ key: "k", code: "KeyK", ctrlKey: true, repeat: true }), VISUAL_FRAME_SHORTCUTS));

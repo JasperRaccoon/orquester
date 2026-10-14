@@ -946,8 +946,13 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         }
         carry = text.slice(Math.max(0, text.length - (longest - 1)));
       }
-    } catch {
-      // No log: nothing names them.
+    } catch (error) {
+      // No log at all: nothing names them. Any other failure (EIO, EMFILE, a
+      // read cut short) leaves `found` partial, and a page it missed would be
+      // deleted for good — so it is thrown, and the sweep skips this thread.
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
+        throw error;
+      }
     }
     return found;
   }
