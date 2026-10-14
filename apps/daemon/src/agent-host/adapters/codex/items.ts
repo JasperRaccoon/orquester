@@ -15,6 +15,7 @@
 
 import {
   MCP_APP_RESOURCE_SCHEME,
+  boundSessionToolData,
   isSessionToolsServerName,
   type CanonicalItemType,
   type RuntimeItemStatus
@@ -141,9 +142,14 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
           // names an MCP App resource (§3) replays its result into the app,
           // so those results are kept; slimming keeps the references and
           // summarises the rest. Other servers' results stay out, as before.
-          ...(item.result !== null && (isSessionToolsServerName(item.server) || namesMcpAppResource(item))
+          // An app's result is persisted bounded as a session tool's is
+          // (ingestion): no image bytes, base64 blob or oversized string in
+          // `events.ndjson` — the model already had it whole.
+          ...(item.result !== null && isSessionToolsServerName(item.server)
             ? { result: item.result }
-            : {})
+            : item.result !== null && namesMcpAppResource(item)
+              ? { result: boundSessionToolData(item.result) }
+              : {})
         }
       };
 

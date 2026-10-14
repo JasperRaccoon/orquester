@@ -69,6 +69,44 @@ describe("item classification — typed on the generated discriminants", () => {
     assert.equal(theirs.result, undefined);
   });
 
+  it("an MCP App call keeps its result bounded: image bytes, base64 blobs and oversized text never reach the log", () => {
+    const png = "iVBORw0KGgo".padEnd(20_000, "A");
+    const result = {
+      content: [
+        { type: "text", text: "shown" },
+        { type: "image", data: png, mimeType: "image/png" },
+        { type: "text", text: `chart: ${png} (end)` },
+        { type: "text", text: "x".repeat(200_000) }
+      ],
+      structuredContent: { n: 1, preview: `data:image/png;base64,${png}` },
+      _meta: null
+    };
+    const item: CodexThreadItem = {
+      type: "mcpToolCall",
+      id: "call-app-1",
+      server: "apps",
+      tool: "show_widget",
+      status: "completed",
+      arguments: { blob: png },
+      appContext: { connectorId: "apps", linkId: null, resourceUri: "ui://apps/widget.html", appName: null, actionName: null },
+      pluginId: null,
+      readOnlyHint: true,
+      result,
+      error: null,
+      durationMs: 5
+    };
+    const data = classifyItem(item).data as { arguments: unknown; result: typeof result };
+    const content = data.result.content as Array<Record<string, unknown>>;
+    assert.deepEqual(content[0], { type: "text", text: "shown" }, "the app's own text stays whole");
+    assert.deepEqual(content[1], { type: "image", mimeType: "image/png", omittedBytes: 15_000 });
+    assert.equal(content[2]!.text, "chart: [base64 omitted: 15000 bytes] (end)");
+    assert.ok((content[3]!.text as string).length < 70_000);
+    assert.equal(data.result.structuredContent.n, 1);
+    assert.equal(data.result.structuredContent.preview, "[image/png;base64 omitted: 15000 bytes]");
+    assert.deepEqual(data.arguments, { blob: png }, "the call's arguments are kept as the agent wrote them");
+    assert.ok(JSON.stringify(data).length < 100_000);
+  });
+
   it("collabAgentToolCall's `interrupted` has no RuntimeItemStatus, so it settles failed", () => {
     const classified = classifyItem({
       type: "collabAgentToolCall",
