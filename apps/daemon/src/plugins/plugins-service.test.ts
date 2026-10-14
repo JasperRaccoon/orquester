@@ -461,6 +461,29 @@ test("a symlinked workspaces dir bakes both its real path and the configured one
   );
 });
 
+test("moving to another symlink of the same workspaces dir rewrites the preload", async (t) => {
+  const h = await harness(t);
+  h.registry.latest = "9.9.9";
+  const first = join(h.root, "workspaces-link");
+  const second = join(h.root, "workspaces-other-link");
+  await symlink(join(h.root, "workspaces"), first);
+  await symlink(join(h.root, "workspaces"), second);
+  h.workspacesDir.current = first;
+  await enable(h);
+  h.workspacesDir.current = second;
+  await h.service.workspacesChanged();
+  await h.service.settled();
+  const real = await realpath(first);
+  assert.deepEqual(
+    h.preloadWrites.map((write) => write.options),
+    [
+      { statePath: h.file, workspacesRoot: real, configuredWorkspacesRoot: first },
+      { statePath: h.file, workspacesRoot: real, configuredWorkspacesRoot: second }
+    ]
+  );
+  assert.equal(h.sessionPreload.at(-1), tsRustPreloadPath(h.baseDir));
+});
+
 test("start: staging emptied, preload rewritten, and a check when enabled anywhere", async (t) => {
   const h = await harness(t, { start: false, seed: { version: 1, plugins: { [ID]: { enabledWorkspaces: ["acme"] } } } });
   await publish(h.registry, h.root, "0.7.0");

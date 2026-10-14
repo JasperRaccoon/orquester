@@ -138,7 +138,7 @@ export class PluginsService {
   private jobAbort: AbortController | null = null;
 
   private runtimeQueue: Promise<unknown> = Promise.resolve();
-  /** The workspaces root the preload on disk was written with by this process; null if not (yet). */
+  /** The real and configured workspaces roots the preload on disk was written with by this process; null if not (yet). */
   private preloadRoot: string | null = null;
   /** The enabled existing workspaces at the last runtime refresh, as JSON; null before the first. */
   private activeKey: string | null = null;
@@ -474,22 +474,24 @@ export class PluginsService {
       this.activeKey = activeKey;
       const workspacesDir = this.options.workspacesDir();
       const root = await realpath(workspacesDir).catch(() => resolve(workspacesDir));
-      if (this.preloadRoot !== root && (active.length > 0 || (await isFile(this.preloadPath)))) {
+      // Both spellings of a symlinked root: a `tsc` path can go through either, so a
+      // move to another symlink of the same directory rewrites the preload too.
+      const configured = resolve(workspacesDir);
+      const roots = `${root}\0${configured}`;
+      if (this.preloadRoot !== roots && (active.length > 0 || (await isFile(this.preloadPath)))) {
         try {
-          // Both spellings of a symlinked root: a `tsc` path can go through either.
-          const configured = resolve(workspacesDir);
           await this.writePreload(this.preloadPath, {
             statePath: this.configFile,
             workspacesRoot: root,
             ...(configured !== root ? { configuredWorkspacesRoot: configured } : {})
           });
-          this.preloadRoot = root;
+          this.preloadRoot = roots;
         } catch (error) {
           this.preloadRoot = null;
           this.logger.error("Failed to write the tsc-rs preload", error);
         }
       }
-      this.setSessionPreload(active.length > 0 && this.preloadRoot === root ? this.preloadPath : null);
+      this.setSessionPreload(active.length > 0 && this.preloadRoot === roots ? this.preloadPath : null);
       // Armed for any listed name, existing or not. The daemon's workspace routes call
       // `workspacesChanged`; each tick re-reads the workspaces too, so a workspace re-created
       // behind the daemon's back picks the plugin up again within the hour.
