@@ -787,6 +787,18 @@
 }
 
 /*
+ * Display math (`$$…$$`): a formula wider than the column scrolls on its own
+ * instead of widening the message. The padding keeps tall glyphs (fractions,
+ * large operators) from being clipped by the scroller.
+ */
+.ac-stream .katex-display {
+  margin: 0.65rem 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  padding: 0.15rem 0;
+}
+
+/*
  * `.ac-fade-top` — the hairline fade under the status line, so rows dissolve
  * into the chrome instead of being guillotined by it. Mask, not a gradient
  * overlay: an overlay would have to re-blend every frame a streaming row

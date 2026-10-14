@@ -1,5 +1,6 @@
 import React from "react";
 import Markdown, { type Components } from "react-markdown";
+import rehypeKatex from "rehype-katex";
 import remarkGfm from "remark-gfm";
 
 import { useApi } from "../../../../context/orquester-context";
@@ -12,6 +13,9 @@ import { CodeBlock } from "./CodeBlock";
 import { extractFenceLanguage } from "./highlight-core";
 import { createIncrementalMarkdownPlugin } from "./incremental";
 import { resolveMarkdownImageSource } from "./local-image";
+import { KATEX_OPTIONS, mightContainMath, remarkChatMath } from "./math";
+import { MermaidBlock } from "./MermaidBlock";
+import { isMermaidFence } from "./mermaid-render";
 
 /**
  * Assistant markdown (spec §7.3).
@@ -113,7 +117,9 @@ function MarkdownCode({
       </code>
     );
   }
-  return <CodeBlock code={text.replace(/\n$/, "")} info={language} streaming={streaming} mode={mode} />;
+  const code = text.replace(/\n$/, "");
+  if (isMermaidFence(language)) return <MermaidBlock code={code} streaming={streaming} mode={mode} />;
+  return <CodeBlock code={code} info={language} streaming={streaming} mode={mode} />;
 }
 
 function MarkdownLink({
@@ -222,6 +228,10 @@ const COMPONENTS: Components = {
 // ---------------------------------------------------------------------------
 
 const STATIC_PLUGINS = [remarkGfm];
+const MATH_PLUGINS = [remarkGfm, remarkChatMath as unknown as typeof remarkGfm];
+const NO_REHYPE_PLUGINS: never[] = [];
+/** KaTeX writes hast elements (no HTML string); see `math.ts` for its settings. */
+const MATH_REHYPE_PLUGINS = [[rehypeKatex, KATEX_OPTIONS]] as React.ComponentProps<typeof Markdown>["rehypePlugins"];
 
 /**
  * Arms the incremental parser: streaming, and the text already contains a
@@ -246,10 +256,14 @@ export const ChatMarkdown = React.memo(function ChatMarkdown({
   incrementalPlugin.current ??= createIncrementalMarkdownPlugin() as unknown as typeof remarkGfm;
 
   const armed = shouldArmIncrementalParser(text, streaming);
-  const plugins = React.useMemo(
-    () => (armed ? [remarkGfm, incrementalPlugin.current as typeof remarkGfm] : STATIC_PLUGINS),
-    [armed]
-  );
+  // Math is armed per message by a dollar sign, so the common message pays
+  // nothing for it; the arrays are memoised so a stream's tokens keep the
+  // processor unless one of the two switches flips.
+  const math = mightContainMath(text);
+  const plugins = React.useMemo(() => {
+    const base = math ? MATH_PLUGINS : STATIC_PLUGINS;
+    return armed ? [...base, incrementalPlugin.current as typeof remarkGfm] : base;
+  }, [armed, math]);
 
   const config = React.useMemo<MarkdownConfig>(
     () => ({ mode, streaming, onOpenFile }),
@@ -265,7 +279,11 @@ export const ChatMarkdown = React.memo(function ChatMarkdown({
         )}
         {...(streaming ? { "data-streaming": "true" } : {})}
       >
-        <Markdown remarkPlugins={plugins} components={COMPONENTS}>
+        <Markdown
+          remarkPlugins={plugins}
+          rehypePlugins={math ? MATH_REHYPE_PLUGINS : NO_REHYPE_PLUGINS}
+          components={COMPONENTS}
+        >
           {text}
         </Markdown>
       </div>

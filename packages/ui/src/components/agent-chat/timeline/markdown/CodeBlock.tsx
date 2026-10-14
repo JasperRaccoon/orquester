@@ -46,6 +46,16 @@ export interface CodeBlockProps {
   info: string;
   streaming: boolean;
   mode: "light" | "dark";
+  /** Controls placed before the wrap and copy buttons (the Mermaid toggle). */
+  leadingActions?: React.ReactNode;
+  /** A line between the header and the source (why a diagram fell back to code). */
+  notice?: React.ReactNode;
+  /**
+   * Replaces the source view, e.g. a rendered diagram. The header and its copy
+   * button stay, still copying the source; the wrap toggle goes, since there
+   * is nothing to wrap.
+   */
+  body?: React.ReactNode;
 }
 
 const WRAP_STORAGE_KEY = "orquester.agentChat.codeWrap";
@@ -95,7 +105,10 @@ export const CodeBlock = React.memo(function CodeBlock({
   code,
   info,
   streaming,
-  mode
+  mode,
+  leadingActions,
+  notice,
+  body
 }: CodeBlockProps): React.ReactElement {
   const label = fenceLanguageLabel(info);
   const parser = useLanguageParser(info);
@@ -140,34 +153,42 @@ export const CodeBlock = React.memo(function CodeBlock({
           {label || "text"}
         </span>
         <span className="flex items-center gap-0.5" role="toolbar" aria-label="Code block actions">
-          <ChatIconButton
-            size="xs"
-            label={wrapped ? "Disable line wrap" : "Wrap lines"}
-            aria-pressed={wrapped}
-            onClick={toggleWrap}
-          >
-            <WrapText size={12} strokeWidth={1.8} aria-hidden />
-          </ChatIconButton>
+          {leadingActions}
+          {body === undefined ? (
+            <ChatIconButton
+              size="xs"
+              label={wrapped ? "Disable line wrap" : "Wrap lines"}
+              aria-pressed={wrapped}
+              onClick={toggleWrap}
+            >
+              <WrapText size={12} strokeWidth={1.8} aria-hidden />
+            </ChatIconButton>
+          ) : null}
           {/* Code chrome never hover-reveals: the copy button is why the chrome exists. */}
           <CopyButton value={code} label="Copy code" size="xs" />
         </span>
       </div>
-      <pre
-        className={cn(
-          "ac-scroll-thin m-0 overflow-x-auto px-[0.9rem] pb-[0.8rem] pt-1",
-          "font-mono text-[length:var(--font-size-code,0.8125rem)] leading-relaxed",
-          "text-neutral-200",
-          wrapped && "whitespace-pre-wrap [overflow-wrap:anywhere]"
-        )}
-      >
-        <code className="block">
-          {lines.map((line, index) => (
-            // A line's position is stable as tokens and new lines are appended.
-            // eslint-disable-next-line react/no-array-index-key
-            <HighlightedLineView key={index} line={line} mode={mode} />
-          ))}
-        </code>
-      </pre>
+      {notice}
+      {body !== undefined ? (
+        body
+      ) : (
+        <pre
+          className={cn(
+            "ac-scroll-thin m-0 overflow-x-auto px-[0.9rem] pb-[0.8rem] pt-1",
+            "font-mono text-[length:var(--font-size-code,0.8125rem)] leading-relaxed",
+            "text-neutral-200",
+            wrapped && "whitespace-pre-wrap [overflow-wrap:anywhere]"
+          )}
+        >
+          <code className="block">
+            {lines.map((line, index) => (
+              // A line's position is stable as tokens and new lines are appended.
+              // eslint-disable-next-line react/no-array-index-key
+              <HighlightedLineView key={index} line={line} mode={mode} />
+            ))}
+          </code>
+        </pre>
+      )}
     </div>
   );
 });
