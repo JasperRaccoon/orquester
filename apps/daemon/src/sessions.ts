@@ -1,5 +1,5 @@
 import type { AgentEventRequest, CreateSessionRequest, RegistryEntry, SessionActivity, SessionSummary } from "@orquester/api";
-import { type SessionRecord, type SessionsConfig, createDefaultSessionsConfig, parseSessionsConfig } from "@orquester/config";
+import { type SessionRecord, type SessionsConfig, createDefaultSessionsConfig, parseSessionsConfig, sessionRecordSchema } from "@orquester/config";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
@@ -304,6 +304,10 @@ export async function writeAddonEnvLaunchScript(
  */
 export class SessionManager implements ISessionManager {
   private sessions = new Map<string, Session>();
+  /** What `sessions.json` held that this build cannot read, written back as found. */
+  private indexPreserved: SessionsIndexPreserved = NOTHING_PRESERVED;
+  /** Why `sessions.json` may not be written this run (it could not be read), or null. */
+  private indexBlocked: string | null = null;
   /** Coalesces resize-driven index writes (≤ one per second) so the latest size persists. */
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   /** Emits "created" | "exited" | "updated" (SessionSummary), "closed" ({ id }), and "activity" ({ id, activity, cause, hasHookSource, kind }). */
@@ -764,7 +768,12 @@ export class SessionManager implements ISessionManager {
    */
   async reattach(): Promise<void> {
     const live = new Set(await this.tmux.listSessions());
-    const { loaded: indexLoaded, config: index } = await this.readIndex();
+    const read = await readSessionsIndex(this.indexPath);
+    const { loaded: indexLoaded, config: index } = read;
+    // What this build cannot read is written back as found; an index it could not read at all
+    // is never written over this run (non-destructive, like the other tolerant stores).
+    this.indexPreserved = read.preserved;
+    this.indexBlocked = read.writable ? null : "the sessions index could not be read";
     // Fallback sizes for records that predate persisted cols/rows (read before
     // we attach any client, so the windows still hold their pre-restart size).
     const liveSizes = await this.tmux.windowSizes();
@@ -859,41 +868,16 @@ export class SessionManager implements ISessionManager {
   }
 
   /**
-   * Read the reattach index, distinguishing "file is absent/empty" (clean — the
-   * daemon has never persisted, treat as no known sessions) from "file exists
-   * but is unreadable/corrupt" (UNRELIABLE — we must not trust an empty result,
-   * or reattach() would reap every surviving session as an orphan). Returns
-   * `loaded: false` on the latter so the caller can stay conservative.
-   */
-  private async readIndex(): Promise<{ loaded: boolean; config: SessionsConfig }> {
-    let raw: string;
-    try {
-      raw = await readFile(this.indexPath, "utf8");
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") {
-        // No index yet (first run / cleared) — genuinely no known sessions.
-        return { loaded: true, config: createDefaultSessionsConfig() };
-      }
-      // Exists but unreadable (permissions, I/O error): do NOT assume empty.
-      console.error("Failed to read sessions index; skipping orphan reap", error);
-      return { loaded: false, config: createDefaultSessionsConfig() };
-    }
-    try {
-      return { loaded: true, config: parseSessionsConfig(JSON.parse(raw)) };
-    } catch (error) {
-      // Corrupt/partial JSON (e.g. an interrupted write): same caution as above.
-      console.error("Failed to parse sessions index; skipping orphan reap", error);
-      return { loaded: false, config: createDefaultSessionsConfig() };
-    }
-  }
-
-  /**
    * Best-effort persist of running sessions; never throws (logs and moves on).
    * Writes atomically (tmp file + rename) so an interrupted or concurrent write
    * can never leave a half-written/corrupt sessions.json — readIndex() would
    * otherwise see truncated JSON and reattach() would refuse to reap orphans.
    */
   private async persistIndex(): Promise<void> {
+    if (this.indexBlocked !== null) {
+      warnBlockedIndexOnce(this.indexPath, this.indexBlocked);
+      return;
+    }
     const sessions = [...this.sessions.values()]
       .filter((s) => s.summary.status === "running")
       .map((s) => this.recordOf(s));
@@ -907,7 +891,8 @@ export class SessionManager implements ISessionManager {
     await writeSessionsIndex(
       this.indexPath,
       sessions,
-      this.options.indexContributor?.pendingThreadDeletes?.() ?? []
+      this.options.indexContributor?.pendingThreadDeletes?.() ?? [],
+      this.indexPreserved
     );
   }
 }
@@ -945,7 +930,8 @@ export async function drainSessionIndexWrites(indexPath?: string): Promise<void>
 async function writeSessionsIndex(
   indexPath: string,
   sessions: SessionRecord[],
-  pendingThreadDeletes: string[] = []
+  pendingThreadDeletes: string[] = [],
+  preserved: SessionsIndexPreserved = NOTHING_PRESERVED
 ): Promise<void> {
   const previous = sessionIndexWrites.get(indexPath) ?? Promise.resolve();
   const run = previous.then(async () => {
@@ -954,7 +940,11 @@ async function writeSessionsIndex(
       await mkdir(dirname(indexPath), { recursive: true });
       await writeFile(
         tmpPath,
-        `${JSON.stringify({ version: 1, sessions, pendingThreadDeletes }, null, 2)}\n`,
+        `${JSON.stringify(
+          { ...preserved.extra, version: 1, sessions: [...sessions, ...preserved.rejected], pendingThreadDeletes },
+          null,
+          2
+        )}\n`,
         "utf8"
       );
       await rename(tmpPath, indexPath);
@@ -1315,19 +1305,21 @@ export class LocalSessionManager implements ISessionManager {
     if (!contributor || !this.indexPath) {
       return;
     }
-    try {
-      const raw = await readFile(this.indexPath, "utf8");
-      const index = parseSessionsConfig(JSON.parse(raw));
-      contributor.adopt(index.sessions.filter((record) => contributor.owns(record)));
-      contributor.adoptPendingThreadDeletes?.(index.pendingThreadDeletes);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        console.error("Failed to read sessions index for agent-chat tabs", error);
-        // The tab records did not load: nothing may take a missing tab for a deleted thread (D-M2).
-        throw new SessionsIndexUnreadableError();
-      }
+    const read = await readSessionsIndex(this.indexPath);
+    this.indexPreserved = read.preserved;
+    this.indexBlocked = read.writable ? null : "the sessions index could not be read";
+    if (!read.loaded) {
+      // The tab records did not load: nothing may take a missing tab for a deleted thread (D-M2).
+      throw new SessionsIndexUnreadableError();
     }
+    contributor.adopt(read.config.sessions.filter((record) => contributor.owns(record)));
+    contributor.adoptPendingThreadDeletes?.(read.config.pendingThreadDeletes);
   }
+
+  /** What `sessions.json` held that this build cannot read, written back as found. */
+  private indexPreserved: SessionsIndexPreserved = NOTHING_PRESERVED;
+  /** Why `sessions.json` may not be written this run (it could not be read), or null. */
+  private indexBlocked: string | null = null;
 
   /**
    * Persist ONLY the contributor's records: a direct PTY cannot survive a
@@ -1339,6 +1331,10 @@ export class LocalSessionManager implements ISessionManager {
       return;
     }
     const indexPath = this.indexPath;
+    if (this.indexBlocked !== null) {
+      warnBlockedIndexOnce(indexPath, this.indexBlocked);
+      return;
+    }
     let records: SessionRecord[];
     try {
       records = contributor.records();
@@ -1347,7 +1343,7 @@ export class LocalSessionManager implements ISessionManager {
       return;
     }
     // Same atomic, uniquely-named, serialised write as the tmux backend.
-    void writeSessionsIndex(indexPath, records, contributor.pendingThreadDeletes?.() ?? []);
+    void writeSessionsIndex(indexPath, records, contributor.pendingThreadDeletes?.() ?? [], this.indexPreserved);
   }
 }
 
@@ -1361,4 +1357,81 @@ export class SessionsIndexUnreadableError extends Error {
     super("The sessions index could not be read; the tab records are not loaded.");
     this.name = "SessionsIndexUnreadableError";
   }
+}
+
+/** What `sessions.json` held beyond what this build reads: written back verbatim by every rewrite. */
+export interface SessionsIndexPreserved {
+  /** `sessions` entries this build's schema refuses (a newer build's shape), as found. */
+  rejected: unknown[];
+  /** Top-level keys other than `version`, `sessions` and `pendingThreadDeletes`, as found. */
+  extra: Record<string, unknown>;
+}
+
+const NOTHING_PRESERVED: SessionsIndexPreserved = { rejected: [], extra: {} };
+
+/**
+ * Read `sessions.json` for a reattach, non-destructively (the tolerant-store rules the other daemon
+ * stores follow):
+ * - missing → loaded, empty, writable;
+ * - unreadable (permissions, I/O) → NOT loaded and NOT writable for this run: the file may hold
+ *   good records (the agent-chat tabs among them), so nothing is written over it;
+ * - corrupt (bad JSON, another version) → moved aside to `sessions.json.corrupt-<stamp>` (kept to
+ *   look at, never overwritten), NOT loaded, writable from an empty index; if it cannot be moved,
+ *   not writable;
+ * - read → loaded, with the records this build refuses and unknown top-level keys preserved for
+ *   every rewrite.
+ */
+export async function readSessionsIndex(indexPath: string): Promise<{
+  loaded: boolean;
+  writable: boolean;
+  config: SessionsConfig;
+  preserved: SessionsIndexPreserved;
+}> {
+  let raw: string;
+  try {
+    raw = await readFile(indexPath, "utf8");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") {
+      // No index yet (first run / cleared) — genuinely no known sessions.
+      return { loaded: true, writable: true, config: createDefaultSessionsConfig(), preserved: NOTHING_PRESERVED };
+    }
+    // Exists but unreadable: do NOT assume empty, and never write over it.
+    console.error("Failed to read sessions index; it is left as it is and not written this run", error);
+    return { loaded: false, writable: false, config: createDefaultSessionsConfig(), preserved: NOTHING_PRESERVED };
+  }
+  try {
+    const value: unknown = JSON.parse(raw);
+    const config = parseSessionsConfig(value);
+    const record = value as Record<string, unknown>;
+    const rejected = Array.isArray(record.sessions)
+      ? record.sessions.filter((entry) => !sessionRecordSchema.safeParse(entry).success)
+      : [];
+    // `fromEntries`, not assignment: a key such as `__proto__` stays an own key.
+    const extra = Object.fromEntries(
+      Object.entries(record).filter(([key]) => key !== "version" && key !== "sessions" && key !== "pendingThreadDeletes")
+    );
+    if (rejected.length > 0) {
+      console.warn(`sessions.json: ${rejected.length} record(s) this build cannot read are kept in the file untouched`);
+    }
+    return { loaded: true, writable: true, config, preserved: { rejected, extra } };
+  } catch (error) {
+    // Corrupt/partial JSON (an interrupted write) or another version: kept aside, never overwritten.
+    const aside = `${indexPath}.corrupt-${new Date().toISOString().replace(/[:.]/g, "-")}`;
+    try {
+      await rename(indexPath, aside);
+      console.error(`Failed to parse sessions index; moved it to ${aside}`, error);
+      return { loaded: false, writable: true, config: createDefaultSessionsConfig(), preserved: NOTHING_PRESERVED };
+    } catch {
+      console.error("Failed to parse sessions index, and could not move it aside; it is not written this run", error);
+      return { loaded: false, writable: false, config: createDefaultSessionsConfig(), preserved: NOTHING_PRESERVED };
+    }
+  }
+}
+
+const warnedBlockedIndexes = new Set<string>();
+
+function warnBlockedIndexOnce(indexPath: string, reason: string): void {
+  if (warnedBlockedIndexes.has(indexPath)) return;
+  warnedBlockedIndexes.add(indexPath);
+  console.error(`sessions.json is not written this run: ${reason} (${indexPath})`);
 }

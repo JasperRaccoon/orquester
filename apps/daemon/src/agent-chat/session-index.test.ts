@@ -1,7 +1,7 @@
 import { strict as assert } from "node:assert";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { test } from "node:test";
 import type { SessionRecord } from "@orquester/config";
 import { LocalSessionManager, SessionManager, SessionsIndexUnreadableError, drainSessionIndexWrites } from "../sessions.ts";
@@ -225,5 +225,104 @@ test("the direct-PTY backend's reattach also fails on an unreadable index, and n
   } finally {
     console.error = original;
   }
+  await rm(dir, { recursive: true, force: true });
+});
+
+// --- a reattach never rewrites what it could not read (both backends) -----------------------
+
+const quietly = async <T>(run: () => Promise<T>): Promise<T> => {
+  const original = { error: console.error, warn: console.warn };
+  console.error = () => undefined;
+  console.warn = () => undefined;
+  try {
+    return await run();
+  } finally {
+    console.error = original.error;
+    console.warn = original.warn;
+  }
+};
+
+const asRoot = typeof process.getuid === "function" && process.getuid() === 0;
+
+test("tmux: an unreadable index is never written over — the chat tabs in it survive the run", { skip: asRoot ? "root reads any file" : false }, async () => {
+  const h = await harness([chatRecord("chat-1", 0)], []);
+  const before = await readFile(h.indexPath, "utf8");
+  await chmod(h.indexPath, 0o000);
+  try {
+    await quietly(() => assert.rejects(h.manager.reattach(), SessionsIndexUnreadableError));
+    h.manager.persistIndexNow();
+    await drainSessionIndexWrites(h.indexPath);
+  } finally {
+    await chmod(h.indexPath, 0o600);
+  }
+  assert.equal(await readFile(h.indexPath, "utf8"), before, "the file is as it was");
+  h.manager.closeAll();
+  await h.cleanup();
+});
+
+test("tmux: a corrupt index is moved aside, kept whole, before anything new is written", async () => {
+  const h = await harness([], []);
+  await writeFile(h.indexPath, '{"version":1,"sessions":[{"id":"chat-1"', "utf8");
+  await quietly(() => assert.rejects(h.manager.reattach(), SessionsIndexUnreadableError));
+  await drainSessionIndexWrites(h.indexPath);
+  const dir = dirname(h.indexPath);
+  const aside = (await readdir(dir)).find((name) => name.startsWith("sessions.json.corrupt-"));
+  assert.ok(aside, "moved aside");
+  assert.equal(await readFile(join(dir, aside), "utf8"), '{"version":1,"sessions":[{"id":"chat-1"');
+  h.manager.closeAll();
+  await h.cleanup();
+});
+
+test("tmux: records and top-level keys this build cannot read are written back as found", async () => {
+  const future = { id: "future-1", kind: "hologram", title: "from a newer build" };
+  const h = await harness([chatRecord("chat-1", 0)], []);
+  const index = JSON.parse(await readFile(h.indexPath, "utf8")) as Record<string, unknown> & { sessions: unknown[] };
+  await writeFile(h.indexPath, JSON.stringify({ ...index, sessions: [...index.sessions, future], newerKey: { keep: true } }), "utf8");
+  await quietly(() => h.manager.reattach());
+  h.manager.persistIndexNow();
+  await drainSessionIndexWrites(h.indexPath);
+  const written = JSON.parse(await readFile(h.indexPath, "utf8")) as { sessions: Array<{ id: string }>; newerKey?: unknown };
+  assert.deepEqual(written.newerKey, { keep: true });
+  assert.deepEqual(written.sessions.find((record) => record.id === "future-1"), future);
+  assert.ok(written.sessions.some((record) => record.id === "chat-1"), "the chat tab too");
+  h.manager.closeAll();
+  await h.cleanup();
+});
+
+test("direct PTY: the same — never written over when unreadable, unknown records kept", { skip: asRoot ? "root reads any file" : false }, async () => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-session-index-local-"));
+  const indexPath = join(dir, "sessions.json");
+  const future = { id: "future-1", kind: "hologram" };
+  await writeFile(indexPath, JSON.stringify({ version: 1, sessions: [chatRecord("chat-1", 0), future], newerKey: 1 }), "utf8");
+  const before = await readFile(indexPath, "utf8");
+  const make = () => {
+    const chat = new ChatSessionManager({ requestPersist: () => undefined });
+    const manager = new LocalSessionManager(
+      REGISTRY,
+      { indexContributor: { records: () => chat.records(), adopt: (rows: SessionRecord[]) => chat.adopt(rows), owns: (record: SessionRecord) => record.kind === "agent-chat" } },
+      indexPath
+    );
+    return { chat, manager };
+  };
+
+  const blocked = make();
+  await chmod(indexPath, 0o000);
+  try {
+    await quietly(() => assert.rejects(blocked.manager.reattach(), SessionsIndexUnreadableError));
+    blocked.manager.persistIndexNow();
+    await drainSessionIndexWrites(indexPath);
+  } finally {
+    await chmod(indexPath, 0o600);
+  }
+  assert.equal(await readFile(indexPath, "utf8"), before, "not written over");
+
+  const readable = make();
+  await quietly(() => readable.manager.reattach());
+  assert.equal(readable.chat.get("chat-1")?.kind, "agent-chat");
+  readable.manager.persistIndexNow();
+  await drainSessionIndexWrites(indexPath);
+  const written = JSON.parse(await readFile(indexPath, "utf8")) as { sessions: Array<{ id: string }>; newerKey?: unknown };
+  assert.equal(written.newerKey, 1);
+  assert.deepEqual(written.sessions.find((record) => record.id === "future-1"), future);
   await rm(dir, { recursive: true, force: true });
 });
