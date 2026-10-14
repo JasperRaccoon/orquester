@@ -159,40 +159,39 @@ function killBrowser(browser: Browser): void {
   }
 }
 
-/** A counting semaphore whose waits honour an abort signal. */
-class Gate {
+/** A counting semaphore whose waits honour an abort signal; a freed slot passes straight to the next waiter. */
+export class Gate {
   private active = 0;
   private readonly waiters: Array<() => void> = [];
 
   constructor(private readonly limit: number) {}
 
   async enter(signal: AbortSignal): Promise<() => void> {
-    if (this.active >= this.limit) {
+    signal.throwIfAborted();
+    if (this.active < this.limit) {
+      this.active += 1;
+    } else {
       await new Promise<void>((resolve, reject) => {
         const onAbort = (): void => {
-          const index = this.waiters.indexOf(wake);
+          const index = this.waiters.indexOf(handOver);
           if (index !== -1) this.waiters.splice(index, 1);
           reject(signal.reason);
         };
-        const wake = (): void => {
+        const handOver = (): void => {
           signal.removeEventListener("abort", onAbort);
           resolve();
         };
-        if (signal.aborted) {
-          reject(signal.reason);
-          return;
-        }
-        this.waiters.push(wake);
+        this.waiters.push(handOver);
         signal.addEventListener("abort", onAbort, { once: true });
       });
     }
-    this.active += 1;
     let released = false;
     return () => {
       if (released) return;
       released = true;
-      this.active -= 1;
-      this.waiters.shift()?.();
+      const next = this.waiters.shift();
+      if (next) next();
+      else this.active -= 1;
     };
   }
 }

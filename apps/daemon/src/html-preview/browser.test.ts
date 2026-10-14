@@ -14,7 +14,7 @@ import { after, before, describe, it } from "node:test";
 
 import { HTML_RENDER_COLUMN_WIDTH, htmlRenderStockTheme } from "@orquester/api/agent-chat";
 
-import { HtmlPreviewBrowser, HtmlPreviewError, MAX_CONSOLE_MESSAGES, MAX_CONSOLE_TEXT_CHARS } from "./browser.ts";
+import { Gate, HtmlPreviewBrowser, HtmlPreviewError, MAX_CONSOLE_MESSAGES, MAX_CONSOLE_TEXT_CHARS } from "./browser.ts";
 import { measureHtmlPage, previewHtmlPage } from "./index.ts";
 
 function findChromium(): string | undefined {
@@ -274,5 +274,43 @@ describe("html preview without a browser", () => {
 
   it("measures nothing, so a page publishes without heights", async () => {
     assert.equal(await measureHtmlPage(none, FIXED(10)), undefined);
+  });
+});
+
+describe("the browser gate", () => {
+  it("lets two in, hands a freed slot to the next waiter, and drops a waiter whose call was cancelled", async () => {
+    const gate = new Gate(2);
+    const live = new AbortController().signal;
+    const first = await gate.enter(live);
+    const second = await gate.enter(live);
+    const order: string[] = [];
+    const cancelled = new AbortController();
+    const third = gate.enter(cancelled.signal).then(
+      () => order.push("third"),
+      () => order.push("third cancelled")
+    );
+    const fourth = gate.enter(live).then((release) => {
+      order.push("fourth");
+      return release;
+    });
+    cancelled.abort();
+    await third;
+    first();
+    first(); // a second release is a no-op
+    const releaseFourth = await fourth;
+    assert.deepEqual(order, ["third cancelled", "fourth"]);
+    // Still full: second and fourth hold the two slots.
+    let fifthIn = false;
+    const fifth = gate.enter(live).then((release) => {
+      fifthIn = true;
+      return release;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.equal(fifthIn, false);
+    second();
+    (await fifth)();
+    releaseFourth();
+    // Both slots free again.
+    (await gate.enter(live))();
   });
 });
