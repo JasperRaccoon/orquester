@@ -1,0 +1,49 @@
+{
+  "total_count": 4,
+  "check_runs": [
+    {
+      "id": 115691177693,
+      "name": "CodeQL",
+      "head_sha": "2de1e0886a0cf896165db70e7729b28bd5b0febc",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-14T05:06:06Z",
+      "completed_at": "2026-10-14T05:06:08Z",
+      "html_url": "https://github.com/cli/cli/runs/115691177693",
+      "details_url": "https://github.com/cli/cli/runs/115691177693"
+    },
+    {
+      "id": 115691007304,
+      "name": "copilot-pull-request-reviewer",
+      "head_sha": "2de1e0886a0cf896165db70e7729b28bd5b0febc",
+      "status": "completed",
+      "conclusion": "success",
+      "started_at": "2026-10-14T05:05:32Z",
+      "completed_at": "2026-10-14T05:07:25Z",
+      "html_url": "https://github.com/cli/cli/actions/runs/38514778183/job/115691007304",
+      "details_url": "https://github.com/cli/cli/actions/runs/38514778183/job/115691007304"
+    },
+    {
+      "id": 115691003395,
+      "name": "check-requirements / close-unmet-requirements",
+      "head_sha": "2de1e0886a0cf896165db70e7729b28bd5b0febc",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-10-14T05:05:27Z",
+      "completed_at": "2026-10-14T05:05:20Z",
+      "html_url": "https://github.com/cli/cli/actions/runs/38514767273/job/115691003395",
+      "details_url": "https://github.com/cli/cli/actions/runs/38514767273/job/115691003395"
+    },
+    {
+      "id": 115691001462,
+      "name": "ready-for-review",
+      "head_sha": "2de1e0886a0cf896165db70e7729b28bd5b0febc",
+      "status": "completed",
+      "conclusion": "skipped",
+      "started_at": "2026-10-14T05:05:27Z",
+      "completed_at": "2026-10-14T05:05:20Z",
+      "html_url": "https://github.com/cli/cli/actions/runs/38514767273/job/115691001462",
+      "details_url": "https://github.com/cli/cli/actions/runs/38514767273/job/115691001462"
+    }
+  ]
+}

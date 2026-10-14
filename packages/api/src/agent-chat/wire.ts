@@ -91,6 +91,15 @@ export const agentChatRoutes = {
    */
   account: (sessionId: string): string => `${sessionBase(sessionId)}/account`,
 
+  /**
+   * The thread's pull request watches (spec 2026-10-14 §5 "PR watch"; `pr-watch.ts`): `GET` lists,
+   * `POST` starts one. Daemon-owned, never forwarded to the host.
+   */
+  prWatches: (sessionId: string): string => `${sessionBase(sessionId)}/pr-watches`,
+  /** `DELETE` stops one watch. */
+  prWatch: (sessionId: string, watchId: string): string =>
+    `${sessionBase(sessionId)}/pr-watches/${encodeURIComponent(watchId)}`,
+
   // §6.3 reads
   thread: (sessionId: string): string => `${sessionBase(sessionId)}/thread`,
   events: (sessionId: string): string => `${sessionBase(sessionId)}/events`,

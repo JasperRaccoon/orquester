@@ -38,10 +38,18 @@ const toolkit = (id: string, names: string[], instructions?: string): SessionToo
     )
   });
 
-test("the production registry builds: valid names, instructions within the budget", () => {
-  // Building validates every name and throws past SESSION_TOOL_INSTRUCTIONS_MAX_BYTES.
+test("the production registry carries every listed toolkit's tools, within the instruction cap", () => {
   const registry = sessionToolRegistry();
   assert.equal(registry.enabled, true);
+  assert.deepEqual(
+    registry.tools.map((tool) => tool.name),
+    SESSION_TOOLKITS.flatMap((toolkit) => toolkit.tools.map((tool) => tool.name))
+  );
+  for (const name of ["watch_pull_request", "unwatch_pull_request", "list_pull_request_watches"]) {
+    assert.ok(registry.get(name), name);
+  }
+  assert.ok(Buffer.byteLength(registry.instructions, "utf8") <= SESSION_TOOL_INSTRUCTIONS_MAX_BYTES);
+  assert.match(registry.instructions, /watch_pull_request/);
   assert.ok(SESSION_TOOLKITS.includes(schedulingToolkit));
   for (const tool of schedulingToolkit.tools) assert.equal(registry.get(tool.name)?.name, tool.name);
   assert.ok(registry.instructions.includes("`schedule_task`"));

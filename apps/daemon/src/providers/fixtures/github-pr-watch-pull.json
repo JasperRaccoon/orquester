@@ -1,0 +1,42 @@
+{
+  "url": "https://api.github.com/repos/cli/cli/pulls/14679",
+  "id": 4853228991,
+  "html_url": "https://github.com/cli/cli/pull/14679",
+  "number": 14679,
+  "state": "open",
+  "locked": false,
+  "title": "Reject terminal stdin for `gh auth login --with-token`",
+  "user": {
+    "login": "BagToad",
+    "id": 47394200,
+    "type": "User"
+  },
+  "body": "<!--\nThank you for contributing to GitHub CLI!\n\nIf you are proposing a fix for a security issue, STOP and follow .github/SECURITY.md instead.\n\nKeep the entire pull request self-contained, reviewer-fac",
+  "created_at": "2026-10-14T05:05:15Z",
+  "updated_at": "2026-10-14T05:07:25Z",
+  "closed_at": null,
+  "merged_at": null,
+  "draft": true,
+  "head": {
+    "label": "cli:bagtoad/auth-login-with-token-tty-error",
+    "ref": "bagtoad/auth-login-with-token-tty-error",
+    "sha": "2de1e0886a0cf896165db70e7729b28bd5b0febc",
+    "repo": {
+      "full_name": "cli/cli"
+    }
+  },
+  "base": {
+    "label": "cli:trunk",
+    "ref": "trunk",
+    "sha": "d6b82b12e67d108b7c82d76d943a3a47814acbc1",
+    "repo": {
+      "full_name": "cli/cli"
+    }
+  },
+  "merged": false,
+  "mergeable": true,
+  "mergeable_state": "clean",
+  "comments": 0,
+  "review_comments": 1,
+  "commits": 1
+}

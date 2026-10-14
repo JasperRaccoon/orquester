@@ -1,7 +1,8 @@
 import React from "react";
-import { ArrowUp, Clock, Undo2, X } from "lucide-react";
+import { ArrowUp, Clock, GitPullRequest, Undo2, X } from "lucide-react";
 
 import { isScheduledTaskMessage, type AttachmentRef } from "@orquester/api";
+import { parsePullRequestWatchMessage, type ParsedPullRequestWatchMessage } from "@orquester/api/agent-chat";
 
 import { FileTypeIcon } from "../../../../icons/files";
 import { cn } from "../../../../lib/cn";
@@ -238,6 +239,9 @@ export const UserMessageRow = React.memo(function UserMessageRow({
   // Sent by the daemon's scheduler on the thread's behalf (session tools §5): say so, as an agent's
   // launch prompt does, rather than passing it off as typed.
   const scheduled = isScheduledTaskMessage(row.message);
+  const automated = React.useMemo(() => parsePullRequestWatchMessage(text), [text]);
+
+  if (automated !== null) return <PullRequestWatchMessageRow row={row} message={automated} />;
 
   return (
     <div className="group flex flex-col items-end gap-1" data-scheduled-task={scheduled ? "true" : undefined}>
@@ -269,6 +273,50 @@ export const UserMessageRow = React.memo(function UserMessageRow({
     </div>
   );
 });
+
+/**
+ * A message Orquester sent the thread for a pull request watch (spec
+ * 2026-10-14 §5 "PR watch"): it reaches the agent as a user turn, but nobody
+ * typed it, so it is not the user's bubble — a full-width notice with the
+ * watch's icon, an "Automated" caption and the one-line summary, the details
+ * under it. No rewind from it: the user did not write it.
+ */
+function PullRequestWatchMessageRow({
+  row,
+  message
+}: {
+  row: Row<"message">;
+  message: ParsedPullRequestWatchMessage;
+}): React.ReactElement {
+  return (
+    <div className="group flex flex-col gap-1" data-automated-message="pr-watch">
+      <div className="rounded-xl border border-dashed border-neutral-700 bg-neutral-900/60 px-3 py-2 text-neutral-300">
+        <AuthorHeading>Orquester (automated)</AuthorHeading>
+        <div className="flex min-w-0 items-center gap-1.5 text-xs">
+          <GitPullRequest size={13} aria-hidden className="shrink-0 text-info" />
+          <span className="shrink-0 font-medium text-neutral-200">Pull request watch</span>
+          <span className="shrink-0 rounded border border-neutral-700 px-1 text-[10px] uppercase tracking-wide text-neutral-500">
+            Automated
+          </span>
+          <span className="min-w-0 truncate text-neutral-400" title={message.summary}>
+            {message.summary}
+          </span>
+        </div>
+        {message.body.length > 0 ? (
+          <div className="mt-1.5 text-neutral-400">
+            <ClampedBubbleText text={message.body} showLabel="Show the whole update" />
+          </div>
+        ) : null}
+      </div>
+      <div className="ac-reveal ac-tabular flex w-full items-center justify-end gap-2 pe-1 text-xs">
+        <span className="text-neutral-500" title={formatRowTimestampTooltip(row.createdAt)}>
+          {formatRowTimestamp(row.createdAt)}
+        </span>
+        <CopyButton size="micro" value={row.message.text} label="Copy update" />
+      </div>
+    </div>
+  );
+}
 
 // ---------------------------------------------------------------------------
 // An agent's launch prompt (§7.6)

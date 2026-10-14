@@ -8,6 +8,7 @@ import { toRemoteConfig, toUiConnection } from "../lib/connections";
 import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-chat/providers";
 import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/store";
 import { applyScheduledTaskEvent, resetScheduledTasks } from "../lib/scheduled-tasks/store";
+import { applyPullRequestWatchesEvent, resetPullRequestWatches } from "../lib/pr-watches/store";
 import { applyAgentProfileEvent, resetAgentProfile } from "../lib/agent-profile/store";
 import { applyWorkflowsEvent, resetWorkflows, workflowsStore } from "../lib/workflows/store";
 import { observeWorkflowRunEvent, resetWorkflowNotifications } from "../lib/workflows/notifications";
@@ -135,7 +136,7 @@ import type {
   UsageResponse,
   UsageTokensResponse
 } from "@orquester/api";
-import { AGENT_PROFILE_CHANNEL, DESKTOP_CHANNEL, SAVED_PROMPTS_CHANNEL, SCHEDULED_TASKS_CHANNEL, WORKFLOWS_CHANNEL } from "@orquester/api";
+import { AGENT_PROFILE_CHANNEL, DESKTOP_CHANNEL, PR_WATCHES_CHANNEL, SAVED_PROMPTS_CHANNEL, SCHEDULED_TASKS_CHANNEL, WORKFLOWS_CHANNEL } from "@orquester/api";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -1706,6 +1707,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     invalidateProjectIndex();
     resetSavedPrompts();
     resetScheduledTasks();
+    resetPullRequestWatches();
     resetAgentProfile();
     resetWorkflows();
     resetWorkflowNotifications();
@@ -3242,6 +3244,12 @@ export const useAppStore = create<AppState>((set, get) => ({
     if (event.channel === SCHEDULED_TASKS_CHANNEL) {
       // A chat thread's scheduled tasks (its status-line chip) live in their own module store.
       applyScheduledTaskEvent(event);
+      return;
+    }
+    if (event.channel === PR_WATCHES_CHANNEL) {
+      // A chat thread's pull request watches (the whole list per event), kept
+      // in their own module store; a malformed payload is ignored there.
+      applyPullRequestWatchesEvent(event);
       return;
     }
     if (event.channel === AGENT_PROFILE_CHANNEL) {

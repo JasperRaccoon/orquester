@@ -202,6 +202,14 @@ export function pushConfigPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "push.json");
 }
 
+/**
+ * Pull request watches (spec 2026-10-14 §5 "PR watch"): what each chat thread watches and what it
+ * was already told. 0600, the daemon's own file, read tolerantly ({@link parsePullRequestWatchFile}).
+ */
+export function pullRequestWatchesPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "pr-watches.json");
+}
+
 /** Cached token/cost scan (Claude JSONL + Codex sessions); 0600. */
 export function usageTokensCacheFile(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "usage-tokens.json");
@@ -1641,3 +1649,4 @@ export function isValidName(name: string | undefined): name is string {
 
 export * from "./workflows.ts";
 export * from "./scheduled-tasks.ts";
+export * from "./pr-watches.ts";

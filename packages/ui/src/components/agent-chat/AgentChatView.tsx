@@ -98,6 +98,7 @@ import { ChatComposer } from "./composer/ChatComposer";
 import { ChatErrorBoundary } from "./ChatErrorBoundary";
 import { FullOutputPane } from "./FullOutputPane";
 import { ChatStatusLine } from "./status/ChatStatusLine";
+import { PullRequestWatchStrip } from "./status/PullRequestWatchStrip";
 import { GOAL_ACTION_TEXT, goalActions, goalActionsNote } from "./status/goal-chip";
 import { ChatTimeline } from "./timeline/ChatTimeline";
 import { resolveMarkdownImageSource } from "./timeline/markdown/local-image";
@@ -1014,6 +1015,11 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 onGoalAction={paintOnly ? noop : sendGoalAction}
                 showScheduledTasks
               />
+            </div>
+            {/* The thread's pull request watches (spec 2026-10-14 §5): nothing
+                when it watches none. */}
+            <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
+              <PullRequestWatchStrip sessionId={sessionId} enabled={!paintOnly} />
             </div>
             {/* The dock overlaps the composer by 17px so the two read as ONE
                 shape — a drawer pulled out of the composer, not a card resting

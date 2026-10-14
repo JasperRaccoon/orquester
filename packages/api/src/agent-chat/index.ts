@@ -27,6 +27,7 @@ export * from "./message-liveness.ts";
 export * from "./open-work.ts";
 export * from "./pending.ts";
 export * from "./plan.ts";
+export * from "./pr-watch.ts";
 export * from "./prompts.ts";
 export * from "./re-emitted.ts";
 export * from "./roster.ts";
