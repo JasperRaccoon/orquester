@@ -63,6 +63,7 @@ const HOST_RESTARTING: DaemonOutcome<never> = { ok: false, code: "HOST_UNAVAILAB
  */
 function visualRefusal(error: unknown): DaemonOutcome<never> {
   if (error instanceof HtmlRenderPublishError) {
+    if (error.code === "cancelled") return { ok: false, code: "CANCELLED", message: error.message };
     if (error.code === "store-failed") {
       console.error("[session-tools] an html_render page could not be stored", error);
       return { ok: false, code: "UNAVAILABLE", message: "The page could not be saved. Try again in a few seconds." };

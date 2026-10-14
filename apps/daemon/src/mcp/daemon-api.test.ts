@@ -149,6 +149,10 @@ test("visual pages answer outcomes: the publisher's and preview's messages pass,
   };
   const stored = await publish();
   assert.deepEqual(stored, { ok: false, code: "UNAVAILABLE", message: "The page could not be saved. Try again in a few seconds." });
+  next = async () => {
+    throw new HtmlRenderPublishError("cancelled", "The call was cancelled.");
+  };
+  assert.deepEqual(await publish(), { ok: false, code: "CANCELLED", message: "The call was cancelled." });
   for (const [code, expected] of [
     ["timeout", "TIMEOUT"],
     ["cancelled", "CANCELLED"],

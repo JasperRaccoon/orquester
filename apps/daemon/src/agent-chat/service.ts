@@ -976,9 +976,7 @@ export class AgentChatService {
    * answer is the reference the tool returns. Refusals throw
    * `HtmlRenderPublishError` with an agent-facing message.
    */
-  async publishHtmlRender(
-    input: Omit<PublishHtmlRenderInput, "measure"> & { signal?: AbortSignal }
-  ): Promise<HtmlRenderReference> {
+  async publishHtmlRender(input: Omit<PublishHtmlRenderInput, "measure">): Promise<HtmlRenderReference> {
     const { signal, ...page } = input;
     const browser = this.opts.htmlPreview;
     return publishHtmlRender(
@@ -1000,6 +998,7 @@ export class AgentChatService {
       },
       {
         ...page,
+        ...(signal ? { signal } : {}),
         ...(browser && page.heights === undefined
           ? { measure: (prepared: string) => measureHtmlPage(browser, prepared, signal) }
           : {})
