@@ -706,8 +706,10 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
     }
     const exitedAt = this.now().toISOString();
     for (const app of live) {
+      // Read first, as `syncApps` does: never `exited` without its code.
+      const exitCode = await readInt(appFile(layout, app.id, "exit"));
       app.status = "exited";
-      app.exitCode = await readInt(appFile(layout, app.id, "exit"));
+      app.exitCode = exitCode;
       app.exitedAt = exitedAt;
     }
     await this.killHost(rt);
@@ -828,8 +830,12 @@ export class DesktopManager extends EventEmitter<DesktopManagerEvents> {
             }
             const exitPath = appFile(layout, app.id, "exit");
             if (existsSync(exitPath)) {
+              // Read before the app turns `exited`: a summary taken during
+              // the read (`get()`, another update) would show it exited with
+              // no code.
+              const exitCode = await readInt(exitPath);
               app.status = "exited";
-              app.exitCode = await readInt(exitPath);
+              app.exitCode = exitCode;
               app.exitedAt = this.now().toISOString();
               const timer = rt.killTimers.get(app.id);
               if (timer) clearTimeout(timer);
