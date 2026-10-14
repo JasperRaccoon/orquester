@@ -20,9 +20,22 @@
  *   errors that the path does not exist (§4.5 Codex).
  */
 
+import { readFileSync, statSync } from "node:fs";
+
+import type { PluginId } from "@orquester/api";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
+import {
+  appendNodeRequireOption,
+  parsePluginsConfig,
+  pluginStateOf,
+  pluginsConfigPath,
+  tsRustPreloadPath
+} from "@orquester/config";
 
 import { AGENT_LAUNCH_ENV_VAR } from "./leftover-processes.ts";
+
+/** `TS_RUST_PLUGIN_ID`, spelled here so the host never loads the whole `@orquester/api` graph. */
+const TS_RUST_PLUGIN_ID: PluginId = "ts-rust";
 
 /** The env variable each adapter binds its managed account home through. */
 export const ACCOUNT_HOME_ENV_VAR: Record<AgentAdapterId, string> = {
@@ -86,6 +99,30 @@ interface BuildProviderEnvInput {
    * is a marker and nothing more.
    */
   launchId: string;
+  /**
+   * The plugins' NODE_OPTIONS preload ({@link providerNodePreload}), appended
+   * to any NODE_OPTIONS in `extraEnv`. Omitted while no plugin needs one.
+   */
+  nodePreloadPath?: string;
+}
+
+/**
+ * The tsc-rs preload a provider child loads through NODE_OPTIONS, or
+ * `undefined` (plugins spec §3.3). Read from disk at every spawn — the host
+ * has no plugin state of its own: the preload must exist (Node refuses to
+ * start on a missing `--require`) and plugins.json must turn the plugin on in
+ * at least one workspace. Any read or parse failure means no preload; the
+ * preload itself decides per `tsc` call whether to redirect.
+ */
+export function providerNodePreload(appdir: string): string | undefined {
+  try {
+    const preload = tsRustPreloadPath(appdir);
+    if (!statSync(preload).isFile()) return undefined;
+    const config = parsePluginsConfig(JSON.parse(readFileSync(pluginsConfigPath(appdir), "utf8")));
+    return pluginStateOf(config, TS_RUST_PLUGIN_ID).enabledWorkspaces.length > 0 ? preload : undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -104,7 +141,8 @@ export function buildProviderEnv(input: BuildProviderEnvInput): Record<string, s
     accountHomeDir,
     extraEnv,
     sessionId,
-    launchId
+    launchId,
+    nodePreloadPath
   } = input;
 
   const env: Record<string, string> = {
@@ -129,6 +167,11 @@ export function buildProviderEnv(input: BuildProviderEnvInput): Record<string, s
       continue;
     }
     env[key] = value;
+  }
+
+  // Appended, never replacing a NODE_OPTIONS the launcher env set.
+  if (nodePreloadPath !== undefined) {
+    env.NODE_OPTIONS = appendNodeRequireOption(env.NODE_OPTIONS, nodePreloadPath);
   }
 
   // Last, so nothing in extraEnv can shadow the account binding or the

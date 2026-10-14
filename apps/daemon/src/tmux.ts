@@ -473,6 +473,24 @@ export class Tmux {
     }
   }
 
+  /**
+   * The value of `key` a new pane inherits from outside its session env: the
+   * server's GLOBAL environment, or — when no server is running yet — this
+   * client's env, which the starting new-session copies into the global one.
+   * (Measured on tmux 3.4: a pane gets global env + the session's `-e` vars, and
+   * PATH from the new-session client; no other client variable reaches it.)
+   * `undefined` when the variable is unset there.
+   */
+  async inheritedEnvValue(key: string): Promise<string | undefined> {
+    const result = await this.run(["show-environment", "-g", key]);
+    if (result.code !== 0) {
+      return TMUX_NO_SERVER.test(result.stderr) ? sessionEnvBase()[key] : undefined;
+    }
+    // `KEY=value`, or `-KEY` for a variable marked unset.
+    const line = result.stdout.replace(/\n$/, "");
+    return line.startsWith(`${key}=`) ? line.slice(key.length + 1) : undefined;
+  }
+
   /** Kill a session (used to reap orphans / forget on close). */
   async killSession(id: string): Promise<void> {
     await this.run(["kill-session", "-t", tmuxName(id)]);

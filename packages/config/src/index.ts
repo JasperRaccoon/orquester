@@ -52,6 +52,7 @@ export function expandVars(value: string, vars: ConfigVars): string {
 //     app/     app.json, remotes.json, logs/<yyyy-mm-dd>.log
 //     daemon/  daemon.json, daemon.sock, sessions.json, todos.json, saved-prompts.json,
 //              desktops.json, desktops/<id>/ (per-desktop runtime dir, 0700),
+//              plugins.json, plugins/<id>/ (built-in plugin runtime files),
 //              logs/<yyyy-mm-dd>.log
 //
 // Workspaces live wherever daemon.json `workspacesDir` points (default
@@ -127,6 +128,38 @@ export function browserProfilesDir(baseDir: string): string {
 
 export function desktopsIndexPath(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "desktops.json");
+}
+
+/** Built-in plugin state (enabled workspaces, installed versions); see plugins.json below. */
+export function pluginsConfigPath(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "plugins.json");
+}
+
+/** Per-plugin runtime dirs (downloaded binaries, the tsc-rs preload). */
+export function pluginsDir(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "plugins");
+}
+
+/** `<appdir>/daemon/plugins/ts-rust`: holds preload.cjs, versions/<version>/ and .tmp/. */
+export function tsRustPluginDir(baseDir: string): string {
+  return joinPath(pluginsDir(baseDir), "ts-rust");
+}
+
+/** The tsc-rs preload every Orquester session loads through NODE_OPTIONS while the plugin is on. */
+export function tsRustPreloadPath(baseDir: string): string {
+  return joinPath(tsRustPluginDir(baseDir), "preload.cjs");
+}
+
+/**
+ * Append `--require "<preloadPath>"` to an existing NODE_OPTIONS value, keeping
+ * whatever the user already set. Idempotent: a value that already requires the
+ * preload is returned unchanged.
+ */
+export function appendNodeRequireOption(existing: string | undefined, preloadPath: string): string {
+  const option = `--require ${JSON.stringify(preloadPath)}`;
+  const current = (existing ?? "").trim();
+  if (current.includes(option)) return current;
+  return current.length > 0 ? `${current} ${option}` : option;
 }
 
 /** Parent of every desktop's runtime dir (sockets, cookies, logs); mode 0700. */
@@ -784,6 +817,79 @@ export function createDefaultWorkspacesConfig(): WorkspacesConfig {
 
 export function parseWorkspacesConfig(value: unknown): WorkspacesConfig {
   return workspacesConfigSchema.parse(value);
+}
+
+// plugins.json — built-in plugin state (docs/superpowers/specs/2026-10-14-plugins-ts-rust-design.md §5.1).
+// Keyed by plugin id. Tolerant like the other stores: unknown fields and unknown
+// plugin ids written by other app versions are preserved on rewrite. The tsc-rs
+// preload reads this file too, so it must stay plain JSON.
+
+export const pluginInstalledVersionSchema = z
+  .object({
+    version: z.string().min(1),
+    /** npm `dist.integrity` (sha512-…) of the platform tarball this version came from. */
+    integrity: z.string().min(1),
+    /** ISO timestamp the version was installed. */
+    installedAt: z.string()
+  })
+  .passthrough();
+
+export const pluginLastErrorSchema = z
+  .object({
+    at: z.string(),
+    /** Which install step failed, e.g. "registry", "download", "integrity", "extract", "smoke-test". */
+    step: z.string(),
+    message: z.string()
+  })
+  .passthrough();
+
+export const pluginStateSchema = z
+  .object({
+    /** Workspace names the plugin is on for. Unknown names are kept and ignored at runtime. */
+    enabledWorkspaces: z.array(z.string()).default([]),
+    current: pluginInstalledVersionSchema.optional(),
+    previous: pluginInstalledVersionSchema.optional(),
+    /** Set by rollback; a check stops at this version until `latest` moves past it. */
+    skippedVersion: z.string().optional(),
+    lastCheckAt: z.string().optional(),
+    lastError: pluginLastErrorSchema.optional()
+  })
+  .passthrough();
+
+export const pluginsConfigSchema = z
+  .object({
+    version: z.literal(1).default(1),
+    /**
+     * Keyed by plugin id. Entries are NOT validated here: a record another app
+     * version wrote for a plugin this one does not know is kept verbatim, whatever
+     * its shape. A known plugin's record is validated where it is read, by
+     * `pluginStateOf`.
+     */
+    plugins: z.record(z.string(), z.unknown()).default({})
+  })
+  .passthrough();
+
+export type PluginInstalledVersion = z.infer<typeof pluginInstalledVersionSchema>;
+export type PluginLastError = z.infer<typeof pluginLastErrorSchema>;
+export type PluginState = z.infer<typeof pluginStateSchema>;
+export type PluginsConfig = z.infer<typeof pluginsConfigSchema>;
+
+export function createDefaultPluginsConfig(): PluginsConfig {
+  return pluginsConfigSchema.parse({});
+}
+
+export function parsePluginsConfig(value: unknown): PluginsConfig {
+  return pluginsConfigSchema.parse(value);
+}
+
+/**
+ * A plugin's state, validated, or the empty default when the file has no record
+ * for it. Throws (a ZodError) when the record is malformed: the caller must
+ * treat that plugin's state as unreadable and never write over it. The result
+ * is a fresh object; unknown fields of the record are kept.
+ */
+export function pluginStateOf(config: PluginsConfig, id: string): PluginState {
+  return pluginStateSchema.parse(config.plugins[id] ?? {});
 }
 
 // sessions.json — the daemon's index of live tmux-backed sessions, used to

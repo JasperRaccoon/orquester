@@ -114,6 +114,8 @@ import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { RecentProjectsService, describeProjectPath } from "./recent-projects";
 import { SavedPromptError, SavedPromptsService, publishSavedPromptEvents } from "./saved-prompts.ts";
+import { PluginsService, publishPluginEvents } from "./plugins/plugins-service.ts";
+import { registerPluginRoutes } from "./plugins/routes.ts";
 import { detectRepoId } from "./repo-id";
 import { Tmux, sessionPath, tmuxAvailable, tmuxVersionOk } from "./tmux";
 import { SystemStatusService } from "./system-status";
@@ -621,6 +623,20 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     logger: console
   });
   await savedPrompts.load();
+  // Built-in plugins (Settings → Plugins; plugins spec §4–5): plugins.json, the tsc-rs install and
+  // its hourly update check, and the preload new sessions load through NODE_OPTIONS. Started before
+  // any transport serves or any chat or workflow run starts, so new sessions already see the
+  // preload; its update checks run in the background.
+  const plugins = new PluginsService({
+    baseDir: paths.baseDir,
+    // A getter: PUT /api/config/daemon moves it, then calls `workspacesChanged`.
+    workspacesDir: () => resolved.workspacesDir,
+    writeJson: writeJsonFile,
+    env,
+    logger: console
+  });
+  publishPluginEvents(plugins, broadcaster);
+  await plugins.start();
   // Automated workflows (workflows spec §3, §5.7, §5.8): definitions, secrets, runs and runtime
   // state. Each store is tolerant at load — a file it cannot parse is moved aside, one it cannot
   // read leaves that store read-only (503 WORKFLOWS_UNAVAILABLE) — so none of them blocks boot.
@@ -1085,6 +1101,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   grokDeviceLink.events.on("changed", (status) => broadcaster.publish("agent-accounts", "grok-link.changed", status));
   const services: Services = {
     registry, sessions, grokDeviceLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
+    plugins,
     desktops, desktopAudio,
     agentProfile,
     workflows, workflowSecrets, workflowRuns, workflowState, workflowEngine: null, internalApi: null,
@@ -1198,6 +1215,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Both are fast; the 3 s backstop in cli.ts bounds them regardless.
     await workflowDaemon.stop().catch((error) => console.error("Workflow engine stop failed", error));
     await Promise.all([workflows.flush(), workflowSecrets.flush(), workflowRuns.flush(), workflowState.flush()]);
+    // Plugins: the hourly timer, and a running download or smoke test cancelled (its staging dir is
+    // emptied at the next start); queued plugins.json writes land.
+    await plugins.stop().catch((error) => console.error("Plugins stop failed", error));
     // Agent profile: its watchers and debounce timers, each adapter's long-lived helpers (a codex
     // app-server may take its whole kill grace to exit) and the import trees. Started here, awaited
     // last: it must not hold up the session and agent-host shutdown below within cli.ts's 3 s backstop.
@@ -1280,6 +1300,8 @@ interface Services {
   recentProjects: RecentProjectsService;
   /** Daemon-owned saved-prompt library (the right rail), shared by every client. */
   savedPrompts: SavedPromptsService;
+  /** Built-in plugins (Settings → Plugins): plugins.json, the tsc-rs install, the session preload. */
+  plugins: PluginsService;
   /** Each agent CLI's own global config (agent profile spec §4): the right rail's Agent profile. */
   agentProfile: AgentProfileService;
   /** Automated workflow definitions (workflows spec §3.1). */
@@ -1546,6 +1568,8 @@ export function createServer(
       : resolved.workspacesDir;
     resolved.logsDir = expandVars(merged.logsDir, resolved.vars);
     await mkdir(resolved.workspacesDir, { recursive: true }).catch(() => undefined);
+    // The tsc-rs preload has the workspaces root baked in: rewrite it for the new one.
+    void services.plugins.workspacesChanged();
     void services.reloadHttp?.();
 
     return sanitizeDaemonConfig(config);
@@ -1618,6 +1642,17 @@ export function createServer(
     });
   }
 
+  // A directory created, renamed or deleted directly under the workspaces root is a workspace
+  // change: the plugins service re-decides which of its enabled workspaces exist (the session
+  // preload, its timer, a first install, a broadcast). `parentDir` is a realpath. Optional
+  // chaining here and in the workspace routes: their route tests stub `services` without plugins.
+  const notifyWorkspacesChanged = async (parentDir: string): Promise<void> => {
+    const root = await realpath(resolved.workspacesDir).catch(() => resolve(resolved.workspacesDir));
+    if (parentDir === root) {
+      void services.plugins?.workspacesChanged();
+    }
+  };
+
   // Filesystem-backed workspaces & projects:
   //   (workspacesDir)/<workspace>           -> a workspace
   //   (workspacesDir)/<workspace>/<project> -> a project
@@ -1664,6 +1699,7 @@ export function createServer(
         app.log.error({ err: error }, "git account binding failed");
       });
     }
+    void services.plugins?.workspacesChanged();
 
     return {
       name,
@@ -2021,6 +2057,7 @@ export function createServer(
       // its /private/tmp realpath differ — a post-rm fallback wouldn't match).
       await services.accounts.unbindWorkspace(target).catch(() => undefined);
       await rm(safe, { recursive: true, force: true });
+      void services.plugins?.workspacesChanged();
       // Only now that the tree is gone: cascade-delete the workspace's own to-do
       // lists AND every list under a project inside it (`workspace` = name
       // refKey; `target` = raw-join path), and the saved prompts of every
@@ -2564,6 +2601,7 @@ export function createServer(
       const safe = await assertInsideFsRoot(resolved.fsRoot, body.path);
       if (body.kind === "dir") {
         await mkdir(safe, { recursive: true });
+        await notifyWorkspacesChanged(dirname(safe));
       } else {
         await mkdir(dirname(safe), { recursive: true });
         await writeFile(safe, "", { flag: "wx" });
@@ -2625,6 +2663,7 @@ export function createServer(
           .send({ code: "FS_EXISTS", message: `A file or folder named "${newName}" already exists.` });
       }
       await rename(source, target);
+      await notifyWorkspacesChanged(parent);
       return { ok: true };
     } catch (error) {
       if (error instanceof FsSandboxError) {
@@ -2778,6 +2817,7 @@ export function createServer(
         await services.browsers.closeForProject(safe, resolve(path));
         await services.desktops.closeForProject(safe);
         await rm(safe, { recursive: true, force: false });
+        await notifyWorkspacesChanged(dirname(safe));
         return { ok: true };
       } catch (error) {
         if (error instanceof FsSandboxError) {
@@ -3870,6 +3910,11 @@ export function createServer(
       }
     }
   );
+
+  // Built-in plugins (plugins spec §5.3). Both transports, like the protect-archived toggle:
+  // enabling downloads and runs a verified binary, which is no more than a remote user can do
+  // already (installing agent CLIs, running shells), and nothing here is secret.
+  registerPluginRoutes(app, { plugins: services.plugins });
 
   // Automated workflows (workflows spec §8.1) — definitions, runs, logs, secrets. Both
   // transports; the bearer hook above gates HTTP. Secret values are write-only.
