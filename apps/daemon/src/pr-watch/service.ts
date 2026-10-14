@@ -38,13 +38,15 @@ import type { EventMessage, SessionSummary } from "@orquester/api";
 import {
   agentChatCommandPath,
   agentChatRoutes,
+  currentInteractionMode,
   MAX_PR_WATCHES_PER_THREAD,
   type CreatePullRequestWatchRequest,
   type CreatePullRequestWatchResponse,
   type PullRequestWatchErrorCode,
   type PullRequestWatchListQuery,
   type PullRequestWatchesChangedEvent,
-  type PullRequestWatchSummary
+  type PullRequestWatchSummary,
+  type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
 import {
   parsePullRequestWatchFile,
@@ -1038,17 +1040,21 @@ export function deliverThroughTurnRoute(api: () => DaemonApi | null): PullReques
     if (!client) return { kind: "unavailable" };
     let res: { status: number; body: unknown };
     try {
-      // The thread's current mode is its latest turn's: the host takes a missing mode as
-      // "default", which would flip a thread out of plan mode.
+      // The thread's current mode (`currentInteractionMode`: its running or latest turn's, a steer
+      // that switched it included): the host takes a missing mode as "default", which would flip a
+      // thread out of plan mode.
       let interactionMode = modes.get(body.commandId);
       if (interactionMode === undefined) {
         const thread = await client.request("GET", agentChatRoutes.thread(sessionId));
         const threadCode = (thread.body as { error?: { code?: unknown } } | null)?.error?.code;
         if (thread.status === 404 && threadCode === "THREAD_NOT_FOUND") return { kind: "gone" };
         if (thread.status >= 400) return { kind: "unavailable" };
-        const turns = (thread.body as { kind?: unknown; thread?: { turns?: Array<{ interactionMode?: unknown }> } } | null)?.thread?.turns ?? [];
-        const latest = [...turns].reverse().find((turn) => turn.interactionMode === "plan" || turn.interactionMode === "default");
-        interactionMode = latest?.interactionMode === "plan" ? "plan" : "default";
+        const snap = (thread.body as { kind?: unknown; thread?: Partial<ThreadSnapshotPayload> } | null)?.thread;
+        interactionMode = currentInteractionMode({
+          head: { session: { activeTurnId: snap?.head?.session?.activeTurnId ?? null } },
+          turns: Array.isArray(snap?.turns) ? snap.turns : [],
+          items: Array.isArray(snap?.items) ? snap.items : []
+        });
         remember(body.commandId, interactionMode);
       }
       res = await client.request("POST", agentChatCommandPath(sessionId, "turn"), {

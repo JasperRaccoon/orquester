@@ -5,7 +5,7 @@
  * planning thread out of plan mode — and a session tool's turn policy must see a caller that plans.
  *
  * The mode is the running turn's (else the latest unsettled one's, else the latest turn's), as the
- * turn recorded it when it started — unless a user message steered that turn since: a steer may
+ * turn recorded it when it started (a turn that recorded none: the latest earlier one that did) — unless a user message steered that turn since: a steer may
  * switch the live session's mode (Claude's `setPermissionMode` on a running turn), and a message
  * that records its own `interactionMode` (`ThreadMessageItem.interactionMode`) is the latest word.
  */
@@ -29,5 +29,12 @@ export function currentInteractionMode(snap: {
     if (item.kind !== "message" || item.role !== "user" || item.turnId !== turn.turnId) continue;
     if (item.interactionMode === "plan" || item.interactionMode === "default") return item.interactionMode;
   }
-  return turn.interactionMode === "plan" ? "plan" : "default";
+  if (turn.interactionMode === "plan" || turn.interactionMode === "default") return turn.interactionMode;
+  // A turn that recorded no mode (a provider-started continuation, an older log): the latest
+  // earlier turn that did is the thread's mode.
+  for (let index = snap.turns.indexOf(turn) - 1; index >= 0; index -= 1) {
+    const earlier = snap.turns[index]!.interactionMode;
+    if (earlier === "plan" || earlier === "default") return earlier;
+  }
+  return "default";
 }

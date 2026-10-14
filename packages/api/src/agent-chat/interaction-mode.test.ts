@@ -34,3 +34,9 @@ test("a steer that switched the running turn's mode is the latest word (T6-M2)",
   // A message of another turn says nothing about this one.
   assert.equal(currentInteractionMode({ ...snap, items: [user("u9", "t0", "plan")] }), "default");
 });
+
+test("a turn that recorded no mode reads as the latest earlier turn that did", () => {
+  const none = { turnId: "t2", state: "completed", turnCount: null, requestedAt: "t", startedAt: "t", completedAt: "t", assistantMessageId: null } as Turn;
+  assert.equal(currentInteractionMode({ head: { session: { activeTurnId: null } }, turns: [turn("t1", "completed", "plan"), none], items: [] }), "plan");
+  assert.equal(currentInteractionMode({ head: { session: { activeTurnId: null } }, turns: [none], items: [] }), "default");
+});

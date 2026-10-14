@@ -39,6 +39,23 @@ test("a wake keeps the thread's current interaction mode", async () => {
   }
 });
 
+test("a wake keeps a running turn the user steered into plan mode in plan mode (steer-aware)", async () => {
+  const steered: DaemonResponse = {
+    status: 200,
+    body: {
+      kind: "snapshot",
+      thread: {
+        head: { session: { activeTurnId: "t2" } },
+        turns: [{ turnId: "t2", state: "running", interactionMode: "default" }],
+        items: [{ kind: "message", id: "u2", role: "user", text: "plan first", turnId: "t2", interactionMode: "plan" }]
+      }
+    }
+  };
+  const { api, posts } = fakeApi({ [`GET ${agentChatRoutes.thread("s1")}`]: steered });
+  await deliverThroughTurnRoute(() => api)("s1", { commandId: "pr-watch:2", input: "x" });
+  assert.deepEqual(posts, [{ commandId: "pr-watch:2", input: "x", interactionMode: "plan" }]);
+});
+
 test("only THREAD_NOT_FOUND is a gone thread; an unreadable thread or a host miss is not", async () => {
   const notFound = { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: "No chat session with that id." } } };
   const gone = fakeApi({ [`GET ${agentChatRoutes.thread("s1")}`]: notFound });
