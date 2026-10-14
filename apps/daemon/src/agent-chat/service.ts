@@ -17,10 +17,13 @@ import type {
   AgentAdapterId,
   CreateAgentChatSessionFields,
   CreateSessionRequest,
+  ForkSessionRequest,
+  ForkSessionResponse,
   RegistryEntry,
-  SessionSummary, AgentAccount } from "@orquester/api";
+  SessionSummary, AgentAccount,
+  ThreadLineage } from "@orquester/api";
 import { SYSTEM_ACCOUNT_ID } from "@orquester/api";
-import { CONVERSATION_ALREADY_OPEN } from "@orquester/api/agent-chat";
+import { CONVERSATION_ALREADY_OPEN, forkTitle } from "@orquester/api/agent-chat";
 import type { AgentChatHome, RuntimePlatform } from "@orquester/config";
 import { agentHostSocketPath, agentHostTokenPath } from "@orquester/config";
 import {
@@ -28,6 +31,8 @@ import {
   agentHostRoutes,
   type AgentHostHealthResponse,
   type CreateHostThreadRequest,
+  type ForkHostThreadRequest,
+  type ForkHostThreadResponse,
   type SetThreadIdentityRequest
 } from "../agent-host/host-protocol.ts";
 import { Transform, type Readable } from "node:stream";
@@ -176,8 +181,18 @@ function chatFields(req: CreateAgentChatRequest): Partial<CreateAgentChatSession
     ...(req.modelSelection !== undefined ? { modelSelection: req.modelSelection } : {}),
     ...(req.runtimeMode !== undefined ? { runtimeMode: req.runtimeMode } : {}),
     ...(req.resume !== undefined ? { resume: req.resume } : {}),
+    ...(req.lineage !== undefined ? { lineage: req.lineage } : {}),
     ...(req.chat ?? {})
   };
+}
+
+/** A fork request's optional strings: absent, or a non-blank string of at most `max` characters. */
+function optionalField(value: unknown, name: string, max: number): string | undefined {
+  if (value === undefined || value === null) return undefined;
+  if (typeof value !== "string" || value.length > max || !/\S/.test(value)) {
+    throw new ChatSessionError(`${name} must be a non-empty string of at most ${max} characters.`, "INVALID_COMMAND");
+  }
+  return value;
 }
 
 export class AgentChatService {
@@ -570,6 +585,23 @@ export class AgentChatService {
     if (!owner.ok) {
       throw new ChatSessionError(owner.message, owner.code);
     }
+    // Spec 2026-10-14 §6: a delegate names its parent — a chat tab of the same project. A fork
+    // carries the parent's conversation and is created by `forkSession`, never here.
+    let lineage: ThreadLineage | undefined;
+    if (fields.lineage !== undefined) {
+      const parentId = fields.lineage?.parentThreadId;
+      const parent = typeof parentId === "string" ? this.chat.get(parentId) : undefined;
+      if (fields.lineage?.relation !== "delegate" || !parent) {
+        throw new ChatSessionError(
+          "lineage must name a chat session as parent, with relation \"delegate\".",
+          "INVALID_LINEAGE"
+        );
+      }
+      if (parent.projectPath !== (req.projectPath ?? "")) {
+        throw new ChatSessionError("A delegated session opens in its parent's project.", "INVALID_LINEAGE");
+      }
+      lineage = { parentThreadId: parent.id, relation: "delegate", createdAt: new Date().toISOString() };
+    }
     if (fields.resume && !isUsableConversationId(fields.resume.conversationId)) {
       throw new ChatSessionError(
         "That conversation cannot be resumed with this agent.",
@@ -620,7 +652,8 @@ export class AgentChatService {
       order,
       accountId,
       home,
-      ...(owner.owner ? { owner: owner.owner } : {})
+      ...(owner.owner ? { owner: owner.owner } : {}),
+      ...(lineage ? { lineage } : {})
     });
 
     const body: CreateHostThreadRequest = {
@@ -639,7 +672,8 @@ export class AgentChatService {
       launchEnv,
       ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
       ...(homePath ? { homePath } : {}),
-      ...(fields.resume ? { resume: fields.resume } : {})
+      ...(fields.resume ? { resume: fields.resume } : {}),
+      ...(lineage ? { lineage } : {})
     };
     try {
       const response = await this.client.json<{
@@ -672,6 +706,123 @@ export class AgentChatService {
       throw new ChatSessionError(error instanceof Error ? error.message : String(error));
     }
     return summary;
+  }
+
+  /**
+   * Thread lineage (spec 2026-10-14 §6): a new chat tab in the parent's project, with the
+   * parent's agent, account, model and options, whose conversation is the parent's up to a
+   * message. The order mirrors {@link createSession}: everything that can refuse first, then the
+   * tab record, then the host's `POST /threads/:parentId/fork` — and a refusal rolls the tab back.
+   *
+   * The account is the PARENT's, pinned (the system identity included): a provider's resume
+   * identity stays in the home that created it, so a parent whose account is gone is refused
+   * rather than forked into another home.
+   */
+  async forkSession(parentId: string, req: ForkSessionRequest, order: number): Promise<ForkSessionResponse> {
+    const parent = this.chat.get(parentId);
+    if (!parent) {
+      throw new ChatSessionError("No chat session with that id.", "THREAD_NOT_FOUND");
+    }
+    const body = (req ?? {}) as Record<string, unknown>;
+    const messageId = optionalField(body.messageId, "messageId", 200);
+    const turnId = optionalField(body.turnId, "turnId", 200);
+    const role = body.role === undefined || body.role === null ? undefined : body.role;
+    if (role !== undefined && role !== "user" && role !== "assistant") {
+      throw new ChatSessionError('role must be "user" or "assistant".', "INVALID_COMMAND");
+    }
+    const title = optionalField(body.title, "title", 200)?.trim();
+    const entry = this.opts.registryEntry(parent.refId);
+    if (!entry?.resolvedBin || !entry.enabled || !entry.chat?.adapter) {
+      throw new ChatSessionError(`Registry entry "${parent.refId}" is not available.`);
+    }
+    const adapter = entry.chat.adapter;
+    if (!this.supervisor.isHealthy()) {
+      throw this.hostUnavailable();
+    }
+    const parentAccount = parent.accountId ?? "";
+    let launch: ChatLaunchEnv | null = null;
+    try {
+      launch = await this.opts.resolveLaunchEnv(entry, { accountId: parentAccount || SYSTEM_ACCOUNT_ID });
+    } catch (error) {
+      throw error instanceof ChatSessionError
+        ? error
+        : new ChatSessionError(error instanceof Error ? error.message : String(error));
+    }
+    if ((launch?.accountId ?? "") !== parentAccount) {
+      throw new ChatSessionError(
+        "The account this conversation runs under is no longer available, so it cannot be forked.",
+        "SESSION_UNAVAILABLE"
+      );
+    }
+    const home = resolveHomeKind(parentAccount);
+    const launchEnv: Record<string, string> = { ...entry.env, ...(launch?.env ?? {}) };
+    const homePath = launchEnv[ACCOUNT_HOME_ENV_VAR[adapter]];
+    await this.prepareHome(adapter, launchEnv, parent.projectPath);
+
+    const id = randomUUID();
+    const summary = this.chat.create({
+      id,
+      refId: parent.refId,
+      title: title || forkTitle(parent.title),
+      projectPath: parent.projectPath,
+      cwd: parent.cwd,
+      order,
+      accountId: parentAccount,
+      home,
+      // Provisional until the host answers with the fork point it resolved.
+      lineage: { parentThreadId: parentId, relation: "fork", createdAt: new Date().toISOString() }
+    });
+    const request: ForkHostThreadRequest = {
+      threadId: id,
+      projectPath: summary.projectPath,
+      cwd: summary.cwd,
+      title: summary.title,
+      refId: parent.refId,
+      accountId: parentAccount,
+      home,
+      // The parent's, chosen by the host from its head.
+      modelSelection: undefined,
+      runtimeMode: undefined,
+      launchEnv,
+      ...(launch?.unset?.length ? { unsetEnv: launch.unset } : {}),
+      ...(homePath ? { homePath } : {}),
+      fork: {
+        ...(messageId !== undefined ? { messageId } : {}),
+        ...(turnId !== undefined ? { turnId } : {}),
+        ...(role !== undefined ? { role } : {})
+      }
+    };
+    let result: ForkHostThreadResponse;
+    try {
+      const response = await this.client.json<
+        ForkHostThreadResponse & { error?: { code: string; message: string } }
+      >("POST", agentHostRoutes.forkThread(parentId), request);
+      if (response.status >= 400 || !response.value?.head) {
+        const message = response.value?.error?.message ?? "The agent host refused the fork.";
+        // A host from before forks answers its generic route miss until its drain-restart.
+        if (response.status === 404 && message.startsWith("No route for")) {
+          throw new ChatSessionError(
+            "Forking needs the updated agent host, which starts once no turn is running. Try again then.",
+            "COMMAND_REJECTED"
+          );
+        }
+        const code = response.value?.error?.code;
+        throw new ChatSessionError(
+          message,
+          code === "THREAD_NOT_FOUND" || code === "INVALID_COMMAND" || code === "COMMAND_REJECTED"
+            ? code
+            : "SESSION_UNAVAILABLE"
+        );
+      }
+      result = response.value;
+    } catch (error) {
+      this.chat.close(id);
+      if (error instanceof ChatSessionError) throw error;
+      if (error instanceof HostUnavailableError) throw this.hostUnavailable();
+      throw new ChatSessionError(error instanceof Error ? error.message : String(error));
+    }
+    const forked = this.chat.setLineage(id, result.lineage) ?? summary;
+    return { session: forked, lineage: result.lineage, strategy: result.strategy };
   }
 
   /**

@@ -215,7 +215,8 @@ of every parameter. The annotations: `readOnlyHint` on every tool that only read
 `list_*`, `get_*` and `read_*` tools, `search_sessions` and `wait_for_session`; `destructiveHint`
 on `close_session`, `revert_session` and `delete_todo`; `idempotentHint` on every tool but
 `create_session`, `interrupt_session` (a retry after the turn has stopped goes on to stop the
-background work), `compact_session` (a retry compacts again), `send_message`, `implement_plan`,
+background work), `compact_session` (a retry compacts again), `fork_session` and
+`merge_back_session` (a retry forks, or merges, again), `send_message`, `implement_plan`,
 the three request tools, `create_todo` and `toggle_todo_item`; `openWorldHint: false` on reads,
 waits, usage and the todo and file tools, which touch only the daemon's own state (a tool that
 drives an agent keeps the default).
@@ -300,7 +301,8 @@ Tools that return a session return one of these two shapes.
            pending: { approvals: boolean, questions: boolean },
            planReady: boolean, backgroundLiveness: "working" | "monitoring" | null,
            goal: { objective /* ≤ 200 characters */, status, continuing: boolean, heldForUpdate?: true } | null },
-  terminal?: { status: "running" | "exited", exitCode?, legacyAgent? }
+  terminal?: { status: "running" | "exited", exitCode?, legacyAgent? },
+  lineage?: { parentSessionId, relation: "fork" | "delegate", forkedFromTurnId? }   // a chat forked or delegated from another
 }
 ```
 
@@ -461,6 +463,9 @@ and its default model (the flagged one, else the first) are never shed.
 | `close_session` | `sessionId` | `{closed: true, sessionId}` | Closing the tab |
 | `revert_session` | `sessionId`, `keepTurns` | `{seq, session}` | "Rewind the conversation to here" |
 | `compact_session` | `sessionId` | `{seq, session}` | "Compact context" |
+| `fork_session` | `sessionId`, `throughTurn?` (default: the latest finished turn), `title?` | `{strategy, lineage, session}` | "Fork from here" on a message |
+| `merge_back_session` | `sessionId` (the fork), `text?` (default: the fork's final reply) | `{parentSessionId, delivery: "sent" \| "queued", mergeId, seq?}` | The fork's "Merge back" |
+| `get_session_lineage` | `sessionId` | `{sessionId, lineage, parent, children, pendingMerges}` | The fork chip and the forks list in the chat header |
 
 - **`list_sessions`** — ordered by project, then tab order. With `attention: true`, only the
   sessions whose `attention` is set or whose `status` is `waiting`, newest attention first by
@@ -570,6 +575,35 @@ and its default model (the flagged one, else the first) are never shed.
   an Orquester update holds (`chat.goal.heldForUpdate`) is paused already and starts no next turn,
   so while its final turn runs the refusal is the plain one (`Context compaction is unavailable
   while a provider turn is running.`): wait for that turn, then compact.
+
+- **`fork_session`** — a new chat tab in the same project, with the same agent, model, options,
+  permission mode and account, whose conversation is this one's through turn `throughTurn` (the
+  turn numbers `read_transcript` shows; `0` forks before the first message, a fresh session that
+  only remembers where it came from). The original is never touched, and may even be running: only
+  the kept turns must have finished (`COMMAND_REJECTED` "That reply is still being written."
+  otherwise). Providers fork at turn boundaries, so a fork keeps whole turns. `strategy` says how
+  the conversation was carried over: `"native"` — Claude (`forkSession`), Codex (`thread/fork`) and
+  OpenCode (session fork) copy it themselves and the fork's transcript shows the inherited history;
+  `"transcript"` — Grok has no fork of its own (and a native fork that refuses, e.g. a cut a
+  compaction made unreachable, falls back to this), so the fork starts fresh, its transcript opens
+  with a "Forked from …" row, and the conversation so far reaches the agent together with the
+  fork's first message (not a `/command`); `"empty"` — nothing preceded the fork point. A parent
+  whose managed account was removed is refused (`SESSION_UNAVAILABLE`): a conversation is only
+  readable from the home that created it. The result's `session` is the fork's `SessionDetail`.
+- **`merge_back_session`** — sends the fork's result to the session it came from (its `lineage`
+  names it) as an ordinary message that starts `[Merged back from fork "<title>"]`: `text`, or the
+  fork's final reply (the latest finished turn's answer). An idle parent takes it at once
+  (`delivery: "sent"`, with the parent's `seq`); a busy one — a turn running or starting, an approval
+  or question open, a Codex goal continuing — gets it once it is idle (`delivery: "queued"`). The
+  queue is kept across daemon restarts and delivers each merge exactly once (its `mergeId` is the
+  turn's command id), one per idle point; a merge for a parent that is closed meanwhile is dropped.
+  Refused (`COMMAND_REJECTED`) for a session with no parent, a closed parent, or a fork with no
+  finished reply.
+- **`get_session_lineage`** — `lineage` is the session's own (`{parentThreadId, relation,
+  forkedFrom?: {messageId, turnId}, createdAt}` or `null`); `parent` is `{sessionId, title, exists}`
+  (`exists: false` once that tab is closed); `children` are the tabs forked from or delegated by
+  this one, oldest first, each with `relation`, `createdAt`, `forkedFrom?`, `chatSessionStatus?` and
+  `latestTurnState?`; `pendingMerges` are the queued merges to or from this session.
 
 ### Search
 

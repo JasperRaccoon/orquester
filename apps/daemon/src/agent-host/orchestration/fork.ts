@@ -77,6 +77,17 @@ export function resolveForkCut(
   };
 
   const messageId = target.messageId;
+  if (messageId === undefined && target.turnId !== undefined) {
+    // By turn alone (the MCP's `throughTurn`): through that turn, or before it for `role: "user"`.
+    const index = started.findIndex((turn) => turn.turnId === target.turnId);
+    if (index === -1) {
+      throw new ForkRefusal("That turn is not part of this conversation.");
+    }
+    const replyId = started[index]!.assistantMessageId;
+    return target.role === "user"
+      ? keep(index)
+      : keep(index + 1, replyId !== null ? { messageId: replyId, turnId: target.turnId } : undefined);
+  }
   if (messageId === undefined) {
     // The latest settled message: every turn through the last settled one.
     let last = started.length - 1;

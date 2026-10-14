@@ -14,6 +14,7 @@ import { EventEmitter } from "node:events";
 import type {
   AgentChatSessionSummaryFields,
   SessionSummary,
+  ThreadLineage,
   WorkflowSessionOwner
 } from "@orquester/api";
 import type { AgentChatHome, SessionRecord } from "@orquester/config";
@@ -43,6 +44,8 @@ export interface ChatSessionCreateInput {
   createdAt?: string;
   /** The workflow run that started this tab (workflows spec §5.10), already validated by the route. */
   owner?: WorkflowSessionOwner;
+  /** The thread this one was forked from or delegated by (spec 2026-10-14 §6), already checked. */
+  lineage?: ThreadLineage;
 }
 
 interface ChatSession {
@@ -129,7 +132,8 @@ export class ChatSessionManager {
       status: "running",
       order: input.order,
       createdAt: input.createdAt ?? new Date().toISOString(),
-      ...(input.owner ? { owner: { ...input.owner } } : {})
+      ...(input.owner ? { owner: { ...input.owner } } : {}),
+      ...(input.lineage ? { lineage: cloneLineage(input.lineage) } : {})
     };
     this.sessions.set(input.id, {
       summary,
@@ -212,6 +216,19 @@ export class ChatSessionManager {
     return { ...session.summary };
   }
 
+  /**
+   * Record the lineage the host resolved for a fork (spec 2026-10-14 §6): its fork point is
+   * only known once the host has cut the parent's conversation.
+   */
+  setLineage(id: string, lineage: ThreadLineage): SessionSummary | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    session.summary.lineage = cloneLineage(lineage);
+    this.lifecycle.emit("updated", { ...session.summary });
+    this.options.requestPersist();
+    return { ...session.summary };
+  }
+
   /** Set one tab's order; used by the shared cross-kind reorder. */
   setOrder(id: string, order: number): boolean {
     const session = this.sessions.get(id);
@@ -270,7 +287,9 @@ export class ChatSessionManager {
       accountId: s.summary.accountId,
       chat: { ...s.chat },
       // workflows §5.10: persisted so the Workflow chip and the tab sweeper survive a restart.
-      ...(s.summary.owner ? { owner: { ...s.summary.owner } } : {})
+      ...(s.summary.owner ? { owner: { ...s.summary.owner } } : {}),
+      // Spec 2026-10-14 §6: a parent's children are the tabs naming it here.
+      ...(s.summary.lineage ? { lineage: cloneLineage(s.summary.lineage) } : {})
     }));
   }
 
@@ -299,7 +318,9 @@ export class ChatSessionManager {
         order: record.order,
         createdAt: record.createdAt,
         // The tolerant parse already dropped a malformed owner (never the record).
-        ...(record.owner ? { owner: { ...record.owner } } : {})
+        ...(record.owner ? { owner: { ...record.owner } } : {}),
+        // …and a malformed lineage, or a fork point that did not read on its own.
+        ...(record.lineage ? { lineage: lineageFromRecord(record.lineage) } : {})
       };
       this.sessions.set(record.id, {
         summary,
@@ -312,6 +333,24 @@ export class ChatSessionManager {
       });
     }
   }
+}
+
+function cloneLineage(lineage: ThreadLineage): ThreadLineage {
+  return {
+    parentThreadId: lineage.parentThreadId,
+    relation: lineage.relation,
+    ...(lineage.forkedFrom ? { forkedFrom: { ...lineage.forkedFrom } } : {}),
+    createdAt: lineage.createdAt
+  };
+}
+
+function lineageFromRecord(record: NonNullable<SessionRecord["lineage"]>): ThreadLineage {
+  return {
+    parentThreadId: record.parentThreadId,
+    relation: record.relation,
+    ...(record.forkedFrom ? { forkedFrom: { ...record.forkedFrom } } : {}),
+    createdAt: record.createdAt
+  };
 }
 
 /** Only the derived §6.4 fields are compared — never `activity`, which is derived from them. */

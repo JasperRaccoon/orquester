@@ -131,6 +131,15 @@ describe("resolveForkCut", () => {
     assert.throws(() => resolveForkCut(odd, { messageId: "u4" }), /not been answered/);
   });
 
+  it("cuts by turn alone when no message is named", () => {
+    const withReply = { ...state, turns: state.turns.map((t) => ({ ...t, assistantMessageId: `a${t.turnId!.slice(1)}` })) };
+    const through = resolveForkCut(withReply, { turnId: "t2" });
+    assert.deepEqual(through.retained.map((t) => t.turnId), ["t1", "t2"]);
+    assert.deepEqual(through.forkedFrom, { messageId: "a2", turnId: "t2" });
+    assert.deepEqual(resolveForkCut(withReply, { turnId: "t2", role: "user" }).retained.map((t) => t.turnId), ["t1"]);
+    assert.throws(() => resolveForkCut(withReply, { turnId: "t9" }), /not part of this conversation/);
+  });
+
   it("takes the client's turn and role only for a message the window lost", () => {
     const cut = resolveForkCut(state, { messageId: "gone", turnId: "t1", role: "assistant" });
     assert.deepEqual(cut.retained.map((t) => t.turnId), ["t1"]);

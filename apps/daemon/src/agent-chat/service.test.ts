@@ -22,6 +22,7 @@ import { InjectDaemonApi } from "../mcp/daemon-api.ts";
 import {
   AGENT_HOST_PROTOCOL_VERSION,
   type CreateHostThreadRequest,
+  type ForkHostThreadRequest,
   type SetThreadIdentityRequest
 } from "../agent-host/host-protocol.ts";
 import { AgentChatService } from "./service.ts";
@@ -90,6 +91,10 @@ interface Fixture {
   recycleRequests: number;
   /** Its answer; `"drop"` tears the connection down unanswered. */
   recycleAnswer: { status: number; body: unknown } | "drop";
+  /** Thread lineage: every `POST /threads/:parentId/fork` the fake host received. */
+  forks: Array<{ parentId: string; body: ForkHostThreadRequest }>;
+  /** What the fake host answers a fork; built from the request when null. */
+  forkAnswer: { status: number; body: unknown } | null;
   requests: EventEmitter;
   broadcasts: EventEmitter;
   cleanup(): Promise<void>;
@@ -163,6 +168,8 @@ async function makeFixture(
     resumeAnswer: { status: 200, body: { threadIds: [] } },
     recycleRequests: 0,
     recycleAnswer: { status: 200, body: { recycled: 0, deferred: 0 } },
+    forks: [],
+    forkAnswer: null,
     requests: new EventEmitter(),
     broadcasts: new EventEmitter(),
     service: null as unknown as AgentChatService,
@@ -270,6 +277,26 @@ async function makeFixture(
           return;
         }
         res.writeHead(200, { "content-type": "application/json" }).end("{}");
+        return;
+      }
+      const fork = /^\/threads\/([^/]+)\/fork$/.exec(req.url ?? "");
+      if (fork && req.method === "POST") {
+        const request = JSON.parse(body) as ForkHostThreadRequest;
+        state.forks.push({ parentId: decodeURIComponent(fork[1]!), body: request });
+        const answer = state.forkAnswer ?? {
+          status: 200,
+          body: {
+            head: { id: request.threadId },
+            strategy: "native",
+            lineage: {
+              parentThreadId: decodeURIComponent(fork[1]!),
+              relation: "fork",
+              forkedFrom: { messageId: request.fork.messageId ?? "m", turnId: "t1" },
+              createdAt: "2026-10-14T00:00:00.000Z"
+            }
+          }
+        };
+        res.writeHead(answer.status, { "content-type": "application/json" }).end(JSON.stringify(answer.body));
         return;
       }
       const identity = /^\/threads\/([^/]+)\/identity$/.exec(req.url ?? "");
@@ -1252,4 +1279,122 @@ test("an over-cap chat upload answers 413 UPLOAD_TOO_LARGE through the MCP seam 
     await app.close();
     await f.cleanup();
   }
+});
+
+// --- Thread lineage (spec 2026-10-14 §6) -----------------------------------
+
+test("a fork opens in the parent's project under the parent's account, pinned", async () => {
+  const seen: Array<{ accountId?: string }> = [];
+  const f = await makeFixture(CLAUDE, {
+    env: { CLAUDE_CONFIG_DIR: "/homes/acc-1" },
+    unset: ["ANTHROPIC_API_KEY"],
+    accountId: "acc-1"
+  });
+  const parent = await f.service.createSession(
+    { kind: "agent-chat", refId: "claude", projectPath: "/w/p", cwd: "/w/p/sub", title: "Plan" },
+    0
+  );
+  f.launchFor = (ctx) => {
+    seen.push(ctx);
+    return { env: { CLAUDE_CONFIG_DIR: "/homes/acc-1" }, unset: ["ANTHROPIC_API_KEY"], accountId: "acc-1" };
+  };
+  const result = await f.service.forkSession(parent.id, { messageId: "msg-7" }, 3);
+  assert.deepEqual(seen, [{ accountId: "acc-1" }], "the parent's account, never the family default");
+  assert.equal(f.forks.length, 1);
+  const { parentId, body } = f.forks[0]!;
+  assert.equal(parentId, parent.id);
+  assert.equal(body.threadId, result.session.id);
+  assert.deepEqual(body.fork, { messageId: "msg-7" });
+  assert.equal(body.projectPath, "/w/p");
+  assert.equal(body.cwd, "/w/p/sub");
+  assert.equal(body.homePath, "/homes/acc-1");
+  assert.equal(body.modelSelection, undefined, "the host takes the parent's model");
+  assert.equal(result.session.title, "Plan (fork)");
+  assert.equal(result.session.order, 3);
+  assert.equal(result.strategy, "native");
+  assert.deepEqual(result.session.lineage?.forkedFrom, { messageId: "msg-7", turnId: "t1" });
+  assert.deepEqual(f.service.chat.get(result.session.id)?.lineage, result.lineage);
+  await f.cleanup();
+});
+
+test("a system-identity parent's fork stays on the system identity", async () => {
+  const seen: Array<{ accountId?: string }> = [];
+  const f = await makeFixture(CLAUDE, null);
+  f.launchFor = (ctx) => {
+    seen.push(ctx);
+    return null;
+  };
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  seen.length = 0;
+  await f.service.forkSession(parent.id, {}, 1);
+  assert.deepEqual(seen, [{ accountId: "system" }]);
+  assert.equal(f.forks[0]!.body.home, "system");
+  await f.cleanup();
+});
+
+test("a fork refuses a parent whose account is gone, and rolls its tab back on a host refusal", async () => {
+  const f = await makeFixture(CLAUDE, { env: { CLAUDE_CONFIG_DIR: "/homes/acc-1" }, accountId: "acc-1" });
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  f.launchFor = () => null;
+  await assert.rejects(f.service.forkSession(parent.id, {}, 1), /no longer available/);
+  assert.equal(f.forks.length, 0, "refused before the host is asked");
+
+  f.launchFor = () => ({ env: { CLAUDE_CONFIG_DIR: "/homes/acc-1" }, accountId: "acc-1" });
+  f.forkAnswer = {
+    status: 409,
+    body: { error: { code: "COMMAND_REJECTED", message: "That reply is still being written." } }
+  };
+  await assert.rejects(
+    f.service.forkSession(parent.id, { messageId: "m" }, 1),
+    (error: unknown) => error instanceof ChatSessionError && error.code === "COMMAND_REJECTED"
+  );
+  assert.equal(f.service.chat.list("/w/p").length, 1, "the fork's tab is rolled back");
+
+  f.forkAnswer = { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: "No route for POST /threads/x/fork." } } };
+  await assert.rejects(f.service.forkSession(parent.id, {}, 1), /updated agent host/);
+  await assert.rejects(f.service.forkSession(parent.id, { role: "system" } as never, 1), /role must be/);
+  await assert.rejects(f.service.forkSession("nope", {}, 1), /No chat session/);
+  await f.cleanup();
+});
+
+test("a delegate names a parent in its own project; anything else is refused", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  const child = await f.service.createSession(
+    {
+      kind: "agent-chat",
+      refId: "claude",
+      projectPath: "/w/p",
+      chat: { modelSelection: { model: "" }, lineage: { parentThreadId: parent.id, relation: "delegate" } }
+    },
+    1
+  );
+  assert.equal(child.lineage?.parentThreadId, parent.id);
+  assert.equal(child.lineage?.relation, "delegate");
+  assert.equal(f.created.at(-1)?.lineage?.relation, "delegate", "the host records it too");
+  await assert.rejects(
+    f.service.createSession(
+      {
+        kind: "agent-chat",
+        refId: "claude",
+        projectPath: "/w/other",
+        chat: { modelSelection: { model: "" }, lineage: { parentThreadId: parent.id, relation: "delegate" } }
+      },
+      2
+    ),
+    /parent's project/
+  );
+  await assert.rejects(
+    f.service.createSession(
+      {
+        kind: "agent-chat",
+        refId: "claude",
+        projectPath: "/w/p",
+        chat: { modelSelection: { model: "" }, lineage: { parentThreadId: parent.id, relation: "fork" as never } }
+      },
+      2
+    ),
+    /relation "delegate"/
+  );
+  await f.cleanup();
 });

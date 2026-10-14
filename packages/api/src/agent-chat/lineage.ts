@@ -114,9 +114,11 @@ export type ThreadForkStrategy = "native" | "transcript" | "empty";
 export interface ThreadForkTarget {
   messageId?: string;
   /**
-   * The message's turn and author as the CLIENT saw them — used only when the
-   * host's retained window no longer holds the message (a page loaded with
-   * "Load older"). The host's own fold wins whenever it has the message.
+   * With `messageId`: the message's turn and author as the CLIENT saw them —
+   * used only when the host's retained window no longer holds the message (a
+   * page loaded with "Load older"); the host's own fold wins whenever it has
+   * the message. Without one: the cut by turn alone — through that turn, or
+   * before it for `role: "user"` (the MCP's `throughTurn`).
    */
   turnId?: string;
   role?: "user" | "assistant";
