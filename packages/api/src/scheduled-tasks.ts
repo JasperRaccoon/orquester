@@ -129,7 +129,9 @@ export type ScheduledTaskErrorCode =
   | "SCHEDULED_TASK_NOT_FOUND"
   | "SCHEDULED_TASKS_FULL"
   | "ALREADY_QUEUED"
-  | "SCHEDULER_UNAVAILABLE";
+  | "SCHEDULER_UNAVAILABLE"
+  /** 500: an unexpected failure (logged by the daemon; the message never carries its cause). */
+  | "INTERNAL";
 
 /**
  * The context chip a delivered prompt's user message carries (`TurnCommandBody.context`, for

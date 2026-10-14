@@ -6,6 +6,7 @@ import type { FastifyInstance, FastifyReply } from "fastify";
 import {
   scheduledTaskRoutes,
   type CreateScheduledTaskRequest,
+  type ScheduledTaskErrorCode,
   type RunScheduledTaskResponse,
   type ScheduledTask,
   type ScheduledTaskListResponse,
@@ -26,7 +27,8 @@ function fail(reply: FastifyReply, error: unknown): void {
     return;
   }
   console.error("[scheduled-tasks] route failed", error);
-  void reply.code(500).send({ code: "INTERNAL", message: "The scheduled-task operation failed." });
+  const code: ScheduledTaskErrorCode = "INTERNAL";
+  void reply.code(500).send({ code, message: "The scheduled-task operation failed." });
 }
 
 function unavailable(reply: FastifyReply): void {

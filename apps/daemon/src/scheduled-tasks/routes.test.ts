@@ -4,7 +4,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Fastify from "fastify";
-import { scheduledTaskRoutes } from "@orquester/api";
+import { scheduledTaskRoutes, type ScheduledTaskErrorCode } from "@orquester/api";
 import { FakeDaemonApi } from "../mcp/testing.ts";
 import { ManualClock } from "../workflows/testing/manual-trigger-clock.ts";
 import { silentLogger } from "../workflows/triggers/test-support.ts";
@@ -65,4 +65,22 @@ test("without a service every route answers 503", async (t) => {
   const res = await server.inject({ method: "GET", url: scheduledTaskRoutes.list });
   assert.equal(res.statusCode, 503);
   assert.equal((res.json() as { code: string }).code, "SCHEDULER_UNAVAILABLE");
+});
+
+test("an unexpected failure answers 500 INTERNAL, a listed refusal code, without its cause (D-M6)", async (t) => {
+  const server = Fastify();
+  const broken = {
+    update: async () => {
+      throw new Error("EACCES: /secret/path");
+    }
+  } as unknown as ScheduledTasksService;
+  registerScheduledTaskRoutes(server, { service: () => broken });
+  t.after(() => server.close());
+  const errors = t.mock.method(console, "error", () => undefined);
+  const res = await server.inject({ method: "PUT", url: scheduledTaskRoutes.item("x"), payload: { enabled: false } });
+  assert.equal(res.statusCode, 500);
+  const code: ScheduledTaskErrorCode = (res.json() as { code: ScheduledTaskErrorCode }).code;
+  assert.deepEqual(res.json(), { code: "INTERNAL", message: "The scheduled-task operation failed." });
+  assert.equal(code, "INTERNAL");
+  assert.equal(errors.mock.callCount(), 1);
 });
