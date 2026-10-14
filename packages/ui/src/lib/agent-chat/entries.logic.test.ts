@@ -676,8 +676,33 @@ describe("session tools (design 2026-10-14 §1.5)", () => {
     for (const row of rows) {
       const entry = workLogEntryFromActivity(row);
       assert.equal(entry.sessionTool, "thread_wait");
-      assert.equal(workEntryDisplayLabel(entry), "Orquester: Thread wait");
+      assert.equal(workEntryDisplayLabel(entry), "Waited for a chat");
     }
+    // A tool with no label of its own reads as its name in words, never its arguments.
+    const unlabelled = workLogEntryFromActivity(
+      activity("tool.completed", { itemType: "mcp_tool_call", title: "MCP tool call", detail: "mcp__orquester__brand_new: {}", data: { toolName: "mcp__orquester__brand_new", sessionTool: { name: "brand_new" } } })
+    );
+    assert.equal(workEntryDisplayLabel(unlabelled), "Orquester: Brand new");
+  });
+
+  it("links a thread or delegation tool's row to the thread its result names (threadRef)", () => {
+    const threadRef = { threadId: "c7", title: "Task: audit", relation: "delegate" };
+    const result = { type: "tool_result", content: [{ type: "text", text: JSON.stringify({ taskId: "c7", state: "working", threadRef }) }] };
+    const entry = workLogEntryFromActivity(
+      activity("tool.completed", {
+        itemType: "mcp_tool_call",
+        title: "MCP tool call",
+        detail: 'mcp__orquester__delegate_task: {"prompt":"audit"}',
+        data: { toolName: "mcp__orquester__delegate_task", sessionTool: { name: "delegate_task" }, result }
+      })
+    );
+    assert.deepEqual(entry.threadLink, threadRef);
+    assert.equal(workEntryDisplayLabel(entry), "Delegated a task");
+    // The same result on an unmarked row (a user's same-named server) links nowhere.
+    const unmarked = workLogEntryFromActivity(
+      activity("tool.completed", { itemType: "mcp_tool_call", title: "MCP tool call", data: { toolName: "mcp__orquester__delegate_task", result } })
+    );
+    assert.equal(unmarked.threadLink, undefined);
   });
 
   it("labels the visual-replies tools in words: a preview, and a render while it runs or when it failed", () => {

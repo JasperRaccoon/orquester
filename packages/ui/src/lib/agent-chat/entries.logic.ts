@@ -37,7 +37,8 @@ import {
   reEmittedAssistantCopies,
   sessionToolNameOfData,
   secretRequestRecordOf,
-  SECRET_REQUEST_TOOL_NAME
+  SECRET_REQUEST_TOOL_NAME,
+  threadToolReferenceOfActivityData
 } from "@orquester/api/agent-chat";
 
 import type { WorkLogEntry, WorkLogToolLifecycleStatus } from "./contracts";
@@ -257,6 +258,10 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
       );
       if (sessionTool === SECRET_REQUEST_TOOL_NAME && secretRequest !== null) {
         entry.secretRequest = secretRequest;
+      }
+      const threadLink = threadToolReferenceOfActivityData(data);
+      if (threadLink) {
+        entry.threadLink = threadLink;
       }
     }
   }

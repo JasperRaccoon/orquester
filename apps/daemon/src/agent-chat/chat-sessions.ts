@@ -426,7 +426,8 @@ function cloneLineage(lineage: ThreadLineage): ThreadLineage {
     parentThreadId: lineage.parentThreadId,
     relation: lineage.relation,
     ...(lineage.forkedFrom ? { forkedFrom: { ...lineage.forkedFrom } } : {}),
-    createdAt: lineage.createdAt
+    createdAt: lineage.createdAt,
+    ...(lineage.delegationDepth !== undefined ? { delegationDepth: lineage.delegationDepth } : {})
   };
 }
 
@@ -435,7 +436,8 @@ function lineageFromRecord(record: NonNullable<SessionRecord["lineage"]>): Threa
     parentThreadId: record.parentThreadId,
     relation: record.relation,
     ...(record.forkedFrom ? { forkedFrom: { ...record.forkedFrom } } : {}),
-    createdAt: record.createdAt
+    createdAt: record.createdAt,
+    ...(record.delegationDepth !== undefined ? { delegationDepth: record.delegationDepth } : {})
   };
 }
 

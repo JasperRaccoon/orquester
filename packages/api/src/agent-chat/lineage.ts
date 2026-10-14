@@ -31,7 +31,17 @@ export interface ThreadLineage {
   forkedFrom?: ThreadForkPoint;
   /** When the child was created. */
   createdAt: string;
+  /**
+   * How many delegate links lie between the top-level thread and this one, this one's own
+   * included (a top-level thread's delegate: 1; a fork carries its parent's). Stamped by the
+   * daemon at creation, so closing a thread in the middle never resets it — the session tools'
+   * delegation cap (`session-tools/threads`) reads it. Absent on records written before it.
+   */
+  delegationDepth?: number;
 }
+
+/** The deepest delegation depth a lineage may record (well past any cap). */
+export const MAX_LINEAGE_DELEGATION_DEPTH = 64;
 
 /** The longest id a lineage field may carry. Thread ids are UUIDs; message ids are host-minted. */
 const MAX_LINEAGE_ID_CHARS = 200;
@@ -76,11 +86,15 @@ export function parseThreadLineage(value: unknown): ThreadLineage | undefined {
       forkedFrom = { messageId, turnId };
     }
   }
+  const depth = record.delegationDepth;
+  const delegationDepth =
+    typeof depth === "number" && Number.isInteger(depth) && depth >= 0 && depth <= MAX_LINEAGE_DELEGATION_DEPTH ? depth : undefined;
   return {
     parentThreadId,
     relation: relation as ThreadLineageRelation,
     ...(forkedFrom !== undefined ? { forkedFrom } : {}),
-    createdAt
+    createdAt,
+    ...(delegationDepth !== undefined ? { delegationDepth } : {})
   };
 }
 
@@ -171,6 +185,12 @@ export interface MergeBackRequest {
    * meets is queued (or stays queued) and tried again after a delay.
    */
   commandId?: string;
+  /**
+   * The mode the parent's turn runs in: `"plan"` when the merge comes from a turn that is
+   * planning (session tools' turn policy, `apps/daemon/src/session-tools/turn-policy.ts`), so a
+   * planning fork never starts editing work in its parent. Absent: `"default"`.
+   */
+  interactionMode?: "default" | "plan";
 }
 
 export type MergeBackDelivery = "sent" | "queued";

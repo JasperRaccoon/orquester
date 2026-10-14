@@ -1,5 +1,5 @@
 import React from "react";
-import { ArrowDownToLine, UserRound, X } from "lucide-react";
+import { ArrowDownToLine, ArrowUpRight, UserRound, X } from "lucide-react";
 
 import type { RuntimeSubagent } from "@orquester/api";
 
@@ -292,6 +292,55 @@ function IdentityNoticeRow({ entry }: { entry: WorkLogEntry }): React.ReactEleme
 // The tool row
 // ---------------------------------------------------------------------------
 
+/**
+ * The thread a thread or delegation session tool created or acted on (design
+ * 2026-10-14 §5): a link that opens its tab, named by the tab's live title
+ * (`title`, undefined once the tab is gone: "closed"). Never the reference's
+ * own title — a provider's result is not trusted to name a tab.
+ */
+export function ThreadLink({
+  link,
+  title,
+  onOpen
+}: {
+  link: NonNullable<WorkLogEntry["threadLink"]>;
+  title: string | undefined;
+  onOpen: (threadId: string) => void;
+}): React.ReactElement {
+  if (title === undefined) {
+    return (
+      <span className="shrink-0 text-[11px] text-neutral-600" data-thread-link="closed" title="That chat's tab was closed">
+        closed
+      </span>
+    );
+  }
+  return (
+    <button
+      type="button"
+      data-thread-link={link.threadId}
+      onClick={(event) => {
+        event.stopPropagation();
+        onOpen(link.threadId);
+      }}
+      onKeyDown={(event) => event.stopPropagation()}
+      title={`Open “${title}”`}
+      className="inline-flex min-w-0 max-w-[45%] shrink items-center gap-0.5 rounded px-1 text-[11px] text-neutral-400 transition-colors hover:bg-neutral-800/60 hover:text-neutral-100 focus:outline-none focus-visible:ring-1 focus-visible:ring-neutral-500"
+    >
+      <span className="min-w-0 truncate">{title}</span>
+      <ArrowUpRight size={11} strokeWidth={1.8} aria-hidden className="shrink-0" />
+    </button>
+  );
+}
+
+/** {@link ThreadLink} on the store: the project's chat tab of that id, opened as a tab. */
+function ThreadLinkButton({ link }: { link: NonNullable<WorkLogEntry["threadLink"]> }): React.ReactElement {
+  const title = useAppStore(
+    (state) => state.sessions.find((session) => session.id === link.threadId && session.kind === "agent-chat")?.title
+  );
+  const activateTab = useAppStore((state) => state.activateTab);
+  return <ThreadLink link={link} title={title} onOpen={activateTab} />;
+}
+
 const ToolEntryRow = React.memo(function ToolEntryRow({
   entry,
   insideExpandedGroup = false,
@@ -397,6 +446,7 @@ const ToolEntryRow = React.memo(function ToolEntryRow({
               {label}
             </span>
           </p>
+          {entry.threadLink ? <ThreadLinkButton link={entry.threadLink} /> : null}
           {failed && !destructive ? (
             <X size={12} strokeWidth={1.8} aria-hidden className="shrink-0 text-neutral-500/40" />
           ) : null}

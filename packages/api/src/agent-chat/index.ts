@@ -36,6 +36,7 @@ export * from "./roster.ts";
 export * from "./slim.ts";
 export * from "./session-tools.ts";
 export * from "./secret-requests.ts";
+export * from "./thread-tools.ts";
 export * from "./turn-state.ts";
 export * from "./turns.ts";
 export * from "./utf8.ts";

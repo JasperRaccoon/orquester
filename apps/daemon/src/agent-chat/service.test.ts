@@ -1499,6 +1499,33 @@ test("a fork's commandId makes it idempotent: a double submit, or a repeat after
   await f.cleanup();
 });
 
+test("a delegate's lineage records its delegation depth, a fork carries its parent's, and closing the middle keeps it", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const top = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  const delegate = (parentId: string, order: number) =>
+    f.service.createSession(
+      { kind: "agent-chat", refId: "claude", projectPath: "/w/p", chat: { modelSelection: { model: "" }, lineage: { parentThreadId: parentId, relation: "delegate" } } },
+      order
+    );
+  const d1 = await delegate(top.id, 1);
+  assert.equal(d1.lineage?.delegationDepth, 1);
+  const d2 = await delegate(d1.id, 2);
+  assert.equal(d2.lineage?.delegationDepth, 2);
+  assert.equal(f.created.at(-1)?.lineage?.delegationDepth, 2, "the host records it too");
+  assert.equal(top.lineage, undefined);
+  // A fork of a depth-1 task carries depth 1 (its relation is fork); a fork of a top thread none.
+  const fork = await f.service.forkSession(d1.id, {}, 3);
+  assert.equal(fork.lineage.delegationDepth, 1);
+  assert.equal(fork.session.lineage?.delegationDepth, 1);
+  assert.equal((await f.service.forkSession(top.id, {}, 4)).lineage.delegationDepth, undefined);
+  // The middle thread closes: its children keep their depth, and a new one under d2 is 3.
+  f.service.chat.close(d1.id);
+  assert.equal(f.service.delegationDepthOf({ lineage: d2.lineage! }), 2);
+  const d3 = await delegate(d2.id, 5);
+  assert.equal(d3.lineage?.delegationDepth, 3);
+  await f.cleanup();
+});
+
 test("a delegate's project is compared resolved, and the child groups under the parent's spelling", async () => {
   const f = await makeFixture(CLAUDE, null);
   const projectPath = join(f.appdir, "ws", "proj");

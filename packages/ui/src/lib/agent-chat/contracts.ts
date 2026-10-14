@@ -35,7 +35,8 @@ import type {
   TurnState,
   HistoryImportProgress,
   HtmlRenderReference,
-  McpAppReference
+  McpAppReference,
+  ThreadToolReference
 } from "@orquester/api/agent-chat";
 import type { ComposerDraft } from "./composer.logic";
 
@@ -280,6 +281,12 @@ export interface WorkLogEntry {
    * (the row's `data.sessionTool.references.secretRequest`).
    */
   secretRequest?: SecretRequestRecord;
+  /**
+   * The chat thread a thread or delegation session tool created or acted on
+   * (design 2026-10-14 §5: `delegate_task`, `thread_send`, `task_wait`, …),
+   * from its result's `threadRef` — the row links to it.
+   */
+  threadLink?: ThreadToolReference;
   /**
    * True when §5.6's slimming dropped something and `GET …/items/:itemId`
    * genuinely holds more, so the expanded row may offer "load full output".

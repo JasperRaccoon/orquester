@@ -161,11 +161,15 @@ export function sessionToolMarkedData(data: unknown, registered: ReadonlySet<str
  *   `htmlRenderReferenceOfActivityPayload`.
  * - `secretRequest`: `request_secret`'s record (name, purpose, outcome —
  *   never the value, which `stripSecretRequestValues` removes first).
+ * - `threadRef`: the thread a thread or delegation tool created or acted on
+ *   (`ThreadToolReference`, `thread-tools.ts`, design §5), read back with
+ *   `threadToolReferenceOfActivityData`.
  */
 export const SESSION_TOOL_REFERENCE_KEYS: readonly string[] = [
   "htmlRender",
   // `request_secret`: name, purpose and outcome — the card's record, never the value (`secret-requests.ts`).
-  "secretRequest"
+  "secretRequest",
+  "threadRef"
 ];
 
 /** One kept reference field may take this much JSON; a bigger one is dropped, never cut. */

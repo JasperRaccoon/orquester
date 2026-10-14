@@ -108,3 +108,19 @@ test("the merge outbox keeps unreadable entries and unknown fields for the next 
   assert.deepEqual(parsed.unreadable, [{ mergeId: 3 }, "junk"]);
   assert.deepEqual(parseMergeOutbox("garbage"), { entries: [], unreadable: [] });
 });
+
+test("a lineage's delegation depth persists, and a bad one is dropped on its own", () => {
+  const kept = parseSessionsConfig({ version: 1, sessions: [chatRecord({ lineage: { ...LINEAGE, relation: "delegate", delegationDepth: 2 } })] });
+  assert.equal(kept.sessions[0]?.lineage?.delegationDepth, 2);
+  const bad = parseSessionsConfig({ version: 1, sessions: [chatRecord({ lineage: { ...LINEAGE, delegationDepth: "deep" } })] });
+  assert.equal(bad.sessions[0]?.lineage?.parentThreadId, "parent-1");
+  assert.equal(bad.sessions[0]?.lineage?.delegationDepth, undefined);
+});
+
+test("a queued merge keeps its plan mode; an unknown mode is dropped, never the merge", () => {
+  const entry = { mergeId: "m1", parentSessionId: "p", childSessionId: "c", input: "x", queuedAt: "t" };
+  assert.equal(parseMergeOutbox({ entries: [{ ...entry, interactionMode: "plan" }] }).entries[0]?.interactionMode, "plan");
+  const odd = parseMergeOutbox({ entries: [{ ...entry, interactionMode: "edit" }] }).entries[0];
+  assert.equal(odd?.mergeId, "m1");
+  assert.equal(odd?.interactionMode, undefined);
+});

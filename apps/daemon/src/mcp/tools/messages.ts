@@ -113,7 +113,7 @@ async function dispatchTurn(ctx: ToolContext, sessionId: string, checked: Thread
  * Settled is decided by the state alone, as wait.ts and views.ts decide it: a running turn's `completedAt` can hold a
  * mid-turn placeholder stamp (turn-state.ts), and a steer into that turn is this message's.
  */
-function turnsOverBefore(checked: ThreadSnapshotPayload, summary: SessionSummary): ReadonlySet<string> {
+export function turnsOverBefore(checked: ThreadSnapshotPayload, summary: SessionSummary): ReadonlySet<string> {
   const over = new Set<string>();
   for (const t of [...checked.turns, summary.latestTurn]) {
     if (t?.turnId && SETTLED_TURN_STATES.has(t.state)) over.add(t.turnId);
@@ -129,7 +129,7 @@ function turnsOverBefore(checked: ThreadSnapshotPayload, summary: SessionSummary
  * `over` when the message was posted is the list catching up, not this message's outcome: the wait rebases on it and
  * goes on. A session in error is a real failure whatever its latest turn.
  */
-async function awaitTurn(ctx: ToolContext, sessionId: string, baseline: TurnBaseline, over: ReadonlySet<string>, timeoutMs: number): Promise<{ outcome: TurnOutcome; session: SessionDetail }> {
+export async function awaitTurn(ctx: Pick<ToolContext, "api" | "signal" | "now">, sessionId: string, baseline: TurnBaseline, over: ReadonlySet<string>, timeoutMs: number): Promise<{ outcome: TurnOutcome; session: SessionDetail }> {
   // Elapsed time as wait.ts counts it: the larger of the caller's clock and the monotonic one.
   const startedAt = ctx.now();
   const startedMono = performance.now();
@@ -323,7 +323,7 @@ async function awaitGoalAnswer(ctx: ToolContext, sessionId: string, input: strin
   }
 }
 
-const sendMessage = defineTool({
+export const sendMessage = defineTool({
   name: "send_message",
   title: "Send a message",
   description: "Send a message to a chat session (with optional image/file attachments, optionally in plan mode). With wait:true (default) it returns the agent's reply, or the question/approval it stopped on. While a turn is running the message steers it. On Codex the host runs `/goal …` itself: no turn starts, and outcome \"goal\" carries its `answer`.",
@@ -403,7 +403,7 @@ const implementPlan = defineTool({
   }
 });
 
-const readTranscript = defineTool({
+export const readTranscript = defineTool({
   name: "read_transcript",
   title: "Read the transcript",
   // A list cut to fit ends in one element of its own shape counting the rest (transcript.ts `cutRow`): a changedFiles

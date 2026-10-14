@@ -254,6 +254,10 @@ export class LineageService {
     if (text.length === 0) {
       throw new LineageError("There is no reply to merge back yet: nothing finished in this session.", "COMMAND_REJECTED");
     }
+    const mode = body.interactionMode;
+    if (mode !== undefined && mode !== null && mode !== "default" && mode !== "plan") {
+      throw new LineageError('interactionMode must be "default" or "plan".', "INVALID_COMMAND");
+    }
     if (text.length > MERGE_BACK_MAX_TEXT_CHARS) {
       throw new LineageError(
         `The text to merge back is ${text.length} characters; at most ${MERGE_BACK_MAX_TEXT_CHARS} fit in a message.`,
@@ -267,7 +271,8 @@ export class LineageService {
       input: buildMergeBackMessage({ childTitle: child.title, relation: lineage.relation, text }),
       queuedAt: (this.opts.now?.() ?? new Date()).toISOString(),
       state: "queued",
-      attempts: 0
+      attempts: 0,
+      ...(mode === "plan" ? { interactionMode: "plan" as const } : {})
     };
     const response = await this.lane(parent.id, async (): Promise<MergeBackResponse> => {
       // A repeat that raced the first into the lane is the same merge.
@@ -422,7 +427,7 @@ export class LineageService {
   private async deliver(api: DaemonApi, entry: MergeOutboxEntry): Promise<Delivery> {
     try {
       const res = await api.request("POST", agentChatCommandPath(entry.parentSessionId, "turn"), {
-        body: { commandId: attemptCommandId(entry), input: entry.input, interactionMode: "default" }
+        body: { commandId: attemptCommandId(entry), input: entry.input, interactionMode: entry.interactionMode ?? "default" }
       });
       if (res.status < 400) return { kind: "sent", seq: (res.body as { seq?: number } | null)?.seq ?? 0 };
       const error = (res.body as { error?: { code?: string; message?: string } } | null)?.error;

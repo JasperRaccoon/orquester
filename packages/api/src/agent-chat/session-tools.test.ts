@@ -203,7 +203,7 @@ test("htmlRender is a kept reference key and survives a double slim through the 
 });
 
 test("secretRequest is a kept reference key beside htmlRender: the record survives a double slim, the value never", () => {
-  assert.deepEqual([...SESSION_TOOL_REFERENCE_KEYS], ["htmlRender", "secretRequest"]);
+  assert.deepEqual([...SESSION_TOOL_REFERENCE_KEYS], ["htmlRender", "secretRequest", "threadRef"]);
   const record = { name: "DEPLOY_KEY", purpose: "Push the release", outcome: "provided" };
   const value = "correct-horse-battery-staple-4711";
   // As ingestion stores it: the value stripped by shape first, then marked.

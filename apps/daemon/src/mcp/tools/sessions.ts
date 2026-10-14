@@ -14,7 +14,8 @@ import { defineTool, DESTRUCTIVE, MUTATING, MUTATING_IDEMPOTENT, READ_ONLY, type
 import { buildViewContext, chatDetail, sessionView } from "../views.ts";
 import { byAttention } from "./watch.ts";
 
-const MAX_RUNNING_SESSIONS_PER_PROJECT = 24;
+/** The most running tabs a project may hold before a tool opens another (also the session tools' cap, `session-tools/threads`). */
+export const MAX_RUNNING_SESSIONS_PER_PROJECT = 24;
 const runtimeModeSchema = z.enum(RUNTIME_MODES as unknown as [RuntimeMode, ...RuntimeMode[]]);
 const optionsSchema = z.record(z.union([z.string(), z.boolean()])).describe("Model options by id, e.g. {\"effort\":\"high\",\"thinking\":true}. `effort` works for every agent.");
 const sessionIdField = z.string().min(1).describe("The session id from list_sessions.");
