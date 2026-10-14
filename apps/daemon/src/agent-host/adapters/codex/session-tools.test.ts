@@ -167,3 +167,94 @@ describe("codex session tools — a launch", () => {
     await adapter.stopAll();
   });
 });
+
+describe("codex session tools — a fork (thread lineage, spec 2026-10-14 §6)", () => {
+  it("the fork's own process gets no credential, and the child thread gets its OWN grant — never the parent's", async () => {
+    const server = writeMockCodexServer({ turns: [], forkThreadId: "forked-1" });
+    cleanups.push(() => rmSync(server.dir, { recursive: true, force: true }));
+    // Every process the adapter spawns appends the credential it was handed.
+    const wrapper = join(server.dir, "codex-wrapper.sh");
+    const envLog = join(server.dir, "env.txt");
+    writeFileSync(
+      wrapper,
+      `#!/bin/sh\nprintf '[%s]\\n' "$${CODEX_SESSION_TOOLS_TOKEN_ENV}" >> '${envLog}'\nexec '${server.bin}' "$@"\n`,
+      "utf8"
+    );
+    chmodSync(wrapper, 0o755);
+    const tools = recordingSessionTools();
+    const builds: Array<{ threadId: string; token: string | undefined }> = [];
+    const { context } = createFakeContext({
+      resolveBin: () => Promise.resolve(wrapper),
+      sessionTools: tools,
+      buildEnv: (input) => {
+        builds.push({ threadId: input.threadId, token: input.extraEnv?.[CODEX_SESSION_TOOLS_TOKEN_ENV] });
+        return { PATH: process.env.PATH ?? "", HOME: process.env.HOME ?? "/tmp", ...input.extraEnv } as Record<string, string>;
+      }
+    });
+    const adapter = await createCodexAdapter(context);
+    cleanups.push(() => adapter.stopAll());
+    await adapter.refreshSnapshot({ cwd: process.cwd() });
+    // The probe ran the CLI too; only the sessions and the fork are of interest.
+    writeFileSync(envLog, "", "utf8");
+    const home = { kind: "system" as const, path: "" };
+
+    // The parent runs, with its grant.
+    await adapter.startSession({
+      threadId: "parent",
+      cwd: process.cwd(),
+      home,
+      modelSelection: { model: "gpt-5.5" },
+      runtimeMode: "approval-required"
+    });
+    assert.equal(tools.grants.length, 1);
+    const parentGrant = tools.grants[0]!;
+    assert.equal(parentGrant.threadId, "parent");
+    const parentCodexThread = (adapter.listSessions()[0]!.resumeCursor as { threadId: string }).threadId;
+
+    // The fork: a short-lived process under the parent's home — no grant issued, no credential handed.
+    const buildsBefore = builds.length;
+    const forked = await adapter.forkConversation!({
+      sourceThreadId: "parent",
+      sourceResumeCursor: { threadId: parentCodexThread },
+      threadId: "child",
+      projectPath: process.cwd(),
+      cwd: process.cwd(),
+      home,
+      cut: { firstRemovedTurnId: null, retainedTurnIds: ["turn-1"] }
+    });
+    assert.deepEqual(forked.resumeCursor, { threadId: "forked-1" });
+    assert.equal(tools.grants.length, 1, "a fork issues nothing");
+    assert.deepEqual(builds.slice(buildsBefore), [{ threadId: "parent", token: undefined }]);
+
+    // The child: its own session, its own fresh grant, bound to the child.
+    await adapter.startSession({
+      threadId: "child",
+      cwd: process.cwd(),
+      home,
+      modelSelection: { model: "gpt-5.5" },
+      runtimeMode: "approval-required",
+      resumeCursor: forked.resumeCursor
+    });
+    assert.equal(tools.grants.length, 2);
+    const childGrant = tools.grants[1]!;
+    assert.equal(childGrant.threadId, "child");
+    assert.notEqual(childGrant.token, parentGrant.token);
+    assert.equal(builds.at(-1)?.token, childGrant.token);
+    assert.equal(parentGrant.revoked, false, "the parent keeps its own");
+    // What each process was really handed: the parent's, nothing for the fork, the child's.
+    assert.deepEqual(readFileSync(envLog, "utf8").trim().split("\n"), [
+      `[${parentGrant.token}]`,
+      "[]",
+      `[${childGrant.token}]`
+    ]);
+    const resume = server.received().find(
+      (frame) => frame.method === "thread/resume" && (frame.params as { threadId?: string }).threadId === "forked-1"
+    );
+    assert.ok(resume !== undefined, "the child resumes the fork");
+    assert.deepEqual(Object.keys((resume.params as { config?: object }).config ?? {}), ["mcp_servers.orquester"]);
+    await adapter.stopSession("child");
+    assert.equal(childGrant.revoked, true);
+    assert.equal(parentGrant.revoked, false, "ending the child never ends the parent's");
+    await adapter.stopAll();
+  });
+});

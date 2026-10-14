@@ -35,6 +35,8 @@ import { AsyncEventQueue, createDeferred } from "./async-queue.ts";
 import type { ClaudeAdapterDeps } from "./deps.ts";
 import { countingIds, readClaudeFixture } from "./fixtures.ts";
 import { createClaudeAdapterWith } from "./index.ts";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
 import { recordingSessionTools } from "../../session-tools/testing.ts";
 
 // Delay native filesystem operations for real transcript races; every operation
@@ -3545,6 +3547,61 @@ describe("Claude adapter — session tools (design 2026-10-14 §1)", () => {
     assert.ok(opened);
     const options = harness.queryOptions.find((entry) => entry.persistSession !== false)!;
     assert.deepEqual(options.mcpServers, {});
+  });
+
+  it("a fork's child runs its own in-process server, bound to the child — never the parent's (spec §6)", async () => {
+    const tools = recordingSessionTools();
+    const SOURCE = "b46b654b-57bb-40e4-8c82-d3536bd06a28";
+    const FORKED = "d908c283-1c9a-45ee-9506-3ca4a69c8579";
+    const transcript = [
+      { type: "user", uuid: "user-a", parent_tool_use_id: null, message: { role: "user", content: [{ type: "text", text: "one" }] } },
+      { type: "assistant", uuid: "asst-a", parent_tool_use_id: null, message: { role: "assistant", content: [{ type: "text", text: "ok" }] } }
+    ];
+    const harness = await makeHarness({
+      sessionTools: tools,
+      historyStdout: (method) => JSON.stringify(method === "forkSession" ? { sessionId: FORKED } : transcript)
+    });
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.adapter.sendTurn({ threadId: START.threadId, input: "one", attachments: [], interactionMode: "default" });
+    await peer.nextTurn();
+    peer.emit(systemInit(SOURCE));
+    peer.emit(successResult(SOURCE));
+    await harness.waitFor("turn.completed", harness.events.length - 1);
+
+    const forked = await harness.adapter.forkConversation!({
+      sourceThreadId: START.threadId,
+      sourceResumeCursor: undefined,
+      threadId: "child",
+      projectPath: START.cwd,
+      cwd: START.cwd,
+      home: START.home,
+      cut: { firstRemovedTurnId: null, retainedTurnIds: [] }
+    });
+    assert.deepEqual(forked.resumeCursor, { threadId: "child", resume: FORKED });
+    await harness.adapter.startSession({ ...START, threadId: "child", resumeCursor: forked.resumeCursor });
+
+    const launches = harness.queryOptions.filter((entry) => entry.persistSession !== false);
+    const parentOptions = launches[0]!;
+    const childOptions = launches.at(-1)!;
+    assert.equal(childOptions.resume, FORKED);
+    const instanceOf = (options: (typeof launches)[number]) =>
+      (options.mcpServers?.["orquester"] as { instance?: unknown } | undefined)?.instance;
+    assert.ok(instanceOf(childOptions) !== undefined);
+    assert.notEqual(instanceOf(childOptions), instanceOf(parentOptions), "a server of its own");
+    for (const [options, threadId] of [
+      [childOptions, "child"],
+      [parentOptions, START.threadId]
+    ] as const) {
+      const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
+      await (instanceOf(options) as { connect(transport: unknown): Promise<void> }).connect(serverSide);
+      const client = new Client({ name: "claude-cli-stand-in", version: "0" });
+      await client.connect(clientSide);
+      const result = await client.callTool({ name: "echo", arguments: { text: "hi" } });
+      assert.deepEqual(result.content, [{ type: "text", text: `ran echo for ${threadId}` }]);
+      assert.equal(tools.calls.at(-1)!.threadId, threadId);
+      await client.close();
+    }
   });
 
   it("the instruction block rides the system prompt, never the user's turn", async () => {

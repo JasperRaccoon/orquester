@@ -38,6 +38,7 @@ import {
   counterIdGen,
   settle
 } from "../../ingestion/test-harness.ts";
+import { withForkHandoff } from "../../orchestration/fork.ts";
 import { resumeCursorFor } from "../../orchestration/resume.ts";
 import { readLeftoverWork } from "../../support/leftover-work.ts";
 import { createGrokAdapter } from "./index.ts";
@@ -2196,6 +2197,47 @@ test("session tools: the server rides session/new with its credential redacted f
 
   await r.adapter.stopSession("t1");
   assert.equal(grant.revoked, true, "the credential dies with its session");
+  await r.dispose();
+});
+
+test("session tools × fork: a transcript fork's child opens with its OWN grant; the handoff rides its prompt, the rules only _meta", async () => {
+  const tools = recordingSessionTools();
+  const rawFrames: unknown[] = [];
+  const r = await rig({ sessionTools: tools, rawFrames });
+  await start(r);
+  // Grok has no native fork (spec §6): the child is a fresh session of its own.
+  const before = rawFrames.length;
+  await start(r, { threadId: "child" });
+  assert.deepEqual(
+    tools.grants.map((grant) => grant.threadId),
+    ["t1", "child"]
+  );
+  const [parentGrant, childGrant] = tools.grants;
+  assert.notEqual(childGrant!.token, parentGrant!.token);
+  const sent = (method: string) =>
+    rawFrames
+      .slice(before)
+      .map((entry) => entry as { direction: string; frame: { method?: string; params?: Record<string, unknown> } })
+      .find((entry) => entry.direction === "send" && entry.frame.method === method);
+  const opened = sent("session/new")?.frame.params as { mcpServers: Array<{ name: string }>; _meta?: { rules?: string } };
+  assert.deepEqual(
+    opened.mcpServers.map((server) => server.name),
+    ["orquester"]
+  );
+  assert.equal(opened._meta?.rules, tools.instructions);
+  assert.ok(!JSON.stringify(rawFrames).includes(childGrant!.token), "the raw log never holds the child's credential");
+
+  // The orchestrator's first ordinary message of a transcript fork.
+  const input = withForkHandoff("carry on", "[fork transcript]")!;
+  await r.adapter.sendTurn({ threadId: "child", input, attachments: [], interactionMode: "default" });
+  await r.waitFor((event) => event.type === "turn.completed" && event.threadId === "child", "child turn.completed");
+  const prompt = JSON.stringify(sent("session/prompt")?.frame.params);
+  assert.ok(prompt.includes("[fork transcript]") && prompt.includes("carry on"), "the handoff is on the wire");
+  assert.ok(!prompt.includes(tools.instructions), "the instruction block never rides the prompt");
+
+  await r.adapter.stopSession("child");
+  assert.equal(childGrant!.revoked, true);
+  assert.equal(parentGrant!.revoked, false, "ending the child never ends the parent's");
   await r.dispose();
 });
 
