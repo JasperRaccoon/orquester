@@ -34,7 +34,8 @@ import {
   ForkRefusal,
   resolveForkCut,
   stripForkHandoff,
-  withForkHandoff
+  withForkHandoff,
+  type ForkHandoffStore
 } from "./fork.ts";
 import { createScriptedAdapter, createTestHost, type TestHost } from "./testing/index.ts";
 import type { ScriptedAdapter } from "./testing/scripted-adapter.ts";
@@ -531,17 +532,45 @@ describe("forkThread", () => {
     await host.stop();
   });
 
-  it("transcript: the handoff file lives only while it may be re-armed, and keeps a newer build's fields", async (t) => {
+  it("transcript: the handoff record lives with the child; a failed carrier and a rewind past a completed one re-arm it, with a newer build's fields", async (t) => {
     const root = await mkdtemp(join(tmpdir(), "orq-fork-handoff-"));
     t.after(() => rm(root, { recursive: true, force: true }));
     const pathFor = (threadId: string) => join(root, threadId, "fork-handoff.json");
+    const files = createFileForkHandoffStore(pathFor);
+    let host: TestHost | undefined;
+    let marks = 0;
+    const store: ForkHandoffStore = {
+      load: (threadId) => files.load(threadId),
+      save: async (threadId, record) => {
+        await files.save(threadId, record);
+        // The reviewer's window: the delivery mark is written before the turn is adopted,
+        // and an ingestion batch lands right there (a cold child's first message).
+        if (record.deliveredTurnId !== undefined && (marks += 1) === 1) {
+          await host!.orchestrator.ingestionSink(threadId, [
+            domainEvent(threadId, host!, "thread.activity-appended", {
+              activity: {
+                id: "between",
+                kind: "activity",
+                tone: "info",
+                activityKind: "runtime.warning",
+                summary: "a frame between the send and the adoption",
+                payload: null,
+                turnId: null,
+                createdAt: host!.clock.nowIso(),
+                updatedAt: host!.clock.nowIso()
+              }
+            })
+          ]);
+        }
+      }
+    };
     const claude = createScriptedAdapter({
       id: "claude",
       forkConversation: async () => {
         throw new Error("compacted after that turn");
       }
     });
-    const host = createTestHost({ adapters: { claude }, forkHandoffs: createFileForkHandoffStore(pathFor) });
+    host = createTestHost({ adapters: { claude }, forkHandoffs: store });
     const parentId = await host.createThread({ threadId: "parent" });
     const said = await runTurn(host, claude, parentId, "remember SWORDFISH", "noted");
     assert.equal(
@@ -552,35 +581,39 @@ describe("forkThread", () => {
     // A newer build's field on the record: every rewrite keeps it.
     const written = JSON.parse(await readFile(pathFor("child"), "utf8")) as Record<string, unknown>;
     await writeFile(pathFor("child"), JSON.stringify({ ...written, fromNewerBuild: { kept: true } }));
+    const onDisk = async () => JSON.parse(await readFile(pathFor("child"), "utf8")) as Record<string, unknown>;
 
-    // The carrier fails: the record stays, marked, with the newer field.
+    // The first message carries it, a batch lands before the turn is adopted, and the turn fails.
     await host.orchestrator.command("child", "turn", { commandId: cmd(), input: "continue" });
     await host.settle();
+    assert.equal(marks, 1);
     assert.match(claude.lastTurn?.input ?? "", /SWORDFISH/);
     const carrier = claude.turnIds.at(-1)!;
-    const marked = JSON.parse(await readFile(pathFor("child"), "utf8")) as Record<string, unknown>;
-    assert.equal(marked.deliveredTurnId, carrier);
-    assert.deepEqual(marked.fromNewerBuild, { kept: true }, "an unknown field survives the delivery mark");
+    assert.equal((await onDisk()).deliveredTurnId, carrier);
+    assert.deepEqual((await onDisk()).fromNewerBuild, { kept: true }, "an unknown field survives the delivery mark");
     await host.orchestrator.ingestionSink("child", [
       domainEvent("child", host, "thread.session-set", { session: { status: "error", activeTurnId: null, lastError: "boom" } })
     ]);
     await host.settle();
-    assert.ok((await readFile(pathFor("child"), "utf8")).includes(carrier), "a failed carrier keeps the record");
 
-    // A rewind that drops the failed carrier re-arms it: the next message carries it.
+    // The retry carries it again, and completes.
+    await runTurn(host, claude, "child", "retry", "ok");
+    assert.match(claude.lastTurn?.input ?? "", /^<forked-conversation>[\s\S]*SWORDFISH[\s\S]*\n\nretry$/, "the retry carries the transcript");
+    await runTurn(host, claude, "child", "next", "ok");
+    assert.equal(claude.lastTurn?.input, "next", "delivered once its carrier completed");
+    const delivered = await onDisk();
+    assert.equal(typeof delivered.deliveredTurnId, "string", "kept for the child's lifetime");
+    assert.deepEqual(delivered.fromNewerBuild, { kept: true });
+
+    // A rewind past the completed carrier: the provider no longer has the parent's conversation.
     await host.orchestrator.command("child", "revert", { commandId: cmd(), targetTurnCount: 0 });
     await host.settle();
-    assert.equal(claude.calls.filter((call) => call.kind === "rollbackThread").length, 1);
-    const rearmed = JSON.parse(await readFile(pathFor("child"), "utf8")) as Record<string, unknown>;
+    assert.ok(claude.calls.some((call) => call.kind === "rollbackThread"));
+    const rearmed = await onDisk();
     assert.equal(rearmed.deliveredTurnId, undefined);
     assert.deepEqual(rearmed.fromNewerBuild, { kept: true }, "and survives the re-arm");
     await runTurn(host, claude, "child", "from the top", "ok");
     assert.match(claude.lastTurn?.input ?? "", /^<forked-conversation>[\s\S]*SWORDFISH[\s\S]*\n\nfrom the top$/);
-
-    // That carrier settled: the copy of the parent's conversation is deleted.
-    await assert.rejects(readFile(pathFor("child"), "utf8"), /ENOENT/, "deleted once its carrier settled");
-    await runTurn(host, claude, "child", "next", "ok");
-    assert.equal(claude.lastTurn?.input, "next");
     await host.stop();
   });
 

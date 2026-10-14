@@ -1070,10 +1070,9 @@ export const forkHandoffSchema = z.object({
   transcript: z.string().min(1),
   createdAt: z.string(),
   /**
-   * The turn that carried the transcript, while it may still need it again: that turn failing,
-   * or a rewind dropping it, re-arms the handoff for the next message; once it settles any
-   * other way the file is deleted. A value that does not read is no delivery — the transcript
-   * is sent again rather than lost.
+   * The turn that carried the transcript. The record is kept for the child's lifetime: that
+   * turn failing, or a rewind dropping it, re-arms the handoff for the next message. A value
+   * that does not read is no delivery — the transcript is sent again rather than lost.
    */
   deliveredTurnId: z.string().min(1).optional().catch(undefined)
 }).passthrough();

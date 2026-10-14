@@ -2280,13 +2280,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   /**
    * The conversation a transcript-handoff fork still owes its provider. Only
    * a fork the host could not fork natively has one (`forkThread`). A turn
-   * that carried it marks it delivered, and the record stays only while it
-   * may be needed again: when that turn FAILS the provider may never have
-   * taken it in, so the next message carries it again; a rewind that drops
-   * the turn while it may still re-arm re-arms it ({@link rearmRewoundForkHandoff}).
-   * Once the turn settles any other way — completed, or a Stop's, which did
-   * reach the provider — the copy of the parent's conversation is deleted
-   * ({@link retireDeliveredForkHandoff}).
+   * that carried it marks it delivered — kept for the child's lifetime, not
+   * deleted (it lives in the child's own thread directory and goes with it):
+   * when that turn FAILED the provider may never have taken it in, so the
+   * next message carries it again (a Stop's turn did reach the provider, and
+   * is not resent); a rewind that drops the turn re-arms it
+   * ({@link rearmRewoundForkHandoff}).
    */
   const pendingForkHandoff = async (
     runtime: ThreadRuntime,
@@ -2297,31 +2296,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     const delivered = record.deliveredTurnId;
     if (delivered === undefined) return record.transcript;
     const carrier = (runtime.state.turns ?? []).find((turn) => turn.turnId === delivered);
-    if (carrier?.state !== "failed") {
-      await retireDeliveredForkHandoff(runtime);
-      return null;
-    }
+    if (carrier?.state !== "failed") return null;
     const { deliveredTurnId: _failed, ...owed } = record;
     await saveForkHandoff(runtime, owed);
     return owed.transcript;
-  };
-
-  /**
-   * The turn that carried the handoff settled other than failed (or is no
-   * longer in the thread at all): the provider has the parent's conversation
-   * for good, so `fork-handoff.json` — a copy of it that would otherwise
-   * outlive the parent — is deleted. Run after every ingested batch (cheap:
-   * only a runtime holding a delivered record looks) and before a send.
-   */
-  const retireDeliveredForkHandoff = async (runtime: ThreadRuntime): Promise<void> => {
-    const delivered = runtime.forkHandoff?.deliveredTurnId;
-    if (delivered === undefined) return;
-    const carrier = (runtime.state.turns ?? []).find((turn) => turn.turnId === delivered);
-    if (carrier !== undefined && (!SETTLED_TURN_STATES.has(carrier.state) || carrier.state === "failed")) return;
-    runtime.forkHandoff = null;
-    await forkHandoffs.remove(runtime.id).catch((error: unknown) => {
-      logger.warn(`agent-host: could not remove the fork handoff of ${runtime.id}`, error);
-    });
   };
 
   /** A rewind dropped the turn that carried the handoff: the provider no longer has it. */
@@ -5845,7 +5823,6 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       return;
     }
     await append(runtime, guarded);
-    await retireDeliveredForkHandoff(runtime);
   };
 
   // -------------------------------------------------------------------------

@@ -11,7 +11,7 @@
  * refuses one by contract, and the others would copy half a reply).
  */
 
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import {
@@ -249,7 +249,6 @@ export function stripForkHandoff(text: string): string {
 export interface ForkHandoffStore {
   load(threadId: string): Promise<ForkHandoffRecord | null>;
   save(threadId: string, record: ForkHandoffRecord): Promise<void>;
-  remove(threadId: string): Promise<void>;
 }
 
 /** `fork-handoff.json` beside `meta.json`: 0600, written atomically, read tolerantly. */
@@ -268,9 +267,6 @@ export function createFileForkHandoffStore(pathFor: (threadId: string) => string
       const tmp = `${path}.tmp`;
       await writeFile(tmp, JSON.stringify(record), { encoding: "utf8", mode: 0o600 });
       await rename(tmp, path);
-    },
-    async remove(threadId) {
-      await rm(pathFor(threadId), { force: true });
     }
   };
 }
@@ -284,9 +280,6 @@ export function createMemoryForkHandoffStore(): ForkHandoffStore {
     },
     async save(threadId, record) {
       records.set(threadId, record);
-    },
-    async remove(threadId) {
-      records.delete(threadId);
     }
   };
 }
