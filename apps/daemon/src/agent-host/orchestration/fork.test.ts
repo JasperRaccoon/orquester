@@ -6,10 +6,16 @@
  */
 
 import assert from "node:assert/strict";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import {
   HISTORICAL_RAW_SOURCE,
+  htmlRenderReferenceOfActivityPayload,
+  isHtmlRenderAttachmentId,
+  sessionToolMarkedData,
   type DomainEvent,
   type RuntimeEvent,
   type ThreadActivityItem,
@@ -18,6 +24,8 @@ import {
 } from "@orquester/api/agent-chat";
 
 import type { ForkConversationInput } from "../adapter.ts";
+import type { AgentThreadStore } from "../services.ts";
+import { createThreadStore } from "../store/index.ts";
 import { isAgentChatCommandError } from "./errors.ts";
 import {
   buildForkTranscript,
@@ -626,5 +634,138 @@ describe("forkThread", () => {
       "INVALID_COMMAND"
     );
     await host.stop();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// A fork's child and the parent's published pages (spec 2026-10-14 §2.2, §3, §6)
+// ---------------------------------------------------------------------------
+
+/** An `html_render` row as each native-forking provider records it, marked as ingestion marks it. */
+function pageRowData(provider: "claude" | "codex" | "opencode", page: { attachmentId: string; title: string; height: number }) {
+  const text = JSON.stringify({ htmlRender: page, message: "Shown." });
+  const data =
+    provider === "claude"
+      ? {
+          toolName: "mcp__orquester__html_render",
+          input: { html: "<p>x</p>", title: page.title, height: page.height },
+          result: { type: "tool_result", content: [{ type: "text", text }] }
+        }
+      : provider === "codex"
+        ? {
+            server: "orquester",
+            tool: "html_render",
+            arguments: { html: "<p>x</p>" },
+            result: { content: [{ type: "text", text }], structuredContent: { htmlRender: page, message: "Shown." } }
+          }
+        : {
+            tool: "orquester-0123456789abcdef_html_render",
+            state: { status: "completed", input: { html: "<p>x</p>" }, output: text }
+          };
+  return sessionToolMarkedData(data, new Set(["html_render"]));
+}
+
+async function pushPageRow(
+  host: TestHost<AgentThreadStore>,
+  threadId: string,
+  turnId: string,
+  id: string,
+  data: unknown
+): Promise<void> {
+  await host.orchestrator.ingestionSink(threadId, [
+    domainEvent(threadId, host as unknown as TestHost, "thread.activity-appended", {
+      activity: {
+        id,
+        kind: "activity",
+        tone: "tool",
+        activityKind: "tool.completed",
+        summary: "orquester: html_render",
+        payload: { itemType: "mcp_tool_call", toolUseId: id, status: "completed", data },
+        turnId,
+        createdAt: host.clock.nowIso(),
+        updatedAt: host.clock.nowIso()
+      }
+    })
+  ]);
+  await host.settle();
+}
+
+describe("a fork's child and its parent's pages", () => {
+  for (const provider of ["claude", "codex", "opencode"] as const) {
+    it(`${provider} (native): the retained turns' pages load in the child, survive the parent and the child's sweep`, async (t) => {
+      const root = await mkdtemp(join(tmpdir(), "orq-fork-pages-"));
+      t.after(() => rm(root, { recursive: true, force: true }));
+      const store = createThreadStore({ rootDir: join(root, "threads") });
+      t.after(() => store.close());
+      const adapter = createScriptedAdapter({
+        id: provider,
+        forkConversation: async (input) => ({ resumeCursor: { threadId: input.threadId, resume: "forked" } })
+      });
+      const host = createTestHost({ adapters: { [provider]: adapter }, store });
+      t.after(() => host.stop());
+      const parentId = await host.createThread({ threadId: "parent", refId: provider });
+      const asFake = host as unknown as TestHost;
+      const first = await runTurn(asFake, adapter, parentId, "chart it", "here");
+      const second = await runTurn(asFake, adapter, parentId, "another", "there");
+
+      const publish = async (title: string) => {
+        const source = join(root, `${title}.html`);
+        await writeFile(source, `<p>${title}</p>`);
+        const ref = await store.putAttachment({ threadId: parentId, name: `${title}.html`, mimeType: "text/html", sourcePath: source });
+        assert.ok(isHtmlRenderAttachmentId(ref.id), ref.id);
+        return { attachmentId: ref.id, title, height: 300 };
+      };
+      const kept = await publish("Kept");
+      const dropped = await publish("Dropped");
+      await pushPageRow(host, parentId, first.turnId, "row-kept", pageRowData(provider, kept));
+      await pushPageRow(host, parentId, second.turnId, "row-dropped", pageRowData(provider, dropped));
+
+      const result = await host.orchestrator.forkThread(parentId, forkRequest("child", provider, { messageId: first.replyId }));
+      await host.settle();
+      assert.equal(result.strategy, "native");
+
+      // The child's replay names the parent's page, as the provider's row did.
+      await pushPageRow(host, "child", "child-turn-1", "child-row", pageRowData(provider, kept));
+      const read = await host.orchestrator.readThread("child");
+      assert.ok(read.kind === "snapshot");
+      const childRow = read.thread.items.find((item) => item.kind === "activity" && item.id === "child-row");
+      assert.deepEqual(
+        htmlRenderReferenceOfActivityPayload((childRow as { payload?: unknown } | undefined)?.payload),
+        kept,
+        "the child's row is a visual row, from the slim row it is sent as"
+      );
+
+      // It loads in the child — the child's own copy — and only the kept turn's.
+      const path = await store.resolveAttachment("child", kept.attachmentId);
+      assert.ok(path.startsWith(join(root, "threads", "child")), path);
+      assert.equal(await readFile(path, "utf8"), "<p>Kept</p>");
+      await assert.rejects(store.resolveAttachment("child", dropped.attachmentId), /not found/);
+      // A thread that holds no copy still cannot read another thread's page.
+      await assert.rejects(store.resolveAttachment("stranger", kept.attachmentId));
+
+      // Deleting the parent breaks nothing; the child's sweep keeps what its rows name.
+      await store.deleteThread(parentId);
+      await store.pruneAttachments({ threadId: "child", now: new Date(Date.now() + 365 * 24 * 3600_000) });
+      assert.equal(await readFile(await store.resolveAttachment("child", kept.attachmentId), "utf8"), "<p>Kept</p>");
+    });
+  }
+
+  it("grok (transcript): no row of the parent is replayed, so no page is copied", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "orq-fork-pages-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const store = createThreadStore({ rootDir: join(root, "threads") });
+    t.after(() => store.close());
+    const grok = createScriptedAdapter({ id: "grok" });
+    const host = createTestHost({ adapters: { grok }, store });
+    t.after(() => host.stop());
+    const parentId = await host.createThread({ threadId: "parent", refId: "grok" });
+    const said = await runTurn(host as unknown as TestHost, grok, parentId, "chart it", "here");
+    const source = join(root, "p.html");
+    await writeFile(source, "<p>p</p>");
+    const ref = await store.putAttachment({ threadId: parentId, name: "p.html", mimeType: "text/html", sourcePath: source });
+    const result = await host.orchestrator.forkThread(parentId, forkRequest("child", "grok", { messageId: said.replyId }));
+    await host.settle();
+    assert.equal(result.strategy, "transcript");
+    await assert.rejects(store.resolveAttachment("child", ref.id), /not found/);
   });
 });

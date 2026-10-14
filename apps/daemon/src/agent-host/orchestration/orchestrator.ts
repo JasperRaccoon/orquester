@@ -96,6 +96,7 @@ import {
 } from "@orquester/api/agent-chat";
 
 import type { AccountHome, HistoryImportProgress, McpAppOperation } from "@orquester/api/agent-chat";
+import { htmlRenderReferenceOfActivityPayload, mcpAppReferenceOfActivityPayload } from "@orquester/api/agent-chat";
 import { runMcpAppRequest } from "../mcp-apps.ts";
 
 import { stat } from "node:fs/promises";
@@ -4105,6 +4106,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       resumeCursor,
       lineage,
       afterCreate: async () => {
+        if (strategy === "native") {
+          await copyRetainedPages(parentThreadId, threadId, parent.state.activities, cut.retained);
+        }
         if (transcript !== null) {
           await forkHandoffs.save(threadId, {
             version: 1,
@@ -4130,6 +4134,52 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       }
     });
     return { head, strategy, lineage };
+  };
+
+  /**
+   * A native fork's child replays the parent's retained turns from the
+   * provider, and their rows name the parent's published pages and MCP App
+   * snapshots — `-html` attachments in the PARENT's directory, which the
+   * store resolves for the parent only. So they are copied into the child
+   * under the same ids (`store.copyPages`) before its session starts: the
+   * child's own sweep keeps what its rows name, and deleting the parent
+   * breaks nothing. Copied: every page a retained turn's row references,
+   * and every page no row of the parent's fold references any more — the
+   * window drops the OLDEST rows first, and a fork keeps the oldest turns,
+   * so such a page belongs to a kept turn (one past the cut is swept from
+   * the child once its grace ends). A transcript fork replays no rows, so
+   * names no page. A copy that fails costs the child its pages, never the
+   * fork.
+   */
+  const copyRetainedPages = async (
+    parentThreadId: string,
+    threadId: string,
+    activities: readonly ThreadActivityItem[],
+    retained: readonly { turnId: string }[]
+  ): Promise<void> => {
+    if (store.copyPages === undefined) return;
+    const retainedTurns = new Set(retained.map((turn) => turn.turnId));
+    const named = new Set<string>();
+    const kept = new Set<string>();
+    for (const activity of activities) {
+      for (const reference of [
+        htmlRenderReferenceOfActivityPayload(activity.payload),
+        mcpAppReferenceOfActivityPayload(activity.payload)
+      ]) {
+        if (reference === undefined) continue;
+        named.add(reference.attachmentId);
+        if (activity.turnId !== null && retainedTurns.has(activity.turnId)) kept.add(reference.attachmentId);
+      }
+    }
+    try {
+      await store.copyPages(parentThreadId, threadId, (id) => kept.has(id) || !named.has(id));
+    } catch (error) {
+      logger.warn("agent-host: a fork's pages could not be copied to the child", {
+        threadId,
+        parentThreadId,
+        error: describeFailure(error)
+      });
+    }
   };
 
   /**

@@ -223,8 +223,23 @@ export interface ThreadStore {
    */
   putAttachment(input: AttachmentPutInput): Promise<AttachmentRef>;
 
-  /** Absolute path for an attachment id owned by this thread. */
+  /**
+   * Absolute path for an attachment id owned by this thread: one its own
+   * segment names, or a published page / MCP App snapshot (`-html`) a fork
+   * copied into its own directory from an ancestor ({@link copyPages}).
+   */
   resolveAttachment(threadId: string, attachmentId: string): Promise<string>;
+
+  /**
+   * Thread lineage (spec 2026-10-14 §6): copy the `-html` attachments (agent
+   * pages, MCP App snapshots) of `fromThreadId` that `keep` selects into
+   * `toThreadId`'s own directory under the SAME ids — the forked child's
+   * replayed rows name them as the parent's did. The child then holds its own
+   * copies: its sweep keeps what its rows name, and deleting the parent
+   * breaks nothing. Regular files only; an existing copy is left as is.
+   * Answers the ids copied.
+   */
+  copyPages?(fromThreadId: string, toThreadId: string, keep: (attachmentId: string) => boolean): Promise<string[]>;
 
   /**
    * Sweep: `pending`-segment uploads after 24 h, `.part` files after 1 h, and

@@ -32,7 +32,7 @@
  *   snapshot rather than a replay.
  */
 
-import { createReadStream } from "node:fs";
+import { constants as fsConstants, createReadStream } from "node:fs";
 import * as fsp from "node:fs/promises";
 import * as path from "node:path";
 import { randomUUID } from "node:crypto";
@@ -815,9 +815,14 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
     if (segment === PENDING_ATTACHMENT_THREAD_SEGMENT) {
       return pendingDir;
     }
-    return segment === toSafeThreadAttachmentSegment(threadId)
-      ? threadAttachmentsDir(rootDir, threadId)
-      : null;
+    if (segment === toSafeThreadAttachmentSegment(threadId)) {
+      return threadAttachmentsDir(rootDir, threadId);
+    }
+    // A page or MCP App snapshot an ANCESTOR published keeps its ancestor's
+    // segment when a fork copies it here (`copyPages`): it is looked up in
+    // this thread's own directory only, so it resolves only once copied —
+    // never another thread's file.
+    return isHtmlRenderAttachmentId(attachmentId) ? threadAttachmentsDir(rootDir, threadId) : null;
   }
 
   async function findAttachmentFile(dir: string, attachmentId: string): Promise<string | null> {
@@ -1537,6 +1542,40 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         // upload reply carries it; `validate.ts` strips it from commands.
         path: destination
       };
+    },
+
+    async copyPages(
+      fromThreadId: string,
+      toThreadId: string,
+      keep: (attachmentId: string) => boolean
+    ): Promise<string[]> {
+      assertSafeThreadId(fromThreadId);
+      assertSafeThreadId(toThreadId);
+      const fromDir = threadAttachmentsDir(rootDir, fromThreadId);
+      const toDir = threadAttachmentsDir(rootDir, toThreadId);
+      const entries = await fsp.readdir(fromDir).catch((): string[] => []);
+      const copied: string[] = [];
+      for (const entry of entries) {
+        const attachmentId = parseAttachmentIdFromRelativePath(entry);
+        if (attachmentId === null || !isHtmlRenderAttachmentId(attachmentId) || !keep(attachmentId)) {
+          continue;
+        }
+        const source = path.join(fromDir, entry);
+        const stat = await fsp.lstat(source).catch(() => null);
+        if (stat === null || !stat.isFile()) {
+          continue;
+        }
+        await fsp.mkdir(toDir, { recursive: true });
+        const destination = path.join(toDir, entry);
+        try {
+          await fsp.copyFile(source, destination, fsConstants.COPYFILE_EXCL);
+          await fsp.chmod(destination, 0o600);
+        } catch (error) {
+          if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+        }
+        copied.push(attachmentId);
+      }
+      return copied;
     },
 
     async resolveAttachment(threadId: string, attachmentId: string): Promise<string> {
