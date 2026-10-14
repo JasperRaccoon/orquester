@@ -364,7 +364,8 @@ function handle(frame) {
       return; // Never answers: a server that hangs on the read.
     }
     // `mcp-app-slow`: a server slower than the 4 s probe deadline, inside the
-    // capture's own 15 s one.
+    // capture's own 15 s one. Deterministic: the answer waits for the test's
+    // next `_x.ai/mcp/list`, sent once its mocked clock has passed 4 s.
     const answer = () => result(id, {
       result: {
         contents: [
@@ -377,7 +378,7 @@ function handle(frame) {
         ]
       }
     });
-    if (scenario === "mcp-app-slow") setTimeout(answer, 4500);
+    if (scenario === "mcp-app-slow") heldReadAnswer = answer;
     else answer();
     return;
   }
@@ -388,6 +389,12 @@ function handle(frame) {
     return;
   }
   if (method === "_x.ai/mcp/list") {
+    // `mcp-app-slow`'s held read is answered first, as a slow server would.
+    if (heldReadAnswer !== null) {
+      const held = heldReadAnswer;
+      heldReadAnswer = null;
+      held();
+    }
     result(id, {
       result: {
         servers: [
@@ -426,6 +433,8 @@ function handle(frame) {
 
 let cancelled = false;
 let firstPromptAnswered = false;
+/** `mcp-app-slow`: the `_x.ai/mcp/read_resource` answer waiting for its trigger. */
+let heldReadAnswer = null;
 let pendingPermissionId = null;
 let permissionAnswer = null;
 
