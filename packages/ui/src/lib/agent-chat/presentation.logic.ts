@@ -499,7 +499,20 @@ export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   run_scheduled_task_now: "Ran a scheduled task now",
   watch_pull_request: "Watched pull request",
   unwatch_pull_request: "Stopped watching pull request",
-  list_pull_request_watches: "Listed pull request watches"
+  list_pull_request_watches: "Listed pull request watches",
+  // Threads and delegation (design 2026-10-14 §5, §6).
+  thread_list: "Listed this project's chats",
+  thread_read: "Read a chat",
+  thread_create: "Opened a chat",
+  thread_send: "Messaged a chat",
+  thread_wait: "Waited for a chat",
+  thread_interrupt: "Interrupted a chat",
+  thread_fork: "Forked this chat",
+  thread_merge_back: "Merged back to the parent chat",
+  delegate_task: "Delegated a task",
+  task_status: "Checked a task",
+  task_wait: "Waited for a task",
+  task_cancel: "Cancelled a task"
 };
 
 /** `thread_wait` → `Thread wait`. */

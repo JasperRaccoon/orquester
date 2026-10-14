@@ -35,7 +35,8 @@ import {
   isCompactionActivity,
   isPlanImplementationMessage,
   reEmittedAssistantCopies,
-  sessionToolNameOfData
+  sessionToolNameOfData,
+  threadToolReferenceOfActivityData
 } from "@orquester/api/agent-chat";
 
 import type { WorkLogEntry, WorkLogToolLifecycleStatus } from "./contracts";
@@ -250,6 +251,10 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     const sessionTool = sessionToolNameOfData(data);
     if (sessionTool !== null) {
       entry.sessionTool = sessionTool;
+      const threadLink = threadToolReferenceOfActivityData(data);
+      if (threadLink) {
+        entry.threadLink = threadLink;
+      }
     }
   }
   const requestKind = payload?.requestKind;
