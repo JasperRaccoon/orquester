@@ -108,10 +108,11 @@ preload file exists**:
   using the daemon's in-memory plugin state. Both the tmux `new-session` path and the direct
   node-pty path take it. The plan must check which env a tmux pane actually inherits, the client's
   or the server's global environment, and set it there.
-- **Agent-chat providers:** `buildAgentHostEnv()` passes the preload path to the agent host in a
-  new env var. `buildProviderEnv()` in `agent-host/support/env.ts` adds `NODE_OPTIONS` at each
-  provider spawn if that var is set and `plugins.json` shows any enabled workspace. An older agent
-  host that doesn't know the var never adds it, which keeps daemon handovers compatible.
+- **Agent-chat providers:** the agent host already receives `ORQUESTER_APPDIR`, so it derives the
+  preload and `plugins.json` paths with the `packages/config` helpers; no new env var. At each
+  provider spawn, `buildProviderEnv()` in `agent-host/support/env.ts` adds `NODE_OPTIONS` if the
+  preload file exists and `plugins.json` shows any enabled workspace. An older agent host never
+  adds it, which keeps daemon handovers compatible.
 - **Workflow blocks:** `buildSandboxEnv()` in `workflows/sandbox/env.ts`, using the daemon's state.
 
 **The daemon never deletes `preload.cjs`** once written. Already-running sessions reference it in
