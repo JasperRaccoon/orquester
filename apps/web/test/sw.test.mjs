@@ -74,6 +74,20 @@ describe("the asset cache", () => {
     assert.deepEqual(left, ["/assets/chunk-2.js", "/assets/chunk-3.js"]);
   });
 
+  it("does not read the shell while the cache is under the limit", async () => {
+    const { context, caches } = worker();
+    const assets = caches.openSync("orq-assets-v6");
+    await assets.put("/assets/chunk-0.js", "x");
+    const opened = [];
+    const open = caches.open;
+    caches.open = async (name) => {
+      opened.push(name);
+      return open(name);
+    };
+    await context.trimCache("orq-assets-v6", 2);
+    assert.deepEqual(opened, ["orq-assets-v6"]);
+  });
+
   it("has room for the lazy diagram and math chunks beside the app", () => {
     const { context } = worker();
     assert.ok(context.ASSET_CACHE_LIMIT >= 150);

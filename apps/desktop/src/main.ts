@@ -6,6 +6,7 @@ import https from "node:https";
 import path from "node:path";
 import {
   navigationAction,
+  remoteBaseOf,
   visualTarget,
   windowOpenAction,
   VISUAL_SCHEME,
@@ -63,19 +64,16 @@ protocol.registerSchemesAsPrivileged([
 ]);
 
 /**
- * Origins of the remote daemons the renderer reached through this process —
- * the only remotes a page URL may name, so a page cannot turn the scheme into
- * a fetch of an arbitrary host.
+ * Bases (origin plus configured sub-path, `remoteBaseOf`) of the remote
+ * daemons the renderer reached through this process — the only remotes a
+ * page URL or a download may name, so a page cannot turn the scheme into a
+ * fetch of an arbitrary host or path.
  */
-const remoteOrigins = new Set<string>();
+const remoteBases = new Set<string>();
 
-function rememberRemoteOrigin(url: string): void {
-  try {
-    const origin = new URL(url).origin;
-    if (origin.startsWith("http://") || origin.startsWith("https://")) remoteOrigins.add(origin);
-  } catch {
-    /* an unparseable URL fails its own request */
-  }
+function rememberRemoteBase(url: string): void {
+  const base = remoteBaseOf(url);
+  if (base !== null) remoteBases.add(base);
 }
 
 function visualRefusal(status: number, message: string): Response {
@@ -88,7 +86,7 @@ function visualRefusal(status: number, message: string): Response {
 function registerVisualProtocol(): void {
   protocol.handle(VISUAL_SCHEME, async (request) => {
     if (request.method !== "GET") return visualRefusal(405, "Not allowed.");
-    const target = visualTarget(request.url, remoteOrigins);
+    const target = visualTarget(request.url, remoteBases);
     if (target === null) return visualRefusal(404, "Not found.");
     try {
       const response =
@@ -501,7 +499,7 @@ function httpModuleFor(target: URL): typeof http | typeof https {
 
 /** One unary request/response round trip to a remote daemon over TCP. */
 function requestOverHttp({ url, method, headers, body, requestId }: RemoteHttpRequest, senderId?: number): Promise<DaemonResponse> {
-  rememberRemoteOrigin(url);
+  rememberRemoteBase(url);
   return new Promise((resolve, reject) => {
     let target: URL;
     try {
@@ -739,11 +737,11 @@ function createWindow(): void {
     else if (action.kind === "external") void shell.openExternal(action.url);
   };
   contents.setWindowOpenHandler(({ url }) => {
-    perform(windowOpenAction(url, { remoteOrigins }));
+    perform(windowOpenAction(url, { remoteBases }));
     return { action: "deny" };
   });
   contents.on("will-navigate", (event, url) => {
-    const action = navigationAction(url, { currentUrl: contents.getURL(), remoteOrigins });
+    const action = navigationAction(url, { currentUrl: contents.getURL(), remoteBases });
     if (action.kind === "allow") return;
     event.preventDefault();
     perform(action);

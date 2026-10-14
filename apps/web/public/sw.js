@@ -120,20 +120,21 @@ function pinnedAssetPaths() {
 }
 
 function trimCache(cacheName, limit) {
-  return Promise.all([caches.open(cacheName), pinnedAssetPaths()]).then(function (opened) {
-    var cache = opened[0];
-    var pinned = opened[1];
+  return caches.open(cacheName).then(function (cache) {
     return cache.keys().then(function (keys) {
+      // Under the limit (the usual case) the shell is not read at all.
       if (keys.length <= limit) return undefined;
-      // Delete the oldest unpinned entries (keys() is insertion-ordered)
-      // until under the limit.
-      var overflow = keys.length - limit;
-      var deletions = [];
-      for (var i = 0; i < keys.length && deletions.length < overflow; i++) {
-        if (pinned[new URL(keys[i].url).pathname]) continue;
-        deletions.push(cache.delete(keys[i]));
-      }
-      return Promise.all(deletions);
+      return pinnedAssetPaths().then(function (pinned) {
+        // Delete the oldest unpinned entries (keys() is insertion-ordered)
+        // until under the limit.
+        var overflow = keys.length - limit;
+        var deletions = [];
+        for (var i = 0; i < keys.length && deletions.length < overflow; i++) {
+          if (pinned[new URL(keys[i].url).pathname]) continue;
+          deletions.push(cache.delete(keys[i]));
+        }
+        return Promise.all(deletions);
+      });
     });
   });
 }
