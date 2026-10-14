@@ -111,4 +111,13 @@ describe("scheduled tasks store", () => {
     assert.equal(scheduledTasksStore.getState().notices.s1, "Couldn't run the task: A delivery already waits.");
     assert.equal(scheduledTasksStore.getState().busy.size, 0);
   });
+  it("a failed load is an error the next load clears", async () => {
+    await loadThreadScheduledTasks(fakeApi(async () => {
+      throw Object.assign(new Error("503"), { body: { code: "SCHEDULER_UNAVAILABLE", message: "Scheduled tasks are unavailable." } });
+    }), "s1");
+    assert.deepEqual(scheduledTasksStore.getState().loads.s1, { status: "error", error: "Scheduled tasks are unavailable.", stale: false });
+    await loadThreadScheduledTasks(fakeApi(async () => ({ tasks: [task("a")] })), "s1");
+    assert.equal(scheduledTasksStore.getState().loads.s1!.status, "loaded");
+    assert.deepEqual(ids(), ["a"]);
+  });
 });

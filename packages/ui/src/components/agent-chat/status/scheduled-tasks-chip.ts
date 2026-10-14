@@ -30,11 +30,17 @@ export interface TimeFormatOptions {
   timeZone?: string;
 }
 
+/** An ISO time as a number for sorting; none (or unreadable) sorts last. */
+function instant(iso: string | null): number {
+  const ms = iso === null ? Number.NaN : Date.parse(iso);
+  return Number.isNaN(ms) ? Number.MAX_SAFE_INTEGER : ms;
+}
+
 /** Soonest first; paused and finished ones (no next run) last, oldest first among them. */
 export function sortScheduledTasks(tasks: readonly ScheduledTask[]): ScheduledTask[] {
   return [...tasks].sort(
     (a, b) =>
-      (a.nextRunAt ?? "￿").localeCompare(b.nextRunAt ?? "￿") || a.createdAt.localeCompare(b.createdAt) || a.id.localeCompare(b.id)
+      instant(a.nextRunAt) - instant(b.nextRunAt) || instant(a.createdAt) - instant(b.createdAt) || (a.id < b.id ? -1 : a.id > b.id ? 1 : 0)
   );
 }
 

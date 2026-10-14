@@ -177,6 +177,13 @@ export class ScheduledTasksService {
   private unsubscribe: (() => void) | null = null;
   /** Threads with a delivery pass already queued on the chain (bus events can come in bursts). */
   private readonly wakeQueued = new Set<string>();
+  /**
+   * When the timer next re-tries waiting deliveries — anchored when a delivery starts waiting, so
+   * a stream of bus events (each re-arming the timer) cannot postpone it; null while none waits.
+   */
+  private retryAt: number | null = null;
+  /** After a scheduler write failed, no timer step before this (no hot loop while the disk is bad). */
+  private backoffUntil: number | null = null;
 
   constructor(private readonly options: ScheduledTasksServiceOptions) {
     this.store = options.store;
@@ -199,6 +206,7 @@ export class ScheduledTasksService {
     this.unsubscribe = api.subscribe((event) => this.onEvent(event));
     return this.enqueue(async () => {
       await this.reconcileThreads();
+      await this.expireStaleDeliveries();
       await this.tick();
       await this.deliverQueued(null);
     });
@@ -295,7 +303,13 @@ export class ScheduledTasksService {
       if (body.prompt !== undefined) next.prompt = readPrompt(body.prompt);
       if (body.enabled !== undefined && typeof body.enabled !== "boolean") throw invalid("enabled must be a boolean.");
       const scheduleChanged = body.schedule !== undefined;
-      if (scheduleChanged) next.schedule = readSchedule(body.schedule, now);
+      if (scheduleChanged) {
+        next.schedule = readSchedule(body.schedule, now);
+        // A run of the OLD schedule still waiting for the thread is dropped: the new schedule owns
+        // the task from now (a one-shot would otherwise go out at idle and be removed, its new time
+        // lost). A Run now the user or agent asked for explicitly stays queued.
+        if (current.pending !== null && !current.pending.manual) next.pending = null;
+      }
       const enabled = body.enabled === undefined ? current.enabled : body.enabled;
       next.enabled = enabled;
       if (!enabled) {
@@ -412,15 +426,47 @@ export class ScheduledTasksService {
     }
   }
 
-  /** `commit` for the scheduler's own steps: a failed write is logged, never thrown. */
+  /**
+   * `commit` for the scheduler's own steps: a failed write is logged, never thrown, and backs the
+   * timer off for `SCHEDULED_TASK_RETRY_MS` — memory was rolled back, so the due task is still due
+   * and would otherwise be retried at once, in a loop, until the disk recovers.
+   */
   private async commitQuietly(upserts: ScheduledTaskRecord[], deletes: string[]): Promise<boolean> {
     try {
       await this.commit(upserts, deletes);
+      this.backoffUntil = null;
       return true;
     } catch {
-      this.logger.error("could not save scheduled tasks; the change is not applied");
+      if (this.backoffUntil === null) this.logger.error("could not save scheduled tasks; retrying later");
+      this.backoffUntil = this.clock.now().getTime() + SCHEDULED_TASK_RETRY_MS;
       return false;
     }
+  }
+
+  /**
+   * At boot: a scheduled (not Run now) delivery that has waited past the missed-run grace — the
+   * daemon was down while it waited — is not sent that late; it is recorded as missed, like a run
+   * that came due during the downtime (a one-shot task is paused).
+   */
+  private async expireStaleDeliveries(): Promise<void> {
+    const now = this.clock.now();
+    const graceMs = MISSED_RUN_GRACE_MINUTES * 60_000;
+    const stamp = now.toISOString();
+    const stale = this.store
+      .all()
+      .filter((task) => task.pending !== null && !task.pending.manual && now.getTime() - Date.parse(task.pending.scheduledFor) > graceMs);
+    if (stale.length === 0) return;
+    await this.commitQuietly(
+      stale.map((task) => ({
+        ...task,
+        pending: null,
+        updatedAt: stamp,
+        lastRunStatus: "missed",
+        lastRunError: `Missed the run due at ${task.pending!.scheduledFor}: Orquester was not running.`,
+        ...(task.schedule.kind === "once" ? { enabled: false, nextRunAt: null } : {})
+      })),
+      []
+    );
   }
 
   private async sessions(): Promise<SessionSummary[]> {
@@ -522,7 +568,7 @@ export class ScheduledTasksService {
     const queued = this.store
       .all()
       .filter((record) => record.pending !== null && (onlyThread === null || record.threadId === onlyThread))
-      .sort((a, b) => a.pending!.queuedAt.localeCompare(b.pending!.queuedAt));
+      .sort((a, b) => Date.parse(a.pending!.queuedAt) - Date.parse(b.pending!.queuedAt));
     if (queued.length === 0) return;
     let sessions: SessionSummary[];
     try {
@@ -564,6 +610,10 @@ export class ScheduledTasksService {
     if (snapshotBusy(snap.thread)) return;
     const task = this.store.get(taskId);
     if (!task?.pending) return;
+    // A window remains between this snapshot and the POST below: a message the user sends in it
+    // starts a turn, and the scheduled prompt then joins that turn as a steer. The host's `/turn`
+    // has no "only if idle" guard to close it (a protocol change beyond this feature); the window is
+    // one in-process request long.
     const fireKey = task.pending.fireKey;
     const body: TurnCommandBody = {
       commandId: `scheduled-task:${task.id}:${fireKey}`,
@@ -613,26 +663,37 @@ export class ScheduledTasksService {
     );
   }
 
-  /** One timer: the earliest due time, sooner while a delivery waits, never more than a minute away. */
+  /**
+   * One timer: the earliest due time, or the anchored retry while a delivery waits — never more
+   * than a minute away, and never before the back-off after a failed write.
+   */
   private arm(): void {
     this.timer?.cancel();
     this.timer = null;
     if (this.stopped || !this.started) return;
     const now = this.clock.now().getTime();
     let earliest: number | null = null;
+    const consider = (at: number) => {
+      if (!Number.isNaN(at)) earliest = earliest === null ? at : Math.min(earliest, at);
+    };
+    let waiting = false;
     for (const record of this.store.all()) {
-      const candidates: number[] = [];
-      if (record.enabled && record.nextRunAt !== null) candidates.push(Date.parse(record.nextRunAt));
-      if (record.pending !== null) candidates.push(now + SCHEDULED_TASK_RETRY_MS);
-      for (const at of candidates) {
-        if (Number.isNaN(at)) continue;
-        earliest = earliest === null ? at : Math.min(earliest, at);
-      }
+      if (record.enabled && record.nextRunAt !== null) consider(Date.parse(record.nextRunAt));
+      if (record.pending !== null) waiting = true;
+    }
+    if (waiting) {
+      this.retryAt ??= now + SCHEDULED_TASK_RETRY_MS;
+      consider(this.retryAt);
+    } else {
+      this.retryAt = null;
     }
     if (earliest === null) return;
-    const delay = Math.min(SCHEDULER_MAX_TIMER_MS, Math.max(0, earliest - now));
+    const at = this.backoffUntil !== null && this.backoffUntil > now ? Math.max(earliest, this.backoffUntil) : earliest;
+    const delay = Math.min(SCHEDULER_MAX_TIMER_MS, Math.max(0, at - now));
     this.timer = this.clock.setTimeout(() => {
       this.timer = null;
+      // This step is the retry: the next one is anchored afresh when the timer is re-armed.
+      this.retryAt = null;
       void this.enqueue(async () => {
         await this.tick();
         await this.deliverQueued(null);

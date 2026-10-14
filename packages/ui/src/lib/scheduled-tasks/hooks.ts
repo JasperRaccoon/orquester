@@ -6,7 +6,7 @@
  * app store without an import cycle.
  */
 
-import { useEffect, useMemo, useSyncExternalStore } from "react";
+import { useCallback, useEffect, useMemo, useSyncExternalStore } from "react";
 
 import type { ScheduledTask } from "@orquester/api";
 
@@ -21,6 +21,10 @@ export interface ThreadScheduledTasksView {
   busy: ReadonlySet<string>;
   /** The last failed action on this thread's tasks. */
   notice: string | null;
+  /** Why the last load failed, or null. */
+  loadError: string | null;
+  /** Load the thread's tasks again (after a failed load). */
+  retry: () => void;
 }
 
 let watchingConnection = false;
@@ -56,6 +60,15 @@ export function useThreadScheduledTasks(sessionId: string): ThreadScheduledTasks
     void loadThreadScheduledTasks(api, sessionId);
   }, [api, connected, sessionId, needsLoad]);
 
+  const retry = useCallback(() => {
+    void loadThreadScheduledTasks(api, sessionId);
+  }, [api, sessionId]);
   const tasks = useMemo(() => [...state.tasks.values()].filter((task) => task.threadId === sessionId), [state.tasks, sessionId]);
-  return { tasks, busy: state.busy, notice: state.notices[sessionId] ?? null };
+  return {
+    tasks,
+    busy: state.busy,
+    notice: state.notices[sessionId] ?? null,
+    loadError: load?.status === "error" ? load.error ?? "the daemon did not answer." : null,
+    retry
+  };
 }

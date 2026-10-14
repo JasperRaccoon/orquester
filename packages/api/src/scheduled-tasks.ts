@@ -9,10 +9,13 @@
  *
  * Delivery: when a task comes due the daemon queues ONE delivery and sends the prompt as a user
  * message through the normal agent-chat `/turn` path once the thread is idle — never as a steer into
- * a running turn, never while an approval or a question is open. A cron run that comes due while the
+ * a running turn, never while an approval or a question is open — and always in the `default`
+ * interaction mode (never plan mode, whatever the thread was last doing). A cron run that comes due while the
  * previous delivery still waits is folded into it. Missed runs (Orquester not running at the time):
  * a run more than {@link SCHEDULED_TASK_MISSED_GRACE_MINUTES} late is not delivered; it is recorded
- * as `missed`, a cron task moves on to its next time from now, a one-shot task is paused.
+ * as `missed`, a cron task moves on to its next time from now, a one-shot task is paused. The same
+ * applies at boot to a scheduled delivery that was still waiting for its thread past the grace.
+ * Changing a task's schedule drops a scheduled run still waiting for the thread (a Run now stays).
  */
 
 import { nextScheduleRun, validateCron, isValidTimeZone } from "./workflows/schedule.ts";

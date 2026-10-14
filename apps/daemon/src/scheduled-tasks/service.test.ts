@@ -406,3 +406,96 @@ test("a task this build cannot read stays in the file across rewrites", async (t
   assert.deepEqual(onDisk.tasks.map((task) => task.id).sort(), ["task-1", "x"]);
   assert.deepEqual(r.service.list().map((task) => task.id), ["task-1"]);
 });
+
+// ---- fix round 1 -------------------------------------------------------------------------------
+
+test("a scheduler write that keeps failing backs off instead of looping, and recovers", async (t) => {
+  const r = await rig(t);
+  await cron(r); // due 10:15
+  const realPersist = r.store.persist.bind(r.store);
+  let attempts = 0;
+  r.store.persist = () => {
+    attempts += 1;
+    return Promise.reject(new Error("disk full"));
+  };
+  await r.run(8 * MIN + 5 * MIN); // 10:20:30, failing since 10:15
+  assert.equal(r.turns.length, 0, "nothing is sent on an unpersisted state");
+  assert.ok(attempts >= 2 && attempts <= 5 * 60_000 / SCHEDULED_TASK_RETRY_MS + 2, `bounded attempts (${attempts})`);
+  assert.ok(r.clock.pending()[0]! >= SCHEDULED_TASK_RETRY_MS - 1_000, "the next try is a back-off away");
+  r.store.persist = realPersist;
+  await r.run(SCHEDULED_TASK_RETRY_MS);
+  assert.equal(r.turns.length, 1, "delivered once the disk recovered (still within the grace)");
+});
+
+test("the retry of a waiting delivery is anchored: bus events do not postpone it", async (t) => {
+  const r = await rig(t);
+  await cron(r);
+  r.summary = "running";
+  r.snapshot = "running";
+  await r.run(8 * MIN); // queued at 10:15:00
+  await r.run(20_000);
+  r.api.emit({ id: "e", channel: "sessions", type: "session.updated", createdAt: "", payload: summaryOf("running") });
+  await r.service.idle();
+  assert.ok(r.clock.pending()[0]! <= 10_000, `retry still due at the anchor (${r.clock.pending()[0]} ms away)`);
+});
+
+test("rescheduling drops a scheduled run waiting for the thread — a one-shot goes at its NEW time", async (t) => {
+  const r = await rig(t);
+  const task = await r.service.create({ threadId: THREAD, prompt: "Ping", schedule: { kind: "once", at: "2026-10-14T10:20:00.000Z" } });
+  r.summary = "running";
+  r.snapshot = "running";
+  await r.run(13 * MIN); // due 10:20, waiting
+  assert.notEqual(r.service.get(task.id)!.queuedAt, null);
+  const moved = await r.service.update(task.id, { schedule: { kind: "once", at: "2026-10-14T11:00:00.000Z" } });
+  assert.equal(moved.queuedAt, null);
+  assert.equal(moved.nextRunAt, "2026-10-14T11:00:00.000Z");
+  r.summary = "idle";
+  r.snapshot = "idle";
+  await r.run(SCHEDULED_TASK_RETRY_MS);
+  assert.equal(r.turns.length, 0, "the old run is not sent at idle");
+  await r.run(40 * MIN);
+  assert.equal(r.turns.length, 1, "sent at the new time");
+  assert.equal(r.service.get(task.id), undefined);
+});
+
+test("rescheduling a cron task drops its waiting run but keeps a waiting Run now", async (t) => {
+  const r = await rig(t);
+  const task = await cron(r);
+  r.summary = "running";
+  r.snapshot = "running";
+  await r.run(8 * MIN); // the 10:15 run waits
+  const moved = await r.service.update(task.id, { schedule: { kind: "cron", cron: "0 12 * * *", timezone: "UTC" } });
+  assert.equal(moved.queuedAt, null);
+  const manual = await r.service.runNow(task.id);
+  assert.equal(manual.delivered, false);
+  const again = await r.service.update(task.id, { schedule: { kind: "cron", cron: "0 13 * * *", timezone: "UTC" } });
+  assert.notEqual(again.queuedAt, null, "an explicit Run now stays queued");
+  r.summary = "idle";
+  r.snapshot = "idle";
+  await r.run(SCHEDULED_TASK_RETRY_MS);
+  assert.equal(r.turns.length, 1);
+  assert.match(r.turns[0]!.commandId, /:manual-/);
+});
+
+test("at boot a scheduled delivery that waited past the grace is recorded missed; a Run now is still sent", async (t) => {
+  const r = await rig(t);
+  const scheduled = await cron(r);
+  const once = await r.service.create({ threadId: THREAD, prompt: "Ping", schedule: { kind: "once", at: "2026-10-14T10:20:00.000Z" } });
+  const manual = await r.service.create({ threadId: THREAD, prompt: "Manual", schedule: { kind: "cron", cron: "0 0 1 1 *", timezone: "UTC" } });
+  r.turnStatus = 503; // the host is down: everything stays queued
+  await r.run(13 * MIN);
+  await r.service.runNow(manual.id);
+  r.service.stop();
+  await r.store.flush();
+  r.clock.jump("2026-10-14T12:30:00.000Z");
+  r.turnStatus = 200;
+  await r.restart();
+  const a = r.service.get(scheduled.id)!;
+  assert.equal(a.lastRunStatus, "missed");
+  assert.equal(a.queuedAt, null);
+  assert.equal(a.enabled, true);
+  const b = r.service.get(once.id)!;
+  assert.equal(b.lastRunStatus, "missed");
+  assert.equal(b.enabled, false);
+  assert.deepEqual(r.turns.map((turn) => turn.input), ["Manual"]);
+});

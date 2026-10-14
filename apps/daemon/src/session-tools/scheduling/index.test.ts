@@ -150,3 +150,11 @@ test("list, update, run now and delete stay inside the caller's project", async 
   assert.deepEqual(deleted.value, { deleted: true, taskId: mine.taskId });
   assert.equal((await call("me", "delete_scheduled_task", { taskId: mine.taskId })).value.code, "SCHEDULED_TASK_NOT_FOUND");
 });
+
+test("update_scheduled_task: a cron-only change keeps the task's time zone", async (t) => {
+  const { call } = await rig(t);
+  const task = (await call("me", "schedule_task", { prompt: "Report", cron: "0 9 * * *", timezone: "Asia/Kolkata" })).value.task;
+  const updated = await call("me", "update_scheduled_task", { taskId: task.taskId, cron: "30 9 * * *" });
+  assert.deepEqual(updated.value.task.schedule, { kind: "cron", cron: "30 9 * * *", timezone: "Asia/Kolkata" });
+  assert.equal(updated.value.task.nextRunAt, "2026-10-15T04:00:00.000Z", "09:30 in +05:30");
+});

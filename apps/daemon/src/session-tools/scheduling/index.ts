@@ -42,14 +42,15 @@ const MAX_IN_MINUTES = 366 * 24 * 60;
 const DELIVERY_RULES =
   "The prompt arrives in the thread as a user message, through the normal send path: if the thread is busy (a turn running, an approval or question open) it waits until that turn has ended — it never interrupts or steers a running turn. " +
   `Missed runs (Orquester was not running at the time): a run more than ${SCHEDULED_TASK_MISSED_GRACE_MINUTES} minutes late is not delivered; it is recorded as missed, a cron task moves on to its next time, a one-shot task is paused. ` +
-  "A one-shot task is removed once delivered. A thread's tasks are removed when the thread is closed.";
+  "A one-shot task is removed once delivered. A thread's tasks are removed when the thread is closed. " +
+  "The scheduled turn always runs in default mode, never plan mode — even in a thread that was planning.";
 
 const taskIdField = z.string().min(1).max(200).describe("The task id from schedule_task or list_scheduled_tasks.");
 const whenFields = {
   at: z.string().max(64).optional().describe("Run once at this instant: ISO 8601 with an offset, e.g. 2026-10-15T09:00:00+02:00."),
   inMinutes: z.number().int().min(1).max(MAX_IN_MINUTES).optional().describe("Run once this many minutes from now."),
   cron: z.string().max(120).optional().describe("Run repeatedly on this 5-field cron (minute hour day month weekday), at most once a minute, e.g. \"0 9 * * 1-5\"."),
-  timezone: z.string().max(64).optional().describe("IANA time zone for `cron` (e.g. Europe/Berlin). Default: the Orquester host's zone, returned in the result.")
+  timezone: z.string().max(64).optional().describe("IANA time zone for `cron` (e.g. Europe/Berlin). Default: the task's current zone when updating a cron task, else the Orquester host's zone (returned in the result).")
 };
 
 /** What an agent sees of a task. */
@@ -71,6 +72,12 @@ function view(task: ScheduledTask, opts: { clip?: boolean } = {}) {
   };
 }
 
+/** An ISO time as a number for sorting; none (or unreadable) sorts last. */
+function instant(iso: string | null): number {
+  const ms = iso === null ? Number.NaN : Date.parse(iso);
+  return Number.isNaN(ms) ? Number.MAX_SAFE_INTEGER : ms;
+}
+
 function hostTimeZone(): string {
   try {
     return Intl.DateTimeFormat().resolvedOptions().timeZone || "UTC";
@@ -81,14 +88,15 @@ function hostTimeZone(): string {
 
 /**
  * The schedule the arguments name, or null when they name none. At most one of `at`, `inMinutes`
- * and `cron`; `timezone` belongs to a cron (`fallbackCron`: the task's own, for a time-zone-only
- * update).
+ * and `cron`; `timezone` belongs to a cron. `current`: the task being updated — an omitted cron or
+ * time zone keeps its own (a time-zone-only update re-zones its cron; a cron-only one keeps its zone).
  */
 function scheduleOf(
   args: { at?: string; inMinutes?: number; cron?: string; timezone?: string },
   ctx: SessionToolContext,
-  fallbackCron?: string
+  current?: ScheduledTaskSchedule
 ): ScheduledTaskSchedule | null {
+  const currentCron = current?.kind === "cron" ? current : undefined;
   const given = [args.at, args.inMinutes, args.cron].filter((value) => value !== undefined).length;
   if (given > 1) throw new ToolError("INVALID_ARGUMENT", "Give only one of at, inMinutes or cron.");
   if (args.at !== undefined) {
@@ -99,12 +107,12 @@ function scheduleOf(
     if (args.timezone !== undefined) throw new ToolError("INVALID_ARGUMENT", "timezone applies to cron only.");
     return { kind: "once", at: new Date(ctx.now() + args.inMinutes * 60_000).toISOString() };
   }
-  const cron = args.cron ?? (args.timezone !== undefined ? fallbackCron : undefined);
+  const cron = args.cron ?? (args.timezone !== undefined ? currentCron?.cron : undefined);
   if (cron === undefined) {
     if (args.timezone !== undefined) throw new ToolError("INVALID_ARGUMENT", "timezone applies to a cron task only.");
     return null;
   }
-  return { kind: "cron", cron, timezone: args.timezone ?? hostTimeZone() };
+  return { kind: "cron", cron, timezone: args.timezone ?? currentCron?.timezone ?? hostTimeZone() };
 }
 
 /** Whether a task (or thread) of `projectPath` / `threadId` is the caller's to see. */
@@ -182,7 +190,7 @@ export const schedulingToolkit = defineSessionToolkit({
         const { tasks } = expectOk<ScheduledTaskListResponse>(await ctx.api.request("GET", scheduledTaskRoutes.list, { query }));
         const listed = tasks
           .filter((task) => inScope(ctx, task) && (args.threadId === undefined || task.threadId === args.threadId))
-          .sort((a, b) => (a.nextRunAt ?? "￿").localeCompare(b.nextRunAt ?? "￿") || a.createdAt.localeCompare(b.createdAt));
+          .sort((a, b) => instant(a.nextRunAt) - instant(b.nextRunAt) || instant(a.createdAt) - instant(b.createdAt));
         return jsonResult({
           tasks: listed.slice(0, LIST_LIMIT).map((task) => view(task, { clip: true })),
           ...(listed.length > LIST_LIMIT ? { more: listed.length - LIST_LIMIT } : {}),
@@ -194,7 +202,7 @@ export const schedulingToolkit = defineSessionToolkit({
       name: "update_scheduled_task",
       title: "Update a scheduled task",
       description:
-        "Change a scheduled task of this project: its prompt, its schedule (one of at, inMinutes or cron; `timezone` alone re-zones a cron task), or `enabled` (false pauses it without deleting it; true resumes it from now — a one-shot task whose time has passed needs a new time). Omitted fields stay as they are. Pausing also drops a run that waits for its thread.",
+        "Change a scheduled task of this project: its prompt, its schedule (one of at, inMinutes or cron; `timezone` alone re-zones a cron task, `cron` alone keeps its zone; a new schedule drops a run still waiting for the thread — a Run now stays), or `enabled` (false pauses it without deleting it; true resumes it from now — a one-shot task whose time has passed needs a new time). Omitted fields stay as they are. Pausing also drops a run that waits for its thread.",
       input: {
         taskId: taskIdField,
         prompt: z.string().min(1).max(SCHEDULED_TASK_PROMPT_MAX).optional().describe("The new prompt, replacing the old one whole."),
@@ -205,7 +213,7 @@ export const schedulingToolkit = defineSessionToolkit({
       resultKind: "json",
       run: async (args, ctx) => {
         const current = await scopedTask(ctx, args.taskId);
-        const schedule = scheduleOf(args, ctx, current.schedule.kind === "cron" ? current.schedule.cron : undefined);
+        const schedule = scheduleOf(args, ctx, current.schedule);
         const body = {
           ...(args.prompt !== undefined ? { prompt: args.prompt } : {}),
           ...(schedule !== null ? { schedule } : {}),
