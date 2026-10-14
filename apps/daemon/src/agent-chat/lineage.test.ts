@@ -278,6 +278,29 @@ describe("merge back", () => {
     await busy.cleanup();
   });
 
+  it("a merge keeps a planning parent in plan mode — sent at once or delivered later (D-I1)", async () => {
+    const planning = (busy: boolean) => {
+      const snap = snapshot({ busy });
+      return { ...snap, turns: snap.turns.map((t) => ({ ...t, interactionMode: "plan" as const })) };
+    };
+    const now = await setup();
+    now.world.threads.set("parent", planning(false));
+    await now.service.mergeBack("child", { text: "Plain." });
+    assert.equal(now.world.turns.at(-1)!.body.interactionMode, "plan", "the parent's own mode, not default");
+    await now.cleanup();
+
+    const later = await setup({ parentBusy: true });
+    later.world.threads.set("parent", planning(true));
+    await later.service.mergeBack("child", { text: "Plain." });
+    await settled(later.service);
+    later.world.sessions.set("parent", summary("parent", { title: "Parent", chatSessionStatus: "ready" }));
+    later.world.threads.set("parent", planning(false));
+    later.world.touch("parent");
+    await settled(later.service);
+    assert.equal(later.world.turns[0]!.body.interactionMode, "plan");
+    await later.cleanup();
+  });
+
   it("never answers queued for a merge it could not save: refused, nothing left queued (D-M1)", async () => {
     const { service, outboxFile, published, cleanup } = await setup({ parentBusy: true });
     // The file's place is taken: the write's rename fails.

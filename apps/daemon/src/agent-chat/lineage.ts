@@ -49,7 +49,7 @@ import {
   type ThreadReadResponse,
   type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
-import { agentChatRoutes } from "@orquester/api/agent-chat";
+import { agentChatRoutes, currentInteractionMode } from "@orquester/api/agent-chat";
 import { parseMergeOutbox, serializeMergeOutbox, type MergeOutbox, type MergeOutboxEntry } from "@orquester/config";
 
 import type { DaemonApi } from "../mcp/daemon-api.ts";
@@ -460,8 +460,13 @@ export class LineageService {
 
   private async deliver(api: DaemonApi, entry: MergeOutboxEntry): Promise<Delivery> {
     try {
+      // A merge from a planning turn plans (Task 6's turn policy); any other keeps the parent in
+      // the mode it is in — the host takes a missing mode as "default", which would flip a
+      // planning parent out of plan mode (D-I1).
+      const interactionMode =
+        entry.interactionMode === "plan" ? "plan" : currentInteractionMode(await this.readThread(api, entry.parentSessionId));
       const res = await api.request("POST", agentChatCommandPath(entry.parentSessionId, "turn"), {
-        body: { commandId: attemptCommandId(entry), input: entry.input, interactionMode: entry.interactionMode ?? "default" }
+        body: { commandId: attemptCommandId(entry), input: entry.input, interactionMode }
       });
       if (res.status < 400) return { kind: "sent", seq: (res.body as { seq?: number } | null)?.seq ?? 0 };
       const error = (res.body as { error?: { code?: string; message?: string } } | null)?.error;
