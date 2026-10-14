@@ -1316,7 +1316,8 @@ function reduceMessageSent(
       // older adapter, or a flush that could not resolve the phase) must not
       // strip a badge the first event established.
       ...(payload.reasoningKind !== undefined ? { reasoningKind: payload.reasoningKind } : {}),
-      ...(payload.messageKind !== undefined ? { messageKind: payload.messageKind } : {})
+      ...(payload.messageKind !== undefined ? { messageKind: payload.messageKind } : {}),
+      ...(payload.interactionMode !== undefined ? { interactionMode: payload.interactionMode } : {})
     };
     const items = state.items.slice();
     items[existingIndex!] = next;
@@ -1341,7 +1342,8 @@ function reduceMessageSent(
     ...(payload.context !== undefined ? { context: payload.context } : {}),
     ...(payload.agentId !== undefined ? { agentId: payload.agentId } : {}),
     ...(payload.reasoningKind !== undefined ? { reasoningKind: payload.reasoningKind } : {}),
-    ...(payload.messageKind !== undefined ? { messageKind: payload.messageKind } : {})
+    ...(payload.messageKind !== undefined ? { messageKind: payload.messageKind } : {}),
+    ...(payload.interactionMode !== undefined ? { interactionMode: payload.interactionMode } : {})
   };
   return {
     // `concat` with an array argument takes V8's fast path, one exact-size

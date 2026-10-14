@@ -27,6 +27,7 @@ export * from "./history-cursor.ts";
 export * from "./lineage.ts";
 export * from "./message-liveness.ts";
 export * from "./open-work.ts";
+export * from "./interaction-mode.ts";
 export * from "./pending.ts";
 export * from "./plan.ts";
 export * from "./pr-watch.ts";

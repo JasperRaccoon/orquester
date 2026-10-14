@@ -440,6 +440,7 @@ const isMessageItem = shaped<ThreadMessageItem>({
   agentId: optional(isString),
   reasoningKind: optional(isString),
   messageKind: optional(isString),
+  interactionMode: optional(isString),
   streaming: isBoolean,
   createdAt: isString,
   updatedAt: isString
