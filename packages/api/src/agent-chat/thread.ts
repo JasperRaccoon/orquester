@@ -261,8 +261,11 @@ export interface ThreadMessageItem {
    */
   messageKind?: "answer" | "commentary";
   /**
-   * Only on a `user` message that steered a running turn into another interaction mode: the mode
-   * it asked for (`currentInteractionMode`). Absent: the turn's own mode stands.
+   * Only on a `user` message that steered a running turn: the interaction mode that steer asked
+   * for — every steer is stamped, the same mode as the turn's or another — which
+   * `currentInteractionMode` reads as the turn's latest word. Absent on a message that started its
+   * turn (that mode is on the turn) and on one from a host that did not record it: the turn's own
+   * mode stands.
    */
   interactionMode?: import("./adapter-types.ts").InteractionMode;
   streaming: boolean;
