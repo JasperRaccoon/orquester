@@ -159,8 +159,14 @@ export function sessionToolMarkedData(data: unknown, registered: ReadonlySet<str
  * - `htmlRender`: the visual-replies toolkit's published page
  *   (`HtmlRenderReference`, `html-render.ts`, design §2.1), read back with
  *   `htmlRenderReferenceOfActivityPayload`.
+ * - `secretRequest`: `request_secret`'s record (name, purpose, outcome —
+ *   never the value, which `stripSecretRequestValues` removes first).
  */
-export const SESSION_TOOL_REFERENCE_KEYS: readonly string[] = ["htmlRender"];
+export const SESSION_TOOL_REFERENCE_KEYS: readonly string[] = [
+  "htmlRender",
+  // `request_secret`: name, purpose and outcome — the card's record, never the value (`secret-requests.ts`).
+  "secretRequest"
+];
 
 /** One kept reference field may take this much JSON; a bigger one is dropped, never cut. */
 export const SESSION_TOOL_REFERENCE_MAX_BYTES = 4 * 1024;

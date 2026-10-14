@@ -163,6 +163,9 @@ import type {
 import type {
   DeletePullRequestWatchResponse,
   PullRequestWatchListResponse,
+  SecretRequestAnswerRequest,
+  SecretRequestAnswerResponse,
+  SecretRequestListResponse,
   ThreadItemOutputResponse,
   ThreadItemResponse,
   ThreadPromptsQuery,
@@ -1360,6 +1363,24 @@ export class ApiClient {
       }
       throw error;
     }
+  }
+
+  /** The thread's pending `request_secret` cards (daemon memory; never a value). */
+  listSecretRequests(id: string, signal?: AbortSignal): Promise<SecretRequestListResponse> {
+    return this.send("GET", agentChatRoutes.secretRequests(id), { signal });
+  }
+
+  /**
+   * Answer one. The value rides in this body only — never a URL, a log, a
+   * store — and the response carries the outcome alone. A failure's
+   * `ApiError` holds the daemon's answer, which never quotes the body.
+   */
+  answerSecretRequest(
+    id: string,
+    requestId: string,
+    body: SecretRequestAnswerRequest
+  ): Promise<SecretRequestAnswerResponse> {
+    return this.send("POST", agentChatRoutes.secretRequest(id, requestId), { body });
   }
 
   sendSessionInput(id: string, data: string): Promise<void> {

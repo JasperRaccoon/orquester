@@ -125,6 +125,28 @@ export interface IngestionOptions {
    * slimming and the UI read. Absent: no session tools, nothing stamped.
    */
   sessionToolNames?: ReadonlySet<string>;
+  /**
+   * Session-tool secrets (design 2026-10-14 §5 "Secrets",
+   * `session-tools/secret-redaction.ts`): every runtime event passes
+   * `redactEvent` before anything else reads it, so no value a tool handed the
+   * thread reaches a row, a log line or the index; `forget` drops a released
+   * thread's values.
+   */
+  secrets?: {
+    redactEvent(event: RuntimeEvent): RuntimeEvent;
+    /**
+     * The rows about to be written, streamed text masked after joining
+     * (`SessionSecretRedactor.maskOutgoing`); `final` releases every held
+     * tail (the thread's flush).
+     */
+    maskOutgoing?(
+      threadId: string,
+      events: readonly AppendableDomainEvent[],
+      mintId: () => string,
+      final?: boolean
+    ): AppendableDomainEvent[];
+    forget(threadId: string): void;
+  };
 }
 
 interface SegmentState {
@@ -577,12 +599,19 @@ export function createIngestion(options: IngestionOptions): Ingestion {
    * becomes one row; any other event closes the window immediately, which is
    * what preserves ordering.
    */
-  function commit(threadId: string, state: ThreadState): Promise<void> {
-    const outbox = state.outbox;
+  function commit(threadId: string, state: ThreadState, final = false): Promise<void> {
+    if (state.outbox.length === 0 && !final) {
+      return state.chain;
+    }
+    // Streamed text is masked here, joined, not chunk by chunk at `ingest`
+    // (design 2026-10-14 §5 "Secrets"): a value split across deltas or flushes.
+    const outbox = options.secrets?.maskOutgoing
+      ? options.secrets.maskOutgoing(threadId, state.outbox, () => ids.eventId(), final)
+      : state.outbox;
+    state.outbox = [];
     if (outbox.length === 0) {
       return state.chain;
     }
-    state.outbox = [];
     const ship: AppendableDomainEvent[] = [];
     for (const event of outbox) {
       if (isToolUpdatedEvent(event)) {
@@ -1018,7 +1047,9 @@ export function createIngestion(options: IngestionOptions): Ingestion {
   // The public surface
   // -------------------------------------------------------------------------
 
-  async function ingest(event: RuntimeEvent): Promise<void> {
+  async function ingest(incoming: RuntimeEvent): Promise<void> {
+    // First, before a warning could quote it: a secret never goes further.
+    const event = options.secrets ? options.secrets.redactEvent(incoming) : incoming;
     let state: ThreadState | null = null;
     try {
       if (
@@ -1973,10 +2004,11 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     }
     flushThreadState(threadId, state, { cause: null, occurredAt: clock.nowIso() });
     closeCoalesceWindow(threadId, state);
-    await commit(threadId, state);
+    await commit(threadId, state, true);
   }
 
   async function forget(threadId: string): Promise<void> {
+    options.secrets?.forget(threadId);
     const state = threads.get(threadId);
     if (state === undefined) {
       return;
@@ -1998,7 +2030,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
     await state.chain;
   }
 
-  async function drain(): Promise<void> {
+  async function drain(options: { final?: boolean } = {}): Promise<void> {
     // Deliver everything buffered without closing any message: a drain is a
     // synchronisation point, not a turn end.
     for (const [threadId, state] of [...threads]) {
@@ -2027,7 +2059,7 @@ export function createIngestion(options: IngestionOptions): Ingestion {
         emitBufferedPlan(threadId, state, planId, null);
       }
       closeCoalesceWindow(threadId, state);
-      await commit(threadId, state);
+      await commit(threadId, state, options.final === true);
     }
     // A sink may itself have enqueued nothing; awaiting each chain twice is
     // cheap and covers a commit that landed while an earlier chain was awaited.

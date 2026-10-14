@@ -73,6 +73,36 @@ try {
   }));
   assert.match(secret, /<input\b[^>]*type="password"/);
   assert.doesNotMatch(secret, /<input\b[^>]*type="(?:text|file)"/);
+
+  // An agent's request_secret (design 2026-10-14 §5): docked after a question,
+  // a hidden, unremembered field, the prompt and purpose, Decline and Send.
+  const secretRequest = {
+    requestId: "secret-1", sessionId: "s1", name: "DEPLOY_KEY", prompt: "Paste the deploy key.",
+    purpose: "Push the release", createdAt: "2026-09-21T10:00:00.000Z"
+  };
+  const answer = async (): Promise<void> => {};
+  const secretDock = renderToStaticMarkup(createElement(ChatBannerDock, {
+    ...dockProps, userInputs: [], secretRequests: [secretRequest, { ...secretRequest, requestId: "secret-2" }], onAnswerSecret: answer
+  }));
+  assert.match(secretDock, /data-secret-request="secret-1"/);
+  assert.match(secretDock, /DEPLOY_KEY/);
+  assert.match(secretDock, /Paste the deploy key\./);
+  assert.match(secretDock, /For: Push the release/);
+  // Where the value goes, said on the card: the agent and its model provider; masked in Orquester's records.
+  assert.match(secretDock, /to its model provider/);
+  assert.match(secretDock, /Later repeats are masked while this chat stays loaded/);
+  assert.match(secretDock, />1\/2</, "the counter says another is behind it");
+  assert.match(secretDock, /<input\b[^>]*type="password"/);
+  assert.match(secretDock, /<input\b[^>]*autocomplete="off"/i);
+  assert.match(secretDock, /data-1p-ignore/);
+  assert.match(secretDock, />Decline</);
+  // The question outranks it; without an answer path it is not shown at all.
+  const behindQuestion = renderToStaticMarkup(createElement(ChatBannerDock, {
+    ...dockProps, userInputs: [request], secretRequests: [secretRequest], onAnswerSecret: answer
+  }));
+  assert.doesNotMatch(behindQuestion, /data-secret-request=/);
+  const unwired = renderToStaticMarkup(createElement(ChatBannerDock, { ...dockProps, userInputs: [], secretRequests: [secretRequest] }));
+  assert.doesNotMatch(unwired, /data-secret-request=/);
 } finally {
   console.error = consoleError;
 }

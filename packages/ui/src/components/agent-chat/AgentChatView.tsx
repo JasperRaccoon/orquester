@@ -95,6 +95,9 @@ import { useRegistry } from "../../hooks";
 /** Per-device: the roster folded to its summary line. */
 const ROSTER_COLLAPSED_KEY = "orquester.chat.roster-collapsed";
 import { ChatBannerDock } from "./banners/ChatBannerDock";
+import type { SecretRequestAnswer } from "./banners/SecretRequestCard";
+import { useSecretRequests } from "./banners/use-secret-requests";
+import { markSecretRequestClosed } from "../../lib/agent-chat/secret-requests";
 import { ChatComposer } from "./composer/ChatComposer";
 import { ChatErrorBoundary } from "./ChatErrorBoundary";
 import { FullOutputPane } from "./FullOutputPane";
@@ -271,6 +274,56 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   });
   heldRef.current = nextHeldTimeline(heldRef.current, displayed);
   const paintOnly = displayed.paintOnly;
+
+  // --- `request_secret` cards (design 2026-10-14 §5) ------------------------
+  // Daemon-owned and memory-only; the value goes from the card to the answer
+  // route and nowhere else on this side.
+  const secretRequests = useSecretRequests(sessionId);
+  // An answer the agent had stopped waiting for was discarded: say so, since
+  // the card itself is gone.
+  const [secretNotice, setSecretNotice] = React.useState<string | null>(null);
+  const answerSecret = React.useCallback(
+    async (requestId: string, answer: SecretRequestAnswer): Promise<void> => {
+      const name = secretRequests.find((request) => request.requestId === requestId)?.name ?? "the secret";
+      let outcome: string;
+      try {
+        outcome = (await api.answerSecretRequest(sessionId, requestId, answer)).outcome;
+      } catch (error) {
+        if (error instanceof ApiError && (error.status === 404 || error.status === 409)) {
+          // 404: already answered elsewhere, or ended with its turn. 409: the
+          // agent stopped waiting before the answer reached it. Nothing was sent.
+          markSecretRequestClosed(sessionId, requestId);
+          if (error.status === 409) {
+            setSecretNotice(`Your answer for ${name} was not delivered: the agent had stopped waiting.`);
+          }
+          return;
+        }
+        throw error instanceof ApiError ? error.status : null;
+      }
+      setSecretNotice(
+        outcome === "unconfirmed"
+          ? `Your answer for ${name} reached the agent's request, but its delivery could not be confirmed: the agent may not have received it.`
+          : null
+      );
+      markSecretRequestClosed(sessionId, requestId);
+    },
+    [api, secretRequests, sessionId]
+  );
+  const secretNotices = React.useMemo(
+    () =>
+      secretNotice === null
+        ? undefined
+        : [
+            {
+              id: `secret-notice:${sessionId}`,
+              variant: "warning" as const,
+              title: "Secret request",
+              description: secretNotice,
+              onDismiss: () => setSecretNotice(null)
+            }
+          ],
+    [secretNotice, sessionId]
+  );
 
   // --- the composer overlay's published height -----------------------------
   const [overlay, setOverlay] = React.useState<HTMLDivElement | null>(null);
@@ -1192,6 +1245,9 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
                 active={active}
                 entries={paintOnly ? undefined : slice.entries}
                 planTitle={planFollowUp ? proposedPlanTitle(planFollowUp.planMarkdown) : null}
+                notices={paintOnly ? undefined : secretNotices}
+                secretRequests={paintOnly ? undefined : secretRequests}
+                onAnswerSecret={paintOnly ? undefined : answerSecret}
               />
             </div>
             <div className="pointer-events-auto relative z-10 mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">

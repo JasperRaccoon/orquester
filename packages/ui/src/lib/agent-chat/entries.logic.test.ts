@@ -712,6 +712,29 @@ describe("session tools (design 2026-10-14 §1.5)", () => {
     assert.equal(singleToolCallLabel(entry), "Scheduled a task");
   });
 
+  it("a request_secret row reads its record — name and outcome, never a value", () => {
+    const record = { name: "API_KEY", purpose: "Deploy", outcome: "provided" };
+    const entry = workLogEntryFromActivity(
+      activity("tool.completed", {
+        itemType: "mcp_tool_call",
+        title: "orquester: request_secret",
+        data: { server: "orquester", tool: "request_secret", sessionTool: { name: "request_secret", references: { secretRequest: record } } }
+      })
+    );
+    assert.deepEqual(entry.secretRequest, record);
+    assert.equal(workEntryDisplayLabel(entry), "Requested a secret: API_KEY · provided");
+    // Still in flight: no record yet, the tool's own label.
+    const pending = workLogEntryFromActivity(
+      activity("tool.started", {
+        itemType: "mcp_tool_call",
+        title: "orquester: request_secret",
+        data: { server: "orquester", tool: "request_secret", sessionTool: { name: "request_secret" } }
+      })
+    );
+    assert.equal(pending.secretRequest, undefined);
+    assert.equal(workEntryDisplayLabel(pending), "Requested a secret");
+  });
+
   it("leaves every unmarked MCP call alone — a user's same-named external server's included", () => {
     for (const [data, detail] of [
       [{ server: "github", tool: "list_issues" }, "list_issues: {}"],

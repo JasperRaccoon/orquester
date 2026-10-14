@@ -35,7 +35,9 @@ import {
   isCompactionActivity,
   isPlanImplementationMessage,
   reEmittedAssistantCopies,
-  sessionToolNameOfData
+  sessionToolNameOfData,
+  secretRequestRecordOf,
+  SECRET_REQUEST_TOOL_NAME
 } from "@orquester/api/agent-chat";
 
 import type { WorkLogEntry, WorkLogToolLifecycleStatus } from "./contracts";
@@ -250,6 +252,12 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
     const sessionTool = sessionToolNameOfData(data);
     if (sessionTool !== null) {
       entry.sessionTool = sessionTool;
+      const secretRequest = secretRequestRecordOf(
+        asRecord(asRecord(asRecord(data?.sessionTool)?.references)?.secretRequest)
+      );
+      if (sessionTool === SECRET_REQUEST_TOOL_NAME && secretRequest !== null) {
+        entry.secretRequest = secretRequest;
+      }
     }
   }
   const requestKind = payload?.requestKind;

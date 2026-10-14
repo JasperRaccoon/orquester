@@ -83,6 +83,7 @@ import {
   createSessionToolsHost,
   type SessionToolsHost
 } from "./session-tools/index.ts";
+import { SessionSecretRedactor } from "./session-tools/secret-redaction.ts";
 
 /**
  * How long a host teardown lets the consumers read what the adapters'
@@ -284,11 +285,15 @@ export async function startAgentHost(
   const daemonSocketPath =
     env.ORQUESTER_DAEMON_SOCK ??
     defaultSocketPath(appdir, process.platform === "win32" ? "win32" : "linux");
+  // Secrets a session tool hands a thread (`request_secret`) are masked in
+  // everything of that thread the host persists (design 2026-10-14 §5).
+  const secretRedactor = new SessionSecretRedactor();
   const sessionTools: SessionToolsHost | undefined = toolRegistry.enabled
     ? createSessionToolsHost({
         registry: toolRegistry,
         forward: createDaemonForwarder({ socketPath: () => daemonSocketPath, token }),
-        logger
+        logger,
+        onSecretValues: (threadId, values) => secretRedactor.remember(threadId, values)
       })
     : undefined;
 
@@ -400,7 +405,7 @@ export async function startAgentHost(
       }
     },
     leftoverWorkPath: (threadId) => agentChatThreadLeftoverWorkPath(appdir, threadId),
-    logRawFrame: (threadId, frame) => store.logRawFrame(threadId, frame),
+    logRawFrame: (threadId, frame) => store.logRawFrame(threadId, secretRedactor.redactFrame(threadId, frame)),
     buildEnv: ({ threadId, home, projectPath, extraEnv }) => {
       // The §6.1 launcher env the daemon composed for this thread: the registry
       // entry's own env (which already carries `<appdir>/daemon/env/<id>.env`)
@@ -540,7 +545,8 @@ export async function startAgentHost(
     // The provenance of a session-tool row (design 2026-10-14 §1.5).
     ...(sessionTools !== undefined
       ? { sessionToolNames: new Set(sessionTools.tools.map((tool) => tool.name)) }
-      : {})
+      : {}),
+    secrets: secretRedactor
   });
 
   orchestrator = createOrchestrator({

@@ -93,6 +93,7 @@ import {
   DESKTOP_WS_PREFIXES,
   MAX_INITIAL_COMMAND,
   SCHEDULED_TASKS_CHANNEL,
+  SECRET_REQUEST_EVENT_TYPE,
   SYSTEM_ACCOUNT_ID
 } from "@orquester/api";
 import { isBinOnPath, RegistryService } from "./registry";
@@ -113,6 +114,7 @@ import { ChatAwareSessionManager } from "./agent-chat/session-router.ts";
 import { AGENT_VISUAL_ROUTE_PATTERN, registerAgentChatRoutes } from "./agent-chat/proxy-routes.ts";
 import { LineageService } from "./agent-chat/lineage.ts";
 import { registerLineageRoutes } from "./agent-chat/lineage-routes.ts";
+import { registerSecretRequestRoutes, SecretRequestRegistry } from "./agent-chat/secret-requests.ts";
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { RecentProjectsService, describeProjectPath } from "./recent-projects";
@@ -1146,7 +1148,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     importAccount: (content) => agentAccounts.importAccount({ content })
   });
   grokDeviceLink.events.on("changed", (status) => broadcaster.publish("agent-accounts", "grok-link.changed", status));
+  // `request_secret` cards (design 2026-10-14 §5): in memory only, values
+  // handed straight to the waiting session-tool call.
+  const secretRequests = new SecretRequestRegistry({
+    publish: (payload) => broadcaster.publish("sessions", SECRET_REQUEST_EVENT_TYPE, payload),
+    // A pending card is a pending question for the tab, the Attention Center and push.
+    onChange: (threadId) => agentChat.secretRequestsChanged(threadId)
+  });
+  agentChat.setSecretRequests(secretRequests);
   const services: Services = {
+    secretRequests,
     registry, sessions, grokDeviceLink, accounts, git, gitWatcher, todos, recentProjects, savedPrompts, usage, usageTokens, subagentCacheTtl, push, broadcaster, agentAccounts, browsers, urlWatcher, agentChat,
     desktops, desktopAudio,
     agentProfile,
@@ -1405,6 +1416,8 @@ interface Services {
   internalApi: InjectDaemonApi | null;
   /** Pull request watches (spec 2026-10-14 §5); null until started, after `internalApi`. */
   prWatches?: PullRequestWatchService | null;
+  /** Pending `request_secret` cards, memory only (optional: route-level tests build a partial `services`). */
+  secretRequests?: SecretRequestRegistry;
   usage: UsageService;
   usageTokens: UsageTokensScanner;
   /** The Claude subagent cache lifetime as it applies now (auto mode's decision). */
@@ -3494,6 +3507,13 @@ export function createServer(
         );
       }
     });
+    // The `request_secret` cards: daemon-owned, never proxied to the host.
+    if (services.secretRequests) {
+      registerSecretRequestRoutes(app, {
+        registry: services.secretRequests,
+        isChatSession: (id) => agentChatDeps.chatSession(id) !== undefined
+      });
+    }
   }
 
   // Sessions (PTYs and chat tabs — one list, one per-project order)
@@ -4503,7 +4523,8 @@ export function createServer(
       authorizeHost: (authorization) => services.agentChat?.authorizeHostRequest(authorization) ?? false,
       resolveThread: (threadId) => services.agentChat?.sessionToolThread(threadId) ?? null,
       api: () => services.internalApi,
-      registry: sessionToolRegistry
+      registry: sessionToolRegistry,
+      ...(services.secretRequests ? { secretRequests: services.secretRequests } : {})
     });
   }
 

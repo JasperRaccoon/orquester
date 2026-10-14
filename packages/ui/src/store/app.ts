@@ -9,6 +9,8 @@ import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-cha
 import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/store";
 import { applyScheduledTaskEvent, resetScheduledTasks } from "../lib/scheduled-tasks/store";
 import { applyPullRequestWatchesEvent, resetPullRequestWatches } from "../lib/pr-watches/store";
+import { applySecretRequestEvent, resetSecretRequests } from "../lib/agent-chat/secret-requests";
+import { SECRET_REQUEST_EVENT_TYPE } from "@orquester/api/agent-chat";
 import { applyAgentProfileEvent, resetAgentProfile } from "../lib/agent-profile/store";
 import { applyWorkflowsEvent, resetWorkflows, workflowsStore } from "../lib/workflows/store";
 import { observeWorkflowRunEvent, resetWorkflowNotifications } from "../lib/workflows/notifications";
@@ -1721,6 +1723,7 @@ export const useAppStore = create<AppState>((set, get) => ({
     resetSavedPrompts();
     resetScheduledTasks();
     resetPullRequestWatches();
+    resetSecretRequests();
     resetAgentProfile();
     resetWorkflows();
     resetWorkflowNotifications();
@@ -3311,6 +3314,12 @@ export const useAppStore = create<AppState>((set, get) => ({
       return;
     }
     if (event.channel !== "sessions") {
+      return;
+    }
+    if (event.type === SECRET_REQUEST_EVENT_TYPE) {
+      // A `request_secret` card opened or closed (never a value): its own
+      // module store, which the chat view's dock reads.
+      applySecretRequestEvent(event);
       return;
     }
     if (event.type === "session.activity") {

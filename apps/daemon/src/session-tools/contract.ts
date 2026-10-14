@@ -49,8 +49,56 @@ export interface SessionToolContext {
    * validation the GUI meets applies here by construction.
    */
   readonly api: DaemonApi;
+  /**
+   * The daemon's in-memory secret requests (`request_secret`): the one port a
+   * handler reaches besides `api`, because the value it returns must never
+   * cross an API response. Absent where the daemon wires none (tests).
+   */
+  readonly secretRequests?: SessionSecretRequests;
+  /**
+   * Resolves true once this call's result has been handed to the agent host,
+   * false when it was dropped (the caller went away first). Absent outside
+   * the route (tests).
+   */
+  readonly delivered?: Promise<boolean>;
   now(): number;
 }
+
+/** A request for a secret, as the asking tool states it. */
+export interface SessionSecretRequestInput {
+  readonly name: string;
+  readonly prompt: string;
+  readonly purpose?: string;
+}
+
+/** How a request ended — the value only when the user provided it. */
+export type SessionSecretRequestResult =
+  | { readonly outcome: "provided"; readonly value: string }
+  | { readonly outcome: "declined" | "cancelled" | "timed_out" };
+
+/**
+ * The daemon's secret requests (`agent-chat/secret-requests.ts`): opens a
+ * private card in `threadId` and waits for the user's answer, `signal`, or
+ * the request's own deadline. The value is held in memory and handed to this
+ * one waiter only.
+ */
+export interface SessionSecretRequests {
+  request(
+    threadId: string,
+    input: SessionSecretRequestInput,
+    signal: AbortSignal,
+    delivered?: Promise<boolean>
+  ): Promise<SessionSecretRequestResult>;
+}
+
+/**
+ * How long a provider lets a session-tool call run before it gives up on it,
+ * where the provider takes a per-server setting (Codex `tool_timeout_sec`,
+ * OpenCode's registration `timeout`): a tool that waits — for the user, for
+ * another thread — ends its own wait first, by its own deadline, well inside
+ * this. Claude's default (~27 h) and Grok's (6 000 s) already exceed it.
+ */
+export const SESSION_TOOL_CALL_TIMEOUT_MS = 65 * 60 * 1000;
 
 /** MCP tool annotations (hints to the model; Orquester pre-approves every session tool, §1.3). */
 export interface SessionToolAnnotations {
@@ -78,6 +126,14 @@ export interface SessionToolDefinition<Shape extends z.ZodRawShape = z.ZodRawSha
   readonly input: Shape;
   readonly annotations: SessionToolAnnotations;
   readonly resultKind: SessionToolResultKind;
+  /**
+   * `structuredContent` keys whose string values are secrets handed to the
+   * agent (`request_secret`'s `value`). The agent host remembers each such
+   * value for the thread before it passes the result on, and masks it in
+   * everything of that thread it persists (`agent-host/session-tools/
+   * secret-redaction.ts`). Absent for every tool that hands out none.
+   */
+  readonly secretResultKeys?: readonly string[];
 }
 
 /** The MCP `CallToolResult` a handler returns — build it with `results.ts`. */

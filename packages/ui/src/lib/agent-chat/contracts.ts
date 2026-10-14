@@ -21,6 +21,7 @@ import type {
   ProviderSnapshot,
   RuntimeMode,
   RuntimeSubagent,
+  SecretRequestRecord,
   ThreadGoal,
   ThreadHead,
   ThreadHistoryBounds,
@@ -274,6 +275,11 @@ export interface WorkLogEntry {
    * read from instead of the call's raw arguments.
    */
   sessionTool?: string;
+  /**
+   * A `request_secret` row's record — name, purpose, outcome; never the value
+   * (the row's `data.sessionTool.references.secretRequest`).
+   */
+  secretRequest?: SecretRequestRecord;
   /**
    * True when §5.6's slimming dropped something and `GET …/items/:itemId`
    * genuinely holds more, so the expanded row may offer "load full output".

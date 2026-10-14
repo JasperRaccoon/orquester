@@ -44,7 +44,7 @@ test("the production registry carries every listed toolkit's tools, within the i
   assert.equal(registry.enabled, true);
   assert.deepEqual(
     SESSION_TOOLKITS.map((toolkit) => toolkit.id),
-    ["html", schedulingToolkit.id, pullRequestsToolkit.id]
+    ["html", schedulingToolkit.id, pullRequestsToolkit.id, "secrets"]
   );
   assert.deepEqual(
     registry.tools.map((tool) => tool.name),
@@ -56,15 +56,24 @@ test("the production registry carries every listed toolkit's tools, within the i
     ...schedulingToolkit.tools.map((tool) => tool.name),
     "watch_pull_request",
     "unwatch_pull_request",
-    "list_pull_request_watches"
+    "list_pull_request_watches",
+    "request_secret"
   ]) {
     assert.equal(registry.get(name)?.name, name);
   }
   assert.match(registry.instructions, /^## Orquester\n/);
   assert.ok(registry.instructions.includes("### Showing visuals"));
   assert.match(registry.instructions, /watch_pull_request/);
+  assert.ok(registry.instructions.includes("`request_secret`"));
   assert.ok(registry.instructions.includes("`schedule_task`"));
   assert.ok(Buffer.byteLength(registry.instructions) <= SESSION_TOOL_INSTRUCTIONS_MAX_BYTES);
+});
+
+test("an empty toolkit list attaches no server", () => {
+  const registry = createSessionToolRegistry([]);
+  assert.equal(registry.enabled, false);
+  assert.equal(registry.instructions, "");
+  assert.equal(registry.tools.length, 0);
 });
 
 test("the test toolkit registers and composes its paragraph after the header", () => {

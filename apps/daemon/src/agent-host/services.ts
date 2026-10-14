@@ -291,8 +291,13 @@ export interface Ingestion {
    */
   forget(threadId: string): Promise<void>;
 
-  /** Flush everything. The drain seam every test waits on instead of sleeping (§9). */
-  drain(): Promise<void>;
+  /**
+   * Flush everything. The drain seam every test waits on instead of sleeping (§9).
+   * `final` (the host's teardown) also releases what is held back from a
+   * stream — the masked tail of a session-tool secret's possible start
+   * (design 2026-10-14 §5) — since no later chunk will come in this process.
+   */
+  drain(options?: { final?: boolean }): Promise<void>;
 
 }
 

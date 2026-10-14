@@ -1,7 +1,7 @@
 // Ported from T3 Code (MIT): apps/web/src/components/chat/ChatComposer.tsx:6131-6274,
 // apps/web/src/components/chat/ComposerBannerStack.tsx
 import React from "react";
-import type { AttachmentRef, ThreadItem } from "@orquester/api/agent-chat";
+import type { AttachmentRef, SecretRequestSummary, ThreadItem } from "@orquester/api/agent-chat";
 import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
@@ -15,6 +15,7 @@ import { mcpAppConsents } from "../../../lib/agent-chat/mcp-app-consent";
 import { BackgroundLivenessBanner } from "./BackgroundLivenessBanner";
 import { PlanReadyBanner } from "./PlanReadyBanner";
 import { QuestionCard, type QuestionAttachment } from "./QuestionCard";
+import { SecretRequestCard, type SecretRequestAnswer } from "./SecretRequestCard";
 import {
   resolveDockCard,
   showBackgroundLivenessBanner,
@@ -72,7 +73,16 @@ export interface ChatBannerDockExtraProps {
    * *Added by W15; the boolean `actionableProposedPlan` still gates the card.*
    */
   planTitle?: string | null;
+  /**
+   * The thread's pending `request_secret` cards, oldest first (design
+   * 2026-10-14 §5); the first is shown, after approvals and questions.
+   */
+  secretRequests?: readonly SecretRequestSummary[];
+  /** Answers one; resolves once the daemon took it, rejects with the HTTP status (or null). */
+  onAnswerSecret?: (requestId: string, answer: SecretRequestAnswer) => Promise<void>;
 }
+
+const NO_SECRET_REQUESTS: readonly SecretRequestSummary[] = [];
 
 /** Match `ac-banner-exit`: keep a dismissed notice mounted while it leaves. */
 const DISMISS_TRANSITION_MS = 220;
@@ -92,8 +102,8 @@ const CARD_BACKDROP = "min-w-0 rounded-t-xl bg-neutral-950";
  * line and the composer.
  *
  * **Fixed priority order, one request at a time.** Approval, then pending
- * question, then the plan-ready prompt, then the mobile-collapsed question
- * ({@link resolveDockCard}); a `1/N` counter says how many are behind it.
+ * question, then an agent's request for a secret, then the plan-ready prompt,
+ * then the mobile-collapsed question ({@link resolveDockCard}); a `1/N` counter says how many are behind it.
  * Nothing here is ever a modal, nothing steals focus, and nothing scrolls
  * away — a request that scrolls away is a turn that hangs.
  *
@@ -125,7 +135,9 @@ export function ChatBannerDock({
   notices,
   active,
   entries,
-  planTitle = null
+  planTitle = null,
+  secretRequests = NO_SECRET_REQUESTS,
+  onAnswerSecret
 }: ChatBannerDockProps & ChatBannerDockExtraProps): React.ReactElement | null {
   // One breakpoint governs every mobile rule in the chat surface (§7.8).
   const isMobile = !useMediaQuery("(min-width: 640px)");
@@ -138,6 +150,7 @@ export function ChatBannerDock({
 
   const approval = approvals[0] ?? null;
   const userInput = userInputs[0] ?? null;
+  const secretRequest = onAnswerSecret ? (secretRequests[0] ?? null) : null;
 
   // MCP Apps (spec 2026-10-14 §3): this dock is where an app of this thread
   // asks for consent. While it is mounted the thread can be asked; an app
@@ -167,6 +180,7 @@ export function ChatBannerDock({
   const liveCard = resolveDockCard({
     hasApproval: approval !== null,
     hasUserInput: userInput !== null,
+    hasSecretRequest: secretRequest !== null,
     hasActionableProposedPlan: actionableProposedPlan,
     isComposerCollapsedMobile: isMobile,
     hasAppConsent: appConsent !== null
@@ -416,6 +430,15 @@ export function ChatBannerDock({
           onDismiss={userInput.dismissible ? () => onDismiss(userInput.requestId) : null}
           onCarryTextToDraft={onCarryTextToDraft}
           active={active}
+        />
+      ) : null}
+
+      {card === "secret" && secretRequest && onAnswerSecret ? (
+        <SecretRequestCard
+          key={secretRequest.requestId}
+          request={secretRequest}
+          pendingCount={secretRequests.length}
+          onAnswer={(answer) => onAnswerSecret(secretRequest.requestId, answer)}
         />
       ) : null}
 

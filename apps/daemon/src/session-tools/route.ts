@@ -19,6 +19,7 @@ import type { AgentAdapterId } from "@orquester/api/agent-chat";
 
 import { daemonRoutesForHost, type SessionToolCallRequest } from "../agent-host/host-protocol.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
+import type { SessionSecretRequests } from "./contract.ts";
 import { executeSessionToolCall } from "./executor.ts";
 import type { SessionToolRegistry } from "./registry.ts";
 
@@ -40,6 +41,8 @@ export interface SessionToolRouteDeps {
   /** The daemon's in-process API for handlers; null while it does not exist yet. */
   api(): DaemonApi | null;
   registry(): SessionToolRegistry;
+  /** The daemon's secret requests (`request_secret`); absent where none is wired. */
+  secretRequests?: SessionSecretRequests;
   now?: () => number;
 }
 
@@ -78,8 +81,16 @@ export function registerSessionToolsRoute(app: FastifyInstance, deps: SessionToo
     // turn was interrupted, the session ended — cancels the handler. 'close'
     // also fires after a sent reply, where the abort is harmless.
     const controller = new AbortController();
+    // Whether the result reached the host: a tool that hands out something
+    // once (`request_secret`) reports its outcome truthfully by it.
+    let markDelivered!: (delivered: boolean) => void;
+    const delivered = new Promise<boolean>((resolve) => {
+      markDelivered = resolve;
+    });
+    reply.raw.on("finish", () => markDelivered(true));
     reply.raw.on("close", () => {
       if (!reply.raw.writableFinished) controller.abort();
+      markDelivered(reply.raw.writableFinished);
     });
     const result = await executeSessionToolCall(
       deps.registry(),
@@ -92,11 +103,14 @@ export function registerSessionToolsRoute(app: FastifyInstance, deps: SessionToo
         callId: call.callId,
         signal: controller.signal,
         api,
+        ...(deps.secretRequests !== undefined ? { secretRequests: deps.secretRequests } : {}),
+        delivered,
         now: deps.now ?? Date.now
       }
     );
     if (controller.signal.aborted) {
       // Nobody is left to read it.
+      markDelivered(false);
       return reply.code(499).send();
     }
     return reply.code(200).send(result);

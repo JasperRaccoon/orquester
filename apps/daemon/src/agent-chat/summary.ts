@@ -108,6 +108,8 @@ export interface ThreadUsageReading {
 /** What the service remembers per thread, beyond the summary itself. */
 interface ThreadState {
   fields: AgentChatSessionSummaryFields;
+  /** The host's own fields and requests as last read, before the daemon's secret requests are folded in. */
+  host: { fields: AgentChatSessionSummaryFields; pending: readonly AgentHostPendingRequest[] };
   activity: SessionActivity;
   /**
    * The open requests as of the last poll, keyed by `requestId`. Diffed against
@@ -122,8 +124,19 @@ interface ThreadState {
   polledAt: number;
 }
 
+/** The daemon's own pending requests (`request_secret` cards), which the host does not know. */
+export interface SummarySecretRequests {
+  list(threadId: string): ReadonlyArray<{ requestId: string; name: string }>;
+}
+
+/** The pending-request id a secret card is announced under (`agentChat.pending`). */
+export function secretPendingRequestId(requestId: string): string {
+  return `secret:${requestId}`;
+}
+
 export class AgentChatSummaryService {
   private readonly threads = new Map<string, ThreadState>();
+  private secretRequests: SummarySecretRequests | null = null;
   /** The `observedAt` of each thread's last usage reading handed on. */
   private readonly usageObservedAt = new Map<string, string>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -217,6 +230,24 @@ export class AgentChatSummaryService {
   }
 
   /**
+   * Fold the daemon's `request_secret` cards into each thread's attention
+   * (design 2026-10-14 §5): a pending card is a pending question — the
+   * `hasPendingUserInput` field, the needs-input rung and its push, and an
+   * `agentChat.pending` "question" whose title names the secret, never its
+   * prompt or a value.
+   */
+  setSecretRequests(source: SummarySecretRequests): void {
+    this.secretRequests = source;
+  }
+
+  /** A thread's secret cards changed: re-resolve it now from the host fields last read. */
+  secretRequestsChanged(threadId: string): void {
+    const state = this.threads.get(threadId);
+    if (state === undefined) return;
+    this.applyFields(threadId, state.host.fields, state.host.pending, state.polledAt);
+  }
+
+  /**
    * Read one thread's summary and fold it in. A read that fails leaves the last
    * known state alone rather than blanking the tab: a host restarting mid-poll
    * must not make every tab flicker to "unknown".
@@ -274,8 +305,10 @@ export class AgentChatSummaryService {
    */
   private applyFields(
     threadId: string,
-    fields: AgentChatSessionSummaryFields,
-    pendingRequests: readonly AgentHostPendingRequest[]
+    hostFields: AgentChatSessionSummaryFields,
+    hostPending: readonly AgentHostPendingRequest[],
+    /** When the host fields were read: a re-resolve between polls keeps the poll's instant. */
+    readAt?: number
   ): void {
     if (!this.opts.chat.has(threadId)) {
       // A thread the daemon has no tab for (closed here, still live there).
@@ -283,6 +316,18 @@ export class AgentChatSummaryService {
       return;
     }
     const previous = this.threads.get(threadId);
+    const host = { fields: hostFields, pending: hostPending };
+    const secrets = this.secretRequests?.list(threadId) ?? [];
+    const fields: AgentChatSessionSummaryFields =
+      secrets.length > 0 ? { ...hostFields, hasPendingUserInput: true } : hostFields;
+    const pendingRequests: AgentHostPendingRequest[] = [
+      ...hostPending,
+      ...secrets.map((request) => ({
+        requestId: secretPendingRequestId(request.requestId),
+        kind: "question" as const,
+        title: `Secret requested: ${request.name}`
+      }))
+    ];
     const resolution = resolveChatActivity(fields);
     const nowMs = Date.now();
     const nowIso = new Date(nowMs).toISOString();
@@ -317,7 +362,7 @@ export class AgentChatSummaryService {
             ? nowIso
             : (previous?.activity.needsAttentionAt ?? nowIso)
     };
-    this.threads.set(threadId, { fields, activity, pending, polledAt: nowMs });
+    this.threads.set(threadId, { fields, host, activity, pending, polledAt: readAt ?? nowMs });
     // Background work ending reopens the §3.1 drain window exactly as a turn
     // settling does: a deploy's handover otherwise waits for the next 15 s
     // health tick.

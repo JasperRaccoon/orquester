@@ -33,7 +33,8 @@ describe("codex session tools — the builders", () => {
       "mcp_servers.orquester": {
         url: "http://127.0.0.1:4711/mcp",
         bearer_token_env_var: "ORQUESTER_SESSION_TOOLS_TOKEN",
-        default_tools_approval_mode: "approve"
+        default_tools_approval_mode: "approve",
+        tool_timeout_sec: 3900
       }
     });
   });
@@ -99,7 +100,8 @@ describe("codex session tools — a launch", () => {
       "mcp_servers.orquester": {
         url: grant.url,
         bearer_token_env_var: CODEX_SESSION_TOOLS_TOKEN_ENV,
-        default_tools_approval_mode: "approve"
+        default_tools_approval_mode: "approve",
+        tool_timeout_sec: 3900
       }
     });
 
