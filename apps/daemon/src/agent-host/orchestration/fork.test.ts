@@ -14,6 +14,7 @@ import { describe, it } from "node:test";
 import {
   HISTORICAL_RAW_SOURCE,
   htmlRenderReferenceOfActivityPayload,
+  mcpAppReferenceOfActivityPayload,
   isHtmlRenderAttachmentId,
   sessionToolMarkedData,
   type DomainEvent,
@@ -748,6 +749,66 @@ describe("a fork's child and its parent's pages", () => {
       assert.equal(await readFile(await store.resolveAttachment("child", kept.attachmentId), "utf8"), "<p>Kept</p>");
     });
   }
+
+  it("codex (native): a replayed MCP App call gets its parent row's app, naming the child's own snapshot, which its sweep keeps", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "orq-fork-apps-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const store = createThreadStore({ rootDir: join(root, "threads") });
+    t.after(() => store.close());
+    // The provider's history names the call, never its app (Codex `thread/read`'s `mcpToolCall`).
+    const call = { server: "apps", tool: "show_widget", arguments: {}, result: { content: [{ type: "text", text: "ok" }] } };
+    const replayed = (threadId: string): RuntimeEvent[] => {
+      const raw = { source: HISTORICAL_RAW_SOURCE, payload: null };
+      const base = { threadId, createdAt: "1970-01-01T00:00:00.000Z", turnId: "turn-1", raw };
+      return [
+        { ...base, eventId: "h-start", type: "turn.started", payload: {} },
+        {
+          ...base,
+          eventId: "h-app",
+          itemId: "call-app",
+          type: "item.completed",
+          payload: { itemType: "mcp_tool_call", status: "completed", title: "apps: show_widget", data: call }
+        },
+        { ...base, eventId: "h-other", itemId: "call-other", type: "item.completed", payload: { itemType: "mcp_tool_call", status: "completed", data: call } },
+        { ...base, eventId: "h-end", type: "turn.completed", payload: { state: "completed", tokenUsage: { usageStatus: "unavailable" } } }
+      ] as unknown as RuntimeEvent[];
+    };
+    const codex = createScriptedAdapter({
+      id: "codex",
+      forkConversation: async (input) => ({ resumeCursor: { threadId: input.threadId, resume: "forked" } }),
+      history: { threadId: "child", turns: [{ id: "turn-1", items: [] }] },
+      projectHistory: () => replayed("child")
+    });
+    const host = createTestHost({ adapters: { codex }, store });
+    t.after(() => host.stop());
+    const parentId = await host.createThread({ threadId: "parent", refId: "codex" });
+    const first = await runTurn(host as unknown as TestHost, codex, parentId, "show it", "here");
+    const source = join(root, "widget.html");
+    await writeFile(source, "<h1>widget</h1>");
+    const snapshot = await store.putAttachment({ threadId: parentId, name: "show_widget.html", mimeType: "text/html", sourcePath: source });
+    const app = { attachmentId: snapshot.id, server: "apps", tool: "show_widget", resourceUri: "ui://apps/widget.html" };
+    await pushPageRow(host, parentId, first.turnId, "call-app", { ...call, mcpApp: app });
+
+    const result = await host.orchestrator.forkThread(parentId, forkRequest("child", "codex", { messageId: first.replyId }));
+    await host.settle();
+    assert.equal(result.strategy, "native");
+
+    const ingested = (itemId: string) =>
+      host.ingestion.ingested.find((event) => event.threadId === "child" && event.type === "item.completed" && event.itemId === itemId);
+    const appCall = ingested("call-app");
+    assert.deepEqual(mcpAppReferenceOfActivityPayload(appCall?.payload), app, "the replayed call renders its app");
+    const other = ingested("call-other");
+    assert.ok(other !== undefined);
+    assert.equal(mcpAppReferenceOfActivityPayload(other.payload), undefined, "a call the parent showed no app for gets none");
+    // The row ingestion writes from it (the fake ingestion writes none).
+    await pushPageRow(host, "child", "child-turn-1", "call-app", (appCall!.payload as { data: unknown }).data);
+
+    const path = await store.resolveAttachment("child", snapshot.id);
+    assert.ok(path.includes(join("child", "attachments")), path);
+    await store.deleteThread(parentId);
+    await store.pruneAttachments({ threadId: "child", now: new Date(Date.now() + 365 * 24 * 3600_000) });
+    assert.equal(await readFile(await store.resolveAttachment("child", snapshot.id), "utf8"), "<h1>widget</h1>");
+  });
 
   it("grok (transcript): no row of the parent is replayed, so no page is copied", async (t) => {
     const root = await mkdtemp(join(tmpdir(), "orq-fork-pages-"));

@@ -95,7 +95,7 @@ import {
   AGENT_CHAT_REPLAY_PAYLOAD_BUDGET_BYTES
 } from "@orquester/api/agent-chat";
 
-import type { AccountHome, HistoryImportProgress, McpAppOperation } from "@orquester/api/agent-chat";
+import type { AccountHome, HistoryImportProgress, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
 import { htmlRenderReferenceOfActivityPayload, mcpAppReferenceOfActivityPayload } from "@orquester/api/agent-chat";
 import { runMcpAppRequest } from "../mcp-apps.ts";
 
@@ -1903,6 +1903,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         return;
       }
       const total = events.length;
+      const forkedApps = await forkedMcpApps(head);
       reportHistoryImport(runtime, { phase: "importing", done: 0, total });
       runtime.historyBuffer = [];
       try {
@@ -1916,7 +1917,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               type: event.type
             });
           }
-          await ingestion.ingest(event);
+          await ingestion.ingest(withForkedMcpApp(event, forkedApps));
         }
         await ingestion.flushThread(runtime.id);
       } finally {
@@ -1933,6 +1934,38 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         detail: describeFailure(error)
       });
     }
+  };
+
+  /**
+   * A native fork's child replays its MCP App calls from the provider's
+   * history, which never names the app: the reference (`data.mcpApp`) is the
+   * adapter's, attached live. So the parent's rows lend theirs, by call id —
+   * the provider's fork keeps its item ids — and the snapshot they name is
+   * the child's own copy (`copyRetainedPages` copied every retained turn's),
+   * which the child's sweep then keeps because a row names it. Read from the
+   * parent's fold at replay time: a parent deleted before the child's first
+   * start, or a row its window no longer holds, lends nothing and the call
+   * replays as a plain tool row.
+   */
+  const forkedMcpApps = async (head: ThreadHead): Promise<ReadonlyMap<string, McpAppReference>> => {
+    const apps = new Map<string, McpAppReference>();
+    if (head.lineage?.relation !== "fork") return apps;
+    try {
+      const parent = await loadRuntime(head.lineage.parentThreadId);
+      if (parent.deleted || parent.state.deleted) return apps;
+      for (const activity of parent.state.activities) {
+        const reference = mcpAppReferenceOfActivityPayload(activity.payload);
+        const callId = (activity.payload as { toolUseId?: unknown } | null)?.toolUseId;
+        if (reference !== undefined && typeof callId === "string") apps.set(callId, reference);
+      }
+    } catch (error) {
+      logger.warn("agent-host: a fork's parent could not lend its MCP App rows", {
+        threadId: head.id,
+        parentThreadId: head.lineage.parentThreadId,
+        error: describeFailure(error)
+      });
+    }
+    return apps;
   };
 
   /**
@@ -8061,4 +8094,15 @@ function stampHistoryTimes<TEvent extends { createdAt?: string }>(
     }
     return { ...event, createdAt: new Date(anchorMs - (events.length - index)).toISOString() };
   });
+}
+
+/** A replayed call's completion with the app its parent row named ({@link forkedMcpApps}); else as it was. */
+function withForkedMcpApp(event: RuntimeEvent, apps: ReadonlyMap<string, McpAppReference>): RuntimeEvent {
+  if (apps.size === 0 || event.type !== "item.completed" || event.itemId === undefined) return event;
+  const mcpApp = apps.get(event.itemId);
+  if (mcpApp === undefined) return event;
+  const data = event.payload.data;
+  const record = data !== null && typeof data === "object" && !Array.isArray(data) ? (data as Record<string, unknown>) : {};
+  if ("mcpApp" in record) return event;
+  return { ...event, payload: { ...event.payload, data: { ...record, mcpApp } } };
 }
