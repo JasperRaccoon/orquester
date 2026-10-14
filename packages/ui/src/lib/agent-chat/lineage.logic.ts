@@ -91,7 +91,7 @@ export function isForkOutcomeUnknown(error: unknown): boolean {
  * one. A fork that answered — opened or refused — frees its point.
  */
 export class ForkRetryKeys {
-  private readonly pending = new Map<string, string>();
+  private readonly pending = new Map<string, { sessionId: string; commandId: string }>();
 
   static keyFor(
     sessionId: string,
@@ -102,12 +102,26 @@ export class ForkRetryKeys {
 
   /** The id to send: the one an unknown outcome left for this point, else a fresh one. */
   commandIdFor(key: string, mint: () => string): string {
-    return this.pending.get(key) ?? mint();
+    return this.pending.get(key)?.commandId ?? mint();
   }
 
   /** Record how the fork sent under `commandId` ended: kept only while its outcome is unknown. */
   settle(key: string, commandId: string, error: unknown | null): void {
-    if (error !== null && isForkOutcomeUnknown(error)) this.pending.set(key, commandId);
+    const sessionId = (JSON.parse(key) as unknown[])[0] as string;
+    if (error !== null && isForkOutcomeUnknown(error)) this.pending.set(key, { sessionId, commandId });
     else this.pending.delete(key);
+  }
+
+  /**
+   * A tab closed: the kept ids of forks from it, or from the parent of a fork tab that closed,
+   * are dropped. The tab that went may be the very fork a kept id would converge on — a stray
+   * one the user closed, or one the daemon took back — and its key now answers
+   * COMMAND_ID_CONFLICT, so the next fork from that point is a new command.
+   */
+  forgetTab(closed: Pick<SessionSummary, "id" | "lineage">): void {
+    const parentId = closed.lineage?.relation === "fork" ? closed.lineage.parentThreadId : null;
+    for (const [key, entry] of this.pending) {
+      if (entry.sessionId === closed.id || entry.sessionId === parentId) this.pending.delete(key);
+    }
   }
 }

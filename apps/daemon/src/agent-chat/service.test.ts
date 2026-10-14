@@ -101,6 +101,8 @@ interface Fixture {
   dropForkUncreated: boolean;
   /** The fork children the fake host holds, by id, with the lineage it resolved. */
   forkChildren: Map<string, unknown>;
+  /** What the fake host answers a `confirmOnly` fork instead of the truth, when set. */
+  confirmAnswer: { status: number; body: unknown } | null;
   requests: EventEmitter;
   broadcasts: EventEmitter;
   cleanup(): Promise<void>;
@@ -179,6 +181,7 @@ async function makeFixture(
     dropForkAnswer: false,
     dropForkUncreated: false,
     forkChildren: new Map(),
+    confirmAnswer: null,
     requests: new EventEmitter(),
     broadcasts: new EventEmitter(),
     service: null as unknown as AgentChatService,
@@ -299,9 +302,9 @@ async function makeFixture(
         }
         const held = state.forkChildren.get(request.threadId);
         if (request.confirmOnly) {
-          const confirmed = held
+          const confirmed = state.confirmAnswer ?? (held
             ? { status: 200, body: { head: { id: request.threadId, lineage: held }, strategy: "native", lineage: held } }
-            : { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: `Thread '${request.threadId}' was not found.` } } };
+            : { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: `Thread '${request.threadId}' was not found.` } } });
           res.writeHead(confirmed.status, { "content-type": "application/json" }).end(JSON.stringify(confirmed.body));
           return;
         }
@@ -1607,6 +1610,93 @@ test("the reconcile never deletes a child the host did create, and leaves a fork
   assert.equal(f.service.chat.has(id), true);
   assert.deepEqual(f.service.chat.unconfirmedForks(), []);
   assert.equal(f.service.chat.pendingThreadDeletes().includes(id), false);
+  await f.cleanup();
+});
+
+test("a new chat is announced as pending until the host has its thread, then confirmed with an update", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const events: Array<[string, boolean | undefined]> = [];
+  f.service.chat.lifecycle.on("created", (s: { chatPending?: boolean }) => events.push(["created", s.chatPending]));
+  f.service.chat.lifecycle.on("updated", (s: { chatPending?: boolean }) => events.push(["updated", s.chatPending]));
+  // What a grid cell mounted on `session.created` sees: pending — so a THREAD_NOT_FOUND on its
+  // stream is "starting", never "gone" — and then the update its view reconnects on.
+  const created = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  assert.deepEqual(events, [["created", true], ["updated", false]]);
+  assert.equal(created.chatPending, false);
+  // A fork the same way: pending at creation, confirmed once the host answered.
+  events.length = 0;
+  const fork = await f.service.forkSession(created.id, { messageId: "m" }, 1);
+  assert.deepEqual(events, [["created", true], ["updated", false]]);
+  assert.equal(fork.session.chatPending, false);
+  await f.cleanup();
+});
+
+test("a fork whose answer was lost stays pending, also across a restart, until the reconcile confirms it", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  f.dropForkAnswer = true;
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "msg-4" }, 1));
+  const id = forkIdFor(parent.id, "k");
+  assert.equal(f.service.chat.get(id)?.chatPending, true);
+  const reloaded = new ChatSessionManager();
+  reloaded.adopt(parseSessionsConfig({ version: 1, sessions: f.service.chat.records() }).sessions);
+  assert.equal(reloaded.get(id)?.chatPending, true, "a restarted daemon still says it is pending");
+  await f.service.reconcileForks();
+  assert.equal(f.service.chat.get(id)?.chatPending, false);
+  await f.cleanup();
+});
+
+test("the reconcile re-sends the lost fork's whole request — cut and launch environment — with confirmOnly", async () => {
+  const f = await makeFixture(CLAUDE, { env: { CLAUDE_CONFIG_DIR: "/homes/acc-1" }, unset: ["ANTHROPIC_API_KEY"], accountId: "acc-1" });
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  f.dropForkAnswer = true;
+  // Unkeyed and keyed alike record their cut.
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", turnId: "t3", role: "user" }, 1));
+  const original = f.forks.at(-1)!.body;
+  await f.service.reconcileForks();
+  const confirm = f.forks.at(-1)!.body;
+  assert.equal(confirm.confirmOnly, true);
+  assert.deepEqual(confirm.fork, { turnId: "t3", role: "user" }, "the cut the lost request asked for");
+  assert.deepEqual(confirm.launchEnv, original.launchEnv);
+  assert.deepEqual(confirm.unsetEnv, original.unsetEnv);
+  assert.equal(confirm.homePath, "/homes/acc-1");
+  assert.equal(confirm.accountId, "acc-1");
+  await f.cleanup();
+});
+
+test("only the host's 'no such thread' takes a stray fork tab back; any other refusal keeps it for later", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  f.dropForkUncreated = true;
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1));
+  const id = forkIdFor(parent.id, "k");
+  for (const refusal of [
+    { status: 400, body: { error: { code: "INVALID_COMMAND", message: `Thread '${id}' was deleted.` } } },
+    { status: 409, body: { error: { code: "COMMAND_REJECTED", message: "busy" } } },
+    { status: 500, body: { error: { code: "COMMAND_REJECTED", message: "boom" } } }
+  ]) {
+    f.confirmAnswer = refusal;
+    await f.service.reconcileForks();
+    assert.equal(f.service.chat.has(id), true, `${refusal.status}: kept`);
+    assert.deepEqual(f.service.chat.unconfirmedForks(), [id], `${refusal.status}: still to reconcile`);
+  }
+  // An older host's route miss is a "no such thread" too: it never had a fork route to create one.
+  f.confirmAnswer = { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: "No route for POST /threads/x/fork." } } };
+  await f.service.reconcileForks();
+  assert.equal(f.service.chat.has(id), false);
+  await f.cleanup();
+});
+
+test("a stopped service reconciles nothing", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  f.dropForkUncreated = true;
+  await assert.rejects(f.service.forkSession(parent.id, { commandId: "k", messageId: "m" }, 1));
+  const asked = f.forks.length;
+  await f.service.stop();
+  await f.service.reconcileForks();
+  assert.equal(f.forks.length, asked, "no host request after stop()");
+  assert.equal(f.service.chat.has(forkIdFor(parent.id, "k")), true);
   await f.cleanup();
 });
 

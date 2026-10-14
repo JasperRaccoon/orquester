@@ -2786,6 +2786,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     }
     const session = get().sessions.find((s) => s.id === id);
     const isSession = Boolean(session);
+    // A fork tab the user closes (a stray one included) frees the fork ids kept for its point.
+    if (session) forkRetryKeys.forgetTab(session);
     const isBrowser = !isSession && get().browsers.some((b) => b.id === id);
     set((state) => {
       const next = isSession
@@ -3354,6 +3356,8 @@ export const useAppStore = create<AppState>((set, get) => ({
       });
     } else if (event.type === "session.closed") {
       const { id } = event.payload as { id: string };
+      const closed = get().sessions.find((s) => s.id === id);
+      if (closed) forkRetryKeys.forgetTab(closed);
       set((state) => removeSession(state, id));
     }
   }

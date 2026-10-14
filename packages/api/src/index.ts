@@ -1219,6 +1219,14 @@ export interface SessionSummary {
    * taken yet, and those addressed to it (spec 2026-10-14 §6). Absent when there are none.
    */
   pendingMerges?: PendingMergeBack[];
+  /**
+   * Agent-chat tabs only: the agent host has not created this tab's thread yet — its create
+   * or fork is in flight, or a fork's answer was lost and the daemon has not reconciled it.
+   * A client shows such a tab as starting, never as a chat that no longer exists, even when
+   * its stream answers `THREAD_NOT_FOUND`. Cleared with an explicit `false` in a
+   * `session.updated` once the host has the thread (a client merges summaries field-wise).
+   */
+  chatPending?: boolean;
 }
 
 // --- Thread lineage (spec 2026-10-14 §6) ------------------------------------

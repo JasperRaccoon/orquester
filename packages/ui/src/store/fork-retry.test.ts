@@ -76,4 +76,22 @@ describe("forkChatTab's retry", () => {
     assert.notEqual(b, a, "nothing was opened by a refused fork: a new click is a new command");
     assert.notEqual(c, b, "another message is another fork");
   });
+
+  it("closing the stray fork tab (or the daemon taking it back) frees the kept id", async () => {
+    const world = fakeApi([unavailable(), unavailable(), null]);
+    useAppStore.setState({ api: world.api as never });
+    const point = { messageId: "m1", role: "assistant" as const };
+    await assert.rejects(store().forkChatTab("parent", point));
+    // The stray tab arrived over the bus (session.created); the user closes it.
+    const stray = { ...tab("stray"), lineage: { parentThreadId: "parent", relation: "fork" as const, createdAt: "t" } };
+    useAppStore.setState({ sessions: [tab("parent"), stray] });
+    store().applyEvent({ id: "e1", channel: "sessions", type: "session.closed", createdAt: "t", payload: { id: "stray" } } as never);
+    await assert.rejects(store().forkChatTab("parent", point));
+    assert.notEqual(world.sent[1]!.commandId, world.sent[0]!.commandId, "a new command, never COMMAND_ID_CONFLICT");
+    // …and the same through the user's own close.
+    useAppStore.setState({ sessions: [tab("parent"), stray], api: { ...world.api, closeSession: async () => {} } as never });
+    await store().closeTab("stray");
+    await store().forkChatTab("parent", point);
+    assert.notEqual(world.sent[2]!.commandId, world.sent[1]!.commandId);
+  });
 });

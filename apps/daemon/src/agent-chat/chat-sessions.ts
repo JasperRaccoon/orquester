@@ -51,6 +51,8 @@ export interface ChatSessionCreateInput {
   forkFingerprint?: string;
   /** A fork tab the host has not answered for yet (`AgentChatService.reconcileForks`). */
   forkUnconfirmed?: boolean;
+  /** The host has not created the thread yet (`SessionSummary.chatPending`); see {@link confirmCreated}. */
+  pending?: boolean;
 }
 
 interface ChatSession {
@@ -155,7 +157,8 @@ export class ChatSessionManager {
       order: input.order,
       createdAt: input.createdAt ?? new Date().toISOString(),
       ...(input.owner ? { owner: { ...input.owner } } : {}),
-      ...(input.lineage ? { lineage: cloneLineage(input.lineage) } : {})
+      ...(input.lineage ? { lineage: cloneLineage(input.lineage) } : {}),
+      ...(input.pending === true || input.forkUnconfirmed === true ? { chatPending: true } : {})
     };
     this.sessions.set(input.id, {
       summary,
@@ -265,10 +268,29 @@ export class ChatSessionManager {
     const session = this.sessions.get(id);
     if (!session) return null;
     session.summary.lineage = cloneLineage(lineage);
-    // The host's answer is in: the fork is confirmed.
+    // The host's answer is in: the fork is confirmed, its thread exists.
     delete session.chat.forkUnconfirmed;
+    if (session.summary.chatPending === true) session.summary.chatPending = false;
     this.lifecycle.emit("updated", { ...session.summary });
     this.options.requestPersist();
+    return { ...session.summary };
+  }
+
+  /**
+   * The host created the tab's thread: `chatPending` goes to `false` (explicitly — a client
+   * merges summaries field by field), announced so a view that met `THREAD_NOT_FOUND` while it
+   * was being created connects again. Nothing is announced for a tab that was not pending.
+   */
+  confirmCreated(id: string): SessionSummary | null {
+    const session = this.sessions.get(id);
+    if (!session) return null;
+    if (session.summary.chatPending !== true) return { ...session.summary };
+    session.summary.chatPending = false;
+    if (session.chat.forkUnconfirmed === true) {
+      delete session.chat.forkUnconfirmed;
+      this.options.requestPersist();
+    }
+    this.lifecycle.emit("updated", { ...session.summary });
     return { ...session.summary };
   }
 
@@ -378,7 +400,9 @@ export class ChatSessionManager {
         // The tolerant parse already dropped a malformed owner (never the record).
         ...(record.owner ? { owner: { ...record.owner } } : {}),
         // …and a malformed lineage, or a fork point that did not read on its own.
-        ...(record.lineage ? { lineage: lineageFromRecord(record.lineage) } : {})
+        ...(record.lineage ? { lineage: lineageFromRecord(record.lineage) } : {}),
+        // A fork whose host answer never came: still being reconciled.
+        ...(record.chat.forkUnconfirmed === true ? { chatPending: true } : {})
       };
       this.sessions.set(record.id, {
         summary,

@@ -348,7 +348,12 @@ export interface ForkHostThreadRequest extends CreateHostThreadRequest {
    * The daemon's reconcile of a fork whose answer it lost: answer the child
    * `threadId` names if this host holds it (or once the fork creating it is
    * done), and never create one — 404 `THREAD_NOT_FOUND` when there is none.
-   * Additive: a host from before it forks as asked, which converges as well.
+   * Additive. A host from before it ignores the flag and forks as asked, so
+   * the daemon always sends the lost fork's WHOLE request with it — the same
+   * cut and the launch environment recomposed as the fork composed it — and
+   * such a host creates exactly the child the lost request would have: the
+   * convergence of a retry under the same key. (Only builds of this feature
+   * before the flag existed have the fork route without it.)
    */
   confirmOnly?: boolean;
 }

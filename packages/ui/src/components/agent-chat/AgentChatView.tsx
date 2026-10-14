@@ -104,6 +104,12 @@ import { ChatTimeline } from "./timeline/ChatTimeline";
 import type { TimelineForkInput } from "./timeline/context";
 import { ThreadLineageBar, type LineageNotice } from "./ThreadLineageBar";
 import { ThreadGoneNotice } from "./ThreadGoneNotice";
+import {
+  goneDisplay,
+  initialGoneWatch,
+  nextGoneWatch,
+  type GoneWatch
+} from "../../lib/agent-chat/status.logic";
 import { defaultMergeBackText } from "../../lib/agent-chat/lineage.logic";
 import { resolveMarkdownImageSource } from "./timeline/markdown/local-image";
 import { TurnDiffModal, type TurnDiffRequest } from "./timeline/TurnDiffModal";
@@ -521,22 +527,25 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
   const forkChatTab = useAppStore((s) => s.forkChatTab);
   const activateTab = useAppStore((s) => s.activateTab);
   const closeTab = useAppStore((s) => s.closeTab);
-  // The host holds no such thread (its stream said THREAD_NOT_FOUND). The stream stops; the
-  // tab offers to close. A change to the tab's record — a fork the daemon confirmed with the
-  // host after its answer was lost — is worth one more look, so it connects again then.
+  // The host holds no such thread (its stream said THREAD_NOT_FOUND). A tab whose record is,
+  // or just was, `chatPending` is only being created — a grid cell opens its stream on
+  // `session.created` — and shows as starting; it connects again once its record says the
+  // host has the thread. Otherwise the tab says the chat is gone and offers to close; a change
+  // to its record (a fork the daemon confirmed later) is still worth one more look.
   const gone = slice.connection === "gone";
+  const chatPending = session.chatPending === true;
   const retryStream = actions.retryStream;
-  const goneRecord = React.useRef(session);
+  const goneWatch = React.useRef<GoneWatch>(initialGoneWatch({ pending: chatPending, record: session }));
+  const goneShown = goneDisplay({ gone, pending: chatPending, watch: goneWatch.current }) === "gone";
   React.useEffect(() => {
-    if (!gone) {
-      goneRecord.current = session;
-      return;
-    }
-    if (goneRecord.current !== session) {
-      goneRecord.current = session;
-      retryStream();
-    }
-  }, [gone, session, retryStream]);
+    const next = nextGoneWatch(goneWatch.current, {
+      connection: slice.connection,
+      pending: chatPending,
+      record: session
+    });
+    goneWatch.current = next.watch;
+    if (next.retry) retryStream();
+  }, [slice.connection, chatPending, session, retryStream]);
   const [lineageNotice, setLineageNotice] = React.useState<LineageNotice | null>(null);
   React.useEffect(() => setLineageNotice(null), [sessionId]);
   // One fork at a time from this view: a second click while the first is on
@@ -984,7 +993,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
           }
         />
       ) : null}
-      {gone ? (
+      {goneShown ? (
         <ThreadGoneNotice onClose={() => void closeTab(sessionId)} onRetry={retryStream} />
       ) : null}
       {/* Its "Try again" also leaves an open drill-in: the fallback replaced the
@@ -1118,7 +1127,8 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
             <div className="pointer-events-auto mx-auto w-full min-w-0 max-w-3xl px-3 sm:px-5">
               <ChatStatusLine
                 sessionId={sessionId}
-                connection={status.connection}
+                // A thread still being created reads as connecting, never as gone.
+                connection={gone && !goneShown ? "connecting" : status.connection}
                 turnStartedAt={paintOnly ? null : status.turnStartedAt}
                 activityLabel={paintOnly ? null : status.activityLabel}
                 tokensUsed={slice.contextWindow?.usedTokens ?? null}
