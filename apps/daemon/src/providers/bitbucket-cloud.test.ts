@@ -112,3 +112,47 @@ test("SSH key uploads distinguish duplicate keys from authentication and upstrea
     });
   }
 });
+
+test("pagination follows a next link only on the API's own origin; credentials never go elsewhere (S-M4)", async (t) => {
+  const seen: Array<{ url: string; auth: string | null }> = [];
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+    const url = String(input);
+    seen.push({ url, auth: new Headers(init?.headers).get("authorization") });
+    if (url.includes("/user/workspaces")) {
+      return Response.json({ values: [{ workspace: { slug: "ws" } }], next: "https://evil.example/2.0/steal?page=2" });
+    }
+    return Response.json({ values: [] });
+  });
+  await assert.rejects(bitbucketCloudProvider.listRepos({ token: "secret-token-0" }), (error: unknown) => error instanceof GitRemoteError);
+  assert.ok(seen.every((entry) => entry.url.startsWith("https://api.bitbucket.org/2.0/")), JSON.stringify(seen.map((entry) => entry.url)));
+
+  // Lookalikes are refused too: another scheme, userinfo, a sibling path.
+  for (const next of [
+    "http://api.bitbucket.org/2.0/x",
+    "https://user@api.bitbucket.org/2.0/x",
+    "https://api.bitbucket.org.evil.example/2.0/x",
+    "https://api.bitbucket.org/internal/x"
+  ]) {
+    seen.length = 0;
+    t.mock.method(globalThis, "fetch", async (input: string | URL | Request, init?: RequestInit) => {
+      seen.push({ url: String(input), auth: new Headers(init?.headers).get("authorization") });
+      return Response.json({ values: [{ workspace: { slug: "ws" } }], next });
+    });
+    await assert.rejects(bitbucketCloudProvider.listRepos({ token: `secret-token-${next}` }), GitRemoteError, next);
+    assert.equal(seen.length, 1, next);
+  }
+});
+
+test("pagination on the API's own origin is followed", async (t) => {
+  const urls: string[] = [];
+  t.mock.method(globalThis, "fetch", async (input: string | URL | Request) => {
+    const url = String(input);
+    urls.push(url);
+    if (url.includes("/user/workspaces") && !url.includes("page=2")) {
+      return Response.json({ values: [{ workspace: { slug: "ws" } }], next: "https://api.bitbucket.org/2.0/user/workspaces?page=2" });
+    }
+    return Response.json({ values: [] });
+  });
+  await bitbucketCloudProvider.listRepos({ token: "pagination-fixture" });
+  assert.ok(urls.includes("https://api.bitbucket.org/2.0/user/workspaces?page=2"), urls.join("\n"));
+});

@@ -84,6 +84,24 @@ function missingScopesOf(body: string): string[] | null {
   return required;
 }
 
+/** Whether `url` is on Bitbucket Cloud's API: its https origin and its `/2.0` path. */
+function isApiUrl(url: string): boolean {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    return false;
+  }
+  const api = new URL(API);
+  return (
+    parsed.protocol === api.protocol &&
+    parsed.origin === api.origin &&
+    parsed.username === "" &&
+    parsed.password === "" &&
+    (parsed.pathname === api.pathname || parsed.pathname.startsWith(`${api.pathname}/`))
+  );
+}
+
 /** One Bitbucket Cloud answer: its status, decoded JSON and headers. */
 interface CloudResponse {
   status: number;
@@ -103,6 +121,12 @@ async function bbRequest(
   retry = 2
 ): Promise<CloudResponse> {
   const url = pathOrUrl.startsWith("http") ? pathOrUrl : `${API}${pathOrUrl}`;
+  // A page's `next` link (and any absolute URL) is followed only on the API's own origin, over
+  // https, under its path: the credentials ride in Authorization and must never reach another host
+  // a response names (S-M4).
+  if (!isApiUrl(url)) {
+    throw new GitRemoteError(502, "Bitbucket answered with a link outside its API; it was not followed.", "upstream");
+  }
   const { body, etag } = opts;
   let res: Response;
   try {
