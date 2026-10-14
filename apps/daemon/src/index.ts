@@ -547,6 +547,16 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // The supervised agent host (chat spec §3.1). `init()` runs after
   // `sessions.reattach()`, so the chat tab records are already loaded.
   const agentChatTmux = tmuxAvailable() && tmuxVersionOk() ? tmux : null;
+  // Agent pages (design 2026-10-14 §2.1): previews and publish-time heights, in a browser of their
+  // own per call, never the browser tabs' process. Stopped with the daemon (its previews killed);
+  // the profiles a daemon that died mid-preview left behind are swept at boot (D-M4).
+  const htmlPreview = new HtmlPreviewBrowser({
+    resolveChromium,
+    log: (message, error) => console.warn(message, error ?? "")
+  });
+  void htmlPreview.sweepStaleProfiles().then((removed) => {
+    if (removed.length > 0) console.log(`[html-preview] removed ${removed.length} stale preview profile(s)`);
+  });
   const agentChat = new AgentChatService({
     baseDir: paths.baseDir,
     daemonSocketPath: paths.socketPath,
@@ -560,12 +570,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     push,
     registryEntry: (refId) => registry.get(refId),
     resolveLaunchEnv: (entry, ctx) => resolveAgentLaunchEnv(entry, ctx),
-    // Agent pages (design 2026-10-14 §2.1): previews and publish-time heights,
-    // in a browser of their own per call, never the browser tabs' process.
-    htmlPreview: new HtmlPreviewBrowser({
-      resolveChromium,
-      log: (message, error) => console.warn(message, error ?? "")
-    }),
+    htmlPreview,
     // §7.7: "sign in again" only when NO account of the family is valid — the
     // host probes under the daemon user's own login, which may well be stale
     // while every managed account is fine.
@@ -1322,6 +1327,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Stops supervising only: under tmux the agent host is deliberately left
     // running so in-flight turns survive the deploy (chat spec §3.1).
     await lineage.stop();
+    await htmlPreview.stop();
     await agentChat.stop();
     await browsers.shutdown();
     // Desktops keep running in tmux; only their watchers, window trackers and

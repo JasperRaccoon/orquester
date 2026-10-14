@@ -7,7 +7,7 @@
 import assert from "node:assert/strict";
 import { existsSync, readFileSync, watch } from "node:fs";
 import { on } from "node:events";
-import { mkdir, mkdtemp, readdir, rm, symlink, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import * as http from "node:http";
 import { tmpdir } from "node:os";
 import { delimiter, join } from "node:path";
@@ -23,7 +23,9 @@ import {
   MAX_CONSOLE_TEXT_CHARS,
   MAX_SCREENSHOT_BASE64_CHARS,
   MAX_WAITING_CALLS,
-  PREVIEWS_BUSY_MESSAGE
+  PREVIEW_PROFILE_PREFIX,
+  PREVIEWS_BUSY_MESSAGE,
+  STALE_PROFILE_AGE_MS
 } from "./browser.ts";
 import { measureHtmlPage, previewHtmlPage } from "./index.ts";
 
@@ -488,6 +490,41 @@ describe("html preview browser: slots, queue and cancellation", () => {
     third.abort();
     await assert.rejects(three);
     assert.deepEqual(await readdir(scratch), []);
+  });
+
+  it("the daemon's stop kills a preview in flight, removes its profile, and refuses any after it (D-M4)", async (t) => {
+    const fake = await hangingChromium();
+    t.after(() => fake.cleanup());
+    const own = await mkdtemp(join(tmpdir(), "orq-html-preview-stop-"));
+    t.after(() => rm(own, { recursive: true, force: true }));
+    const browser = new HtmlPreviewBrowser({ resolveChromium: () => fake.executable, tmpDir: own, captureTimeoutMs: 60_000 });
+    const running = browser.capture({ html: FIXED(1), width: 320, urlFragment: "" });
+    running.catch(() => undefined);
+    const [pid] = await fake.started(1);
+    await browser.stop();
+    await assert.rejects(running, (error: unknown) => error instanceof HtmlPreviewError && error.code === "cancelled");
+    assert.ok(notRunning(pid!));
+    assert.deepEqual(await readdir(own), [], "no profile left");
+    await assert.rejects(
+      browser.capture({ html: FIXED(1), width: 320, urlFragment: "" }),
+      (error: unknown) => error instanceof HtmlPreviewError && error.code === "cancelled"
+    );
+  });
+
+  it("at boot, sweeps the stale preview profiles a dead daemon left, never a young one or another name (D-M4)", async (t) => {
+    const own = await mkdtemp(join(tmpdir(), "orq-html-preview-sweep-"));
+    t.after(() => rm(own, { recursive: true, force: true }));
+    await mkdir(join(own, `${PREVIEW_PROFILE_PREFIX}old`));
+    await mkdir(join(own, `${PREVIEW_PROFILE_PREFIX}young`));
+    await mkdir(join(own, "someone-elses"));
+    const browser = new HtmlPreviewBrowser({ resolveChromium: () => undefined, tmpDir: own });
+    // Seen from now, nothing is stale yet.
+    assert.deepEqual(await browser.sweepStaleProfiles(Date.now()), []);
+    // Seen from later, the untouched one is; the one touched "later" is still young.
+    const later = Date.now() + STALE_PROFILE_AGE_MS + 1_000;
+    await utimes(join(own, `${PREVIEW_PROFILE_PREFIX}young`), new Date(later), new Date(later));
+    assert.deepEqual(await browser.sweepStaleProfiles(later), [`${PREVIEW_PROFILE_PREFIX}old`]);
+    assert.deepEqual((await readdir(own)).sort(), [`${PREVIEW_PROFILE_PREFIX}young`, "someone-elses"]);
   });
 
   it("a call waiting for a slot is told previews are busy — at its own bound, or at once past the waiting cap", async (t) => {

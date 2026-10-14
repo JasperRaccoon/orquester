@@ -22,7 +22,7 @@
  *   output is capped; at most two browsers run at once.
  */
 
-import { mkdtemp, rm } from "node:fs/promises";
+import { lstat, mkdtemp, readdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import puppeteer, { type Browser, type ConsoleMessage as PuppeteerConsoleMessage, type HTTPRequest, type Page } from "puppeteer-core";
@@ -240,12 +240,53 @@ class SourceFailure {
   constructor(readonly cause: unknown) {}
 }
 
+/** The prefix of every preview's temporary profile directory. */
+export const PREVIEW_PROFILE_PREFIX = "orq-html-preview-";
+/** A profile older than this at boot belongs to no running preview (every one ends within a minute). */
+export const STALE_PROFILE_AGE_MS = 10 * 60_000;
+
 export class HtmlPreviewBrowser {
   private readonly gate = new Gate(MAX_CONCURRENT_BROWSERS, MAX_WAITING_CALLS);
   /** Learnt once per daemon: false after the sandbox failed to start here. */
   private sandboxWorks = true;
+  /** The calls in flight: `stop()` cancels each and waits for it to clean up. */
+  private readonly inFlight = new Map<AbortController, Promise<unknown>>();
+  private closed = false;
 
   constructor(private readonly opts: HtmlPreviewBrowserOptions) {}
+
+  /**
+   * The daemon is stopping (D-M4): every preview or measurement in flight is cancelled — its
+   * Chromium process group killed, its profile and proxy removed — and none starts after this.
+   */
+  async stop(): Promise<void> {
+    this.closed = true;
+    for (const controller of this.inFlight.keys()) {
+      if (!controller.signal.aborted) controller.abort(new HtmlPreviewError("cancelled", "Orquester is shutting down."));
+    }
+    await Promise.allSettled([...this.inFlight.values()]);
+  }
+
+  /**
+   * At boot (D-M4): remove the temporary profiles a daemon that died mid-preview left behind —
+   * this process's own `PREVIEW_PROFILE_PREFIX` directories older than `STALE_PROFILE_AGE_MS`
+   * (younger ones may be another daemon's running preview sharing the temp dir). Never throws.
+   */
+  async sweepStaleProfiles(now = Date.now()): Promise<string[]> {
+    const dir = this.opts.tmpDir ?? tmpdir();
+    const removed: string[] = [];
+    const entries = await readdir(dir).catch((): string[] => []);
+    for (const entry of entries) {
+      if (!entry.startsWith(PREVIEW_PROFILE_PREFIX)) continue;
+      const path = join(dir, entry);
+      const info = await lstat(path).catch(() => null);
+      if (info === null || !info.isDirectory() || now - info.mtimeMs < STALE_PROFILE_AGE_MS) continue;
+      if (typeof process.getuid === "function" && info.uid !== process.getuid()) continue;
+      await rm(path, { recursive: true, force: true }).catch(() => undefined);
+      removed.push(entry);
+    }
+    return removed;
+  }
 
   /** Whether a Chromium-family browser is there to launch. */
   available(): boolean {
@@ -337,7 +378,12 @@ export class HtmlPreviewBrowser {
         "Orquester has no Chromium-family browser on this machine yet, so it cannot render pages. Ask the user to install Chromium or Google Chrome (or enable one under Settings › Tools), then call again; html_render still works without it."
       );
     }
+    if (this.closed) {
+      throw new HtmlPreviewError("cancelled", "Orquester is shutting down.");
+    }
     const controller = new AbortController();
+    let finished!: () => void;
+    this.inFlight.set(controller, new Promise<void>((resolve) => (finished = resolve)));
     const stop = (reason: HtmlPreviewError): void => {
       if (!controller.signal.aborted) controller.abort(reason);
     };
@@ -379,7 +425,7 @@ export class HtmlPreviewBrowser {
       }
       controller.signal.throwIfAborted();
       proxy = await startPublicProxy(this.opts.proxy);
-      profile = await mkdtemp(join(this.opts.tmpDir ?? tmpdir(), "orq-html-preview-"));
+      profile = await mkdtemp(join(this.opts.tmpDir ?? tmpdir(), PREVIEW_PROFILE_PREFIX));
       controller.signal.throwIfAborted();
       browser = await this.launch(executable, profile, proxy.port, controller.signal, bounds.timeoutMs);
       // Killed at once if the deadline passed while it was starting.
@@ -413,6 +459,8 @@ export class HtmlPreviewBrowser {
       await proxy?.close();
       if (profile) await rm(profile, { recursive: true, force: true }).catch(() => undefined);
       release?.();
+      this.inFlight.delete(controller);
+      finished();
     }
   }
 
