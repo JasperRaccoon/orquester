@@ -6,7 +6,9 @@
  * (`AccountsService.pullRequestStatus`, the same provider seam and credential resolution as the
  * workflow git trigger), every two minutes (Bitbucket Cloud three; an anonymous GitHub read ten,
  * as those share 60 requests an hour), with exponential backoff on a failure and the host's own
- * wait on a rate limit. Every thread watching one pull request through one account shares a read.
+ * wait on a rate limit. Every thread watching one pull request through one account shares a read;
+ * one host + account's reads run one after another in their own lane, which a pass starts but never
+ * waits for (a read has a 45 s deadline).
  *
  * News — a check failing, the checks passing, someone else's comment or review, a new conflict,
  * a merge or a close — becomes ONE concise message to the thread (`evaluate.ts`), sent through
@@ -80,13 +82,13 @@ const MAX_RETRY_AFTER_MS = 60 * 60_000;
 const TICK_MS = 30_000;
 /** The first tick after a start, so a restart does not read every pull request at once. */
 const FIRST_TICK_MS = 5_000;
-/** Hosts read at once; one host's pull requests are read one after another. */
-const HOST_CONCURRENCY = 4;
 /**
  * A read that has not answered by then counts as a timed-out read: the provider fetches carry no
  * deadline of their own, and one hung read must not hold every later pass.
  */
-const READ_TIMEOUT_MS = 90_000;
+const READ_TIMEOUT_MS = 45_000;
+/** A wake a live tab's host keeps refusing as a missing thread is retried this far apart, at most. */
+const MAX_DELIVERY_BACKOFF_MS = 15 * 60_000;
 /** A wake refused this many times (for a passing reason) is given up. */
 const MAX_WAKE_ATTEMPTS = 3;
 /** After a send, the next wake waits for the thread's latest turn to move on — or this long. */
@@ -252,6 +254,13 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
   let saveRetryAt = 0;
   /** Creates in flight per thread: each holds a slot of the per-thread cap. */
   const reserved = new Map<string, number>();
+  /**
+   * Threads whose host answers THREAD_NOT_FOUND while the daemon still has the tab (a route miss of
+   * a host build): their wake waits, backing off, instead of posting every pass.
+   */
+  const deliveryHolds = new Map<string, { failures: number; retryAt: number }>();
+  /** One chain of reads per host + account, never more: a slow or hung read holds only its own. */
+  const readLanes = new Map<string, Promise<void>>();
   let timer: { cancel(): void } | null = null;
   let unsubscribe: (() => void) | null = null;
   let ticking: Promise<void> | null = null;
@@ -391,6 +400,8 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
     }
     if (!acceptsWake(summary) || awaitingSentTurn(sessionId, summary)) return;
     if (saveFailures > 0 && now() < saveRetryAt) return;
+    const hold = deliveryHolds.get(sessionId);
+    if (hold && now() < hold.retryAt) return;
 
     // A wake already persisted goes first, under its own id.
     const pending = watches
@@ -470,9 +481,25 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
     const result = await deps.deliver(sessionId, { commandId, input: first.pendingWake!.input });
     if (result.kind === "unavailable") return;
     if (result.kind === "gone") {
-      // Only a thread the daemon no longer has is gone; a host-side miss on a live tab is not.
-      if (!deps.session(sessionId) && sessionsLoaded()) await dropThread(sessionId);
+      // Only a thread the daemon no longer has is gone; a host-side miss on a live tab is not: the
+      // wake waits, counted, backing off, and the state change is logged once.
+      if (!deps.session(sessionId) && sessionsLoaded()) {
+        deliveryHolds.delete(sessionId);
+        await dropThread(sessionId);
+        return;
+      }
+      const failures = (deliveryHolds.get(sessionId)?.failures ?? 0) + 1;
+      deliveryHolds.set(sessionId, { failures, retryAt: now() + Math.min(MAX_DELIVERY_BACKOFF_MS, TICK_MS * 2 ** (failures - 1)) });
+      if (failures === 1) {
+        logger.warn("pr watch: the agent host does not know this thread; the wake waits and is retried with backoff", { sessionId, commandId });
+      }
+      for (const watch of holders()) watch.pendingWake = { ...watch.pendingWake!, attempts: watch.pendingWake!.attempts + 1 };
+      await persist();
+      publish(sessionId);
       return;
+    }
+    if (deliveryHolds.delete(sessionId)) {
+      logger.info("pr watch: the agent host knows the thread again", { sessionId });
     }
     if (result.kind === "sent") {
       sentTurn.set(sessionId, { key: turnKey(summary), at: now() });
@@ -628,22 +655,32 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
       group.members.push(watch);
       groups.set(key, group);
     }
-    // One host's pull requests one after another; up to HOST_CONCURRENCY hosts at once.
-    const byHost = new Map<string, Array<{ accountId: string | null; members: PullRequestWatchRecord[] }>>();
+    // One chain per host + account: its pull requests are read one after another, and the pass does
+    // not wait for it. A lane still reading from an earlier pass is left alone; its due watches are
+    // read once it is free.
+    const byLane = new Map<string, Array<{ accountId: string | null; members: PullRequestWatchRecord[] }>>();
     for (const group of groups.values()) {
       const host = parseRemoteUrl(group.members[0]!.repoUrl)?.host ?? "";
-      byHost.set(host, [...(byHost.get(host) ?? []), group]);
+      const lane = `${host}|${group.accountId ?? "anonymous"}`;
+      byLane.set(lane, [...(byLane.get(lane) ?? []), group]);
     }
-    const hosts = [...byHost.values()];
-    const workers = Array.from({ length: Math.min(HOST_CONCURRENCY, hosts.length) }, async () => {
-      for (let queue = hosts.shift(); queue !== undefined; queue = hosts.shift()) {
+    for (const [lane, queue] of byLane) {
+      if (readLanes.has(lane)) continue;
+      const chain = (async () => {
         for (const group of queue) {
           if (stopped) return;
           await readGroup(group.members, group.accountId);
         }
-      }
-    });
-    await Promise.all(workers);
+      })()
+        .catch((error: unknown) => {
+          logger.error("pr watch: reads failed", { error: error instanceof Error ? error.message : String(error) });
+        })
+        .finally(() => {
+          readLanes.delete(lane);
+        });
+      readLanes.set(lane, chain);
+      track(chain);
+    }
     for (const sessionId of retry) {
       if (watchesOf(sessionId).some((watch) => watch.pendingWake !== null || !live(watch))) void wakeThread(sessionId);
     }
@@ -813,7 +850,12 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
       lastReads.set(watch.id, read);
       nextReadAt.set(watch.id, now() + jitter(intervalFor(target.repoUrl, accountId)));
     }
-    await persist();
+    if (!(await persist())) {
+      // Not saved, not started: memory goes back to what the disk holds.
+      forget(watch.id);
+      file = { ...file, watches: file.watches.filter((candidate) => candidate !== watch) };
+      throw new PullRequestWatchError(503, "UNAVAILABLE", "Orquester could not save the watch; try again in a moment.");
+    }
     publish(sessionId);
     logger.info("pr watch: started", { sessionId, repository: watch.repository, number: watch.number });
     return { watch: summaryOf(watch), created: true, ...(note ? { note } : {}) };
@@ -823,10 +865,20 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
     requireThread(sessionId);
     const watch = file.watches.find((candidate) => candidate.id === watchId && candidate.sessionId === sessionId && live(candidate));
     if (!watch) throw new PullRequestWatchError(404, "WATCH_NOT_FOUND", "This thread has no such pull request watch.");
-    forget(watch.id);
+    const index = file.watches.indexOf(watch);
+    const others = watch.pendingWake ? file.watches.filter((candidate) => candidate !== watch && candidate.pendingWake?.commandId === watch.pendingWake!.commandId) : [];
+    const wakesBefore = new Map(others.map((candidate) => [candidate, candidate.pendingWake]));
     file = { ...file, watches: file.watches.filter((candidate) => candidate !== watch) };
     pruneWake(watch);
-    await persist();
+    if (!(await persist())) {
+      // Not saved, not stopped: the watch and the wake it shared go back as they were.
+      const watches = [...file.watches];
+      watches.splice(Math.min(index, watches.length), 0, watch);
+      file = { ...file, watches };
+      for (const [candidate, wake] of wakesBefore) if (file.watches.includes(candidate)) candidate.pendingWake = wake ?? null;
+      throw new PullRequestWatchError(503, "UNAVAILABLE", "Orquester could not save the change; the pull request is still watched. Try again in a moment.");
+    }
+    forget(watch.id);
     publish(sessionId);
     logger.info("pr watch: stopped", { sessionId, repository: watch.repository, number: watch.number });
   }
@@ -925,20 +977,44 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
  * `COMMAND_REJECTED` / `COMPACTION_UNAVAILABLE` is a refusal of the moment.
  */
 export function deliverThroughTurnRoute(api: () => DaemonApi | null): PullRequestWatchServiceDeps["deliver"] {
+  /**
+   * The mode each pending wake is sent in, read once per wake: no lighter route names a thread's
+   * mode (the summary does not carry it), so the snapshot is read on the first attempt only and
+   * a retry reuses it. Bounded; an entry goes once its wake is settled.
+   */
+  const modes = new Map<string, "default" | "plan">();
+  const remember = (commandId: string, mode: "default" | "plan") => {
+    modes.set(commandId, mode);
+    while (modes.size > 200) {
+      const oldest = modes.keys().next().value;
+      if (oldest === undefined) break;
+      modes.delete(oldest);
+    }
+  };
   return async (sessionId, body) => {
+    const outcome = await post(sessionId, body);
+    if (outcome.kind !== "unavailable" && !(outcome.kind === "refused" && outcome.retryable) && outcome.kind !== "gone") modes.delete(body.commandId);
+    return outcome;
+  };
+
+  async function post(sessionId: string, body: { commandId: string; input: string }): Promise<WakeDelivery> {
     const client = api();
     if (!client) return { kind: "unavailable" };
     let res: { status: number; body: unknown };
     try {
       // The thread's current mode is its latest turn's: the host takes a missing mode as
       // "default", which would flip a thread out of plan mode.
-      const thread = await client.request("GET", agentChatRoutes.thread(sessionId));
-      const threadCode = (thread.body as { error?: { code?: unknown } } | null)?.error?.code;
-      if (thread.status === 404 && threadCode === "THREAD_NOT_FOUND") return { kind: "gone" };
-      if (thread.status >= 400) return { kind: "unavailable" };
-      const turns = (thread.body as { kind?: unknown; thread?: { turns?: Array<{ interactionMode?: unknown }> } } | null)?.thread?.turns ?? [];
-      const latest = [...turns].reverse().find((turn) => turn.interactionMode === "plan" || turn.interactionMode === "default");
-      const interactionMode = latest?.interactionMode === "plan" ? "plan" : "default";
+      let interactionMode = modes.get(body.commandId);
+      if (interactionMode === undefined) {
+        const thread = await client.request("GET", agentChatRoutes.thread(sessionId));
+        const threadCode = (thread.body as { error?: { code?: unknown } } | null)?.error?.code;
+        if (thread.status === 404 && threadCode === "THREAD_NOT_FOUND") return { kind: "gone" };
+        if (thread.status >= 400) return { kind: "unavailable" };
+        const turns = (thread.body as { kind?: unknown; thread?: { turns?: Array<{ interactionMode?: unknown }> } } | null)?.thread?.turns ?? [];
+        const latest = [...turns].reverse().find((turn) => turn.interactionMode === "plan" || turn.interactionMode === "default");
+        interactionMode = latest?.interactionMode === "plan" ? "plan" : "default";
+        remember(body.commandId, interactionMode);
+      }
       res = await client.request("POST", agentChatCommandPath(sessionId, "turn"), {
         body: { commandId: body.commandId, input: body.input, interactionMode }
       });
@@ -955,7 +1031,7 @@ export function deliverThroughTurnRoute(api: () => DaemonApi | null): PullReques
       retryable: res.status === 409 && (code === "COMMAND_REJECTED" || code === "COMPACTION_UNAVAILABLE"),
       message: typeof error?.message === "string" ? error.message.slice(0, 500) : `The thread answered ${res.status}.`
     };
-  };
+  }
 }
 
 const metaText = (meta?: Record<string, unknown>): string => {

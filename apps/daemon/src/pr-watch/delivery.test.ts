@@ -56,3 +56,25 @@ test("only THREAD_NOT_FOUND is a gone thread; an unreadable thread or a host mis
   assert.deepEqual(await deliverThroughTurnRoute(() => down.api)("s1", { commandId: "c", input: "x" }), { kind: "unavailable" });
   assert.deepEqual(down.posts, []);
 });
+
+test("the thread is read once per wake: a retry of the same wake reuses its mode", async () => {
+  let reads = 0;
+  let posts = 0;
+  const api = {
+    async request(method: string) {
+      if (method === "GET") {
+        reads += 1;
+        return thread(["plan"]);
+      }
+      posts += 1;
+      return posts === 1 ? { status: 503, body: { error: { code: "HOST_UNAVAILABLE" } } } : { status: 200, body: { seq: 2 } };
+    }
+  } as unknown as DaemonApi;
+  const deliver = deliverThroughTurnRoute(() => api);
+  assert.deepEqual(await deliver("s1", { commandId: "pr-watch:9", input: "x" }), { kind: "unavailable" });
+  assert.deepEqual(await deliver("s1", { commandId: "pr-watch:9", input: "x" }), { kind: "sent" });
+  assert.equal(reads, 1);
+  // A new wake reads the thread again (the mode may have changed since).
+  await deliver("s1", { commandId: "pr-watch:10", input: "y" });
+  assert.equal(reads, 2);
+});

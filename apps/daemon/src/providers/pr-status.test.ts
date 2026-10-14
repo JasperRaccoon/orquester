@@ -1,10 +1,14 @@
 // The pull request watch read (`getPullRequestStatus`) of each provider: state, head, mergeability,
 // checks and remarks mapped from API payloads, with every request going to a stubbed `fetch`.
 //
-// GitHub and Bitbucket Cloud payloads are trimmed captures of public pull requests
-// (./fixtures/*-pr-watch-*.json: cli/cli#14679, atlassianlabs/atlascode#1115, read anonymously on
-// 2026-10-14); the Bitbucket Cloud approval / change-request activity entries and every Bitbucket
-// Server payload are synthetic, written from the providers' REST references.
+// Provenance. ./fixtures/github-pr-watch-*.json and ./fixtures/bitbucket-cloud-pr-watch-*.json are
+// captures of public pull requests (cli/cli#14679 and atlassianlabs/atlascode#1115, read
+// anonymously on 2026-10-14), TRIMMED only: fields left out, long bodies cut (GitHub 200, Bitbucket
+// 160 chars) — no value changed or added (GitHub's `author_association: "CONTRIBUTOR"` is as
+// observed). Everything synthetic lives in THIS file, built in the test that needs it: the
+// Bitbucket Cloud approval / change-request activity entries (`SYNTHETIC_CLOUD_VERDICTS`, shape
+// from the REST reference), the variants each test derives (`over`), and every Bitbucket Server
+// payload (no instance to capture from).
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -170,13 +174,38 @@ test("github: a spent rate limit is a rate_limited GitRemoteError with when to r
 
 // --- Bitbucket Cloud -----------------------------------------------------------
 
+/** Synthetic (no public sample captured): Bitbucket Cloud activity entries for an approval and a change request. */
+const SYNTHETIC_CLOUD_VERDICTS = [
+  {
+    changes_requested: {
+      date: "2026-06-10T09:30:00.000000+00:00",
+      user: { display_name: "Bo Lead", nickname: "bo", uuid: "{0b0e8f2a-0000-4000-8000-000000000002}", account_id: "5f0000000000000000000002", type: "user" }
+    },
+    pull_request: { type: "pullrequest", id: 1115 }
+  },
+  {
+    approval: {
+      date: "2026-06-10T09:00:00.000000+00:00",
+      user: { display_name: "Ana Reviewer", nickname: "ana", uuid: "{0b0e8f2a-0000-4000-8000-000000000001}", account_id: "5f0000000000000000000001", type: "user" }
+    },
+    pull_request: { type: "pullrequest", id: 1115 }
+  }
+];
+
 function cloudRoutes(over: { diffstat?: unknown; pull?: Record<string, unknown> } = {}): Array<[RegExp, () => Response]> {
   const prefix = "/2.0/repositories/atlassianlabs/atlascode/pullrequests/1115";
   return [
     [new RegExp(`^${prefix}$`), () => json({ ...(fixture("bitbucket-cloud-pr-watch-pull.json") as Record<string, unknown>), ...over.pull })],
     [new RegExp(`^${prefix}/statuses`), () => json(fixture("bitbucket-cloud-pr-watch-statuses.json"))],
     [new RegExp(`^${prefix}/comments`), () => json(fixture("bitbucket-cloud-pr-watch-comments.json"))],
-    [new RegExp(`^${prefix}/activity`), () => json(fixture("bitbucket-cloud-pr-watch-activity.json"))],
+    [
+      new RegExp(`^${prefix}/activity`),
+      () => {
+        // Newest first, as captured: the synthetic verdicts are newer than the captured entries.
+        const captured = fixture("bitbucket-cloud-pr-watch-activity.json") as { values: unknown[] };
+        return json({ ...captured, values: [...SYNTHETIC_CLOUD_VERDICTS, ...captured.values] });
+      }
+    ],
     [new RegExp(`^${prefix}/diffstat`), () => json(over.diffstat ?? fixture("bitbucket-cloud-pr-watch-diffstat.json"))]
   ];
 }

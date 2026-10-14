@@ -214,7 +214,8 @@ export function resetGithubWatchState(): void {
 
 /**
  * One GET of a watch read, decoded; throws the shared GitRemoteError on a non-2xx. Conditional:
- * a 304 (free on GitHub's limit) reuses the cached answer. Reads GitHub's `X-RateLimit-*` headers
+ * a 304 reuses the cached answer (and, for an authorized request only, does not count against the
+ * primary rate limit; an anonymous 304 still counts). Reads GitHub's `X-RateLimit-*` headers
  * and refuses ahead of time, as rate-limited until the reset, once a reader is down to its reserve.
  */
 async function githubGet(token: string | null, path: string): Promise<{ data: unknown; next: string | undefined }> {

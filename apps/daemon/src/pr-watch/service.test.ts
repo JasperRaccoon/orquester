@@ -57,7 +57,8 @@ test("a failing check wakes the thread once, persisted before the post, under th
   assert.equal(wake.fileHadIt, true);
   assert.ok(wake.commandId.startsWith("pr-watch:"));
   assert.equal(parsePullRequestWatchMessage(wake.input)?.summary, "#12: checks failed");
-  assert.ok(wake.input.includes("- Checks failed on aaaaaaa:\n  - build https://ci/build"));
+  assert.ok(wake.input.includes("- 1 check failed on aaaaaaa (named below)."));
+  assert.ok(wake.input.includes("Failed checks:\n  - build https://ci/build"));
   // The same state is never reported again.
   h.sessions.set("s1", chat("s1", { latestTurn: { turnId: "t2", state: "completed", startedAt: START, completedAt: START } }));
   await h.run(POLL * 3);
@@ -105,7 +106,7 @@ test("each change kind wakes once: checks passed, a comment, a review, a conflic
   assert.ok(h.delivered[1]!.input.includes('reviewer: "Please add a test."'));
   assert.ok(!h.delivered[1]!.input.includes("Done."));
   assert.ok(h.delivered[2]!.input.includes("reviewer: approved"));
-  assert.ok(h.delivered[3]!.input.includes("The branch now conflicts with main."));
+  assert.ok(h.delivered[3]!.input.includes("The branch now conflicts with its base branch (main)."));
 });
 
 test("a busy thread's news waits for its idle point and arrives as one coalesced message", async () => {
@@ -260,8 +261,9 @@ test("a read that never answers times out and does not hold later passes", async
   const ticking = h.service.tick();
   await started;
   assert.equal(h.service.list("s1")[0]?.lastError, null);
-  h.clock.advance(90_000);
-  await ticking;
+  await ticking; // the pass itself does not wait for its reads
+  h.clock.advance(45_000);
+  await h.service.idle();
   assert.equal(h.service.list("s1")[0]?.lastError, "timed out");
   const reads = h.reads.length;
   h.hang.delete(KEY);
@@ -434,7 +436,7 @@ test("stopping a watch takes its part out of a wake not posted yet", async () =>
   assert.ok(!h.delivered[0]!.input.includes("#13"));
 });
 
-test("one host's pull requests are read one after another", async () => {
+test("one host and account's pull requests are read one after another", async () => {
   const h = await harness();
   h.pulls.set(`${REMOTE}#12`, prStatus());
   h.pulls.set(`${REMOTE}#13`, prStatus({ number: 13 }));
@@ -450,8 +452,9 @@ test("one host's pull requests are read one after another", async () => {
   // Turns of the event loop (not time): a second read of the same host would have started by now.
   for (let i = 0; i < 5; i += 1) await new Promise<void>((resolve) => setImmediate(resolve));
   assert.equal(h.reads.length, before + 1);
-  h.clock.advance(90_000);
   await ticking;
+  h.clock.advance(45_000);
+  await h.service.idle();
   assert.deepEqual(h.reads.slice(before).map((read) => read.number), [12, 13]);
 });
 
@@ -463,4 +466,65 @@ test("an anonymous reader (no workspace account) is read every ten minutes", asy
   assert.equal(h.reads.length, 1);
   await h.run(90_000);
   assert.equal(h.reads.length, 2);
+});
+
+// --- fix round 2 ---------------------------------------------------------------
+
+test("a host that keeps not knowing a live tab gets the wake again with backoff, counted, logged once", async () => {
+  const h = await harness();
+  await watching(h);
+  h.outcome.next = () => ({ kind: "gone" });
+  h.pulls.set(KEY, prStatus({ checks: [check("build", "failure"), check("lint", "success")] }));
+  await h.run(POLL);
+  assert.equal(h.delivered.length, 1);
+  // Retries at +30 s, +60 s, +120 s… — not every pass.
+  await h.run(10 * 60_000);
+  const posts = h.delivered.length;
+  assert.ok(posts >= 3 && posts <= 6, String(posts));
+  assert.equal(new Set(h.delivered.map((wake) => wake.commandId)).size, 1);
+  assert.equal(h.warnings.filter((line) => line.includes("does not know this thread")).length, 1);
+  const disk = parsePullRequestWatchFile(JSON.parse(readFileSync(h.file, "utf8")));
+  assert.equal(disk.watches[0]!.pendingWake?.attempts, posts);
+  h.outcome.next = () => ({ kind: "sent" });
+  await h.run(15 * 60_000);
+  assert.equal(h.delivered.length, posts + 1);
+  assert.equal(parsePullRequestWatchFile(JSON.parse(readFileSync(h.file, "utf8"))).watches[0]!.pendingWake, null);
+});
+
+test("reads are serialized per host and account, and a pass does not wait for a hung one", async () => {
+  const h = await harness({ accountOf: (projectPath) => (projectPath === "/ws/other/app" ? "acct-2" : "acct-1") });
+  h.sessions.set("s2", chat("s2", { projectPath: "/ws/other/app" }));
+  h.pulls.set(`${REMOTE}#12`, prStatus());
+  h.pulls.set(`${REMOTE}#13`, prStatus({ number: 13 }));
+  await h.service.create("s1", { number: 12 });
+  await h.service.create("s2", { number: 13 });
+  await h.service.idle();
+  const before = h.reads.length;
+  h.hang.add(`${REMOTE}#12`);
+  h.clock.jump(Date.parse(START) + POLL);
+  await h.service.tick();
+  // Event-loop turns, not time: the other account's lane reads although acct-1's read hangs.
+  for (let i = 0; i < 5; i += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.deepEqual(h.reads.slice(before).map((read) => [read.number, read.accountId]).sort(), [[12, "acct-1"], [13, "acct-2"]]);
+  // A pass while acct-1's lane still reads leaves that lane alone.
+  await h.service.tick();
+  for (let i = 0; i < 5; i += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(h.reads.filter((read) => read.number === 12).length - 1, 1);
+  h.clock.advance(45_000);
+  await h.service.idle();
+  assert.equal(h.service.list("s1")[0]?.lastError, "timed out");
+});
+
+test("a create or a stop that cannot be saved fails, and memory stays as the disk has it", async () => {
+  const h = await harness();
+  const { watch } = await watching(h);
+  h.saves.fail = true;
+  h.pulls.set(`${REMOTE}#13`, prStatus({ number: 13 }));
+  await assert.rejects(h.service.create("s1", { number: 13 }), (error: unknown) => error instanceof PullRequestWatchError && error.code === "UNAVAILABLE");
+  assert.deepEqual(h.service.list("s1").map((entry) => entry.number), [12]);
+  await assert.rejects(h.service.remove("s1", watch.id), (error: unknown) => error instanceof PullRequestWatchError && error.code === "UNAVAILABLE");
+  assert.deepEqual(h.service.list("s1").map((entry) => entry.id), [watch.id]);
+  h.saves.fail = false;
+  await h.service.remove("s1", watch.id);
+  assert.deepEqual(h.service.list("s1"), []);
 });

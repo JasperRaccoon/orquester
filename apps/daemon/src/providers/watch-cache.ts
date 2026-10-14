@@ -1,8 +1,10 @@
 /**
  * Pull request watch reads — the conditional-request cache (spec 2026-10-14 §5 "PR watch"). Each
  * GET a watch makes remembers its ETag and decoded answer, keyed by WHO read it (a hash of the
- * token, never the token) and the path, so the next read sends `If-None-Match` and a 304 — free on
- * GitHub's rate limit, cheap on Bitbucket's — reuses the answer. Bounded, least recently used out.
+ * token, never the token) and the path, so the next read sends `If-None-Match` and a 304 reuses the
+ * answer. On GitHub a 304 does not count against the primary rate limit only for an AUTHORIZED
+ * request; an anonymous 304 still spends one of its 60 an hour (it saves the transfer, not the
+ * quota). Bitbucket counts every request. Bounded, least recently used out.
  * Memory only: a restart reads each once in full.
  */
 

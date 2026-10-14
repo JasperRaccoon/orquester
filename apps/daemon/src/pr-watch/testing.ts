@@ -71,6 +71,8 @@ export interface Harness {
   nextRead(): Promise<void>;
   /** While set, every save of the store fails. */
   saves: { fail: boolean; loaded: boolean; reject?: (content: string) => boolean };
+  /** Warning lines the service logged. */
+  warnings: string[];
   reads: Array<{ accountId: string | null; repoUrl: string; number: number; remarksSince?: string }>;
   delivered: Array<{ sessionId: string; commandId: string; input: string; fileHadIt: boolean }>;
   published: PullRequestWatchesChangedEvent[];
@@ -81,7 +83,9 @@ export interface Harness {
   restart(): Promise<void>;
 }
 
-export async function harness(opts: { viewer?: string[]; account?: string | null } = {}): Promise<Harness> {
+export async function harness(
+  opts: { viewer?: string[]; account?: string | null; accountOf?: (projectPath: string) => string | null } = {}
+): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), "orq-prw-"));
   dirs.push(dir);
   const file = join(dir, "daemon", "pr-watches.json");
@@ -91,6 +95,7 @@ export async function harness(opts: { viewer?: string[]; account?: string | null
   const hang = new Set<string>();
   const readWaiters: Array<() => void> = [];
   const saves: Harness["saves"] = { fail: false, loaded: true };
+  const warnings: string[] = [];
   const reads: Harness["reads"] = [];
   const delivered: Harness["delivered"] = [];
   const published: PullRequestWatchesChangedEvent[] = [];
@@ -110,7 +115,7 @@ export async function harness(opts: { viewer?: string[]; account?: string | null
         return { status: structuredClone(answer), viewer: opts.viewer ?? ["agent-bot"] };
       },
       projectRemote: async () => REMOTE,
-      projectAccount: async () => (opts.account === undefined ? "acct-1" : opts.account),
+      projectAccount: async (projectPath) => (opts.accountOf ? opts.accountOf(projectPath) : opts.account === undefined ? "acct-1" : opts.account),
       session: (id) => sessions.get(id),
       subscribe: (listener) => {
         listeners.add(listener);
@@ -130,7 +135,7 @@ export async function harness(opts: { viewer?: string[]; account?: string | null
         await rename(`${path}.tmp`, path);
       },
       clock,
-      logger: silentLogger,
+      logger: { ...silentLogger, warn: (msg) => warnings.push(msg) },
       mintId: () => `id-${(seq += 1)}`,
       random: () => 0.5
     });
@@ -141,6 +146,7 @@ export async function harness(opts: { viewer?: string[]; account?: string | null
     pulls,
     hang,
     saves,
+    warnings,
     nextRead: () => new Promise<void>((resolve) => readWaiters.push(resolve)),
     reads,
     delivered,
