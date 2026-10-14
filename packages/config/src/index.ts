@@ -1061,7 +1061,8 @@ export type AgentThreadHead = z.infer<typeof agentThreadHeadSchema>;
 /**
  * `fork-handoff.json` (spec 2026-10-14 §6): the conversation a transcript-handoff fork owes
  * its provider with the first message. `null` for anything that does not read — the fork then
- * runs without it, which the host reports rather than guessing.
+ * runs without it, which the host reports rather than guessing. Unknown fields a newer build
+ * wrote survive a rewrite (`passthrough`).
  */
 export const forkHandoffSchema = z.object({
   version: z.literal(1),
@@ -1069,12 +1070,13 @@ export const forkHandoffSchema = z.object({
   transcript: z.string().min(1),
   createdAt: z.string(),
   /**
-   * The turn that carried the transcript. Kept rather than deleted once sent: a turn that
-   * fails, or a rewind that drops it, re-arms the handoff for the next message. A value that
-   * does not read is no delivery — the transcript is sent again rather than lost.
+   * The turn that carried the transcript, while it may still need it again: that turn failing,
+   * or a rewind dropping it, re-arms the handoff for the next message; once it settles any
+   * other way the file is deleted. A value that does not read is no delivery — the transcript
+   * is sent again rather than lost.
    */
   deliveredTurnId: z.string().min(1).optional().catch(undefined)
-});
+}).passthrough();
 export type ForkHandoffRecord = z.infer<typeof forkHandoffSchema>;
 
 export function parseForkHandoff(value: unknown): ForkHandoffRecord | null {

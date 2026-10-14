@@ -29,6 +29,7 @@ import { createThreadStore, type AgentThreadStore } from "../store/index.ts";
 import { isAgentChatCommandError } from "./errors.ts";
 import {
   buildForkTranscript,
+  createFileForkHandoffStore,
   FORK_TRANSCRIPT_MAX_CHARS,
   ForkRefusal,
   resolveForkCut,
@@ -530,37 +531,56 @@ describe("forkThread", () => {
     await host.stop();
   });
 
-  it("transcript: a rewind that drops the turn which carried the handoff re-arms it", async () => {
+  it("transcript: the handoff file lives only while it may be re-armed, and keeps a newer build's fields", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "orq-fork-handoff-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const pathFor = (threadId: string) => join(root, threadId, "fork-handoff.json");
     const claude = createScriptedAdapter({
       id: "claude",
       forkConversation: async () => {
         throw new Error("compacted after that turn");
       }
     });
-    const host = createTestHost({ adapters: { claude } });
+    const host = createTestHost({ adapters: { claude }, forkHandoffs: createFileForkHandoffStore(pathFor) });
     const parentId = await host.createThread({ threadId: "parent" });
     const said = await runTurn(host, claude, parentId, "remember SWORDFISH", "noted");
-    const result = await host.orchestrator.forkThread(parentId, forkRequest("child", "claude", { messageId: said.replyId }));
+    assert.equal(
+      (await host.orchestrator.forkThread(parentId, forkRequest("child", "claude", { messageId: said.replyId }))).strategy,
+      "transcript"
+    );
     await host.settle();
-    assert.equal(result.strategy, "transcript");
+    // A newer build's field on the record: every rewrite keeps it.
+    const written = JSON.parse(await readFile(pathFor("child"), "utf8")) as Record<string, unknown>;
+    await writeFile(pathFor("child"), JSON.stringify({ ...written, fromNewerBuild: { kept: true } }));
 
-    await runTurn(host, claude, "child", "continue", "ok");
+    // The carrier fails: the record stays, marked, with the newer field.
+    await host.orchestrator.command("child", "turn", { commandId: cmd(), input: "continue" });
+    await host.settle();
     assert.match(claude.lastTurn?.input ?? "", /SWORDFISH/);
-    await runTurn(host, claude, "child", "next", "ok");
-    assert.equal(claude.lastTurn?.input, "next");
-
-    // Rewinding to turn 1 keeps the turn that carried it: nothing to re-arm.
-    await host.orchestrator.command("child", "revert", { commandId: cmd(), targetTurnCount: 1 });
+    const carrier = claude.turnIds.at(-1)!;
+    const marked = JSON.parse(await readFile(pathFor("child"), "utf8")) as Record<string, unknown>;
+    assert.equal(marked.deliveredTurnId, carrier);
+    assert.deepEqual(marked.fromNewerBuild, { kept: true }, "an unknown field survives the delivery mark");
+    await host.orchestrator.ingestionSink("child", [
+      domainEvent("child", host, "thread.session-set", { session: { status: "error", activeTurnId: null, lastError: "boom" } })
+    ]);
     await host.settle();
-    await runTurn(host, claude, "child", "after one", "ok");
-    assert.equal(claude.lastTurn?.input, "after one");
+    assert.ok((await readFile(pathFor("child"), "utf8")).includes(carrier), "a failed carrier keeps the record");
 
-    // Rewinding to before it: the provider no longer has the parent's conversation.
+    // A rewind that drops the failed carrier re-arms it: the next message carries it.
     await host.orchestrator.command("child", "revert", { commandId: cmd(), targetTurnCount: 0 });
     await host.settle();
-    assert.equal(claude.calls.filter((call) => call.kind === "rollbackThread").length, 2);
+    assert.equal(claude.calls.filter((call) => call.kind === "rollbackThread").length, 1);
+    const rearmed = JSON.parse(await readFile(pathFor("child"), "utf8")) as Record<string, unknown>;
+    assert.equal(rearmed.deliveredTurnId, undefined);
+    assert.deepEqual(rearmed.fromNewerBuild, { kept: true }, "and survives the re-arm");
     await runTurn(host, claude, "child", "from the top", "ok");
     assert.match(claude.lastTurn?.input ?? "", /^<forked-conversation>[\s\S]*SWORDFISH[\s\S]*\n\nfrom the top$/);
+
+    // That carrier settled: the copy of the parent's conversation is deleted.
+    await assert.rejects(readFile(pathFor("child"), "utf8"), /ENOENT/, "deleted once its carrier settled");
+    await runTurn(host, claude, "child", "next", "ok");
+    assert.equal(claude.lastTurn?.input, "next");
     await host.stop();
   });
 

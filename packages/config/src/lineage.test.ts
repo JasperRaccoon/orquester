@@ -91,6 +91,8 @@ test("the fork handoff reads whole or not at all", () => {
   const unreadable = parseForkHandoff({ ...record, deliveredTurnId: 7 });
   assert.equal(unreadable?.transcript, "t", "an unreadable delivery does not cost the transcript");
   assert.equal(unreadable?.deliveredTurnId, undefined, "an unreadable delivery is none");
+  const newer = { ...record, fromNewerBuild: { x: 1 } };
+  assert.deepEqual(parseForkHandoff(newer), newer, "a newer build's fields survive a read, so a rewrite keeps them");
 });
 
 test("the merge outbox keeps unreadable entries and unknown fields for the next rewrite", () => {
