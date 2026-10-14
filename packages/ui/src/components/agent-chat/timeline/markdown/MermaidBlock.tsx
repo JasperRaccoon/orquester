@@ -105,7 +105,16 @@ function ExpandedDiagram({ svg, onClose }: { svg: string; onClose: () => void })
           <ModalCloseButton onClose={onClose} />
         </div>
         <div className="ac-scroll-thin min-h-0 flex-1 overflow-auto p-3">
-          {url ? <img src={url} alt="Mermaid diagram" className="mx-auto block max-w-none" /> : null}
+          {url ? (
+            // Small diagrams grow to a readable width; wide ones keep their
+            // natural size and scroll.
+            <img
+              src={url}
+              alt="Mermaid diagram"
+              className="mx-auto block max-w-none"
+              style={{ minWidth: "min(100%, 60rem)" }}
+            />
+          ) : null}
         </div>
       </div>
     </Modal>
