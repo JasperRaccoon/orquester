@@ -890,13 +890,7 @@ async function runPrompt(id, params) {
   if (scenario === "leftover-question-exit") {
     // A background shell as `leftover` starts one, then a question left open:
     // the user's stop answers it first, and this CLI exits on that answer.
-    const shell = spawn(
-      "sh",
-      ["-c", 'sleep 302 & setsid sh -c "echo daemon; exec sleep 303" & echo shell; wait'],
-      { detached: true, stdio: ["ignore", "pipe", "ignore"] }
-    );
-    shell.unref();
-    await linesFrom(shell.stdout, ["shell", "daemon"]);
+    await startLeftoverShell();
     notify("_x.ai/task_backgrounded", {
       sessionId,
       update: {
@@ -913,20 +907,9 @@ async function runPrompt(id, params) {
   }
 
   if (scenario === "leftover" || scenario === "leftover-exit") {
-    // A background shell as the real CLI starts one — a session of its own —
-    // so the group signal of a stop never reaches it and it outlives this
-    // process, reparented to init (Grok fixtures README observation 48). It
-    // runs a member of its session (`sleep 302`) and a daemon that `setsid`s
-    // away (`sleep 303`, a browser daemon's or an SSH master's move). Each
-    // says it is in place once it is, and only then does the turn go on: no
-    // timing. All inherit the launch environment, marker included.
-    const shell = spawn(
-      "sh",
-      ["-c", 'sleep 302 & setsid sh -c "echo daemon; exec sleep 303" & echo shell; wait'],
-      { detached: true, stdio: ["ignore", "pipe", "ignore"] }
-    );
-    shell.unref();
-    await linesFrom(shell.stdout, ["shell", "daemon"]);
+    // A background shell as the real CLI starts one ({@link startLeftoverShell}),
+    // in place before the turn goes on.
+    await startLeftoverShell();
     notify("_x.ai/task_backgrounded", {
       sessionId,
       update: {
@@ -1340,6 +1323,39 @@ async function wakeUntilCancelled() {
     sessionId,
     update: { sessionUpdate: "turn_completed", prompt_id: wake, stop_reason: "cancelled" }
   });
+}
+
+/**
+ * The `leftover` scenarios' background shell, as the real CLI starts one — a
+ * session of its own — so the group signal of a stop never reaches it and it
+ * outlives this process, reparented to init (Grok fixtures README observation
+ * 48). It runs a member of its session (`sleep 302`) and a daemon that
+ * `setsid`s away (`sleep 303`, a browser daemon's or an SSH master's move).
+ * All inherit the launch environment, marker included.
+ *
+ * Resolves once both run as what they are: a test tells them apart by their
+ * command line (`leftovers()` in `lifecycle.test.ts`), and a forked child
+ * keeps its parent's until its `exec` — an `echo` before that `exec` let a
+ * test under load read the daemon as an unnamed `sh` and then find a `sleep
+ * 303` it "never had". So the shell says `shell` only once each child's
+ * `/proc/<pid>/stat` names `sleep` (comm changes at the `exec`; the pids are
+ * kept: neither `setsid`, not a group leader here, nor `sh -c 'exec …'`
+ * forks). A spin on that condition, read with builtins only — no timing.
+ */
+function startLeftoverShell() {
+  const shell = spawn(
+    "sh",
+    [
+      "-c",
+      'sleep 302 & m=$!; setsid sh -c "exec sleep 303" & d=$!; ' +
+        'until read -r a < /proc/$m/stat && read -r b < /proc/$d/stat && ' +
+        'case "$a $b" in *"(sleep) "*"(sleep) "*) true ;; *) false ;; esac; do :; done 2>/dev/null; ' +
+        "echo shell; wait"
+    ],
+    { detached: true, stdio: ["ignore", "pipe", "ignore"] }
+  );
+  shell.unref();
+  return linesFrom(shell.stdout, ["shell"]);
 }
 
 /**
