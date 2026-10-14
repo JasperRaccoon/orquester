@@ -101,7 +101,12 @@ async function dispatchTurn(ctx: ToolContext, sessionId: string, checked: Thread
   const summary = await requireChatSession(ctx.api, sessionId);
   const baseline = turnBaseline(summary);
   const over = turnsOverBefore(checked, summary);
-  const { seq } = await sendCommand(ctx.api, sessionId, "turn", { input: body.input, ...(body.attachments?.length ? { attachments: body.attachments } : {}), interactionMode: body.interactionMode });
+  const { seq } = await sendCommand(ctx.api, sessionId, "turn", {
+    input: body.input,
+    ...(body.attachments?.length ? { attachments: body.attachments } : {}),
+    interactionMode: body.interactionMode,
+    ...(ctx.turnContext?.length ? { context: [...ctx.turnContext] } : {})
+  });
   const { outcome, session } = wait ? await awaitTurn(ctx, sessionId, baseline, over, timeoutMs) : { outcome: "sent" as const, session: await chatDetail(ctx.api, sessionId) };
   return sendResult(seq, outcome, session, over);
 }

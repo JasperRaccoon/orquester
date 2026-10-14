@@ -12,7 +12,7 @@ import { join } from "node:path";
 import { describe, it } from "node:test";
 
 import type { EventMessage, PendingMergeBack, SessionSummary } from "@orquester/api";
-import { parseMergeBackMessage, type ThreadSnapshotPayload, type Turn } from "@orquester/api/agent-chat";
+import { mergeBackContext, parseMergeBackMessage, type ThreadSnapshotPayload, type Turn } from "@orquester/api/agent-chat";
 
 import type { DaemonApi, DaemonResponse } from "../mcp/daemon-api.ts";
 import { acceptsMessage, LineageError, LineageService } from "./lineage.ts";
@@ -287,6 +287,8 @@ describe("merge back", () => {
     now.world.threads.set("parent", planning(false));
     await now.service.mergeBack("child", { text: "Plain." });
     assert.equal(now.world.turns.at(-1)!.body.interactionMode, "plan", "the parent's own mode, not default");
+    // Marked as Orquester's merge, never a header the user typed (T6-M3).
+    assert.deepEqual(now.world.turns.at(-1)!.body.context, [mergeBackContext(now.world.turns.at(-1)!.body.commandId as string)]);
     await now.cleanup();
 
     const later = await setup({ parentBusy: true });

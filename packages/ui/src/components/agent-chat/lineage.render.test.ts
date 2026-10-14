@@ -10,7 +10,7 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { SessionSummary } from "@orquester/api";
-import { buildMergeBackMessage } from "@orquester/api/agent-chat";
+import { buildMergeBackMessage, mergeBackContext } from "@orquester/api/agent-chat";
 
 import type { AgentChatTimelineRow } from "../../lib/agent-chat/contracts";
 import { LineageMark } from "./LineageMark";
@@ -136,7 +136,10 @@ test("pending merges show on both tabs, with deliver and discard; a failed one s
 
 test("a merged-back message shows where it came from, and the result alone", () => {
   const text = buildMergeBackMessage({ childTitle: "Try B", relation: "fork", text: "B works." });
-  const html = render(createElement(UserMessageRow, { row: messageRow("user", text) as never }), context({}));
+  // Marked as Orquester's merge (T6-M3); the same text without the mark is the user's own.
+  const row = messageRow("user", text) as unknown as { message: Record<string, unknown> };
+  row.message.context = [mergeBackContext("m1")];
+  const html = render(createElement(UserMessageRow, { row: row as never }), context({}));
   assert.match(html, /Merged back from fork/);
   assert.match(html, /Try B/);
   assert.match(html, /B works\./);

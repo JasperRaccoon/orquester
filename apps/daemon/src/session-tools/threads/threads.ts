@@ -12,7 +12,7 @@
 
 import { z } from "zod";
 import type { ForkSessionRequest, ForkSessionResponse, MergeBackResponse } from "@orquester/api";
-import { agentChatRoutes, MAX_TURN_INPUT_CHARS, SETTLED_TURN_STATES, startedTurns } from "@orquester/api/agent-chat";
+import { agentChatRoutes, MAX_TURN_INPUT_CHARS, SETTLED_TURN_STATES, startedTurns, threadMessageContext } from "@orquester/api/agent-chat";
 
 import { findAgent, loadAgents } from "../../mcp/agents.ts";
 
@@ -203,7 +203,8 @@ const threadSend = defineSessionTool({
     const send = () =>
       sendMessage.run(
         { sessionId: target.id, text: withProvenance(policy, "sent", args.text), planMode: plan, wait: args.wait, timeoutMs: seconds(args.timeoutSeconds) },
-        externalToolContext(ctx)
+        // The marker that the message is this thread's, not the user's (T6-M3).
+        { ...externalToolContext(ctx), turnContext: [threadMessageContext(ctx.threadId)] }
       );
     let sent: Record<string, unknown>;
     try {

@@ -3,6 +3,8 @@ import { ArrowUp, Clock, GitFork, GitMerge, GitPullRequest, Undo2, X } from "luc
 
 import { isScheduledTaskMessage, type AttachmentRef } from "@orquester/api";
 import {
+  isMergeBackMessage,
+  isThreadAuthoredMessage,
   parseMergeBackMessage,
   parseThreadMessage,
   parsePullRequestWatchMessage,
@@ -287,10 +289,14 @@ export const UserMessageRow = React.memo(function UserMessageRow({
   const automated = React.useMemo(() => parsePullRequestWatchMessage(text), [text]);
   // A fork's result sent back to this thread (spec 2026-10-14 §6): its header
   // becomes a caption, and the bubble holds the result alone.
-  const merged = React.useMemo(() => parseMergeBackMessage(text), [text]);
+  // Only a message Orquester marked as such (its context chip, T6-M3) — the same header typed by
+  // the user is the user's own text, never another chat's.
+  const markedMerge = isMergeBackMessage(row.message);
+  const markedThread = isThreadAuthoredMessage(row.message);
+  const merged = React.useMemo(() => (markedMerge ? parseMergeBackMessage(text) : null), [markedMerge, text]);
   // Sent, opened or delegated by another thread through a session tool (design 2026-10-14 §5):
   // the provenance header the agent read becomes a caption; the bubble holds the message alone.
-  const fromThread = React.useMemo(() => (merged ? null : parseThreadMessage(text)), [merged, text]);
+  const fromThread = React.useMemo(() => (merged || !markedThread ? null : parseThreadMessage(text)), [merged, markedThread, text]);
 
   if (automated !== null) return <PullRequestWatchMessageRow row={row} message={automated} />;
 

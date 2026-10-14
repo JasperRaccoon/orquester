@@ -5,7 +5,7 @@
  */
 
 import type { CreateSessionRequest, SessionSummary } from "@orquester/api";
-import type { CreateAgentChatSessionFields } from "@orquester/api/agent-chat";
+import { threadMessageContext, type CreateAgentChatSessionFields } from "@orquester/api/agent-chat";
 
 import { findAgent, loadAgents, resolveModelSelection, validateAccountId } from "../../mcp/agents.ts";
 import { expectOk, ToolError } from "../../mcp/errors.ts";
@@ -91,7 +91,9 @@ export async function openThread(ctx: SessionToolContext, project: ProjectThread
   try {
     await sendCommand(ctx.api, session.id, "turn", {
       input: withProvenance(policy, input.delegate ? "delegated" : "opened", input.prompt),
-      interactionMode
+      interactionMode,
+      // The marker that the message is the calling thread's, not the user's (T6-M3).
+      context: [threadMessageContext(ctx.threadId)]
     });
   } catch (error) {
     const failure = toSafeToolError(error).structuredContent;

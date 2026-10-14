@@ -12,6 +12,8 @@
  * Pure and dependency-free: the daemon writes it, the UI reads it.
  */
 
+import type { ComposerContextRecord } from "./adapter-types.ts";
+import { parseMergeBackMessage } from "./lineage.ts";
 import { sessionToolNameOfData, sessionToolReferences } from "./session-tools.ts";
 
 /** The result field the reference travels in; listed in `SESSION_TOOL_REFERENCE_KEYS`. */
@@ -148,4 +150,51 @@ export function parseThreadMessage(text: string): ParsedThreadMessage | null {
   const explanation = ORIGIN_EXPLANATIONS[origin];
   if (rest.startsWith(explanation)) rest = rest.slice(explanation.length);
   return { origin, fromTitle: match[2]!.replace(/\\(.)/g, "$1"), body: rest.replace(/^\n+/, "") };
+}
+
+// ---------------------------------------------------------------------------
+// Which messages Orquester authored (T6-M3)
+// ---------------------------------------------------------------------------
+
+/**
+ * The context chip (`TurnCommandBody.context`, re-render only — the agent never sees it) on a turn
+ * another thread caused: `thread_send` / `thread_create` / `delegate_task`. Only a message that
+ * carries it reads as another chat's (`isThreadAuthoredMessage`); the same header typed by the user
+ * is the user's own text.
+ */
+export const THREAD_MESSAGE_CONTEXT_KIND = "thread-message";
+/** The chip a merge back's `/turn` carries (`LineageService.deliver`). */
+export const MERGE_BACK_CONTEXT_KIND = "merge-back";
+
+/** The chip for a turn the thread `fromThreadId` caused. */
+export function threadMessageContext(fromThreadId: string): ComposerContextRecord {
+  return { kind: THREAD_MESSAGE_CONTEXT_KIND, label: "From another chat", ref: fromThreadId };
+}
+
+/** The chip for a merge back (`mergeId`). */
+export function mergeBackContext(mergeId: string): ComposerContextRecord {
+  return { kind: MERGE_BACK_CONTEXT_KIND, label: "Merged back", ref: mergeId };
+}
+
+function hasContext(message: { context?: readonly { kind: string }[] | undefined }, kind: string): boolean {
+  return Array.isArray(message.context) && message.context.some((record) => record?.kind === kind);
+}
+
+/** Whether a user message is another thread's (Orquester put it there), never by its text alone. */
+export function isThreadAuthoredMessage(message: { context?: readonly { kind: string }[] | undefined }): boolean {
+  return hasContext(message, THREAD_MESSAGE_CONTEXT_KIND);
+}
+
+/** Whether a user message is a merge back Orquester delivered, never by its text alone. */
+export function isMergeBackMessage(message: { context?: readonly { kind: string }[] | undefined }): boolean {
+  return hasContext(message, MERGE_BACK_CONTEXT_KIND);
+}
+
+/**
+ * A recalled prompt's text without the provenance header Orquester wrote on it — another
+ * thread's `[Sent by thread …]` or a merge back's `[Merged back from …]` — so Insert / Send from
+ * the prompt history never re-sends that header as the user's own words.
+ */
+export function stripThreadProvenance(text: string): string {
+  return parseThreadMessage(text)?.body ?? parseMergeBackMessage(text)?.body ?? text;
 }

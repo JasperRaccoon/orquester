@@ -11,7 +11,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
 import type { SessionSummary } from "@orquester/api";
-import { agentChatRoutes, parseThreadMessage, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { agentChatRoutes, parseThreadMessage, threadMessageContext, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 
 import { chatSummary, head, message, shellSummary, snapshot, stamp, turn } from "../../mcp/fixtures.ts";
 import { busEvent, FakeDaemonApi } from "../../mcp/testing.ts";
@@ -299,6 +299,8 @@ test("thread_send: never into a broader permission mode; an open request is the 
   const post = r.posts.find((p) => p.path === agentChatRoutes.turn("linked"))!;
   assert.deepEqual(parseThreadMessage(post.body.input as string), { origin: "sent", fromTitle: "Main", body: "look at this" });
   assert.equal(post.body.interactionMode, "default");
+  // Marked as Orquester's, so the GUI reads the header as provenance — never a header typed by the user (T6-M3).
+  assert.deepEqual(post.body.context, [threadMessageContext("me")]);
   // A slash command from another thread is text with provenance, never run as the user's command.
   await r.call("me", "thread_send", { threadId: "linked", text: "/goal ship it" });
   const goal = r.posts.filter((p) => p.path === agentChatRoutes.turn("linked")).at(-1)!;
@@ -445,6 +447,7 @@ test("delegate_task opens a child thread delegated by the caller, sends the prom
     fromTitle: "Main",
     body: "Audit the auth module.\nReport risks."
   });
+  assert.deepEqual(r.posts.find((p) => p.path === "new-turn")!.body.context, [threadMessageContext("me")], "marked (T6-M3)");
   assert.equal(value.taskId, "new-1");
   assert.equal(value.state, "working");
   assert.deepEqual(value.threadRef, { threadId: "new-1", title: "Task: Audit the auth module.", relation: "delegate" });

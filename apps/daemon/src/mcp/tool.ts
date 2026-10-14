@@ -1,4 +1,5 @@
 import type { z } from "zod";
+import type { ComposerContextRecord } from "@orquester/api/agent-chat";
 import type { DaemonApi } from "./daemon-api.ts";
 import type { TodoTools } from "./todo-tools.ts";
 import type { FsTools } from "./fs-tools.ts";
@@ -10,6 +11,12 @@ export interface ToolContext {
   /** Aborted when the MCP request closes; every wait must honour it. */
   signal: AbortSignal;
   now: () => number;
+  /**
+   * In-daemon callers only (the session tools reusing a handler): context chips a `/turn` this
+   * handler posts carries (`TurnCommandBody.context`) — the marker that says Orquester authored the
+   * message. Never set for an external MCP client, which cannot reach it.
+   */
+  turnContext?: readonly ComposerContextRecord[];
 }
 
 export interface ToolAnnotations { readOnlyHint?: boolean; destructiveHint?: boolean; idempotentHint?: boolean; openWorldHint?: boolean }

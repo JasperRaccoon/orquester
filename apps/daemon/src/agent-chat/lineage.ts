@@ -49,7 +49,7 @@ import {
   type ThreadReadResponse,
   type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
-import { agentChatRoutes, currentInteractionMode } from "@orquester/api/agent-chat";
+import { agentChatRoutes, currentInteractionMode, mergeBackContext } from "@orquester/api/agent-chat";
 import { parseMergeOutbox, serializeMergeOutbox, type MergeOutbox, type MergeOutboxEntry } from "@orquester/config";
 
 import type { DaemonApi } from "../mcp/daemon-api.ts";
@@ -491,7 +491,8 @@ export class LineageService {
       const interactionMode =
         entry.interactionMode === "plan" ? "plan" : currentInteractionMode(await this.readThread(api, entry.parentSessionId));
       const res = await api.request("POST", agentChatCommandPath(entry.parentSessionId, "turn"), {
-        body: { commandId: attemptCommandId(entry), input: entry.input, interactionMode }
+        // The marker that the message is a merge back Orquester delivered (T6-M3).
+        body: { commandId: attemptCommandId(entry), input: entry.input, interactionMode, context: [mergeBackContext(entry.mergeId)] }
       });
       if (res.status < 400) return { kind: "sent", seq: (res.body as { seq?: number } | null)?.seq ?? 0 };
       const error = (res.body as { error?: { code?: string; message?: string } } | null)?.error;

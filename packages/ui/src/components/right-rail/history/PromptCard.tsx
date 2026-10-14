@@ -300,8 +300,10 @@ export const PromptCard = React.memo(function PromptCard(props: PromptCardProps)
 
   const deliver = (kind: "insert" | "send") => {
     if (whole.status !== "ready") return;
-    const delivery =
-      kind === "insert" ? insertIntoChat(sessionId, whole.text) : sendToChat(sessionId, whole.text);
+    // A message Orquester wrote on another thread's behalf (or a merge back) is recalled without
+    // its provenance header: the header is Orquester's, never the user's own words (T6-M3).
+    const text = stripThreadProvenance(whole.text);
+    const delivery = kind === "insert" ? insertIntoChat(sessionId, text) : sendToChat(sessionId, text);
     showFeedback(deliveryFeedback(delivery), delivery.ok ? DELIVERY_FEEDBACK_MS : null);
     if (delivery.ok) props.onDelivered?.();
   };

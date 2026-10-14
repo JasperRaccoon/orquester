@@ -8,10 +8,15 @@ import test from "node:test";
 
 import { sessionToolMarkedData, SESSION_TOOL_REFERENCE_KEYS } from "./session-tools.ts";
 import { slimActivityPayload } from "./slim.ts";
-import { parseThreadLineage } from "./lineage.ts";
+import { buildMergeBackMessage, parseThreadLineage } from "./lineage.ts";
 import {
   buildThreadMessage,
+  isMergeBackMessage,
+  isThreadAuthoredMessage,
+  mergeBackContext,
   parseThreadMessage,
+  stripThreadProvenance,
+  threadMessageContext,
   THREAD_MESSAGE_OVERHEAD_CHARS,
   readThreadToolReference,
   THREAD_TOOL_REFERENCE_KEY,
@@ -93,4 +98,16 @@ test("the provenance header never outgrows its budget, whatever the title — qu
       assert.ok(title.startsWith(parsed.fromTitle), "a prefix of the title, never a broken escape");
     }
   }
+});
+
+test("only a marked message is another chat's; recalled prompts lose Orquester's header (T6-M3)", () => {
+  const text = buildThreadMessage({ origin: "sent", fromTitle: "Main", text: "Run the tests." });
+  assert.equal(isThreadAuthoredMessage({ context: [threadMessageContext("main")] }), true);
+  assert.equal(isThreadAuthoredMessage({}), false, "a header typed by the user is not provenance");
+  assert.equal(isThreadAuthoredMessage({ context: [{ kind: "file" }] }), false);
+  assert.equal(isMergeBackMessage({ context: [mergeBackContext("m1")] }), true);
+  assert.equal(isMergeBackMessage({ context: [threadMessageContext("main")] }), false);
+  assert.equal(stripThreadProvenance(text), "Run the tests.");
+  assert.equal(stripThreadProvenance(buildMergeBackMessage({ childTitle: "Try B", relation: "fork", text: "B works." })), "B works.");
+  assert.equal(stripThreadProvenance("plain prompt"), "plain prompt");
 });
