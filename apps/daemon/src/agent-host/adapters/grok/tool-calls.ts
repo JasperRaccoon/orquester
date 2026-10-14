@@ -11,6 +11,7 @@
  */
 
 import type { RuntimeEvent, RuntimeEventRaw, RuntimeItemStatus } from "@orquester/api/agent-chat";
+import { GROK_USE_TOOL_NAME } from "@orquester/api/agent-chat";
 
 import type { SessionNotification, SessionUpdate, ToolCallStatus } from "./acp/_generated/schema.ts";
 import { backgroundFromToolCall, PARENT_SCOPE } from "./background-tasks.ts";
@@ -60,6 +61,13 @@ export interface ToolTrack extends ToolCallSnapshot {
    * the completion drops the vendor block altogether.
    */
   spawnsSubagent: boolean;
+  /**
+   * The call is the CLI's own `use_tool` meta-tool (an MCP call by its
+   * qualified catalog key in `rawInput.tool_name`). Remembered from the frame
+   * that said so, as {@link spawnsSubagent} is: the completion drops the
+   * vendor block, and the row's `vendorTool` keeps naming it.
+   */
+  usesTool: boolean;
   /**
    * A subagent's own call — its child session made it — and the turn it
    * rides: the turn live when its FIRST frame arrived, absent between parent
@@ -129,6 +137,9 @@ export function toolCall(
     owner === undefined &&
     (previous?.spawnsSubagent === true ||
       (vendor?.name === SPAWN_SUBAGENT_TOOL && vendor.namespace === GROK_TOOL_NAMESPACE));
+  const usesTool =
+    previous?.usesTool === true ||
+    (vendor?.name === GROK_USE_TOOL_NAME && vendor.namespace === GROK_TOOL_NAMESPACE);
   const kind = normalizeToolKind(update.kind) ?? previous?.kind;
   const title = update.title ?? previous?.title;
   const status = (update.status ?? previous?.status ?? (method === "tool_call" ? "pending" : undefined)) as
@@ -163,10 +174,11 @@ export function toolCall(
           // kind Grok files it under — sticky, as a later frame may not repeat
           // the `_meta` that named it (nothing else here is an MCP call).
           previous?.itemType === "mcp_tool_call" ||
-            isGrokSessionToolCall({ title: title ?? null, _meta: update._meta ?? null, rawInput })
+            isGrokSessionToolCall({ title: title ?? null, _meta: update._meta ?? null, rawInput }, { usesTool })
           ? "mcp_tool_call"
           : itemTypeFromToolKind(acpKindFromVendorKind(vendor?.kind) ?? kind ?? undefined)),
     spawnsSubagent,
+    usesTool,
     ...(previous?.owned !== undefined
       ? { owned: previous.owned }
       : owner === undefined
@@ -210,7 +222,11 @@ export function toolCall(
         toolUseId: toolCallId,
         ...(next.kind === undefined ? {} : { kind: next.kind }),
         ...(command === undefined ? {} : { command }),
-        ...(vendor === undefined ? {} : { vendorTool: vendor.name, readOnly: vendor.read_only }),
+        ...(vendor !== undefined
+          ? { vendorTool: vendor.name, readOnly: vendor.read_only }
+          : usesTool
+            ? { vendorTool: GROK_USE_TOOL_NAME }
+            : {}),
         ...(rawInput === undefined ? {} : { rawInput }),
         ...(rawOutput === undefined ? {} : { rawOutput }),
         ...(content === undefined ? {} : { content }),

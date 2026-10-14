@@ -101,9 +101,11 @@ export function sessionToolNameFromProviderData(data: unknown): string | null {
         return parsed;
       }
     }
-    // Grok's `use_tool`: the called tool is its argument, never the row's own name.
+    // Grok's `use_tool`: the called tool is its argument, never the row's own
+    // name — read only on a row the adapter says is `use_tool` (`vendorTool`,
+    // kept on every frame of the call), never off any tool's arguments.
     const rawInput = asRecord(holder.rawInput);
-    if (rawInput && (holder.vendorTool === GROK_USE_TOOL_NAME || rawInput.variant === "UseTool")) {
+    if (rawInput && holder.vendorTool === GROK_USE_TOOL_NAME) {
       const parsed = parseSessionToolName(rawInput.tool_name);
       if (parsed !== null) {
         return parsed;
@@ -180,6 +182,15 @@ const RESULT_WRAPPER_KEYS = ["structuredContent", "content", "text", "output", "
 
 const utf8 = new TextEncoder();
 
+/** `text` parsed as JSON, when that is an object; undefined otherwise. */
+function parsedObjectOf(text: string): Record<string, unknown> | undefined {
+  try {
+    return asRecord(JSON.parse(text)) ?? undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 /**
  * The structured object a session tool's result carries: the first object,
  * in whichever layout the provider recorded, that holds one of `keys`. The
@@ -193,14 +204,31 @@ function structuredResultOf(value: unknown, keys: readonly string[], depth = 0):
   }
   if (typeof value === "string") {
     const text = value.trim();
-    if (!text.startsWith("{") || text.length > REFERENCE_SCAN_MAX_CHARS) {
+    if (text.length > REFERENCE_SCAN_MAX_CHARS) {
       return null;
     }
-    try {
-      return structuredResultOf(JSON.parse(text), keys, depth + 1);
-    } catch {
-      return null;
+    if (text.startsWith("{")) {
+      const whole = parsedObjectOf(text);
+      if (whole !== undefined) {
+        return structuredResultOf(whole, keys, depth + 1);
+      }
     }
+    // Grok's `use_tool` joins a result's text blocks and its
+    // `structuredContent` (as JSON) one per line in `OkayOutput` (fixture
+    // `32-mcp-use-tool-call.ndjson`): a session tool's `{…}\n{…}` is no one
+    // JSON value, so each line that is one is tried, the last first.
+    const lines = text.split("\n");
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index]!.trim();
+      if (line.startsWith("{") && line.length < text.length) {
+        const parsed = parsedObjectOf(line);
+        const found = parsed === undefined ? null : structuredResultOf(parsed, keys, depth + 1);
+        if (found) {
+          return found;
+        }
+      }
+    }
+    return null;
   }
   if (Array.isArray(value)) {
     for (const entry of value) {

@@ -8,6 +8,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { redactAcpFrame } from "./acp/redact.ts";
+import type { ToolCallUpdate } from "./acp/_generated/schema.ts";
+import { agentFrames, readCapture } from "./fixtures.ts";
 import { grokSessionMcpServers, grokSessionMeta, grokSessionToolName, isGrokSessionToolCall } from "./session-tools.ts";
 
 const launch = {
@@ -49,16 +51,44 @@ test("a session tool's call is recognised by its exact name, never a substring",
 });
 
 test("a call through Grok's use_tool meta-tool is recognised by its tool_name argument", () => {
-  // As observed in Grok's own session logs: the first frame is titled and
-  // `_meta`-named `use_tool`, the qualified catalog key is in `rawInput`.
+  // Fixture 32 (`32-mcp-use-tool-call.ndjson`): the first frame is titled and
+  // `_meta`-named `use_tool`, the qualified catalog key is in `rawInput`; the
+  // update after it keeps the vendor block; the end has none.
   const useTool = { "x.ai/tool": { version: 1, name: "use_tool", kind: "use_tool", namespace: "grok_build" } };
   const rawInput = { tool_name: "orquester__html_render", tool_input: { title: "Chart" } };
   assert.equal(grokSessionToolName({ title: "use_tool", _meta: useTool, rawInput }), "html_render");
-  assert.equal(grokSessionToolName({ title: null, _meta: null, rawInput: { variant: "UseTool", ...rawInput } }), "html_render");
+  // A frame without the vendor block counts only when an earlier one said `use_tool`.
+  assert.equal(grokSessionToolName({ title: null, _meta: null, rawInput: { variant: "UseTool", ...rawInput } }), null);
+  assert.equal(
+    grokSessionToolName({ title: null, _meta: null, rawInput: { variant: "UseTool", ...rawInput } }, { usesTool: true }),
+    "html_render"
+  );
   assert.equal(isGrokSessionToolCall({ title: "use_tool", _meta: null, rawInput }), true);
   // Another server through use_tool, or a `tool_name` argument of any other tool.
   assert.equal(grokSessionToolName({ title: "use_tool", _meta: useTool, rawInput: { tool_name: "serena__find_symbol" } }), null);
   assert.equal(grokSessionToolName({ title: "read_file", _meta: null, rawInput }), null);
+});
+
+test("fixture 33: the captured permission request for an MCP use_tool call names the session tool", () => {
+  const request = agentFrames(readCapture("33-mcp-use-tool-permission.ndjson")).find(
+    (frame) => frame.method === "session/request_permission"
+  );
+  assert.ok(request, "the capture holds the request");
+  const toolCall = (request.params as { toolCall: ToolCallUpdate }).toolCall;
+  // As captured: the qualified title, the use_tool vendor block, rawInput.tool_name.
+  assert.equal(toolCall.title, "orquester__echo");
+  assert.equal(grokSessionToolName(toolCall), "echo");
+  // Either half alone suffices: the title, or the vendor block with tool_name.
+  assert.equal(grokSessionToolName({ ...toolCall, title: "use_tool" }), "echo");
+  assert.equal(grokSessionToolName({ ...toolCall, rawInput: {} }), "echo");
+  // Without the vendor block and the qualified title, an argument names nothing.
+  assert.equal(grokSessionToolName({ ...toolCall, title: "use_tool", _meta: null }), "echo", "title use_tool is the marker");
+  assert.equal(grokSessionToolName({ ...toolCall, title: "read_file", _meta: null }), null);
+  const options = (request.params as { options: Array<{ optionId: string; kind: string }> }).options;
+  assert.deepEqual(
+    options.map((option) => option.kind),
+    ["allow_always", "allow_once", "reject_once"]
+  );
 });
 
 test("the raw log masks an MCP server's headers like its env", () => {

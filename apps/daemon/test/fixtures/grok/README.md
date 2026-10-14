@@ -56,6 +56,36 @@ left uncaptured.
 | Harness | the same out-of-repo scripts, plus `acp-2026-09-26.mjs` (that launch, and a sweep after every run of every process still carrying the run's marker — SIGTERM, then SIGKILL — listing each one's `ppid`/`pgid`/`sid` first) and `export-2026-09-26.mjs` (the same export rules, its dedupe map seeded from the committed set) |
 | Cost | nine runs — the eight committed and the override attempt of observation 50 — $4.04 by their own `turn_completed` `costUsdTicks` (a few turns report none, so somewhat more); 31, the last, $0.26 |
 
+### The 2026-10-14 capture (32)
+
+How Grok calls an MCP server's tool, for the session tools (design
+`2026-10-14-agent-visuals-and-session-tools-design.md` §1.5): the frames of one call, excerpted.
+
+| | |
+|---|---|
+| CLI | `grok 1.0.46` (`initialize._meta.agentVersion: "1.0.46"`) |
+| Capture date | 2026-10-14 |
+| argv | `agent --always-approve stdio` (full-access) |
+| Account | a scratch `HOME` outside any account home, authenticated with `authenticate {methodId: "cached_token"}` |
+| MCP server | a stub stdio server `apps` (outside the repo) whose `show_widget` answers `content: [{type: "text", text: "widget shown"}]` + `structuredContent: {n: 1}` |
+| Prompt | "Call the show_widget tool of the `apps` MCP server once with n=1. Then reply with the single word: done." |
+| Kept | only the call's own frames (its `arguments_delta`, `tool_call`, `pending_interaction`, `tool_call_update`s, `interaction_resolved`), verbatim; the harness recorded no timestamps, so every `t` is `0` (a `note` frame says so) |
+
+### The 2026-10-14 capture (33)
+
+What Grok asks before an MCP tool runs, for the session tools' card-free pre-approval (design §1.3).
+
+| | |
+|---|---|
+| CLI | `grok 1.0.46` |
+| Capture date | 2026-10-14 |
+| argv | `--reasoning-effort low --permission-mode default agent stdio` (supervised: it asks) |
+| Environment | only `PATH`, `HOME`, `TMPDIR`, `LANG`, `GROK_HOME` and `GROK_CONFIG_PATH` → an overlay with `[features] support_permission = true` and `[cli] auto_update = false`; a scratch directory (mode 0700, written `<scratch>`) holding the home, the sandbox (`git init`, empty) and the overlay, removed after the run |
+| Account | `GROK_HOME` held only a copy of one managed account's `auth.json` (`authenticate {methodId: "cached_token"}`); its hash was unchanged after the run |
+| MCP server | a throwaway loopback Streamable-HTTP server (`127.0.0.1:<ephemeral>/mcp`, stateless JSON, bearer-checked) named `orquester` with one tool `echo` answering `{echoed}` as a JSON text block + the same object as `structuredContent` — the session tools' own result shape; given as an ACP `http` entry with an `Authorization` header, as the adapter does |
+| Prompt | "Call the echo tool of the `orquester` MCP server once with text \"hi\". Then reply with the single word: done." — answered `allow-once`; one model turn |
+| Kept | `session/new` (bearer → `Bearer <redacted-token>`), the prompt, every frame of the `use_tool` call, the permission request and our answer, the prompt's result; dropped: an earlier `search_tool` call (it asked nothing) and every session/setup, model, settings and announcement frame |
+
 ### Sandbox configuration that shaped the captures
 
 The sandbox carries a project config layer at `<cwd>/.grok/config.toml`:
@@ -203,6 +233,8 @@ mcpServers: []}` unless stated otherwise. `argv` below excludes the binary path.
 | `29-loop-scheduled-task.ndjson` | the same full-access argv | `/loop 60s Reply with exactly: tick`, its first fire watched, then `scheduler_list` and `scheduler_delete` | The scheduler's `_x.ai/scheduled_task_*`, the fire's subagent the CLI spawns itself, its wake (observation 52). |
 | `30-goal.ndjson` | the same full-access argv | `/goal Create a file named goal.txt containing exactly: ok --budget 20000`, watched to its end, then `/goal clear` | `goal_updated`: `active` → `budget_limited` → `cleared`; the goal's planner, a subagent the CLI spawns itself (observation 53). |
 | `31-question-cancelled.ndjson` | the same full-access argv | two turns, each asking one `ask_user_question` ("alpha or beta?"): the first answered `{outcome: "cancelled"}` alone, the second answered so and followed at once by `session/cancel` (a host Stop's order) | What the CLI makes of the host's cancel of a question, with and without the Stop's cancel after it (observation 54); the CLI's direct children, from `/proc`, right after `session/new` returned, at `_x.ai/mcp_initialized` and at the end (the harness's `note` frames; observation 55). |
+| `32-mcp-use-tool-call.ndjson` | `agent --always-approve stdio` (grok 1.0.46) | one `apps__show_widget` call (excerpt) | An MCP tool reached through the `use_tool` meta-tool: the first frame's title and `_meta["x.ai/tool"]` name `use_tool` with `rawInput {tool_name: "apps__show_widget", tool_input}`; the update retitles it `apps__show_widget` with `rawInput.variant: "UseTool"`; the end carries no vendor block and no ACP `content`, only `rawOutput {type: "MCP", tool_name, server_name, output: {OkayOutput}}` — the text blocks and the `structuredContent` (as JSON) joined one per line: `"widget shown\n{\"n\":1}"`. |
+| `33-mcp-use-tool-permission.ndjson` | `--reasoning-effort low --permission-mode default agent stdio` (grok 1.0.46) | one `orquester__echo` call (excerpt), answered allow-once | `session/request_permission` for an MCP tool reached through `use_tool`: its `toolCall` carries the qualified title `orquester__echo`, `rawInput {variant: "UseTool", tool_name: "orquester__echo", tool_input}` and the `use_tool` vendor block; options `always-allow` / `allow-once` / `reject-once`. The end's `OkayOutput` was the one line `{"echoed":"hi"}` — a text block equal to the structuredContent's JSON gave one line here, where fixture 32's differing text gave two. |
 
 ---
 

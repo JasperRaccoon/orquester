@@ -494,7 +494,13 @@ export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   // Visual replies (§2.1). A published page shows as its `visual` row; this
   // label is the row while it runs or when it failed.
   html_preview: "Previewed HTML",
-  html_render: "Rendered HTML"
+  html_render: "Rendered HTML",
+  // Scheduling (design 2026-10-14 §5).
+  schedule_task: "Scheduled a task",
+  list_scheduled_tasks: "Listed scheduled tasks",
+  update_scheduled_task: "Updated a scheduled task",
+  delete_scheduled_task: "Deleted a scheduled task",
+  run_scheduled_task_now: "Ran a scheduled task now"
 };
 
 /** `thread_wait` → `Thread wait`. */

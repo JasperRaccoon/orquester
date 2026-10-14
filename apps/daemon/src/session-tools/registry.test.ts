@@ -9,6 +9,7 @@ import { test } from "node:test";
 import { z } from "zod";
 
 import { defineSessionTool, defineSessionToolkit, SESSION_TOOL_READ_ONLY, type SessionToolkit } from "./contract.ts";
+import { schedulingToolkit } from "./scheduling/index.ts";
 import { SESSION_TOOLKITS, sessionToolRegistry } from "./index.ts";
 import {
   composeSessionToolInstructions,
@@ -37,19 +38,20 @@ const toolkit = (id: string, names: string[], instructions?: string): SessionToo
     )
   });
 
-test("production ships the visual-replies toolkit, within the instruction budget", () => {
-  assert.deepEqual(
-    SESSION_TOOLKITS.map((toolkit) => toolkit.id),
-    ["html"]
-  );
+test("the production registry builds: valid names, instructions within the budget", () => {
+  // Building validates every name and throws past SESSION_TOOL_INSTRUCTIONS_MAX_BYTES.
   const registry = sessionToolRegistry();
   assert.equal(registry.enabled, true);
   assert.deepEqual(
-    registry.tools.map((tool) => tool.name),
-    ["html_preview", "html_render"]
+    SESSION_TOOLKITS.map((toolkit) => toolkit.id),
+    ["html", schedulingToolkit.id]
   );
+  for (const name of ["html_preview", "html_render", ...schedulingToolkit.tools.map((tool) => tool.name)]) {
+    assert.equal(registry.get(name)?.name, name);
+  }
   assert.match(registry.instructions, /^## Orquester\n/);
   assert.ok(registry.instructions.includes("### Showing visuals"));
+  assert.ok(registry.instructions.includes("`schedule_task`"));
   assert.ok(Buffer.byteLength(registry.instructions) <= SESSION_TOOL_INSTRUCTIONS_MAX_BYTES);
 });
 

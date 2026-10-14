@@ -1320,59 +1320,109 @@ test("a loop's deletion by expiry completes it; a report of a loop never seen cr
 });
 
 // ---------------------------------------------------------------------------
-// A session tool called through Grok's `use_tool` meta-tool
+// An MCP tool called through Grok's `use_tool` meta-tool (fixture 32)
 // ---------------------------------------------------------------------------
 
-test("a session tool reached through use_tool is an MCP call from its first frame, marked and rendered at ingestion", () => {
-  // The frame shapes Grok's own session logs show for an MCP call (an
-  // `updates.jsonl` `serena__initial_instructions` call through `use_tool`):
-  // title and `_meta` name `use_tool` with the qualified key in `rawInput`;
-  // an update with the qualified title and `{variant: "UseTool", …}`; the end
-  // with `rawOutput {type: "MCP", …, output: {OkayOutput}}` and ACP content.
-  const ref = { attachmentId: "thread-1-0f8fad5b-d9cb-469f-a165-70867728950e-html", title: "Chart", height: 420 };
-  const text = JSON.stringify({ htmlRender: ref, message: "Shown to the reader above your reply." });
-  const useTool = { "x.ai/tool": { version: 1, name: "use_tool", kind: "use_tool", namespace: "grok_build", read_only: false } };
+const USE_TOOL_CALL = "call-a0c1eb77-5628-4b27-8ca9-1061c28e4d33-1";
+
+/**
+ * Fixture 32's call (an `apps__show_widget` call, grok 1.0.46) as if it were
+ * the session tools' `html_render`: the same frames, the tool renamed, and
+ * `OkayOutput` joined as the CLI joins it — the text block, then the
+ * structuredContent as JSON, one per line — from what `jsonResult` answers
+ * (the reference as JSON text + the same object as structuredContent).
+ */
+function htmlRenderThroughUseTool(okayOutput: string): SessionNotification[] {
+  return capturedCall("32-mcp-use-tool-call.ndjson", USE_TOOL_CALL).map((params) => {
+    const renamed = JSON.parse(JSON.stringify(params).replaceAll("apps__show_widget", "orquester__html_render")) as {
+      update: { rawOutput?: { tool_name?: string; server_name?: string; output?: { OkayOutput?: string } } };
+    };
+    const rawOutput = renamed.update.rawOutput;
+    if (rawOutput !== undefined) {
+      assert.equal(rawOutput.output?.OkayOutput, "widget shown\n{\"n\":1}", "the captured join");
+      rawOutput.tool_name = "html_render";
+      rawOutput.server_name = "orquester";
+      rawOutput.output = { OkayOutput: okayOutput };
+    }
+    return renamed as unknown as SessionNotification;
+  });
+}
+
+test("fixture 32: an MCP call through use_tool, as the CLI sends it, is no session tool's", () => {
   const grok = normalizer();
-  const events = [
-    ...grok.handleSessionUpdate(
-      frame({
-        sessionUpdate: "tool_call",
-        toolCallId: "call-u1",
-        title: "use_tool",
-        rawInput: { tool_name: "orquester__html_render", tool_input: { title: "Chart" } },
-        _meta: useTool
-      })
-    ),
-    ...grok.handleSessionUpdate(
-      frame({
-        sessionUpdate: "tool_call_update",
-        toolCallId: "call-u1",
-        kind: "other",
-        title: "orquester__html_render",
-        rawInput: { variant: "UseTool", tool_name: "orquester__html_render", tool_input: { title: "Chart" } },
-        _meta: useTool
-      })
-    ),
-    ...grok.handleSessionUpdate(
-      frame({
-        sessionUpdate: "tool_call_update",
-        toolCallId: "call-u1",
-        status: "completed",
-        rawOutput: { type: "MCP", tool_name: "html_render", server_name: "orquester", output: { OkayOutput: text } },
-        content: [{ type: "content", content: { type: "text", text } }]
-      })
-    )
-  ];
-  const lifecycle = events.filter((event) => event.type.startsWith("item.") && event.itemId === "call-u1");
+  const frames = capturedCall("32-mcp-use-tool-call.ndjson", USE_TOOL_CALL);
+  assert.equal(frames.length, 3, "tool_call, the retitling update, the end");
+  const events = frames.flatMap((params) => grok.handleSessionUpdate(params));
+  const lifecycle = events.filter((event) => event.type.startsWith("item.") && event.itemId === USE_TOOL_CALL);
+  assert.ok(lifecycle.length >= 2);
+  for (const event of lifecycle) {
+    assert.notEqual((event.payload as { itemType?: string }).itemType, "mcp_tool_call", event.type);
+    // The end has no vendor block; the row still names the meta-tool.
+    assert.equal((event.payload as { data?: { vendorTool?: string } }).data?.vendorTool, "use_tool", event.type);
+  }
+  const completed = only(events, "item.completed").find((event) => event.itemId === USE_TOOL_CALL)!;
+  const data = completed.payload.data as { rawOutput?: { output?: { OkayOutput?: string } }; content?: unknown };
+  assert.equal(data.rawOutput?.output?.OkayOutput, "widget shown\n{\"n\":1}", "text blocks and structuredContent, one per line");
+  assert.equal(data.content, undefined, "no ACP content on the end");
+});
+
+test("a session tool reached through use_tool is an MCP call from its first frame, marked and rendered at ingestion", () => {
+  const ref = { attachmentId: "thread-1-0f8fad5b-d9cb-469f-a165-70867728950e-html", title: "Chart", height: 420 };
+  const json = JSON.stringify({ htmlRender: ref, message: "Shown to the reader above your reply." });
+  const grok = normalizer();
+  const events = htmlRenderThroughUseTool(`${json}\n${json}`).flatMap((params) => grok.handleSessionUpdate(params));
+  const lifecycle = events.filter((event) => event.type.startsWith("item.") && event.itemId === USE_TOOL_CALL);
   assert.ok(lifecycle.length >= 2);
   for (const event of lifecycle) {
     assert.equal((event.payload as { itemType?: string }).itemType, "mcp_tool_call", event.type);
   }
-  const completed = only(events, "item.completed").find((event) => event.itemId === "call-u1")!;
+  const completed = only(events, "item.completed").find((event) => event.itemId === USE_TOOL_CALL)!;
   const [row] = runtimeEventToActivities(completed, { sessionToolNames: new Set(["html_render"]) });
   assert.deepEqual(htmlRenderReferenceOfActivityPayload(row!.payload), ref);
   assert.deepEqual(htmlRenderReferenceOfActivityPayload(slimActivityPayload(slimActivityPayload(row!.payload))), ref);
   // A host without that tool registered marks nothing, so nothing renders.
   const [unmarked] = runtimeEventToActivities(completed, { sessionToolNames: new Set(["echo"]) });
   assert.equal(htmlRenderReferenceOfActivityPayload(unmarked!.payload), undefined);
+});
+
+test("a native tool whose arguments hold variant and tool_name is never taken for a session tool", () => {
+  const grok = normalizer();
+  const rawInput = { variant: "UseTool", tool_name: "orquester__html_render", path: "notes.txt" };
+  const events = [
+    ...grok.handleSessionUpdate(
+      frame({
+        sessionUpdate: "tool_call",
+        toolCallId: "call-n1",
+        title: "read_file",
+        rawInput,
+        _meta: { "x.ai/tool": { version: 1, name: "read_file", kind: "read", namespace: "grok_build", read_only: true } }
+      })
+    ),
+    ...grok.handleSessionUpdate(
+      frame({ sessionUpdate: "tool_call_update", toolCallId: "call-n1", status: "completed", rawInput, rawOutput: { type: "Text" } })
+    )
+  ];
+  const rows = events.filter((event) => event.type.startsWith("item.") && event.itemId === "call-n1");
+  assert.ok(rows.length >= 1);
+  for (const event of rows) {
+    assert.notEqual((event.payload as { itemType?: string }).itemType, "mcp_tool_call", event.type);
+    const [row] = runtimeEventToActivities(event, { sessionToolNames: new Set(["html_render"]) });
+    assert.equal((row!.payload as { data?: { sessionTool?: unknown } }).data?.sessionTool, undefined, event.type);
+  }
+});
+
+test("fixture 33: the captured use_tool call of an orquester tool is an MCP row the ingestion marks", () => {
+  const call = "call-c531d9cf-2c02-43f3-8ef1-0e9af738e2c1-1";
+  const grok = normalizer();
+  const events = capturedCall("33-mcp-use-tool-permission.ndjson", call).flatMap((params) => grok.handleSessionUpdate(params));
+  const lifecycle = events.filter((event) => event.type.startsWith("item.") && event.itemId === call);
+  assert.ok(lifecycle.length >= 2);
+  for (const event of lifecycle) {
+    assert.equal((event.payload as { itemType?: string }).itemType, "mcp_tool_call", event.type);
+  }
+  const completed = only(events, "item.completed").find((event) => event.itemId === call)!;
+  const [row] = runtimeEventToActivities(completed, { sessionToolNames: new Set(["echo"]) });
+  const data = row!.payload as { data: { sessionTool?: unknown; rawOutput?: { output?: { OkayOutput?: string } } } };
+  assert.deepEqual(data.data.sessionTool, { name: "echo" });
+  assert.equal(data.data.rawOutput?.output?.OkayOutput, '{"echoed":"hi"}', "one line, as captured");
 });

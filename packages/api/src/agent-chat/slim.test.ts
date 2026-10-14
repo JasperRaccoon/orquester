@@ -301,11 +301,17 @@ test("a session html_render row keeps its page reference, for every provider's l
       state: { status: "completed", output: VISUAL_RESULT },
       result: VISUAL_RESULT
     },
+    // Grok's end: no ACP content; `OkayOutput` = text block + "\n" + structuredContent
+    // as JSON (fixture apps/daemon/test/fixtures/grok/32-mcp-use-tool-call.ndjson).
     grok: {
       vendorTool: "use_tool",
       rawInput: { variant: "UseTool", tool_name: "orquester__html_render", tool_input: {} },
-      rawOutput: { type: "MCP", server_name: "orquester", tool_name: "html_render", output: { OkayOutput: VISUAL_RESULT } },
-      content: [{ type: "content", content: { type: "text", text: VISUAL_RESULT } }]
+      rawOutput: {
+        type: "MCP",
+        server_name: "orquester",
+        tool_name: "html_render",
+        output: { OkayOutput: `${VISUAL_RESULT}\n${VISUAL_RESULT}` }
+      }
     }
   };
   const expected = { name: "html_render", references: { htmlRender: VISUAL_REF } };

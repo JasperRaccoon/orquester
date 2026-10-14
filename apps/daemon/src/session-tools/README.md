@@ -110,7 +110,7 @@ API in-process, `../mcp/daemon-api.ts`). Whatever a toolkit imports, the host lo
 |---|---|---|---|---|
 | Claude | the host's `McpServer` instance as `mcpServers.orquester = {type: "sdk", name, instance}`, raw arguments forwarded | none | system prompt `append` | `allowedTools`: each `mcp__orquester__<tool>` + `canUseTool` |
 | Codex | thread `config["mcp_servers.orquester"]` on `thread/start` and `thread/resume` | env `ORQUESTER_SESSION_TOOLS_TOKEN` via `bearer_token_env_var` | `turn/start` `additionalContext` (`application`) | `default_tools_approval_mode = "approve"` |
-| Grok | ACP `mcpServers` http entry on `session/new` / `session/load`; the model calls the tools through Grok's `use_tool` (`rawInput.tool_name = "orquester__<tool>"`) | `Authorization` header in the frame (redacted from `raw.ndjson`) | `_meta.rules` | `allow_once` without a card |
+| Grok | ACP `mcpServers` http entry on `session/new` / `session/load`; the model calls the tools through Grok's `use_tool` (`rawInput.tool_name = "orquester__<tool>"`, read only on a call Grok's vendor block names `use_tool`) | `Authorization` header in the frame (redacted from `raw.ndjson`) | `_meta.rules` | `allow_once` without a card |
 | OpenCode | `POST /mcp` per thread, server `orquester-<16 hex>` on the shared server | `Authorization` header in the registration (memory only) | per-turn `system` addendum | session ruleset: deny `orquester-????????????????_*`, allow `orquester-<own key>_*` |
 
 Where each credential lives. Codex: in the `codex app-server` child's env
@@ -121,10 +121,19 @@ and nothing more, and dies with the app-server. Grok: in the ACP `session/new`/`
 frame (masked in `raw.ndjson`). OpenCode: in the shared server's memory (`POST /mcp`). None in
 argv or on disk.
 
+Grok's file-backed `use_tool` forms (`{"file": …}`, `{"tool_name": …, "tool_input_file": …}`,
+its `07-mcp-servers.md`) may not occur over ACP at all — those docs say ACP client filesystems
+reject file mode without an agent-local fallback — but the `{file}` form carries no `tool_name`: such a call names no session tool, so it is neither
+pre-approved (the user gets an approval card — fail closed) nor marked, and its row is an ordinary
+tool row.
+
 Pre-approval is always by registered tool name, never server-wide: `docs/orquester-mcp.md` tells
 users to install Orquester's own full-drive `/mcp` under the same name `orquester`, and such a
 server must never be waved through. (Codex's thread override replaces a user's same-named entry
 outright — verified on 0.159.0; Claude's and Grok's precedence between the two is unverified.)
+Grok's `session/request_permission` for a session tool carries the qualified title
+`orquester__<tool>`, `rawInput.tool_name` and the `use_tool` vendor block (fixture 33, grok 1.0.46),
+so the by-name match answers it `allow_once` without a card.
 
 OpenCode isolation: each thread's session ruleset hides every other thread's `orquester-<key>_…`
 tools (`OPENCODE_SESSION_TOOLS_DENY = "orquester-????????????????_*"`; OpenCode drops a tool whose

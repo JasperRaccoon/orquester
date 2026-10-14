@@ -73,13 +73,20 @@ interface VendorTool {
  * tool `server__tool` (its `22-permissions-and-safety.md`, "MCP Rules"); the
  * name is read off `_meta["x.ai/tool"]` and, failing that, the title — each
  * only as an exact spelling, never a substring. The model reaches MCP tools
- * through Grok's `use_tool` meta-tool (`07-mcp-servers.md`; observed frames:
- * the first carries title and `_meta` name `use_tool`, `rawInput:
- * {tool_name: "<server>__<tool>", tool_input}`, a later update the qualified
- * title), so a `use_tool` call's `rawInput.tool_name` is read too.
+ * through Grok's `use_tool` meta-tool (`07-mcp-servers.md`; fixture
+ * `32-mcp-use-tool-call.ndjson`, grok 1.0.46: the first frame's title and
+ * `_meta["x.ai/tool"]` name `use_tool` with `rawInput {tool_name:
+ * "<server>__<tool>", tool_input}`, the next update the qualified title, the
+ * end no vendor block), so a `use_tool` call's `rawInput.tool_name` is read
+ * too — only when the call is `use_tool` by its vendor block, its title, or
+ * (`options.usesTool`) an earlier frame's vendor block: a native tool whose
+ * arguments happen to hold a `tool_name` names nothing. A file-backed
+ * `use_tool` (`{file}`, `tool_input_file`) may carry no `tool_name`; it is
+ * then no session tool's, and asks (fail closed).
  */
 export function grokSessionToolName(
-  toolCall: Pick<ToolCallUpdate, "title" | "_meta" | "rawInput"> | null | undefined
+  toolCall: Pick<ToolCallUpdate, "title" | "_meta" | "rawInput"> | null | undefined,
+  options: { usesTool?: boolean } = {}
 ): string | null {
   if (toolCall === null || toolCall === undefined) {
     return null;
@@ -93,7 +100,7 @@ export function grokSessionToolName(
   if (
     rawInput !== null &&
     typeof rawInput === "object" &&
-    (vendor?.name === GROK_USE_TOOL_NAME || toolCall.title === GROK_USE_TOOL_NAME || rawInput.variant === "UseTool")
+    (vendor?.name === GROK_USE_TOOL_NAME || toolCall.title === GROK_USE_TOOL_NAME || options.usesTool === true)
   ) {
     candidates.push(rawInput.tool_name);
   }
@@ -106,7 +113,8 @@ export function grokSessionToolName(
 
 /** True when a tool call is a session tool's (any name, for the timeline's classification). */
 export function isGrokSessionToolCall(
-  toolCall: Pick<ToolCallUpdate, "title" | "_meta" | "rawInput"> | null | undefined
+  toolCall: Pick<ToolCallUpdate, "title" | "_meta" | "rawInput"> | null | undefined,
+  options: { usesTool?: boolean } = {}
 ): boolean {
-  return grokSessionToolName(toolCall) !== null;
+  return grokSessionToolName(toolCall, options) !== null;
 }

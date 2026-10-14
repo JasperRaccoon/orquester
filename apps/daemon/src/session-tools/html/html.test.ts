@@ -99,7 +99,7 @@ describe("html toolkit definitions", () => {
   it("contributes the Showing visuals paragraph", () => {
     assert.equal(htmlToolkit.instructions, HTML_TOOLKIT_INSTRUCTIONS);
     assert.match(HTML_TOOLKIT_INSTRUCTIONS, /check it with `html_preview`, then publish it with `html_render` before your final reply/);
-    assert.ok(sessionToolRegistry().instructions.endsWith(HTML_TOOLKIT_INSTRUCTIONS));
+    assert.ok(sessionToolRegistry().instructions.includes(HTML_TOOLKIT_INSTRUCTIONS));
   });
 
   it("bounds the page as the publisher does", () => {
