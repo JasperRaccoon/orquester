@@ -3220,7 +3220,14 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
               streaming: false,
               turnId: session.activeTurnId,
               ...(attachments.length > 0 ? { attachments } : {}),
-              ...(context !== undefined ? { context } : {})
+              ...(context !== undefined ? { context } : {}),
+              // A steer carries its own mode: every adapter applies it to the
+              // running turn (Claude/Grok switch the live session, Codex and
+              // OpenCode send it with the steered prompt), so a default turn
+              // steered into plan now plans — `currentInteractionMode` reads
+              // it off this message (T6-M2). A new turn's mode is on its
+              // `turn-start-requested` instead.
+              ...(session.activeTurnId !== null ? { interactionMode } : {})
             },
             { commandId, occurredAt }
           )
