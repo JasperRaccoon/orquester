@@ -13,9 +13,12 @@
  * Ported from T3 Code (MIT): `packages/shared/src/mcpApp.ts` (reference,
  * CSP, bootstraps, allow attribute) and `apps/server/src/mcpApps/McpAppSnapshot.ts`
  * (reading the document out of a `resources/read` result), plus Orquester's
- * per-provider readers of the tool row. Pure and dependency-free: the host
- * (capture, request checks), `slim.ts` and the UI read one copy.
+ * per-provider readers of the tool row. Pure (it imports only the session-tool
+ * name readers): the host (capture, request checks), `slim.ts` and the UI
+ * read one copy.
  */
+
+import { isSessionToolsServerName, sessionToolNameOfData } from "./session-tools.ts";
 
 export const MCP_APP_PROTOCOL_VERSION = "2026-01-26";
 export const MCP_APP_MIME_TYPE = "text/html;profile=mcp-app";
@@ -496,12 +499,17 @@ export function mcpCallOfActivityPayload(payload: unknown): { server: string; to
  * records — a server can only ever point at an app of its own. A row with no
  * call identity left is a slimmed one, whose `mcpApp` `slim.ts` wrote only
  * after this same check on the full row.
+ *
+ * Orquester's own session tools are never an MCP App (their pages are the
+ * `visual` row, `html-render.ts`): a row the ingestion marked as a session
+ * tool's (`data.sessionTool`), or an app naming a session-tools server, has none.
  */
 export function mcpAppReferenceOfActivityPayload(payload: unknown): McpAppReference | undefined {
   const data = asRecord(asRecord(payload)?.data);
   if (data === undefined || !("mcpApp" in data)) return undefined;
+  if (sessionToolNameOfData(data) !== null) return undefined;
   const reference = readMcpAppReference(data.mcpApp);
-  if (reference === undefined) return undefined;
+  if (reference === undefined || isSessionToolsServerName(reference.server)) return undefined;
   const call = mcpCallOfActivityPayload(payload);
   if (call !== undefined && (call.server !== reference.server || call.tool !== reference.tool)) {
     return undefined;

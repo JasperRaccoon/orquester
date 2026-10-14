@@ -30,6 +30,7 @@
 
 import {
   MCP_APP_RESOURCE_SCHEME,
+  isSessionToolsServerName,
   readMcpAppResourceUri,
   type McpAppCallToolResult,
   type McpAppReference,
@@ -77,6 +78,16 @@ export interface GrokMcpAppCall {
  * completed `tool_call_update` of an MCP tool (`rawOutput.type === "MCP"`)
  * whose `_meta` names a `ui://` resource. The caller checks the session is
  * the parent's — a subagent's call is a row of the subagent's.
+ *
+ * Every MCP call reaches Grok's model through `use_tool` (fixture 32): the
+ * first frames are titled `use_tool` with `rawInput.tool_name` qualified as
+ * `<server>__<tool>`, and only this completed frame — whose `_meta` is the
+ * tool definition's, without the `x.ai/tool` vendor block — names the server
+ * and the tool apart, in `rawOutput`. Those two fields are the call's
+ * identity here and on the row (`mcpCallOfActivityPayload`); the qualified
+ * name is never split, as a server name may itself hold `__`. A session-tools
+ * server's call (Orquester's own `orquester`, design 2026-10-14 §1) is never
+ * an app: its pages are `visual` rows.
  */
 export function grokMcpAppCallOf(notification: SessionNotification): GrokMcpAppCall | null {
   const update = asRecord(notification.update);
@@ -91,7 +102,12 @@ export function grokMcpAppCallOf(notification: SessionNotification): GrokMcpAppC
   }
   const server = asName(rawOutput.server_name);
   const tool = asName(rawOutput.tool_name);
-  if (server === undefined || tool === undefined || !resourceUri.startsWith(MCP_APP_RESOURCE_SCHEME)) {
+  if (
+    server === undefined ||
+    tool === undefined ||
+    isSessionToolsServerName(server) ||
+    !resourceUri.startsWith(MCP_APP_RESOURCE_SCHEME)
+  ) {
     return null;
   }
   return { toolCallId, server, tool, resourceUri };

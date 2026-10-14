@@ -248,6 +248,34 @@ describe("codex — MCP Apps", () => {
     await r.stop();
   });
 
+  it("a session tool's call is never an app, even one naming a ui:// resource; its result is still kept", async () => {
+    const r = rig({ turns: [] });
+    await r.session.start();
+    const threadId = threadIdOf(r.session);
+    const reference = { htmlRender: { attachmentId: STORED_ID, title: "Chart", height: 420 } };
+    const sessionToolCall = appCall({
+      id: "session-tool",
+      server: "orquester",
+      tool: "html_render",
+      appContext: { connectorId: "orquester", linkId: null, resourceUri: "ui://orquester/page.html", appName: null, actionName: null },
+      result: { content: [{ type: "text", text: JSON.stringify(reference) }], structuredContent: reference, _meta: null }
+    });
+    await r.notify("item/completed", { item: sessionToolCall, threadId, turnId: "t", completedAtMs: 1 });
+    await r.notify("item/completed", { item: agentMessage("msg-after", "x"), threadId, turnId: "t", completedAtMs: 2 });
+    await r.events.waitFor((event) => event.type === "item.completed" && event.itemId === "msg-after", "the later message");
+    assert.equal(r.received().some((frame) => frame.method === "mcpServer/resource/read"), false, "never read");
+    assert.equal(r.stored.length, 0);
+    const completed = r.events.events[completedCall(r.events.events, "session-tool")] as Extract<
+      RuntimeEvent,
+      { type: "item.completed" }
+    >;
+    const data = completed.payload.data as Record<string, unknown>;
+    assert.equal("mcpApp" in data, false);
+    // Task 1's rule stands: the session tool's result carries its reference.
+    assert.deepEqual((data.result as { structuredContent?: unknown }).structuredContent, reference);
+    await r.stop();
+  });
+
   it("the session's end lets go of a capture in flight: the call completes plain before the exit", async () => {
     const r = rig({ turns: [], mcpApps: { contents: "hang" } });
     await r.session.start();
@@ -316,6 +344,25 @@ describe("codex — MCP Apps", () => {
     assert.equal("additionalContext" in (starts[0]!.params as object), false, "no context, no field");
     assert.deepEqual((starts[1]!.params as { additionalContext?: unknown }).additionalContext, {
       "mcp-app:item-1": { kind: "untrusted", value: "MCP app apps/show_widget (mcp-app:item-1):\nboard has 3 cards" }
+    });
+    await r.stop();
+  });
+
+  it("an app's context rides beside the session tools' instruction block, never in place of it", async () => {
+    const contexts = new Map([["mcp-app:item-1", "board has 3 cards"]]);
+    const r = rig(
+      { turns: [{ kind: "text", text: "ok" }] },
+      {
+        appContext: () => contexts,
+        sessionTools: { url: "http://127.0.0.1:1/mcp", instructions: "Orquester tools block", revoke: () => undefined }
+      }
+    );
+    await r.session.start();
+    await r.session.sendTurn({ input: "go", attachments: [], interactionMode: "default" });
+    const [start] = r.received().filter((frame) => frame.method === "turn/start");
+    assert.deepEqual((start!.params as { additionalContext?: unknown }).additionalContext, {
+      "mcp-app:item-1": { kind: "untrusted", value: "board has 3 cards" },
+      orquester: { kind: "application", value: "Orquester tools block" }
     });
     await r.stop();
   });

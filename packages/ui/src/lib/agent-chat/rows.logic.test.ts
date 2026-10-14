@@ -1547,9 +1547,11 @@ describe("MCP Apps — the mcp-app row (spec 2026-10-14 §3)", () => {
     grok: {
       itemType: "dynamic_tool_call",
       title: "charts__show_chart",
+      // As Task 1's Grok normaliser writes a `use_tool` end (fixture 32).
       data: {
         toolUseId: "call-1",
-        rawInput: { tool_name: "charts__show_chart", tool_input: {} },
+        vendorTool: "use_tool",
+        rawInput: { variant: "UseTool", tool_name: "charts__show_chart", tool_input: {} },
         rawOutput: { type: "MCP", server_name: "charts", tool_name: "show_chart", output: { OkayOutput: "ok" } },
         mcpApp: reference
       }
@@ -1647,6 +1649,35 @@ describe("MCP Apps — the mcp-app row (spec 2026-10-14 §3)", () => {
     ).rows;
     assert.equal(apps(failed).length, 0);
     assert.ok(failed.some((row) => row.kind === "work"));
+  });
+
+  it("an orquester html_render row is its page, never an app — even carrying an mcpApp", () => {
+    const page = { attachmentId: "t1-2f8fad5b-d9cb-469f-a165-70867728950e-html", title: "Chart", height: 420 };
+    const forced = { ...reference, server: "orquester", tool: "html_render" };
+    const rows = deriveTimelineRowsWithState(
+      baseInput(
+        entriesFrom(
+          call(
+            {
+              itemType: "mcp_tool_call",
+              title: "orquester: html_render",
+              data: {
+                server: "orquester",
+                tool: "html_render",
+                arguments: {},
+                result: { content: [], structuredContent: { htmlRender: page } },
+                sessionTool: { name: "html_render" },
+                mcpApp: forced
+              }
+            },
+            1
+          )
+        ),
+        running
+      )
+    ).rows;
+    assert.equal(apps(rows).length, 0);
+    assert.ok(rows.some((row) => row.kind === "visual"));
   });
 
   it("a settled turn's fold never hides its app, and an unchanged app keeps its row object", () => {

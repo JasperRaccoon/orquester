@@ -67,7 +67,7 @@ import type {
   ThreadSnapshot,
   UserInputQuestion
 } from "@orquester/api/agent-chat";
-import { SESSION_TOOLS_SERVER_NAME } from "@orquester/api/agent-chat";
+import { SESSION_TOOLS_SERVER_NAME, isSessionToolsServerName } from "@orquester/api/agent-chat";
 
 import type {
   AdapterContext,
@@ -1673,7 +1673,9 @@ export class CodexSession {
    * The app a notification's completed call names, when it is one to capture:
    * this thread's own (a collab child's calls are rows of the child's), the
    * call succeeded, and its tool names a `ui://` resource — on
-   * `appContext.resourceUri`, or the deprecated `mcpAppResourceUri`.
+   * `appContext.resourceUri`, or the deprecated `mcpAppResourceUri`. A
+   * session-tools server's call (Orquester's own `orquester`, design
+   * 2026-10-14 §1) is never one: its pages are `visual` rows, not apps.
    */
   private appCallOf(
     method: ServerNotificationMethod,
@@ -1689,6 +1691,7 @@ export class CodexSession {
       item.status !== "completed" ||
       item.result === null ||
       item.error !== null ||
+      isSessionToolsServerName(item.server) ||
       this.providerThreadId === null ||
       p.threadId !== this.providerThreadId
     ) {

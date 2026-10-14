@@ -231,6 +231,25 @@ test("the slimmed row keeps a checked reference and never a foreign one", () => 
   assert.equal("mcpApp" in foreign.data, false);
 });
 
+test("a session tool's row is never an app: the ingestion's marker or a session-tools server refuses it", () => {
+  // Orquester's own `html_render` row (Codex layout), marked by the ingestion.
+  const own = codexRow({ ...reference, server: "orquester", tool: "html_render" }, "orquester", "html_render");
+  const marked = { ...own, data: { ...own.data, sessionTool: { name: "html_render" } } };
+  assert.equal(mcpAppReferenceOfActivityPayload(marked), undefined);
+  const slim = slimActivityPayload(marked) as { data: Record<string, unknown> };
+  assert.equal("mcpApp" in slim.data, false);
+  assert.deepEqual(slim.data.sessionTool, { name: "html_render" });
+  // Unmarked, the server name alone refuses it — OpenCode's per-thread spelling too.
+  assert.equal(
+    mcpAppReferenceOfActivityPayload(codexRow({ ...reference, server: "orquester", tool: "x" }, "orquester", "x")),
+    undefined
+  );
+  const perThread = "orquester-0123456789abcdef";
+  assert.equal(mcpAppReferenceOfActivityPayload(codexRow({ ...reference, server: perThread }, perThread)), undefined);
+  // A third-party app's row stays an app, the marker absent.
+  assert.deepEqual(mcpAppReferenceOfActivityPayload(codexRow(reference)), reference);
+});
+
 test("the original call is read in each provider's layout", () => {
   assert.deepEqual(mcpAppToolCallOfActivityPayload(codexRow(reference)), {
     arguments: { range: "7d" },

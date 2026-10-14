@@ -20,12 +20,19 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 
-import { htmlRenderReferenceOfActivityPayload, slimActivityPayload, type RuntimeEvent } from "@orquester/api/agent-chat";
+import {
+  htmlRenderReferenceOfActivityPayload,
+  mcpAppReferenceOfActivityPayload,
+  slimActivityPayload,
+  type McpAppReference,
+  type RuntimeEvent
+} from "@orquester/api/agent-chat";
 
 import { runtimeEventToActivities } from "../../ingestion/activities.ts";
 
 import type { SessionNotification } from "./acp/_generated/schema.ts";
 import { agentFrames, readCapture } from "./fixtures.ts";
+import { grokMcpAppCallOf, withGrokMcpApp } from "./mcp-apps.ts";
 import {
   GrokNormalizer
 } from "./normalize.ts";
@@ -1425,4 +1432,63 @@ test("fixture 33: the captured use_tool call of an orquester tool is an MCP row 
   const data = row!.payload as { data: { sessionTool?: unknown; rawOutput?: { output?: { OkayOutput?: string } } } };
   assert.deepEqual(data.data.sessionTool, { name: "echo" });
   assert.equal(data.data.rawOutput?.output?.OkayOutput, '{"echoed":"hi"}', "one line, as captured");
+});
+
+// ---------------------------------------------------------------------------
+// MCP Apps vs session tools, both through `use_tool` (fixture 32)
+// ---------------------------------------------------------------------------
+
+const WIDGET_APP: McpAppReference = {
+  attachmentId: "thread-1-0f8fad5b-d9cb-469f-a165-70867728950e-html",
+  server: "apps",
+  tool: "show_widget",
+  resourceUri: "ui://stub/widget.html"
+};
+
+test("fixture 32: a third-party app reached through use_tool is captured by rawOutput's names, unmarked, and kept through a double slim", () => {
+  const grok = normalizer();
+  const frames = capturedCall("32-mcp-use-tool-call.ndjson", USE_TOOL_CALL);
+  // Only the end names the app: `rawOutput`'s server and tool, `_meta.ui`.
+  assert.deepEqual(
+    frames.map((params) => grokMcpAppCallOf(params)),
+    [null, null, { toolCallId: USE_TOOL_CALL, server: "apps", tool: "show_widget", resourceUri: "ui://stub/widget.html" }]
+  );
+  // The qualified name the first frames carry is the same call's.
+  assert.equal((frames[0]!.update as { rawInput?: { tool_name?: string } }).rawInput?.tool_name, "apps__show_widget");
+  const events = frames.flatMap((params) => grok.handleSessionUpdate(params)).map(withGrokMcpApp(USE_TOOL_CALL, WIDGET_APP));
+  const completed = only(events, "item.completed").find((event) => event.itemId === USE_TOOL_CALL)!;
+  // A host with session tools registered marks nothing on a foreign server's call.
+  const [row] = runtimeEventToActivities(completed, { sessionToolNames: new Set(["html_render", "show_widget"]) });
+  const data = (row!.payload as { data: { sessionTool?: unknown; vendorTool?: string } }).data;
+  assert.equal(data.sessionTool, undefined);
+  assert.equal(data.vendorTool, "use_tool");
+  assert.deepEqual(mcpAppReferenceOfActivityPayload(row!.payload), WIDGET_APP);
+  const once = slimActivityPayload(row!.payload);
+  assert.deepEqual(mcpAppReferenceOfActivityPayload(once), WIDGET_APP);
+  assert.deepEqual(mcpAppReferenceOfActivityPayload(slimActivityPayload(once)), WIDGET_APP);
+  assert.equal(htmlRenderReferenceOfActivityPayload(slimActivityPayload(once)), undefined, "no page");
+});
+
+test("a session tool reached through use_tool is never an app, even with a ui:// resource on its end", () => {
+  const ref = { attachmentId: "thread-1-0f8fad5b-d9cb-469f-a165-70867728950e-html", title: "Chart", height: 420 };
+  const json = JSON.stringify({ htmlRender: ref });
+  const frames = htmlRenderThroughUseTool(`${json}\n${json}`);
+  // The renamed end keeps fixture 32's `_meta.ui.resourceUri`: still no capture.
+  assert.ok((frames.at(-1)!.update as { _meta?: { ui?: unknown } })._meta?.ui !== undefined);
+  assert.deepEqual(
+    frames.map((params) => grokMcpAppCallOf(params)),
+    [null, null, null]
+  );
+  // An app forced onto the row anyway is refused by the shared reader: the
+  // session tool's marker wins, and the row is its page.
+  const grok = normalizer();
+  const forced = { ...WIDGET_APP, server: "orquester", tool: "html_render" };
+  const events = frames.flatMap((params) => grok.handleSessionUpdate(params)).map(withGrokMcpApp(USE_TOOL_CALL, forced));
+  const completed = only(events, "item.completed").find((event) => event.itemId === USE_TOOL_CALL)!;
+  const [row] = runtimeEventToActivities(completed, { sessionToolNames: new Set(["html_render"]) });
+  assert.equal(mcpAppReferenceOfActivityPayload(row!.payload), undefined);
+  const twice = slimActivityPayload(slimActivityPayload(row!.payload));
+  assert.equal(mcpAppReferenceOfActivityPayload(twice), undefined);
+  assert.equal("mcpApp" in (twice as { data: object }).data, false);
+  assert.deepEqual(htmlRenderReferenceOfActivityPayload(twice), ref);
 });
