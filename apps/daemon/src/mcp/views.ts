@@ -335,12 +335,13 @@ export function assistantTextForTurn(items: readonly ThreadItem[], turnId: strin
  * The latest settled turn's answer, as the parent's timeline shows it. On a Claude thread that leaves out the opening
  * paragraph a host before the pre-turn-stream fix wrote a second time at `result`, which an old log keeps: the GUI's
  * rule, from the one implementation (`reEmittedAssistantCopies`, `@orquester/api/agent-chat`), counted over the window.
+ * `cap`: the most characters the text keeps (the session tools' task results take more than a detail's).
  */
-function lastReply(snap: ThreadSnapshotPayload): SessionDetail["lastReply"] | null {
+export function lastReply(snap: ThreadSnapshotPayload, cap = VIEW_TEXT_CAP): SessionDetail["lastReply"] | null {
   const t = latestSettledTurn(snap.turns);
   if (!t?.turnId) return null;
   const copies = repairsReEmittedAssistantCopies(snap.head.adapter) ? reEmittedAssistantCopies(snap.items) : undefined;
-  const capped = capText(assistantTextForTurn(snap.items, t.turnId, copies), VIEW_TEXT_CAP);
+  const capped = capText(assistantTextForTurn(snap.items, t.turnId, copies), cap);
   return { turnId: t.turnId, text: capped.text, truncated: capped.truncated, completedAt: t.completedAt };
 }
 

@@ -47,6 +47,33 @@ API in-process, `../mcp/daemon-api.ts`). Whatever a toolkit imports, the host lo
 | Directory | Tools | Daemon side |
 |---|---|---|
 | `pull-requests/` | `watch_pull_request`, `unwatch_pull_request`, `list_pull_request_watches` | `../pr-watch/` (service, routes `agentChatRoutes.prWatches`/`prWatch`, change detection); store `pr-watches.json` (`@orquester/config`) |
+| `threads/` | `thread_list`, `thread_read`, `thread_create`, `thread_send`, `thread_wait`, `thread_interrupt`, `thread_fork`, `thread_merge_back`; `delegate_task`, `task_status`, `task_wait`, `task_cancel` | the daemon's own routes: `/api/sessions` (create, with `chat.lineage` for a delegate), the §6.2 `turn`/`interrupt` commands, Task 4's `fork`/`mergeBack`; reuses the external `/mcp`'s `read_transcript`, `send_message` and turn wait (`../mcp/tools/messages.ts`, `../mcp/wait.ts`) — pure modules the host loads with the toolkit |
+
+### `threads/`: scope and caps
+
+- **Scope.** Every tool acts on chat threads of the caller's project only, compared after resolving
+  both paths as the daemon does (realpath inside the sandbox). Another project's thread, a terminal
+  or a closed tab is `THREAD_NOT_FOUND`; `task_*` take only the caller's own delegates
+  (`TASK_NOT_FOUND` otherwise). A thread bound to no project sees only itself.
+- **Self.** `thread_wait`, `thread_send` and `thread_interrupt` refuse the caller (a wait on
+  yourself never ends; an interrupt would cut the very call).
+- **Permission.** `thread_send` refuses a thread whose permission mode is broader than the caller's
+  (`PERMISSION_DENIED`); `thread_create` and `delegate_task` open threads in the caller's own mode.
+- **Caps.** Delegates nest at most `MAX_DELEGATION_DEPTH` (2) deep — counted over every delegate
+  link up the lineage, forks included — a thread has at most `MAX_OPEN_TASKS` (6) unfinished
+  tasks, and every new thread meets the project's open-chat limit (24, the external `/mcp`'s).
+- **Waits** (`thread_wait`, `task_wait`, `thread_send` with `wait`) ride the daemon bus through
+  the external `/mcp`'s turn wait, end at once on `ctx.signal`, and are bounded to 600 s, inside
+  the providers' MCP call timeouts once the secrets toolkit's raise them (Codex `tool_timeout_sec`,
+  OpenCode `timeout`: 3 900 s; Claude and Grok are longer by default — without that raise, Codex
+  and OpenCode cut a call at 60 s, which then cancels the wait). A timeout never stops the other
+  thread.
+- **Untrusted content.** A result carrying another thread's words (`thread_read`, a reply, a
+  task's `result`) starts with a `notice` saying it is data, not instructions. What it reads is the
+  thread's stored record, with whatever the host masked there.
+- **Timeline.** A result naming one thread carries `threadRef` (`@orquester/api` `thread-tools.ts`,
+  a reference key): the row links to that thread's tab. A delegate's own tab shows "Delegated by"
+  through its lineage (Task 4's lineage bar).
 
 ## Adding a toolkit
 
@@ -57,37 +84,41 @@ API in-process, `../mcp/daemon-api.ts`). Whatever a toolkit imports, the host lo
    import { defineSessionTool, defineSessionToolkit, SESSION_TOOL_READ_ONLY } from "../contract.ts";
    import { jsonResult, ToolError } from "../results.ts";
 
-   export const threadsToolkit = defineSessionToolkit({
-     id: "threads",
+   export const tabsToolkit = defineSessionToolkit({
+     id: "tabs",
      // ≤ one short paragraph; the whole block stays under 1 536 bytes (the registry throws past it).
-     instructions: "Use `thread_list` to see the other chats in this project.",
+     instructions: "Use `tab_count` to see how many tabs this project has open.",
      tools: [
        defineSessionTool({
-         name: "thread_list",                 // bare name, ^[a-z][a-z0-9_]{0,47}$
-         title: "List threads",
-         description: "Lists the chat threads of the caller's project, newest first. …the full rules…",
-         input: { limit: z.number().int().min(1).max(50).default(20) },
+         name: "tab_count",                   // bare name, ^[a-z][a-z0-9_]{0,47}$
+         title: "Count tabs",
+         description: "Counts the open tabs of the caller's project. …the full rules…",
+         input: { kind: z.enum(["chat", "terminal", "all"]).default("all") },
          annotations: SESSION_TOOL_READ_ONLY,
          resultKind: "json",
          run: async (args, ctx) => {
            const res = await ctx.api.request("GET", "/api/sessions", {
              query: { projectPath: ctx.projectPath }
            });
-           if (res.status !== 200) throw new ToolError("UNAVAILABLE", "Could not list threads.");
-           return jsonResult({ threads: (res.body as unknown[]).slice(0, args.limit) });
+           if (res.status !== 200) throw new ToolError("UNAVAILABLE", "Could not list tabs.");
+           const tabs = res.body as { kind: string }[];
+           const chat = (t: { kind: string }) => t.kind === "agent-chat";
+           return jsonResult({
+             count: tabs.filter((t) => args.kind === "all" || (args.kind === "chat") === chat(t)).length
+           });
          }
        })
      ]
    });
    ```
 
-2. **One line** in `index.ts`: `SESSION_TOOLKITS = [threadsToolkit]`.
+2. **One line** in `index.ts`: `SESSION_TOOLKITS = [..., tabsToolkit]`.
 3. **A presentation label** per tool in `packages/ui/src/lib/agent-chat/presentation.logic.ts`
-   `SESSION_TOOL_LABELS` (`thread_list: "Listed threads"`). Without one a row reads
-   "Orquester: Thread list" — never its raw arguments.
+   `SESSION_TOOL_LABELS` (`tab_count: "Counted tabs"`). Without one a row reads
+   "Orquester: Tab count" — never its raw arguments.
 4. **Reference fields** the UI renders from: add the key to `SESSION_TOOL_REFERENCE_KEYS` in
-   `packages/api/src/agent-chat/session-tools.ts` (`htmlRender`, the visual replies' page, is the
-   first). Slimming then keeps it at `data.sessionTool.references.<key>` (≤ 4 KiB each) on every
+   `packages/api/src/agent-chat/session-tools.ts` (`htmlRender`, the visual replies' page;
+   `threadRef`, the thread a thread or delegation tool acted on). Slimming then keeps it at `data.sessionTool.references.<key>` (≤ 4 KiB each) on every
    provider's row — also through a second slim — and the rest of a result is summarised as usual.
    Read it back with `sessionToolReferences(data, [key])` on a row whose `sessionTool` marker
    names your tool (`htmlRenderReferenceOfActivityPayload` is the pattern); never by spelling.

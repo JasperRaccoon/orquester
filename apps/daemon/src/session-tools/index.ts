@@ -15,11 +15,13 @@ import type { SessionToolkit } from "./contract.ts";
 import { pullRequestsToolkit } from "./pull-requests/index.ts";
 import { createSessionToolRegistry, type SessionToolRegistry } from "./registry.ts";
 import { schedulingToolkit } from "./scheduling/index.ts";
+import { threadsToolkit } from "./threads/index.ts";
 
 export const SESSION_TOOLKITS: readonly SessionToolkit[] = [
   // One line per toolkit, e.g. `htmlToolkit,` (from `./html/index.ts`).
   schedulingToolkit,
-  pullRequestsToolkit
+  pullRequestsToolkit,
+  threadsToolkit
 ];
 
 /** The production registry, built once per process. */

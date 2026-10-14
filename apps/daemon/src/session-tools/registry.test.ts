@@ -11,6 +11,7 @@ import { z } from "zod";
 import { defineSessionTool, defineSessionToolkit, SESSION_TOOL_READ_ONLY, type SessionToolkit } from "./contract.ts";
 import { schedulingToolkit } from "./scheduling/index.ts";
 import { SESSION_TOOLKITS, sessionToolRegistry } from "./index.ts";
+import { THREADS_TOOLKIT_INSTRUCTIONS, threadsToolkit } from "./threads/index.ts";
 import {
   composeSessionToolInstructions,
   createSessionToolRegistry,
@@ -53,6 +54,9 @@ test("the production registry carries every listed toolkit's tools, within the i
   assert.ok(SESSION_TOOLKITS.includes(schedulingToolkit));
   for (const tool of schedulingToolkit.tools) assert.equal(registry.get(tool.name)?.name, tool.name);
   assert.ok(registry.instructions.includes("`schedule_task`"));
+  assert.ok(SESSION_TOOLKITS.includes(threadsToolkit));
+  for (const tool of threadsToolkit.tools) assert.equal(registry.get(tool.name)?.name, tool.name);
+  assert.ok(registry.instructions.includes(THREADS_TOOLKIT_INSTRUCTIONS));
 });
 
 test("the test toolkit registers and composes its paragraph after the header", () => {

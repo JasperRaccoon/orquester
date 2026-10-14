@@ -159,8 +159,11 @@ export function sessionToolMarkedData(data: unknown, registered: ReadonlySet<str
  * - `htmlRender`: the visual-replies toolkit's published page
  *   (`HtmlRenderReference`, `html-render.ts`, design §2.1), read back with
  *   `htmlRenderReferenceOfActivityPayload`.
+ * - `threadRef`: the thread a thread or delegation tool created or acted on
+ *   (`ThreadToolReference`, `thread-tools.ts`, design §5), read back with
+ *   `threadToolReferenceOfActivityData`.
  */
-export const SESSION_TOOL_REFERENCE_KEYS: readonly string[] = ["htmlRender"];
+export const SESSION_TOOL_REFERENCE_KEYS: readonly string[] = ["htmlRender", "threadRef"];
 
 /** One kept reference field may take this much JSON; a bigger one is dropped, never cut. */
 export const SESSION_TOOL_REFERENCE_MAX_BYTES = 4 * 1024;
