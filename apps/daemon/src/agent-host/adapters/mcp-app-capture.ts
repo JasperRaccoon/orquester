@@ -191,6 +191,19 @@ export class McpAppSessionCache<T> {
 }
 
 /**
+ * A snapshot read for one call, as THIS call's reference: the cache is keyed
+ * by server + URI, and two tools of a server can share one `ui://` resource,
+ * so every field the row's own-call check compares (server, tool, resource)
+ * is this call's — the snapshot, its CSP and permissions are the shared part.
+ */
+export function mcpAppReferenceForCall(
+  snapshot: McpAppReference,
+  call: { server: string; tool: string; resourceUri: string }
+): McpAppReference {
+  return { ...snapshot, server: call.server, tool: call.tool, resourceUri: call.resourceUri };
+}
+
+/**
  * The snapshots an adapter already stored, by thread + server + URI + the
  * prepared document's SHA-256: an app called again with an unchanged
  * document reuses its attachment rather than storing another copy (≤ 5 MiB

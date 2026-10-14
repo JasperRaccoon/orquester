@@ -63,6 +63,16 @@ const TEXT_RULES: readonly TextRule[] = [
       /\b(?:sk-[A-Za-z0-9_-]{16,}|xai-[A-Za-z0-9_-]{16,}|gh[pousr]_[A-Za-z0-9]{16,}|github_pat_[A-Za-z0-9_]{16,}|xox[abprs]-[A-Za-z0-9-]{8,}|ATATT[A-Za-z0-9_=-]{16,}|eyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]*)/g
   },
   {
+    // The codex README: an account's credit balance is written "0" (`account/rateLimits/*`).
+    name: "an account's credit balance",
+    pattern: /"balance":"(?!0")[^"]*"/g
+  },
+  {
+    // The codex README: the capture host's name in `remoteControl/status/changed` → `<redacted-hostname>`.
+    name: "the capture host's name",
+    pattern: /remoteControl\/status\/changed".*?"serverName":"(?!<redacted-hostname>")[^"]*"/g
+  },
+  {
     // The scheme as HTTP spells it: a lower-case "bearer" is prose.
     name: "a credential",
     pattern: /\b(?:Bearer|Basic)\s+[A-Za-z0-9._~+/-]{8,}=*/g,

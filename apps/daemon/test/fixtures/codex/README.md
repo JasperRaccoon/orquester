@@ -980,7 +980,9 @@ end's `summary`: the agent's result, as Claude's is.
 Captured 2026-10-14 for the agent-visuals spec's appendix A (MCP Apps), from a scratch
 `CODEX_HOME` holding only a managed account's auth file and a config naming a stub MCP Apps server
 (`apps`: one tool `show_widget` whose `_meta.ui.resourceUri` is `ui://stub/widget.html`). Redacted
-as above; the scratch home is `~/codex-home`, the probe dir `~/tmp/mcp-apps-probe`.
+as above — `remoteControl/status/changed`'s `serverName` → `<redacted-hostname>`, every credit
+`balance` → `"0"`, `installationId` → all-zero UUID — and the scratch home is `~/codex-home`, the
+probe dir `~/tmp/mcp-apps-probe`.
 
 - With `initialize.capabilities.extensions["io.modelcontextprotocol/ui"]` declared, the model's call
   completes as `mcpToolCall {appContext: null, mcpAppResourceUri: "ui://stub/widget.html"}` — the

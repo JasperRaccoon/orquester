@@ -1199,6 +1199,10 @@ async function runPrompt(id, params) {
   }
 
   if (scenario === "mcp-app" || scenario === "mcp-app-hang" || scenario === "mcp-app-slow") {
+    // `GROK_MOCK_SECOND_TOOL`: the second prompt calls another tool of the
+    // same server that shares the resource.
+    const appTool = promptSeq === 2 && process.env.GROK_MOCK_SECOND_TOOL ? process.env.GROK_MOCK_SECOND_TOOL : "show_widget";
+    const appCallId = `call-app-${promptSeq}`;
     // A `use_tool` call of an MCP Apps tool, as Grok 1.0.46 streams it (the
     // 2026-10-14 probe, spec appendix): its completed update carries the TOOL
     // definition's `_meta` (`ui.resourceUri`) and an MCP `rawOutput`.
@@ -1209,9 +1213,9 @@ async function runPrompt(id, params) {
       sessionId,
       update: {
         sessionUpdate: "tool_call",
-        toolCallId: "call-app-1",
+        toolCallId: appCallId,
         title: "use_tool",
-        rawInput: { tool_name: "apps__show_widget", tool_input: { n: 1 } },
+        rawInput: { tool_name: `apps__${appTool}`, tool_input: { n: 1 } },
         _meta: vendor
       },
       _meta: { totalTokens: 1690, promptId }
@@ -1220,11 +1224,11 @@ async function runPrompt(id, params) {
       sessionId,
       update: {
         sessionUpdate: "tool_call_update",
-        toolCallId: "call-app-1",
+        toolCallId: appCallId,
         kind: "other",
-        title: "apps__show_widget",
+        title: `apps__${appTool}`,
         locations: [],
-        rawInput: { variant: "UseTool", tool_name: "apps__show_widget", tool_input: { n: 1 } },
+        rawInput: { variant: "UseTool", tool_name: `apps__${appTool}`, tool_input: { n: 1 } },
         _meta: vendor
       },
       _meta: { totalTokens: 1690, promptId }
@@ -1233,9 +1237,9 @@ async function runPrompt(id, params) {
       sessionId,
       update: {
         sessionUpdate: "tool_call_update",
-        toolCallId: "call-app-1",
+        toolCallId: appCallId,
         status: "completed",
-        rawOutput: { type: "MCP", tool_name: "show_widget", server_name: "apps", output: { OkayOutput: 'widget shown\n{"n":1}' } },
+        rawOutput: { type: "MCP", tool_name: appTool, server_name: "apps", output: { OkayOutput: 'widget shown\n{"n":1}' } },
         _meta: { ui: { resourceUri: "ui://apps/widget.html", visibility: ["model", "app"] }, "ui/resourceUri": "ui://apps/widget.html" }
       },
       _meta: { totalTokens: 1695, promptId }

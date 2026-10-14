@@ -348,9 +348,12 @@ export function isMcpAppUnloadNotice(data: unknown): boolean {
 export function injectMcpAppThemeBootstrap(html: string): string {
   return insertAfterPolicy(
     html,
-    `<script>(function(){window.addEventListener("pagehide",function(){try{window.parent.postMessage({jsonrpc:"2.0",method:${JSON.stringify(
+    // The parent is read at install, before any app script could shadow
+    // `window.parent`; a page kept in the back-forward cache (`persisted`)
+    // is not going away, so it says nothing.
+    `<script>(function(){var P=window.parent;window.addEventListener("pagehide",function(ev){if(ev&&ev.persisted)return;try{P.postMessage({jsonrpc:"2.0",method:${JSON.stringify(
       MCP_APP_UNLOAD_METHOD
-    )}},"*");}catch(e){}},true);window.addEventListener("message",function(e){if(e.source!==window.parent)return;var m=e.data;if(!m||m.jsonrpc!=="2.0")return;var t=m.method==="ui/notifications/host-context-changed"?m.params&&m.params.theme:(m.id!==undefined&&m.method===undefined&&m.result&&m.result.hostContext?m.result.hostContext.theme:undefined);if(t==="light"||t==="dark")document.documentElement.style.colorScheme=t;});})();</script>`
+    )}},"*");}catch(e){}},true);window.addEventListener("message",function(e){if(e.source!==P)return;var m=e.data;if(!m||m.jsonrpc!=="2.0")return;var t=m.method==="ui/notifications/host-context-changed"?m.params&&m.params.theme:(m.id!==undefined&&m.method===undefined&&m.result&&m.result.hostContext?m.result.hostContext.theme:undefined);if(t==="light"||t==="dark")document.documentElement.style.colorScheme=t;});})();</script>`
   );
 }
 

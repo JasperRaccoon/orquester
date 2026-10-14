@@ -304,3 +304,25 @@ test("an app whose domains reach Orquester's own origin is recognised", () => {
   assert.equal(mcpAppCspReachesOrigin(csp, "unix:///run/daemon.sock"), false);
   assert.equal(mcpAppCspReachesOrigin(csp, "not a url"), false);
 });
+
+test("the unload notice goes to the parent seen at install, and not for a page kept in the back-forward cache", () => {
+  const html = readMcpAppDocument([{ mimeType: "text/html;profile=mcp-app", text: "<p>app</p>" }], "ui://x");
+  assert.equal(html.kind, "document");
+  if (html.kind !== "document") return;
+  const bootstrap = /<script>(\(function\(\)\{var P=window\.parent;[\s\S]*?)<\/script>/.exec(html.html)?.[1];
+  assert.ok(bootstrap, "the theme bootstrap");
+  const posted: Array<{ to: string; message: unknown }> = [];
+  const parent = { postMessage: (message: unknown) => posted.push({ to: "parent", message }) };
+  const listeners = new Map<string, (event: unknown) => void>();
+  const fakeWindow: Record<string, unknown> = {
+    parent,
+    addEventListener: (type: string, listener: (event: unknown) => void) => listeners.set(type, listener)
+  };
+  new Function("window", "document", bootstrap)(fakeWindow, { documentElement: { style: {} } });
+  // An app script shadowing `window.parent` after the bootstrap ran changes nothing.
+  fakeWindow.parent = { postMessage: (message: unknown) => posted.push({ to: "impostor", message }) };
+  listeners.get("pagehide")!({ persisted: true });
+  assert.deepEqual(posted, [], "a page kept in the back-forward cache says nothing");
+  listeners.get("pagehide")!({ persisted: false });
+  assert.deepEqual(posted, [{ to: "parent", message: { jsonrpc: "2.0", method: "orq/notifications/document-unloaded" } }]);
+});

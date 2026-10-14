@@ -150,6 +150,7 @@ import {
   MCP_APP_READ_CACHE_MS,
   MCP_APP_TOOLS_CACHE_MS,
   captureMcpApp,
+  mcpAppReferenceForCall,
   McpAppFrameHold,
   McpAppSessionCache,
   type McpAppSnapshotStore
@@ -1608,7 +1609,7 @@ export class CodexSession {
     const readKey = `${app.server}\u0000${app.resourceUri}`;
     const recent = this.appReads.get(readKey);
     if (recent !== undefined) {
-      this.handleNotification(method, params, withMcpApp(app.itemId, recent));
+      this.handleNotification(method, params, withMcpApp(app.itemId, mcpAppReferenceForCall(recent, app)));
       return;
     }
     this.frames.hold(

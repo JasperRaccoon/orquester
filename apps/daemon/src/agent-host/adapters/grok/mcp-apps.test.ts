@@ -16,7 +16,7 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import test, { after, describe } from "node:test";
 
-import type { RuntimeEvent } from "@orquester/api/agent-chat";
+import { mcpAppReferenceOfActivityPayload, type RuntimeEvent } from "@orquester/api/agent-chat";
 
 import type { AdapterContext } from "../../adapter.ts";
 import type { SessionNotification } from "./acp/_generated/schema.ts";
@@ -112,7 +112,7 @@ after(async () => {
   for (const dispose of rigs) await dispose();
 });
 
-async function rig(scenario: string) {
+async function rig(scenario: string, env: Record<string, string> = {}) {
   const cwd = await mkdtemp(join(tmpdir(), "grok-mcp-apps-"));
   const events: RuntimeEvent[] = [];
   const waiters: Array<{ predicate: (event: RuntimeEvent) => boolean; resolve: (event: RuntimeEvent) => void }> = [];
@@ -140,7 +140,7 @@ async function rig(scenario: string) {
         if (sentWaiters[index]!.method === frame.method) sentWaiters.splice(index, 1)[0]!.resolve();
       }
     },
-    buildEnv: () => ({ PATH: process.env.PATH ?? "", HOME: cwd, TMPDIR: cwd, GROK_MOCK_SCENARIO: scenario }),
+    buildEnv: () => ({ PATH: process.env.PATH ?? "", HOME: cwd, TMPDIR: cwd, GROK_MOCK_SCENARIO: scenario, ...env }),
     resolveBin: async () => MOCK,
     sessionPath: () => process.env.PATH ?? "",
     tmpDir: () => cwd,
@@ -232,17 +232,31 @@ describe("grok MCP Apps — the adapter", () => {
   });
 
   test("a read slower than the 4 s probe deadline is still captured, and a second turn reuses it without reading", async () => {
-    const r = await rig("mcp-app-slow");
+    // The second turn calls ANOTHER tool of the server that shares the resource.
+    const r = await rig("mcp-app-slow", { GROK_MOCK_SECOND_TOOL: "edit_widget" });
     await r.adapter.sendTurn({ threadId: "t1", input: "show it", attachments: [], interactionMode: "default" });
     await r.waitFor((event) => event.type === "turn.completed");
     const first = r.events.find(isAppCompletion) as Extract<RuntimeEvent, { type: "item.completed" }>;
     assert.equal(((first.payload.data as Record<string, unknown>).mcpApp as { attachmentId?: string })?.attachmentId, STORED_ID);
-    const completions = () => r.events.filter(isAppCompletion).length;
     await r.adapter.sendTurn({ threadId: "t1", input: "again", attachments: [], interactionMode: "default" });
     await r.waitFor((event) => event.type === "turn.completed" && r.events.filter((e) => e.type === "turn.completed").length === 2);
     assert.equal(r.sent.filter((frame) => frame.method === "_x.ai/mcp/read_resource").length, 1, "read once");
     assert.equal(r.stored.length, 1, "stored once");
-    assert.ok(completions() >= 1);
+    const second = r.events.find(
+      (event) => event.type === "item.completed" && event.itemId === "call-app-2"
+    ) as Extract<RuntimeEvent, { type: "item.completed" }> | undefined;
+    assert.ok(second, "the second turn's call completed");
+    assert.equal(r.events.filter((event) => event.type === "item.completed" && /^call-app-/.test(event.itemId ?? "")).length, 2);
+    const data = second.payload.data as Record<string, unknown>;
+    // The reused snapshot, as the second call's own reference: the row's own-call check accepts it.
+    assert.deepEqual(data.mcpApp, {
+      attachmentId: STORED_ID,
+      server: "apps",
+      tool: "edit_widget",
+      resourceUri: "ui://apps/widget.html",
+      prefersBorder: true
+    });
+    assert.deepEqual(mcpAppReferenceOfActivityPayload({ itemType: "dynamic_tool_call", data }), data.mcpApp);
     await r.dispose();
   });
 

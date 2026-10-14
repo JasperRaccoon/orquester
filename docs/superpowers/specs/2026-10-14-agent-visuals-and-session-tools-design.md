@@ -344,12 +344,15 @@ rows; and the `untrusted` `additionalContext` value appears in no live notificat
 Hardening (fix round 1): declared domains drop loopback, link-local and private hosts,
 `.localhost`/`.local` names and bare-TLD wildcards (`*.com`); a client refuses to frame an app whose
 domains reach its own origin or the daemon's (`mcpAppCspReachesOrigin`). Grok's capture read is
-bounded by the capture's own 15 s deadline. A session reuses an app's snapshot reference for 5 minutes
-without reading (and so without pausing its stream); past that, an unchanged document (same thread,
+bounded by the capture's own 15 s deadline. A session reuses an app's snapshot for 5 minutes without
+reading (and so without pausing its stream), as each call's own reference — its server, tool and
+URI, since two tools may share one resource; past that, an unchanged document (same thread,
 server, URI and SHA-256) reuses its stored attachment instead of storing another copy. A server's tool
 listing is cached 30 s per session (dropped on Codex's `mcpServer/startupStatus/updated` and Grok's
 `tools_changed` / `servers_updated` / `server_status`). The captured document reports its own
-`pagehide` (`orq/notifications/document-unloaded`, from the first listener the bootstrap installs);
+`pagehide` (`orq/notifications/document-unloaded`, from the first listener the bootstrap installs,
+to the parent it read at install — never a later `window.parent` — and not for a page the
+back-forward cache keeps);
 the client stops the bridge on it, ahead of anything a page it navigated to could post, and still
 on the frame's second `load`; the row then shows "left its page" in place of the frame. Residual:
 an app that never reaches its `pagehide` listener (a crash of the document) is caught only by that

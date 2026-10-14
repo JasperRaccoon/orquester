@@ -12,7 +12,7 @@ import assert from "node:assert/strict";
 import { rmSync } from "node:fs";
 import { after, describe, it } from "node:test";
 
-import { MCP_APP_EXTENSION_ID, type RuntimeEvent } from "@orquester/api/agent-chat";
+import { MCP_APP_EXTENSION_ID, mcpAppReferenceOfActivityPayload, type RuntimeEvent } from "@orquester/api/agent-chat";
 
 import { AsyncEventQueue } from "./event-queue.ts";
 import { CodexSession, type CodexSessionOptions } from "./session.ts";
@@ -183,6 +183,33 @@ describe("codex — MCP Apps", () => {
     assert.equal(r.received().filter((frame) => frame.method === "mcpServer/resource/read").length, 1);
     assert.equal(r.stored.length, 1);
     assert.equal(((second.payload.data as Record<string, unknown>).mcpApp as { attachmentId: string }).attachmentId, STORED_ID);
+    await r.stop();
+  });
+
+  it("another tool sharing the resource gets its own reference from the cached snapshot", async () => {
+    const r = rig({
+      turns: [],
+      mcpApps: { contents: [{ uri: "ui://apps/widget.html", mimeType: "text/html;profile=mcp-app", text: APP_HTML }] }
+    });
+    await r.session.start();
+    const threadId = threadIdOf(r.session);
+    await r.notify("item/completed", { item: appCall(), threadId, turnId: "t", completedAtMs: 1 });
+    await r.events.waitFor(isCompletionOf("call-app-1"), "the first call");
+    await r.notify("item/completed", {
+      item: appCall({ id: "call-other", tool: "edit_widget" }),
+      threadId,
+      turnId: "t",
+      completedAtMs: 2
+    });
+    const other = (await r.events.waitFor(isCompletionOf("call-other"), "the other tool's call")) as Extract<
+      RuntimeEvent,
+      { type: "item.completed" }
+    >;
+    assert.equal(r.received().filter((frame) => frame.method === "mcpServer/resource/read").length, 1, "the snapshot is shared");
+    const data = other.payload.data as Record<string, unknown>;
+    assert.equal((data.mcpApp as { tool: string }).tool, "edit_widget");
+    // The row's own-call check accepts it, so the app renders and its requests resolve.
+    assert.deepEqual(mcpAppReferenceOfActivityPayload({ itemType: "mcp_tool_call", data }), data.mcpApp);
     await r.stop();
   });
 

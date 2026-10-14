@@ -89,6 +89,7 @@ import {
   MCP_APP_READ_CACHE_MS,
   MCP_APP_TOOLS_CACHE_MS,
   captureMcpApp,
+  mcpAppReferenceForCall,
   McpAppFrameHold,
   McpAppSessionCache,
   type McpAppSnapshotStore
@@ -1311,7 +1312,7 @@ export class GrokSession {
     const readKey = `${app.server}\u0000${app.resourceUri}`;
     const recent = this.appReads.get(readKey);
     if (recent !== undefined) {
-      this.onSessionUpdate(notification, withGrokMcpApp(app.toolCallId, recent));
+      this.onSessionUpdate(notification, withGrokMcpApp(app.toolCallId, mcpAppReferenceForCall(recent, app)));
       return;
     }
     const sessionId = this.acpSessionId;
