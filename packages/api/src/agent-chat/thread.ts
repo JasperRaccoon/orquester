@@ -20,7 +20,7 @@ import type {
   RuntimeMode
 } from "./adapter-types.ts";
 import type { AgentGoal, AgentGoalChange, ThreadGoal } from "./goal.ts";
-import type { ThreadLineage } from "./lineage.ts";
+import type { ThreadForkStrategy, ThreadLineage } from "./lineage.ts";
 import type {
   ApprovalOption,
   CanonicalRequestType,
@@ -144,6 +144,13 @@ export interface ThreadHead {
    * from a build that predates lineage.
    */
   lineage?: ThreadLineage;
+  /**
+   * How a fork's conversation was carried over (spec 2026-10-14 §6), for a
+   * repeated fork request's answer. Head-only, written at the fork: the
+   * `thread.forked` row says the same, but a long thread's fold window drops
+   * it. Absent on a thread that is no fork and from an older build.
+   */
+  forkStrategy?: ThreadForkStrategy;
   createdAt: string;
   updatedAt: string;
 }

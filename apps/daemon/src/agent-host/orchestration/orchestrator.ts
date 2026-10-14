@@ -387,6 +387,8 @@ interface ThreadRuntime {
    * over. The goal reads `continuing` while it is set.
    */
   goalHeldForHandover: true | undefined;
+  /** Head-only like {@link continueAfterRestart}: how this fork was carried over (`forkThread`). */
+  forkStrategy: ThreadForkStrategy | undefined;
   /**
    * When this host last started a provider session for the thread (epoch ms),
    * or null. A (re)started session is an idle point a provider continues its
@@ -1105,6 +1107,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
       continueAfterRestart: persistedHead?.continueAfterRestart,
       resumeGoalAfterRestart: persistedHead?.resumeGoalAfterRestart === true ? true : undefined,
       goalHeldForHandover: persistedHead?.goalHeldForHandover === true ? true : undefined,
+      forkStrategy: persistedHead?.forkStrategy,
       sessionStartedAt: null,
       goalResumedAt: null,
       binding,
@@ -1156,13 +1159,15 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
   };
 
   /**
-   * The three head-only markers, merged onto a projected head (§3.3, goals
-   * §5.5, §5.7) — so every head rewrite, whoever triggers it, carries them.
+   * The head-only state, merged onto a projected head (§3.3, goals §5.5,
+   * §5.7, a fork's strategy) — so every head rewrite, whoever triggers it,
+   * carries it.
    */
   const withHeadOnlyState = (runtime: ThreadRuntime, head: ThreadHead): ThreadHead =>
     runtime.continueAfterRestart === undefined &&
     runtime.resumeGoalAfterRestart === undefined &&
-    runtime.goalHeldForHandover === undefined
+    runtime.goalHeldForHandover === undefined &&
+    runtime.forkStrategy === undefined
       ? head
       : {
           ...head,
@@ -1170,7 +1175,8 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
             ? { continueAfterRestart: runtime.continueAfterRestart }
             : {}),
           ...(runtime.resumeGoalAfterRestart === true ? { resumeGoalAfterRestart: true } : {}),
-          ...(runtime.goalHeldForHandover === true ? { goalHeldForHandover: true } : {})
+          ...(runtime.goalHeldForHandover === true ? { goalHeldForHandover: true } : {}),
+          ...(runtime.forkStrategy !== undefined ? { forkStrategy: runtime.forkStrategy } : {})
         };
 
   const requireHead = (runtime: ThreadRuntime): ThreadHead => {
@@ -4167,6 +4173,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
     // The child's rows — the parent's turns its history replay carries over
     // first — are masked with the parent's secrets, never given them.
     options.secrets?.link(threadId, parentThreadId);
+    // On the head from its first save, so a repeated request answers it
+    // however long the child's timeline grows (`recordedForkStrategy`).
+    runtime.forkStrategy = strategy;
     const head = await createThreadNow(runtime, request, {
       adapterId,
       modelSelection,
@@ -4253,10 +4262,12 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
 
   /**
    * How an existing fork was carried over, for a repeated fork request: the
-   * strategy its `thread.forked` row recorded, else `native` — the one
-   * strategy that writes no row (its history replay says it all).
+   * strategy its head recorded; for a head an older build wrote, the one its
+   * `thread.forked` row recorded while the fold still holds it, else `native`
+   * — the one strategy that writes no row (its history replay says it all).
    */
   const recordedForkStrategy = (runtime: ThreadRuntime): ThreadForkStrategy => {
+    if (runtime.forkStrategy !== undefined) return runtime.forkStrategy;
     for (const item of runtime.state.activities) {
       if (item.activityKind !== "thread.forked") continue;
       const strategy = (item.payload as { strategy?: unknown } | null)?.strategy;

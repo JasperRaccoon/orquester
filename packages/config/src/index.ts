@@ -1050,6 +1050,9 @@ export const agentThreadHeadSchema = z.object({
   // Spec 2026-10-14 §6, as `thread.created` recorded it. Must be listed (zod strips unknown
   // keys); a malformed one reads as none, never as a head nothing can read.
   lineage: threadLineageRecordSchema.optional().catch(undefined),
+  // How a fork was carried over; head-only. Unreadable reads as none: the host then falls
+  // back to the `thread.forked` row the fold still holds.
+  forkStrategy: z.enum(["native", "transcript", "empty", "unavailable"]).optional().catch(undefined),
   createdAt: z.string(),
   updatedAt: z.string()
 });

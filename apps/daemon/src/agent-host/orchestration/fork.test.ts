@@ -647,6 +647,53 @@ describe("forkThread", () => {
     await host.stop();
   });
 
+  it("a repeated fork answers the strategy the head recorded, after the window dropped its row and a restart", async (t) => {
+    const root = await mkdtemp(join(tmpdir(), "orq-fork-strategy-"));
+    t.after(() => rm(root, { recursive: true, force: true }));
+    const store = createThreadStore({ rootDir: join(root, "threads") });
+    t.after(() => store.close());
+    const grok = createScriptedAdapter({ id: "grok" });
+    const host = createTestHost({ adapters: { grok }, store });
+    const parentId = await host.createThread({ threadId: "parent", refId: "grok" });
+    const said = await runTurn(host as unknown as TestHost, grok, parentId, "q", "a");
+    const request = forkRequest("child", "grok", { messageId: said.replyId });
+    assert.equal((await host.orchestrator.forkThread(parentId, request)).strategy, "transcript");
+    await host.settle();
+
+    // A long child: its `thread.forked` row leaves the fold's activity window.
+    const rows = Array.from({ length: 600 }, (_, index) =>
+      domainEvent("child", host as unknown as TestHost, "thread.activity-appended", {
+        activity: {
+          id: `row-${index}`,
+          kind: "activity",
+          tone: "info",
+          activityKind: "runtime.warning",
+          summary: `row ${index}`,
+          payload: null,
+          turnId: null,
+          createdAt: host.clock.nowIso(),
+          updatedAt: host.clock.nowIso()
+        }
+      })
+    );
+    await host.orchestrator.ingestionSink("child", rows);
+    await host.settle();
+    const child = await snapshotOf(host as unknown as TestHost, "child");
+    assert.equal(
+      child.items.some((item) => item.kind === "activity" && item.activityKind === "thread.forked"),
+      false,
+      "the row is out of the window"
+    );
+    assert.equal(child.head.forkStrategy, "transcript");
+    assert.equal((await host.orchestrator.forkThread(parentId, request)).strategy, "transcript");
+    await host.stop();
+
+    const next = createTestHost({ adapters: { grok: createScriptedAdapter({ id: "grok" }) }, store });
+    t.after(() => next.stop());
+    assert.equal((await next.orchestrator.forkThread(parentId, { ...request, confirmOnly: true })).strategy, "transcript");
+    assert.equal((await next.orchestrator.forkThread(parentId, request)).strategy, "transcript");
+  });
+
   it("never hands back a deleted fork child for a repeated fork", async () => {
     const grok = createScriptedAdapter({ id: "grok" });
     const host = createTestHost({ adapters: { grok } });
