@@ -31,7 +31,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type { EventMessage, SessionSummary } from "@orquester/api";
@@ -224,11 +224,17 @@ function digest(status: PullRequestStatus): PullRequestWatchStatusRecord {
   };
 }
 
-async function writeAtomic(path: string, content: string): Promise<void> {
+/** Temp file + rename, 0600; a failed write or rename leaves no temp file behind. */
+export async function writeAtomic(path: string, content: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
   const tmp = `${path}.${process.pid}.${randomUUID()}.tmp`;
-  await writeFile(tmp, content, { encoding: "utf8", mode: 0o600 });
-  await rename(tmp, path);
+  try {
+    await writeFile(tmp, content, { encoding: "utf8", mode: 0o600 });
+    await rename(tmp, path);
+  } catch (error) {
+    await rm(tmp, { force: true }).catch(() => undefined);
+    throw error;
+  }
 }
 
 export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps): PullRequestWatchService {
