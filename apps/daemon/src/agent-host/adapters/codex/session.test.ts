@@ -3058,8 +3058,22 @@ describe("codex session — a pause never waits for the goal to settle (final fi
     t.mock.timers.enable({ apis: ["Date", "setTimeout"], now: Date.now() });
     let result: { summary: string } | undefined;
     const paused = r.session.goalCommand({ kind: "pause" }).then((value) => { result = value; });
+    // "At once": the set leaves within the call's own microtasks, before any
+    // timer or I/O — so it is on the wire by the next macrotask. A pause that
+    // waited for the settle would be parked on a (mocked) timer instead.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.ok(
+      r.rawFrames.some(({ frame }) => {
+        const logged = frame as { direction: string; frame: { method?: string } };
+        return logged.direction === "send" && logged.frame.method === "thread/goal/set";
+      }),
+      "pause bypasses the pending snapshot"
+    );
+    // Only now is the barrier written AFTER the set: issued straight after the
+    // call, its `thread/turns/list` went out first (the set is a few awaits in),
+    // and the mock could answer it before it had read the set at all.
     await wireBarrier(r);
-    assert.equal(sentFrames(r.received(), "thread/goal/set").length, 1, "pause bypasses the pending snapshot");
+    assert.equal(sentFrames(r.received(), "thread/goal/set").length, 1, "the mock has the pause");
     await paused;
     assert.deepEqual(result, { summary: "" });
     assert.deepEqual(sentFrames(r.received(), "thread/goal/set"), [
