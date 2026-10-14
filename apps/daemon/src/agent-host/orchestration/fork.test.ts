@@ -481,6 +481,74 @@ describe("forkThread", () => {
     await host.stop();
   });
 
+  it("transcript: a first turn that fails keeps the handoff for the next message; one that succeeds does not", async () => {
+    const grok = createScriptedAdapter({ id: "grok" });
+    const host = createTestHost({ adapters: { grok } });
+    const parentId = await host.createThread({ threadId: "parent", refId: "grok" });
+    const said = await runTurn(host, grok, parentId, "remember SWORDFISH", "noted");
+    await host.orchestrator.forkThread(parentId, forkRequest("child", "grok", { messageId: said.replyId }));
+    await host.settle();
+
+    const settle = async (status: "error" | "ready") => {
+      await host.orchestrator.ingestionSink("child", [
+        domainEvent("child", host, "thread.session-set", {
+          session: { status, activeTurnId: null, ...(status === "error" ? { lastError: "provider error" } : {}) }
+        })
+      ]);
+      await host.settle();
+    };
+    await host.orchestrator.command("child", "turn", { commandId: cmd(), input: "continue" });
+    await host.settle();
+    assert.match(grok.lastTurn?.input ?? "", /^<forked-conversation>[\s\S]*SWORDFISH[\s\S]*\n\ncontinue$/);
+    await settle("error");
+    const failed = (await snapshotOf(host, "child")).turns?.at(-1);
+    assert.equal(failed?.state, "failed");
+
+    await host.orchestrator.command("child", "turn", { commandId: cmd(), input: "retry" });
+    await host.settle();
+    assert.match(grok.lastTurn?.input ?? "", /^<forked-conversation>[\s\S]*SWORDFISH[\s\S]*\n\nretry$/, "carried again");
+    await settle("ready");
+
+    await host.orchestrator.command("child", "turn", { commandId: cmd(), input: "again" });
+    await host.settle();
+    assert.equal(grok.lastTurn?.input, "again", "delivered once it settled");
+    await host.stop();
+  });
+
+  it("transcript: a rewind that drops the turn which carried the handoff re-arms it", async () => {
+    const claude = createScriptedAdapter({
+      id: "claude",
+      forkConversation: async () => {
+        throw new Error("compacted after that turn");
+      }
+    });
+    const host = createTestHost({ adapters: { claude } });
+    const parentId = await host.createThread({ threadId: "parent" });
+    const said = await runTurn(host, claude, parentId, "remember SWORDFISH", "noted");
+    const result = await host.orchestrator.forkThread(parentId, forkRequest("child", "claude", { messageId: said.replyId }));
+    await host.settle();
+    assert.equal(result.strategy, "transcript");
+
+    await runTurn(host, claude, "child", "continue", "ok");
+    assert.match(claude.lastTurn?.input ?? "", /SWORDFISH/);
+    await runTurn(host, claude, "child", "next", "ok");
+    assert.equal(claude.lastTurn?.input, "next");
+
+    // Rewinding to turn 1 keeps the turn that carried it: nothing to re-arm.
+    await host.orchestrator.command("child", "revert", { commandId: cmd(), targetTurnCount: 1 });
+    await host.settle();
+    await runTurn(host, claude, "child", "after one", "ok");
+    assert.equal(claude.lastTurn?.input, "after one");
+
+    // Rewinding to before it: the provider no longer has the parent's conversation.
+    await host.orchestrator.command("child", "revert", { commandId: cmd(), targetTurnCount: 0 });
+    await host.settle();
+    assert.equal(claude.calls.filter((call) => call.kind === "rollbackThread").length, 2);
+    await runTurn(host, claude, "child", "from the top", "ok");
+    assert.match(claude.lastTurn?.input ?? "", /^<forked-conversation>[\s\S]*SWORDFISH[\s\S]*\n\nfrom the top$/);
+    await host.stop();
+  });
+
   it("falls back to the transcript when the native fork refuses, and says why", async () => {
     const claude = createScriptedAdapter({
       id: "claude",

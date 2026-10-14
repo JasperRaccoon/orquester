@@ -1064,7 +1064,13 @@ export const forkHandoffSchema = z.object({
   version: z.literal(1),
   parentThreadId: z.string().min(1),
   transcript: z.string().min(1),
-  createdAt: z.string()
+  createdAt: z.string(),
+  /**
+   * The turn that carried the transcript. Kept rather than deleted once sent: a turn that
+   * fails, or a rewind that drops it, re-arms the handoff for the next message. A value that
+   * does not read is no delivery — the transcript is sent again rather than lost.
+   */
+  deliveredTurnId: z.string().min(1).optional().catch(undefined)
 });
 export type ForkHandoffRecord = z.infer<typeof forkHandoffSchema>;
 

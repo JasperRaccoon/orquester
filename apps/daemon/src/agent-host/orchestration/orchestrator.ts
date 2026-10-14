@@ -224,6 +224,7 @@ import {
   type ForkHandoffStore,
   type ResolvedForkCut
 } from "./fork.ts";
+import type { ForkHandoffRecord } from "@orquester/config";
 
 // ---------------------------------------------------------------------------
 // Dependencies
@@ -507,11 +508,11 @@ interface ThreadRuntime {
    */
   hostClosedRequests: Set<string>;
   /**
-   * A transcript-handoff fork's pending conversation (spec 2026-10-14 §6):
-   * `undefined` until `fork-handoff.json` was read for this runtime, `null`
-   * once there is none (never was, or delivered).
+   * A transcript-handoff fork's conversation (spec 2026-10-14 §6), as
+   * `fork-handoff.json` holds it: `undefined` until read for this runtime,
+   * `null` when there is none. Delivered once `deliveredTurnId` is set.
    */
-  forkHandoff: string | null | undefined;
+  forkHandoff: ForkHandoffRecord | null | undefined;
 }
 
 /**
@@ -2253,20 +2254,56 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         logger.error(`agent-host: effect failed for ${runtime.id}`, error);
       });
 
+  /** A transcript-handoff fork's record, read once per runtime ({@link ThreadRuntime.forkHandoff}). */
+  const forkHandoffOf = async (runtime: ThreadRuntime, head: ThreadHead): Promise<ForkHandoffRecord | null> => {
+    if (head.lineage?.relation !== "fork") return null;
+    if (runtime.forkHandoff === undefined) {
+      runtime.forkHandoff = await forkHandoffs.load(runtime.id);
+    }
+    return runtime.forkHandoff;
+  };
+
+  /** Record the handoff as owed again (`deliveredTurnId` gone), on disk first. */
+  const saveForkHandoff = async (runtime: ThreadRuntime, record: ForkHandoffRecord): Promise<void> => {
+    runtime.forkHandoff = record;
+    await forkHandoffs.save(runtime.id, record).catch((error: unknown) => {
+      logger.warn(`agent-host: could not record the fork handoff of ${runtime.id}`, error);
+    });
+  };
+
   /**
-   * The conversation a transcript-handoff fork still owes its provider, read
-   * once per runtime. Only a fork the host could not fork natively has one
-   * (`forkThread`), and it is removed once a turn carried it.
+   * The conversation a transcript-handoff fork still owes its provider. Only
+   * a fork the host could not fork natively has one (`forkThread`). A turn
+   * that carried it marks it delivered — kept, not deleted: when that turn
+   * FAILED the provider may never have taken it in, so the next message
+   * carries it again (a Stop's turn did reach the provider, and is not
+   * resent); a rewind that drops the turn re-arms it ({@link rearmRewoundForkHandoff}).
    */
   const pendingForkHandoff = async (
     runtime: ThreadRuntime,
     head: ThreadHead
   ): Promise<string | null> => {
-    if (head.lineage?.relation !== "fork") return null;
-    if (runtime.forkHandoff === undefined) {
-      runtime.forkHandoff = (await forkHandoffs.load(runtime.id))?.transcript ?? null;
-    }
-    return runtime.forkHandoff;
+    const record = await forkHandoffOf(runtime, head);
+    if (record === null) return null;
+    const delivered = record.deliveredTurnId;
+    if (delivered === undefined) return record.transcript;
+    const carrier = (runtime.state.turns ?? []).find((turn) => turn.turnId === delivered);
+    if (carrier?.state !== "failed") return null;
+    const { deliveredTurnId: _failed, ...owed } = record;
+    await saveForkHandoff(runtime, owed);
+    return owed.transcript;
+  };
+
+  /** A rewind dropped the turn that carried the handoff: the provider no longer has it. */
+  const rearmRewoundForkHandoff = async (
+    runtime: ThreadRuntime,
+    head: ThreadHead,
+    droppedTurnIds: ReadonlySet<string>
+  ): Promise<void> => {
+    const record = await forkHandoffOf(runtime, head);
+    if (record?.deliveredTurnId === undefined || !droppedTurnIds.has(record.deliveredTurnId)) return;
+    const { deliveredTurnId: _dropped, ...owed } = record;
+    await saveForkHandoff(runtime, owed);
   };
 
   const sendTurnEffect = async (runtime: ThreadRuntime, turn: QueuedTurn): Promise<void> => {
@@ -2337,12 +2374,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         ...(turn.modelSelection !== undefined ? { modelSelection: turn.modelSelection } : {}),
         interactionMode: turn.interactionMode
       });
-      if (input !== null) {
-        // The provider has it now: never sent twice.
-        runtime.forkHandoff = null;
-        await forkHandoffs.remove(runtime.id).catch((error: unknown) => {
-          logger.warn(`agent-host: could not remove the fork handoff of ${runtime.id}`, error);
-        });
+      if (input !== null && runtime.forkHandoff) {
+        // The provider has it now: not sent again unless this turn fails or
+        // a rewind drops it (`pendingForkHandoff`).
+        await saveForkHandoff(runtime, { ...runtime.forkHandoff, deliveredTurnId: result.turnId });
       }
       if (runtime.bound) {
         runtime.bound = {
@@ -2879,6 +2914,7 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         });
       }
       const droppedIds = new Set(droppedTurnIds);
+      await rearmRewoundForkHandoff(runtime, head, droppedIds);
       const droppedTurnCounts = [
         ...new Set(
           (runtime.state.checkpoints ?? [])

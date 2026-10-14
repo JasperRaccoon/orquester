@@ -86,6 +86,11 @@ test("the fork handoff reads whole or not at all", () => {
   assert.equal(parseForkHandoff({ ...record, version: 2 }), null);
   assert.equal(parseForkHandoff({ ...record, transcript: "" }), null);
   assert.equal(parseForkHandoff(null), null);
+  const delivered = { ...record, deliveredTurnId: "turn-1" };
+  assert.deepEqual(parseForkHandoff(delivered), delivered);
+  const unreadable = parseForkHandoff({ ...record, deliveredTurnId: 7 });
+  assert.equal(unreadable?.transcript, "t", "an unreadable delivery does not cost the transcript");
+  assert.equal(unreadable?.deliveredTurnId, undefined, "an unreadable delivery is none");
 });
 
 test("the merge outbox keeps unreadable entries and unknown fields for the next rewrite", () => {
