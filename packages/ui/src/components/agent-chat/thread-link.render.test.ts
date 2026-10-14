@@ -88,6 +88,6 @@ test("the same header typed by the user is the user's own text, never another ch
   const context = { readOnly: true, canRevert: false, revertBusy: false, startedTurnCount: 1, skills: [], onFork: null } as unknown as TimelineRowContextValue;
   const html = renderToStaticMarkup(createElement(TimelineRowContext.Provider, { value: context }, createElement(UserMessageRow, { row: row as never })));
   assert.doesNotMatch(html, /data-from-thread/);
-  assert.doesNotMatch(html, /Another chat/);
-  assert.match(html, /You/);
+  assert.doesNotMatch(html, />Another chat</, "the author is the user");
+  assert.match(html, />You</);
 });

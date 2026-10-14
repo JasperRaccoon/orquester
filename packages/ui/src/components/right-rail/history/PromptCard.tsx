@@ -2,7 +2,7 @@ import React from "react";
 import { BookmarkPlus, ChevronUp, FileDiff, LocateFixed } from "lucide-react";
 
 import { escapePromptVariables } from "@orquester/api";
-import type { Checkpoint } from "@orquester/api/agent-chat";
+import { stripThreadProvenance, type Checkpoint } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
 import { diffSummaryOf, type DiffSummary } from "../../../lib/prompt-history/checkpoints.logic";
