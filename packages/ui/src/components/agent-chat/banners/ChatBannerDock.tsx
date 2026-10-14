@@ -10,6 +10,8 @@ import type { AgentChatActions } from "../../../lib/agent-chat/contracts";
 import type { ChatBannerDockProps } from "../contracts";
 import { BannerCard } from "../primitives";
 import { ApprovalCard } from "./ApprovalCard";
+import { McpAppConsentCard } from "./McpAppConsentCard";
+import { mcpAppConsents } from "../../../lib/agent-chat/mcp-app-consent";
 import { BackgroundLivenessBanner } from "./BackgroundLivenessBanner";
 import { PlanReadyBanner } from "./PlanReadyBanner";
 import { QuestionCard, type QuestionAttachment } from "./QuestionCard";
@@ -137,6 +139,17 @@ export function ChatBannerDock({
   const approval = approvals[0] ?? null;
   const userInput = userInputs[0] ?? null;
 
+  // MCP Apps (spec 2026-10-14 §3): this dock is where an app of this thread
+  // asks for consent. While it is mounted the thread can be asked; an app
+  // asking with no dock mounted is told nobody could be (`mcp-app-consent.ts`).
+  React.useEffect(() => mcpAppConsents.attachDock(sessionId), [sessionId]);
+  const appConsents = React.useSyncExternalStore(
+    React.useCallback((listener: () => void) => mcpAppConsents.subscribe(listener), []),
+    () => mcpAppConsents.pending(sessionId),
+    () => mcpAppConsents.pending(sessionId)
+  );
+  const appConsent = appConsents[0] ?? null;
+
   // Per-question attachment drafts belong to one request; a new one starts
   // clean rather than inheriting the previous question's files.
   const userInputRequestId = userInput?.requestId ?? null;
@@ -155,7 +168,8 @@ export function ChatBannerDock({
     hasApproval: approval !== null,
     hasUserInput: userInput !== null,
     hasActionableProposedPlan: actionableProposedPlan,
-    isComposerCollapsedMobile: isMobile
+    isComposerCollapsedMobile: isMobile,
+    hasAppConsent: appConsent !== null
   });
   /*
    * R8-m1: answering an approval or a question used to make the card vanish in
@@ -402,6 +416,15 @@ export function ChatBannerDock({
           onDismiss={userInput.dismissible ? () => onDismiss(userInput.requestId) : null}
           onCarryTextToDraft={onCarryTextToDraft}
           active={active}
+        />
+      ) : null}
+
+      {card === "app-consent" && appConsent ? (
+        <McpAppConsentCard
+          key={appConsent.id}
+          request={appConsent}
+          pendingCount={appConsents.length}
+          onAnswer={(allowed) => mcpAppConsents.answer(appConsent.id, allowed)}
         />
       ) : null}
 

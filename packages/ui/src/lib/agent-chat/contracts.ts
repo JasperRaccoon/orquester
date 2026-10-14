@@ -33,7 +33,8 @@ import type {
   Turn,
   TurnState,
   HistoryImportProgress,
-  HtmlRenderReference
+  HtmlRenderReference,
+  McpAppReference
 } from "@orquester/api/agent-chat";
 import type { ComposerDraft } from "./composer.logic";
 
@@ -357,6 +358,14 @@ export interface WorkLogEntry {
    * its own `visual` row — never grouped, never folded.
    */
   visual?: HtmlRenderReference;
+  /**
+   * Present on a COMPLETED MCP tool call whose app the adapter captured
+   * (spec 2026-10-14 §3): the app, read from the row's `data.mcpApp` by the
+   * shared reader (`mcpAppReferenceOfActivityPayload`, own server+tool
+   * only). Such an entry is its own `mcp-app` row — never grouped, never
+   * folded.
+   */
+  mcpApp?: McpAppReference;
   goal?: {
     change: AgentGoalChange;
     /** The whole objective: the summary cuts it to 200 characters. */
@@ -511,6 +520,21 @@ export type AgentChatTimelineRow =
       createdAt: string;
       turnId: string | null;
       htmlRender: HtmlRenderReference;
+    }
+  /**
+   * An MCP App (spec 2026-10-14 §3), in place of the tool call that produced
+   * it: its captured document framed inline, speaking the MCP Apps bridge.
+   * Never grouped or folded, keyed by the snapshot (`mcp-app:<attachmentId>`)
+   * so the frame — and the app's own state — survives re-derivation.
+   * `itemId` is the call's completed row, which names the app to the daemon.
+   */
+  | {
+      kind: "mcp-app";
+      id: string;
+      createdAt: string;
+      turnId: string | null;
+      itemId: string;
+      mcpApp: McpAppReference;
     }
   | {
       kind: "message";

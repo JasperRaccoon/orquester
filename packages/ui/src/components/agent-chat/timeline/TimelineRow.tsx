@@ -30,6 +30,7 @@ import {
   WorkingRow
 } from "./rows/StructureRows";
 import { VisualRow } from "./rows/VisualRow";
+import { McpAppRow } from "./rows/McpAppRow";
 
 function RowBody({ row }: { row: AgentChatTimelineRow }): React.ReactElement | null {
   switch (row.kind) {
@@ -49,6 +50,8 @@ function RowBody({ row }: { row: AgentChatTimelineRow }): React.ReactElement | n
       return <GoalMarkerRow row={row} />;
     case "visual":
       return <VisualRow row={row} />;
+    case "mcp-app":
+      return <McpAppRow row={row} />;
     case "message": {
       // An agent's launch prompt at the head of its run (§7.6) — first, so a
       // prompt reads as the prompt whatever it says.

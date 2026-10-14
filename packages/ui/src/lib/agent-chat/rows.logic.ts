@@ -39,6 +39,7 @@
 import {
   GOAL_STATUS_ACTIVITY_KIND,
   htmlRenderReferencesEqual,
+  mcpAppReferencesEqual,
   isMessageStreaming,
   isProviderInternalUserText,
   isSettledTurnState,
@@ -252,14 +253,16 @@ function isCompactionEntry(entry: TimelineEntry): boolean {
 }
 
 /**
- * An agent's published page (spec 2026-10-14 §2.5): a completed `orquester`
- * `html_render` call, its own `visual` row. Never grouped, never folded — the
- * page is part of the reply — and never the live tool row.
+ * An agent's published page (spec 2026-10-14 §2.5) — a completed `orquester`
+ * `html_render` call, its own `visual` row — or an MCP App (§3), a completed
+ * call whose app the adapter captured, its own `mcp-app` row. Never grouped,
+ * never folded — what it shows is part of the reply — and never the live
+ * tool row.
  */
 function isVisualEntry(entry: TimelineEntry): boolean {
   return (
     entry.kind === "work" &&
-    entry.entry.visual !== undefined &&
+    (entry.entry.visual !== undefined || entry.entry.mcpApp !== undefined) &&
     entry.entry.toolLifecycleStatus === "completed"
   );
 }
@@ -1339,6 +1342,22 @@ function deriveRowsDetailed(input: TimelineRowsInput): {
       continue;
     }
 
+    // ── MCP App (spec 2026-10-14 §3) ──────────────────────────────────────
+    if (timelineEntry.kind === "work" && isVisualEntry(timelineEntry) && timelineEntry.entry.visual === undefined) {
+      const mcpApp = timelineEntry.entry.mcpApp!;
+      rows.push({
+        kind: "mcp-app",
+        // Keyed by the snapshot: the frame — and the app's session with its
+        // host — survives every re-derivation.
+        id: `mcp-app:${mcpApp.attachmentId}`,
+        createdAt: timelineEntry.createdAt,
+        turnId: timelineEntry.entry.turnId,
+        itemId: timelineEntry.entry.id,
+        mcpApp
+      });
+      continue;
+    }
+
     // ── Published page (spec 2026-10-14 §2.5) ─────────────────────────────
     if (timelineEntry.kind === "work" && isVisualEntry(timelineEntry)) {
       const htmlRender = timelineEntry.entry.visual!;
@@ -1972,6 +1991,15 @@ function isRowUnchanged(a: AgentChatTimelineRow, b: AgentChatTimelineRow): boole
         a.createdAt === other.createdAt &&
         a.turnId === other.turnId &&
         htmlRenderReferencesEqual(a.htmlRender, other.htmlRender)
+      );
+    }
+    case "mcp-app": {
+      const other = b as typeof a;
+      return (
+        a.createdAt === other.createdAt &&
+        a.turnId === other.turnId &&
+        a.itemId === other.itemId &&
+        mcpAppReferencesEqual(a.mcpApp, other.mcpApp)
       );
     }
     case "turn-diff": {
