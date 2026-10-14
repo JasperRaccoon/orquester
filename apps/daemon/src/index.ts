@@ -164,6 +164,15 @@ import { FsTools } from "./mcp/fs-tools.ts";
 import { registerMcp } from "./mcp/server.ts";
 import { sessionToolRegistry } from "./session-tools/index.ts";
 import { registerSessionToolsRoute } from "./session-tools/route.ts";
+import { registerPullRequestWatchRoutes } from "./pr-watch/routes.ts";
+import {
+  consolePullRequestWatchLogger,
+  createPullRequestWatchService,
+  deliverThroughTurnRoute,
+  type PullRequestWatchService
+} from "./pr-watch/service.ts";
+import { systemTriggerClock } from "./workflows/triggers/clock.ts";
+import { PR_WATCHES_CHANNEL, PR_WATCHES_CHANGED } from "@orquester/api/agent-chat";
 import { TodoTools } from "./mcp/todo-tools.ts";
 import {
   UploadTooLargeError,
@@ -222,6 +231,7 @@ import {
   subagentCacheTtlStateFile,
   usageStateFile,
   workspacesMetaPath,
+  pullRequestWatchesPath,
   isValidName
 } from "@orquester/config";
 import { CHROMIUM_FAMILY_IDS, TEMPLATES } from "@orquester/registry";
@@ -1147,6 +1157,29 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   await usage.whenFirstReading(15_000);
   await workflowDaemon.start(services.internalApi).catch((error) => console.error("Workflow engine start failed", error));
 
+  // Pull request watches (spec 2026-10-14 §5 "PR watch"): after the agent host and the in-process
+  // API exist, since a watch's news is sent through the thread's own `/turn` route.
+  const prWatches = createPullRequestWatchService({
+    file: pullRequestWatchesPath(paths.baseDir),
+    read: ({ accountId, repoUrl, number, remarksSince }) =>
+      accounts.pullRequestStatus(accountId, repoUrl, number, remarksSince ? { remarksSince } : {}),
+    projectRemote: (projectPath) => git.remoteUrl(projectPath),
+    projectAccount: async (projectPath) => {
+      const described = describeProjectPath(resolved.workspacesDir, projectPath);
+      if (!described) return null;
+      const meta = (await readWorkspacesMeta(resolved.workspacesMetaFile)).workspaces.find((w) => w.name === described.workspace);
+      return meta?.gitAccountId ?? null;
+    },
+    session: (id) => sessions.get(id),
+    subscribe: (listener) => services.internalApi?.subscribe(listener) ?? (() => undefined),
+    deliver: deliverThroughTurnRoute(() => services.internalApi),
+    publish: (event) => broadcaster.publish(PR_WATCHES_CHANNEL, PR_WATCHES_CHANGED, event),
+    clock: systemTriggerClock,
+    logger: consolePullRequestWatchLogger
+  });
+  await prWatches.start().catch((error) => console.error("Pull request watches start failed", error));
+  services.prWatches = prWatches;
+
   // The external HTTP transport is opt-in and hot-reloadable: changing its
   // config (password / host / port / enabled) restarts THIS transport only —
   // the daemon, sessions (PTYs) and the unix transport keep running. Connected
@@ -1199,6 +1232,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Workflows first: the engine stops its timers, triggers and sweepers (never a sandbox child —
     // those are detached and survive, §5.8), then every workflow store's write chain is flushed.
     // Both are fast; the 3 s backstop in cli.ts bounds them regardless.
+    prWatches.stop();
     await workflowDaemon.stop().catch((error) => console.error("Workflow engine stop failed", error));
     await Promise.all([workflows.flush(), workflowSecrets.flush(), workflowRuns.flush(), workflowState.flush()]);
     // Agent profile: its watchers and debounce timers, each adapter's long-lived helpers (a codex
@@ -1307,6 +1341,8 @@ interface Services {
    * (see its construction in `startDaemon`); null until that app exists. The engine's ChatClient.
    */
   internalApi: InjectDaemonApi | null;
+  /** Pull request watches (spec 2026-10-14 §5); null until started, after `internalApi`. */
+  prWatches?: PullRequestWatchService | null;
   usage: UsageService;
   usageTokens: UsageTokensScanner;
   /** The Claude subagent cache lifetime as it applies now (auto mode's decision). */
@@ -3893,6 +3929,10 @@ export function createServer(
         : null;
     }
   });
+
+  // Pull request watches (spec 2026-10-14 §5): list, start, stop. Both transports; the bearer hook
+  // above gates HTTP. The session tools reach them through the unix app's in-process client.
+  registerPullRequestWatchRoutes(app, { service: () => services.prWatches ?? null });
 
   // Agent profile (agent profile spec §8): each agent CLI's global config. Both transports; the
   // bearer hook above gates HTTP. MCP secret values never leave the daemon.

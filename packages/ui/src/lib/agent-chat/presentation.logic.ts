@@ -490,7 +490,11 @@ export function shortenPath(path: string, workspaceRoot?: string): string {
  * calls them. A toolkit adds a line per tool here (its README); a tool with
  * none still reads "Orquester: <its name in words>", never its raw arguments.
  */
-export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {};
+export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
+  watch_pull_request: "Watched pull request",
+  unwatch_pull_request: "Stopped watching pull request",
+  list_pull_request_watches: "Listed pull request watches"
+};
 
 /** `thread_wait` → `Thread wait`. */
 function humanizeToolName(name: string): string {

@@ -12,10 +12,12 @@
  */
 
 import type { SessionToolkit } from "./contract.ts";
+import { pullRequestsToolkit } from "./pull-requests/index.ts";
 import { createSessionToolRegistry, type SessionToolRegistry } from "./registry.ts";
 
 export const SESSION_TOOLKITS: readonly SessionToolkit[] = [
   // One line per toolkit, e.g. `htmlToolkit,` (from `./html/index.ts`).
+  pullRequestsToolkit
 ];
 
 /** The production registry, built once per process. */

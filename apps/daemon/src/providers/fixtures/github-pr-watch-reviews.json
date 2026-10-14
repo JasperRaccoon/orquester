@@ -1,0 +1,14 @@
+[
+  {
+    "id": 5513319160,
+    "user": {
+      "login": "copilot-pull-request-reviewer[bot]",
+      "type": "Bot"
+    },
+    "body": "<!-- ccr-overview-v2 -->\n\n### \ud83d\udfe1 Changes recommended\n\nRegression coverage does not verify the intended behavior when stdin is a terminal but stdout is piped.\n\n<details open>\n<summary><strong>1 open fin",
+    "state": "COMMENTED",
+    "html_url": "https://github.com/cli/cli/pull/14679#pullrequestreview-5513319160",
+    "submitted_at": "2026-10-14T05:07:25Z",
+    "commit_id": "2de1e0886a0cf896165db70e7729b28bd5b0febc"
+  }
+]

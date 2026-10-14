@@ -37,12 +37,18 @@ const toolkit = (id: string, names: string[], instructions?: string): SessionToo
     )
   });
 
-test("production ships no toolkit, so no provider is given a server", () => {
-  assert.deepEqual(SESSION_TOOLKITS, []);
+test("the production registry carries every listed toolkit's tools, within the instruction cap", () => {
   const registry = sessionToolRegistry();
-  assert.equal(registry.enabled, false);
-  assert.equal(registry.instructions, "");
-  assert.equal(registry.tools.length, 0);
+  assert.equal(registry.enabled, true);
+  assert.deepEqual(
+    registry.tools.map((tool) => tool.name),
+    SESSION_TOOLKITS.flatMap((toolkit) => toolkit.tools.map((tool) => tool.name))
+  );
+  for (const name of ["watch_pull_request", "unwatch_pull_request", "list_pull_request_watches"]) {
+    assert.ok(registry.get(name), name);
+  }
+  assert.ok(Buffer.byteLength(registry.instructions, "utf8") <= SESSION_TOOL_INSTRUCTIONS_MAX_BYTES);
+  assert.match(registry.instructions, /watch_pull_request/);
 });
 
 test("the test toolkit registers and composes its paragraph after the header", () => {

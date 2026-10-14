@@ -13,7 +13,11 @@ import type {
   ParsedRepo,
   ProviderCreds,
   ProviderIdentity,
+  PullRequestCheck,
   PullRequestInfo,
+  PullRequestRemark,
+  PullRequestStatus,
+  PullRequestStatusOptions,
   ReleaseInfo,
   SshProbe,
   UrlContext
@@ -289,6 +293,155 @@ function userRef(identity: ProviderIdentity): string {
   return encodeURIComponent(ref);
 }
 
+// ---------------------------------------------------------------------------
+// Pull request watch reads (spec 2026-10-14 §5 "PR watch")
+// ---------------------------------------------------------------------------
+
+/** Pages a watch read follows before calling a listing incomplete. */
+const WATCH_MAX_PAGES = 5;
+
+const objOf = (value: unknown): Json => (value && typeof value === "object" ? (value as Json) : {});
+
+function valuesOf(data: Json | undefined): Json[] {
+  const values = data?.values;
+  return Array.isArray(values) ? values.filter((value): value is Json => !!value && typeof value === "object") : [];
+}
+
+/** A Bitbucket Cloud timestamp (`2026-06-09T22:07:03.485338+00:00`) as ISO, or "". */
+function isoOf(value: unknown): string {
+  const ms = typeof value === "string" ? Date.parse(value) : Number.NaN;
+  return Number.isNaN(ms) ? "" : new Date(ms).toISOString();
+}
+
+/** A build status's state; the newest of each `key` stands for it. */
+function buildStatus(state: unknown): PullRequestCheck["status"] {
+  switch (state) {
+    case "SUCCESSFUL":
+      return "success";
+    case "FAILED":
+      return "failure";
+    case "STOPPED":
+      return "cancelled";
+    default:
+      return "pending";
+  }
+}
+
+/** Shorter of the two hashes as a prefix of the longer: the PR listing abbreviates to 12 hex. */
+function sameCommit(a: string, b: string): boolean {
+  const [short, long] = a.length <= b.length ? [a, b] : [b, a];
+  return short.length > 0 && long.toLowerCase().startsWith(short.toLowerCase());
+}
+
+async function cloudChecks(creds: ProviderCreds | null, prefix: string, headSha: string | null): Promise<PullRequestCheck[]> {
+  const newest = new Map<string, Json>();
+  let url: string | undefined = `${prefix}/statuses?pagelen=100`;
+  for (let page = 0; url !== undefined && page < WATCH_MAX_PAGES; page += 1) {
+    const res = await bbRequest(creds, "GET", url);
+    for (const status of valuesOf(res.data)) {
+      const commit = str(objOf(status.commit).hash);
+      // The pull request's statuses span its commits; only the head's count.
+      if (headSha && commit && !sameCommit(commit, headSha)) continue;
+      const key = str(status.key) ?? str(status.name) ?? "";
+      const held = newest.get(key);
+      if (!held || (str(status.updated_on) ?? "") > (str(held.updated_on) ?? "")) newest.set(key, status);
+    }
+    url = str(res.data?.next);
+  }
+  return [...newest.values()].map((status) => ({
+    name: str(status.name) ?? str(status.key) ?? "build",
+    status: buildStatus(status.state),
+    url: str(status.url) ?? null,
+    required: null
+  }));
+}
+
+/**
+ * Comments newest-updated first (paged until older than `since`), and approvals / change requests
+ * from the activity log's newest page. An edit is an `updated_on` more than a second after
+ * `created_on` (Bitbucket stamps both on creation, a few milliseconds apart).
+ */
+async function cloudRemarks(creds: ProviderCreds | null, prefix: string, since: string | undefined): Promise<PullRequestRemark[] | null> {
+  const sinceMs = since ? Date.parse(since) : Number.NaN;
+  const before = (iso: string) => !Number.isNaN(sinceMs) && Date.parse(iso) < sinceMs;
+  const remarks: PullRequestRemark[] = [];
+  let url: string | undefined = `${prefix}/comments?pagelen=100&sort=-updated_on`;
+  let complete = false;
+  for (let page = 0; page < WATCH_MAX_PAGES; page += 1) {
+    const res = await bbRequest(creds, "GET", url!);
+    let reachedOlder = false;
+    for (const comment of valuesOf(res.data)) {
+      const created = isoOf(comment.created_on);
+      const updated = isoOf(comment.updated_on) || created;
+      if (before(updated)) {
+        reachedOlder = true;
+        continue;
+      }
+      if (comment.deleted === true || comment.pending === true) continue;
+      const user = objOf(comment.user);
+      const inline = objOf(comment.inline);
+      remarks.push({
+        id: `c:${String(comment.id ?? "")}`,
+        kind: str(inline.path) ? "review-comment" : "comment",
+        author: str(user.nickname) ?? str(user.display_name) ?? null,
+        authorRef: str(user.uuid) ?? str(user.account_id) ?? null,
+        body: str(objOf(comment.content).raw) ?? "",
+        createdAt: created,
+        editedAt: Date.parse(updated) - Date.parse(created) > 1_000 ? updated : null,
+        path: str(inline.path) ?? null,
+        url: str(objOf(objOf(comment.links).html).href) ?? null,
+        reviewState: null
+      });
+    }
+    url = str(res.data?.next);
+    if (reachedOlder || url === undefined) {
+      complete = true;
+      break;
+    }
+  }
+  if (!complete) return null;
+  const activity = await bbRequest(creds, "GET", `${prefix}/activity?pagelen=50`);
+  for (const entry of valuesOf(activity.data)) {
+    const verdict = entry.approval ? "approved" : entry.changes_requested ? "changes requested" : null;
+    if (verdict === null) continue;
+    const detail = objOf(entry.approval ?? entry.changes_requested);
+    const at = isoOf(detail.date);
+    if (!at || before(at)) continue;
+    const user = objOf(detail.user);
+    const who = str(user.uuid) ?? str(user.account_id) ?? str(user.nickname) ?? "";
+    remarks.push({
+      id: `${entry.approval ? "ap" : "cr"}:${who}:${at}`,
+      kind: "review",
+      author: str(user.nickname) ?? str(user.display_name) ?? null,
+      authorRef: str(user.uuid) ?? str(user.account_id) ?? null,
+      body: "",
+      createdAt: at,
+      editedAt: null,
+      path: null,
+      url: null,
+      reviewState: verdict
+    });
+  }
+  return remarks.sort((a, b) => a.createdAt.localeCompare(b.createdAt));
+}
+
+/**
+ * Bitbucket Cloud has no mergeability flag on the pull request: its diffstat marks a conflicted
+ * file `status: "merge conflict"`. One page is read; no conflict on a partial listing is "unknown".
+ */
+async function cloudMergeability(creds: ProviderCreds | null, prefix: string): Promise<PullRequestStatus["mergeability"]> {
+  try {
+    const res = await bbRequest(creds, "GET", `${prefix}/diffstat?pagelen=500`);
+    const values = valuesOf(res.data);
+    if (values.some((value) => value.status === "merge conflict")) return "conflicting";
+    return str(res.data?.next) ? "unknown" : "clean";
+  } catch (error) {
+    // A diffstat the host cannot compute (a deleted source branch) says nothing about the rest.
+    if (error instanceof GitRemoteError && error.kind === "rate_limited") throw error;
+    return "unknown";
+  }
+}
+
 export const bitbucketCloudProvider: GitProvider = {
   id: "bitbucket-cloud",
   scopesHint: SCOPES,
@@ -459,6 +612,42 @@ export const bitbucketCloudProvider: GitProvider = {
   /** Bitbucket has no releases (the editor offers "tag" there). */
   async listReleases(): Promise<ConditionalPage<ReleaseInfo>> {
     return { items: [], unsupported: true };
+  },
+
+  /**
+   * `GET …/pullrequests/:id`, then — only while it is open — its build statuses on the head commit,
+   * the remarks since `opts.remarksSince` and the diffstat for conflicts. Needs `read:pullrequest`.
+   */
+  async getPullRequestStatus(
+    creds: ProviderCreds | null,
+    repo: ParsedRepo,
+    number: number,
+    opts?: PullRequestStatusOptions
+  ): Promise<PullRequestStatus> {
+    const auth = creds?.token ? creds : null;
+    const prefix = `/repositories/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}/pullrequests/${number}`;
+    const res = await bbRequest(auth, "GET", prefix);
+    const info = toCloudPullRequest(res.data ?? {});
+    const status: PullRequestStatus = {
+      number: info.number || number,
+      title: info.title,
+      url: info.url,
+      state: info.state,
+      author: info.author,
+      headSha: info.headSha || null,
+      headBranch: info.head,
+      baseBranch: info.base,
+      mergeability: "unknown",
+      checks: [],
+      remarks: []
+    };
+    if (status.state !== "open") return status;
+    const [checks, remarks, mergeability] = await Promise.all([
+      cloudChecks(auth, prefix, status.headSha),
+      cloudRemarks(auth, prefix, opts?.remarksSince),
+      cloudMergeability(auth, prefix)
+    ]);
+    return { ...status, checks, remarks, mergeability };
   }
 };
 

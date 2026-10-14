@@ -1,0 +1,69 @@
+{
+  "values": [
+    {
+      "id": 808855610,
+      "created_on": "2026-06-09T22:07:03.485338+00:00",
+      "updated_on": "2026-06-09T22:07:03.490648+00:00",
+      "content": {
+        "type": "rendered",
+        "raw": "##### \ud83d\udd0e Testing  \n\nThe `mockedChildProcess` mock functions are shared across all tests in the `describe('shell')` block without being cleared between tests, so ",
+        "markup": "markdown"
+      },
+      "user": {
+        "display_name": "Rovo Dev",
+        "nickname": null,
+        "account_id": "712020:0ce54ba4-841e-47d9-943e-872f93f78020",
+        "type": "app_user"
+      },
+      "deleted": false,
+      "inline": {
+        "from": null,
+        "to": 17,
+        "path": "src/util/shell.test.ts",
+        "start_from": null,
+        "start_to": null
+      },
+      "pending": false,
+      "type": "pullrequest_comment",
+      "links": {
+        "html": {
+          "href": "https://bitbucket.org/atlassianlabs/atlascode/pull-requests/1115/_/diff#comment-808855610"
+        }
+      }
+    },
+    {
+      "id": 808855608,
+      "created_on": "2026-06-09T22:07:02.714304+00:00",
+      "updated_on": "2026-06-09T22:07:02.722354+00:00",
+      "content": {
+        "type": "rendered",
+        "raw": "##### \ud83d\udd0e Testing  \n\nThe `parseGitCommits` test mocks the very method it calls, so `(api as any).parseGitCommits(gitData)` invokes the spy's fake implementation i",
+        "markup": "markdown"
+      },
+      "user": {
+        "display_name": "Rovo Dev",
+        "nickname": null,
+        "account_id": "712020:0ce54ba4-841e-47d9-943e-872f93f78020",
+        "type": "app_user"
+      },
+      "deleted": false,
+      "inline": {
+        "from": null,
+        "to": 481,
+        "path": "src/webview/pullrequest/vscCreatePullRequestActionImpl.test.ts",
+        "start_from": null,
+        "start_to": null
+      },
+      "pending": false,
+      "type": "pullrequest_comment",
+      "links": {
+        "html": {
+          "href": "https://bitbucket.org/atlassianlabs/atlascode/pull-requests/1115/_/diff#comment-808855608"
+        }
+      }
+    }
+  ],
+  "pagelen": 100,
+  "size": 2,
+  "page": 1
+}
