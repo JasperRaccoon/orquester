@@ -12,6 +12,7 @@ import { parseThreadLineage } from "./lineage.ts";
 import {
   buildThreadMessage,
   parseThreadMessage,
+  THREAD_MESSAGE_OVERHEAD_CHARS,
   readThreadToolReference,
   THREAD_TOOL_REFERENCE_KEY,
   threadToolReference,
@@ -78,5 +79,18 @@ test("a lineage's delegation depth is read tolerantly: a bad one is dropped on i
     const lineage = parseThreadLineage({ ...base, delegationDepth: bad });
     assert.equal(lineage?.parentThreadId, "p");
     assert.equal(lineage?.delegationDepth, undefined, String(bad));
+  }
+});
+
+test("the provenance header never outgrows its budget, whatever the title — quotes and backslashes included (T6-M1)", () => {
+  for (const title of ['"'.repeat(300), "\\".repeat(300), `${"x".repeat(199)}"tail`, "😀".repeat(150), "a\\\"b".repeat(80)]) {
+    for (const origin of ["sent", "opened", "delegated"] as const) {
+      const message = buildThreadMessage({ origin, fromTitle: title, text: "body" });
+      assert.ok(message.length - "body".length <= THREAD_MESSAGE_OVERHEAD_CHARS, `${origin}: ${message.length}`);
+      const parsed = parseThreadMessage(message);
+      assert.ok(parsed, "still reads back");
+      assert.equal(parsed.body, "body");
+      assert.ok(title.startsWith(parsed.fromTitle), "a prefix of the title, never a broken escape");
+    }
   }
 });

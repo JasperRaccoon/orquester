@@ -102,9 +102,24 @@ const ORIGIN_HEADER = /^\[(Sent|Opened|Delegated) by thread "((?:[^"\\\n]|\\.)*)
 /** The characters {@link buildThreadMessage} adds around a text, at most. */
 export const THREAD_MESSAGE_OVERHEAD_CHARS = 512;
 
+/** The quoted title in a header is at most this many characters, escapes included. */
+const QUOTED_TITLE_MAX_CHARS = 200;
+
+/**
+ * The title as the header quotes it: one line, `\\` and `"` escaped, then cut to
+ * {@link QUOTED_TITLE_MAX_CHARS} — after escaping (T6-M1), so a title of quotes or backslashes
+ * can never make the header longer than {@link THREAD_MESSAGE_OVERHEAD_CHARS} allows — never
+ * inside an escape or a surrogate pair.
+ */
 function quoteThreadTitle(title: string): string {
-  const oneLine = title.replace(/\s+/g, " ").trim().slice(0, 200) || "Untitled";
-  return oneLine.replace(/\\/g, "\\\\").replace(/"/g, '\\"');
+  const oneLine = title.replace(/\s+/g, " ").trim() || "Untitled";
+  let out = "";
+  for (const char of oneLine) {
+    const piece = char === "\\" || char === '"' ? `\\${char}` : char;
+    if (out.length + piece.length > QUOTED_TITLE_MAX_CHARS) break;
+    out += piece;
+  }
+  return out;
 }
 
 /**
