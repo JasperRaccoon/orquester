@@ -52,7 +52,9 @@ let browser: HtmlPreviewBrowser;
 
 before(async () => {
   scratch = await mkdtemp(join(tmpdir(), "orq-html-preview-test-"));
-  browser = new HtmlPreviewBrowser({ resolveChromium: () => CHROMIUM, tmpDir: scratch });
+  // Measuring loads many pages; a loaded test machine must not turn the
+  // measuring tests into budget tests (the budget has its own test).
+  browser = new HtmlPreviewBrowser({ resolveChromium: () => CHROMIUM, tmpDir: scratch, measureTimeoutMs: 60_000 });
 });
 
 after(async () => {
@@ -467,16 +469,21 @@ describe("html preview browser: slots, queue and cancellation", () => {
     const two = browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: second.signal });
     const [pidOne, pidTwo] = await fake.started(2);
     const cancelledAt = Date.now();
+    // Both outcomes are taken at once: neither rejection may go unhandled while the other is awaited.
+    const outcomes = Promise.allSettled([one, two]);
     first.abort();
     second.abort();
-    for (const pending of [one, two]) {
-      await assert.rejects(pending, (error: unknown) => error instanceof HtmlPreviewError && error.code === "cancelled");
+    for (const outcome of await outcomes) {
+      assert.equal(outcome.status, "rejected");
+      const error = (outcome as PromiseRejectedResult).reason;
+      assert.ok(error instanceof HtmlPreviewError && error.code === "cancelled", String(error));
     }
     assert.ok(Date.now() - cancelledAt < 5_000, `${Date.now() - cancelledAt} ms`);
     assert.ok(notRunning(pidOne!) && notRunning(pidTwo!));
     // Both slots are free again: a third launch starts at once.
     const third = new AbortController();
     const three = browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: third.signal });
+    three.catch(() => undefined);
     assert.equal((await fake.started(3)).length, 3);
     third.abort();
     await assert.rejects(three);
@@ -494,6 +501,7 @@ describe("html preview browser: slots, queue and cancellation", () => {
     });
     const holders = [new AbortController(), new AbortController()];
     const held = holders.map((holder) => browser.capture({ html: FIXED(1), width: 320, urlFragment: "", signal: holder.signal }));
+    for (const pending of held) pending.catch(() => undefined);
     await fake.started(2);
     let made = 0;
     const source = async (): Promise<string> => {
