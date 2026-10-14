@@ -562,6 +562,8 @@ async function dcRemarks(creds: ProviderCreds, prefix: string, webUrl: string, s
           kind: activity.commentAnchor?.path ? "review-comment" : "comment",
           author: (typeof author.name === "string" && author.name) || login,
           authorRef: typeof author.slug === "string" ? author.slug : null,
+          // DC says nothing of the author's standing in the repository: never quoted.
+          trusted: false,
           body: typeof comment.text === "string" ? comment.text : "",
           createdAt: created,
           editedAt: updated && updated !== created ? updated : null,
@@ -575,6 +577,7 @@ async function dcRemarks(creds: ProviderCreds, prefix: string, webUrl: string, s
           kind: "review",
           author: login,
           authorRef: typeof user.slug === "string" ? user.slug : null,
+          trusted: false,
           body: "",
           createdAt: isoOfMs(activity.createdDate),
           editedAt: null,
@@ -857,11 +860,10 @@ export const bitbucketServerProvider: GitProvider = {
       remarks: []
     };
     if (status.state !== "open") return status;
-    const [checks, remarks, mergeability] = await Promise.all([
-      status.headSha ? dcChecks(creds, status.headSha) : Promise.resolve([]),
-      dcRemarks(creds, prefix, status.url, opts?.remarksSince),
-      dcMergeability(creds, prefix)
-    ]);
+    // One after another: a read's requests never fan out against the instance's limits.
+    const checks = status.headSha ? await dcChecks(creds, status.headSha) : [];
+    const remarks = await dcRemarks(creds, prefix, status.url, opts?.remarksSince);
+    const mergeability = await dcMergeability(creds, prefix);
     return { ...status, checks, remarks, mergeability };
   }
 };

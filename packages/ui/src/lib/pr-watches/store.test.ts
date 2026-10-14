@@ -55,7 +55,8 @@ describe("pull request watches store", () => {
   beforeEach(() => resetPullRequestWatches());
 
   it("a load fills the thread's list, dropping malformed entries", async () => {
-    const { api } = fakeApi({ list: async () => ({ watches: [watch("w1"), { id: 3 } as unknown as PullRequestWatchSummary] }) });
+    const broken = watch("w2", { status: { state: "open", mergeability: "clean", headSha: null, baseBranch: "main", checks: null } as unknown as PullRequestWatchSummary["status"] });
+    const { api } = fakeApi({ list: async () => ({ watches: [watch("w1"), { id: 3 } as unknown as PullRequestWatchSummary, broken] }) });
     await loadPullRequestWatches(api, "s1");
     assert.deepEqual(listOf("s1").map((entry) => entry.id), ["w1"]);
     assert.deepEqual(listOf("other"), []);
@@ -70,6 +71,8 @@ describe("pull request watches store", () => {
     await loading;
     assert.deepEqual(listOf("s1").map((entry) => entry.id), ["w2"]);
     applyPullRequestWatchesEvent(changed("s1", [{ nope: true }]));
+    // A summary whose status is not whole never reaches the chip.
+    applyPullRequestWatchesEvent(changed("s1", [watch("w9", { status: { state: "open" } as unknown as PullRequestWatchSummary["status"] })]));
     applyPullRequestWatchesEvent({ type: "other", payload: { sessionId: "s1", watches: [] } });
     assert.deepEqual(listOf("s1").map((entry) => entry.id), ["w2"]);
     applyPullRequestWatchesEvent(changed("s1", []));

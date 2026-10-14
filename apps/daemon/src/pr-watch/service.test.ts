@@ -82,6 +82,7 @@ test("each change kind wakes once: checks passed, a comment, a review, a conflic
     id: "ic:1",
     kind: "comment",
     author: "reviewer",
+    trusted: true,
     body: "Please add a test.",
     createdAt: "2026-10-14T10:03:00.000Z",
     editedAt: null,
@@ -338,4 +339,128 @@ test("threads watching one pull request through one account share a read, each t
   await h.run(POLL);
   assert.equal(h.reads.length, before + 1);
   assert.deepEqual(h.delivered.map((wake) => wake.sessionId).sort(), ["s1", "s2"]);
+});
+
+// --- fix round 1 ---------------------------------------------------------------
+
+test("an unsaved wake is not posted; it goes once the store saves again, under its id", async () => {
+  const h = await harness();
+  await watching(h);
+  h.saves.fail = true;
+  h.pulls.set(KEY, prStatus({ checks: [check("build", "failure"), check("lint", "success")] }));
+  await h.run(POLL);
+  assert.equal(h.delivered.length, 0);
+  // While saves fail, no pass posts it either.
+  await h.run(60_000);
+  assert.equal(h.delivered.length, 0);
+  h.saves.fail = false;
+  await h.run(15 * 60_000);
+  assert.equal(h.delivered.length, 1);
+  assert.equal(h.delivered[0]!.fileHadIt, true);
+  assert.equal(parsePullRequestWatchMessage(h.delivered[0]!.input)?.summary, "#12: checks failed");
+});
+
+test("a host-side 404 on a tab the daemon still has keeps the watches", async () => {
+  const h = await harness();
+  await watching(h);
+  h.outcome.next = () => ({ kind: "gone" });
+  h.pulls.set(KEY, prStatus({ checks: [check("build", "failure"), check("lint", "success")] }));
+  await h.run(POLL);
+  assert.equal(h.delivered.length, 1);
+  assert.equal(h.service.list("s1").length, 1);
+  assert.equal(parsePullRequestWatchFile(JSON.parse(readFileSync(h.file, "utf8"))).watches.length, 1);
+});
+
+test("until the tab records are known to have loaded, a missing tab does not cost its watches", async () => {
+  const h = await harness();
+  await watching(h);
+  h.saves.loaded = false;
+  h.sessions.delete("s1");
+  await h.run(POLL * 2);
+  assert.equal(parsePullRequestWatchFile(JSON.parse(readFileSync(h.file, "utf8"))).watches.length, 1);
+  h.saves.loaded = true;
+  await h.run(30_000);
+  assert.equal(parsePullRequestWatchFile(JSON.parse(readFileSync(h.file, "utf8"))).watches.length, 0);
+});
+
+test("concurrent creates cannot pass the per-thread cap", async () => {
+  const h = await harness();
+  for (let n = 20; n < 31; n += 1) h.pulls.set(`${REMOTE}#${n}`, prStatus({ number: n }));
+  const outcomes = await Promise.allSettled(Array.from({ length: 11 }, (_, i) => h.service.create("s1", { number: 20 + i })));
+  assert.equal(outcomes.filter((outcome) => outcome.status === "fulfilled").length, 10);
+  const refused = outcomes.filter((outcome): outcome is PromiseRejectedResult => outcome.status === "rejected");
+  assert.equal(refused.length, 1);
+  assert.equal((refused[0]!.reason as PullRequestWatchError).code, "WATCH_LIMIT");
+  assert.equal(h.service.list("s1").length, 10);
+});
+
+test("a match resolves URL variants and a bare number by repository and number, even before a first read", async () => {
+  const h = await harness();
+  h.pulls.set(KEY, new GitRemoteError(502, "GitHub GET → 502", "upstream", 502));
+  const blind = await h.service.create("s1", { number: 12 });
+  assert.equal(blind.watch.url, "");
+  for (const url of ["https://github.com/acme/app/pull/12", "http://www.github.com/ACME/app/pull/12/files#x"]) {
+    assert.deepEqual((await h.service.match("s1", { url })).map((watch) => watch.id), [blind.watch.id], url);
+  }
+  assert.deepEqual((await h.service.match("s1", { url: "https://github.com/acme/other/pull/12" })), []);
+  assert.deepEqual((await h.service.match("s1", { number: 12 })).map((watch) => watch.id), [blind.watch.id]);
+  await assert.rejects(h.service.match("s1", { url: "nope" }), (error: unknown) => error instanceof PullRequestWatchError && error.code === "INVALID_ARGUMENT");
+});
+
+test("stopping a watch takes its part out of a wake not posted yet", async () => {
+  const h = await harness();
+  h.pulls.set(`${REMOTE}#12`, prStatus());
+  h.pulls.set(`${REMOTE}#13`, prStatus({ number: 13, url: "https://github.com/acme/app/pull/13" }));
+  await h.service.create("s1", { number: 12 });
+  const thirteen = await h.service.create("s1", { number: 13 });
+  await h.service.idle();
+  // The reads save; the save that would mark the composed wake posted fails, so it stays unposted.
+  h.saves.reject = (content) => content.includes('"posted": true');
+  h.pulls.set(`${REMOTE}#12`, prStatus({ checks: [check("build", "failure"), check("lint", "success")] }));
+  h.pulls.set(`${REMOTE}#13`, prStatus({ number: 13, url: "https://github.com/acme/app/pull/13", mergeability: "conflicting" }));
+  await h.run(POLL);
+  assert.equal(h.delivered.length, 0);
+  const pending = h.service.list("s1").filter((watch) => watch.wakePending);
+  assert.equal(pending.length, 2);
+  h.saves.reject = undefined;
+  await h.service.remove("s1", thirteen.watch.id);
+  const disk = parsePullRequestWatchFile(JSON.parse(readFileSync(h.file, "utf8")));
+  const left = disk.watches[0]!.pendingWake!;
+  assert.equal(left.posted, false);
+  assert.ok(!left.input.includes("#13"));
+  await h.run(15 * 60_000);
+  assert.equal(h.delivered.length, 1);
+  assert.equal(parsePullRequestWatchMessage(h.delivered[0]!.input)?.summary, "#12: checks failed");
+  assert.ok(!h.delivered[0]!.input.includes("#13"));
+});
+
+test("one host's pull requests are read one after another", async () => {
+  const h = await harness();
+  h.pulls.set(`${REMOTE}#12`, prStatus());
+  h.pulls.set(`${REMOTE}#13`, prStatus({ number: 13 }));
+  await h.service.create("s1", { number: 12 });
+  await h.service.create("s1", { number: 13 });
+  await h.service.idle();
+  const before = h.reads.length;
+  h.hang.add(`${REMOTE}#12`);
+  h.clock.jump(Date.parse(START) + POLL);
+  const started = h.nextRead();
+  const ticking = h.service.tick();
+  await started;
+  // Turns of the event loop (not time): a second read of the same host would have started by now.
+  for (let i = 0; i < 5; i += 1) await new Promise<void>((resolve) => setImmediate(resolve));
+  assert.equal(h.reads.length, before + 1);
+  h.clock.advance(90_000);
+  await ticking;
+  assert.deepEqual(h.reads.slice(before).map((read) => read.number), [12, 13]);
+});
+
+test("an anonymous reader (no workspace account) is read every ten minutes", async () => {
+  const h = await harness({ account: null });
+  await watching(h);
+  assert.equal(h.reads[0]!.accountId, null);
+  await h.run(9 * 60_000);
+  assert.equal(h.reads.length, 1);
+  await h.run(90_000);
+  assert.equal(h.reads.length, 2);
 });

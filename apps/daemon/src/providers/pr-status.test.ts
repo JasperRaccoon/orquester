@@ -12,9 +12,9 @@ import { dirname, join } from "node:path";
 import { afterEach, test } from "node:test";
 import { fileURLToPath } from "node:url";
 
-import { bitbucketCloudProvider } from "./bitbucket-cloud";
+import { bitbucketCloudProvider, resetBitbucketCloudWatchState } from "./bitbucket-cloud";
 import { bitbucketServerProvider } from "./bitbucket-server";
-import { githubProvider } from "./github";
+import { githubProvider, resetGithubWatchState } from "./github";
 import { GitRemoteError } from "./types";
 
 const FIXTURES = join(dirname(fileURLToPath(import.meta.url)), "fixtures");
@@ -23,6 +23,8 @@ const fixture = (name: string): unknown => JSON.parse(readFileSync(join(FIXTURES
 const realFetch = globalThis.fetch;
 afterEach(() => {
   globalThis.fetch = realFetch;
+  resetGithubWatchState();
+  resetBitbucketCloudWatchState();
 });
 
 interface Seen {
@@ -96,6 +98,8 @@ test("github: an open pull request maps state, head, base, mergeability, checks 
       ["rv:5513319160", "review", "copilot-pull-request-reviewer[bot]", null, "commented"]
     ]
   );
+  // Captured as CONTRIBUTOR: not vouched for by the repository, so never quoted.
+  assert.deepEqual(status.remarks?.map((remark) => remark.trusted), [false, false]);
   // The review comment's updated_at differs from created_at by a second: an edit.
   assert.equal(status.remarks?.[0]?.editedAt, "2026-10-14T05:07:25Z");
   for (const request of seen) assert.equal(request.headers.authorization, "Bearer ghp_test");
@@ -305,4 +309,84 @@ test("bitbucket server: no build-status API means no checks; an unanswered merge
     bitbucketServerProvider.getPullRequestStatus(null, { owner: "PRJ", repo: "api" }, 101),
     (error: unknown) => error instanceof GitRemoteError && error.kind === "unsupported"
   );
+});
+
+// --- fix round 1: trust, conditional requests, rate windows -------------------
+
+test("github: only OWNER / MEMBER / COLLABORATOR remarks are trusted", async () => {
+  const comment = (id: number, association: string) => ({
+    id,
+    user: { login: `u${id}` },
+    body: "b",
+    created_at: "2026-10-14T06:00:00Z",
+    updated_at: "2026-10-14T06:00:00Z",
+    author_association: association
+  });
+  stubRoutes([
+    [/\/issues\/14679\/comments/, () => json(["OWNER", "MEMBER", "COLLABORATOR", "CONTRIBUTOR", "FIRST_TIME_CONTRIBUTOR", "NONE"].map((a, i) => comment(i + 1, a)))],
+    ...githubRoutes()
+  ]);
+  const status = await githubProvider.getPullRequestStatus(null, { owner: "cli", repo: "cli" }, 14679);
+  assert.deepEqual(
+    status.remarks?.filter((remark) => remark.id.startsWith("ic:")).map((remark) => [remark.author, remark.trusted]),
+    [["u1", true], ["u2", true], ["u3", true], ["u4", false], ["u5", false], ["u6", false]]
+  );
+});
+
+test("github: a second read is conditional, and a 304 reuses the cached answer", async () => {
+  const etagged = githubRoutes().map(([pattern, respond]): [RegExp, () => Response] => [
+    pattern,
+    () => {
+      const res = respond();
+      const headers = new Headers(res.headers);
+      headers.set("etag", `"${pattern.source.length}"`);
+      return new Response(res.body, { status: res.status, headers });
+    }
+  ]);
+  stubRoutes(etagged);
+  const first = await githubProvider.getPullRequestStatus({ token: "t" }, { owner: "cli", repo: "cli" }, 14679);
+  const seen = stubRoutes([[/./, () => new Response(null, { status: 304 })]]);
+  const second = await githubProvider.getPullRequestStatus({ token: "t" }, { owner: "cli", repo: "cli" }, 14679);
+  assert.ok(seen.length > 0);
+  assert.ok(seen.every((request) => request.headers["if-none-match"]?.startsWith('"')));
+  assert.deepEqual(second, first);
+  // Another reader never gets this reader's cached answers.
+  const other = stubRoutes(githubRoutes());
+  await githubProvider.getPullRequestStatus({ token: "other" }, { owner: "cli", repo: "cli" }, 14679);
+  assert.ok(other.every((request) => request.headers["if-none-match"] === undefined));
+});
+
+test("github: an anonymous reader near its hourly limit is refused until the reset, without a request", async () => {
+  const reset = Math.ceil(Date.now() / 1000) + 1_800;
+  stubRoutes([[/pulls\/14679$/, () => json(fixture("github-pr-watch-pull.json"), 200, { "x-ratelimit-remaining": "5", "x-ratelimit-reset": String(reset) })]]);
+  await assert.rejects(
+    githubProvider.getPullRequestStatus(null, { owner: "cli", repo: "cli" }, 14679),
+    (error: unknown) => error instanceof GitRemoteError && error.kind === "rate_limited" && (error.retryAfterMs ?? 0) > 1_700_000
+  );
+  const seen = stubRoutes(githubRoutes());
+  await assert.rejects(githubProvider.getPullRequestStatus(null, { owner: "cli", repo: "cli" }, 14679), GitRemoteError);
+  assert.equal(seen.length, 0);
+  // A token reader has its own window.
+  await githubProvider.getPullRequestStatus({ token: "t" }, { owner: "cli", repo: "cli" }, 14679);
+});
+
+test("bitbucket cloud: remarks are never trusted; a second read is conditional and a 304 reuses the answer", async () => {
+  const withEtags = cloudRoutes().map(([pattern, respond]): [RegExp, () => Response] => [
+    pattern,
+    () => {
+      const res = respond();
+      const headers = new Headers(res.headers);
+      headers.set("etag", `"bb${pattern.source.length}"`);
+      return new Response(res.body, { status: res.status, headers });
+    }
+  ]);
+  stubRoutes(withEtags);
+  const creds = { token: "atl", email: "me@example.com" };
+  const repo = { owner: "atlassianlabs", repo: "atlascode" };
+  const first = await bitbucketCloudProvider.getPullRequestStatus(creds, repo, 1115, { remarksSince: "2026-06-09T22:07:03.000Z" });
+  assert.ok(first.remarks?.every((remark) => !remark.trusted));
+  const seen = stubRoutes([[/./, () => new Response(null, { status: 304 })]]);
+  const second = await bitbucketCloudProvider.getPullRequestStatus(creds, repo, 1115, { remarksSince: "2026-06-09T22:07:03.000Z" });
+  assert.ok(seen.every((request) => request.headers["if-none-match"]?.startsWith('"bb')));
+  assert.deepEqual(second, first);
 });

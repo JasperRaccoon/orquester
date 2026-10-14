@@ -68,7 +68,27 @@ export const pullRequestWatchWakeSchema = z
     input: z.string().min(1),
     createdAt: z.string(),
     /** Refused deliveries so far. */
-    attempts: z.number().int().nonnegative().catch(0).default(0)
+    attempts: z.number().int().nonnegative().catch(0).default(0),
+    /**
+     * Set (and saved) before the first post: the host may hold it, so its text can no longer
+     * change. An unposted wake is rewritten when one of its watches stops.
+     */
+    posted: z.boolean().catch(true).default(true),
+    /** This watch's own part of the message, so the rest can be recomposed without it. */
+    part: z
+      .object({
+        summary: z.string(),
+        lines: z.array(z.string()),
+        /** The watch keeps going after this message. */
+        watching: z.boolean(),
+        /** The part reports checks or a conflict (something to act on). */
+        actionable: z.boolean(),
+        /** The part quotes other people's comments. */
+        comments: z.boolean()
+      })
+      .passthrough()
+      .optional()
+      .catch(undefined)
   })
   .passthrough();
 export type PullRequestWatchWake = z.infer<typeof pullRequestWatchWakeSchema>;
@@ -104,7 +124,11 @@ export const pullRequestWatchSchema = z
      * its record stays only until its last wake is delivered.
      */
     endedAt: z.string().nullable().catch(null).default(null),
-    endReason: z.enum(PULL_REQUEST_WATCH_END_REASONS).nullable().catch(null).default(null)
+    /**
+     * One of {@link PULL_REQUEST_WATCH_END_REASONS}, or a newer build's reason, kept verbatim (this
+     * build only drops such a watch once nothing is left to tell).
+     */
+    endReason: z.string().max(64).nullable().catch(null).default(null)
   })
   .passthrough();
 export type PullRequestWatchRecord = z.infer<typeof pullRequestWatchSchema>;

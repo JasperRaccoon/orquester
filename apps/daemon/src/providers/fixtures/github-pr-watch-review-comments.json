@@ -10,6 +10,7 @@
     "body": "\ud83d\uded1 Requirement: Add coverage for terminal stdin when stdout is piped. The new cases run with stdout forced to a TTY at line 267, so they would still pass if this check were changed to `CanPrompt()`, wh",
     "created_at": "2026-10-14T05:07:24Z",
     "updated_at": "2026-10-14T05:07:25Z",
-    "html_url": "https://github.com/cli/cli/pull/14679#discussion_r4266994277"
+    "html_url": "https://github.com/cli/cli/pull/14679#discussion_r4266994277",
+    "author_association": "CONTRIBUTOR"
   }
 ]

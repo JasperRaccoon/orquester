@@ -43,7 +43,7 @@ test("malformed entries are kept verbatim, unknown fields survive, bad progress 
   const broken = { id: "w2", number: "seven" };
   const file = parsePullRequestWatchFile({
     watches: [
-      { ...good, futureField: { x: 1 }, failures: "many", lastStatus: 3, endReason: "exploded" },
+      { ...good, futureField: { x: 1 }, failures: "many", lastStatus: 3, endReason: "archived-by-v9" },
       broken
     ]
   });
@@ -53,7 +53,8 @@ test("malformed entries are kept verbatim, unknown fields survive, bad progress 
   assert.deepEqual(watch.futureField, { x: 1 });
   assert.equal(watch.failures, 0);
   assert.equal(watch.lastStatus, null);
-  assert.equal(watch.endReason, null);
+  // A newer build's end reason survives a rewrite.
+  assert.equal(watch.endReason, "archived-by-v9");
   const round = JSON.parse(serializePullRequestWatchFile(file)) as { version: number; watches: unknown[] };
   assert.equal(round.version, 1);
   assert.equal(round.watches.length, 2);

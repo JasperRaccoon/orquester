@@ -13,6 +13,8 @@ import { GitRemoteError, type PullRequestCheck, type PullRequestStatus } from ".
 import { ManualClock } from "../workflows/testing/manual-trigger-clock.ts";
 import { advance, silentLogger } from "../workflows/triggers/test-support.ts";
 import { createPullRequestWatchService, type PullRequestWatchRead, type WakeDelivery } from "./service.ts";
+import { mkdir, rename, writeFile } from "node:fs/promises";
+import { dirname } from "node:path";
 
 export const START = "2026-10-14T10:00:00.000Z";
 export const PROJECT = "/ws/acme/app";
@@ -67,6 +69,8 @@ export interface Harness {
   hang: Set<string>;
   /** Resolves when the next read starts. */
   nextRead(): Promise<void>;
+  /** While set, every save of the store fails. */
+  saves: { fail: boolean; loaded: boolean; reject?: (content: string) => boolean };
   reads: Array<{ accountId: string | null; repoUrl: string; number: number; remarksSince?: string }>;
   delivered: Array<{ sessionId: string; commandId: string; input: string; fileHadIt: boolean }>;
   published: PullRequestWatchesChangedEvent[];
@@ -77,7 +81,7 @@ export interface Harness {
   restart(): Promise<void>;
 }
 
-export async function harness(opts: { viewer?: string[] } = {}): Promise<Harness> {
+export async function harness(opts: { viewer?: string[]; account?: string | null } = {}): Promise<Harness> {
   const dir = mkdtempSync(join(tmpdir(), "orq-prw-"));
   dirs.push(dir);
   const file = join(dir, "daemon", "pr-watches.json");
@@ -86,6 +90,7 @@ export async function harness(opts: { viewer?: string[] } = {}): Promise<Harness
   const pulls = new Map<string, PullRequestStatus | Error>();
   const hang = new Set<string>();
   const readWaiters: Array<() => void> = [];
+  const saves: Harness["saves"] = { fail: false, loaded: true };
   const reads: Harness["reads"] = [];
   const delivered: Harness["delivered"] = [];
   const published: PullRequestWatchesChangedEvent[] = [];
@@ -105,7 +110,7 @@ export async function harness(opts: { viewer?: string[] } = {}): Promise<Harness
         return { status: structuredClone(answer), viewer: opts.viewer ?? ["agent-bot"] };
       },
       projectRemote: async () => REMOTE,
-      projectAccount: async () => "acct-1",
+      projectAccount: async () => (opts.account === undefined ? "acct-1" : opts.account),
       session: (id) => sessions.get(id),
       subscribe: (listener) => {
         listeners.add(listener);
@@ -117,6 +122,13 @@ export async function harness(opts: { viewer?: string[] } = {}): Promise<Harness
         return outcome.next(sessionId);
       },
       publish: (event) => published.push(event),
+      sessionsLoaded: () => saves.loaded,
+      write: async (path, content) => {
+        if (saves.fail || saves.reject?.(content)) throw new Error("disk full");
+        await mkdir(dirname(path), { recursive: true });
+        await writeFile(`${path}.tmp`, content, { mode: 0o600 });
+        await rename(`${path}.tmp`, path);
+      },
       clock,
       logger: silentLogger,
       mintId: () => `id-${(seq += 1)}`,
@@ -128,6 +140,7 @@ export async function harness(opts: { viewer?: string[] } = {}): Promise<Harness
     sessions,
     pulls,
     hang,
+    saves,
     nextRead: () => new Promise<void>((resolve) => readWaiters.push(resolve)),
     reads,
     delivered,

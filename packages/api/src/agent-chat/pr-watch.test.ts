@@ -42,5 +42,10 @@ test("the changed event is shape-checked", () => {
   assert.equal(isPullRequestWatchesChangedEvent({ sessionId: "s", watches: [watch] }), true);
   assert.equal(isPullRequestWatchesChangedEvent({ sessionId: "s", watches: [{ ...watch, number: "1" }] }), false);
   assert.equal(isPullRequestWatchesChangedEvent({ watches: [] }), false);
+  const status = { state: "open", mergeability: "clean", headSha: null, baseBranch: "main", checks: { total: 1, passed: 1, failed: 0, pending: 0 } };
+  assert.equal(isPullRequestWatchesChangedEvent({ sessionId: "s", watches: [{ ...watch, status }] }), true);
+  for (const bad of [{}, { ...status, checks: null }, { ...status, checks: { total: 1 } }, { ...status, state: "weird" }, { ...status, checks: { ...status.checks, failed: -1 } }]) {
+    assert.equal(isPullRequestWatchesChangedEvent({ sessionId: "s", watches: [{ ...watch, status: bad }] }), false, JSON.stringify(bad));
+  }
   assert.equal(isPullRequestWatchesChangedEvent(null), false);
 });

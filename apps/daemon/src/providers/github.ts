@@ -22,6 +22,7 @@ import type {
   UrlContext
 } from "./types";
 import { GitRemoteError, POLL_PAGE_SIZE, retryAfterMs } from "./types";
+import { readerKey, WatchReadCache } from "./watch-cache";
 
 const GITHUB_API = "https://api.github.com";
 
@@ -193,15 +194,62 @@ function toGithubRelease(release: Record<string, unknown>): ReleaseInfo {
 /** Pages of 100 a watch read follows before calling a listing incomplete. */
 const WATCH_MAX_PAGES = 5;
 
-/** One GET, decoded; throws the shared GitRemoteError on a non-2xx. */
+/** Conditional-request cache of the watch reads (ETag → decoded answer). */
+const watchCache = new WatchReadCache();
+/** The last rate-limit window GitHub reported, per reader (hashed token or "anonymous"). */
+const rateWindows = new Map<string, { remaining: number; resetAt: number }>();
+/**
+ * Requests a reader keeps in hand: a watch read is about six requests, and an anonymous reader has
+ * 60 an hour per IP, shared with everything else on the host. Below this, a read is refused as
+ * rate-limited until the window resets, without spending a request.
+ */
+const ANONYMOUS_RESERVE = 6;
+const TOKEN_RESERVE = 50;
+
+/** Forget the watch reads' ETags and rate windows (tests). */
+export function resetGithubWatchState(): void {
+  watchCache.clear();
+  rateWindows.clear();
+}
+
+/**
+ * One GET of a watch read, decoded; throws the shared GitRemoteError on a non-2xx. Conditional:
+ * a 304 (free on GitHub's limit) reuses the cached answer. Reads GitHub's `X-RateLimit-*` headers
+ * and refuses ahead of time, as rate-limited until the reset, once a reader is down to its reserve.
+ */
 async function githubGet(token: string | null, path: string): Promise<{ data: unknown; next: string | undefined }> {
-  const response = await githubFetch(token, "GET", path);
+  const who = readerKey(token);
+  const window = rateWindows.get(who);
+  const now = Date.now();
+  if (window && window.resetAt > now && window.remaining <= (token ? TOKEN_RESERVE : ANONYMOUS_RESERVE)) {
+    throw new GitRemoteError(
+      429,
+      `GitHub rate limit nearly spent (${window.remaining} requests left until the reset).`,
+      "rate_limited",
+      undefined,
+      window.resetAt - now
+    );
+  }
+  const key = `${who}|${path}`;
+  const cached = watchCache.get(key);
+  const response = await githubFetch(token, "GET", path, undefined, cached ? { "If-None-Match": cached.etag } : undefined);
+  const remaining = Number(response.headers.get("x-ratelimit-remaining"));
+  const reset = Number(response.headers.get("x-ratelimit-reset"));
+  if (response.headers.has("x-ratelimit-remaining") && Number.isFinite(remaining) && Number.isFinite(reset) && reset > 0) {
+    rateWindows.set(who, { remaining, resetAt: reset * 1000 });
+  }
+  if (response.status === 304 && cached) {
+    return { data: cached.data, next: cached.next };
+  }
   if (!response.ok) {
     throw await githubError(response, "GET", path);
   }
   const data = (await response.json().catch(() => null)) as unknown;
-  const next = nextPageUrl(response.headers.get("link"));
-  return { data, next: next?.startsWith(GITHUB_API) ? next.slice(GITHUB_API.length) : undefined };
+  const link = nextPageUrl(response.headers.get("link"));
+  const next = link?.startsWith(GITHUB_API) ? link.slice(GITHUB_API.length) : undefined;
+  const etag = response.headers.get("etag");
+  if (etag) watchCache.set(key, { etag, data, ...(next ? { next } : {}) });
+  return { data, next };
 }
 
 /**
@@ -299,6 +347,16 @@ function editedAt(item: Record<string, unknown>): string | null {
   return updated && updated !== created ? updated : null;
 }
 
+/**
+ * Whether the repository vouches for the author (`author_association` OWNER, MEMBER or
+ * COLLABORATOR). Anyone else's text — on a public repository, anyone at all — is never quoted to the
+ * agent.
+ */
+function isInsider(item: Record<string, unknown>): boolean {
+  const association = item.author_association;
+  return association === "OWNER" || association === "MEMBER" || association === "COLLABORATOR";
+}
+
 const REVIEW_STATES: Record<string, string> = {
   APPROVED: "approved",
   CHANGES_REQUESTED: "changes requested",
@@ -320,11 +378,10 @@ async function githubRemarks(
 ): Promise<PullRequestRemark[] | null> {
   const query = `per_page=100${since ? `&since=${encodeURIComponent(since)}` : ""}`;
   const asArray = (data: unknown) => data;
-  const [issueComments, reviewComments, reviews] = await Promise.all([
-    githubPages(token, `${repoPath(repo)}/issues/${number}/comments?${query}`, asArray),
-    githubPages(token, `${repoPath(repo)}/pulls/${number}/comments?${query}`, asArray),
-    githubPages(token, `${repoPath(repo)}/pulls/${number}/reviews?per_page=100`, asArray)
-  ]);
+  // One after another: a read's requests never fan out against the host's limits.
+  const issueComments = await githubPages(token, `${repoPath(repo)}/issues/${number}/comments?${query}`, asArray);
+  const reviewComments = await githubPages(token, `${repoPath(repo)}/pulls/${number}/comments?${query}`, asArray);
+  const reviews = await githubPages(token, `${repoPath(repo)}/pulls/${number}/reviews?per_page=100`, asArray);
   if (!issueComments.complete || !reviewComments.complete || !reviews.complete) return null;
   const remarks: PullRequestRemark[] = [];
   for (const comment of issueComments.items) {
@@ -332,6 +389,7 @@ async function githubRemarks(
       id: `ic:${numericId(comment.id)}`,
       kind: "comment",
       author: loginOf(comment.user) || null,
+      trusted: isInsider(comment),
       body: text(comment.body),
       createdAt: text(comment.created_at),
       editedAt: editedAt(comment),
@@ -345,6 +403,7 @@ async function githubRemarks(
       id: `rc:${numericId(comment.id)}`,
       kind: "review-comment",
       author: loginOf(comment.user) || null,
+      trusted: isInsider(comment),
       body: text(comment.body),
       createdAt: text(comment.created_at),
       editedAt: editedAt(comment),
@@ -364,6 +423,7 @@ async function githubRemarks(
       id: `rv:${numericId(review.id)}`,
       kind: "review",
       author: loginOf(review.user) || null,
+      trusted: isInsider(review),
       body: text(review.body),
       createdAt: submitted,
       editedAt: null,
@@ -665,10 +725,8 @@ export const githubProvider: GitProvider = {
       remarks: []
     };
     if (status.state !== "open") return status;
-    const [checks, remarks] = await Promise.all([
-      status.headSha ? githubChecks(token, repo, status.headSha) : Promise.resolve([]),
-      githubRemarks(token, repo, number, opts?.remarksSince)
-    ]);
+    const checks = status.headSha ? await githubChecks(token, repo, status.headSha) : [];
+    const remarks = await githubRemarks(token, repo, number, opts?.remarksSince);
     return { ...status, checks, remarks };
   },
 

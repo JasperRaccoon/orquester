@@ -138,6 +138,12 @@ export interface PullRequestRemark {
   author: string | null;
   /** A second identity to match the viewer by (Bitbucket Cloud account UUID / id), when known. */
   authorRef?: string | null;
+  /**
+   * The repository vouches for the author (GitHub `author_association` OWNER / MEMBER /
+   * COLLABORATOR). False where the provider cannot say: the text of an untrusted remark is never
+   * quoted to the agent (prompt injection).
+   */
+  trusted: boolean;
   body: string;
   /** ISO. */
   createdAt: string;

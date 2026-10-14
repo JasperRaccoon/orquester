@@ -13,6 +13,7 @@ import {
   type CreatePullRequestWatchResponse,
   type DeletePullRequestWatchResponse,
   type PullRequestWatchErrorEnvelope,
+  type PullRequestWatchListQuery,
   type PullRequestWatchListResponse
 } from "@orquester/api/agent-chat";
 
@@ -42,16 +43,30 @@ function readRequest(body: unknown): CreatePullRequestWatchRequest | null {
 }
 
 export function registerPullRequestWatchRoutes(app: FastifyInstance, deps: { service: () => PullRequestWatchService | null }): void {
-  app.get<{ Params: { id: string } }>(pattern(agentChatRoutes.prWatches(":id")), async (request, reply) => {
-    const service = deps.service();
-    if (!service) return reply.code(503).send(UNAVAILABLE);
-    try {
-      const body: PullRequestWatchListResponse = { watches: service.list(request.params.id) };
-      return body;
-    } catch (error) {
-      return refuse(reply, error);
+  app.get<{ Params: { id: string }; Querystring: { url?: string; number?: string } }>(
+    pattern(agentChatRoutes.prWatches(":id")),
+    async (request, reply) => {
+      const service = deps.service();
+      if (!service) return reply.code(503).send(UNAVAILABLE);
+      const { url, number } = request.query ?? {};
+      try {
+        if (url !== undefined || number !== undefined) {
+          const parsed = number === undefined ? undefined : Number(number);
+          if (parsed !== undefined && (!Number.isSafeInteger(parsed) || parsed <= 0)) {
+            const invalid: PullRequestWatchErrorEnvelope = { error: { code: "INVALID_ARGUMENT", message: "number must be a positive whole number." } };
+            return reply.code(400).send(invalid);
+          }
+          const query: PullRequestWatchListQuery = url !== undefined ? { url } : { number: parsed! };
+          const body: PullRequestWatchListResponse = { watches: await service.match(request.params.id, query) };
+          return body;
+        }
+        const body: PullRequestWatchListResponse = { watches: service.list(request.params.id) };
+        return body;
+      } catch (error) {
+        return refuse(reply, error);
+      }
     }
-  });
+  );
 
   app.post<{ Params: { id: string } }>(pattern(agentChatRoutes.prWatches(":id")), async (request, reply) => {
     const service = deps.service();

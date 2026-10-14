@@ -9,6 +9,7 @@
     "state": "COMMENTED",
     "html_url": "https://github.com/cli/cli/pull/14679#pullrequestreview-5513319160",
     "submitted_at": "2026-10-14T05:07:25Z",
-    "commit_id": "2de1e0886a0cf896165db70e7729b28bd5b0febc"
+    "commit_id": "2de1e0886a0cf896165db70e7729b28bd5b0febc",
+    "author_association": "CONTRIBUTOR"
   }
 ]

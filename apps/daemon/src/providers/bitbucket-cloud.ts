@@ -23,6 +23,7 @@ import type {
   UrlContext
 } from "./types";
 import { GitRemoteError, POLL_PAGE_SIZE, retryAfterMs } from "./types";
+import { readerKey, WatchReadCache } from "./watch-cache";
 
 /**
  * Bitbucket Cloud (`bitbucket.org`) provider.
@@ -300,6 +301,25 @@ function userRef(identity: ProviderIdentity): string {
 /** Pages a watch read follows before calling a listing incomplete. */
 const WATCH_MAX_PAGES = 5;
 
+/** Conditional-request cache of the watch reads (ETag → decoded answer). */
+const watchCache = new WatchReadCache();
+
+/** Forget the watch reads' ETags (tests). */
+export function resetBitbucketCloudWatchState(): void {
+  watchCache.clear();
+}
+
+/** One GET of a watch read: `If-None-Match` with the last ETag, a 304 reuses the cached answer. */
+async function cloudGet(creds: ProviderCreds | null, pathOrUrl: string): Promise<Json | undefined> {
+  const key = `${readerKey(creds ? `${creds.email ?? ""}:${creds.token}` : null)}|${pathOrUrl}`;
+  const cached = watchCache.get(key);
+  const res = await bbRequest(creds, "GET", pathOrUrl, cached ? { etag: cached.etag } : {});
+  if (res.status === 304 && cached) return cached.data as Json | undefined;
+  const etag = res.headers.get("etag");
+  if (etag) watchCache.set(key, { etag, data: res.data });
+  return res.data;
+}
+
 const objOf = (value: unknown): Json => (value && typeof value === "object" ? (value as Json) : {});
 
 function valuesOf(data: Json | undefined): Json[] {
@@ -337,8 +357,8 @@ async function cloudChecks(creds: ProviderCreds | null, prefix: string, headSha:
   const newest = new Map<string, Json>();
   let url: string | undefined = `${prefix}/statuses?pagelen=100`;
   for (let page = 0; url !== undefined && page < WATCH_MAX_PAGES; page += 1) {
-    const res = await bbRequest(creds, "GET", url);
-    for (const status of valuesOf(res.data)) {
+    const data = await cloudGet(creds, url);
+    for (const status of valuesOf(data)) {
       const commit = str(objOf(status.commit).hash);
       // The pull request's statuses span its commits; only the head's count.
       if (headSha && commit && !sameCommit(commit, headSha)) continue;
@@ -346,7 +366,7 @@ async function cloudChecks(creds: ProviderCreds | null, prefix: string, headSha:
       const held = newest.get(key);
       if (!held || (str(status.updated_on) ?? "") > (str(held.updated_on) ?? "")) newest.set(key, status);
     }
-    url = str(res.data?.next);
+    url = str(data?.next);
   }
   return [...newest.values()].map((status) => ({
     name: str(status.name) ?? str(status.key) ?? "build",
@@ -368,9 +388,9 @@ async function cloudRemarks(creds: ProviderCreds | null, prefix: string, since: 
   let url: string | undefined = `${prefix}/comments?pagelen=100&sort=-updated_on`;
   let complete = false;
   for (let page = 0; page < WATCH_MAX_PAGES; page += 1) {
-    const res = await bbRequest(creds, "GET", url!);
+    const data = await cloudGet(creds, url!);
     let reachedOlder = false;
-    for (const comment of valuesOf(res.data)) {
+    for (const comment of valuesOf(data)) {
       const created = isoOf(comment.created_on);
       const updated = isoOf(comment.updated_on) || created;
       if (before(updated)) {
@@ -385,6 +405,8 @@ async function cloudRemarks(creds: ProviderCreds | null, prefix: string, since: 
         kind: str(inline.path) ? "review-comment" : "comment",
         author: str(user.nickname) ?? str(user.display_name) ?? null,
         authorRef: str(user.uuid) ?? str(user.account_id) ?? null,
+        // Bitbucket says nothing of the author's standing in the repository: never quoted.
+        trusted: false,
         body: str(objOf(comment.content).raw) ?? "",
         createdAt: created,
         editedAt: Date.parse(updated) - Date.parse(created) > 1_000 ? updated : null,
@@ -393,15 +415,15 @@ async function cloudRemarks(creds: ProviderCreds | null, prefix: string, since: 
         reviewState: null
       });
     }
-    url = str(res.data?.next);
+    url = str(data?.next);
     if (reachedOlder || url === undefined) {
       complete = true;
       break;
     }
   }
   if (!complete) return null;
-  const activity = await bbRequest(creds, "GET", `${prefix}/activity?pagelen=50`);
-  for (const entry of valuesOf(activity.data)) {
+  const activity = await cloudGet(creds, `${prefix}/activity?pagelen=50`);
+  for (const entry of valuesOf(activity)) {
     const verdict = entry.approval ? "approved" : entry.changes_requested ? "changes requested" : null;
     if (verdict === null) continue;
     const detail = objOf(entry.approval ?? entry.changes_requested);
@@ -414,6 +436,7 @@ async function cloudRemarks(creds: ProviderCreds | null, prefix: string, since: 
       kind: "review",
       author: str(user.nickname) ?? str(user.display_name) ?? null,
       authorRef: str(user.uuid) ?? str(user.account_id) ?? null,
+      trusted: false,
       body: "",
       createdAt: at,
       editedAt: null,
@@ -431,10 +454,10 @@ async function cloudRemarks(creds: ProviderCreds | null, prefix: string, since: 
  */
 async function cloudMergeability(creds: ProviderCreds | null, prefix: string): Promise<PullRequestStatus["mergeability"]> {
   try {
-    const res = await bbRequest(creds, "GET", `${prefix}/diffstat?pagelen=500`);
-    const values = valuesOf(res.data);
+    const data = await cloudGet(creds, `${prefix}/diffstat?pagelen=500`);
+    const values = valuesOf(data);
     if (values.some((value) => value.status === "merge conflict")) return "conflicting";
-    return str(res.data?.next) ? "unknown" : "clean";
+    return str(data?.next) ? "unknown" : "clean";
   } catch (error) {
     // A diffstat the host cannot compute (a deleted source branch) says nothing about the rest.
     if (error instanceof GitRemoteError && error.kind === "rate_limited") throw error;
@@ -626,8 +649,7 @@ export const bitbucketCloudProvider: GitProvider = {
   ): Promise<PullRequestStatus> {
     const auth = creds?.token ? creds : null;
     const prefix = `/repositories/${encodeURIComponent(repo.owner)}/${encodeURIComponent(repo.repo)}/pullrequests/${number}`;
-    const res = await bbRequest(auth, "GET", prefix);
-    const info = toCloudPullRequest(res.data ?? {});
+    const info = toCloudPullRequest((await cloudGet(auth, prefix)) ?? {});
     const status: PullRequestStatus = {
       number: info.number || number,
       title: info.title,
@@ -642,11 +664,10 @@ export const bitbucketCloudProvider: GitProvider = {
       remarks: []
     };
     if (status.state !== "open") return status;
-    const [checks, remarks, mergeability] = await Promise.all([
-      cloudChecks(auth, prefix, status.headSha),
-      cloudRemarks(auth, prefix, opts?.remarksSince),
-      cloudMergeability(auth, prefix)
-    ]);
+    // One after another: a read's requests never fan out against the host's limits.
+    const checks = await cloudChecks(auth, prefix, status.headSha);
+    const remarks = await cloudRemarks(auth, prefix, opts?.remarksSince);
+    const mergeability = await cloudMergeability(auth, prefix);
     return { ...status, checks, remarks, mergeability };
   }
 };

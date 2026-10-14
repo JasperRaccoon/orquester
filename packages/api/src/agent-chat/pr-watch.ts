@@ -56,6 +56,15 @@ export interface PullRequestWatchListResponse {
   watches: PullRequestWatchSummary[];
 }
 
+/**
+ * `GET agentChatRoutes.prWatches(id)` query: with `url` or `number`, only the watches of that pull
+ * request (matched by repository and number; a number alone in the project's origin first).
+ */
+export interface PullRequestWatchListQuery {
+  url?: string;
+  number?: number;
+}
+
 /** `POST agentChatRoutes.prWatches(id)`: exactly one of `url` and `number`. */
 export interface CreatePullRequestWatchRequest {
   /** The pull request's web URL (GitHub, Bitbucket Cloud, Bitbucket Server). */
@@ -161,6 +170,26 @@ export function isPullRequestWatchSummary(value: unknown): value is PullRequestW
     (watch.lastCheckedAt === null || typeof watch.lastCheckedAt === "string") &&
     (watch.lastError === null || typeof watch.lastError === "string") &&
     typeof watch.wakePending === "boolean" &&
-    (watch.status === null || (typeof watch.status === "object" && watch.status !== null))
+    (watch.status === null || isWatchStatus(watch.status))
+  );
+}
+
+const count = (value: unknown): boolean => typeof value === "number" && Number.isInteger(value) && value >= 0;
+
+function isWatchStatus(value: unknown): boolean {
+  if (value === null || typeof value !== "object") return false;
+  const status = value as Record<string, unknown>;
+  const checks = status.checks as Record<string, unknown> | null | undefined;
+  return (
+    (status.state === "open" || status.state === "merged" || status.state === "closed") &&
+    (status.mergeability === "clean" || status.mergeability === "conflicting" || status.mergeability === "unknown") &&
+    (status.headSha === null || typeof status.headSha === "string") &&
+    typeof status.baseBranch === "string" &&
+    checks !== null &&
+    typeof checks === "object" &&
+    count(checks.total) &&
+    count(checks.passed) &&
+    count(checks.failed) &&
+    count(checks.pending)
   );
 }

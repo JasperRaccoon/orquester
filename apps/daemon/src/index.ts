@@ -848,7 +848,15 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
   // Reattach to any tmux sessions that outlived a previous daemon process
   // (KillMode=process keeps the tmux server alive across restarts). No-op on the
   // local backend. Best-effort: a tmux/socket error must not block startup.
-  await sessions.reattach().catch((error) => console.error("Session reattach failed", error));
+  // Whether the tab records loaded: until then a pull request watch never takes a missing tab for
+  // a deleted thread.
+  let sessionsReattached = false;
+  await sessions
+    .reattach()
+    .then(() => {
+      sessionsReattached = true;
+    })
+    .catch((error) => console.error("Session reattach failed", error));
   // The removed model proxy's one-time handover: stop it and hand the accounts
   // it refreshed back to the refresher started below, fresher tokens first.
   await retireModelProxy({
@@ -1171,6 +1179,7 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
       return meta?.gitAccountId ?? null;
     },
     session: (id) => sessions.get(id),
+    sessionsLoaded: () => sessionsReattached,
     subscribe: (listener) => services.internalApi?.subscribe(listener) ?? (() => undefined),
     deliver: deliverThroughTurnRoute(() => services.internalApi),
     publish: (event) => broadcaster.publish(PR_WATCHES_CHANNEL, PR_WATCHES_CHANGED, event),
