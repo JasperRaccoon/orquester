@@ -80,11 +80,11 @@ async function nodeOptionsOf(
 describe("direct node-pty sessions", () => {
   const managers: LocalSessionManager[] = [];
   const local =
-    (extraEnv?: Record<string, string>) =>
+    (extraEnv?: Record<string, string>, unset?: string[]) =>
     (registry: RegistryService): Manager => {
       const manager = new LocalSessionManager(
         registry,
-        extraEnv ? { resolveExtraEnv: () => ({ env: extraEnv }) } : {}
+        extraEnv ? { resolveExtraEnv: () => ({ env: extraEnv, unset }) } : {}
       );
       managers.push(manager);
       return manager;
@@ -126,20 +126,45 @@ describe("direct node-pty sessions", () => {
       process.env.NODE_OPTIONS = DAEMON_NODE_OPTIONS;
     }
   });
+
+  test("a launcher that unsets NODE_OPTIONS clears the inherited value; the preload is still added", async () => {
+    await assertLauncherUnset(local);
+  });
 });
+
+/** Same on both backends: the launcher's unset applies first, then the preload is appended. */
+async function assertLauncherUnset(
+  backend: (extraEnv?: Record<string, string>, unset?: string[]) => (registry: RegistryService) => Manager
+): Promise<void> {
+  const entryEnv = { NODE_OPTIONS: "--trace-warnings" };
+  assert.equal(await nodeOptionsOf(backend({}, ["NODE_OPTIONS"]), recordingEntry(entryEnv)), "<unset>");
+  setSessionNodePreload(PRELOAD);
+  try {
+    assert.equal(
+      await nodeOptionsOf(backend({}, ["NODE_OPTIONS"]), recordingEntry(entryEnv)),
+      appendNodeRequireOption(undefined, PRELOAD)
+    );
+    assert.equal(
+      await nodeOptionsOf(backend({ NODE_OPTIONS: "--no-warnings" }, ["NODE_OPTIONS"]), recordingEntry(entryEnv)),
+      appendNodeRequireOption(undefined, PRELOAD)
+    );
+  } finally {
+    setSessionNodePreload(null);
+  }
+}
 
 describe("tmux-backed sessions", { skip: tmuxAvailable() && tmuxVersionOk() ? false : "tmux >= 3.2 unavailable" }, () => {
   let socket = "";
   let tmux: Tmux;
   const managers: SessionManager[] = [];
   const tmuxed =
-    (extraEnv?: Record<string, string>) =>
+    (extraEnv?: Record<string, string>, unset?: string[]) =>
     (registry: RegistryService): Manager => {
       const manager = new SessionManager(
         registry,
         tmux,
         join(root, `sessions-${managers.length}.json`),
-        extraEnv ? { resolveExtraEnv: () => ({ env: extraEnv }) } : {}
+        extraEnv ? { resolveExtraEnv: () => ({ env: extraEnv, unset }) } : {}
       );
       managers.push(manager);
       return manager;
@@ -195,6 +220,10 @@ describe("tmux-backed sessions", { skip: tmuxAvailable() && tmuxVersionOk() ? fa
     } finally {
       setSessionNodePreload(null);
     }
+  });
+
+  test("a launcher that unsets NODE_OPTIONS clears the inherited value; the preload is still added", async () => {
+    await assertLauncherUnset(tmuxed);
   });
 
   test("a global value unset on the server: just the preload", async () => {

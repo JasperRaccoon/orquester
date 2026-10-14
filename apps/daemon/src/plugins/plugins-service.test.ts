@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdir, readFile, readdir, realpath, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { type TestContext, test } from "node:test";
 import { type PluginInfo, type PluginsResponse, TS_RUST_PLUGIN_ID } from "@orquester/api";
@@ -445,6 +445,19 @@ test("a moved workspaces dir rewrites the preload with the new root", async (t) 
   assert.deepEqual(
     h.preloadWrites.map((write) => write.options.workspacesRoot),
     [await realpath(join(h.root, "workspaces")), await realpath(moved)]
+  );
+});
+
+test("a symlinked workspaces dir bakes both its real path and the configured one", async (t) => {
+  const h = await harness(t);
+  h.registry.latest = "9.9.9";
+  const linked = join(h.root, "workspaces-link");
+  await symlink(join(h.root, "workspaces"), linked);
+  h.workspacesDir.current = linked;
+  await enable(h);
+  assert.deepEqual(
+    h.preloadWrites.map((write) => write.options),
+    [{ statePath: h.file, workspacesRoot: await realpath(linked), configuredWorkspacesRoot: linked }]
   );
 });
 

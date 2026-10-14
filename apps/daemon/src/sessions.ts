@@ -398,18 +398,23 @@ export class SessionManager implements ISessionManager {
       ...entry.env
     } as Record<string, string>;
 
-    // The plugins' NODE_OPTIONS preload (plugins spec §3.3), appended to the
-    // value the command would otherwise get: the addon wrapper's when it sets
-    // one (its exports run last), else the entry's `-e` one, else the server's
-    // global one. The result goes where that value came from — the wrapper, or
-    // this session's own `-e`; never the global env, which every session on
-    // the server shares.
+    // The plugins' NODE_OPTIONS preload (plugins spec §3.3), appended after the
+    // launcher env is applied, as on the direct backend: to nothing when the
+    // launcher unsets NODE_OPTIONS, else to the addon wrapper's value when it
+    // sets one, else the entry's `-e` one, else the server's global one. The
+    // result goes where it takes effect last — the wrapper (its unset/export
+    // run after `-e`) when the launcher touches NODE_OPTIONS, else this
+    // session's own `-e`; never the global env, which every session on the
+    // server shares.
     let addonEnv = extraEnv;
     if (sessionNodePreload() !== null) {
-      const fromWrapper = extraEnv.NODE_OPTIONS !== undefined;
-      const existing = fromWrapper
-        ? extraEnv.NODE_OPTIONS
-        : (env.NODE_OPTIONS ?? (await this.tmux.inheritedEnvValue("NODE_OPTIONS")));
+      const unsets = unsetEnv.includes("NODE_OPTIONS");
+      const fromWrapper = unsets || extraEnv.NODE_OPTIONS !== undefined;
+      const existing = unsets
+        ? undefined
+        : fromWrapper
+          ? extraEnv.NODE_OPTIONS
+          : (env.NODE_OPTIONS ?? (await this.tmux.inheritedEnvValue("NODE_OPTIONS")));
       const nodeOptions = sessionNodeOptions(existing);
       if (nodeOptions !== undefined) {
         if (fromWrapper) {
