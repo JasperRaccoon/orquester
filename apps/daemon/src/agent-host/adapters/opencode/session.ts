@@ -2354,9 +2354,11 @@ export class OpenCodeThreadSession {
 
     this.pumpAbort.abort();
     if (this.sessionTools !== undefined) {
+      // Revoked at once — the endpoint refuses it from here on. The
+      // disconnect only tidies the shared server, so it never holds the stop.
       this.sessionTools.revoke();
       if (!this.server.hasExited()) {
-        await disconnectOpenCodeSessionTools(this.client, this.sessionTools.serverName);
+        void disconnectOpenCodeSessionTools(this.client, this.sessionTools.serverName);
       }
     }
     this.updateRecord(

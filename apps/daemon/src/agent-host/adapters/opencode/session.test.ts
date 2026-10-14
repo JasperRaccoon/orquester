@@ -4459,9 +4459,10 @@ test("session tools: the thread's own server is registered before its session, i
   assert.deepEqual(submit.parts, [{ type: "text", text: "hello" }], "never the user's parts");
 
   harness.fake.overrides.set(`POST /mcp/${launch.serverName}/disconnect`, () => json(true));
+  const disconnected = harness.fake.waitForRequest("POST", `/mcp/${launch.serverName}/disconnect`);
   await session.stop({ reason: "test", hostInitiated: true });
   assert.equal(launch.revoked, true, "the credential dies with the session");
-  assert.ok(harness.fake.find("POST", `/mcp/${launch.serverName}/disconnect`), "and its server is disconnected");
+  await disconnected;
   harness.dispose();
 });
 
