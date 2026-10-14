@@ -2515,19 +2515,29 @@ export class OpenCodeThreadSession {
       if (fork === undefined || typeof fork.id !== "string") {
         throw new Error("OpenCode session fork returned no session payload.");
       }
-      const forked = await this.listMessages(fork.id);
-      if (forked.length !== expectedCount) {
-        throw new Error("OpenCode did not preserve the requested rewind boundary.");
+      // A fork the rewind cannot use is deleted, never left in OpenCode's
+      // session list as an orphan no thread owns (as `fork.ts` does).
+      let forked: OpenCodeMessageWithParts[];
+      try {
+        forked = await this.listMessages(fork.id);
+        if (forked.length !== expectedCount) {
+          throw new Error("OpenCode did not preserve the requested rewind boundary.");
+        }
+        await this.client.patch<unknown>(openCodeRoutes.session(fork.id), {
+          timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs,
+          body: {
+            permission: withSessionToolRules(buildOpenCodePermissionRules(this.state.runtimeMode), {
+              isolate: this.isolateSessionTools,
+              ...(this.sessionTools !== undefined ? { own: this.sessionTools } : {})
+            })
+          } satisfies UpdateSessionBody
+        });
+      } catch (error) {
+        await this.client
+          .delete<unknown>(openCodeRoutes.session(fork.id), { timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs })
+          .catch(() => undefined);
+        throw error;
       }
-      await this.client.patch<unknown>(openCodeRoutes.session(fork.id), {
-        timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs,
-        body: {
-          permission: withSessionToolRules(buildOpenCodePermissionRules(this.state.runtimeMode), {
-            isolate: this.isolateSessionTools,
-            ...(this.sessionTools !== undefined ? { own: this.sessionTools } : {})
-          })
-        } satisfies UpdateSessionBody
-      });
 
       this.rememberFork(list, forked);
       await this.settlePendingRequests().catch(() => undefined);

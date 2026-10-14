@@ -243,6 +243,10 @@ export class OpenCodeClient {
     return this.request<T>("PATCH", path, options);
   }
 
+  delete<T>(path: string, options: OpenCodeRequestOptions): Promise<T> {
+    return this.request<T>("DELETE", path, options);
+  }
+
   /**
    * Open the SSE stream. Returns the response so the caller owns the body; the
    * stream has no deadline by design — it is long-lived.

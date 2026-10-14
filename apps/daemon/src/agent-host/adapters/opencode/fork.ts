@@ -88,13 +88,23 @@ export async function forkOpenCodeSession(input: {
   }
   // A whole-session fork may legitimately hold more than was read a moment
   // ago (the source moved on); a cut fork must hold exactly the kept part.
-  const forked = await listMessages(fork.id);
-  if (
-    plan.messageID !== undefined
-      ? forked.length !== plan.expectedCount
-      : forked.length < plan.expectedCount
-  ) {
-    throw new Error("OpenCode did not preserve the requested fork point.");
+  // One that does not — or cannot be read back — is deleted before the host
+  // falls back to the transcript, or it would sit in OpenCode's session list
+  // as an orphan no thread owns.
+  try {
+    const forked = await listMessages(fork.id);
+    if (
+      plan.messageID !== undefined
+        ? forked.length !== plan.expectedCount
+        : forked.length < plan.expectedCount
+    ) {
+      throw new Error("OpenCode did not preserve the requested fork point.");
+    }
+  } catch (error) {
+    await input.client
+      .delete<unknown>(openCodeRoutes.session(fork.id), { timeoutMs: AGENT_HOST_DEADLINES.sessionOpenMs })
+      .catch(() => undefined);
+    throw error;
   }
   return fork.id;
 }
