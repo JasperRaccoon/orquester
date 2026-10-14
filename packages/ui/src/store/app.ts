@@ -120,6 +120,8 @@ import type {
   DesktopAppSummary,
   DesktopHostStatus,
   DesktopSummary,
+  ForkSessionRequest,
+  ForkSessionResponse,
   GrokDeviceLinkStatus,
   LaunchAppRequest,
   ProviderUsageWindow,
@@ -995,6 +997,13 @@ export interface AppState {
    * api, or a refused resume).
    */
   openTab: (request: OpenTabRequest) => Promise<SessionSummary | undefined>;
+  /**
+   * Thread lineage (spec 2026-10-14 §6): fork a chat tab from a message into a
+   * new tab of the same project, and open it. Rejects with the daemon's
+   * refusal (an `ApiError`) — a reply still being written, a host that needs
+   * its update — for the caller to show.
+   */
+  forkChatTab: (sessionId: string, request: ForkSessionRequest) => Promise<ForkSessionResponse>;
   /** Dismiss the transient refused-resume notice. */
   dismissResumeError: () => void;
   /** Raise the chat provider auth-error toast (§7.7). Replaces any current one. */
@@ -2461,6 +2470,23 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ openingChat: null });
       }
     }
+  },
+
+  forkChatTab: async (sessionId, request) => {
+    const api = get().api;
+    if (!api) {
+      throw new Error("Not connected to Orquester.");
+    }
+    const result = await api.forkSession(sessionId, request);
+    const session = result.session;
+    set((state) => ({
+      sessions: upsertSession(state.sessions, session),
+      activeTabByProject:
+        state.currentProject?.path === session.projectPath
+          ? { ...state.activeTabByProject, [session.projectPath]: session.id }
+          : state.activeTabByProject
+    }));
+    return result;
   },
 
   dismissResumeError: () => set({ resumeError: null }),

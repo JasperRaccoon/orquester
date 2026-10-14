@@ -43,6 +43,7 @@ import type {
 import type { FullOutputSource } from "../../lib/agent-chat/full-output";
 import type { DrillInMemoryEntry } from "./roster/drill-in-memory";
 import type { RewindTarget } from "../../lib/agent-chat/rewind.logic";
+import type { TimelineForkInput } from "./timeline/context";
 
 /**
  * §7.1: **one** `AgentChatView` instance serves every chat tab in a project.
@@ -78,6 +79,12 @@ export interface ChatTimelineProps {
    * are never touched. The view dispatches `actions.rewindTo(input)`.
    */
   onRevert: (input: { messageId: string; targetTurnCount: number }) => void;
+  /**
+   * "Fork from here" on a settled message (thread lineage, spec 2026-10-14
+   * §6): a new chat tab whose conversation is this one's up to it. Absent:
+   * no fork is offered.
+   */
+  onFork?: ((input: TimelineForkInput) => void) | undefined;
   /**
    * A turn is running or a revert is in flight: the rewind button is shown
    * but disabled ("Available when the agent is idle"). Absent means idle.

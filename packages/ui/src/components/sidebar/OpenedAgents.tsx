@@ -30,6 +30,7 @@ import {
   type AgentSessionEntry
 } from "../attention";
 import { CountPill, SectionHeader } from "./parts";
+import { LineageMark } from "../agent-chat/LineageMark";
 
 /**
  * One agent, as a card: its icon, title and `workspace / project`, with the
@@ -45,7 +46,10 @@ import { CountPill, SectionHeader } from "./parts";
  * still drives the status dot and the Attention Center, and this refines that
  * rather than replacing it.
  */
-const AgentCard: React.FC<{ entry: AgentSessionEntry }> = ({ entry }) => {
+const AgentCard: React.FC<{ entry: AgentSessionEntry; parentTitle?: string | undefined }> = ({
+  entry,
+  parentTitle
+}) => {
   const markTabUnread = useAppStore((s) => s.markTabUnread);
   const unread = useThreadUnread(entry.session.id);
   const activeInProject = useAppStore(
@@ -93,7 +97,11 @@ const AgentCard: React.FC<{ entry: AgentSessionEntry }> = ({ entry }) => {
           {getRegistryIcon(entry.session.kind, entry.session.refId, 17)}
         </span>
         <span className="flex min-w-0 flex-1 flex-col">
-          <span className="truncate text-[13px] text-neutral-100">{entry.session.title}</span>
+          <span className="flex min-w-0 items-center gap-1">
+            {/* A fork or a delegated task (spec 2026-10-14 §6), titled with its parent. */}
+            <LineageMark lineage={entry.session.lineage} parentTitle={parentTitle} />
+            <span className="truncate text-[13px] text-neutral-100">{entry.session.title}</span>
+          </span>
           <span className="truncate text-xs text-neutral-500">
             {entry.project.workspace ? `${entry.project.workspace} / ` : ""}
             {entry.project.name}
@@ -230,6 +238,11 @@ export const OpenedAgents: React.FC<{ query: string }> = ({ query }) => {
     );
     return groupAgentSessionsByRepo(matching, index).flatMap((group) => group.items);
   }, [entries, index, query]);
+  // A child card's parent title, from every agent the section knows (spec 2026-10-14 §6).
+  const titleById = useMemo(
+    () => new Map(entries.map((entry) => [entry.session.id, entry.session.title])),
+    [entries]
+  );
 
   // A search with no matching agent drops the section; the workspaces below
   // may still match.
@@ -279,7 +292,15 @@ export const OpenedAgents: React.FC<{ query: string }> = ({ query }) => {
       ) : (
         <div className="space-y-1.5">
           {ordered.map((entry) => (
-            <AgentCard key={entry.session.id} entry={entry} />
+            <AgentCard
+              key={entry.session.id}
+              entry={entry}
+              parentTitle={
+                entry.session.lineage
+                  ? titleById.get(entry.session.lineage.parentThreadId)
+                  : undefined
+              }
+            />
           ))}
         </div>
       )}

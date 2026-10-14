@@ -28,6 +28,7 @@ import {
 import {
   clearComposerInbox,
   composerTextForDelivery,
+  deliverToComposerDraft,
   subscribeComposerInbox,
   takeComposerDeliveries,
   type ComposerDelivery
@@ -100,6 +101,9 @@ import { FullOutputPane } from "./FullOutputPane";
 import { ChatStatusLine } from "./status/ChatStatusLine";
 import { GOAL_ACTION_TEXT, goalActions, goalActionsNote } from "./status/goal-chip";
 import { ChatTimeline } from "./timeline/ChatTimeline";
+import type { TimelineForkInput } from "./timeline/context";
+import { ThreadLineageBar, type LineageNotice } from "./ThreadLineageBar";
+import { defaultMergeBackText } from "../../lib/agent-chat/lineage.logic";
 import { resolveMarkdownImageSource } from "./timeline/markdown/local-image";
 import { TurnDiffModal, type TurnDiffRequest } from "./timeline/TurnDiffModal";
 import {
@@ -114,6 +118,12 @@ import type { AgentChatViewProps, AgentRosterMainRow } from "./contracts";
 const NO_APPROVALS: never[] = [];
 const NO_REQUEST_IDS: readonly string[] = [];
 const NO_REWIND_TARGETS: readonly RewindTarget[] = [];
+
+/** A fork's or a merge's refusal, in the daemon's words where it gave some. */
+function lineageErrorText(error: unknown): string {
+  if (error instanceof ApiError) return error.serverMessage ?? `the daemon answered ${error.status}.`;
+  return error instanceof Error ? error.message : String(error);
+}
 
 /** Every row callback is a no-op while the paint hold is in effect (§7.1). */
 const noop = (): void => {};
@@ -499,6 +509,60 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
       rewindTo({ messageId: target.messageId, targetTurnCount: target.targetTurnCount }),
     [rewindTo]
   );
+
+  // --- thread lineage (spec 2026-10-14 §6) ----------------------------------
+  // "Fork from here" opens the fork as a new tab of this project (the store
+  // switches to it); a fork taken before a prompt gets that prompt back as its
+  // draft, to send differently. A refusal — a reply still being written, a
+  // host that needs its update — is said in the lineage bar, as is a merge's
+  // outcome. Parent and children are read off the tab records.
+  const projectSessions = useAppStore((s) => s.sessions);
+  const forkChatTab = useAppStore((s) => s.forkChatTab);
+  const activateTab = useAppStore((s) => s.activateTab);
+  const [lineageNotice, setLineageNotice] = React.useState<LineageNotice | null>(null);
+  React.useEffect(() => setLineageNotice(null), [sessionId]);
+  const forkFrom = React.useCallback(
+    (input: TimelineForkInput) => {
+      setLineageNotice(null);
+      void forkChatTab(sessionId, {
+        messageId: input.messageId,
+        ...(input.turnId !== null ? { turnId: input.turnId } : {}),
+        role: input.role
+      })
+        .then((result) => {
+          if (input.role === "user" && input.text.trim().length > 0) {
+            deliverToComposerDraft(result.session.id, { text: input.text, attachments: [] });
+          }
+        })
+        .catch((error: unknown) => {
+          setLineageNotice({ tone: "error", text: `Could not fork: ${lineageErrorText(error)}` });
+        });
+    },
+    [forkChatTab, sessionId]
+  );
+  const mergeBack = React.useCallback(
+    async (text: string) => {
+      setLineageNotice(null);
+      try {
+        const result = await api.mergeBackSession(sessionId, { text });
+        const parentTitle =
+          useAppStore.getState().sessions.find((s) => s.id === result.parentSessionId)?.title ??
+          "the original chat";
+        setLineageNotice({
+          tone: "info",
+          text:
+            result.delivery === "sent"
+              ? `Sent to “${parentTitle}”.`
+              : `Queued: “${parentTitle}” is busy, and gets it once it is idle.`
+        });
+      } catch (error) {
+        setLineageNotice({ tone: "error", text: `Could not merge back: ${lineageErrorText(error)}` });
+        throw error;
+      }
+    },
+    [api, sessionId]
+  );
+  const mergeText = React.useMemo(() => defaultMergeBackText(slice.entries), [slice.entries]);
 
   // --- older history and the palette's reveal (design 2026-09-23) ----------
   // The "Load older turns" row pages the indexed log in ABOVE the window; the
@@ -916,6 +980,18 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               />
             </DrillInErrorBoundary>
           ) : (
+            <>
+            {paintOnly ? null : (
+              <ThreadLineageBar
+                session={session}
+                sessions={projectSessions}
+                defaultMergeText={mergeText}
+                notice={lineageNotice}
+                onDismissNotice={() => setLineageNotice(null)}
+                onOpenSession={activateTab}
+                onMergeBack={mergeBack}
+              />
+            )}
             <ChatTimeline
               sessionId={displayed.displaySessionId}
               rows={displayed.rows as AgentChatTimelineRow[]}
@@ -928,6 +1004,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               // "Rewind to here", confirmed in the row's own popover: the whole
               // §5.5 flow, ending with the message back in the composer.
               onRevert={paintOnly ? noop : rewindTo}
+              onFork={paintOnly ? undefined : forkFrom}
               revertBusy={revertBusy}
               startedTurnCount={startedTurnCount}
               onOpenTurnDiff={paintOnly ? noop : openTurnDiff}
@@ -972,6 +1049,7 @@ export function AgentChatView({ session, projectPath, active }: AgentChatViewPro
               revealRequest={paintOnly ? null : reveal}
               onRevealHandled={actions.acknowledgeReveal}
             />
+            </>
           )}
 
           {/*

@@ -89,6 +89,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
     bottomInset,
     canRevert,
     onRevert,
+    onFork,
     revertBusy = false,
     startedTurnCount = 0,
     onOpenTurnDiff,
@@ -302,6 +303,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
         });
       },
       onRevert: effectiveReadOnly ? NOOP_REVERT : onRevert,
+      onFork: effectiveReadOnly || !onFork ? null : onFork,
       onOpenTurnDiff,
       onOpenFile,
       onLoadFullOutput,
@@ -326,6 +328,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
       onOpenTurnDiff,
       readFullPlanMarkdown,
       onRevert,
+      onFork,
       onBackgroundTool,
       onReturnQueuedToComposer,
       onSendQueuedNow,
