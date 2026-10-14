@@ -273,8 +273,8 @@ export class ClaudeSession {
    * call still in flight (design 2026-10-14 §1.1).
    */
   private readonly sessionToolsLife = new AbortController();
-  /** True when this session launched with the `orquester` server. */
-  private sessionToolsAttached = false;
+  /** The bare names of the session tools this session launched with (none without the server). */
+  private sessionToolNames: ReadonlySet<string> = new Set();
   /** One debug line per session for an unavailable context-usage request. */
   private contextUsageUnavailableLogged = false;
   private hostInitiatedStop = false;
@@ -423,7 +423,7 @@ export class ClaudeSession {
       this.historyPrefetch = { sessionId: this.resumeSessionId, messages };
     }
     const sessionTools = this.options.context.sessionTools;
-    this.sessionToolsAttached = sessionTools !== undefined;
+    this.sessionToolNames = new Set(sessionTools?.tools.map((tool) => tool.name) ?? []);
     const built = buildClaudeQueryOptions({
       ...(sessionTools !== undefined
         ? {
@@ -1536,9 +1536,9 @@ export class ClaudeSession {
 
     // Session tools are pre-approved in every mode (design 2026-10-14 §1.3):
     // `allowedTools` already covers them, this is the belt to its braces. Only
-    // for the server this session attached — never a user's own server that
-    // happens to share the name.
-    if (this.sessionToolsAttached && isClaudeSessionTool(toolName)) {
+    // the tools this session attached — never a user's own server's that
+    // happen to share its name.
+    if (isClaudeSessionTool(toolName, this.sessionToolNames)) {
       return { behavior: "allow", updatedInput: toolInput };
     }
 

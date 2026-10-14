@@ -8,9 +8,14 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 
 import { redactAcpFrame } from "./acp/redact.ts";
-import { grokSessionMcpServers, grokSessionMeta, isGrokSessionToolCall } from "./session-tools.ts";
+import { grokSessionMcpServers, grokSessionMeta, grokSessionToolName, isGrokSessionToolCall } from "./session-tools.ts";
 
-const launch = { url: "http://127.0.0.1:4711/mcp", authorization: "Bearer cred-0123456789abcdef", instructions: "## Orquester" };
+const launch = {
+  url: "http://127.0.0.1:4711/mcp",
+  authorization: "Bearer cred-0123456789abcdef",
+  instructions: "## Orquester",
+  toolNames: new Set(["echo"])
+};
 
 test("the mcpServers entry is ACP http, named orquester, with the bearer as a header", () => {
   assert.deepEqual(grokSessionMcpServers(launch), [
@@ -39,6 +44,8 @@ test("a session tool's call is recognised by its exact name, never a substring",
   assert.equal(isGrokSessionToolCall({ title: "write", _meta: meta("write", "opencode") }), false);
   assert.equal(isGrokSessionToolCall({ title: null, _meta: meta("linear__get_issue") }), false);
   assert.equal(isGrokSessionToolCall(undefined), false);
+  assert.equal(grokSessionToolName({ title: null, _meta: meta("orquester__echo") }), "echo");
+  assert.equal(grokSessionToolName({ title: "write", _meta: null }), null);
 });
 
 test("the raw log masks an MCP server's headers like its env", () => {

@@ -16,8 +16,10 @@
  *   options"). Also sent on `session/load`, where a CLI that keeps the
  *   session's first system prompt may ignore it; the tool descriptions carry
  *   the full guidance either way.
- * - **Approvals.** A `session/request_permission` for one of these tools is
- *   answered `allow_once` without a card (`session.ts`).
+ * - **Approvals.** A `session/request_permission` for one of the REGISTERED
+ *   tools is answered `allow_once` without a card (`session.ts`) — by name,
+ *   so a user's own server that shares the `orquester` name (the external
+ *   `/mcp`, `docs/orquester-mcp.md`) is never waved through.
  */
 
 import { parseSessionToolName, SESSION_TOOLS_SERVER_NAME } from "@orquester/api/agent-chat";
@@ -31,6 +33,8 @@ export interface GrokSessionToolsLaunch {
   authorization: string;
   /** The "Orquester" instruction block; "" for none. */
   instructions: string;
+  /** The registered tools' bare names: only these are answered without a card. */
+  toolNames: ReadonlySet<string>;
 }
 
 /** The `mcpServers` list for `session/new` / `session/load`. */
@@ -60,19 +64,28 @@ interface VendorTool {
 }
 
 /**
- * True when a tool call is one of the `orquester` server's. Grok names an MCP
+ * The bare session-tool name a tool call names, or null. Grok names an MCP
  * tool `server__tool` (its `22-permissions-and-safety.md`, "MCP Rules"); the
  * name is read off `_meta["x.ai/tool"]` and, failing that, the title — each
  * only as an exact spelling, never a substring.
  */
-export function isGrokSessionToolCall(toolCall: Pick<ToolCallUpdate, "title" | "_meta"> | null | undefined): boolean {
+export function grokSessionToolName(toolCall: Pick<ToolCallUpdate, "title" | "_meta"> | null | undefined): string | null {
   if (toolCall === null || toolCall === undefined) {
-    return false;
+    return null;
   }
   const vendor = (toolCall._meta?.["x.ai/tool"] ?? undefined) as VendorTool | undefined;
   const candidates: unknown[] = [vendor?.name, toolCall.title];
   if (typeof vendor?.namespace === "string" && typeof vendor.name === "string") {
     candidates.push(`${vendor.namespace}__${vendor.name}`);
   }
-  return candidates.some((candidate) => parseSessionToolName(candidate) !== null);
+  for (const candidate of candidates) {
+    const name = parseSessionToolName(candidate);
+    if (name !== null) return name;
+  }
+  return null;
+}
+
+/** True when a tool call is a session tool's (any name, for the timeline's classification). */
+export function isGrokSessionToolCall(toolCall: Pick<ToolCallUpdate, "title" | "_meta"> | null | undefined): boolean {
+  return grokSessionToolName(toolCall) !== null;
 }

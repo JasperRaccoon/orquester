@@ -8,9 +8,13 @@
  * which crosses as `{type: "sdk", name}` and is served over the SDK's control
  * channel — so nothing secret could reach argv even if there were a secret.
  *
- * Pre-approved in every permission mode: `allowedTools` carries the
- * server-wide rule `mcp__orquester`, so the CLI never asks, and `canUseTool`
- * short-circuits the same names should it ask anyway (`session.ts`).
+ * Pre-approved in every permission mode: `allowedTools` names each registered
+ * tool (`mcp__orquester__<tool>`), so the CLI never asks, and `canUseTool`
+ * short-circuits the same names should it ask anyway (`session.ts`). Each
+ * tool, never the server-wide `mcp__orquester` rule: the external-MCP guide
+ * (`docs/orquester-mcp.md`) installs Orquester's own full-drive `/mcp` under
+ * that very name at user scope, and a server-wide rule would pre-approve
+ * its tools too wherever it shadowed this one.
  */
 
 import {
@@ -23,14 +27,16 @@ import { SESSION_TOOLS_SERVER_NAME } from "@orquester/api/agent-chat";
 import type { SessionToolsHost } from "../../session-tools/index.ts";
 import { callIdFromMeta, SESSION_TOOLS_SERVER_VERSION } from "../../session-tools/mcp-server.ts";
 
-/** Claude's permission rule for every tool of the server. */
-export const CLAUDE_SESSION_TOOLS_ALLOW_RULE = `mcp__${SESSION_TOOLS_SERVER_NAME}`;
+const TOOL_PREFIX = `mcp__${SESSION_TOOLS_SERVER_NAME}__`;
 
-const TOOL_PREFIX = `${CLAUDE_SESSION_TOOLS_ALLOW_RULE}__`;
+/** A session tool as Claude names it: `mcp__orquester__<tool>`. */
+export function claudeSessionToolName(name: string): string {
+  return `${TOOL_PREFIX}${name}`;
+}
 
-/** True for a tool of the `orquester` server, as Claude names it. */
-export function isClaudeSessionTool(toolName: string): boolean {
-  return toolName.startsWith(TOOL_PREFIX);
+/** True for one of `names` (bare) as Claude names it. */
+export function isClaudeSessionTool(toolName: string, names: ReadonlySet<string>): boolean {
+  return toolName.startsWith(TOOL_PREFIX) && names.has(toolName.slice(TOOL_PREFIX.length));
 }
 
 /** What `buildClaudeQueryOptions` attaches. */
@@ -38,6 +44,8 @@ export interface ClaudeSessionToolsLaunch {
   server: McpSdkServerConfigWithInstance;
   /** The "Orquester" instruction block, appended to the system prompt. */
   instructions: string;
+  /** `allowedTools`: each registered tool by its Claude name. */
+  allowedTools: string[];
 }
 
 /** The `extra` the SDK's MCP server hands a tool handler: only these fields are read. */
@@ -82,6 +90,7 @@ export function createClaudeSessionToolsLaunch(input: {
       version: SESSION_TOOLS_SERVER_VERSION,
       tools
     }),
-    instructions: input.sessionTools.instructions
+    instructions: input.sessionTools.instructions,
+    allowedTools: input.sessionTools.tools.map((definition) => claudeSessionToolName(definition.name))
   };
 }

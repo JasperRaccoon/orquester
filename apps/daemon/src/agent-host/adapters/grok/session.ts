@@ -41,7 +41,7 @@ import type { AcpFrameDirection } from "./acp/peer.ts";
 import {
   grokSessionMcpServers,
   grokSessionMeta,
-  isGrokSessionToolCall,
+  grokSessionToolName,
   type GrokSessionToolsLaunch
 } from "./session-tools.ts";
 import {
@@ -796,7 +796,8 @@ export class GrokSession {
   private async onPermissionRequest(params: RequestPermissionRequest): Promise<RequestPermissionResponse> {
     // Session tools never raise a card (design 2026-10-14 §1.3): one-shot
     // `allow_once`, never a grant Grok would remember for anything else.
-    if (this.options.sessionTools !== undefined && isGrokSessionToolCall(params.toolCall)) {
+    const sessionTool = grokSessionToolName(params.toolCall);
+    if (sessionTool !== null && this.options.sessionTools?.toolNames.has(sessionTool) === true) {
       const optionId = selectPermissionOptionId(params.options, "accept");
       if (optionId !== undefined) {
         return { outcome: { outcome: "selected", optionId } };

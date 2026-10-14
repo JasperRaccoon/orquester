@@ -10,8 +10,13 @@
  * chat server *per thread*; this pool runs **one per project**, shared by that
  * project's threads. The divergence holds on exactly two invariants, and both
  * are enforced elsewhere in this directory:
- *   1. chat sessions register nothing thread-scoped into the server (no MCP
- *      connection — the daemon's `/mcp` server is out of scope, §2); and
+ *   1. a thread-scoped registration never lets one thread act as another.
+ *      The only one is the session-tool server (design 2026-10-14 §1.2,
+ *      `session-tools.ts`): each thread registers its OWN `orquester-<key>`
+ *      MCP server, and each thread's session permission ruleset hides every
+ *      other thread's (OpenCode drops a tool whose last matching rule is a
+ *      `*` deny) — so co-tenant threads neither replace nor reach each
+ *      other's connection; and
  *   2. an automatic approval is a one-shot `once` grant, never a persisted
  *      `always` (`normalize.ts`, `openPermission`), because OpenCode stores
  *      `always` per **directory** and fixture 04 proves a grant made in one

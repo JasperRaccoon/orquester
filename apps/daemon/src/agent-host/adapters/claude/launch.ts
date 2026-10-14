@@ -16,7 +16,7 @@
 import type { CanUseTool, Options as ClaudeQueryOptions } from "@anthropic-ai/claude-agent-sdk";
 import type { ModelSelection, ProviderModel, RuntimeMode } from "@orquester/api/agent-chat";
 
-import { CLAUDE_SESSION_TOOLS_ALLOW_RULE, type ClaudeSessionToolsLaunch } from "./session-tools.ts";
+import type { ClaudeSessionToolsLaunch } from "./session-tools.ts";
 import {
   CLAUDE_OPTION_IDS,
   findModel,
@@ -193,9 +193,9 @@ export function buildClaudeQueryOptions(
     // `.mcp.json` and user-scope servers keep loading as before.
     mcpServers:
       input.sessionTools !== undefined ? { [input.sessionTools.server.name]: input.sessionTools.server } : {},
-    // Session tools never raise an approval card (§1.3): the server-wide rule
-    // pre-approves them in every permission mode.
-    ...(input.sessionTools !== undefined ? { allowedTools: [CLAUDE_SESSION_TOOLS_ALLOW_RULE] } : {}),
+    // Session tools never raise an approval card (§1.3): each one is
+    // pre-approved by name in every permission mode (`session-tools.ts`).
+    ...(input.sessionTools !== undefined ? { allowedTools: [...input.sessionTools.allowedTools] } : {}),
     ...(Object.keys(extraArgs).length > 0 ? { extraArgs } : {}),
     ...(input.stderr !== undefined ? { stderr: input.stderr } : {})
   };

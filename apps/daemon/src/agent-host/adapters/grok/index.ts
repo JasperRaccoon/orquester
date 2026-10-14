@@ -286,7 +286,8 @@ class GrokAdapter implements AgentAdapter {
             sessionTools: {
               url: grant.url,
               authorization: grant.authorization,
-              instructions: this.context.sessionTools?.instructions ?? ""
+              instructions: this.context.sessionTools?.instructions ?? "",
+              toolNames: new Set(this.context.sessionTools?.tools.map((tool) => tool.name) ?? [])
             }
           }
         : {}),

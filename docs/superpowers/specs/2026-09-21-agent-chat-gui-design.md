@@ -355,7 +355,14 @@ its MCP registrations are directory-scoped while its own MCP connection is threa
 co-tenant threads would replace each other's connection. Orquester's chat sessions register no
 per-thread MCP connection into the OpenCode server — the daemon's terminal-shaped `/mcp` server is
 out of scope (§2) — which is what makes one server per project safe; the day a thread-scoped
-registration is added, the server becomes per thread. Second, OpenCode stores persistent approval
+registration is added, the server becomes per thread.
+*Updated by the session tools (design `2026-10-14-agent-visuals-and-session-tools-design.md`
+§1.2): chat agents now DO get an MCP server — `orquester`, scoped to their thread — and the
+OpenCode server stays per project. Each thread registers its own `orquester-<16 hex>` server
+(`POST /mcp`, memory only), so none replaces another's, and each thread's session permission
+ruleset denies `orquester-*` and allows only its own, which OpenCode turns into not offering the
+other threads' tools at all (`adapters/opencode/session-tools.ts`, verified against the 1.18.34
+bundle).* Second, OpenCode stores persistent approval
 grants per directory, so an automatic approval issued on behalf of a `full-access` thread must be
 sent as a one-shot grant, never a persisted one, or it silently widens every other thread sharing
 that server. The server is refcounted by its threads and torn down shortly after the last one
@@ -1425,6 +1432,11 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   `-c '<name>.bearer_token_env_var="…"'` appended to argv with the token in env. Not needed for
   v1 (Orquester's `/mcp` server is terminal-shaped and out of scope), but it is the only place a
   Codex session can be given an MCP server.
+  *Superseded (design 2026-10-14 §1.2): `thread/start` and `thread/resume` carry `config`, so the
+  session-tool server rides `config["mcp_servers.orquester"]` = `{url, bearer_token_env_var,
+  default_tools_approval_mode: "approve"}` over JSON-RPC, the credential in the child's env only;
+  verified on codex-cli 0.159.0, `config/mcpServer/reload` included
+  (`adapters/codex/session-tools.ts`).*
   *T3: `apps/server/src/provider/Layers/CodexAdapter.ts:2298-2306`*
 - **`CODEX_HOME` has two layouts.** `direct` uses the shared home. `authOverlay` builds a shadow
   home of symlinks into it — `sessions`, `archived_sessions`, `sqlite`, `shell_snapshots`,
@@ -1872,6 +1884,10 @@ This is the implementation reference; the audit (`t3-5-adapter-audit.md` §D) ad
   clock, and after 2 s idle a **synthetic** `LoadSessionResponse` is fabricated from
   `initialize._meta`; 90 s overall.
   *T3: `apps/server/src/provider/acp/AcpSessionRuntime.ts:755-880` (the three branches), `:791-796` (load payload), `:804-864` (the replay-idle race); `apps/server/src/provider/acp/AcpRuntimeModel.ts:709-758` (the synthetic response)*
+  *Updated (design 2026-10-14 §1.2–§1.4): `mcpServers` is no longer always `[]` — with a
+  session-tool toolkit registered it holds the thread's `orquester` http entry (its credential in
+  a header, masked in `raw.ndjson`), and `_meta.rules` carries the "Orquester" instruction block
+  (`adapters/grok/session-tools.ts`).*
   *Built: `session/load` answers in ~266 ms in practice, and the replay arrives as
   **`_x.ai/session/update`** — a method name T3 does not register at all, so an adapter that only
   knows `session/update` silently loses the whole replayed history (and the usage rows in it).

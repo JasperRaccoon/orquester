@@ -17,11 +17,7 @@ import { TEST_TOOLKIT_INSTRUCTIONS } from "../../../session-tools/testing.ts";
 import { recordingSessionTools } from "../../session-tools/testing.ts";
 import { buildClaudeQueryOptions } from "./launch.ts";
 import { toProviderModels } from "./models.ts";
-import {
-  CLAUDE_SESSION_TOOLS_ALLOW_RULE,
-  createClaudeSessionToolsLaunch,
-  isClaudeSessionTool
-} from "./session-tools.ts";
+import { createClaudeSessionToolsLaunch, isClaudeSessionTool } from "./session-tools.ts";
 
 async function connectInProcess(instance: unknown): Promise<Client> {
   const [clientSide, serverSide] = InMemoryTransport.createLinkedPair();
@@ -77,11 +73,14 @@ describe("Claude in-process session-tool server", () => {
     await client.close();
   });
 
-  it("names only the orquester server's tools as session tools", () => {
-    assert.equal(isClaudeSessionTool("mcp__orquester__echo"), true);
-    assert.equal(isClaudeSessionTool("mcp__orquester2__echo"), false);
-    assert.equal(isClaudeSessionTool("mcp__github__orquester__x"), false);
-    assert.equal(isClaudeSessionTool("Bash"), false);
+  it("names only the REGISTERED tools of the orquester server as session tools", () => {
+    const names = new Set(["echo"]);
+    assert.equal(isClaudeSessionTool("mcp__orquester__echo", names), true);
+    // A tool of the same-named external `/mcp` (docs/orquester-mcp.md) is not one.
+    assert.equal(isClaudeSessionTool("mcp__orquester__send_message", names), false);
+    assert.equal(isClaudeSessionTool("mcp__orquester2__echo", names), false);
+    assert.equal(isClaudeSessionTool("mcp__github__orquester__echo", names), false);
+    assert.equal(isClaudeSessionTool("Bash", names), false);
   });
 });
 
@@ -103,8 +102,13 @@ describe("Claude launch options with session tools", () => {
     const { options } = buildClaudeQueryOptions({ ...base, sessionTools: launch });
     assert.deepEqual(Object.keys(options.mcpServers ?? {}), ["orquester"]);
     assert.equal(options.mcpServers?.orquester, launch.server);
-    assert.deepEqual(options.allowedTools, [CLAUDE_SESSION_TOOLS_ALLOW_RULE]);
-    assert.equal(CLAUDE_SESSION_TOOLS_ALLOW_RULE, "mcp__orquester");
+    // Each registered tool by name — never the server-wide `mcp__orquester`.
+    assert.deepEqual(options.allowedTools, [
+      "mcp__orquester__echo",
+      "mcp__orquester__wait_for_cancel",
+      "mcp__orquester__pixel",
+      "mcp__orquester__fail"
+    ]);
     const systemPrompt = options.systemPrompt as { type: string; append: string };
     assert.equal(systemPrompt.type, "preset");
     assert.ok(systemPrompt.append.startsWith("You are running inside Orquester's agent chat"));

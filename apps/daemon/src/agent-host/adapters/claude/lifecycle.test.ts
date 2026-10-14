@@ -3514,7 +3514,21 @@ describe("Claude adapter — session tools (design 2026-10-14 §1)", () => {
     // The launch carried the server and its server-wide allow rule.
     const options = harness.queryOptions.find((entry) => entry.persistSession !== false)!;
     assert.deepEqual(Object.keys(options.mcpServers ?? {}), ["orquester"]);
-    assert.deepEqual(options.allowedTools, ["mcp__orquester"]);
+    assert.ok(options.allowedTools?.includes("mcp__orquester__echo"));
+    assert.equal(options.allowedTools?.includes("mcp__orquester"), false, "never the server-wide rule");
+  });
+
+  it("a same-named server's OTHER tool is still asked about", async () => {
+    const harness = await makeHarness({ sessionTools: recordingSessionTools() });
+    await harness.adapter.startSession(START);
+    const peer = harness.peers[0]!;
+    await harness.drain();
+    void peer.canUseTool!("mcp__orquester__send_message", { sessionId: "s" }, {
+      signal: new AbortController().signal,
+      toolUseID: "toolu_ext",
+      requestId: "req-ext"
+    } as unknown as Parameters<CanUseTool>[2]);
+    assert.ok(await harness.waitFor("request.opened"));
   });
 
   it("without a registered toolkit, an `orquester` tool is no session tool and is asked about", async () => {
