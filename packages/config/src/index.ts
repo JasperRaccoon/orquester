@@ -292,10 +292,13 @@ export function agentChatThreadLeftoverWorkPath(baseDir: string, threadId: strin
 }
 
 /**
- * A transcript-handoff fork's pending context (spec 2026-10-14 §6): the
- * parent's conversation up to the fork point, which the host hands the
- * provider together with the child's first message and then deletes. 0600,
- * written atomically; only a provider without a native fork has one.
+ * A transcript-handoff fork's context (spec 2026-10-14 §6): the parent's
+ * conversation up to the fork point, which the host hands the provider
+ * together with the child's first ordinary message. The record is kept for
+ * the child's lifetime (`deliveredTurnId` says which turn carried it): that
+ * turn failing, or a rewind dropping it, re-arms the handoff for the next
+ * message. 0600, written atomically; only a provider without a native fork
+ * has one.
  */
 export function agentChatThreadForkHandoffPath(baseDir: string, threadId: string): string {
   return joinPath(agentChatThreadDir(baseDir, threadId), "fork-handoff.json");
