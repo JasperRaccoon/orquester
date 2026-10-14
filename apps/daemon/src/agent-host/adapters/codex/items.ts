@@ -14,6 +14,7 @@
  */
 
 import {
+  MCP_APP_RESOURCE_SCHEME,
   ORQUESTER_MCP_SERVER_NAME,
   type CanonicalItemType,
   type RuntimeItemStatus
@@ -52,6 +53,12 @@ export interface ClassifiedItem {
  * built from `item/agentMessage/delta`. Were `item.text` ever forwarded, it
  * would belong in `data.text`, which ingestion always reads as text.
  */
+/** Whether an `mcpToolCall`'s tool names an MCP App (`ui://`) resource, in either field Codex reports it. */
+function namesMcpAppResource(item: Extract<CodexThreadItem, { type: "mcpToolCall" }>): boolean {
+  const uri = item.appContext?.resourceUri ?? item.mcpAppResourceUri;
+  return typeof uri === "string" && uri.startsWith(MCP_APP_RESOURCE_SCHEME);
+}
+
 export function classifyItem(item: CodexThreadItem): ClassifiedItem {
   switch (item.type) {
     case "userMessage":
@@ -137,9 +144,12 @@ export function classifyItem(item: CodexThreadItem): ClassifiedItem {
           durationMs: item.durationMs,
           // Orquester's own session tools answer structured references the
           // timeline renders from (an `html_render` page, spec 2026-10-14
-          // §1.5), so their result is kept; every other server's stays
-          // dropped, as before, to keep the log lean.
-          ...(item.server === ORQUESTER_MCP_SERVER_NAME && item.result !== null ? { result: item.result } : {})
+          // §1.5), and a call whose tool names an MCP App resource (§3)
+          // replays its result into the app, so those results are kept;
+          // every other server's stays dropped, as before, to keep the log lean.
+          ...((item.server === ORQUESTER_MCP_SERVER_NAME || namesMcpAppResource(item)) && item.result !== null
+            ? { result: item.result }
+            : {})
         }
       };
 

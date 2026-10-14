@@ -22,6 +22,7 @@ import type {
 } from "./adapter-types.ts";
 import type { DomainEvent } from "./domain-events.ts";
 import type { AgentGoalStatus } from "./goal.ts";
+import type { McpAppCallToolResult } from "./mcp-app.ts";
 import type { ApprovalDecision, TurnTokenUsage } from "./runtime-events.ts";
 import type {
   Checkpoint,
@@ -48,6 +49,64 @@ export const AGENT_VISUAL_ROUTE_PREFIX = "/api/agent-visuals";
 export interface AgentVisualUrlResponse {
   path: string;
   expiresAt: number;
+}
+
+/**
+ * The requests an MCP App makes of its host that reach the daemon (spec
+ * 2026-10-14 §3). Each is `POST agentChatRoutes.mcpApp(id, itemId, op)`:
+ *
+ * - `tool-info` {@link McpAppToolInfoRequest} → {@link McpAppToolInfoResponse};
+ * - `call-tool` {@link McpAppCallToolRequest} → `McpAppCallToolResult`;
+ * - `read-resource` {@link McpAppReadResourceRequest} → {@link McpAppReadResourceResponse};
+ * - `model-context` {@link McpAppModelContextRequest} → `{}`.
+ *
+ * Refusals are the §6.2 envelope: 404 `ITEM_NOT_FOUND` (no such row, or not
+ * an app), 400 `INVALID_COMMAND` (a malformed body), 409 `COMMAND_REJECTED`
+ * (the session is not running, the provider cannot, the tool is hidden from
+ * apps, the request failed) — its message is what the app is told.
+ */
+export const MCP_APP_OPERATIONS = ["tool-info", "call-tool", "read-resource", "model-context"] as const;
+export type McpAppOperation = (typeof MCP_APP_OPERATIONS)[number];
+
+export interface McpAppToolInfoRequest {
+  name: string;
+}
+
+export interface McpAppToolInfoResponse {
+  /** The tool exists on the app's server and its `_meta.ui.visibility` lets an app call it. */
+  callable: boolean;
+  /** The server marks it read-only (`annotations.readOnlyHint`): no consent is asked. */
+  readOnly: boolean;
+  title?: string;
+  /** The server's MCP `Tool` definition, which the app receives as `toolInfo`. */
+  tool?: unknown;
+  /**
+   * The provider takes `ui/update-model-context` into the agent's next turn
+   * (an additive context channel: Codex's `additionalContext`). False: the
+   * host does not offer the capability.
+   */
+  modelContext: boolean;
+}
+
+export interface McpAppCallToolRequest {
+  name: string;
+  arguments: Record<string, unknown>;
+}
+
+export type McpAppCallToolResponse = McpAppCallToolResult;
+
+export interface McpAppReadResourceRequest {
+  uri: string;
+}
+
+export interface McpAppReadResourceResponse {
+  contents: unknown[];
+}
+
+/** Text blocks and/or structured content; neither (or blank text) clears the app's context. */
+export interface McpAppModelContextRequest {
+  content?: unknown[];
+  structuredContent?: Record<string, unknown>;
 }
 
 const sessionBase = (sessionId: string): string =>
@@ -135,6 +194,15 @@ export const agentChatRoutes = {
    */
   visual: (sessionId: string, attachmentId: string): string =>
     `${AGENT_VISUAL_ROUTE_PREFIX}/${encodeURIComponent(sessionId)}/${encodeURIComponent(attachmentId)}`,
+  /**
+   * `POST` — one request of the MCP App a tool call produced (spec
+   * 2026-10-14 §3), named by the call's completed row (`itemId`, the
+   * activity id): {@link McpAppOperation}. The host resolves the app from the
+   * stored row and runs the request through the thread's live provider
+   * session, against the app's own MCP server only.
+   */
+  mcpApp: (sessionId: string, itemId: string, operation: McpAppOperation): string =>
+    `${sessionBase(sessionId)}/mcp-apps/${encodeURIComponent(itemId)}/${operation}`,
 
   // §6.3 host-level reads (not per session)
   providers: "/api/agent/providers",

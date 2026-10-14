@@ -23,6 +23,7 @@ import type {
   ApprovalDecision,
   AttachmentRef,
   InteractionMode,
+  McpAppCallToolResult,
   ModelSelection,
   ProviderSession,
   ProviderSnapshot,
@@ -441,8 +442,61 @@ export interface AgentAdapter {
    */
   pendingSnapshot(checkedAt: string): ProviderSnapshot;
 
+  /**
+   * MCP Apps (spec 2026-10-14 §3): what an app a tool call produced may ask
+   * of its own MCP server, run through the thread's LIVE provider session —
+   * whose MCP client owns the connection and its credentials, so no server
+   * process is ever duplicated. Present only on an adapter whose provider
+   * exposes an MCP Apps UI resource and a way to reach the server (Codex,
+   * Grok); the host checks which app and which server before calling.
+   */
+  readonly mcpApps?: AdapterMcpApps;
+
   /** The adapter's canonical event stream. One consumer: the host's ingestion. */
   readonly events: AsyncIterable<RuntimeEvent>;
+}
+
+/** One tool of an MCP server, as a live provider session lists it. */
+export interface AdapterMcpTool {
+  name: string;
+  /** `annotations.title`, when the server gave one. */
+  title?: string;
+  /** `annotations.readOnlyHint === true`; false when the provider does not say. */
+  readOnly: boolean;
+  /** The tool's own `_meta` (its `ui.visibility` decides whether an app may call it). */
+  meta?: unknown;
+  /** The MCP `Tool` definition as the provider reports it, handed to the app as `toolInfo`. */
+  definition: unknown;
+}
+
+/**
+ * Thrown by {@link AdapterMcpApps} when the thread has no live session: an
+ * app view never starts one (a provider session is the user's to start).
+ */
+export class McpAppSessionUnavailableError extends Error {
+  constructor(message = "The agent's session is not running. Send a message to start it, then try again.") {
+    super(message);
+    this.name = "McpAppSessionUnavailableError";
+  }
+}
+
+export interface AdapterMcpApps {
+  /**
+   * The provider takes {@link setModelContext} into the agent's next turn
+   * through an additive context channel (Codex's `additionalContext`).
+   */
+  readonly modelContext: boolean;
+  listTools(threadId: string, server: string): Promise<AdapterMcpTool[]>;
+  callTool(
+    threadId: string,
+    input: { server: string; tool: string; arguments: Record<string, unknown> }
+  ): Promise<McpAppCallToolResult>;
+  readResource(threadId: string, input: { server: string; uri: string }): Promise<{ contents: unknown[] }>;
+  /**
+   * Replace what one app (`key`, its tool call's row) tells the agent on its
+   * next turn; `null` clears it. Present exactly when {@link modelContext}.
+   */
+  setModelContext?(threadId: string, key: string, context: { server: string; tool: string; text: string } | null): void;
 }
 
 // ---------------------------------------------------------------------------
@@ -483,6 +537,13 @@ export interface AdapterContext {
   resolveAttachmentPath(threadId: string, attachmentId: string): Promise<string>;
   /** The thread's attachments dir, handed to Claude as an additional directory. */
   attachmentsDir(threadId: string): string;
+  /**
+   * Store bytes the ADAPTER produced as one of the thread's attachments (an
+   * MCP App's snapshot, spec 2026-10-14 §3) and answer its id. The id's
+   * suffix is the name's extension (`app.html` → `…-html`). Optional: a
+   * context without it captures nothing.
+   */
+  storeAttachment?(threadId: string, input: { name: string; mimeType: string; bytes: string }): Promise<string>;
   /**
    * Append one untranslated provider frame to `raw.ndjson`. Best-effort and
    * never blocking; transient delta frames are dropped by the writer (§3.1).

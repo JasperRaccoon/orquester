@@ -71,6 +71,7 @@ import {
   createEmptyThreadState,
   deserializeFoldState,
   htmlRenderReferenceOfActivityPayload,
+  mcpAppReferenceOfActivityPayload,
   isHtmlRenderAttachmentId,
   parseFoldSnapshotFile,
   serializeFoldState
@@ -908,6 +909,11 @@ export function createThreadStore(options: ThreadStoreOptions): AgentThreadStore
         const page = htmlRenderReferenceOfActivityPayload(item.payload);
         if (page !== undefined) {
           referenced.add(page.attachmentId);
+        }
+        // An MCP App's snapshot (§3): its reference sits on the call's row.
+        const app = mcpAppReferenceOfActivityPayload(item.payload);
+        if (app !== undefined) {
+          referenced.add(app.attachmentId);
         }
       }
     }

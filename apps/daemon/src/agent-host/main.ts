@@ -21,7 +21,7 @@
 import { randomBytes, randomUUID } from "node:crypto";
 import { readCodeStamp } from "./support/code-stamp.ts";
 import { accessSync, constants as fsConstants, statSync } from "node:fs";
-import { chmod, mkdir, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { delimiter, isAbsolute, join, resolve as resolvePath, sep } from "node:path";
 
@@ -344,6 +344,27 @@ export async function startAgentHost(
     resolveAttachmentPath: (threadId, attachmentId) =>
       store.resolveAttachment(threadId, attachmentId),
     attachmentsDir: (threadId) => agentChatThreadAttachmentsDir(appdir, threadId),
+    // An adapter's own bytes (an MCP App's snapshot, spec 2026-10-14 §3),
+    // claimed exactly as an upload is: staged where the store's `.part` sweep
+    // reaches, copied in by `putAttachment` (which checks the bounds), staged
+    // copy removed whatever happens.
+    storeAttachment: async (threadId, input) => {
+      const stagingDir = store.pendingAttachmentsDir();
+      await mkdir(stagingDir, { recursive: true });
+      const staged = join(stagingDir, `adapter-${randomUUID()}.part`);
+      try {
+        await writeFile(staged, input.bytes, { encoding: "utf8", mode: 0o600 });
+        const ref = await store.putAttachment({
+          threadId,
+          name: input.name,
+          mimeType: input.mimeType,
+          sourcePath: staged
+        });
+        return ref.id;
+      } finally {
+        await rm(staged, { force: true }).catch(() => undefined);
+      }
+    },
     leftoverWorkPath: (threadId) => agentChatThreadLeftoverWorkPath(appdir, threadId),
     logRawFrame: (threadId, frame) => store.logRawFrame(threadId, frame),
     buildEnv: ({ threadId, home, projectPath, extraEnv }) => {

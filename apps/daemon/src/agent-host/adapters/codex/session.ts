@@ -45,6 +45,14 @@
  *   takes the turn back when it no longer is.
  */
 
+import {
+  MCP_APP_EXTENSION_ID,
+  MCP_APP_MIME_TYPE,
+  MCP_APP_RESOURCE_SCHEME,
+  normalizeMcpAppToolResult,
+  type McpAppCallToolResult,
+  type McpAppReference
+} from "@orquester/api/agent-chat";
 import type {
   AgentGoal,
   ApprovalDecision,
@@ -62,6 +70,7 @@ import type {
 
 import type {
   AdapterContext,
+  AdapterMcpTool,
   GoalCommandOptions,
   GoalCommandResult,
   HostGoalCommand,
@@ -137,6 +146,7 @@ import {
   type CodexServerRequest
 } from "./protocol.ts";
 import { CodexUsageTracker } from "./usage.ts";
+import { captureMcpApp, McpAppFrameHold } from "../mcp-app-capture.ts";
 
 /**
  * What a resumed session persists. Codex's cursor is just `{threadId}` (§4.1),
@@ -195,6 +205,14 @@ export interface CodexSessionOptions {
   emit: (draft: RuntimeEventDraft) => void;
   /** Called once the session has settled for good, so the adapter can forget it. */
   onClosed: () => void;
+  /**
+   * What the thread's MCP Apps told the agent (`ui/update-model-context`,
+   * spec 2026-10-14 §3), keyed by app, read at every `turn/start`: each rides
+   * as UNTRUSTED `additionalContext` — text an MCP server wrote, which Codex
+   * renders as quoted user-side input, never as instructions — and Codex
+   * resends an entry only when it changed.
+   */
+  appContext?: () => ReadonlyMap<string, string>;
 }
 
 /** What every parked server→client request carries, approval or question. */
@@ -348,12 +366,24 @@ export class CodexSession {
    * before-turn `config/mcpServer/reload` (§4.5 "Turn"; R3 finding 10).
    */
   private sawMcpServer = false;
+  /**
+   * MCP Apps (spec 2026-10-14 §3): while an app's resource is read for a
+   * completed call, every later frame waits here, so the call's row — with
+   * its app — keeps its place ahead of the reply and the turn's end.
+   */
+  private readonly frames: McpAppFrameHold;
   private readonly createdAt: string;
   private updatedAt: string;
 
   constructor(options: CodexSessionOptions) {
     this.options = options;
     this.threadId = options.threadId;
+    this.frames = new McpAppFrameHold((error) => {
+      options.context.logger.error("codex: a held frame failed", {
+        threadId: options.threadId,
+        error: describeError(error)
+      });
+    });
     this.modelSelection = options.modelSelection;
     this.runtimeMode = options.runtimeMode;
     // Through the `IdGen` seam, so a captured event log stays byte-stable.
@@ -442,9 +472,11 @@ export class CodexSession {
       stdin: child.stdin,
       stdout: child.stdout,
       handlers: {
-        onRequest: (request) => this.handleServerRequest(request),
+        // Both through the MCP App hold: a frame that arrives while an app's
+        // resource is read waits for it, in order (`receiveNotification`).
+        onRequest: (request) => this.frames.offerAsync(() => this.handleServerRequest(request)),
         onNotification: (method, params) => {
-          this.handleNotification(method, params);
+          this.receiveNotification(method, params);
         },
         onUnknownFrame: (frame, reason) => {
           // Surfaced, NEVER dropped by a catch-all (§10). A warning never ends
@@ -486,7 +518,12 @@ export class CodexSession {
           clientInfo: { name: "orquester", title: "Orquester", version: HOST_CLIENT_VERSION },
           capabilities: {
             experimentalApi: true,
-            requestAttestation: false
+            requestAttestation: false,
+            // MCP Apps (SEP-1724 extension negotiation, spec 2026-10-14 §3):
+            // Codex's MCP client declares the UI extension to the user's
+            // servers only when its own client does, so servers attach their
+            // UI resources and Codex names them on the call's item.
+            extensions: { [MCP_APP_EXTENSION_ID]: { mimeTypes: [MCP_APP_MIME_TYPE] } }
           }
         }),
       AGENT_HOST_DEADLINES.handshakeMs,
@@ -586,6 +623,10 @@ export class CodexSession {
         ...(effort !== undefined ? { effort } : {})
       })
     };
+    const appContext = this.additionalAppContext();
+    if (appContext !== undefined) {
+      params.additionalContext = appContext;
+    }
 
     // Best-effort, before the turn (§4.5 "Turn"): an MCP server added to
     // `~/.codex/config.toml` mid-session is otherwise not picked up until the
@@ -1534,7 +1575,89 @@ export class CodexSession {
   // Inbound
   // -------------------------------------------------------------------------
 
-  private handleNotification(method: ServerNotificationMethod, params: unknown): void {
+  /**
+   * One notification, through the MCP App hold. A completed `mcpToolCall` of
+   * this thread whose tool names a `ui://` resource is the one exception to
+   * "handled as it arrives": its resource is read first (bounded), and the
+   * call's completion is written with the app — every frame behind it waits
+   * meanwhile ({@link McpAppFrameHold}).
+   */
+  private receiveNotification(method: ServerNotificationMethod, params: unknown): void {
+    if (this.frames.offer(() => this.receiveNotification(method, params))) {
+      return;
+    }
+    const app = this.appCallOf(method, params);
+    if (app === null) {
+      this.handleNotification(method, params);
+      return;
+    }
+    this.frames.hold(
+      (signal) =>
+        captureMcpApp({
+          context: this.options.context,
+          threadId: this.threadId,
+          server: app.server,
+          tool: app.tool,
+          resourceUri: app.resourceUri,
+          signal,
+          read: async () =>
+            (
+              await this.requirePeer().request("mcpServer/resource/read", {
+                threadId: app.providerThreadId,
+                server: app.server,
+                uri: app.resourceUri
+              })
+            ).contents
+        }),
+      (mcpApp) => {
+        this.handleNotification(method, params, mcpApp === undefined ? undefined : withMcpApp(app.itemId, mcpApp));
+      }
+    );
+  }
+
+  /**
+   * The app a notification's completed call names, when it is one to capture:
+   * this thread's own (a collab child's calls are rows of the child's), the
+   * call succeeded, and its tool names a `ui://` resource — on
+   * `appContext.resourceUri`, or the deprecated `mcpAppResourceUri`.
+   */
+  private appCallOf(
+    method: ServerNotificationMethod,
+    params: unknown
+  ): { itemId: string; server: string; tool: string; resourceUri: string; providerThreadId: string } | null {
+    if (method !== "item/completed" || !this.frames.canCapture || this.options.context.storeAttachment === undefined) {
+      return null;
+    }
+    const p = params as CodexProtocol.v2.ItemCompletedNotification;
+    const item = p.item;
+    if (
+      item.type !== "mcpToolCall" ||
+      item.status !== "completed" ||
+      item.result === null ||
+      item.error !== null ||
+      this.providerThreadId === null ||
+      p.threadId !== this.providerThreadId
+    ) {
+      return null;
+    }
+    const resourceUri = item.appContext?.resourceUri ?? item.mcpAppResourceUri;
+    if (typeof resourceUri !== "string" || !resourceUri.startsWith(MCP_APP_RESOURCE_SCHEME)) {
+      return null;
+    }
+    return {
+      itemId: item.id,
+      server: item.server,
+      tool: item.tool,
+      resourceUri,
+      providerThreadId: this.providerThreadId
+    };
+  }
+
+  private handleNotification(
+    method: ServerNotificationMethod,
+    params: unknown,
+    patch?: (draft: RuntimeEventDraft) => RuntimeEventDraft
+  ): void {
     // Any observable progress refreshes the liveness window (§3.1).
     this.noteActivity();
 
@@ -1571,7 +1694,8 @@ export class CodexSession {
       }
     }
 
-    for (const draft of this.normaliser.notification(method, params)) {
+    for (const raw of this.normaliser.notification(method, params)) {
+      const draft = patch === undefined ? raw : patch(raw);
       if (draft.type === "thread.started") {
         this.announceThread(draft.payload.providerThreadId);
         continue;
@@ -2114,6 +2238,10 @@ export class CodexSession {
     }
     this.exitHandled = true;
     this.disarmLivenessWatchdog();
+    // What the child said before it went is written first, in order: a
+    // capture in flight lets go (its call completes without its app) and
+    // every frame that waited for it is handled now.
+    this.frames.close();
 
     const outcome = exitOutcome(reason, this.hostInitiatedClose);
     const excerpt = this.stderr.excerpt();
@@ -2537,6 +2665,86 @@ export class CodexSession {
     return `codex-${this.threadId}-${this.requestEpoch}-${this.requestSeq}`;
   }
 
+  // -------------------------------------------------------------------------
+  // MCP Apps (spec 2026-10-14 §3): an app's requests, through Codex's own MCP
+  // client — any server the user configured works without Orquester
+  // connecting to it, under the thread's own credentials.
+  // -------------------------------------------------------------------------
+
+  /** The server's tools as this session's MCP client lists them. */
+  async mcpListTools(server: string): Promise<AdapterMcpTool[]> {
+    const peer = this.requirePeer();
+    const threadId = this.requireProviderThreadId();
+    let cursor: string | null = null;
+    // Paged: a host with many servers answers in pages; bounded all the same.
+    for (let page = 0; page < MCP_STATUS_MAX_PAGES; page += 1) {
+      const response: CodexProtocol.v2.ListMcpServerStatusResponse = await this.bounded(
+        () =>
+          peer.request("mcpServerStatus/list", {
+            threadId,
+            detail: "toolsAndAuthOnly",
+            ...(cursor !== null ? { cursor } : {})
+          }),
+        AGENT_HOST_DEADLINES.probeMs,
+        "mcpServerStatus/list"
+      );
+      const entry = response.data.find((candidate) => candidate.name === server);
+      if (entry !== undefined) {
+        return Object.values(entry.tools).flatMap((tool) => (tool === undefined ? [] : [adapterMcpTool(tool)]));
+      }
+      cursor = response.nextCursor;
+      if (cursor === null) {
+        break;
+      }
+    }
+    return [];
+  }
+
+  async mcpCallTool(input: {
+    server: string;
+    tool: string;
+    arguments: Record<string, unknown>;
+  }): Promise<McpAppCallToolResult> {
+    const peer = this.requirePeer();
+    const threadId = this.requireProviderThreadId();
+    const response = await this.bounded(
+      () =>
+        peer.request("mcpServer/tool/call", {
+          threadId,
+          server: input.server,
+          tool: input.tool,
+          arguments: input.arguments as CodexProtocol.v2.McpServerToolCallParams["arguments"]
+        }),
+      MCP_APP_REQUEST_MS,
+      "mcpServer/tool/call"
+    );
+    return normalizeMcpAppToolResult(response);
+  }
+
+  async mcpReadResource(input: { server: string; uri: string }): Promise<{ contents: unknown[] }> {
+    const peer = this.requirePeer();
+    const threadId = this.requireProviderThreadId();
+    const response = await this.bounded(
+      () => peer.request("mcpServer/resource/read", { threadId, server: input.server, uri: input.uri }),
+      MCP_APP_REQUEST_MS,
+      "mcpServer/resource/read"
+    );
+    return { contents: response.contents };
+  }
+
+  /** The apps' context for `turn/start`, as untrusted entries; undefined when none. */
+  private additionalAppContext(): CodexProtocol.v2.TurnStartParams["additionalContext"] {
+    const entries = this.options.appContext?.();
+    if (entries === undefined || entries.size === 0) {
+      return undefined;
+    }
+    const context: Record<string, CodexProtocol.v2.AdditionalContextEntry> = {};
+    for (const [key, value] of entries) {
+      context[key] = { kind: "untrusted", value };
+    }
+    return context;
+  }
+
   private requirePeer(): CodexPeer {
     const peer = this.peer;
     if (peer === null || peer.isClosed) {
@@ -2576,6 +2784,42 @@ const HOST_CLIENT_VERSION = "1";
  * unwrapped (fixtures README obs. 13). Anything else — a deadline, a closed
  * transport — is already worded by us.
  */
+/** Pages of `mcpServerStatus/list` read looking for one server. */
+const MCP_STATUS_MAX_PAGES = 10;
+/** An app's tool call or resource read: as long as a tool may take, never unbounded. */
+const MCP_APP_REQUEST_MS = 120_000;
+
+/**
+ * The completion of call `itemId` with its app: the reference goes on the
+ * row's data (`data.mcpApp`, which `slim.ts` and the timeline read). Any
+ * other draft passes through.
+ */
+function withMcpApp(itemId: string, mcpApp: McpAppReference): (draft: RuntimeEventDraft) => RuntimeEventDraft {
+  return (draft) => {
+    if (draft.type !== "item.completed" || draft.itemId !== itemId || draft.payload.itemType !== "mcp_tool_call") {
+      return draft;
+    }
+    const data = (draft.payload.data ?? {}) as Record<string, unknown>;
+    return { ...draft, payload: { ...draft.payload, data: { ...data, mcpApp } } };
+  };
+}
+
+/** A Codex `Tool` as the host's MCP Apps checks read it. */
+function adapterMcpTool(tool: CodexProtocol.Tool): AdapterMcpTool {
+  const annotations =
+    tool.annotations !== null && typeof tool.annotations === "object" && !Array.isArray(tool.annotations)
+      ? (tool.annotations as Record<string, unknown>)
+      : {};
+  const title = typeof tool.title === "string" ? tool.title : typeof annotations.title === "string" ? annotations.title : undefined;
+  return {
+    name: tool.name,
+    ...(title !== undefined ? { title } : {}),
+    readOnly: annotations.readOnlyHint === true,
+    ...(tool._meta !== undefined ? { meta: tool._meta } : {}),
+    definition: tool
+  };
+}
+
 function goalCommandError(error: unknown): Error {
   if (error instanceof CodexRpcError) {
     return new Error(presentableError(error.providerMessage));

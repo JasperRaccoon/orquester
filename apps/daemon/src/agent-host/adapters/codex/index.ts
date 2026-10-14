@@ -25,17 +25,19 @@ import type {
   ThreadSnapshot
 } from "@orquester/api/agent-chat";
 
-import type {
-  AdapterContext,
-  AdapterFactory,
-  AgentAdapter,
-  GoalCommandOptions,
-  GoalCommandResult,
-  HostGoalCommand,
-  RollbackTarget,
-  SendTurnInput,
-  SendTurnResult,
-  StartSessionInput
+import {
+  McpAppSessionUnavailableError,
+  type AdapterContext,
+  type AdapterFactory,
+  type AdapterMcpApps,
+  type AgentAdapter,
+  type GoalCommandOptions,
+  type GoalCommandResult,
+  type HostGoalCommand,
+  type RollbackTarget,
+  type SendTurnInput,
+  type SendTurnResult,
+  type StartSessionInput
 } from "../../adapter.ts";
 import { AGENT_HOST_DEADLINES, withDeadline } from "../../support/deadline.ts";
 import { describeExit, spawnProviderChild } from "../../support/spawn.ts";
@@ -289,6 +291,52 @@ export const createCodexAdapter: AdapterFactory = async (
     return session;
   };
 
+  /**
+   * MCP Apps' model context (spec 2026-10-14 §3), per thread and app, in this
+   * host's memory: what each app last told the agent, sent with every turn of
+   * the thread (Codex resends an entry only when it changed). A revert drops
+   * the thread's — the app it came from may be gone with the turns. A host
+   * restart forgets it; an app sends it again when it next updates.
+   */
+  const appContexts = new Map<string, Map<string, string>>();
+
+  /** A thread's live session for an app's request; never started here. */
+  const appSession = (threadId: string): CodexSession => {
+    const session = sessions.get(threadId);
+    if (session === undefined || !session.isLive) {
+      throw new McpAppSessionUnavailableError();
+    }
+    return session;
+  };
+
+  const mcpApps: AdapterMcpApps = {
+    modelContext: true,
+    listTools: (threadId, server) => appSession(threadId).mcpListTools(server),
+    callTool: (threadId, input) => appSession(threadId).mcpCallTool(input),
+    readResource: (threadId, input) => appSession(threadId).mcpReadResource(input),
+    setModelContext(threadId, key, context) {
+      const entries = appContexts.get(threadId) ?? new Map<string, string>();
+      if (context === null || context.text.trim() === "") {
+        entries.delete(key);
+      } else {
+        // Named by its server and tool, so the agent knows which app said it.
+        entries.delete(key);
+        entries.set(key, `MCP app ${context.server}/${context.tool} (${key}):\n${context.text}`);
+        // Bounded: the newest apps of a thread win.
+        while (entries.size > MAX_APP_CONTEXTS_PER_THREAD) {
+          const oldest = entries.keys().next().value;
+          if (oldest === undefined) break;
+          entries.delete(oldest);
+        }
+      }
+      if (entries.size === 0) {
+        appContexts.delete(threadId);
+      } else {
+        appContexts.set(threadId, entries);
+      }
+    }
+  };
+
   const startSession = async (input: StartSessionInput): Promise<ProviderSession> => {
     // One live session per thread: stop whatever the thread still holds before
     // starting, so a resume cursor is never advanced by two processes (§3.1).
@@ -318,6 +366,7 @@ export const createCodexAdapter: AdapterFactory = async (
       ...(input.knownGoal !== undefined ? { knownGoal: input.knownGoal } : {}),
       ...(input.carryGoal === true ? { carryGoal: true } : {}),
       emit: emitFor(input.threadId),
+      appContext: () => appContexts.get(input.threadId) ?? new Map<string, string>(),
       onClosed: () => {
         if (sessions.get(input.threadId) === session) {
           sessions.delete(input.threadId);
@@ -409,6 +458,7 @@ export const createCodexAdapter: AdapterFactory = async (
       numTurns: number,
       target?: RollbackTarget
     ): Promise<ThreadSnapshot> {
+      appContexts.delete(threadId);
       return requireSession(threadId).rollbackThread(numTurns, target);
     },
 
@@ -461,7 +511,9 @@ export const createCodexAdapter: AdapterFactory = async (
       return getSnapshot({ ...(input?.cwd !== undefined ? { cwd: input.cwd } : {}), force: true });
     },
 
-    pendingSnapshot: pendingCodexSnapshot
+    pendingSnapshot: pendingCodexSnapshot,
+
+    mcpApps
   };
 
   // Honour host shutdown: every child is owned by its session's scope, and
@@ -549,6 +601,9 @@ function mergeSnapshot(
   }
   return merged;
 }
+
+/** The apps whose model context one thread keeps for its next turn. */
+const MAX_APP_CONTEXTS_PER_THREAD = 16;
 
 /** *T3: `apps/server/src/provider/Layers/ProviderRegistry.ts:80-100`.* */
 const MAX_WORKSPACE_SNAPSHOTS = 16;

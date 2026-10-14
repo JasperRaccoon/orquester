@@ -44,14 +44,16 @@ import type {
   WorkspaceSnapshot
 } from "@orquester/api/agent-chat";
 
-import type {
-  AdapterContext,
-  AdapterFactory,
-  AgentAdapter,
-  RollbackTarget,
-  SendTurnInput,
-  SendTurnResult,
-  StartSessionInput
+import {
+  McpAppSessionUnavailableError,
+  type AdapterContext,
+  type AdapterFactory,
+  type AdapterMcpApps,
+  type AgentAdapter,
+  type RollbackTarget,
+  type SendTurnInput,
+  type SendTurnResult,
+  type StartSessionInput
 } from "../../adapter.ts";
 import { join } from "node:path";
 
@@ -316,6 +318,7 @@ class GrokAdapter implements AgentAdapter {
         this.sweeps.add(sweep);
         void sweep.then(() => this.sweeps.delete(sweep));
       },
+      ...(this.context.storeAttachment === undefined ? {} : { storeAttachment: this.context.storeAttachment }),
       homeDirs: [input.home.path, env["HOME"]].filter(
         (value): value is string => typeof value === "string" && value.length > 1
       )
@@ -494,6 +497,27 @@ class GrokAdapter implements AgentAdapter {
 
   hasSession(threadId: string): boolean {
     return this.sessions.has(threadId);
+  }
+
+  /**
+   * MCP Apps (spec 2026-10-14 §3), through the thread's live session. Grok
+   * has no additive context channel for a turn (ACP's `session/prompt` takes
+   * content blocks only, which would read as the user's own words), so an
+   * app's `ui/update-model-context` is not offered.
+   */
+  readonly mcpApps: AdapterMcpApps = {
+    modelContext: false,
+    listTools: (threadId, server) => this.appSession(threadId).mcpListTools(server),
+    callTool: (threadId, input) => this.appSession(threadId).mcpCallTool(input),
+    readResource: (threadId, input) => this.appSession(threadId).mcpReadResource(input)
+  };
+
+  private appSession(threadId: string): GrokSession {
+    const session = this.sessions.get(threadId);
+    if (session === undefined || session.isStopped) {
+      throw new McpAppSessionUnavailableError();
+    }
+    return session;
   }
 
   async stopSession(threadId: string, options?: { endedByUser?: boolean }): Promise<void> {

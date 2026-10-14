@@ -11,6 +11,7 @@
 import type {
   AccountHomeKind,
   AgentChatSessionSummaryFields,
+  McpAppOperation,
   ProviderUsageWindow
 } from "@orquester/api/agent-chat";
 
@@ -30,6 +31,14 @@ export const agentHostExtraRoutes = {
   /** Resolve an attachment id to its absolute host path. */
   attachment: (threadId: string, attachmentId: string): string =>
     `${thread(threadId)}/attachments/${encodeURIComponent(attachmentId)}`,
+
+  /**
+   * `POST {itemId, …}` — one request of the MCP App a completed tool row
+   * carries (spec 2026-10-14 §3, `McpAppOperation`), run through the thread's
+   * live provider session. The daemon forwards the client's
+   * `agentChatRoutes.mcpApp` here with the row's id in the body.
+   */
+  mcpApp: (threadId: string, operation: McpAppOperation): string => `${thread(threadId)}/mcp-apps/${operation}`,
 
   /**
    * The seven derived `SessionSummary` fields of §6.4 (goals §4.7 added

@@ -68,6 +68,7 @@ import { isAgentAdapterId } from "../adapters/index.ts";
 import { redactStderr } from "../support/stderr.ts";
 import { DeadlineExceededError, withDeadline } from "../support/deadline.ts";
 import type { Orchestrator } from "../orchestration/orchestrator.ts";
+import { isMcpAppOperation } from "../mcp-apps.ts";
 import {
   type AgentHostThreadSummary,
   type AttachmentPathResponse
@@ -795,6 +796,22 @@ export function createAgentHostServer(options: AgentHostServerOptions): AgentHos
 
     if (rest === "/attachments" && method === "POST") {
       await handleAttachmentUpload(request, response, threadId, url);
+      return;
+    }
+
+    // One request of an MCP App (spec 2026-10-14 §3): the app is the one the
+    // body's `itemId` row carries, its server that row's own, the request run
+    // through the thread's live provider session (`mcp-apps.ts`). Additive: a
+    // host that predates it answers its generic route-miss 404.
+    const mcpAppMatch = /^\/mcp-apps\/([^/]+)$/.exec(rest);
+    if (mcpAppMatch && method === "POST") {
+      const operation = decodeURIComponent(mcpAppMatch[1]!);
+      if (!isMcpAppOperation(operation)) {
+        throw new AgentChatCommandError("INVALID_COMMAND", `Unknown MCP app request '${operation}'.`);
+      }
+      const body = await readJsonBody(request);
+      const result = await orchestrator.mcpAppRequest(threadId, operation, body);
+      sendJson(response, 200, result);
       return;
     }
 

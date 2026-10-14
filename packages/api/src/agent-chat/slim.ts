@@ -22,6 +22,8 @@
  * - a row of the `orquester` server's `html_render` call — any item type, any
  *   provider's layout — keeps its page reference as `data.htmlRender`
  *   (`html-render.ts`), so the timeline renders the page from the slim row;
+ * - a completed MCP call whose app the adapter captured keeps `data.mcpApp`
+ *   (`mcp-app.ts`) — only once it names the row's own server and tool;
  * - tool text output is summarised to the first meaningful line, elided at
  *   {@link SLIM_SUMMARY_ELIDE_CHARS}, or to `"N lines"` when there is no
  *   single renderable line;
@@ -42,6 +44,7 @@
  */
 
 import { htmlRenderReferenceOfActivityPayload } from "./html-render.ts";
+import { mcpAppReferenceOfActivityPayload } from "./mcp-app.ts";
 
 /**
  * Any string in an activity payload is capped at this many UTF-8 **bytes** on
@@ -536,6 +539,14 @@ export function slimActivityPayload(payload: unknown): unknown {
   const htmlRender = htmlRenderReferenceOfActivityPayload(record);
   if (htmlRender !== undefined) {
     projectedData.htmlRender = "htmlRender" in data ? data.htmlRender : htmlRender;
+  }
+
+  // MCP Apps (spec 2026-10-14 §3): the app a call produced, kept whole so
+  // the timeline frames it from the slim row. Checked against the call's own
+  // server and tool here, on the full row, where that identity still is.
+  const mcpApp = mcpAppReferenceOfActivityPayload(record);
+  if (mcpApp !== undefined) {
+    projectedData.mcpApp = mcpApp;
   }
 
   const next: Record<string, unknown> = { ...restamped, data: projectedData };
