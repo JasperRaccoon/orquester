@@ -62,8 +62,16 @@ test("malformed entries are kept verbatim, unknown fields survive, bad progress 
   assert.deepEqual((round.watches[0] as Record<string, unknown>).futureField, { x: 1 });
 });
 
-test("anything that is not a watch file reads as empty", () => {
-  for (const value of [null, 3, "x", { watches: "no" }, []]) {
-    assert.deepEqual(parsePullRequestWatchFile(value), { watches: [], unreadable: [] });
+test("anything that is not a version-1 watch file is refused, never read as empty", () => {
+  for (const value of [null, 3, "x", { watches: "no" }, [], { version: 2, watches: [] }, { version: "1", watches: [] }]) {
+    assert.throws(() => parsePullRequestWatchFile(value), /watches file/, JSON.stringify(value));
   }
+  assert.deepEqual(parsePullRequestWatchFile({}), { watches: [], unreadable: [], extra: {} });
+});
+
+test("unknown top-level keys survive a rewrite", () => {
+  const file = parsePullRequestWatchFile({ version: 1, watches: [], fromNewerBuild: { a: 1 } });
+  assert.deepEqual(file.extra, { fromNewerBuild: { a: 1 } });
+  const round = JSON.parse(serializePullRequestWatchFile(file)) as Record<string, unknown>;
+  assert.deepEqual(round, { fromNewerBuild: { a: 1 }, version: 1, watches: [] });
 });

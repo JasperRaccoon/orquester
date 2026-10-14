@@ -243,6 +243,8 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
   const random = deps.random ?? Math.random;
 
   let file: PullRequestWatchFile = { watches: [], unreadable: [] };
+  /** Why the watches file may not be written this run (it could not be read), or null. */
+  let readOnly: string | null = null;
   /** The last good read of each live watch: what an idle point evaluates. Memory only. */
   const lastReads = new Map<string, PullRequestWatchRead>();
   /** When each live watch is next read (epoch ms). Memory only: a restart reads each once. */
@@ -288,6 +290,9 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
    * a restart would re-report the same news under a new id. Posting backs off while saves fail.
    */
   function persist(): Promise<boolean> {
+    // The file on disk could not be read: it may hold good watches, so it is never written over
+    // this run — every change is refused (and nothing is posted on an unsaved wake).
+    if (readOnly !== null) return Promise.resolve(false);
     const body = serializePullRequestWatchFile(file);
     const attempt = writes.then(
       () =>
@@ -923,23 +928,42 @@ export function createPullRequestWatchService(deps: PullRequestWatchServiceDeps)
     return watches.map(summaryOf);
   }
 
+  /**
+   * Missing → no watches. Unreadable (permissions, I/O) → no watches and READ-ONLY for this run:
+   * the file may hold good watches, so nothing is written over it. Not a version-1 watches file
+   * (bad JSON, another version) → moved aside to `pr-watches.json.corrupt-<stamp>` and empty; if it
+   * cannot be moved, read-only. Unknown watches and top-level keys are kept by every rewrite.
+   */
   async function load(): Promise<void> {
+    readOnly = null;
     let raw: string;
     try {
       raw = await readFile(deps.file, "utf8");
     } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") {
-        logger.error("pr watch: could not read the watches", { error: error instanceof Error ? error.message : String(error) });
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        readOnly = `the watches file could not be read (${code ?? "unknown error"})`;
+        logger.error("pr watch: the watches file could not be read; watches are read-only until the next restart", {
+          error: error instanceof Error ? error.message : String(error)
+        });
       }
       return;
     }
     try {
       file = parsePullRequestWatchFile(JSON.parse(raw) as unknown);
-    } catch {
-      // Not JSON at all: kept aside, never overwritten.
-      const aside = `${deps.file}.unreadable-${Date.now()}`;
-      await rename(deps.file, aside).catch(() => undefined);
-      logger.error("pr watch: the watches file was not JSON; kept aside", { file: aside });
+    } catch (error) {
+      // Not a watches file this build can write back: kept aside, never overwritten.
+      const aside = `${deps.file}.corrupt-${new Date(now()).toISOString().replace(/[:.]/g, "-")}`;
+      try {
+        await rename(deps.file, aside);
+        logger.error("pr watch: the watches file is not readable; moved aside", {
+          file: aside,
+          error: error instanceof Error ? error.message : String(error)
+        });
+      } catch {
+        readOnly = "the watches file is corrupt and could not be moved aside";
+        logger.error("pr watch: the watches file is corrupt and could not be moved aside; watches are read-only until the next restart");
+      }
     }
   }
 

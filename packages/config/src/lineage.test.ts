@@ -10,6 +10,7 @@ import {
   parseAgentThreadHead,
   parseForkHandoff,
   parseMergeOutbox,
+  serializeMergeOutbox,
   parseSessionsConfig
 } from "./index.ts";
 
@@ -106,7 +107,13 @@ test("the merge outbox keeps unreadable entries and unknown fields for the next 
   const failed = parseMergeOutbox({ entries: [{ ...good, state: "failed", attempts: 2, error: "no" }, { ...good, mergeId: "m2", state: "weird" }] });
   assert.deepEqual(failed.entries.map((entry) => [entry.state, entry.attempts, entry.error]), [["failed", 2, "no"], ["queued", 0, undefined]]);
   assert.deepEqual(parsed.unreadable, [{ mergeId: 3 }, "junk"]);
-  assert.deepEqual(parseMergeOutbox("garbage"), { entries: [], unreadable: [] });
+  for (const value of ["garbage", null, [], { entries: "no" }, { version: 2, entries: [] }]) {
+    assert.throws(() => parseMergeOutbox(value), /merge outbox/, JSON.stringify(value));
+  }
+  // Unknown top-level keys survive a rewrite.
+  const withExtra = parseMergeOutbox({ version: 1, entries: [], note: "newer" });
+  assert.deepEqual(withExtra.extra, { note: "newer" });
+  assert.deepEqual(JSON.parse(serializeMergeOutbox(withExtra)), { note: "newer", version: 1, entries: [] });
 });
 
 test("a lineage's delegation depth persists, and a bad one is dropped on its own", () => {

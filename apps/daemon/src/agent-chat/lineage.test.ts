@@ -6,7 +6,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, it } from "node:test";
@@ -158,10 +158,11 @@ function fakeWorld() {
   };
 }
 
-async function setup(options: { parentBusy?: boolean; outbox?: string } = {}) {
+async function setup(options: { parentBusy?: boolean; outbox?: string; outboxIsDirectory?: boolean } = {}) {
   const dir = await mkdtemp(join(tmpdir(), "orq-lineage-"));
   const outboxFile = join(dir, "agent-merge-outbox.json");
   if (options.outbox !== undefined) await writeFile(outboxFile, options.outbox);
+  if (options.outboxIsDirectory === true) await mkdir(outboxFile);
   const world = fakeWorld();
   world.sessions.set("parent", summary("parent", { title: "Parent" }));
   world.sessions.set(
@@ -202,6 +203,7 @@ async function setup(options: { parentBusy?: boolean; outbox?: string } = {}) {
     service,
     make,
     outboxFile,
+    dir,
     published,
     /** Move the service's clock on: a deadline refusal's retry delay passes. */
     advance: (ms: number) => {
@@ -274,6 +276,54 @@ describe("merge back", () => {
     await settled(busy.service);
     assert.equal(busy.world.turns[0]!.body.interactionMode, "plan");
     await busy.cleanup();
+  });
+
+  it("never answers queued for a merge it could not save: refused, nothing left queued (D-M1)", async () => {
+    const { service, outboxFile, published, cleanup } = await setup({ parentBusy: true });
+    // The file's place is taken: the write's rename fails.
+    await mkdir(outboxFile);
+    await assert.rejects(
+      service.mergeBack("child", { commandId: "lost" }),
+      (error: unknown) => error instanceof LineageError && error.code === "HOST_UNAVAILABLE"
+    );
+    assert.deepEqual(service.view("parent").pendingMerges, []);
+    assert.deepEqual(published.get("parent") ?? [], []);
+    await cleanup();
+  });
+
+  it("a corrupt outbox, or another version, is moved aside and never overwritten (D-I2)", async () => {
+    for (const body of ["{not json", JSON.stringify({ version: 2, entries: [{ future: true }] })]) {
+      const { service, dir, cleanup } = await setup({ parentBusy: true, outbox: body });
+      const aside = (await readdir(dir)).find((name) => name.startsWith("agent-merge-outbox.json.corrupt-"));
+      assert.ok(aside, "moved aside");
+      assert.equal(await readFile(join(dir, aside), "utf8"), body);
+      // It works on from an empty queue.
+      assert.equal((await service.mergeBack("child", { commandId: "after" })).delivery, "queued");
+      await cleanup();
+    }
+  });
+
+  it("an unreadable outbox makes merges that would queue refused for the run, the file left alone (D-I2)", async () => {
+    const { service, outboxFile, cleanup } = await setup({ parentBusy: true, outboxIsDirectory: true });
+    await assert.rejects(
+      service.mergeBack("child", { commandId: "x" }),
+      (error: unknown) => error instanceof LineageError && error.code === "HOST_UNAVAILABLE"
+    );
+    assert.deepEqual(await readdir(outboxFile), [], "left as it was");
+    await cleanup();
+  });
+
+  it("unknown top-level keys and entries of a newer build survive a rewrite (D-I2)", async () => {
+    const { service, outboxFile, cleanup } = await setup({
+      parentBusy: true,
+      outbox: JSON.stringify({ version: 1, entries: [{ fromTheFuture: 1 }], newerBuild: { keep: true } })
+    });
+    await service.mergeBack("child", { commandId: "kept" });
+    await settled(service);
+    const disk = JSON.parse(await readFile(outboxFile, "utf8")) as { newerBuild?: unknown; entries: unknown[] };
+    assert.deepEqual(disk.newerBuild, { keep: true });
+    assert.equal(disk.entries.length, 2);
+    await cleanup();
   });
 
   it("sends the user's own summary instead when given one", async () => {

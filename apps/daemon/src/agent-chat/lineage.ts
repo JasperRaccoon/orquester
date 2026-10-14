@@ -50,7 +50,7 @@ import {
   type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
 import { agentChatRoutes } from "@orquester/api/agent-chat";
-import { parseMergeOutbox, type MergeOutbox, type MergeOutboxEntry } from "@orquester/config";
+import { parseMergeOutbox, serializeMergeOutbox, type MergeOutbox, type MergeOutboxEntry } from "@orquester/config";
 
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { assistantTextForTurn } from "../mcp/views.ts";
@@ -140,14 +140,43 @@ export class LineageService {
 
   constructor(private readonly opts: LineageServiceOptions) {}
 
-  /** Read the outbox. A missing or unreadable file is an empty queue; its unreadable entries are kept. */
+  /**
+   * Read the outbox. Missing → empty. Unreadable (permissions, I/O) → empty and READ-ONLY for this
+   * run: the file may hold queued merges, so it is never written over and nothing new is queued
+   * (`mergeBack` refuses rather than answer "queued"). Not a version-1 outbox (bad JSON, another
+   * version) → moved aside to `agent-merge-outbox.json.corrupt-<stamp>` and empty; if it cannot be
+   * moved, read-only. Unknown entries and top-level keys are kept by every rewrite.
+   */
   async load(): Promise<void> {
+    this.outbox = { entries: [], unreadable: [] };
+    this.readOnly = null;
+    let text: string;
     try {
-      this.outbox = parseMergeOutbox(JSON.parse(await readFile(this.opts.outboxFile, "utf8")) as unknown);
-    } catch {
-      this.outbox = { entries: [], unreadable: [] };
+      text = await readFile(this.opts.outboxFile, "utf8");
+    } catch (error) {
+      const code = (error as NodeJS.ErrnoException).code;
+      if (code !== "ENOENT") {
+        this.readOnly = `the merge outbox could not be read (${code ?? "unknown error"})`;
+        this.opts.logger?.warn?.(`[lineage] ${this.readOnly}; queued merges are off until the next restart`);
+      }
+      return;
+    }
+    try {
+      this.outbox = parseMergeOutbox(JSON.parse(text) as unknown);
+    } catch (error) {
+      const aside = `${this.opts.outboxFile}.corrupt-${(this.opts.now?.() ?? new Date()).toISOString().replace(/[:.]/g, "-")}`;
+      try {
+        await rename(this.opts.outboxFile, aside);
+        this.opts.logger?.warn?.(`[lineage] the merge outbox is not readable (${(error as Error).message}); moved it to ${aside}`);
+      } catch {
+        this.readOnly = "the merge outbox is corrupt and could not be moved aside";
+        this.opts.logger?.warn?.(`[lineage] ${this.readOnly}; queued merges are off until the next restart`);
+      }
     }
   }
+
+  /** Why the outbox may not be written this run (it could not be read), or null. */
+  private readOnly: string | null = null;
 
   /**
    * Bind the daemon's own API (built after the services, on the unix app) and
@@ -293,7 +322,12 @@ export class LineageService {
         // Unavailable (the host restarting): queued like a busy parent's.
       }
       this.outbox.entries.push(entry);
-      await this.persist([parent.id, childId]);
+      if (!(await this.persist([parent.id, childId]))) {
+        // Never answer "queued" for a merge that is not on disk: a restart would lose it.
+        this.outbox.entries = this.outbox.entries.filter((other) => other !== entry);
+        this.publish([parent.id, childId]);
+        throw new LineageError("Orquester could not save the merge to deliver later; try again in a moment.", "HOST_UNAVAILABLE");
+      }
       this.armRecheck();
       return { parentSessionId: parent.id, delivery: "queued", mergeId };
     });
@@ -576,21 +610,25 @@ export class LineageService {
     }
   }
 
-  /** Written in order, the latest state each time; unreadable entries go back as they came. */
-  private persist(touched: readonly string[]): Promise<void> {
+  /**
+   * Written in order, the latest state each time; unreadable entries and unknown top-level keys go
+   * back as they came. Resolves false when the write failed (or the outbox is read-only this run).
+   */
+  private persist(touched: readonly string[]): Promise<boolean> {
     this.publish(touched);
-    const snapshot = JSON.stringify(
-      { version: 1, entries: [...this.outbox.entries, ...this.outbox.unreadable] },
-      null,
-      2
+    if (this.readOnly !== null) return Promise.resolve(false);
+    const snapshot = serializeMergeOutbox(this.outbox);
+    const attempt = this.writes.then(() =>
+      writeAtomic(this.opts.outboxFile, snapshot).then(
+        () => true,
+        (error: unknown) => {
+          this.opts.logger?.warn?.("[lineage] could not write the merge outbox", error);
+          return false;
+        }
+      )
     );
-    this.writes = this.writes
-      .catch(() => undefined)
-      .then(() => writeAtomic(this.opts.outboxFile, snapshot))
-      .catch((error: unknown) => {
-        this.opts.logger?.warn?.("[lineage] could not write the merge outbox", error);
-      });
-    return this.writes;
+    this.writes = attempt.then(() => undefined);
+    return attempt;
   }
 }
 

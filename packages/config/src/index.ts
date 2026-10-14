@@ -1106,13 +1106,28 @@ export interface MergeOutbox {
   entries: MergeOutboxEntry[];
   /** Entries this build cannot read, kept verbatim for the next rewrite. */
   unreadable: unknown[];
+  /** Every top-level key but `version` and `entries`, exactly as found (a newer build's). */
+  extra?: Record<string, unknown>;
 }
 
+/**
+ * The merge outbox. Tolerant of what a newer build of the same version wrote (unknown entries in
+ * `unreadable`, unknown top-level keys in `extra`), and THROWS on anything that is not a version-1
+ * outbox — another `version`, a non-object, `entries` not a list — so the caller moves it aside
+ * instead of overwriting it.
+ */
 export function parseMergeOutbox(value: unknown): MergeOutbox {
-  const raw =
-    value !== null && typeof value === "object" && Array.isArray((value as { entries?: unknown }).entries)
-      ? ((value as { entries: unknown[] }).entries)
-      : [];
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Not a merge outbox (not an object)");
+  }
+  const record = value as Record<string, unknown>;
+  if (record.version !== undefined && record.version !== 1) {
+    throw new Error(`Not a version-1 merge outbox (version ${JSON.stringify(record.version)})`);
+  }
+  if (record.entries !== undefined && !Array.isArray(record.entries)) {
+    throw new Error("Not a merge outbox (entries is not a list)");
+  }
+  const raw = (record.entries as unknown[] | undefined) ?? [];
   const entries: MergeOutboxEntry[] = [];
   const unreadable: unknown[] = [];
   for (const entry of raw) {
@@ -1120,7 +1135,17 @@ export function parseMergeOutbox(value: unknown): MergeOutbox {
     if (parsed.success) entries.push(parsed.data);
     else unreadable.push(entry);
   }
-  return { entries, unreadable };
+  const extra = Object.fromEntries(Object.entries(record).filter(([key]) => key !== "version" && key !== "entries"));
+  return { entries, unreadable, extra };
+}
+
+/** The outbox as written: unknown top-level keys, then readable entries, then the unreadable ones as they came. */
+export function serializeMergeOutbox(outbox: MergeOutbox): string {
+  return JSON.stringify(
+    { ...(outbox.extra ?? {}), version: 1, entries: [...outbox.entries, ...outbox.unreadable] },
+    null,
+    2
+  );
 }
 
 /**

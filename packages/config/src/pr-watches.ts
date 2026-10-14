@@ -137,13 +137,28 @@ export interface PullRequestWatchFile {
   watches: PullRequestWatchRecord[];
   /** Entries this build cannot read, kept verbatim for the next rewrite. */
   unreadable: unknown[];
+  /** Every top-level key but `version` and `watches`, exactly as found (a newer build's). */
+  extra?: Record<string, unknown>;
 }
 
+/**
+ * The watches file. Tolerant of what a newer build of the same version wrote (unknown watch shapes
+ * kept in `unreadable`, unknown top-level keys in `extra`), and THROWS on anything that is not a
+ * version-1 watches file — another `version`, a non-object, `watches` not a list — so the caller
+ * moves it aside instead of overwriting it.
+ */
 export function parsePullRequestWatchFile(value: unknown): PullRequestWatchFile {
-  const raw =
-    value !== null && typeof value === "object" && Array.isArray((value as { watches?: unknown }).watches)
-      ? (value as { watches: unknown[] }).watches
-      : [];
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Not a pull request watches file (not an object)");
+  }
+  const record = value as Record<string, unknown>;
+  if (record.version !== undefined && record.version !== 1) {
+    throw new Error(`Not a version-1 pull request watches file (version ${JSON.stringify(record.version)})`);
+  }
+  if (record.watches !== undefined && !Array.isArray(record.watches)) {
+    throw new Error("Not a pull request watches file (watches is not a list)");
+  }
+  const raw = (record.watches as unknown[] | undefined) ?? [];
   const watches: PullRequestWatchRecord[] = [];
   const unreadable: unknown[] = [];
   for (const entry of raw) {
@@ -151,10 +166,12 @@ export function parsePullRequestWatchFile(value: unknown): PullRequestWatchFile 
     if (parsed.success) watches.push(parsed.data);
     else unreadable.push(entry);
   }
-  return { watches, unreadable };
+  // `fromEntries`, not assignment: a key such as `__proto__` stays an own key.
+  const extra = Object.fromEntries(Object.entries(record).filter(([key]) => key !== "version" && key !== "watches"));
+  return { watches, unreadable, extra };
 }
 
-/** The file body to write: readable watches first, then the unreadable ones as they were. */
+/** The file body to write: unknown top-level keys, then readable watches, then the unreadable ones as they were. */
 export function serializePullRequestWatchFile(file: PullRequestWatchFile): string {
-  return `${JSON.stringify({ version: 1, watches: [...file.watches, ...file.unreadable] }, null, 2)}\n`;
+  return `${JSON.stringify({ ...(file.extra ?? {}), version: 1, watches: [...file.watches, ...file.unreadable] }, null, 2)}\n`;
 }
