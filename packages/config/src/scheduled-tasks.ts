@@ -55,6 +55,15 @@ export const scheduledTaskRecordSchema = z
     updatedAt: isoDateTime,
     /** The thread whose agent scheduled it, when an agent did. */
     createdByThreadId: z.string().min(1).nullable().default(null),
+    /**
+     * An agent's task (S-I1, the turn policy): the scheduling thread's title — its delivered prompt
+     * names it as the sender —, that thread's permission mode when it scheduled it (the target may
+     * never be broader at delivery), and the turn mode it runs in ("plan" when scheduled from a
+     * planning turn). Null for a user's task and for one from before these fields.
+     */
+    createdByTitle: z.string().max(400).nullable().catch(null).default(null),
+    creatorRuntimeMode: z.string().max(64).nullable().catch(null).default(null),
+    interactionMode: z.enum(["default", "plan"]).nullable().catch(null).default(null),
     /** The next due time; null when disabled, finished, or the cron never fires again. */
     nextRunAt: isoDateTime.nullable().default(null),
     lastRunAt: isoDateTime.nullable().default(null),

@@ -23,7 +23,9 @@ import {
   type ScheduledTaskSchedule
 } from "@orquester/api/scheduled-tasks";
 
+import { findAgent, loadAgents } from "../../mcp/agents.ts";
 import { expectOk } from "../../mcp/errors.ts";
+import { readThread } from "../../mcp/reads.ts";
 import {
   defineSessionTool,
   defineSessionToolkit,
@@ -33,6 +35,12 @@ import {
   type SessionToolContext
 } from "../contract.ts";
 import { jsonResult, ToolError } from "../results.ts";
+import {
+  assertTargetModeNotBroader,
+  interactionModeFor,
+  readTurnPolicyCaller,
+  type TurnPolicyCaller
+} from "../turn-policy.ts";
 
 /** A listed prompt is cut to this many characters; `update_scheduled_task` replaces it whole. */
 const LISTED_PROMPT_CHARS = 500;
@@ -44,7 +52,11 @@ const DELIVERY_RULES =
   "The prompt arrives in the thread as a user message, through the normal send path: if the thread is busy (a turn running, an approval or question open) it waits until that turn has ended — it never interrupts or steers a running turn. " +
   `Missed runs (Orquester was not running at the time): a run more than ${SCHEDULED_TASK_MISSED_GRACE_MINUTES} minutes late is not delivered; it is recorded as missed, a cron task moves on to its next time, a one-shot task is paused. ` +
   "A one-shot task is removed once delivered. A thread's tasks are removed when the thread is closed. " +
-  "The scheduled turn always runs in default mode, never plan mode — even in a thread that was planning.";
+  "The prompt says it was scheduled by this thread — the receiving agent never takes it for the user's. It is refused for a thread in a broader permission mode than this one's, then and at delivery; scheduled from a planning turn it runs in plan mode, and a thread that is planning when it arrives stays in plan mode.";
+
+/** Who may change, run or delete a task (S-I1 (d)), as the toolkit tells the agent. */
+const CHANGE_RULE =
+  "Only a task an agent scheduled can be changed here, and only by the thread that scheduled it or the thread it is for; a task the user scheduled is the user's (PERMISSION_DENIED).";
 
 const taskIdField = z.string().min(1).max(200).describe("The task id from schedule_task or list_scheduled_tasks.");
 const whenFields = {
@@ -69,7 +81,10 @@ function view(task: ScheduledTask, opts: { clip?: boolean } = {}) {
     lastRunAt: task.lastRunAt,
     lastRunStatus: task.lastRunStatus,
     ...(task.lastRunError !== null ? { lastRunError: task.lastRunError } : {}),
-    runCount: task.runCount
+    runCount: task.runCount,
+    // Who scheduled it: "user", or the agent thread's id (S-I1).
+    createdBy: task.createdByThreadId === null ? "user" : task.createdByThreadId,
+    ...(task.interactionMode === "plan" ? { planMode: true } : {})
   };
 }
 
@@ -118,14 +133,47 @@ function inScope(ctx: SessionToolContext, target: { projectPath: string; threadI
 }
 
 /** The target thread: the caller, or another chat thread of its project. */
-async function targetThread(ctx: SessionToolContext, threadId: string | undefined): Promise<string> {
-  if (threadId === undefined || threadId === ctx.threadId) return ctx.threadId;
+async function targetThread(ctx: SessionToolContext, threadId: string | undefined): Promise<SessionSummary> {
   const sessions = expectOk<SessionSummary[]>(await ctx.api.request("GET", "/api/sessions"));
-  const session = sessions.find((candidate) => candidate.id === threadId);
-  if (!session || session.kind !== "agent-chat" || !inScope(ctx, { projectPath: session.projectPath, threadId: session.id })) {
-    throw new ToolError("THREAD_NOT_FOUND", `No chat thread "${threadId}" in this project.`);
+  const id = threadId ?? ctx.threadId;
+  const session = sessions.find((candidate) => candidate.id === id);
+  if (!session || session.kind !== "agent-chat" || (id !== ctx.threadId && !inScope(ctx, { projectPath: session.projectPath, threadId: session.id }))) {
+    throw new ToolError("THREAD_NOT_FOUND", `No chat thread "${id}" in this project.`);
   }
-  return session.id;
+  return session;
+}
+
+/**
+ * The turn policy (S-I1, `../turn-policy.ts`) for a turn a task will cause in `target`: (a) never
+ * a thread in a broader permission mode than the caller's; (b) the turn mode it runs in — plan
+ * while the caller plans, refused for an agent with no plan mode. Answers the authorship the task
+ * records (c: the delivered prompt names the caller; the daemon re-checks (a) at delivery).
+ */
+async function authorFor(ctx: SessionToolContext, caller: TurnPolicyCaller, target: SessionSummary) {
+  const theirs = await readThread(ctx.api, target.id);
+  assertTargetModeNotBroader(caller, { threadId: target.id, runtimeMode: theirs.head.runtimeMode });
+  const interactionMode = await interactionModeFor(caller, {
+    agent: target.refId,
+    supportsPlanMode: async () => findAgent(await loadAgents(ctx.api), target.refId).supports.planMode
+  });
+  return { threadId: caller.threadId, title: caller.title, runtimeMode: caller.runtimeMode, interactionMode };
+}
+
+/**
+ * (d) An agent may change, run or delete only a task an agent scheduled, and only from the thread
+ * that scheduled it or the thread it is for — never a task the user scheduled (`createdBy: "user"`),
+ * nor another pair of threads' (`PERMISSION_DENIED`).
+ */
+function assertAgentMayChange(ctx: SessionToolContext, task: ScheduledTask): void {
+  if (task.createdByThreadId === null) {
+    throw new ToolError("PERMISSION_DENIED", `Task "${task.id}" was scheduled by the user; only the user can change, run or delete it.`);
+  }
+  if (task.createdByThreadId !== ctx.threadId && task.threadId !== ctx.threadId) {
+    throw new ToolError(
+      "PERMISSION_DENIED",
+      `Task "${task.id}" was scheduled by another thread for another thread; only those threads (or the user) can change, run or delete it.`
+    );
+  }
 }
 
 /** A task of the caller's project, or SCHEDULED_TASK_NOT_FOUND — another project's task is never confirmed to exist. */
@@ -160,10 +208,19 @@ export const schedulingToolkit = defineSessionToolkit({
       run: async (args, ctx) => {
         const schedule = scheduleOf(args, ctx);
         if (schedule === null) throw new ToolError("INVALID_ARGUMENT", "Give one of at, inMinutes or cron.");
-        const threadId = await targetThread(ctx, args.threadId);
+        const target = await targetThread(ctx, args.threadId);
+        const author = await authorFor(ctx, await readTurnPolicyCaller(ctx), target);
         const task = expectOk<ScheduledTask>(
           await ctx.api.request("POST", scheduledTaskRoutes.list, {
-            body: { threadId, prompt: args.prompt, schedule, createdByThreadId: ctx.threadId }
+            body: {
+              threadId: target.id,
+              prompt: args.prompt,
+              schedule,
+              createdByThreadId: ctx.threadId,
+              createdByTitle: author.title,
+              creatorRuntimeMode: author.runtimeMode,
+              interactionMode: author.interactionMode
+            }
           })
         );
         return jsonResult({ task: view(task), now: new Date(ctx.now()).toISOString() });
@@ -197,7 +254,7 @@ export const schedulingToolkit = defineSessionToolkit({
       name: "update_scheduled_task",
       title: "Update a scheduled task",
       description:
-        "Change a scheduled task of this project: its prompt, its schedule (one of at, inMinutes or cron; `timezone` alone re-zones a cron task, `cron` alone keeps its zone; a new schedule drops a run still waiting for the thread — a Run now stays), or `enabled` (false pauses it without deleting it; true resumes it from now — a one-shot task whose time has passed needs a new time). Omitted fields stay as they are. Pausing also drops a run that waits for its thread.",
+        "Change a scheduled task of this project: its prompt, its schedule (one of at, inMinutes or cron; `timezone` alone re-zones a cron task, `cron` alone keeps its zone; a new schedule drops a run still waiting for the thread — a Run now stays), or `enabled` (false pauses it without deleting it; true resumes it from now — a one-shot task whose time has passed needs a new time). Omitted fields stay as they are. Pausing also drops a run that waits for its thread. The task becomes this thread's (its prompt then names this thread, in this turn's mode). " + CHANGE_RULE,
       input: {
         taskId: taskIdField,
         prompt: z.string().min(1).max(SCHEDULED_TASK_PROMPT_MAX).optional().describe("The new prompt, replacing the old one whole."),
@@ -208,13 +265,17 @@ export const schedulingToolkit = defineSessionToolkit({
       resultKind: "json",
       run: async (args, ctx) => {
         const current = await scopedTask(ctx, args.taskId);
+        assertAgentMayChange(ctx, current);
         const schedule = scheduleOf(args, ctx, current.schedule);
-        const body = {
+        const change = {
           ...(args.prompt !== undefined ? { prompt: args.prompt } : {}),
           ...(schedule !== null ? { schedule } : {}),
           ...(args.enabled !== undefined ? { enabled: args.enabled } : {})
         };
-        if (Object.keys(body).length === 0) throw new ToolError("INVALID_ARGUMENT", "Nothing to change: give prompt, a schedule, or enabled.");
+        if (Object.keys(change).length === 0) throw new ToolError("INVALID_ARGUMENT", "Nothing to change: give prompt, a schedule, or enabled.");
+        // The task is the caller's from now: the turn policy for its target, its authorship re-stamped.
+        const author = await authorFor(ctx, await readTurnPolicyCaller(ctx), await targetThread(ctx, current.threadId));
+        const body = { ...change, author };
         const task = expectOk<ScheduledTask>(await ctx.api.request("PUT", scheduledTaskRoutes.item(current.id), { body }));
         return jsonResult({ task: view(task), now: new Date(ctx.now()).toISOString() });
       }
@@ -223,12 +284,13 @@ export const schedulingToolkit = defineSessionToolkit({
       name: "delete_scheduled_task",
       title: "Delete a scheduled task",
       description:
-        "Delete a scheduled task of this project for good; a run waiting for its thread is dropped too. To stop it for a while instead, update_scheduled_task with enabled=false.",
+        "Delete a scheduled task of this project for good; a run waiting for its thread is dropped too. To stop it for a while instead, update_scheduled_task with enabled=false. " + CHANGE_RULE,
       input: { taskId: taskIdField },
       annotations: SESSION_TOOL_DESTRUCTIVE,
       resultKind: "json",
       run: async (args, ctx) => {
         const current = await scopedTask(ctx, args.taskId);
+        assertAgentMayChange(ctx, current);
         expectOk(await ctx.api.request("DELETE", scheduledTaskRoutes.item(current.id)));
         return jsonResult({ deleted: true, taskId: current.id });
       }
@@ -237,12 +299,24 @@ export const schedulingToolkit = defineSessionToolkit({
       name: "run_scheduled_task_now",
       title: "Run a scheduled task now",
       description:
-        "Send a scheduled task's prompt to its thread now, whatever its schedule (a paused task too); its schedule is unchanged. If the thread is busy it waits for the running turn to end, like a scheduled run (`delivered: false`). Sending into THIS thread queues it behind your own turn. Refused (ALREADY_QUEUED) while a run of it already waits.",
+        "Send a scheduled task's prompt to its thread now, whatever its schedule (a paused task too); its schedule is unchanged. If the thread is busy it waits for the running turn to end, like a scheduled run (`delivered: false`). Sending into THIS thread queues it behind your own turn. Refused (ALREADY_QUEUED) while a run of it already waits. " + CHANGE_RULE,
       input: { taskId: taskIdField },
       annotations: SESSION_TOOL_MUTATING,
       resultKind: "json",
       run: async (args, ctx) => {
         const current = await scopedTask(ctx, args.taskId);
+        assertAgentMayChange(ctx, current);
+        // The turn policy for the turn it causes now: (a) the target never broader; (b) a planning
+        // caller cannot run a task that would not plan.
+        const caller = await readTurnPolicyCaller(ctx);
+        const theirs = await readThread(ctx.api, current.threadId);
+        assertTargetModeNotBroader(caller, { threadId: current.threadId, runtimeMode: theirs.head.runtimeMode });
+        if (caller.planning && current.interactionMode !== "plan") {
+          throw new ToolError(
+            "PERMISSION_DENIED",
+            "This thread is in plan mode and this task runs in default mode; it cannot be run from here. Update it from this turn (it then plans), or propose it in your plan."
+          );
+        }
         const result = expectOk<RunScheduledTaskResponse>(await ctx.api.request("POST", scheduledTaskRoutes.run(current.id)));
         return jsonResult({
           delivered: result.delivered,

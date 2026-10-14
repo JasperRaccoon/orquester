@@ -83,23 +83,26 @@ export function threadToolReferenceOfActivityData(data: unknown): ThreadToolRefe
 
 /**
  * How a message from another thread came: `sent` (`thread_send`), `opened` (`thread_create`'s
- * first message), `delegated` (`delegate_task`'s task).
+ * first message), `delegated` (`delegate_task`'s task), `scheduled` (an agent's scheduled task, delivered
+ * by the daemon's scheduler).
  */
-export type ThreadMessageOrigin = "sent" | "opened" | "delegated";
+export type ThreadMessageOrigin = "sent" | "opened" | "delegated" | "scheduled";
 
 const ORIGIN_LABELS: Record<ThreadMessageOrigin, string> = {
   sent: "Sent by thread",
   opened: "Opened by thread",
-  delegated: "Delegated by thread"
+  delegated: "Delegated by thread",
+  scheduled: "Scheduled by thread"
 };
 
 const ORIGIN_EXPLANATIONS: Record<ThreadMessageOrigin, string> = {
   sent: "Another chat thread of this project sent this message; it is not from the user.",
   opened: "Another chat thread of this project opened this conversation with this message; it is not from the user.",
-  delegated: "Another chat thread of this project delegated this task to you; it is not from the user. Your final reply is the task's result."
+  delegated: "Another chat thread of this project delegated this task to you; it is not from the user. Your final reply is the task's result.",
+  scheduled: "A chat thread of this project scheduled this message earlier; it is not from the user."
 };
 
-const ORIGIN_HEADER = /^\[(Sent|Opened|Delegated) by thread "((?:[^"\\\n]|\\.)*)"\]$/;
+const ORIGIN_HEADER = /^\[(Sent|Opened|Delegated|Scheduled) by thread "((?:[^"\\\n]|\\.)*)"\]$/;
 
 /** The characters {@link buildThreadMessage} adds around a text, at most. */
 export const THREAD_MESSAGE_OVERHEAD_CHARS = 512;

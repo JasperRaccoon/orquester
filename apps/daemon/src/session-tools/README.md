@@ -49,8 +49,9 @@ API in-process, `../mcp/daemon-api.ts`). Whatever a toolkit imports, the host lo
 
 Session tools are pre-approved in every permission and interaction mode (§1.3), so a tool that
 causes a turn in a thread — `thread_send`, `thread_create`, `delegate_task`, `thread_merge_back`,
-and next the scheduling toolkit — follows one rule, so a supervised or planning agent cannot get
-unsupervised or editing work done by asking another thread for it:
+and the scheduling toolkit's `schedule_task`, `update_scheduled_task`, `run_scheduled_task_now` —
+follows one rule, so a supervised or planning agent cannot get unsupervised or editing work done by
+asking another thread for it:
 
 - **(a) Never broader.** `assertTargetModeNotBroader(caller, {threadId, runtimeMode})` refuses a
   target whose permission mode (approval-required < auto-accept-edits < auto < full-access) is
@@ -66,7 +67,29 @@ unsupervised or editing work done by asking another thread for it:
   message alone (`parseThreadMessage`). A slash command in such a text is plain text. Keep a tool's
   input `TURN_PROVENANCE_OVERHEAD_CHARS` under the turn cap. A merge back carries its own header.
 - The caller: `readTurnPolicyCaller(ctx)`, or `turnPolicyCallerFrom(tab, snapshot)` when both are
-  read already → `{threadId, title, runtimeMode, planning}`.
+  read already → `{threadId, title, runtimeMode, planning}`. `planning` is the thread's CURRENT
+  mode (`currentInteractionMode`): a steer that recorded plan mode on a running turn counts.
+- **Marker.** The turn carries a context chip (`threadMessageContext`, `mergeBackContext`; the
+  agent never sees it): only a message with it reads as another chat's in the GUI, so the same
+  header typed by the user stays the user's; the prompt history strips the header on recall.
+
+**Scheduled tasks** (the scheduling toolkit, S-I1). A delivery happens later, so the rule is
+recorded with the task and checked again by the daemon's scheduler when it delivers
+(`scheduled-tasks/service.ts`):
+
+- `schedule_task` checks (a) for its target thread and (b) for the caller, and records the
+  authorship: `createdByThreadId`, `createdByTitle`, `creatorRuntimeMode`, `interactionMode`.
+- At delivery: (a) again — a target that has become broader than `creatorRuntimeMode` refuses the
+  run (recorded `failed`, a one-shot paused, nothing sent); (b) the turn plans when the task was
+  scheduled from a planning turn, or when the thread is planning when it arrives (a user's task
+  too: a scheduled prompt never flips a thread out of plan mode); (c) an agent's prompt is wrapped
+  as `[Scheduled by thread "<title>"]` with the marker chip; a user's prompt is delivered as written.
+- (d) **Who may change a task.** An agent may update, delete or run now only a task an AGENT
+  scheduled, and only from the thread that scheduled it or the thread it is for (`createdBy` in
+  `list_scheduled_tasks`); a task the user scheduled (`createdBy: "user"`) is the user's alone
+  (`PERMISSION_DENIED`). An update re-stamps the authorship (the task becomes the updating
+  thread's, in its modes); `run_scheduled_task_now` checks (a) and refuses a default-mode task from
+  a planning caller. The user's own routes (`/api/scheduled-tasks`) are not limited.
 
 Not under the rule, by design: `thread_interrupt` / `task_cancel` (they stop work, never start it:
 at worst a nuisance, which project scope bounds) and `thread_fork` (the fork starts idle, in the

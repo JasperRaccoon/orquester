@@ -53,7 +53,12 @@ import {
 } from "@orquester/api";
 import {
   agentChatRoutes,
+  buildThreadMessage,
+  currentInteractionMode,
   isDeadlineRefusal,
+  RUNTIME_MODES,
+  threadMessageContext,
+  type RuntimeMode,
   type ThreadReadResponse,
   type ThreadSnapshotPayload,
   type TurnCommandBody
@@ -129,6 +134,8 @@ export function toScheduledTask(record: ScheduledTaskRecord): ScheduledTask {
     createdAt: record.createdAt,
     updatedAt: record.updatedAt,
     createdByThreadId: record.createdByThreadId,
+    createdByTitle: record.createdByTitle,
+    interactionMode: record.interactionMode,
     nextRunAt: record.nextRunAt,
     lastRunAt: record.lastRunAt,
     lastRunStatus: record.lastRunStatus !== null && RUN_STATUSES.has(record.lastRunStatus) ? (record.lastRunStatus as ScheduledTaskRunStatus) : null,
@@ -136,6 +143,50 @@ export function toScheduledTask(record: ScheduledTaskRecord): ScheduledTask {
     runCount: record.runCount,
     queuedAt: record.pending?.queuedAt ?? null
   };
+}
+
+/** An agent's task's authorship fields from a create body (S-I1); all null for the user's. */
+function readAuthorship(body: Record<string, unknown>): Pick<ScheduledTaskRecord, "createdByTitle" | "creatorRuntimeMode" | "interactionMode"> {
+  const title = body.createdByTitle;
+  const mode = body.creatorRuntimeMode;
+  const interaction = body.interactionMode;
+  if (title !== undefined && title !== null && (typeof title !== "string" || title.length > 400)) throw invalid("createdByTitle must be a string.");
+  if (mode !== undefined && mode !== null && (typeof mode !== "string" || !(RUNTIME_MODES as readonly string[]).includes(mode))) {
+    throw invalid("creatorRuntimeMode must be a permission mode.");
+  }
+  if (interaction !== undefined && interaction !== null && interaction !== "default" && interaction !== "plan") {
+    throw invalid('interactionMode must be "default" or "plan".');
+  }
+  return {
+    createdByTitle: typeof title === "string" ? title : null,
+    creatorRuntimeMode: typeof mode === "string" ? mode : null,
+    interactionMode: interaction === "plan" || interaction === "default" ? interaction : null
+  };
+}
+
+/** An update's `author` (S-I1). */
+function readAuthor(value: unknown): { threadId: string; title: string; runtimeMode: string; interactionMode: "default" | "plan" } {
+  if (!isRecord(value)) throw invalid("author must be an object.");
+  const { threadId, title, runtimeMode, interactionMode } = value;
+  if (typeof threadId !== "string" || threadId.length === 0 || threadId.length > 200) throw invalid("author.threadId must be a session id.");
+  if (typeof title !== "string" || title.length > 400) throw invalid("author.title must be a string.");
+  if (typeof runtimeMode !== "string" || !(RUNTIME_MODES as readonly string[]).includes(runtimeMode)) throw invalid("author.runtimeMode must be a permission mode.");
+  if (interactionMode !== "default" && interactionMode !== "plan") throw invalid('author.interactionMode must be "default" or "plan".');
+  return { threadId, title, runtimeMode, interactionMode };
+}
+
+/**
+ * Why an agent's task may not be delivered now (S-I1, the turn policy's rule (a) at delivery):
+ * the target thread runs in a permission mode broader than the scheduling thread did. Null when
+ * it may — and always for a user's task, or one whose modes are not known.
+ */
+export function deliveryRefusal(task: ScheduledTaskRecord, thread: ThreadSnapshotPayload): string | null {
+  if (task.createdByThreadId === null || task.creatorRuntimeMode === null) return null;
+  const breadth = (mode: string) => (RUNTIME_MODES as readonly string[]).indexOf(mode);
+  const target = (thread.head as { runtimeMode?: RuntimeMode } | undefined)?.runtimeMode;
+  if (target === undefined || breadth(target) === -1 || breadth(task.creatorRuntimeMode) === -1) return null;
+  if (breadth(target) <= breadth(task.creatorRuntimeMode)) return null;
+  return `The thread now runs in ${target} mode, broader than the ${task.creatorRuntimeMode} mode of the thread that scheduled this task; only the user can give it this work.`;
 }
 
 function invalid(message: string): ScheduledTaskError {
@@ -284,6 +335,7 @@ export class ScheduledTasksService {
         throw invalid("createdByThreadId must be a session id or null.");
       }
       const prompt = readPrompt(body.prompt);
+      const authorship = readAuthorship(body);
       const now = this.clock.now();
       const schedule = readSchedule(body.schedule, now);
       const session = (await this.sessions()).find((candidate) => candidate.id === body.threadId);
@@ -307,6 +359,7 @@ export class ScheduledTasksService {
         createdAt: stamp,
         updatedAt: stamp,
         createdByThreadId: typeof createdBy === "string" ? createdBy : null,
+        ...authorship,
         nextRunAt: firstScheduledTaskRun(schedule, now),
         lastRunAt: null,
         lastRunStatus: null,
@@ -329,6 +382,14 @@ export class ScheduledTasksService {
       const next: ScheduledTaskRecord = { ...current, updatedAt: now.toISOString() };
       if (body.prompt !== undefined) next.prompt = readPrompt(body.prompt);
       if (body.enabled !== undefined && typeof body.enabled !== "boolean") throw invalid("enabled must be a boolean.");
+      if (body.author !== undefined) {
+        // An agent's change (S-I1): the task is that thread's from now, in its modes.
+        const author = readAuthor(body.author);
+        next.createdByThreadId = author.threadId;
+        next.createdByTitle = author.title;
+        next.creatorRuntimeMode = author.runtimeMode;
+        next.interactionMode = author.interactionMode;
+      }
       const scheduleChanged = body.schedule !== undefined;
       if (scheduleChanged) {
         next.schedule = readSchedule(body.schedule, now);
@@ -664,11 +725,28 @@ export class ScheduledTasksService {
     // has no "only if idle" guard to close it (a protocol change beyond this feature); the window is
     // one in-process request long.
     const fireKey = task.pending.fireKey;
+    // The turn policy (S-I1) for an agent's task, checked again at delivery: never into a thread
+    // whose permission mode has become broader than the scheduling thread's.
+    const refusal = deliveryRefusal(task, snap.thread);
+    if (refusal !== null) {
+      this.logger.warn("delivery refused by the turn policy", { taskId, reason: refusal });
+      await this.failRun(task, fireKey, refusal);
+      return;
+    }
+    const agentTask = task.createdByThreadId !== null;
     const body: TurnCommandBody = {
       commandId: `scheduled-task:${task.id}:${fireKey}`,
-      input: task.prompt,
-      interactionMode: "default",
-      context: [{ kind: SCHEDULED_TASK_CONTEXT_KIND, label: "Scheduled task", ref: task.id }]
+      // An agent's prompt says which thread scheduled it — never passed off as the user's.
+      input: agentTask
+        ? buildThreadMessage({ origin: "scheduled", fromTitle: task.createdByTitle ?? "another chat", text: task.prompt })
+        : task.prompt,
+      // Plan mode carries on: a task scheduled from a planning turn plans, and a thread that is
+      // planning is never flipped out of it by a scheduled prompt.
+      interactionMode: task.interactionMode === "plan" || currentInteractionMode(snap.thread) === "plan" ? "plan" : "default",
+      context: [
+        { kind: SCHEDULED_TASK_CONTEXT_KIND, label: "Scheduled task", ref: task.id },
+        ...(agentTask ? [threadMessageContext(task.createdByThreadId!)] : [])
+      ]
     };
     let res;
     try {
@@ -709,6 +787,13 @@ export class ScheduledTasksService {
     }
     const reason = daemonError(res).message;
     this.logger.warn("the thread refused the delivery", { taskId, status: res.status, reason });
+    await this.failRun(current, fireKey, reason);
+  }
+
+  /** A run that will not be delivered: recorded failed with its reason; a one-shot is paused. */
+  private async failRun(current: ScheduledTaskRecord, fireKey: string, reason: string): Promise<void> {
+    if (current.pending?.fireKey !== fireKey) return;
+    const stamp = this.clock.now().toISOString();
     await this.commitQuietly(
       [
         {

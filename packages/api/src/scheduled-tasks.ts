@@ -62,6 +62,10 @@ export interface ScheduledTask {
   updatedAt: string;
   /** The thread whose agent scheduled it, when an agent did. */
   createdByThreadId: string | null;
+  /** That thread's title when it scheduled (or last changed) it; the delivered prompt names it. */
+  createdByTitle?: string | null;
+  /** "plan": an agent scheduled it from a planning turn, so it runs in plan mode. */
+  interactionMode?: "default" | "plan" | null;
   /** The next due time; null when paused, finished, or the cron never fires again. */
   nextRunAt: string | null;
   lastRunAt: string | null;
@@ -91,6 +95,22 @@ export interface CreateScheduledTaskRequest {
   prompt: string;
   schedule: ScheduledTaskSchedule;
   createdByThreadId?: string | null;
+  /** An agent's task (the session tools fill these in, S-I1): see {@link ScheduledTaskAuthor}. */
+  createdByTitle?: string | null;
+  creatorRuntimeMode?: string | null;
+  interactionMode?: "default" | "plan" | null;
+}
+
+/**
+ * The agent thread that wrote (or last changed) a task, as the scheduling session tools send it
+ * (S-I1): its id and title (the delivered prompt names it), its permission mode (the target may
+ * never be broader at delivery) and the turn mode the task runs in.
+ */
+export interface ScheduledTaskAuthor {
+  threadId: string;
+  title: string;
+  runtimeMode: string;
+  interactionMode: "default" | "plan";
 }
 
 /** `PUT /api/scheduled-tasks/:id` → the updated {@link ScheduledTask}. Omitted fields stay. */
@@ -98,6 +118,8 @@ export interface UpdateScheduledTaskRequest {
   prompt?: string;
   schedule?: ScheduledTaskSchedule;
   enabled?: boolean;
+  /** An agent's change (S-I1): the task becomes that thread's, in its mode. Absent for the user's. */
+  author?: ScheduledTaskAuthor;
 }
 
 // `GET /api/scheduled-tasks/:id` → the {@link ScheduledTask}.

@@ -311,7 +311,14 @@ export const UserMessageRow = React.memo(function UserMessageRow({
       ) : null}
       {fromThread ? (
         <span className="inline-flex items-center gap-1 pe-1 text-[11px] text-neutral-500" data-from-thread={fromThread.origin}>
-          {fromThread.origin === "delegated" ? "Delegated by" : fromThread.origin === "opened" ? "Opened by" : "Sent by"} “{fromThread.fromTitle}”
+          {fromThread.origin === "delegated"
+            ? "Delegated by"
+            : fromThread.origin === "opened"
+              ? "Opened by"
+              : fromThread.origin === "scheduled"
+                ? "Scheduled by"
+                : "Sent by"}{" "}
+          “{fromThread.fromTitle}”
         </span>
       ) : null}
       <div className="relative max-w-[80%] rounded-2xl bg-neutral-800 p-3 text-neutral-100">

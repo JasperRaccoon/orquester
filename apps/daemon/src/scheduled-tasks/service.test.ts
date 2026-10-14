@@ -5,7 +5,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SCHEDULED_TASK_MISSED_GRACE_MINUTES, type ScheduledTask, type ScheduledTaskDeletedPayload, type SessionSummary } from "@orquester/api";
-import { agentChatRoutes } from "@orquester/api/agent-chat";
+import { agentChatRoutes, buildThreadMessage, stripThreadProvenance, threadMessageContext } from "@orquester/api/agent-chat";
 import { FakeDaemonApi } from "../mcp/testing.ts";
 import { ManualClock } from "../workflows/testing/manual-trigger-clock.ts";
 import { advance, silentLogger } from "../workflows/triggers/test-support.ts";
@@ -162,9 +162,10 @@ test("a cron task is computed from now and delivered at its time through /turn, 
   assert.equal(r.turns.length, 1);
   assert.deepEqual(r.turns[0], {
     commandId: `scheduled-task:${task.id}:${Date.parse("2026-10-14T10:15:00.000Z")}`,
-    input: "Check the deploy",
+    // An agent's task (createdByThreadId): the prompt says which thread scheduled it (S-I1 (c)).
+    input: buildThreadMessage({ origin: "scheduled", fromTitle: "another chat", text: "Check the deploy" }),
     interactionMode: "default",
-    context: [{ kind: "scheduled-task", label: "Scheduled task", ref: task.id }]
+    context: [{ kind: "scheduled-task", label: "Scheduled task", ref: task.id }, threadMessageContext(THREAD)]
   });
   const after = r.service.get(task.id)!;
   assert.equal(after.lastRunStatus, "delivered");
@@ -583,7 +584,7 @@ test("a delivery that waited 30 min for a busy thread survives a 1-minute restar
   r.snapshot = "idle";
   await r.run(SCHEDULED_TASK_RETRY_MS);
   await r.run(SCHEDULED_TASK_RETRY_MS);
-  assert.deepEqual(r.turns.map((turn) => turn.input).sort(), ["Check the deploy", "Ping"]);
+  assert.deepEqual(r.turns.map((turn) => stripThreadProvenance(turn.input)).sort(), ["Check the deploy", "Ping"]);
 });
 
 test("after a crash the heartbeat bounds the measured downtime", async (t) => {
@@ -622,4 +623,44 @@ test("a waiting delivery whose downtime exceeded the grace after a crash is miss
   assert.equal(task.lastRunStatus, "missed");
   assert.equal(task.lastRunError, `Missed the run due at 2026-10-14T10:10:00.000Z: Orquester was not running from ${marker} to ${r.clock.now().toISOString()}.`);
   assert.equal(r.turns.length, 0);
+});
+
+test("a user's task is delivered as written; any task keeps a planning thread in plan mode (S-I1)", async (t) => {
+  const r = await rig(t);
+  const users = await r.service.create({ threadId: THREAD, prompt: "Plain", schedule: { kind: "once", at: "2026-10-14T10:10:00.000Z" } });
+  // The thread is planning when it arrives (its latest turn planned): it stays in plan mode.
+  r.api.on("GET", agentChatRoutes.thread(THREAD), () => {
+    const snap = snapshotOf("idle");
+    return { status: 200, body: { ...snap, thread: { ...snap.thread, turns: [{ turnId: "t0", state: "completed", interactionMode: "plan" }] } } };
+  });
+  await r.run(5 * MIN);
+  assert.deepEqual(r.turns.at(-1), {
+    commandId: `scheduled-task:${users.id}:${Date.parse("2026-10-14T10:10:00.000Z")}`,
+    input: "Plain",
+    interactionMode: "plan",
+    context: [{ kind: "scheduled-task", label: "Scheduled task", ref: users.id }]
+  });
+});
+
+test("an agent's task the target outgrew in permission mode is refused at delivery, never sent (S-I1 (a))", async (t) => {
+  const r = await rig(t);
+  const task = await r.service.create({
+    threadId: THREAD,
+    prompt: "Clean up",
+    schedule: { kind: "once", at: "2026-10-14T10:10:00.000Z" },
+    createdByThreadId: "other",
+    createdByTitle: "Planner",
+    creatorRuntimeMode: "approval-required",
+    interactionMode: "default"
+  });
+  r.api.on("GET", agentChatRoutes.thread(THREAD), () => {
+    const snap = snapshotOf("idle");
+    return { status: 200, body: { ...snap, thread: { ...snap.thread, head: { ...snap.thread.head, runtimeMode: "auto" } } } };
+  });
+  await r.run(5 * MIN);
+  assert.equal(r.turns.length, 0);
+  const after = r.service.get(task.id)!;
+  assert.equal(after.lastRunStatus, "failed");
+  assert.match(after.lastRunError ?? "", /auto mode, broader than the approval-required mode/);
+  assert.equal(after.enabled, false, "a one-shot is paused");
 });
