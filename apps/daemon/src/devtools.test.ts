@@ -54,3 +54,10 @@ test("redactUrlTokens redacts the percent-encoded token inside the DevTools wss=
 test("redactUrlTokens leaves token-free URLs untouched", () => {
   assert.equal(redactUrlTokens("/api/browsers?projectPath=/x"), "/api/browsers?projectPath=/x");
 });
+
+test("redactUrlTokens redacts an agent page's signature", () => {
+  assert.equal(
+    redactUrlTokens("/api/agent-visuals/t1/t1-x-html?exp=123&sig=SECRET"),
+    "/api/agent-visuals/t1/t1-x-html?exp=123&sig=[redacted]"
+  );
+});

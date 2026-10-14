@@ -50,5 +50,8 @@ export function sanitizeDevtoolsPath(rest: string): string | null {
 export function redactUrlTokens(url: string): string {
   return url
     .replace(/([?&]token=)[^&]*/gi, "$1[redacted]")
-    .replace(/(token%3D)[^&]*/gi, "$1[redacted]");
+    .replace(/(token%3D)[^&]*/gi, "$1[redacted]")
+    // An agent page's signed URL (`agent-chat/visual-urls.ts`): a capability
+    // for its lifetime, so it stays out of the logs like a token.
+    .replace(/([?&]sig=)[^&]*/gi, "$1[redacted]");
 }

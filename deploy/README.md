@@ -57,4 +57,14 @@ block's `script-src` (it allows compiling WebAssembly only, not JS `eval`). The
 template `Caddyfile` has it; when deploying, make the same change in the live
 `/etc/caddy/Caddyfile` and `systemctl reload caddy`.
 
+### Agent visuals — Caddy carve-out
+
+An agent can publish an HTML page that renders inline in its chat thread. The
+web client frames it from `/api/agent-visuals/*` (a signed, short-lived URL),
+which needs its own `header @visuals` block: the daemon's sandbox CSP plus
+`frame-ancestors 'self'` and no `X-Frame-Options: DENY`, and that path excluded
+from `@app`. The template `Caddyfile` has both; when deploying, reconcile the
+live `/etc/caddy/Caddyfile` with it and `systemctl reload caddy`, or inline
+pages show as blocked frames on the web (the desktop app is unaffected).
+
 Never commit the real `daemon.env`.

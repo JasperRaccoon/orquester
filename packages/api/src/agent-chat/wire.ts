@@ -36,6 +36,20 @@ import type {
 // Route path builders (§6.1–§6.3)
 // ---------------------------------------------------------------------------
 
+/** Where signed agent pages are served (spec 2026-10-14 §2.2). */
+export const AGENT_VISUAL_ROUTE_PREFIX = "/api/agent-visuals";
+
+/**
+ * The answer of `POST …/visuals/:attachmentId/url`. `path` is
+ * {@link agentChatRoutes.visual} with its `?exp=&sig=` query, relative to the
+ * daemon's origin: the client prefixes its own endpoint (web) or its desktop
+ * page scheme. `expiresAt` is the daemon's clock, epoch milliseconds.
+ */
+export interface AgentVisualUrlResponse {
+  path: string;
+  expiresAt: number;
+}
+
 const sessionBase = (sessionId: string): string =>
   `/api/sessions/${encodeURIComponent(sessionId)}`;
 
@@ -104,6 +118,23 @@ export const agentChatRoutes = {
    */
   attachment: (sessionId: string, attachmentId: string): string =>
     `${sessionBase(sessionId)}/attachments/${encodeURIComponent(attachmentId)}`,
+  /**
+   * `POST` — mint a short-lived signed URL for an agent's published page
+   * (spec 2026-10-14 §2.2, {@link AgentVisualUrlResponse}). Bearer-authed like
+   * every chat route; the page itself is fetched by an iframe, which cannot
+   * send that header, so it is served from {@link agentChatRoutes.visual}.
+   */
+  visualUrl: (sessionId: string, attachmentId: string): string =>
+    `${sessionBase(sessionId)}/visuals/${encodeURIComponent(attachmentId)}/url`,
+  /**
+   * `GET ?exp=&sig=` — the page, authorised by its signature alone (an HMAC
+   * the daemon holds, bound to session + attachment + expiry), served with
+   * the sandbox CSP ({@link HTML_RENDER_CONTENT_SECURITY_POLICY}). Outside
+   * `/api/sessions/` so production Caddy can carve its framing out by prefix
+   * (`deploy/Caddyfile`).
+   */
+  visual: (sessionId: string, attachmentId: string): string =>
+    `${AGENT_VISUAL_ROUTE_PREFIX}/${encodeURIComponent(sessionId)}/${encodeURIComponent(attachmentId)}`,
 
   // §6.3 host-level reads (not per session)
   providers: "/api/agent/providers",

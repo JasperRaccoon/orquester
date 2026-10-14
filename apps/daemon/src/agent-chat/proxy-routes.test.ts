@@ -1,6 +1,6 @@
 import { strict as assert } from "node:assert";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -17,7 +17,8 @@ import {
 } from "@orquester/api/agent-chat";
 import { AGENT_HOST_AUTH_HEADER } from "../agent-host/host-protocol.ts";
 import { AgentHostClient } from "./host-client.ts";
-import { registerAgentChatRoutes } from "./proxy-routes.ts";
+import { registerAgentChatRoutes, type AgentChatRouteDeps } from "./proxy-routes.ts";
+import { createVisualUrlSigner } from "./visual-urls.ts";
 
 // §6.2/§6.3 route coverage. A fake host on a real unix socket stands in for
 // `agent-host.sock`, so the proxy hop — auth header, body passthrough, error
@@ -82,7 +83,8 @@ interface Harness {
 }
 
 async function makeHarness(
-  sessions: Record<string, SessionSummary | undefined> = {}
+  sessions: Record<string, SessionSummary | undefined> = {},
+  overrides: Partial<AgentChatRouteDeps> = {}
 ): Promise<Harness> {
   const host = await makeFakeHost();
   const app = Fastify({ logger: false });
@@ -112,7 +114,9 @@ async function makeHarness(
     restartHost: async () => harness.restartResult!,
     onProvidersChanged: (adapterId) => harness.providerBroadcasts?.push(adapterId),
     attachmentPath: async () => null,
-    sendAttachment: async () => { throw new Error("A refused attachment must never be streamed"); }
+    sendAttachment: async () => { throw new Error("A refused attachment must never be streamed"); },
+    visualUrls: createVisualUrlSigner(Buffer.alloc(32, 1)),
+    ...overrides
   });
   await app.ready();
   harness.app = app;
@@ -795,4 +799,89 @@ test("the host's `indexed:false` page and its INDEX_UNAVAILABLE 503 pass through
   assert.equal(text.statusCode, 503);
   assert.deepEqual(text.json(), envelope);
   await h.close();
+});
+
+// ---------------------------------------------------------------------------
+// Agent pages (spec 2026-10-14 §2.2)
+// ---------------------------------------------------------------------------
+
+const PAGE_ID = "t1-0f8fad5b-d9cb-469f-a165-70867728950e-html";
+
+test("a page URL is minted only for a known tab and a published page's id", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  try {
+    const minted = await h.app.inject({ method: "POST", url: agentChatRoutes.visualUrl("t1", PAGE_ID) });
+    assert.equal(minted.statusCode, 200, minted.body);
+    const body = minted.json() as { path: string; expiresAt: number };
+    assert.ok(body.path.startsWith(`${agentChatRoutes.visual("t1", PAGE_ID)}?exp=`));
+    assert.ok(body.expiresAt > Date.now());
+    assert.equal(
+      (await h.app.inject({ method: "POST", url: agentChatRoutes.visualUrl("ghost", PAGE_ID) })).statusCode,
+      404
+    );
+    assert.equal(
+      (await h.app.inject({ method: "POST", url: agentChatRoutes.visualUrl("t1", PAGE_ID.replace(/-html$/, "-png")) }))
+        .statusCode,
+      404,
+      "an image attachment is no page"
+    );
+  } finally {
+    await h.close();
+  }
+});
+
+test("a signed page is served under the sandbox CSP; a bad signature never reaches the host", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "orq-visual-"));
+  const file = join(dir, `${PAGE_ID}.html`);
+  await writeFile(file, "<!doctype html><p>page</p>");
+  const resolved: string[] = [];
+  const h = await makeHarness(
+    { t1: tab("t1") },
+    {
+      attachmentPath: async (_id, attachmentId) => {
+        resolved.push(attachmentId);
+        return file;
+      }
+    }
+  );
+  try {
+    const { path } = (await h.app.inject({ method: "POST", url: agentChatRoutes.visualUrl("t1", PAGE_ID) })).json() as {
+      path: string;
+    };
+    const page = await h.app.inject({ method: "GET", url: path });
+    assert.equal(page.statusCode, 200);
+    assert.equal(page.body, "<!doctype html><p>page</p>");
+    assert.equal(page.headers["content-security-policy"], "sandbox allow-scripts allow-forms allow-popups allow-downloads");
+    assert.equal(page.headers["content-type"], "text/html; charset=utf-8");
+    assert.equal(page.headers["x-content-type-options"], "nosniff");
+    assert.equal(page.headers["cache-control"], "private, no-store");
+    assert.equal(page.headers["x-frame-options"], undefined, "the daemon never forbids its own framing here");
+
+    const tampered = await h.app.inject({ method: "GET", url: path.replace(/sig=[^&]+/, "sig=AAAA") });
+    assert.equal(tampered.statusCode, 403);
+    assert.equal(tampered.headers["content-security-policy"], "sandbox allow-scripts allow-forms allow-popups allow-downloads");
+    const unsigned = await h.app.inject({ method: "GET", url: agentChatRoutes.visual("t1", PAGE_ID) });
+    assert.equal(unsigned.statusCode, 403);
+    // Another tab's id under this tab's signature.
+    const crossed = await h.app.inject({ method: "GET", url: path.replace("/t1/", "/t2/") });
+    assert.equal(crossed.statusCode, 403);
+    assert.deepEqual(resolved, [PAGE_ID], "only the valid request reached the host");
+  } finally {
+    await h.close();
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("a signed page whose file is gone, or whose host is down, is refused plainly", async () => {
+  const h = await makeHarness({ t1: tab("t1") });
+  try {
+    const { path } = (await h.app.inject({ method: "POST", url: agentChatRoutes.visualUrl("t1", PAGE_ID) })).json() as {
+      path: string;
+    };
+    assert.equal((await h.app.inject({ method: "GET", url: path })).statusCode, 404);
+    h.healthy = false;
+    assert.equal((await h.app.inject({ method: "GET", url: path })).statusCode, 503);
+  } finally {
+    await h.close();
+  }
 });

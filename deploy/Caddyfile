@@ -24,7 +24,25 @@ orquester.example.com {
         -Server
     }
 
-    @app not path /devtools-frontend/*
+    # Agent-published pages in a chat thread (agent visuals): an iframe loads a
+    # short-lived signed URL, and the page is agent output, so it runs under the
+    # daemon's sandbox CSP — an opaque origin with no access to the app's
+    # session or storage. The SPA's CSP (script-src 'self') would block the
+    # page's own inline scripts and X-Frame-Options DENY the frame, so this path
+    # gets its own block: the same sandbox the daemon sends, plus
+    # frame-ancestors 'self' so only the app may frame it.
+    @visuals path /api/agent-visuals/*
+    header @visuals {
+        Strict-Transport-Security "max-age=31536000; includeSubDomains"
+        X-Content-Type-Options "nosniff"
+        Referrer-Policy "no-referrer"
+        Permissions-Policy "camera=(), microphone=(), geolocation=(), interest-cohort=()"
+        Content-Security-Policy "sandbox allow-scripts allow-forms allow-popups allow-downloads; frame-ancestors 'self'"
+        -X-Frame-Options
+        -Server
+    }
+
+    @app not path /devtools-frontend/* /api/agent-visuals/*
     header @app {
         Strict-Transport-Security "max-age=31536000; includeSubDomains"
         X-Content-Type-Options "nosniff"
