@@ -28,6 +28,7 @@ import {
   CALL_OPENER_KINDS,
   commandDisplayDetail,
   compactionMarkerState,
+  htmlRenderReferenceOfActivityPayload,
   IDENTITY_CHANGED_ACTIVITY_KIND,
   isAgentOwnedActivity,
   isCompactionActivity,
@@ -362,6 +363,17 @@ function derivedWorkLogEntry(activity: ThreadActivityItem): DerivedWorkLogEntry 
   const goalUpdate = goalUpdateOf(activity);
   if (goalUpdate !== null) {
     entry.goal = goalMarkerOf(goalUpdate);
+  }
+
+  // Agent visuals (spec 2026-10-14 §2.5): a completed `orquester`
+  // `html_render` call is its page, read from its result through the shared
+  // reader — every provider's layout, the slimmed row included. A failed or
+  // still-running call stays an ordinary tool row.
+  if (activity.activityKind === "tool.completed" && entry.toolLifecycleStatus === "completed") {
+    const visual = htmlRenderReferenceOfActivityPayload(activity.payload);
+    if (visual !== undefined) {
+      entry.visual = visual;
+    }
   }
 
   // §3.4's account switch: ids only, the label resolves at render time.

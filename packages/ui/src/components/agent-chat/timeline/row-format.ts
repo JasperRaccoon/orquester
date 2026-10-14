@@ -39,6 +39,8 @@ export function rowBottomPadding(row: AgentChatTimelineRow): string {
     (row.kind === "message" && row.message.role === "reasoning") ||
     // A goal's landmark sits among the work it drives, not between turns.
     row.kind === "goal-marker" ||
+    // A published page sits just above the reply it belongs to.
+    row.kind === "visual" ||
     row.kind === "work" ||
     row.kind === "work-live" ||
     row.kind === "work-toggle" ||

@@ -29,6 +29,7 @@ import {
   TurnFoldRow,
   WorkingRow
 } from "./rows/StructureRows";
+import { VisualRow } from "./rows/VisualRow";
 
 function RowBody({ row }: { row: AgentChatTimelineRow }): React.ReactElement | null {
   switch (row.kind) {
@@ -46,6 +47,8 @@ function RowBody({ row }: { row: AgentChatTimelineRow }): React.ReactElement | n
       return <CompactionRow row={row} />;
     case "goal-marker":
       return <GoalMarkerRow row={row} />;
+    case "visual":
+      return <VisualRow row={row} />;
     case "message": {
       // An agent's launch prompt at the head of its run (§7.6) — first, so a
       // prompt reads as the prompt whatever it says.

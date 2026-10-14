@@ -14,7 +14,9 @@ import assert from "node:assert/strict";
 import { createWriteStream } from "node:fs";
 import { test } from "node:test";
 import { agentProfileRoutes } from "@orquester/api";
+import { agentChatRoutes } from "@orquester/api/agent-chat";
 import { createDefaultClientConfig, createDefaultDaemonConfig } from "@orquester/config";
+import { createVisualUrlSigner } from "./agent-chat/visual-urls.ts";
 import { createServer } from "./index.ts";
 
 type CreateServerArgs = Parameters<typeof createServer>;
@@ -91,6 +93,67 @@ test("agent profile item routes match ids longer than the router's default 100-c
     });
     assert.equal(res.statusCode, 200, res.body);
     assert.deepEqual(seen, [id]);
+  } finally {
+    await app.close();
+  }
+});
+
+test("an agent page's signed route passes the bearer hook on its signature alone; minting still needs the bearer", async () => {
+  const page = "t1-0f8fad5b-d9cb-469f-a165-70867728950e-html";
+  const signer = createVisualUrlSigner(Buffer.alloc(32, 3));
+  const resolved: string[] = [];
+  const app = remoteApp({
+    agentChat: {
+      routeDeps: () => ({
+        isHostHealthy: () => true,
+        chatSession: (id: string) => (id === "t1" ? { id } : undefined),
+        attachmentPath: async (_id: string, attachmentId: string) => {
+          resolved.push(attachmentId);
+          return null;
+        },
+        visualUrls: signer
+      })
+    }
+  });
+  try {
+    // Minting is an ordinary chat route: the bearer gates it.
+    assert.equal((await app.inject({ method: "POST", url: agentChatRoutes.visualUrl("t1", page) })).statusCode, 401);
+    const minted = await app.inject({
+      method: "POST",
+      url: agentChatRoutes.visualUrl("t1", page),
+      headers: { authorization: BEARER }
+    });
+    assert.equal(minted.statusCode, 200, minted.body);
+    const { path } = minted.json() as { path: string };
+    // The frame's request carries no bearer: the signature authorises it.
+    assert.equal((await app.inject({ method: "GET", url: path })).statusCode, 404, "past the hook, to a gone file");
+    assert.deepEqual(resolved, [page]);
+    // Without a valid signature the route itself refuses.
+    assert.equal((await app.inject({ method: "GET", url: agentChatRoutes.visual("t1", page) })).statusCode, 403);
+    // The bare prefix is no page route: gated like any other /api path.
+    assert.equal((await app.inject({ method: "GET", url: "/api/agent-visuals" })).statusCode, 401);
+    // Percent-encoded spellings: the router decodes them onto the page route,
+    // whose own signature check still refuses an unsigned request — and with a
+    // valid signature they reach the same handler, never a gated one.
+    assert.equal((await app.inject({ method: "GET", url: `/api/agent%2Dvisuals/t1/${page}` })).statusCode, 403);
+    assert.equal((await app.inject({ method: "GET", url: `/%61pi/agent-visuals/t1/${page}` })).statusCode, 403);
+    const encodedSigned = path.replace("/api/agent-visuals/", "/api/agent%2Dvisuals/");
+    assert.equal((await app.inject({ method: "GET", url: encodedSigned })).statusCode, 404, "past the hook, to a gone file");
+    // An encoded traversal stays a page-route parameter, refused by the signature.
+    for (const url of [
+      `/api/agent-visuals/t1/..%2F..%2Fsessions`,
+      `/api/agent-visuals/..%2Fsessions/x`,
+      `/api/agent-visuals/t1/${page}%2F..%2F..%2F..%2Fagent-profile`
+    ]) {
+      const res = await app.inject({ method: "GET", url });
+      assert.ok(res.statusCode === 403 || res.statusCode === 404 || res.statusCode === 401, `${url} answered ${res.statusCode}`);
+    }
+    // The mint route stays gated in any spelling.
+    assert.equal(
+      (await app.inject({ method: "POST", url: `/%61pi/sessions/t1/visuals/${page}/url` })).statusCode,
+      401
+    );
+    assert.deepEqual(resolved, [page, page], "only signed requests ever reached the host");
   } finally {
     await app.close();
   }

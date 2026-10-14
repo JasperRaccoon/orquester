@@ -275,6 +275,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
 
   const context = React.useMemo<TimelineRowContextValue>(
     () => ({
+      sessionId,
       workspaceRoot: projectPath,
       readOnly: effectiveReadOnly,
       canRevert,
@@ -333,6 +334,7 @@ export function ChatTimeline(props: ChatTimelineProps): React.ReactElement {
       projectPath,
       revertBusy,
       roster,
+      sessionId,
       skills,
       startedTurnCount
     ]

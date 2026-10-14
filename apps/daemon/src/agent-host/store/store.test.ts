@@ -6,6 +6,9 @@
 
 import assert from "node:assert/strict";
 import * as fs from "node:fs/promises";
+import fsSync from "node:fs";
+import { syncBuiltinESMExports } from "node:module";
+import { Readable } from "node:stream";
 import * as os from "node:os";
 import * as path from "node:path";
 import test from "node:test";
@@ -759,6 +762,102 @@ test("pruneAttachments keeps referenced files and sweeps stale orphans", async (
   await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(48) });
   await store.resolveAttachment("t1", keptRef.id);
   await assert.rejects(store.resolveAttachment("t1", orphanRef.id), /not found/);
+});
+
+test("a published page stays while any log line names it, past the fold's window (spec 2026-10-14 §2.2)", async (t) => {
+  const rootDir = await tempRoot();
+  const store = createThreadStore({ rootDir, clock: fixedClock(), idGen: countingIds() });
+  t.after(() => store.close());
+  const src = path.join(rootDir, "src");
+  const page = await store.putAttachment({
+    threadId: "t1",
+    name: "page.html",
+    mimeType: "text/html",
+    sourcePath: await writeSource(src, "page.html", 64)
+  });
+  const orphanPage = await store.putAttachment({
+    threadId: "t1",
+    name: "page.html",
+    mimeType: "text/html",
+    sourcePath: await writeSource(src, "page2.html", 64)
+  });
+  assert.match(page.id, /-html$/);
+  const activityEvent = (id: string, payload: unknown): AppendableDomainEvent =>
+    ({
+      eventId: `e-${id}`,
+      threadId: "t1",
+      type: "thread.activity-appended",
+      payload: {
+        activity: {
+          kind: "activity",
+          id,
+          tone: "tool",
+          activityKind: "tool.completed",
+          summary: "html_render",
+          payload,
+          turnId: null,
+          createdAt: "2026-01-01T00:00:01.000Z",
+          updatedAt: "2026-01-01T00:00:01.000Z"
+        }
+      },
+      occurredAt: "2026-01-01T00:00:01.000Z",
+      commandId: null,
+      causationEventId: null,
+      metadata: {}
+    }) as AppendableDomainEvent;
+  // Claude's shape: the reference is JSON text inside the tool_result block.
+  const result = JSON.stringify({ htmlRender: { attachmentId: page.id, title: "Chart", height: 300 }, message: "Shown." });
+  await store.append({
+    threadId: "t1",
+    events: [
+      created(),
+      activityEvent("render", {
+        itemType: "mcp_tool_call",
+        status: "completed",
+        data: {
+          toolName: "mcp__orquester__html_render",
+          result: { type: "tool_result", content: [{ type: "text", text: result }] }
+        }
+      })
+    ]
+  });
+  await store.drain();
+
+  // While the fold holds the row, the fold's own scan keeps the page.
+  await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(48) });
+  await store.resolveAttachment("t1", page.id);
+  await assert.rejects(store.resolveAttachment("t1", orphanPage.id), /not found/, "an unnamed page is an orphan");
+
+  // Push the row well past the 500-row window the fold keeps.
+  for (let i = 0; i < 600; i += 1) {
+    await store.append({ threadId: "t1", events: [activityEvent(`noise-${i}`, { i })] });
+  }
+  await store.drain();
+  await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(96) });
+  await store.resolveAttachment("t1", page.id);
+
+  // A log read that fails partway (EIO) never reads as "nothing names it":
+  // the sweep skips the thread instead of deleting the page.
+  const realCreateReadStream = fsSync.createReadStream;
+  const failing = ((file: fsSync.PathLike, options?: unknown) => {
+    if (String(file).endsWith("events.ndjson")) {
+      return new Readable({
+        read() {
+          this.destroy(Object.assign(new Error("EIO: i/o error, read"), { code: "EIO" }));
+        }
+      });
+    }
+    return realCreateReadStream(file, options as Parameters<typeof realCreateReadStream>[1]);
+  }) as typeof fsSync.createReadStream;
+  (fsSync as { createReadStream: typeof fsSync.createReadStream }).createReadStream = failing;
+  syncBuiltinESMExports();
+  try {
+    await store.pruneAttachments({ threadId: "t1", now: hoursFromNow(144) });
+  } finally {
+    (fsSync as { createReadStream: typeof fsSync.createReadStream }).createReadStream = realCreateReadStream;
+    syncBuiltinESMExports();
+  }
+  await store.resolveAttachment("t1", page.id);
 });
 
 test("pruneAttachments sweeps .part files after an hour and pending uploads after a day", async (t) => {

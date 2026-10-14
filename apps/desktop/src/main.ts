@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, Menu, nativeImage, Tray, type IpcMainEvent } from "electron";
+import { app, BrowserWindow, ipcMain, Menu, nativeImage, protocol, shell, Tray, type IpcMainEvent } from "electron";
 import { startDaemon as startOrquesterDaemon, type RunningDaemon } from "@orquester/daemon";
 import fs from "node:fs";
 import http from "node:http";
@@ -26,6 +26,123 @@ interface DaemonResponse {
   ok: boolean;
   headers: http.IncomingHttpHeaders;
   body: string;
+}
+
+// --- Agent visuals: the page scheme (spec 2026-10-14 §2.2) ---
+//
+// An agent-published page renders in a sandboxed iframe from a short-lived
+// signed URL. The renderer is a file:// document talking to the daemon over
+// its unix socket (or, for a remote, through this process), so an http URL
+// for the frame may not be reachable at all — and a remote's Caddy would
+// refuse a file:// parent anyway (`frame-ancestors 'self'`). The frame loads
+// `orq-visual://local/api/agent-visuals/…` (the local daemon) or
+// `orq-visual://remote/<base64url origin>/api/agent-visuals/…` (a remote this
+// process already talks to) instead, and this process fetches the page and
+// answers it with the same sandbox CSP the daemon sends: the page gets an
+// opaque origin, and the preload bridge never runs in a subframe. The URL
+// layout is `packages/ui/src/lib/agent-chat/visual-frame.ts`'s.
+const VISUAL_SCHEME = "orq-visual";
+const VISUAL_ROUTE_PREFIX = "/api/agent-visuals/";
+const VISUAL_PAGE_HEADERS = {
+  "Content-Type": "text/html; charset=utf-8",
+  "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-popups allow-downloads",
+  "X-Content-Type-Options": "nosniff",
+  "Cache-Control": "private, no-store",
+  "Referrer-Policy": "no-referrer"
+} as const;
+
+// Before `ready`: a privileged standard scheme resolves relative URLs and
+// counts as a secure context, like the https a web client frames from.
+protocol.registerSchemesAsPrivileged([
+  { scheme: VISUAL_SCHEME, privileges: { standard: true, secure: true, stream: true } }
+]);
+
+/**
+ * Origins of the remote daemons the renderer reached through this process —
+ * the only remotes a page URL may name, so a page cannot turn the scheme into
+ * a fetch of an arbitrary host.
+ */
+const remoteOrigins = new Set<string>();
+
+function rememberRemoteOrigin(url: string): void {
+  try {
+    const origin = new URL(url).origin;
+    if (origin.startsWith("http://") || origin.startsWith("https://")) remoteOrigins.add(origin);
+  } catch {
+    /* an unparseable URL fails its own request */
+  }
+}
+
+/** Where a page URL points: a daemon path over the socket, or a remote URL. Null for anything else. */
+function visualTarget(raw: string): { kind: "local"; path: string } | { kind: "remote"; url: string } | null {
+  let url: URL;
+  try {
+    url = new URL(raw);
+  } catch {
+    return null;
+  }
+  if (url.protocol !== `${VISUAL_SCHEME}:`) return null;
+  if (url.hostname === "local") {
+    return url.pathname.startsWith(VISUAL_ROUTE_PREFIX) ? { kind: "local", path: `${url.pathname}${url.search}` } : null;
+  }
+  if (url.hostname !== "remote") return null;
+  const match = /^\/([A-Za-z0-9_-]+)(\/.*)$/.exec(url.pathname);
+  if (!match) return null;
+  const origin = Buffer.from(match[1]!, "base64url").toString("utf8");
+  if (!remoteOrigins.has(origin) || !match[2]!.startsWith(VISUAL_ROUTE_PREFIX)) return null;
+  return { kind: "remote", url: `${origin}${match[2]}${url.search}` };
+}
+
+function visualRefusal(status: number, message: string): Response {
+  return new Response(message, {
+    status,
+    headers: { ...VISUAL_PAGE_HEADERS, "Content-Type": "text/plain; charset=utf-8" }
+  });
+}
+
+function registerVisualProtocol(): void {
+  protocol.handle(VISUAL_SCHEME, async (request) => {
+    if (request.method !== "GET") return visualRefusal(405, "Not allowed.");
+    const target = visualTarget(request.url);
+    if (target === null) return visualRefusal(404, "Not found.");
+    try {
+      const response =
+        target.kind === "local"
+          ? await requestBytesOverSocket({ method: "GET", path: target.path })
+          : await requestBytesOverHttp({ url: target.url, method: "GET" });
+      if (!response.ok) {
+        return visualRefusal(response.status || 502, Buffer.from(response.body).toString("utf8").slice(0, 500));
+      }
+      // The daemon's own headers are not passed on: this process answers with
+      // the sandbox it knows, never a remote's framing rules.
+      return new Response(response.body, { status: 200, headers: VISUAL_PAGE_HEADERS });
+    } catch {
+      return visualRefusal(502, "Orquester could not reach the daemon for this page.");
+    }
+  });
+}
+
+/** A link this app hands to the system browser: http(s) and mail only. */
+function isExternalUrl(url: string): boolean {
+  try {
+    const { protocol: scheme } = new URL(url);
+    return scheme === "https:" || scheme === "http:" || scheme === "mailto:";
+  } catch {
+    return false;
+  }
+}
+
+/** The app's own document, whatever its fragment: the only place the window may navigate. */
+function isAppUrl(win: BrowserWindow, url: string): boolean {
+  try {
+    const target = new URL(url);
+    const current = new URL(win.webContents.getURL());
+    return target.protocol === "file:"
+      ? current.protocol === "file:" && target.pathname === current.pathname
+      : target.origin === current.origin;
+  } catch {
+    return false;
+  }
 }
 
 let daemon: RunningDaemon | undefined;
@@ -422,6 +539,7 @@ function httpModuleFor(target: URL): typeof http | typeof https {
 
 /** One unary request/response round trip to a remote daemon over TCP. */
 function requestOverHttp({ url, method, headers, body, requestId }: RemoteHttpRequest, senderId?: number): Promise<DaemonResponse> {
+  rememberRemoteOrigin(url);
   return new Promise((resolve, reject) => {
     let target: URL;
     try {
@@ -646,6 +764,22 @@ function createWindow(): void {
     }
   });
 
+  // No window of this app opens another one, and no frame may navigate it
+  // away from itself: a link (a chat link's target=_blank, an agent page's
+  // `ui/open-link`, which the renderer opens with window.open) goes to the
+  // system browser, as on the web it goes to a new tab. Anything else is
+  // refused (spec 2026-10-14 §2.2).
+  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+    if (isExternalUrl(url)) void shell.openExternal(url);
+    return { action: "deny" };
+  });
+  mainWindow.webContents.on("will-navigate", (event, url) => {
+    const win = mainWindow;
+    if (win !== undefined && isAppUrl(win, url)) return;
+    event.preventDefault();
+    if (isExternalUrl(url)) void shell.openExternal(url);
+  });
+
   mainWindow.once("ready-to-show", () => {
     mainWindow?.show();
     mainWindow?.focus();
@@ -688,6 +822,7 @@ app.whenReady().then(async () => {
 
   listenForDaemonShutdown();
   registerIpc();
+  registerVisualProtocol();
   if (isDaemonOwner) {
     createTray();
   }

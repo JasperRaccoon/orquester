@@ -1253,3 +1253,40 @@ test("an over-cap chat upload answers 413 UPLOAD_TOO_LARGE through the MCP seam 
     await f.cleanup();
   }
 });
+
+test("publishHtmlRender stores the prepared page through the host's upload and answers its reference", async (t) => {
+  const f = await makeFixture(CLAUDE, { env: {} });
+  t.after(() => f.cleanup());
+  const id = "thread-1-0f8fad5b-d9cb-469f-a165-70867728950e-html";
+  // The real host answers an upload with the stored `AttachmentRef`.
+  f.refuseUploadAfterBody = { status: 200, body: { type: "file", id, name: "Chart.html", sizeBytes: 1 } };
+  const uploads: Array<{ url: string; body: Promise<string> }> = [];
+  f.onUpload = (req) => {
+    const chunks: Buffer[] = [];
+    req.on("data", (chunk: Buffer) => chunks.push(chunk));
+    uploads.push({
+      url: req.url ?? "",
+      body: new Promise((resolve) => req.on("end", () => resolve(Buffer.concat(chunks).toString("utf8"))))
+    });
+  };
+  const reference = await f.service.publishHtmlRender({
+    threadId: "thread-1",
+    html: "<p>chart</p>",
+    title: "Chart",
+    height: 300
+  });
+  assert.deepEqual(reference, { attachmentId: id, title: "Chart", height: 300 });
+  assert.equal(uploads.length, 1);
+  const query = new URL(uploads[0]!.url, "http://host").searchParams;
+  assert.equal(query.get("name"), "Chart.html");
+  assert.equal(query.get("type"), "text/html");
+  const stored = await uploads[0]!.body;
+  assert.ok(stored.includes('<style id="orq-theme">') && stored.endsWith("<p>chart</p>"));
+
+  // A host refusal is a store failure the tool can report.
+  f.refuseUploadAfterBody = { status: 500, body: { error: { code: "COMMAND_REJECTED", message: "disk full" } } };
+  await assert.rejects(
+    f.service.publishHtmlRender({ threadId: "thread-1", html: "<p>x</p>", title: "T", height: 300 }),
+    /disk full/
+  );
+});

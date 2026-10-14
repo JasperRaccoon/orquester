@@ -12,6 +12,8 @@
  * fetched by a bare browser navigation.
  */
 
+import { createReadStream } from "node:fs";
+import { stat } from "node:fs/promises";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type { AgentAccount, SessionSummary } from "@orquester/api";
 import { overlayManagedAccountAuth } from "./provider-auth-overlay.ts";
@@ -21,6 +23,7 @@ import {
   THREAD_SEARCH_MAX_QUERY_CHARS,
   agentChatCommandPath,
   agentChatRoutes,
+  isHtmlRenderAttachmentId,
   type AgentChatCommandName,
   type AgentChatErrorCode,
   type AgentChatErrorEnvelope,
@@ -28,6 +31,7 @@ import {
 } from "@orquester/api/agent-chat";
 import { agentHostRoutes } from "../agent-host/host-protocol.ts";
 import { AgentHostClient, HostUnavailableError } from "./host-client.ts";
+import { VISUAL_PAGE_HEADERS, type VisualUrlSigner } from "./visual-urls.ts";
 
 /** Maps a §6.2 command name onto the host's route for the same command. */
 const HOST_COMMAND_ROUTE: Record<AgentChatCommandName, (threadId: string) => string> = {
@@ -83,6 +87,8 @@ export interface AgentChatRouteDeps {
   attachmentPath(sessionId: string, attachmentId: string): Promise<string | null>;
   /** Stream that file to the client (`index.ts` owns the download headers). */
   sendAttachment(reply: FastifyReply, path: string): Promise<unknown>;
+  /** Mints and checks the signed URLs agent pages are framed from (spec 2026-10-14 §2.2). */
+  visualUrls: VisualUrlSigner;
   logger?: { warn?: (...a: unknown[]) => void; error?: (...a: unknown[]) => void };
 }
 
@@ -144,6 +150,24 @@ function pattern(path: string): string {
  * shape (`/turns/<n>/diff`) owned by the one shared builder.
  */
 const TURN_DIFF_PATTERN = agentChatRoutes.turnDiff(":id", 0).replace(/\/0\/diff$/, "/:turnCount/diff");
+
+/**
+ * The signed page route's pattern. The daemon's bearer hook lets exactly this
+ * route through (`index.ts`): an iframe cannot send the header, and the route
+ * refuses anything its signature does not authorise.
+ */
+export const AGENT_VISUAL_ROUTE_PATTERN = pattern(agentChatRoutes.visual(":id", ":attachmentId"));
+
+/** A refusal a frame may display: plain text, under the page's own sandbox. */
+function refuseVisual(reply: FastifyReply, status: number, message: string): FastifyReply {
+  return reply
+    .code(status)
+    .header("Content-Type", "text/plain; charset=utf-8")
+    .header("Content-Security-Policy", VISUAL_PAGE_HEADERS["Content-Security-Policy"]!)
+    .header("X-Content-Type-Options", "nosniff")
+    .header("Cache-Control", "private, no-store")
+    .send(message);
+}
 
 /**
  * Register every §6.2/§6.3 route on both transports. Chat commands do not
@@ -459,6 +483,56 @@ export function registerAgentChatRoutes(app: FastifyInstance, deps: AgentChatRou
         return reply.code(404).send(chatError("THREAD_NOT_FOUND", "No such attachment."));
       }
       return deps.sendAttachment(reply, path);
+    }
+  );
+
+  // Agent pages (spec 2026-10-14 §2.2). The mint is an ordinary authenticated
+  // chat route; it checks the id names a published page and nothing else —
+  // the host's resolve on the signed read is what binds the id to its thread.
+  app.post<{ Params: { id: string; attachmentId: string } }>(
+    pattern(agentChatRoutes.visualUrl(":id", ":attachmentId")),
+    async (request, reply) => {
+      const { id, attachmentId } = request.params;
+      if (!deps.chatSession(id)) return reply.code(404).send(THREAD_NOT_FOUND);
+      if (!isHtmlRenderAttachmentId(attachmentId)) {
+        return reply.code(404).send(chatError("THREAD_NOT_FOUND", "No such page."));
+      }
+      return deps.visualUrls.mint(id, attachmentId);
+    }
+  );
+
+  // The page itself, for an iframe: authorised by its signature alone, never
+  // by the bearer (which the frame cannot send), and served under the sandbox
+  // CSP so it runs with an opaque origin.
+  app.get<{ Params: { id: string; attachmentId: string }; Querystring: { exp?: unknown; sig?: unknown } }>(
+    AGENT_VISUAL_ROUTE_PATTERN,
+    async (request, reply) => {
+      const { id, attachmentId } = request.params;
+      if (!deps.visualUrls.verify(id, attachmentId, request.query.exp, request.query.sig)) {
+        return refuseVisual(reply, 403, "This page link has expired. Reopen the thread to show it again.");
+      }
+      if (!isHtmlRenderAttachmentId(attachmentId) || !deps.chatSession(id)) {
+        return refuseVisual(reply, 404, "This page is gone.");
+      }
+      if (!deps.isHostHealthy()) {
+        return refuseVisual(reply, 503, "The agent host is restarting. Try again in a moment.");
+      }
+      let path: string | null;
+      try {
+        path = await deps.attachmentPath(id, attachmentId);
+      } catch (error) {
+        if (!(error instanceof HostUnavailableError)) {
+          deps.logger?.error?.("agent visual resolve failed", error);
+        }
+        return refuseVisual(reply, 503, "The agent host is restarting. Try again in a moment.");
+      }
+      const info = path === null ? null : await stat(path).catch(() => null);
+      if (path === null || !info?.isFile()) {
+        return refuseVisual(reply, 404, "This page is gone.");
+      }
+      return reply
+        .headers({ ...VISUAL_PAGE_HEADERS, "Content-Length": String(info.size) })
+        .send(createReadStream(path));
     }
   );
 

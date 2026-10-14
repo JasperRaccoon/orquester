@@ -109,7 +109,7 @@ import { type ISessionManager, SessionError, createSessionManager, resumeLaunchA
 import { AgentChatService, ChatSessionError, type CreateAgentChatRequest } from "./agent-chat/service.ts";
 import { INVALID_OWNER, parseSessionOwner } from "./agent-chat/owner.ts";
 import { ChatAwareSessionManager } from "./agent-chat/session-router.ts";
-import { registerAgentChatRoutes } from "./agent-chat/proxy-routes.ts";
+import { AGENT_VISUAL_ROUTE_PATTERN, registerAgentChatRoutes } from "./agent-chat/proxy-routes.ts";
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { RecentProjectsService, describeProjectPath } from "./recent-projects";
@@ -1373,6 +1373,14 @@ export function createServer(
     // matched route's own pattern — never on the raw request line alone.
     const routePath: string | undefined = request.routeOptions.url;
     if (rawPath === "/ws" || routePath === "/ws") {
+      return;
+    }
+    // An agent's page is framed by an iframe, which cannot send the bearer:
+    // the route matched here is authorised by its own HMAC signature
+    // (`agent-chat/visual-urls.ts`) and refuses anything that does not carry
+    // one (spec 2026-10-14 §2.2). Only the matched route pattern lets it
+    // through, never a path prefix.
+    if (routePath === AGENT_VISUAL_ROUTE_PATTERN) {
       return;
     }
 

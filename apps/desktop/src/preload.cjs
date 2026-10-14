@@ -54,6 +54,11 @@ contextBridge.exposeInMainWorld("orquesterDesktop", {
   // window with it (the native background is chosen before any renderer code
   // runs). Fire-and-forget; the payload is validated in the main process.
   setWindowBackground: (payload) => ipcRenderer.send("orquester:window-background", payload),
+  // Agent visuals: the scheme the main process serves agent pages under
+  // (`orq-visual://local/…`, `orq-visual://remote/<base64url origin>/…`), so
+  // the renderer frames them without an http URL it may not reach. Absent on
+  // an older build, where the renderer falls back to the daemon's http URL.
+  visualScheme: "orq-visual",
   // Frameless window caption controls.
   windowControls: {
     minimize: () => ipcRenderer.send("orquester:window", "minimize"),

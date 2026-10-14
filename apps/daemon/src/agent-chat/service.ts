@@ -30,7 +30,7 @@ import {
   type CreateHostThreadRequest,
   type SetThreadIdentityRequest
 } from "../agent-host/host-protocol.ts";
-import { Transform, type Readable } from "node:stream";
+import { Readable, Transform } from "node:stream";
 import { MAX_UPLOAD_BYTES } from "@orquester/api";
 import { isUploadTooLarge, UploadTooLargeError } from "../upload-stream.ts";
 import { isAgentAdapterId } from "../agent-host/adapters/index.ts";
@@ -43,6 +43,9 @@ import { markClaudeProjectTrusted } from "./home-prep.ts";
 import { parseSessionOwner } from "./owner.ts";
 import type { FastifyReply } from "fastify";
 import type { AgentChatRouteDeps } from "./proxy-routes.ts";
+import type { HtmlRenderReference } from "@orquester/api/agent-chat";
+import { publishHtmlRender, type PublishHtmlRenderInput } from "./html-render-publish.ts";
+import { createVisualUrlSigner, type VisualUrlSigner } from "./visual-urls.ts";
 import { AgentChatSummaryService, type SummaryBroadcaster, type SummaryPush, type ThreadUsageReading } from "./summary.ts";
 import {
   AgentHostSupervisor,
@@ -186,6 +189,11 @@ export class AgentChatService {
   private readonly supervisor: AgentHostSupervisor;
   private readonly summary: AgentChatSummaryService;
   private healthTimer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Signs the URLs agent pages are framed from (spec 2026-10-14 §2.2). Its
+   * key is this process's own, never persisted: a restart retires them all.
+   */
+  private readonly visualUrls: VisualUrlSigner = createVisualUrlSigner();
 
   constructor(private readonly opts: AgentChatServiceOptions) {
     const socketPath = agentHostSocketPath(opts.baseDir, opts.platform);
@@ -524,6 +532,7 @@ export class AgentChatService {
         ),
       attachmentPath: (sessionId, attachmentId) => this.attachmentPath(sessionId, attachmentId),
       sendAttachment: (reply, path) => this.opts.sendAttachment(reply, path),
+      visualUrls: this.visualUrls,
       ...(this.opts.listManagedAccounts
         ? { managedAccounts: () => this.opts.listManagedAccounts!() }
         : {}),
@@ -919,6 +928,39 @@ export class AgentChatService {
       value = null;
     }
     return { status: stream.status, value };
+  }
+
+  /**
+   * Publish an agent's HTML page into its thread (spec 2026-10-14 §2.1,
+   * §2.2): the `orquester` server's `html_render` handler calls this. The
+   * page is prepared here (bootstrap, local images inlined from inside the
+   * thread's project only) and stored through the host's attachment upload,
+   * like any chat attachment; the answer is the reference the tool returns.
+   * Refusals throw `HtmlRenderPublishError` with an agent-facing message.
+   */
+  async publishHtmlRender(input: PublishHtmlRenderInput): Promise<HtmlRenderReference> {
+    return publishHtmlRender(
+      {
+        storeAttachment: async (threadId, fileName, bytes) => {
+          const { status, value } = await this.uploadAttachment(
+            threadId,
+            { name: fileName, type: "text/html" },
+            Readable.from([bytes])
+          );
+          const id = (value as { id?: unknown } | null)?.id;
+          if (status !== 200 || typeof id !== "string") {
+            const message = (value as { error?: { message?: unknown } } | null)?.error?.message;
+            throw new Error(typeof message === "string" ? message : `the agent host answered ${status}`);
+          }
+          return id;
+        },
+        sandboxRoot: async (threadId) => {
+          const projectPath = this.chat.get(threadId)?.projectPath;
+          return projectPath ? this.opts.resolveTrustedProjectDir(projectPath) : null;
+        }
+      },
+      input
+    );
   }
 
   /**
