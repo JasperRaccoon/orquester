@@ -4,6 +4,7 @@
  */
 
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
 import { mkdir, mkdtemp, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -277,4 +278,15 @@ test("an image path swapped for a symlink after its realpath was checked cannot 
   assert.equal(await openInsideRoot(join(swappedDir, "secret.png"), project), null);
   // Plainly outside.
   assert.equal(await openInsideRoot(secret, project), null);
+});
+
+test("a FIFO in an image's place never blocks the open: refused at once, not waited on (S-M2)", { skip: process.platform === "win32" }, async (t) => {
+  const project = await mkdtemp(join(tmpdir(), "orq-html-fifo-"));
+  t.after(() => rm(project, { recursive: true, force: true }));
+  const fifo = join(project, "chart.png");
+  execFileSync("mkfifo", [fifo]);
+  // Without O_NONBLOCK the open waits for a writer forever (and holds a threadpool thread).
+  const started = Date.now();
+  assert.equal(await openInsideRoot(fifo, project), null, "not a regular file");
+  assert.ok(Date.now() - started < 5_000);
 });

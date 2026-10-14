@@ -222,7 +222,10 @@ function isInside(root: string, child: string): boolean {
  * Null when it does not: the image is then treated as outside the project.
  */
 export async function openInsideRoot(real: string, root: string): Promise<FileHandle | null> {
-  const handle = await open(real, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0)).catch(() => null);
+  // O_NONBLOCK: a FIFO swapped in for the image must not block a threadpool thread on open
+  // waiting for a writer (S-M2); a regular file reads the same either way, and anything that is
+  // not one is refused by the stat below.
+  const handle = await open(real, constants.O_RDONLY | (constants.O_NOFOLLOW ?? 0) | (constants.O_NONBLOCK ?? 0)).catch(() => null);
   if (handle === null) return null;
   try {
     const info = await handle.stat();
