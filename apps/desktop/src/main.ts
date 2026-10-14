@@ -4,6 +4,13 @@ import fs from "node:fs";
 import http from "node:http";
 import https from "node:https";
 import path from "node:path";
+import {
+  navigationAction,
+  visualTarget,
+  windowOpenAction,
+  VISUAL_SCHEME,
+  type NavigationAction
+} from "./navigation";
 
 /**
  * A bridged request body: JSON as a string, or an upload's raw bytes as the
@@ -36,13 +43,11 @@ interface DaemonResponse {
 // for the frame may not be reachable at all — and a remote's Caddy would
 // refuse a file:// parent anyway (`frame-ancestors 'self'`). The frame loads
 // `orq-visual://local/api/agent-visuals/…` (the local daemon) or
-// `orq-visual://remote/<base64url origin>/api/agent-visuals/…` (a remote this
-// process already talks to) instead, and this process fetches the page and
+// `orq-visual://remote/<base64url endpoint>/api/agent-visuals/…` (a remote this
+// process already talks to, `navigation.ts`) instead, and this process fetches the page and
 // answers it with the same sandbox CSP the daemon sends: the page gets an
 // opaque origin, and the preload bridge never runs in a subframe. The URL
 // layout is `packages/ui/src/lib/agent-chat/visual-frame.ts`'s.
-const VISUAL_SCHEME = "orq-visual";
-const VISUAL_ROUTE_PREFIX = "/api/agent-visuals/";
 const VISUAL_PAGE_HEADERS = {
   "Content-Type": "text/html; charset=utf-8",
   "Content-Security-Policy": "sandbox allow-scripts allow-forms allow-popups allow-downloads",
@@ -73,26 +78,6 @@ function rememberRemoteOrigin(url: string): void {
   }
 }
 
-/** Where a page URL points: a daemon path over the socket, or a remote URL. Null for anything else. */
-function visualTarget(raw: string): { kind: "local"; path: string } | { kind: "remote"; url: string } | null {
-  let url: URL;
-  try {
-    url = new URL(raw);
-  } catch {
-    return null;
-  }
-  if (url.protocol !== `${VISUAL_SCHEME}:`) return null;
-  if (url.hostname === "local") {
-    return url.pathname.startsWith(VISUAL_ROUTE_PREFIX) ? { kind: "local", path: `${url.pathname}${url.search}` } : null;
-  }
-  if (url.hostname !== "remote") return null;
-  const match = /^\/([A-Za-z0-9_-]+)(\/.*)$/.exec(url.pathname);
-  if (!match) return null;
-  const origin = Buffer.from(match[1]!, "base64url").toString("utf8");
-  if (!remoteOrigins.has(origin) || !match[2]!.startsWith(VISUAL_ROUTE_PREFIX)) return null;
-  return { kind: "remote", url: `${origin}${match[2]}${url.search}` };
-}
-
 function visualRefusal(status: number, message: string): Response {
   return new Response(message, {
     status,
@@ -103,7 +88,7 @@ function visualRefusal(status: number, message: string): Response {
 function registerVisualProtocol(): void {
   protocol.handle(VISUAL_SCHEME, async (request) => {
     if (request.method !== "GET") return visualRefusal(405, "Not allowed.");
-    const target = visualTarget(request.url);
+    const target = visualTarget(request.url, remoteOrigins);
     if (target === null) return visualRefusal(404, "Not found.");
     try {
       const response =
@@ -120,29 +105,6 @@ function registerVisualProtocol(): void {
       return visualRefusal(502, "Orquester could not reach the daemon for this page.");
     }
   });
-}
-
-/** A link this app hands to the system browser: http(s) and mail only. */
-function isExternalUrl(url: string): boolean {
-  try {
-    const { protocol: scheme } = new URL(url);
-    return scheme === "https:" || scheme === "http:" || scheme === "mailto:";
-  } catch {
-    return false;
-  }
-}
-
-/** The app's own document, whatever its fragment: the only place the window may navigate. */
-function isAppUrl(win: BrowserWindow, url: string): boolean {
-  try {
-    const target = new URL(url);
-    const current = new URL(win.webContents.getURL());
-    return target.protocol === "file:"
-      ? current.protocol === "file:" && target.pathname === current.pathname
-      : target.origin === current.origin;
-  } catch {
-    return false;
-  }
 }
 
 let daemon: RunningDaemon | undefined;
@@ -767,17 +729,24 @@ function createWindow(): void {
   // No window of this app opens another one, and no frame may navigate it
   // away from itself: a link (a chat link's target=_blank, an agent page's
   // `ui/open-link`, which the renderer opens with window.open) goes to the
-  // system browser, as on the web it goes to a new tab. Anything else is
-  // refused (spec 2026-10-14 §2.2).
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (isExternalUrl(url)) void shell.openExternal(url);
+  // system browser, as on the web it goes to a new tab. A remote's file
+  // download is downloaded here, and a URL carrying the connection's
+  // password never reaches the system browser. Anything else is refused
+  // (spec 2026-10-14 §2.2; the decisions are `navigation.ts`'s).
+  const contents = mainWindow.webContents;
+  const perform = (action: NavigationAction): void => {
+    if (action.kind === "download") contents.downloadURL(action.url);
+    else if (action.kind === "external") void shell.openExternal(action.url);
+  };
+  contents.setWindowOpenHandler(({ url }) => {
+    perform(windowOpenAction(url, { remoteOrigins }));
     return { action: "deny" };
   });
-  mainWindow.webContents.on("will-navigate", (event, url) => {
-    const win = mainWindow;
-    if (win !== undefined && isAppUrl(win, url)) return;
+  contents.on("will-navigate", (event, url) => {
+    const action = navigationAction(url, { currentUrl: contents.getURL(), remoteOrigins });
+    if (action.kind === "allow") return;
     event.preventDefault();
-    if (isExternalUrl(url)) void shell.openExternal(url);
+    perform(action);
   });
 
   mainWindow.once("ready-to-show", () => {
