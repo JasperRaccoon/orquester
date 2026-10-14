@@ -8,6 +8,7 @@ import {
   Github,
   MessageSquare,
   Palette,
+  Puzzle,
   Search,
   Server,
   SlidersHorizontal,
@@ -25,6 +26,7 @@ import { ChatSettings } from "./ChatSettings";
 import { GeneralSettings } from "./GeneralSettings";
 import { GitHostingSettings } from "./GitHostingSettings";
 import { HostStatusSettings } from "./HostStatusSettings";
+import { PluginsSettings } from "./PluginsSettings";
 import { ServerSettings } from "./ServerSettings";
 import { SettingsPageTitleContext } from "./primitives";
 import { UsageSettings } from "./UsageSettings";
@@ -37,6 +39,7 @@ type SectionId =
   | "accounts"
   | "usage"
   | "git-hosting"
+  | "plugins"
   | "server"
   | "system";
 
@@ -123,6 +126,15 @@ const SECTIONS: SectionDef[] = [
     desc: "GitHub & Bitbucket accounts, SSH keys and repo access",
     keywords: ["github", "bitbucket", "data center", "token", "pat", "ssh", "key", "repo", "identity", "git"],
     render: () => <GitHostingSettings />
+  },
+  {
+    id: "plugins",
+    group: "integrations",
+    label: "Plugins",
+    icon: <Puzzle size={15} />,
+    desc: "Optional built-in features",
+    keywords: ["plugin", "plugins", "typescript", "tsc", "ts-rust", "tsc-rs", "typecheck"],
+    render: () => <PluginsSettings />
   },
   {
     id: "server",
