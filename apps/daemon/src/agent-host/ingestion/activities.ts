@@ -43,6 +43,7 @@ import {
   isHiddenGoalChange,
   isHistoricalRuntimeEvent,
   isToolLifecycleItemType,
+  boundSessionToolData,
   sessionToolMarkedData,
   TASK_PROMPT_MAX_CHARS,
   type ProviderRequestKind,
@@ -256,11 +257,14 @@ function toolLifecyclePayload(
   const p = event.payload;
   // A call to one of the host's own session tools carries the provenance
   // marker `data.sessionTool` (design 2026-10-14 §1.5) — persisted, and the
-  // only thing slimming and the UI trust.
-  const data =
+  // only thing slimming and the UI trust. Its result is persisted without
+  // image bytes or other blobs (an `html_preview` screenshot would otherwise
+  // land whole in `events.ndjson`, as every provider records the result).
+  const marked =
     p.itemType === "mcp_tool_call" && p.data !== undefined && sessionToolNames !== undefined
       ? sessionToolMarkedData(p.data, sessionToolNames)
       : p.data;
+  const data = marked !== p.data ? boundSessionToolData(marked) : marked;
   return {
     itemType: p.itemType,
     ...(event.itemId !== undefined ? { toolUseId: event.itemId } : {}),

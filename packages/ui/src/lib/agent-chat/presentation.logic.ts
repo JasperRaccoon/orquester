@@ -490,7 +490,12 @@ export function shortenPath(path: string, workspaceRoot?: string): string {
  * calls them. A toolkit adds a line per tool here (its README); a tool with
  * none still reads "Orquester: <its name in words>", never its raw arguments.
  */
-export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {};
+export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
+  // Visual replies (§2.1). A published page shows as its `visual` row; this
+  // label is the row while it runs or when it failed.
+  html_preview: "Previewed HTML",
+  html_render: "Rendered HTML"
+};
 
 /** `thread_wait` → `Thread wait`. */
 function humanizeToolName(name: string): string {

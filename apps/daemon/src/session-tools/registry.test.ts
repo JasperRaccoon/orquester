@@ -37,12 +37,20 @@ const toolkit = (id: string, names: string[], instructions?: string): SessionToo
     )
   });
 
-test("production ships no toolkit, so no provider is given a server", () => {
-  assert.deepEqual(SESSION_TOOLKITS, []);
+test("production ships the visual-replies toolkit, within the instruction budget", () => {
+  assert.deepEqual(
+    SESSION_TOOLKITS.map((toolkit) => toolkit.id),
+    ["html"]
+  );
   const registry = sessionToolRegistry();
-  assert.equal(registry.enabled, false);
-  assert.equal(registry.instructions, "");
-  assert.equal(registry.tools.length, 0);
+  assert.equal(registry.enabled, true);
+  assert.deepEqual(
+    registry.tools.map((tool) => tool.name),
+    ["html_preview", "html_render"]
+  );
+  assert.match(registry.instructions, /^## Orquester\n/);
+  assert.ok(registry.instructions.includes("### Showing visuals"));
+  assert.ok(Buffer.byteLength(registry.instructions) <= SESSION_TOOL_INSTRUCTIONS_MAX_BYTES);
 });
 
 test("the test toolkit registers and composes its paragraph after the header", () => {

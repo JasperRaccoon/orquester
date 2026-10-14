@@ -293,6 +293,12 @@ Orquester:
 - Attachments: `agent-host/store/attachments.ts`, `store/index.ts` (save ~1395, sweep ~192/1483,
   reference scan ~873); fold retention `fold.ts` (`ACTIVITY_RETENTION_LIMIT` 500, compaction exemption ~270).
 - External MCP: `apps/daemon/src/mcp/{server,tool,daemon-api,attachments}.ts`, `docs/orquester-mcp.md`.
+- Visual-replies tools (as built): toolkit `apps/daemon/src/session-tools/html/`; preview and
+  publish-time measurement `apps/daemon/src/html-preview/` (`browser.ts` — a puppeteer-core browser
+  per call on the browser tabs' Chromium resolution, `public-proxy.ts` — the public-only SOCKS5
+  proxy); publish `apps/daemon/src/agent-chat/html-render-publish.ts`; reached through
+  `DaemonApi.publishHtmlRender` / `previewHtmlRender`; persisted rows bounded by
+  `boundSessionToolData` (`packages/api/src/agent-chat/session-tools.ts`).
 - UI pipeline: `packages/ui/src/lib/agent-chat/{entries.logic,rows.logic,contracts,presentation.logic}.ts`,
   `components/agent-chat/timeline/{TimelineRow,context}.tsx`, `rows/{ActivityRows,MessageRows,StructureRows}.tsx`,
   `markdown/{ChatMarkdown,CodeBlock}.tsx`, `AgentChatView.tsx` (modal viewer ~1130), banners

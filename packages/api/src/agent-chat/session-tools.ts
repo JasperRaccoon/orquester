@@ -299,3 +299,105 @@ export function projectSessionToolData(
   const references = sessionToolReferences(data, keys);
   return references ? { name, references } : { name };
 }
+
+// ---------------------------------------------------------------------------
+// What a session tool's row persists
+// ---------------------------------------------------------------------------
+
+/**
+ * A string in a session tool's persisted result is cut past this many UTF-8
+ * bytes. The tools' own JSON results stay under the daemon's 60 000-byte cap
+ * (`session-tools/results.ts`), so a reference is never cut; what is over it
+ * is a blob — a page or an image belongs in an attachment, not in
+ * `events.ndjson`.
+ */
+export const SESSION_TOOL_PERSISTED_STRING_MAX_BYTES = 64 * 1024;
+
+/** A data: URL longer than this loses its bytes. */
+const DATA_URL_KEEP_CHARS = 1024;
+
+/** How deep the walk goes; deeper values are kept as they are. */
+const PERSIST_WALK_MAX_DEPTH = 12;
+
+/**
+ * The call's own arguments, under each provider's key (Claude `input`, Codex
+ * `arguments`, Grok `rawInput`/`tool_input`, OpenCode `state.input`): kept as
+ * the agent wrote them, like any tool's.
+ */
+const ARGUMENT_KEYS: ReadonlySet<string> = new Set(["arguments", "input", "rawInput", "tool_input"]);
+
+/** Approximate decoded size of base64 text. */
+function base64Bytes(text: string): number {
+  return Math.floor((text.length * 3) / 4);
+}
+
+function boundString(value: string): string {
+  if (value.startsWith("data:") && value.length > DATA_URL_KEEP_CHARS) {
+    const comma = value.indexOf(",");
+    const head = comma > 0 && comma < 200 ? value.slice(5, comma) : "data";
+    return `[${head} omitted: ${base64Bytes(value.slice(comma + 1))} bytes]`;
+  }
+  if (value.length * 3 <= SESSION_TOOL_PERSISTED_STRING_MAX_BYTES) {
+    return value;
+  }
+  const bytes = utf8.encode(value);
+  if (bytes.length <= SESSION_TOOL_PERSISTED_STRING_MAX_BYTES) {
+    return value;
+  }
+  // Cut on a whole character: a decoder drops a split one at the end.
+  const head = new TextDecoder().decode(bytes.subarray(0, SESSION_TOOL_PERSISTED_STRING_MAX_BYTES)).replace(/�$/, "");
+  return `${head}… [${bytes.length - utf8.encode(head).length} bytes omitted]`;
+}
+
+function boundValue(value: unknown, depth: number): unknown {
+  if (typeof value === "string") {
+    return boundString(value);
+  }
+  if (depth > PERSIST_WALK_MAX_DEPTH || value === null || typeof value !== "object") {
+    return value;
+  }
+  if (Array.isArray(value)) {
+    let changed = false;
+    const next = value.map((entry) => {
+      const bounded = boundValue(entry, depth + 1);
+      changed ||= bounded !== entry;
+      return bounded;
+    });
+    return changed ? next : value;
+  }
+  const record = value as Record<string, unknown>;
+  // An image content block: MCP/ACP `{type: "image", data, mimeType}`, or
+  // Claude's `{type: "image", source: {type: "base64", data, media_type}}`.
+  if (record.type === "image") {
+    if (typeof record.data === "string") {
+      const { data, ...rest } = record;
+      return { ...rest, omittedBytes: base64Bytes(data) };
+    }
+    const source = asRecord(record.source);
+    if (source && typeof source.data === "string") {
+      const { data, ...sourceRest } = source;
+      return { ...record, source: { ...sourceRest, omittedBytes: base64Bytes(data) } };
+    }
+  }
+  let changed = false;
+  const next: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(record)) {
+    const bounded = ARGUMENT_KEYS.has(key) ? entry : boundValue(entry, depth + 1);
+    changed ||= bounded !== entry;
+    next[key] = bounded;
+  }
+  return changed ? next : record;
+}
+
+/**
+ * A session tool's row data as the host persists it (`events.ndjson`): the
+ * bytes of every image in its result dropped — MCP/ACP image content,
+ * Claude's base64 image source, OpenCode's data-URL attachments — and any
+ * other string past {@link SESSION_TOOL_PERSISTED_STRING_MAX_BYTES} cut. The
+ * model got the full result already; the timeline renders a session tool
+ * from its reference fields and labels, which stay whole. The call's
+ * arguments are kept as written. Answers `data` itself when nothing changed.
+ */
+export function boundSessionToolData(data: unknown): unknown {
+  return boundValue(data, 0);
+}

@@ -36,6 +36,7 @@ provider ──► agent host ──► daemon unix socket ──► handler
 | `index.ts` | both | `SESSION_TOOLKITS`, the one list; `sessionToolRegistry()` |
 | `executor.ts`, `route.ts` | daemon | strict argument parse, run, error mapping; the socket-only route |
 | `testing.ts` | tests | a test-only toolkit (`echo`, `wait_for_cancel`, `pixel`, `fail`) — never in `index.ts` |
+| `html/` | both | the visual-replies toolkit (§2.1): `html_preview`, `html_render`, the "Showing visuals" paragraph; it reaches the daemon's preview browser (`../html-preview/`) and page store through `ctx.api.previewHtmlRender` / `ctx.api.publishHtmlRender` |
 
 **The agent host imports this tree statically** (it advertises the definitions), so a toolkit
 module must not import a daemon service: reach the daemon through `ctx.api` (the daemon's own REST
@@ -97,7 +98,9 @@ API in-process, `../mcp/daemon-api.ts`). Whatever a toolkit imports, the host lo
 - **Fail with `ToolError(code, message)`.** It becomes an `isError` result with a safe message.
   Anything else thrown is `INTERNAL`, logged, never echoed.
 - **Results are small.** `jsonResult` caps at 60 000 bytes. Put large things (pages, files) in
-  attachments and return a reference.
+  attachments and return a reference. The model gets an image result whole, but the thread's log
+  does not: ingestion drops a session tool's image bytes and cuts any other result string past
+  64 KiB (`boundSessionToolData`), so never put what the timeline needs in one.
 - **Secrets** never in a result, a log or `events.ndjson` unless the tool's whole point is handing
   one to the requesting agent (and then say where it goes).
 
