@@ -57,7 +57,11 @@ test("the provider spelling is read off each provider's activity data", () => {
     sessionToolNameFromProviderData({ vendorTool: "use_tool", rawInput: { tool_name: "orquester__echo", tool_input: {} } }),
     "echo"
   );
-  assert.equal(sessionToolNameFromProviderData({ rawInput: { variant: "UseTool", tool_name: "orquester__echo" } }), "echo");
+  assert.equal(
+    sessionToolNameFromProviderData({ rawInput: { variant: "UseTool", tool_name: "orquester__echo" } }),
+    null,
+    "arguments alone are no use_tool call: the adapter's vendorTool says so"
+  );
   assert.equal(
     sessionToolNameFromProviderData({ vendorTool: "use_tool", rawInput: { tool_name: "serena__echo" } }),
     null,
@@ -119,20 +123,22 @@ test("reference fields are read from structuredContent or the JSON text block", 
     sessionToolReferences({ tool: "orquester-0123456789abcdef_x", result: JSON.stringify({ htmlRender: ref }) }, keys),
     { htmlRender: ref }
   );
-  // Grok's use_tool: `rawOutput.output.OkayOutput` text, or the ACP content blocks
+  // Grok's use_tool: `rawOutput.output.OkayOutput` joins the text blocks and the
+  // structuredContent (as JSON) one per line — fixture 32 in
+  // apps/daemon/test/fixtures/grok shows `"widget shown\n{\"n\":1}"`.
+  const json = JSON.stringify({ htmlRender: ref, message: "m" });
   assert.deepEqual(
-    sessionToolReferences(
-      { rawOutput: { type: "MCP", server_name: "orquester", output: { OkayOutput: JSON.stringify({ htmlRender: ref }) } } },
-      keys
-    ),
+    sessionToolReferences({ rawOutput: { type: "MCP", server_name: "orquester", output: { OkayOutput: `${json}\n${json}` } } }, keys),
     { htmlRender: ref }
   );
   assert.deepEqual(
-    sessionToolReferences(
-      { content: [{ type: "content", content: { type: "text", text: JSON.stringify({ htmlRender: ref }) } }] },
-      keys
-    ),
+    sessionToolReferences({ rawOutput: { type: "MCP", output: { OkayOutput: `Published.\n${json}` } } }, keys),
     { htmlRender: ref }
+  );
+  // the last line carrying a listed key wins; a line that is no JSON object is skipped
+  assert.deepEqual(
+    sessionToolReferences({ rawOutput: { output: { OkayOutput: `{"htmlRender":1}\n{not json\n{"other":2}` } } }, keys),
+    { htmlRender: 1 }
   );
   // a key nobody listed is not kept, and an oversized reference is dropped whole
   assert.equal(sessionToolReferences({ result: { structuredContent: { other: 1 } } }, keys), undefined);

@@ -156,26 +156,35 @@ const PROVIDER_ROWS: Record<string, Record<string, unknown>> = {
       result: RESULT_JSON
     }
   },
-  // Grok calls an MCP tool through its `use_tool` meta-tool.
+  // Grok calls an MCP tool through its `use_tool` meta-tool; the end carries
+  // no ACP content, only `OkayOutput`: the result's text blocks and its
+  // structuredContent as JSON, one per line (fixture
+  // `apps/daemon/test/fixtures/grok/32-mcp-use-tool-call.ndjson`). A session
+  // tool's `jsonResult` is a JSON text block + the same structuredContent.
   grok: {
     itemType: "mcp_tool_call",
     status: "completed",
     title: "orquester__html_render",
     data: {
       toolUseId: "call_1",
+      kind: "other",
       vendorTool: "use_tool",
       rawInput: { variant: "UseTool", tool_name: "orquester__html_render", tool_input: { title: "Chart" } },
-      rawOutput: { type: "MCP", tool_name: "html_render", server_name: "orquester", output: { OkayOutput: RESULT_JSON } },
-      content: [{ type: "content", content: { type: "text", text: RESULT_JSON } }]
+      rawOutput: {
+        type: "MCP",
+        tool_name: "html_render",
+        server_name: "orquester",
+        output: { OkayOutput: `${RESULT_JSON}\n${RESULT_JSON}` }
+      }
     }
   },
-  "grok (content blocks only)": {
+  "grok (a text block before the structured line)": {
     itemType: "mcp_tool_call",
     status: "completed",
     data: {
       vendorTool: "use_tool",
-      rawInput: { tool_name: "orquester__html_render" },
-      content: [{ type: "content", content: { type: "text", text: RESULT_JSON } }]
+      rawInput: { variant: "UseTool", tool_name: "orquester__html_render" },
+      rawOutput: { type: "MCP", output: { OkayOutput: `Published.\n${JSON.stringify({ htmlRender: REF })}` } }
     }
   }
 };

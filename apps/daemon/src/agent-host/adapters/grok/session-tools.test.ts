@@ -49,12 +49,18 @@ test("a session tool's call is recognised by its exact name, never a substring",
 });
 
 test("a call through Grok's use_tool meta-tool is recognised by its tool_name argument", () => {
-  // As observed in Grok's own session logs: the first frame is titled and
-  // `_meta`-named `use_tool`, the qualified catalog key is in `rawInput`.
+  // Fixture 32 (`32-mcp-use-tool-call.ndjson`): the first frame is titled and
+  // `_meta`-named `use_tool`, the qualified catalog key is in `rawInput`; the
+  // update after it keeps the vendor block; the end has none.
   const useTool = { "x.ai/tool": { version: 1, name: "use_tool", kind: "use_tool", namespace: "grok_build" } };
   const rawInput = { tool_name: "orquester__html_render", tool_input: { title: "Chart" } };
   assert.equal(grokSessionToolName({ title: "use_tool", _meta: useTool, rawInput }), "html_render");
-  assert.equal(grokSessionToolName({ title: null, _meta: null, rawInput: { variant: "UseTool", ...rawInput } }), "html_render");
+  // A frame without the vendor block counts only when an earlier one said `use_tool`.
+  assert.equal(grokSessionToolName({ title: null, _meta: null, rawInput: { variant: "UseTool", ...rawInput } }), null);
+  assert.equal(
+    grokSessionToolName({ title: null, _meta: null, rawInput: { variant: "UseTool", ...rawInput } }, { usesTool: true }),
+    "html_render"
+  );
   assert.equal(isGrokSessionToolCall({ title: "use_tool", _meta: null, rawInput }), true);
   // Another server through use_tool, or a `tool_name` argument of any other tool.
   assert.equal(grokSessionToolName({ title: "use_tool", _meta: useTool, rawInput: { tool_name: "serena__find_symbol" } }), null);

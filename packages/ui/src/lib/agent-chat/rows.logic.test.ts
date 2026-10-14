@@ -1384,7 +1384,8 @@ describe("agent visuals — the visual row (spec 2026-10-14 §2.5)", () => {
         toolUseId: "call-1",
         vendorTool: "use_tool",
         rawInput: { variant: "UseTool", tool_name: "orquester__html_render", tool_input: {} },
-        content: [{ type: "content", content: { type: "text", text: resultText } }]
+        // No ACP content: the text blocks and structuredContent joined one per line.
+        rawOutput: { type: "MCP", server_name: "orquester", tool_name: "html_render", output: { OkayOutput: `${resultText}\n${resultText}` } }
       })
     },
     "any provider, slimmed": {
