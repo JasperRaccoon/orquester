@@ -99,8 +99,20 @@ caller's own settings).
 
 | Directory | Tools | Daemon side |
 |---|---|---|
+| `html/` | `html_preview`, `html_render` | `ctx.api.previewHtmlRender` (the preview browser, `../html-preview/`), `ctx.api.publishHtmlRender` (the page store, `../agent-chat/html-render-publish.ts`) |
+| `scheduling/` | `schedule_task`, `list_scheduled_tasks`, `update_scheduled_task`, `delete_scheduled_task`, `run_scheduled_task_now` | `../scheduled-tasks/` (service, routes `/api/scheduled-tasks`); store `scheduled-tasks.json` (`@orquester/config`); the turn policy above |
+| `secrets/` | `request_secret` | `../agent-chat/secret-requests.ts` through `ctx.secretRequests`; masking in the agent host (`agent-host/session-tools/secret-redaction.ts`) |
 | `pull-requests/` | `watch_pull_request`, `unwatch_pull_request`, `list_pull_request_watches` | `../pr-watch/` (service, routes `agentChatRoutes.prWatches`/`prWatch`, change detection); store `pr-watches.json` (`@orquester/config`) |
 | `threads/` | `thread_list`, `thread_read`, `thread_create`, `thread_send`, `thread_wait`, `thread_interrupt`, `thread_fork`, `thread_merge_back`; `delegate_task`, `task_status`, `task_wait`, `task_cancel` | the daemon's own routes: `/api/sessions` (create, with `chat.lineage` for a delegate), the §6.2 `turn`/`interrupt` commands, Task 4's `fork`/`mergeBack`; reuses the external `/mcp`'s `read_transcript`, `send_message` and turn wait (`../mcp/tools/messages.ts`, `../mcp/wait.ts`) — pure modules the host loads with the toolkit |
+
+### `pull-requests/`: reach (S-M6)
+
+`watch_pull_request` reads a pull request through the project's git account (the workspace's
+identity), so it reaches every repository that account can read — not only the project's origin:
+an agent can watch, and so learn the state, checks and (vouched-for) comments of, any pull request
+the account sees. Give a project's git account the least privilege its work needs (a token scoped
+to the repositories of that workspace), as for any agent with a shell and that account's
+credentials.
 
 ### `threads/`: scope and caps
 
@@ -112,6 +124,10 @@ caller's own settings).
   yourself never ends; an interrupt would cut the very call).
 - **Turn policy.** `thread_send`, `thread_create`, `delegate_task` and `thread_merge_back` follow
   the turn policy above (never broader, plan carries on, provenance).
+  A `thread_send` in plan mode into a WORKING target is a steer, and a steer carries its mode:
+  Claude applies plan mode to its live session (`setPermissionMode` on the running query), so
+  the target plans for the rest of its running turn too, not just for the message (T6-M4) — the
+  description says so; a target in default mode returns to it with its next default-mode turn.
 - **Wait cycles.** A wait (`thread_wait`, `task_wait`, `thread_send` with `wait`) on a thread that
   is itself waiting — directly or through others — on the caller is refused at once
   (`WAIT_CYCLE`), from an in-daemon registry of active waits, instead of both sides running out
@@ -242,6 +258,12 @@ distinctive one (≥ 8 characters of two or more classes, or ≥ 16 of any). Ing
 `value` from any `secretRequest` result by shape (`@orquester/api` `stripSecretRequestValues`,
 once or twice serialised), which holds across a host restart. MCP rows and raw frames that cannot
 be walked are replaced, never kept (fail closed).
+
+What a host restart loses (S-M5): the remembered values live in the agent host's memory only —
+never on disk, by design. After a restart, a deploy, or the thread's release, the result row is
+still clean by shape, but a later echo of the value by the agent (a command, a message) is no
+longer masked. A fork's child is masked with its parent's values while both are held (`link`),
+under the same limit.
 The persisted row keeps `secretRequest` as its reference (the card's record). T3 instead keeps
 the value in its secret store under a one-use `secretRef` that only its own tools accept;
 Orquester has no tool that consumes such a ref, so the value goes to the agent — and the
@@ -264,6 +286,13 @@ that passes it through exposes it to that thread's own shells only — it acts a
 and nothing more, and dies with the app-server. Grok: in the ACP `session/new`/`session/load`
 frame (masked in `raw.ndjson`). OpenCode: in the shared server's memory (`POST /mcp`). None in
 argv or on disk.
+
+Defence in depth only (S-M1): a process environment is readable by the same OS user through
+`/proc/<pid>/environ`, so any process running as the daemon's user — including an agent's own
+shell commands — can read the Codex app-server's credential (and every other secret in that
+process's environment). It names one thread's grant, which dies with that app-server; the
+boundary between agents of one OS user is not a security boundary, and Orquester does not claim
+one.
 
 Grok's file-backed `use_tool` forms (`{"file": …}`, `{"tool_name": …, "tool_input_file": …}`,
 its `07-mcp-servers.md`) may not occur over ACP at all — those docs say ACP client filesystems
