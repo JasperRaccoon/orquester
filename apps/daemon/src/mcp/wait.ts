@@ -1,9 +1,19 @@
 import type { SessionActivity, SessionActivityEvent, SessionSummary } from "@orquester/api";
-import { SETTLED_TURN_STATES } from "@orquester/api/agent-chat";
+import {
+  agentChatRoutes,
+  replyNoticeText,
+  SETTLED_TURN_STATES,
+  startedTurns,
+  type ReplySubscriptionReleaseResponse,
+  type ReplyWaitResponse,
+  type ThreadSnapshotPayload
+} from "@orquester/api/agent-chat";
 import { resolveChatActivity } from "../agent-chat/activity-ladder.ts";
 import type { DaemonApi } from "./daemon-api.ts";
-import { ToolError } from "./errors.ts";
-import { listSessions } from "./reads.ts";
+import { expectOk, ToolError } from "./errors.ts";
+import { listSessions, readThread } from "./reads.ts";
+import { fitJsonBytes } from "./result.ts";
+import { lastReply } from "./views.ts";
 
 interface WatchState { sessions: ReadonlyMap<string, SessionSummary>; closed: ReadonlySet<string> }
 /**
@@ -237,4 +247,208 @@ export async function waitForAttention(api: DaemonApi, opts: WatchScope & { afte
     return at && Date.parse(at) > Date.parse(max) ? at : max;
   }, opts.after);
   return { sessions: hit, cursor, timedOut: false };
+}
+
+// ---------------------------------------------------------------------------
+// Conversation waits (unified MCP design 2026-10-15 §8; plan Task 8): a chat's work state and final
+// reply, waiting while chats work, and the reply-subscription wait with its release on cancel.
+// ---------------------------------------------------------------------------
+
+/** A chat's state as the conversation tools report it. */
+export type WorkState = "working" | "needs-input" | "idle" | "failed";
+
+/** What a chat looks like to the conversation tools: its state, its latest finished turn and that turn's answer. */
+export interface WorkReport {
+  sessionId: string;
+  title: string;
+  agent: string;
+  state: WorkState;
+  /** Turns started so far (read_transcript's numbers). */
+  turnCount: number;
+  /** The latest finished turn: its number, id and how it ended. */
+  lastTurn?: { turn: number; turnId: string; state: string };
+  /** That turn's final reply (another chat's words: content, §5.2). */
+  reply?: string;
+  replyTruncated?: true;
+  /** §13 d: the turn completed without a written reply; `hint` points at read_transcript. */
+  emptyReply?: true;
+  hint?: string;
+  /** Why the session or its latest turn failed. */
+  error?: string;
+  /** What it waits on its user for. */
+  waitingOn?: { approvals: number; questions: number };
+}
+
+/** The reply's ceiling in UTF-8 bytes of its JSON, inside the 60 000-byte result cap. */
+export const WORK_REPLY_MAX_BYTES = 40_000;
+const WORK_REPLY_MAX_CHARS = 40_000;
+
+/** Busy by the tab's summary alone: a turn starting or running, or a goal the provider continues. */
+function summaryBusy(s: SessionSummary): boolean {
+  return (
+    s.chatSessionStatus === "running" ||
+    s.chatSessionStatus === "starting" ||
+    s.latestTurn?.state === "running" ||
+    s.latestTurn?.state === "pending" ||
+    s.goal?.continuing === true
+  );
+}
+
+/**
+ * A chat's state from its summary AND its thread just read — the summary trails the host by up to
+ * one poll, so either one saying busy is busy, and the thread's own open requests are the truth
+ * about needs-input.
+ */
+export function workState(s: SessionSummary, snap: ThreadSnapshotPayload): WorkState {
+  if (snap.pending.approvals.length > 0 || snap.pending.userInputs.length > 0) return "needs-input";
+  const head = snap.head.session;
+  const last = snap.turns.at(-1);
+  if (summaryBusy(s) || head.activeTurnId !== null || head.status === "running" || head.status === "starting" || (last !== undefined && !SETTLED_TURN_STATES.has(last.state))) {
+    return "working";
+  }
+  if (s.chatSessionStatus === "error" || head.status === "error") return "failed";
+  return "idle";
+}
+
+/** The report of one chat, its summary and thread already read. */
+export function workReport(s: SessionSummary, snap: ThreadSnapshotPayload): WorkReport {
+  const state = workState(s, snap);
+  const started = startedTurns(snap.turns);
+  const report: WorkReport = { sessionId: s.id, title: s.title, agent: s.refId, state, turnCount: started.length };
+  for (let i = snap.turns.length - 1; i >= 0; i -= 1) {
+    const turn = snap.turns[i]!;
+    if (turn.turnId !== null && SETTLED_TURN_STATES.has(turn.state)) {
+      const number = started.findIndex((t) => t.turnId === turn.turnId);
+      report.lastTurn = { turn: number === -1 ? started.length : number + 1, turnId: turn.turnId, state: turn.state };
+      if (turn.state === "failed" && turn.errorMessage) report.error = turn.errorMessage;
+      break;
+    }
+  }
+  const reply = lastReply(snap, WORK_REPLY_MAX_CHARS);
+  if (reply && reply.text.trim()) {
+    const fitted = fitJsonBytes(reply.text, WORK_REPLY_MAX_BYTES);
+    report.reply = fitted.text;
+    if (reply.truncated || fitted.truncated) report.replyTruncated = true;
+  } else if (report.lastTurn?.state === "completed") {
+    report.emptyReply = true;
+    report.hint = replyNoticeText("empty", { title: s.title, sessionId: s.id });
+  }
+  if (state === "failed" && snap.head.session.lastError) report.error = snap.head.session.lastError;
+  if (state === "needs-input") report.waitingOn = { approvals: snap.pending.approvals.length, questions: snap.pending.userInputs.length };
+  return report;
+}
+
+/** A chat's report now; null once it is closed. */
+export async function readWorkReport(api: DaemonApi, sessionId: string, sessions?: readonly SessionSummary[]): Promise<WorkReport | null> {
+  const summary = (sessions ?? (await listSessions(api))).find((s) => s.id === sessionId);
+  if (!summary) return null;
+  try {
+    return workReport(summary, await readThread(api, sessionId));
+  } catch (error) {
+    // Closed between the list and the read.
+    if (error instanceof ToolError && (error.code === "THREAD_NOT_FOUND" || error.code === "NOT_FOUND")) return null;
+    throw error;
+  }
+}
+
+/** How long a wait whose reads said "still working" waits for the bus before looking again anyway (a safety net). */
+const WORK_RECHECK_MS = 10_000;
+
+/**
+ * Wait while every chat of `ids` is working — until one of them reaches a state `until` accepts
+ * (default: anything but working), closes, the timeout passes or `signal` aborts. Event-driven on
+ * the daemon bus (each event about one of them re-reads them), never a polling sleep; the reads are
+ * the thread's own, so a summary one poll behind never ends the wait early. Returns the reports it
+ * ended on (null for a closed chat).
+ */
+export async function waitWhileWorking(
+  api: DaemonApi,
+  ids: readonly string[],
+  opts: { timeoutMs: number; signal: AbortSignal; now: () => number; until?: (state: WorkState) => boolean }
+): Promise<{ reports: Map<string, WorkReport | null>; timedOut: boolean; cancelled: boolean }> {
+  const until = opts.until ?? ((state: WorkState) => state !== "working");
+  const watched = new Set(ids);
+  const startedAt = opts.now();
+  const startedMono = performance.now();
+  const remaining = () => opts.timeoutMs - Math.max(opts.now() - startedAt, performance.now() - startedMono);
+  let events = 0;
+  let wake: (() => void) | null = null;
+  const off = api.subscribe((event) => {
+    if (event.channel !== "sessions" || !watched.has((event.payload as { id?: string } | null)?.id ?? "")) return;
+    events += 1;
+    const w = wake;
+    wake = null;
+    w?.();
+  });
+  try {
+    for (;;) {
+      const seen = events;
+      const sessions = await listSessions(api);
+      const reports = new Map<string, WorkReport | null>();
+      for (const id of ids) reports.set(id, await readWorkReport(api, id, sessions));
+      if ([...reports.values()].some((report) => report === null || until(report.state))) return { reports, timedOut: false, cancelled: false };
+      if (opts.signal.aborted) return { reports, timedOut: false, cancelled: true };
+      const left = remaining();
+      if (left <= 0) return { reports, timedOut: true, cancelled: false };
+      if (events === seen) {
+        await new Promise<void>((resolve) => {
+          const resume = () => { clearTimeout(timer); opts.signal.removeEventListener("abort", resume); wake = null; resolve(); };
+          const timer = setTimeout(resume, Math.min(left, WORK_RECHECK_MS));
+          opts.signal.addEventListener("abort", resume, { once: true });
+          wake = resume;
+        });
+      }
+    }
+  } finally {
+    off();
+  }
+}
+
+/** How many times a cancelled wait re-sends its release while the waiter has not attached yet. */
+const MAX_RELEASE_TRIES = 50;
+
+/**
+ * Attach the caller's waiter to one reply subscription (socket-only route) until the bound turn's
+ * reply, `timeoutSeconds`, or that turn asking its user something (§8.1, §8.3). `DaemonApi.request`
+ * cannot abort its in-process inject, so when `signal` aborts (the provider cancelled the call, the
+ * turn was stopped) the waiter is RELEASED through its own route: the subscription becomes `notify`
+ * and the reply arrives as a message instead of being lost. A release that comes before the waiter
+ * attached (it answers `released: false` while the subscription is still `waiting`) is sent again
+ * once per macrotask until the wait answers.
+ */
+export async function awaitReplySubscription(
+  api: DaemonApi,
+  targetId: string,
+  subscriptionId: string,
+  timeoutSeconds: number,
+  signal: AbortSignal
+): Promise<ReplyWaitResponse> {
+  let answered = false;
+  const waiting = api
+    .request("POST", agentChatRoutes.replySubscriptionWait(targetId, subscriptionId), { body: { timeoutSeconds } })
+    .finally(() => { answered = true; });
+  const release = async (): Promise<ReplySubscriptionReleaseResponse | null> => {
+    try {
+      const res = await api.request("POST", agentChatRoutes.replySubscriptionRelease(targetId, subscriptionId));
+      return res.status < 400 ? (res.body as ReplySubscriptionReleaseResponse) : null;
+    } catch {
+      return null;
+    }
+  };
+  const onAbort = (): void => {
+    void (async () => {
+      for (let attempt = 0; attempt < MAX_RELEASE_TRIES && !answered; attempt += 1) {
+        const released = await release();
+        if (released === null || released.released || released.state !== "waiting") return;
+        await new Promise<void>((resolve) => setImmediate(resolve));
+      }
+    })();
+  };
+  if (signal.aborted) onAbort();
+  else signal.addEventListener("abort", onAbort, { once: true });
+  try {
+    return expectOk<ReplyWaitResponse>(await waiting);
+  } finally {
+    signal.removeEventListener("abort", onAbort);
+  }
 }

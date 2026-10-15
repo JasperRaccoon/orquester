@@ -1,18 +1,26 @@
-// Catalog family module `lineage` (Lineage: fork_session, merge_back_session) — owned by plan Task 8 (unified MCP, Wave 3).
-// Task 2 stub: `lineageFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
-// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
-// edits this file again.
+// Catalog family module `lineage` (fork_session, merge_back_session) — plan Task 8 (unified MCP, Wave 3).
+//
+// `fork_session` (spec §4 row 15) and `merge_back_session` (row 16: a FORK's result to its parent,
+// and deliver/discard of a queued delivery by its receiver or sender) for both audiences. A chat's
+// fork is marked `agentCreated` (the fork route honours it only from the forked chat's own agent,
+// §13 c) and inherits workflow ownership through the service (§5.4). Merge-back is for forks only:
+// a delegated or opened chat's final reply goes back by itself (§8.5). `get_session_lineage` and
+// `resolve_merge_back` are folded into `get_session` and `merge_back_session` (§11).
+//
+// The pre-catalog definitions (`lineageTools`) stay exported, unserved, for their tests until plan
+// Task 14 deletes the legacy definitions.
 import { z } from "zod";
-import type { ForkSessionRequest, ForkSessionResponse, MergeBackActionResponse, MergeBackResponse, SessionLineageResponse } from "@orquester/api";
-import { agentChatRoutes, startedTurns } from "@orquester/api/agent-chat";
+import type { ForkSessionRequest, ForkSessionResponse, MergeBackActionResponse, MergeBackResponse, SessionLineageResponse, SessionSummary } from "@orquester/api";
+import { agentChatRoutes, SETTLED_TURN_STATES as SETTLED, startedTurns } from "@orquester/api/agent-chat";
+import { findAgent, loadAgents } from "../agents.ts";
 import { ToolError, expectOk } from "../errors.ts";
-import { postIdempotent, readThread, requireChatSession } from "../reads.ts";
-import { toSafeToolError } from "../result.ts";
+import { listSessions, postIdempotent, readThread, requireChatSession } from "../reads.ts";
+import { clipText, MAX_ECHO_CHARS, toSafeToolError } from "../result.ts";
 import { defineTool, MUTATING, READ_ONLY, type ToolDef } from "../tool.ts";
 import { chatDetail } from "../views.ts";
-import { legacyChatTools, legacyExternalTools } from "../catalog/legacy.ts";
-import { threadTools as legacyThreadTools } from "../../session-tools/threads/threads.ts";
-import { delegationTools as legacyDelegationTools } from "../../session-tools/threads/delegation.ts";
+import { defineTool as defineCatalogTool, MUTATING as CATALOG_MUTATING, type AnyOrquesterTool, type ScopeClaim } from "../catalog/contract.ts";
+import { chatThreadRef, sessionClaim, threadCaller } from "./watch.ts";
+import { MAX_RUNNING_SESSIONS_PER_PROJECT } from "./sessions.ts";
 
 // Thread lineage (spec 2026-10-14 §6): fork a chat session from a turn, merge a fork's result back into its parent,
 // and read a session's parent and children. Every call goes through the daemon's own routes (agentChatRoutes.fork,
@@ -100,12 +108,198 @@ const resolveMergeBack = defineTool({
   }
 });
 
+/** The pre-catalog definitions (unserved; their tests run them until plan Task 14 deletes them). */
 export const lineageTools: ToolDef[] = [forkSession, mergeBackSession, resolveMergeBack, getSessionLineage];
 
-/** The legacy in-chat thread tools this family's owner replaces: `thread_send`, `thread_create`, `delegate_task`, `thread_wait`, `task_wait`, `thread_fork`, `thread_merge_back`. */
-const LEGACY_CHAT_NAMES: ReadonlySet<string> = new Set(["thread_send", "thread_create", "delegate_task", "thread_wait", "task_wait", "thread_fork", "thread_merge_back"]);
+// ---------------------------------------------------------------------------
+// The catalog tools (unified MCP design 2026-10-15 §4 rows 15–16)
+// ---------------------------------------------------------------------------
+
+const catalogSessionId = z.string().min(1).max(200);
+
+/** The fork body's cut by turn number (the transcript's numbers): `finishedOnly` while the caller forks its own running conversation. */
+async function forkCut(api: Parameters<typeof readThread>[0], sessionId: string, throughTurn: number, finishedOnly: boolean): Promise<Pick<ForkSessionRequest, "turnId" | "role">> {
+  const started = startedTurns((await readThread(api, sessionId)).turns);
+  if (started.length === 0) throw new ToolError("INVALID_ARGUMENT", "This conversation has no turn to fork from yet.");
+  if (finishedOnly) {
+    // Only finished turns fork: yours is still running, so the latest finished one is the most a fork keeps.
+    let finished = 0;
+    started.forEach((turn, index) => { if (SETTLED.has(turn.state)) finished = index + 1; });
+    if (throughTurn > finished) {
+      throw new ToolError(
+        "INVALID_ARGUMENT",
+        throughTurn <= started.length
+          ? `Turn ${throughTurn} has not finished; the latest finished turn is ${finished}. Fork through that, or leave throughTurn out.`
+          : `throughTurn must be between 0 and ${finished}, the latest finished turn.`
+      );
+    }
+  } else if (throughTurn > started.length) {
+    throw new ToolError("INVALID_ARGUMENT", `throughTurn must be between 0 and ${started.length}: this conversation has ${started.length} started turn${started.length === 1 ? "" : "s"}.`);
+  }
+  // Through turn N is turn N itself; before the first is turn 1's user side.
+  return throughTurn === 0 ? { turnId: started[0]!.turnId, role: "user" } : { turnId: started[throughTurn - 1]!.turnId, role: "assistant" };
+}
+
+/** Refuse a fork once the target's project holds as many open chats as a tool may add to (§5.6). */
+function assertRoomInProject(sessions: readonly SessionSummary[], projectPath: string): void {
+  const running = sessions.filter((s) => s.projectPath === projectPath && s.status === "running").length;
+  if (running >= MAX_RUNNING_SESSIONS_PER_PROJECT) {
+    throw new ToolError("SESSION_BUSY", `${running} sessions are open in this project (limit ${MAX_RUNNING_SESSIONS_PER_PROJECT}); the user has to close some first.`);
+  }
+}
+
+export const forkSessionTool = defineCatalogTool({
+  name: "fork_session",
+  title: "Fork a chat session",
+  description:
+    "Fork a chat (the GUI's 'Fork from here'): a new tab in the same project with the same agent, model, options, mode and account, whose conversation is the original's through turn `throughTurn` (the transcript's turn numbers; default: the latest finished turn) or up to `messageId`. The original is untouched. Grok has no native fork: its fork is handed the conversation so far (`strategy: \"transcript\"`). The fork starts idle: give it work with send_message; it sends its result back with merge_back_session.",
+  chatNote: "Default sessionId: this chat (the turn you are in is still running, so it is not part of the fork).",
+  input: {
+    sessionId: catalogSessionId.optional().describe("The session to fork (list_sessions)."),
+    throughTurn: z.number().int().min(0).optional().describe("Keep turns 1..throughTurn (0: before the first message)."),
+    messageId: z.string().min(1).max(200).optional().describe("Fork at this message instead (an assistant message keeps its turn; a user message forks just before it)."),
+    title: z.string().trim().min(1).max(200).optional().describe("The fork's tab title; default: the original's + \" (fork)\".")
+  },
+  audiences: ["external", "chat"],
+  toolset: "core",
+  tier: "act",
+  async scope(args, ctx) {
+    if (args.throughTurn !== undefined && args.messageId !== undefined) throw new ToolError("INVALID_ARGUMENT", "Give throughTurn or messageId, not both.");
+    const caller = threadCaller(ctx.caller);
+    const target = args.sessionId ?? caller?.threadId;
+    if (target === undefined) throw new ToolError("INVALID_ARGUMENT", "sessionId is required: the session to fork.");
+    // The fork carries the original's conversation into a tab the caller can read: a content read.
+    return sessionClaim(ctx, target, { reads: "content", writes: false, causesTurnIn: [], self: "allow" });
+  },
+  annotations: CATALOG_MUTATING,
+  resultKind: "json",
+  async run(args, ctx) {
+    const { api } = ctx;
+    const caller = threadCaller(ctx.caller);
+    const target = args.sessionId ?? caller!.threadId;
+    const summary = await requireChatSession(api, target);
+    const sessions = await listSessions(api);
+    assertRoomInProject(sessions, summary.projectPath);
+    const body: ForkSessionRequest = {};
+    if (args.title !== undefined) body.title = args.title;
+    if (args.messageId !== undefined) body.messageId = args.messageId;
+    if (args.throughTurn !== undefined) Object.assign(body, await forkCut(api, target, args.throughTurn, caller !== null && target === caller.threadId));
+    // A chat's fork is its own child (§13 c): the route keeps the flag only from the forked chat's own agent.
+    if (caller !== null) body.agentCreated = true;
+    // A fresh commandId, re-sent unchanged on a 503: a retry lands on the same fork, never a second one.
+    const result = await postIdempotent<ForkSessionResponse>(api, agentChatRoutes.fork(target), { ...body });
+    if (caller !== null) {
+      return {
+        sessionId: result.session.id,
+        title: result.session.title,
+        strategy: result.strategy,
+        ...(result.lineage.forkedFrom ? { forkedFrom: result.lineage.forkedFrom } : {}),
+        ...chatThreadRef(caller, sessions, result.session, target === caller.threadId ? "fork" : "thread")
+      };
+    }
+    try {
+      return { strategy: result.strategy, lineage: result.lineage, session: await chatDetail(api, result.session.id) };
+    } catch (error) {
+      // The fork exists now: a caller told only that the read failed would fork again.
+      const failure = toSafeToolError(error).structuredContent;
+      throw new ToolError(failure.code, `Session ${result.session.id} was forked but could not be read: ${failure.message}`, { sessionId: result.session.id, created: true });
+    }
+  }
+});
+
+/**
+ * Why a session that is no fork cannot merge back (§8.5): a delegate's final reply is its result and
+ * an opened chat's goes back by itself — `self` words it for the chat itself, else for an outsider.
+ */
+function notAFork(lineage: SessionSummary["lineage"], self: boolean): string | null {
+  if (!lineage) return "This session was not forked from another one: there is nothing to merge back into.";
+  if (lineage.relation === "delegate") {
+    return self
+      ? "This is a delegated task: your final reply is delivered to your parent automatically as its result. End your turn with it instead of merging back."
+      : "That session is a delegated task: its final reply is delivered to its parent automatically as its result. Merge-back is for forks.";
+  }
+  if (lineage.relation === "opened") {
+    return self
+      ? "This chat was opened by another chat, not forked from it: your final reply goes back to it by itself when it asked for one; otherwise answer it with send_message."
+      : "That session was opened by another chat, not forked from it. Merge-back is for forks.";
+  }
+  return null;
+}
+
+export const mergeBackSessionTool = defineCatalogTool({
+  name: "merge_back_session",
+  title: "Merge a fork back",
+  description:
+    "Send a FORK's result to the chat it was forked from: `text` (or, from outside the fork, its final reply) arrives there marked as from the fork — at once when that chat is idle, else queued until it is (`delivery: \"queued\"`, kept across restarts). Forks only: a delegated or opened chat's final reply goes back by itself. With `mergeId` and `action` it delivers now or discards a queued delivery instead (get_session's pendingDeliveries), as its receiver or sender. Each send is a new message.",
+  chatNote: "Default sessionId: this chat, which must be the fork. Write the whole result into `text`: your reply in this turn is not finished yet.",
+  input: {
+    sessionId: catalogSessionId.optional().describe("The fork; for mergeId: the chat holding the delivery or the one that sent it."),
+    text: z.string().trim().min(1).max(100_000).optional().describe("The result to send, self-contained."),
+    mergeId: z.string().min(1).max(200).optional().describe("A queued delivery (get_session's pendingDeliveries)."),
+    action: z.enum(["deliver", "discard"]).optional().describe("With mergeId: deliver it now, or discard it.")
+  },
+  audiences: ["external", "chat"],
+  toolset: "core",
+  tier: "act",
+  async scope(args, ctx) {
+    const acting = args.mergeId !== undefined || args.action !== undefined;
+    if (acting && (args.mergeId === undefined || args.action === undefined)) throw new ToolError("INVALID_ARGUMENT", "mergeId and action go together.");
+    if (acting && args.text !== undefined) throw new ToolError("INVALID_ARGUMENT", "text sends a merge; mergeId and action act on a queued one. Not both.");
+    const caller = threadCaller(ctx.caller);
+    if (caller === null) {
+      if (args.sessionId === undefined) throw new ToolError("INVALID_ARGUMENT", "sessionId is required.");
+      return { projects: [], sessions: [args.sessionId], reads: "none", writes: acting && args.action === "discard", causesTurnIn: [] };
+    }
+    if (args.sessionId !== undefined && args.sessionId !== caller.threadId) {
+      throw new ToolError("PERMISSION_DENIED", "A chat merges back, delivers or discards only as itself: leave sessionId out.");
+    }
+    if (acting) return { projects: [], sessions: [caller.threadId], reads: "none", writes: args.action === "discard", causesTurnIn: [] };
+    if (args.text === undefined) throw new ToolError("INVALID_ARGUMENT", "text is required: write your whole result into it (your reply in this turn is not finished yet).");
+    const sessions = await listSessions(ctx.api);
+    const lineage = sessions.find((s) => s.id === caller.threadId)?.lineage;
+    const refusal = notAFork(lineage, true);
+    if (refusal !== null) throw new ToolError("INVALID_ARGUMENT", refusal);
+    // The parent's turn is caused by this merge: the turn policy and the exchange apply to it (§5.3,
+    // §8.4). A parent that is closed is left to the route, which refuses it.
+    const parent = sessions.find((s) => s.id === lineage!.parentThreadId);
+    if (!parent) return { projects: [], sessions: [caller.threadId], reads: "none", writes: false, causesTurnIn: [] };
+    const claim = await sessionClaim(ctx, parent.id, { reads: "none", writes: false, causesTurnIn: [parent.id] });
+    return { ...claim, sessions: [caller.threadId, parent.id] } satisfies ScopeClaim;
+  },
+  annotations: CATALOG_MUTATING,
+  resultKind: "json",
+  async run(args, ctx) {
+    const { api } = ctx;
+    const caller = threadCaller(ctx.caller);
+    const target = args.sessionId ?? caller!.threadId;
+    if (args.mergeId !== undefined && args.action !== undefined) {
+      const done = expectOk<MergeBackActionResponse>(await api.request("POST", agentChatRoutes.mergeBackItem(target, args.mergeId), { body: { action: args.action } }));
+      return { ...done };
+    }
+    const summary = await requireChatSession(api, target);
+    const refusal = notAFork(summary.lineage, caller !== null);
+    if (refusal !== null) throw new ToolError("INVALID_ARGUMENT", refusal);
+    let interactionMode: "plan" | undefined;
+    if (caller !== null && ctx.turn.interactionMode === "plan") {
+      // Plan carries on (§5.3): the parent's turn plans too — refused for an agent with no plan mode.
+      const parent = (await listSessions(api)).find((s) => s.id === summary.lineage!.parentThreadId);
+      if (parent && !findAgent(await loadAgents(api), parent.refId).supports.planMode) {
+        throw new ToolError("PERMISSION_DENIED", `You are planning and ${clipText(parent.refId, MAX_ECHO_CHARS)} has no plan mode, so your result cannot be merged into it now. Propose it in your plan instead.`);
+      }
+      interactionMode = "plan";
+    }
+    // A fresh commandId (the merge's id), re-sent unchanged on a 503: a retry is the same merge.
+    const result = await postIdempotent<MergeBackResponse>(api, agentChatRoutes.mergeBack(target), {
+      ...(args.text !== undefined ? { text: args.text } : {}),
+      ...(interactionMode ? { interactionMode } : {}),
+      ...(ctx.turn.causedBy ? { causedBy: ctx.turn.causedBy } : {})
+    });
+    if (caller === null) return { ...result };
+    const sessions = await listSessions(api);
+    const parent = sessions.find((s) => s.id === result.parentSessionId);
+    return { ...result, ...(parent ? chatThreadRef(caller, sessions, parent, "parent") : {}) };
+  }
+});
+
 /** This family in the catalog (`../catalog/index.ts`). */
-export const lineageFamily = [
-  ...legacyExternalTools(lineageTools),
-  ...legacyChatTools([...legacyThreadTools, ...legacyDelegationTools].filter((tool) => LEGACY_CHAT_NAMES.has(tool.name)))
-];
+export const lineageFamily: readonly AnyOrquesterTool[] = [forkSessionTool, mergeBackSessionTool];

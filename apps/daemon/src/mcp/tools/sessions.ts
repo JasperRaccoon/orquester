@@ -570,4 +570,4 @@ const compactSession = defineTool({
 export const sessionTools: ToolDef[] = [listSessionsTool, getSession, getTurnDiff, createSession, updateSession, interruptSession, stopTask, stopSession, closeSession, revertSession, compactSession];
 
 /** This family in the catalog (`../catalog/index.ts`). */
-export const sessionsFamily = legacyExternalTools(sessionTools);
+export const sessionsFamily = legacyExternalTools(sessionTools.filter((tool) => tool.name !== "create_session")); // create_session: the conversation family (plan Task 8, `./messages.ts`)
