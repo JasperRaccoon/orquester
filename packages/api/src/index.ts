@@ -41,6 +41,7 @@ export * from "./agent-profile.ts";
 export * from "./prompt-variables.ts";
 export * from "./workflows/index.ts";
 export * from "./desktops.ts";
+export * from "./plugins.ts";
 
 export type {
   AgentChatBackgroundLiveness,

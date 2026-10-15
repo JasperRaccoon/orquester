@@ -99,8 +99,10 @@ import {
   type AgentChatTransport
 } from "./agent-chat/transport";
 import { fsPathQuery } from "./fs-path-query";
+import { parsePluginActionResult, parsePluginsResponse } from "./plugins-state";
 import { buildQueryString } from "./transporter";
-import { agentProfileRoutes, desktopRoutes, scheduledTaskRoutes, workflowRoutes } from "@orquester/api";
+import { agentProfileRoutes, desktopRoutes, pluginRoutes, scheduledTaskRoutes, workflowRoutes } from "@orquester/api";
+import type { PluginId, PluginInfo, PluginsResponse, SetPluginWorkspaceRequest } from "@orquester/api";
 import type {
   CreateDesktopRequest,
   DesktopAppSummary,
@@ -338,6 +340,44 @@ export class ApiClient {
   /** The one daemon-config field writable over remote HTTP (UI curtain toggle). */
   setProtectArchived(enabled: boolean): Promise<DaemonConfig> {
     return this.send("PUT", "/api/config/daemon/protect-archived", { body: { enabled } });
+  }
+
+  // --- Built-in plugins (Settings → Plugins) --------------------------------
+
+  /** Every built-in plugin and its state. Rejects when the answer is not a plugins list. */
+  async getPlugins(signal?: AbortSignal): Promise<PluginsResponse> {
+    const response = parsePluginsResponse(await this.send<unknown>("GET", pluginRoutes.list, { signal }));
+    if (!response) {
+      throw new Error("The server sent a plugins list this app cannot read.");
+    }
+    return response;
+  }
+
+  /**
+   * Turn a plugin on or off for one workspace. Resolves to the plugin's new
+   * state, or null when the answer carries none (the `plugins.changed`
+   * broadcast brings it then).
+   */
+  async setPluginWorkspace(id: PluginId, workspace: string, enabled: boolean): Promise<PluginInfo | null> {
+    const data = await this.send<unknown>("PUT", pluginRoutes.workspace(id, workspace), {
+      body: { enabled } satisfies SetPluginWorkspaceRequest
+    });
+    return parsePluginActionResult(data, id);
+  }
+
+  /** Queue an update check (202); its progress arrives as `plugins.changed`. */
+  async checkPluginUpdates(id: PluginId): Promise<void> {
+    await this.send<unknown>("POST", pluginRoutes.check(id));
+  }
+
+  /** Switch back to the previous version (409 without one). Resolves like {@link setPluginWorkspace}. */
+  async rollbackPlugin(id: PluginId): Promise<PluginInfo | null> {
+    return parsePluginActionResult(await this.send<unknown>("POST", pluginRoutes.rollback(id)), id);
+  }
+
+  /** Delete the downloaded versions (409 while a workspace has the plugin on). Resolves like {@link setPluginWorkspace}. */
+  async removePluginDownloads(id: PluginId): Promise<PluginInfo | null> {
+    return parsePluginActionResult(await this.send<unknown>("DELETE", pluginRoutes.downloads(id)), id);
   }
 
   // --- App config + remote servers (shared, daemon-persisted) --------------

@@ -6,7 +6,8 @@ import { mkdir, mkdtemp, readFile, readdir, realpath, rm } from "node:fs/promise
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { DesktopSummary, DesktopWindowsPayload } from "@orquester/api";
-import { desktopRuntimeDir, desktopsIndexPath, desktopsRuntimeDir } from "@orquester/config";
+import { appendNodeRequireOption, desktopRuntimeDir, desktopsIndexPath, desktopsRuntimeDir } from "@orquester/config";
+import { setSessionNodePreload } from "../plugins/session-env.ts";
 import { Tmux, tmuxAvailable, tmuxVersionOk } from "../tmux.ts";
 import { DesktopHostProbe, resolveTool } from "./host-status.ts";
 import { desktopSessionName } from "./host-env.ts";
@@ -208,6 +209,33 @@ test("4. an app exiting with 3 is exited with code 3; no argv ever held a comman
   for (const call of tmuxCalls) {
     assert.ok(!call.includes(SECRET), call);
     assert.ok(!call.includes("exit 3"), call);
+  }
+});
+
+test("4b. an app gets the plugins' NODE_OPTIONS preload after its own NODE_OPTIONS, only while one is active",{ skip: skipReason ?? false }, async () => {
+  assert.ok(desktopId, "needs step 1");
+  const preload = join(appdir, "preload.cjs");
+  let launches = 0;
+  const nodeOptionsOf = async (env: Record<string, string>): Promise<string> => {
+    launches += 1;
+    const out = join(appdir, `node-options-${launches}`);
+    const app = await manager.launchApp(desktopId, {
+      command: `printf '%s' "\${NODE_OPTIONS-<unset>}" > '${out}'`,
+      cwd: project,
+      env
+    });
+    await until((d) => d.apps.some((a) => a.id === app.id && a.status === "exited"));
+    return readFile(out, "utf8");
+  };
+  // The base env is this process's (the daemon's), whatever NODE_OPTIONS it has.
+  const daemonNodeOptions = process.env.NODE_OPTIONS;
+  assert.equal(await nodeOptionsOf({}), daemonNodeOptions ?? "<unset>");
+  setSessionNodePreload(preload);
+  try {
+    assert.equal(await nodeOptionsOf({}), appendNodeRequireOption(daemonNodeOptions, preload));
+    assert.equal(await nodeOptionsOf({ NODE_OPTIONS: "--no-warnings" }), appendNodeRequireOption("--no-warnings", preload));
+  } finally {
+    setSessionNodePreload(null);
   }
 });
 

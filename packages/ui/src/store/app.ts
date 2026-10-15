@@ -25,6 +25,7 @@ import {
   upsertDesktopApp,
   upsertDesktopIn
 } from "../lib/desktop-state";
+import { parsePluginsResponse, upsertPluginIn } from "../lib/plugins-state";
 import type { AgentAdapterId } from "@orquester/api/agent-chat";
 import {
   buildCredential,
@@ -142,7 +143,17 @@ import type {
   UsageResponse,
   UsageTokensResponse
 } from "@orquester/api";
-import { AGENT_PROFILE_CHANNEL, DESKTOP_CHANNEL, PR_WATCHES_CHANNEL, SAVED_PROMPTS_CHANNEL, SCHEDULED_TASKS_CHANNEL, WORKFLOWS_CHANNEL } from "@orquester/api";
+import {
+  AGENT_PROFILE_CHANNEL,
+  DESKTOP_CHANNEL,
+  PLUGINS_CHANGED_EVENT,
+  PLUGINS_CHANNEL,
+  PR_WATCHES_CHANNEL,
+  SAVED_PROMPTS_CHANNEL,
+  SCHEDULED_TASKS_CHANNEL,
+  WORKFLOWS_CHANNEL
+} from "@orquester/api";
+import type { PluginInfo } from "@orquester/api";
 import type { AgentPrefs, UsagePrefs } from "@orquester/config";
 
 const delay = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
@@ -778,6 +789,11 @@ export interface AppState {
    * daemon without desktops (404) and after a failed fetch.
    */
   desktopHost: DesktopHostStatus | null;
+  /**
+   * Built-in plugins (Settings → Plugins), or null until the section first
+   * loads them on this connection; live via `plugins.changed`.
+   */
+  plugins: PluginInfo[] | null;
   /** The open launch dialog (spec §10.2), or null. */
   launchDialog: LaunchDialogTarget | null;
   /** Client-derived working/idle + attention per session id (drives the status dot). */
@@ -1060,6 +1076,10 @@ export interface AppState {
   upsertDesktop: (desktop: DesktopSummary) => void;
   /** Drop a desktop (and its tab and viewer prefs); the daemon side is not touched. */
   removeDesktop: (id: string) => void;
+  /** `GET /api/plugins` into `plugins`. Rejects with the request's error so the section can show it. */
+  loadPlugins: () => Promise<void>;
+  /** Apply one plugin's state as a plugin route answered it. */
+  upsertPlugin: (plugin: PluginInfo) => void;
   openLaunchDialog: (target: LaunchDialogTarget) => void;
   closeLaunchDialog: () => void;
   /**
@@ -1187,6 +1207,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   browsers: [],
   desktops: [],
   desktopHost: null,
+  plugins: null,
   launchDialog: null,
   activityById: {},
   resumeError: null,
@@ -1756,6 +1777,7 @@ export const useAppStore = create<AppState>((set, get) => ({
       browsers: [],
       desktops: [],
       desktopHost: null,
+      plugins: null,
       launchDialog: null,
       accounts: []
     });
@@ -2733,6 +2755,18 @@ export const useAppStore = create<AppState>((set, get) => ({
 
   upsertDesktop: (desktop) => set((state) => ({ desktops: upsertDesktopIn(state.desktops, desktop) })),
 
+  loadPlugins: async () => {
+    const api = get().api;
+    if (!api) {
+      return;
+    }
+    const { plugins } = await api.getPlugins();
+    // An answer from the previous connection's daemon is not this one's state.
+    if (get().api === api) set({ plugins });
+  },
+
+  upsertPlugin: (plugin) => set((state) => ({ plugins: upsertPluginIn(state.plugins, plugin) })),
+
   removeDesktop: (id) => {
     clearDesktopPrefs(id);
     set((state) => removeDesktopState(state, id));
@@ -3269,6 +3303,15 @@ export const useAppStore = create<AppState>((set, get) => ({
       } else if (event.type === "desktop.windows") {
         const payload = parseDesktopWindowsPayload(event.payload);
         if (payload) set((state) => ({ desktops: applyDesktopWindows(state.desktops, payload) }));
+      }
+      return;
+    }
+    if (event.channel === PLUGINS_CHANNEL) {
+      // Every change carries the whole list; a malformed payload is ignored,
+      // keeping the last good list until the next event or refetch.
+      if (event.type === PLUGINS_CHANGED_EVENT) {
+        const response = parsePluginsResponse(event.payload);
+        if (response) set({ plugins: response.plugins });
       }
       return;
     }

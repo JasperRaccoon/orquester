@@ -76,7 +76,7 @@ import {
 import { systemClock, systemIdGen } from "./orchestration/runtime-seams.ts";
 import { createAgentHostServer, type AgentHostServer } from "./server/index.ts";
 import { createThreadStore } from "./store/index.ts";
-import { buildProviderEnv } from "./support/env.ts";
+import { buildProviderEnv, providerNodePreload } from "./support/env.ts";
 import { sessionToolRegistry, type SessionToolRegistry } from "../session-tools/index.ts";
 import {
   createDaemonForwarder,
@@ -435,7 +435,9 @@ export async function startAgentHost(
         // hosts could share. Every adapter's provider and what it starts carry
         // it, so Settings → System can reach what outlives the provider; only
         // the Grok adapter sweeps by it (it stamps its own value over this one).
-        launchId: randomUUID()
+        launchId: randomUUID(),
+        // Checked per spawn: the plugin can be turned on while the host runs.
+        nodePreloadPath: providerNodePreload(appdir)
       });
       // The `unset` half of §3.1: the daemon names the ambient vars this launch
       // must not carry, and they are removed after everything else is layered.

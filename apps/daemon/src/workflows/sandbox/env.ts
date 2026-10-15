@@ -11,6 +11,8 @@
 //   ORQUESTER_AGENT_LAUNCH  one fresh UUID per attempt — the launch marker every descendant
 //                           inherits, so Settings → System lists (and can kill) a leftover
 //   + the block's own env (already rendered; secrets allowed there by the user's choice)
+//   NODE_OPTIONS  the block's own, with the plugins' preload appended while one is active
+//                 (plugins spec §3.3); absent when neither is set
 //
 // The workflow ids and the launch marker are set LAST: a block's env cannot shadow them.
 
@@ -18,6 +20,7 @@ import { randomUUID } from "node:crypto";
 import { homedir, tmpdir, userInfo } from "node:os";
 
 import { AGENT_LAUNCH_ENV_VAR } from "../../agent-host/support/leftover-processes.ts";
+import { sessionNodeOptions } from "../../plugins/session-env.ts";
 import { sessionPath } from "../../tmux.ts";
 
 const WORKFLOW_RUN_ID_ENV_VAR = "ORQUESTER_WORKFLOW_RUN_ID";
@@ -72,6 +75,10 @@ export function buildSandboxEnv(input: SandboxEnvInput): Record<string, string> 
       throw new Error(`The environment variable ${name} holds a value that cannot be passed to a process.`);
     }
     env[name] = value;
+  }
+  const nodeOptions = sessionNodeOptions(env.NODE_OPTIONS);
+  if (nodeOptions !== undefined) {
+    env.NODE_OPTIONS = nodeOptions;
   }
   env[WORKFLOW_RUN_ID_ENV_VAR] = input.runId;
   env[WORKFLOW_ID_ENV_VAR] = input.workflowId;
