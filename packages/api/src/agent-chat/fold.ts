@@ -53,6 +53,7 @@ import type {
   ThreadTurnDiffCompletedPayload
 } from "./domain-events.ts";
 import { parseThreadLineage } from "./lineage.ts";
+import { parseCausedBy } from "./thread-tools.ts";
 import { openWorkOf } from "./open-work.ts";
 import { GOAL_ACTIVITY_KIND, parseGoalUpdatedPayload } from "./goal.ts";
 import type { ThreadGoal } from "./goal.ts";
@@ -1889,6 +1890,8 @@ function requestedTurn(
 ): Turn {
   const payload = event.payload;
   const settled = payload.settled;
+  // Read like every persisted field: a value that does not parse is no exchange (§8.4).
+  const causedBy = parseCausedBy(payload.causedBy);
   return {
     turnId: payload.turnId,
     state: settled?.state ?? (payload.turnId === null ? "pending" : "running"),
@@ -1906,7 +1909,8 @@ function requestedTurn(
       ? { model: payload.modelSelection.model }
       : head?.modelSelection.model !== undefined
         ? { model: head.modelSelection.model }
-        : {})
+        : {}),
+    ...(causedBy !== undefined ? { causedBy } : {})
   };
 }
 
