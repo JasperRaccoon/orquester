@@ -8,76 +8,27 @@
  * cannot restart a session.
  */
 
-import type {
-  ModelSelection,
-  ProviderModel,
-  ProviderOptionDescriptor,
-  ProviderOptionSelectionValue,
-  SelectProviderOptionDescriptor
+import {
+  optionDescriptors,
+  type ModelSelection,
+  type ProviderModel,
+  type ProviderOptionSelectionValue,
+  type SelectProviderOptionDescriptor
 } from "@orquester/api/agent-chat";
 
 /**
- * The descriptor ids the four adapters use for reasoning effort: Claude and
- * Codex `effort`, Grok `reasoningEffort`, OpenCode `variant` (labelled
- * "Reasoning"). `/effort` writes exactly this one option and nothing else.
+ * The picker's read-side logic lives in `@orquester/api` (`agent-chat/model-selection.ts`) so
+ * `list_agents` reports exactly what the composer shows (unified MCP design 2026-10-15 §4.1).
  */
-export const REASONING_OPTION_IDS: readonly string[] = ["effort", "reasoningEffort", "variant"];
-
-export function optionDescriptors(model: ProviderModel | null): ProviderOptionDescriptor[] {
-  return model?.capabilities?.optionDescriptors ?? [];
-}
-
-/** The reasoning select of a model, or `null` — what gates `/effort` (§4.6.7). */
-export function findReasoningDescriptor(
-  model: ProviderModel | null
-): SelectProviderOptionDescriptor | null {
-  for (const descriptor of optionDescriptors(model)) {
-    if (descriptor.type === "select" && REASONING_OPTION_IDS.includes(descriptor.id)) {
-      return descriptor;
-    }
-  }
-  return null;
-}
-
-export function resolveSelectedModel(
-  models: readonly ProviderModel[],
-  selection: ModelSelection | null
-): ProviderModel | null {
-  if (selection) {
-    const exact = models.find((model) => model.slug === selection.model);
-    if (exact) return exact;
-  }
-  return models.find((model) => model.isDefault) ?? models[0] ?? null;
-}
-
-/** What the chip reads. Falls back to the raw slug so it is never blank. */
-export function modelChipLabel(
-  model: ProviderModel | null,
-  selection: ModelSelection | null
-): string {
-  return model?.shortName ?? model?.name ?? selection?.model ?? "Model";
-}
-
-/** The descriptor's current value: the selection first, the descriptor's own default behind it. */
-export function currentOptionValue(
-  selection: ModelSelection | null,
-  descriptor: ProviderOptionDescriptor
-): ProviderOptionSelectionValue | undefined {
-  const selected = selection?.options?.find((option) => option.id === descriptor.id);
-  if (selected) return selected.value;
-  if (descriptor.type === "select") {
-    return descriptor.currentValue ?? descriptor.options.find((choice) => choice.isDefault)?.id;
-  }
-  return descriptor.currentValue;
-}
-
-export function optionChoiceLabel(
-  descriptor: SelectProviderOptionDescriptor,
-  value: ProviderOptionSelectionValue | undefined
-): string | null {
-  if (typeof value !== "string") return null;
-  return descriptor.options.find((choice) => choice.id === value)?.label ?? value;
-}
+export {
+  REASONING_OPTION_IDS,
+  currentOptionValue,
+  findReasoningDescriptor,
+  modelChipLabel,
+  optionChoiceLabel,
+  optionDescriptors,
+  resolveSelectedModel
+} from "@orquester/api/agent-chat";
 
 function sameSelection(left: ModelSelection, right: ModelSelection): boolean {
   if (left.model !== right.model || left.instanceId !== right.instanceId) return false;

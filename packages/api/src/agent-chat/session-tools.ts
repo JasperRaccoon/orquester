@@ -164,12 +164,17 @@ export function sessionToolMarkedData(data: unknown, registered: ReadonlySet<str
  * - `threadRef`: the thread a thread or delegation tool created or acted on
  *   (`ThreadToolReference`, `thread-tools.ts`, design §5), read back with
  *   `threadToolReferenceOfActivityData`.
+ * - `toolApproval`: the Orquester approval card a call went through, or the
+ *   grant that allowed it (`ToolApprovalReference`, `tool-approvals.ts`,
+ *   unified MCP design 2026-10-15 §7.3) — never arguments or card secrets —
+ *   read back with `toolApprovalReferenceOfActivityData`.
  */
 export const SESSION_TOOL_REFERENCE_KEYS: readonly string[] = [
   "htmlRender",
   // `request_secret`: name, purpose and outcome — the card's record, never the value (`secret-requests.ts`).
   "secretRequest",
-  "threadRef"
+  "threadRef",
+  "toolApproval"
 ];
 
 /** One kept reference field may take this much JSON; a bigger one is dropped, never cut. */

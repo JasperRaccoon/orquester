@@ -239,6 +239,23 @@ export function agentChatMergeOutboxFile(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "agent-merge-outbox.json");
 }
 
+/**
+ * Reply subscriptions and their deliveries (unified MCP design 2026-10-15 §8.3): a
+ * `send_message`/`create_session` with `reply: "wait" | "notify"` is written here BEFORE its turn
+ * is posted or queued. 0600, the daemon's own file, read tolerantly ({@link parseReplyOutbox}).
+ */
+export function agentChatReplyOutboxFile(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "agent-reply-outbox.json");
+}
+
+/**
+ * The in-chat Orquester tools' settings, chat toolset overrides, toolset declines and approval
+ * grants (unified MCP design 2026-10-15 §9.6). 0600, read tolerantly ({@link parseAgentToolsFile}).
+ */
+export function agentToolsFile(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "agent-tools.json");
+}
+
 /** Cached token/cost scan (Claude JSONL + Codex sessions); 0600. */
 export function usageTokensCacheFile(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "usage-tokens.json");
@@ -988,7 +1005,9 @@ export type WorkflowSessionOwnerRecord = z.infer<typeof workflowSessionOwnerSche
 const lineageIdSchema = z.string().min(1).max(200).regex(/\S/, "must not be blank");
 export const threadLineageRecordSchema = z.object({
   parentThreadId: lineageIdSchema,
-  relation: z.enum(["fork", "delegate"]),
+  // `opened`: a chat another chat opened through `create_session` without `delegate` (unified MCP
+  // design 2026-10-15 §4.1). An older build rejects it and drops the lineage, never the record.
+  relation: z.enum(["fork", "delegate", "opened"]),
   forkedFrom: z
     .object({ messageId: lineageIdSchema, turnId: lineageIdSchema })
     .optional()
@@ -996,7 +1015,10 @@ export const threadLineageRecordSchema = z.object({
   createdAt: z.string().catch(""),
   // Delegate links above and including this thread (`ThreadLineage.delegationDepth`); a bad
   // value is dropped on its own, never the lineage.
-  delegationDepth: z.number().int().min(0).max(64).optional().catch(undefined)
+  delegationDepth: z.number().int().min(0).max(64).optional().catch(undefined),
+  // Set when a chat tool created this child (`ThreadLineage.agentCreated`, §13 c): only such
+  // children are the parent agent's own. Anything but `true` is dropped on its own.
+  agentCreated: z.literal(true).optional().catch(undefined)
 });
 export type ThreadLineageRecord = z.infer<typeof threadLineageRecordSchema>;
 
@@ -1210,7 +1232,28 @@ export const mergeOutboxEntrySchema = z
     /** The last refusal, in the parent's words. */
     error: z.string().max(2_000).optional().catch(undefined),
     /** The parent's turn mode (`MergeBackRequest.interactionMode`); absent: default. */
-    interactionMode: z.enum(["default", "plan"]).optional().catch(undefined)
+    interactionMode: z.enum(["default", "plan"]).optional().catch(undefined),
+    /**
+     * What the queued turn is (`PendingMergeBack.kind`, unified MCP design 2026-10-15 §8.3): a
+     * fork's `merge` (absent = merge, as every entry written before the field), a `reply`
+     * delivered to the requester (`parentSessionId`) from the chat that replied
+     * (`childSessionId`), or a queued `message` sent with `reply: "wait" | "notify"` to the busy
+     * target (`parentSessionId`) by the sender (`childSessionId`). A kind this build does not
+     * know makes the entry unreadable: kept verbatim, never delivered as something else.
+     */
+    kind: z.enum(["merge", "reply", "message"]).optional(),
+    /** The exchange the queued turn belongs to (`TurnCommandBody.causedBy`, §8.4). */
+    causedBy: z
+      .object({ threadId: z.string().min(1), exchangeId: z.string().min(1).max(200), hop: z.number().int().min(1) })
+      .optional()
+      .catch(undefined),
+    /** `reply` / `message`: the reply subscription (`agent-reply-outbox.json`) the entry belongs to. */
+    subscriptionId: z.string().min(1).max(200).optional().catch(undefined),
+    /** `message`: the context chips the turn carries (the thread-message chip); absent for a merge. */
+    context: z
+      .array(z.object({ kind: z.string(), label: z.string(), ref: z.string().optional() }).passthrough())
+      .optional()
+      .catch(undefined)
   })
   .passthrough();
 export type MergeOutboxEntry = z.infer<typeof mergeOutboxEntrySchema>;
@@ -1256,6 +1299,171 @@ export function parseMergeOutbox(value: unknown): MergeOutbox {
 export function serializeMergeOutbox(outbox: MergeOutbox): string {
   return JSON.stringify(
     { ...(outbox.extra ?? {}), version: 1, entries: [...outbox.entries, ...outbox.unreadable] },
+    null,
+    2
+  );
+}
+
+// --- agent chat: reply subscriptions (unified MCP design 2026-10-15 §8.3) -----------------
+//
+// `agent-reply-outbox.json`. A subscription is written BEFORE the turn it binds to is posted or
+// queued; every state transition is persisted (serialized writes) before its effect. Exactly one
+// consumer claims a settled reply: the ReplyRouter (`waiting|notify -> claimed-by-router`) or the
+// waiter (`waiting -> notify` on timeout / needs-input, or `waiting -> claimed-by-waiter` when the
+// router hands it the reply). A delivery is the reply (or a notice) bound for the requester, kept
+// here until the delivery queue has it under its fixed `commandId`.
+
+/** A subscription's state (§8.3). Order matters only for reading: `done` is final. */
+export const REPLY_SUBSCRIPTION_STATES = ["waiting", "notify", "claimed-by-waiter", "claimed-by-router", "done"] as const;
+export type ReplySubscriptionState = (typeof REPLY_SUBSCRIPTION_STATES)[number];
+
+const replyExchangeSchema = z.object({
+  /** The exchange id (`CausedBy.exchangeId`). */
+  id: z.string().min(1).max(200),
+  /** The hop of the turn this subscription's message causes (`CausedBy.hop`). */
+  hop: z.number().int().min(1)
+});
+
+/**
+ * One reply subscription. An unknown `state` (a newer build's) makes the entry unreadable: kept
+ * verbatim and never acted on, rather than guessed at.
+ */
+export const replySubscriptionSchema = z
+  .object({
+    id: z.string().min(1).max(200),
+    /** The requester: the chat whose tool sent the message and gets the reply. */
+    fromThreadId: z.string().min(1).max(200),
+    /** The target: the chat whose turn answers. */
+    toThreadId: z.string().min(1).max(200),
+    /** The fixed `/turn` command id the message is (or will be) posted under. */
+    commandId: z.string().min(1).max(200),
+    /** The bound turn, once the host receipt mapped `commandId` to it. */
+    turnId: z.string().min(1).max(200).optional(),
+    state: z.enum(REPLY_SUBSCRIPTION_STATES),
+    /** The requester's interaction mode when it asked: the delivery's turn mode (plan if it plans when it lands). */
+    interactionMode: z.enum(["default", "plan"]).catch("default").default("default"),
+    exchange: replyExchangeSchema,
+    /** How the message came (`ThreadMessageOrigin` of its header); absent: `sent`. */
+    origin: z.enum(["sent", "opened", "delegated"]).optional().catch(undefined),
+    /** `ReplySubscriptionRequest.idempotencyKey`: a repeat with the same requester and key answers this subscription. */
+    idempotencyKey: z.string().min(1).max(200).optional(),
+    /**
+     * The delivery-queue entry (`agent-merge-outbox.json` `mergeId`, kind `message`) holding the
+     * message while the target is busy. Stable across retries — a retry posts `<queueEntryId>:<n>`,
+     * so the bound turn is found by this id (and `commandId` for an immediate post), never by an
+     * attempt's command id alone.
+     */
+    queueEntryId: z.string().min(1).max(200).optional(),
+    createdAt: z.string(),
+    updatedAt: z.string().optional().catch(undefined)
+  })
+  .passthrough();
+export type ReplySubscriptionRecord = z.infer<typeof replySubscriptionSchema>;
+
+/** What a delivery carries: the final reply, or one of the §8.3 / §13 d notices. */
+export const REPLY_DELIVERY_OUTCOMES = ["reply", "empty", "failed", "interrupted", "closed", "exchange-limit"] as const;
+export type ReplyDeliveryOutcome = (typeof REPLY_DELIVERY_OUTCOMES)[number];
+
+/** A delivery to the requester (§8.3), persisted before it is handed to the delivery queue. */
+export const replyDeliverySchema = z
+  .object({
+    id: z.string().min(1).max(200),
+    subscriptionId: z.string().min(1).max(200),
+    /** The requester, who receives it. */
+    toThreadId: z.string().min(1).max(200),
+    /** The chat whose turn produced it. */
+    fromThreadId: z.string().min(1).max(200),
+    /** The fixed `/turn` command id of its first post (host receipts dedupe a re-post). */
+    commandId: z.string().min(1).max(200),
+    /** Once queued: the delivery-queue entry (`mergeId`, kind `reply`); a retry posts `<queueEntryId>:<n>`. */
+    queueEntryId: z.string().min(1).max(200).optional(),
+    /** The bound turn whose reply it carries, when known. */
+    turnId: z.string().min(1).max(200).optional(),
+    outcome: z.enum(REPLY_DELIVERY_OUTCOMES),
+    /** The whole `/turn` input, the `[Reply from …]` header included. */
+    input: z.string().min(1),
+    interactionMode: z.enum(["default", "plan"]).catch("default").default("default"),
+    causedBy: z.object({ threadId: z.string().min(1), exchangeId: z.string().min(1).max(200), hop: z.number().int().min(1) }),
+    /** `pending`: persisted, not yet queued; `queued`: in the delivery queue; `delivered` / `dropped`: final. */
+    state: z.enum(["pending", "queued", "delivered", "dropped"]),
+    createdAt: z.string(),
+    deliveredAt: z.string().optional().catch(undefined)
+  })
+  .passthrough();
+export type ReplyDeliveryRecord = z.infer<typeof replyDeliverySchema>;
+
+export interface ReplyOutbox {
+  subscriptions: ReplySubscriptionRecord[];
+  deliveries: ReplyDeliveryRecord[];
+  /** Entries this build cannot read, kept verbatim for the next rewrite. */
+  unreadableSubscriptions: unknown[];
+  unreadableDeliveries: unknown[];
+  /** Every top-level key but `version`, `subscriptions` and `deliveries`, exactly as found. */
+  extra?: Record<string, unknown>;
+}
+
+export function createDefaultReplyOutbox(): ReplyOutbox {
+  return { subscriptions: [], deliveries: [], unreadableSubscriptions: [], unreadableDeliveries: [] };
+}
+
+/**
+ * The reply outbox (the merge-outbox pattern): entry-wise tolerant — a malformed or newer-shaped
+ * entry is kept aside verbatim, unknown fields of a good one survive (`passthrough`) — and THROWS on
+ * anything that is not a version-1 outbox (not an object, another `version`, a list that is not a
+ * list) so the caller moves it aside instead of overwriting it.
+ */
+export function parseReplyOutbox(value: unknown): ReplyOutbox {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Not a reply outbox (not an object)");
+  }
+  const record = value as Record<string, unknown>;
+  if (record.version !== undefined && record.version !== 1) {
+    throw new Error(`Not a version-1 reply outbox (version ${JSON.stringify(record.version)})`);
+  }
+  for (const key of ["subscriptions", "deliveries"] as const) {
+    if (record[key] !== undefined && !Array.isArray(record[key])) {
+      throw new Error(`Not a reply outbox (${key} is not a list)`);
+    }
+  }
+  const read = <T>(list: unknown, schema: z.ZodType<T, z.ZodTypeDef, unknown>): { good: T[]; bad: unknown[] } => {
+    const good: T[] = [];
+    const bad: unknown[] = [];
+    const ids = new Set<string>();
+    for (const entry of (list as unknown[] | undefined) ?? []) {
+      const parsed = schema.safeParse(entry);
+      const id = parsed.success ? (parsed.data as { id: string }).id : undefined;
+      if (parsed.success && id !== undefined && !ids.has(id)) {
+        ids.add(id);
+        good.push(parsed.data);
+      } else {
+        bad.push(entry);
+      }
+    }
+    return { good, bad };
+  };
+  const subscriptions = read(record.subscriptions, replySubscriptionSchema);
+  const deliveries = read(record.deliveries, replyDeliverySchema);
+  const extra = Object.fromEntries(
+    Object.entries(record).filter(([key]) => key !== "version" && key !== "subscriptions" && key !== "deliveries")
+  );
+  return {
+    subscriptions: subscriptions.good,
+    deliveries: deliveries.good,
+    unreadableSubscriptions: subscriptions.bad,
+    unreadableDeliveries: deliveries.bad,
+    ...(Object.keys(extra).length > 0 ? { extra } : {})
+  };
+}
+
+/** The outbox as written: unknown top-level keys, then the readable entries, then the unreadable ones as they came. */
+export function serializeReplyOutbox(outbox: ReplyOutbox): string {
+  return JSON.stringify(
+    {
+      ...(outbox.extra ?? {}),
+      version: 1,
+      subscriptions: [...outbox.subscriptions, ...outbox.unreadableSubscriptions],
+      deliveries: [...outbox.deliveries, ...outbox.unreadableDeliveries]
+    },
     null,
     2
   );
@@ -1750,6 +1958,31 @@ export function parseRecentProjectsConfig(raw: unknown): RecentProjectsConfig {
 // seeded" marker, so a user who deletes the starters never gets them back.
 
 /**
+ * `SavedPrompt.createdBy` in `@orquester/api`. Open on purpose (`kind` any string, unknown fields
+ * passed through) so a newer build's value survives this build's rewrite verbatim; a kind other
+ * than `agent` reads as the user's (fail closed: an agent's edit of it needs approval). `null`
+ * reads as absent; a non-null value that is not even this shape makes its record unreadable —
+ * kept verbatim in `rejected`, as any malformed record is.
+ */
+export const savedPromptCreatedBySchema = z
+  .object({
+    kind: z.string().min(1),
+    /** The chat whose agent created it. */
+    threadId: z.string().optional(),
+    /** That chat's agent (`AgentAdapterId`), for the "by <agent>" badge. */
+    agent: z.string().optional(),
+    /** That chat's title when it created the prompt. */
+    title: z.string().optional()
+  })
+  .passthrough();
+export type SavedPromptCreatedByRecord = z.infer<typeof savedPromptCreatedBySchema>;
+
+/** Whether a stored `createdBy` marks an agent-created prompt (anything else — absent, another kind — is the user's). */
+export function isAgentCreatedPrompt(createdBy: SavedPromptCreatedByRecord | undefined): boolean {
+  return createdBy?.kind === "agent";
+}
+
+/**
  * One stored prompt. Deliberately checks SHAPE, never the editor's limits
  * (title/body/tag lengths, the tag count): those are enforced when a prompt is
  * written, and a read that re-applied them would hide a prompt a build with
@@ -1777,7 +2010,15 @@ export const savedPromptRecordSchema = z
     createdAt: z.string().datetime({ offset: true }),
     updatedAt: z.string().datetime({ offset: true }),
     lastUsedAt: z.string().datetime({ offset: true }).nullable().default(null),
-    useCount: z.number().int().nonnegative().default(0)
+    useCount: z.number().int().nonnegative().default(0),
+    /**
+     * Who created the prompt (`SavedPrompt.createdBy`, unified MCP design 2026-10-15 D-16). Absent
+     * or `null`: the user (a `null` reads, and is rewritten, as absent). Any object of the open
+     * {@link savedPromptCreatedBySchema} is kept verbatim; only a structurally invalid non-null
+     * value (a string, a list, an object without `kind`) sets the record aside (`rejected`, kept
+     * verbatim).
+     */
+    createdBy: z.preprocess((value) => (value === null ? undefined : value), savedPromptCreatedBySchema.optional())
   })
   .passthrough();
 
@@ -1910,3 +2151,4 @@ export function isValidName(name: string | undefined): name is string {
 // assertInsideFsRoot / FsSandboxError moved to ./fs.ts (node-only; see that file).
 
 export * from "./workflows.ts";
+export * from "./agent-tools.ts";

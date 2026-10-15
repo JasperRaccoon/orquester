@@ -34,6 +34,7 @@ import type {
   LaunchAppRequest
 } from "./desktops.ts";
 import { desktopRoutes } from "./desktops.ts";
+import type { AgentProfileAgentId } from "./agent-profile.ts";
 export * from "./agent-chat/index.ts";
 export * from "./saved-prompts.ts";
 export * from "./agent-profile.ts";
@@ -41,6 +42,7 @@ export * from "./prompt-variables.ts";
 export * from "./workflows/index.ts";
 export * from "./desktops.ts";
 export * from "./plugins.ts";
+export * from "./agent-tools.ts";
 
 export type {
   AgentChatBackgroundLiveness,
@@ -85,10 +87,24 @@ export interface WorkspaceSummary {
    * to a label from its accounts store; this contract carries only the id.
    */
   gitAccountId?: string | null;
+  /**
+   * The bound git account's public identity (unified MCP design 2026-10-15 §5.5): label, login,
+   * provider — never a key, key path or token. `null` with no binding (or an account that no
+   * longer exists); absent from daemons that predate the field. Filled by joining `gitAccountId`
+   * with the accounts store (`/api/accounts`); `list_projects` (Task 9) does the join.
+   */
+  gitAccount?: WorkspaceGitAccount | null;
   /** ISO creation timestamp from workspaces.json, when present. */
   createdAt?: string;
   /** Hidden from the sidebar lists (workspaces.json flag). Absent = false. */
   isArchived?: boolean;
+}
+
+/** A workspace's git identity as tools and lists may show it. */
+export interface WorkspaceGitAccount {
+  label: string;
+  login: string;
+  provider: GitProviderId;
 }
 
 /**
@@ -851,6 +867,58 @@ export interface PushUnsubscribeRequest {
 
 export interface PushTestResponse {
   sent: number;
+}
+
+/** `notify_user` caps (unified MCP design 2026-10-15 §4.1). */
+export const PUSH_NOTIFY_TITLE_MAX_CHARS = 120;
+export const PUSH_NOTIFY_BODY_MAX_CHARS = 300;
+
+/**
+ * `POST /api/push/notify` — an agent's Web Push to the user's devices (`notify_user`), deep-linked
+ * to `sessionId` (payload `tag: session-<id>`) when given. Rate-limited by the daemon (1 per chat
+ * per 5 min; 1 per external credential per minute → 429). No push carries an action button.
+ */
+export interface PushNotifyRequest {
+  title: string;
+  body?: string;
+  /** The chat to open on click; also the push's tag (`session-<id>`). */
+  sessionId?: string;
+}
+
+/** `sent`: devices the push reached (0 when push is unsupported or nobody subscribed). */
+export interface PushNotifyResponse {
+  sent: number;
+}
+
+// Daemon-pointing MCP servers (unified MCP design 2026-10-15 §12.1): MCP servers in an agent
+// CLI's config that reach THIS daemon's full-trust `/mcp` — denied inside every Orquester chat.
+
+/** `GET` → {@link DaemonMcpServersResponse}. Both transports, bearer on HTTP. */
+export const AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE = "/api/agent-profile/daemon-mcp-servers";
+
+/**
+ * Why a server is flagged: its headers carry a bearer this daemon accepts (`bearer`), its URL
+ * resolves to this daemon's `/mcp` (`url`), or it is named `orquester` without being Orquester's
+ * own (`name`).
+ */
+export type DaemonPointingReason = "bearer" | "url" | "name";
+
+/** One flagged server. Never its bearer, headers or env values. */
+export interface DaemonPointingServer {
+  agent: AgentProfileAgentId;
+  /** The account home whose config holds it: `"system"` or a managed account id. */
+  home: string;
+  /** `user`: the CLI's user config in that home; `project`: a project-level config. */
+  scope: "user" | "project";
+  /** `scope: "project"`: the project whose config holds it. */
+  projectPath?: string;
+  /** The server's name as the CLI knows it (what a deny rule names). */
+  name: string;
+  reason: DaemonPointingReason;
+}
+
+export interface DaemonMcpServersResponse {
+  servers: DaemonPointingServer[];
 }
 
 /** Public auth metadata for the HTTP transport (no secrets). */

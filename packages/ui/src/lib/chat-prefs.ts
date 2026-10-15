@@ -102,18 +102,5 @@ export function runtimeModeForAgent(prefs: ChatPrefs, agentId: string): AgentRun
   return prefs.runtimeModeByAgent[agentId] ?? DEFAULT_RUNTIME_MODE;
 }
 
-/** Short chip labels for the four permission modes (§4.4's own column headings). */
-export const RUNTIME_MODE_LABELS: Record<AgentRuntimeMode, string> = {
-  "approval-required": "Supervised",
-  "auto-accept-edits": "Accept edits",
-  auto: "Auto",
-  "full-access": "Full access"
-};
-
-/** One-line explanation shown as the chip's title. */
-export const RUNTIME_MODE_HINTS: Record<AgentRuntimeMode, string> = {
-  "approval-required": "Every tool call asks you first.",
-  "auto-accept-edits": "File edits apply without asking; commands still ask.",
-  auto: "The agent reviews its own work where the provider supports it; otherwise supervised.",
-  "full-access": "Nothing asks. The agent may run any command in this project."
-};
+/** Permission-mode labels and hints: shared with `list_agents` (`@orquester/api`, model-selection.ts). */
+export { RUNTIME_MODE_HINTS, RUNTIME_MODE_LABELS } from "@orquester/api";

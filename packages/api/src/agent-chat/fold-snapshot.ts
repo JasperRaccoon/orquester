@@ -483,7 +483,8 @@ const isTurn = shaped<Turn>({
   tokenUsage: optional(isRecord),
   totalCostUsd: optional(isNumber),
   stopReason: optional(nullable(isString)),
-  errorMessage: optional(isString)
+  errorMessage: optional(isString),
+  causedBy: optional(isRecord)
 });
 
 const isCheckpointFile = shaped<CheckpointFile>({

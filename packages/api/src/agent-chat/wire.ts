@@ -26,6 +26,7 @@ import type { McpAppCallToolResult } from "./mcp-app.ts";
 import type { ForkSessionRequest, MergeBackRequest, MergeBackResponse } from "./lineage.ts";
 import type { ApprovalDecision, TurnTokenUsage } from "./runtime-events.ts";
 import type {
+  CausedBy,
   Checkpoint,
   LatestTurnSummary,
   ThreadItem,
@@ -162,6 +163,36 @@ export const agentChatRoutes = {
    */
   secretRequest: (sessionId: string, requestId: string): string =>
     `${sessionBase(sessionId)}/secret-requests/${encodeURIComponent(requestId)}`,
+  /**
+   * The chat's pending Orquester approval cards (`GET`, `ToolApprovalListResponse`; unified MCP
+   * design 2026-10-15 §7.3) — daemon-owned like `secretRequests`, both transports, never proxied.
+   */
+  toolApprovals: (sessionId: string): string => `${sessionBase(sessionId)}/tool-approvals`,
+  /**
+   * One card: `GET` → `ToolApprovalDetailResponse` (its whole preview); `POST`
+   * `ToolApprovalAnswer` → `ToolApprovalAnswerResponse` (409 `APPROVAL_NOT_PENDING`, 400 for a
+   * grant outside its `grantOptions`). The ONLY way to answer a card.
+   */
+  toolApproval: (sessionId: string, approvalId: string): string =>
+    `${sessionBase(sessionId)}/tool-approvals/${encodeURIComponent(approvalId)}`,
+  /**
+   * The chat's toolsets and grants for its Tools chip: `GET` → `ThreadAgentToolsResponse`, `PUT`
+   * `UpdateThreadAgentToolsRequest` (both in `@orquester/api`'s `agent-tools.ts`). Daemon-owned.
+   */
+  agentTools: (sessionId: string): string => `${sessionBase(sessionId)}/agent-tools`,
+  /**
+   * SOCKET-ONLY (never on the remote transport): `POST` {@link ReplySubscriptionRequest} →
+   * {@link ReplySubscriptionResponse} on the TARGET chat — persist a reply subscription, then send
+   * the message as the target's next turn (queued while it works or waits for its user; §8.3).
+   */
+  replySubscriptions: (sessionId: string): string => `${sessionBase(sessionId)}/reply-subscriptions`,
+  /**
+   * SOCKET-ONLY: `POST` {@link ReplyWaitRequest} → {@link ReplyWaitResponse} — attach the
+   * requester's waiter to one subscription until its reply, the timeout or the target needing its
+   * user (then the subscription becomes `notify`).
+   */
+  replySubscriptionWait: (sessionId: string, subscriptionId: string): string =>
+    `${sessionBase(sessionId)}/reply-subscriptions/${encodeURIComponent(subscriptionId)}/wait`,
 
   // §6.3 reads
   thread: (sessionId: string): string => `${sessionBase(sessionId)}/thread`,
@@ -522,12 +553,17 @@ export interface CreateAgentChatSessionFields {
    */
   resume?: { home: AccountHomeKind; conversationId: string };
   /**
-   * Create the thread as a child of another chat tab in the same project
-   * (spec 2026-10-14 §6) — `relation: "delegate"` only: a fork carries the
-   * parent's conversation and is created by `POST …/fork`. The daemon checks
-   * the parent and stamps `createdAt` itself.
+   * Create the thread as a child of another chat tab (spec 2026-10-14 §6; unified MCP design
+   * 2026-10-15 §4.1): `delegate` (a task) or `opened` (a chat another chat opened). The parent may
+   * be in ANOTHER project — `create_session` opens chats in any project. A fork carries the
+   * parent's conversation and is created by `POST …/fork` instead. The daemon checks the parent
+   * and stamps `createdAt` and `delegationDepth` itself.
+   *
+   * `agentCreated: true` is PRINCIPAL-GATED: honoured only when the request's server-stamped
+   * principal is an agent whose `threadId` is `parentThreadId` (`principal.ts`,
+   * `isAgentPrincipalFor`); ignored from every other caller, socket callers included.
    */
-  lineage?: { parentThreadId: string; relation: "delegate" };
+  lineage?: { parentThreadId: string; relation: "delegate" | "opened"; agentCreated?: true };
 }
 
 /** §6.1's create-time refusal code. Deliberately not in {@link AgentChatErrorCode}. */
@@ -561,6 +597,40 @@ export interface TurnCommandBody extends AgentChatCommandBase {
   modelSelection?: ModelSelection;
   /** Composer chips persisted beside the message for re-render only (§4.1). */
   context?: ComposerContextRecord[];
+  /**
+   * The agent exchange the turn belongs to, when another chat caused it (unified MCP design
+   * 2026-10-15 §8.4). SOCKET-TRUSTED (`principal.ts`): honoured from any unix-socket /
+   * in-process caller — the catalog executor, and the daemon's own workers (reply router,
+   * delivery queue) that post without a principal — and STRIPPED by the remote transport before
+   * the route sees the body ({@link stripRemoteTurnFields}, {@link REMOTE_STRIPPED_TURN_FIELDS};
+   * Task 5 enforces). The GUI, the external MCP and user-authored turns never carry one. The host
+   * persists it with the turn (`Turn.causedBy`); a steer leaves the running turn's own. Additive:
+   * an older host ignores it.
+   */
+  causedBy?: CausedBy;
+}
+
+/** The {@link TurnCommandBody} fields only the daemon may set: removed from every remote body. */
+export const REMOTE_STRIPPED_TURN_FIELDS = ["causedBy"] as const satisfies readonly (keyof TurnCommandBody)[];
+
+/** The {@link MergeBackRequest} fields only socket / in-process callers may set: removed from every remote body. */
+export const REMOTE_STRIPPED_MERGE_BACK_FIELDS = ["causedBy"] as const satisfies readonly (keyof MergeBackRequest)[];
+
+function stripFields<T extends object>(body: T, fields: readonly string[]): T {
+  if (!fields.some((field) => Object.prototype.hasOwnProperty.call(body, field))) return body;
+  const copy = { ...body } as Record<string, unknown>;
+  for (const field of fields) delete copy[field];
+  return copy as T;
+}
+
+/** A turn body without its socket-trusted fields — what the remote transport forwards. Same reference when none was present. */
+export function stripRemoteTurnFields<T extends object>(body: T): T {
+  return stripFields(body, REMOTE_STRIPPED_TURN_FIELDS);
+}
+
+/** A merge-back body without its socket-trusted fields — what the remote transport forwards. Same reference when none was present. */
+export function stripRemoteMergeBackFields<T extends object>(body: T): T {
+  return stripFields(body, REMOTE_STRIPPED_MERGE_BACK_FIELDS);
 }
 
 /**
@@ -1123,7 +1193,92 @@ export type AgentChatEventType =
   | "agentChat.turn"
   | "agentChat.pending"
   | "agentChat.secretRequest"
+  /** An Orquester approval card opened or closed (`AgentChatToolApprovalEventPayload`, `tool-approvals.ts`). */
+  | "agentChat.toolApproval"
   | "agent.providers.changed";
+
+// ---------------------------------------------------------------------------
+// Reply subscriptions (unified MCP design 2026-10-15 §8.3) — socket-only
+// ---------------------------------------------------------------------------
+
+/**
+ * `POST agentChatRoutes.replySubscriptions(targetSessionId)` — SOCKET-ONLY, every field
+ * socket-trusted (`principal.ts`); when the request carries an agent principal its `threadId` must
+ * be `fromThreadId` (403 otherwise). The subscription is persisted
+ * (`agent-reply-outbox.json`) BEFORE the message is posted or queued. An idle target gets the turn
+ * at once; a working one (or one waiting for its user) gets it as its next turn — never a steer —
+ * under the response's fixed `commandId`, which binds the reply to that turn.
+ */
+export interface ReplySubscriptionRequest {
+  /** The requester (the calling chat); its final-reply delivery goes here. */
+  fromThreadId: string;
+  /** `wait`: the requester may attach a waiter; `notify`: delivered as a new message. */
+  reply: "wait" | "notify";
+  /** The whole turn input, provenance header (v2) included. */
+  input: string;
+  attachments?: AttachmentRef[];
+  /** The target turn's mode (plan carries on, §5.3). */
+  interactionMode?: InteractionMode;
+  /** Usually the thread-message chip. */
+  context?: ComposerContextRecord[];
+  /** The caused turn's exchange (§8.4), computed by the executor. */
+  causedBy: CausedBy;
+  /** How the message came: its header's origin. Default `sent`. */
+  origin?: "sent" | "opened" | "delegated";
+  /**
+   * Idempotency key (persisted as `ReplySubscriptionRecord.idempotencyKey`): a repeat answers the
+   * first subscription (and its `commandId`), never a second one. 1–180 characters, no `:`.
+   */
+  idempotencyKey?: string;
+}
+
+/** Pending (not `done`) reply subscriptions one requester may hold (spec §5.6); the next is refused. */
+export const MAX_PENDING_REPLY_SUBSCRIPTIONS = 20;
+/** 429 code of a subscription over {@link MAX_PENDING_REPLY_SUBSCRIPTIONS}. */
+export const REPLY_SUBSCRIPTION_LIMIT = "REPLY_SUBSCRIPTION_LIMIT";
+
+export interface ReplySubscriptionResponse {
+  subscriptionId: string;
+  /**
+   * The command id of the message's FIRST post. A queued message the target refused is retried as
+   * `<queueEntryId>:<n>` (the merge-queue rule), so bind the reply by `queueEntryId` when present,
+   * never by an attempt's command id.
+   */
+  commandId: string;
+  /** `delivery: "queued"`: the delivery-queue entry (`PendingMergeBack.mergeId`, kind `message`) holding the message. */
+  queueEntryId?: string;
+  /** `sent`: the target took the turn now; `queued`: it gets it at its next idle point. */
+  delivery: "sent" | "queued";
+  /** The target's sequence after a `sent` delivery. */
+  seq?: number;
+}
+
+/** `POST agentChatRoutes.replySubscriptionWait(targetSessionId, subscriptionId)`. */
+export interface ReplyWaitRequest {
+  /** 1–600; the waiter gives up then and the subscription becomes `notify`. */
+  timeoutSeconds: number;
+}
+
+/**
+ * The waiter's answer (exactly one consumer, CAS §8.3):
+ * - `replied` — the bound turn settled and this waiter got it: `reply` (the final assistant
+ *   text; absent with `emptyReply: true` for a turn with no written reply, §13 d), or the
+ *   turn's `failed` / `interrupted` state and `error`;
+ * - `notify` — the timeout passed, or the target's turn asks its user something: the
+ *   subscription is now `notify` and the reply will be delivered as a new message;
+ * - `closed` — the target closed before replying.
+ */
+export type ReplyWaitResponse =
+  | {
+      outcome: "replied";
+      turnId: string | null;
+      state: "completed" | "failed" | "interrupted";
+      reply?: string;
+      emptyReply?: true;
+      error?: string;
+    }
+  | { outcome: "notify"; reason: "timeout" | "needs-input"; willNotify: true }
+  | { outcome: "closed" };
 
 // ---------------------------------------------------------------------------
 // §6.4 / §7.1 — the seven derived `SessionSummary` fields

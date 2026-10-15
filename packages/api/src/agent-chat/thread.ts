@@ -417,6 +417,26 @@ export interface Turn {
   totalCostUsd?: number;
   stopReason?: string | null;
   errorMessage?: string;
+  /**
+   * The agent exchange this turn belongs to, when another chat (or Orquester on its behalf: a
+   * reply or merge delivery) caused it (unified MCP design 2026-10-15 §8.4). Absent on a
+   * user-authored turn, an external MCP client's, and every turn of a log written before the field.
+   * Folded from the turn-start event's optional `causedBy`.
+   */
+  causedBy?: CausedBy;
+}
+
+/**
+ * Which exchange of agent-caused turns a turn belongs to (§8.4): the chat whose tool caused it,
+ * the exchange id (the first agent-caused turn of a chain minted it) and the hop — 1 for the first
+ * agent-caused turn after a user-authored one, +1 per caused turn. `TurnCommandBody.causedBy`
+ * carries it to the host; `Turn.causedBy` keeps it.
+ */
+export interface CausedBy {
+  /** The chat whose tool caused the turn (for a delivery: the chat whose reply it carries). */
+  threadId: string;
+  exchangeId: string;
+  hop: number;
 }
 
 /** The compact turn row every ambient surface reads off `SessionSummary` (§6.4). */
