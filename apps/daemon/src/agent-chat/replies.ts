@@ -177,7 +177,24 @@ interface Posted {
  * (cancelled, or its result never reached the provider): no waiter may take this reply any more —
  * a later wait answers `notify` at once — and its reply goes out as a message.
  */
-type Sub = ReplySubscriptionRecord & { posted?: Posted; ended?: Ended; toTitle?: string; answeredNotice?: string; released?: true };
+type Sub = ReplySubscriptionRecord & {
+  posted?: Posted;
+  ended?: Ended;
+  toTitle?: string;
+  answeredNotice?: string;
+  released?: true;
+  /**
+   * How many calls a reply was handed to (the first waiter, a late waiter's take-back, a re-sent
+   * call answered again) and how many of those calls went away without it (`release` after the
+   * hand-out). The reply is re-delivered as a message only once every call that was handed it is
+   * gone — so a host re-sending the call after a restart and the first call's undelivered result
+   * never both deliver it. Passthrough, persisted.
+   */
+  handOuts?: number;
+  lostHandOuts?: number;
+  /** A reply a waiter took could not be read again when its call went away: no message follows. */
+  unreadable?: true;
+};
 
 /** What a bound turn (or its absence) produced. */
 export type ReplyResult =
@@ -518,6 +535,9 @@ export class ReplyRouter implements DeliveryListener {
     if (sub.state === "notify") return { outcome: "notify", reason: "timeout", willNotify: true };
     if (sub.released) {
       // Tombstoned: never attached, never taken back — the reply is (or will be) a message.
+      if (sub.unreadable) {
+        return { outcome: "replied", turnId: sub.turnId ?? null, state: "failed", error: `The reply could not be read again after the call that took it went away; no message will follow. Read it with read_transcript {sessionId: "${sub.toThreadId}"}.` };
+      }
       if (sub.state === "done" && sub.ended !== "delivered" && sub.ended !== "waiter" && sub.ended !== undefined) return this.answerForEnded(sub);
       return { outcome: "notify", reason: "timeout", willNotify: true };
     }
@@ -596,7 +616,12 @@ export class ReplyRouter implements DeliveryListener {
     }
     if (sub.ended === "waiter" && !sub.posted?.steered) {
       const result = await this.resultFor(sub);
-      if (result) return waitResponseOf(result);
+      // A re-sent call (same idempotency key) is handed the reply again: one more holder.
+      if (result && sub.state === "done" && !sub.released) {
+        sub.handOuts = (sub.handOuts ?? 1) + 1;
+        await this.persist();
+        return waitResponseOf(result);
+      }
       return { outcome: "replied", turnId: sub.turnId ?? null, state: "failed", error: "This reply was already returned to an earlier wait; no message will follow." };
     }
     return { outcome: "replied", turnId: null, state: "failed", error: "This exchange ended without a reply; no message will follow." };
@@ -625,8 +650,11 @@ export class ReplyRouter implements DeliveryListener {
     if (principal?.kind === "agent" && principal.threadId !== sub.fromThreadId) {
       throw new ReplyError("Only the chat that asked may release this wait.", "PERMISSION_DENIED");
     }
-    sub.released = true;
     const waiter = this.waiters.get(sub.id);
+    if (sub.state === "done" && sub.ended === "waiter" && !waiter) {
+      return this.releaseHandedOut(sub);
+    }
+    sub.released = true;
     if (waiter) {
       waiter.live = false;
       this.waiters.delete(sub.id);
@@ -641,33 +669,51 @@ export class ReplyRouter implements DeliveryListener {
       void this.evaluate(sub.toThreadId);
       return { released: true, state: sub.state };
     }
-    if (sub.state === "done" && sub.ended === "waiter") {
-      await this.redeliver(sub);
-      return { released: true, state: sub.state };
-    }
     void this.evaluate(sub.toThreadId);
     return { released: false, state: sub.state };
   }
 
-  /** A reply a waiter took whose call never got it: delivered as a message (once). */
-  private async redeliver(sub: Sub): Promise<void> {
+  /**
+   * A release after a waiter took the reply: one holder fewer. Once every call it was handed to is
+   * gone, the reply is re-delivered as a message — the tombstone and the delivery in ONE persisted
+   * write (no crash leaves a released record without its delivery). A reply that cannot be read
+   * again is recorded as such (`unreadable`), so no wait promises a message that never comes.
+   */
+  private async releaseHandedOut(sub: Sub): Promise<{ released: boolean; state: ReplySubscriptionRecord["state"] }> {
+    sub.lostHandOuts = (sub.lostHandOuts ?? 0) + 1;
+    if (sub.lostHandOuts < (sub.handOuts ?? 1) || sub.released) {
+      // Another call still holds it (a re-sent call answered again), or it was already re-delivered.
+      await this.persist();
+      return { released: false, state: sub.state };
+    }
     const existing = this.outbox.deliveries.find((d) => d.subscriptionId === sub.id);
     if (existing) {
-      // Taken back from the queue for a waiter (D-4): put back.
-      if (existing.state === "dropped") {
-        existing.state = "pending";
-        await this.persist();
-        await this.hand(existing);
-      }
-      return;
+      // Taken back from the queue for a waiter (D-4): put back, with the tombstone, in one write.
+      sub.released = true;
+      if (existing.state === "dropped") existing.state = "pending";
+      await this.persist();
+      await this.hand(existing);
+      return { released: true, state: sub.state };
     }
     const result: ReplyResult | null = sub.answeredNotice !== undefined ? { kind: "notice", text: sub.answeredNotice } : await this.resultFor(sub);
+    if (sub.released || this.outbox.deliveries.some((d) => d.subscriptionId === sub.id)) return { released: false, state: sub.state };
+    sub.released = true;
     if (!result) {
+      sub.unreadable = true;
       this.opts.logger?.warn?.("[replies] a released reply could not be read again; not re-delivered", { subscriptionId: sub.id });
-      return;
+      await this.persist();
+      return { released: false, state: sub.state };
     }
+    // claimForRouter persists the claim, the delivery and the tombstone together.
     const deliver = await this.claimForRouter(sub, result);
+    if (!this.outbox.deliveries.some((d) => d.subscriptionId === sub.id)) {
+      // The write failed: nothing was recorded, so neither is the tombstone (the next release retries).
+      delete sub.released;
+      sub.lostHandOuts -= 1;
+      return { released: false, state: sub.state };
+    }
     await deliver();
+    return { released: true, state: sub.state };
   }
 
   /**
@@ -681,15 +727,24 @@ export class ReplyRouter implements DeliveryListener {
     if (!delivery || (delivery as { notice?: unknown }).notice === true || this.handing.has(delivery.id)) return null;
     if (delivery.state !== "pending" && delivery.state !== "queued") return null;
     const result = await this.resultFor(sub);
-    if (!result || result.kind !== "turn") return null;
+    // The waiting call may have been released meanwhile: a cancelled waiter never receives the reply.
+    if (!result || result.kind !== "turn" || sub.released) return null;
     if (delivery.state === "queued") {
       if (this.handing.has(delivery.id) || !(await this.opts.queue.retract(delivery.queueEntryId ?? delivery.id))) return null;
+      if (sub.released) {
+        // Released while the entry came out of the queue: it goes back in, as a message.
+        delivery.state = "pending";
+        await this.persist();
+        await this.hand(delivery);
+        return null;
+      }
     } else if (this.handing.has(delivery.id)) {
       return null;
     }
     if (delivery.state !== "pending" && delivery.state !== "queued") return null;
     delivery.state = "dropped";
     this.finish(sub, "waiter");
+    sub.handOuts = 1;
     await this.persist();
     return result;
   }
@@ -1116,6 +1171,7 @@ export class ReplyRouter implements DeliveryListener {
       if (waiter.live) {
         waiter.resolve(result);
         this.finish(sub, result.kind === "closed" ? "closed" : "waiter");
+        sub.handOuts = 1;
         if (result.kind === "notice") sub.answeredNotice = result.text;
         await this.persist();
         return nothing;

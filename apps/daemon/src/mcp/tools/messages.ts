@@ -13,10 +13,10 @@
 // also `send_message`'s `reply: "none"` and the legacy `thread_send {wait}` alias's.
 import { createHash, randomUUID } from "node:crypto";
 import { stat } from "node:fs/promises";
-import { basename, isAbsolute, relative as relativePath, resolve as resolvePath } from "node:path";
+import { isAbsolute, relative as relativePath, resolve as resolvePath } from "node:path";
 import { z } from "zod";
 import type { AgentConversationsResponse, ApprovalPreviewSection, CreateSessionRequest, SessionSummary } from "@orquester/api";
-import { agentChatRoutes, buildPlanImplementationPrompt, buildThreadMessage, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isGoalCommandText, isHiddenGoalChange, MAX_TURN_INPUT_CHARS, parseGoalSupport, parseGoalUpdatedPayload, parseThreadGoal, replyNoticeText, resolveLaunchModel, startedTurns, THREAD_MESSAGE_OVERHEAD_CHARS, threadMessageContext, TURN_NOT_IDLE, UNTRUSTED_NOTICE, type AttachmentRef, type CausedBy, type ComposerContextRecord, type CreateAgentChatSessionFields, type ProviderModel, type ReplySubscriptionResponse, type ReplyWaitResponse, type RuntimeMode, type ThreadGoal, type ThreadItem, type ThreadItemResponse, type ThreadMessageOrigin, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
+import { agentChatRoutes, buildPlanImplementationPrompt, GOAL_ACTIVITY_KIND, GOAL_COMMAND_FAILED_ACTIVITY_KIND, GOAL_STATUS_ACTIVITY_KIND, isGoalCommandText, isHiddenGoalChange, MAX_TURN_INPUT_CHARS, parseGoalSupport, parseGoalUpdatedPayload, parseThreadGoal, replyNoticeText, resolveLaunchModel, startedTurns, THREAD_MESSAGE_OVERHEAD_CHARS, threadMessageContext, TURN_NOT_IDLE, UNTRUSTED_NOTICE, WAIT_CYCLE, type AttachmentRef, type CausedBy, type ComposerContextRecord, type CreateAgentChatSessionFields, type ProviderModel, type ReplySubscriptionResponse, type ReplyWaitResponse, type RuntimeMode, type ThreadGoal, type ThreadItem, type ThreadItemResponse, type ThreadMessageOrigin, type ThreadSnapshotPayload } from "@orquester/api/agent-chat";
 import { findAgent, findModel, loadAgents, resolveModelSelection, supportsFrom, validateAccountId, type AgentView } from "../agents.ts";
 import { canonicalProject, realPathInSandbox, resolveProject } from "../addressing.ts";
 import { assertInsideFsRoot, FsSandboxError } from "@orquester/config/fs";
@@ -500,14 +500,13 @@ type ReplyMode = "wait" | "notify" | "none";
 
 
 /**
- * The provenance-headed text of a turn a chat causes (§8.2). With `reply: "none"` the header tells
- * the receiver how to answer — truthfully: a receiver narrower than the sender may not message it
- * (never broader, §5.3), so it is told its answer stays visible in its own chat instead.
+ * The provenance-headed text of a turn a chat causes (§8.2), through the executor's one header
+ * builder. With `reply: "none"` the header tells the receiver how to answer — truthfully: a receiver
+ * narrower than the sender may not message it (never broader, §5.3), so it is told its answer stays
+ * visible in its own chat instead (`senderReachable`).
  */
 function provenanceFor(ctx: CallContext, caller: ThreadCaller, origin: Exclude<ThreadMessageOrigin, "reply">, text: string, reply: ReplyMode, receiverMode: RuntimeMode): string {
-  if (reply !== "none" || origin === "delegated" || runtimeModesUpTo(receiverMode).includes(caller.runtimeMode)) return ctx.turn.provenance(origin, text, reply);
-  const fromProject = caller.workspace && caller.projectPath ? `${caller.workspace}/${basename(caller.projectPath)}` : "";
-  return buildThreadMessage({ origin, fromTitle: caller.title, text, fromSessionId: caller.threadId, ...(fromProject ? { fromProject } : {}), replyMode: "none", senderReachable: false });
+  return ctx.turn.provenance(origin, text, reply, { senderReachable: runtimeModesUpTo(receiverMode).includes(caller.runtimeMode) });
 }
 
 /** Refused for an external caller: the chat-only reply mode (§13: "External client calls a chat-only field"). */
@@ -555,6 +554,27 @@ function replyResult(wait: ReplyWaitResponse, target: { id: string; title: strin
 }
 
 /**
+ * A wait that failed after its message went out, said truthfully (the message is never to be sent
+ * again): a wait refused for a cycle or while Orquester restarts leaves the subscription without a
+ * waiter, so its reply is delivered as a message; another wait holding it gets it there; a
+ * subscription that is gone delivers nothing here.
+ */
+function waitFailure(failure: { code: string; message: string }): Record<string, unknown> {
+  const why = `${failure.code}: ${failure.message}`;
+  switch (failure.code) {
+    case WAIT_CYCLE:
+    case "HOST_UNAVAILABLE":
+      return { willNotify: true, hint: `The message was sent, but its reply could not be waited for here (${why}). Its final reply will be delivered to you as a new message; do not send it again.` };
+    case "COMMAND_REJECTED":
+      return { willNotify: false, hint: `The message was sent, and another wait of this chat already holds its reply (${why}): the reply returns there, not here. Do not send it again.` };
+    case "THREAD_NOT_FOUND":
+      return { willNotify: false, hint: `The message was sent, but its reply subscription is gone (${why}) — the chat may have closed. No reply will come here; get_session shows its state. Do not send it again.` };
+    default:
+      return { willNotify: false, hint: `The message was sent, but waiting for its reply failed (${why}). Whether the reply arrives as a message is unknown; check with get_session or read_transcript before sending again.` };
+  }
+}
+
+/**
  * Send a chat caller's reply-requesting message (§8.3): the subscription is persisted before the
  * message is posted or queued as the target's next turn (Task 5's socket-only route); with `wait`,
  * the caller's waiter attaches until the bound turn's reply, the timeout or a question (then the
@@ -595,14 +615,10 @@ async function converse(
   try {
     answered = await awaitReplySubscription(ctx.api, target.id, sub.subscriptionId, input.timeoutSeconds, ctx.signal, ctx.caller.kind === "thread" ? ctx.caller.delivered : undefined);
   } catch (error) {
-    // The message is saved and sent (or queued): only the wait failed. Its reply still comes as a
-    // message — never a failed send the agent would repeat.
+    // The message is saved and sent (or queued): only the wait failed — never a failed send the
+    // agent would repeat. What happens to the reply depends on why the wait failed.
     const failure = toSafeToolError(error).structuredContent as { code: string; message: string };
-    return {
-      ...head,
-      willNotify: true,
-      hint: `The message was sent, but waiting for its reply failed (${failure.code}: ${failure.message}). Its final reply will be delivered to you as a new message; do not send it again.`
-    };
+    return { ...head, ...waitFailure(failure) };
   }
   return { ...head, ...replyResult(answered, target) };
 }

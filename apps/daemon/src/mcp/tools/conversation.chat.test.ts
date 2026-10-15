@@ -702,3 +702,23 @@ test("an external wait uploads nothing for a message that is never sent, and pos
   assert.equal(cancelled.isError, true);
   assert.equal(posted(later.api, "/api/sessions/peer/turn").length, 1, "the one refused post only");
 });
+
+test("a failed wait is worded by why: a message follows only for WAIT_CYCLE / HOST_UNAVAILABLE; another wait or a gone subscription says so", async () => {
+  const cases: [number, string, boolean, RegExp][] = [
+    [409, "WAIT_CYCLE", true, /delivered to you as a new message/],
+    [503, "HOST_UNAVAILABLE", true, /delivered to you as a new message/],
+    [409, "COMMAND_REJECTED", false, /another wait of this chat already holds its reply/],
+    [404, "THREAD_NOT_FOUND", false, /No reply will come here/],
+    [403, "PERMISSION_DENIED", false, /unknown/]
+  ];
+  for (const [status, failure, notify, hint] of cases) {
+    const r = rig();
+    r.api.on("POST", agentChatRoutes.replySubscriptions("peer"), { status: 200, body: { subscriptionId: "sub-1", commandId: "cmd-1", delivery: "sent", seq: 3 } });
+    r.api.on("POST", agentChatRoutes.replySubscriptionWait("peer", "sub-1"), { status, body: { error: { code: failure, message: "nope" } } });
+    const out = body(await r.call("send_message", { sessionId: "peer", text: "hi" }));
+    assert.equal(out.willNotify, notify, failure);
+    assert.match(out.hint, hint, failure);
+    assert.match(out.hint, /not send it again|before sending again/, failure);
+    if (!notify) assert.doesNotMatch(out.hint, /will be delivered/, failure);
+  }
+});

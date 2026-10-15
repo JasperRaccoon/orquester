@@ -262,8 +262,11 @@ export interface CallContext {
   turn: {
     /** The interaction mode of a turn this call causes (plan carries on, §5.3). */
     interactionMode: InteractionMode;
-    /** The text with its provenance header (v2, §8.2) for a turn this call causes. */
-    provenance(origin: ThreadMessageOrigin, text: string, replyMode: ThreadReplyMode): string;
+    /**
+     * The text with its provenance header (v2, §8.2) for a turn this call causes. `senderReachable:
+     * false` (with `replyMode: "none"`): the receiver may not message the caller back, and is told so.
+     */
+    provenance(origin: ThreadMessageOrigin, text: string, replyMode: ThreadReplyMode, opts?: { senderReachable?: boolean }): string;
     /** The `causedBy` of a turn this call causes (§8.4); absent for external callers' turns. */
     causedBy?: CausedBy;
   };

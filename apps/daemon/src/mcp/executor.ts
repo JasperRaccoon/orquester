@@ -544,8 +544,16 @@ async function turnFor(deps: ExecutorDeps, tool: AnyOrquesterTool, caller: ToolC
   const fromProject = caller.workspace && caller.projectPath ? `${caller.workspace}/${basename(caller.projectPath)}` : "";
   const turn: CallContext["turn"] = {
     interactionMode: caller.planning ? "plan" : "default",
-    provenance: (origin, text, replyMode) =>
-      buildThreadMessage({ origin, fromTitle: caller.title, text, fromSessionId: caller.threadId, ...(fromProject ? { fromProject } : {}), replyMode })
+    provenance: (origin, text, replyMode, opts) =>
+      buildThreadMessage({
+        origin,
+        fromTitle: caller.title,
+        text,
+        fromSessionId: caller.threadId,
+        ...(fromProject ? { fromProject } : {}),
+        replyMode,
+        ...(opts?.senderReachable === false ? { senderReachable: false } : {})
+      })
   };
   if (scope.causesTurnIn.length === 0) return turn;
   const causedBy = causedByFor(caller, (deps.newId ?? randomUUID)());

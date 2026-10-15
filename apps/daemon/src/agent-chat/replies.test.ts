@@ -1426,3 +1426,101 @@ describe("Task 8 fix round 1: the release tombstone", () => {
     await w.cleanup();
   });
 });
+
+describe("Task 8 fix round 2: re-delivery after a release", () => {
+  it("the tombstone and the re-delivery are one write: a crash before the hand is delivered once by the restarted router", async () => {
+    const w = await world();
+    const res = await w.router.subscribe("tgt", request("wait"));
+    const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await settled(w);
+    w.host.settle("tgt", { reply: "Survives a crash." });
+    assert.equal((await waiting).outcome, "replied");
+    await settled(w);
+    // The queue refuses the hand (the process dies right after the release's write).
+    const queue = w.queue as unknown as { enqueue: (...args: unknown[]) => Promise<unknown> };
+    const enqueue = queue.enqueue.bind(w.queue);
+    queue.enqueue = async () => { throw new Error("crashed"); };
+    await w.router.release("tgt", res.subscriptionId);
+    const disk = JSON.parse(await readFile(w.replyFile, "utf8")) as { subscriptions: { id: string; released?: true }[]; deliveries: { subscriptionId: string; state: string }[] };
+    assert.equal(disk.subscriptions.find((sub) => sub.id === res.subscriptionId)?.released, true);
+    assert.deepEqual(disk.deliveries.map((d) => [d.subscriptionId, d.state]), [[res.subscriptionId, "pending"]], "written with the tombstone");
+    queue.enqueue = enqueue;
+    await w.cleanup(false);
+    const again = await world({ dir: w.dir, host: w.host });
+    await settled(again);
+    assert.equal(parseThreadMessage(postsTo(again.host, "req")[0]!.body.input as string)?.body, "Survives a crash.");
+    await again.router.release("tgt", res.subscriptionId);
+    await settled(again);
+    assert.equal(postsTo(again.host, "req").length, 1, "exactly once");
+    await again.cleanup();
+  });
+
+  it("a reply that cannot be read again is recorded: a later wait says so truthfully, never willNotify", async () => {
+    const w = await world();
+    const res = await w.router.subscribe("tgt", request("wait"));
+    const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await settled(w);
+    w.host.settle("tgt", { reply: "Gone soon." });
+    assert.equal((await waiting).outcome, "replied");
+    w.host.rewindLast("tgt");
+    await settled(w);
+    assert.deepEqual(await w.router.release("tgt", res.subscriptionId), { released: false, state: "done" });
+    const later = await w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    assert.equal(later.outcome, "replied");
+    assert.ok(later.outcome === "replied" && later.state === "failed" && /no message will follow/.test(later.error ?? ""));
+    await settled(w);
+    assert.equal(postsTo(w.host, "req").length, 0);
+    await w.cleanup();
+  });
+
+  it("a waiter released while its take-back reads the reply never receives it: the reply stays a message", async () => {
+    const w = await world();
+    w.host.userTurn("req");
+    const res = await w.router.subscribe("tgt", request("wait"));
+    w.host.settle("tgt", { reply: "Not for a cancelled call." });
+    await settled(w);
+    assert.equal(w.queue.pending().filter((entry) => entry.kind === "reply").length, 1);
+    // The take-back's thread read is where the cancel lands.
+    const api = w.host.api as { request: typeof w.host.api.request };
+    const read = api.request.bind(w.host.api);
+    let released: Promise<unknown> | null = null;
+    api.request = async (method, path, opts) => {
+      if (released === null && method === "GET" && path === "/api/sessions/tgt/thread" && opts?.query?.after === undefined) {
+        released = w.router.release("tgt", res.subscriptionId);
+      }
+      return read(method, path, opts);
+    };
+    const answer = await w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await released;
+    api.request = read;
+    assert.equal(answer.outcome, "notify", "a cancelled waiter gets nothing");
+    w.host.settle("req", { reply: "user turn done" });
+    await settled(w);
+    assert.equal(parseThreadMessage(postsTo(w.host, "req").at(-1)!.body.input as string)?.body, "Not for a cancelled call.");
+    assert.equal(postsTo(w.host, "req").length, 1);
+    await w.cleanup();
+  });
+
+  it("a host re-sending the same call gets the reply again; the first call's lost result then delivers nothing — exactly one holder delivers", async () => {
+    const w = await world();
+    const res = await w.router.subscribe("tgt", request("wait", { idempotencyKey: "call-1" }));
+    const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await settled(w);
+    w.host.settle("tgt", { reply: "Once." });
+    assert.equal((await waiting).outcome, "replied");
+    // The host restarts and re-sends the call: the same subscription answers it again.
+    const resent = await w.router.subscribe("tgt", request("wait", { idempotencyKey: "call-1" }));
+    assert.equal(resent.subscriptionId, res.subscriptionId);
+    const second = await w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    assert.ok(second.outcome === "replied" && second.reply === "Once.");
+    // The first call's result never reached the provider: its release finds another holder.
+    assert.deepEqual(await w.router.release("tgt", res.subscriptionId), { released: false, state: "done" });
+    await settled(w);
+    assert.equal(postsTo(w.host, "req").length, 0, "the re-sent call holds the reply");
+    // Had the re-sent call's result been lost too, the reply goes out once.
+    await w.router.release("tgt", res.subscriptionId);
+    await settled(w);
+    assert.equal(postsTo(w.host, "req").length, 1);
+    await w.cleanup();
+  });
+});

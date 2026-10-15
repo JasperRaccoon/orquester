@@ -445,7 +445,11 @@ export async function awaitReplySubscription(
   signal: AbortSignal,
   delivered?: Promise<boolean>
 ): Promise<ReplyWaitResponse> {
+  // One release per call at most: a cancel and an undelivered result are the same call going away.
+  let releasedOnce = false;
   const release = (): void => {
+    if (releasedOnce) return;
+    releasedOnce = true;
     void api.request("POST", agentChatRoutes.replySubscriptionRelease(targetId, subscriptionId)).catch(() => undefined);
   };
   const waiting = api.request("POST", agentChatRoutes.replySubscriptionWait(targetId, subscriptionId), { body: { timeoutSeconds } });
