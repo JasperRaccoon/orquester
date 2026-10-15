@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { cp, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "@decimalturn/toml-patch";
 import type { ProfileItem } from "@orquester/api";
@@ -13,6 +13,7 @@ import type { ProfileAdapterContext } from "../types.ts";
 import { CodexAppServerClient, type CodexConfigClient, type CodexConfigClientFactory } from "./codex-config-client.ts";
 import { codexHookHash } from "./hooks.ts";
 import { CodexProfileAdapter } from "./index.ts";
+import { armHangGuard } from "./testing/hang-guard.ts";
 
 const FAKE = fileURLToPath(new URL("./testing/fake-app-server.mjs", import.meta.url));
 
@@ -230,14 +231,26 @@ function assertProfileError(code: string, status?: number) {
 
 describe("CodexProfileAdapter", () => {
   let f: Fixture;
+  let checkHangGuard: () => void;
 
   beforeEach(async () => {
+    // The app-server client's deadlines are wall-clock timers (a call's, the idle close's, the kill
+    // grace's). This suite tests the adapter, not them (codex-config-client.test.ts does), and its
+    // app-server is a Node script whose startup on a loaded host can outlast any deadline: mocked and
+    // never ticked, none of them fires here, short of the hang guard.
+    mock.timers.enable({ apis: ["setTimeout"] });
+    checkHangGuard = armHangGuard();
     f = await makeFixture();
   });
 
   afterEach(async () => {
-    await f.adapter.close();
-    await rm(f.root, { recursive: true, force: true });
+    try {
+      await f.adapter.close();
+      await rm(f.root, { recursive: true, force: true });
+    } finally {
+      mock.timers.reset();
+      checkHangGuard();
+    }
   });
 
   describe("snapshot", () => {

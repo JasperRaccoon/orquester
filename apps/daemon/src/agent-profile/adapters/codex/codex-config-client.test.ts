@@ -2,11 +2,12 @@ import assert from "node:assert/strict";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { after, before, describe, it } from "node:test";
+import { after, afterEach, before, beforeEach, describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import { CodexRpcError } from "../../../agent-host/adapters/codex/protocol.ts";
 import { AgentProfileError } from "../../errors.ts";
 import { CodexAppServerClient, keyPath, toProfileError } from "./codex-config-client.ts";
+import { armHangGuard } from "./testing/hang-guard.ts";
 
 const FAKE = fileURLToPath(new URL("./testing/fake-app-server.mjs", import.meta.url));
 
@@ -22,6 +23,20 @@ describe("CodexAppServerClient", () => {
     log = join(dir, "requests.ndjson");
     await import("node:fs/promises").then((fs) => fs.mkdir(codexHome, { recursive: true }));
     await writeFile(join(codexHome, "config.toml"), 'model = "gpt-5.5"\n');
+  });
+
+  let checkHangGuard: () => void;
+
+  // Every test runs on mocked timers: a deadline fires only when the test ticks it, never because
+  // the fake app-server (a Node script) started slowly on a loaded host.
+  beforeEach(() => {
+    mock.timers.enable({ apis: ["setTimeout"] });
+    checkHangGuard = armHangGuard();
+  });
+
+  afterEach(() => {
+    mock.timers.reset();
+    checkHangGuard();
   });
 
   after(async () => {
@@ -67,45 +82,42 @@ describe("CodexAppServerClient", () => {
     assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
   });
 
-  it("closes after the idle window and respawns on the next call", async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout"] });
+  it("closes after the idle window and respawns on the next call", async () => {
     const c = client();
     await c.call("config/read", {});
     const pid = (await requests()).at(-1)!.pid;
-    t.mock.timers.tick(29_999);
+    mock.timers.tick(29_999);
     await c.call("config/read", {});
     assert.equal((await requests()).at(-1)!.pid, pid, "still inside the idle window");
-    t.mock.timers.tick(30_000);
+    mock.timers.tick(30_000);
     await c.call("config/read", {});
     assert.notEqual((await requests()).at(-1)!.pid, pid, "an idle child is replaced");
     await c.close();
     assert.throws(() => process.kill(pid, 0), { code: "ESRCH" });
   });
 
-  it("does not close for idleness while a call is pending", async (t) => {
-    t.mock.timers.enable({ apis: ["setTimeout"] });
+  it("does not close for idleness while a call is pending", async () => {
     const c = client({ extraEnv: { FAKE_CODEX_LOG: log, FAKE_CODEX_HANG: "hooks/list" } });
     const pending = c.call("hooks/list", { cwds: [dir] }, { timeoutMs: 60_000 }).catch((error: unknown) => error);
     await c.call("config/read", {});
     const pid = (await requests()).at(-1)!.pid;
-    t.mock.timers.tick(30_000);
+    mock.timers.tick(30_000);
     await c.call("config/read", {});
     assert.equal((await requests()).at(-1)!.pid, pid, "pending calls keep their child alive");
-    t.mock.timers.tick(30_000);
+    mock.timers.tick(30_000);
     assert.ok((await pending) instanceof AgentProfileError);
     await c.close();
   });
 
-  it("fails a call that misses its deadline with AGENT_CLI_FAILED and kills the child", async (t) => {
+  it("fails a call that misses its deadline with AGENT_CLI_FAILED and kills the child", async () => {
     {
-      t.mock.timers.enable({ apis: ["setTimeout"] });
       const c = client({ extraEnv: { FAKE_CODEX_LOG: log, FAKE_CODEX_HANG: "hooks/list" } });
       await c.call("config/read", {});
       const pid = (await requests()).at(-1)!.pid;
       const hung = c.call("hooks/list", {});
-      t.mock.timers.tick(9_999);
+      mock.timers.tick(9_999);
       assert.doesNotThrow(() => process.kill(pid, 0));
-      t.mock.timers.tick(1);
+      mock.timers.tick(1);
       await assert.rejects(hung, (error: unknown) => {
         assert.ok(error instanceof AgentProfileError);
         assert.equal(error.code, "AGENT_CLI_FAILED");
