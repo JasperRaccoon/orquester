@@ -563,6 +563,8 @@ export function blockSections(node: WorkflowNode, prompts: ReadonlyMap<string, R
           const pool = Array.isArray(accounts.accounts) && accounts.accounts.length > 0 ? `accounts ${accounts.accounts.join(", ")}` : "any account";
           return { label: index === 0 ? "Agent" : `Fallback ${index}`, value: `${String(entry.agent)} · ${String(entry.model)}${options ? ` (${options})` : ""} · ${String(accounts.strategy ?? "least-used")}, ${pool}` };
         }),
+        // Workflow agent sessions run unattended in Full access (`workflows/agent/create.ts`).
+        { label: "Permission mode", value: "Full access, unattended", state: "flagged" as const },
         { label: "Session", value: session.kind === "continue" ? `continues the session of block ${String(session.fromNode)}` : `a new chat${session.title ? ` "${String(session.title)}"` : ""}` },
         { label: "Runs up to", value: `${String(config.maxMinutes ?? 240)} min` },
         ...extras

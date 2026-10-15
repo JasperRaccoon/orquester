@@ -685,6 +685,7 @@ test("a create card is complete: triggers, code and shell in full, the whole HTT
   assert.equal((find(/^HTTP body \(json\) · Notify/) as { text: string }).text, "{\"ok\":true}");
   assert.equal((find(/^Prompt · Fix/) as { text: string }).text, "Fix every failing test.\nThen commit.");
   assert.match(JSON.stringify(find(/^Agent · Fix/)), /claude · opus · fixed, accounts acct-1/);
+  assert.match(JSON.stringify(find(/^Agent · Fix/)), /"Permission mode","value":"Full access, unattended","state":"flagged"/);
   const saved = find(/^Saved prompt "Review checklist" · Review/) as { text: string; sha256: string };
   assert.equal(saved.text, body, "a saved prompt's whole current body");
   assert.equal((find(/^Appended to the prompt · Review/) as { text: string }).text, "Be brief.");
@@ -869,6 +870,23 @@ test("chat reads claim the workflow's home: list_workflows defaults to the calle
   await call(api, "get_workflow", { workflowId: "wf-beta" }, { who: chat(api, { runtimeMode: "auto" }), port });
   assert.equal(port.cards[0]!.kind, "boundary");
   assert.equal(port.cards[0]!.family, "cross-workspace-read");
+});
+
+test("cancel_workflow_run is Act in the project the run runs in: own project free, another workspace cards below Full access, a workflow-owned caller never acts away", async (t) => {
+  const api = await sandbox(t);
+  const ownRun = { ...runRecord(definition(api)), projectPath: api.own };
+  const awayRun = { ...runRecord(definition(api, { project: { kind: "existing", projectPath: api.other } })), id: "run-2", projectPath: api.other };
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: ownRun } });
+  api.on("GET", "/api/workflow-runs/run-2", { status: 200, body: { run: awayRun } });
+  api.on("POST", "/api/workflow-runs/*", { status: 200, body: { cancelled: true } });
+  const port = new FakeApprovalPort();
+  assert.equal((await call(api, "cancel_workflow_run", { runId: "run-1" }, { who: chat(api, { runtimeMode: "approval-required" }), port })).cancelRequested, true);
+  assert.equal(port.cards.length, 0);
+  await call(api, "cancel_workflow_run", { runId: "run-2" }, { who: chat(api, { runtimeMode: "auto" }), port });
+  assert.equal(port.cards[0]!.kind, "boundary");
+  assert.equal(port.cards[0]!.family, "cross-project");
+  await rejects(call(api, "cancel_workflow_run", { runId: "run-2" }, { who: chat(api, { workflowOwned: true }), port }), "PERMISSION_DENIED", /automated workflow/);
+  await rejects(call(api, "cancel_workflow_run", { runId: "run-1" }, { who: chat(api, { planning: true }), port }), "PERMISSION_DENIED", /planning/);
 });
 
 test("workflow-owned callers get no Admin (ADMIN_NOT_AVAILABLE, no card); planning callers are refused Admin; dry runs stay available", async (t) => {

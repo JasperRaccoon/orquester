@@ -1173,10 +1173,15 @@ const previewExpression = defineTool({
   }
 });
 
-/** A run's home: where its workflow lives (the frozen definition's project, so a deleted workflow's run still has one). */
+/**
+ * A run's home: the project it runs in (a temp run's own directory once created), else its frozen
+ * definition's project — so a deleted workflow's run still has one.
+ */
 async function runHome(ctx: ScopeContext, runId: string, writes: boolean): Promise<ScopeClaim> {
   const run = await readRun(ctx.api, runId);
-  return claim({ ...(await homeScope(ctx.api, run.definition?.project)), reads: "metadata", writes });
+  const ranIn = run.projectPath ? await homeScope(ctx.api, { kind: "existing", projectPath: run.projectPath }) : { projects: [] };
+  const home = ranIn.projects.length > 0 ? ranIn : await homeScope(ctx.api, run.definition?.project);
+  return claim({ ...home, reads: "metadata", writes });
 }
 
 /** The revision a run must start from; a mismatch before any card is the caller's stale read. */
@@ -1484,8 +1489,7 @@ const setSecret = defineTool({
       title: args.delete ? `${agentLabel(ctx.caller)} wants to delete the workflow secret ${args.name}` : `${agentLabel(ctx.caller)} asks you to set the workflow secret ${args.name}`,
       scopeLabel: workflow ? `Workflow ${workflow.name}` : "Global — every workflow",
       sections,
-      ...(args.delete ? {} : { secretFields: [{ key: SECRET_FIELD, label: `Value of ${args.name}` }] }),
-      ...(workflow ? { pins: previewPins(workflow, new Map()) } : {})
+      ...(args.delete ? {} : { secretFields: [{ key: SECRET_FIELD, label: `Value of ${args.name}` }] })
     };
   },
   annotations: DESTRUCTIVE,
@@ -1494,7 +1498,6 @@ const setSecret = defineTool({
     const { api } = ctx;
     const scoped = args.workflowId !== undefined ? { query: { workflowId: args.workflowId } } : {};
     const result: Record<string, unknown> = { name: args.name, scope: args.workflowId !== undefined ? "workflow" : "global", ...(args.workflowId !== undefined ? { workflowId: args.workflowId } : {}) };
-    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins);
     if (args.delete) {
       if (args.value !== undefined) throw new ToolError("INVALID_ARGUMENT", "Pass value or delete: true, not both.");
       expectWorkflowOk(await api.request("DELETE", workflowRoutes.secret(args.name), scoped));
