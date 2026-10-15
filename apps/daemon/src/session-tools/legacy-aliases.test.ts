@@ -11,7 +11,8 @@ import { test } from "node:test";
 import { z } from "zod";
 
 import { defineTool, MUTATING, READ_ONLY, type AnyOrquesterTool, type CallContext, type ThreadCaller } from "../mcp/catalog/contract.ts";
-import { executeToolCall } from "../mcp/executor.ts";
+import { audienceShape, executeToolCall } from "../mcp/executor.ts";
+import { toolByName } from "../mcp/catalog/index.ts";
 import { FakeDaemonApi } from "../mcp/testing.ts";
 import { chatToolByName, LEGACY_CHAT_TOOL_ALIASES, LEGACY_CHAT_TOOL_NAMES } from "./legacy-aliases.ts";
 
@@ -67,6 +68,18 @@ test("every legacy name has an alias onto spec §14.1's tool", () => {
   ]);
   assert.equal(LEGACY_CHAT_TOOL_ALIASES.thread_send!.target, "send_message");
   assert.equal(LEGACY_CHAT_TOOL_ALIASES.delegate_task!.target, "create_session");
+});
+
+test("against the production catalog every legacy name resolves; agent_catalog is Task 9's list_agents, and its old fields fit the target's chat schema", () => {
+  for (const name of LEGACY_CHAT_TOOL_NAMES) assert.ok(chatToolByName(name), `${name} resolves`);
+  assert.equal(toolByName("agent_catalog", "chat"), undefined, "the catalog itself no longer serves the old name");
+  const target = toolByName("list_agents", "chat");
+  assert.ok(target, "list_agents is served to chats");
+  const alias = chatToolByName("agent_catalog")!;
+  assert.equal(alias.toolset, target.toolset);
+  assert.equal(alias.tier, target.tier);
+  const targetKeys = new Set(Object.keys(audienceShape(target, "chat")));
+  for (const key of ["agent", "model"]) assert.ok(targetKeys.has(key), key);
 });
 
 test("thread_send without wait steers as before (reply none); with wait it waits WITHOUT the notify conversion", async () => {
