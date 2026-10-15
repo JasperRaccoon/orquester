@@ -207,6 +207,25 @@ describe("acceptance (a): a chat opens a session in another project, by workspac
     });
   });
 
+  test("the create card shows the permission mode the new chat will really get; a broader one is refused before any card", async () => {
+    await withWorld(async (w) => {
+      const orq = w.project("jaspersito/orquester");
+      // A mode this daemon does not know (a newer host's): read as the narrowest (fail closed).
+      w.host.addChat("odd", { project: orq, title: "Odd mode", runtimeMode: "bypass-everything" as never });
+      w.host.userTurn("odd", "Open a chat in orquester-3.");
+      const { card, result } = await w.carded("odd", "create_session", { project: "jaspersito/orquester-3", prompt: "Survey.", reply: "none" }, { decision: "approve" });
+      const shown = (card.sections[0] as { rows: { label: string; value: string }[] }).rows.find((row) => row.label === "Permission mode")!.value;
+      const created = ok(result);
+      assert.equal(w.host.threads.get(created.sessionId)!.runtimeMode, "approval-required");
+      assert.equal(shown, "approval-required", "what the user approves is what runs");
+      // Auto asking for a Full-access chat elsewhere: refused at once — no card the call could never honour.
+      w.host.addChat("auto", { project: orq, title: "Auto", runtimeMode: "auto" });
+      w.host.userTurn("auto", "go");
+      const broader = refused(await w.uncarded("auto", "create_session", { project: "jaspersito/orquester-3", runtimeMode: "full-access", prompt: "x", reply: "none" }), "PERMISSION_DENIED");
+      assert.match(broader.message, /broader/);
+    });
+  });
+
   test("external callers: address validation only — any project, no card, Full access by default; chat-only fields refused", async () => {
     await withWorld(async (w) => {
       const before = w.cards.opened.length;
