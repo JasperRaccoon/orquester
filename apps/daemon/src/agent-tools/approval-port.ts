@@ -78,7 +78,7 @@ export const WORKFLOW_GRANT_NOTICE =
   "This chat's 'Allow workflows' grant will cover the new workflow: its later changes, runs and deletion from this chat won't ask again until you revoke the grant.";
 
 const AGENT_TOOLS_OFF = (label: string): string =>
-  `Agent tools are switched off in Settings › Agent tools, so ${label} cannot be turned on for this chat (it would have no effect). Ask the user to turn agent tools on.`;
+  `"Extra toolsets for agent chats" is switched off in Settings › Agent tools, so ${label} cannot be turned on for this chat (it would have no effect). Ask the user to turn that switch on.`;
 const READ_ONLY_TOOLSET =
   "Agent tool settings are read-only until agent-tools.json is fixed and Orquester restarts, so this toolset cannot be turned on. Deny this card for now.";
 const READ_ONLY_GRANT =

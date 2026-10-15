@@ -100,7 +100,8 @@ test("the page renders the switch, the locked core, bytes, tier badges and the g
     }
   });
   const html = renderToStaticMarkup(createElement(AgentToolsSettings));
-  assert.match(html, /Offer Orquester tools to agent chats/);
+  assert.match(html, /Extra toolsets for agent chats/);
+  assert.match(html, /always has the core Chats &amp; delegation tools/, "the switch says the core tools stay");
   assert.match(html, /role="switch"[^>]*aria-checked="true"/);
   assert.match(html, /data-agent-tools-matrix=""/);
   for (const label of ["Claude Code", "Codex", "Grok", "OpenCode"]) assert.match(html, new RegExp(`>${label}<`));

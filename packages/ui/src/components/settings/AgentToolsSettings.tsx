@@ -113,17 +113,17 @@ export const AgentToolsSettings: React.FC = () => {
 
       <SettingsSection title="Agent tools in chats">
         <SettingRow
-          label="Offer Orquester tools to agent chats"
+          label="Extra toolsets for agent chats"
           description={
             settings.enabled
-              ? "Each chat gets the toolsets on for its agent below, plus its own choices in its Tools chip."
-              : "Off: every chat gets only Chats & delegation. Your choices below and in each chat are kept for when you turn it back on."
+              ? "Every chat always has the core Chats & delegation tools. On: each chat also gets the toolsets on for its agent below, plus its own choices in its Tools chip."
+              : "Off: every chat keeps only the core Chats & delegation tools. Your choices below and in each chat are kept for when you turn it back on."
           }
         >
           <Switch
             checked={settings.enabled}
             disabled={busy || !api}
-            label="Offer Orquester tools to agent chats"
+            label="Extra toolsets for agent chats"
             onChange={(enabled) => api && run(() => updateAgentToolsSettings(api, { revision: settings.revision, enabled }))}
           />
         </SettingRow>
