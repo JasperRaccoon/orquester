@@ -831,15 +831,20 @@ test("a wait that fails after the message went out is no failed send: willNotify
 test("a reply the waiter took whose result never reached the provider is released, so it comes again as a message", async () => {
   const r = rig();
   replyRoutes(r.api, "peer");
-  r.api.on("POST", agentChatRoutes.replySubscriptionRelease("peer", "sub-1"), { status: 200, body: { released: true, state: "done" } });
+  // The release route is the receipt the test waits on (no event-loop counting).
+  let releasedOnce!: () => void;
+  const released = new Promise<void>((resolve) => { releasedOnce = resolve; });
+  r.api.on("POST", agentChatRoutes.replySubscriptionRelease("peer", "sub-1"), () => {
+    releasedOnce();
+    return { status: 200, body: { released: true, state: "done" } };
+  });
   let undelivered!: (value: boolean) => void;
   const delivered = new Promise<boolean>((resolve) => { undelivered = resolve; });
   const result = await r.call("send_message", { sessionId: "peer", text: "hi" }, { delivered });
   assert.equal(body(result).reply, "Found 3 issues.");
   assert.equal(posted(r.api, agentChatRoutes.replySubscriptionRelease("peer", "sub-1")).length, 0, "nothing released while the result may still arrive");
   undelivered(false);
-  await delivered;
-  await new Promise<void>((resolve) => setImmediate(resolve));
+  await released;
   assert.equal(r.api.calls.filter((c) => c.path === agentChatRoutes.replySubscriptionRelease("peer", "sub-1")).length, 1);
 });
 

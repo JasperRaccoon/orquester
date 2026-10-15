@@ -37,7 +37,7 @@ import { daemonRoutesForHost } from "../agent-host/host-protocol.ts";
 import { estimateCostParts } from "../usage-tokens.ts";
 import { catalogFor } from "./catalog/index.ts";
 import { isoWeek } from "./usage-view.ts";
-import { DAEMON_BEARER, DAEMON_PORT, HOST_BEARER, out, scenarioWorld, writeHomeFile, type ScenarioWorld } from "./scenario-world.ts";
+import { DAEMON_BEARER, DAEMON_PORT, HOST_BEARER, out, scenarioWorld, writeHomeFile, type ScenarioWorld } from "./testing/scenario-world.ts";
 
 const SEED = {
   projects: { jaspersito: ["orquester", "orquester-3"], acme: ["site", "docs"] },
@@ -111,17 +111,15 @@ describe("acceptance (a): a chat opens a session in another project, by workspac
         assert.equal(created.toolApproval.outcome, "approved");
         assert.equal(w.host.tabs.get(created.sessionId)!.projectPath, orq3);
         assert.equal(w.host.threads.get(created.sessionId)!.runtimeMode, mode, `${mode}: the opened chat runs no broader than its opener`);
-        // A broader mode for the new chat is refused before any card (never broader, §5.3).
-        if (mode !== "auto") {
-          const broader = refused(await w.uncarded(id, "create_session", { prompt: "x", runtimeMode: "full-access", reply: "none" }), "PERMISSION_DENIED");
-          assert.match(broader.message, /full-access/);
-        }
+        // A broader mode for the new chat is refused before any card (never broader, §5.3), in every mode below Full access.
+        const broader = refused(await w.uncarded(id, "create_session", { prompt: "x", runtimeMode: "full-access", reply: "none" }), "PERMISSION_DENIED");
+        assert.match(broader.message, /full-access/);
       }
       // A grant offered to nobody is honoured for nobody: an approve naming one is refused 400 and the card stays open.
       w.host.addChat("sup", { project: orq, title: "Supervised", runtimeMode: "approval-required" });
       w.host.userTurn("sup", "again");
       const pending = w.chat("sup", "create_session", { project: "jaspersito/orquester-3", prompt: "Survey.", reply: "none" });
-      const card = await w.cards.next();
+      const card = await w.cardFor(pending, "create_session");
       const bad = await w.answer(card, { decision: "approve", grant: "chat" });
       assert.equal(bad.status, 400);
       assert.equal((await w.answer(card, { decision: "deny" })).status, 200);
@@ -337,7 +335,7 @@ describe("acceptance (b) / §14.2.11 'add a skill': edit_agent_profile is an Adm
 
       // A person may not grant it: an approve naming a grant is refused 400, the card stays pending.
       const pending = w.chat("claude", "edit_agent_profile", args);
-      const card = await w.cards.next();
+      const card = await w.cardFor(pending, "edit_agent_profile");
       assert.equal(card.kind, "admin");
       assert.equal(card.family, "agent-profile");
       assert.deepEqual(card.grantOptions, [], "agent-profile is never grantable, even at Full access");
@@ -736,8 +734,8 @@ describe("acceptance (e) / §14.2.11 usage: per session for Claude, Codex and Gr
         assert.equal(byWeek[thisWeek], round4(claudeThisWeek + codexThisWeek));
         assert.equal(byWeek[priorWeek], round4(claudePrior));
         assert.deepEqual(cost.rows.map((row: { agent: string; week: string }) => `${row.week} ${row.agent}`).sort(), [`${priorWeek} claude`, `${thisWeek} claude`, `${thisWeek} codex`].sort());
-        // Grok has no transcript scanner (the Cost tab's source): it never appears in the weekly cost.
-        assert.equal(cost.rows.some((row: { agent: string }) => row.agent === "grok"), false);
+        // Grok's weekly cost is not asserted: the Cost tab's scanner reads Claude and Codex transcripts only. The planned
+        // fix (final fix wave) adds Grok weekly usage from Orquester's own thread logs; extend this scenario with it then.
 
         // Quota windows: chats never see an account's email; external callers do.
         w.quota = { agents: [
@@ -807,8 +805,9 @@ describe("acceptance (f) / §14.2.11 review: Claude (Full access) opens Codex (S
 
       // 3. Claude follows up with reply:"wait" (hop 3) and gets the answer in the call.
       const posted = w.host.nextPost(codex);
-      const asking = w.chat("claude", "send_message", { sessionId: codex, text: "Fixed 1 and 2; re-review.", reply: "wait", timeoutSeconds: 120 });
-      await posted;
+      const asking = w.uncarded("claude", "send_message", { sessionId: codex, text: "Fixed 1 and 2; re-review.", reply: "wait", timeoutSeconds: 120 });
+      // The post is the receipt; the call answering first (it never posted) fails at once.
+      await Promise.race([posted, asking.then((result) => assert.fail(`send_message answered before posting: ${JSON.stringify(result.structuredContent)}`))]);
       await w.drain();
       assert.deepEqual(w.host.runningTurn(codex)!.causedBy, { threadId: "claude", exchangeId, hop: 3 });
       // Codex starting its own conversation with the broader Claude is refused in every reply mode (never broader).
@@ -934,32 +933,29 @@ describe("acceptance (h): a workflow-owned chat gets no Admin tools and asks for
       w.host.userTurn("wf", "Do the nightly work.");
       // The user's own workflow in this project.
       const userWf = (await w.user({ method: "POST", url: "/api/workflows", payload: { name: "Mine", project: { kind: "existing", projectPath: orq }, nodes: [{ type: "trigger.manual", name: "Go" }] } })).body.workflow;
-      const cardsBefore = w.cards.opened.length;
-      refused(await w.chat("wf", "run_workflow", { workflowId: userWf.id, revision: userWf.revision }), "ADMIN_NOT_AVAILABLE");
-      refused(await w.chat("wf", "edit_agent_profile", { agent: "claude", changes: [{ action: "create", skill: { name: "x", frontmatter: { description: "x" }, body: "x" } }] }), "ADMIN_NOT_AVAILABLE");
-      const createWf = refused(await w.chat("wf", "create_workflow", { name: "Spawn", project: { kind: "existing", project: "jaspersito/orquester" }, nodes: [{ type: "trigger.manual", name: "Go" }] }), "ADMIN_NOT_AVAILABLE");
+      refused(await w.uncarded("wf", "run_workflow", { workflowId: userWf.id, revision: userWf.revision }), "ADMIN_NOT_AVAILABLE");
+      refused(await w.uncarded("wf", "edit_agent_profile", { agent: "claude", changes: [{ action: "create", skill: { name: "x", frontmatter: { description: "x" }, body: "x" } }] }), "ADMIN_NOT_AVAILABLE");
+      const createWf = refused(await w.uncarded("wf", "create_workflow", { name: "Spawn", project: { kind: "existing", project: "jaspersito/orquester" }, nodes: [{ type: "trigger.manual", name: "Go" }] }), "ADMIN_NOT_AVAILABLE");
       assert.match(createWf.message, /automated workflow/);
       const userPrompt = await w.user({ method: "POST", url: "/api/saved-prompts", payload: { title: "Mine", body: "b", projectPath: null } });
-      refused(await w.chat("wf", "update_saved_prompts", { action: "update", id: userPrompt.body.id, body: "changed" }), "ADMIN_NOT_AVAILABLE");
-      refused(await w.chat("wf", "request_toolset", { toolset: "workflow-authoring", reason: "x" }), "PERMISSION_DENIED");
+      refused(await w.uncarded("wf", "update_saved_prompts", { action: "update", id: userPrompt.body.id, body: "changed" }), "ADMIN_NOT_AVAILABLE");
+      refused(await w.uncarded("wf", "request_toolset", { toolset: "workflow-authoring", reason: "x" }), "PERMISSION_DENIED");
       // A boundary card becomes a denial too (another workspace's content, below Full access).
       w.host.addChat("site", { project: w.project("acme/site"), title: "Site", runtimeMode: "auto" });
       w.host.setMode("wf", "auto");
-      refused(await w.chat("wf", "read_transcript", { sessionId: "site" }), "PERMISSION_DENIED");
+      refused(await w.uncarded("wf", "read_transcript", { sessionId: "site" }), "PERMISSION_DENIED");
       w.host.setMode("wf", "full-access");
       // Its own project's Act still works: the agent-made prompt needs no card.
-      ok(await w.chat("wf", "update_saved_prompts", { action: "create", title: "Nightly notes", body: "notes" }));
-      assert.equal(w.cards.opened.length, cardsBefore, "nothing ever asked the user");
+      ok(await w.uncarded("wf", "update_saved_prompts", { action: "create", title: "Nightly notes", body: "notes" }));
 
       // A chat it opens is workflow-owned (lineage), and stays so after the workflow's chat closes.
-      const child = ok(await w.chat("wf", "create_session", { prompt: "Help with the nightly work.", reply: "none" })).sessionId as string;
+      const child = ok(await w.uncarded("wf", "create_session", { prompt: "Help with the nightly work.", reply: "none" })).sessionId as string;
       assert.equal(w.host.tabs.get(child)!.lineage?.workflowOwned, true);
       assert.equal((await w.user({ method: "DELETE", url: "/api/sessions/wf" })).status, 204);
       await w.user({ method: "PUT", url: `/api/sessions/${child}/agent-tools`, payload: { toolsets: on } });
       assert.deepEqual((await manifestOf(w, child)).tools.filter((name) => admin.includes(name)), []);
-      refused(await w.chat(child, "run_workflow", { workflowId: userWf.id, revision: userWf.revision }), "ADMIN_NOT_AVAILABLE");
-      refused(await w.chat(child, "create_session", { project: "jaspersito/orquester-3", prompt: "x", reply: "none" }), "PERMISSION_DENIED");
-      assert.equal(w.cards.opened.length, cardsBefore);
+      refused(await w.uncarded(child, "run_workflow", { workflowId: userWf.id, revision: userWf.revision }), "ADMIN_NOT_AVAILABLE");
+      refused(await w.uncarded(child, "create_session", { project: "jaspersito/orquester-3", prompt: "x", reply: "none" }), "PERMISSION_DENIED");
       assert.equal(w.runtime.tools.snapshot().grants.length, 0);
     });
   });
@@ -972,22 +968,20 @@ describe("acceptance (h): a workflow-owned chat gets no Admin tools and asks for
       w.host.addChat("sibling", { project: w.project("jaspersito/orquester-3"), title: "Sibling", agent: "claude", runtimeMode: "auto" });
       w.host.addChat("codex", { project: w.project("jaspersito/orquester-3"), title: "Codex", agent: "codex", runtimeMode: "auto" });
       w.host.userTurn("planner", "Plan the migration.", { plan: true });
-      const cardsBefore = w.cards.opened.length;
       const promptsBefore = (await w.savedPrompts.list(orq)).length;
-      assert.match(refused(await w.chat("planner", "update_saved_prompts", { action: "create", title: "x", body: "y" }), "PERMISSION_DENIED").message, /planning/);
+      assert.match(refused(await w.uncarded("planner", "update_saved_prompts", { action: "create", title: "x", body: "y" }), "PERMISSION_DENIED").message, /planning/);
       assert.equal((await w.savedPrompts.list(orq)).length, promptsBefore);
-      refused(await w.chat("planner", "create_workflow", { name: "W", project: { kind: "existing", project: "jaspersito/orquester" }, nodes: [{ type: "trigger.manual", name: "Go" }] }), "PERMISSION_DENIED");
-      refused(await w.chat("planner", "edit_agent_profile", { agent: "claude", changes: [{ action: "create", skill: { name: "x", frontmatter: { description: "x" }, body: "x" } }] }), "PERMISSION_DENIED");
+      refused(await w.uncarded("planner", "create_workflow", { name: "W", project: { kind: "existing", project: "jaspersito/orquester" }, nodes: [{ type: "trigger.manual", name: "Go" }] }), "PERMISSION_DENIED");
+      refused(await w.uncarded("planner", "edit_agent_profile", { agent: "claude", changes: [{ action: "create", skill: { name: "x", frontmatter: { description: "x" }, body: "x" } }] }), "PERMISSION_DENIED");
       // Messages to other chats carry the plan: the sibling's caused turn runs in plan mode.
-      ok(await w.chat("planner", "send_message", { sessionId: "sibling", text: "Plan your half.", reply: "none" }));
+      ok(await w.uncarded("planner", "send_message", { sessionId: "sibling", text: "Plan your half.", reply: "none" }));
       assert.equal(w.host.postsTo("sibling")[0]!.interactionMode, "plan");
       assert.equal(w.host.runningTurn("sibling")!.interactionMode, "plan");
       // Codex has no plan mode: it cannot be given work from a planning chat.
-      refused(await w.chat("planner", "send_message", { sessionId: "codex", text: "Edit it.", reply: "none" }), "PERMISSION_DENIED");
+      refused(await w.uncarded("planner", "send_message", { sessionId: "codex", text: "Edit it.", reply: "none" }), "PERMISSION_DENIED");
       assert.equal(w.host.postsTo("codex").length, 0);
       // implementPlan starts editing work: refused while planning.
-      refused(await w.chat("planner", "send_message", { sessionId: "sibling", text: "go", implementPlan: true, reply: "none" }), "PERMISSION_DENIED");
-      assert.equal(w.cards.opened.length, cardsBefore, "planning never raises a card");
+      refused(await w.uncarded("planner", "send_message", { sessionId: "sibling", text: "go", implementPlan: true, reply: "none" }), "PERMISSION_DENIED");
     });
   });
 });
@@ -1079,13 +1073,13 @@ describe("§12.1 / §7.3: an Orquester card is answered only by a person, on its
       w.host.addChat("orq3", { project: w.project("jaspersito/orquester-3"), title: "Sibling", runtimeMode: "auto" });
       w.host.userTurn("auto", "go");
       const pending = w.chat("auto", "create_session", { project: "jaspersito/orquester-3", prompt: "x", reply: "none" });
-      const card = await w.cards.next();
+      const card = await w.cardFor(pending, "create_session");
       // The external MCP: no request by that id (cards are not provider requests).
       const viaMcp = await w.external("respond_to_request", { sessionId: "auto", requestId: card.approvalId, decision: "accept" });
       assert.equal(viaMcp.isError, true);
       // Another chat's agent, even holding chat-extras: no request by that id either.
       await w.user({ method: "PUT", url: "/api/sessions/orq3/agent-tools", payload: { toolsets: { "chat-extras": true } } });
-      assert.equal((await w.chat("orq3", "respond_to_request", { sessionId: "auto", requestId: card.approvalId, answers: { "1": "yes" } })).isError, true);
+      assert.equal((await w.uncarded("orq3", "respond_to_request", { sessionId: "auto", requestId: card.approvalId, answers: { "1": "yes" } })).isError, true);
       // The card route itself refuses any principal but the user's.
       const route = agentChatRoutes.toolApproval(card.threadId, card.approvalId);
       for (const principal of [{ kind: "agent", threadId: "orq3", projectPath: w.project("jaspersito/orquester-3"), agent: "claude", title: "Sibling" }, { kind: "external", credentialId: "cred_x" }] as const) {
@@ -1101,7 +1095,7 @@ describe("§12.1 / §7.3: an Orquester card is answered only by a person, on its
       // The chat closes while its card waits: the call ends CANCELLED and the card closes; a late answer finds nothing.
       w.host.userTurn("auto", "again");
       const waiting = w.chat("auto", "create_session", { project: "jaspersito/orquester-3", prompt: "y", reply: "none" });
-      const orphan = await w.cards.next();
+      const orphan = await w.cardFor(waiting, "create_session");
       assert.equal((await w.user({ method: "DELETE", url: "/api/sessions/auto" })).status, 204);
       const cancelled = refused(await waiting, "CANCELLED");
       assert.match(cancelled.message, /closed/);

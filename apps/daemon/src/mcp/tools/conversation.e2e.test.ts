@@ -242,17 +242,12 @@ function world() {
     runningTurn: (id: string) => active(threads.get(id)!),
     /** Resolves when the next turn is posted to `id`. */
     nextPost: (id: string) => new Promise<void>((resolve) => { postWaiters.set(id, [...(postWaiters.get(id) ?? []), resolve]); }),
-    /** Let every lane, evaluation and write settle (no clock). */
+    /** Let every lane, evaluation and write settle (no clock): the queue and the router until neither has work. */
     async drain() {
-      const q = queue as unknown as { writes: Promise<void>; lanes: Map<string, Promise<unknown>> };
-      const r = router as unknown as { writes: Promise<void>; evalTail: Map<string, Promise<void>> };
-      for (let round = 0; round < 10; round += 1) {
-        await new Promise((resolve) => setImmediate(resolve));
-        await Promise.all([...q.lanes.values()]);
-        await Promise.all([...r.evalTail.values()]);
-        await q.writes;
-        await r.writes;
-      }
+      do {
+        await queue.whenIdle();
+        await router.whenIdle();
+      } while (queue.hasWorkInFlight() || router.hasWorkInFlight());
     },
     async stop() {
       await queue.stop();

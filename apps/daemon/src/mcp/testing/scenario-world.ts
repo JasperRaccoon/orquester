@@ -64,39 +64,39 @@ import {
   workflowsPath
 } from "@orquester/config";
 
-import { daemonRoutesForHost } from "../agent-host/host-protocol.ts";
-import { gateSessionCreateBody, principalOf, registerLineageRoutes, registerReplySubscriptionRoutes } from "../agent-chat/lineage-routes.ts";
-import { LineageService } from "../agent-chat/lineage.ts";
-import { ReplyRouter } from "../agent-chat/replies.ts";
-import { countsTowardDelegationDepth } from "../agent-chat/service.ts";
-import { DaemonMcpDetector, listProjectDirs, registerDaemonMcpServersRoutes } from "../agent-profile/daemon-mcp.ts";
-import { ClaudeProfileAdapter } from "../agent-profile/adapters/claude/index.ts";
-import type { AgentHomes } from "../agent-profile/adapters/types.ts";
-import { createProfileConverter } from "../agent-profile/convert.ts";
-import { ProfileBackups, ProfileStash } from "../agent-profile/infra/index.ts";
-import { registerAgentProfileRoutes } from "../agent-profile/routes.ts";
-import { AgentProfileService } from "../agent-profile/service.ts";
-import { canonicalProjectPath, connectExecutor, createAgentToolsRuntime, type AgentToolsRuntime } from "../agent-tools/approval-port.ts";
-import { registerAgentToolsRuntimeRoutes } from "../agent-tools/routes.ts";
-import { Broadcaster } from "../broadcaster.ts";
-import { GitService } from "../git.ts";
-import { registerSavedPromptRoutes, SavedPromptsService } from "../saved-prompts.ts";
-import { registerSessionToolsRoute } from "../session-tools/route.ts";
-import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "../session-tools/toolset-refresh.ts";
-import { UsageTokensScanner } from "../usage-tokens.ts";
-import { createWorkflowDaemon, type WorkflowDaemon } from "../workflows/daemon-wiring.ts";
-import { registerWorkflowRoutes } from "../workflows/routes.ts";
-import { FileRunStore } from "../workflows/run-store.ts";
-import { WorkflowSecretsService } from "../workflows/secrets.ts";
-import { publishWorkflowEvents, WorkflowService } from "../workflows/service.ts";
-import { WorkflowStateStore } from "../workflows/state-store.ts";
-import { FakeGitRemote } from "../workflows/testing/daemon-harness.ts";
-import { silentLogger } from "../workflows/testing/fakes.ts";
-import { catalogFor } from "./catalog/index.ts";
-import { InjectDaemonApi } from "./daemon-api.ts";
-import { executorPorts } from "./executor.ts";
-import { registerPrincipalHook, registerRemoteFieldStripping } from "./principal.ts";
-import { registerMcp } from "./server.ts";
+import { daemonRoutesForHost } from "../../agent-host/host-protocol.ts";
+import { gateSessionCreateBody, principalOf, registerLineageRoutes, registerReplySubscriptionRoutes } from "../../agent-chat/lineage-routes.ts";
+import { LineageService } from "../../agent-chat/lineage.ts";
+import { ReplyRouter } from "../../agent-chat/replies.ts";
+import { createdChildLineage } from "../../agent-chat/service.ts";
+import { DaemonMcpDetector, listProjectDirs, registerDaemonMcpServersRoutes } from "../../agent-profile/daemon-mcp.ts";
+import { ClaudeProfileAdapter } from "../../agent-profile/adapters/claude/index.ts";
+import type { AgentHomes } from "../../agent-profile/adapters/types.ts";
+import { createProfileConverter } from "../../agent-profile/convert.ts";
+import { ProfileBackups, ProfileStash } from "../../agent-profile/infra/index.ts";
+import { registerAgentProfileRoutes } from "../../agent-profile/routes.ts";
+import { AgentProfileService } from "../../agent-profile/service.ts";
+import { canonicalProjectPath, connectExecutor, createAgentToolsRuntime, type AgentToolsRuntime } from "../../agent-tools/approval-port.ts";
+import { registerAgentToolsRuntimeRoutes } from "../../agent-tools/routes.ts";
+import { Broadcaster } from "../../broadcaster.ts";
+import { GitService } from "../../git.ts";
+import { registerSavedPromptRoutes, SavedPromptsService } from "../../saved-prompts.ts";
+import { registerSessionToolsRoute } from "../../session-tools/route.ts";
+import { registerSessionToolsManifestRoute, SessionToolsRefresher } from "../../session-tools/toolset-refresh.ts";
+import { UsageTokensScanner } from "../../usage-tokens.ts";
+import { createWorkflowDaemon, type WorkflowDaemon } from "../../workflows/daemon-wiring.ts";
+import { registerWorkflowRoutes } from "../../workflows/routes.ts";
+import { FileRunStore } from "../../workflows/run-store.ts";
+import { WorkflowSecretsService } from "../../workflows/secrets.ts";
+import { publishWorkflowEvents, WorkflowService } from "../../workflows/service.ts";
+import { WorkflowStateStore } from "../../workflows/state-store.ts";
+import { FakeGitRemote } from "../../workflows/testing/daemon-harness.ts";
+import { silentLogger } from "../../workflows/testing/fakes.ts";
+import { catalogFor } from "../catalog/index.ts";
+import { InjectDaemonApi } from "../daemon-api.ts";
+import { executorPorts } from "../executor.ts";
+import { registerPrincipalHook, registerRemoteFieldStripping } from "../principal.ts";
+import { registerMcp } from "../server.ts";
 
 /** The agent host's own bearer on the session-tool routes (the 0600 `agent-host.token`). */
 export const HOST_BEARER = "Bearer scenario-host-token";
@@ -315,13 +315,9 @@ export class FakeHost {
       if (fields.lineage) {
         const parent = this.tabs.get(fields.lineage.parentThreadId);
         if (!parent) return reply.code(400).send({ code: "INVALID_LINEAGE", message: "lineage must name a chat session as parent." });
-        const agentCreated = fields.lineage.agentCreated === true;
-        lineage = {
-          parentThreadId: parent.id, relation: fields.lineage.relation, createdAt: "2026-10-15T00:00:00.000Z",
-          delegationDepth: (parent.lineage?.delegationDepth ?? 0) + (countsTowardDelegationDepth({ relation: fields.lineage.relation, agentCreated }) ? 1 : 0),
-          ...(agentCreated ? { agentCreated: true as const } : {}),
-          ...(parent.owner?.kind === "workflow" || parent.lineage?.workflowOwned === true ? { workflowOwned: true as const } : {})
-        };
+        if (fields.lineage.relation !== "delegate" && fields.lineage.relation !== "opened") return reply.code(400).send({ code: "INVALID_LINEAGE", message: "relation must be delegate or opened." });
+        // The service's own stamping (depth, agentCreated, the inherited workflow-ownership marker).
+        lineage = createdChildLineage(parent, { relation: fields.lineage.relation, agentCreated: fields.lineage.agentCreated === true }, (id) => this.tabs.get(id), "2026-10-15T00:00:00.000Z");
       }
       const id = `chat-${(this.ids += 1)}`;
       const tab = this.addChat(id, {
@@ -449,14 +445,14 @@ export interface ScenarioWorld {
   external(name: string, args?: Record<string, unknown>): Promise<CallToolResult>;
   /** The user answers a card on its card route (the GUI, remote app, no principal). */
   answer(card: ToolApprovalSummary, answer: ToolApprovalAnswer): Promise<{ status: number; body: any }>;
+  /** The card a running call opens; fails at once when the call settles without one. */
+  cardFor(pending: Promise<CallToolResult>, what: string): Promise<ToolApprovalSummary>;
   /** A chat call that opens exactly one card, which the user answers as given. */
   carded(threadId: string, name: string, args: Record<string, unknown>, answer: ToolApprovalAnswer): Promise<{ card: ToolApprovalSummary; result: CallToolResult; answered: { ok: true; outcome: string; grantId?: string } }>;
   /** A chat call that must open no card (one that opens is denied and fails the test). */
   uncarded(threadId: string, name: string, args?: Record<string, unknown>): Promise<CallToolResult>;
   /** A GUI request on the remote app (the user's own principal). */
   user(options: InjectOptions): Promise<{ status: number; body: any }>;
-  /** Waits for the first bus event (seen or future) that matches. */
-  waitEvent(match: (event: EventMessage) => boolean): Promise<EventMessage>;
   /** Lets every queue lane, router evaluation and store write settle (no clock). */
   drain(): Promise<void>;
   close(): Promise<void>;
@@ -491,27 +487,14 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
     return join(workspacesDir, workspace!, name2!);
   };
 
-  // The bus, as the daemon's broadcaster; every event kept in order for the waits.
+  // The bus, as the daemon's broadcaster; every event kept in order (the secrets scenario reads them all).
   const broadcaster = new Broadcaster();
   const events: EventMessage[] = [];
-  const eventWaiters = new Set<{ match: (event: EventMessage) => boolean; resolve: (event: EventMessage) => void }>();
   broadcaster.add({
     send(data: string) {
-      const event = JSON.parse(data) as EventMessage;
-      events.push(event);
-      for (const waiter of [...eventWaiters]) {
-        if (waiter.match(event)) {
-          eventWaiters.delete(waiter);
-          waiter.resolve(event);
-        }
-      }
+      events.push(JSON.parse(data) as EventMessage);
     }
   });
-  const waitEvent = (match: (event: EventMessage) => boolean): Promise<EventMessage> => {
-    const seen = events.find(match);
-    if (seen) return Promise.resolve(seen);
-    return new Promise((resolve) => eventWaiters.add({ match, resolve }));
-  };
 
   // Cards: every `opened` payload on the bus, handed out in order.
   const opened: ToolApprovalSummary[] = [];
@@ -566,6 +549,8 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
     agentOf: (id) => host.tabs.get(id)?.refId ?? null,
     api: () => internalApi,
     projectExists: (path) => existsSync(path),
+    // A card the test never answers ends in a minute, not the production 30: no scenario can hang.
+    timeoutMs: 60_000,
     logger: quiet
   });
   await runtime.load();
@@ -725,7 +710,13 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
   registerShared(remote, "remote");
   let externalApi!: InjectDaemonApi;
   registerMcp(remote, { createApi: () => externalApi, credentialId: () => "cred_scenario" });
-  // Match IncomingMessage after Fastify has consumed its body (light-my-request omits it).
+  // `/mcp` under `app.inject`: the MCP SDK's transport answers through @hono/node-server's listener,
+  // which, after responding, "drains" the request body unless the IncomingMessage is destroyed
+  // (`drainIncoming`). Fastify has already consumed the body and light-my-request's request never
+  // emits 'end', so the drain's timer fires and calls `socket.destroySoon()` — which
+  // light-my-request's fake socket lacks: an uncaught TypeError after the test ends. Marking the
+  // consumed request destroyed tells the drain there is nothing left to read (a real socket
+  // needs no such help). Test transport only; the daemon's `/mcp` route is unchanged.
   remote.addHook("preHandler", async (request: FastifyRequest) => {
     if (request.url === "/mcp") (request.raw as unknown as { destroyed: boolean }).destroyed = true;
   });
@@ -768,25 +759,30 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
   const answer = (card: ToolApprovalSummary, response: ToolApprovalAnswer) =>
     user({ method: "POST", url: agentChatRoutes.toolApproval(card.threadId, card.approvalId), payload: response as unknown as Record<string, unknown> });
   /** A call that opens one card, answered by the user as given. */
+  /** The card `pending` opens; the call settling first fails at once (never a wait for a card that will not come). */
+  const cardFor = async (pending: Promise<CallToolResult>, what: string): Promise<ToolApprovalSummary> => {
+    const waiter = cards.next();
+    const first = await Promise.race([waiter.then((card) => ({ card })), pending.then((result) => ({ result }))]);
+    if ("card" in first) return first.card;
+    // Withdraw the waiter, so a later card is not handed to it.
+    cardWaiters.splice(0, cardWaiters.length);
+    return assert.fail(`${what} opened no card; it answered ${JSON.stringify(first.result.structuredContent).slice(0, 400)}`);
+  };
   const carded = async (threadId: string, name: string, args: Record<string, unknown>, response: ToolApprovalAnswer) => {
     assert.equal(unread.length, 0, "a card from an earlier call is still unanswered");
     const pending = chat(threadId, name, args);
-    const card = await cards.next();
+    const card = await cardFor(pending, name);
     const answered = await answer(card, response);
     assert.equal(answered.status, 200, JSON.stringify(answered.body));
     return { card, result: await pending, answered: answered.body as { ok: true; outcome: string; grantId?: string } };
   };
 
+  /** The queue and the router until neither has work in flight (each can hand the other more). */
   const drain = async (): Promise<void> => {
-    const q = lineage as unknown as { writes: Promise<void>; lanes: Map<string, Promise<unknown>> };
-    const r = router as unknown as { writes: Promise<void>; evalTail: Map<string, Promise<void>> };
-    for (let round = 0; round < 10; round += 1) {
-      await new Promise((resolve) => setImmediate(resolve));
-      await Promise.all([...q.lanes.values()]);
-      await Promise.all([...r.evalTail.values()]);
-      await q.writes;
-      await r.writes;
-    }
+    do {
+      await lineage.whenIdle();
+      await router.whenIdle();
+    } while (lineage.hasWorkInFlight() || router.hasWorkInFlight());
   };
 
   let closed = false;
@@ -797,7 +793,7 @@ export async function scenarioWorld(seed: WorkspaceSeed): Promise<ScenarioWorld>
     set quota(value: UsageResponse) { world.quota = value; },
     get agentAccounts() { return world.agentAccounts; },
     set agentAccounts(value: AgentAccountsResponse) { world.agentAccounts = value; },
-    events, cards, chat, external, answer, carded, uncarded: (threadId, name, args = {}) => noCard(() => chat(threadId, name, args)), user, waitEvent, drain,
+    events, cards, chat, external, answer, cardFor, carded, uncarded: (threadId, name, args = {}) => noCard(() => chat(threadId, name, args)), user, drain,
     async close() {
       if (closed) return;
       closed = true;
