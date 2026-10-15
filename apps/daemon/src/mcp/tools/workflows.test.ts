@@ -941,6 +941,26 @@ test("a run card shows the definition that will run in full, and pins every sub-
   assert.equal(card.workflowId, "wf-1");
 });
 
+test("run_workflow: the run's frozen sub-workflows must be the pinned revisions, else it is cancelled (PREVIEW_STALE)", async (t) => {
+  const api = await sandbox(t);
+  const child = definition(api, { id: "wf-child", name: "Child", revision: 3 });
+  api.on("GET", "/api/workflows/wf-child", { status: 200, body: { workflow: child, problems: [] } });
+  const parent = definition(api, { nodes: [...definition(api).nodes, { id: "s", name: "Sub", type: "workflow", position: { x: 0, y: 0 }, config: { workflowId: "wf-child" } }] as Workflow["nodes"] });
+  serveDefinition(api, parent);
+  api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
+  api.on("POST", "/api/workflow-runs/run-1/cancel", { status: 200, body: { cancelled: true } });
+  const port = new FakeApprovalPort();
+  // The child was edited between the card's check and the start: the run froze revision 4.
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: { ...runRecord(parent), subWorkflowRevisions: { "wf-child": 4 } } } });
+  const error = await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port }), "PREVIEW_STALE", /sub-workflow wf-child \(revision 3 → 4\) changed as run run-1 started/);
+  assert.deepEqual(error.detail, { runId: "run-1", cancelled: true });
+  assert.ok(api.calls.some((c) => c.method === "POST" && c.path === "/api/workflow-runs/run-1/cancel"), "the run was cancelled");
+  // Frozen as pinned: it runs.
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: { ...runRecord(parent), subWorkflowRevisions: { "wf-child": 3 } } } });
+  const started = await call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port });
+  assert.equal(started.status, "started");
+});
+
 test("grants fail closed on a union member that no longer resolves, and cover a sub-workflow only when the same grant covers it", async (t) => {
   const api = await sandbox(t);
   const broken = definition(api, { nodes: [...definition(api).nodes, { id: "g", name: "Gone", type: "code", position: { x: 0, y: 0 }, config: { source: "1" }, projectOverride: join(api.workspacesDir, "acme", "removed") }] as Workflow["nodes"] });
@@ -956,7 +976,7 @@ test("grants fail closed on a union member that no longer resolves, and cover a 
   api.on("GET", "/api/workflows/wf-child", { status: 200, body: { workflow: child, problems: [] } });
   const parent = definition(api, { nodes: [...definition(api).nodes, { id: "s", name: "Sub", type: "workflow", position: { x: 0, y: 0 }, config: { workflowId: "wf-child" } }] as Workflow["nodes"] });
   serveDefinition(api, parent);
-  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(parent) } });
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: { ...runRecord(parent), subWorkflowRevisions: { "wf-child": 7 } } } });
   await call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port });
   assert.equal(port.cards.length, 2, "the child is not in the grant");
   assert.deepEqual(port.cards[1]!.grantOptions, ["chat"]);
@@ -1145,7 +1165,7 @@ test("the children-join-the-grant title only where a grant chosen there records 
   const parent = definition(api, { nodes: [...definition(api).nodes, { id: "s", name: "Sub", type: "workflow", position: { x: 0, y: 0 }, config: { workflowId: "wf-child" } }] as Workflow["nodes"] });
   serveDefinition(api, parent);
   api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
-  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(parent) } });
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: { ...runRecord(parent), subWorkflowRevisions: { "wf-child": 2 } } } });
   api.on("DELETE", "/api/workflows/wf-1", { status: 200, body: { ok: true } });
   api.on("GET", "/api/workflow-secrets", { status: 200, body: { secrets: [] } });
   api.on("PUT", "/api/workflow-secrets/*", { status: 200, body: { secrets: [] } });

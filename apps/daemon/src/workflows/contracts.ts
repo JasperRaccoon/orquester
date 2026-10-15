@@ -130,6 +130,14 @@ export interface PersistedRun extends Omit<WorkflowRun, "blocks"> {
   finalOutputNodeId?: string;
   /** Test runs: a block with a pinned output (the frozen definition's `pinned`) uses it instead of running. */
   usePinned?: boolean;
+  /**
+   * The sub-workflow definitions frozen when the top-level run started (by workflow id; every
+   * workflow its Run workflow blocks reach, recursively, up to the depth cap): a child run runs the
+   * frozen definition, never a later edit — what a run's approval showed is what runs. A child run
+   * carries its top-level run's map. Absent: none to freeze, or a run recorded by an older build (its
+   * children then read the current definitions).
+   */
+  subWorkflows?: Record<string, Workflow>;
 }
 
 export interface RunStore {

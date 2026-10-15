@@ -177,13 +177,13 @@ export const EditorToolbar: React.FC<EditorToolbarProps> = (props) => {
         type="button"
         role="switch"
         aria-checked={props.enabled}
-        aria-label={props.enabled ? "Enabled — its triggers fire" : "Disabled — only Run now starts it"}
+        aria-label={props.enabled ? "Enabled — its triggers fire" : "Disabled — triggers off; Run now and sub-workflow calls still run it"}
         title={
           enableBlocked
             ? props.enableRefusal!
             : props.enabled
               ? "Enabled — its triggers fire. Click to disable."
-              : "Disabled — only Run now starts it. Click to enable."
+              : "Disabled — its triggers are off; Run now, and other workflows that call it as a sub-workflow, still run it. Click to enable."
         }
         disabled={readOnly || enableBlocked}
         onClick={() => props.onToggleEnabled(!props.enabled)}

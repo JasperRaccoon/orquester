@@ -649,6 +649,23 @@ export async function verifyPins(
   }
 }
 
+/**
+ * After a run started: the first sub-workflow whose revision the run froze (`subWorkflowRevisions`,
+ * the engine's map) differs from the card's pin — "wf-child (revision 2 → 3)" — or null when every
+ * pinned child is what the run will run (a `missing` pin: not frozen either).
+ */
+export function frozenChildMismatch(pins: Readonly<Record<string, string>>, parentId: string, frozen: Readonly<Record<string, number>> | undefined): string | null {
+  for (const [key, value] of Object.entries(pins)) {
+    if (!key.startsWith(WORKFLOW_PIN)) continue;
+    const id = key.slice(WORKFLOW_PIN.length);
+    if (id === parentId) continue;
+    const ran = frozen?.[id];
+    const expected = value === MISSING ? undefined : value;
+    if ((ran === undefined ? undefined : String(ran)) !== expected) return `${id} (revision ${value} → ${ran ?? "missing"})`;
+  }
+  return null;
+}
+
 // ---------------------------------------------------------------------------
 // Preview sections (§7.1)
 // ---------------------------------------------------------------------------

@@ -248,7 +248,18 @@ export function publicRun(run: PersistedRun): WorkflowRun {
     deadEdges: [...run.deadEdges]
   };
   if (run.finalOutput !== undefined) out.finalOutput = structuredClone(run.finalOutput);
+  const revisions = subWorkflowRevisionsOf(run);
+  if (revisions !== undefined) out.subWorkflowRevisions = revisions;
   return out;
+}
+
+/** The revisions of the sub-workflows a run froze (the wire's view of `subWorkflows`), or undefined with none. */
+export function subWorkflowRevisionsOf(run: Pick<PersistedRun, "subWorkflows">): Record<string, number> | undefined {
+  const frozen = run.subWorkflows;
+  if (frozen === undefined || frozen === null || typeof frozen !== "object") return undefined;
+  const out: Record<string, number> = {};
+  for (const [id, workflow] of Object.entries(frozen)) if (typeof workflow?.revision === "number") out[id] = workflow.revision;
+  return Object.keys(out).length > 0 ? out : undefined;
 }
 
 export function isFinishedBlockStatus(status: WorkflowBlockRun["status"]): boolean {

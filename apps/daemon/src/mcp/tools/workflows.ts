@@ -96,6 +96,7 @@ import {
   SECRET_USE_NOTE,
   callerParts,
   workflowCallers,
+  frozenChildMismatch,
   workflowFields,
   workflowPin,
   workflowProjectLabel,
@@ -1234,6 +1235,21 @@ async function refuseStartedRun(api: DaemonApi, runId: string, asked: number, ra
   throw via ? new ToolError("PREVIEW_STALE", `${message} Re-read it (get_workflow) and call again.`, detail) : new ToolError("REVISION_CONFLICT", message, detail);
 }
 
+/** A started run whose frozen sub-workflow is not the one pinned: cancelled, PREVIEW_STALE. */
+async function refuseStaleChildRun(api: DaemonApi, runId: string, child: string, via: PassedBy): Promise<never> {
+  const cancel = await api.request("POST", workflowRoutes.runCancel(runId)).catch(() => null);
+  const outcome = cancel === null || cancel.status >= 500
+    ? `it could NOT be cancelled (the cancel failed): cancel it with cancel_workflow_run {runId: "${runId}"}`
+    : cancel.status >= 400
+      ? "it had already ended"
+      : "it was cancelled";
+  throw new ToolError(
+    "PREVIEW_STALE",
+    `The sub-workflow ${child} changed as run ${runId} started, ${passedPhrase(via)}; ${outcome}. Re-read it (get_workflow) and call again.`,
+    { runId, cancelled: cancel !== null && cancel.status < 400 }
+  );
+}
+
 /** The revision a run must start from; a mismatch before any card is the caller's stale read. */
 function revisionConflict(current: number, asked: number): ToolError {
   return workflowError({ status: 409, body: { error: { code: "REVISION_CONFLICT", message: `The workflow is at revision ${current}, not ${asked}` } } });
@@ -1353,6 +1369,12 @@ const runWorkflow = defineTool({
       const first = await readRun(api, started.runId).catch(() => null);
       const ran = first?.definition?.revision;
       if (ran !== args.revision) await refuseStartedRun(api, started.runId, args.revision, ran, ctx.approval?.outcome);
+      // The run froze its sub-workflows as it started: they must be the revisions the card (or the
+      // grant's check) pinned, or the run is cancelled — what was approved is what runs.
+      if (ctx.approval?.pins) {
+        const child = frozenChildMismatch(ctx.approval.pins, args.workflowId, first?.subWorkflowRevisions);
+        if (child !== null) await refuseStaleChildRun(api, started.runId, child, ctx.approval.outcome);
+      }
       if (!tap) return { runId: started.runId, status: "started", revision: args.revision, next: "get_workflow_runs {runId, waitSeconds} watches it; run_workflow with wait:true waits for the end." };
       const { run, ended } = await waitForRunEnd(api, tap, started.runId, { timeoutMs: args.timeoutSeconds * 1_000, signal });
       if (!run) return { runId: started.runId, finished: false, timedOut: true, next: "get_workflow_runs {runId, waitSeconds} watches it." };

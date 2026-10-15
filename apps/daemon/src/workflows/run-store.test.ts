@@ -215,6 +215,14 @@ test("deleteForWorkflow removes every run of that workflow only", async () => {
   assert.equal(store.summaryOf("run-a"), undefined);
 });
 
+test("persistedRunToWire: frozen sub-workflow definitions cross the wire as their revisions only; a run without them has none", () => {
+  const frozen = run("run-f", { subWorkflows: { "wf-child": { ...definition, id: "wf-child", revision: 4 } } });
+  const wire = persistedRunToWire(frozen);
+  assert.ok(!("subWorkflows" in wire));
+  assert.deepEqual(wire.subWorkflowRevisions, { "wf-child": 4 });
+  assert.ok(!("subWorkflowRevisions" in persistedRunToWire(run("run-g"))), "an older run (no map) has none");
+});
+
 test("toRunSummary / persistedRunToWire: bookkeeping stripped, outputs cut to the preview", () => {
   const big = "é".repeat(40_000);
   const persisted = run("run-w", {

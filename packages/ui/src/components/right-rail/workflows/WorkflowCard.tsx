@@ -201,7 +201,7 @@ export const WorkflowCard: React.FC<WorkflowCardProps> = (props) => {
             checked={workflow.enabled}
             sheet={sheet}
             label={`Enable ${workflow.name}`}
-            title={workflow.enabled ? "Enabled — its triggers fire" : "Disabled — only Run now starts it"}
+            title={workflow.enabled ? "Enabled — its triggers fire" : "Disabled — triggers off; Run now and sub-workflow calls still run it"}
             onChange={props.onToggleEnabled}
             className={cn("-my-1", sheet ? "-mr-1.5" : "-mr-1")}
           />

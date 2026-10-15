@@ -28,7 +28,7 @@ import {
 } from "@orquester/api";
 import { writeFileAtomic } from "../agent-hooks.ts";
 import type { PersistedRun, RunStore } from "./contracts.ts";
-import { jsonBytes, toRunSummary } from "./run-context.ts";
+import { jsonBytes, subWorkflowRevisionsOf, toRunSummary } from "./run-context.ts";
 
 export interface RunStoreOptions {
   /** `workflowRunsDir(baseDir)`. */
@@ -58,11 +58,12 @@ function previewOutput(output: unknown): { output: unknown; truncated: boolean }
 
 /**
  * A persisted run as the wire serves it (`GET /api/workflow-runs/:runId` without the engine): the
- * store's own bookkeeping (`version`, `depth`, `seededOutputs`, `fromNodeId`, each block's
+ * store's own bookkeeping (`version`, `depth`, `seededOutputs`, `fromNodeId`, the frozen
+ * `subWorkflows` — as their revisions only —, each block's
  * `waitingOn` and `outputFile`) is dropped and every block output is cut to the inline preview.
  */
 export function persistedRunToWire(run: PersistedRun): WorkflowRun {
-  const { version: _version, depth: _depth, seededOutputs: _seeded, fromNodeId: _from, blocks, ...rest } = run;
+  const { version: _version, depth: _depth, seededOutputs: _seeded, fromNodeId: _from, subWorkflows: _frozen, blocks, ...rest } = run;
   const wireBlocks: Record<string, WorkflowBlockRun> = {};
   for (const [nodeId, block] of Object.entries(blocks)) {
     const { waitingOn: _waitingOn, outputFile, ...wire } = block;
@@ -75,7 +76,8 @@ export function persistedRunToWire(run: PersistedRun): WorkflowRun {
     }
     wireBlocks[nodeId] = wire;
   }
-  return { ...(rest as Omit<WorkflowRun, "blocks">), blocks: wireBlocks };
+  const revisions = subWorkflowRevisionsOf(run);
+  return { ...(rest as Omit<WorkflowRun, "blocks">), blocks: wireBlocks, ...(revisions !== undefined ? { subWorkflowRevisions: revisions } : {}) };
 }
 
 const SAFE_SEGMENT = /^[A-Za-z0-9_-]{1,128}$/;

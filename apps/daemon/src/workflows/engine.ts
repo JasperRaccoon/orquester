@@ -191,6 +191,8 @@ interface RunSpec {
   fromNodeId?: string;
   testNodeOnly?: boolean;
   usePinned?: boolean;
+  /** A child run: its top-level run's frozen sub-workflow definitions (`PersistedRun.subWorkflows`). */
+  subWorkflows?: Record<string, Workflow>;
 }
 
 interface PreparedOutput {
@@ -1638,6 +1640,30 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     }
   };
 
+  /**
+   * Every sub-workflow `workflow` reaches through its Run workflow blocks (recursively, each once, to
+   * the depth cap), as stored NOW: what its runs will run. Undefined when it has none.
+   */
+  const freezeSubWorkflows = (workflow: Workflow): Record<string, Workflow> | undefined => {
+    const childIds = (definition: Workflow): string[] =>
+      definition.nodes.flatMap((node) => (node.type === "workflow" && typeof node.config.workflowId === "string" ? [node.config.workflowId] : []));
+    const frozen: Record<string, Workflow> = {};
+    let frontier = childIds(workflow);
+    if (frontier.length === 0) return undefined;
+    for (let depth = 0; depth < limits.maxSubWorkflowDepth && frontier.length > 0; depth += 1) {
+      const next: string[] = [];
+      for (const id of frontier) {
+        if (id === workflow.id || Object.hasOwn(frozen, id)) continue;
+        const child = store.get(id);
+        if (!child) continue; // a missing child fails its block when it is reached, as before
+        frozen[id] = structuredClone(child);
+        next.push(...childIds(child));
+      }
+      frontier = next;
+    }
+    return frozen;
+  };
+
   const launch = async (workflow: Workflow, spec: RunSpec): Promise<{ response: RunWorkflowResponse; run?: ActiveRun }> => {
     if (stopped || stopping) throw new WorkflowEngineError(503, "ENGINE_UNAVAILABLE", "The workflow engine is stopping.");
     const runId = opts.mintId();
@@ -1662,6 +1688,9 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     const now = nowIso();
     const run = baseRun(workflow, runId, spec, now, redactor);
     if (queuedFor !== undefined) run.queuedFor = queuedFor;
+    // Sub-workflows are frozen when the top-level run starts; a child run carries that map on.
+    const subWorkflows = spec.subWorkflows ?? (spec.parentRunId === undefined ? freezeSubWorkflows(workflow) : undefined);
+    if (subWorkflows !== undefined) run.subWorkflows = subWorkflows;
     const a = newActive(run, secrets, redactSecrets);
     let executed: Set<string> | null = null;
     if (spec.fromNodeId !== undefined) {
@@ -1758,19 +1787,33 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
       }
       cursor = cursor.run.parentRunId !== undefined ? active.get(cursor.run.parentRunId) : undefined;
     }
-    const workflow = store.get(input.workflowId);
-    if (!workflow) throw new WorkflowEngineError(404, "WORKFLOW_NOT_FOUND", `No workflow with id "${input.workflowId}".`);
+    // The definition frozen when the top-level run started (what its approval showed), never a later
+    // edit; a run recorded before freezing existed (no map) reads the current one.
+    const frozen = parent?.run.subWorkflows;
+    const workflow = frozen !== undefined ? (Object.hasOwn(frozen, input.workflowId) ? frozen[input.workflowId]! : null) : store.get(input.workflowId);
+    if (!workflow) {
+      throw new WorkflowEngineError(
+        404,
+        "WORKFLOW_NOT_FOUND",
+        frozen !== undefined ? `No workflow with id "${input.workflowId}" existed when this run started.` : `No workflow with id "${input.workflowId}".`
+      );
+    }
+    // Deleted since: its runs (and their history) went with it — never start one under a gone id.
+    if (frozen !== undefined && !store.get(input.workflowId)) {
+      throw new WorkflowEngineError(404, "WORKFLOW_NOT_FOUND", `The sub-workflow "${workflow.name}" was deleted after this run started.`);
+    }
     const problems = validationErrors(workflow);
     if (problems) {
       throw new WorkflowEngineError(400, "INVALID_WORKFLOW", `The sub-workflow "${workflow.name}" has errors: ${problems[0]!.message}`, problems);
     }
-    const launched = await launch(workflow, {
+    const launched = await launch(structuredClone(workflow), {
       trigger: { kind: "subworkflow", text: parent ? `From ${parent.run.workflowName}` : undefined },
       payload: { kind: "subworkflow", input: input.input, parentRunId: input.parentRunId, parentNodeId: input.parentNodeId },
       test: parent?.run.test ?? false,
       force: true,
       depth,
-      parentRunId: input.parentRunId
+      parentRunId: input.parentRunId,
+      ...(frozen !== undefined ? { subWorkflows: frozen } : {})
     });
     const runId = launched.response.runId!;
     parent?.children.add(runId);
