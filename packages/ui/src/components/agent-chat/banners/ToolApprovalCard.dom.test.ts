@@ -225,6 +225,7 @@ describe("ToolApprovalCard", () => {
     const input = q<HTMLInputElement>('input[type="password"]');
     type(input, "s3cret-value");
     assert.equal(approve.disabled, false);
+    clock = START + 60_000;
     act(() => approve.click());
     await flush();
     assert.deepEqual(answers, [{ decision: "approve", secrets: { TOKEN: "s3cret-value" } }]);
@@ -262,6 +263,7 @@ describe("ToolApprovalCard", () => {
     act(() => q<HTMLButtonElement>("[data-grant-menu]").click());
     const rows = dom.window.document.querySelectorAll("[data-grant]");
     assert.deepEqual(Array.from(rows).map((row) => row.getAttribute("data-grant")), ["project"]);
+    clock = START + 60_000;
     act(() => (rows[0] as HTMLButtonElement).click());
     await flush();
     assert.deepEqual(answers, [{ decision: "approve", grant: "project" }]);
@@ -313,6 +315,57 @@ describe("ToolApprovalCard", () => {
     pointerClick(q("[data-approve]"), 1);
     await flush();
     assert.equal(answers.length, 2);
+  });
+
+  it("a click with detail 0 (assistive or programmatic) also waits out the appearance window", async () => {
+    clock = START;
+    render(card());
+    clock = START + 799;
+    act(() => q<HTMLButtonElement>("[data-approve]").click());
+    await flush();
+    assert.equal(answers.length, 0);
+    clock = START + 800;
+    act(() => q<HTMLButtonElement>("[data-approve]").click());
+    await flush();
+    assert.equal(answers.length, 1);
+  });
+
+  it("new content under the same card id re-locks the preview gate and restarts the guards", async () => {
+    clock = START;
+    full = card({ sections: [{ kind: "text", text: "the whole text" }] });
+    render(card({ fullPreview: true, sections: [{ kind: "text", text: "the who", partial: true }] }));
+    act(() => q<HTMLButtonElement>("[data-view-all]").click());
+    await flush();
+    await flush();
+    assert.equal(q<HTMLButtonElement>("[data-approve]").disabled, false, "loaded: the gate opened");
+    // The daemon re-opens ap-1 with other content (the store replaces it in place).
+    clock = START + 60_000;
+    render(card({ fullPreview: true, sections: [{ kind: "text", text: "something else", partial: true }] }));
+    await flush();
+    const approve = q<HTMLButtonElement>("[data-approve]");
+    assert.equal(approve.disabled, true, "the old full preview no longer counts");
+    assert.match(mount.innerHTML, /something else/);
+    assert.doesNotMatch(mount.innerHTML, /the whole text/);
+    // Loaded again for the new content: the gate opens, but the guards started over at the change.
+    full = card({ sections: [{ kind: "text", text: "something else, whole" }] });
+    act(() => q<HTMLButtonElement>("[data-view-all]").click());
+    await flush();
+    await flush();
+    assert.equal(loads, 2);
+    assert.equal(q<HTMLButtonElement>("[data-approve]").disabled, false);
+    key(q('[data-tool-approval="ap-1"]'), { key: "Enter", ctrlKey: true });
+    pointerClick(q("[data-approve]"), 1);
+    await flush();
+    assert.equal(answers.length, 0, "keyboard and click guards restarted with the new content");
+    clock += TOOL_APPROVAL_KEYBOARD_GUARD_MS;
+    key(q('[data-tool-approval="ap-1"]'), { key: "Enter", ctrlKey: true });
+    await flush();
+    assert.equal(answers.length, 1);
+  });
+
+  it("on a phone a blocked Approve says why next to it", () => {
+    render(card({ fullPreview: true, sections: [{ kind: "text", text: "s", partial: true }] }), true);
+    assert.match(q("[data-approve-blocked]").textContent ?? "", /Open Review to load the whole preview/);
   });
 
   it("a grant row ignores a pointer click inside the guard too", async () => {

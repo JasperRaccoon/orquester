@@ -367,15 +367,26 @@ export function contentHash(text: string): string {
 }
 
 /**
- * How long a POINTER activation of Approve (or a grant row) is ignored after the card appears or
- * its content changes: the second click of a double click aimed at the previous card's Approve
- * must not approve the card that just mounted under the pointer.
+ * How long ANY activation of Approve (or a grant row) by click is ignored after the card appears
+ * or its content changes — a pointer click (the second click of a double click aimed at the
+ * previous card's Approve) and a click with `detail` 0 alike (assistive technology, programmatic):
+ * the window is measured from the card's own timestamp, never from the event.
  */
 export const TOOL_APPROVAL_POINTER_GUARD_MS = 800;
 
-/** Whether a click is a pointer click (`detail ≥ 1`; keyboard activation is 0) inside the pointer guard. */
-export function toolApprovalPointerGuarded(input: { detail: number; now: number; shownAt: number }): boolean {
-  return input.detail > 0 && input.now - input.shownAt < TOOL_APPROVAL_POINTER_GUARD_MS;
+/** Whether a click on an approving control falls inside the appearance window. */
+export function toolApprovalClickGuarded(input: { now: number; shownAt: number }): boolean {
+  return input.now - input.shownAt < TOOL_APPROVAL_POINTER_GUARD_MS;
+}
+
+/**
+ * What the loaded full preview is valid for: the card's decision-bearing content as the summary
+ * showed it (sections, `fullPreview`, title, scope, reason). The same `approvalId` re-opened with
+ * other content (`upsertApproval` replaces in place) gets another key, so a full preview loaded
+ * for the old content no longer counts and the preview gate locks again.
+ */
+export function toolApprovalCardKey(card: ParsedToolApprovalSummary): string {
+  return `${card.approvalId}:${contentHash(JSON.stringify([card.sections, card.fullPreview, card.title, card.scope, card.reason ?? ""]))}`;
 }
 
 /**

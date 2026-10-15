@@ -17,8 +17,9 @@
  *  - **The preview is complete.** A long section has "View all"; a summary the daemon had to cut
  *    fetches the whole preview (`GET toolApproval`) before showing the rest, and Approve (grant
  *    rows too) stays disabled, with its reason as the tooltip, until the user loaded it.
- *  - **A double click never approves the next card.** A pointer click on Approve or a grant row is
- *    ignored for `TOOL_APPROVAL_POINTER_GUARD_MS` after the card appears or changes.
+ *  - **A double click never approves the next card.** Any click on Approve or a grant row (pointer,
+ *    assistive or programmatic) is ignored for `TOOL_APPROVAL_POINTER_GUARD_MS` after the card
+ *    appears or changes; a full preview loaded for other content no longer counts.
  *  - **Grants only as offered.** The Approve menu lists exactly the card's `grantOptions`.
  *  - **Secrets stay in this component.** Masked inputs for `secretFields`; the values go into the
  *    answer body and are cleared from state as soon as it is sent, whatever the outcome.
@@ -51,7 +52,8 @@ import {
   toolApprovalGuardKey,
   toolApprovalKeyAction,
   toolApprovalKindBadge,
-  toolApprovalPointerGuarded,
+  toolApprovalCardKey,
+  toolApprovalClickGuarded,
   toolApprovalPreviewIsCut,
   toolApprovalPrimaryLabel,
   type ToolApprovalKeyEvent
@@ -121,8 +123,13 @@ export function ToolApprovalCard({
   const [error, setError] = React.useState<string | null>(null);
   const [denyOpen, setDenyOpen] = React.useState(false);
   const [denyReason, setDenyReason] = React.useState("");
-  const [full, setFull] = React.useState<ParsedToolApprovalSummary | null>(null);
-  const [loadingFull, setLoadingFull] = React.useState(false);
+  // The whole preview, kept with the key of the card content it was loaded FOR: when the same
+  // card comes back with other content, it no longer counts (the gate locks again).
+  const cardKey = React.useMemo(() => toolApprovalCardKey(card), [card]);
+  const [fullState, setFullState] = React.useState<{ key: string; card: ParsedToolApprovalSummary } | null>(null);
+  const full = fullState !== null && fullState.key === cardKey ? fullState.card : null;
+  const [loadingFor, setLoadingFor] = React.useState<string | null>(null);
+  const loadingFull = loadingFor === cardKey;
   const [fullError, setFullError] = React.useState<string | null>(null);
   const [sheetOpen, setSheetOpen] = React.useState(false);
   // Enter then a click can both land before a re-render; this guard is synchronous.
@@ -150,10 +157,14 @@ export function ToolApprovalCard({
     setError(null);
     setDenyOpen(false);
     setDenyReason("");
-    setFull(null);
-    setFullError(null);
     setSheetOpen(false);
   }, [card.approvalId]);
+  // New content (same card or not): the full preview loaded for the old content is dropped, and
+  // the guards restart (the guard key moves with the shown content).
+  React.useEffect(() => {
+    setFullState((current) => (current !== null && current.key !== cardKey ? null : current));
+    setFullError(null);
+  }, [cardKey]);
 
   React.useEffect(() => {
     if (denyOpen && focusDenyReason.current) {
@@ -203,12 +214,13 @@ export function ToolApprovalCard({
   const guarded = (): boolean => now() - shownAt.current < TOOL_APPROVAL_KEYBOARD_GUARD_MS;
 
   /**
-   * A click on a control that approves: a POINTER click (`detail ≥ 1`) inside the pointer guard is
-   * ignored — the second click of a double click meant for the previous card. Keyboard activation
-   * (`detail` 0) has its own guard in {@link approveKeys}.
+   * A click on a control that approves, inside the appearance window, is ignored — whatever its
+   * `detail` (the second click of a double click meant for the previous card; an assistive or
+   * programmatic click). Measured from the card's timestamp, never the event's. Keyboard chords
+   * have the longer guard in {@link approveKeys}.
    */
   const approveClick = (run: () => void) => (event: React.MouseEvent<HTMLButtonElement>) => {
-    if (toolApprovalPointerGuarded({ detail: event.detail, now: now(), shownAt: shownAt.current })) {
+    if (toolApprovalClickGuarded({ now: now(), shownAt: shownAt.current })) {
       event.preventDefault();
       return;
     }
@@ -248,15 +260,18 @@ export function ToolApprovalCard({
 
   const loadFull = (): void => {
     if (loadingFull || full !== null) return;
-    setLoadingFull(true);
+    // Kept for the content it was asked for: an answer that lands after the card changed is not
+    // the preview of what is shown now.
+    const forKey = cardKey;
+    setLoadingFor(forKey);
     setFullError(null);
     onLoadFull()
       .then((detail) => {
         if (detail === null) setFullError("The full preview is no longer available.");
-        else setFull(detail);
+        else setFullState({ key: forKey, card: detail });
       })
       .catch(() => setFullError("Could not load the full preview. Try again."))
-      .finally(() => setLoadingFull(false));
+      .finally(() => setLoadingFor((current) => (current === forKey ? null : current)));
   };
 
   const preview = (expandAll: boolean): React.ReactElement => (
@@ -412,6 +427,13 @@ export function ToolApprovalCard({
         {error !== null ? (
           <p role="alert" className="mt-2 text-[11px] text-danger-300">
             {error}
+          </p>
+        ) : null}
+
+        {/* Phones have no hover tooltip: why Approve is disabled is said next to it. */}
+        {isMobile && approveBlocked !== null && !submitting ? (
+          <p className="mt-2 text-[11px] text-warn-300" data-approve-blocked="">
+            {previewComplete ? approveBlocked : "Open Review to load the whole preview before approving."}
           </p>
         ) : null}
 

@@ -13,7 +13,8 @@ import {
   toolApprovalGrantChoices,
   toolApprovalGuardKey,
   toolApprovalKeyAction,
-  toolApprovalPointerGuarded,
+  toolApprovalCardKey,
+  toolApprovalClickGuarded,
   toolApprovalPreviewIsCut,
   TOOL_APPROVAL_POINTER_GUARD_MS
 } from "./banner-model.ts";
@@ -200,17 +201,18 @@ test("the guard key moves with section CONTENT, not only its count", () => {
   assert.notEqual(toolApprovalGuardKey(parsed({ reason: "because" })), a);
 });
 
-test("pointer clicks are ignored inside the pointer guard; keyboard activation is not a pointer click", () => {
-  assert.equal(toolApprovalPointerGuarded({ detail: 1, now: TOOL_APPROVAL_POINTER_GUARD_MS - 1, shownAt: 0 }), true);
-  assert.equal(toolApprovalPointerGuarded({ detail: 2, now: 10, shownAt: 0 }), true);
-  assert.equal(toolApprovalPointerGuarded({ detail: 1, now: TOOL_APPROVAL_POINTER_GUARD_MS, shownAt: 0 }), false);
-  assert.equal(toolApprovalPointerGuarded({ detail: 0, now: 10, shownAt: 0 }), false);
+test("every click inside the appearance window is ignored, whatever its detail", () => {
+  assert.equal(toolApprovalClickGuarded({ now: TOOL_APPROVAL_POINTER_GUARD_MS - 1, shownAt: 0 }), true);
+  assert.equal(toolApprovalClickGuarded({ now: 10, shownAt: 0 }), true);
+  assert.equal(toolApprovalClickGuarded({ now: TOOL_APPROVAL_POINTER_GUARD_MS, shownAt: 0 }), false);
 });
 
-test("every family has its own what-will-change sentence", () => {
-  const families = ["workflows", "workflow-secrets", "agent-profile", "desktops", "saved-prompts", "cross-project", "cross-project-read", "cross-workspace-read"] as const;
-  const sentences = new Set(families.map((family) => toolApprovalChangeSentence({ kind: "admin", family, scope: { label: "x" } })));
-  assert.equal(sentences.size, families.length - 1, "the two read families share one");
-  assert.match(toolApprovalChangeSentence({ kind: "toolset", family: "toolset", scope: { label: "x" } }), /this chat only/);
-  assert.match(toolApprovalChangeSentence({ kind: "unknown", family: "unknown", scope: { label: "x" } }), /newer Orquester/);
+test("the card key moves with the summary's content under the same id", () => {
+  const a = toolApprovalCardKey(parsed({}));
+  assert.equal(toolApprovalCardKey(parsed({})), a);
+  assert.notEqual(toolApprovalCardKey(parsed({ sections: [{ kind: "code", title: "run.sh", text: "other" }] })), a);
+  assert.notEqual(toolApprovalCardKey(parsed({ fullPreview: true })), a);
+  assert.notEqual(toolApprovalCardKey(parsed({ title: "T2" })), a);
+  assert.notEqual(toolApprovalCardKey(parsed({ scope: { label: "S2" } })), a);
+  assert.notEqual(toolApprovalCardKey(parsed({ reason: "r" })), a);
 });
