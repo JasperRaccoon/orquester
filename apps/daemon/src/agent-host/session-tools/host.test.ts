@@ -560,3 +560,57 @@ test("a relaunch that already read this change or a newer one owes nothing (`sup
   assert.equal(await service.applyManifest("thread-c", { tools: ["echo"], instructions: "## Orquester (test)", deny: [], seq: 2, epoch: "e1" }), "superseded");
   assert.equal(service.needsRestart("thread-c"), false);
 });
+
+test("a daemon epoch some thread moved on from is retired host-wide", async (t) => {
+  let epoch = "boot-1";
+  const service = testHost(recordingForward().forward, async () => ({ kind: "manifest", manifest: { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: [], seq: 100, epoch } }));
+  t.after(() => service.stop());
+  await service.issue("thread-a", CODEX);
+  await service.issue("thread-b", CODEX);
+  // thread-a hears from the restarted daemon…
+  epoch = "boot-2";
+  assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "", deny: [], seq: 1, epoch: "boot-2" }), "next-idle");
+  // …so a late push of the old daemon is stale everywhere, thread-b included.
+  assert.equal(await service.applyManifest("thread-b", { tools: ["echo"], instructions: "", deny: [], seq: 500, epoch: "boot-1" }), "superseded");
+});
+
+test("a fallback (the thread's own last manifest too) carries no stamp and records none", async (t) => {
+  let up = true;
+  const service = testHost(recordingForward().forward, async () =>
+    up ? { kind: "manifest", manifest: { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: [], seq: 50, epoch: "e1" } } : { kind: "unavailable" }
+  );
+  t.after(() => service.stop());
+  await service.issue("thread-a", CODEX);
+  up = false;
+  const again = await service.issue("thread-a", CODEX);
+  assert.equal(again.prepared.source, "fallback");
+  assert.equal(again.prepared.seq, undefined);
+  // The relaunch recorded nothing new; a newer refresh is judged against the last REAL manifest.
+  assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "", deny: [], seq: 51, epoch: "e1" }), "next-idle");
+});
+
+test("a launch whose read is OLDER than a refresh that claimed meanwhile keeps the refresh's wanted list", async (t) => {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  let reads = 0;
+  let entered!: () => void;
+  const reading = new Promise<void>((resolve) => (entered = resolve));
+  const service = testHost(recordingForward().forward, async () => {
+    reads += 1;
+    if (reads === 2) {
+      entered();
+      await gate;
+    }
+    return { kind: "manifest", manifest: { tools: TEST_NAMES, instructions: "## Orquester (test)", deny: [], seq: reads === 1 ? 10 : 11, epoch: "e1" } };
+  });
+  t.after(() => service.stop());
+  await service.issue("thread-a", CODEX);
+  // The newer refresh is wanted (a restart at idle)…
+  assert.equal(await service.applyManifest("thread-a", { tools: ["echo"], instructions: "", deny: [], seq: 12, epoch: "e1" }), "next-idle");
+  // …and a relaunch whose read (seq 11) is older than it must not drop it.
+  const relaunch = service.issue("thread-a", CODEX);
+  await reading;
+  release();
+  await relaunch;
+  assert.equal(service.needsRestart("thread-a"), true);
+});
