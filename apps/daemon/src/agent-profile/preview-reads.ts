@@ -306,7 +306,10 @@ export async function readInstalledPlugin(
       const tree = await readPreviewTree(real);
       return { tree, provides: pluginProvidesOf(tree) };
     }
-    const cacheRoot = await realpath(pluginCacheRoot(real)).catch(() => real);
+    // The cache root as the agent names it (`…/plugins/cache` on the unresolved path), then
+    // resolved: an account home that reaches the cache through a symlink still finds its own
+    // sibling versions inside it.
+    const cacheRoot = await realpath(pluginCacheRoot(resolve(path))).catch(() => real);
     // Version directories, and symlinks to one that stay inside the plugin cache.
     const children = new Map<string, string>();
     for (const entry of await readdir(real, { withFileTypes: true })) {

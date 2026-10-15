@@ -184,9 +184,10 @@ function specOf(raw: unknown): string | null {
   return null;
 }
 
-/** `base-2`, `base-3`, … — the first free name `valid` accepts. */
+/** No names taken beyond the agent's own (the also-taken default of the naming helpers). */
 const NO_NAMES: ReadonlySet<string> = new Set();
 
+/** `base-2`, `base-3`, … — the first free name `valid` accepts. */
 function keepBothName(base: string, taken: (name: string) => boolean, valid: (name: string) => boolean): string {
   for (let n = 2; n < 1000; n += 1) {
     const candidate = `${base}-${n}`;

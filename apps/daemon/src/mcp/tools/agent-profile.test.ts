@@ -823,3 +823,28 @@ test("chat: copies in one batch landing on one name — the second copy preview 
   ] }), "INVALID_ARGUMENT");
   assert.equal(refused.cards.length, 0);
 });
+
+test("chat: a batch landing on a name an earlier change deletes or renames is refused before the card (the disk cannot know yet)", async () => {
+  const skillPath = `${base}/items/skill%3Ax`;
+  const api = new FakeDaemonApi().on("GET", base, reply(snapshot([item("skill", "x", { path: "/h/.claude/skills/x" }), item("skill", "y")])))
+    .on("GET", skillPath, reply({ kind: "skill", item: item("skill", "x"), document: { frontmatter: { description: "X" }, body: "x" } }))
+    .on("GET", `${skillPath}/files`, reply({ itemId: "skill:x", revision: "item-r1", complete: true, files: [] }))
+    // On disk X still exists: a keep-both create would be told "x-2" — but after the delete it writes "x".
+    .on("GET", `${base}/names/keep-both`, (call) => reply({ name: `${call.query?.name}-2` }));
+  const cases: [string, Record<string, unknown>[]][] = [
+    ["delete then create", [{ action: "delete", id: "skill:x" }, { action: "create", onConflict: "keep-both", skill: { name: "x", body: "new" } }]],
+    ["rename then create the new name", [{ action: "update", id: "skill:x", skill: { name: "z" } }, { action: "create", skill: { name: "z", body: "new" } }]],
+    ["rename then create the freed name", [{ action: "update", id: "skill:x", skill: { name: "z" } }, { action: "create", onConflict: "keep-both", skill: { name: "x", body: "new" } }]],
+    ["create then rename onto it", [{ action: "create", skill: { name: "z", body: "new" } }, { action: "update", id: "skill:x", skill: { name: "z" } }]]
+  ];
+  for (const [label, changes] of cases) {
+    const port = new FakeApprovalPort();
+    const error = await rejects(chat(api, port, { agent: "claude", changes }), "INVALID_ARGUMENT");
+    assert.match(error.message, /^changes\[1\]/, label);
+    assert.equal(port.cards.length, 0, label);
+  }
+  assert.deepEqual(writes(api), []);
+  // A rename and a create of unrelated names still card together.
+  const fine = new FakeApprovalPort(() => ({ outcome: "denied", approvalId: "" }));
+  await rejects(chat(api, fine, { agent: "claude", changes: [{ action: "update", id: "skill:x", skill: { name: "z" } }, { action: "create", skill: { name: "w", body: "new" } }] }), "APPROVAL_DENIED");
+});

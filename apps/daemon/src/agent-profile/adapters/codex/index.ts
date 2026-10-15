@@ -1826,4 +1826,5 @@ function codexMcpKeepBothName(servers: Record<string, unknown>, name: string, al
   return taken(name) ? uniqueName(name, taken) : name;
 }
 
+/** No names taken beyond the agent's own (the also-taken default of the naming helpers). */
 const NO_NAMES: ReadonlySet<string> = new Set();

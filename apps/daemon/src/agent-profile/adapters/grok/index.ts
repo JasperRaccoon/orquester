@@ -381,9 +381,10 @@ function isCommandPath(path: string | undefined): boolean {
   return path !== undefined && /[\\/]commands[\\/][^\\/]+\.md$/.test(path);
 }
 
-/** Next free `<base>-2`, `<base>-3`, … that passes `valid` and fits `max`. */
+/** No names taken beyond the agent's own (the also-taken default of the naming helpers). */
 const NO_NAMES: ReadonlySet<string> = new Set();
 
+/** Next free `<base>-2`, `<base>-3`, … that passes `valid` and fits `max`. */
 function nextFreeName(base: string, taken: (name: string) => boolean, max: number, valid: (name: string) => boolean): string {
   for (let n = 2; n < 1000; n += 1) {
     const suffix = `-${n}`;

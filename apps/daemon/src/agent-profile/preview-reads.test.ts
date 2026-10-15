@@ -400,3 +400,17 @@ test("keep-both import detail: only picks are named, in pick order, in one adapt
   assert.deepEqual(byRef.get(deploy)!.files.map((file) => file.path), ["deploy-2.md"], "the command's file as written, not its source path");
   assert.equal(detail.candidates.find((candidate) => candidate.name === "refused")!.writtenName, undefined);
 });
+
+test("readInstalledPlugin: the cache root comes from the path as named — an account home reaching the cache through a symlink still follows sibling versions", async (t) => {
+  const root = await tempRoot(t);
+  // The system cache lives under a directory not named plugins/cache; the account home links to it.
+  const store = join(root, "system", "plugin-store");
+  await write(join(store, "mkt", "shared-2.0.0", ".codex-plugin", "plugin.json"), JSON.stringify({ name: "p-two" }));
+  await mkdir(join(store, "mkt", "p"), { recursive: true });
+  await symlink(join(store, "mkt", "shared-2.0.0"), join(store, "mkt", "p", "2.0.0"));
+  await mkdir(join(root, "account", ".codex", "plugins"), { recursive: true });
+  await symlink(store, join(root, "account", ".codex", "plugins", "cache"));
+  const read = await readInstalledPlugin(join(root, "account", ".codex", "plugins", "cache", "mkt", "p"), "2.0.0");
+  assert.equal(read.unreadable, undefined);
+  assert.match(read.tree.files[0]!.text!, /p-two/);
+});

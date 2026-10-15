@@ -593,6 +593,22 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
     }
     names.push(name);
   };
+  // Names an earlier change deletes or renames (from and to). The agents' naming reads the disk,
+  // which cannot know a name will be freed or taken half-way through the batch: a later change
+  // landing on one of them is refused before the card rather than shown under a name it would
+  // not get (ruling: refuse, not predict).
+  const moved = new Map<Agent, Required<ProfileTakenNames>>();
+  const movedOf = (target: Agent): Required<ProfileTakenNames> => {
+    let names = moved.get(target);
+    if (!names) moved.set(target, (names = { mcp: [], skill: [], command: [] }));
+    return names;
+  };
+  const refuseMoved = (index: number, target: Agent, kind: "mcp" | "skill" | "command", names: readonly string[]) => {
+    const hit = names.find((name) => movedOf(target)[kind].includes(name));
+    if (hit !== undefined) {
+      throw new ToolError("INVALID_ARGUMENT", `${where(index)}: the ${KIND_ONE[kind]} name "${clipText(hit, MAX_ECHO_CHARS)}" is deleted or renamed by an earlier change of this call in ${CLI_LABELS[target]}. Make that change in its own call first.`);
+    }
+  };
   for (const [index, change] of changes.entries()) {
     const fact: ChangeFacts = {};
     const pin = (what: string, value: string) => {
@@ -616,7 +632,9 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
         if (name !== undefined && (kind === "mcp" || kind === "skill" || kind === "command")) {
           // The name written, always pinned: keep-both asks the agent's own naming (which knows
           // what its write would collide with); otherwise it is the name itself.
+          refuseMoved(index, agent, kind, [name]);
           fact.writtenName = policy === "keep-both" ? (await client.keepBothName(agent, kind, name, takenOf(agent))).name : name;
+          refuseMoved(index, agent, kind, [fact.writtenName]);
           claim(index, agent, kind, fact.writtenName, policy);
           pin("name", fact.writtenName);
         }
@@ -651,9 +669,21 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
         if (fact.item.kind === "mcp" || fact.item.kind === "hook" || fact.item.kind === "plugin" || fact.item.kind === "marketplace" || change.action === "update") {
           fact.detail = await client.item(agent, change.id!);
         }
+        // A delete frees the item's name; a rename frees the old one and takes the new one.
+        const named = fact.item.kind === "mcp" || fact.item.kind === "skill" || fact.item.kind === "command" ? fact.item.kind : null;
+        if (named !== null && change.action === "delete") movedOf(agent)[named].push(fact.item.name);
+        const renamedTo = change.action === "update" && named !== null ? change[named]?.name : undefined;
+        if (named !== null && renamedTo !== undefined && renamedTo !== fact.item.name) {
+          refuseMoved(index, agent, named, [renamedTo]);
+          if (takenOf(agent)[named].includes(renamedTo)) {
+            throw new ToolError("INVALID_ARGUMENT", `${where(index)}: an earlier change of this call already writes the ${KIND_ONE[named]} "${clipText(renamedTo, MAX_ECHO_CHARS)}". Rename to another name, or make the changes in separate calls.`);
+          }
+          movedOf(agent)[named].push(fact.item.name, renamedTo);
+        }
         if (change.action === "copy") {
           // What the target gets: converted, named by the target's own keep-both naming.
           fact.copy = await client.copyPreview(agent, change.id!, change.toAgent!, change.onConflict ?? "fail", takenOf(change.toAgent!));
+          refuseMoved(index, change.toAgent!, fact.copy.kind, [fact.item.name, fact.copy.name]);
           claim(index, change.toAgent!, fact.copy.kind, fact.copy.name, change.onConflict ?? "fail");
           pin("name", fact.copy.name);
           if (fact.copy.tree) pin("files", treeDigest(fact.copy.tree));
@@ -695,6 +725,7 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
         const byRef = new Map(fact.importDetail.candidates.map((candidate) => [candidate.ref, candidate]));
         for (const ref of new Set(change.picks!)) {
           const candidate = byRef.get(ref)!;
+          refuseMoved(index, agent, candidate.kind, [candidate.name, candidate.writtenName ?? candidate.name]);
           claim(index, agent, candidate.kind, candidate.writtenName ?? candidate.name, change.onConflict ?? "fail");
         }
         for (const candidate of fact.importDetail.candidates.filter((entry) => change.picks!.includes(entry.ref))) {
