@@ -80,3 +80,37 @@ test("no threads directory yet: no rows", async () => {
   const scanner = new ChatThreadUsageScanner({ threadsDir: join(tmpdir(), "chat-usage-missing-dir-x"), agents: ["grok"], now: () => 0 });
   assert.deepEqual((await scanner.snapshot("grok")).rows, []);
 });
+
+test("tolerant of every line it cannot use: malformed, unknown or old shapes are skipped, never thrown on", async (t) => {
+  const w = await world(t);
+  const junk = [
+    "{not json",
+    '{"type":"thread.session-set","payload":{"turn":', // cut mid-line, still mentions both markers
+    "null",
+    "42",
+    '"a string"',
+    "[1,2,3]",
+    line({ type: "thread.session-set", payload: null }).trim(),
+    line({ type: "thread.session-set", occurredAt: "2026-10-14T10:00:00Z", payload: { turn: "not an object" } }).trim(),
+    line({ type: "thread.session-set", occurredAt: "not a date", payload: { turn: { turnId: "x", totalCostUsd: 1 } } }).trim(),
+    line({ type: "thread.session-set", payload: { turn: { turnId: "no-time", totalCostUsd: 1 } } }).trim(),
+    line({ type: "thread.session-set", occurredAt: "2026-10-14T11:00:00Z", payload: { session: { status: "ready" } } }).trim(), // no turn: not a settlement
+    line({ type: "thread.some-future-event", occurredAt: "2026-10-14T12:00:00Z", payload: { turn: { totalCostUsd: 5 } } }).trim(),
+    line({ type: "thread.meta-updated", payload: { modelSelection: "grok-old-shape" } }).trim(),
+    line({ type: "thread.meta-updated", payload: { modelSelection: { model: 7 } } }).trim(),
+    // An old or odd settlement: strings and NaN-like values count as nothing, the turn still counts.
+    line({ type: "thread.session-set", occurredAt: "2026-10-14T13:00:00Z", payload: { turn: { turnId: "odd", totalCostUsd: "0.5", tokenUsage: { inputTokens: "10", outputTokens: null, cachedInputTokens: -0 } } } }).trim(),
+    line({ type: "thread.session-set", occurredAt: "2026-10-14T14:00:00Z", payload: { turn: { turnId: "ok", totalCostUsd: 0.25, tokenUsage: "unavailable" } } }).trim(),
+    "�� binary-ish \u0000 junk"
+  ].join("\n");
+  await w.thread("g1", created("grok", "grok-4") + `${junk}\n` + settled("2026-10-14T15:00:00Z", 0.5, { input: 100, output: 10 }));
+  // A log whose first line is not thread.created (an older or damaged log): never read, never thrown on.
+  await w.thread("g2", "garbage first line\n" + settled("2026-10-14T15:00:00Z", 99, { input: 1, output: 1 }));
+  // A thread directory with no log at all, and an empty log.
+  await mkdir(join(w.dir, "empty-dir"), { recursive: true });
+  await w.thread("g3", "");
+  const usage = await w.scanner.snapshot("grok");
+  assert.deepEqual(usage.rows, [
+    { day: "2026-10-14", model: "grok-4", turns: 3, costedTurns: 2, inputTokens: 100, outputTokens: 10, cachedInputTokens: 0, costUsd: 0.75 }
+  ]);
+});
