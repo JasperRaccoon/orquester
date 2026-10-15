@@ -98,7 +98,6 @@ function rig(options: RigOptions = {}) {
 const body = (result: CallToolResult) => result.structuredContent as Record<string, any>;
 const code = (result: CallToolResult) => (result.isError ? body(result).code : undefined);
 const posted = (api: FakeDaemonApi, path: string) => api.calls.filter((c) => c.method === "POST" && c.path === path).map((c) => c.body as Record<string, any>);
-const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
 /** The reply-subscription routes as Task 5's router answers them. */
 function replyRoutes(api: FakeDaemonApi, target: string, wait: (body: any) => any = () => ({ outcome: "replied", turnId: "t9", state: "completed", reply: "Found 3 issues." })) {
@@ -309,18 +308,21 @@ test("send_message from an external client: notify and delegate are chat-only; w
   const posts: Record<string, any>[] = [];
   const done = snapshot({ head: head({ id: "peer" }), turns: [turn(), turn({ turnId: "t2", turnCount: 2, requestedAt: stamp(5), startedAt: stamp(5), completedAt: stamp(6) })], items: [message("assistant", "the new answer", { turnId: "t2" })] });
   r.api.on("GET", agentChatRoutes.thread("peer"), () => ({ status: 200, body: { kind: "snapshot", thread: busy ? thread("peer", { head: head({ id: "peer", session: { status: "running", activeTurnId: "t1" } }), turns: [turn({ state: "running", completedAt: null })] }) : posts.length > 1 ? done : thread("peer") } }));
+  const waiters: [number, () => void][] = [];
+  const postCount = (n: number) => new Promise<void>((resolve) => { if (posts.length >= n) resolve(); else waiters.push([n, resolve]); });
   r.api.on("POST", "/api/sessions/peer/turn", ({ body: b }) => {
     posts.push(b as Record<string, any>);
+    for (const [n, wake] of waiters) if (posts.length >= n) wake();
     return busy ? { status: 409, body: { error: { code: "TURN_NOT_IDLE", message: "working" } } } : { status: 200, body: { seq: 20 } };
   });
   const running = r.external("send_message", { sessionId: "peer", text: "Next task", timeoutSeconds: 30 });
-  for (let i = 0; i < 100 && posts.length === 0; i += 1) await tick();
+  await postCount(1);
   assert.equal(posts[0]!.ifIdle, true, "never a steer");
   busy = false;
   const summaries = r.sessions.map((s) => (s.id === "peer" ? { ...s, latestTurn: { turnId: "t1", state: "completed" as const, startedAt: stamp(0), completedAt: stamp(1) } } : s));
   r.api.on("GET", "/api/sessions", { status: 200, body: summaries });
   r.api.emit(busEvent("session.updated", summaries.find((s) => s.id === "peer")));
-  for (let i = 0; i < 100 && posts.length < 2; i += 1) await tick();
+  await postCount(2);
   assert.equal(posts[1]!.commandId, posts[0]!.commandId, "posted again under the same command id");
   const later = summaries.map((s) => (s.id === "peer" ? { ...s, latestTurn: { turnId: "t2", state: "completed" as const, startedAt: stamp(5), completedAt: stamp(6) } } : s));
   r.api.on("GET", "/api/sessions", { status: 200, body: later });
