@@ -20,7 +20,7 @@
  * No React import. Tested by `presentation.logic.test.ts`.
  */
 
-import { isToolLifecycleItemType } from "@orquester/api/agent-chat";
+import { isToolLifecycleItemType, type ToolApprovalReference } from "@orquester/api/agent-chat";
 
 import type { ToolGroupSummaryKind, WorkLogEntry } from "./contracts";
 
@@ -485,19 +485,76 @@ export function shortenPath(path: string, workspaceRoot?: string): string {
 }
 
 /**
- * Readable labels for the Orquester session tools (design 2026-10-14 §1.5),
- * by bare name — the `orquester` MCP server's tools, whatever the harness
- * calls them. A toolkit adds a line per tool here (its README); a tool with
- * none still reads "Orquester: <its name in words>", never its raw arguments.
+ * Readable labels for the Orquester session tools (design 2026-10-14 §1.5;
+ * unified MCP 2026-10-15 §4), by bare name — the in-chat `orquester` server's
+ * tools, whatever the harness calls them. Every chat tool of the unified
+ * catalogue (`TOOLSETS`) has a line (a test reads the names from there), and
+ * so does every legacy name an older transcript or an older agent host may
+ * still show: the old in-chat tools (`thread_*`, `task_*`, `delegate_task`,
+ * `agent_catalog`) and the external names the unified tools replaced. A tool
+ * with none still reads "Orquester: <its name in words>", never its raw
+ * arguments.
  */
 export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
+  // --- The unified catalogue (§4, §9.1), by toolset -------------------------
+  // core
+  list_projects: "Listed projects",
+  list_agents: "Listed agents and models",
+  list_sessions: "Listed chats",
+  get_session: "Checked a chat",
+  read_transcript: "Read a chat",
+  search_sessions: "Searched chats",
+  create_session: "Opened a chat",
+  send_message: "Messaged a chat",
+  wait_for_session: "Waited for a chat",
+  control_session: "Controlled a chat",
+  fork_session: "Forked a chat",
+  merge_back_session: "Merged back to the parent chat",
+  get_usage: "Checked usage",
   // Visual replies (§2.1). A published page shows as its `visual` row; this
   // label is the row while it runs or when it failed.
   html_preview: "Previewed HTML",
   html_render: "Rendered HTML",
   // Secrets (design 2026-10-14 §5).
   request_secret: "Requested a secret",
-  // Threads and delegation (design 2026-10-14 §5, §6).
+  request_toolset: "Asked for more tools",
+  // reads
+  list_workflows: "Listed workflows",
+  get_workflow: "Read a workflow",
+  get_workflow_runs: "Checked workflow runs",
+  get_agent_profile: "Read the agent profile",
+  list_saved_prompts: "Listed saved prompts",
+  // notes
+  list_todos: "Listed to-dos",
+  update_todos: "Updated to-dos",
+  update_saved_prompts: "Changed saved prompts",
+  // chat-extras
+  update_session: "Updated a chat",
+  respond_to_request: "Answered a chat's request",
+  get_turn_diff: "Read a turn's changes",
+  read_tool_output: "Read a tool's output",
+  list_conversations: "Listed resumable conversations",
+  notify_user: "Sent you a notification",
+  // files-git
+  read_file: "Read a file",
+  get_git_state: "Checked git",
+  // workflow-authoring
+  list_workflow_block_types: "Listed workflow blocks",
+  create_workflow: "Created a workflow",
+  update_workflow: "Changed a workflow",
+  delete_workflow: "Deleted a workflow",
+  preview_expression: "Previewed a workflow expression",
+  run_workflow: "Ran a workflow",
+  cancel_workflow_run: "Cancelled a workflow run",
+  list_workflow_secrets: "Listed workflow secrets",
+  set_workflow_secret: "Set a workflow secret",
+  // agent-profile-editing
+  edit_agent_profile: "Changed the agent profile",
+  // desktops
+  get_desktops: "Checked desktops",
+  control_desktop: "Controlled a desktop",
+
+  // --- Legacy in-chat names (design 2026-10-14 §5, §6) ----------------------
   thread_list: "Listed this project's chats",
   thread_read: "Read a chat",
   thread_create: "Opened a chat",
@@ -510,8 +567,66 @@ export const SESSION_TOOL_LABELS: Readonly<Record<string, string>> = {
   delegate_task: "Delegated a task",
   task_status: "Checked a task",
   task_wait: "Waited for a task",
-  task_cancel: "Cancelled a task"
+  task_cancel: "Cancelled a task",
+
+  // --- Legacy external names the unified tools replaced (§4 "Replaces") -----
+  get_session_lineage: "Checked a chat's lineage",
+  interrupt_session: "Interrupted a chat",
+  stop_task: "Stopped a task",
+  stop_session: "Stopped a chat",
+  close_session: "Closed a chat",
+  revert_session: "Rewound a chat",
+  compact_session: "Compacted a chat",
+  implement_plan: "Implemented a plan",
+  resolve_merge_back: "Resolved a merge back",
+  answer_question: "Answered a question",
+  dismiss_question: "Dismissed a question",
+  resolve_approval: "Decided an approval",
+  get_cost: "Checked costs",
+  list_files: "Listed files",
+  create_todo: "Created a to-do",
+  update_todo: "Updated a to-do",
+  delete_todo: "Deleted a to-do",
+  toggle_todo_item: "Ticked a to-do item",
+  validate_workflow: "Validated a workflow",
+  list_workflow_runs: "Listed workflow runs",
+  get_workflow_run: "Read a workflow run",
+  list_agent_profiles: "Listed agent profiles",
+  get_agent_profile_item: "Read an agent-profile item",
+  get_agent_instructions: "Read an agent's instructions",
+  list_marketplace_plugins: "Listed marketplace plugins",
+  desktops_list: "Listed desktops",
+  desktop_host_status: "Checked the desktop host",
+  desktop_windows: "Listed desktop windows",
+  desktop_app_log: "Read a desktop app's log",
+  desktop_open: "Opened a desktop",
+  desktop_launch_app: "Launched a desktop app",
+  desktop_window_action: "Closed a desktop window",
+  desktop_stop_app: "Stopped a desktop app",
+  desktop_close: "Closed a desktop"
 };
+
+/**
+ * How an approval-gated call ended, as its row says it (unified MCP §7.1
+ * "After"). The reference carries no deny reason (the agent's result holds the
+ * user's words), so a denial reads "Denied by you".
+ */
+export function toolApprovalOutcomeText(reference: Pick<ToolApprovalReference, "kind" | "outcome">): string {
+  switch (reference.outcome) {
+    case "approved":
+      return reference.kind === "toolset" ? "Enabled by you" : "Approved by you";
+    case "granted":
+      return "Allowed by a grant";
+    case "denied":
+      return "Denied by you";
+    case "timed_out":
+      return "Expired";
+    case "cancelled":
+      return "Cancelled";
+    case "not_delivered":
+      return "Approved, but the result never reached the agent";
+  }
+}
 
 const SECRET_OUTCOME_WORDS = {
   provided: "provided",
@@ -534,12 +649,18 @@ export function sessionToolLabel(name: string): string {
 /**
  * A session tool row's label: its tool's, and for `request_secret` the
  * secret's name and how the request ended (never the value, which the row
- * does not hold).
+ * does not hold); for a call an approval card gated, how the card ended.
  */
 export function sessionToolEntryLabel(entry: WorkLogEntry & { sessionTool: string }): string {
   const secret = entry.secretRequest;
   if (secret !== undefined) {
     return `Requested a secret: ${secret.name} · ${SECRET_OUTCOME_WORDS[secret.outcome]}`;
+  }
+  // A call that went through an Orquester card or a grant (unified MCP §7.1):
+  // its tool's label, then how the card ended.
+  const approval = entry.toolApproval;
+  if (approval !== undefined) {
+    return `${sessionToolLabel(entry.sessionTool)} · ${toolApprovalOutcomeText(approval)}`;
   }
   return sessionToolLabel(entry.sessionTool);
 }
