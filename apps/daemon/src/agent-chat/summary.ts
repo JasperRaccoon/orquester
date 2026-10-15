@@ -66,6 +66,13 @@ export interface SummaryBroadcaster {
 
 export interface SummaryPush {
   notifyStructural(session: SessionSummary, type: ChatPushType): Promise<void>;
+  /**
+   * An Orquester approval card opened (unified MCP design 2026-10-15 §7.5): a push titled
+   * "Approval needed: <title>" deep-linking to the session, with NO action button (approval happens
+   * only on the card) and no value. Optional: without it the card's needs-input transition pushes
+   * the structural "needs your input" instead.
+   */
+  notifyApprovalNeeded?(session: SessionSummary, cardTitle: string): Promise<void>;
 }
 
 interface AgentChatSummaryOptions {
@@ -124,9 +131,14 @@ interface ThreadState {
   polledAt: number;
 }
 
-/** The daemon's own pending requests (`request_secret` cards), which the host does not know. */
+/**
+ * The daemon's own pending cards, which the host does not know: `request_secret` cards and
+ * (unified MCP design 2026-10-15 §7.5) Orquester approval cards.
+ */
 export interface SummarySecretRequests {
   list(threadId: string): ReadonlyArray<{ requestId: string; name: string }>;
+  /** The thread's pending approval cards (`agent-chat/tool-approvals.ts`), oldest first: id and sanitised title. */
+  approvals?(threadId: string): ReadonlyArray<{ approvalId: string; title: string }>;
 }
 
 /** The pending-request id a secret card is announced under (`agentChat.pending`). */
@@ -134,9 +146,25 @@ export function secretPendingRequestId(requestId: string): string {
   return `secret:${requestId}`;
 }
 
+/** The pending-request id an approval card is announced under (`agentChat.pending`). */
+export function approvalPendingRequestId(approvalId: string): string {
+  return `approval:${approvalId}`;
+}
+
+/** The Attention Center's and the push's words for a pending approval card. */
+export function approvalNeededTitle(cardTitle: string): string {
+  return `Approval needed: ${cardTitle}`;
+}
+
 export class AgentChatSummaryService {
   private readonly threads = new Map<string, ThreadState>();
   private secretRequests: SummarySecretRequests | null = null;
+  /**
+   * Approval cards already pushed, per thread, for each card's life: a card is pushed at most once
+   * even when its thread's state is dropped and re-adopted (a host 404, `forget`, a handover).
+   * Pruned to the thread's pending cards on every fold, and with the tab.
+   */
+  private readonly pushedApprovals = new Map<string, Set<string>>();
   /** The `observedAt` of each thread's last usage reading handed on. */
   private readonly usageObservedAt = new Map<string, string>();
   private timer: ReturnType<typeof setInterval> | null = null;
@@ -234,7 +262,8 @@ export class AgentChatSummaryService {
    * (design 2026-10-14 §5): a pending card is a pending question — the
    * `hasPendingUserInput` field, the needs-input rung and its push, and an
    * `agentChat.pending` "question" whose title names the secret, never its
-   * prompt or a value.
+   * prompt or a value. The source's `approvals` (Orquester approval cards,
+   * unified MCP §7.5) fold in the same way, titled "Approval needed: <title>".
    */
   setSecretRequests(source: SummarySecretRequests): void {
     this.secretRequests = source;
@@ -313,19 +342,28 @@ export class AgentChatSummaryService {
     if (!this.opts.chat.has(threadId)) {
       // A thread the daemon has no tab for (closed here, still live there).
       this.threads.delete(threadId);
+      this.pushedApprovals.delete(threadId);
       return;
     }
     const previous = this.threads.get(threadId);
     const host = { fields: hostFields, pending: hostPending };
     const secrets = this.secretRequests?.list(threadId) ?? [];
+    // An approval card is pending user input exactly as a secret card is (unified MCP §7.5): the
+    // field, the needs-input rung, an `agentChat.pending` row and a push — never its preview.
+    const approvals = this.secretRequests?.approvals?.(threadId) ?? [];
     const fields: AgentChatSessionSummaryFields =
-      secrets.length > 0 ? { ...hostFields, hasPendingUserInput: true } : hostFields;
+      secrets.length + approvals.length > 0 ? { ...hostFields, hasPendingUserInput: true } : hostFields;
     const pendingRequests: AgentHostPendingRequest[] = [
       ...hostPending,
       ...secrets.map((request) => ({
         requestId: secretPendingRequestId(request.requestId),
         kind: "question" as const,
         title: `Secret requested: ${request.name}`
+      })),
+      ...approvals.map((card) => ({
+        requestId: approvalPendingRequestId(card.approvalId),
+        kind: "question" as const,
+        title: approvalNeededTitle(card.title)
       }))
     ];
     const resolution = resolveChatActivity(fields);
@@ -334,6 +372,15 @@ export class AgentChatSummaryService {
     const attentionChanged = (previous?.activity.attention ?? null) !== resolution.attention;
     const previousPending = previous?.pending ?? new Map<string, AgentHostPendingRequest>();
     const pending = this.publishPendingTransitions(threadId, previousPending, pendingRequests);
+    // Cards not pushed yet (by id, for the card's life — never by "new since the last poll", which a
+    // re-adopted thread would read as new again). Only the oldest pushes; every one is marked.
+    const pushedBefore = this.pushedApprovals.get(threadId) ?? new Set<string>();
+    const unpushed = approvals.filter((card) => !pushedBefore.has(card.approvalId));
+    const newApproval = unpushed[0];
+    const pushedNow = new Set(approvals.filter((card) => pushedBefore.has(card.approvalId)).map((card) => card.approvalId));
+    for (const card of unpushed) pushedNow.add(card.approvalId);
+    if (pushedNow.size > 0) this.pushedApprovals.set(threadId, pushedNow);
+    else this.pushedApprovals.delete(threadId);
     const previousTurn = previous?.fields.latestTurn ?? null;
     const latestTurn = fields.latestTurn ?? null;
     // `needsAttentionAt` is the Attention Center's `flaggedAt` and the MCP
@@ -406,6 +453,11 @@ export class AgentChatSummaryService {
     // backstop. Seed the baseline silently; push only on a transition we
     // actually observed. Same guard covers re-adoption after `forget()` or a
     // host handover.
+    //
+    // An approval card is the exception: it only ever opens live (cards do not survive a
+    // restart), so a NEW one pushes its own "Approval needed: <title>" even on a thread seen for
+    // the first time — one push per newly seen card, the oldest when several appear at once.
+    const approvalPushed = newApproval !== undefined && this.pushApproval(threadId, newApproval.title);
     if (previous === undefined) {
       return;
     }
@@ -416,9 +468,26 @@ export class AgentChatSummaryService {
     }
     const pushType = pushTypeForFields(fields);
     if (!pushType) return;
+    // The card's own push already said it.
+    if (approvalPushed && pushType === "needs-input") return;
     const summary = this.opts.chat.get(threadId);
     if (!summary) return;
     void this.opts.push.notifyStructural(summary, pushType);
+  }
+
+  /** Push "Approval needed: <title>" when the push service can; false when it cannot (the structural push then speaks). */
+  private pushApproval(threadId: string, cardTitle: string): boolean {
+    const notify = this.opts.push.notifyApprovalNeeded;
+    const summary = this.opts.chat.get(threadId);
+    if (!notify || !summary) return false;
+    try {
+      void notify.call(this.opts.push, summary, cardTitle).catch((error: unknown) => {
+        this.opts.logger?.warn?.("agent-chat: approval push failed", error instanceof Error ? error.name : typeof error);
+      });
+    } catch (error) {
+      this.opts.logger?.warn?.("agent-chat: approval push failed", error instanceof Error ? error.name : typeof error);
+    }
+    return true;
   }
 
   /**

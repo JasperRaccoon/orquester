@@ -114,6 +114,10 @@ import { AGENT_VISUAL_ROUTE_PATTERN, registerAgentChatRoutes } from "./agent-cha
 import { LineageService } from "./agent-chat/lineage.ts";
 import { registerLineageRoutes } from "./agent-chat/lineage-routes.ts";
 import { registerSecretRequestRoutes, SecretRequestRegistry } from "./agent-chat/secret-requests.ts";
+// umcp:t3 begin
+import { createAgentToolsRuntime, type AgentToolsRuntime } from "./agent-tools/approval-port.ts";
+import { registerAgentToolsRuntimeRoutes } from "./agent-tools/routes.ts";
+// umcp:t3 end
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { RecentProjectsService, describeProjectPath } from "./recent-projects";
@@ -1163,6 +1167,30 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     workflowProjects: workflowDaemon.runtime.projects,
     workflowCatalogReady: () => workflowDaemon.validationCatalog.ready()
   };
+  // umcp:t3 begin
+  // Orquester approval cards (memory only; a journal of open ids resolves a crash's leftovers as
+  // cancelled) and `agent-tools.json` (settings, chat toolsets, declines, grants). A pending card
+  // is pending user input like a secret card; a closed chat's cards, overrides and chat grants go.
+  const agentToolsRuntime = createAgentToolsRuntime({
+    baseDir: paths.baseDir,
+    publish: (channel, type, payload) => broadcaster.publish(channel, type, payload),
+    onApprovalsChanged: (threadId) => agentChat.secretRequestsChanged(threadId),
+    tab: (id) => agentChat.chat.get(id),
+    agentOf: (id) => agentChat.sessionToolThread(id)?.agentId ?? null,
+    api: () => services.internalApi,
+    projectExists: (path) => existsSync(path),
+    logger: console
+  });
+  await agentToolsRuntime.load();
+  agentChat.setSecretRequests({
+    list: (threadId) => secretRequests.list(threadId),
+    approvals: (threadId) => agentToolsRuntime.approvals.pendingTitles(threadId)
+  });
+  agentChat.chat.lifecycle.on("closed", ({ id, rolledBack }: { id: string; rolledBack?: boolean }) => {
+    if (!rolledBack) agentToolsRuntime.threadClosed(id);
+  });
+  services.agentToolsRuntime = agentToolsRuntime;
+  // umcp:t3 end
 
   // The agent host (chat spec §3.1), adopted or spawned AFTER reattach so the
   // chat tab records are already loaded, and before any transport serves.
@@ -1291,6 +1319,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     // Stops supervising only: under tmux the agent host is deliberately left
     // running so in-flight turns survive the deploy (chat spec §3.1).
     await lineage.stop();
+    // umcp:t3 begin
+    await agentToolsRuntime.shutdown().catch((error) => console.error("Agent tools stop failed", error));
+    // umcp:t3 end
     await htmlPreview.stop();
     await agentChat.stop();
     await browsers.shutdown();
@@ -1387,6 +1418,10 @@ interface Services {
   internalApi: InjectDaemonApi | null;
   /** Pending `request_secret` cards, memory only (optional: route-level tests build a partial `services`). */
   secretRequests?: SecretRequestRegistry;
+  // umcp:t3 begin
+  /** Approval cards, agent-tools settings, chat toolsets and grants (unified MCP §7, §9). Optional: route tests build a partial `services`. */
+  agentToolsRuntime?: AgentToolsRuntime;
+  // umcp:t3 end
   usage: UsageService;
   usageTokens: UsageTokensScanner;
   /** The Claude subagent cache lifetime as it applies now (auto mode's decision). */
@@ -3502,6 +3537,12 @@ export function createServer(
       });
     }
   }
+  // umcp:t3 begin
+  // Approval cards and agent tools: daemon-owned, both transports (the bearer hook guards remote).
+  if (services.agentToolsRuntime) {
+    registerAgentToolsRuntimeRoutes(app, services.agentToolsRuntime);
+  }
+  // umcp:t3 end
 
   // Sessions (PTYs and chat tabs — one list, one per-project order)
   app.get<{ Querystring: { projectPath?: string } }>(

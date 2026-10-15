@@ -34,7 +34,8 @@ async function harness(
   now: () => number = () => 1_000_000,
   onTurnSettled?: () => void,
   onBackgroundWorkEnded?: () => void,
-  onUsageLimits?: (reading: ThreadUsageReading) => void
+  onUsageLimits?: (reading: ThreadUsageReading) => void,
+  approvalPushes?: Array<{ id: string; title: string }>
 ): Promise<Harness> {
   t.mock.timers.enable({ apis: ["Date"], now: now() });
   const dir = await mkdtemp(join(tmpdir(), "orq-summary-"));
@@ -56,7 +57,12 @@ async function harness(
     client: new AgentHostClient({ socketPath, token: () => "tok" }),
     chat,
     broadcaster: { publish: (channel, type, payload) => published.push({ channel, type, payload }) },
-    push: { notifyStructural: async (session: SessionSummary, type) => { pushes.push({ id: session.id, type }); } },
+    push: {
+      notifyStructural: async (session: SessionSummary, type) => { pushes.push({ id: session.id, type }); },
+      ...(approvalPushes
+        ? { notifyApprovalNeeded: async (session: SessionSummary, title: string) => { approvalPushes.push({ id: session.id, title }); } }
+        : {})
+    },
     onTurnSettled,
     onBackgroundWorkEnded,
     onUsageLimits
@@ -720,4 +726,75 @@ test("a pending request_secret card is a pending question: tab, attention, agent
     h.published.filter((p) => p.type === "agentChat.pending").map((p) => (p.payload as { open: boolean }).open),
     [true, false]
   );
+});
+
+test("a pending Orquester approval card is pending user input: tab, attention, agentChat.pending, one titled push (unified MCP §7.5)", async (t) => {
+  const approvalPushes: Array<{ id: string; title: string }> = [];
+  const h = await harness(t, undefined, undefined, undefined, undefined, approvalPushes);
+  const cards = new Map<string, Array<{ approvalId: string; title: string }>>();
+  h.service.setSecretRequests({ list: () => [], approvals: (threadId) => cards.get(threadId) ?? [] });
+  seedTab(h.chat, "t1");
+  const working = {
+    chatSessionStatus: "running" as const,
+    latestTurn: { turnId: "a", state: "running" as const, startedAt: "2026-09-21T00:00:00.000Z", completedAt: null }
+  };
+  await h.read("t1", working);
+
+  cards.set("t1", [{ approvalId: "a1", title: "Claude wants to run the workflow Deploy" }]);
+  h.service.secretRequestsChanged("t1");
+  assert.equal(h.chat.get("t1")?.hasPendingUserInput, true);
+  assert.equal(h.chat.get("t1")?.activity?.attention, "needs-input");
+  assert.deepEqual(approvalPushes, [{ id: "t1", title: "Claude wants to run the workflow Deploy" }]);
+  assert.deepEqual(h.pushes, [], "the card's own push replaces the generic needs-input one");
+  assert.deepEqual(
+    h.published.filter((p) => p.type === "agentChat.pending").map((p) => p.payload),
+    [{ id: "t1", requestId: "approval:a1", kind: "question", title: "Approval needed: Claude wants to run the workflow Deploy" }].map((row) => ({ ...row, open: true }))
+  );
+
+  // A poll keeps it; a second card pushes once more; nothing pushes twice for the same card.
+  await h.read("t1", working);
+  cards.set("t1", [...cards.get("t1")!, { approvalId: "a2", title: "Claude wants to open a desktop" }]);
+  h.service.secretRequestsChanged("t1");
+  assert.deepEqual(approvalPushes.map((p) => p.title), ["Claude wants to run the workflow Deploy", "Claude wants to open a desktop"]);
+
+  // Answered: the attention clears at once.
+  cards.delete("t1");
+  h.service.secretRequestsChanged("t1");
+  assert.ok(!h.chat.get("t1")?.hasPendingUserInput);
+  assert.deepEqual(
+    h.published.filter((p) => p.type === "agentChat.pending").map((p) => (p.payload as { open: boolean }).open),
+    [true, true, false, false]
+  );
+});
+
+test("without an approval push the card's needs-input transition pushes the structural one", async (t) => {
+  const h = await harness(t);
+  const cards: Array<{ approvalId: string; title: string }> = [];
+  h.service.setSecretRequests({ list: () => [], approvals: () => cards });
+  seedTab(h.chat, "t1");
+  await h.read("t1", { chatSessionStatus: "running", latestTurn: { turnId: "a", state: "running", startedAt: "2026-09-21T00:00:00.000Z", completedAt: null } });
+  cards.push({ approvalId: "a1", title: "Claude wants to open a desktop" });
+  h.service.secretRequestsChanged("t1");
+  assert.deepEqual(h.pushes, [{ id: "t1", type: "needs-input" }]);
+});
+
+test("an approval card pushes once for its life, even when its thread is forgotten and re-adopted", async (t) => {
+  const approvalPushes: Array<{ id: string; title: string }> = [];
+  const h = await harness(t, undefined, undefined, undefined, undefined, approvalPushes);
+  const cards = [{ approvalId: "a1", title: "Claude wants to open a desktop" }];
+  h.service.setSecretRequests({ list: () => [], approvals: () => cards });
+  seedTab(h.chat, "t1");
+  const working = { chatSessionStatus: "running" as const, latestTurn: { turnId: "a", state: "running" as const, startedAt: "2026-09-21T00:00:00.000Z", completedAt: null } };
+  await h.read("t1", working);
+  assert.equal(approvalPushes.length, 1);
+  // The host answers 404 once (state dropped), then the thread is re-adopted; and a forget/re-read.
+  await h.read("t1", {}, undefined, 404);
+  await h.read("t1", working);
+  h.service.forget("t1");
+  await h.read("t1", working);
+  assert.equal(approvalPushes.length, 1, "no duplicate push for the same card");
+  // A new card still pushes.
+  cards.push({ approvalId: "a2", title: "Claude wants to run the workflow Deploy" });
+  h.service.secretRequestsChanged("t1");
+  assert.deepEqual(approvalPushes.map((p) => p.title), ["Claude wants to open a desktop", "Claude wants to run the workflow Deploy"]);
 });
