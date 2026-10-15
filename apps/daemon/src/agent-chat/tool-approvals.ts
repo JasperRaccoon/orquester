@@ -377,6 +377,8 @@ export class ToolApprovalRegistry {
       outcome: "approved",
       approvalId,
       ...(grantId !== undefined ? { grantId } : {}),
+      // What the user chose (absent for approve-once): the executor tells an explicit grant from a create joining one.
+      ...(answer.grant !== undefined && grantId !== undefined ? { grantChosen: answer.grant } : {}),
       ...(answer.secrets !== undefined ? { secrets: answer.secrets } : {})
     };
     entry.settle(outcome, answer.grant !== undefined ? `grant=${answer.grant}` : undefined);

@@ -90,6 +90,7 @@ import {
   validateDefinition,
   verifyPins,
   workflowError,
+  unionGrantable,
   unionGrantFields,
   workflowFields,
   workflowPin,
@@ -914,7 +915,7 @@ const createWorkflow = defineTool({
     const sections: ApprovalPreviewSection[] = [
       ...(draft.enabled ? [{ kind: "warning" as const, level: "caution" as const, text: "Created ENABLED: its schedule and git triggers start firing at once." }] : []),
       workflowFields(draft, api.workspacesDir),
-      ...(await unionSections(api, union, ctx.caller)),
+      ...(await unionSections(api, union, ctx.caller, { childrenJoinGrant: await unionGrantable(api, union, ctx.caller) })),
       ...definitionSections(draft, prompts, api.workspacesDir),
       ...problemSections(problems)
     ];
@@ -937,7 +938,7 @@ const createWorkflow = defineTool({
       return dryRunResult(await validateDefinition(api, plan.draft), union);
     }
     // What the user approved is what is saved: the prompts the card showed are unchanged (§7.2).
-    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { via: ctx.approval.outcome, hintProjects: plan.draft ? (await workflowUnion(api, [plan.draft])).projects : [] });
+    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { creating: true, via: ctx.approval.outcome, hintProjects: plan.draft ? (await workflowUnion(api, [plan.draft])).projects : [] });
     const res = await api.request("POST", workflowRoutes.create, { body: plan.request });
     if (res.status >= 400) throw indexedCreateError(workflowError(res), args.nodes.length);
     return writeResult(api, res.body as WorkflowWriteResponse, "created");
@@ -990,7 +991,7 @@ const updateWorkflow = defineTool({
       ...diff.sections,
       { kind: "code", title: "Ops", language: "json", text: JSON.stringify(args.ops, null, 2) },
       workflowFields(after, api.workspacesDir, "The workflow after the change"),
-      ...(await unionSections(api, union, ctx.caller)),
+      ...(await unionSections(api, union, ctx.caller, { childrenJoinGrant: await unionGrantable(api, union, ctx.caller) })),
       ...definitionSections(after, prompts, api.workspacesDir, only),
       ...problemSections(problems)
     ];
@@ -1195,8 +1196,6 @@ async function runHome(ctx: ScopeContext, runId: string, writes: boolean): Promi
 
 const stalePreview = (message: string) => new ToolError("PREVIEW_STALE", `${message} Re-read it (get_workflow) and call again.`);
 
-/** The input JSON a run card shows when the definition is too large to show (the outline card). */
-const RUN_CARD_INPUT_CHARS = 64 * 1024;
 
 /**
  * A started run that froze another revision, or whose definition could not be read back: cancel it
@@ -1264,37 +1263,42 @@ const runWorkflow = defineTool({
       ]
     };
     const inputText = args.input === undefined ? "null" : JSON.stringify(args.input, null, 2);
-    const inputTitle = "Input ({{ trigger.input }})";
-    const unionParts = await unionSections(api, union, ctx.caller);
+    const inputSection: ApprovalPreviewSection = { kind: "code", title: "Input ({{ trigger.input }})", language: "json", text: inputText };
     const problemParts = problemSections(problems);
     const title = `${agentLabel(ctx.caller)} wants to run the workflow "${workflow.name}"`;
     const base = { title, scopeLabel: unionLabel(union), workflowId: workflow.id, pins: previewPins(workflow, prompts, union) };
+    const tooLargeInput = () =>
+      new ToolError("PREVIEW_TOO_LARGE", "The run input is too large to show the user in one approval card. Pass a smaller input (let a block read the bulk from a file or an earlier block).");
     // The definition that will run, in full: a card only opens for a workflow no grant covers —
     // one this chat neither created nor was granted (often the user's own, or an external client's).
+    const grantable = await unionGrantable(api, union, ctx.caller);
     const full: ApprovalPreviewSection[] = [
       runFields,
-      { kind: "code", title: inputTitle, language: "json", text: inputText },
-      ...unionParts,
+      inputSection,
+      ...(await unionSections(api, union, ctx.caller, { childrenJoinGrant: grantable })),
       ...definitionSections(workflow, prompts, api.workspacesDir),
       ...problemParts
     ];
-    // A grant covers the run only if it covers every sub-workflow the run calls (§7.6).
+    // Measured whole, as the executor measures the card. A grant covers the run only if it covers every sub-workflow it calls (§7.6).
     if (approvalPreviewBytes(full) <= TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES) return { ...base, sections: full, ...unionGrantFields(union) };
-    // Too large to show whole (measured as the executor measures the card): an outline the user is told
-    // to review elsewhere, never a grant (nothing seen, nothing standing), the input cut and marked.
+    // Over the cap. The input is the agent's and is never cut: when the definition alone would fit,
+    // the input is what is too large — refused, the agent passes a smaller one.
+    if (approvalPreviewBytes(full.filter((section) => section !== inputSection)) <= TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES) throw tooLargeInput();
+    // The DEFINITION is too large to show: an outline the user is told to review in Workflows, the
+    // input whole, never grantable (nothing shown, nothing standing).
     const outline = workflow.nodes.filter((node) => node.type !== "note").map((node) => `${node.type} · ${node.name}${node.disabled ? " (disabled)" : ""}`);
-    const cutInput = clipText(inputText, RUN_CARD_INPUT_CHARS);
     const compact: ApprovalPreviewSection[] = [
       { kind: "warning", level: "danger", text: "This workflow is too large to show here — open it in Workflows to review every block before approving." },
       runFields,
-      { kind: "code", title: inputTitle, language: "json", text: cutInput, ...(cutInput !== inputText ? { partial: true } : {}) },
-      ...unionParts,
+      inputSection,
+      ...(await unionSections(api, union, ctx.caller)),
       { kind: "text", title: "Blocks", text: outline.join("\n") || "none" },
       ...(prompts.size > 0
         ? [{ kind: "fields" as const, title: "Saved prompts its agents use", rows: [...prompts].map(([id, prompt]) => ({ label: prompt ? prompt.title : id, value: prompt ? `${prompt.body.length} characters` : "missing — that block fails", ...(prompt ? {} : { state: "flagged" as const }) })) }]
         : []),
       ...problemParts
     ];
+    if (approvalPreviewBytes(compact) > TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES) throw tooLargeInput();
     return { ...base, sections: compact, ungrantable: true };
   },
   annotations: MUTATING,

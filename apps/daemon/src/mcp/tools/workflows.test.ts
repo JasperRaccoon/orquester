@@ -984,7 +984,7 @@ test("an update card shows in full what the change makes run: an added edge's ta
   assert.ok(shown(port.cards[1]!).includes("Code · Branch"), "a re-routed if shows its branches in full");
 });
 
-test("a run card too large to show whole: measured as the executor measures it, an outline with a red warning, the prompts listed, the input cut — never grantable", async (t) => {
+test("a run card whose DEFINITION is too large to show: measured whole, an outline with a red warning, the prompts listed, the input whole — never grantable", async (t) => {
   const api = await sandbox(t);
   const big = "x".repeat(400 * 1024);
   const huge = definition(api, { nodes: [
@@ -1009,8 +1009,8 @@ test("a run card too large to show whole: measured as the executor measures it, 
   assert.match(sectionText(card.sections), /code · A.*code · B.*code · C/);
   assert.match(sectionText(card.sections), /"label":"Triage","value":"5 characters"/);
   const shownInput = card.sections.find((s) => s.kind === "code" && s.title.startsWith("Input")) as { text: string; partial?: boolean };
-  assert.equal(shownInput.partial, true);
-  assert.ok(shownInput.text.length < JSON.stringify(input, null, 2).length);
+  assert.equal(shownInput.partial, undefined, "the agent's input is never cut");
+  assert.equal(shownInput.text, JSON.stringify(input, null, 2));
   // A smaller one is shown whole, covered by the grant.
   serveDefinition(api, definition(api));
   await call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port });
@@ -1025,6 +1025,77 @@ test("PREVIEW_STALE wording tells a grant pass from a card approval", async (t) 
   const error = await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port }), "PREVIEW_STALE", /The workflow \(revision 7 → 8\) changed after this chat's grant allowed the call/);
   assert.doesNotMatch(error.message, /approved the card/);
   assert.equal(port.cards.length, 0);
+});
+
+test("an input too large to show is PREVIEW_TOO_LARGE before any card (never cut, never outlined away)", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api);
+  const port = new FakeApprovalPort();
+  await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7, input: { blob: "z".repeat(1_100_000) } }, { who: chat(api), port }), "PREVIEW_TOO_LARGE", /Pass a smaller input/);
+  assert.equal(port.cards.length, 0);
+  assert.ok(!api.calls.some((c) => c.path === "/api/workflows/wf-1/run"));
+});
+
+test("the children-join-the-grant title only where a grant chosen there records them; a create records its children only on an explicit grant choice", async (t) => {
+  const api = await sandbox(t);
+  const child = definition(api, { id: "wf-child", name: "Child", revision: 2 });
+  api.on("GET", "/api/workflows/wf-child", { status: 200, body: { workflow: child, problems: [] } });
+  const parent = definition(api, { nodes: [...definition(api).nodes, { id: "s", name: "Sub", type: "workflow", position: { x: 0, y: 0 }, config: { workflowId: "wf-child" } }] as Workflow["nodes"] });
+  serveDefinition(api, parent);
+  api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(parent) } });
+  api.on("DELETE", "/api/workflows/wf-1", { status: 200, body: { ok: true } });
+  api.on("GET", "/api/workflow-secrets", { status: 200, body: { secrets: [] } });
+  api.on("PUT", "/api/workflow-secrets/*", { status: 200, body: { secrets: [] } });
+  const titleOf = (card: { sections: ApprovalPreviewSection[] }) => (card.sections.find((s) => s.kind === "fields" && /^Workflows it also runs/.test(s.title ?? "")) as { title: string } | undefined)?.title;
+  const JOIN = "Workflows it also runs (a chat grant chosen here covers them too)";
+  const port = new FakeApprovalPort({ outcome: "approved", approvalId: "", secrets: { value: "v4lue" } });
+  await call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port });
+  assert.equal(titleOf(port.cards[0]!), JOIN, "full-access, own project: a grant chosen here records the child");
+  await call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api, { runtimeMode: "auto" }), port });
+  assert.equal(titleOf(port.cards[1]!), "Workflows it also runs", "no grant can be offered: neutral");
+  await call(api, "delete_workflow", { workflowId: "wf-1", confirm: true }, { who: chat(api), port });
+  assert.equal(titleOf(port.cards[2]!), "Workflows it also runs", "deleting runs nothing: neutral");
+  await call(api, "set_workflow_secret", { name: "TOKEN", workflowId: "wf-1" }, { who: chat(api), port });
+  assert.equal(titleOf(port.cards[3]!), "Workflows it also runs", "secrets are never grantable: neutral");
+  // A create wiring in a sub-workflow: the join path (grantId, no choice) records nothing; an explicit choice records the child.
+  serveDefinition(api, definition(api, { id: "wf-new" }));
+  const nodes = [{ type: "trigger.manual", name: "Go" }, { type: "workflow", name: "Sub", config: { workflowId: "wf-child" } }];
+  port.answerWith({ outcome: "approved", approvalId: "", grantId: "g_9" });
+  await call(api, "create_workflow", { ...draft(), nodes, edges: [] }, { who: chat(api), port });
+  assert.equal(titleOf(port.cards.at(-1)!), JOIN);
+  assert.deepEqual(port.recorded.map((r) => r.workflowId), ["wf-new"], "joining: only the new workflow (after it ran)");
+  port.answerWith({ outcome: "approved", approvalId: "", grantId: "g_9", grantChosen: "chat" });
+  await call(api, "create_workflow", { ...draft(), nodes, edges: [] }, { who: chat(api), port });
+  assert.deepEqual(port.recorded.slice(1).map((r) => [r.workflowId, r.grantId]), [["wf-child", "g_9"], ["wf-new", "g_9"]], "an explicit grant choice records the child too");
+});
+
+test("a sub-workflow that does not exist makes the card ungrantable, even under a grant naming both", async (t) => {
+  const api = await sandbox(t);
+  api.on("GET", "/api/workflows/wf-ghost", failure(404, "WORKFLOW_NOT_FOUND", "gone"));
+  const parent = definition(api, { nodes: [...definition(api).nodes, { id: "z", name: "Nowhere", type: "workflow", position: { x: 0, y: 0 }, config: { workflowId: "wf-ghost" } }] as Workflow["nodes"] });
+  serveDefinition(api, parent);
+  api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(parent) } });
+  const port = new FakeApprovalPort().grant({ family: "workflows", scope: "chat", threadId: "me", projectPath: api.own, workflowIds: ["wf-1", "wf-ghost"] });
+  await call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port });
+  assert.equal(port.cards.length, 1);
+  assert.deepEqual(port.cards[0]!.grantOptions, []);
+  assert.equal(port.grantQueries.length, 0, "never looked up");
+});
+
+test("create_workflow's stale pins name the sub-workflow that changed", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api);
+  let child = definition(api, { id: "wf-child", name: "Child", revision: 2 });
+  api.on("GET", "/api/workflows/wf-child", () => ({ status: 200, body: { workflow: child, problems: [] } }));
+  const port = new FakeApprovalPort(() => {
+    child = { ...child, revision: 3 };
+    return { outcome: "approved", approvalId: "" };
+  });
+  const nodes = [{ type: "trigger.manual", name: "Go" }, { type: "workflow", name: "Sub", config: { workflowId: "wf-child" } }];
+  await rejects(call(api, "create_workflow", { ...draft(), nodes, edges: [] }, { who: chat(api), port }), "PREVIEW_STALE", /^The sub-workflow wf-child \(revision 2 → 3\) changed after the user approved the card/);
+  assert.ok(!api.calls.some((c) => c.method === "POST" && c.path === "/api/workflows"));
 });
 
 // ---------------------------------------------------------------------------

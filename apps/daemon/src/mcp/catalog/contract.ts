@@ -163,8 +163,8 @@ export interface ApprovalPreview {
   /**
    * `workflows` family: the OTHER workflows the call runs or wires in (sub-workflows, recursively).
    * A grant covers the call only when the same grant also covers each of them (§7.6: a grant covers
-   * only workflows created or approved in that chat). A grant the user chooses on such a card (not a
-   * create) is made for the workflow AND these, so the card must name each of them.
+   * only workflows created or approved in that chat). A grant the user CHOOSES on such a card
+   * (`grantChosen`) is made for the workflow AND these, so the card must name each of them.
    */
   childWorkflowIds?: string[];
   /** This call is never covered by a grant and its card offers none (e.g. a scope member that no longer resolves: fail closed). */
@@ -215,7 +215,14 @@ export type ApprovalCancelReason = "aborted" | "closed" | "restarting";
 
 /** How a card ended, for the waiting call. Secrets only on `approved`, for this one write. */
 export type ApprovalOutcome =
-  | { outcome: "approved"; approvalId: string; grantId?: string; secrets?: Record<string, string> }
+  | {
+      outcome: "approved";
+      approvalId: string;
+      grantId?: string;
+      /** The grant scope the user CHOSE on this card; absent for approve-once (a create joining the chat's grant included). */
+      grantChosen?: ToolApprovalGrantScope;
+      secrets?: Record<string, string>;
+    }
   | { outcome: "denied"; approvalId: string; reason?: string }
   | { outcome: "timed_out"; approvalId: string }
   | { outcome: "cancelled"; approvalId: string; reason?: ApprovalCancelReason };

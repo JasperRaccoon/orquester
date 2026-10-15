@@ -285,8 +285,21 @@ export async function workflowUnion(api: DaemonApi, definitions: readonly { id?:
 export function unionGrantFields(union: WorkflowUnion): { childWorkflowIds?: string[]; ungrantable?: true } {
   return {
     ...(union.children.length > 0 ? { childWorkflowIds: union.children.map((child) => child.workflowId) } : {}),
-    ...(union.missing.length > 0 ? { ungrantable: true as const } : {})
+    // A member that no longer resolves, or a sub-workflow that does not exist: no grant can judge it.
+    ...(union.missing.length > 0 || union.children.some((child) => child.name === null) ? { ungrantable: true as const } : {})
   };
+}
+
+/**
+ * Whether a chat grant could be offered on this card at all (the executor and the port decide; this
+ * only keeps the card's wording true): a full-access chat that is not workflow-owned, a union inside
+ * its own project, nothing missing.
+ */
+export async function unionGrantable(api: DaemonApi, union: WorkflowUnion, caller: ToolCaller): Promise<boolean> {
+  if (caller.kind !== "thread" || caller.runtimeMode !== "full-access" || caller.workflowOwned || !caller.projectPath) return false;
+  if (unionGrantFields(union).ungrantable || union.pendingWorkspaces.length > 0) return false;
+  const own = (await canonicalProject(api, caller.projectPath))?.canonical;
+  return own !== undefined && union.projects.every((path) => path === own);
 }
 
 /** The union as the gate judges it. */
@@ -457,11 +470,12 @@ const stale = (what: string, via: PassedBy | undefined) =>
 export async function verifyPins(
   api: DaemonApi,
   pins: Readonly<Record<string, string>> | undefined,
-  opts: { current?: { id: string; revision: number }; hintProjects?: readonly string[]; via?: PassedBy } = {}
+  opts: { current?: { id: string; revision: number }; hintProjects?: readonly string[]; via?: PassedBy; creating?: boolean } = {}
 ): Promise<void> {
   if (!pins) return;
-  // The workflow the call is about: the one read, else the first workflow pin (`previewPins` writes it first).
-  const parentId = opts.current?.id ?? Object.keys(pins).find((key) => key.startsWith(WORKFLOW_PIN))?.slice(WORKFLOW_PIN.length);
+  // The workflow the call is about: the one read, else the first workflow pin (`previewPins` writes it
+  // first). A create has none yet: every workflow pin is a sub-workflow.
+  const parentId = opts.creating ? undefined : (opts.current?.id ?? Object.keys(pins).find((key) => key.startsWith(WORKFLOW_PIN))?.slice(WORKFLOW_PIN.length));
   for (const [key, value] of Object.entries(pins)) {
     if (!key.startsWith(WORKFLOW_PIN)) continue;
     const id = key.slice(WORKFLOW_PIN.length);
@@ -510,7 +524,7 @@ export async function gitIdentities(api: DaemonApi): Promise<Map<string, string>
  * The union with each member's git identity (§5.5: a workflow runs with each member project's
  * workspace identity), the caller's own project marked, temp workspaces and missing members named.
  */
-export async function unionSections(api: DaemonApi, union: WorkflowUnion, caller: ToolCaller): Promise<ApprovalPreviewSection[]> {
+export async function unionSections(api: DaemonApi, union: WorkflowUnion, caller: ToolCaller, opts: { childrenJoinGrant?: boolean } = {}): Promise<ApprovalPreviewSection[]> {
   const identities = await gitIdentities(api);
   const own = caller.kind === "thread" && caller.projectPath ? (await canonicalProject(api, caller.projectPath))?.canonical ?? "" : "";
   const identity = (workspace: string) => (identities.has(workspace) ? `git: ${identities.get(workspace)}` : "git: the default identity");
@@ -537,7 +551,8 @@ export async function unionSections(api: DaemonApi, union: WorkflowUnion, caller
     // A chat grant chosen on this card covers these too (§7.6): each is named, with the revision it is at.
     sections.push({
       kind: "fields",
-      title: "Workflows it also runs (a chat grant chosen here covers them too)",
+      // Only where a grant chosen on this card really records them (grantable update / run / create cards).
+      title: opts.childrenJoinGrant ? "Workflows it also runs (a chat grant chosen here covers them too)" : "Workflows it also runs",
       rows: union.children.map((child) => ({
         label: child.name === null ? child.workflowId : `${child.name} (${child.workflowId})`,
         value: child.name === null ? "missing" : `revision ${child.revision ?? "?"}${child.enabled === false ? ", disabled" : ""}`,

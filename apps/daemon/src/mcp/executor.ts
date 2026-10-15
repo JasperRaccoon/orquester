@@ -312,7 +312,7 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
       approval = outcome.approval;
       card = { preview: outcome.preview, family: outcome.family };
       args = outcome.frozenArgs;
-      await recordChildrenInGrant(deps, caller, card, approval);
+      if (outcome.grantChosen === true) await recordChildrenInGrant(deps, caller, card, approval);
       // §13: the caller may have changed while the card waited (now planning, a narrower mode): the
       // gate re-runs on it, and the call proceeds as the caller is now. A card it would raise again
       // is the one the user just answered.
@@ -352,7 +352,7 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
 // ---------------------------------------------------------------------------
 
 type CardOutcome =
-  | { kind: "passed"; approval: NonNullable<CallContext["approval"]>; preview: ApprovalPreview | null; family: string; frozenArgs: Record<string, unknown> }
+  | { kind: "passed"; approval: NonNullable<CallContext["approval"]>; preview: ApprovalPreview | null; family: string; frozenArgs: Record<string, unknown>; grantChosen?: boolean }
   | { kind: "cancelled"; reason?: ApprovalCancelReason };
 
 async function passCard(
@@ -471,7 +471,8 @@ async function passCard(
         },
         preview,
         family,
-        frozenArgs
+        frozenArgs,
+        ...(outcome.grantChosen !== undefined ? { grantChosen: true } : {})
       };
     case "denied":
       throw new ToolError(
@@ -512,11 +513,10 @@ async function afterApprovedRun(
 }
 
 /**
- * A `workflows` card (not a create) the user APPROVED with a grant choice, for a workflow that runs
- * sub-workflows (`preview.childWorkflowIds`, each named on the card): the grant the user made covers
- * those children too, so the grant can ever take effect (§7.6, the grant rule above needs them all).
- * Only an approval that names a `grantId` on a card with a `workflowId` — i.e. the user's explicit
- * grant choice on that card; approving once never widens a grant (ruling).
+ * A `workflows` card the user approved WITH an explicit grant choice (`grantChosen`; never
+ * approve-once, never a create joining the chat's grant), for a workflow that runs sub-workflows
+ * (`preview.childWorkflowIds`, each named on the card): the grant the user made covers those
+ * children too, so it can ever take effect (§7.6: the grant rule above needs them all).
  */
 async function recordChildrenInGrant(
   deps: ExecutorDeps,
@@ -525,7 +525,7 @@ async function recordChildrenInGrant(
   approval: NonNullable<CallContext["approval"]>
 ): Promise<void> {
   const children = card.preview?.childWorkflowIds ?? [];
-  if (card.family !== "workflows" || !card.preview?.workflowId || approval.outcome !== "approved" || !approval.grantId || children.length === 0) return;
+  if (card.family !== "workflows" || approval.outcome !== "approved" || !approval.grantId || children.length === 0) return;
   const port = deps.approvals === undefined ? executorPorts.approvals : deps.approvals;
   if (!port) return;
   for (const workflowId of children) {
