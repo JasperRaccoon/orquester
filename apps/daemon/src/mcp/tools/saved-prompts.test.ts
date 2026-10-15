@@ -113,6 +113,7 @@ test("create: project and global are exclusive; external callers name one; chats
   await h.refused("update_saved_prompts", { action: "create", title: "t", body: "b", global: true, project: "acme/api" }, "INVALID_ARGUMENT", h.chat());
   assert.match(await h.refused("update_saved_prompts", { action: "create", title: "t", body: "b" }, "INVALID_ARGUMENT"), /project, or global/);
   await h.refused("update_saved_prompts", { action: "create", title: "t", body: "b", pinned: true }, "INVALID_ARGUMENT", h.chat());
+  assert.match(await h.refused("update_saved_prompts", { action: "create", title: "t", body: "b" }, "INVALID_ARGUMENT", h.chat({ projectPath: "", workspace: "" })), /global: true/);
   const agents = (await h.value("update_saved_prompts", { action: "create", title: "A", body: "a" }, h.chat())).prompt as Row;
   assert.equal(await h.refused("update_saved_prompts", { action: "update", id: agents.id, project: "acme/api", pinned: true }, "AGENT_PROMPT_PIN_REFUSED").then(() => true), true);
   const mine = await h.userPrompt();

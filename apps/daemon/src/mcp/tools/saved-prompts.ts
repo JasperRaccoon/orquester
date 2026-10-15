@@ -218,7 +218,13 @@ function checkAction(args: UpdateArgs, external: boolean): void {
 const looked = new WeakMap<object, { tier: Tier; family?: AdminFamily }>();
 
 async function targetOf(args: UpdateArgs, ctx: ScopeContext): Promise<{ place: Place; prompt: SavedPrompt | null }> {
-  if (args.action === "create") return { place: args.global === true ? GLOBAL : await placeOf(args.project, ctx), prompt: null };
+  if (args.action === "create") {
+    if (args.global === true) return { place: GLOBAL, prompt: null };
+    const place = await placeOf(args.project, ctx);
+    // A chat with no project of its own never makes a global prompt by omission.
+    if (place.projectPath === null) throw new ToolError("INVALID_ARGUMENT", "update_saved_prompts create: this chat has no project; pass project, or global: true.");
+    return { place, prompt: null };
+  }
   // External callers naming no project look among the global prompts.
   const place = await placeOf(args.project, ctx);
   return { place, prompt: await findPrompt(ctx.api, place, args.id!) };
