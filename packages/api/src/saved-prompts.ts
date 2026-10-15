@@ -82,6 +82,11 @@ export const AGENT_PROMPT_PIN_REFUSED = "AGENT_PROMPT_PIN_REFUSED";
 export interface SavedPromptWorkflowUse {
   workflowId: string;
   name: string;
+  /**
+   * The workspace of the workflow's own project (an existing project's, or a temp project's), when
+   * known. Agent tools show another workspace's workflows to a chat below Full access only as a count.
+   */
+  workspace?: string;
 }
 
 /**

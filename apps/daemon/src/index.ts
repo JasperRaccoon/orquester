@@ -10,7 +10,6 @@ import type {
   CreateAccountRequest,
   CreateBrowserRequest,
   CreateProjectRequest,
-  CreateSavedPromptRequest,
   CreateSessionRequest,
   CreateTodoRequest,
   CreateWorkspaceRequest,
@@ -61,8 +60,6 @@ import type {
   RenameSessionRequest,
   RepoSummary,
   ReorderSessionsRequest,
-  SavedPrompt,
-  SavedPromptListResponse,
   ServerInfoResponse,
   SetAgentAccountDefaultsRequest,
   SetProtectArchivedRequest,
@@ -78,7 +75,6 @@ import type {
   SystemProcessesResponse,
   SystemResourcesResponse,
   UpdateProjectRequest,
-  UpdateSavedPromptRequest,
   UpdateTodoRequest,
   UpdateWorkspaceRequest,
   UsageAccount,
@@ -134,7 +130,8 @@ import { AGENT_PROFILE_CHANNEL } from "@orquester/api";
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
 import { RecentProjectsService, describeProjectPath } from "./recent-projects";
-import { SavedPromptError, SavedPromptsService, publishSavedPromptEvents } from "./saved-prompts.ts";
+import { SavedPromptsService, publishSavedPromptEvents, registerSavedPromptRoutes } from "./saved-prompts.ts";
+import { registerTodoToggleRoute } from "./todo-items.ts";
 import { PluginsService, publishPluginEvents } from "./plugins/plugins-service.ts";
 import { registerPluginRoutes } from "./plugins/routes.ts";
 import { detectRepoId } from "./repo-id";
@@ -4105,65 +4102,17 @@ export function createServer(
     }
   });
 
-  // Saved prompts — the right rail's library, global and per project (channel
-  // "saved-prompts"). Allowed on both transports like /api/todos (no secret
-  // returned). Refusals are SavedPromptError's own status + { code, message }:
-  // 400 INVALID_REQUEST / INVALID_PROJECT_PATH, 404 SAVED_PROMPT_NOT_FOUND,
-  // 409 SAVED_PROMPTS_FULL. A missing `projectPath` lists the global prompts only.
-  app.get<{ Querystring: { projectPath?: string } }>(
-    "/api/saved-prompts",
-    async (request, reply): Promise<SavedPromptListResponse | void> => {
-      const { projectPath } = request.query;
-      try {
-        return { prompts: await services.savedPrompts.list(projectPath ? projectPath : null) };
-      } catch (error) {
-        return savedPromptError(reply, error);
-      }
-    }
-  );
-
-  app.post<{ Body: CreateSavedPromptRequest }>(
-    "/api/saved-prompts",
-    async (request, reply): Promise<SavedPrompt | void> => {
-      try {
-        return reply.code(201).send(await services.savedPrompts.create(request.body));
-      } catch (error) {
-        return savedPromptError(reply, error);
-      }
-    }
-  );
-
-  app.put<{ Params: { id: string }; Body: UpdateSavedPromptRequest }>(
-    "/api/saved-prompts/:id",
-    async (request, reply): Promise<SavedPrompt | void> => {
-      try {
-        return await services.savedPrompts.update(request.params.id, request.body);
-      } catch (error) {
-        return savedPromptError(reply, error);
-      }
-    }
-  );
-
-  app.delete<{ Params: { id: string } }>("/api/saved-prompts/:id", async (request, reply): Promise<void> => {
-    try {
-      await services.savedPrompts.delete(request.params.id);
-      return reply.code(204).send();
-    } catch (error) {
-      return savedPromptError(reply, error);
-    }
+  // umcp:t12 begin — the saved-prompt routes live with their service (unified MCP design
+  // 2026-10-15 D-16): `createdBy` and the pin refusal read the server-stamped principal, and the
+  // list rows carry `usedByWorkflows` (with each workflow's workspace) from the workflow store.
+  // The atomic todo-item toggle beside the other /api/todos routes (update_todos toggle).
+  registerSavedPromptRoutes(app, {
+    service: services.savedPrompts,
+    workflows: () => services.workflows.list(),
+    workspacesDir: () => resolved.workspacesDir
   });
-
-  // An Insert or a Send used the prompt: `lastUsedAt` now, `useCount` + 1. No body.
-  app.post<{ Params: { id: string } }>(
-    "/api/saved-prompts/:id/used",
-    async (request, reply): Promise<SavedPrompt | void> => {
-      try {
-        return await services.savedPrompts.markUsed(request.params.id);
-      } catch (error) {
-        return savedPromptError(reply, error);
-      }
-    }
-  );
+  registerTodoToggleRoute(app, todos);
+  // umcp:t12 end
 
   // Built-in plugins (plugins spec §5.3). Both transports, like the protect-archived toggle:
   // enabling downloads and runs a verified binary, which is no more than a remote user can do
@@ -4968,19 +4917,6 @@ function gitError(reply: FastifyReply, error: unknown): void {
   const status = error instanceof GitError ? error.status : 500;
   const message = error instanceof Error ? error.message : "Git operation failed.";
   void reply.code(status).send({ code: "GIT_ERROR", message });
-}
-
-/**
- * Map a saved-prompt route failure to the wire: a `SavedPromptError` carries
- * its own status and code; anything else is an unexpected 500.
- */
-function savedPromptError(reply: FastifyReply, error: unknown): void {
-  if (error instanceof SavedPromptError) {
-    void reply.code(error.status).send({ code: error.code, message: error.message });
-    return;
-  }
-  const message = error instanceof Error ? error.message : "Saved prompt operation failed.";
-  void reply.code(500).send({ code: "SAVED_PROMPTS_ERROR", message });
 }
 
 /**

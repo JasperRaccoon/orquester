@@ -1,19 +1,24 @@
-// Catalog family module `desktops` (Desktops) — owned by plan Task 12 (unified MCP, Wave 3).
-// Task 2 stub: `desktopsFamily` exports this family's tools as catalog tools (`../catalog/legacy.ts`
-// adapters over the pre-catalog definitions below); the owning task replaces it and Task 2 never
-// edits this file again.
-// Desktop tabs through the MCP (docs/superpowers/specs/2026-09-30-desktop-tab-design.md §7.4).
+// Catalog family module `desktops` (get_desktops, control_desktop) — unified MCP design 2026-10-15
+// §4 rows 40–41, §4.1 (ruling S4), plan Task 12. Both audiences, toolset `desktops`.
 //
-// A desktop is a virtual X display on the daemon's host that GUI apps run in, shown to the user as a tab. Every tool is
-// an in-process client of the daemon's desktop routes (`desktopRoutes`), through DaemonApi only, so a desktop an agent
-// opens appears in every client as the GUI's own would (`desktop.created`).
+// A desktop is a virtual X display on the daemon's host that GUI apps run in, shown to the user as
+// a tab (docs/superpowers/specs/2026-09-30-desktop-tab-design.md §7.4). Every call is an in-process
+// client of the daemon's desktop routes (`desktopRoutes`) through DaemonApi only, so a desktop an
+// agent opens appears in every client as the GUI's own would (`desktop.created`).
+//
+// Chat tiers: `open` and `launch_app` start processes on the host — Admin (`desktops`), with a card
+// naming the command, the working directory and the env keys (`./desktop-preview.ts`);
+// `stop_app`, `close_window` and `close` only stop things — Act. A desktop's project is its target
+// (§5.2); a chat caller's `cwd` must lie inside a project (ruling S6).
 
+import { basename, isAbsolute, resolve } from "node:path";
 import { z } from "zod";
 import { DESKTOP_MAX_HEIGHT, DESKTOP_MAX_WIDTH, DESKTOP_MIN_HEIGHT, DESKTOP_MIN_WIDTH } from "@orquester/config";
 import {
   DESKTOP_ENV_KEY_PATTERN,
   DESKTOP_MAX_COMMAND_LENGTH,
   DESKTOP_UNAVAILABLE_CODE,
+  TOOL_APPROVAL_REASON_MAX_CHARS,
   desktopRoutes,
   type CreateDesktopRequest,
   type DesktopAppSummary,
@@ -21,26 +26,26 @@ import {
   type DesktopSummary,
   type LaunchAppRequest
 } from "@orquester/api";
-import { resolveProject } from "../addressing.ts";
-import type { DaemonResponse } from "../daemon-api.ts";
+import { projectNamesFor, resolveProject } from "../addressing.ts";
+import type { DaemonApi, DaemonResponse } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
 import { clipText, jsonBytes, MAX_ECHO_CHARS } from "../result.ts";
-import { defineTool, DESTRUCTIVE, MUTATING, READ_ONLY, type ToolDef } from "../tool.ts";
-import { legacyExternalTools } from "../catalog/legacy.ts";
+import { defineTool, READ_ONLY, type AnyOrquesterTool, type ScopeClaim, type ScopeContext } from "../catalog/contract.ts";
+import { desktopPreview } from "./desktop-preview.ts";
 
-/** What desktop_app_log returns of a log at most: its tail, well under ok()'s 60 000-byte cap once JSON-escaped. */
+/** What an app's log returns at most: its tail, well under ok()'s 60 000-byte cap once JSON-escaped. */
 const LOG_RESULT_BYTES = 50_000;
 /** The most of the daemon's install hint an error quotes. */
 const MAX_HINT_CHARS = 500;
 
-const NOT_FOUND_HINT = " desktops_list shows the desktops with their apps and ids; desktop_windows shows a desktop's window ids.";
+const NOT_FOUND_HINT = " get_desktops shows the desktops with their apps and windows.";
 
 const ERROR_HINTS: Record<string, string> = {
   NOT_FOUND: NOT_FOUND_HINT,
   DESKTOP_NOT_FOUND: NOT_FOUND_HINT,
   DESKTOP_APP_NOT_FOUND: NOT_FOUND_HINT,
-  DESKTOP_WINDOW_NOT_FOUND: " desktop_windows shows the desktop's current windows.",
-  [DESKTOP_UNAVAILABLE_CODE]: " desktop_host_status shows what is missing."
+  DESKTOP_WINDOW_NOT_FOUND: " get_desktops {desktopId} shows the desktop's current windows.",
+  [DESKTOP_UNAVAILABLE_CODE]: " get_desktops {host: true} shows what is missing."
 };
 
 /**
@@ -79,172 +84,262 @@ function tailJsonBytes(text: string, budget: number): { text: string; truncated:
   return { text: chars.slice(lo).join(""), truncated: true };
 }
 
-const projectArg = z.string().describe("The project: an absolute path or \"<workspace>/<project>\".");
-const desktopIdArg = z.string().min(1).describe("The desktop's id (desktops_list).");
-const commandArg = z.string().min(1).max(DESKTOP_MAX_COMMAND_LENGTH)
-  .refine((command) => !/[\r\n]/.test(command), "must be a single line")
-  .describe("One shell command line, run as `sh -c 'exec <command>'` with DISPLAY and audio wired to the desktop, e.g. \"xterm\" or \"./build/bin/editor --level 2\".");
-const cwdArg = z.string().min(1).optional().describe("Working directory: absolute, or relative to the project; default: the project.");
-const envArg = z.record(z.string().regex(DESKTOP_ENV_KEY_PATTERN, "is not an environment variable name"), z.string()).optional()
-  .describe("Extra environment variables for the app, applied last (they can override LP_NUM_THREADS or anything else).");
+// ---------------------------------------------------------------------------
+// Addressing
+// ---------------------------------------------------------------------------
+
+/** Every desktop, every project (the list route without `projectPath`). */
+async function allDesktops(api: DaemonApi): Promise<DesktopSummary[]> {
+  return expectDesktopOk<DesktopSummary[]>(await api.request("GET", desktopRoutes.list));
+}
+
+/** One desktop by id (there is no per-desktop GET: the full list is filtered). */
+async function findDesktop(api: DaemonApi, desktopId: string): Promise<DesktopSummary> {
+  const desktop = (await allDesktops(api)).find((candidate) => candidate.id === desktopId);
+  if (!desktop) throw new ToolError("NOT_FOUND", `No desktop "${clipText(desktopId, MAX_ECHO_CHARS)}".${NOT_FOUND_HINT}`);
+  return desktop;
+}
+
+/** `project` resolved to the path desktops are keyed by; a chat caller naming none means its own (null: none). */
+async function projectOf(project: string | undefined, ctx: ScopeContext): Promise<string | null> {
+  let ref = project;
+  if (ref === undefined && ctx.caller.kind === "thread" && ctx.caller.projectPath && ctx.caller.workspace) {
+    ref = `${ctx.caller.workspace}/${basename(ctx.caller.projectPath)}`;
+  }
+  return ref === undefined ? null : (await resolveProject(ctx.api, ref)).path;
+}
+
+/** `ws/p` of a project path, for cards (the path itself when it names no project). */
+function labelOf(api: DaemonApi, projectPath: string): string {
+  const names = projectNamesFor(projectPath, api.workspacesDir);
+  return names.workspace && names.name ? `${names.workspace}/${names.name}` : projectPath;
+}
+
+/** A launch's working directory as the daemon runs it: absolute, or relative to the desktop's project. */
+const cwdIn = (projectPath: string, cwd: string): string => (isAbsolute(cwd) ? resolve(cwd) : resolve(projectPath, cwd));
+
+// ---------------------------------------------------------------------------
+// get_desktops
+// ---------------------------------------------------------------------------
+
+const desktopIdArg = z.string().min(1).describe("A desktop's id (get_desktops).");
+
+const getDesktops = defineTool({
+  name: "get_desktops",
+  title: "Get desktops",
+  description:
+    "Desktop tabs: virtual X displays on the daemon's host that GUI apps run in, shown to the user live. Without desktopId: a project's desktops — id, title, status (starting, running, stopped, error), size, audio, apps (id, command, status, exit code) and open windows (id, title, appId). With desktopId: that desktop. With desktopId and appId: the app's recent stdout/stderr (its last 64 KiB, newest at the end; a long one keeps its tail, truncated: true). host: true adds whether this host can run desktops: the tools found, GPU, warnings and installHint, the apt-get line for what is missing — installing is for the host's owner, tell the user.",
+  chatNote: "Without project: this chat's project.",
+  externalNote: "Without project: every project's desktops.",
+  input: {
+    project: z.string().min(1).optional().describe("Absolute project path or \"<workspace>/<project>\"."),
+    desktopId: desktopIdArg.optional(),
+    appId: z.string().min(1).optional().describe("With desktopId: that app's output."),
+    host: z.boolean().optional().describe("Add the host's desktop support status.")
+  },
+  audiences: ["external", "chat"],
+  toolset: "desktops",
+  tier: "read",
+  async scope(args, ctx) {
+    if (args.appId !== undefined && args.desktopId === undefined) throw new ToolError("INVALID_ARGUMENT", "appId needs desktopId.");
+    if (args.desktopId !== undefined && args.project !== undefined) throw new ToolError("INVALID_ARGUMENT", "Pass desktopId or project, not both.");
+    const claim: ScopeClaim = { projects: [], sessions: [], reads: "metadata", writes: false, causesTurnIn: [] };
+    if (args.desktopId !== undefined) {
+      const desktop = await findDesktop(ctx.api, args.desktopId);
+      // An app's output is content (§5.2), like a tool's output.
+      return { ...claim, projects: [desktop.projectPath], reads: args.appId !== undefined ? "content" : "metadata" };
+    }
+    const projectPath = await projectOf(args.project, ctx);
+    if (projectPath === null && ctx.caller.kind === "thread" && args.host !== true) {
+      throw new ToolError("INVALID_ARGUMENT", "This chat has no project: pass project.");
+    }
+    return { ...claim, projects: projectPath ? [projectPath] : [] };
+  },
+  annotations: READ_ONLY,
+  resultKind: "json",
+  async run(args, ctx) {
+    const { api } = ctx;
+    const host = args.host === true ? { host: expectDesktopOk<DesktopHostStatus>(await api.request("GET", desktopRoutes.host)) } : {};
+    if (args.desktopId !== undefined && args.appId !== undefined) {
+      const body = expectDesktopOk<unknown>(await api.request("GET", desktopRoutes.appLog(args.desktopId, args.appId)));
+      // text/plain; the in-process client parses a body that happens to be JSON, so give such a log back as text.
+      const raw = typeof body === "string" ? body : body === null ? "" : JSON.stringify(body);
+      const log = tailJsonBytes(raw, LOG_RESULT_BYTES);
+      return { desktopId: args.desktopId, appId: args.appId, text: log.text, ...(log.truncated ? { truncated: true } : {}), ...host };
+    }
+    if (args.desktopId !== undefined) return { desktop: await findDesktop(api, args.desktopId), ...host };
+    const projectPath = await projectOf(args.project, ctx);
+    if (projectPath === null && ctx.caller.kind === "thread") return host;
+    const desktops = expectDesktopOk<DesktopSummary[]>(await api.request("GET", desktopRoutes.list, projectPath ? { query: { projectPath } } : undefined));
+    return { desktops, ...host };
+  }
+});
+
+// ---------------------------------------------------------------------------
+// control_desktop
+// ---------------------------------------------------------------------------
+
+const ACTIONS = ["open", "launch_app", "stop_app", "close_window", "close"] as const;
+type Action = (typeof ACTIONS)[number];
+
+const controlInput = {
+  action: z.enum(ACTIONS),
+  project: z.string().min(1).optional().describe("open: the project, an absolute path or \"<workspace>/<project>\"."),
+  desktopId: desktopIdArg.optional(),
+  appId: z.string().min(1).optional().describe("stop_app: the app's id."),
+  windowId: z.string().min(1).optional().describe("close_window: the window's id (0x… hex)."),
+  command: z
+    .string()
+    .min(1)
+    .max(DESKTOP_MAX_COMMAND_LENGTH)
+    .refine((command) => !/[\r\n]/.test(command), "must be a single line")
+    .optional()
+    .describe("One shell command line, run as `sh -c 'exec <command>'` with DISPLAY and audio wired to the desktop, e.g. \"xterm\"."),
+  cwd: z.string().min(1).optional().describe("The app's working directory: absolute, or relative to the project (default)."),
+  env: z
+    .record(z.string().regex(DESKTOP_ENV_KEY_PATTERN, "is not an environment variable name"), z.string())
+    .optional()
+    .describe("Extra environment variables for the app, applied last."),
+  title: z.string().min(1).max(200).optional().describe("open: the tab's title (default \"Desktop\")."),
+  size: z
+    .object({
+      width: z.number().int().min(DESKTOP_MIN_WIDTH).max(DESKTOP_MAX_WIDTH),
+      height: z.number().int().min(DESKTOP_MIN_HEIGHT).max(DESKTOP_MAX_HEIGHT)
+    })
+    .strict()
+    .optional()
+    .describe(`open: pixels, ${DESKTOP_MIN_WIDTH}×${DESKTOP_MIN_HEIGHT} to ${DESKTOP_MAX_WIDTH}×${DESKTOP_MAX_HEIGHT} (default 1280×800).`),
+  renderThreads: z.number().int().min(1).max(256).optional().describe("open: software-OpenGL threads per app (LP_NUM_THREADS, default 4)."),
+  force: z.boolean().optional().describe("stop_app: SIGKILL at once instead of SIGTERM, then SIGKILL after 5 s."),
+  reason: z.string().max(TOOL_APPROVAL_REASON_MAX_CHARS).optional().describe("Why, shown to the user when the action needs approval.")
+};
+type ControlArgs = z.infer<z.ZodObject<typeof controlInput>>;
+
+/** The fields each action takes (required, then allowed; `reason` always) — anything else given is refused. */
+const ACTION_FIELDS: Readonly<Record<Action, { required: readonly (keyof ControlArgs)[]; allowed: readonly (keyof ControlArgs)[] }>> = {
+  open: { required: [], allowed: ["project", "title", "size", "renderThreads", "command", "cwd", "env"] },
+  launch_app: { required: ["desktopId", "command"], allowed: ["cwd", "env"] },
+  stop_app: { required: ["desktopId", "appId"], allowed: ["force"] },
+  close_window: { required: ["desktopId", "windowId"], allowed: [] },
+  close: { required: ["desktopId"], allowed: [] }
+};
+const FIELD_KEYS = ["project", "desktopId", "appId", "windowId", "command", "cwd", "env", "title", "size", "renderThreads", "force"] as const;
+
+function checkAction(args: ControlArgs, external: boolean): void {
+  const fields = ACTION_FIELDS[args.action];
+  for (const key of fields.required) {
+    if (args[key] === undefined) throw new ToolError("INVALID_ARGUMENT", `control_desktop ${args.action} needs ${key}.`);
+  }
+  for (const key of FIELD_KEYS) {
+    if (args[key] !== undefined && !fields.required.includes(key) && !fields.allowed.includes(key)) {
+      throw new ToolError("INVALID_ARGUMENT", `control_desktop ${args.action} takes no ${key}.`);
+    }
+  }
+  if (args.action === "open") {
+    if (external && args.project === undefined) throw new ToolError("INVALID_ARGUMENT", "control_desktop open needs project.");
+    if (args.command === undefined && (args.cwd !== undefined || args.env !== undefined)) {
+      throw new ToolError("INVALID_ARGUMENT", "cwd and env apply to the first app: pass command too, or launch it later with launch_app.");
+    }
+  }
+}
 
 function launchRequest(args: { command: string; cwd?: string; env?: Record<string, string> }): LaunchAppRequest {
   const app: LaunchAppRequest = { command: args.command };
   if (args.cwd !== undefined) app.cwd = args.cwd;
-  if (args.env !== undefined) app.env = args.env;
+  if (args.env !== undefined) app.env = { ...args.env };
   return app;
 }
 
-const desktopsList = defineTool({
-  name: "desktops_list",
-  title: "List desktops",
-  description: "The desktop tabs — virtual X displays on the daemon's host that GUI apps run in — of one project, or of every project: id, title, status (starting, running, stopped, error), size, audio, the apps launched in it (id, command, status, exit code) and its open windows. Use a desktop's id with desktop_launch_app, desktop_windows and desktop_close.",
-  input: { projectPath: projectArg.optional().describe("Only this project's desktops: an absolute path or \"<workspace>/<project>\"; omit for every project.") },
-  annotations: READ_ONLY,
-  async run(args, { api }) {
-    // `!== undefined`: an empty projectPath is refused by resolveProject, never read as "every project".
-    const query = args.projectPath !== undefined ? { projectPath: (await resolveProject(api, args.projectPath)).path } : undefined;
-    const desktops = expectDesktopOk<DesktopSummary[]>(await api.request("GET", desktopRoutes.list, query ? { query } : undefined));
-    return { desktops };
+/** The call's target: the project it opens in, or the desktop it acts on (and that desktop's project). */
+async function targetOf(args: ControlArgs, ctx: ScopeContext): Promise<{ projectPath: string; desktop?: DesktopSummary }> {
+  if (args.action === "open") {
+    const projectPath = await projectOf(args.project, ctx);
+    if (projectPath === null) throw new ToolError("INVALID_ARGUMENT", "This chat has no project: pass project.");
+    return { projectPath };
   }
-});
+  const desktop = await findDesktop(ctx.api, args.desktopId!);
+  return { projectPath: desktop.projectPath, desktop };
+}
 
-const desktopHostStatus = defineTool({
-  name: "desktop_host_status",
-  title: "Check the desktop host",
-  description: "Whether this host can run desktops, before desktop_open: available (Xvnc, Openbox, D-Bus and a usable tmux ≥ 3.2 are present), audioAvailable (PulseAudio and ffmpeg with pulse and libopus), each tool's path, whether a GPU render node exists (else OpenGL is software-rendered), warnings, and installHint — the apt-get line for whatever is missing. Installing is for the host's owner; tell the user rather than running it.",
-  input: {},
-  annotations: READ_ONLY,
-  async run(_args, { api }) {
-    return { ...expectDesktopOk<DesktopHostStatus>(await api.request("GET", desktopRoutes.host)) };
-  }
-});
-
-const desktopOpen = defineTool({
-  name: "desktop_open",
-  title: "Open a desktop",
-  description: "Open a desktop tab in a project: a virtual X display on the daemon's host, with a window manager and audio, that GUI apps run in and the user sees and controls live as a tab in every client. Optionally launch a first app into it (command). Several apps can share one desktop; launch more with desktop_launch_app. Check desktop_host_status first: without the host packages this answers DESKTOP_UNAVAILABLE with the install line. Returns the desktop; while status is \"starting\" its display is still coming up.",
-  input: {
-    projectPath: projectArg,
-    title: z.string().min(1).max(200).optional().describe("The tab's title; default \"Desktop\"."),
-    size: z.object({
-      width: z.number().int().min(DESKTOP_MIN_WIDTH).max(DESKTOP_MAX_WIDTH),
-      height: z.number().int().min(DESKTOP_MIN_HEIGHT).max(DESKTOP_MAX_HEIGHT)
-    }).strict().optional().describe(`The display size in pixels, ${DESKTOP_MIN_WIDTH}×${DESKTOP_MIN_HEIGHT} to ${DESKTOP_MAX_WIDTH}×${DESKTOP_MAX_HEIGHT}; default 1280×800.`),
-    renderThreads: z.number().int().min(1).max(256).optional().describe("Software-OpenGL (llvmpipe) threads per app, LP_NUM_THREADS; default 4, at most the host's core count."),
-    command: commandArg.optional().describe("A first app to launch once the display is up: one shell command line, e.g. \"xterm\"."),
-    cwd: cwdArg.describe("The first app's working directory: absolute, or relative to the project; default: the project. Needs command."),
-    env: envArg.describe("The first app's extra environment variables. Needs command.")
-  },
-  annotations: MUTATING,
-  async run(args, { api }) {
-    if (args.command === undefined && (args.cwd !== undefined || args.env !== undefined)) {
-      throw new ToolError("INVALID_ARGUMENT", "cwd and env apply to the first app: pass command too, or launch it later with desktop_launch_app.");
-    }
-    const project = await resolveProject(api, args.projectPath);
-    const body: CreateDesktopRequest = { projectPath: project.path };
-    if (args.title !== undefined) body.title = args.title;
-    if (args.size !== undefined) body.size = args.size;
-    if (args.renderThreads !== undefined) body.renderThreads = args.renderThreads;
-    if (args.command !== undefined) body.app = launchRequest({ command: args.command, cwd: args.cwd, env: args.env });
-    const desktop = expectDesktopOk<DesktopSummary>(await api.request("POST", desktopRoutes.create, { body }));
-    return { desktop };
-  }
-});
-
-const desktopLaunchApp = defineTool({
-  name: "desktop_launch_app",
-  title: "Launch an app in a desktop",
-  description: "Start a GUI app in a running desktop, next to the apps already in it (they share one display and one audio output). Returns the app with its id: desktop_app_log reads its output, desktop_stop_app stops it, and its windows appear in desktop_windows once it opens them.",
-  input: { desktopId: desktopIdArg, command: commandArg, cwd: cwdArg, env: envArg },
-  annotations: MUTATING,
-  async run(args, { api }) {
-    const app = expectDesktopOk<DesktopAppSummary>(await api.request("POST", desktopRoutes.apps(args.desktopId), { body: launchRequest(args) }));
-    return { app };
-  }
-});
-
-const desktopWindows = defineTool({
-  name: "desktop_windows",
-  title: "List a desktop's windows",
-  description: "The top-level windows open in a desktop, as the tab's window bar shows them: id (0x… hex), title, the app that owns it (appId, or null for one no launched app claims), WM_CLASS and maximized; the active window; and the desktop's apps. Use a window's id with desktop_window_action.",
-  input: { desktopId: desktopIdArg },
-  annotations: READ_ONLY,
-  async run(args, { api }) {
-    // No per-desktop GET: the list route without projectPath lists every project's desktops.
-    const desktops = expectDesktopOk<DesktopSummary[]>(await api.request("GET", desktopRoutes.list));
-    const desktop = desktops.find((d) => d.id === args.desktopId);
-    if (!desktop) throw new ToolError("NOT_FOUND", `No desktop "${clipText(args.desktopId, MAX_ECHO_CHARS)}".${NOT_FOUND_HINT}`);
+const controlDesktop = defineTool({
+  name: "control_desktop",
+  title: "Control desktops",
+  description:
+    "Open and drive desktop tabs (see get_desktops). open: a new desktop in a project — a virtual display with a window manager and audio the user sees live — optionally launching a first app (command). launch_app: start another GUI app in a running desktop. stop_app: SIGTERM the app's process group, SIGKILL after 5 s (or at once with force); unsaved work is lost. close_window: ask a window to close (the app may ask to save). close: stop every app and remove the desktop tab. Without the host packages, open answers DESKTOP_UNAVAILABLE with the install line.",
+  chatNote:
+    "open and launch_app run commands on the host: they ask the user to approve in the chat (up to 30 min); if denied, don't retry — ask the user. Without project, open uses this chat's project.",
+  input: controlInput,
+  audiences: ["external", "chat"],
+  toolset: "desktops",
+  tier: (args) => (args.action === "open" || args.action === "launch_app" ? "admin" : "act"),
+  adminFamily: "desktops",
+  async scope(args, ctx) {
+    checkAction(args, ctx.caller.kind === "external");
+    const { projectPath } = await targetOf(args, ctx);
     return {
-      desktopId: desktop.id,
-      status: desktop.status,
-      windows: desktop.windows,
-      activeWindowId: desktop.activeWindowId,
-      apps: desktop.apps.map((app) => ({ id: app.id, command: app.command, status: app.status }))
+      projects: [projectPath],
+      sessions: [],
+      reads: "none",
+      writes: true,
+      causesTurnIn: [],
+      // Ruling S6: a chat caller's working directory must lie inside a project.
+      ...(args.cwd !== undefined ? { paths: [cwdIn(projectPath, args.cwd)] } : {})
     };
-  }
-});
-
-const desktopWindowAction = defineTool({
-  name: "desktop_window_action",
-  title: "Act on a desktop window",
-  description: "Activate (raise and focus), maximize or close one window of a desktop, as the tab's window bar does. maximize toggles: on a maximized window it restores it. close is graceful (_NET_CLOSE_WINDOW), so the app may ask to save instead of closing; desktop_stop_app ends an app outright.",
-  input: {
-    desktopId: desktopIdArg,
-    windowId: z.string().min(1).describe("The window's id from desktop_windows (0x… hex)."),
-    action: z.enum(["activate", "maximize", "close"]).describe("activate, maximize (a toggle) or close.")
   },
-  annotations: MUTATING,
-  async run(args, { api }) {
-    expectDesktopOk(await api.request("POST", desktopRoutes.windowAction(args.desktopId, args.windowId, args.action)));
-    return { done: true, desktopId: args.desktopId, windowId: args.windowId, action: args.action };
-  }
-});
-
-const desktopAppLog = defineTool({
-  name: "desktop_app_log",
-  title: "Read an app's output",
-  description: "The recent stdout and stderr of an app launched in a desktop (the daemon keeps its last 64 KiB), newest at the end — for why an app failed to start or what it printed. A log too long for one result keeps its tail (truncated: true).",
-  input: { desktopId: desktopIdArg, appId: z.string().min(1).describe("The app's id (desktops_list, or desktop_launch_app's answer).") },
-  annotations: READ_ONLY,
-  async run(args, { api }) {
-    const body = expectDesktopOk<unknown>(await api.request("GET", desktopRoutes.appLog(args.desktopId, args.appId)));
-    // text/plain; the in-process client parses a body that happens to be JSON, so give such a log back as text.
-    const raw = typeof body === "string" ? body : body === null ? "" : JSON.stringify(body);
-    const log = tailJsonBytes(raw, LOG_RESULT_BYTES);
-    return { desktopId: args.desktopId, appId: args.appId, text: log.text, ...(log.truncated ? { truncated: true } : {}) };
-  }
-});
-
-const desktopStopApp = defineTool({
-  name: "desktop_stop_app",
-  title: "Stop an app in a desktop",
-  description: "Stop one app in a desktop: SIGTERM to its process group, then SIGKILL if it is still alive after 5 s — or at once with force. Unsaved work in it is lost. The desktop and its other apps keep running.",
-  input: {
-    desktopId: desktopIdArg,
-    appId: z.string().min(1).describe("The app's id (desktops_list)."),
-    force: z.boolean().default(false).describe("SIGKILL at once instead of SIGTERM first.")
+  async approval(args, ctx) {
+    const { projectPath, desktop } = await targetOf(args, ctx);
+    return desktopPreview({
+      action: args.action,
+      agentId: ctx.caller.kind === "thread" ? ctx.caller.agentId : undefined,
+      projectLabel: labelOf(ctx.api, projectPath),
+      ...(desktop ? { desktop } : {}),
+      ...(args.title !== undefined ? { title: args.title } : {}),
+      ...(args.size !== undefined ? { size: args.size } : {}),
+      ...(args.renderThreads !== undefined ? { renderThreads: args.renderThreads } : {}),
+      ...(args.command !== undefined ? { command: args.command } : {}),
+      ...(args.cwd !== undefined ? { cwd: cwdIn(projectPath, args.cwd) } : {}),
+      ...(args.env !== undefined ? { env: args.env } : {}),
+      ...(args.appId !== undefined ? { appId: args.appId } : {}),
+      ...(args.windowId !== undefined ? { windowId: args.windowId } : {}),
+      ...(args.force !== undefined ? { force: args.force } : {})
+    });
   },
-  annotations: DESTRUCTIVE,
-  async run(args, { api }) {
-    expectDesktopOk(await api.request("DELETE", desktopRoutes.app(args.desktopId, args.appId), args.force ? { query: { force: "1" } } : undefined));
-    return { stopped: true, desktopId: args.desktopId, appId: args.appId, force: args.force };
+  // Launching an app runs anything, so no closed world; stop and close destroy unsaved work.
+  annotations: { readOnlyHint: false, destructiveHint: true, idempotentHint: false },
+  resultKind: "json",
+  async run(args, ctx) {
+    checkAction(args, ctx.caller.kind === "external");
+    const { api } = ctx;
+    switch (args.action) {
+      case "open": {
+        const { projectPath } = await targetOf(args, ctx);
+        const body: CreateDesktopRequest = { projectPath };
+        if (args.title !== undefined) body.title = args.title;
+        if (args.size !== undefined) body.size = { ...args.size };
+        if (args.renderThreads !== undefined) body.renderThreads = args.renderThreads;
+        if (args.command !== undefined) body.app = launchRequest({ command: args.command, cwd: args.cwd, env: args.env });
+        return { desktop: expectDesktopOk<DesktopSummary>(await api.request("POST", desktopRoutes.create, { body })) };
+      }
+      case "launch_app": {
+        const app = expectDesktopOk<DesktopAppSummary>(
+          await api.request("POST", desktopRoutes.apps(args.desktopId!), { body: launchRequest({ command: args.command!, cwd: args.cwd, env: args.env }) })
+        );
+        return { app };
+      }
+      case "stop_app": {
+        const force = args.force === true;
+        expectDesktopOk(await api.request("DELETE", desktopRoutes.app(args.desktopId!, args.appId!), force ? { query: { force: "1" } } : undefined));
+        return { stopped: true, desktopId: args.desktopId!, appId: args.appId!, force };
+      }
+      case "close_window":
+        expectDesktopOk(await api.request("POST", desktopRoutes.windowAction(args.desktopId!, args.windowId!, "close")));
+        return { done: true, desktopId: args.desktopId!, windowId: args.windowId!, action: "close" };
+      case "close":
+        expectDesktopOk(await api.request("DELETE", desktopRoutes.desktop(args.desktopId!)));
+        return { closed: true, desktopId: args.desktopId! };
+    }
   }
 });
-
-const desktopClose = defineTool({
-  name: "desktop_close",
-  title: "Close a desktop",
-  description: "Close a desktop tab: stops every app in it (unsaved work is lost), shuts its display down and removes the tab from every client, as closing the tab does. Stop a single app with desktop_stop_app instead.",
-  input: { desktopId: desktopIdArg },
-  annotations: DESTRUCTIVE,
-  async run(args, { api }) {
-    expectDesktopOk(await api.request("DELETE", desktopRoutes.desktop(args.desktopId)));
-    return { closed: true, desktopId: args.desktopId };
-  }
-});
-
-export const desktopTools: ToolDef[] = [desktopsList, desktopHostStatus, desktopOpen, desktopLaunchApp, desktopWindows, desktopWindowAction, desktopAppLog, desktopStopApp, desktopClose];
 
 /** This family in the catalog (`../catalog/index.ts`). */
-export const desktopsFamily = legacyExternalTools(desktopTools);
+export const desktopsFamily: readonly AnyOrquesterTool[] = [getDesktops, controlDesktop];

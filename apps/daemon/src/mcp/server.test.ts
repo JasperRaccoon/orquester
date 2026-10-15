@@ -47,11 +47,10 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   list_files: { required: ["path"], annotations: READ },
   read_file: { required: ["path"], annotations: READ },
   list_todos: { required: [], annotations: READ },
-  create_todo: { required: ["name"], annotations: closed(WRITE) },
-  update_todo: { required: ["id"], annotations: closed(WRITE_IDEMPOTENT) },
-  delete_todo: { required: ["id"], annotations: closed(DESTROY) },
-  // Omitting `checked` flips the item, so a repeated call is not a no-op: not idempotent.
-  toggle_todo_item: { required: ["id", "item"], annotations: closed(WRITE) },
+  // Task 12: one tool for every todo write; the most dangerous is delete, and a toggle that flips is not idempotent.
+  update_todos: { required: ["action"], annotations: closed({ ...WRITE, destructiveHint: true }) },
+  list_saved_prompts: { required: [], annotations: READ },
+  update_saved_prompts: { required: ["action"], annotations: closed({ ...WRITE, destructiveHint: true }) },
   // Automated workflows (workflows spec §8.3). run_workflow drives agents, so no tool that writes claims a closed world.
   list_workflow_block_types: { required: [], annotations: READ },
   list_workflows: { required: [], annotations: READ },
@@ -83,15 +82,8 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   import_agent_profile_items: { required: ["agent"], annotations: WRITE },
   list_marketplace_plugins: { required: ["agent", "marketplace"], annotations: READ },
   // Desktops (desktop tab spec §7.4): launching an app runs anything, so no write claims a closed world.
-  desktops_list: { required: [], annotations: READ },
-  desktop_host_status: { required: [], annotations: READ },
-  desktop_open: { required: ["projectPath"], annotations: WRITE },
-  desktop_launch_app: { required: ["desktopId", "command"], annotations: WRITE },
-  desktop_windows: { required: ["desktopId"], annotations: READ },
-  desktop_window_action: { required: ["desktopId", "windowId", "action"], annotations: WRITE },
-  desktop_app_log: { required: ["desktopId", "appId"], annotations: READ },
-  desktop_stop_app: { required: ["desktopId", "appId"], annotations: DESTROY },
-  desktop_close: { required: ["desktopId"], annotations: DESTROY }
+  get_desktops: { required: [], annotations: READ },
+  control_desktop: { required: ["action"], annotations: { ...WRITE, destructiveHint: true } }
 };
 
 type ListedTool = { name: string; title?: string; description: string; annotations?: object; inputSchema: { properties?: Record<string, { description?: string }>; required?: string[]; additionalProperties?: unknown } };
@@ -143,7 +135,8 @@ test("tools/list is generated from the catalog's external audience: each entry's
     const meta = Object.fromEntries((list.result.tools as (ListedTool & { _meta?: Record<string, string> })[]).map((t) => [t.name, t._meta]));
     assert.deepEqual(meta.list_sessions, { "orquester/tier": "read", "orquester/toolset": "core" });
     assert.deepEqual(meta.create_workflow, { "orquester/tier": "admin", "orquester/toolset": "workflow-authoring" });
-    assert.deepEqual(meta.desktop_close, { "orquester/tier": "act", "orquester/toolset": "desktops" });
+    assert.deepEqual(meta.control_desktop, { "orquester/tier": "admin", "orquester/toolset": "desktops" });
+    assert.deepEqual(meta.update_todos, { "orquester/tier": "act", "orquester/toolset": "notes" });
     assert.ok(Object.values(meta).every((m) => m !== undefined && typeof m["orquester/tier"] === "string"));
   } finally { await app.close(); }
 });

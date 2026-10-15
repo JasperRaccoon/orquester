@@ -718,6 +718,30 @@ export interface UpdateTodoRequest {
   body?: string;
 }
 
+/** `POST /api/todos/:id/toggle` — check or uncheck ONE task item of a list, atomically. */
+export const todoToggleRoute = (id: string): string => `/api/todos/${encodeURIComponent(id)}/toggle`;
+
+/**
+ * `POST /api/todos/:id/toggle` body. The daemon edits that item's mark in the STORED body in one
+ * step (no other write can land between its read and its write), so a toggle never overwrites a
+ * concurrent edit. `item`: the item's 1-based index among the list's task items, or its exact text
+ * (trimmed, case-insensitive). `checked`: the state to set; omitted flips it. Setting the state it
+ * already has writes nothing. Refusals: 404 (no such list), 400 (no such / an ambiguous item),
+ * `{code: "TODO_ERROR", message}` like the other todo routes.
+ */
+export interface ToggleTodoItemRequest {
+  item: string | number;
+  checked?: boolean;
+}
+
+/** `POST /api/todos/:id/toggle` answer: the item as matched, its state now, the list's whole body now. */
+export interface ToggleTodoItemResponse {
+  id: string;
+  item: string;
+  checked: boolean;
+  body: string;
+}
+
 /** `/events` channel "todos"; type one of these. Payload is always a full TodoListRecord
  *  (for "todo.deleted" it is the record as it was at deletion — clients remove by id). */
 export type TodoEventType = "todo.created" | "todo.updated" | "todo.deleted";
