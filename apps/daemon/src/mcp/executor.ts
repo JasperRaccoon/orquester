@@ -62,7 +62,9 @@ import type {
   ThreadCaller,
   Tier,
   ToolCaller,
-  ToolsetCardInput
+  ToolsetApplyOutcome,
+  ToolsetCardInput,
+  ToolsetCardOutcome
 } from "./catalog/contract.ts";
 import { withPrincipal, type DaemonApi } from "./daemon-api.ts";
 import { ToolError } from "./errors.ts";
@@ -97,7 +99,7 @@ export interface ExecutorPorts {
    * truthfully, and schedules the automatic continue turn (spec §9.3). Its errors are logged,
    * never thrown into the call; null → nothing waited for or scheduled.
    */
-  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId, signal: AbortSignal) => void | Promise<void>) | null;
+  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId, signal: AbortSignal) => ToolsetApplyOutcome | void | Promise<ToolsetApplyOutcome | void>) | null;
 }
 
 export const executorPorts: ExecutorPorts = { approvals: null, enabledToolsets: null, onToolsetApproved: null };
@@ -110,7 +112,7 @@ export interface ExecutorDeps {
   /** The caller as it is NOW (mode, planning) — the gate re-runs on it after a card (§13). */
   refreshCaller?: (caller: ThreadCaller) => Promise<ThreadCaller>;
   /** See {@link ExecutorPorts.onToolsetApproved} (default: the daemon's wiring). */
-  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId, signal: AbortSignal) => void | Promise<void>) | null;
+  onToolsetApproved?: ((caller: ThreadCaller, toolset: ToolsetId, signal: AbortSignal) => ToolsetApplyOutcome | void | Promise<ToolsetApplyOutcome | void>) | null;
   legacy?: LegacyToolServices;
   secretRequests?: SessionSecretRequests;
   now?: () => number;
@@ -621,7 +623,7 @@ async function recordChildrenInGrant(
  * (not "already on", which opens none) is reported to the chat transport, which schedules the
  * automatic continue turn where the provider cannot take the tools in-session.
  */
-async function requestToolsetCard(deps: ExecutorDeps, caller: ThreadCaller, input: ToolsetCardInput, signal: AbortSignal, record: CallRecord): Promise<ApprovalOutcome> {
+async function requestToolsetCard(deps: ExecutorDeps, caller: ThreadCaller, input: ToolsetCardInput, signal: AbortSignal, record: CallRecord): Promise<ToolsetCardOutcome> {
   if (caller.workflowOwned) {
     throw new ToolError("PERMISSION_DENIED", "This chat runs inside an automated workflow, where nobody can approve a toolset.");
   }
@@ -663,8 +665,10 @@ async function requestToolsetCard(deps: ExecutorDeps, caller: ThreadCaller, inpu
     if (outcome.outcome === "approved") {
       const hook = deps.onToolsetApproved === undefined ? executorPorts.onToolsetApproved : deps.onToolsetApproved;
       try {
-        // The call's own signal: a Stop or a provider cancel ends the wait at once.
-        await hook?.(caller, input.toolset, signal);
+        // The call's own signal: a Stop or a provider cancel ends the wait at once. What the
+        // transport did with the change is the tool's answer ("now" / "after-restart" / pending).
+        const applied = await hook?.(caller, input.toolset, signal);
+        if (applied) return { ...outcome, applied };
       } catch (error) {
         console.error("[mcp] toolset approval hook failed", error instanceof Error ? error.message : "unknown error");
       }

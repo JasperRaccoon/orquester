@@ -53,7 +53,7 @@ import {
   type SessionToolsManifestRequest,
   type SessionToolsRefreshResponse
 } from "../agent-host/host-protocol.ts";
-import type { AnyOrquesterTool, ThreadCaller } from "../mcp/catalog/contract.ts";
+import type { AnyOrquesterTool, ThreadCaller, ToolsetApplyOutcome } from "../mcp/catalog/contract.ts";
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { isWorkflowOwned } from "../mcp/gate/scope.ts";
 import { listSessions, readThread, sendCommand } from "../mcp/reads.ts";
@@ -381,10 +381,12 @@ export class SessionToolsRefresher {
    * wait (bounded) for the host's answer to the push the change started. `live` / `unchanged` —
    * the advertised set is the new one ("now"); `next-idle` — a restart really is pending: the
    * automatic continue is scheduled ("after-restart"); anything else (no host, no live session, no
-   * answer in time) — pending, truthfully "after-restart", and NO continue (nothing would restart).
+   * answer in time, a superseded push) — `pending`: the change waits for the session's next start,
+   * and NO continue (nothing would restart). The answer is `request_toolset`'s (`ToolsetApplyOutcome`);
+   * none for a call that went away.
    */
-  async toolsetApproved(caller: ThreadCaller, toolset: string, signal?: AbortSignal): Promise<void> {
-    if (this.stopped || signal?.aborted) return;
+  async toolsetApproved(caller: ThreadCaller, toolset: string, signal?: AbortSignal): Promise<ToolsetApplyOutcome | undefined> {
+    if (this.stopped || signal?.aborted) return undefined;
     let timer: NodeJS.Timeout | undefined;
     let onAbort: (() => void) | undefined;
     const aborted = new Promise<"aborted">((resolve) => {
@@ -398,7 +400,7 @@ export class SessionToolsRefresher {
       // The bound covers the HOST (its worst case is below it): it starts when the host is asked,
       // after the manifest was built (that build has its own bounds, `DAEMON_POINTING_READ_TIMEOUT_MS`).
       const started = await Promise.race([own.hostStarted, aborted]);
-      if (started === "aborted") return;
+      if (started === "aborted") return undefined;
       const deadline = new Promise<"timeout">((resolve) => {
         timer = setTimeout(() => resolve("timeout"), this.deps.applyWaitMs ?? TOOLSET_APPLY_WAIT_MS);
       });
@@ -424,15 +426,17 @@ export class SessionToolsRefresher {
       if (onAbort) signal?.removeEventListener("abort", onAbort);
     }
     // The call went away (Stop, the provider cancelled it): nothing is scheduled for it.
-    if (answer === "aborted" || signal?.aborted) return;
+    if (answer === "aborted" || signal?.aborted) return undefined;
     if (answer === "timeout") {
       this.markPending(caller.threadId);
-      return;
+      return "pending";
     }
-    if (answer !== "next-idle") return;
+    if (answer === "live" || answer === "unchanged") return "now";
+    if (answer !== "next-idle") return "pending";
     void this.scheduleContinue(caller.threadId, toolset, caller.planning ? "plan" : "default").catch((error: unknown) =>
       this.deps.logger?.warn?.("session-tools: the automatic continue failed", error instanceof Error ? error.message : String(error))
     );
+    return "after-restart";
   }
 
   private cancelContinue(threadId: string): void {

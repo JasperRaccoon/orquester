@@ -79,6 +79,12 @@ test("a workflow-owned chat is advertised no always-Admin tool; per-call tiers s
   assert.deepEqual(advertisedChatTools(CATALOG, new Set(["core", "notes", "workflow-authoring"]), true), ["list_sessions", "update_todos", "update_saved_prompts"]);
 });
 
+test("request_toolset is never advertised to a workflow-owned chat (nobody can approve its card there, §5.4)", () => {
+  const chat = catalogFor("chat");
+  assert.ok(advertisedChatTools(chat, new Set(["core"]), false).includes("request_toolset"));
+  assert.ok(!advertisedChatTools(chat, new Set(["core"]), true).includes("request_toolset"));
+});
+
 test("deny: the thread's agent, in its own account home or its project — exactly what its CLI loads", () => {
   const servers = [
     server({ name: "orquester_remote" }),

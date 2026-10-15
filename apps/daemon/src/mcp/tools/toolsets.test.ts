@@ -21,7 +21,7 @@ import { agentChatRoutes, TOOL_APPROVAL_EVENT_TYPE, type AgentChatToolApprovalEv
 
 import { connectExecutor, createAgentToolsRuntime } from "../../agent-tools/approval-port.ts";
 import { FakeApprovalPort, type CardAnswer } from "../catalog/approval-double.ts";
-import type { ApprovalOutcome, ThreadCaller, ToolCaller } from "../catalog/contract.ts";
+import type { ApprovalOutcome, ThreadCaller, ToolCaller, ToolsetApplyOutcome } from "../catalog/contract.ts";
 import { toolByName } from "../catalog/index.ts";
 import { ToolError } from "../errors.ts";
 import { executeToolCall, executorPorts } from "../executor.ts";
@@ -50,9 +50,18 @@ function rig(answer: CardAnswer = { outcome: "approved", approvalId: "" }) {
   const api = new FakeDaemonApi();
   let current: ThreadAgentToolsResponse | null = view();
   api.on("GET", agentChatRoutes.agentTools(ME), () => (current === null ? { status: 404, body: { error: { code: "THREAD_NOT_FOUND", message: "x" } } } : { status: 200, body: current }));
-  const call = (args: unknown, opts: { caller?: ToolCaller; signal?: AbortSignal; approvals?: FakeApprovalPort | null } = {}): Promise<CallToolResult> =>
+  const call = (
+    args: unknown,
+    opts: { caller?: ToolCaller; signal?: AbortSignal; approvals?: FakeApprovalPort | null; applied?: ToolsetApplyOutcome } = {}
+  ): Promise<CallToolResult> =>
     executeToolCall(
-      { approvals: opts.approvals === undefined ? port : opts.approvals, enabledToolsets: async () => new Set(["core"]), now: () => NOW },
+      {
+        approvals: opts.approvals === undefined ? port : opts.approvals,
+        enabledToolsets: async () => new Set(["core"]),
+        now: () => NOW,
+        // The chat transport's answer (Task 6), when the test gives one.
+        ...(opts.applied ? { onToolsetApproved: async () => opts.applied } : {})
+      },
       { name: "request_toolset", arguments: args },
       { caller: opts.caller ?? chatCaller(), api, signal: opts.signal ?? new AbortController().signal }
     );
@@ -68,10 +77,12 @@ function rig(answer: CardAnswer = { outcome: "approved", approvalId: "" }) {
 
 /** The structured result, every variant's fields optional (the tests assert which ones are there). */
 type AnyResult = { enabled: boolean; toolset: ToolsetId; available?: string; outcome?: string; declinedUntil?: string; reason?: string; note: string };
+/** The tool's own result; the row's `toolApproval` reference (Task 6's executor adds it) is read by {@link referenceOf}. */
 const result = (r: CallToolResult): AnyResult => {
-  const value = r.structuredContent as RequestToolsetResult & { note: string };
+  const { toolApproval: _reference, ...value } = r.structuredContent as RequestToolsetResult & { note: string; toolApproval?: unknown };
   return value as AnyResult;
 };
+const referenceOf = (r: CallToolResult) => (r.structuredContent as { toolApproval?: { kind?: string; family?: string; outcome?: string } }).toolApproval;
 const errorOf = (r: CallToolResult) => {
   assert.equal(r.isError, true, JSON.stringify(r.structuredContent));
   return r.structuredContent as { code: string; message: string; detail?: unknown };
@@ -158,6 +169,28 @@ describe("request_toolset over the port double", () => {
     const answer = result(await r.call({ toolset: "desktops", reason: "open the app" }));
     assert.deepEqual(answer, { enabled: true, toolset: "desktops", available: "after-restart", note: REQUEST_TOOLSET_NOTES["after-restart"] });
     assert.match(answer.note, /End your turn now/);
+  });
+
+  it("approved: the chat transport's own answer decides — now, after-restart (continue coming) or pending (next start, nothing comes)", async () => {
+    const r = rig((card) => {
+      // After the card the view would say "now" (advertised already); the transport's answer wins.
+      r.setView(view({ resolved: ["core", "reads", card.toolset as ToolsetId], appliesAtNextIdle: false }));
+      return { outcome: "approved", approvalId: "a1" };
+    });
+    const restart = await r.call({ toolset: "notes", reason: "todos" }, { applied: "after-restart" });
+    assert.deepEqual(result(restart), { enabled: true, toolset: "notes", available: "after-restart", note: REQUEST_TOOLSET_NOTES["after-restart"] });
+    assert.deepEqual(
+      [referenceOf(restart)?.kind, referenceOf(restart)?.family, referenceOf(restart)?.outcome],
+      ["toolset", "toolset", "approved"],
+      "the row's reference rides along"
+    );
+    r.setView(view());
+    assert.deepEqual(result(await r.call({ toolset: "desktops", reason: "app" }, { applied: "now" })), {
+      enabled: true, toolset: "desktops", available: "now", note: REQUEST_TOOLSET_NOTES.now
+    });
+    const pending = result(await r.call({ toolset: "files-git", reason: "diff" }, { applied: "pending" }));
+    assert.deepEqual(pending, { enabled: true, toolset: "files-git", available: "after-restart", note: REQUEST_TOOLSET_NOTES.pending });
+    assert.doesNotMatch(pending.note, /End your turn now/, "no continue turn is coming: never told to wait for one");
   });
 
   it("approved with an unreadable chat view: after-restart (the transport restarts whenever the sets differ)", async () => {

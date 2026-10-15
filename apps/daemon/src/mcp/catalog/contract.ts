@@ -250,6 +250,18 @@ export interface ApprovalPort {
 // The call context
 // ---------------------------------------------------------------------------
 
+/**
+ * After an APPROVED toolset card, what the chat transport did with the change (Task 6's refresh
+ * answer, awaited before the call resumes): `now` — the live session has the tools; `after-restart`
+ * — a restart at the next idle point is pending and the automatic continue turn is scheduled;
+ * `pending` — the change waits for the session's next start (no host answer, a superseded push, no
+ * live session): nothing restarts or continues on its own.
+ */
+export type ToolsetApplyOutcome = "now" | "after-restart" | "pending";
+
+/** A toolset card's outcome; `applied` only on an approved real card the transport answered for. */
+export type ToolsetCardOutcome = ApprovalOutcome & { applied?: ToolsetApplyOutcome };
+
 /** What `request_toolset` asks the executor to show (`CallContext.requestToolsetCard`). */
 export interface ToolsetCardInput {
   toolset: ToolsetId;
@@ -294,7 +306,7 @@ export interface CallContext {
    * the calling chat — kind and family `toolset`, `ApprovalRequest.toolset` set, no grant options —
    * and refuses a workflow-owned caller before any card (§5.4).
    */
-  requestToolsetCard?(input: ToolsetCardInput): Promise<ApprovalOutcome>;
+  requestToolsetCard?(input: ToolsetCardInput): Promise<ToolsetCardOutcome>;
   /** TEMPORARY: legacy external handlers only ({@link LegacyToolServices}); absent where none is wired. */
   legacy?: LegacyToolServices;
   /**

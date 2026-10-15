@@ -77,9 +77,14 @@ export function alwaysAdmin(tool: AnyOrquesterTool): boolean {
   return tool.tier === "admin";
 }
 
+/** Tools a workflow-owned chat can never use, whatever their tier: `request_toolset` (nobody approves a card there, §5.4). */
+const NEVER_FOR_WORKFLOW_OWNED: ReadonlySet<string> = new Set(["request_toolset"]);
+
 /** The chat tools a thread advertises, in catalog order. */
 export function advertisedChatTools(catalog: readonly AnyOrquesterTool[], toolsets: ReadonlySet<string>, workflowOwned: boolean): string[] {
-  return catalog.filter((tool) => toolsets.has(tool.toolset) && !(workflowOwned && alwaysAdmin(tool))).map((tool) => tool.name);
+  return catalog
+    .filter((tool) => toolsets.has(tool.toolset) && !(workflowOwned && (alwaysAdmin(tool) || NEVER_FOR_WORKFLOW_OWNED.has(tool.name))))
+    .map((tool) => tool.name);
 }
 
 const samePath = (a: string, b: string): boolean => a !== "" && b !== "" && resolve(a) === resolve(b);

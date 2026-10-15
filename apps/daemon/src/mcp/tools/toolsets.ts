@@ -43,7 +43,7 @@ import {
 } from "@orquester/api";
 import { agentChatRoutes } from "@orquester/api/agent-chat";
 
-import { closedWorld, defineTool, MUTATING_IDEMPOTENT, type AnyOrquesterTool, type CallContext, type ThreadCaller } from "../catalog/contract.ts";
+import { closedWorld, defineTool, MUTATING_IDEMPOTENT, type AnyOrquesterTool, type CallContext, type ThreadCaller, type ToolsetApplyOutcome } from "../catalog/contract.ts";
 import { ToolError } from "../errors.ts";
 import { clipText } from "../result.ts";
 
@@ -66,6 +66,8 @@ export const REQUEST_TOOLSET_NOTES = {
   now: "The tools are available now: call them in this turn.",
   "after-restart":
     "End your turn now. Orquester restarts this chat's agent session with the new tools (the conversation is kept) and then sends you a message to continue.",
+  pending:
+    "The toolset is on for this chat, but its tools reach you only when this chat's agent session next starts; nothing restarts on its own. Carry on without them, or tell the user what they would unblock.",
   declined: "The user declined. Don't ask for this toolset again before declinedUntil; carry on without it or say in your reply what it blocks.",
   timed_out: "Nobody answered the card in time; nothing changed. Ask again only if the user still wants it.",
   cancelled: "The request ended before the user answered (the turn was stopped or the chat closed); nothing changed."
@@ -99,8 +101,17 @@ async function threadView(ctx: CallContext, threadId: string): Promise<ThreadAge
   }
 }
 
-/** Enabled: "now" only when the running provider session already advertises this chat's toolsets. */
-function enabled(toolset: ToolsetId, view: ThreadAgentToolsResponse | null): RequestToolsetResult & { note: string } {
+/**
+ * Enabled. With the chat transport's own answer (`applied`, Task 6: awaited before this call
+ * resumed) that answer decides; otherwise "now" only when the running provider session already
+ * advertises this chat's toolsets. `pending` — the change waits for the session's next start and
+ * no continue turn is coming — reads `available: "after-restart"` with its own note.
+ */
+function enabled(toolset: ToolsetId, view: ThreadAgentToolsResponse | null, applied?: ToolsetApplyOutcome): RequestToolsetResult & { note: string } {
+  if (applied !== undefined) {
+    const available = applied === "now" ? "now" : "after-restart";
+    return { enabled: true, toolset, available, note: REQUEST_TOOLSET_NOTES[applied] };
+  }
   const available = view !== null && view.resolved.includes(toolset) && !view.appliesAtNextIdle ? "now" : "after-restart";
   return { enabled: true, toolset, available, note: REQUEST_TOOLSET_NOTES[available] };
 }
@@ -153,8 +164,8 @@ export const toolsetsFamily: readonly AnyOrquesterTool[] = [
       });
       switch (outcome.outcome) {
         case "approved":
-          // The override is saved and the transport's listener has run (it runs before this resumes).
-          return enabled(toolset, await threadView(ctx, caller.threadId));
+          // The override is saved; the transport's answer (when it gave one) is what happened.
+          return outcome.applied !== undefined ? enabled(toolset, null, outcome.applied) : enabled(toolset, await threadView(ctx, caller.threadId));
         case "denied": {
           const after = await threadView(ctx, caller.threadId);
           const declinedUntil = after?.declines[toolset] ?? new Date(ctx.now() + TOOLSET_DECLINE_MS).toISOString();
