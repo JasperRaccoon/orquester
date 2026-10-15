@@ -24,19 +24,20 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   list_sessions: { required: [], annotations: READ },
   get_session: { required: ["sessionId"], annotations: READ },
   get_turn_diff: { required: ["sessionId"], annotations: READ },
-  create_session: { required: ["project"], annotations: WRITE },
+  // `project` is required of external callers in the tool (a chat's defaults to its own; one shared schema).
+  create_session: { required: [], annotations: WRITE },
   update_session: { required: ["sessionId"], annotations: WRITE_IDEMPOTENT },
   // Unified MCP (Task 7): interrupt/stop_task/stop_process/compact/rewind/close. The most dangerous action names the
   // hints: close and rewind discard; a retried interrupt goes on to stop background work, so not idempotent.
   control_session: { required: ["sessionId", "action"], annotations: { ...DESTROY, idempotentHint: false } },
-  // Thread lineage (spec 2026-10-14 §6): a retry forks again, and merges again.
-  fork_session: { required: ["sessionId"], annotations: WRITE },
-  merge_back_session: { required: ["sessionId"], annotations: WRITE },
-  resolve_merge_back: { required: ["sessionId", "mergeId", "action"], annotations: WRITE },
-  get_session_lineage: { required: ["sessionId"], annotations: READ },
+  // Thread lineage (spec 2026-10-14 §6): a retry forks again, and merges again. `sessionId` is required of external
+  // callers in the tool (a chat's defaults to itself); resolve_merge_back is merge_back_session {mergeId, action} and
+  // get_session_lineage is get_session's lineage (unified MCP §11, Task 8).
+  fork_session: { required: [], annotations: WRITE },
+  merge_back_session: { required: [], annotations: WRITE },
   search_sessions: { required: ["query"], annotations: READ },
+  // implement_plan is send_message {implementPlan: true} (unified MCP §11).
   send_message: { required: ["sessionId"], annotations: WRITE },
-  implement_plan: { required: ["sessionId"], annotations: WRITE },
   read_transcript: { required: ["sessionId"], annotations: READ },
   read_tool_output: { required: ["sessionId", "itemId"], annotations: READ },
   // Unified MCP (Task 7): answer_question / dismiss_question / resolve_approval in one tool.
@@ -203,7 +204,7 @@ test("an argument name the tool does not take is refused and named, never droppe
     assert.equal(bad.result.content[0].text, `INVALID_ARGUMENT: ${bad.result.structuredContent.message}`);
     assert.deepEqual(api.calls, [], "refused before the tool ran: nothing was read, nothing was sent");
     // Every unknown key is named, in one issue; the known keys beside them do not save the call.
-    const several = await postMcp(app, call(41, "wait_for_session", { sessionid: "c1", timeout: 5, timeoutMs: 1_000 }));
+    const several = await postMcp(app, call(41, "wait_for_session", { sessionid: "c1", timeout: 5, timeoutSeconds: 1 }));
     assert.equal(several.result.structuredContent.code, "INVALID_ARGUMENT");
     assert.match(several.result.structuredContent.message, /sessionid/);
     assert.match(several.result.structuredContent.message, /timeout/);
@@ -273,7 +274,7 @@ test("a client that disconnects aborts the request's signal: a wait lets go of t
   let raw: { destroy(): void } | undefined;
   app.addHook("onRequest", async (_request, reply) => { raw = reply.raw; });
   try {
-    const answered = app.inject({ method: "POST", url: "/mcp", headers: MCP_HEADERS, payload: call(16, "wait_for_session", { timeoutMs: 5_000 }) }).then(() => "answered", () => "closed");
+    const answered = app.inject({ method: "POST", url: "/mcp", headers: MCP_HEADERS, payload: call(16, "wait_for_session", { timeoutSeconds: 5 }) }).then(() => "answered", () => "closed");
     for (let i = 0; i < 200 && api.listenerCount() === 0; i += 1) await tick();
     assert.equal(api.listenerCount(), 1, "the wait is on the bus");
     raw!.destroy(); // the client goes away: the response closes before it finished
@@ -292,7 +293,7 @@ test("a client already gone when the route runs gets nothing done for it: its 'c
     await tick(); // the response's 'close' is emitted here, before the route could listen for it
   });
   try {
-    const answered = await app.inject({ method: "POST", url: "/mcp", headers: MCP_HEADERS, payload: call(17, "wait_for_session", { timeoutMs: 1_000 }) }).then(() => "answered", () => "closed");
+    const answered = await app.inject({ method: "POST", url: "/mcp", headers: MCP_HEADERS, payload: call(17, "wait_for_session", { timeoutSeconds: 1 }) }).then(() => "answered", () => "closed");
     assert.equal(answered, "closed");
     await ticks(20);
     assert.equal(built, 0, "no server built, no tool run");

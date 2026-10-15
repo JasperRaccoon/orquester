@@ -203,14 +203,14 @@ test("send_message: a wait on a flag the snapshot never confirms still ends — 
   assert.deepEqual([late, gone, dropped].map((wait) => wait.api.listenerCount()), [0, 0, 0], "every bus listener is removed");
 });
 
-test("send_message: PENDING_REQUEST names each open request and the tool that settles it", async (t) => {
+test("send_message: PENDING_REQUEST names each open request and respond_to_request, never the removed tools", async (t) => {
   const open = snapshot({ pending: { approvals: [{ requestId: "r1", requestKind: "command", createdAt: stamp(5) }], userInputs: [{ requestId: "q1", createdAt: stamp(6), dismissible: false, questions: [] }] } });
   const h = await harness([chatSummary({ hasPendingApprovals: true, hasPendingUserInput: true })], open); t.after(h.close);
   await assert.rejects(tool("send_message").run({ sessionId: "c1", text: "hi", planMode: false, wait: false, timeoutMs: 1000 }, h.ctx),
     (e: { code: string; message: string; detail: unknown }) => {
       assert.equal(e.code, "PENDING_REQUEST");
       assert.deepEqual(e.detail, { approvals: ["r1"], questions: ["q1"] });
-      return /r1/.test(e.message) && /q1/.test(e.message) && /resolve_approval/.test(e.message) && /answer_question/.test(e.message);
+      return /r1/.test(e.message) && /q1/.test(e.message) && /respond_to_request/.test(e.message) && !/resolve_approval|answer_question|dismiss_question/.test(e.message);
     });
 });
 

@@ -248,3 +248,17 @@ test("exchanges: a user turn starts hop 1, a caused turn adds one, the ninth is 
 test("the untrusted notice names another agent chat", () => {
   assert.match(UNTRUSTED_NOTICE, /another agent chat/);
 });
+
+test("reply \"none\" from a sender the receiver may not message: the header says so and never advises send_message; it parses", () => {
+  for (const origin of ["sent", "opened"] as const) {
+    const message = buildThreadMessage({ origin, fromTitle: "Lead", fromSessionId: "s-1", fromProject: "w/p", text: "FYI", replyMode: "none", senderReachable: false });
+    assert.match(message, /The sender can't be messaged from this chat; your answer is visible in this chat\./);
+    assert.doesNotMatch(message, /send_message/);
+    const parsed = parseThreadMessage(message)!;
+    assert.equal(parsed.origin, origin);
+    assert.equal(parsed.body, "FYI");
+    assert.ok(message.length - "FYI".length <= THREAD_MESSAGE_OVERHEAD_CHARS);
+  }
+  // Reachable (the default) keeps the send_message line.
+  assert.match(buildThreadMessage({ origin: "sent", fromTitle: "Lead", fromSessionId: "s-1", text: "x", replyMode: "none" }), /call send_message with sessionId s-1/);
+});

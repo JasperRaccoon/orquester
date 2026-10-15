@@ -57,7 +57,6 @@ import { defineTool as defineLegacyTool, type ToolDef } from "../tool.ts";
 import { transcriptEntries, transcriptRange, type TranscriptResult } from "../transcript.ts";
 import { buildViewContext, chatDetail, CONTENT_OMITTED_HINT, detailWithoutContent, fitDetail, rowWithoutContent, sessionDetail, sessionView, type SessionDetail } from "../views.ts";
 import { byAttention } from "./watch.ts";
-import { legacyExternalTools } from "../catalog/legacy.ts";
 
 /** The most running tabs a project may hold before a tool opens another (also the session tools' cap, `session-tools/threads`). */
 export const MAX_RUNNING_SESSIONS_PER_PROJECT = 24;
@@ -1040,7 +1039,6 @@ export const sessionsFamily: readonly AnyOrquesterTool[] = [
   getSession,
   readTranscript,
   getTurnDiff,
-  ...legacyExternalTools(legacyCreateSessionTools),
   updateSession,
   controlSession
 ];

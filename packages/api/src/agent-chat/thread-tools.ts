@@ -127,12 +127,18 @@ const V2_WHO: Record<Exclude<ThreadMessageOrigin, "reply">, string> = {
 const V2_REPLY_GOES_BACK = "Your final reply to this turn goes back to it automatically — do not send_message it.";
 const V2_DELEGATED_RESULT = "This is a task; your final reply is its result and goes back automatically.";
 const V2_DELEGATED_NO_REPLY = "This is a task; your final reply is its result.";
+/**
+ * `reply: "none"` from a sender this chat may not message (its permission mode is broader: the turn
+ * policy refuses a turn there): no `send_message` advice that would only be refused.
+ */
+const V2_SENDER_UNREACHABLE = "The sender can't be messaged from this chat; your answer is visible in this chat.";
 
 /** The v2 second line for an origin, reply mode and sending session (§8.2). */
-function v2Explanation(origin: ThreadMessageOrigin, mode: ThreadReplyMode, sessionId: string): string {
+function v2Explanation(origin: ThreadMessageOrigin, mode: ThreadReplyMode, sessionId: string, senderReachable = true): string {
   if (origin === "reply") return V1_EXPLANATIONS.reply;
   if (origin === "delegated") return `${V2_WHO.delegated} ${mode === "none" ? V2_DELEGATED_NO_REPLY : V2_DELEGATED_RESULT}`;
-  return `${V2_WHO[origin]} ${mode === "none" ? `To answer, call send_message with sessionId ${sessionId}.` : V2_REPLY_GOES_BACK}`;
+  if (mode !== "none") return `${V2_WHO[origin]} ${V2_REPLY_GOES_BACK}`;
+  return `${V2_WHO[origin]} ${senderReachable ? `To answer, call send_message with sessionId ${sessionId}.` : V2_SENDER_UNREACHABLE}`;
 }
 
 /**
@@ -200,6 +206,11 @@ export interface BuildThreadMessageInput {
   fromProject?: string;
   /** v2, `sent` / `opened` / `delegated`: how the sender asked for the reply. Default `wait`. */
   replyMode?: ThreadReplyMode;
+  /**
+   * v2 with `replyMode: "none"`: whether the receiving chat may message the sender back (false when
+   * the sender's permission mode is broader than the receiver's). Default true.
+   */
+  senderReachable?: boolean;
 }
 
 /**
@@ -216,7 +227,7 @@ export function buildThreadMessage(input: BuildThreadMessageInput): string {
   }
   const project = input.fromProject === undefined ? "" : headerProject(input.fromProject);
   const header = `[${ORIGIN_LABELS[input.origin]} "${title}" · session ${sessionId}${project ? ` · ${project}` : ""}]`;
-  return `${header}\n${v2Explanation(input.origin, input.replyMode ?? "wait", sessionId)}\n\n${input.text.trim()}`;
+  return `${header}\n${v2Explanation(input.origin, input.replyMode ?? "wait", sessionId, input.senderReachable ?? true)}\n\n${input.text.trim()}`;
 }
 
 export interface ParsedThreadMessage {
@@ -240,7 +251,9 @@ export function parseThreadMessage(text: string): ParsedThreadMessage | null {
   const project = match[4]?.trim();
   let rest = newline === -1 ? "" : text.slice(newline + 1);
   const explanations =
-    sessionId === undefined ? [V1_EXPLANATIONS[origin]] : THREAD_REPLY_MODES.map((mode) => v2Explanation(origin, mode, sessionId));
+    sessionId === undefined
+      ? [V1_EXPLANATIONS[origin]]
+      : [...THREAD_REPLY_MODES.map((mode) => v2Explanation(origin, mode, sessionId)), v2Explanation(origin, "none", sessionId, false)];
   const explanation = explanations.filter((line) => rest.startsWith(line)).sort((a, b) => b.length - a.length)[0];
   if (explanation !== undefined) rest = rest.slice(explanation.length);
   return {
