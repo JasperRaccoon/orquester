@@ -220,6 +220,17 @@ test("the reply outbox round-trips and keeps unknown fields, unknown states and 
   assert.deepEqual(parseReplyOutbox({}), { subscriptions: [], deliveries: [], unreadableSubscriptions: [], unreadableDeliveries: [] });
 });
 
+test("a subscription keeps its idempotency key and its retry-stable queue entry", () => {
+  const read = parseReplyOutbox({
+    subscriptions: [{ ...subscription, idempotencyKey: "k1", queueEntryId: "q-1" }],
+    deliveries: [{ ...delivery, queueEntryId: "r-1" }]
+  });
+  assert.equal(read.subscriptions[0]?.idempotencyKey, "k1");
+  assert.equal(read.subscriptions[0]?.queueEntryId, "q-1");
+  assert.equal(read.deliveries[0]?.queueEntryId, "r-1");
+  assert.equal(parseReplyOutbox({ subscriptions: [{ ...subscription, idempotencyKey: 7 }] }).unreadableSubscriptions.length, 1);
+});
+
 test("the reply outbox refuses anything but a version-1 outbox", () => {
   for (const value of [null, [], "x", { version: 2 }, { subscriptions: {} }, { deliveries: "no" }]) {
     assert.throws(() => parseReplyOutbox(value), /reply outbox/, JSON.stringify(value));

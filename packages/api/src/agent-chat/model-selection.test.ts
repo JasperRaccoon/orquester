@@ -16,6 +16,7 @@ import {
   modelPickerHint,
   optionDescriptors,
   providerPickerView,
+  resolveLaunchModel,
   resolveSelectedModel,
   RUNTIME_MODE_HINTS,
   RUNTIME_MODE_LABELS,
@@ -124,4 +125,13 @@ test("every permission mode has a label and both hints", () => {
   for (const mode of RUNTIME_MODES) {
     assert.ok(RUNTIME_MODE_LABELS[mode] && RUNTIME_MODE_HINTS[mode] && RUNTIME_MODE_SHORT_HINTS[mode], mode);
   }
+});
+
+test("resolveLaunchModel: the one choice both the launch and the reported default use", () => {
+  const models = SNAPSHOT.models;
+  assert.equal(resolveLaunchModel(models)?.slug, providerPickerView(SNAPSHOT).defaultModel);
+  assert.equal(resolveLaunchModel(models, "")?.slug, "claude-opus-5");
+  assert.equal(resolveLaunchModel(models, "claude-3")?.isLegacy, true, "a legacy model named explicitly");
+  assert.equal(resolveLaunchModel(models, "nope"), null);
+  assert.equal(resolveLaunchModel([]), null);
 });

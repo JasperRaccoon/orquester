@@ -304,6 +304,13 @@ export interface ThreadAgentToolsResponse {
   resolved: ToolsetId[];
   /** Workflow-owned chats get no Admin tools and no cards (spec §5.4). */
   workflowOwned: boolean;
+  /**
+   * True when `resolved` differs from what the chat's running provider session advertises: the
+   * change applies at the chat's next idle point (the session restarts with resume).
+   */
+  appliesAtNextIdle: boolean;
+  /** Toolsets the user denied on a toolset card in this chat, with the ISO time asking is allowed again (30 min). */
+  declines: Partial<Record<ToolsetId, string>>;
   /** This chat's grants and its project's project grants. */
   grants: AgentToolGrant[];
 }
@@ -358,12 +365,26 @@ export interface AgentToolsChangedPayload {
 export const TOOLSET_DECLINE_MS = AGENT_TOOLSET_DECLINE_MS;
 
 /**
- * `request_toolset`'s result once the toolset is on in the chat: `now` — the provider re-listed its
- * tools and they can be called in this turn; `after-restart` — end the turn, the chat's provider
- * session restarts with resume and Orquester posts an automatic continue turn.
+ * `request_toolset`'s result (spec §9.3):
+ * - enabled (also at once, without a card, when the toolset is already on): `available: "now"` —
+ *   the provider re-listed its tools and they can be called in this turn; `"after-restart"` — end
+ *   the turn, the provider session restarts with resume and Orquester posts an automatic continue
+ *   turn;
+ * - not enabled: the user denied the card (`declined`, with the time asking is allowed again and
+ *   their reason), the card expired (`timed_out`) or the call was cancelled (`cancelled`).
+ * Asking again for a toolset declined in the last 30 minutes is refused before any card with
+ * `TOOLSET_DECLINED` ({@link RequestToolsetDeclinedDetail}); a workflow-owned chat gets
+ * `PERMISSION_DENIED`.
  */
-export interface RequestToolsetResult {
-  enabled: true;
+export type RequestToolsetResult =
+  | { enabled: true; toolset: ToolsetId; available: "now" | "after-restart" }
+  | { enabled: false; toolset: ToolsetId; outcome: "declined"; declinedUntil: string; reason?: string }
+  | { enabled: false; toolset: ToolsetId; outcome: "timed_out" | "cancelled" };
+
+/** The error code (and its `detail`) of a request for a recently declined toolset. */
+export const TOOLSET_DECLINED = "TOOLSET_DECLINED";
+export interface RequestToolsetDeclinedDetail {
   toolset: ToolsetId;
-  available: "now" | "after-restart";
+  /** ISO time from which the toolset may be requested again. */
+  declinedUntil: string;
 }

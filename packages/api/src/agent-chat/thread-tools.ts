@@ -20,8 +20,8 @@ import { sessionToolNameOfData, sessionToolReferences } from "./session-tools.ts
 /** The result field the reference travels in; listed in `SESSION_TOOL_REFERENCE_KEYS`. */
 export const THREAD_TOOL_REFERENCE_KEY = "threadRef";
 
-/** How the referenced thread relates to the calling one. */
-export type ThreadToolRelation = "delegate" | "fork" | "parent" | "thread";
+/** How the referenced thread relates to the calling one (`opened`: a chat the caller opened, §4.1). */
+export type ThreadToolRelation = "delegate" | "fork" | "opened" | "parent" | "thread";
 
 /** The thread a thread or delegation tool acted on, as its row links to it. */
 export interface ThreadToolReference {
@@ -35,7 +35,7 @@ export interface ThreadToolReference {
 /** The longest title a reference carries; a longer one is cut. */
 export const THREAD_TOOL_REFERENCE_TITLE_MAX = 200;
 
-const RELATIONS: ReadonlySet<string> = new Set<ThreadToolRelation>(["delegate", "fork", "parent", "thread"]);
+const RELATIONS: ReadonlySet<string> = new Set<ThreadToolRelation>(["delegate", "fork", "opened", "parent", "thread"]);
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
   return value !== null && typeof value === "object" && !Array.isArray(value)

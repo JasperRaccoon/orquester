@@ -11,6 +11,7 @@ import {
   createDefaultAgentToolsFile,
   findGrant,
   parseAgentToolsFile,
+  removeThreadFromAgentTools,
   resolveThreadToolsets,
   serializeAgentToolsFile,
   toolsetDeclinedUntil,
@@ -55,12 +56,47 @@ test("a file round-trips; unknown keys, toolset ids, agents and grant families s
   assert.deepEqual(parseAgentToolsFile(JSON.parse(serializeAgentToolsFile(file))), file);
 });
 
-test("missing fields read as defaults; malformed cells are dropped, not the file", () => {
+test("missing fields read as defaults; unreadable rows and cells are never honoured but come back verbatim on rewrite", () => {
   assert.deepEqual(parseAgentToolsFile({}), createDefaultAgentToolsFile());
-  const file = parseAgentToolsFile({ enabled: "yes", revision: -1, toolsets: { defaults: { notes: { claude: "on", codex: true }, reads: 5 } } });
+  const raw = {
+    toolsets: {
+      defaults: { notes: { claude: "on", codex: true }, reads: 5 },
+      threads: { t1: { notes: { until: "x" }, reads: true } }
+    },
+    toolsetDeclines: { t1: { notes: 17, reads: "2026-10-15T10:00:00.000Z" }, t2: "x" }
+  };
+  const file = parseAgentToolsFile({ enabled: "yes", revision: -1, ...raw });
   assert.equal(file.enabled, true);
   assert.equal(file.revision, 0);
   assert.deepEqual(file.toolsets.defaults, { notes: { codex: true } });
+  assert.deepEqual(file.toolsets.threads, { t1: { reads: true } });
+  assert.deepEqual(file.toolsetDeclines, { t1: { reads: "2026-10-15T10:00:00.000Z" } });
+  const written = JSON.parse(serializeAgentToolsFile(file));
+  assert.deepEqual(written.toolsets.defaults, raw.toolsets.defaults);
+  assert.deepEqual(written.toolsets.threads, raw.toolsets.threads);
+  assert.deepEqual(written.toolsetDeclines, raw.toolsetDeclines);
+  // A write of a readable cell keeps its row's unreadable neighbours.
+  const defaults: Record<string, Record<string, boolean>> = file.toolsets.defaults;
+  defaults.notes!.claude = false;
+  assert.deepEqual(JSON.parse(serializeAgentToolsFile(file)).toolsets.defaults.notes, { claude: false, codex: true });
+});
+
+test("removing a thread drops its overrides, declines, leftovers and chat grants — nothing else", () => {
+  const file = parseAgentToolsFile({
+    toolsets: { threads: { t1: { notes: true, x: "?" }, t2: { notes: false } } },
+    toolsetDeclines: { t1: { notes: "2026-10-15T10:00:00.000Z" } },
+    grants: [
+      { id: "a", family: "desktops", scope: "chat", threadId: "t1", projectPath: P, createdAt: "1" },
+      { id: "b", family: "desktops", scope: "project", threadId: "t1", projectPath: P, createdAt: "2" },
+      { id: "c", family: "desktops", scope: "chat", threadId: "t2", projectPath: P, createdAt: "3" }
+    ]
+  });
+  const after = removeThreadFromAgentTools(file, "t1");
+  assert.deepEqual(after.toolsets.threads, { t2: { notes: false } });
+  assert.deepEqual(after.toolsetDeclines, {});
+  assert.deepEqual(after.grants.map((grant) => grant.id), ["b", "c"]);
+  assert.deepEqual(JSON.parse(serializeAgentToolsFile(after)).toolsets.threads, { t2: { notes: false } });
+  assert.deepEqual(file.toolsets.threads.t1, { notes: true }, "the input is not changed");
 });
 
 test("anything that is not a version-1 file throws, so the daemon moves it aside and grants read as none", () => {

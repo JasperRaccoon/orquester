@@ -265,12 +265,19 @@ export function toolApprovalReferenceOfActivityData(data: unknown): ToolApproval
 // ---------------------------------------------------------------------------
 
 /**
- * Characters never rendered as they are: bidi embeddings, overrides and isolates
- * (U+202A–202E, U+2066–2069) and marks (U+200E, U+200F, U+061C); zero-width and invisible
- * formatting (U+200B–200D, U+2060–2064, U+FEFF, U+180E, U+00AD); C0 and C1 controls and DEL.
- * `\n` and `\t` are matched too; the callers decide what they become.
+ * Characters never rendered as they are: every control (`\p{Cc}`: C0, DEL, C1) and every format
+ * character (`\p{Cf}`: bidi embeddings, overrides, isolates and marks U+202A–202E, U+2066–2069,
+ * U+200E/F, U+061C; zero-width U+200B–200D, U+2060–2064, U+FEFF, U+00AD, U+180E; interlinear
+ * annotation U+FFF9–FFFB; tag characters U+E0000–E007F; …), the combining grapheme joiner U+034F,
+ * the Hangul fillers U+115F, U+1160, U+3164, U+FFA0, and lone surrogates. `\n` and `\t` are
+ * matched too; the callers decide what they become.
  */
-const UNSAFE_CHARS = /[\u0000-\u001f\u007f-\u009f\u00ad\u061c\u180e\u200b-\u200f\u202a-\u202e\u2060-\u2064\u2066-\u2069\ufeff]/g;
+const UNSAFE_CHARS = /[\p{Cc}\p{Cf}\p{Cs}\u034f\u115f\u1160\u3164\uffa0]/gu;
+
+/** `<U+XXXX>` for one character (code point, so a tag character reads `<U+E0041>`). */
+function visibleEscape(char: string): string {
+  return `<U+${(char.codePointAt(0) ?? 0).toString(16).toUpperCase().padStart(4, "0")}>`;
+}
 
 function cut(text: string, maxChars: number): string {
   if (text.length <= maxChars) return text;
@@ -295,7 +302,7 @@ export function sanitizeApprovalLabel(text: string, maxChars: number = TOOL_APPR
  * and `\r` read as `\n`), tabs kept, every other unsafe character removed.
  */
 export function sanitizeApprovalProse(text: string, maxChars?: number): string {
-  const clean = text.replace(/\r\n?/g, "\n").replace(UNSAFE_CHARS, (char) => (char === "\n" || char === "\t" ? char : ""));
+  const clean = text.replace(/\r\n?|[\u2028\u2029]/g, "\n").replace(UNSAFE_CHARS, (char) => (char === "\n" || char === "\t" ? char : ""));
   return maxChars === undefined ? clean : cut(clean, maxChars);
 }
 
@@ -306,7 +313,7 @@ export function sanitizeApprovalProse(text: string, maxChars?: number): string {
  */
 export function escapeApprovalCodeText(text: string): string {
   return text.replace(/\r\n/g, "\n").replace(UNSAFE_CHARS, (char) =>
-    char === "\n" || char === "\t" ? char : `<U+${char.charCodeAt(0).toString(16).toUpperCase().padStart(4, "0")}>`
+    char === "\n" || char === "\t" ? char : visibleEscape(char)
   );
 }
 
@@ -337,58 +344,73 @@ function cutToBytes(text: string, maxBytes: number): string {
   return new TextDecoder().decode(bytes.subarray(0, end));
 }
 
+/** Room kept for the closing "view all" note whenever something is cut. */
+const SUMMARY_NOTE_RESERVE_BYTES = 512;
+
+/** A `text` / `code` / `diff` / `warning` section cut to fit `budget` bytes (`partial: true`), or null when even its shell does not fit. */
+function cutSection(section: ApprovalPreviewSection, budget: number): ApprovalPreviewSection | null {
+  if (section.kind !== "text" && section.kind !== "code" && section.kind !== "diff" && section.kind !== "warning") return null;
+  const text = section.kind === "diff" ? section.unifiedDiff : section.text;
+  const shell: ApprovalPreviewSection =
+    section.kind === "diff"
+      ? { ...section, unifiedDiff: "", partial: true }
+      : section.kind === "warning"
+        ? { ...section, text: "" }
+        : { ...section, text: "", partial: true };
+  // JSON escaping can grow a character up to 6 bytes; leave room for it.
+  const room = Math.floor((budget - jsonBytes(shell) - 1) / 6);
+  if (room <= 0) return null;
+  const kept = cutToBytes(text, room) + (section.kind === "warning" ? " … (view all)" : "");
+  const next: ApprovalPreviewSection = section.kind === "diff" ? { ...(shell as typeof section), unifiedDiff: kept } : ({ ...shell, text: kept } as ApprovalPreviewSection);
+  return jsonBytes(next) + 1 <= budget ? next : null;
+}
+
 /**
- * The sections a summary carries: the whole preview when it fits `maxBytes`, else every section in
- * order with the long text of `text` / `code` / `diff` sections cut (`partial: true`) so the whole
- * fits. `warning` and `file` sections are always kept — a flag is never cut away — and a `fields`
- * or `changes` section that does not fit is replaced by a `text` note. `fullPreview` says whether
- * anything was cut (the whole preview is then fetched from the card route).
+ * The sections a summary carries — NEVER more than `maxBytes` (`approvalPreviewBytes`). When the
+ * whole preview fits, all of it (`fullPreview: false`). Otherwise budget goes first to the flags
+ * (`warning`, then `file` sections, in order; a warning's text is cut rather than dropped), then to
+ * the other sections in order: long `text` / `code` / `diff` text is cut (`partial: true`) and a
+ * section that cannot fit is left out. Whatever was cut or left out, the summary ends with a
+ * `danger` note pointing at "View all" (`fullPreview: true`: the whole preview is fetched from the
+ * card route). Sections keep their original order.
  */
 export function summarizeApprovalPreview(
   sections: readonly ApprovalPreviewSection[],
   maxBytes: number = TOOL_APPROVAL_SUMMARY_MAX_BYTES
 ): { sections: ApprovalPreviewSection[]; fullPreview: boolean } {
   if (approvalPreviewBytes(sections) <= maxBytes) return { sections: [...sections], fullPreview: false };
-  // Flags first: whatever else is cut, they stay.
-  const reserved = sections.filter((section) => section.kind === "warning" || section.kind === "file");
-  let budget = maxBytes - approvalPreviewBytes(reserved);
-  const out: ApprovalPreviewSection[] = [];
-  for (const section of sections) {
-    if (section.kind === "warning" || section.kind === "file") {
-      out.push(section);
-      continue;
-    }
+  // `[]` is 2 bytes; each section adds its JSON and a comma.
+  let budget = maxBytes - 2 - SUMMARY_NOTE_RESERVE_BYTES;
+  const kept = new Map<number, ApprovalPreviewSection>();
+  let omitted = 0;
+  const place = (index: number, section: ApprovalPreviewSection): void => {
     const whole = jsonBytes(section) + 1;
     if (whole <= budget) {
-      out.push(section);
+      kept.set(index, section);
       budget -= whole;
-      continue;
+      return;
     }
-    if (section.kind === "text" || section.kind === "code" || section.kind === "diff") {
-      const text = section.kind === "diff" ? section.unifiedDiff : section.text;
-      const shell = section.kind === "diff" ? { ...section, unifiedDiff: "", partial: true } : { ...section, text: "", partial: true };
-      // JSON escaping can grow a character up to 6 bytes; leave room for it.
-      const room = Math.floor((budget - jsonBytes(shell) - 1) / 6);
-      const kept = cutToBytes(text, room);
-      const next = section.kind === "diff" ? { ...shell, unifiedDiff: kept } : { ...shell, text: kept };
-      const size = jsonBytes(next) + 1;
-      if (size <= budget) {
-        out.push(next as ApprovalPreviewSection);
-        budget -= size;
-        continue;
-      }
+    const cut = cutSection(section, budget);
+    if (cut) {
+      kept.set(index, cut);
+      budget -= jsonBytes(cut) + 1;
+      return;
     }
-    const note: ApprovalPreviewSection = {
-      kind: "text",
-      text: `${"title" in section && section.title ? `${section.title}: ` : ""}open "View all" to see this section.`,
-      partial: true
-    };
-    const size = jsonBytes(note) + 1;
-    if (size <= budget) {
-      out.push(note);
-      budget -= size;
-    }
-  }
+    omitted += 1;
+  };
+  const order = (kinds: readonly ApprovalPreviewSectionKind[]): void =>
+    sections.forEach((section, index) => {
+      if (kinds.includes(section.kind)) place(index, section);
+    });
+  order(["warning"]);
+  order(["file"]);
+  order(["text", "code", "diff", "fields", "changes"]);
+  const out = sections.flatMap((_, index) => (kept.has(index) ? [kept.get(index)!] : []));
+  out.push({
+    kind: "warning",
+    level: "danger",
+    text: `This preview is longer than the card shows${omitted > 0 ? ` (${omitted} section${omitted === 1 ? "" : "s"} left out)` : ""}: open "View all" to read every part before approving.`
+  });
   return { sections: out, fullPreview: true };
 }
 
@@ -464,12 +486,26 @@ export const TOOL_APPROVAL_SECRET_MASK_MIN_CHARS = 4;
 const STRIP_MAX_DEPTH = 64;
 
 /**
+ * Whether `record` is an approval answer or approval context that carries card secrets: a
+ * `secrets` key whose value is an object (`{key: value}`), beside `decision` (a
+ * {@link ToolApprovalAnswer}) or `outcome` / `approvalId` / `grantId` (`CallContext.approval`, an
+ * `ApprovalOutcome`). A `secrets` LIST — e.g. `list_workflow_secrets`' secret names — or a
+ * `secrets` key anywhere else is data and is never touched.
+ */
+function carriesCardSecrets(record: Record<string, unknown>): boolean {
+  const secrets = record.secrets;
+  if (secrets === null || typeof secrets !== "object" || Array.isArray(secrets)) return false;
+  return "decision" in record || "outcome" in record || "approvalId" in record || "grantId" in record;
+}
+
+/**
  * `value` without card secrets, for anything that leaves the waiting call — a summary, an event, a
  * log line, a tool result, a row:
- * - **by shape**: every `secrets` key of an object is removed;
+ * - **by shape**: the `secrets` object of an approval answer or approval context is removed
+ *   (only those records — see `carriesCardSecrets`; secret NAMES elsewhere stay);
  * - **by value**: every occurrence of one of `secretValues` (at least
  *   {@link TOOL_APPROVAL_SECRET_MASK_MIN_CHARS} characters) in any string is replaced by
- *   `[secret redacted]`.
+ *   `[secret redacted]`. Pass the values the card collected.
  * Fails closed past the depth bound (the value is replaced). Returns `value` itself when nothing
  * changed.
  */
@@ -503,7 +539,7 @@ function stripApproval(value: unknown, masks: readonly string[], depth: number):
   }
   const record = value as Record<string, unknown>;
   let copy: Record<string, unknown> | null = null;
-  if (Object.prototype.hasOwnProperty.call(record, "secrets")) {
+  if (carriesCardSecrets(record)) {
     copy = { ...record };
     delete copy.secrets;
   }
@@ -581,15 +617,34 @@ function parseSection(value: unknown): ApprovalPreviewSection | null {
 }
 
 /**
- * A {@link ToolApprovalSummary} from untrusted JSON, sanitised for rendering, or null when it is
- * not one. A section that does not read is replaced by a caution, never dropped silently.
+ * A card as a client renders it: {@link ToolApprovalSummary}, except that a kind or family this
+ * build does not know (a newer daemon's) reads `"unknown"` — rendered as a generic card with a
+ * caution, never dropped (the agent is waiting on it).
  */
-export function parseToolApprovalSummary(value: unknown): ToolApprovalSummary | null {
+export interface ParsedToolApprovalSummary extends Omit<ToolApprovalSummary, "kind" | "family"> {
+  kind: ApprovalKind | "unknown";
+  family: ApprovalFamily | "unknown";
+}
+
+const NEWER_CARD_CAUTION: ApprovalPreviewSection = {
+  kind: "warning",
+  level: "caution",
+  text: "This approval comes from a newer Orquester than this client knows; check it on an updated client before approving."
+};
+
+/**
+ * A card from untrusted JSON (a bus payload, a list answer), sanitised for rendering, or null when
+ * it is not a card at all (no ids, title, times, scope or sections). An unknown kind or family
+ * reads `"unknown"` with a caution first and no grant options; a section that does not read is
+ * replaced by a caution, never dropped silently.
+ */
+export function parseToolApprovalSummary(value: unknown): ParsedToolApprovalSummary | null {
   const r = asRecord(value);
   if (!r) return null;
   const { approvalId, threadId, tool, kind, family, title, requestedAt, expiresAt } = r;
   if (!SHORT_ID(approvalId) || !SHORT_ID(threadId) || !str(tool) || !str(title) || !str(requestedAt) || !str(expiresAt)) return null;
-  if (typeof kind !== "string" || !(APPROVAL_KINDS as readonly string[]).includes(kind) || !isApprovalFamily(family)) return null;
+  const knownKind = typeof kind === "string" && (APPROVAL_KINDS as readonly string[]).includes(kind);
+  const knownFamily = isApprovalFamily(family);
   const scope = asRecord(r.scope);
   if (!scope || !str(scope.label) || !Array.isArray(r.sections)) return null;
   const projects = Array.isArray(scope.projects)
@@ -608,15 +663,17 @@ export function parseToolApprovalSummary(value: unknown): ToolApprovalSummary | 
         return field && str(field.key) && field.key.length > 0 && str(field.label) ? [{ key: field.key, label: sanitizeApprovalLabel(field.label) }] : [];
       })
     : [];
-  const grantOptions = Array.isArray(r.grantOptions)
-    ? [...new Set(r.grantOptions.filter((g): g is ToolApprovalGrantScope => g === "chat" || g === "project"))]
-    : [];
+  const grantOptions =
+    knownKind && knownFamily && Array.isArray(r.grantOptions)
+      ? [...new Set(r.grantOptions.filter((g): g is ToolApprovalGrantScope => g === "chat" || g === "project"))]
+      : [];
+  if (!knownKind || !knownFamily) sections.unshift(NEWER_CARD_CAUTION);
   return {
     approvalId,
     threadId,
     tool: sanitizeApprovalLabel(tool, 64),
-    kind: kind as ApprovalKind,
-    family,
+    kind: knownKind ? (kind as ApprovalKind) : "unknown",
+    family: knownFamily ? family : "unknown",
     title: sanitizeApprovalLabel(title),
     scope: { label: sanitizeApprovalLabel(scope.label), ...(projects ? { projects } : {}) },
     ...(str(r.reason) && r.reason.trim() ? { reason: sanitizeApprovalProse(r.reason, TOOL_APPROVAL_REASON_MAX_CHARS) } : {}),

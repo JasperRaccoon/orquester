@@ -48,9 +48,11 @@ export interface SavedPrompt {
   lastUsedAt: string | null;
   useCount: number;
   /**
-   * Who created it (unified MCP design 2026-10-15 D-16). Absent: the user — every prompt written
-   * before the field, and every one the UI creates. An agent-created prompt shows a "by <agent>"
-   * badge and cannot be pinned (the daemon refuses pinning one from anything but the user's UI).
+   * Who created it (unified MCP design 2026-10-15 D-16), derived by the daemon from the creating
+   * request's principal — never from a body. Absent: the user — every prompt written before the
+   * field, and every one the UI or an external client creates. An agent-created prompt shows a
+   * "by <agent>" badge and cannot be pinned: `PUT` with `pinned` from any principal but `user` is
+   * 403 {@link AGENT_PROMPT_PIN_REFUSED}.
    */
   createdBy?: SavedPromptCreatedBy;
   /**
@@ -63,7 +65,8 @@ export interface SavedPrompt {
 
 /** `SavedPrompt.createdBy`. */
 export interface SavedPromptCreatedBy {
-  kind: "agent" | "user";
+  /** `agent`: an agent tool created it. Any other value (a newer build's kind) reads as the user's. */
+  kind: "agent" | "user" | (string & {});
   /** The chat whose agent created it. */
   threadId?: string;
   /** That chat's agent (`AgentAdapterId`). */
@@ -71,6 +74,9 @@ export interface SavedPromptCreatedBy {
   /** That chat's title when it created the prompt. */
   title?: string;
 }
+
+/** 403 code: pinning an agent-created prompt from anything but the user's own UI. */
+export const AGENT_PROMPT_PIN_REFUSED = "AGENT_PROMPT_PIN_REFUSED";
 
 /** A workflow that references a saved prompt. */
 export interface SavedPromptWorkflowUse {
@@ -99,11 +105,9 @@ export interface CreateSavedPromptRequest {
   /** `null` = global; else a project directory (`<workspacesDir>/<ws>/<project>`). */
   projectPath: string | null;
   pinned?: boolean;
-  /**
-   * Stamped by the agent tools (`update_saved_prompts {action: "create"}`) as `{kind: "agent", …}`.
-   * The daemon decides whom to believe; absent = the user.
-   */
-  createdBy?: SavedPromptCreatedBy;
+  // No `createdBy`: the daemon derives it from the request's server-stamped principal
+  // (`CallerPrincipal`, agent-chat/principal.ts) — an agent tool's create is `{kind: "agent", …}`,
+  // anything else the user's. A body field naming it is ignored.
 }
 
 /**

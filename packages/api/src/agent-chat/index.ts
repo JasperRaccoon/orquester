@@ -38,6 +38,7 @@ export * from "./session-tools.ts";
 export * from "./secret-requests.ts";
 export * from "./tool-approvals.ts";
 export * from "./model-selection.ts";
+export * from "./principal.ts";
 export * from "./thread-tools.ts";
 export * from "./turn-state.ts";
 export * from "./turns.ts";

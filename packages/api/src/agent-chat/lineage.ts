@@ -12,6 +12,8 @@
  * record that carries it.
  */
 
+import type { CausedBy } from "./thread.ts";
+
 /**
  * How a child thread came to be: forked from the parent, delegated a task by it, or `opened` by it
  * — a chat another chat opened through `create_session` without `delegate` (unified MCP design
@@ -166,6 +168,13 @@ export interface ForkSessionRequest extends ThreadForkTarget {
    * restart too — answers the tab the first created, never a second one.
    */
   commandId?: string;
+  /**
+   * Mark the fork agent-created (`ThreadLineage.agentCreated`, unified MCP design 2026-10-15
+   * §13 c). A HINT honoured only when the request's server-stamped principal is an agent whose
+   * `threadId` is the forked chat (`principal.ts`); ignored from any other caller — a fork the user
+   * makes in the GUI is never the agent's child.
+   */
+  agentCreated?: true;
 }
 
 /** The fork tab's default title. */
@@ -205,6 +214,13 @@ export interface MergeBackRequest {
    * planning fork never starts editing work in its parent. Absent: `"default"`.
    */
   interactionMode?: "default" | "plan";
+  /**
+   * The exchange of the parent turn this merge causes (unified MCP design 2026-10-15 §8.4):
+   * TRUSTED-PATH ONLY — honoured only when the request's principal is an agent whose `threadId` is
+   * the child (`principal.ts`); ignored from the GUI and external clients (their merges start no
+   * exchange) and stripped by the remote transport like `TurnCommandBody.causedBy`.
+   */
+  causedBy?: CausedBy;
 }
 
 export type MergeBackDelivery = "sent" | "queued";

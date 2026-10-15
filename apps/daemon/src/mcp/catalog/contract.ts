@@ -159,6 +159,8 @@ export interface ApprovalPreview {
 /** One card the executor asks the port to show and wait on. */
 export interface ApprovalRequest {
   threadId: string;
+  /** The caller's canonical project root ("" when it has none): the project a grant is recorded for. */
+  callerProjectPath: string;
   tool: string;
   kind: ApprovalKind;
   family: ApprovalFamily;
@@ -190,6 +192,14 @@ export interface ApprovalPort {
   findGrant(query: GrantQuery): Promise<Grant | null>;
   /** Open a card and wait for the user, the deadline or `signal` (→ `cancelled`). */
   request(card: ApprovalRequest, signal: AbortSignal): Promise<ApprovalOutcome>;
+  /**
+   * After an approved (or granted) `create_workflow` ran: add the new workflow's id to the chat's
+   * `workflows` grant (§7.6 — "a create approved under it adds the new id"), so later updates,
+   * runs and deletes of it are covered. `grantId`: the grant the approval created or matched; absent
+   * → the chat's existing `workflows` chat grant, if any. A no-op when there is none, when the caller
+   * is not `full-access`, or when the workflow's project union is not the caller's project.
+   */
+  recordWorkflowInGrant(input: { threadId: string; callerProjectPath: string; workflowId: string; grantId?: string }): Promise<void>;
 }
 
 // ---------------------------------------------------------------------------

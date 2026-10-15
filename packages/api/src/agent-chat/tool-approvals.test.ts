@@ -130,7 +130,8 @@ test("a summary carries the whole preview when it fits, and cuts long text — n
   assert.equal(summary.fullPreview, true);
   assert.ok(approvalPreviewBytes(summary.sections) <= TOOL_APPROVAL_SUMMARY_MAX_BYTES, String(approvalPreviewBytes(summary.sections)));
   assert.deepEqual(summary.sections[0], big[0]);
-  assert.deepEqual(summary.sections.at(-1), big[3]);
+  assert.deepEqual(summary.sections.at(-2), big[3]);
+  assert.match((summary.sections.at(-1) as { text: string }).text, /View all/);
   const code = summary.sections.find((s) => s.kind === "code");
   assert.ok(code && code.kind === "code" && code.partial === true && code.text.length > 0);
   assert.ok(!code.text.includes("�"), "cut on a character boundary");
@@ -171,7 +172,7 @@ test("a summary read from untrusted JSON round-trips, sanitised; unknown section
   assert.deepEqual(odd.grantOptions, ["chat"]);
   assert.equal(odd.sections[0]?.kind, "warning");
   assert.deepEqual(odd.sections[1], { kind: "code", title: "x", text: "a<U+202E>b" });
-  for (const bad of [null, { ...SUMMARY, family: "root" }, { ...SUMMARY, kind: "x" }, { ...SUMMARY, scope: null }, { ...SUMMARY, approvalId: "" }]) {
+  for (const bad of [null, { ...SUMMARY, scope: null }, { ...SUMMARY, sections: "x" }, { ...SUMMARY, approvalId: "" }]) {
     assert.equal(parseToolApprovalSummary(bad), null);
   }
 });
@@ -194,4 +195,49 @@ test("the row keeps its toolApproval reference through slimming, and a malformed
   assert.equal(readToolApprovalReference({ kind: "admin", family: "desktops", title: "x", outcome: "approved" }), undefined, "a card outcome needs its id");
   assert.equal(readToolApprovalReference({ ...ref, family: "root" }), undefined);
   assert.equal(readToolApprovalReference({ ...ref, outcome: "maybe" }), undefined);
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1
+// ---------------------------------------------------------------------------
+
+test("every format character is unsafe: tag characters, interlinear annotations, the grapheme joiner, fillers", () => {
+  const hidden = "a\u{E0041}\u{E007F}b￹c￻d͏e⁡f⁪gㅤh";
+  assert.equal(sanitizeApprovalLabel(hidden), "abcdefgh");
+  assert.equal(sanitizeApprovalProse(`x y${hidden}`), "x\nyabcdefgh");
+  assert.equal(escapeApprovalCodeText("run\u{E0041}"), "run<U+E0041>");
+  assert.equal(escapeApprovalCodeText("\ud800x"), "<U+D800>x", "a lone surrogate is shown, not rendered");
+});
+
+test("stripping touches only answers and approval contexts — a secret NAMES list in a result stays", () => {
+  const result = { secrets: ["DEPLOY_KEY", "API_TOKEN"], workflow: { secrets: { DEPLOY_KEY: "set" } } };
+  assert.equal(stripToolApprovalSecrets(result), result);
+  const context = { outcome: "approved", approvalId: "ap-1", secrets: { k: "v" }, pins: { a: "1" } };
+  assert.deepEqual(stripToolApprovalSecrets(context), { outcome: "approved", approvalId: "ap-1", pins: { a: "1" } });
+});
+
+test("an unknown kind or family is a generic card with a caution and no grant options — never dropped", () => {
+  const parsed = parseToolApprovalSummary({ ...SUMMARY, kind: "quorum", family: "teleport", grantOptions: ["chat"] });
+  assert.ok(parsed);
+  assert.equal(parsed.kind, "unknown");
+  assert.equal(parsed.family, "unknown");
+  assert.deepEqual(parsed.grantOptions, []);
+  assert.equal(parsed.sections[0]?.kind, "warning");
+  assert.equal(parsed.sections.length, SUMMARY.sections.length + 1);
+});
+
+test("a summary never exceeds its cap, even when the flags alone do", () => {
+  const flags: ApprovalPreviewSection[] = [
+    ...Array.from({ length: 40 }, (_, i): ApprovalPreviewSection => ({ kind: "warning", level: "danger", text: `${i}:${"w".repeat(4_000)}` })),
+    ...Array.from({ length: 2_000 }, (_, i): ApprovalPreviewSection => ({ kind: "file", path: `bin/${i}/${"p".repeat(60)}`, size: i, sha256: "f".repeat(64), flag: "executable" })),
+    { kind: "code", title: "x", text: "c".repeat(10_000) }
+  ];
+  for (const max of [TOOL_APPROVAL_SUMMARY_MAX_BYTES, 4_096]) {
+    const summary = summarizeApprovalPreview(flags, max);
+    assert.ok(approvalPreviewBytes(summary.sections) <= max, `${max}: ${approvalPreviewBytes(summary.sections)}`);
+    assert.equal(summary.fullPreview, true);
+    const last = summary.sections.at(-1);
+    assert.ok(last?.kind === "warning" && /View all/.test(last.text) && /left out/.test(last.text));
+    assert.equal(summary.sections[0]?.kind, "warning", "flags first in budget");
+  }
 });

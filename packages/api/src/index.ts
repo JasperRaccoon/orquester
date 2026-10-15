@@ -90,7 +90,8 @@ export interface WorkspaceSummary {
   /**
    * The bound git account's public identity (unified MCP design 2026-10-15 §5.5): label, login,
    * provider — never a key, key path or token. `null` with no binding (or an account that no
-   * longer exists); absent from daemons that predate the field.
+   * longer exists); absent from daemons that predate the field. Filled by joining `gitAccountId`
+   * with the accounts store (`/api/accounts`); `list_projects` (Task 9) does the join.
    */
   gitAccount?: WorkspaceGitAccount | null;
   /** ISO creation timestamp from workspaces.json, when present. */

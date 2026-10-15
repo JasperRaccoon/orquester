@@ -95,6 +95,18 @@ export interface AgentToolsFile {
   };
   /** `threadId -> toolsetId -> ISO time the user denied the toolset card`. */
   toolsetDeclines: Record<string, Record<string, string>>;
+  /**
+   * Rows and cells of the three matrices this build cannot read (a non-object row, a non-boolean
+   * or non-string cell — a newer build's value), kept VERBATIM and merged back on rewrite; never
+   * honoured. A row's entry is the raw row when the row itself is unreadable, else an object of
+   * its unreadable cells. Delete a thread with {@link removeThreadFromAgentTools}, which drops its
+   * leftovers here too.
+   */
+  unreadableCells?: {
+    defaults?: Record<string, unknown>;
+    threads?: Record<string, unknown>;
+    toolsetDeclines?: Record<string, unknown>;
+  };
   grants: AgentToolGrantRecord[];
   /** Grant entries this build cannot read, kept verbatim and never honoured. */
   unreadableGrants: unknown[];
@@ -117,15 +129,44 @@ function entriesOf(value: unknown): [string, unknown][] {
   return isPlainRecord(value) ? Object.entries(value) : [];
 }
 
-function booleanMatrix(value: unknown, where: string): AgentToolsBooleanMatrix {
-  if (value === undefined) return {};
+/** A matrix split into the cells this build reads and the rest, kept verbatim ({@link mergeMatrix} reverses it). */
+function readMatrix<T>(
+  value: unknown,
+  where: string,
+  isCell: (cell: unknown) => cell is T
+): { rows: Record<string, Record<string, T>>; unreadable: Record<string, unknown> } {
+  if (value === undefined) return { rows: {}, unreadable: {} };
   if (!isPlainRecord(value)) throw new Error(`Not an agent-tools file (${where} is not an object)`);
-  return Object.fromEntries(
-    entriesOf(value)
-      .filter(([, row]) => isPlainRecord(row))
-      .map(([key, row]) => [key, Object.fromEntries(entriesOf(row).filter((cell): cell is [string, boolean] => typeof cell[1] === "boolean"))])
-  );
+  const rows: [string, Record<string, T>][] = [];
+  const unreadable: [string, unknown][] = [];
+  for (const [key, row] of entriesOf(value)) {
+    if (!isPlainRecord(row)) {
+      unreadable.push([key, row]);
+      continue;
+    }
+    const good = entriesOf(row).filter((cell): cell is [string, T] => isCell(cell[1]));
+    const bad = entriesOf(row).filter(([, cell]) => !isCell(cell));
+    rows.push([key, Object.fromEntries(good)]);
+    if (bad.length > 0) unreadable.push([key, Object.fromEntries(bad)]);
+  }
+  return { rows: Object.fromEntries(rows), unreadable: Object.fromEntries(unreadable) };
 }
+
+/** The matrix as written: every readable row with its unreadable cells put back; unreadable rows as found. */
+function mergeMatrix(rows: Record<string, Record<string, unknown>>, unreadable: Record<string, unknown> | undefined): Record<string, unknown> {
+  const out: [string, unknown][] = [];
+  for (const [key, row] of entriesOf(rows)) {
+    const leftover = unreadable && Object.prototype.hasOwnProperty.call(unreadable, key) ? unreadable[key] : undefined;
+    out.push([key, isPlainRecord(leftover) ? { ...leftover, ...(row as Record<string, unknown>) } : row]);
+  }
+  for (const [key, leftover] of entriesOf(unreadable)) {
+    if (!Object.prototype.hasOwnProperty.call(rows, key)) out.push([key, leftover]);
+  }
+  return Object.fromEntries(out);
+}
+
+const isBoolean = (cell: unknown): cell is boolean => typeof cell === "boolean";
+const isString = (cell: unknown): cell is string => typeof cell === "string";
 
 /**
  * Read `agent-tools.json`. Tolerant of what a newer build of the same version wrote; THROWS on
@@ -156,21 +197,29 @@ export function parseAgentToolsFile(raw: unknown): AgentToolsFile {
   const toolsetsExtra = Object.fromEntries(entriesOf(toolsetsRaw).filter(([key]) => key !== "defaults" && key !== "threads"));
   const extra = Object.fromEntries(entriesOf(raw).filter(([key]) => !KNOWN_KEYS.has(key)));
   const revision = typeof raw.revision === "number" && Number.isSafeInteger(raw.revision) && raw.revision >= 0 ? raw.revision : 0;
-  const toolsetDeclines = Object.fromEntries(
-    entriesOf(raw.toolsetDeclines)
-      .filter(([, row]) => isPlainRecord(row))
-      .map(([threadId, row]) => [threadId, Object.fromEntries(entriesOf(row).filter((cell): cell is [string, string] => typeof cell[1] === "string"))])
+  const defaults = readMatrix(toolsetsRaw.defaults, "toolsets.defaults", isBoolean);
+  const threads = readMatrix(toolsetsRaw.threads, "toolsets.threads", isBoolean);
+  const declines = readMatrix(raw.toolsetDeclines, "toolsetDeclines", isString);
+  const unreadableCells = Object.fromEntries(
+    (
+      [
+        ["defaults", defaults.unreadable],
+        ["threads", threads.unreadable],
+        ["toolsetDeclines", declines.unreadable]
+      ] as const
+    ).filter(([, cells]) => Object.keys(cells).length > 0)
   );
   return {
     version: 1,
     revision,
     enabled: typeof raw.enabled === "boolean" ? raw.enabled : true,
     toolsets: {
-      defaults: booleanMatrix(toolsetsRaw.defaults, "toolsets.defaults"),
-      threads: booleanMatrix(toolsetsRaw.threads, "toolsets.threads"),
+      defaults: defaults.rows,
+      threads: threads.rows,
       ...(Object.keys(toolsetsExtra).length > 0 ? { extra: toolsetsExtra } : {})
     },
-    toolsetDeclines,
+    toolsetDeclines: declines.rows,
+    ...(Object.keys(unreadableCells).length > 0 ? { unreadableCells } : {}),
     grants,
     unreadableGrants,
     ...(Object.keys(extra).length > 0 ? { extra } : {})
@@ -185,8 +234,12 @@ export function serializeAgentToolsFile(file: AgentToolsFile): string {
       version: 1,
       revision: file.revision,
       enabled: file.enabled,
-      toolsets: { ...(file.toolsets.extra ?? {}), defaults: file.toolsets.defaults, threads: file.toolsets.threads },
-      toolsetDeclines: file.toolsetDeclines,
+      toolsets: {
+        ...(file.toolsets.extra ?? {}),
+        defaults: mergeMatrix(file.toolsets.defaults, file.unreadableCells?.defaults),
+        threads: mergeMatrix(file.toolsets.threads, file.unreadableCells?.threads)
+      },
+      toolsetDeclines: mergeMatrix(file.toolsetDeclines, file.unreadableCells?.toolsetDeclines),
       grants: [...file.grants, ...file.unreadableGrants]
     },
     null,
@@ -316,4 +369,28 @@ export function findGrant(file: AgentToolsFile, query: AgentToolGrantQuery): Age
     if (grant.scope === "project" && scopes.includes("project") && grant.projectPath === query.projectPath) return grant;
   }
   return null;
+}
+
+/**
+ * `file` without anything of `threadId` (spec §9.6: "thread entries and chat grants are deleted
+ * with their thread"): its toolset overrides, its declines, their unreadable leftovers and its chat
+ * grants. Project grants stay. A new object; `file` is not changed.
+ */
+export function removeThreadFromAgentTools(file: AgentToolsFile, threadId: string): AgentToolsFile {
+  const without = <T>(record: Record<string, T> | undefined): Record<string, T> =>
+    Object.fromEntries(entriesOf(record).filter(([key]) => key !== threadId)) as Record<string, T>;
+  const unreadableCells = file.unreadableCells
+    ? {
+        ...(file.unreadableCells.defaults ? { defaults: file.unreadableCells.defaults } : {}),
+        threads: without(file.unreadableCells.threads),
+        toolsetDeclines: without(file.unreadableCells.toolsetDeclines)
+      }
+    : undefined;
+  return {
+    ...file,
+    toolsets: { ...file.toolsets, threads: without(file.toolsets.threads) },
+    toolsetDeclines: without(file.toolsetDeclines),
+    ...(unreadableCells ? { unreadableCells } : {}),
+    grants: file.grants.filter((grant) => !(grant.scope === "chat" && grant.threadId === threadId))
+  };
 }

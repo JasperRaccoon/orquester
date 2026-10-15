@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { parseSavedPromptsConfig, savedPromptsPath } from "./index.ts";
+import { isAgentCreatedPrompt, parseSavedPromptsConfig, savedPromptsPath } from "./index.ts";
 
 const record = (overrides: Record<string, unknown> = {}): Record<string, unknown> => ({
   id: "p-1",
@@ -93,12 +93,17 @@ test("the outer shape still throws — an unknown version included — so the fi
   assert.deepEqual(parseSavedPromptsConfig({}), { version: 1, prompts: [], rejected: [], extra: {} });
 });
 
-test("createdBy survives a read (unknown fields too); a malformed one is dropped, never the prompt", () => {
+test("createdBy survives a read and a rewrite verbatim — newer kinds and fields too; a non-object makes the record unreadable, kept verbatim", () => {
   const createdBy = { kind: "agent", threadId: "t-1", agent: "claude", title: "Implement auth", fromNewerBuild: true };
-  const parsed = parseSavedPromptsConfig({ version: 1, prompts: [record({ createdBy }), record({ id: "p-2", createdBy: { kind: "robot" } })] });
+  const newer = { kind: "workflow", workflowId: "wf_1" };
+  const broken = record({ id: "p-3", createdBy: "agent" });
+  const parsed = parseSavedPromptsConfig({ version: 1, prompts: [record({ createdBy }), record({ id: "p-2", createdBy: newer }), broken] });
   assert.deepEqual(parsed.prompts[0]?.createdBy, createdBy);
-  assert.equal(parsed.prompts[1]?.id, "p-2");
-  assert.equal(parsed.prompts[1]?.createdBy, undefined);
-  assert.deepEqual(parsed.rejected, []);
-  assert.equal(parseSavedPromptsConfig({ version: 1, prompts: [record()] }).prompts[0]?.createdBy, undefined, "older prompts are the user's");
+  assert.deepEqual(parsed.prompts[1]?.createdBy, newer);
+  assert.equal(isAgentCreatedPrompt(parsed.prompts[0]?.createdBy), true);
+  assert.equal(isAgentCreatedPrompt(parsed.prompts[1]?.createdBy), false, "an unknown kind reads as the user's");
+  assert.deepEqual(parsed.rejected, [broken]);
+  const older = parseSavedPromptsConfig({ version: 1, prompts: [record()] }).prompts[0];
+  assert.equal(older?.createdBy, undefined);
+  assert.equal(isAgentCreatedPrompt(older?.createdBy), false, "older prompts are the user's");
 });

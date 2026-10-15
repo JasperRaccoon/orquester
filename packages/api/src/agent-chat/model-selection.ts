@@ -43,6 +43,11 @@ export function findReasoningDescriptor(model: ProviderModel | null): SelectProv
  * The model a selection names, else the default — the provider's `isDefault` model that is not
  * legacy, else its first non-legacy model, else its first model (D-23: a legacy model is never
  * chosen by default, but one named explicitly is honoured).
+ *
+ * **Behaviour change (D-23)** from the UI copy it replaced, which fell back to `isDefault ??
+ * models[0]` legacy or not: a provider whose default-flagged or first model is legacy now gets its
+ * first non-legacy model as the composer's default. Identical for every catalogue without legacy
+ * models.
  */
 export function resolveSelectedModel(models: readonly ProviderModel[], selection: ModelSelection | null): ProviderModel | null {
   if (selection) {
@@ -55,6 +60,20 @@ export function resolveSelectedModel(models: readonly ProviderModel[], selection
     models[0] ??
     null
   );
+}
+
+/**
+ * THE model a launch gets — the one function `create_session` / `update_session` (Task 8) and
+ * `list_agents`' `defaultModel` (Task 9, via {@link providerPickerView}) must both use, so the
+ * reported default is exactly what a launch naming no model gets: `requested` when it names a
+ * catalogue model (legacy included — D-23, marked by `isLegacy`), null for an unknown slug (the
+ * caller refuses or passes it through as today), else the {@link resolveSelectedModel} default.
+ */
+export function resolveLaunchModel(models: readonly ProviderModel[], requested?: string | null): ProviderModel | null {
+  if (requested !== undefined && requested !== null && requested !== "") {
+    return models.find((model) => model.slug === requested) ?? null;
+  }
+  return resolveSelectedModel(models, null);
 }
 
 /** What the chip reads. Falls back to the raw slug so it is never blank. */
@@ -160,7 +179,7 @@ export interface PickerView {
   /** `ready | degraded | error | unknown`; `catalogueLoading` when a ready-or-unknown provider lists no model yet. */
   status: ProviderSnapshot["status"];
   catalogueLoading: boolean;
-  /** The model a launch naming none gets ({@link resolveSelectedModel} with no selection); null with no models. */
+  /** The model a launch naming none gets ({@link resolveLaunchModel} with no request); null with no models. */
   defaultModel: string | null;
   models: PickerModelView[];
 }
@@ -192,7 +211,7 @@ function optionView(descriptor: ProviderOptionDescriptor): PickerOptionView {
  */
 export function providerPickerView(snapshot: Pick<ProviderSnapshot, "status" | "models">, opts?: { includeLegacy?: boolean }): PickerView {
   const listed = snapshot.models.filter((model) => opts?.includeLegacy === true || model.isLegacy !== true);
-  const fallback = resolveSelectedModel(snapshot.models, null);
+  const fallback = resolveLaunchModel(snapshot.models);
   return {
     status: snapshot.status,
     catalogueLoading: snapshot.models.length === 0 && (snapshot.status === "ready" || snapshot.status === "unknown"),

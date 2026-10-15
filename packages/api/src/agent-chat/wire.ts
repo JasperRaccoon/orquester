@@ -553,12 +553,17 @@ export interface CreateAgentChatSessionFields {
    */
   resume?: { home: AccountHomeKind; conversationId: string };
   /**
-   * Create the thread as a child of another chat tab in the same project
-   * (spec 2026-10-14 §6) — `relation: "delegate"` only: a fork carries the
-   * parent's conversation and is created by `POST …/fork`. The daemon checks
-   * the parent and stamps `createdAt` itself.
+   * Create the thread as a child of another chat tab (spec 2026-10-14 §6; unified MCP design
+   * 2026-10-15 §4.1): `delegate` (a task) or `opened` (a chat another chat opened). The parent may
+   * be in ANOTHER project — `create_session` opens chats in any project. A fork carries the
+   * parent's conversation and is created by `POST …/fork` instead. The daemon checks the parent
+   * and stamps `createdAt` and `delegationDepth` itself.
+   *
+   * `agentCreated: true` is a HINT honoured only when the request's server-stamped principal is an
+   * agent whose `threadId` is `parentThreadId` (`principal.ts`, `isAgentPrincipalFor`); from any
+   * other caller it is ignored (and a remote body's is never trusted).
    */
-  lineage?: { parentThreadId: string; relation: "delegate" };
+  lineage?: { parentThreadId: string; relation: "delegate" | "opened"; agentCreated?: true };
 }
 
 /** §6.1's create-time refusal code. Deliberately not in {@link AgentChatErrorCode}. */
@@ -594,11 +599,26 @@ export interface TurnCommandBody extends AgentChatCommandBase {
   context?: ComposerContextRecord[];
   /**
    * The agent exchange the turn belongs to, when another chat caused it (unified MCP design
-   * 2026-10-15 §8.4): set by the daemon only — the external MCP, the GUI and user-authored turns
-   * never carry it. The host persists it with the turn (`Turn.causedBy`); a steer leaves the
-   * running turn's own. Additive: an older host ignores it.
+   * 2026-10-15 §8.4). TRUSTED-PATH ONLY: set by the daemon from an agent principal
+   * (`principal.ts`) — the catalog executor, the reply router, the delivery queue. The REMOTE
+   * transport strips it before the route sees the body ({@link stripRemoteTurnFields}, listed in
+   * {@link REMOTE_STRIPPED_TURN_FIELDS}; Task 5 enforces), and the socket route honours it only
+   * from an agent principal; the GUI, the external MCP and user-authored turns never carry one.
+   * The host persists it with the turn (`Turn.causedBy`); a steer leaves the running turn's own.
+   * Additive: an older host ignores it.
    */
   causedBy?: CausedBy;
+}
+
+/** The {@link TurnCommandBody} fields only the daemon may set: removed from every remote body. */
+export const REMOTE_STRIPPED_TURN_FIELDS = ["causedBy"] as const satisfies readonly (keyof TurnCommandBody)[];
+
+/** `body` without the trusted-path-only fields — what the remote transport forwards. Same reference when none was present. */
+export function stripRemoteTurnFields<T extends object>(body: T): T {
+  if (!REMOTE_STRIPPED_TURN_FIELDS.some((field) => Object.prototype.hasOwnProperty.call(body, field))) return body;
+  const copy = { ...body } as Record<string, unknown>;
+  for (const field of REMOTE_STRIPPED_TURN_FIELDS) delete copy[field];
+  return copy as T;
 }
 
 /**
@@ -1192,16 +1212,27 @@ export interface ReplySubscriptionRequest {
   /** How the message came: its header's origin. Default `sent`. */
   origin?: "sent" | "opened" | "delegated";
   /**
-   * Idempotency key: a repeat answers the first subscription (and its `commandId`), never a second
-   * one. 1–180 characters, no `:`.
+   * Idempotency key (persisted as `ReplySubscriptionRecord.idempotencyKey`): a repeat answers the
+   * first subscription (and its `commandId`), never a second one. 1–180 characters, no `:`.
    */
   idempotencyKey?: string;
 }
 
+/** Pending (not `done`) reply subscriptions one requester may hold (spec §5.6); the next is refused. */
+export const MAX_PENDING_REPLY_SUBSCRIPTIONS = 20;
+/** 429 code of a subscription over {@link MAX_PENDING_REPLY_SUBSCRIPTIONS}. */
+export const REPLY_SUBSCRIPTION_LIMIT = "REPLY_SUBSCRIPTION_LIMIT";
+
 export interface ReplySubscriptionResponse {
   subscriptionId: string;
-  /** The fixed `/turn` command id the message goes (or went) out under. */
+  /**
+   * The command id of the message's FIRST post. A queued message the target refused is retried as
+   * `<queueEntryId>:<n>` (the merge-queue rule), so bind the reply by `queueEntryId` when present,
+   * never by an attempt's command id.
+   */
   commandId: string;
+  /** `delivery: "queued"`: the delivery-queue entry (`PendingMergeBack.mergeId`, kind `message`) holding the message. */
+  queueEntryId?: string;
   /** `sent`: the target took the turn now; `queued`: it gets it at its next idle point. */
   delivery: "sent" | "queued";
   /** The target's sequence after a `sent` delivery. */

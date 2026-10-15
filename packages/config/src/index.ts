@@ -1345,6 +1345,15 @@ export const replySubscriptionSchema = z
     exchange: replyExchangeSchema,
     /** How the message came (`ThreadMessageOrigin` of its header); absent: `sent`. */
     origin: z.enum(["sent", "opened", "delegated"]).optional().catch(undefined),
+    /** `ReplySubscriptionRequest.idempotencyKey`: a repeat with the same requester and key answers this subscription. */
+    idempotencyKey: z.string().min(1).max(200).optional(),
+    /**
+     * The delivery-queue entry (`agent-merge-outbox.json` `mergeId`, kind `message`) holding the
+     * message while the target is busy. Stable across retries — a retry posts `<queueEntryId>:<n>`,
+     * so the bound turn is found by this id (and `commandId` for an immediate post), never by an
+     * attempt's command id alone.
+     */
+    queueEntryId: z.string().min(1).max(200).optional(),
     createdAt: z.string(),
     updatedAt: z.string().optional().catch(undefined)
   })
@@ -1364,8 +1373,10 @@ export const replyDeliverySchema = z
     toThreadId: z.string().min(1).max(200),
     /** The chat whose turn produced it. */
     fromThreadId: z.string().min(1).max(200),
-    /** The fixed `/turn` command id it is delivered under (host receipts dedupe a re-post). */
+    /** The fixed `/turn` command id of its first post (host receipts dedupe a re-post). */
     commandId: z.string().min(1).max(200),
+    /** Once queued: the delivery-queue entry (`mergeId`, kind `reply`); a retry posts `<queueEntryId>:<n>`. */
+    queueEntryId: z.string().min(1).max(200).optional(),
     /** The bound turn whose reply it carries, when known. */
     turnId: z.string().min(1).max(200).optional(),
     outcome: z.enum(REPLY_DELIVERY_OUTCOMES),
@@ -1947,6 +1958,31 @@ export function parseRecentProjectsConfig(raw: unknown): RecentProjectsConfig {
 // seeded" marker, so a user who deletes the starters never gets them back.
 
 /**
+ * `SavedPrompt.createdBy` in `@orquester/api`. Open on purpose (`kind` any string, unknown fields
+ * passed through) so a newer build's value survives this build's rewrite verbatim; a kind other
+ * than `agent` reads as the user's (fail closed: an agent's edit of it needs approval). A value
+ * that is not even this shape makes its record unreadable — kept verbatim in `rejected`, as any
+ * malformed record is.
+ */
+export const savedPromptCreatedBySchema = z
+  .object({
+    kind: z.string().min(1),
+    /** The chat whose agent created it. */
+    threadId: z.string().optional(),
+    /** That chat's agent (`AgentAdapterId`), for the "by <agent>" badge. */
+    agent: z.string().optional(),
+    /** That chat's title when it created the prompt. */
+    title: z.string().optional()
+  })
+  .passthrough();
+export type SavedPromptCreatedByRecord = z.infer<typeof savedPromptCreatedBySchema>;
+
+/** Whether a stored `createdBy` marks an agent-created prompt (anything else — absent, another kind — is the user's). */
+export function isAgentCreatedPrompt(createdBy: SavedPromptCreatedByRecord | undefined): boolean {
+  return createdBy?.kind === "agent";
+}
+
+/**
  * One stored prompt. Deliberately checks SHAPE, never the editor's limits
  * (title/body/tag lengths, the tag count): those are enforced when a prompt is
  * written, and a read that re-applied them would hide a prompt a build with
@@ -1961,20 +1997,6 @@ export function parseRecentProjectsConfig(raw: unknown): RecentProjectsConfig {
  * version makes an older build quarantine the file instead (moved aside, never
  * written over).
  */
-/** `SavedPrompt.createdBy` in `@orquester/api`. */
-export const savedPromptCreatedBySchema = z
-  .object({
-    kind: z.enum(["agent", "user"]),
-    /** The chat whose agent created it. */
-    threadId: z.string().min(1).max(200).optional(),
-    /** That chat's agent (`AgentAdapterId`), for the "by <agent>" badge. */
-    agent: z.string().min(1).max(64).optional(),
-    /** That chat's title when it created the prompt. */
-    title: z.string().max(500).optional()
-  })
-  .passthrough();
-export type SavedPromptCreatedByRecord = z.infer<typeof savedPromptCreatedBySchema>;
-
 export const savedPromptRecordSchema = z
   .object({
     id: z.string().min(1),
@@ -1991,10 +2013,9 @@ export const savedPromptRecordSchema = z
     useCount: z.number().int().nonnegative().default(0),
     /**
      * Who created the prompt (`SavedPrompt.createdBy`, unified MCP design 2026-10-15 D-16). Absent:
-     * the user (every prompt written before the field). A malformed one is dropped on its own —
-     * the prompt then reads as the user's, which only makes agents' edits of it need approval.
+     * the user. Never dropped or rewritten by this build ({@link savedPromptCreatedBySchema}).
      */
-    createdBy: savedPromptCreatedBySchema.optional().catch(undefined)
+    createdBy: savedPromptCreatedBySchema.optional()
   })
   .passthrough();
 
