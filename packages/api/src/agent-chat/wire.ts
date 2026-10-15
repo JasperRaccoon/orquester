@@ -193,6 +193,14 @@ export const agentChatRoutes = {
    */
   replySubscriptionWait: (sessionId: string, subscriptionId: string): string =>
     `${sessionBase(sessionId)}/reply-subscriptions/${encodeURIComponent(subscriptionId)}/wait`,
+  /**
+   * SOCKET-ONLY: `POST` (no body) → {@link ReplySubscriptionReleaseResponse} — the requester's
+   * waiting tool call was cancelled (an in-process `DaemonApi.request` cannot abort its inject), so
+   * the attached waiter is released and the reply comes as a message instead (§8.3). With an agent
+   * principal, only the requester (`fromThreadId`) may release (403 `PERMISSION_DENIED`).
+   */
+  replySubscriptionRelease: (sessionId: string, subscriptionId: string): string =>
+    `${sessionBase(sessionId)}/reply-subscriptions/${encodeURIComponent(subscriptionId)}/release`,
 
   // §6.3 reads
   thread: (sessionId: string): string => `${sessionBase(sessionId)}/thread`,
@@ -608,6 +616,15 @@ export interface TurnCommandBody extends AgentChatCommandBase {
    * an older host ignores it.
    */
   causedBy?: CausedBy;
+  /**
+   * Precondition (unified MCP design 2026-10-15 §8.3): start a NEW turn only — with a turn active
+   * the command is refused 409 {@link TURN_NOT_IDLE} instead of steering it, and NOT recorded as a
+   * receipt, so the same `commandId` may be posted again at the next idle point. The daemon's
+   * delivery queue sets it on reply-bound messages and replies. Accepted from ANY caller (remote
+   * included, never stripped): it can only make a turn refuse, never widen what one does.
+   * Additive: an older host ignores it (the steer race stays there).
+   */
+  ifIdle?: true;
 }
 
 /** The {@link TurnCommandBody} fields only the daemon may set: removed from every remote body. */
@@ -813,7 +830,13 @@ export type AgentChatErrorCode =
    * reason: a host that predates the route answers the miss as its generic
    * 404 `THREAD_NOT_FOUND`.
    */
-  | "PROMPT_NOT_FOUND";
+  | "PROMPT_NOT_FOUND"
+  /**
+   * 409 — only `turn` with `ifIdle: true` answers it: a turn is active, so the message would steer
+   * it. A refusal of the moment, never recorded as a receipt: the same `commandId` may land at the
+   * next idle point ({@link TurnCommandBody.ifIdle}).
+   */
+  | "TURN_NOT_IDLE";
 
 export const AGENT_CHAT_ERROR_CODES = [
   "INVALID_COMMAND",
@@ -824,8 +847,12 @@ export const AGENT_CHAT_ERROR_CODES = [
   "HOST_UNAVAILABLE",
   "INDEX_UNAVAILABLE",
   "ITEM_NOT_FOUND",
-  "PROMPT_NOT_FOUND"
+  "PROMPT_NOT_FOUND",
+  "TURN_NOT_IDLE"
 ] as const satisfies readonly AgentChatErrorCode[];
+
+/** {@link AgentChatErrorCode} `TURN_NOT_IDLE`: the `ifIdle` precondition of a `turn` refused. */
+export const TURN_NOT_IDLE = "TURN_NOT_IDLE" satisfies AgentChatErrorCode;
 
 /** A failed command answers this, and it is not a transport error to swallow. */
 export interface AgentChatErrorEnvelope {
@@ -1236,6 +1263,19 @@ export interface ReplySubscriptionRequest {
 export const MAX_PENDING_REPLY_SUBSCRIPTIONS = 20;
 /** 429 code of a subscription over {@link MAX_PENDING_REPLY_SUBSCRIPTIONS}. */
 export const REPLY_SUBSCRIPTION_LIMIT = "REPLY_SUBSCRIPTION_LIMIT";
+/**
+ * 409 code (lineage and reply-subscription routes, and the chat tools that call them): the target
+ * chat is working, so a merge or a reply-bound message is delivered at its next idle point instead
+ * of now. Deliberately not in {@link AgentChatErrorCode} (a daemon route code, not a host command's).
+ */
+export const TARGET_BUSY = "TARGET_BUSY";
+/**
+ * 409 code of a blocking wait that would close a cycle — the target is itself waiting, directly or
+ * through others, on the caller (§8.6; project-blind). Chat tools and the reply-subscription
+ * waiter answer it at once instead of both sides sitting out their timeouts. Deliberately not in
+ * {@link AgentChatErrorCode}.
+ */
+export const WAIT_CYCLE = "WAIT_CYCLE";
 
 export interface ReplySubscriptionResponse {
   subscriptionId: string;
@@ -1251,6 +1291,14 @@ export interface ReplySubscriptionResponse {
   delivery: "sent" | "queued";
   /** The target's sequence after a `sent` delivery. */
   seq?: number;
+}
+
+/** `POST agentChatRoutes.replySubscriptionRelease(targetSessionId, subscriptionId)`. */
+export interface ReplySubscriptionReleaseResponse {
+  /** False when no waiter was attached (it already answered, timed out, or never attached). */
+  released: boolean;
+  /** The subscription's state after the release (`ReplySubscriptionState`, `@orquester/config`). */
+  state: string;
 }
 
 /** `POST agentChatRoutes.replySubscriptionWait(targetSessionId, subscriptionId)`. */

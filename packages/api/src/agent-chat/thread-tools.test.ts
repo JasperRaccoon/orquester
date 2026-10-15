@@ -98,6 +98,12 @@ test("a lineage's delegation depth is read tolerantly: a bad one is dropped on i
   }
 });
 
+test("a lineage keeps the inherited workflowOwned marker only as `true`", () => {
+  const base = { parentThreadId: "p", relation: "delegate", createdAt: "t" };
+  assert.equal(parseThreadLineage({ ...base, workflowOwned: true })?.workflowOwned, true);
+  for (const bad of [false, "true", 1]) assert.equal(parseThreadLineage({ ...base, workflowOwned: bad })?.workflowOwned, undefined, String(bad));
+});
+
 test("the provenance header never outgrows its budget, whatever the title — quotes and backslashes included (T6-M1)", () => {
   for (const title of ['"'.repeat(300), "\\".repeat(300), `${"x".repeat(199)}"tail`, "😀".repeat(150), "a\\\"b".repeat(80)]) {
     for (const origin of ["sent", "opened", "delegated"] as const) {

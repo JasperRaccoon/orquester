@@ -1,7 +1,8 @@
 /**
- * The agent principal contract and the trusted-path-only turn fields (unified MCP design
- * 2026-10-15, coordinator ruling): body hints are honoured only for the matching agent principal,
- * and the remote transport strips `causedBy`.
+ * The principal contract (unified MCP design 2026-10-15, coordinator rulings rounds 1–2):
+ * principal-gated hints are honoured only for the matching agent principal; socket-trusted fields
+ * (`causedBy` on turns and merge-backs, reply subscriptions) are honoured from socket/in-process
+ * callers and stripped by the remote transport.
  */
 
 import assert from "node:assert/strict";
@@ -18,7 +19,7 @@ import {
   type CallerPrincipal
 } from "./principal.ts";
 import { readThreadToolReference } from "./thread-tools.ts";
-import { REMOTE_STRIPPED_MERGE_BACK_FIELDS, REMOTE_STRIPPED_TURN_FIELDS, stripRemoteMergeBackFields, stripRemoteTurnFields, type TurnCommandBody } from "./wire.ts";
+import { agentChatRoutes, REMOTE_STRIPPED_MERGE_BACK_FIELDS, REMOTE_STRIPPED_TURN_FIELDS, stripRemoteMergeBackFields, stripRemoteTurnFields, type TurnCommandBody } from "./wire.ts";
 
 test("an agent hint is honoured only for that very agent", () => {
   const agent: CallerPrincipal = { kind: "agent", threadId: "t1", projectPath: "/w/ws/app" };
@@ -38,6 +39,9 @@ test("the remote transport strips causedBy from a turn body, and leaves a clean 
   const clean = { commandId: "c", input: "hi" };
   assert.equal(stripRemoteTurnFields(clean), clean);
   assert.deepEqual([...REMOTE_STRIPPED_TURN_FIELDS], ["causedBy"]);
+  // `ifIdle` is a precondition (it can only refuse a turn): accepted from any caller, never stripped.
+  const idle: TurnCommandBody = { commandId: "c", input: "hi", ifIdle: true };
+  assert.equal(stripRemoteTurnFields(idle), idle);
 });
 
 test("a threadRef may name an opened chat", () => {
@@ -50,6 +54,8 @@ test("token requirements and gates are written into the contract", () => {
   assert.equal(PRINCIPAL_TOKEN_INVALID, "PRINCIPAL_TOKEN_INVALID");
   const gate = (method: string, path: string) => PRINCIPAL_ROUTES.find((route) => route.method === method && route.path === path)?.gate;
   assert.equal(gate("POST", "/api/sessions/:id/turn"), "socket", "workers post /turn without a principal");
+  assert.equal(gate("POST", "/api/sessions/:id/reply-subscriptions/:subscriptionId/release"), "socket");
+  assert.equal(agentChatRoutes.replySubscriptionRelease("t 1", "s/1"), "/api/sessions/t%201/reply-subscriptions/s%2F1/release");
   assert.equal(gate("POST", "/api/sessions/:id/merge-back"), "socket");
   assert.equal(gate("POST", "/api/sessions/:id/reply-subscriptions"), "socket");
   assert.equal(gate("POST", "/api/sessions"), "principal");

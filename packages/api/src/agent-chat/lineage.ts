@@ -53,6 +53,15 @@ export interface ThreadLineage {
    * user made in the GUI, or a session an external client created, carries none. Additive.
    */
   agentCreated?: true;
+  /**
+   * `true` when this thread inherits workflow ownership (unified MCP design 2026-10-15 §5.4): its
+   * creator — the parent of a delegate, an opened chat or an agent-made fork — was owned by a
+   * workflow, or itself carried this marker. Stamped by the DAEMON at creation from the creator's
+   * tab (never from a request body), so the trait survives the creator's tab closing. The gate's
+   * ownership walk takes it as proof of ownership before walking tabs; its absence proves nothing
+   * (records written before it, or by an older build, fall back to the walk). Additive.
+   */
+  workflowOwned?: true;
 }
 
 /** The deepest delegation depth a lineage may record (well past any cap). */
@@ -110,7 +119,8 @@ export function parseThreadLineage(value: unknown): ThreadLineage | undefined {
     ...(forkedFrom !== undefined ? { forkedFrom } : {}),
     createdAt,
     ...(delegationDepth !== undefined ? { delegationDepth } : {}),
-    ...(record.agentCreated === true ? { agentCreated: true as const } : {})
+    ...(record.agentCreated === true ? { agentCreated: true as const } : {}),
+    ...(record.workflowOwned === true ? { workflowOwned: true as const } : {})
   };
 }
 

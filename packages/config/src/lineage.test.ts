@@ -8,6 +8,7 @@ import assert from "node:assert/strict";
 
 import {
   agentChatReplyOutboxFile,
+  agentToolApprovalsJournalFile,
   agentToolsFile,
   parseAgentThreadHead,
   parseForkHandoff,
@@ -244,4 +245,27 @@ test("the reply outbox refuses anything but a version-1 outbox", () => {
 test("the new stores live beside the merge outbox", () => {
   assert.equal(agentChatReplyOutboxFile("/srv/orq"), "/srv/orq/daemon/agent-reply-outbox.json");
   assert.equal(agentToolsFile("/srv/orq"), "/srv/orq/daemon/agent-tools.json");
+  assert.equal(agentToolApprovalsJournalFile("/srv/orq"), "/srv/orq/daemon/agent-tool-approvals.json");
+});
+
+test("a lineage keeps the inherited `workflowOwned: true`; any other value is dropped on its own", () => {
+  const owned = { ...LINEAGE, relation: "delegate", forkedFrom: undefined, agentCreated: true, workflowOwned: true };
+  assert.equal(parseSessionsConfig({ version: 1, sessions: [chatRecord({ lineage: owned })] }).sessions[0]?.lineage?.workflowOwned, true);
+  const odd = parseSessionsConfig({ version: 1, sessions: [chatRecord({ lineage: { ...owned, workflowOwned: 1 } })] });
+  assert.equal(odd.sessions[0]?.lineage?.relation, "delegate");
+  assert.equal(odd.sessions[0]?.lineage?.workflowOwned, undefined);
+});
+
+test("a subscription's posted / ended / toTitle round-trip; a newer ending is kept, a malformed post makes the entry unreadable", () => {
+  const posted = { commandId: "cmd-1", seq: 12, messageId: "m-9" };
+  const read = parseReplyOutbox({
+    subscriptions: [{ ...subscription, state: "done", posted, ended: "delivered", toTitle: "Codex review" }, { ...subscription, id: "s2", ended: "teleported" }]
+  });
+  assert.deepEqual(read.subscriptions[0]?.posted, posted);
+  assert.equal(read.subscriptions[0]?.ended, "delivered");
+  assert.equal(read.subscriptions[0]?.toTitle, "Codex review");
+  assert.equal(read.subscriptions[1]?.ended, "teleported", "a newer build's ending is kept as is");
+  const bad = parseReplyOutbox({ subscriptions: [{ ...subscription, posted: { commandId: "cmd-1" } }] });
+  assert.equal(bad.subscriptions.length, 0);
+  assert.equal(bad.unreadableSubscriptions.length, 1);
 });

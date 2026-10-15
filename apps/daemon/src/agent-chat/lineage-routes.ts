@@ -46,7 +46,8 @@ const STATUS: Record<AgentChatErrorCode, number> = {
   HOST_UNAVAILABLE: 503,
   INDEX_UNAVAILABLE: 503,
   ITEM_NOT_FOUND: 404,
-  PROMPT_NOT_FOUND: 404
+  PROMPT_NOT_FOUND: 404,
+  TURN_NOT_IDLE: 409
 };
 
 function envelope(code: AgentChatErrorCode, message: string): AgentChatErrorEnvelope {

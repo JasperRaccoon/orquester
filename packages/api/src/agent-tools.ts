@@ -330,7 +330,14 @@ export interface RevokeAgentToolGrantsResponse {
 }
 
 /** The routes' own refusals (besides `INVALID_ARGUMENT`, `THREAD_NOT_FOUND`). */
-export type AgentToolsErrorCode = "REVISION_MISMATCH" | "GRANT_NOT_FOUND" | "TOOLSET_LOCKED";
+export type AgentToolsErrorCode =
+  | "REVISION_MISMATCH"
+  | "GRANT_NOT_FOUND"
+  | "TOOLSET_LOCKED"
+  /** 403: a write (settings, a chat's toolsets, a grant revocation) from an agent or external principal — only a person changes these. */
+  | "PERMISSION_DENIED"
+  /** 503: `agent-tools.json` is unreadable or corrupt and could not be moved aside — the store is read-only for this run. */
+  | "AGENT_TOOLS_UNAVAILABLE";
 
 /** The daemon-owned agent-tools routes (both transports). */
 export const agentToolsRoutes = {

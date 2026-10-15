@@ -79,6 +79,13 @@ export const TOOL_APPROVAL_LABEL_MAX_CHARS = 300;
 export const TOOL_APPROVAL_KEYBOARD_GUARD_MS = 1_500;
 /** A card secret value, at most (as `request_secret`'s). */
 export const TOOL_APPROVAL_SECRET_MAX_CHARS = SECRET_VALUE_MAX_CHARS;
+/**
+ * At most this many cards wait in one chat at once; one more is refused before any card with the
+ * tool error {@link TOOL_APPROVAL_LIMIT} (other chats are not affected; an answered card frees a slot).
+ */
+export const MAX_PENDING_TOOL_APPROVALS_PER_THREAD = 5;
+/** The tool error code of a card refused by {@link MAX_PENDING_TOOL_APPROVALS_PER_THREAD}: wait for answers, batch changes. */
+export const TOOL_APPROVAL_LIMIT = "APPROVAL_LIMIT";
 
 // ---------------------------------------------------------------------------
 // The card (§7.3)
@@ -189,7 +196,16 @@ export type ToolApprovalErrorCode =
   /** 409: the card is no longer pending — answered by another client, or the agent stopped waiting. */
   | "APPROVAL_NOT_PENDING"
   /** 400: a malformed answer, a grant outside `grantOptions`, a missing or unknown secret field. */
-  | "INVALID_ARGUMENT";
+  | "INVALID_ARGUMENT"
+  /** 403: the answer came from an agent or external principal — only a person answers a card. */
+  | "PERMISSION_DENIED"
+  /**
+   * 503: the approval needs a write (a grant, a toolset override) the read-only agent-tools store
+   * refuses; the card stays pending (approve without a grant, or deny).
+   */
+  | "AGENT_TOOLS_UNAVAILABLE"
+  /** 409: approving a toolset card while agent tools are switched off in Settings; the card stays pending. */
+  | "AGENT_TOOLS_DISABLED";
 
 export interface ToolApprovalErrorEnvelope {
   error: { code: ToolApprovalErrorCode; message: string };
@@ -214,7 +230,8 @@ export const TOOL_APPROVAL_REFERENCE_KEY = "toolApproval";
 
 /**
  * What a gated call's row keeps: "Approved by you", "Allowed by a chat grant · Revoke" (`granted`,
- * with `grantId`), "Denied: <reason>", "Expired", "Cancelled". No arguments, no secrets.
+ * with `grantId` and `grantScope`), "Denied: <reason>", "Expired", "Cancelled". No arguments, no
+ * secrets.
  */
 export interface ToolApprovalReference {
   /** Absent when an existing grant allowed the call without a card (`outcome: "granted"`). */
@@ -225,6 +242,10 @@ export interface ToolApprovalReference {
   outcome: ToolApprovalOutcome | "granted";
   /** The grant that allowed the call, or the one its approval created. */
   grantId?: string;
+  /** That grant's reach ("Allowed by a chat grant" / "a project grant"); with `grantId` only. */
+  grantScope?: ToolApprovalGrantScope;
+  /** `denied`: the user's words (sanitised prose, ≤ {@link TOOL_APPROVAL_DENY_REASON_MAX_CHARS}). */
+  reason?: string;
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {
@@ -237,19 +258,23 @@ const SHORT_ID = (value: unknown): value is string => typeof value === "string" 
 export function readToolApprovalReference(value: unknown): ToolApprovalReference | undefined {
   const record = asRecord(value);
   if (!record) return undefined;
-  const { approvalId, kind, family, title, outcome, grantId } = record;
+  const { approvalId, kind, family, title, outcome, grantId, grantScope, reason } = record;
   if (typeof kind !== "string" || !(APPROVAL_KINDS as readonly string[]).includes(kind)) return undefined;
   if (!isApprovalFamily(family)) return undefined;
   if (typeof outcome !== "string" || !([...TOOL_APPROVAL_OUTCOMES, "granted"] as string[]).includes(outcome)) return undefined;
   if (approvalId !== undefined && !SHORT_ID(approvalId)) return undefined;
   if (approvalId === undefined && outcome !== "granted") return undefined;
+  const denyReason =
+    outcome === "denied" && typeof reason === "string" ? sanitizeApprovalProse(reason, TOOL_APPROVAL_DENY_REASON_MAX_CHARS).trim() : "";
   return {
     ...(approvalId !== undefined ? { approvalId } : {}),
     kind: kind as ApprovalKind,
     family,
     title: typeof title === "string" ? sanitizeApprovalLabel(title) : "",
     outcome: outcome as ToolApprovalReference["outcome"],
-    ...(SHORT_ID(grantId) ? { grantId } : {})
+    ...(SHORT_ID(grantId) ? { grantId } : {}),
+    ...(SHORT_ID(grantId) && (grantScope === "chat" || grantScope === "project") ? { grantScope } : {}),
+    ...(denyReason ? { reason: denyReason } : {})
   };
 }
 

@@ -113,6 +113,7 @@ export const PRINCIPAL_ROUTES: readonly { method: "GET" | "POST" | "PUT" | "DELE
   { method: "POST", path: "/api/sessions/:id/turn", gate: "socket", reads: "causedBy (stripped remotely)" },
   { method: "POST", path: "/api/sessions/:id/reply-subscriptions", gate: "socket", reads: "socket-only route; an agent principal must be fromThreadId" },
   { method: "POST", path: "/api/sessions/:id/reply-subscriptions/:subscriptionId/wait", gate: "socket", reads: "socket-only route; an agent principal must own the subscription" },
+  { method: "POST", path: "/api/sessions/:id/reply-subscriptions/:subscriptionId/release", gate: "socket", reads: "socket-only route; an agent principal must own the subscription" },
   { method: "POST", path: "/api/push/notify", gate: "principal", reads: "rate-limit key (agent: chat; external: credential)" },
   { method: "POST", path: "/api/sessions/:id/tool-approvals/:approvalId", gate: "principal", reads: "agents refused (403)" },
   { method: "PUT", path: "/api/agent-tools/settings", gate: "principal", reads: "agents refused (403)" },

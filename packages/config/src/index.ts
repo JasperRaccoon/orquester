@@ -256,6 +256,15 @@ export function agentToolsFile(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "agent-tools.json");
 }
 
+/**
+ * The ids of Orquester approval cards open right now (unified MCP design 2026-10-15 §7.4, §13), so
+ * a daemon that died with cards pending resolves each as `cancelled` at its next boot. Only ids,
+ * kinds and times — never a title, preview, argument or value. 0600, beside `agent-tools.json`.
+ */
+export function agentToolApprovalsJournalFile(baseDir: string): string {
+  return joinPath(daemonConfigDir(baseDir), "agent-tool-approvals.json");
+}
+
 /** Cached token/cost scan (Claude JSONL + Codex sessions); 0600. */
 export function usageTokensCacheFile(baseDir: string): string {
   return joinPath(daemonConfigDir(baseDir), "usage-tokens.json");
@@ -1018,7 +1027,10 @@ export const threadLineageRecordSchema = z.object({
   delegationDepth: z.number().int().min(0).max(64).optional().catch(undefined),
   // Set when a chat tool created this child (`ThreadLineage.agentCreated`, §13 c): only such
   // children are the parent agent's own. Anything but `true` is dropped on its own.
-  agentCreated: z.literal(true).optional().catch(undefined)
+  agentCreated: z.literal(true).optional().catch(undefined),
+  // Inherited workflow ownership (`ThreadLineage.workflowOwned`, §5.4), stamped at creation.
+  // Anything but `true` is dropped on its own.
+  workflowOwned: z.literal(true).optional().catch(undefined)
 });
 export type ThreadLineageRecord = z.infer<typeof threadLineageRecordSchema>;
 
@@ -1317,6 +1329,14 @@ export function serializeMergeOutbox(outbox: MergeOutbox): string {
 export const REPLY_SUBSCRIPTION_STATES = ["waiting", "notify", "claimed-by-waiter", "claimed-by-router", "done"] as const;
 export type ReplySubscriptionState = (typeof REPLY_SUBSCRIPTION_STATES)[number];
 
+/**
+ * How a `done` subscription ended (`ended`): its reply `delivered` as a message, handed to its
+ * `waiter`, the target `closed`, `dropped` (the requester closed), `refused` (nothing was posted or
+ * queued), or its message `discarded` from the target's queue. A newer build's value is kept as is.
+ */
+export const REPLY_SUBSCRIPTION_ENDINGS = ["delivered", "waiter", "closed", "dropped", "refused", "discarded"] as const;
+export type ReplySubscriptionEnding = (typeof REPLY_SUBSCRIPTION_ENDINGS)[number];
+
 const replyExchangeSchema = z.object({
   /** The exchange id (`CausedBy.exchangeId`). */
   id: z.string().min(1).max(200),
@@ -1354,6 +1374,19 @@ export const replySubscriptionSchema = z
      * attempt's command id alone.
      */
     queueEntryId: z.string().min(1).max(200).optional(),
+    /**
+     * The post that landed: its command id, the host receipt's `seq`, and the user message it
+     * opened (binds the reply turn when no turn id is known). Absent until then. A malformed one
+     * makes the entry unreadable (kept verbatim, never acted on) rather than taken for "not posted".
+     */
+    posted: z
+      .object({ commandId: z.string().min(1).max(200), seq: z.number().int().min(0), messageId: z.string().min(1).max(200).optional() })
+      .passthrough()
+      .optional(),
+    /** How a `done` subscription ended ({@link REPLY_SUBSCRIPTION_ENDINGS}; any string kept). */
+    ended: z.string().min(1).max(40).optional().catch(undefined),
+    /** The target's tab title when subscribed: names it in a notice after the tab closed. */
+    toTitle: z.string().max(1000).optional().catch(undefined),
     createdAt: z.string(),
     updatedAt: z.string().optional().catch(undefined)
   })

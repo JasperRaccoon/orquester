@@ -197,6 +197,18 @@ test("the row keeps its toolApproval reference through slimming, and a malformed
   assert.equal(readToolApprovalReference({ ...ref, outcome: "maybe" }), undefined);
 });
 
+test("a row reference carries the grant's scope and the user's deny reason, read tolerantly", () => {
+  const granted = { kind: "admin", family: "desktops", title: "Open", outcome: "granted", grantId: "g", grantScope: "chat" };
+  assert.equal(readToolApprovalReference(granted)?.grantScope, "chat");
+  assert.equal(readToolApprovalReference({ ...granted, grantScope: "galaxy" })?.grantScope, undefined, "an unknown scope is dropped on its own");
+  assert.equal(readToolApprovalReference({ ...granted, grantId: undefined })?.grantScope, undefined, "a scope needs its grant");
+  const denied = { approvalId: "ap-2", kind: "admin", family: "workflows", title: "Delete", outcome: "denied" };
+  assert.equal(readToolApprovalReference({ ...denied, reason: "  not\u202e today\n" })?.reason, "not today");
+  assert.equal(readToolApprovalReference({ ...denied, reason: "x".repeat(900) })?.reason?.length, 500);
+  assert.equal(readToolApprovalReference({ ...denied, reason: "\u200b" })?.reason, undefined, "nothing readable is no reason");
+  assert.equal(readToolApprovalReference({ ...denied, outcome: "approved", reason: "why" })?.reason, undefined, "only a denial has a reason");
+});
+
 // ---------------------------------------------------------------------------
 // Fix round 1
 // ---------------------------------------------------------------------------
