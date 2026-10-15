@@ -3,6 +3,16 @@
  * children as the tab records name them, and the merge back — a child's result
  * sent to its parent as an ordinary `/turn`, queued while the parent is busy.
  *
+ * The same queue is the DELIVERY QUEUE of the agent conversation protocol (unified MCP design
+ * 2026-10-15 §8.3): an entry is a fork's `merge` (no `kind`, as every entry before the field), a
+ * `reply` the reply router (`replies.ts`) delivers to the chat that asked for it, or a `message`
+ * sent with `reply: "wait" | "notify"` that waits for its busy target's next idle point — queued,
+ * never steered. In every case `parentSessionId` receives the turn and `childSessionId` is the
+ * other chat; either may Deliver now or Discard it. Each entry's turn carries its exchange
+ * (`causedBy`, §8.4). The router hears every post and discard of its entries BEFORE the entry
+ * leaves the queue ({@link DeliveryListener}), so a crash in between never loses which turn a
+ * message became.
+ *
  * Every send goes through `DaemonApi` (the daemon's own routes, in process),
  * so the parent's turn is gated, receipted and broadcast exactly as the GUI's
  * own. A queued merge is persisted BEFORE the caller hears "queued"
@@ -40,6 +50,10 @@ import type {
 import {
   agentChatCommandPath,
   buildMergeBackMessage,
+  exceedsExchangeLimit,
+  MAX_EXCHANGE_HOPS,
+  parseCausedBy,
+  parseThreadMessage,
   MAX_TURN_INPUT_CHARS,
   MERGE_BACK_OVERHEAD_CHARS,
   MERGE_PREVIEW_CHARS,
@@ -59,7 +73,7 @@ import { assistantTextForTurn } from "../mcp/views.ts";
 export class LineageError extends Error {
   constructor(
     message: string,
-    readonly code: "THREAD_NOT_FOUND" | "INVALID_COMMAND" | "COMMAND_REJECTED" | "HOST_UNAVAILABLE"
+    readonly code: "THREAD_NOT_FOUND" | "INVALID_COMMAND" | "COMMAND_REJECTED" | "HOST_UNAVAILABLE" | "EXCHANGE_LIMIT"
   ) {
     super(message);
     this.name = "LineageError";
@@ -89,6 +103,23 @@ export interface LineageServiceOptions {
    * still exist, so no merge is dropped for it (`pruneOrphans`). Default: loaded.
    */
   sessionsLoaded?: () => boolean;
+}
+
+/**
+ * What the reply router (`replies.ts`) hears from the delivery queue. `posted` and `discarded` are
+ * awaited in the receiving chat's lane BEFORE the entry leaves the queue, so the router's own
+ * record is written first: an entry missing from the queue was either posted (and the router knows
+ * its turn) or discarded (and the router knows that).
+ */
+export interface DeliveryListener {
+  /** The daemon's API is bound (the queue's own `attachApi`): the router starts. */
+  attachApi(api: DaemonApi): void;
+  /** `entry`'s turn was accepted under `commandId` at the receiver's `seq`. Never throws. */
+  posted(entry: MergeOutboxEntry, commandId: string, seq: number): Promise<void>;
+  /** `bySessionId` (the receiver or the other chat) discarded `entry`. Never throws. */
+  discarded(entry: MergeOutboxEntry, bySessionId: string): Promise<void>;
+  /** The queue stops: so does the router. */
+  stop(): Promise<void>;
 }
 
 const DEFAULT_RECHECK_MS = 30_000;
@@ -144,6 +175,19 @@ export class LineageService {
   private published = new Set<string>();
 
   constructor(private readonly opts: LineageServiceOptions) {}
+
+  /** The reply router, once wired (`index.ts`); it starts and stops with this queue. */
+  private listener: DeliveryListener | null = null;
+
+  setDeliveryListener(listener: DeliveryListener): void {
+    this.listener = listener;
+    if (this.api) listener.attachApi(this.api);
+  }
+
+  /** The reply router wired to this queue, for the routes that reach it. */
+  deliveryListener(): DeliveryListener | null {
+    return this.listener;
+  }
 
   /**
    * Read the outbox. Missing → empty. Unreadable (permissions, I/O) → empty and READ-ONLY for this
@@ -202,6 +246,7 @@ export class LineageService {
     this.armRecheck();
     void this.pruneOrphans();
     this.drainAll();
+    this.listener?.attachApi(api);
   }
 
   /**
@@ -222,12 +267,13 @@ export class LineageService {
     return this.persist(orphans.flatMap((entry) => [entry.parentSessionId, entry.childSessionId])).then(() => undefined);
   }
 
-  stop(): Promise<void> {
+  async stop(): Promise<void> {
     this.stopped = true;
     this.unsubscribe?.();
     this.unsubscribe = null;
     if (this.recheck) clearInterval(this.recheck);
     this.recheck = null;
+    await this.listener?.stop();
     return this.writes;
   }
 
@@ -312,6 +358,18 @@ export class LineageService {
     if (mode !== undefined && mode !== null && mode !== "default" && mode !== "plan") {
       throw new LineageError('interactionMode must be "default" or "plan".', "INVALID_COMMAND");
     }
+    // SOCKET-TRUSTED (`MergeBackRequest.causedBy`; the remote transport strips it): the merge's
+    // turn is agent-caused, one hop on in the fork's exchange (§8.4). Past the cap, refused.
+    const causedBy = body.causedBy === undefined || body.causedBy === null ? undefined : parseCausedBy(body.causedBy);
+    if (body.causedBy !== undefined && body.causedBy !== null && causedBy === undefined) {
+      throw new LineageError("causedBy must be {threadId, exchangeId, hop}.", "INVALID_COMMAND");
+    }
+    if (causedBy !== undefined && exceedsExchangeLimit(causedBy)) {
+      throw new LineageError(
+        `This exchange reached its limit of ${MAX_EXCHANGE_HOPS} agent-caused turns; summarise for your user instead.`,
+        "EXCHANGE_LIMIT"
+      );
+    }
     if (text.length > MERGE_BACK_MAX_TEXT_CHARS) {
       throw new LineageError(
         `The text to merge back is ${text.length} characters; at most ${MERGE_BACK_MAX_TEXT_CHARS} fit in a message.`,
@@ -326,7 +384,8 @@ export class LineageService {
       queuedAt: (this.opts.now?.() ?? new Date()).toISOString(),
       state: "queued",
       attempts: 0,
-      ...(mode === "plan" ? { interactionMode: "plan" as const } : {})
+      ...(mode === "plan" ? { interactionMode: "plan" as const } : {}),
+      ...(causedBy !== undefined ? { causedBy } : {})
     };
     const response = await this.lane(parent.id, async (): Promise<MergeBackResponse> => {
       // A repeat that raced the first into the lane is the same merge.
@@ -338,6 +397,7 @@ export class LineageService {
         const sent = await this.deliver(api, entry);
         if (sent.kind === "sent") {
           // Never queued, so no later deliver/discard can name it: nothing to remember.
+          await this.notifyPosted(entry, sent);
           return { parentSessionId: parent.id, delivery: "sent", mergeId, seq: sent.seq };
         }
         // The caller hears a refusal at once; nothing was queued for it — unless it is the
@@ -390,6 +450,8 @@ export class LineageService {
         // answer is what happened to it, never "discarded" for a message the parent has.
         const current = find();
         if (!current) return this.settledOutcome(mergeId);
+        // The router records the discard first (a reply dropped, a message that never ran).
+        await this.listener?.discarded(current, sessionId).catch(() => undefined);
         this.outbox.entries = this.outbox.entries.filter((other) => other.mergeId !== mergeId);
         this.retryAt.delete(mergeId);
         await this.persist([current.parentSessionId, current.childSessionId]);
@@ -412,6 +474,7 @@ export class LineageService {
         await this.persist([current.parentSessionId, current.childSessionId]);
         throw new LineageError(sent.message, "COMMAND_REJECTED");
       }
+      await this.notifyPosted(current, sent);
       this.settle(current, sent.seq);
       await this.persist([current.parentSessionId, current.childSessionId]);
       return { mergeId, outcome: "sent", seq: sent.seq };
@@ -490,11 +553,22 @@ export class LineageService {
       // planning parent out of plan mode (D-I1).
       const interactionMode =
         entry.interactionMode === "plan" ? "plan" : currentInteractionMode(await this.readThread(api, entry.parentSessionId));
+      const commandId = attemptCommandId(entry);
+      const attachments = (entry as { attachments?: unknown }).attachments;
       const res = await api.request("POST", agentChatCommandPath(entry.parentSessionId, "turn"), {
-        // The marker that the message is a merge back Orquester delivered (T6-M3).
-        body: { commandId: attemptCommandId(entry), input: entry.input, interactionMode, context: [mergeBackContext(entry.mergeId)] }
+        body: {
+          commandId,
+          input: entry.input,
+          interactionMode,
+          // The marker that Orquester delivered it (T6-M3): a merge's own chip, else the one the
+          // entry carries (the thread-message or reply chip).
+          context: entry.context ?? [mergeBackContext(entry.mergeId)],
+          ...(Array.isArray(attachments) && attachments.length > 0 ? { attachments } : {}),
+          // The exchange the turn belongs to (§8.4); socket-trusted, this is the daemon itself.
+          ...(entry.causedBy ? { causedBy: entry.causedBy } : {})
+        }
       });
-      if (res.status < 400) return { kind: "sent", seq: (res.body as { seq?: number } | null)?.seq ?? 0 };
+      if (res.status < 400) return { kind: "sent", seq: (res.body as { seq?: number } | null)?.seq ?? 0, commandId };
       const error = (res.body as { error?: { code?: string; message?: string } } | null)?.error;
       if (res.status === 503 || error?.code === "HOST_UNAVAILABLE") return { kind: "unavailable" };
       return {
@@ -511,6 +585,78 @@ export class LineageService {
     } catch {
       return { kind: "unavailable" };
     }
+  }
+
+  /** Tell the router a turn landed, before the entry leaves the queue (never throws). */
+  private async notifyPosted(entry: MergeOutboxEntry, sent: { seq: number; commandId: string }): Promise<void> {
+    if (!this.listener) return;
+    await this.listener.posted(entry, sent.commandId, sent.seq).catch((error: unknown) => {
+      this.opts.logger?.warn?.("[lineage] the reply router could not record a delivery", error);
+    });
+  }
+
+  /**
+   * The reply router's way in (§8.3): queue `entry` — a `message` for a target or a `reply` for a
+   * requester — PERSISTED before anything is posted, then posted at once when the receiver is idle
+   * and nothing older waits for it (`sent`), else at its next idle point (`queued`). A first
+   * refusal of a `message` that waiting will not cure takes it back out and throws (the sender
+   * hears it now, nothing was queued); one of a `reply` leaves it `failed` for the user. A repeat
+   * of a queued entry's id answers `queued`.
+   */
+  async enqueue(entry: MergeOutboxEntry): Promise<{ delivery: "sent"; seq: number } | { delivery: "queued" }> {
+    const api = this.requireApi();
+    if (this.readOnly !== null) {
+      throw new LineageError("Orquester could not save the message to deliver later; try again in a moment.", "HOST_UNAVAILABLE");
+    }
+    const receiver = entry.parentSessionId;
+    const result = await this.lane(receiver, async (): Promise<{ delivery: "sent"; seq: number } | { delivery: "queued" }> => {
+      if (this.outbox.entries.some((other) => other.mergeId === entry.mergeId)) return { delivery: "queued" };
+      const olderWaiting = this.queuedFor(receiver).length > 0;
+      this.outbox.entries.push(entry);
+      if (!(await this.persist([receiver, entry.childSessionId]))) {
+        this.outbox.entries = this.outbox.entries.filter((other) => other !== entry);
+        this.publish([receiver, entry.childSessionId]);
+        throw new LineageError("Orquester could not save the message to deliver later; try again in a moment.", "HOST_UNAVAILABLE");
+      }
+      if (!olderWaiting && (await this.isIdle(api, receiver))) {
+        const sent = await this.deliver(api, entry);
+        if (sent.kind === "sent") {
+          await this.notifyPosted(entry, sent);
+          this.settle(entry, sent.seq);
+          await this.persist([receiver, entry.childSessionId]);
+          return { delivery: "sent", seq: sent.seq };
+        }
+        if (sent.kind === "refused" && !sent.retryable && entry.kind === "message") {
+          this.outbox.entries = this.outbox.entries.filter((other) => other !== entry);
+          await this.persist([receiver, entry.childSessionId]);
+          throw new LineageError(sent.message, "COMMAND_REJECTED");
+        }
+        if (sent.kind === "refused" && !sent.retryable) this.markFailed(entry, sent.message);
+        else if (sent.kind === "refused") this.noteRetry(entry, sent.message);
+        if (sent.kind === "refused") await this.persist([receiver, entry.childSessionId]);
+      }
+      this.armRecheck();
+      return { delivery: "queued" };
+    });
+    if (result.delivery === "queued") void this.drain(receiver);
+    return result;
+  }
+
+  /** Whether an entry with this id waits in the queue. */
+  has(mergeId: string): boolean {
+    return this.outbox.entries.some((entry) => entry.mergeId === mergeId);
+  }
+
+  /** The router drops an entry nobody can take any more (its receiver or its sender closed). No listener call. */
+  async drop(mergeId: string): Promise<void> {
+    const entry = this.outbox.entries.find((other) => other.mergeId === mergeId);
+    if (!entry) return;
+    await this.lane(entry.parentSessionId, async () => {
+      if (!this.outbox.entries.some((other) => other.mergeId === mergeId)) return;
+      this.outbox.entries = this.outbox.entries.filter((other) => other.mergeId !== mergeId);
+      this.retryAt.delete(mergeId);
+      await this.persist([entry.parentSessionId, entry.childSessionId]);
+    });
   }
 
   private markFailed(entry: MergeOutboxEntry, message: string): void {
@@ -591,6 +737,7 @@ export class LineageService {
       await this.persist([parentId, entry.childSessionId]);
       return;
     }
+    await this.notifyPosted(entry, sent);
     this.settle(entry, sent.seq);
     await this.persist([parentId, entry.childSessionId]);
   }
@@ -665,7 +812,7 @@ export class LineageService {
 }
 
 type Delivery =
-  | { kind: "sent"; seq: number }
+  | { kind: "sent"; seq: number; commandId: string }
   | { kind: "unavailable" }
   | { kind: "refused"; message: string; retryable: boolean };
 
@@ -709,8 +856,12 @@ async function writeAtomic(path: string, content: string): Promise<void> {
 }
 
 function pendingOf(entry: MergeOutboxEntry): PendingMergeBack {
-  const body = parseMergeBackMessage(entry.input)?.body ?? entry.input;
+  const body =
+    entry.kind === "reply" || entry.kind === "message"
+      ? (parseThreadMessage(entry.input)?.body ?? entry.input)
+      : (parseMergeBackMessage(entry.input)?.body ?? entry.input);
   return {
+    ...(entry.kind !== undefined ? { kind: entry.kind } : {}),
     mergeId: entry.mergeId,
     parentSessionId: entry.parentSessionId,
     childSessionId: entry.childSessionId,

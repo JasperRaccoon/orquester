@@ -7,11 +7,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
 
-import { agentChatRoutes } from "@orquester/api/agent-chat";
+import { agentChatRoutes, type CallerPrincipal } from "@orquester/api/agent-chat";
 
 import { ChatSessionError } from "./chat-sessions.ts";
 import { LineageError, type LineageService } from "./lineage.ts";
-import { registerLineageRoutes } from "./lineage-routes.ts";
+import { gateSessionCreateBody, registerLineageRoutes, registerReplySubscriptionRoutes } from "./lineage-routes.ts";
+import { ReplyError, type ReplyRouter } from "./replies.ts";
 
 function app(overrides: { fork?: () => Promise<unknown>; lineage?: Partial<LineageService> | null } = {}) {
   const server = Fastify();
@@ -105,4 +106,118 @@ test("a refusal whose code is not on the wire list (SESSION_UNAVAILABLE) answers
   assert.equal(res.statusCode, 409);
   assert.equal(res.json().error.code, "COMMAND_REJECTED");
   assert.match(res.json().error.message, /no longer available/);
+});
+
+// --- unified MCP design 2026-10-15: principal gates and the socket-only reply routes ---------
+
+/** A test app whose principal comes from a test header (Task 2's hook stands in). */
+function gatedApp(record: { sessionBody?: unknown; forkBody?: unknown; replies?: ReplyRouter | null }) {
+  const server = Fastify();
+  server.addHook("onRequest", async (request) => {
+    const header = request.headers["x-test-principal"];
+    if (typeof header === "string") (request as unknown as { principal: CallerPrincipal }).principal = JSON.parse(header) as CallerPrincipal;
+  });
+  registerLineageRoutes(server, {
+    isChatSession: (id) => id === "chat-1" || id === "chat-2",
+    lineage: () =>
+      ({
+        mergeBack: async () => ({ parentSessionId: "p", delivery: "queued", mergeId: "m" }),
+        actOnMerge: async (_id: string, mergeId: string) => ({ mergeId, outcome: "discarded" }) as never
+      }) as unknown as LineageService,
+    fork: (async (_id: string, body: unknown) => {
+      record.forkBody = body;
+      return { ok: true };
+    }) as never
+  });
+  // Declared after the lineage routes, as `index.ts` declares it.
+  server.post("/api/sessions", async (request) => {
+    record.sessionBody = request.body;
+    return { ok: true };
+  });
+  return server;
+}
+
+const agentOf = (threadId: string) => JSON.stringify({ kind: "agent", threadId, projectPath: "/w/p" });
+
+test("lineage.agentCreated on session create survives only from the parent's own agent (principal-gated)", async () => {
+  const record: { sessionBody?: unknown } = {};
+  const server = gatedApp(record);
+  const lineage = () => ({ parentThreadId: "chat-1", relation: "opened", agentCreated: true });
+  // Both spellings the service reads (`chatFields`): top-level `lineage` and `chat.lineage`.
+  const shapes = [
+    { payload: () => ({ kind: "agent-chat", lineage: lineage() }), read: (b: unknown) => (b as { lineage: Record<string, unknown> }).lineage },
+    {
+      payload: () => ({ kind: "agent-chat", chat: { lineage: lineage() } }),
+      read: (b: unknown) => (b as { chat: { lineage: Record<string, unknown> } }).chat.lineage
+    }
+  ];
+  for (const shape of shapes) {
+    await server.inject({ method: "POST", url: "/api/sessions", payload: shape.payload(), headers: { "x-test-principal": agentOf("chat-1") } });
+    assert.equal(shape.read(record.sessionBody).agentCreated, true, "the parent's agent: kept");
+    for (const headers of [{}, { "x-test-principal": agentOf("chat-2") }, { "x-test-principal": JSON.stringify({ kind: "external" }) }]) {
+      await server.inject({ method: "POST", url: "/api/sessions", payload: shape.payload(), headers });
+      assert.equal("agentCreated" in shape.read(record.sessionBody), false, JSON.stringify(headers));
+      assert.equal(shape.read(record.sessionBody).relation, "opened", "the rest of the lineage is untouched");
+    }
+  }
+  assert.equal(gateSessionCreateBody("not an object", undefined), "not an object");
+});
+
+test("ForkSessionRequest.agentCreated survives only from the forked chat's agent; merges only as oneself", async () => {
+  const record: { forkBody?: unknown } = {};
+  const server = gatedApp(record);
+  await server.inject({ method: "POST", url: agentChatRoutes.fork("chat-1"), payload: { agentCreated: true }, headers: { "x-test-principal": agentOf("chat-1") } });
+  assert.deepEqual(record.forkBody, { agentCreated: true });
+  await server.inject({ method: "POST", url: agentChatRoutes.fork("chat-1"), payload: { agentCreated: true, title: "x" } });
+  assert.deepEqual(record.forkBody, { title: "x" }, "the GUI's fork is nobody's child");
+  await server.inject({ method: "POST", url: agentChatRoutes.fork("chat-1"), payload: { agentCreated: true }, headers: { "x-test-principal": agentOf("chat-2") } });
+  assert.deepEqual(record.forkBody, {});
+
+  const asOther = await server.inject({ method: "POST", url: agentChatRoutes.mergeBack("chat-1"), payload: {}, headers: { "x-test-principal": agentOf("chat-2") } });
+  assert.equal(asOther.statusCode, 403);
+  const item = await server.inject({ method: "POST", url: agentChatRoutes.mergeBackItem("chat-1", "m"), payload: { action: "discard" }, headers: { "x-test-principal": agentOf("chat-2") } });
+  assert.equal(item.statusCode, 403);
+  const self = await server.inject({ method: "POST", url: agentChatRoutes.mergeBackItem("chat-1", "m"), payload: { action: "discard" }, headers: { "x-test-principal": agentOf("chat-1") } });
+  assert.equal(self.statusCode, 200);
+});
+
+test("a merge past the exchange cap answers 409 EXCHANGE_LIMIT", async () => {
+  const server = app({
+    lineage: {
+      mergeBack: async () => {
+        throw new LineageError("This exchange reached its limit.", "EXCHANGE_LIMIT");
+      }
+    }
+  });
+  const res = await server.inject({ method: "POST", url: agentChatRoutes.mergeBack("chat-1"), payload: {} });
+  assert.equal(res.statusCode, 409);
+  assert.equal(res.json().error.code, "EXCHANGE_LIMIT");
+});
+
+test("the reply-subscription routes exist only where registered (the unix app), and answer the router's refusals", async () => {
+  const remote = app();
+  const missing = await remote.inject({ method: "POST", url: agentChatRoutes.replySubscriptions("chat-1"), payload: {} });
+  assert.equal(missing.statusCode, 404, "registerLineageRoutes never adds them");
+
+  const server = Fastify();
+  const calls: unknown[] = [];
+  registerReplySubscriptionRoutes(server, {
+    isChatSession: (id) => id === "chat-1",
+    replies: () =>
+      ({
+        subscribe: async (target: string, body: unknown) => {
+          calls.push([target, body]);
+          throw new ReplyError("This chat already waits for 20 replies.", "REPLY_SUBSCRIPTION_LIMIT");
+        },
+        wait: async () => ({ outcome: "notify", reason: "timeout", willNotify: true })
+      }) as unknown as ReplyRouter
+  });
+  const limited = await server.inject({ method: "POST", url: agentChatRoutes.replySubscriptions("chat-1"), payload: { fromThreadId: "x" } });
+  assert.equal(limited.statusCode, 429);
+  assert.equal(limited.json().error.code, "REPLY_SUBSCRIPTION_LIMIT");
+  assert.deepEqual(calls, [["chat-1", { fromThreadId: "x" }]]);
+  const notChat = await server.inject({ method: "POST", url: agentChatRoutes.replySubscriptions("nope"), payload: {} });
+  assert.equal(notChat.statusCode, 404);
+  const waited = await server.inject({ method: "POST", url: agentChatRoutes.replySubscriptionWait("chat-1", "s-1"), payload: { timeoutSeconds: 5 } });
+  assert.deepEqual(waited.json(), { outcome: "notify", reason: "timeout", willNotify: true });
 });

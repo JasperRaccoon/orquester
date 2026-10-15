@@ -113,6 +113,11 @@ import { ChatAwareSessionManager } from "./agent-chat/session-router.ts";
 import { AGENT_VISUAL_ROUTE_PATTERN, registerAgentChatRoutes } from "./agent-chat/proxy-routes.ts";
 import { LineageService } from "./agent-chat/lineage.ts";
 import { registerLineageRoutes } from "./agent-chat/lineage-routes.ts";
+// umcp:t5 begin
+import { registerReplySubscriptionRoutes } from "./agent-chat/lineage-routes.ts";
+import { ReplyRouter } from "./agent-chat/replies.ts";
+import { agentChatReplyOutboxFile } from "@orquester/config";
+// umcp:t5 end
 import { registerSecretRequestRoutes, SecretRequestRegistry } from "./agent-chat/secret-requests.ts";
 import type { ActivityCause } from "./ansi-activity";
 import { TodoError, TodoListManager } from "./todos";
@@ -1182,6 +1187,24 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
     authRequired: false,
     mode: "local"
   });
+  // umcp:t5 begin
+  // Reply subscriptions (unified MCP design 2026-10-15 §8.3): persisted before posting, delivered
+  // through the lineage delivery queue. The router starts and stops with that queue (its
+  // `attachApi` below binds both); its routes are SOCKET-ONLY — the unix app alone.
+  const replies = new ReplyRouter({
+    outboxFile: agentChatReplyOutboxFile(paths.baseDir),
+    sessions: agentChat.chat,
+    queue: lineage,
+    logger: console,
+    sessionsLoaded: () => sessionsReattached
+  });
+  await replies.load();
+  lineage.setDeliveryListener(replies);
+  registerReplySubscriptionRoutes(unixServer, {
+    replies: () => replies,
+    isChatSession: (id) => agentChat.chat.has(id)
+  });
+  // umcp:t5 end
   await unixServer.listen({ path: paths.socketPath });
 
   // The daemon's in-process client of its OWN REST API for the workflow engine's agent blocks

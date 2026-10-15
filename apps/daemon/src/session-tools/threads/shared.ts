@@ -22,6 +22,7 @@ import {
 } from "@orquester/api/agent-chat";
 import { assertInsideFsRoot } from "@orquester/config/fs";
 
+import { asWaiter } from "../../agent-chat/waits.ts";
 import type { DaemonApi } from "../../mcp/daemon-api.ts";
 import { ToolError } from "../../mcp/errors.ts";
 import { listSessions, readThread } from "../../mcp/reads.ts";
@@ -282,50 +283,8 @@ export function referenceTo(s: { id: string; title: string }, relation: ThreadTo
   return threadToolReference(s.id, s.title, relation);
 }
 
-/**
- * Who waits on whom right now, in this daemon (`thread_wait`, `task_wait`, `thread_send` with
- * `wait`): waiter → targets, counted. A wait that would close a cycle — the target is itself
- * waiting, directly or through others, on the caller — is refused at once instead of both
- * sides sitting out their timeouts.
- */
-const activeWaits = new Map<string, Map<string, number>>();
-
-function waitsOn(from: string, to: string): boolean {
-  const seen = new Set<string>();
-  const stack = [from];
-  while (stack.length > 0) {
-    const current = stack.pop()!;
-    if (current === to) return true;
-    if (seen.has(current)) continue;
-    seen.add(current);
-    for (const next of activeWaits.get(current)?.keys() ?? []) stack.push(next);
-  }
-  return false;
-}
-
-/**
- * Register `waiter` as waiting on `target` for the life of `run` — after refusing a wait that
- * would close a cycle. The check and the registration happen in one synchronous step.
- */
-export async function asWaiter<T>(waiter: string, target: string, run: () => Promise<T>): Promise<T> {
-  if (waitsOn(target, waiter)) {
-    throw new ToolError(
-      "WAIT_CYCLE",
-      `Thread "${target}" is itself waiting on this thread, so waiting on it would only run out the clock. Answer it (finish your turn), or read it with thread_read.`
-    );
-  }
-  const targets = activeWaits.get(waiter) ?? new Map<string, number>();
-  activeWaits.set(waiter, targets);
-  targets.set(target, (targets.get(target) ?? 0) + 1);
-  try {
-    return await run();
-  } finally {
-    const left = (targets.get(target) ?? 1) - 1;
-    if (left > 0) targets.set(target, left);
-    else targets.delete(target);
-    if (targets.size === 0) activeWaits.delete(waiter);
-  }
-}
+/** The wait registry lives in `agent-chat/waits.ts` (unified MCP design §8.6); re-exported for the toolkit. */
+export { asWaiter };
 
 /** Seconds to milliseconds, for the tools' `timeoutSeconds`. */
 export const seconds = (value: number): number => value * 1000;

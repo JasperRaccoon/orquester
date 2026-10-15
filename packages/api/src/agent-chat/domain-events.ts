@@ -28,6 +28,7 @@ import type {
 import type { ThreadLineage } from "./lineage.ts";
 import type { ApprovalDecision, TurnTokenUsage } from "./runtime-events.ts";
 import type {
+  CausedBy,
   CheckpointFile,
   CheckpointStatus,
   ThreadActivityItem,
@@ -177,6 +178,13 @@ export interface ThreadTurnStartRequestedPayload {
     /** The turn's answer, for the §5.5 "rewind to here" anchor. */
     assistantMessageId?: string;
   };
+  /**
+   * The agent exchange the turn belongs to, when another chat caused it (unified MCP design
+   * 2026-10-15 §8.4; `TurnCommandBody.causedBy`). Folded onto `Turn.causedBy`. Absent on a
+   * user-authored turn and on every event written before the field; additive (§8 rollback
+   * boundary): an older build ignores it.
+   */
+  causedBy?: CausedBy;
 }
 
 export interface ThreadTurnInterruptRequestedPayload {

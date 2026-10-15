@@ -97,6 +97,7 @@ import {
 
 import type { AccountHome, HistoryImportProgress, McpAppOperation, McpAppReference } from "@orquester/api/agent-chat";
 import { htmlRenderReferenceOfActivityPayload, mcpAppReferenceOfActivityPayload } from "@orquester/api/agent-chat";
+import { parseCausedBy } from "@orquester/api/agent-chat";
 import { runMcpAppRequest } from "../mcp-apps.ts";
 
 import { stat } from "node:fs/promises";
@@ -3162,6 +3163,10 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
         const attachments = parseAttachments(body.attachments);
         const context = parseComposerContext(body.context);
         const interactionMode = parseInteractionMode(body.interactionMode);
+        // The agent exchange another chat's tool (or Orquester delivering a reply or merge) caused
+        // this turn in (unified MCP design 2026-10-15 §8.4). The daemon alone sets it — the remote
+        // transport strips it — so a value that does not parse is dropped, never a refusal.
+        const causedBy = parseCausedBy(body.causedBy);
         runtime.lastInteractionMode = interactionMode;
         const modelSelection =
           body.modelSelection === undefined
@@ -3246,7 +3251,9 @@ export function createOrchestrator(options: OrchestratorOptions): Orchestrator {
                 turnId: null,
                 messageId,
                 interactionMode,
-                ...(modelSelection !== undefined ? { modelSelection } : {})
+                ...(modelSelection !== undefined ? { modelSelection } : {}),
+                // A steer joins the running turn and leaves its own exchange (no event here).
+                ...(causedBy !== undefined ? { causedBy } : {})
               },
               { commandId, occurredAt }
             )

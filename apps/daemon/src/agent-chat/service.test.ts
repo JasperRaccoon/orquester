@@ -1438,7 +1438,7 @@ test("a fork refuses a parent whose account is gone, and rolls its tab back on a
   await f.cleanup();
 });
 
-test("a delegate names a parent in its own project; anything else is refused", async () => {
+test("a delegate or opened chat names a parent in any project; any other relation is refused", async () => {
   const f = await makeFixture(CLAUDE, null);
   const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
   const child = await f.service.createSession(
@@ -1453,18 +1453,18 @@ test("a delegate names a parent in its own project; anything else is refused", a
   assert.equal(child.lineage?.parentThreadId, parent.id);
   assert.equal(child.lineage?.relation, "delegate");
   assert.equal(f.created.at(-1)?.lineage?.relation, "delegate", "the host records it too");
-  await assert.rejects(
-    f.service.createSession(
-      {
-        kind: "agent-chat",
-        refId: "claude",
-        projectPath: "/w/other",
-        chat: { modelSelection: { model: "" }, lineage: { parentThreadId: parent.id, relation: "delegate" } }
-      },
-      2
-    ),
-    /parent's project/
+  // Unified MCP design 2026-10-15 §4.1: create_session opens chats in any project.
+  const elsewhere = await f.service.createSession(
+    {
+      kind: "agent-chat",
+      refId: "claude",
+      projectPath: "/w/other",
+      chat: { modelSelection: { model: "" }, lineage: { parentThreadId: parent.id, relation: "delegate" } }
+    },
+    2
   );
+  assert.equal(elsewhere.projectPath, "/w/other");
+  assert.equal(elsewhere.lineage?.parentThreadId, parent.id);
   await assert.rejects(
     f.service.createSession(
       {
@@ -1526,6 +1526,53 @@ test("a delegate's lineage records its delegation depth, a fork carries its pare
   assert.equal(f.service.delegationDepthOf({ lineage: d2.lineage! }), 2);
   const d3 = await delegate(d2.id, 5);
   assert.equal(d3.lineage?.delegationDepth, 3);
+  await f.cleanup();
+});
+
+test("opened and delegate links: agentCreated is stamped as given, and only agent-made links deepen delegationDepth (§13 c)", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const top = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  const open = (parentId: string, relation: "opened" | "delegate", agentCreated: boolean, order: number) =>
+    f.service.createSession(
+      {
+        kind: "agent-chat",
+        refId: "claude",
+        projectPath: "/w/q",
+        chat: { modelSelection: { model: "" }, lineage: { parentThreadId: parentId, relation, ...(agentCreated ? { agentCreated: true as const } : {}) } }
+      },
+      order
+    );
+  const byUser = await open(top.id, "opened", false, 1);
+  assert.equal(byUser.lineage?.relation, "opened");
+  assert.equal(byUser.lineage?.agentCreated, undefined, "an opened chat the user (or an external client) made is nobody's child");
+  assert.equal(byUser.lineage?.delegationDepth, 0, "recorded even at 0");
+  const byAgent = await open(top.id, "opened", true, 2);
+  assert.equal(byAgent.lineage?.agentCreated, true);
+  assert.equal(byAgent.lineage?.delegationDepth, 1);
+  assert.equal(f.created.at(-1)?.lineage?.agentCreated, true, "the host records it too");
+  assert.equal(f.created.at(-1)?.lineage?.relation, "opened");
+  const task = await open(byAgent.id, "delegate", true, 3);
+  assert.equal(task.lineage?.delegationDepth, 2, "an agent's opened chat delegating: two links");
+  // Kept on the tab record across a reload of the records.
+  assert.equal(f.service.chat.get(byAgent.id)?.lineage?.agentCreated, true);
+  // A record from before the recorded depth is counted by the same rule.
+  assert.equal(f.service.delegationDepthOf({ lineage: { parentThreadId: "gone", relation: "opened", createdAt: "" } }), 0);
+  assert.equal(f.service.delegationDepthOf({ lineage: { parentThreadId: "gone", relation: "opened", createdAt: "", agentCreated: true } }), 1);
+  assert.equal(f.service.delegationDepthOf({ lineage: { parentThreadId: "gone", relation: "delegate", createdAt: "" } }), 1);
+  await f.cleanup();
+});
+
+test("a fork records agentCreated only when the (gated) request carries it, and keeps it on a keyed repeat", async () => {
+  const f = await makeFixture(CLAUDE, null);
+  const parent = await f.service.createSession({ kind: "agent-chat", refId: "claude", projectPath: "/w/p" }, 0);
+  const byAgent = await f.service.forkSession(parent.id, { commandId: "a", agentCreated: true }, 1);
+  assert.equal(byAgent.lineage.agentCreated, true);
+  assert.equal(byAgent.session.lineage?.agentCreated, true);
+  assert.equal(byAgent.lineage.relation, "fork");
+  const repeat = await f.service.forkSession(parent.id, { commandId: "a" }, 1);
+  assert.equal(repeat.lineage.agentCreated, true, "the first answer's record stands");
+  const byUser = await f.service.forkSession(parent.id, {}, 2);
+  assert.equal(byUser.lineage.agentCreated, undefined, "a GUI fork is nobody's child");
   await f.cleanup();
 });
 
