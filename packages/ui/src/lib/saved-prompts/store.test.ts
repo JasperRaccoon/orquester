@@ -156,6 +156,25 @@ describe("wire validation", () => {
       assert.deepEqual(held(), [], JSON.stringify(bad));
     }
   });
+  it("keeps who created a prompt and the workflows that use it (unified MCP D-16); anything else reads as the user's", () => {
+    applySavedPromptEvent({
+      type: "savedPrompt.upserted",
+      payload: {
+        id: "agent",
+        title: "T",
+        body: "B",
+        projectPath: null,
+        createdBy: { kind: "agent", threadId: "t1", agent: "codex", title: "Plan", extra: 1 },
+        usedByWorkflows: [{ workflowId: "w1", name: "Nightly" }, { workflowId: 3 }]
+      }
+    });
+    assert.deepEqual(state().prompts.get("agent")?.createdBy, { kind: "agent", threadId: "t1", agent: "codex", title: "Plan" });
+    assert.deepEqual(state().prompts.get("agent")?.usedByWorkflows, [{ workflowId: "w1", name: "Nightly" }]);
+    for (const createdBy of [null, "agent", [], {}, { kind: "" }]) {
+      applySavedPromptEvent({ type: "savedPrompt.upserted", payload: { id: "user", title: "T", body: "B", projectPath: null, createdBy, updatedAt: String(Math.random()) } });
+      assert.equal(state().prompts.get("user")?.createdBy, undefined, JSON.stringify(createdBy));
+    }
+  });
 });
 
 describe("loads", () => {
