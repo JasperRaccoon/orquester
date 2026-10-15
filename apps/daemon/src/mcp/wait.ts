@@ -364,7 +364,17 @@ const WORK_RECHECK_MS = 10_000;
 export async function waitWhileWorking(
   api: DaemonApi,
   ids: readonly string[],
-  opts: { timeoutMs: number; signal: AbortSignal; now: () => number; until?: (state: WorkState) => boolean }
+  opts: {
+    timeoutMs: number;
+    signal: AbortSignal;
+    now: () => number;
+    until?: (state: WorkState) => boolean;
+    /**
+     * Look only after the next bus event about one of them (or the safety re-check): for a caller
+     * the host just refused for a reason these reads may not see yet, so it never re-asks in a loop.
+     */
+    afterNextEvent?: boolean;
+  }
 ): Promise<{ reports: Map<string, WorkReport | null>; timedOut: boolean; cancelled: boolean }> {
   const until = opts.until ?? ((state: WorkState) => state !== "working");
   const watched = new Set(ids);
@@ -380,7 +390,15 @@ export async function waitWhileWorking(
     wake = null;
     w?.();
   });
+  const pause = (left: number) =>
+    new Promise<void>((resolve) => {
+      const resume = () => { clearTimeout(timer); opts.signal.removeEventListener("abort", resume); wake = null; resolve(); };
+      const timer = setTimeout(resume, Math.min(left, WORK_RECHECK_MS));
+      opts.signal.addEventListener("abort", resume, { once: true });
+      wake = resume;
+    });
   try {
+    if (opts.afterNextEvent && !opts.signal.aborted && remaining() > 0) await pause(remaining());
     for (;;) {
       const seen = events;
       const sessions = await listSessions(api);
@@ -390,14 +408,7 @@ export async function waitWhileWorking(
       if (opts.signal.aborted) return { reports, timedOut: false, cancelled: true };
       const left = remaining();
       if (left <= 0) return { reports, timedOut: true, cancelled: false };
-      if (events === seen) {
-        await new Promise<void>((resolve) => {
-          const resume = () => { clearTimeout(timer); opts.signal.removeEventListener("abort", resume); wake = null; resolve(); };
-          const timer = setTimeout(resume, Math.min(left, WORK_RECHECK_MS));
-          opts.signal.addEventListener("abort", resume, { once: true });
-          wake = resume;
-        });
-      }
+      if (events === seen) await pause(left);
     }
   } finally {
     off();

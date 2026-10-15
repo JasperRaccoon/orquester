@@ -638,7 +638,9 @@ async function dispatchNextTurn(ctx: SendContext, sessionId: string, body: TurnB
     const left = remaining();
     const notSent = { outcome: "timeout", sent: false, hint: 'The session stayed busy for the whole wait, so the message was not sent. Send it again, or with reply "none" to steer its running turn.' };
     if (left <= 0) return notSent;
-    const waited = await waitWhileWorking(ctx.api, [sessionId], { timeoutMs: left, signal: ctx.signal, now: ctx.now, until: (state) => state === "idle" || state === "failed" });
+    // The host said busy: look again only once something about the session moved, so a busy reason
+    // these reads cannot see (a compaction in flight) never turns into a re-post loop.
+    const waited = await waitWhileWorking(ctx.api, [sessionId], { timeoutMs: left, signal: ctx.signal, now: ctx.now, until: (state) => state === "idle" || state === "failed", afterNextEvent: true });
     if (waited.reports.get(sessionId) === null) throw new ToolError("SESSION_NOT_FOUND", `Session "${sessionId}" was closed while the message waited for it.`);
     if (waited.cancelled) throw new ToolError("CANCELLED", "The call was cancelled before the message was sent.");
     if (waited.timedOut) return notSent;
@@ -1025,7 +1027,7 @@ async function createExternal(args: CreateArgs, ctx: CallContext): Promise<Recor
   };
   const body: CreateSessionRequest = { kind: "agent-chat", refId, projectPath, cwd, title: args.title ?? (resume?.title || agent.name), ...(account.accountId ? { accountId: account.accountId } : {}), chat };
   const summary = expectOk<SessionSummary>(await api.request("POST", "/api/sessions", { body }));
-  const created = { sessionId: summary.id, accountSource: account.source, ...(account.note ? { accountNote: account.note } : {}), ...(model.isLegacy ? { isLegacy: true } : {}) };
+  const created = { sessionId: summary.id, accountId: summary.accountId || account.accountId || "system", accountSource: account.source, ...(account.note ? { accountNote: account.note } : {}), ...(model.isLegacy ? { isLegacy: true } : {}) };
   let first: FirstTurn = {};
   if (args.prompt !== undefined) {
     try {
@@ -1064,8 +1066,12 @@ async function createFromChat(args: CreateArgs, ctx: CallContext, caller: Thread
   if (!tab) throw new ToolError("THREAD_NOT_FOUND", "This chat thread is no longer open.");
   // Caps (§5.6): the project's open chats, this chat's unfinished children, agent depth.
   const canonical = await canonicalProject(api, projectPath);
-  const inProject = await Promise.all(sessions.filter((s) => s.status === "running").map(async (s) => s.projectPath === projectPath || (await canonicalProject(api, s.projectPath))?.canonical === canonical?.canonical));
-  const running = inProject.filter(Boolean).length;
+  const roots = new Map<string, string | undefined>();
+  let running = 0;
+  for (const s of sessions.filter((tab) => tab.status === "running")) {
+    if (!roots.has(s.projectPath)) roots.set(s.projectPath, (await canonicalProject(api, s.projectPath))?.canonical);
+    if (s.projectPath === projectPath || (canonical !== null && roots.get(s.projectPath) === canonical.canonical)) running += 1;
+  }
   if (running >= MAX_RUNNING_SESSIONS_PER_PROJECT) throw new ToolError("SESSION_BUSY", `${running} chats are open in that project (limit ${MAX_RUNNING_SESSIONS_PER_PROJECT}); the user has to close some first.`);
   const now = ctx.now();
   const open = sessions.filter((s) => s.lineage?.parentThreadId === caller.threadId && s.lineage.agentCreated === true && unfinished(s, now)).length;

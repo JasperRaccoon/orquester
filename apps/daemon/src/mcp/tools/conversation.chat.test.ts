@@ -600,3 +600,24 @@ test("external send_message parity: none steers and refuses an open request (res
   assert.equal(code(await ok.external("send_message", { sessionId: "peer", text: "  " })), "INVALID_ARGUMENT");
   assert.equal(code(await ok.external("send_message", { sessionId: "peer", implementPlan: true, text: "and this" })), "INVALID_ARGUMENT");
 });
+
+test("external fork_session and merge_back_session parity (§11): throughTurn, the host's refusal, the old result; resolve_merge_back as mergeId + action", async () => {
+  const r = rig({ sessions: [...tabs(), tab("f9", OWN)], threads: { peer: thread("peer", { turns: [turn({ turnId: "t1" }), turn({ turnId: "t2", turnCount: 2 })] }) } });
+  r.api.on("POST", agentChatRoutes.fork("peer"), { status: 200, body: { session: tab("f9", OWN), strategy: "native", lineage: { parentThreadId: "peer", relation: "fork", createdAt: stamp(1) } } });
+  const forked = await r.external("fork_session", { sessionId: "peer", throughTurn: 1, title: "B" });
+  assert.equal(forked.isError, undefined, JSON.stringify(body(forked)));
+  assert.equal(body(forked).strategy, "native");
+  assert.equal(body(forked).session.id, "f9");
+  const [req] = posted(r.api, agentChatRoutes.fork("peer"));
+  assert.equal(req!.turnId, "t1");
+  assert.equal(req!.role, "assistant");
+  assert.equal(req!.agentCreated, undefined, "an external client's fork is nobody's child");
+  assert.equal(code(await r.external("fork_session", { sessionId: "peer", throughTurn: 3 })), "INVALID_ARGUMENT");
+  r.api.on("POST", agentChatRoutes.fork("peer"), { status: 409, body: { error: { code: "COMMAND_REJECTED", message: "That reply is still being written." } } });
+  assert.equal(code(await r.external("fork_session", { sessionId: "peer" })), "COMMAND_REJECTED");
+  r.api.on("POST", agentChatRoutes.mergeBack("fork"), { status: 200, body: { parentSessionId: "me", delivery: "sent", mergeId: "m2", seq: 4 } });
+  assert.deepEqual(body(await r.external("merge_back_session", { sessionId: "fork", text: "Use B." })), { parentSessionId: "me", delivery: "sent", mergeId: "m2", seq: 4 });
+  assert.equal(posted(r.api, agentChatRoutes.mergeBack("fork"))[0]!.causedBy, undefined);
+  r.api.on("POST", agentChatRoutes.mergeBackItem("me", "m2"), { status: 409, body: { error: { code: "TARGET_BUSY", message: "It is working." } } });
+  assert.equal(code(await r.external("merge_back_session", { sessionId: "me", mergeId: "m2", action: "deliver" })), "TARGET_BUSY");
+});
