@@ -103,6 +103,19 @@ test("deny: the thread's agent, in its own account home or its project — exact
   assert.deepEqual(denyFor(thread({ projectPaths: ["/w/acme/api-link", "/w/acme/api"] }), [server({ name: "p", scope: "project", projectPath: "/w/acme/api" })]), ["p"]);
 });
 
+test("deny: a chat in a directory inside its project — the configs from the root down to its cwd, never a sibling's or a deeper one's", () => {
+  const servers = [
+    server({ name: "root", scope: "project", projectPath: "/w/acme/api" }),
+    server({ name: "on_the_way", scope: "project", projectPath: "/w/acme/api/packages" }),
+    server({ name: "at_cwd", scope: "project", projectPath: "/w/acme/api/packages/app/" }),
+    server({ name: "deeper", scope: "project", projectPath: "/w/acme/api/packages/app/src" }),
+    server({ name: "sibling", scope: "project", projectPath: "/w/acme/api/docs" }),
+    server({ name: "outside", scope: "project", projectPath: "/w/acme" })
+  ];
+  assert.deepEqual(denyFor(thread({ cwdPaths: ["/w/acme/api/packages/app"] }), servers), ["at_cwd", "on_the_way", "root"]);
+  assert.deepEqual(denyFor(thread(), servers), ["root"], "at the project root: the root's alone");
+});
+
 test("deny: a server every home of the agent loads (Grok's inherited ~/.claude.json, allHomes) is denied in an account home too", () => {
   const inherited = server({ agent: "grok", home: "system", name: "claude_inherited", allHomes: true });
   const ownConfig = server({ agent: "grok", home: "system", name: "grok_system_only" });

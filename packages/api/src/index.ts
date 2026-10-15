@@ -917,7 +917,13 @@ export interface PushNotifyResponse {
 // Daemon-pointing MCP servers (unified MCP design 2026-10-15 §12.1): MCP servers in an agent
 // CLI's config that reach THIS daemon's full-trust `/mcp` — denied inside every Orquester chat.
 
-/** `GET` → {@link DaemonMcpServersResponse}. Both transports, bearer on HTTP. */
+/**
+ * `GET [?projectPath=<abs>[&cwd=<abs>]]` → {@link DaemonMcpServersResponse}. Both transports, bearer
+ * on HTTP. Without `projectPath`: every project's configs (the panel's view); with it, that
+ * project's — and with `cwd` (a directory inside it), every directory's from the project down to
+ * `cwd` (what a chat started there loads). Each project-scope server names the directory whose
+ * config holds it as its `projectPath`.
+ */
 export const AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE = "/api/agent-profile/daemon-mcp-servers";
 
 /**
@@ -934,7 +940,7 @@ export interface DaemonPointingServer {
   home: string;
   /** `user`: the CLI's user config in that home; `project`: a project-level config. */
   scope: "user" | "project";
-  /** `scope: "project"`: the project whose config holds it. */
+  /** `scope: "project"`: the project (or, for a `cwd` read, the directory inside it) whose config holds it. */
   projectPath?: string;
   /** The server's name as the CLI knows it (what a deny rule names). */
   name: string;

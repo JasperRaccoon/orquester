@@ -495,3 +495,88 @@ test("a turn the user stopped is no turn to continue, even when the summary read
   assert.equal(await r.refresher.scheduleContinue("codex-1", "notes", "default"), "skipped");
   assert.equal(r.posted.length, 0);
 });
+
+test("concurrent manifests share ONE daemon-pointing read", async () => {
+  const r = rig();
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const request = r.api.request.bind(r.api);
+  let reads = 0;
+  r.api.request = async (method, path, opts) => {
+    if (path === AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE) {
+      reads += 1;
+      await gate;
+    }
+    return request(method, path, opts);
+  };
+  const both = Promise.all([r.refresher.manifest("claude-1"), r.refresher.manifest("codex-1"), r.refresher.daemonPointing()]);
+  release();
+  const [claude, codex, servers] = await both;
+  assert.equal(reads, 1, "one read in flight, shared");
+  assert.notEqual(claude, "unavailable");
+  assert.notEqual(codex, "unavailable");
+  assert.deepEqual(servers, []);
+});
+
+test("the session list read inside a manifest is bounded: no answer in time counts as workflow-owned", async () => {
+  const r = rig({ sessionsReadTimeoutMs: 20 });
+  r.toolsets.set("claude-1", ["core", "reads", "workflow-authoring"]);
+  const request = r.api.request.bind(r.api);
+  r.api.request = async (method, path, opts) => (path === "/api/sessions" ? new Promise(() => undefined) : request(method, path, opts));
+  const manifest = await manifestOf(r, "claude-1");
+  assert.deepEqual(manifest.tools, ["list_sessions", "list_workflows"], "no Admin tool (fail closed)");
+  assert.ok(r.warnings.some((warning) => /session list did not answer/.test(warning)));
+});
+
+test("a chat refused for unknown denials gets its manifest pushed once the daemon-pointing read lands", async () => {
+  let pushedTo!: (push: { threadId: string; deny: string[] }) => void;
+  const pushedOnce = new Promise<{ threadId: string; deny: string[] }>((resolve) => (pushedTo = resolve));
+  const r = rig({
+    pointingReadTimeoutMs: 20,
+    pushToHost: async (threadId, manifest) => {
+      pushedTo({ threadId, deny: manifest.deny });
+      return { applied: "unchanged" };
+    }
+  });
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, { status: 200, body: { servers: [{ agent: "codex", home: "system", scope: "user", name: "codex_remote", reason: "url" }] } });
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => (release = resolve));
+  const request = r.api.request.bind(r.api);
+  r.api.request = async (method, path, opts) => {
+    if (path === AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE) await gate;
+    return request(method, path, opts);
+  };
+  // The read outlasts the launch's bound: the manifest route answers 503…
+  assert.equal(await r.refresher.manifest("codex-1"), "unavailable");
+  // …and when the read lands, the host (whose launch waits for its denials) is handed the manifest.
+  release();
+  assert.deepEqual(await pushedOnce, { threadId: "codex-1", deny: ["codex_remote"] });
+});
+
+test("a chat started in a directory inside its project is denied the servers configured on the way down to it", async () => {
+  const r = rig({
+    thread: (id) => (id === "codex-1" ? { agentId: "codex", home: "system", projectPath: "/w/acme/api", cwd: "/w/acme/api/packages/app" } : null)
+  });
+  const queries: unknown[] = [];
+  r.api.on("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, (request: { query?: Record<string, string> }) => {
+    queries.push(request.query);
+    const scoped = request.query?.cwd !== undefined;
+    return {
+      status: 200,
+      body: {
+        servers: scoped
+          ? [
+              { agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api/packages", name: "sub_remote", reason: "url" },
+              { agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api/packages/app", name: "cwd_remote", reason: "url" }
+            ]
+          : [
+              { agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api", name: "root_remote", reason: "url" },
+              { agent: "codex", home: "system", scope: "project", projectPath: "/w/acme/api/docs", name: "sibling_remote", reason: "url" }
+            ]
+      }
+    };
+  });
+  const manifest = await manifestOf(r, "codex-1");
+  assert.deepEqual(manifest.deny, ["cwd_remote", "root_remote", "sub_remote"], "never a sibling directory's (Codex refuses a name its config lacks)");
+  assert.deepEqual(queries, [undefined, { projectPath: "/w/acme/api", cwd: "/w/acme/api/packages/app" }]);
+});

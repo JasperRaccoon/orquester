@@ -25,6 +25,7 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { resolve as resolvePath } from "node:path";
 
 import type { FastifyInstance } from "fastify";
 import {
@@ -58,7 +59,7 @@ import type { DaemonApi } from "../mcp/daemon-api.ts";
 import { isWorkflowOwned } from "../mcp/gate/scope.ts";
 import { listSessions, readThread, sendCommand } from "../mcp/reads.ts";
 import { turnBaseline, waitForTurn } from "../mcp/wait.ts";
-import { buildSessionToolsManifest, type ManifestThread } from "./manifest.ts";
+import { buildSessionToolsManifest, isWithinDir, type ManifestThread } from "./manifest.ts";
 
 /** How long a scheduled continue waits for the asking turn to settle; past it nothing is posted. */
 export const TOOLSET_CONTINUE_WAIT_MS = 60 * 60 * 1000;
@@ -79,6 +80,15 @@ export const REFRESH_CONCURRENCY = 4;
 /** How long the daemon-pointing read may take before the last good list (or "unavailable") answers. */
 export const DAEMON_POINTING_READ_TIMEOUT_MS = 5_000;
 
+/** How long the session list read for the workflow-owned trait may take before it counts as owned. */
+export const MANIFEST_SESSIONS_READ_TIMEOUT_MS = 5_000;
+
+/**
+ * How long after a refused launch manifest (503) the chat's manifest is pushed to the host once a
+ * daemon-pointing read succeeds: above the host's wait for denials (`DENIALS_WAIT_MS`, 15 s).
+ */
+export const REFUSED_PUSH_WINDOW_MS = 20_000;
+
 /** One push in flight: its outcome, its stamp once its manifest is built, and when the host was asked. */
 export interface PushHandle {
   done: Promise<RefreshAnswer>;
@@ -97,7 +107,19 @@ export interface ToolsetRefreshThread {
   projectPath: string;
   /** Its canonical spelling, when the daemon resolves one. */
   canonicalProjectPath?: string;
+  /** The tab's cwd (the project root unless the chat was started in a directory inside it). */
+  cwd?: string;
+  /** Its canonical spelling, when the daemon resolves one. */
+  canonicalCwd?: string;
 }
+
+/** A read of the daemon-pointing servers for a chat in a directory inside its project. */
+interface PointingScope {
+  projectPath: string;
+  cwd: string;
+}
+
+type PointingRead = { servers: readonly DaemonPointingServer[] } | { failed: string };
 
 export interface ToolsetRefreshDeps {
   /** The open chat thread, or null (closed, unknown, not a chat, no known adapter). */
@@ -121,6 +143,8 @@ export interface ToolsetRefreshDeps {
   applyWaitMs?: number;
   /** Overrides {@link DAEMON_POINTING_READ_TIMEOUT_MS} (tests). */
   pointingReadTimeoutMs?: number;
+  /** Overrides {@link MANIFEST_SESSIONS_READ_TIMEOUT_MS} (tests). */
+  sessionsReadTimeoutMs?: number;
   logger?: { log?(message: string): void; warn?(message: string, detail?: unknown): void };
 }
 
@@ -166,8 +190,15 @@ export class SessionToolsRefresher {
   private readonly continues = new Map<string, PendingContinue>();
   /** The push in flight per chat (a `request_toolset` call awaits its answer). */
   private readonly pushes = new Map<string, PushHandle>();
-  /** The last GOOD read of the daemon-pointing servers; `stale` once invalidated (re-read, but kept). */
-  private pointing: { at: number; servers: readonly DaemonPointingServer[]; stale: boolean } | null = null;
+  /**
+   * The last GOOD read of the daemon-pointing servers per scope (`""`: every project's; else a
+   * chat's project and cwd); `stale` once invalidated (re-read, but kept).
+   */
+  private readonly pointing = new Map<string, { at: number; servers: readonly DaemonPointingServer[]; stale: boolean }>();
+  /** The read in flight per scope: concurrent manifests share it, and it outlives their timeouts. */
+  private readonly pointingReads = new Map<string, Promise<PointingRead>>();
+  /** Chats whose launch manifest was refused (503), and since when: pushed once a read succeeds. */
+  private readonly refused = new Map<string, number>();
   /** The manifest sequence clock: monotonic within this daemon process. */
   private seqClock = 0;
   /** This daemon process's epoch: the host compares sequences only within one epoch. */
@@ -191,6 +222,7 @@ export class SessionToolsRefresher {
 
   /** A closed chat: forget it, and drop its scheduled continue. */
   forget(threadId: string): void {
+    this.refused.delete(threadId);
     this.advertised.delete(threadId);
     this.advertisedSeq.delete(threadId);
     this.latestAnswer.delete(threadId);
@@ -203,17 +235,21 @@ export class SessionToolsRefresher {
   }
 
   /**
-   * The daemon-pointing servers (Task 11's read), reused for {@link DAEMON_POINTING_CACHE_MS}.
+   * The daemon-pointing servers (Task 11's read) — of every project, or with `scope`, of a chat's
+   * project down to its cwd — reused for {@link DAEMON_POINTING_CACHE_MS}. Concurrent callers share
+   * ONE read per scope, which outlives a caller's bound ({@link DAEMON_POINTING_READ_TIMEOUT_MS}):
+   * when it lands it is cached, and the chats refused meanwhile get their manifest pushed.
    * Fails CLOSED (§12.1): every failed read is a warning and answers the last GOOD list (also
    * after an invalidation, which only marks it stale), or `null` when none was ever read — the
-   * manifest is then unavailable (503) and the host falls back to what it knows for that launch.
-   * Only a route-miss 404 (a daemon without the detection) means "none", and only when its body is
-   * exactly Fastify's default not-found body ({@link isFastifyRouteMiss}). Every answer of the
-   * detection itself that is not a 200 list — its own 404 or 400 (e.g. a `projectPath` outside the
-   * workspaces root) in any envelope — is a failed read.
+   * manifest is then unavailable (503) and the host waits for its denials (bounded), else refuses
+   * the launch. Only a route-miss 404 (a daemon without the detection) means "none", and only when
+   * its body is exactly Fastify's default not-found body ({@link isFastifyRouteMiss}). Every answer
+   * of the detection itself that is not a 200 list — its own 404 or 400 (e.g. a `projectPath`
+   * outside the workspaces root) in any envelope — is a failed read.
    */
-  async daemonPointing(): Promise<readonly DaemonPointingServer[] | null> {
-    const cached = this.pointing;
+  async daemonPointing(scope?: PointingScope): Promise<readonly DaemonPointingServer[] | null> {
+    const key = scope ? `${scope.projectPath}\u0000${scope.cwd}` : "";
+    const cached = this.pointing.get(key);
     if (cached && !cached.stale && this.now() - cached.at < DAEMON_POINTING_CACHE_MS) return cached.servers;
     const failed = (why: string): readonly DaemonPointingServer[] | null => {
       this.deps.logger?.warn?.(`session-tools: the daemon-pointing MCP servers could not be read (${why}); ${cached ? "the last good list is reused" : "manifests are unavailable until a read succeeds"}`);
@@ -221,35 +257,65 @@ export class SessionToolsRefresher {
     };
     const api = this.deps.api();
     if (!api) return failed("no API yet");
+    let read = this.pointingReads.get(key);
+    if (read === undefined) {
+      const started = this.readPointing(api, key, scope);
+      read = started;
+      this.pointingReads.set(key, started);
+      void started.finally(() => {
+        if (this.pointingReads.get(key) === started) this.pointingReads.delete(key);
+      });
+    }
+    let timer: NodeJS.Timeout | undefined;
+    const answer = await Promise.race([
+      read,
+      new Promise<"timeout">((resolve) => {
+        timer = setTimeout(() => resolve("timeout"), this.deps.pointingReadTimeoutMs ?? DAEMON_POINTING_READ_TIMEOUT_MS);
+      })
+    ]).finally(() => clearTimeout(timer));
+    if (answer === "timeout") return failed("timed out");
+    return "failed" in answer ? failed(answer.failed) : answer.servers;
+  }
+
+  /** One read of the detection route; a good answer is cached and releases the refused chats. Never throws. */
+  private async readPointing(api: DaemonApi, key: string, scope: PointingScope | undefined): Promise<PointingRead> {
     try {
-      let timer: NodeJS.Timeout | undefined;
-      const res = await Promise.race([
-        api.request("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE),
-        new Promise<"timeout">((resolve) => {
-          timer = setTimeout(() => resolve("timeout"), this.deps.pointingReadTimeoutMs ?? DAEMON_POINTING_READ_TIMEOUT_MS);
-        })
-      ]).finally(() => clearTimeout(timer));
-      if (res === "timeout") return failed("timed out");
-      if (res.status === 404 && isFastifyRouteMiss(res.body)) {
-        this.pointing = { at: this.now(), servers: [], stale: false };
-        return [];
+      const res = await api.request("GET", AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, scope ? { query: { projectPath: scope.projectPath, cwd: scope.cwd } } : undefined);
+      let servers: DaemonPointingServer[];
+      if (res.status === 404 && isFastifyRouteMiss(res.body)) servers = [];
+      else {
+        const listed = (res.body as Partial<DaemonMcpServersResponse> | null)?.servers;
+        if (res.status !== 200 || !Array.isArray(listed)) return { failed: `HTTP ${res.status}` };
+        servers = listed.filter(
+          (server): server is DaemonPointingServer =>
+            server !== null && typeof server === "object" && typeof server.name === "string" && typeof server.agent === "string" && typeof server.home === "string"
+        );
       }
-      const servers = (res.body as Partial<DaemonMcpServersResponse> | null)?.servers;
-      if (res.status !== 200 || !Array.isArray(servers)) return failed(`HTTP ${res.status}`);
-      const valid = servers.filter(
-        (server): server is DaemonPointingServer =>
-          server !== null && typeof server === "object" && typeof server.name === "string" && typeof server.agent === "string" && typeof server.home === "string"
-      );
-      this.pointing = { at: this.now(), servers: valid, stale: false };
-      return valid;
+      this.pointing.set(key, { at: this.now(), servers, stale: false });
+      this.releaseRefused();
+      return { servers };
     } catch (error) {
-      return failed(error instanceof Error ? error.message : "request failed");
+      return { failed: error instanceof Error ? error.message : "request failed" };
     }
   }
 
-  /** A new or changed MCP server config: the next manifest reads the servers afresh (the last good list stays the fallback). */
+  /**
+   * A read succeeded: push the manifest of every chat whose launch was refused within
+   * {@link REFUSED_PUSH_WINDOW_MS} — the host's launch waiting for its denials takes it.
+   */
+  private releaseRefused(): void {
+    if (this.stopped) return;
+    const now = this.now();
+    for (const [threadId, at] of [...this.refused]) {
+      // The entry goes when the chat's manifest is built; a push that is refused again keeps it.
+      if (now - at > REFUSED_PUSH_WINDOW_MS) this.refused.delete(threadId);
+      else this.pushLogged(threadId);
+    }
+  }
+
+  /** A newer read is wanted (a new or changed MCP server config); the last good lists stay the fallback. */
   invalidateDaemonPointing(): void {
-    if (this.pointing) this.pointing = { ...this.pointing, stale: true };
+    for (const [key, entry] of this.pointing) this.pointing.set(key, { ...entry, stale: true });
   }
 
   /** The next manifest sequence: strictly increasing within this process (its epoch orders restarts). */
@@ -272,23 +338,47 @@ export class SessionToolsRefresher {
   async manifest(threadId: string, purpose: "launch" | "check" = "launch"): Promise<SessionToolsManifest | null | "unavailable"> {
     const thread = this.deps.thread(threadId);
     if (!thread) return null;
-    const daemonPointing = await this.daemonPointing();
-    if (daemonPointing === null) return "unavailable";
+    const projectPaths = [thread.projectPath, thread.canonicalProjectPath ?? ""].filter((path) => path !== "");
+    // A chat started in a directory inside its project also loads the configs on the way down to it.
+    const cwdPaths = [thread.cwd ?? "", thread.canonicalCwd ?? ""].filter((path) => path !== "" && !projectPaths.some((root) => resolvePath(root) === resolvePath(path)));
+    const inside = thread.cwd !== undefined && cwdPaths.includes(thread.cwd) && isWithinDir(thread.cwd, thread.projectPath);
+    const [everyProject, ownCwd] = await Promise.all([
+      this.daemonPointing(),
+      inside ? this.daemonPointing({ projectPath: thread.projectPath, cwd: thread.cwd! }) : Promise.resolve([] as readonly DaemonPointingServer[])
+    ]);
+    if (everyProject === null || ownCwd === null) {
+      if (!this.refused.has(threadId)) this.refused.set(threadId, this.now());
+      return "unavailable";
+    }
+    this.refused.delete(threadId);
+    const daemonPointing = [...everyProject, ...ownCwd];
     const api = this.deps.api();
     // The workflow-owned trait walks lineage through closed tabs (the gate's own walk): fail
-    // closed — an unreadable list counts as owned, so no Admin tool is advertised.
+    // closed — an unreadable (or unanswered, bounded) list counts as owned, so no Admin tool is
+    // advertised.
     let workflowOwned = true;
     if (api) {
+      let timer: NodeJS.Timeout | undefined;
       try {
-        workflowOwned = isWorkflowOwned(await listSessions(api), threadId);
+        const sessions = await Promise.race([
+          listSessions(api),
+          new Promise<"timeout">((resolve) => {
+            timer = setTimeout(() => resolve("timeout"), this.deps.sessionsReadTimeoutMs ?? MANIFEST_SESSIONS_READ_TIMEOUT_MS);
+          })
+        ]);
+        if (sessions === "timeout") this.deps.logger?.warn?.("session-tools: the session list did not answer in time; the chat counts as workflow-owned");
+        else workflowOwned = isWorkflowOwned(sessions, threadId);
       } catch {
         workflowOwned = true;
+      } finally {
+        clearTimeout(timer);
       }
     }
     const manifestThread: ManifestThread = {
       agentId: thread.agentId,
       home: thread.home,
-      projectPaths: [thread.projectPath, thread.canonicalProjectPath ?? ""].filter((path) => path !== ""),
+      projectPaths,
+      ...(cwdPaths.length > 0 ? { cwdPaths } : {}),
       workflowOwned
     };
     const toolsets = this.deps.resolvedToolsets(threadId, thread.agentId);

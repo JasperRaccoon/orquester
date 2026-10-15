@@ -13,6 +13,12 @@
  * | grok     | `<GROK_HOME>/config.toml` `[mcp_servers.<n>]`, plus the system `~/.claude.json` `mcpServers` Grok inherits | `<p>/.grok/config.toml` |
  * | opencode | `<dir>/{config.json,opencode.json,opencode.jsonc}` `mcp` | `<p>/opencode.json`, `<p>/opencode.jsonc` |
  *
+ * A chat whose cwd is a subdirectory of its project loads the project-level configs of EVERY
+ * directory from the project root down to its cwd (Codex 0.159.0 loads each `.codex/config.toml`
+ * on that path — probed; Claude, OpenCode and Grok search upward from the cwd), and Claude's local
+ * scope may be keyed by any of them: with `cwd`, each of those directories is scanned as a project
+ * (`projectPath` = the directory that holds the config).
+ *
  * Homes: the daemon user's own (`home: "system"`) and **every managed account home** of the
  * agent's family (`home: <account id>`; spec S11). A file already read through another home (an
  * account's `config.toml` is a symlink to the system one) is read once, under the first home.
@@ -35,11 +41,12 @@
  *
  * ## API (consumed by the chat manifest, plan Task 6)
  *
- * - `DaemonMcpDetector.detect({projectPath?})` → `DaemonPointingServer[]`: user-scope servers of
- *   every home, plus project-level ones — of `projectPath` only when it is given (what a chat in
- *   that project loads), else of every project under the workspaces root (the panel's view).
- * - `GET /api/agent-profile/daemon-mcp-servers[?projectPath=<abs>]` (both transports; bearer on
- *   HTTP) answers `{servers}` from the same call.
+ * - `DaemonMcpDetector.detect({projectPath?, cwd?})` → `DaemonPointingServer[]`: user-scope servers
+ *   of every home, plus project-level ones — of `projectPath` only when it is given (what a chat in
+ *   that project loads; with `cwd`, a directory inside it, of every directory from `projectPath`
+ *   down to `cwd`), else of every project under the workspaces root (the panel's view).
+ * - `GET /api/agent-profile/daemon-mcp-servers[?projectPath=<abs>[&cwd=<abs>]]` (both transports;
+ *   bearer on HTTP) answers `{servers}` from the same call.
  * - `DaemonMcpDetector.check(candidate)` → the reason a definition (an `edit_agent_profile`
  *   change, the current one merged in) would be flagged, or null. Socket-only route
  *   `POST /api/agent-profile/daemon-mcp-servers/check` for the tool's card preview.
@@ -260,8 +267,8 @@ interface ScanTarget {
   projectPath?: string;
   path: string;
   shape: FileShape;
-  /** `claude-json` user files: also read `projects[<p>].mcpServers` (local scope) — of `localFor` only, or of every project. */
-  local?: { only?: string };
+  /** `claude-json` user files: also read `projects[<p>].mcpServers` (local scope) — of the `only` directories (realpaths), or of every project. */
+  local?: { only?: ReadonlySet<string> };
   /** Every home of `agent` loads this file (`DaemonPointingServer.allHomes`). */
   allHomes?: true;
 }
@@ -279,11 +286,14 @@ export class DaemonMcpDetector {
 
   /**
    * Every flagged server: user configs of every home, and project-level configs — of
-   * `projectPath` only when given (the chat manifest), else of every project (the panel).
+   * `projectPath` only when given (the chat manifest; with `cwd`, of every directory from it down
+   * to `cwd`), else of every project (the panel).
    */
-  async detect(options: { projectPath?: string } = {}): Promise<DaemonPointingServer[]> {
+  async detect(options: { projectPath?: string; cwd?: string } = {}): Promise<DaemonPointingServer[]> {
+    if (options.cwd !== undefined && !options.projectPath) throw new AgentProfileError(400, "INVALID_REQUEST", "cwd needs projectPath.");
     const projectFilter = options.projectPath ? await this.containedProject(options.projectPath) : undefined;
-    const targets = await this.targets(projectFilter);
+    const dirs = projectFilter !== undefined ? await this.configDirs(projectFilter, options.cwd) : undefined;
+    const targets = await this.targets(dirs);
     const seenFiles = new Set<string>();
     const out: DaemonPointingServer[] = [];
     const seen = new Set<string>();
@@ -296,7 +306,7 @@ export class DaemonMcpDetector {
       if (text === null) continue;
       let found: { candidate: McpCandidate; scope: "user" | "project"; projectPath?: string }[];
       try {
-        found = await this.candidatesOf(target, text, projectFilter);
+        found = await this.candidatesOf(target, text);
       } catch (error) {
         this.sources.logger?.warn(`daemon-pointing MCP scan: ${target.path} could not be parsed (${error instanceof Error ? error.name : "error"}); skipped.`);
         continue;
@@ -336,10 +346,34 @@ export class DaemonMcpDetector {
     return real;
   }
 
-  private async targets(projectFilter: string | undefined): Promise<ScanTarget[]> {
+  /**
+   * The directories a chat in `project` (a contained realpath) with `cwd` loads project-level
+   * configs from: `project`, then each directory down to `cwd`'s realpath, which must be `project`
+   * or inside it (else refused, 400, never read). Without `cwd`, `project` alone.
+   */
+  private async configDirs(project: string, cwd: string | undefined): Promise<string[]> {
+    if (cwd === undefined) return [project];
+    let real: string;
+    try {
+      real = await realpath(cwd);
+    } catch {
+      throw new AgentProfileError(400, "INVALID_REQUEST", "cwd is not a directory inside projectPath.");
+    }
+    if (real === project) return [project];
+    if (!real.startsWith(`${project}${sep}`)) throw new AgentProfileError(400, "INVALID_REQUEST", "cwd is not a directory inside projectPath.");
+    const dirs = [project];
+    let dir = project;
+    for (const part of real.slice(project.length + 1).split(sep)) {
+      dir = join(dir, part);
+      dirs.push(dir);
+    }
+    return dirs;
+  }
+
+  private async targets(dirs: readonly string[] | undefined): Promise<ScanTarget[]> {
     const { homes } = this.sources;
     const targets: ScanTarget[] = [];
-    const local = projectFilter ? { only: projectFilter } : {};
+    const local = dirs ? { only: new Set(dirs) } : {};
     // System homes.
     targets.push({ agent: "claude", home: "system", scope: "user", path: homes.claudeJson, shape: "claude-json", local });
     targets.push({ agent: "codex", home: "system", scope: "user", path: join(homes.codexHome, "config.toml"), shape: "toml" });
@@ -367,8 +401,8 @@ export class DaemonMcpDetector {
       }
     }
     // Project-level configs.
-    let projects: string[];
-    if (projectFilter) projects = [projectFilter];
+    let projects: readonly string[];
+    if (dirs) projects = dirs;
     else {
       try {
         projects = await this.sources.projects();
@@ -388,8 +422,7 @@ export class DaemonMcpDetector {
 
   private async candidatesOf(
     target: ScanTarget,
-    text: string,
-    projectFilter: string | undefined
+    text: string
   ): Promise<{ candidate: McpCandidate; scope: "user" | "project"; projectPath?: string }[]> {
     const own = (candidates: McpCandidate[]) =>
       candidates.map((candidate) => ({ candidate, scope: target.scope, ...(target.projectPath ? { projectPath: target.projectPath } : {}) }));
@@ -412,7 +445,7 @@ export class DaemonMcpDetector {
         if (target.local && isRecord(doc.projects)) {
           for (const [projectPath, entry] of Object.entries(doc.projects)) {
             if (!isRecord(entry)) continue;
-            if (target.local.only !== undefined && (await realpathOr(projectPath)) !== projectFilter) continue;
+            if (target.local.only !== undefined && !target.local.only.has(await realpathOr(projectPath))) continue;
             for (const candidate of claudeCandidates(entry.mcpServers)) out.push({ candidate, scope: "project", projectPath });
           }
         }
@@ -470,14 +503,19 @@ export function registerDaemonMcpServersRoutes(
   app: FastifyInstance,
   deps: { detector: DaemonMcpDetector; mode: "local" | "remote"; current?: CurrentMcpCandidate }
 ): void {
-  app.get<{ Querystring: { projectPath?: unknown } }>(AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, async (request, reply) => {
+  app.get<{ Querystring: { projectPath?: unknown; cwd?: unknown } }>(AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE, async (request, reply) => {
     const projectPath = request.query?.projectPath;
-    if (projectPath !== undefined && (typeof projectPath !== "string" || !projectPath.startsWith("/") || projectPath.includes("\0"))) {
+    const cwd = request.query?.cwd;
+    const absolute = (value: unknown): value is string => typeof value === "string" && value.startsWith("/") && !value.includes("\0");
+    if (projectPath !== undefined && !absolute(projectPath)) {
       return reply.code(400).send({ error: { code: "INVALID_REQUEST", message: "projectPath must be an absolute path." } });
+    }
+    if (cwd !== undefined && (!absolute(cwd) || projectPath === undefined)) {
+      return reply.code(400).send({ error: { code: "INVALID_REQUEST", message: "cwd must be an absolute path, with projectPath." } });
     }
     let servers: DaemonPointingServer[];
     try {
-      servers = await deps.detector.detect(projectPath ? { projectPath } : {});
+      servers = await deps.detector.detect(projectPath ? { projectPath, ...(cwd !== undefined ? { cwd } : {}) } : {});
     } catch (error) {
       if (error instanceof AgentProfileError) return reply.code(error.status).send({ error: { code: error.code, message: error.message } });
       throw error;

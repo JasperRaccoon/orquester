@@ -1227,7 +1227,9 @@ export async function startDaemon(options: StartDaemonOptions = {}): Promise<Run
         agentId: info.agentId,
         home: tab.accountId ? tab.accountId : "system",
         projectPath: tab.projectPath,
-        canonicalProjectPath: tab.projectPath ? canonicalProjectPath(tab.projectPath) : ""
+        canonicalProjectPath: tab.projectPath ? canonicalProjectPath(tab.projectPath) : "",
+        // A chat started in a directory inside its project loads the configs down to it too.
+        ...(tab.cwd ? { cwd: tab.cwd, canonicalCwd: canonicalProjectPath(tab.cwd) } : {})
       };
     },
     openThreads: () => agentChat.chat.list().map((tab) => tab.id),
