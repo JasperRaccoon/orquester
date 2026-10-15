@@ -12,7 +12,8 @@ import { ToolError } from "../errors.ts";
 import { readThread, requireChatSession, sendCommand } from "../reads.ts";
 import { clipText, MAX_ECHO_CHARS } from "../result.ts";
 import { chatDetail, pendingApprovalViews, pendingQuestionViews, type PendingQuestionView } from "../views.ts";
-import { chatNotice, chatThreadRef, sessionAmongTabs, sessionCard, sessionClaim, sessionIdField } from "./sessions.ts";
+import { chatNotice, chatThreadRef, sessionAmongTabs, sessionCard, sessionClaim } from "./session-access.ts";
+import { sessionIdField } from "./sessions.ts";
 
 // min(1): an empty requestId is not an omitted one — read as omitted, it would act on the one request pending.
 const requestIdField = z.string().min(1).optional().describe("The request id from get_session; omit when exactly one is pending.");
@@ -245,7 +246,7 @@ const respondToRequest = defineTool({
         ...(args.requestId !== undefined ? [{ label: "Request", value: args.requestId }] : []),
         ...(args.decision !== undefined ? [{ label: "Decision", value: args.decision }] : [])
       ],
-      [
+      { sections: [
         ...(args.answers !== undefined
           ? [{ kind: "fields" as const, title: "Answers", rows: Object.entries(args.answers).map(([key, value]) => ({ label: key, value: Array.isArray(value) ? value.join(", ") : value })) }]
           : []),
@@ -259,7 +260,7 @@ const respondToRequest = defineTool({
               )
             }]
           : [])
-      ]
+      ] }
     ),
   annotations: MUTATING,
   resultKind: "json",

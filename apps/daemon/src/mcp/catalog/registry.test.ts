@@ -165,6 +165,7 @@ const PURE_MODULES = new Set([
   "mcp/tools/saved-prompts.ts",
   "mcp/tools/search.ts",
   "mcp/tools/secrets.ts",
+  "mcp/tools/session-access.ts",
   "mcp/tools/sessions.ts",
   "mcp/tools/todos.ts",
   "mcp/tools/toolsets.ts",

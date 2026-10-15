@@ -2,18 +2,16 @@
 // list_sessions, get_session, read_transcript, get_turn_diff, update_session, control_session (unified MCP design
 // 2026-10-15 §4 rows 4–6, 8, 11, 12; §4.1; §5; §13 a–c). `create_session` is the conversation family's (`messages.ts`).
 //
-// Shared with this task's other family modules (`output.ts`, `requests.ts`, `search.ts`): the scope claim of a
-// session-addressed call (`sessionClaim`), content rights (§5.2, §13 a), the chat result frame (`notice`, `threadRef`,
-// §4.3) and the boundary card a session-addressed call shows (`sessionCard`, §7.1).
+// The scope claim of a session-addressed call, content rights (§5.2, §13 a), the chat result frame (§4.3) and the
+// boundary cards (§7.1) are shared with every session-addressed family (`./session-access.ts`).
 import { z } from "zod";
-import { SYSTEM_ACCOUNT_ID, type ApprovalPreviewSection, type SessionLineageResponse, type SessionSummary } from "@orquester/api";
+import { SYSTEM_ACCOUNT_ID, type SessionLineageResponse, type SessionSummary } from "@orquester/api";
 import {
   agentChatRoutes,
   isSettledConversationCompaction,
   parseThreadGoal,
   RUNTIME_MODES,
   startedTurns,
-  threadToolReference,
   UNTRUSTED_NOTICE,
   type ModelSelection,
   type RuntimeMode,
@@ -21,11 +19,9 @@ import {
   type ThreadActivityItem,
   type ThreadItem,
   type ThreadSnapshotPayload,
-  type ThreadToolReference,
-  type ThreadToolRelation,
   type TurnDiffResponse
 } from "@orquester/api/agent-chat";
-import { canonicalProject, resolveProject, type CanonicalProject } from "../addressing.ts";
+import { canonicalProject, resolveProject } from "../addressing.ts";
 import { findAgent, loadAgents, resolveModelSelection, validateAccountId, type ResolvedSelection } from "../agents.ts";
 import {
   defineTool,
@@ -33,24 +29,20 @@ import {
   MUTATING_IDEMPOTENT,
   READ_ONLY,
   type AnyOrquesterTool,
-  type ApprovalPreview,
   type CallContext,
-  type ScopeClaim,
-  type ScopeContext,
-  type ThreadCaller,
-  type ToolCaller
+  type ScopeClaim
 } from "../catalog/contract.ts";
 import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { runtimeModesUpTo } from "../gate/turn-policy.ts";
 import { readOlderHistory, unavailableHint } from "../history.ts";
 import { findSession, listSessions, readThread, requireChatSession, sendCommand } from "../reads.ts";
-import { clipText, fitJsonBytes, jsonBytes, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes, toSafeToolError } from "../result.ts";
+import { fitJsonBytes, jsonBytes, MAX_RESULT_BYTES, resultBytes, toSafeToolError } from "../result.ts";
 import { transcriptEntries, transcriptRange, type TranscriptResult } from "../transcript.ts";
 import { buildViewContext, chatDetail, CONTENT_OMITTED_HINT, detailWithoutContent, fitDetail, rowWithoutContent, sessionDetail, sessionView, type SessionDetail } from "../views.ts";
-import { byAttention } from "./watch.ts";
+import { byAttention, canonicalProjects, chatFrame, chatNotice, chatThreadRef, hasContentRights, projectCard, sessionAmongTabs, sessionCard, sessionClaim } from "./session-access.ts";
 
-/** The most running tabs a project may hold before a tool opens another (also the session tools' cap, `session-tools/threads`). */
+/** The most running tabs a project may hold before a tool opens another (`create_session`, `fork_session`; spec §5.6). */
 export const MAX_RUNNING_SESSIONS_PER_PROJECT = 24;
 /** A permission mode, as create_session and update_session take it (also the session tools' thread_create / delegate_task). */
 export const runtimeModeSchema = z.enum(RUNTIME_MODES as unknown as [RuntimeMode, ...RuntimeMode[]]);
@@ -58,130 +50,6 @@ export const runtimeModeSchema = z.enum(RUNTIME_MODES as unknown as [RuntimeMode
 export const optionsSchema = z.record(z.union([z.string(), z.boolean()])).describe("Model options by id, e.g. {\"effort\":\"high\",\"thinking\":true}. `effort` works for every agent.");
 /** The session a call names (§9.5: shared field texts stay short). */
 export const sessionIdField = z.string().min(1).describe("The session id (list_sessions).");
-
-// ---------------------------------------------------------------------------
-// Scope, content rights and the chat frame — shared by this task's families
-// ---------------------------------------------------------------------------
-
-const AGENT_NAMES: Readonly<Record<string, string>> = { claude: "Claude", codex: "Codex", grok: "Grok", opencode: "OpenCode" };
-
-/** The caller as a card names it. */
-function agentName(caller: ToolCaller): string {
-  return caller.kind === "thread" ? (AGENT_NAMES[caller.agentId] ?? caller.agentId) : "An agent";
-}
-
-/** A permission mode's breadth; an unknown one is the narrowest (fail closed). */
-const breadth = (mode: RuntimeMode): number => RUNTIME_MODES.indexOf(mode);
-
-/**
- * Whether a chat caller may read the CONTENT of a target project without a card (§5.2): its own project always; another
- * project of its workspace from `auto`; any other project — and every project when the caller has none — only in
- * `full-access`. A target in no project is never readable that way. The caller itself always is.
- */
-export function hasContentRights(caller: ThreadCaller, project: CanonicalProject | null, self = false): boolean {
-  if (self) return true;
-  if (project === null) return false;
-  if (caller.projectPath !== "" && project.canonical === caller.projectPath) return true;
-  const sameWorkspace = caller.projectPath !== "" && caller.workspace !== "" && project.workspace === caller.workspace;
-  return breadth(caller.runtimeMode) >= breadth(sameWorkspace ? "auto" : "full-access");
-}
-
-/** Each distinct `projectPath` of `sessions`, canonical (null: no project). */
-export async function canonicalProjects(api: DaemonApi, sessions: readonly SessionSummary[]): Promise<Map<string, CanonicalProject | null>> {
-  const out = new Map<string, CanonicalProject | null>();
-  for (const session of sessions) {
-    if (!out.has(session.projectPath)) out.set(session.projectPath, await canonicalProject(api, session.projectPath));
-  }
-  return out;
-}
-
-/** The tabs now, and the one `sessionId` names (`SESSION_NOT_FOUND` otherwise, as `findSession`). */
-export async function sessionAmongTabs(api: DaemonApi, sessionId: string): Promise<{ summary: SessionSummary; sessions: SessionSummary[] }> {
-  const sessions = await listSessions(api);
-  const summary = sessions.find((s) => s.id === sessionId);
-  if (!summary) throw new ToolError("SESSION_NOT_FOUND", `No session with id "${sessionId}". Use list_sessions.`);
-  return { summary, sessions };
-}
-
-/**
- * The scope claim of a call naming one session (§5.1): the session, and — for a chat caller — its project, which the
- * gate classifies (the caller itself is its own project: no project claimed). A session in no project is refused to
- * chat callers (it lies in no project they could be allowed into). External callers claim the session only: they are
- * full trust, and the tool validates the address itself.
- */
-export async function sessionClaim(ctx: ScopeContext, sessionId: string, claim: Omit<ScopeClaim, "projects" | "sessions" | "causesTurnIn">): Promise<ScopeClaim> {
-  const base: ScopeClaim = { projects: [], sessions: [sessionId], causesTurnIn: [], ...claim };
-  const { caller } = ctx;
-  if (caller.kind !== "thread" || sessionId === caller.threadId) return base;
-  const summary = await findSession(ctx.api, sessionId);
-  const project = await canonicalProject(ctx.api, summary.projectPath);
-  if (project === null) throw new ToolError("PERMISSION_DENIED", `Session "${clipText(sessionId, MAX_ECHO_CHARS)}" belongs to no project; chat tools reach only sessions inside a project.`);
-  return { ...base, projects: [project.canonical] };
-}
-
-/** `notice` (§4.3): a chat caller reading another chat's words is told they are data, first thing in the result. */
-export function chatNotice(caller: ToolCaller, sessionId: string): { notice?: string } {
-  return caller.kind === "thread" && sessionId !== caller.threadId ? { notice: UNTRUSTED_NOTICE } : {};
-}
-
-/** How the target relates to the calling chat, for its tool row's link. */
-function relationTo(callerId: string, sessions: readonly SessionSummary[], target: Pick<SessionSummary, "id" | "lineage">): ThreadToolRelation {
-  if (target.lineage?.parentThreadId === callerId) return target.lineage.relation;
-  if (sessions.find((s) => s.id === callerId)?.lineage?.parentThreadId === target.id) return "parent";
-  return "thread";
-}
-
-/** `threadRef` (§4.3): the session a chat caller's result names, for its tool row. External results carry none. */
-export function chatThreadRef(caller: ToolCaller, sessions: readonly SessionSummary[], target: Pick<SessionSummary, "id" | "title" | "lineage">): { threadRef?: ThreadToolReference } {
-  if (caller.kind !== "thread") return {};
-  return { threadRef: threadToolReference(target.id, target.title, relationTo(caller.threadId, sessions, target)) };
-}
-
-/**
- * A chat caller's result frame around a session's data: `notice` first, `threadRef` last, and what the two take of the
- * result in bytes — measured, so a long title (a 200-character CJK one is 600 bytes in `threadRef`) is budgeted for.
- */
-export function chatFrame(caller: ToolCaller, sessions: readonly SessionSummary[], target: Pick<SessionSummary, "id" | "title" | "lineage">): { before: { notice?: string }; after: { threadRef?: ThreadToolReference }; bytes: number } {
-  const before = chatNotice(caller, target.id);
-  const after = chatThreadRef(caller, sessions, target);
-  // The keys and a comma each beside the data they join: the measured object's braces cover the commas.
-  return { before, after, bytes: Object.keys(before).length + Object.keys(after).length > 0 ? resultBytes({ ...before, ...after }) : 0 };
-}
-
-/** `workspace/project`, or a phrase when the path is no project. */
-async function projectLabel(api: DaemonApi, projectPath: string): Promise<string> {
-  const project = await canonicalProject(api, projectPath);
-  return project ? `${project.workspace}/${project.name}` : "no project";
-}
-
-/**
- * The boundary card of a session-addressed call (§7.1: action, target project and session, the full text, settings),
- * composed from structured arguments — never the raw arguments (no inline attachment bytes).
- */
-export async function sessionCard(ctx: ScopeContext, sessionId: string, action: string, rows: { label: string; value: string }[] = [], sections: ApprovalPreviewSection[] = []): Promise<ApprovalPreview> {
-  const summary = await findSession(ctx.api, sessionId);
-  const where = await projectLabel(ctx.api, summary.projectPath);
-  const title = clipText(summary.title.replace(/\s+/g, " ").trim(), 80);
-  return {
-    title: `${agentName(ctx.caller)} wants to ${action} the chat "${title}" in ${where}`,
-    scopeLabel: `Project ${where}`,
-    sections: [
-      { kind: "fields", title: "Request", rows: [{ label: "Action", value: action }, { label: "Session", value: `${summary.title} · ${summary.id}` }, { label: "Project", value: where }, ...rows] },
-      ...sections
-    ]
-  };
-}
-
-/** The boundary card of a call naming a project (list or search in another project). */
-export async function projectCard(ctx: ScopeContext, project: string, action: string, rows: { label: string; value: string }[] = []): Promise<ApprovalPreview> {
-  const ref = await resolveProject(ctx.api, project);
-  const where = await projectLabel(ctx.api, ref.path);
-  return {
-    title: `${agentName(ctx.caller)} wants to ${action} ${where}`,
-    scopeLabel: `Project ${where}`,
-    sections: [{ kind: "fields", title: "Request", rows: [{ label: "Action", value: action }, { label: "Project", value: where }, ...rows] }]
-  };
-}
 
 // ---------------------------------------------------------------------------
 // Turn and goal state (shared by update_session and control_session)
@@ -585,7 +453,7 @@ const updateSession = defineTool({
         throw new ToolError("PERMISSION_DENIED", "A chat may change only its own title; ask the user to change its model, options, permission mode or account.");
       }
       // Never broader (§4.1): a chat it created may run in the caller's mode or a narrower one.
-      if (args.runtimeMode !== undefined && breadth(args.runtimeMode) > breadth(caller.runtimeMode)) {
+      if (args.runtimeMode !== undefined && !runtimeModesUpTo(caller.runtimeMode).includes(args.runtimeMode)) {
         throw new ToolError("PERMISSION_DENIED", `runtimeMode ${args.runtimeMode} is broader than this chat's ${caller.runtimeMode}; allowed: ${runtimeModesUpTo(caller.runtimeMode).join(", ")}.`);
       }
     }

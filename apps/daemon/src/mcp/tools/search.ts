@@ -11,7 +11,7 @@ import type { DaemonApi } from "../daemon-api.ts";
 import { ToolError, expectOk } from "../errors.ts";
 import { listSessions } from "../reads.ts";
 import { capText, clipText, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
-import { canonicalProjects, projectCard } from "./sessions.ts";
+import { canonicalProjects, projectCard } from "./session-access.ts";
 
 /**
  * A hit's title, in code points: the longest title create_session and update_session accept, so a title set through

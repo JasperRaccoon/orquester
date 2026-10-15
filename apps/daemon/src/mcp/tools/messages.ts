@@ -30,7 +30,7 @@ import { defineTool, MUTATING, type AnyOrquesterTool, type CallContext, type Sco
 import { NEW_SESSION, openedThreadRuntimeMode, runtimeModesUpTo } from "../gate/turn-policy.ts";
 import { asWaiter } from "../../agent-chat/waits.ts";
 import { MAX_RUNNING_SESSIONS_PER_PROJECT, optionsSchema, runtimeModeSchema } from "./sessions.ts";
-import { agentLabel, chatThreadRef, sessionCard, sessionClaim, threadCaller } from "./watch.ts";
+import { agentLabel, chatThreadRef, sessionCard, sessionClaim, threadCaller } from "./session-access.ts";
 
 /**
  * How long a needs-input the snapshot contradicts waits for the summary to move before looking again anyway: just
@@ -625,7 +625,7 @@ export const sendMessageTool = defineTool({
       { label: "Reply", value: args.reply ?? "wait" },
       ...(args.planMode ? [{ label: "Mode", value: "plan" }] : []),
       ...attachmentRows(args.attachments)
-    ], args.implementPlan ? undefined : args.text),
+    ], { text: args.implementPlan ? undefined : args.text }),
   annotations: MUTATING,
   resultKind: "json",
   async run(args, ctx) {
@@ -923,7 +923,7 @@ export const createSessionTool = defineTool({
     ];
     const sections: ApprovalPreviewSection[] = [{ kind: "fields", title: "Request", rows }];
     if (args.prompt !== undefined) sections.push({ kind: "text", title: "First message", text: args.prompt });
-    return { title: `${caller ? agentLabel(caller) : "An agent"} wants to open a chat in ${where}`, scopeLabel: `Project ${where}`, sections };
+    return { title: `${agentLabel(ctx.caller)} wants to open a chat in ${where}`, scopeLabel: `Project ${where}`, sections };
   },
   annotations: MUTATING,
   resultKind: "json",

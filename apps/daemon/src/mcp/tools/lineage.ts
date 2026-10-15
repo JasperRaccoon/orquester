@@ -16,7 +16,7 @@ import { listSessions, postIdempotent, readThread, requireChatSession } from "..
 import { clipText, MAX_ECHO_CHARS, toSafeToolError } from "../result.ts";
 import { chatDetail } from "../views.ts";
 import { defineTool, MUTATING, type AnyOrquesterTool, type ScopeClaim } from "../catalog/contract.ts";
-import { chatThreadRef, sessionCard, sessionClaim, threadCaller } from "./watch.ts";
+import { chatThreadRef, sessionCard, sessionClaim, threadCaller } from "./session-access.ts";
 import { MAX_RUNNING_SESSIONS_PER_PROJECT } from "./sessions.ts";
 
 // Every call goes through the daemon's own routes (agentChatRoutes.fork, .mergeBack, .mergeBackItem), so the GUI's
@@ -97,7 +97,7 @@ export const forkSessionTool = defineTool({
       ...(args.throughTurn !== undefined ? [{ label: "Through turn", value: String(args.throughTurn) }] : []),
       ...(args.messageId !== undefined ? [{ label: "At message", value: args.messageId }] : []),
       ...(args.title !== undefined ? [{ label: "Fork title", value: args.title }] : [])
-    ], undefined),
+    ]),
   annotations: MUTATING,
   resultKind: "json",
   async run(args, ctx) {
@@ -197,7 +197,7 @@ export const mergeBackSessionTool = defineTool({
     // Only a send reaches another chat: its parent (a fork lives in its parent's project, so this card is rare).
     const caller = threadCaller(ctx.caller);
     const parent = caller ? (await listSessions(ctx.api)).find((s) => s.id === caller.threadId)?.lineage?.parentThreadId : undefined;
-    return sessionCard(ctx, parent ?? args.sessionId ?? "", "merge a fork's result into", [], args.text);
+    return sessionCard(ctx, parent ?? args.sessionId ?? "", "merge a fork's result into", [], { text: args.text });
   },
   annotations: MUTATING,
   resultKind: "json",

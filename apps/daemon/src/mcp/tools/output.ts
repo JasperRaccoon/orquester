@@ -17,7 +17,8 @@ import { daemonError, ToolError } from "../errors.ts";
 import { requireChatSession } from "../reads.ts";
 import { clipText, MAX_ECHO_CHARS, MAX_RESULT_BYTES, resultBytes } from "../result.ts";
 import { defineTool, READ_ONLY, type AnyOrquesterTool } from "../catalog/contract.ts";
-import { chatFrame, sessionAmongTabs, sessionCard, sessionClaim, sessionIdField } from "./sessions.ts";
+import { chatFrame, sessionAmongTabs, sessionCard, sessionClaim } from "./session-access.ts";
+import { sessionIdField } from "./sessions.ts";
 
 /** A window's default size, in UTF-8 bytes of the text. */
 const DEFAULT_OUTPUT_BYTES = 40_000;
