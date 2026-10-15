@@ -160,6 +160,14 @@ export interface ApprovalPreview {
   workflowId?: string;
   /** `workflows` family raised by a saved-prompt edit a workflow references: never grantable. */
   workflowReferencedPrompt?: boolean;
+  /**
+   * `workflows` family: the OTHER workflows the call runs or wires in (sub-workflows, recursively).
+   * A grant covers the call only when the same grant also covers each of them (§7.6: a grant covers
+   * only workflows created or approved in that chat).
+   */
+  childWorkflowIds?: string[];
+  /** This call is never covered by a grant and its card offers none (e.g. a scope member that no longer resolves: fail closed). */
+  ungrantable?: boolean;
 }
 
 /** One card the executor asks the port to show and wait on. */

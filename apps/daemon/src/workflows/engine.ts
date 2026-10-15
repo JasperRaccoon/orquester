@@ -1882,6 +1882,16 @@ export function createWorkflowEngine(opts: WorkflowEngineOptions): WorkflowRunti
     async run(workflowId: string, request: RunWorkflowRequest): Promise<RunWorkflowResponse> {
       const workflow = store.get(workflowId);
       if (!workflow) throw new WorkflowEngineError(404, "WORKFLOW_NOT_FOUND", `No workflow with id "${workflowId}".`);
+      // The definition read here is the one the run freezes (`launch(workflow, …)`): checking its
+      // revision now is atomic with what runs.
+      if (request.expectedRevision !== undefined) {
+        if (typeof request.expectedRevision !== "number" || !Number.isInteger(request.expectedRevision) || request.expectedRevision < 0) {
+          throw new WorkflowEngineError(400, "INVALID_REQUEST", "expectedRevision must be a non-negative integer.");
+        }
+        if (workflow.revision !== request.expectedRevision) {
+          throw new WorkflowEngineError(409, "REVISION_CONFLICT", `The workflow is at revision ${workflow.revision}, not ${request.expectedRevision}.`);
+        }
+      }
       const problems = validationErrors(workflow);
       if (problems) throw new WorkflowEngineError(400, "INVALID_WORKFLOW", `The workflow has errors: ${problems[0]!.message}`, problems);
       let payload: WorkflowTriggerPayload = { kind: "manual", input: request.input ?? null };

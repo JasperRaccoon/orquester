@@ -233,3 +233,23 @@ test("the grant never covers a change whose union leaves the caller's project, a
   assert.deepEqual(secret.card.secretFields, [{ key: "value", label: "Value of TOKEN" }]);
   assert.ok(!JSON.stringify(r.runtime.approvals.list("me")).includes("typed-by-user"));
 });
+
+test("no escape through sub-workflows: wiring the user's (disabled) workflow into a granted one, and running it, both card until that workflow is granted too", async (t) => {
+  const r = await rig(t);
+  const created = ok((await r.carded("create_workflow", fixer, { decision: "approve", grant: "chat" })).result);
+  const id = created.workflowId as string;
+  r.backend.serve(id);
+  const theirs = r.backend.seed("Theirs");
+  assert.equal(theirs.enabled, false);
+  // The edit that wires it in: a card (the grant covers the parent, not the child), its warning naming the disabled child.
+  const wire = await r.carded("update_workflow", { workflowId: id, revision: 0, ops: [{ op: "add_node", node: { type: "workflow", name: "Call", config: { workflowId: theirs.id } } }, { op: "connect", source: "Fix", target: "Call" }] }, { decision: "approve" });
+  ok(wire.result);
+  assert.ok(wire.card.sections.some((s) => s.kind === "warning" && /DISABLED workflow "Theirs"/.test(s.text)));
+  assert.deepEqual(r.workflowGrant()[0]!.workflowIds, [id], "approve-once did not widen the grant");
+  // Running the parent now runs the user's workflow: a card every time.
+  const run = await r.carded("run_workflow", { workflowId: id, revision: 1 }, { decision: "deny" });
+  assert.equal(codeOf(run.result), "APPROVAL_DENIED");
+  // Once the user grants the child explicitly in this chat, the same grant covers both.
+  ok((await r.carded("run_workflow", { workflowId: theirs.id, revision: theirs.revision }, { decision: "approve", grant: "chat" })).result);
+  ok(await r.uncarded("run_workflow", { workflowId: id, revision: 1 }));
+});

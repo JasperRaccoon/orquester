@@ -17,7 +17,9 @@
 
 import { createHash } from "node:crypto";
 import {
+  downstreamOf,
   isTriggerType,
+  reachableFromTriggers,
   triggerSummaryText,
   WORKFLOW_LIMITS,
   workflowRoutes,
@@ -218,7 +220,7 @@ export interface WorkflowUnion {
   /** Stored members that resolve to no project any more (the card names them; a run fails there). */
   missing: string[];
   /** Sub-workflows reached through `workflow` blocks (recursively), with their names; `name: null` = not found. */
-  children: { workflowId: string; name: string | null; revision?: number; project?: WorkflowProject }[];
+  children: { workflowId: string; name: string | null; revision?: number; enabled?: boolean; project?: WorkflowProject }[];
 }
 
 const emptyUnion = (): WorkflowUnion => ({ projects: [], pendingWorkspaces: [], missing: [], children: [] });
@@ -265,7 +267,7 @@ export async function workflowUnion(api: DaemonApi, definitions: readonly { id?:
         continue;
       }
       const child = (res.body as GetWorkflowResponse).workflow;
-      union.children.push({ workflowId: childId, name: child.name, revision: child.revision, project: child.project });
+      union.children.push({ workflowId: childId, name: child.name, revision: child.revision, enabled: child.enabled, project: child.project });
       const members = membersOf(child);
       await addMembers(api, union, members);
       next.push(...members.childIds);
@@ -273,6 +275,18 @@ export async function workflowUnion(api: DaemonApi, definitions: readonly { id?:
     frontier = next;
   }
   return union;
+}
+
+/**
+ * What a card needs for grants (§7.6): every sub-workflow the call runs must be covered by the same
+ * grant (`childWorkflowIds`), and a member that no longer resolves to a project can be judged by no
+ * grant — fail closed (`ungrantable`).
+ */
+export function unionGrantFields(union: WorkflowUnion): { childWorkflowIds?: string[]; ungrantable?: true } {
+  return {
+    ...(union.children.length > 0 ? { childWorkflowIds: union.children.map((child) => child.workflowId) } : {}),
+    ...(union.missing.length > 0 ? { ungrantable: true as const } : {})
+  };
 }
 
 /** The union as the gate judges it. */
@@ -412,10 +426,14 @@ export function workflowPin(workflowId: string): string {
   return `${WORKFLOW_PIN}${workflowId}`;
 }
 
-/** Pins for a preview: the workflow's revision (when it exists) and every prompt the card showed. */
-export function previewPins(workflow: { id: string; revision: number } | null, prompts: ReadonlyMap<string, ReferencedPrompt | null>): Record<string, string> {
+/**
+ * Pins for a preview: the workflow's revision (when it exists), every sub-workflow's revision (or
+ * `missing`) the union reached, and every prompt the card showed.
+ */
+export function previewPins(workflow: { id: string; revision: number } | null, prompts: ReadonlyMap<string, ReferencedPrompt | null>, union?: WorkflowUnion): Record<string, string> {
   const pins: Record<string, string> = {};
   if (workflow) pins[workflowPin(workflow.id)] = String(workflow.revision);
+  for (const child of union?.children ?? []) pins[workflowPin(child.workflowId)] = child.name === null || child.revision === undefined ? MISSING : String(child.revision);
   for (const [id, prompt] of prompts) pins[`${PROMPT_PIN}${id}`] = prompt ? prompt.sha256 : MISSING;
   return pins;
 }
@@ -434,10 +452,15 @@ export async function verifyPins(api: DaemonApi, pins: Readonly<Record<string, s
     if (!key.startsWith(WORKFLOW_PIN)) continue;
     const id = key.slice(WORKFLOW_PIN.length);
     const current = opts.current && opts.current.id === id ? opts.current : await readWorkflow(api, id).then((r) => r.workflow, (error) => {
-      if (error instanceof ToolError && error.code === "WORKFLOW_NOT_FOUND") throw stale("The workflow");
+      if (error instanceof ToolError && error.code === "WORKFLOW_NOT_FOUND") return null;
       throw error;
     });
-    if (String(current.revision) !== value) throw stale(`The workflow (revision ${value} → ${current.revision})`);
+    const what = opts.current && opts.current.id !== id ? `The sub-workflow ${id}` : "The workflow";
+    if (current === null) {
+      if (value !== MISSING) throw stale(what);
+      continue;
+    }
+    if (String(current.revision) !== value) throw stale(`${what} (revision ${value === MISSING ? "missing" : value} → ${current.revision})`);
   }
   const promptIds = Object.keys(pins).filter((key) => key.startsWith(PROMPT_PIN)).map((key) => key.slice(PROMPT_PIN.length));
   if (promptIds.length === 0) return;
@@ -486,11 +509,15 @@ export async function unionSections(api: DaemonApi, union: WorkflowUnion, caller
   for (const workspace of union.pendingWorkspaces) rows.push({ label: `A new temporary project in workspace ${workspace} (each run)`, value: identity(workspace), state: "flagged" });
   const sections: ApprovalPreviewSection[] = [{ kind: "fields", title: "Runs in these projects", rows: rows.length > 0 ? rows : [{ label: "Projects", value: "none" }] }];
   for (const child of union.children) {
-    sections.push(
-      child.name === null
-        ? { kind: "warning", level: "caution", text: `A block runs the workflow ${child.workflowId}, which does not exist: that block will fail.` }
-        : { kind: "text", title: "Sub-workflow", text: `Runs the workflow "${child.name}" (${child.workflowId}, revision ${child.revision ?? "?"}) in ${child.project ? workflowProjectLabel(child.project, api.workspacesDir) : "its project"}; its projects are counted above.` }
-    );
+    if (child.name === null) {
+      sections.push({ kind: "warning", level: "caution", text: `A block runs the workflow ${child.workflowId}, which does not exist: that block will fail.` });
+      continue;
+    }
+    // A disabled workflow still runs when another one calls it: say so where it cannot be missed.
+    if (child.enabled === false) {
+      sections.push({ kind: "warning", level: "danger", text: `A block runs the DISABLED workflow "${child.name}" (${child.workflowId}): being disabled does not stop it running as a sub-workflow.` });
+    }
+    sections.push({ kind: "text", title: "Sub-workflow", text: `Runs the workflow "${child.name}" (${child.workflowId}, revision ${child.revision ?? "?"}${child.enabled === false ? ", disabled" : ""}) in ${child.project ? workflowProjectLabel(child.project, api.workspacesDir) : "its project"}; its projects are counted above.` });
   }
   for (const path of union.missing) sections.push({ kind: "warning", level: "caution", text: `${path} is no longer a project: blocks that run there will fail.` });
   return sections;
@@ -742,13 +769,31 @@ export function graphDiff(before: Workflow, after: Workflow, workspacesDir: stri
     if (diff) diffs.push({ kind: "diff", title: `Block ${node.name}`, unifiedDiff: diff });
   }
   for (const node of before.nodes) if (!afterById.has(node.id)) items.push({ label: `${node.type} · ${node.name}`, change: "removed" });
+  // What can now run differently is part of the change: an added edge's target and everything
+  // downstream of it, every block whose reachability from a trigger changed, and everything
+  // downstream of a block whose routing (if/switch) or enabled state changed.
+  const withDownstream = (id: string) => {
+    if (!afterById.has(id)) return;
+    touched.add(id);
+    for (const next of downstreamOf(after, id)) touched.add(next);
+  };
+  const [reachBefore, reachAfter] = [reachableFromTriggers(before), reachableFromTriggers(after)];
+  for (const node of after.nodes) {
+    if (reachBefore.has(node.id) !== reachAfter.has(node.id)) touched.add(node.id);
+    const old = beforeById.get(node.id);
+    if (old && (node.type === "if" || node.type === "switch" || old.disabled !== node.disabled) && changedFields(old, node).length > 0) withDownstream(node.id);
+  }
   // Connections by block ids (a renamed block keeps its connections), labelled with names.
   const edgeKeys = (workflow: Workflow) => {
     const labels = connectionsOf(workflow);
     return new Map(workflow.edges.map((e, i) => [`${e.source}|${e.sourceHandle}|${e.target}`, labels[i]!]));
   };
   const [edgesBefore, edgesAfter] = [edgeKeys(before), edgeKeys(after)];
-  for (const [key, label] of edgesAfter) if (!edgesBefore.has(key)) items.push({ label: `connection ${label}`, change: "added" });
+  for (const [key, label] of edgesAfter) {
+    if (edgesBefore.has(key)) continue;
+    items.push({ label: `connection ${label}`, change: "added" });
+    withDownstream(key.split("|")[2]!);
+  }
   for (const [key, label] of edgesBefore) if (!edgesAfter.has(key)) items.push({ label: `connection ${label}`, change: "removed" });
   if (!same(before.project, after.project)) {
     items.push({ label: "project", change: "changed", detail: `${workflowProjectLabel(before.project, workspacesDir)} → ${workflowProjectLabel(after.project, workspacesDir)}` });

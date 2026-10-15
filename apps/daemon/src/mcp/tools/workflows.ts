@@ -18,6 +18,7 @@ import { z } from "zod";
 import { WORKFLOW_NODE_TYPES, WORKFLOW_SECRET_MAX_VALUE_BYTES, WORKFLOW_SECRET_NAME_PATTERN } from "@orquester/config";
 import {
   applyWorkflowPatch,
+  approvalPreviewBytes,
   createWorkflowFromRequest,
   EXPRESSION_PREVIEW_LIMITS,
   isRunActive,
@@ -87,6 +88,7 @@ import {
   validateDefinition,
   verifyPins,
   workflowError,
+  unionGrantFields,
   workflowFields,
   workflowPin,
   workflowProjectLabel,
@@ -917,7 +919,8 @@ const createWorkflow = defineTool({
       title: `${agentLabel(ctx.caller)} wants to create the workflow "${draft.name}"${draft.enabled ? " and enable it" : ""}`,
       scopeLabel: unionLabel(union),
       sections,
-      pins: previewPins(null, prompts)
+      pins: previewPins(null, prompts, union),
+      ...unionGrantFields(union)
     };
   },
   annotations: MUTATING,
@@ -994,7 +997,9 @@ const updateWorkflow = defineTool({
       scopeLabel: unionLabel(union),
       sections,
       workflowId: current.id,
-      pins: previewPins(current, prompts)
+      pins: previewPins(current, prompts, union),
+      // A grant covers the edit only if it covers every sub-workflow it wires in (§7.6).
+      ...unionGrantFields(union)
     };
   },
   annotations: MUTATING,
@@ -1078,7 +1083,8 @@ const deleteWorkflow = defineTool({
         ...(await unionSections(api, union, ctx.caller))
       ],
       workflowId: workflow.id,
-      pins: previewPins(workflow, new Map())
+      pins: previewPins(workflow, new Map()),
+      ...(union.missing.length > 0 ? { ungrantable: true } : {})
     };
   },
   annotations: DESTRUCTIVE,
@@ -1184,6 +1190,30 @@ async function runHome(ctx: ScopeContext, runId: string, writes: boolean): Promi
   return claim({ ...home, reads: "metadata", writes });
 }
 
+const stalePreview = (message: string) => new ToolError("PREVIEW_STALE", `${message} Re-read it (get_workflow) and call again.`);
+
+/** A run definition too big to show whole on a run card falls back to an outline (under the 1 MiB preview cap). */
+const RUN_CARD_DEFINITION_BYTES = 768 * 1024;
+
+/**
+ * A started run that froze another revision, or whose definition could not be read back: cancel it
+ * and say truthfully what happened — including a cancel that failed.
+ */
+async function refuseStartedRun(api: DaemonApi, runId: string, asked: number, ran: number | undefined, approved: boolean): Promise<never> {
+  const cancel = await api.request("POST", workflowRoutes.runCancel(runId)).catch(() => null);
+  const outcome = cancel === null || cancel.status >= 500
+    ? `it could NOT be cancelled (the cancel failed): cancel it with cancel_workflow_run {runId: "${runId}"}`
+    : cancel.status >= 400
+      ? "it had already ended"
+      : "it was cancelled";
+  const detail = { runId, cancelled: cancel !== null && cancel.status < 400 };
+  if (ran === undefined) {
+    throw new ToolError("RUN_UNVERIFIED", `Run ${runId} started, but its definition could not be checked against revision ${asked}, so ${outcome}.`, detail);
+  }
+  const message = `The workflow changed (revision ${asked} → ${ran}) as run ${runId} started; ${outcome}.`;
+  throw approved ? new ToolError("PREVIEW_STALE", `${message} Re-read it (get_workflow) and call again.`, detail) : new ToolError("REVISION_CONFLICT", message, detail);
+}
+
 /** The revision a run must start from; a mismatch before any card is the caller's stale read. */
 function revisionConflict(current: number, asked: number): ToolError {
   return workflowError({ status: 409, body: { error: { code: "REVISION_CONFLICT", message: `The workflow is at revision ${current}, not ${asked}` } } });
@@ -1219,7 +1249,16 @@ const runWorkflow = defineTool({
     if (workflow.revision !== args.revision) throw revisionConflict(workflow.revision, args.revision);
     const union = await workflowUnion(api, [workflow]);
     const prompts = await resolveSavedPrompts(api, savedPromptIdsOf(workflow), union.projects);
-    const blocks = workflow.nodes.filter((node) => node.type !== "note").map((node) => `${node.type} · ${node.name}${node.disabled ? " (disabled)" : ""}`);
+    // The definition that will run, in full: a card only opens for a workflow no grant covers —
+    // one this chat neither created nor was granted (often the user's own, or an external client's).
+    let blocks = definitionSections(workflow, prompts, api.workspacesDir);
+    if (approvalPreviewBytes(blocks) > RUN_CARD_DEFINITION_BYTES) {
+      const outline = workflow.nodes.filter((node) => node.type !== "note").map((node) => `${node.type} · ${node.name}${node.disabled ? " (disabled)" : ""}`);
+      blocks = [
+        { kind: "warning", level: "caution", text: `The definition is too large to show in full here; the run executes revision ${workflow.revision} exactly. get_workflow shows every block.` },
+        { kind: "text", title: "Blocks", text: outline.join("\n") || "none" }
+      ];
+    }
     const sections: ApprovalPreviewSection[] = [
       {
         kind: "fields",
@@ -1234,10 +1273,7 @@ const runWorkflow = defineTool({
       },
       { kind: "code", title: "Input ({{ trigger.input }})", language: "json", text: args.input === undefined ? "null" : JSON.stringify(args.input, null, 2) },
       ...(await unionSections(api, union, ctx.caller)),
-      { kind: "text", title: "Blocks", text: blocks.join("\n") || "none" },
-      ...(prompts.size > 0
-        ? [{ kind: "fields" as const, title: "Saved prompts its agents use (read when each block starts)", rows: [...prompts].map(([id, prompt]) => ({ label: prompt ? prompt.title : id, value: prompt ? `${prompt.body.length} characters` : "missing — that block fails", ...(prompt ? {} : { state: "flagged" as const }) })) }]
-        : []),
+      ...blocks,
       ...problemSections(problems)
     ];
     return {
@@ -1245,7 +1281,9 @@ const runWorkflow = defineTool({
       scopeLabel: unionLabel(union),
       sections,
       workflowId: workflow.id,
-      pins: { [workflowPin(workflow.id)]: String(workflow.revision) }
+      pins: previewPins(workflow, prompts, union),
+      // A grant covers the run only if it covers every sub-workflow the run calls (§7.6).
+      ...unionGrantFields(union)
     };
   },
   annotations: MUTATING,
@@ -1253,26 +1291,28 @@ const runWorkflow = defineTool({
   async run(args, ctx) {
     const { api, signal } = ctx;
     const { workflow } = await readWorkflow(api, args.workflowId);
-    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { current: workflow });
+    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { current: workflow, hintProjects: (await workflowUnion(api, [workflow])).projects });
     if (workflow.revision !== args.revision) throw revisionConflict(workflow.revision, args.revision);
     // Tap the bus before starting, so a run that ends before the POST answers is still heard.
     const tap = args.wait ? new RunEndTap(api) : null;
     try {
-      const body = { ...(args.input !== undefined ? { input: args.input } : {}), ...(args.force ? { force: true } : {}) };
-      const started = expectWorkflowOk<RunWorkflowResponse>(await api.request("POST", workflowRoutes.run(args.workflowId), { body }));
+      // The engine refuses atomically, before any block starts, unless the workflow is still at this revision.
+      const body = { expectedRevision: args.revision, ...(args.input !== undefined ? { input: args.input } : {}), ...(args.force ? { force: true } : {}) };
+      const res = await api.request("POST", workflowRoutes.run(args.workflowId), { body });
+      if (res.status >= 400) {
+        const error = workflowError(res);
+        if (ctx.approval && error.code === "REVISION_CONFLICT") throw stalePreview("The workflow changed after the user approved the card; no run started.");
+        throw error;
+      }
+      const started = res.body as RunWorkflowResponse;
       if (started.runId === null || started.skipped) {
         return { runId: null, skipped: started.skipped ?? "overlap", message: "Not run: a run of this workflow is already active and its overlap policy skipped this one. Pass force:true to run anyway, or watch the active run (get_workflow_runs {workflowId})." };
       }
-      // The run froze the definition it started with: it must be the revision asked for (and
-      // approved). An edit that landed between the check above and the start is cancelled at once.
+      // Defence in depth: the run froze the definition it started with. One that is not the revision
+      // asked for (or approved), or that cannot be checked, is cancelled at once (fail closed).
       const first = await readRun(api, started.runId).catch(() => null);
       const ran = first?.definition?.revision;
-      if (typeof ran === "number" && ran !== args.revision) {
-        await api.request("POST", workflowRoutes.runCancel(started.runId)).catch(() => undefined);
-        throw ctx.approval
-          ? new ToolError("PREVIEW_STALE", `The workflow changed (revision ${args.revision} → ${ran}) as the run started: run ${started.runId} was cancelled. Re-read it and call again.`)
-          : revisionConflict(ran, args.revision);
-      }
+      if (ran !== args.revision) await refuseStartedRun(api, started.runId, args.revision, ran, ctx.approval !== undefined);
       if (!tap) return { runId: started.runId, status: "started", revision: args.revision, next: "get_workflow_runs {runId, waitSeconds} watches it; run_workflow with wait:true waits for the end." };
       const { run, ended } = await waitForRunEnd(api, tap, started.runId, { timeoutMs: args.timeoutSeconds * 1_000, signal });
       if (!run) return { runId: started.runId, finished: false, timedOut: true, next: "get_workflow_runs {runId, waitSeconds} watches it." };
@@ -1311,17 +1351,16 @@ async function logWindow(api: DaemonApi, run: WorkflowRun, block: WorkflowBlockR
 const getWorkflowRuns = defineTool({
   name: "get_workflow_runs",
   title: "Watch a workflow's runs",
-  description: "Watch and debug runs. {workflowId}: its runs, newest first (page with before). {runId}: its status and each block's status, handle, error, warnings, agent session and output (capped); waitSeconds first waits for it to end. {runId, nodeId}: one block's whole output paged by outputOffset (nextOffset), or its stdout/stderr (log; default: the tail). Secret values read «secret:NAME».",
+  description: "Watch/debug runs. {workflowId}: runs, newest first. {runId}: each block's status, error, session and output (capped); waitSeconds waits for the end. {runId, nodeId}: a block's whole output (outputOffset pages), or its stdout/stderr log (default: the tail). Secrets read «secret:NAME».",
   input: {
-    workflowId: z.string().min(1).optional().describe("List this workflow's runs."),
+    workflowId: z.string().min(1).optional().describe("List its runs."),
     runId: z.string().min(1).optional().describe("One run."),
-    nodeId: z.string().min(1).optional().describe("With runId: one block (id or name)."),
-    log: z.enum(["stdout", "stderr"]).optional().describe("With nodeId: read this log instead of the output."),
-    outputOffset: z.number().int().min(0).optional().describe("With nodeId: the byte offset to read from (the last nextOffset)."),
-    includeOutputs: z.boolean().default(true).describe("With runId: include block outputs."),
-    before: z.string().min(1).optional().describe("With workflowId: the last page's before."),
-    limit: z.number().int().min(1).max(50).default(20).describe("With workflowId: runs per page."),
-    waitSeconds: z.number().int().min(1).max(MAX_WAIT_SECONDS).optional().describe("With runId: wait up to this long for the run to end.")
+    nodeId: z.string().min(1).optional().describe("One block (id or name)."),
+    log: z.enum(["stdout", "stderr"]).optional().describe("Read this log, not the output."),
+    outputOffset: z.number().int().min(0).optional().describe("Byte offset (the last nextOffset)."),
+    before: z.string().min(1).optional().describe("Next page cursor."),
+    limit: z.number().int().min(1).max(50).default(20).describe("Runs per page."),
+    waitSeconds: z.number().int().min(1).max(MAX_WAIT_SECONDS).optional().describe("Wait this long for the run to end.")
   },
   audiences: ["external", "chat"],
   toolset: "reads",
@@ -1374,7 +1413,7 @@ const getWorkflowRuns = defineTool({
     } finally {
       tap?.close();
     }
-    if (args.nodeId === undefined) return runView(run, { includeOutputs: args.includeOutputs, extra: waited });
+    if (args.nodeId === undefined) return runView(run, { includeOutputs: true, extra: waited });
     const block = findBlock(run, args.nodeId);
     const result: Record<string, unknown> = { ...waited, run: runSummaryView(run), block: blockView(block) };
     const room = Math.min(OUTPUT_WINDOW_BYTES, WORKFLOW_RESULT_BUDGET - resultBytes(result) - 200);

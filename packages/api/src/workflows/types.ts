@@ -646,6 +646,12 @@ export interface RunWorkflowRequest {
   usePinned?: boolean;
   /** Ignore the overlap policy (the UI's "run anyway"). */
   force?: boolean;
+  /**
+   * Refuse with 409 `REVISION_CONFLICT`, before any block starts, unless the workflow is at this
+   * revision — the run then executes exactly that definition (the MCP's `run_workflow {revision}`;
+   * unified MCP design 2026-10-15 §4.1, §7.2). Absent: whatever revision is current.
+   */
+  expectedRevision?: number;
 }
 export interface RunWorkflowResponse {
   runId: string | null;

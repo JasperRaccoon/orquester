@@ -300,13 +300,13 @@ test("run_workflow maps run/overlap answers, needs the revision, and sends input
   api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
   api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(definition(api)) } });
   assert.equal((await call(api, "run_workflow", { workflowId: "wf-1", revision: 7, input: { ticket: "PROJ-1" } })).runId, "run-1");
-  assert.deepEqual(api.calls.find((c) => c.path === "/api/workflows/wf-1/run")!.body, { input: { ticket: "PROJ-1" } });
+  assert.deepEqual(api.calls.find((c) => c.path === "/api/workflows/wf-1/run")!.body, { expectedRevision: 7, input: { ticket: "PROJ-1" } });
   api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: null, skipped: "overlap" } });
   const skipped = await call(api, "run_workflow", { workflowId: "wf-1", revision: 7 });
   assert.equal(skipped.runId, null);
   assert.equal(skipped.skipped, "overlap");
   await call(api, "run_workflow", { workflowId: "wf-1", revision: 7, force: true });
-  assert.deepEqual(api.calls.at(-1)!.body, { force: true });
+  assert.deepEqual(api.calls.filter((c) => c.path === "/api/workflows/wf-1/run").at(-1)!.body, { expectedRevision: 7, force: true });
   await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7, timeoutSeconds: 601 }), "INVALID_ARGUMENT");
   await rejects(call(api, "run_workflow", { workflowId: "wf-1" }), "INVALID_ARGUMENT", /revision/);
   const runsBefore = api.calls.filter((c) => c.path === "/api/workflows/wf-1/run").length;
@@ -405,9 +405,7 @@ test("get_workflow_runs {runId} fits outputs and {runId, nodeId} pages whole Uni
   assert.deepEqual(blocks[1]!.output, { done: true });
   assert.equal(blocks[1]!.outputTruncated, true);
   assert.match(String(result.outputNote), /get_workflow_runs \{runId, nodeId\}/);
-  const bare = await call(api, "get_workflow_runs", { runId: "run-1", includeOutputs: false });
-  assert.deepEqual((bare.blocks as { nodeId: string }[]).map((block) => block.nodeId), ["a", "b"]);
-  assert.ok((bare.blocks as { output?: unknown }[]).every((block) => block.output === undefined));
+  await rejects(call(api, "get_workflow_runs", { runId: "run-1", includeOutputs: false }), "INVALID_ARGUMENT", /includeOutputs/);
   let text = "";
   let offset = 0;
   for (let page = 0; page < 10; page += 1) {
@@ -795,7 +793,7 @@ test("PREVIEW_STALE: the workflow edited while its update or run card waited —
   port.answerWith({ outcome: "approved", approvalId: "" });
   api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(definition(api, { revision: 9 })) } });
   api.on("POST", "/api/workflow-runs/run-1/cancel", { status: 200, body: { cancelled: true } });
-  await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port }), "PREVIEW_STALE", /run-1 was cancelled/);
+  await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port }), "PREVIEW_STALE", /run run-1 started; it was cancelled/);
   assert.ok(api.calls.some((c) => c.path === "/api/workflow-runs/run-1/cancel"));
   // A patch refused for its revision after the card is PREVIEW_STALE too.
   api.on("POST", "/api/workflows/wf-1/patch", failure(409, "REVISION_CONFLICT", "Stale"));
@@ -899,6 +897,91 @@ test("workflow-owned callers get no Admin (ADMIN_NOT_AVAILABLE, no card); planni
   }
   assert.equal(port.cards.length, 0);
   assert.equal((await call(api, "create_workflow", { ...draft(), dryRun: true }, { who: chat(api, { workflowOwned: true }), port })).dryRun, true);
+});
+
+test("run_workflow fails closed after the start: an unreadable run is cancelled, a failed cancel is reported truthfully, the engine's refusal after a card is PREVIEW_STALE", async (t) => {
+  const api = await sandbox(t);
+  serveDefinition(api);
+  api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
+  api.on("GET", "/api/workflow-runs/run-1", { status: 500, body: null });
+  api.on("POST", "/api/workflow-runs/run-1/cancel", { status: 200, body: { cancelled: true } });
+  const unread = await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }), "RUN_UNVERIFIED", /could not be checked against revision 7, so it was cancelled/);
+  assert.deepEqual(unread.detail, { runId: "run-1", cancelled: true });
+  api.on("POST", "/api/workflow-runs/run-1/cancel", { status: 503, body: null });
+  const stuck = await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }), "RUN_UNVERIFIED", /could NOT be cancelled.*cancel_workflow_run/);
+  assert.deepEqual(stuck.detail, { runId: "run-1", cancelled: false });
+  // The engine's own atomic check (expectedRevision) after a card.
+  api.on("POST", "/api/workflows/wf-1/run", failure(409, "REVISION_CONFLICT", "The workflow is at revision 8, not 7."));
+  await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port: new FakeApprovalPort() }), "PREVIEW_STALE", /no run started/);
+  await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }), "REVISION_CONFLICT");
+});
+
+test("a run card shows the definition that will run in full, and pins every sub-workflow's revision (PREVIEW_STALE when one changes)", async (t) => {
+  const api = await sandbox(t);
+  let child = definition(api, { id: "wf-child", name: "Child", enabled: false, revision: 3 });
+  api.on("GET", "/api/workflows/wf-child", () => ({ status: 200, body: { workflow: child, problems: [] } }));
+  const parent = definition(api, { nodes: [...definition(api).nodes, { id: "s", name: "Sub", type: "workflow", position: { x: 0, y: 0 }, config: { workflowId: "wf-child" } }] as Workflow["nodes"] });
+  serveDefinition(api, parent);
+  api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(parent) } });
+  const port = new FakeApprovalPort(() => {
+    child = { ...child, revision: 4 };
+    return { outcome: "approved", approvalId: "" };
+  });
+  await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port }), "PREVIEW_STALE", /sub-workflow wf-child \(revision 3 → 4\)/);
+  assert.ok(!api.calls.some((c) => c.path === "/api/workflows/wf-1/run"), "no run started");
+  const card = port.cards[0]!;
+  assert.ok(card.sections.some((s) => s.kind === "code" && s.title === "Code · Work" && s.text.includes("return 1")), "block contents in full");
+  assert.ok(card.sections.some((s) => s.kind === "warning" && s.level === "danger" && /DISABLED workflow "Child"/.test(s.text)));
+  assert.equal(card.workflowId, "wf-1");
+});
+
+test("grants fail closed on a union member that no longer resolves, and cover a sub-workflow only when the same grant covers it", async (t) => {
+  const api = await sandbox(t);
+  const broken = definition(api, { nodes: [...definition(api).nodes, { id: "g", name: "Gone", type: "code", position: { x: 0, y: 0 }, config: { source: "1" }, projectOverride: join(api.workspacesDir, "acme", "removed") }] as Workflow["nodes"] });
+  serveDefinition(api, broken);
+  api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(broken) } });
+  const port = new FakeApprovalPort().grant({ family: "workflows", scope: "chat", threadId: "me", projectPath: api.own, workflowIds: ["wf-1"] });
+  await call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port });
+  assert.equal(port.cards.length, 1, "a missing member: never covered by the grant");
+  assert.deepEqual(port.cards[0]!.grantOptions, []);
+  // A sub-workflow the grant does not cover → card; covered by the same grant → none.
+  const child = definition(api, { id: "wf-child", name: "Child" });
+  api.on("GET", "/api/workflows/wf-child", { status: 200, body: { workflow: child, problems: [] } });
+  const parent = definition(api, { nodes: [...definition(api).nodes, { id: "s", name: "Sub", type: "workflow", position: { x: 0, y: 0 }, config: { workflowId: "wf-child" } }] as Workflow["nodes"] });
+  serveDefinition(api, parent);
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(parent) } });
+  await call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port });
+  assert.equal(port.cards.length, 2, "the child is not in the grant");
+  assert.deepEqual(port.cards[1]!.grantOptions, ["chat"]);
+  port.file.grants[0]!.workflowIds = ["wf-1", "wf-child"];
+  await call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port });
+  assert.equal(port.cards.length, 2, "parent and child covered by the same grant: no card");
+});
+
+test("an update card shows in full what the change makes run: an added edge's target and its downstream, newly reachable blocks, a re-routed if's branches", async (t) => {
+  const api = await sandbox(t);
+  const base = definition(api, {
+    nodes: [
+      ...definition(api).nodes,
+      { id: "x", name: "Dormant", type: "shell", position: { x: 0, y: 0 }, config: { script: "rm -rf build", env: [] } },
+      { id: "y", name: "After", type: "code", position: { x: 0, y: 0 }, config: { source: "return 'after'" } },
+      { id: "i", name: "Gate", type: "if", position: { x: 0, y: 0 }, config: { combine: "all", rules: [{ left: "{{ input }}", op: "isTrue" }] } },
+      { id: "z", name: "Branch", type: "code", position: { x: 0, y: 0 }, config: { source: "return 'branch'" } }
+    ] as Workflow["nodes"],
+    edges: [...definition(api).edges, { id: "xy", source: "x", sourceHandle: "success", target: "y" }, { id: "bi", source: "b", sourceHandle: "success", target: "i" }, { id: "iz", source: "i", sourceHandle: "true", target: "z" }]
+  });
+  serveDefinition(api, base);
+  const port = new FakeApprovalPort({ outcome: "denied", approvalId: "" });
+  await exec(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "connect", source: "Start", target: "Dormant" }] }, { who: chat(api), port });
+  const shown = (card: (typeof port.cards)[number]) => card.sections.filter((s) => s.kind === "code" || s.kind === "fields").map((s) => ("title" in s ? s.title : ""));
+  const first = shown(port.cards[0]!);
+  assert.ok(first.includes("Shell (bash) · Dormant"), "the newly wired block in full");
+  assert.ok(first.includes("Code · After"), "its downstream in full");
+  assert.ok(!first.includes("Code · Branch"));
+  await exec(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "update_node", node: "Gate", set: { config: { rules: [{ left: "true", op: "isTrue" }] } } }] }, { who: chat(api), port });
+  assert.ok(shown(port.cards[1]!).includes("Code · Branch"), "a re-routed if shows its branches in full");
 });
 
 // ---------------------------------------------------------------------------

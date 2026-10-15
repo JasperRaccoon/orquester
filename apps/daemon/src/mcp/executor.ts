@@ -49,6 +49,7 @@ import type {
   ApprovalPreview,
   ApprovalRequest,
   Audience,
+  GrantQuery,
   CallContext,
   ScopeClaim,
   ScopeContext,
@@ -378,8 +379,8 @@ async function passCard(
 
   // A grant covers the call without a card (full-access, non workflow-owned callers only; §7.6).
   // Grants are recorded for the caller's canonical project: without one, none can match (skip the read).
-  if (port && ownProject !== null) {
-    const grant = await port.findGrant({
+  if (port && ownProject !== null && preview?.ungrantable !== true) {
+    const query: GrantQuery = {
       family,
       callerRuntimeMode: caller.runtimeMode,
       workflowOwned: caller.workflowOwned,
@@ -391,7 +392,15 @@ async function passCard(
       ...(decision.targetProjectPath ? { targetProjectPath: decision.targetProjectPath } : {}),
       ...(preview?.workflowId ? { workflowId: preview.workflowId } : {}),
       ...(preview?.workflowReferencedPrompt ? { workflowReferencedPrompt: true } : {})
-    });
+    };
+    let grant = await port.findGrant(query);
+    // Every other workflow the call runs (sub-workflows) must be covered by that same grant.
+    for (const child of grant ? (preview?.childWorkflowIds ?? []) : []) {
+      if ((await port.findGrant({ ...query, workflowId: child }))?.id !== grant!.id) {
+        grant = null;
+        break;
+      }
+    }
     if (grant) {
       return { kind: "passed", approval: { outcome: "granted", grantId: grant.id, ...(preview?.pins ? { pins: { ...preview.pins } } : {}) }, preview, family, frozenArgs };
     }
@@ -418,7 +427,7 @@ async function passCard(
   const grantOptions =
     // A grant is recorded for the caller's canonical project: none without one (findGrant never
     // honours projectPath ""); a cross-project grant needs its single target.
-    ownProject === null || (decision.approvalKind === "boundary" && decision.family === "cross-project" && !decision.targetProjectPath)
+    ownProject === null || preview?.ungrantable === true || (decision.approvalKind === "boundary" && decision.family === "cross-project" && !decision.targetProjectPath)
       ? []
       : grantOptionsFor({
           family,
