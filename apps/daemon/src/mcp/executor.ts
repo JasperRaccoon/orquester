@@ -312,6 +312,7 @@ async function execute(deps: ExecutorDeps, call: { name: string; arguments: unkn
       approval = outcome.approval;
       card = { preview: outcome.preview, family: outcome.family };
       args = outcome.frozenArgs;
+      await recordChildrenInGrant(deps, caller, card, approval);
       // §13: the caller may have changed while the card waited (now planning, a narrower mode): the
       // gate re-runs on it, and the call proceeds as the caller is now. A card it would raise again
       // is the one the user just answered.
@@ -508,6 +509,30 @@ async function afterApprovedRun(
   await port
     .recordWorkflowInGrant({ threadId: caller.threadId, callerProjectPath: caller.projectPath, workflowId, grantId })
     .catch((error) => console.error("[mcp] could not record a workflow in its grant", error instanceof Error ? error.message : "unknown error"));
+}
+
+/**
+ * A `workflows` card (not a create) the user APPROVED with a grant choice, for a workflow that runs
+ * sub-workflows (`preview.childWorkflowIds`, each named on the card): the grant the user made covers
+ * those children too, so the grant can ever take effect (§7.6, the grant rule above needs them all).
+ * Only an approval that names a `grantId` on a card with a `workflowId` — i.e. the user's explicit
+ * grant choice on that card; approving once never widens a grant (ruling).
+ */
+async function recordChildrenInGrant(
+  deps: ExecutorDeps,
+  caller: ThreadCaller,
+  card: { preview: ApprovalPreview | null; family: string },
+  approval: NonNullable<CallContext["approval"]>
+): Promise<void> {
+  const children = card.preview?.childWorkflowIds ?? [];
+  if (card.family !== "workflows" || !card.preview?.workflowId || approval.outcome !== "approved" || !approval.grantId || children.length === 0) return;
+  const port = deps.approvals === undefined ? executorPorts.approvals : deps.approvals;
+  if (!port) return;
+  for (const workflowId of children) {
+    await port
+      .recordWorkflowInGrant({ threadId: caller.threadId, callerProjectPath: caller.projectPath, workflowId, grantId: approval.grantId })
+      .catch((error) => console.error("[mcp] could not record a sub-workflow in its grant", error instanceof Error ? error.message : "unknown error"));
+  }
 }
 
 /** `request_toolset`'s card (spec §9.3): kind/family `toolset`, never a grant; refused for workflow-owned callers. */

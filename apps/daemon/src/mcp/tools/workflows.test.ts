@@ -793,7 +793,7 @@ test("PREVIEW_STALE: the workflow edited while its update or run card waited —
   port.answerWith({ outcome: "approved", approvalId: "" });
   api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(definition(api, { revision: 9 })) } });
   api.on("POST", "/api/workflow-runs/run-1/cancel", { status: 200, body: { cancelled: true } });
-  await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port }), "PREVIEW_STALE", /run run-1 started; it was cancelled/);
+  await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port }), "PREVIEW_STALE", /run run-1 started, after the user approved the card; it was cancelled/);
   assert.ok(api.calls.some((c) => c.path === "/api/workflow-runs/run-1/cancel"));
   // A patch refused for its revision after the card is PREVIEW_STALE too.
   api.on("POST", "/api/workflows/wf-1/patch", failure(409, "REVISION_CONFLICT", "Stale"));
@@ -982,6 +982,49 @@ test("an update card shows in full what the change makes run: an added edge's ta
   assert.ok(!first.includes("Code · Branch"));
   await exec(api, "update_workflow", { workflowId: "wf-1", revision: 7, ops: [{ op: "update_node", node: "Gate", set: { config: { rules: [{ left: "true", op: "isTrue" }] } } }] }, { who: chat(api), port });
   assert.ok(shown(port.cards[1]!).includes("Code · Branch"), "a re-routed if shows its branches in full");
+});
+
+test("a run card too large to show whole: measured as the executor measures it, an outline with a red warning, the prompts listed, the input cut — never grantable", async (t) => {
+  const api = await sandbox(t);
+  const big = "x".repeat(400 * 1024);
+  const huge = definition(api, { nodes: [
+    ...definition(api).nodes,
+    ...["A", "B", "C"].map((name) => ({ id: name, name, type: "code", position: { x: 0, y: 0 }, config: { source: big } })),
+    { id: "p", name: "Ask", type: "agent", position: { x: 0, y: 0 }, config: { prompt: { kind: "saved", promptId: "p1" }, chain: [{ agent: "claude", model: "opus" }] } }
+  ] as Workflow["nodes"] });
+  serveDefinition(api, huge);
+  api.on("GET", "/api/saved-prompts", { status: 200, body: { prompts: [{ id: "p1", title: "Triage", body: "Look.", projectPath: null }] } });
+  api.on("POST", "/api/workflows/wf-1/run", { status: 200, body: { runId: "run-1" } });
+  api.on("GET", "/api/workflow-runs/run-1", { status: 200, body: { run: runRecord(huge) } });
+  // A grant that would cover wf-1: an outline card is never covered.
+  const port = new FakeApprovalPort().grant({ family: "workflows", scope: "chat", threadId: "me", projectPath: api.own, workflowIds: ["wf-1"] });
+  const input = { blob: "y".repeat(100 * 1024) };
+  const result = await call(api, "run_workflow", { workflowId: "wf-1", revision: 7, input }, { who: chat(api), port });
+  assert.equal(result.runId, "run-1");
+  const card = port.cards[0]!;
+  assert.ok(card, "a card opened despite the grant");
+  assert.deepEqual(card.grantOptions, []);
+  assert.deepEqual(card.sections[0], { kind: "warning", level: "danger", text: "This workflow is too large to show here — open it in Workflows to review every block before approving." });
+  assert.ok(!card.sections.some((s) => s.kind === "code" && s.title.startsWith("Code · ")), "no block bodies");
+  assert.match(sectionText(card.sections), /code · A.*code · B.*code · C/);
+  assert.match(sectionText(card.sections), /"label":"Triage","value":"5 characters"/);
+  const shownInput = card.sections.find((s) => s.kind === "code" && s.title.startsWith("Input")) as { text: string; partial?: boolean };
+  assert.equal(shownInput.partial, true);
+  assert.ok(shownInput.text.length < JSON.stringify(input, null, 2).length);
+  // A smaller one is shown whole, covered by the grant.
+  serveDefinition(api, definition(api));
+  await call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port });
+  assert.equal(port.cards.length, 1, "the whole-card run is covered by the grant");
+});
+
+test("PREVIEW_STALE wording tells a grant pass from a card approval", async (t) => {
+  const api = await sandbox(t);
+  let reads = 0;
+  api.on("GET", "/api/workflows/wf-1", () => ({ status: 200, body: { workflow: definition(api, { revision: (reads += 1) >= 3 ? 8 : 7 }), problems: [] } }));
+  const port = new FakeApprovalPort().grant({ family: "workflows", scope: "chat", threadId: "me", projectPath: api.own, workflowIds: ["wf-1"] });
+  const error = await rejects(call(api, "run_workflow", { workflowId: "wf-1", revision: 7 }, { who: chat(api), port }), "PREVIEW_STALE", /The workflow \(revision 7 → 8\) changed after this chat's grant allowed the call/);
+  assert.doesNotMatch(error.message, /approved the card/);
+  assert.equal(port.cards.length, 0);
 });
 
 // ---------------------------------------------------------------------------

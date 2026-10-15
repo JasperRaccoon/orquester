@@ -438,16 +438,30 @@ export function previewPins(workflow: { id: string; revision: number } | null, p
   return pins;
 }
 
-const stale = (what: string) =>
-  new ToolError("PREVIEW_STALE", `${what} changed after the user approved the card; nothing was done. Re-read it (get_workflow) and call again: the user approves what will run.`);
+/** How a gated call passed: a card the user approved, or this chat's grant (no card). */
+export type PassedBy = "approved" | "granted";
+
+/** "after the user approved the card" / "after this chat's grant allowed the call". */
+export function passedPhrase(via: PassedBy | undefined): string {
+  return via === "granted" ? "after this chat's grant allowed the call" : "after the user approved the card";
+}
+
+const stale = (what: string, via: PassedBy | undefined) =>
+  new ToolError("PREVIEW_STALE", `${what} changed ${passedPhrase(via)}; nothing was done. Re-read it (get_workflow) and call again: what was allowed is what runs.`);
 
 /**
  * Re-verify a card's pins immediately before the write (§7.2): the workflow's revision, then each
  * shown prompt's body hash. Any mismatch is `PREVIEW_STALE`, nothing written. `current` is the
  * definition the caller just read (it saves a read); prompts are looked up in `hintProjects` first.
  */
-export async function verifyPins(api: DaemonApi, pins: Readonly<Record<string, string>> | undefined, opts: { current?: { id: string; revision: number }; hintProjects?: readonly string[] } = {}): Promise<void> {
+export async function verifyPins(
+  api: DaemonApi,
+  pins: Readonly<Record<string, string>> | undefined,
+  opts: { current?: { id: string; revision: number }; hintProjects?: readonly string[]; via?: PassedBy } = {}
+): Promise<void> {
   if (!pins) return;
+  // The workflow the call is about: the one read, else the first workflow pin (`previewPins` writes it first).
+  const parentId = opts.current?.id ?? Object.keys(pins).find((key) => key.startsWith(WORKFLOW_PIN))?.slice(WORKFLOW_PIN.length);
   for (const [key, value] of Object.entries(pins)) {
     if (!key.startsWith(WORKFLOW_PIN)) continue;
     const id = key.slice(WORKFLOW_PIN.length);
@@ -455,19 +469,19 @@ export async function verifyPins(api: DaemonApi, pins: Readonly<Record<string, s
       if (error instanceof ToolError && error.code === "WORKFLOW_NOT_FOUND") return null;
       throw error;
     });
-    const what = opts.current && opts.current.id !== id ? `The sub-workflow ${id}` : "The workflow";
+    const what = id === parentId ? "The workflow" : `The sub-workflow ${id}`;
     if (current === null) {
-      if (value !== MISSING) throw stale(what);
+      if (value !== MISSING) throw stale(what, opts.via);
       continue;
     }
-    if (String(current.revision) !== value) throw stale(`${what} (revision ${value === MISSING ? "missing" : value} → ${current.revision})`);
+    if (String(current.revision) !== value) throw stale(`${what} (revision ${value === MISSING ? "missing" : value} → ${current.revision})`, opts.via);
   }
   const promptIds = Object.keys(pins).filter((key) => key.startsWith(PROMPT_PIN)).map((key) => key.slice(PROMPT_PIN.length));
   if (promptIds.length === 0) return;
   const now = await resolveSavedPrompts(api, promptIds, opts.hintProjects ?? []);
   for (const id of promptIds) {
     const prompt = now.get(id) ?? null;
-    if ((prompt ? prompt.sha256 : MISSING) !== pins[`${PROMPT_PIN}${id}`]) throw stale(`The saved prompt ${prompt ? `"${clipText(prompt.title, 80)}"` : id}`);
+    if ((prompt ? prompt.sha256 : MISSING) !== pins[`${PROMPT_PIN}${id}`]) throw stale(`The saved prompt ${prompt ? `"${clipText(prompt.title, 80)}"` : id}`, opts.via);
   }
 }
 
@@ -518,6 +532,18 @@ export async function unionSections(api: DaemonApi, union: WorkflowUnion, caller
       sections.push({ kind: "warning", level: "danger", text: `A block runs the DISABLED workflow "${child.name}" (${child.workflowId}): being disabled does not stop it running as a sub-workflow.` });
     }
     sections.push({ kind: "text", title: "Sub-workflow", text: `Runs the workflow "${child.name}" (${child.workflowId}, revision ${child.revision ?? "?"}${child.enabled === false ? ", disabled" : ""}) in ${child.project ? workflowProjectLabel(child.project, api.workspacesDir) : "its project"}; its projects are counted above.` });
+  }
+  if (union.children.length > 0) {
+    // A chat grant chosen on this card covers these too (§7.6): each is named, with the revision it is at.
+    sections.push({
+      kind: "fields",
+      title: "Workflows it also runs (a chat grant chosen here covers them too)",
+      rows: union.children.map((child) => ({
+        label: child.name === null ? child.workflowId : `${child.name} (${child.workflowId})`,
+        value: child.name === null ? "missing" : `revision ${child.revision ?? "?"}${child.enabled === false ? ", disabled" : ""}`,
+        state: "flagged" as const
+      }))
+    });
   }
   for (const path of union.missing) sections.push({ kind: "warning", level: "caution", text: `${path} is no longer a project: blocks that run there will fail.` });
   return sections;

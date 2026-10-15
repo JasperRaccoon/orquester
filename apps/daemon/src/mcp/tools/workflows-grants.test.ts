@@ -249,7 +249,14 @@ test("no escape through sub-workflows: wiring the user's (disabled) workflow int
   // Running the parent now runs the user's workflow: a card every time.
   const run = await r.carded("run_workflow", { workflowId: id, revision: 1 }, { decision: "deny" });
   assert.equal(codeOf(run.result), "APPROVAL_DENIED");
-  // Once the user grants the child explicitly in this chat, the same grant covers both.
-  ok((await r.carded("run_workflow", { workflowId: theirs.id, revision: theirs.revision }, { decision: "approve", grant: "chat" })).result);
+  // Approving once covers nothing more.
+  ok((await r.carded("run_workflow", { workflowId: id, revision: 1 }, { decision: "approve" })).result);
+  assert.deepEqual(r.workflowGrant()[0]!.workflowIds, [id]);
+  // A grant chosen on that card names the child (with its revision) and covers it too: from then on, no card.
+  const granted = await r.carded("run_workflow", { workflowId: id, revision: 1 }, { decision: "approve", grant: "chat" });
+  ok(granted.result);
+  const named = granted.card.sections.find((s) => s.kind === "fields" && /a chat grant chosen here covers them too/.test(s.title ?? "")) as { rows: { label: string; value: string }[] };
+  assert.deepEqual(named.rows.map((row) => [row.label, row.value]), [[`Theirs (${theirs.id})`, `revision ${theirs.revision}, disabled`]]);
+  assert.deepEqual(r.workflowGrant()[0]!.workflowIds, [id, theirs.id]);
   ok(await r.uncarded("run_workflow", { workflowId: id, revision: 1 }));
 });

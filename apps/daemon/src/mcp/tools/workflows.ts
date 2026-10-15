@@ -19,6 +19,7 @@ import { WORKFLOW_NODE_TYPES, WORKFLOW_SECRET_MAX_VALUE_BYTES, WORKFLOW_SECRET_N
 import {
   applyWorkflowPatch,
   approvalPreviewBytes,
+  TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES,
   createWorkflowFromRequest,
   EXPRESSION_PREVIEW_LIMITS,
   isRunActive,
@@ -76,6 +77,7 @@ import {
   graphDiff,
   homeScope,
   isRecord,
+  passedPhrase,
   previewPins,
   problemSections,
   problemsView,
@@ -93,6 +95,7 @@ import {
   workflowPin,
   workflowProjectLabel,
   workflowUnion,
+  type PassedBy,
   type ReferencedPrompt,
   type WorkflowUnion
 } from "./workflow-preview.ts";
@@ -934,7 +937,7 @@ const createWorkflow = defineTool({
       return dryRunResult(await validateDefinition(api, plan.draft), union);
     }
     // What the user approved is what is saved: the prompts the card showed are unchanged (§7.2).
-    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { hintProjects: plan.draft ? (await workflowUnion(api, [plan.draft])).projects : [] });
+    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { via: ctx.approval.outcome, hintProjects: plan.draft ? (await workflowUnion(api, [plan.draft])).projects : [] });
     const res = await api.request("POST", workflowRoutes.create, { body: plan.request });
     if (res.status >= 400) throw indexedCreateError(workflowError(res), args.nodes.length);
     return writeResult(api, res.body as WorkflowWriteResponse, "created");
@@ -1016,13 +1019,13 @@ const updateWorkflow = defineTool({
     const ops = await convertOps(api, args.ops);
     if (ctx.approval?.pins) {
       const { workflow: current } = await readWorkflow(api, args.workflowId);
-      await verifyPins(api, ctx.approval.pins, { current, hintProjects: (await workflowUnion(api, [current])).projects });
+      await verifyPins(api, ctx.approval.pins, { current, via: ctx.approval.outcome, hintProjects: (await workflowUnion(api, [current])).projects });
     }
     const res = await api.request("POST", workflowRoutes.patch(args.workflowId), { body: { revision: args.revision, ops } });
     if (res.status >= 400) {
       const error = workflowError(res);
       // Edited between the card and this write: the user approved another revision (§7.2).
-      if (ctx.approval && error.code === "REVISION_CONFLICT") throw new ToolError("PREVIEW_STALE", "The workflow changed after the user approved the card; nothing was saved. Re-read it (get_workflow) and call again.");
+      if (ctx.approval && error.code === "REVISION_CONFLICT") throw new ToolError("PREVIEW_STALE", `The workflow changed ${passedPhrase(ctx.approval.outcome)}; nothing was saved. Re-read it (get_workflow) and call again.`);
       throw await indexedPatchError(api, args.workflowId, args.revision, ops, error);
     }
     return writeResult(api, res.body as WorkflowWriteResponse, "updated");
@@ -1091,7 +1094,7 @@ const deleteWorkflow = defineTool({
   resultKind: "json",
   async run(args, ctx) {
     const { api } = ctx;
-    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins);
+    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { via: ctx.approval.outcome });
     expectWorkflowOk(await api.request("DELETE", workflowRoutes.workflow(args.workflowId)));
     return { deleted: true, workflowId: args.workflowId };
   }
@@ -1192,14 +1195,14 @@ async function runHome(ctx: ScopeContext, runId: string, writes: boolean): Promi
 
 const stalePreview = (message: string) => new ToolError("PREVIEW_STALE", `${message} Re-read it (get_workflow) and call again.`);
 
-/** A run definition too big to show whole on a run card falls back to an outline (under the 1 MiB preview cap). */
-const RUN_CARD_DEFINITION_BYTES = 768 * 1024;
+/** The input JSON a run card shows when the definition is too large to show (the outline card). */
+const RUN_CARD_INPUT_CHARS = 64 * 1024;
 
 /**
  * A started run that froze another revision, or whose definition could not be read back: cancel it
  * and say truthfully what happened — including a cancel that failed.
  */
-async function refuseStartedRun(api: DaemonApi, runId: string, asked: number, ran: number | undefined, approved: boolean): Promise<never> {
+async function refuseStartedRun(api: DaemonApi, runId: string, asked: number, ran: number | undefined, via: PassedBy | undefined): Promise<never> {
   const cancel = await api.request("POST", workflowRoutes.runCancel(runId)).catch(() => null);
   const outcome = cancel === null || cancel.status >= 500
     ? `it could NOT be cancelled (the cancel failed): cancel it with cancel_workflow_run {runId: "${runId}"}`
@@ -1210,8 +1213,8 @@ async function refuseStartedRun(api: DaemonApi, runId: string, asked: number, ra
   if (ran === undefined) {
     throw new ToolError("RUN_UNVERIFIED", `Run ${runId} started, but its definition could not be checked against revision ${asked}, so ${outcome}.`, detail);
   }
-  const message = `The workflow changed (revision ${asked} → ${ran}) as run ${runId} started; ${outcome}.`;
-  throw approved ? new ToolError("PREVIEW_STALE", `${message} Re-read it (get_workflow) and call again.`, detail) : new ToolError("REVISION_CONFLICT", message, detail);
+  const message = `The workflow changed (revision ${asked} → ${ran}) as run ${runId} started${via ? `, ${passedPhrase(via)}` : ""}; ${outcome}.`;
+  throw via ? new ToolError("PREVIEW_STALE", `${message} Re-read it (get_workflow) and call again.`, detail) : new ToolError("REVISION_CONFLICT", message, detail);
 }
 
 /** The revision a run must start from; a mismatch before any card is the caller's stale read. */
@@ -1249,49 +1252,57 @@ const runWorkflow = defineTool({
     if (workflow.revision !== args.revision) throw revisionConflict(workflow.revision, args.revision);
     const union = await workflowUnion(api, [workflow]);
     const prompts = await resolveSavedPrompts(api, savedPromptIdsOf(workflow), union.projects);
+    const runFields: ApprovalPreviewSection = {
+      kind: "fields",
+      title: "Run",
+      rows: [
+        { label: "Workflow", value: `${workflow.name} (${workflow.id})` },
+        { label: "Revision", value: String(workflow.revision) },
+        { label: "Enabled", value: workflow.enabled ? "yes" : "no (a manual run works anyway)" },
+        { label: "Project", value: workflowProjectLabel(workflow.project, api.workspacesDir) },
+        ...(args.force ? [{ label: "Overlap", value: "force: runs even if a run is active", state: "flagged" as const }] : [])
+      ]
+    };
+    const inputText = args.input === undefined ? "null" : JSON.stringify(args.input, null, 2);
+    const inputTitle = "Input ({{ trigger.input }})";
+    const unionParts = await unionSections(api, union, ctx.caller);
+    const problemParts = problemSections(problems);
+    const title = `${agentLabel(ctx.caller)} wants to run the workflow "${workflow.name}"`;
+    const base = { title, scopeLabel: unionLabel(union), workflowId: workflow.id, pins: previewPins(workflow, prompts, union) };
     // The definition that will run, in full: a card only opens for a workflow no grant covers —
     // one this chat neither created nor was granted (often the user's own, or an external client's).
-    let blocks = definitionSections(workflow, prompts, api.workspacesDir);
-    if (approvalPreviewBytes(blocks) > RUN_CARD_DEFINITION_BYTES) {
-      const outline = workflow.nodes.filter((node) => node.type !== "note").map((node) => `${node.type} · ${node.name}${node.disabled ? " (disabled)" : ""}`);
-      blocks = [
-        { kind: "warning", level: "caution", text: `The definition is too large to show in full here; the run executes revision ${workflow.revision} exactly. get_workflow shows every block.` },
-        { kind: "text", title: "Blocks", text: outline.join("\n") || "none" }
-      ];
-    }
-    const sections: ApprovalPreviewSection[] = [
-      {
-        kind: "fields",
-        title: "Run",
-        rows: [
-          { label: "Workflow", value: `${workflow.name} (${workflow.id})` },
-          { label: "Revision", value: String(workflow.revision) },
-          { label: "Enabled", value: workflow.enabled ? "yes" : "no (a manual run works anyway)" },
-          { label: "Project", value: workflowProjectLabel(workflow.project, api.workspacesDir) },
-          ...(args.force ? [{ label: "Overlap", value: "force: runs even if a run is active", state: "flagged" as const }] : [])
-        ]
-      },
-      { kind: "code", title: "Input ({{ trigger.input }})", language: "json", text: args.input === undefined ? "null" : JSON.stringify(args.input, null, 2) },
-      ...(await unionSections(api, union, ctx.caller)),
-      ...blocks,
-      ...problemSections(problems)
+    const full: ApprovalPreviewSection[] = [
+      runFields,
+      { kind: "code", title: inputTitle, language: "json", text: inputText },
+      ...unionParts,
+      ...definitionSections(workflow, prompts, api.workspacesDir),
+      ...problemParts
     ];
-    return {
-      title: `${agentLabel(ctx.caller)} wants to run the workflow "${workflow.name}"`,
-      scopeLabel: unionLabel(union),
-      sections,
-      workflowId: workflow.id,
-      pins: previewPins(workflow, prompts, union),
-      // A grant covers the run only if it covers every sub-workflow the run calls (§7.6).
-      ...unionGrantFields(union)
-    };
+    // A grant covers the run only if it covers every sub-workflow the run calls (§7.6).
+    if (approvalPreviewBytes(full) <= TOOL_APPROVAL_FULL_PREVIEW_MAX_BYTES) return { ...base, sections: full, ...unionGrantFields(union) };
+    // Too large to show whole (measured as the executor measures the card): an outline the user is told
+    // to review elsewhere, never a grant (nothing seen, nothing standing), the input cut and marked.
+    const outline = workflow.nodes.filter((node) => node.type !== "note").map((node) => `${node.type} · ${node.name}${node.disabled ? " (disabled)" : ""}`);
+    const cutInput = clipText(inputText, RUN_CARD_INPUT_CHARS);
+    const compact: ApprovalPreviewSection[] = [
+      { kind: "warning", level: "danger", text: "This workflow is too large to show here — open it in Workflows to review every block before approving." },
+      runFields,
+      { kind: "code", title: inputTitle, language: "json", text: cutInput, ...(cutInput !== inputText ? { partial: true } : {}) },
+      ...unionParts,
+      { kind: "text", title: "Blocks", text: outline.join("\n") || "none" },
+      ...(prompts.size > 0
+        ? [{ kind: "fields" as const, title: "Saved prompts its agents use", rows: [...prompts].map(([id, prompt]) => ({ label: prompt ? prompt.title : id, value: prompt ? `${prompt.body.length} characters` : "missing — that block fails", ...(prompt ? {} : { state: "flagged" as const }) })) }]
+        : []),
+      ...problemParts
+    ];
+    return { ...base, sections: compact, ungrantable: true };
   },
   annotations: MUTATING,
   resultKind: "json",
   async run(args, ctx) {
     const { api, signal } = ctx;
     const { workflow } = await readWorkflow(api, args.workflowId);
-    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { current: workflow, hintProjects: (await workflowUnion(api, [workflow])).projects });
+    if (ctx.approval?.pins) await verifyPins(api, ctx.approval.pins, { current: workflow, via: ctx.approval.outcome, hintProjects: (await workflowUnion(api, [workflow])).projects });
     if (workflow.revision !== args.revision) throw revisionConflict(workflow.revision, args.revision);
     // Tap the bus before starting, so a run that ends before the POST answers is still heard.
     const tap = args.wait ? new RunEndTap(api) : null;
@@ -1301,7 +1312,7 @@ const runWorkflow = defineTool({
       const res = await api.request("POST", workflowRoutes.run(args.workflowId), { body });
       if (res.status >= 400) {
         const error = workflowError(res);
-        if (ctx.approval && error.code === "REVISION_CONFLICT") throw stalePreview("The workflow changed after the user approved the card; no run started.");
+        if (ctx.approval && error.code === "REVISION_CONFLICT") throw stalePreview(`The workflow changed ${passedPhrase(ctx.approval.outcome)}; no run started.`);
         throw error;
       }
       const started = res.body as RunWorkflowResponse;
@@ -1312,7 +1323,7 @@ const runWorkflow = defineTool({
       // asked for (or approved), or that cannot be checked, is cancelled at once (fail closed).
       const first = await readRun(api, started.runId).catch(() => null);
       const ran = first?.definition?.revision;
-      if (ran !== args.revision) await refuseStartedRun(api, started.runId, args.revision, ran, ctx.approval !== undefined);
+      if (ran !== args.revision) await refuseStartedRun(api, started.runId, args.revision, ran, ctx.approval?.outcome);
       if (!tap) return { runId: started.runId, status: "started", revision: args.revision, next: "get_workflow_runs {runId, waitSeconds} watches it; run_workflow with wait:true waits for the end." };
       const { run, ended } = await waitForRunEnd(api, tap, started.runId, { timeoutMs: args.timeoutSeconds * 1_000, signal });
       if (!run) return { runId: started.runId, finished: false, timedOut: true, next: "get_workflow_runs {runId, waitSeconds} watches it." };
