@@ -269,6 +269,10 @@ function fakeHost() {
     endlessHistory(): void {
       historyMode.endless = true;
     },
+    /** The index reaches turn 1 again (after {@link endlessHistory}). */
+    finiteHistory(): void {
+      historyMode.endless = false;
+    },
     /** Move the target's oldest turns below the snapshot's window (still in the index). */
     archive(id: string, count: number): void {
       const t = thread(id);
@@ -1717,6 +1721,45 @@ describe("final fix wave: re-delivery reads and closed targets", () => {
     assert.match(body, /replied, but it was closed before its reply could be delivered again/);
     assert.doesNotMatch(body, /closed before replying/);
     assert.equal(postsTo(again.host, "req").length, 1);
+    await again.cleanup();
+  });
+});
+
+describe("final fix wave follow-up: deferred releases and closed-after-reply answers", () => {
+  it("a release that lands while the history lookup backs off is saved: after a restart the reply is re-delivered exactly once", async () => {
+    const w = await world();
+    const res = await w.router.subscribe("tgt", request("wait"));
+    const waiting = w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    await idle(w);
+    w.host.settle("tgt", { reply: "Survives the back-off." });
+    assert.equal((await waiting).outcome, "replied");
+    await idle(w);
+    // The turn leaves the window and the index never reaches it: a second wait's lookup is
+    // inconclusive and starts the back-off (it hands nothing out).
+    w.host.archive("tgt", 1);
+    w.host.endlessHistory();
+    const second = await w.router.wait("tgt", res.subscriptionId, { timeoutSeconds: 60 });
+    assert.ok(second.outcome === "replied" && second.state === "failed", JSON.stringify(second));
+    const historyReads = w.host.historyReads();
+    // The call's result was lost: the release lands while the lookup backs off (no read runs).
+    assert.deepEqual(await w.router.release("tgt", res.subscriptionId), { released: false, state: "done" });
+    assert.equal(w.host.historyReads(), historyReads, "no lookup ran");
+    await idle(w);
+    const disk = JSON.parse(await readFile(w.replyFile, "utf8")) as { subscriptions: { id: string; released?: true; lostHandOuts?: number; rereads?: number }[] };
+    const saved = disk.subscriptions.find((sub) => sub.id === res.subscriptionId)!;
+    assert.equal(saved.released, true, "the tombstone is on disk");
+    assert.equal(saved.lostHandOuts, 1);
+    assert.equal(saved.rereads, undefined, "and no read was counted");
+    // The daemon restarts; the index is whole again.
+    await w.cleanup(false);
+    w.host.finiteHistory();
+    const again = await world({ dir: w.dir, host: w.host });
+    await idle(again);
+    assert.equal(parseThreadMessage(postsTo(again.host, "req")[0]!.body.input as string)?.body, "Survives the back-off.");
+    await again.router.recheckNow();
+    await again.router.release("tgt", res.subscriptionId);
+    await idle(again);
+    assert.equal(postsTo(again.host, "req").length, 1, "exactly once");
     await again.cleanup();
   });
 });

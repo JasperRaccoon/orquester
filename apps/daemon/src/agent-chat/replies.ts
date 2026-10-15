@@ -774,8 +774,12 @@ export class ReplyRouter implements DeliveryListener {
       else ({ result, read } = await this.readHandedOut(sub));
       if (this.outbox.deliveries.some((d) => d.subscriptionId === sub.id) || sub.state !== "done" || sub.ended !== "waiter") return false;
       if (!result) {
-        // A look that read nothing (the history lookup is backing off) is not a failed read.
-        if (!read) return false;
+        // A look that read nothing (the history lookup is backing off) is not a failed read — but the
+        // release's tombstone and holder count are saved now, so a restart still re-delivers it.
+        if (!read) {
+          await this.persist();
+          return false;
+        }
         sub.rereads = (sub.rereads ?? 0) + 1;
         if (sub.rereads >= MAX_REDELIVERY_READS) {
           sub.unreadable = true;
