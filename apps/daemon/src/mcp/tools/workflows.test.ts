@@ -838,7 +838,10 @@ test("set_workflow_secret from a chat: no value argument; the user types it into
   assert.deepEqual(card.grantOptions, [], "workflow secrets are never grantable, even in Full access");
   const put = api.calls.find((c) => c.method === "PUT")!;
   assert.deepEqual(put, { method: "PUT", path: "/api/workflow-secrets/JIRA_TOKEN", query: { workflowId: "wf-1" }, body: { value } });
-  assert.deepEqual(result, { set: true, name: "JIRA_TOKEN", scope: "workflow", workflowId: "wf-1" });
+  // The result carries the row's toolApproval reference (Task 6), never the value.
+  const { toolApproval, ...stored } = result as Record<string, unknown>;
+  assert.deepEqual(stored, { set: true, name: "JIRA_TOKEN", scope: "workflow", workflowId: "wf-1" });
+  assert.deepEqual([(toolApproval as { outcome?: string }).outcome, (toolApproval as { family?: string }).family], ["approved", "workflow-secrets"]);
   assert.ok(!JSON.stringify(result).includes(value) && !JSON.stringify(card).includes(value), "never in the result or the card");
   // A global secret's card says so; a delete asks for no value.
   await call(api, "set_workflow_secret", { name: "OLD", delete: true }, { who: chat(api), port });

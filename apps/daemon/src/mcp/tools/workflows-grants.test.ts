@@ -179,7 +179,13 @@ test("create → run → fix → run → delete under ONE chat grant: the approv
   assert.equal(fixed.revision, 1);
   ok(await r.uncarded("run_workflow", { workflowId: id, revision: 1 }));
   ok(await r.uncarded("update_workflow", { workflowId: id, revision: 1, ops: [{ op: "set_enabled", enabled: true }] }));
-  assert.deepEqual(ok(await r.uncarded("delete_workflow", { workflowId: id, confirm: true })), { deleted: true, workflowId: id });
+  // The result carries the row's toolApproval reference (Task 6): allowed by the chat grant.
+  const { toolApproval: deleteRef, ...deleted } = ok(await r.uncarded("delete_workflow", { workflowId: id, confirm: true }));
+  assert.deepEqual(deleted, { deleted: true, workflowId: id });
+  assert.deepEqual(
+    [(deleteRef as { outcome?: string }).outcome, (deleteRef as { grantScope?: string }).grantScope],
+    ["granted", "chat"]
+  );
   assert.equal(r.opened.length, 0, "no further card was opened");
   assert.equal(r.runtime.approvals.list("me").length, 0);
   assert.equal(r.backend.runs(), 2);
