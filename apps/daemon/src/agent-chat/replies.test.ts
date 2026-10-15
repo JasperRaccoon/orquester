@@ -88,6 +88,9 @@ function fakeHost() {
   const raceOnNextPost = new Set<string>();
   /** Full thread reads (snapshots) per session. */
   const snapshotReads = new Map<string, number>();
+  /** History pages read, and how the index behaves: `endless` never reaches turn 1. */
+  let historyReads = 0;
+  const historyMode = { endless: false };
 
   const thread = (id: string): FakeThread => {
     let t = threads.get(id);
@@ -147,7 +150,11 @@ function fakeHost() {
       }
       const history = /^\/api\/sessions\/([^/]+)\/history$/.exec(path);
       if (method === "GET" && history) {
+        historyReads += 1;
         const t = thread(decodeURIComponent(history[1]!));
+        if (historyMode.endless) {
+          return { status: 200, body: { threadId: history[1], turns: [], items: [], checkpoints: [], page: { beforeCursor: "more" }, seq: t.seq } };
+        }
         return {
           status: 200,
           body: {
@@ -258,6 +265,10 @@ function fakeHost() {
       raceOnNextPost.add(id);
     },
     snapshotReads: (id: string) => snapshotReads.get(id) ?? 0,
+    historyReads: () => historyReads,
+    endlessHistory(): void {
+      historyMode.endless = true;
+    },
     /** Move the target's oldest turns below the snapshot's window (still in the index). */
     archive(id: string, count: number): void {
       const t = thread(id);
@@ -1273,6 +1284,87 @@ describe("fix round 2", () => {
     w.host.settle("req", {});
     await settled(w);
     assert.equal(parseThreadMessage(postsTo(w.host, "req")[0]!.body.input as string)?.body, "Kept.");
+    await w.cleanup();
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 3
+// ---------------------------------------------------------------------------
+
+/** A settled turn of the target's own at a given time (the window's turns carry real times). */
+function oldTurn(host: Host, id: string, turnId: string, requestedAt: string): void {
+  host.thread(id).turns.push({ turnId, state: "completed", turnCount: null, requestedAt, startedAt: requestedAt, completedAt: requestedAt, assistantMessageId: null });
+}
+
+describe("fix round 3", () => {
+  it("a bound turn posted after the window's oldest turn and missing from it is lost at once — no history read", async () => {
+    const now = Date.parse("2026-10-15T10:00:00.000Z");
+    const w = await world({ now: () => new Date(now) });
+    oldTurn(w.host, "tgt", "older", "2026-10-15T08:00:00.000Z");
+    oldTurn(w.host, "tgt", "in-window", "2026-10-15T09:00:00.000Z");
+    w.host.archive("tgt", 1); // the window now starts at 09:00 and has older history below it
+    await w.router.subscribe("tgt", request("notify"));
+    await settled(w);
+    w.host.rewindLast("tgt");
+    await settled(w);
+    assert.match(parseThreadMessage(w.router.deliveries()[0]!.input)!.body, /lost track of the turn/);
+    assert.equal(w.host.historyReads(), 0);
+    await w.cleanup();
+  });
+
+  it("an inconclusive history lookup backs off instead of re-reading pages on every look", async () => {
+    let now = Date.parse("2026-10-15T10:00:00.000Z");
+    const host = fakeHost();
+    host.sessions.set("req", summary("req"));
+    host.sessions.set("tgt", summary("tgt"));
+    host.thread("req");
+    oldTurn(host, "tgt", "below", "2026-10-15T07:00:00.000Z");
+    oldTurn(host, "tgt", "window", "2026-10-15T09:30:00.000Z");
+    host.archive("tgt", 1);
+    host.endlessHistory();
+    // Posted BEFORE the window's oldest turn: its turn may be anywhere below — not conclusive.
+    const outbox = {
+      version: 1,
+      subscriptions: [
+        { id: "s-5", fromThreadId: "req", toThreadId: "tgt", commandId: "c-5", queueEntryId: "c-5", state: "notify", interactionMode: "default", exchange: { id: "ex-1", hop: 1 }, createdAt: "2026-10-15T09:00:00.000Z", posted: { commandId: "c-5", seq: 2, at: "2026-10-15T09:00:00.000Z", messageId: "msg-far-below" } }
+      ],
+      deliveries: []
+    };
+    const w = await world({ host, replyOutbox: JSON.stringify(outbox), now: () => new Date(now) });
+    await settled(w);
+    assert.equal(host.historyReads(), 5, "one lookup: five pages, no answer");
+    const look = async (): Promise<void> => {
+      (w.router as unknown as { seen: Map<string, string> }).seen.clear();
+      host.touch("tgt");
+      await settled(w);
+    };
+    await look();
+    assert.equal(host.historyReads(), 5, "within the backoff: no history read");
+    now += 61_000;
+    await look();
+    assert.equal(host.historyReads(), 10, "after it: one more lookup");
+    now += 61_000;
+    await look();
+    assert.equal(host.historyReads(), 10, "the delay doubled (2 min)");
+    assert.equal(w.router.deliveries().length, 0, "never declared lost while inconclusive");
+    await w.cleanup();
+  });
+
+  it("expiry drops the still-queued message: it never runs after the requester was told no reply comes", async () => {
+    let now = Date.parse("2026-10-15T10:00:00.000Z");
+    const w = await world({ now: () => new Date(now) });
+    w.host.userTurn("tgt");
+    const res = await w.router.subscribe("tgt", request("notify"));
+    assert.equal(w.queue.has(res.commandId), true);
+    now += 8 * 24 * 60 * 60 * 1000;
+    w.host.touch("tgt");
+    await settled(w);
+    assert.match(parseThreadMessage(w.router.deliveries()[0]!.input)!.body, /stopped waiting/);
+    assert.equal(w.queue.has(res.commandId), false, "the queued message is dropped");
+    w.host.settle("tgt", { reply: "the user's turn" });
+    await settled(w);
+    assert.equal(postsTo(w.host, "tgt").length, 0, "never delivered afterwards");
     await w.cleanup();
   });
 });

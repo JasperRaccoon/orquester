@@ -212,6 +212,9 @@ const MAX_IDEMPOTENCY_KEY_CHARS = 180;
 const MAX_WAIT_SECONDS = 600;
 /** History pages read looking for a bound turn below the snapshot's window. */
 const HISTORY_PAGES = 5;
+/** After an inconclusive history lookup, the next one waits this long, doubling up to the max. */
+export const HISTORY_RETRY_MIN_MS = 60_000;
+export const HISTORY_RETRY_MAX_MS = 60 * 60 * 1000;
 /** A subscription open this long ends with a notice and frees its slot (no reply came). */
 export const MAX_SUBSCRIPTION_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 /** A posted message whose turn could not be identified (no readable receipt events, no fallback match) for this long ends with a notice. */
@@ -242,6 +245,8 @@ export class ReplyRouter implements DeliveryListener {
   private readonly handing = new Set<string>();
   /** `claimed-by-router` subscriptions being resumed right now. */
   private readonly resuming = new Set<string>();
+  /** Per subscription, when an inconclusive history lookup may run again (and its current delay). */
+  private readonly historyBackoff = new Map<string, { nextAt: number; delayMs: number }>();
   /** Per target, the summary fields last evaluated on: an event that changes none of them reads nothing. */
   private readonly seen = new Map<string, string>();
 
@@ -803,8 +808,35 @@ export class ReplyRouter implements DeliveryListener {
     if (messageId === undefined && sub.turnId === undefined) return { kind: "unknown" };
     const bounds = snap.history;
     if (!bounds || !bounds.hasOlder) return { kind: "absent" };
-    if (!bounds.indexed) return { kind: "unknown" };
-    let cursor = bounds.beforeCursor;
+    // Recency: the message was posted after the oldest turn the window still holds, so its turn
+    // would be in the window — its absence there is conclusive (a rewind), no history read.
+    const oldest = snap.turns[0]?.requestedAt;
+    const postedAt = sub.posted?.at;
+    if (oldest !== undefined && postedAt !== undefined && Date.parse(postedAt) >= Date.parse(oldest)) return { kind: "absent" };
+    // An inconclusive lookup is not repeated on every look: it backs off (1 min, doubling to 1 h).
+    const backoff = this.historyBackoff.get(sub.id);
+    const nowMs = this.now().getTime();
+    if (backoff && nowMs < backoff.nextAt) return { kind: "unknown" };
+    const outcome = await this.readHistoryFor(api, sub, bounds.indexed ? bounds.beforeCursor : null, bounds.indexed);
+    if (outcome.kind === "unknown") {
+      const delayMs = Math.min(backoff ? backoff.delayMs * 2 : HISTORY_RETRY_MIN_MS, HISTORY_RETRY_MAX_MS);
+      this.historyBackoff.set(sub.id, { nextAt: nowMs + delayMs, delayMs });
+    } else {
+      this.historyBackoff.delete(sub.id);
+    }
+    return outcome;
+  }
+
+  /** The history pages below the window, read for one bound turn (see {@link lookOutsideWindow}). */
+  private async readHistoryFor(
+    api: DaemonApi,
+    sub: Sub,
+    firstCursor: string | null,
+    indexed: boolean
+  ): Promise<{ kind: "found"; result: ReplyResult | null } | { kind: "absent" } | { kind: "unknown" }> {
+    if (!indexed) return { kind: "unknown" };
+    const messageId = sub.posted?.messageId;
+    let cursor = firstCursor;
     for (let page = 0; cursor !== null && page < HISTORY_PAGES; page += 1) {
       let body: ThreadHistoryPage;
       try {
@@ -878,6 +910,8 @@ export class ReplyRouter implements DeliveryListener {
     // Past the maximum age (§12.7): no reply came; the requester hears so and its slot is freed.
     for (const sub of this.openSubs().filter(open)) {
       if (this.ageMs(sub.createdAt) > MAX_SUBSCRIPTION_AGE_MS) {
+        // Its message, if still queued, never runs: the requester is told no reply will come.
+        if (!sub.posted) await this.opts.queue.drop(sub.queueEntryId ?? sub.commandId);
         const deliver = await this.claim(sub, { kind: "notice", text: this.noticeText("expired", sub) });
         await deliver();
       }
@@ -1222,6 +1256,7 @@ export class ReplyRouter implements DeliveryListener {
   }
 
   private finish(sub: Sub, ended: Ended): void {
+    this.historyBackoff.delete(sub.id);
     sub.state = "done";
     sub.ended = ended;
     sub.updatedAt = this.stamp();

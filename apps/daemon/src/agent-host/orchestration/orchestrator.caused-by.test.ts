@@ -134,6 +134,10 @@ describe("causedBy on turn commands", () => {
     };
     await host.orchestrator.command(threadId, "compact", { commandId: cmd() });
     await new Promise((resolve) => setImmediate(resolve));
+    // No turn is active (the first settled): only the compaction in flight makes it busy.
+    const read = await host.orchestrator.readThread(threadId);
+    assert.ok(read.kind === "snapshot");
+    assert.equal(read.thread.head.session.activeTurnId, null, "an activeTurnId-only check would let it through");
     await assert.rejects(
       host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "during compaction", ifIdle: true }),
       (error: unknown) => isAgentChatCommandError(error) && (error.detail as { reason?: unknown } | undefined)?.reason === "turn-not-idle"
@@ -142,7 +146,7 @@ describe("causedBy on turn commands", () => {
     await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "queued by the user" });
     await assert.rejects(
       host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "behind the queue", ifIdle: true }),
-      (error: unknown) => isAgentChatCommandError(error)
+      (error: unknown) => isAgentChatCommandError(error) && (error.detail as { reason?: unknown } | undefined)?.reason === "turn-not-idle"
     );
     releaseCompact();
     await host.settle();
