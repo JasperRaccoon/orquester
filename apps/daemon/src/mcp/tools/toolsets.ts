@@ -3,6 +3,7 @@
  * chat-only, in the locked `core` toolset — the agent-raisable one-click card "Claude asks to enable
  * <toolset> for this chat". Turning a toolset on is the user's act: the tool only asks.
  *
+ * - A workflow-owned chat is refused first (`PERMISSION_DENIED`), whatever the toolset (§5.4).
  * - Already on in this chat (`GET agentChatRoutes.agentTools(id)` `resolved`) → `{enabled: true}`
  *   at once, no card (§13). The port answers the same for a toolset it finds on (`approvalId: ""`).
  * - Otherwise the card goes through the executor's port (`ctx.requestToolsetCard`): kind and family
@@ -134,6 +135,10 @@ export const toolsetsFamily: readonly AnyOrquesterTool[] = [
       if (caller === null) throw new ToolError("TOOL_NOT_FOUND", `${REQUEST_TOOLSET_TOOL_NAME} is a chat tool.`);
       const toolset: ToolsetId = args.toolset;
 
+      // A workflow-owned chat never raises a toolset card, and is told so even for a toolset already on (§5.4).
+      if (caller.workflowOwned) {
+        throw new ToolError("PERMISSION_DENIED", "This chat runs inside an automated workflow, where nobody can approve a toolset.");
+      }
       // Already on: nothing to ask (§13).
       const before = await threadView(ctx, caller.threadId);
       if (before?.resolved.includes(toolset)) return enabled(toolset, before);

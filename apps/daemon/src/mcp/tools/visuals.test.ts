@@ -95,6 +95,7 @@ describe("visuals definitions", () => {
       "fits the frame to the page's height at each reader's width",
       "inside this chat's project",
       "transparent",
+      "overrides style preferences such as a fixed black page",
       "var(--radius)",
       "100vh",
       `${HTML_RENDER_COLUMN_WIDTH}px`,

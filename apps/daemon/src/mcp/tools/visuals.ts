@@ -45,12 +45,12 @@ export const HTML_RENDER_TOKEN_LINE = (() => {
 })();
 
 const PAGE_RULES =
-  'Write one self-contained document with inline <style> and <script>. Local images given as absolute paths (src="/abs/shot.png", CSS url(/abs/bg.webp), or a JS string) are inlined when inside this chat\'s project (≤ 10 MiB each, 25 MiB a page); remote http(s) URLs, such as a CDN chart library, load as-is.';
+  'Write one self-contained document with inline <style> and <script>. Local images by absolute path (src="/abs/a.png", CSS url() or a JS string) are inlined when inside this chat\'s project (≤ 10 MiB each, 25 MiB a page); remote http(s) URLs, such as a CDN chart library, load as-is.';
 
 const LAYOUT =
-  `Layout: a borderless frame on the thread's background, as wide as the reply column (${HTML_RENDER_COLUMN_WIDTH}px on desktop, wider if the reader widens chat, ~360px on phones), aligned with your text. Keep html, body and the outermost element transparent, fluid-width, with no horizontal padding, outer card, border or banner title. A box with its own background gets ≥ 16px padding and var(--radius) corners. Charts get fixed pixel heights. Content sets the height: no 100vh or height:100% on html or body.`;
+  `Layout: a borderless frame on the thread's background, as wide as the reply column (${HTML_RENDER_COLUMN_WIDTH}px on desktop, wider if the reader widens it, ~360px on phones), aligned with your text. Keep html, body and the outermost element transparent (this overrides style preferences such as a fixed black page), fluid-width, with no horizontal padding, outer card, border or banner title. A box with its own background gets ≥ 16px padding and var(--radius) corners. Charts get fixed px heights. Content sets the height: no 100vh or height:100% on html or body.`;
 
-const THEME = `Theme: CSS variables on :root (hex) that follow the user's theme and light/dark live: ${HTML_RENDER_TOKEN_LINE}. The base stylesheet sets html background, color and font from them, body margin 0, and hides the scrollbar; your CSS overrides it.`;
+const THEME = `Theme: CSS variables on :root (hex) that follow the user's theme and light/dark live: ${HTML_RENDER_TOKEN_LINE}. The base stylesheet sets html background, color and font from them, body margin 0 and no scrollbar; your CSS wins.`;
 
 const html = z.string().min(1).max(HTML_RENDER_MAX_HTML_CHARS).describe("A complete, self-contained HTML document.");
 
@@ -124,7 +124,7 @@ export const visualsFamily: readonly AnyOrquesterTool[] = [
   defineTool({
     name: HTML_RENDER_TOOL_NAME,
     title: "Render HTML",
-    description: `Show a finished HTML page (chart, table, diagram, collage, mockup) inline in this chat, above your final text reply; call it before writing that reply. The reader already sees the page, so the reply should not announce it, say where it is, or restate it. Preview with ${HTML_PREVIEW_TOOL_NAME} first. Orquester fits the frame to the page's height at each reader's width; a height below contentHeight caps it and the rest scrolls inside. ${PAGE_RULES} ${LAYOUT} ${THEME}`,
+    description: `Show a finished HTML page (chart, table, diagram, collage, mockup) inline in this chat, above your final text reply; call it before writing that reply. The reader already sees the page, so the reply should not announce it, point to it, or restate it. Preview with ${HTML_PREVIEW_TOOL_NAME} first. Orquester fits the frame to the page's height at each reader's width; a height below contentHeight caps it and the rest scrolls inside. ${PAGE_RULES} ${LAYOUT} ${THEME}`,
     input: {
       html,
       title: z.string().min(1).max(HTML_RENDER_MAX_TITLE_LENGTH).describe("Short name for the page."),

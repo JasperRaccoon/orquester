@@ -223,6 +223,11 @@ describe("request_toolset over the port double", () => {
     assert.equal(owned.code, "PERMISSION_DENIED");
     assert.match(owned.message, /automated workflow/);
     assert.equal(r.port.cards.length, 0);
+    // Even for a toolset already on: no "enabled" answer for a workflow-owned chat.
+    const alreadyOn = errorOf(await r.call({ toolset: "reads", reason: "list workflows" }, { caller: chatCaller({ workflowOwned: true }) }));
+    assert.equal(alreadyOn.code, "PERMISSION_DENIED");
+    assert.match(alreadyOn.message, /automated workflow/);
+    assert.equal(r.port.cards.length, 0);
     assert.equal(errorOf(await r.call({ toolset: "notes", reason: "todos" }, { approvals: null })).code, "PERMISSION_DENIED");
   });
 
