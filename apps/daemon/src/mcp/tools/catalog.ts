@@ -41,11 +41,22 @@ export function workspaceGitAccount(ws: WorkspaceSummary, accounts: readonly Acc
 
 interface ProjectRow { workspace: string; name: string; path: string; isArchived: boolean; lastInteractedAt?: string; openSessions: number; repoId?: string; current?: true; sameRepo?: true }
 
+/**
+ * Which workspaces a caller sees whole (coordinator ruling on §5.2 S13): an external or Full-access caller every one;
+ * a chat below Full access only its own workspace — another one only when it names it (`workspace`, carded by its
+ * scope) — and the rest as `excludedWorkspaces` counts. A chat with no project has no own workspace.
+ */
+function seesWorkspace(caller: ToolCaller, workspace: string, named: string | undefined): boolean {
+  if (caller.kind === "external" || caller.runtimeMode === "full-access") return true;
+  if (named !== undefined) return workspace === named;
+  return caller.projectPath !== "" && workspace === caller.workspace;
+}
+
 const listProjects = defineTool({
   name: "list_projects",
   title: "List projects",
   description: "Projects (workspace/name, path), recent first, with open-session counts. Clones of one repository share `repoId`; `workspaces` gives each one's git account. Pass workspace/name as other tools' `project`.",
-  chatNote: "`current`: this chat's project; `sameRepo`: its other clones.",
+  chatNote: "`current`: this chat's project; `sameRepo`: its clones. Below Full access, other workspaces are only counted.",
   input: {
     workspace: z.string().min(1).optional().describe("Only this workspace."),
     query: z.string().trim().min(1).max(200).optional().describe("Filter on workspace/name."),
@@ -54,8 +65,19 @@ const listProjects = defineTool({
   audiences: ["external", "chat"],
   toolset: "core",
   tier: "read",
-  // A discovery list over every workspace: global metadata (§5.2), never one project's.
-  scope: async () => ({ projects: [], sessions: [], reads: "metadata", writes: false, causesTurnIn: [] }),
+  /*
+   * A discovery list is global metadata (§5.2), except that a chat below Full access naming ANOTHER workspace reads that
+   * workspace's projects: their paths are the targets, so the gate raises the cross-workspace metadata card (S13).
+   */
+  async scope(args, { api, caller }) {
+    const none = { projects: [], sessions: [], reads: "metadata" as const, writes: false, causesTurnIn: [] };
+    if (caller.kind === "external" || caller.runtimeMode === "full-access" || args.workspace === undefined) return none;
+    if (caller.projectPath !== "" && args.workspace === caller.workspace) return none;
+    const read = await readWorkspace(api, args.workspace);
+    // An unknown or unreadable workspace reveals nothing here; `run` refuses or warns as for anyone.
+    if ("warning" in read) return none;
+    return { ...none, projects: read.projects.filter((p) => args.includeArchived || !p.isArchived).map((p) => p.path) };
+  },
   annotations: READ_ONLY,
   resultKind: "json",
   async run(args, { api, caller }) {
@@ -71,19 +93,29 @@ const listProjects = defineTool({
       if (!named) throw new ToolError("INVALID_ARGUMENT", `Unknown workspace "${args.workspace}". Workspaces: ${nameList(workspaces.map((ws) => ws.name))}.`);
       if (named.isArchived && !args.includeArchived) warnings.push(`Workspace "${named.name}" is archived; pass includeArchived: true to list its projects.`);
     }
-    const listed = workspaces.filter((ws) => (args.workspace === undefined || ws.name === args.workspace) && (!ws.isArchived || args.includeArchived));
+    const shownArchive = (ws: WorkspaceSummary) => !ws.isArchived || args.includeArchived;
+    const listed = workspaces.filter((ws) => (args.workspace === undefined || ws.name === args.workspace) && shownArchive(ws) && seesWorkspace(caller, ws.name, args.workspace));
+    const excluded = args.workspace === undefined
+      ? workspaces.filter((ws) => shownArchive(ws) && !seesWorkspace(caller, ws.name, undefined))
+        .map((ws) => ({ workspace: ws.name, projectCount: Math.max(0, ws.projectCount - (args.includeArchived ? 0 : ws.archivedProjectCount ?? 0)) }))
+      : [];
     const reads = await Promise.all(listed.map((ws) => readWorkspace(api, ws.name)));
     const needle = args.query?.toLowerCase();
     // The caller's own project, by name (its path is canonical, a listing's may be spelt through a link).
     const own = caller.kind === "thread" && caller.projectPath ? { workspace: caller.workspace, name: basename(caller.projectPath) } : null;
+    // Its repository, whatever the filters list: read from its own workspace when that is not listed.
     let ownRepoId: string | undefined;
+    if (own !== null) {
+      const at = listed.findIndex((ws) => ws.name === own.workspace);
+      const ownRead = at >= 0 ? reads[at]! : await readWorkspace(api, own.workspace);
+      if (!("warning" in ownRead)) ownRepoId = ownRead.projects.find((p) => p.name === own.name)?.repoId;
+    }
     const projects: ProjectRow[] = [];
     for (const [i, ws] of listed.entries()) {
       const read = reads[i]!;
       if ("warning" in read) { warnings.push(read.warning); continue; }
       for (const p of read.projects) {
         const isOwn = own !== null && ws.name === own.workspace && p.name === own.name;
-        if (isOwn && p.repoId) ownRepoId = p.repoId;
         if (p.isArchived && !args.includeArchived) continue;
         if (needle !== undefined && !`${ws.name}/${p.name}`.toLowerCase().includes(needle)) continue;
         const r = recent.find((x) => x.path === p.path);
@@ -93,18 +125,18 @@ const listProjects = defineTool({
           ...(r ? { lastInteractedAt: r.lastInteractedAt } : {}),
           openSessions: sessions.filter((s) => s.projectPath === p.path).length,
           ...(p.repoId ? { repoId: p.repoId } : {}),
-          ...(isOwn ? { current: true as const } : {})
+          ...(isOwn ? { current: true as const } : {}),
+          ...(!isOwn && ownRepoId !== undefined && p.repoId === ownRepoId ? { sameRepo: true as const } : {})
         });
       }
     }
-    if (ownRepoId !== undefined) for (const row of projects) if (row.current !== true && row.repoId === ownRepoId) row.sameRepo = true;
     projects.sort((a, b) => {
       if (a.lastInteractedAt !== b.lastInteractedAt) { if (!a.lastInteractedAt) return 1; if (!b.lastInteractedAt) return -1; return a.lastInteractedAt < b.lastInteractedAt ? 1 : -1; }
       return `${a.workspace}/${a.name}`.localeCompare(`${b.workspace}/${b.name}`);
     });
     const shown = new Set(projects.map((row) => row.workspace));
     const workspaceRows = listed.filter((ws) => shown.has(ws.name)).map((ws) => ({ name: ws.name, ...(ws.isArchived ? { isArchived: true } : {}), gitAccount: workspaceGitAccount(ws, accounts) }));
-    return { projects, workspaces: workspaceRows, ...(warnings.length ? { warnings } : {}) };
+    return { projects, workspaces: workspaceRows, ...(excluded.length ? { excludedWorkspaces: excluded } : {}), ...(warnings.length ? { warnings } : {}) };
   }
 });
 

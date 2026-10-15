@@ -98,13 +98,16 @@ export function isoWeek(day: string): { week: string; from: string } {
 type CostRowView = { agent: string; model: string; inputTokens: number; outputTokens: number; cacheReadTokens: number; cacheWriteTokens: number; costUsd: number | null } & ({ day: string } | { week: string });
 
 /**
- * API-equivalent cost per agent and model, bucketed by UTC day or ISO week (UTC), over the last `days` UTC days. Unpriced
+ * API-equivalent cost per agent and model, bucketed by UTC day or ISO week (UTC), over the last `days` UTC days — for
+ * weeks, from the Monday of the first one (`since`: the first day counted). Unpriced
  * models count as $0 in the totals and keep `costUsd: null` on their rows. Over {@link MAX_COST_VIEW_BYTES} the rows lose
  * whole buckets, oldest first (`truncated`, `rowsDropped`); the totals still count every row.
  */
 export function costView(res: UsageTokensResponse, opts: { days: number; bucket: "day" | "week"; now: number }): Record<string, unknown> {
   const today = new Date(opts.now);
-  const start = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - (opts.days - 1))).toISOString().slice(0, 10);
+  const firstDay = new Date(Date.UTC(today.getUTCFullYear(), today.getUTCMonth(), today.getUTCDate() - (opts.days - 1))).toISOString().slice(0, 10);
+  // Weeks are whole: the window starts on the Monday of its first week, so no week is a partial sum (`since` says so).
+  const start = opts.bucket === "week" ? isoWeek(firstDay).from : firstDay;
   // Newest first, so a cut below takes the oldest buckets; the daemon's order within a day is kept.
   const inWindow = res.rows.filter((r) => r.day >= start).sort((a, b) => (a.day < b.day ? 1 : a.day > b.day ? -1 : 0));
   const keyOf = (day: string): string => (opts.bucket === "day" ? day : isoWeek(day).week);
@@ -131,7 +134,7 @@ export function costView(res: UsageTokensResponse, opts: { days: number; bucket:
     }
     rows = [...merged.values()].map((row) => ({ ...row, costUsd: row.costUsd === null ? null : round4(row.costUsd) }));
   }
-  const head = { asOf: res.asOf, days: opts.days, bucket: opts.bucket, totalUsd, ...byBucket };
+  const head = { asOf: res.asOf, days: opts.days, bucket: opts.bucket, since: start, totalUsd, ...byBucket };
   const whole = { ...head, rows };
   if (jsonBytes(whole) <= MAX_COST_VIEW_BYTES) return whole;
   // Over budget: drop whole buckets of rows, oldest first, until the rest fits. Each row is measured once, with the
@@ -148,14 +151,41 @@ export function costView(res: UsageTokensResponse, opts: { days: number; bucket:
   return { ...head, rows: rows.slice(0, kept), truncated: true, rowsDropped: rows.length - kept };
 }
 
+/** A model's price for `tokens` (fresh input, output, cache reads and writes), or null when the table has no price. */
+function priceTurn(model: string, tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }, writesOneHour: boolean): number | null {
+  // A model whose price row has no cache-write rate (Codex's) bills written tokens as input, as the Cost tab counts them.
+  const writeRate = estimateCostParts(model, { input: 0, output: 0, cacheRead: 0, cacheWrite: 1_000_000, cacheWrite1h: writesOneHour ? 1_000_000 : 0 });
+  const asInput = writeRate !== null && writeRate.cache === 0;
+  const parts = estimateCostParts(model, {
+    input: tokens.input + (asInput ? tokens.cacheWrite : 0),
+    output: tokens.output,
+    cacheRead: tokens.cacheRead,
+    cacheWrite: asInput ? 0 : tokens.cacheWrite,
+    cacheWrite1h: asInput || !writesOneHour ? 0 : tokens.cacheWrite
+  });
+  return parts ? parts.input + parts.output + parts.cache : null;
+}
+
 /**
  * One chat session's token usage and cost (get_usage `session`): the per-turn `tokenUsage` of the turns its snapshot
- * holds, summed (`turnsCounted`; `partial` when older turns lie outside the snapshot's window). A turn's cost is the
- * provider's `totalCostUsd` where it reported one (Claude), else the API-equivalent estimate from the cost table the
- * Cost tab prices with (Codex reports tokens only); `costSource` says which: `reported`, `estimated` or `mixed`. A turn
- * neither reported nor priceable counts in `unpricedTurns` and adds $0; with no priced turn `costUsd` is null.
+ * holds, summed (`turnsCounted`; `partial` when older turns lie outside the snapshot's window).
+ *
+ * Cost per turn:
+ * - **Claude**: always the API-equivalent ESTIMATE from the turn's own tokens and the Cost tab's price table. The turn's
+ *   `totalCostUsd` is the CLI result's `total_cost_usd`, which is CUMULATIVE per CLI process (fixture 11: 0.0348 then
+ *   0.0455 in one process, 0.0109 after a resume) — summing it overstates, so it is never used. Claude Code writes the
+ *   conversation's prompt cache with the 1-hour TTL (every result frame of fixtures 11, 12, 17, 19), so cache writes
+ *   are priced at that rate. The model is the turn's (else the head's) slug resolved through the provider catalogue
+ *   (`resolveModel`: `opus` → the `claude-…` id it runs), as the picker names it.
+ * - **Other agents** (OpenCode, Grok report a per-turn cost): the provider's `totalCostUsd` where reported, else the
+ *   estimate (Codex reports tokens only).
+ *
+ * `costSource`: `reported`, `estimated` or `mixed`. A turn neither reported nor priceable counts in `unpricedTurns` and
+ * adds $0; with no priced turn `costUsd` is null.
  */
-export function sessionUsageView(snapshot: Pick<ThreadSnapshotPayload, "head" | "turns" | "history">): Record<string, unknown> {
+export function sessionUsageView(snapshot: Pick<ThreadSnapshotPayload, "head" | "turns" | "history">, opts?: { resolveModel?: (slug: string) => string }): Record<string, unknown> {
+  const claude = snapshot.head.adapter === "claude";
+  const resolve = opts?.resolveModel ?? ((slug: string) => slug);
   const sums = { inputTokens: 0, outputTokens: 0, cachedInputTokens: 0, cacheCreationTokens: 0, reasoningTokens: 0 };
   let reported = 0;
   let estimated = 0;
@@ -168,27 +198,29 @@ export function sessionUsageView(snapshot: Pick<ThreadSnapshotPayload, "head" | 
     const input = usage?.inputTokens;
     const output = usage?.outputTokens;
     const hasTokens = typeof input === "number" || typeof output === "number";
+    const reportedCost = !claude && typeof turn.totalCostUsd === "number" && Number.isFinite(turn.totalCostUsd) ? turn.totalCostUsd : undefined;
+    if (!hasTokens && reportedCost === undefined) {
+      turnsWithoutUsage += 1;
+      continue;
+    }
     if (hasTokens) {
       sums.inputTokens += input ?? 0;
       sums.outputTokens += output ?? 0;
       sums.cachedInputTokens += usage?.cachedInputTokens ?? 0;
       sums.cacheCreationTokens += usage?.cacheCreationTokens ?? 0;
       sums.reasoningTokens += usage?.reasoningTokens ?? 0;
-    } else if (turn.totalCostUsd === undefined) {
-      turnsWithoutUsage += 1;
-      continue;
     }
-    if (typeof turn.totalCostUsd === "number" && Number.isFinite(turn.totalCostUsd)) {
-      reported += turn.totalCostUsd;
+    if (reportedCost !== undefined) {
+      reported += reportedCost;
       reportedTurns += 1;
       continue;
     }
     // `inputTokens` holds the cached and cache-written tokens too (the adapters' convention): the fresh rest bills as input.
     const cached = usage?.cachedInputTokens ?? 0;
     const written = usage?.cacheCreationTokens ?? 0;
-    const parts = estimateCostParts(turn.model || snapshot.head.modelSelection.model, { input: Math.max(0, (input ?? 0) - cached - written), output: output ?? 0, cacheRead: cached, cacheWrite: written, cacheWrite1h: 0 });
-    if (parts) {
-      estimated += parts.input + parts.output + parts.cache;
+    const cost = priceTurn(resolve(turn.model || snapshot.head.modelSelection.model), { input: Math.max(0, (input ?? 0) - cached - written), output: output ?? 0, cacheRead: cached, cacheWrite: written }, claude);
+    if (cost !== null) {
+      estimated += cost;
       estimatedTurns += 1;
     } else {
       unpricedTurns += 1;

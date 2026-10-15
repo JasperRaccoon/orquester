@@ -105,6 +105,8 @@ test("POST /api/push/notify: validated body, the agent's push always deep-links 
     assert.equal(res.status, 400, JSON.stringify(body));
     assert.equal((res.body as { code: string }).code, "INVALID_ARGUMENT");
   }
+  // A title with nothing visible once flattened is refused like an empty one.
+  assert.equal((await asAgent.request("POST", "/api/push/notify", { body: { title: "\u202e\u200b\u0007" } })).status, 400);
   // A refused body takes no slot.
   const first = await asAgent.request("POST", "/api/push/notify", { body: { title: "Done", body: "PR is up", sessionId: "someone-else" } });
   assert.deepEqual(first, { status: 200, body: { sent: 1 } });

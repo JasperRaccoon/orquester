@@ -38,4 +38,8 @@ test("notify_user: caps are the contract's, the daemon's RATE_LIMITED passes thr
     assert.equal(answer(await notify(api, caller(), args)).code, "INVALID_ARGUMENT", JSON.stringify(args).slice(0, 60));
   }
   assert.equal(answer(await notify(api, caller(), { title: "x" }, ["core", "reads"])).code, "TOOL_NOT_ENABLED");
+  // A title with nothing visible once flattened is refused before the daemon is asked (no rate slot taken).
+  const before = api.calls.length;
+  assert.equal(answer(await notify(api, caller(), { title: "\u202e\u200b\u0007" })).code, "INVALID_ARGUMENT");
+  assert.equal(api.calls.length, before);
 });

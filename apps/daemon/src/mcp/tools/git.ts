@@ -47,6 +47,12 @@ function withDiff(frame: Record<string, unknown>, diff: string, cutAlready: bool
   return { ...frame, diff: fitted.text, truncated: cutAlready || fitted.truncated };
 }
 
+/** An argument the view would ignore is refused (before any card): `path` and `staged` belong to a one-file diff. */
+function assertArgs(args: { view: (typeof VIEWS)[number]; path?: string; staged: boolean }): void {
+  if (args.path !== undefined && args.view !== "diff") throw new ToolError("INVALID_ARGUMENT", "path applies to view \"diff\" only.");
+  if (args.staged && args.path === undefined) throw new ToolError("INVALID_ARGUMENT", "staged applies to a one-file diff: pass path (the whole-tree diff is staged and unstaged changes together).");
+}
+
 const getGitState = defineTool({
   name: "get_git_state",
   title: "Get git state",
@@ -63,6 +69,7 @@ const getGitState = defineTool({
   toolset: "files-git",
   tier: "read",
   async scope(args, ctx) {
+    assertArgs(args);
     const project = await gitProject(args.project, ctx);
     const file = args.path !== undefined ? fileInProject(project.path, args.path) : null;
     return { projects: [project.path], sessions: [], reads: "content", writes: false, causesTurnIn: [], ...(file ? { paths: [file.absolute] } : {}) };
@@ -73,7 +80,7 @@ const getGitState = defineTool({
     const { api } = ctx;
     const project = await gitProject(args.project, ctx);
     const where = { path: project.path };
-    if (args.path !== undefined && args.view !== "diff") throw new ToolError("INVALID_ARGUMENT", "path applies to view \"diff\" only.");
+    assertArgs(args);
     const label = `${project.workspace}/${project.name}`;
     switch (args.view) {
       case "status": {

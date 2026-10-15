@@ -89,6 +89,23 @@ test("isoWeek: ISO 8601 weeks in UTC, the week-year of the Thursday, Monday as `
   assert.deepEqual(isoWeek("2024-12-30"), { week: "2025-W01", from: "2024-12-30" }, "a Monday's week can belong to the next year");
 });
 
+test("get_usage cost by week extends the window back to the Monday of its first week: no partial week (days 7 on Thursday 2026-10-15)", async () => {
+  const row = (day: string, costUsd: number) => ({ agent: "claude", model: "opus", day, inputTokens: 1, outputTokens: 1, cacheReadTokens: 0, cacheWriteTokens: 0, costUsd, costSource: "api_equivalent" });
+  const api = new FakeDaemonApi().on("GET", "/api/usage/tokens", { status: 200, body: { asOf: "2026-10-15T11:00:00.000Z", rows: [
+    row("2026-10-15", 1), row("2026-10-12", 2), row("2026-10-09", 4), row("2026-10-05", 8), row("2026-10-04", 16)
+  ] } });
+  const at = Date.parse("2026-10-15T12:00:00.000Z");
+  const cost = async (args: Record<string, unknown>) => ((await getUsage.run(z.object(getUsage.input).strict().parse(args), { api, signal: new AbortController().signal, now: () => at, caller: external, turn: { interactionMode: "default", provenance: (_o, t) => t } })) as Record<string, any>).cost;
+  const weekly = await cost({ include: ["cost"], bucket: "week", days: 7 });
+  // Seven days back is Friday 2026-10-09; its week began Monday 2026-10-05, so W41 is counted whole.
+  assert.equal(weekly.since, "2026-10-05");
+  assert.deepEqual(weekly.byWeek, [{ week: "2026-W41", from: "2026-10-05", usd: 12 }, { week: "2026-W42", from: "2026-10-12", usd: 3 }]);
+  assert.equal(weekly.totalUsd, 15);
+  const daily = await cost({ include: ["cost"], days: 7 });
+  assert.equal(daily.since, "2026-10-09");
+  assert.equal(daily.totalUsd, 7, "days stay exactly the window");
+});
+
 test("get_usage cost by week: one row per agent, model and ISO week, priced when any day is; week totals with their Monday", async () => {
   const row = (day: string, model: string, costUsd: number | null, input = 1) => ({ agent: "codex", model, day, inputTokens: input, outputTokens: 2, cacheReadTokens: 3, cacheWriteTokens: 0, costUsd, costSource: "api_equivalent" });
   const api = new FakeDaemonApi().on("GET", "/api/usage/tokens", { status: 200, body: { asOf: "2026-09-22T11:00:00.000Z", rows: [
@@ -99,6 +116,8 @@ test("get_usage cost by week: one row per agent, model and ISO week, priced when
   assert.equal(r.bucket, "week");
   assert.equal(r.byDay, undefined);
   assert.deepEqual(r.byWeek, [{ week: "2026-W38", from: "2026-09-14", usd: 12 }, { week: "2026-W39", from: "2026-09-21", usd: 3 }]);
+  // Nine days back is Monday the 14th: the window already starts on its week's Monday, so the 13th stays out.
+  assert.equal(r.since, "2026-09-14");
   assert.equal(r.totalUsd, 15, "the 13th is outside nine days");
   assert.deepEqual(r.rows, [
     { agent: "codex", model: "gpt-5.6-sol", week: "2026-W39", inputTokens: 11, outputTokens: 4, cacheReadTokens: 6, cacheWriteTokens: 0, costUsd: 3 },
@@ -108,10 +127,12 @@ test("get_usage cost by week: one row per agent, model and ISO week, priced when
 });
 
 /** A chat session `s1` whose snapshot holds `turns` (and a history window when `hasOlder`). */
-function sessionApi(turns: Turn[], over: { model?: string; refId?: string; hasOlder?: boolean } = {}): FakeDaemonApi {
-  const thread = snapshot({ head: head({ id: "s1", refId: over.refId ?? "codex", adapter: "codex", modelSelection: { model: over.model ?? "gpt-5.6-sol", options: [] } }), turns, ...(over.hasOlder !== undefined ? { history: { indexed: true, hasOlder: over.hasOlder, beforeCursor: over.hasOlder ? "c" : null, oldestRetainedOrdinal: 4, totalTurns: 9 } } : {}) });
+function sessionApi(turns: Turn[], over: { model?: string; refId?: string; adapter?: "claude" | "codex" | "grok" | "opencode"; hasOlder?: boolean; providers?: unknown } = {}): FakeDaemonApi {
+  const adapter = over.adapter ?? "codex";
+  const thread = snapshot({ head: head({ id: "s1", refId: over.refId ?? adapter, adapter, modelSelection: { model: over.model ?? "gpt-5.6-sol", options: [] } }), turns, ...(over.hasOlder !== undefined ? { history: { indexed: true, hasOlder: over.hasOlder, beforeCursor: over.hasOlder ? "c" : null, oldestRetainedOrdinal: 4, totalTurns: 9 } } : {}) });
   return new FakeDaemonApi()
-    .on("GET", "/api/sessions", { status: 200, body: [chatSummary({ id: "s1", refId: over.refId ?? "codex", projectPath: "" })] })
+    .on("GET", "/api/agent/providers", { status: 200, body: over.providers ?? { hostInstanceId: "h", providers: [] } })
+    .on("GET", "/api/sessions", { status: 200, body: [chatSummary({ id: "s1", refId: over.refId ?? adapter, projectPath: "" })] })
     .on("GET", "/api/sessions/s1/thread", { status: 200, body: { kind: "snapshot", thread } });
 }
 const usage = (inputTokens: number, outputTokens: number, extra: Partial<{ cachedInputTokens: number; cacheCreationTokens: number; reasoningTokens: number }> = {}) =>
@@ -134,15 +155,15 @@ test("get_usage session: sums the snapshot's turn tokens and prices Codex turns 
   assert.ok(!api.calls.some((call) => call.path === "/api/usage"));
 });
 
-test("get_usage session: a provider-reported cost wins per turn; reported + estimated is mixed; a turn's own model prices it; unpriced and partial are said", async () => {
-  const claude = sessionApi([turn({ tokenUsage: usage(10, 5), totalCostUsd: 0.42 }), turn({ turnId: "t2", totalCostUsd: 0.08 })], { refId: "claude", model: "claude-opus-5" });
-  const reported = (await run(claude, { include: ["session"], sessionId: "s1" })).session;
+test("get_usage session: a per-turn reported cost (OpenCode, Grok) wins; reported + estimated is mixed; a turn's own model prices it; unpriced and partial are said", async () => {
+  const grok = sessionApi([turn({ tokenUsage: usage(10, 5), totalCostUsd: 0.42 }), turn({ turnId: "t2", totalCostUsd: 0.08 })], { adapter: "grok", model: "grok-4.6" });
+  const reported = (await run(grok, { include: ["session"], sessionId: "s1" })).session;
   assert.equal(reported.costUsd, 0.5); assert.equal(reported.costSource, "reported"); assert.equal(reported.estimatedUsd, undefined);
   const mixed = (await run(sessionApi([
     turn({ tokenUsage: usage(1_000_000, 0), totalCostUsd: 1 }),
     turn({ turnId: "t2", model: "gpt-5.6-luna", tokenUsage: usage(1_000_000, 0) }),
     turn({ turnId: "t3", model: "no-such-model", tokenUsage: usage(5, 5) })
-  ], { hasOlder: true }), { include: ["session"], sessionId: "s1" })).session;
+  ], { adapter: "opencode", hasOlder: true }), { include: ["session"], sessionId: "s1" })).session;
   assert.equal(mixed.costSource, "mixed");
   assert.equal(mixed.costUsd, 2, "$1 reported + 1M luna input at $1/M");
   assert.equal(mixed.unpricedTurns, 1);
@@ -152,9 +173,73 @@ test("get_usage session: a provider-reported cost wins per turn; reported + esti
   assert.deepEqual([none.costUsd, none.costSource, none.unpricedTurns], [null, undefined, 1]);
 });
 
+/**
+ * The Claude CLI's `result.total_cost_usd` is CUMULATIVE per CLI process: fixture 11 (`test/fixtures/claude/
+ * 11-resume-and-fork.ndjson`) reports 0.0348223 then 0.0455023 in one process, then 0.0108531 after a resume. The
+ * per-turn `usage` blocks of those frames (claude-sonnet-5; cache writes at the 1-hour TTL) are what the turns carry.
+ */
+const FIXTURE_11 = [
+  { tokens: { input: 2, read: 30_681, write: 4_159, output: 4 }, cumulative: 0.03482230000000001 },
+  { tokens: { input: 2, read: 34_840, write: 27, output: 4 }, cumulative: 0.04550230000000001 },
+  { tokens: { input: 2, read: 34_867, write: 27, output: 15 }, cumulative: 0.010853100000000001 }
+];
+/**
+ * Fixture 12's first turn (a new process: its cumulative cost is that turn's alone; the main model's share). Fixtures 17
+ * and 19 run `claude-opus-5-5`, which the price table prices at its `claude-opus-5` row — not the CLI's own rate for
+ * it — so they assert only the token sums (the table is the Cost tab's, not this tool's to change).
+ */
+const FIRST_TURNS = [
+  { model: "claude-sonnet-5", tokens: { input: 4, read: 65_525, write: 4_293, output: 130 }, modelCost: 0.0473775 }
+];
+const claudeTurn = (id: string, t: { input: number; read: number; write: number; output: number }, totalCostUsd?: number, model?: string) =>
+  turn({ turnId: id, ...(model ? { model } : {}), ...(totalCostUsd !== undefined ? { totalCostUsd } : {}), tokenUsage: usage(t.input + t.read + t.write, t.output, { cachedInputTokens: t.read, cacheCreationTokens: t.write }) });
+
+test("get_usage session: a Claude session is priced from its turns' own tokens, never by summing the CLI's cumulative total_cost_usd (fixtures 11, 12, 17, 19)", async () => {
+  const api = sessionApi(FIXTURE_11.map((f, i) => claudeTurn(`t${i}`, f.tokens, f.cumulative)), { adapter: "claude", model: "claude-sonnet-5" });
+  const r = (await run(api, { sessionId: "s1" })).session;
+  assert.equal(r.costSource, "estimated");
+  // The per-turn costs the fixture's cumulative totals imply for the sonnet model (process 1: 0.0342243, then +0.01068; process 2: 0.0108531).
+  assert.equal(r.costUsd, 0.0558);
+  assert.ok(Math.abs(r.estimatedUsd - (0.0342243 + 0.01068 + 0.0108531)) < 0.0001);
+  const summed = FIXTURE_11.reduce((sum, f) => sum + f.cumulative, 0);
+  assert.ok(summed > r.costUsd * 1.6, `summing the cumulative values would report ${summed}`);
+  assert.deepEqual([r.inputTokens, r.cachedInputTokens, r.cacheCreationTokens, r.outputTokens], [6 + 100_388 + 4_213, 100_388, 4_213, 23]);
+  // A first turn's estimate matches what the CLI itself charged the main model for it.
+  for (const first of FIRST_TURNS) {
+    const one = (await run(sessionApi([claudeTurn("t1", first.tokens, 99, first.model)], { adapter: "claude" }), { sessionId: "s1" })).session;
+    assert.ok(Math.abs(one.costUsd - first.modelCost) < 0.0001, `${first.model}: ${one.costUsd} vs ${first.modelCost}`);
+  }
+  // Fixtures 17 and 19 (two turns each, one process): the tokens of both turns are summed, the cumulative costs never.
+  const workflow = (await run(sessionApi([
+    claudeTurn("t1", { input: 4, read: 29_426, write: 6_900, output: 333 }, 0.06897020000000001, "claude-opus-5-5"),
+    claudeTurn("t2", { input: 4, read: 18_714, write: 954, output: 33 }, 0.161081, "claude-opus-5-5")
+  ], { adapter: "claude" }), { sessionId: "s1" })).session;
+  assert.deepEqual([workflow.outputTokens, workflow.cachedInputTokens, workflow.cacheCreationTokens, workflow.costSource], [366, 48_140, 7_854, "estimated"]);
+  assert.ok(workflow.costUsd < 0.161081 + 0.06897020000000001 - 0.05, "not the sum of the cumulative totals");
+});
+
+test("get_usage session: a Claude alias slug is priced as the model the provider catalogue resolves it to", async () => {
+  const providers = { hostInstanceId: "h", providers: [{ id: "claude", installed: true, status: "ready", auth: { status: "authenticated" }, models: [
+    { slug: "default", name: "Default · Sonnet", subProvider: "claude-sonnet-5", capabilities: null }, { slug: "opus", name: "Opus", capabilities: null }
+  ] }] };
+  const api = sessionApi([claudeTurn("t1", FIXTURE_11[0]!.tokens, 0.0348)], { adapter: "claude", model: "default", providers });
+  const r = (await run(api, { sessionId: "s1" })).session;
+  assert.equal(r.costUsd, 0.0342);
+  const alias = (await run(sessionApi([claudeTurn("t1", FIXTURE_11[0]!.tokens)], { adapter: "claude", model: "opus", providers }), { sessionId: "s1" })).session;
+  assert.deepEqual([alias.costUsd, alias.unpricedTurns], [null, 1], "an alias the catalogue does not resolve stays unpriced, never guessed");
+});
+
+test("get_usage session: Codex cache-written tokens bill at the input price (its row has no cache-write rate), as the Cost tab counts them", async () => {
+  const api = sessionApi([turn({ tokenUsage: usage(1_000_000, 0, { cacheCreationTokens: 400_000 }) })], { model: "gpt-5.6-sol" });
+  assert.equal((await run(api, { sessionId: "s1" })).session.costUsd, 5, "1M input at $5/M, the 400k written ones included");
+});
+
 test("get_usage session needs a sessionId and a chat session; its scope is that session's metadata", async () => {
   const api = sessionApi([]);
   await assert.rejects(run(api, { include: ["session"] }), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
+  // A sessionId the call would ignore is refused, in scope too (before any card).
+  await assert.rejects(run(api, { include: ["quota"], sessionId: "s1" }), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /sessionId/.test(e.message));
+  await assert.rejects(getUsage.scope(z.object(getUsage.input).parse({ include: ["cost"], sessionId: "s1" }), { api, signal: new AbortController().signal, now: () => NOW, caller: chat }), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
   await assert.rejects(run(api, { sessionId: "nope" }), (e: { code: string }) => e.code === "SESSION_NOT_FOUND");
   const scope = await getUsage.scope(z.object(getUsage.input).parse({ sessionId: "s1" }), { api, signal: new AbortController().signal, now: () => NOW, caller: chat });
   assert.deepEqual(scope, { projects: [], sessions: ["s1"], reads: "metadata", writes: false, causesTurnIn: [] });

@@ -395,7 +395,8 @@ export function registerPushNotifyRoute(app: FastifyInstance, push: Pick<PushSer
   app.post("/api/push/notify", async (request, reply): Promise<PushNotifyResponse | void> => {
     const body = (request.body ?? {}) as Partial<Record<keyof PushNotifyRequest, unknown>>;
     const title = typeof body.title === "string" ? body.title.trim() : "";
-    if (!title || title.length > PUSH_NOTIFY_TITLE_MAX_CHARS) {
+    // Empty once flattened to the safe text the push shows (only control or format characters): refused, no slot taken.
+    if (!title || title.length > PUSH_NOTIFY_TITLE_MAX_CHARS || sanitizeApprovalLabel(title, PUSH_NOTIFY_TITLE_MAX_CHARS) === "") {
       return reply.code(400).send({ code: "INVALID_ARGUMENT", message: `title is required, at most ${PUSH_NOTIFY_TITLE_MAX_CHARS} characters.` });
     }
     if (body.body !== undefined && (typeof body.body !== "string" || body.body.length > PUSH_NOTIFY_BODY_MAX_CHARS)) {

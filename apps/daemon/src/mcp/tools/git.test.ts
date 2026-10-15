@@ -84,4 +84,8 @@ test("get_git_state scope: a content read of the project (the chat's own by defa
   await assert.rejects(scope({ view: "status" }, { ...chat, projectPath: "", workspace: "" }), (e: { code: string }) => e.code === "PROJECT_NOT_FOUND");
   await assert.rejects(scope({ project: "acme/nope", view: "status" }, chat), (e: { code: string }) => e.code === "PROJECT_NOT_FOUND");
   await assert.rejects(run({ view: "log" }), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
+  // Arguments the view would ignore are refused in scope, before any card.
+  await assert.rejects(scope({ view: "status", path: "src/a.ts" }, chat), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /path/.test(e.message));
+  await assert.rejects(scope({ view: "diff", staged: true }, chat), (e: { code: string; message: string }) => e.code === "INVALID_ARGUMENT" && /staged/.test(e.message));
+  await assert.rejects(scope({ view: "log", staged: true }, chat), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
 });

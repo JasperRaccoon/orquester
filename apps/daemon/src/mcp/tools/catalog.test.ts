@@ -1,6 +1,6 @@
 import { test,type TestContext } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtemp,mkdir,rm } from "node:fs/promises";
+import { mkdtemp,mkdir,realpath,rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { FakeDaemonApi } from "../testing.ts";
@@ -8,6 +8,8 @@ import { chatSummary,shellSummary,stamp } from "../fixtures.ts";
 import { ok } from "../result.ts";
 import type { AnyOrquesterTool, CallContext, ThreadCaller } from "../catalog/contract.ts";
 import { providerPickerView } from "@orquester/api/agent-chat";
+import { FakeApprovalPort } from "../catalog/approval-double.ts";
+import { executeToolCall } from "../executor.ts";
 import { catalogFamily } from "./catalog.ts";
 
 const resultBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
@@ -382,14 +384,18 @@ test("list_projects for a chat: `current` marks its project and `sameRepo` every
     .on("GET", "/api/projects/recent", { status: 200, body: [] })
     .on("GET", "/api/sessions", { status: 200, body: [] });
   // The caller's canonical path may be spelt differently from the listing's: matched by workspace/name.
-  const caller = thread({ projectPath: "/real/w/acme/orquester", workspace: "acme" });
+  // Full access: every workspace is listed (below it, other workspaces are only counted — the S13 ruling test below).
+  const caller = thread({ projectPath: "/real/w/acme/orquester", workspace: "acme", runtimeMode: "full-access" });
   const rows = (await tool("list_projects").run({ includeArchived: true }, ctx(api, caller))).projects as { name: string; current?: true; sameRepo?: true }[];
   assert.deepEqual(rows.map((p) => [p.name, p.current === true, p.sameRepo === true]), [["orquester", true, false], ["orquester-3", false, true], ["site", false, false], ["fork", false, true]]);
   // An archived own project still names the repository its listed siblings share.
-  const hidden = await tool("list_projects").run({ includeArchived: false }, ctx(api, thread({ projectPath: "/w/acme/orquester-3" })));
+  const hidden = await tool("list_projects").run({ includeArchived: false }, ctx(api, thread({ projectPath: "/w/acme/orquester-3", runtimeMode: "full-access" })));
+  // The repository is the own project's whatever the filter lists: naming another workspace still marks its clones.
+  const filtered = await tool("list_projects").run({ workspace: "solo", includeArchived: false }, ctx(api, thread({ projectPath: "/w/acme/orquester", runtimeMode: "full-access" })));
+  assert.deepEqual((filtered.projects as { name: string; sameRepo?: true }[]).map((p) => [p.name, p.sameRepo]), [["fork", true]]);
   assert.deepEqual((hidden.projects as { name: string; sameRepo?: true }[]).filter((p) => p.sameRepo).map((p) => p.name), ["orquester", "fork"]);
   // A chat with no project: nothing is current, nothing sameRepo.
-  const none = await tool("list_projects").run({ includeArchived: true }, ctx(api, thread({ projectPath: "", workspace: "" })));
+  const none = await tool("list_projects").run({ includeArchived: true }, ctx(api, thread({ projectPath: "", workspace: "", runtimeMode: "full-access" })));
   assert.ok((none.projects as { current?: true; sameRepo?: true }[]).every((p) => p.current === undefined && p.sameRepo === undefined));
 });
 
@@ -470,4 +476,54 @@ test("list_conversations: a chat's project defaults to its own; an external call
   assert.deepEqual((await tool("list_conversations").run({ limit: 20 }, ctx(api, caller))).conversations, [{ id: "s1", agent: "claude", title: "A", updatedAt: stamp(1), home: "system", resumable: true }]);
   await assert.rejects(tool("list_conversations").run({ limit: 20 }, ctx(api)), (e: { code: string }) => e.code === "INVALID_ARGUMENT");
   await assert.rejects(tool("list_conversations").run({ limit: 20 }, ctx(api, thread({ projectPath: "", workspace: "" }))), (e: { code: string }) => e.code === "PROJECT_NOT_FOUND");
+});
+
+test("list_projects below Full access (ruling S13): its own workspace whole, the others only counted; naming another workspace raises the cross-workspace metadata card", async (t) => {
+  const root = await realpath(await mkdtemp(join(tmpdir(), "mcp-cat-s13-")));
+  t.after(() => rm(root, { recursive: true, force: true }));
+  for (const dir of ["acme/api", "acme/web", "beta/app", "beta/old", "gamma/x"]) await mkdir(join(root, dir), { recursive: true });
+  const api = new FakeDaemonApi(); api.fsRoot = root; api.workspacesDir = root;
+  const project = (ws: string, name: string, over: object = {}) => ({ name, workspace: ws, path: join(root, ws, name), ...over });
+  api.on("GET", "/api/workspaces", { status: 200, body: [
+    { name: "acme", path: join(root, "acme"), projectCount: 2 },
+    { name: "beta", path: join(root, "beta"), projectCount: 2, archivedProjectCount: 1 },
+    { name: "gamma", path: join(root, "gamma"), projectCount: 1, isArchived: true }
+  ] })
+    .on("GET", "/api/workspaces/acme/projects", { status: 200, body: [project("acme", "api"), project("acme", "web")] })
+    .on("GET", "/api/workspaces/beta/projects", { status: 200, body: [project("beta", "app"), project("beta", "old", { isArchived: true })] })
+    .on("GET", "/api/workspaces/gamma/projects", { status: 200, body: [project("gamma", "x")] })
+    .on("GET", "/api/projects/recent", { status: 200, body: [] })
+    .on("GET", "/api/sessions", { status: 200, body: [] });
+  const me = thread({ projectPath: join(root, "acme", "api"), workspace: "acme", cwd: join(root, "acme", "api"), runtimeMode: "auto" });
+  const listed = await tool("list_projects").run({ includeArchived: false }, ctx(api, me));
+  assert.deepEqual((listed.projects as { workspace: string; name: string }[]).map((p) => `${p.workspace}/${p.name}`), ["acme/api", "acme/web"]);
+  assert.deepEqual(listed.excludedWorkspaces, [{ workspace: "beta", projectCount: 1 }]);
+  assert.ok(!api.calls.some((c) => c.path === "/api/workspaces/beta/projects"), "an excluded workspace's projects are never read");
+  assert.deepEqual((await tool("list_projects").run({ includeArchived: true }, ctx(api, me))).excludedWorkspaces, [{ workspace: "beta", projectCount: 2 }, { workspace: "gamma", projectCount: 1 }]);
+  // A chat with no project has no own workspace: everything is counted, nothing listed.
+  const loose = await tool("list_projects").run({ includeArchived: false }, ctx(api, thread({ projectPath: "", workspace: "", runtimeMode: "auto" })));
+  assert.deepEqual([loose.projects, (loose.excludedWorkspaces as { workspace: string }[]).map((w) => w.workspace)], [[], ["acme", "beta"]]);
+  // Full access and external callers list everything.
+  for (const who of [thread({ ...me, runtimeMode: "full-access" }), { kind: "external" } as const]) {
+    const all = await tool("list_projects").run({ includeArchived: false }, ctx(api, who));
+    assert.deepEqual((all.projects as { workspace: string; name: string }[]).map((p) => `${p.workspace}/${p.name}`), ["acme/api", "acme/web", "beta/app"]);
+    assert.equal(all.excludedWorkspaces, undefined);
+  }
+
+  // Naming another workspace: its projects are the call's targets, so the gate cards it (approved → listed); own: no card.
+  const port = new FakeApprovalPort({ outcome: "approved", approvalId: "a1" });
+  const call = (args: Record<string, unknown>, caller: ThreadCaller = me) =>
+    executeToolCall({ approvals: port, enabledToolsets: async () => new Set(["core"]) }, { name: "list_projects", arguments: args }, { caller, api, signal: new AbortController().signal });
+  const named = await call({ workspace: "beta" });
+  assert.equal(named.isError, undefined, JSON.stringify(named.content));
+  assert.equal(port.cards.length, 1);
+  assert.equal(port.cards[0]!.kind, "boundary");
+  assert.deepEqual(port.cards[0]!.scope.projects?.map((p) => p.workspace), ["acme", "beta"]);
+  assert.deepEqual(((named.structuredContent as { projects: { name: string }[] }).projects).map((p) => p.name), ["app"]);
+  await call({ workspace: "acme" });
+  await call({ workspace: "beta" }, thread({ ...me, runtimeMode: "full-access" }));
+  await call({});
+  assert.equal(port.cards.length, 1, "own workspace, Full access and the unnamed list raise no card");
+  port.answerWith({ outcome: "denied", approvalId: "a2", reason: "no" });
+  assert.equal((((await call({ workspace: "beta" })).structuredContent) as { code: string }).code, "APPROVAL_DENIED");
 });
