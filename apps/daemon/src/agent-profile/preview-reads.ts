@@ -261,42 +261,88 @@ async function isPluginRoot(dir: string): Promise<boolean> {
 }
 
 /**
+ * The plugin cache a plugin directory lives in — the `…/plugins/cache` ancestor both Claude
+ * (`plugins/cache/<mkt>/<name>/<version>`) and Codex (`plugins/cache/<mkt>/<name>`) use — else the
+ * directory itself. A symlinked version directory is followed only into it.
+ */
+function pluginCacheRoot(dir: string): string {
+  const parts = dir.split(sep);
+  for (let i = parts.length - 1; i > 0; i -= 1) {
+    if (parts[i] === "cache" && parts[i - 1] === "plugins") return parts.slice(0, i + 1).join(sep) || sep;
+  }
+  return dir;
+}
+
+function insideDir(root: string, path: string): boolean {
+  return path === root || path.startsWith(root.endsWith(sep) ? root : `${root}${sep}`);
+}
+
+/** Why a path cannot be read, in words: ENOENT is "cache missing"; anything else names its code. */
+function unreadableReason(error: unknown): string {
+  const code = (error as NodeJS.ErrnoException | null)?.code;
+  if (code === "ENOENT" || code === "ENOTDIR") return "contents not readable (cache missing)";
+  return `contents not readable (${code ?? (error instanceof Error ? error.message : "unknown error")})`;
+}
+
+/**
  * An installed plugin's files and what it ships. `path` is the plugin's install directory as the
  * agent reports it: a plugin root (Claude's versioned `installPath`), or — Codex — the unversioned
  * `plugins/cache/<marketplace>/<name>` whose children are its installed versions. Then the version
  * the agent reports is read, else the only child, else every child (each under `<version>/`).
- * A missing or empty cache is `unreadable`, never an error: enabling such a plugin still cards.
+ * A version directory that is a symlink is followed only when its realpath stays inside the
+ * plugin cache. Nothing here throws for an unreadable plugin: a missing cache, a permission error
+ * or a symlink leading out is `unreadable` (empty files) — enabling such a plugin still cards.
  */
 export async function readInstalledPlugin(
   path: string,
   version: string | undefined
 ): Promise<{ tree: ProfilePreviewTree; provides: ProfilePluginPreviewResponse["provides"]; unreadable?: string }> {
   const empty = { skills: [], commands: [], agents: [], hooks: [], mcpServers: [] };
-  let real: string;
+  const unreadable = (reason: string) => ({ tree: { files: [], complete: true }, provides: empty, unreadable: reason });
   try {
-    real = await realpath(path);
-    if (!(await lstat(real)).isDirectory()) throw new Error("not a directory");
-  } catch {
-    return { tree: { files: [], complete: true }, provides: empty, unreadable: "contents not readable (cache missing)" };
+    const real = await realpath(path);
+    if (!(await lstat(real)).isDirectory()) return unreadable("contents not readable (cache missing)");
+    if (await isPluginRoot(real)) {
+      const tree = await readPreviewTree(real);
+      return { tree, provides: pluginProvidesOf(tree) };
+    }
+    const cacheRoot = await realpath(pluginCacheRoot(real)).catch(() => real);
+    // Version directories, and symlinks to one that stay inside the plugin cache.
+    const children = new Map<string, string>();
+    for (const entry of await readdir(real, { withFileTypes: true })) {
+      if (entry.name.startsWith(".")) continue;
+      if (entry.isDirectory()) children.set(entry.name, join(real, entry.name));
+      else if (entry.isSymbolicLink()) {
+        const target = await realpath(join(real, entry.name)).catch(() => null);
+        if (target === null || !(await lstat(target)).isDirectory()) continue;
+        if (!insideDir(cacheRoot, target)) return unreadable(`contents not readable (the version directory "${entry.name}" leads outside the plugin cache)`);
+        children.set(entry.name, target);
+      }
+    }
+    const names = [...children.keys()].sort();
+    // The version the agent reports, else every child there is (one, usually).
+    const chosen = version !== undefined && children.has(version) ? [version] : names;
+    if (chosen.length === 0) return unreadable("contents not readable (cache empty)");
+    if (chosen.length === 1) {
+      const tree = await readPreviewTree(children.get(chosen[0]!)!);
+      return { tree, provides: pluginProvidesOf(tree) };
+    }
+    return await readVersions(children, chosen);
+  } catch (error) {
+    return unreadable(unreadableReason(error));
   }
-  if (await isPluginRoot(real)) {
-    const tree = await readPreviewTree(real);
-    return { tree, provides: pluginProvidesOf(tree) };
-  }
-  const children = (await readdir(real, { withFileTypes: true })).filter((entry) => entry.isDirectory() && !entry.name.startsWith(".")).map((entry) => entry.name).sort();
-  // The version the agent reports, else every child there is (one, usually).
-  const chosen = version !== undefined && children.includes(version) ? [version] : children;
-  if (chosen.length === 0) return { tree: { files: [], complete: true }, provides: empty, unreadable: "contents not readable (cache empty)" };
-  if (chosen.length === 1) {
-    const tree = await readPreviewTree(join(real, chosen[0]!));
-    return { tree, provides: pluginProvidesOf(tree) };
-  }
-  // Several versions and none reported: show them all.
+}
+
+/** Several versions and none reported: every one, each under `<version>/`. */
+async function readVersions(
+  children: ReadonlyMap<string, string>,
+  chosen: readonly string[]
+): Promise<{ tree: ProfilePreviewTree; provides: ProfilePluginPreviewResponse["provides"] }> {
   const files: ProfilePreviewFile[] = [];
   let complete = true;
   const provides: ProfilePluginPreviewResponse["provides"] = { skills: [], commands: [], agents: [], hooks: [], mcpServers: [] };
   for (const child of chosen) {
-    const tree = await readPreviewTree(join(real, child));
+    const tree = await readPreviewTree(children.get(child)!);
     complete &&= tree.complete;
     files.push(...tree.files.map((file) => ({ ...file, path: `${child}/${file.path}` })));
     const own = pluginProvidesOf(tree);
@@ -304,7 +350,8 @@ export async function readInstalledPlugin(
     provides.commands.push(...own.commands.filter((name) => !provides.commands.includes(name)));
     provides.agents.push(...own.agents.filter((name) => !provides.agents.includes(name)));
     provides.hooks.push(...own.hooks);
-    provides.mcpServers.push(...own.mcpServers.filter((server) => !provides.mcpServers.some((known) => known.name === server.name)));
+    // Each distinct definition is kept: two versions may run different command lines under one name.
+    provides.mcpServers.push(...own.mcpServers.filter((server) => !provides.mcpServers.some((known) => JSON.stringify(known) === JSON.stringify(server))));
   }
   return { tree: { files, complete }, provides };
 }

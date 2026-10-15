@@ -108,6 +108,15 @@ export interface PortableMcpServer {
   advanced?: Record<string, unknown>;
 }
 
+/** One name {@link ProfileAdapter.keepBothNames} resolves. */
+export interface KeepBothRequest {
+  kind: "mcp" | "skill" | "command";
+  name: string;
+}
+
+/** Names already claimed, by kind. */
+export type KeepBothTaken = Partial<Record<KeepBothRequest["kind"], Iterable<string>>>;
+
 /** {@link ProfileAdapter.pluginSource}'s answer. */
 export interface PluginSourceLocation {
   /** The marketplace's checkout (its commit is pinned on the card); null for a remote-only catalog. */
@@ -155,11 +164,13 @@ export interface ProfileAdapter {
   pluginSource?(marketplace: string, plugin: string): Promise<PluginSourceLocation>;
 
   /**
-   * The name a create, import or copy of this kind lands on with `onConflict: "keep-both"` — the
-   * name itself when it is free — computed by the very naming code the write runs (approval
-   * cards show and pin it). Read-only.
+   * The names creates, imports or copies land on with `onConflict: "keep-both"`, in order — each
+   * the name itself when it is free — computed by the very naming code the writes run (approval
+   * cards show and pin them). The requests are named one after another as the writes happen:
+   * each name given counts as taken for the next. `alsoTaken`: names an earlier change of the same
+   * batch writes first. The agent's state is read once per call. Read-only.
    */
-  keepBothName?(kind: "mcp" | "skill" | "command", name: string): Promise<string>;
+  keepBothNames?(requests: readonly KeepBothRequest[], alsoTaken?: KeepBothTaken): Promise<string[]>;
 
   /** Lift a copyable item (`PROFILE_COPYABLE_KINDS`) out, real secret values included. Caller owns any temp dir. */
   exportItem(id: string): Promise<PortableItem>;

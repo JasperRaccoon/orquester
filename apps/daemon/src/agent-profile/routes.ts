@@ -40,6 +40,7 @@ import {
   type PluginInstallDraft,
   type ProfileConflictPolicy,
   type ProfileItemDraft,
+  type ProfileTakenNames,
   type SecretEntryDraft
 } from "@orquester/api";
 import {
@@ -277,7 +278,11 @@ export function registerAgentProfileRoutes(app: FastifyInstance, deps: AgentProf
         if (!service.importDetail) throw unavailable();
         const importId = stringField(request.params.importId, "importId", { max: ID_MAX });
         const onConflict = request.query?.onConflict === undefined ? "fail" : conflictPolicy(request.query.onConflict);
-        return service.importDetail(agentParam(request.params), importId, onConflict);
+        const picks = request.query?.picks === undefined ? undefined : jsonStringList(request.query.picks, "picks");
+        return service.importDetail(agentParam(request.params), importId, onConflict, {
+          ...(picks ? { picks } : {}),
+          ...(request.query?.taken !== undefined ? { taken: takenNames(request.query.taken) } : {})
+        });
       })
     );
 
@@ -287,7 +292,8 @@ export function registerAgentProfileRoutes(app: FastifyInstance, deps: AgentProf
         const kind = request.query?.kind;
         if (kind !== "mcp" && kind !== "skill" && kind !== "command") throw invalid("kind must be mcp, skill or command.");
         const name = stringField(request.query?.name, "name", { max: NAME_MAX });
-        return { name: await service.keepBothName(agentParam(request.params), kind, name) };
+        const taken = request.query?.taken === undefined ? undefined : takenNames(request.query.taken);
+        return { name: await service.keepBothName(agentParam(request.params), kind, name, taken) };
       })
     );
 
@@ -297,7 +303,8 @@ export function registerAgentProfileRoutes(app: FastifyInstance, deps: AgentProf
         const toAgent = request.query?.toAgent;
         if (!isAgentProfileAgentId(toAgent)) throw invalid("toAgent must be an agent.");
         const onConflict = request.query?.onConflict === undefined ? "fail" : conflictPolicy(request.query.onConflict);
-        return service.copyPreview(agentParam(request.params), idParam(request.params), toAgent, onConflict);
+        const taken = request.query?.taken === undefined ? undefined : takenNames(request.query.taken);
+        return service.copyPreview(agentParam(request.params), idParam(request.params), toAgent, onConflict, taken);
       })
     );
 
@@ -465,6 +472,37 @@ function optionalString(
 function revisionField(value: unknown, field: string): string {
   if (value === undefined || value === null) throw invalid(`${field} is required.`);
   return stringField(value, field, { max: ID_MAX });
+}
+
+/** A JSON-encoded list of strings in a query parameter (bounded). */
+function jsonStringList(value: unknown, field: string): string[] {
+  let parsed: unknown;
+  try {
+    parsed = typeof value === "string" ? JSON.parse(value) : undefined;
+  } catch {
+    parsed = undefined;
+  }
+  if (!Array.isArray(parsed) || parsed.length > LIST_MAX || !parsed.every((entry) => typeof entry === "string" && entry.length <= URL_MAX)) {
+    throw invalid(`${field} must be a JSON list of strings.`);
+  }
+  return parsed as string[];
+}
+
+/** `taken`: JSON `{mcp?: [...], skill?: [...], command?: [...]}` (`ProfileTakenNames`). */
+function takenNames(value: unknown): ProfileTakenNames {
+  let parsed: unknown;
+  try {
+    parsed = typeof value === "string" ? JSON.parse(value) : undefined;
+  } catch {
+    parsed = undefined;
+  }
+  if (!isRecord(parsed)) throw invalid("taken must be a JSON object of name lists.");
+  const out: ProfileTakenNames = {};
+  for (const [kind, names] of Object.entries(parsed)) {
+    if (kind !== "mcp" && kind !== "skill" && kind !== "command") throw invalid("taken lists mcp, skill or command names.");
+    out[kind] = jsonStringList(JSON.stringify(names), `taken.${kind}`);
+  }
+  return out;
 }
 
 function conflictPolicy(value: unknown): ProfileConflictPolicy {

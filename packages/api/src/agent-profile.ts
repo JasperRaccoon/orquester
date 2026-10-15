@@ -720,7 +720,11 @@ export interface ProfileImportDetailResponse {
     name: string;
     exists: boolean;
     notes?: string[];
-    /** `?onConflict=keep-both`: the name the import will write (`name` itself when free); the shown `SKILL.md` carries it. */
+    /**
+     * `?onConflict=keep-both`: the name the import will write (`name` itself when free); the shown
+     * `SKILL.md` carries it. Computed in pick order (`?picks=`, JSON) over `?taken=`, as the import
+     * writes them one after another; only picked candidates carry it when `picks` is given.
+     */
     writtenName?: string;
   })[];
 }
@@ -790,12 +794,19 @@ export interface DaemonMcpCheckResponse {
   reason: DaemonPointingReason | null;
 }
 
-/** `GET agentProfilePreviewRoutes.keepBothName(agent)?kind=&name=`: what a keep-both create lands on, by the agent's own naming. */
+/**
+ * Names an earlier change of the same `edit_agent_profile` batch writes first, by kind: a later
+ * keep-both counts them as taken, as they will be on disk by then. Sent as the `taken` query
+ * parameter, JSON-encoded.
+ */
+export type ProfileTakenNames = Partial<Record<"mcp" | "skill" | "command", string[]>>;
+
+/** `GET agentProfilePreviewRoutes.keepBothName(agent)?kind=&name=[&taken=]`: what a keep-both create lands on, by the agent's own naming. */
 export interface ProfileKeepBothNameResponse {
   name: string;
 }
 
-/** `GET agentProfilePreviewRoutes.copyPreview(agent, id)?toAgent=&onConflict=`: the item as the copy will write it. */
+/** `GET agentProfilePreviewRoutes.copyPreview(agent, id)?toAgent=&onConflict=[&taken=]`: the item as the copy will write it. */
 export interface ProfileCopyPreviewResponse {
   itemId: string;
   revision: string;

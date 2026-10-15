@@ -776,3 +776,50 @@ test("chat: a plugin whose directory is outside the pinned checkout says so in r
   assert.deepEqual(row, { label: "Marketplace commit", value: "plugin directory is outside the pinned checkout (not pinned)", state: "flagged" });
   assert.ok(sectionsOf(card, "warning").some((w) => w.level === "danger" && /outside the marketplace's checkout/.test(w.text)));
 });
+
+test("chat: a plugin with several installed versions defining one server name is flagged when ANY definition points at the daemon", async () => {
+  const safe = JSON.stringify({ mcpServers: { orq: { type: "http", url: "https://safe.example/mcp" } } });
+  const pointing = JSON.stringify({ mcpServers: { orq: { type: "http", url: "http://127.0.0.1:47831/mcp" } } });
+  const files = [
+    { path: "1.0.0/.mcp.json", size: safe.length, sha256: "1".repeat(64), text: safe },
+    { path: "2.0.0/.mcp.json", size: pointing.length, sha256: "2".repeat(64), text: pointing }
+  ];
+  const plugin = item("plugin", "p@acme", { id: "plugin:p@acme", path: "/h/.codex/plugins/cache/acme/p", enabled: false });
+  const codex = "/api/agent-profile/codex";
+  const pluginPath = `${codex}/items/plugin%3Ap%40acme`;
+  const checked: unknown[] = [];
+  const api = new FakeDaemonApi().on("GET", codex, reply(snapshot([plugin], "codex")))
+    .on("GET", pluginPath, reply({ kind: "plugin", item: plugin, plugin: { id: "p@acme", name: "p" } }))
+    .on("GET", `${pluginPath}/files`, reply({ itemId: plugin.id, revision: "item-r1", complete: true, files,
+      provides: { skills: [], commands: [], agents: [], hooks: [], mcpServers: [{ name: "orq", url: "https://safe.example/mcp", envKeys: [], headerKeys: [] }] } }))
+    .on("POST", CHECK, (call) => {
+      checked.push(call.body);
+      return reply({ reason: JSON.stringify(call.body).includes("127.0.0.1:47831") ? "url" : null });
+    });
+  const port = new FakeApprovalPort(() => ({ outcome: "denied", approvalId: "" }));
+  await rejects(chat(api, port, { agent: "codex", changes: [{ action: "enable", id: plugin.id }] }), "APPROVAL_DENIED");
+  assert.deepEqual(checked.map((body) => (body as { url?: string }).url), ["https://safe.example/mcp", "http://127.0.0.1:47831/mcp"], "every definition is checked until one points");
+  assert.ok(sectionsOf(port.cards[0]!, "warning").some((w) => w.level === "danger" && /"orq" points at this Orquester/.test(w.text)));
+});
+
+test("chat: copies in one batch landing on one name — the second copy preview is told the first's name; without keep-both it is refused", async () => {
+  const preview = (id: string) => `${base}/items/${encodeURIComponent(id)}/copy-preview`;
+  const api = new FakeDaemonApi().on("GET", base, reply(snapshot([item("skill", "review"), item("command", "review")])))
+    .on("GET", preview("skill:review"), (call) => reply({ itemId: "skill:review", revision: "item-r1", kind: "skill", name: call.query?.taken && call.query.onConflict === "keep-both" ? "review-2" : "review", notes: [] }))
+    .on("GET", preview("command:review"), (call) => reply({ itemId: "command:review", revision: "item-r1", kind: "skill", name: call.query?.taken && call.query.onConflict === "keep-both" ? "review-2" : "review", notes: [] }));
+  const port = new FakeApprovalPort(() => ({ outcome: "denied", approvalId: "" }));
+  await rejects(chat(api, port, { agent: "claude", changes: [
+    { action: "copy", id: "skill:review", toAgent: "codex", onConflict: "keep-both" },
+    { action: "copy", id: "command:review", toAgent: "codex", onConflict: "keep-both" }
+  ] }), "APPROVAL_DENIED");
+  assert.deepEqual(request(api, "GET", preview("command:review")).query, { toAgent: "codex", onConflict: "keep-both", taken: JSON.stringify({ mcp: [], skill: ["review"], command: [] }) });
+  const rows = sectionsOf(port.cards[0]!, "fields").filter((section) => section.title === "As written to Codex").map((section) => section.rows[0].value as string);
+  assert.deepEqual(rows.map((value) => value.split(" ")[0]), ["review", "review-2"]);
+  // "fail" twice onto one name would stop the batch half-way: refused before the card.
+  const refused = new FakeApprovalPort();
+  await rejects(chat(api, refused, { agent: "claude", changes: [
+    { action: "copy", id: "skill:review", toAgent: "codex" },
+    { action: "copy", id: "command:review", toAgent: "codex" }
+  ] }), "INVALID_ARGUMENT");
+  assert.equal(refused.cards.length, 0);
+});

@@ -73,6 +73,7 @@ import {
   contentHash,
   copyTree,
   itemId,
+  keepBothTakenSets,
   parseMarkdownDocument,
   pathKind,
   readSkillFiles,
@@ -89,6 +90,8 @@ import {
   writeSkill
 } from "../../infra/index.ts";
 import type {
+  KeepBothRequest,
+  KeepBothTaken,
   PluginSourceLocation,
   AdapterMutationResult,
   AdapterSnapshot,
@@ -1591,19 +1594,28 @@ export class CodexProfileAdapter implements ProfileAdapter {
     return (await pathKind(join(this.skillsRoot, candidate))) !== null;
   }
 
-  async keepBothName(kind: "mcp" | "skill" | "command", name: string): Promise<string> {
-    switch (kind) {
-      case "mcp": {
+  async keepBothNames(requests: readonly KeepBothRequest[], alsoTaken?: KeepBothTaken): Promise<string[]> {
+    const claimed = keepBothTakenSets(alsoTaken);
+    let servers: Record<string, unknown> | undefined;
+    const out: string[] = [];
+    for (const { kind, name } of requests) {
+      let written: string;
+      if (kind === "mcp") {
         assertMcpServerName(name);
-        return codexMcpKeepBothName(record(this.requireConfig(await this.load()).config.mcp_servers), name);
-      }
-      case "skill":
+        servers ??= record(this.requireConfig(await this.load()).config.mcp_servers);
+        written = codexMcpKeepBothName(servers, name, claimed.mcp);
+      } else if (kind === "skill") {
         assertSkillName(name);
-        return (await this.skillNameTaken(name)) ? uniqueNameAsync(name, (candidate) => this.skillNameTaken(candidate)) : name;
-      case "command":
+        const taken = async (candidate: string) => claimed.skill.has(candidate) || (await this.skillNameTaken(candidate));
+        written = (await taken(name)) ? await uniqueNameAsync(name, taken) : name;
+      } else {
         // Codex has no commands: an import or copy makes one a skill before it gets here.
         throw profileErrors.kindNotSupported(AGENT_PROFILE_AGENT_LABELS.codex, "command");
+      }
+      claimed[kind].add(written);
+      out.push(written);
     }
+    return out;
   }
 
   /** `plugin/list`: a local plugin's directory (its `source.path`) inside the marketplace's checkout, else what Codex fetches. */
@@ -1809,6 +1821,9 @@ export function codexMarketplaceRoot(manifestPath: string): string {
 }
 
 /** `name`, or the first free `name-<n>` among `[mcp_servers]` (`createMcp`'s keep-both). */
-function codexMcpKeepBothName(servers: Record<string, unknown>, name: string): string {
-  return Object.hasOwn(servers, name) ? uniqueName(name, (candidate) => Object.hasOwn(servers, candidate)) : name;
+function codexMcpKeepBothName(servers: Record<string, unknown>, name: string, alsoTaken: ReadonlySet<string> = NO_NAMES): string {
+  const taken = (candidate: string) => Object.hasOwn(servers, candidate) || alsoTaken.has(candidate);
+  return taken(name) ? uniqueName(name, taken) : name;
 }
+
+const NO_NAMES: ReadonlySet<string> = new Set();

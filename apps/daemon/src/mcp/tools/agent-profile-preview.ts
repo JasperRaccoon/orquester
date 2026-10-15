@@ -56,6 +56,7 @@ import {
   type ProfileImportDetailResponse,
   type ProfileItemFilesResponse,
   type ProfileKeepBothNameResponse,
+  type ProfileTakenNames,
   type ProfilePluginPreviewResponse,
   type ProfilePreviewFile,
   type ProfilePreviewTree
@@ -314,18 +315,25 @@ export function profileClient(api: DaemonApi) {
     marketplacePlugins: (agent: Agent, marketplace: string) =>
       call<MarketplacePluginsResponse>("GET", agentProfileRoutes.marketplacePlugins(agent, marketplace)),
     itemFiles: (agent: Agent, id: string) => call<ProfileItemFilesResponse>("GET", agentProfilePreviewRoutes.itemFiles(agent, id)),
-    importDetail: (agent: Agent, importId: string, onConflict: ProfileConflictPolicy = "fail") =>
-      call<ProfileImportDetailResponse>("GET", agentProfilePreviewRoutes.importDetail(agent, importId), { query: { onConflict } }),
-    keepBothName: (agent: Agent, kind: "mcp" | "skill" | "command", name: string) =>
-      call<ProfileKeepBothNameResponse>("GET", agentProfilePreviewRoutes.keepBothName(agent), { query: { kind, name } }),
-    copyPreview: (agent: Agent, id: string, toAgent: Agent, onConflict: ProfileConflictPolicy) =>
-      call<ProfileCopyPreviewResponse>("GET", agentProfilePreviewRoutes.copyPreview(agent, id), { query: { toAgent, onConflict } }),
+    importDetail: (agent: Agent, importId: string, onConflict: ProfileConflictPolicy = "fail", order: { picks?: string[]; taken?: ProfileTakenNames } = {}) =>
+      call<ProfileImportDetailResponse>("GET", agentProfilePreviewRoutes.importDetail(agent, importId), {
+        query: { onConflict, ...(order.picks ? { picks: JSON.stringify(order.picks) } : {}), ...takenQuery(order.taken) }
+      }),
+    keepBothName: (agent: Agent, kind: "mcp" | "skill" | "command", name: string, taken?: ProfileTakenNames) =>
+      call<ProfileKeepBothNameResponse>("GET", agentProfilePreviewRoutes.keepBothName(agent), { query: { kind, name, ...takenQuery(taken) } }),
+    copyPreview: (agent: Agent, id: string, toAgent: Agent, onConflict: ProfileConflictPolicy, taken?: ProfileTakenNames) =>
+      call<ProfileCopyPreviewResponse>("GET", agentProfilePreviewRoutes.copyPreview(agent, id), { query: { toAgent, onConflict, ...takenQuery(taken) } }),
     pluginPreview: (agent: Agent, marketplace: string, plugin: string) =>
       call<ProfilePluginPreviewResponse>("GET", agentProfilePreviewRoutes.pluginPreview(agent, marketplace, plugin)),
     daemonPointing: (body: DaemonMcpCheckRequest) => call<DaemonMcpCheckResponse>("POST", DAEMON_MCP_SERVERS_CHECK_ROUTE, { body })
   };
 }
 export type ProfileClient = ReturnType<typeof profileClient>;
+
+/** `taken` as the reads take it: only when some name was claimed. */
+function takenQuery(taken: ProfileTakenNames | undefined): { taken?: string } {
+  return taken && Object.values(taken).some((names) => names !== undefined && names.length > 0) ? { taken: JSON.stringify(taken) } : {};
+}
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -490,11 +498,12 @@ function findItem(snapshot: AgentProfileSnapshot, agent: Agent, id: string, inde
 }
 
 /**
- * The string values one MCP server of a plugin carries (its URL, command line, header and env
- * values), read from the plugin's own JSON files — what the CLI would load.
+ * Every definition of one MCP server a plugin's own JSON files carry (its URL, command line,
+ * header and env values) — one per file, so several installed versions defining the same name
+ * are each checked: what the CLI loads may be any of them.
  */
-function pluginServerValues(files: readonly ProfilePreviewFile[], name: string): { url?: string; values: string[] } {
-  const out: { url?: string; values: string[] } = { values: [] };
+function pluginServerDefinitions(files: readonly ProfilePreviewFile[], name: string): { url?: string; values: string[] }[] {
+  const out: { url?: string; values: string[] }[] = [];
   const strings = (value: unknown): string[] =>
     typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : value !== null && typeof value === "object" ? Object.values(value).filter((v): v is string => typeof v === "string") : [];
   for (const file of files) {
@@ -511,13 +520,18 @@ function pluginServerValues(files: readonly ProfilePreviewFile[], name: string):
     const def = servers[name];
     if (def === null || typeof def !== "object" || Array.isArray(def)) continue;
     const server = def as Record<string, unknown>;
-    if (typeof server.url === "string") out.url = server.url;
-    out.values.push(...strings(server.headers), ...strings(server.env), ...strings(server.args), ...strings(server.command));
+    out.push({
+      ...(typeof server.url === "string" ? { url: server.url } : {}),
+      values: [...strings(server.headers), ...strings(server.env), ...strings(server.args), ...strings(server.command)]
+    });
   }
   return out;
 }
 
-/** A plugin's MCP servers that point at this daemon: URL, bearer where its files carry one, the name. */
+/**
+ * A plugin's MCP servers that point at this daemon: every definition of each (URL, bearer where
+ * its files carry one, command line) and the name; flagged when ANY definition points.
+ */
 async function pluginPointing(
   client: ProfileClient,
   agent: Agent,
@@ -525,12 +539,22 @@ async function pluginPointing(
   files: readonly ProfilePreviewFile[]
 ): Promise<NonNullable<ChangeFacts["pluginPointing"]>> {
   const out: NonNullable<ChangeFacts["pluginPointing"]> = [];
-  for (const server of provides.mcpServers) {
-    const found = pluginServerValues(files, server.name);
-    const url = found.url ?? server.url;
-    const values = [...found.values, ...(server.command ? [server.command] : []), ...(server.args ?? [])];
-    const { reason } = await client.daemonPointing({ agent, name: server.name, ...(url ? { url } : {}), values });
-    if (reason) out.push({ name: server.name, reason });
+  for (const name of [...new Set(provides.mcpServers.map((server) => server.name))]) {
+    const definitions = [
+      ...pluginServerDefinitions(files, name),
+      // As `provides` lists them (a definition the files scan could not attribute, an inline one).
+      ...provides.mcpServers.filter((server) => server.name === name).map((server) => ({
+        ...(server.url ? { url: server.url } : {}),
+        values: [...(server.command ? [server.command] : []), ...(server.args ?? [])]
+      }))
+    ];
+    for (const definition of definitions) {
+      const { reason } = await client.daemonPointing({ agent, name, ...(definition.url ? { url: definition.url } : {}), values: definition.values });
+      if (reason) {
+        out.push({ name, reason });
+        break;
+      }
+    }
   }
   return out;
 }
@@ -553,6 +577,22 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
   const facts: ChangeFacts[] = [];
   let snapshot: AgentProfileSnapshot | undefined;
   const snap = async () => (snapshot ??= await client.snapshot(agent));
+  // The names earlier changes of this batch write, per target agent and kind: the writes run in
+  // order, so a later keep-both finds them taken (and gets the next suffix), exactly as on disk.
+  const claimed = new Map<Agent, Required<ProfileTakenNames>>();
+  const takenOf = (target: Agent): Required<ProfileTakenNames> => {
+    let names = claimed.get(target);
+    if (!names) claimed.set(target, (names = { mcp: [], skill: [], command: [] }));
+    return names;
+  };
+  const claim = (index: number, target: Agent, kind: "mcp" | "skill" | "command", name: string, policy: ProfileConflictPolicy) => {
+    const names = takenOf(target)[kind];
+    if (names.includes(name)) {
+      // Only keep-both steps aside; "fail" would stop the batch half-way, "replace" overwrite an earlier change.
+      throw new ToolError("INVALID_ARGUMENT", `${where(index)}: the ${KIND_ONE[kind]} "${clipText(name, MAX_ECHO_CHARS)}" is also written by an earlier change of this call in ${CLI_LABELS[target]}. Use onConflict "keep-both", or drop one of them.`);
+    }
+    names.push(name);
+  };
   for (const [index, change] of changes.entries()) {
     const fact: ChangeFacts = {};
     const pin = (what: string, value: string) => {
@@ -576,7 +616,8 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
         if (name !== undefined && (kind === "mcp" || kind === "skill" || kind === "command")) {
           // The name written, always pinned: keep-both asks the agent's own naming (which knows
           // what its write would collide with); otherwise it is the name itself.
-          fact.writtenName = policy === "keep-both" ? (await client.keepBothName(agent, kind, name)).name : name;
+          fact.writtenName = policy === "keep-both" ? (await client.keepBothName(agent, kind, name, takenOf(agent))).name : name;
+          claim(index, agent, kind, fact.writtenName, policy);
           pin("name", fact.writtenName);
         }
         if (name !== undefined && policy === "replace") {
@@ -612,7 +653,8 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
         }
         if (change.action === "copy") {
           // What the target gets: converted, named by the target's own keep-both naming.
-          fact.copy = await client.copyPreview(agent, change.id!, change.toAgent!, change.onConflict ?? "fail");
+          fact.copy = await client.copyPreview(agent, change.id!, change.toAgent!, change.onConflict ?? "fail", takenOf(change.toAgent!));
+          claim(index, change.toAgent!, fact.copy.kind, fact.copy.name, change.onConflict ?? "fail");
           pin("name", fact.copy.name);
           if (fact.copy.tree) pin("files", treeDigest(fact.copy.tree));
         }
@@ -645,10 +687,16 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
         break;
       }
       case "import_pick": {
-        fact.importDetail = await client.importDetail(agent, change.importId!, change.onConflict ?? "fail");
+        fact.importDetail = await client.importDetail(agent, change.importId!, change.onConflict ?? "fail", { picks: change.picks!, taken: takenOf(agent) });
         const known = new Set(fact.importDetail.candidates.map((candidate) => candidate.ref));
         const missing = change.picks!.filter((ref) => !known.has(ref));
         if (missing.length > 0) throw new ToolError("INVALID_ARGUMENT", `${where(index)}: the import has no item ${missing.slice(0, 3).map((ref) => JSON.stringify(clipText(ref, MAX_ECHO_CHARS))).join(", ")}.`);
+        // In pick order, as the import writes them.
+        const byRef = new Map(fact.importDetail.candidates.map((candidate) => [candidate.ref, candidate]));
+        for (const ref of new Set(change.picks!)) {
+          const candidate = byRef.get(ref)!;
+          claim(index, agent, candidate.kind, candidate.writtenName ?? candidate.name, change.onConflict ?? "fail");
+        }
         for (const candidate of fact.importDetail.candidates.filter((entry) => change.picks!.includes(entry.ref))) {
           pin(`pick.${candidate.ref}`, treeDigest(candidate));
           pin(`pick.${candidate.ref}.name`, candidate.writtenName ?? candidate.name);

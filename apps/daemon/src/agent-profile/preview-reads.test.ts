@@ -18,7 +18,7 @@ import { codexMarketplaceRoot, codexPluginLocation } from "./adapters/codex/inde
 import { ProfileImportStore } from "./import.ts";
 import { AgentProfileService } from "./service.ts";
 import { FakeProfileAdapter, fakeItem } from "./testing.ts";
-import { pluginProvidesOf, readGitCommit, readPreviewTree, treeDigest } from "./preview-reads.ts";
+import { pluginProvidesOf, readGitCommit, readInstalledPlugin, readPreviewTree, treeDigest } from "./preview-reads.ts";
 import { registerAgentProfileRoutes, type AgentProfileRouteDeps } from "./routes.ts";
 
 async function write(path: string, text: string | Buffer): Promise<void> {
@@ -172,7 +172,7 @@ test("routes: the card reads answer what the service reads, and 503 without it",
   assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/claude/items/skill%3Aa/files" })).statusCode, 200);
   assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/claude/imports/i" })).statusCode, 200);
   assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/claude/marketplaces/m/plugins/p" })).statusCode, 200);
-  assert.deepEqual(calls, [["itemFiles", "claude", "skill:a"], ["importDetail", "claude", "i", "fail"], ["pluginPreview", "claude", "m", "p"]]);
+  assert.deepEqual(calls, [["itemFiles", "claude", "skill:a"], ["importDetail", "claude", "i", "fail", {}], ["pluginPreview", "claude", "m", "p"]]);
   calls.length = 0;
   assert.deepEqual((await app.inject({ method: "GET", url: "/api/agent-profile/codex/names/keep-both?kind=skill&name=x" })).json(), { name: "x-2" });
   assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/codex/names/keep-both?kind=plugin&name=x" })).statusCode, 400);
@@ -180,7 +180,12 @@ test("routes: the card reads answer what the service reads, and 503 without it",
   assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/claude/items/skill%3Aa/copy-preview?toAgent=nope" })).statusCode, 400);
   assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/claude/imports/i?onConflict=bogus" })).statusCode, 400);
   assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/claude/imports/i?onConflict=keep-both" })).statusCode, 200);
-  assert.deepEqual(calls, [["keepBothName", "codex", "skill", "x"], ["copyPreview", "claude", "skill:a", "codex", "keep-both"], ["importDetail", "claude", "i", "keep-both"]]);
+  assert.equal((await app.inject({ method: "GET", url: `/api/agent-profile/claude/imports/i?onConflict=keep-both&picks=${encodeURIComponent('["b","a"]')}&taken=${encodeURIComponent('{"skill":["x"]}')}` })).statusCode, 200);
+  assert.equal((await app.inject({ method: "GET", url: `/api/agent-profile/claude/imports/i?taken=${encodeURIComponent('{"plugin":["x"]}')}` })).statusCode, 400);
+  assert.deepEqual(calls, [
+    ["keepBothName", "codex", "skill", "x", undefined], ["copyPreview", "claude", "skill:a", "codex", "keep-both", undefined], ["importDetail", "claude", "i", "keep-both", {}],
+    ["importDetail", "claude", "i", "keep-both", { picks: ["b", "a"], taken: { skill: ["x"] } }]
+  ]);
   assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/nope/imports/i" })).statusCode, 404);
   const missing = await bare.inject({ method: "GET", url: "/api/agent-profile/claude/items/skill%3Aa/files" });
   assert.equal(missing.statusCode, 503);
@@ -284,8 +289,8 @@ test("pluginPreview: a plugin directory outside the marketplace checkout (on rea
 test("copyPreview and keep-both import detail: written under the target's own keep-both name, SKILL.md carrying it; temp copies removed", async (t) => {
   const root = await tempRoot(t);
   class Adapter extends FakeProfileAdapter {
-    async keepBothName(_kind: "mcp" | "skill" | "command", name: string) {
-      return `${name}-2`;
+    async keepBothNames(requests: readonly { kind: "mcp" | "skill" | "command"; name: string }[]) {
+      return requests.map((request) => `${request.name}-2`);
     }
   }
   const claude = new Adapter("claude");
@@ -318,4 +323,80 @@ test("copyPreview and keep-both import detail: written under the target's own ke
   assert.equal(alpha.writtenName, "alpha-2");
   assert.match(alpha.files.find((file) => file.path === "SKILL.md")!.text!, /^---\nname: alpha-2\n/);
   assert.equal((await service.importDetail("claude", scan.importId)).candidates[0]!.writtenName, undefined);
+});
+
+test("readInstalledPlugin: the reported version, symlinked versions only inside the plugin cache, and unreadable reasons", async (t) => {
+  const root = await tempRoot(t);
+  const cache = join(root, "home", ".codex", "plugins", "cache");
+  const plugin = join(cache, "mkt", "p");
+  const manifest = (dir: string, name: string) => write(join(dir, ".codex-plugin", "plugin.json"), JSON.stringify({ name }));
+  await manifest(join(plugin, "1.0.0"), "p-one");
+  await manifest(join(cache, "mkt", "shared-2.0.0"), "p-two");
+  await symlink(join(cache, "mkt", "shared-2.0.0"), join(plugin, "2.0.0"));
+  const read = await readInstalledPlugin(plugin, "2.0.0");
+  assert.equal(read.unreadable, undefined);
+  assert.match(read.tree.files[0]!.text!, /p-two/, "a symlinked version inside the plugin cache is followed");
+  const both = await readInstalledPlugin(plugin, undefined);
+  assert.deepEqual(both.tree.files.map((file) => file.path), ["1.0.0/.codex-plugin/plugin.json", "2.0.0/.codex-plugin/plugin.json"]);
+  // A version directory leading out of the plugin cache: unreadable, never followed.
+  await manifest(join(root, "elsewhere"), "evil");
+  await symlink(join(root, "elsewhere"), join(plugin, "3.0.0"));
+  const outside = await readInstalledPlugin(plugin, "3.0.0");
+  assert.match(outside.unreadable ?? "", /contents not readable \(the version directory "3\.0\.0" leads outside the plugin cache\)/);
+  assert.deepEqual(outside.tree.files, []);
+  assert.equal((await readInstalledPlugin(join(cache, "mkt", "gone"), undefined)).unreadable, "contents not readable (cache missing)");
+  if (process.getuid?.() !== 0) {
+    const locked = join(cache, "mkt", "locked");
+    await mkdir(join(locked, "1.0.0"), { recursive: true });
+    await chmod(locked, 0o000);
+    try {
+      assert.equal((await readInstalledPlugin(locked, undefined)).unreadable, "contents not readable (EACCES)", "a permission error is not a missing cache");
+    } finally {
+      await chmod(locked, 0o755);
+    }
+  }
+});
+
+test("keep-both import detail: only picks are named, in pick order, in one adapter call; a command shows as the file it is written to", async (t) => {
+  const root = await tempRoot(t);
+  const asked: { kind: string; name: string }[][] = [];
+  class Adapter extends FakeProfileAdapter {
+    async keepBothNames(requests: readonly { kind: "mcp" | "skill" | "command"; name: string }[], alsoTaken?: { skill?: Iterable<string>; command?: Iterable<string> }) {
+      asked.push(requests.map((request) => ({ ...request })));
+      if (requests.some((request) => request.name === "refused")) throw new Error("an unpicked candidate was named");
+      const taken = { skill: new Set(alsoTaken?.skill ?? []), command: new Set(alsoTaken?.command ?? []) } as Record<string, Set<string>>;
+      return requests.map((request) => {
+        let name = request.name;
+        for (let n = 2; taken[request.kind]!.has(name) || name === "deploy"; n += 1) name = `${request.name}-${n}`;
+        taken[request.kind]!.add(name);
+        return name;
+      });
+    }
+  }
+  const store = new ProfileImportStore({
+    dir: join(root, "imports"), existing: async () => new Set(), logger: { info: () => undefined, warn: () => undefined },
+    clone: async (_url, _ref, dest) => {
+      await write(join(dest, "commands", "deploy.md"), "---\ndescription: D\n---\nship it");
+      await write(join(dest, "a", "skills", "alpha", "SKILL.md"), "---\nname: alpha\ndescription: A\n---\none");
+      await write(join(dest, "b", "skills", "alpha", "SKILL.md"), "---\nname: alpha\ndescription: B\n---\ntwo");
+      await write(join(dest, "skills", "refused", "SKILL.md"), "---\nname: refused\ndescription: R\n---\nno");
+    }
+  });
+  t.after(() => store.stop());
+  const service = new AgentProfileService({
+    adapters: { claude: new Adapter("claude") }, agentInfo: () => ({ installed: true }), converter: (item) => ({ item, notes: [] }), imports: store,
+    logger: { warn: () => undefined, error: () => undefined }
+  });
+  const scan = await service.scanGit("claude", "https://git.example/acme/kit.git");
+  const ref = (predicate: (candidate: { kind: string; name: string; ref: string }) => boolean) => scan.candidates.find(predicate)!.ref;
+  const alphaA = ref((c) => c.name === "alpha" && c.ref.startsWith("a/"));
+  const alphaB = ref((c) => c.name === "alpha" && c.ref.startsWith("b/"));
+  const deploy = ref((c) => c.kind === "command");
+  const detail = await service.importDetail("claude", scan.importId, "keep-both", { picks: [alphaB, alphaA, deploy], taken: { skill: ["alpha"] } });
+  assert.deepEqual(asked, [[{ kind: "skill", name: "alpha" }, { kind: "skill", name: "alpha" }, { kind: "command", name: "deploy" }]], "one call, picks only, in pick order");
+  const byRef = new Map(detail.candidates.map((candidate) => [candidate.ref, candidate]));
+  assert.deepEqual([byRef.get(alphaB)!.writtenName, byRef.get(alphaA)!.writtenName], ["alpha-2", "alpha-3"]);
+  assert.match(byRef.get(alphaA)!.files.find((file) => file.path === "SKILL.md")!.text!, /^---\nname: alpha-3\n/);
+  assert.deepEqual(byRef.get(deploy)!.files.map((file) => file.path), ["deploy-2.md"], "the command's file as written, not its source path");
+  assert.equal(detail.candidates.find((candidate) => candidate.name === "refused")!.writtenName, undefined);
 });

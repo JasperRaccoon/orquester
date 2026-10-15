@@ -103,10 +103,13 @@ import {
   scanSkills,
   writeCommand,
   writeProfileFile,
+  keepBothTakenSets,
   writeProfileFileVerified,
   writeSkill
 } from "../../infra/index.ts";
 import type {
+  KeepBothRequest,
+  KeepBothTaken,
   AdapterMutationResult,
   AdapterSnapshot,
   PortableItem,
@@ -379,6 +382,8 @@ function isCommandPath(path: string | undefined): boolean {
 }
 
 /** Next free `<base>-2`, `<base>-3`, … that passes `valid` and fits `max`. */
+const NO_NAMES: ReadonlySet<string> = new Set();
+
 function nextFreeName(base: string, taken: (name: string) => boolean, max: number, valid: (name: string) => boolean): string {
   for (let n = 2; n < 1000; n += 1) {
     const suffix = `-${n}`;
@@ -2204,33 +2209,44 @@ export class GrokProfileAdapter implements ProfileAdapter {
   }
 
   /** The first free `name-<n>` among the skills directory's entries. */
-  private async nextFreeSkillName(name: string): Promise<string> {
-    const used = new Set(await readdir(this.skillsDir).catch(() => [] as string[]));
+  private async nextFreeSkillName(name: string, alsoTaken: ReadonlySet<string> = NO_NAMES): Promise<string> {
+    const used = new Set([...(await readdir(this.skillsDir).catch(() => [] as string[])), ...alsoTaken]);
     return nextFreeName(name, (candidate) => used.has(candidate), PROFILE_SKILL_NAME_MAX, isValidSkillName);
   }
 
   /** The first free `name-<n>` among the commands directory's files. */
-  private async nextFreeCommandName(name: string): Promise<string> {
-    const used = new Set((await readdir(this.commandsDir).catch(() => [] as string[])).map((file) => file.replace(/\.md$/, "")));
+  private async nextFreeCommandName(name: string, alsoTaken: ReadonlySet<string> = NO_NAMES): Promise<string> {
+    const used = new Set([...(await readdir(this.commandsDir).catch(() => [] as string[])).map((file) => file.replace(/\.md$/, "")), ...alsoTaken]);
     return nextFreeName(name, (candidate) => used.has(candidate), PROFILE_SKILL_NAME_MAX, isValidSkillName);
   }
 
-  async keepBothName(kind: "mcp" | "skill" | "command", name: string): Promise<string> {
-    switch (kind) {
-      case "mcp": {
+  async keepBothNames(requests: readonly KeepBothRequest[], alsoTaken?: KeepBothTaken): Promise<string[]> {
+    const claimed = keepBothTakenSets(alsoTaken);
+    let onDisk: ((candidate: string) => boolean) | undefined;
+    const out: string[] = [];
+    for (const { kind, name } of requests) {
+      let written: string;
+      if (kind === "mcp") {
         assertMcpServerName(name);
-        const model = await this.load();
-        this.requireConfig(model);
-        const taken = this.mcpNameTaken(model);
-        return taken(name) ? nextFreeName(name, taken, PROFILE_MCP_NAME_MAX, isValidMcpServerName) : name;
-      }
-      case "skill":
+        if (onDisk === undefined) {
+          const model = await this.load();
+          this.requireConfig(model);
+          onDisk = this.mcpNameTaken(model);
+        }
+        const known = onDisk;
+        const taken = (candidate: string) => known(candidate) || claimed.mcp.has(candidate);
+        written = taken(name) ? nextFreeName(name, taken, PROFILE_MCP_NAME_MAX, isValidMcpServerName) : name;
+      } else if (kind === "skill") {
         assertSkillName(name);
-        return (await pathKind(join(this.skillsDir, name))) !== null ? this.nextFreeSkillName(name) : name;
-      case "command":
+        written = claimed.skill.has(name) || (await pathKind(join(this.skillsDir, name))) !== null ? await this.nextFreeSkillName(name, claimed.skill) : name;
+      } else {
         this.assertFlatCommand(name);
-        return (await this.commandNameTaken(name)) ? this.nextFreeCommandName(name) : name;
+        written = claimed.command.has(name) || (await this.commandNameTaken(name)) ? await this.nextFreeCommandName(name, claimed.command) : name;
+      }
+      claimed[kind].add(written);
+      out.push(written);
     }
+    return out;
   }
 
   private async importSkill(requested: string, dir: string, onConflict: ProfileConflictPolicy): Promise<AdapterMutationResult> {

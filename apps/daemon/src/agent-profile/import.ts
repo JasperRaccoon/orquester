@@ -325,6 +325,8 @@ export class ProfileImportStore implements ProfileImports {
       } else {
         const mapped = mapFrontmatter(document.frontmatter, "command", agent);
         text = serializeMarkdownDocument(mapped.frontmatter, document.body);
+        // Shown as the command it becomes (`git/pr` for Claude, `git-pr` for Grok), not the source path.
+        renamed = `${candidate.name}.md`;
         notes = droppedKeysNote(mapped.dropped, agent);
       }
     }

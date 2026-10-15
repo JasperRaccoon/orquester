@@ -69,6 +69,7 @@ import type {
   AdapterMutationResult,
   AdapterSnapshot,
   AgentHomes,
+  KeepBothRequest,
   PortableItem,
   ProfileAdapter
 } from "./adapters/types.ts";
@@ -83,7 +84,8 @@ import type {
   ProfileImportDetailResponse,
   ProfileItemFilesResponse,
   ProfilePluginPreviewResponse,
-  ProfilePreviewFile
+  ProfilePreviewFile,
+  ProfileTakenNames
 } from "@orquester/api";
 
 /** What the registry knows about an agent's CLI. */
@@ -313,26 +315,56 @@ export class AgentProfileService {
   }
 
   /** An open import scan in full (its source, commit and every candidate's files). */
-  async importDetail(agent: AgentProfileAgentId, importId: string, onConflict: ProfileConflictPolicy = "fail"): Promise<ProfileImportDetailResponse> {
-    const adapter = this.installedAdapter(agent);
+  async importDetail(
+    agent: AgentProfileAgentId,
+    importId: string,
+    onConflict: ProfileConflictPolicy = "fail",
+    order: { picks?: string[]; taken?: ProfileTakenNames } = {}
+  ): Promise<ProfileImportDetailResponse> {
+    this.installedAdapter(agent);
     const imports = this.requireImports();
     if (!imports.inspect) throw new AgentProfileError(503, "AGENT_PROFILE_ERROR", "Imports cannot be inspected.");
     const detail = await imports.inspect(agent, importId);
     if (onConflict !== "keep-both") return detail;
-    // keep-both: each candidate as the import will write it — under the name the agent's own
-    // naming picks, its `SKILL.md` carrying that name (as every adapter's import aligns it).
-    const candidates = [];
-    for (const candidate of detail.candidates) {
-      const name = await this.keepBothName(agent, candidate.kind, candidate.name, adapter);
-      candidates.push({ ...candidate, writtenName: name, ...(candidate.kind === "skill" ? { files: renameSkillFile(candidate.files, name, agent) } : {}) });
-    }
+    // keep-both: each pick as the import will write it — in pick order, one after another (as
+    // `take` and the adapter's imports do), so a name an earlier pick takes is taken for the next;
+    // its `SKILL.md` carrying the name (as every adapter's import aligns it).
+    // Only the picks are named (an unpicked candidate's name is never asked, so never refused),
+    // all in one adapter call (its state read once).
+    const byRef = new Map(detail.candidates.map((candidate) => [candidate.ref, candidate]));
+    const refs = order.picks ? [...new Set(order.picks)].filter((ref) => byRef.has(ref)) : detail.candidates.map((candidate) => candidate.ref);
+    const names = await this.keepBothNames(agent, refs.map((ref) => ({ kind: byRef.get(ref)!.kind, name: byRef.get(ref)!.name })), order.taken);
+    const written = new Map(refs.map((ref, index) => [ref, names[index]!]));
+    const candidates = detail.candidates.map((candidate) => {
+      const name = written.get(candidate.ref);
+      if (name === undefined) return candidate;
+      // A skill's SKILL.md carries the name; a command's file is shown as the file it is written to.
+      const files = candidate.kind === "skill"
+        ? renameSkillFile(candidate.files, name, agent)
+        : candidate.files.map((file) => (file.path === `${candidate.name}.md` ? { ...file, path: `${name}.md` } : file));
+      return { ...candidate, writtenName: name, files };
+    });
     return { ...detail, candidates };
   }
 
-  /** The name a keep-both create of this kind lands on, by the agent's own naming (`name` when free). */
-  async keepBothName(agent: AgentProfileAgentId, kind: "mcp" | "skill" | "command", name: string, adapter = this.installedAdapter(agent)): Promise<string> {
-    if (!adapter.keepBothName) throw new AgentProfileError(503, "AGENT_PROFILE_ERROR", `${AGENT_PROFILE_AGENT_LABELS[agent]} cannot name a keep-both copy ahead.`);
-    return adapter.keepBothName(kind, name);
+  /**
+   * The name a keep-both create of this kind lands on, by the agent's own naming (`name` when
+   * free); `alsoTaken`: names an earlier change of the same batch writes first.
+   */
+  async keepBothName(
+    agent: AgentProfileAgentId,
+    kind: "mcp" | "skill" | "command",
+    name: string,
+    alsoTaken?: ProfileTakenNames
+  ): Promise<string> {
+    return (await this.keepBothNames(agent, [{ kind, name }], alsoTaken))[0]!;
+  }
+
+  /** Several keep-both names in order, each counting the ones before it as taken (`ProfileAdapter.keepBothNames`). */
+  async keepBothNames(agent: AgentProfileAgentId, requests: readonly KeepBothRequest[], alsoTaken?: ProfileTakenNames): Promise<string[]> {
+    const adapter = this.installedAdapter(agent);
+    if (!adapter.keepBothNames) throw new AgentProfileError(503, "AGENT_PROFILE_ERROR", `${AGENT_PROFILE_AGENT_LABELS[agent]} cannot name a keep-both copy ahead.`);
+    return requests.length === 0 ? [] : adapter.keepBothNames(requests, alsoTaken);
   }
 
   /**
@@ -344,7 +376,8 @@ export class AgentProfileService {
     fromAgent: AgentProfileAgentId,
     id: string,
     toAgent: AgentProfileAgentId,
-    onConflict: ProfileConflictPolicy
+    onConflict: ProfileConflictPolicy,
+    taken?: ProfileTakenNames
   ): Promise<ProfileCopyPreviewResponse> {
     assertAgent(fromAgent);
     assertAgent(toAgent);
@@ -352,7 +385,7 @@ export class AgentProfileService {
     const idKind = kindOfId(id);
     if (idKind && !PROFILE_COPYABLE_KINDS.includes(idKind)) throw notCopyable(idKind);
     const source = this.installedAdapter(fromAgent);
-    const target = this.installedAdapter(toAgent);
+    this.installedAdapter(toAgent);
     const item = (await this.snapshot(fromAgent)).items.find((entry) => entry.id === id);
     if (item === undefined) throw profileErrors.notFound(id);
     const portable = await this.enqueue(fromAgent, () => source.exportItem(id));
@@ -364,7 +397,7 @@ export class AgentProfileService {
       assertPortableReceivable(toAgent, conversion.item);
       const converted = conversion.item;
       const base = converted.kind === "mcp" ? converted.server.name : converted.name;
-      const name = onConflict === "keep-both" ? await this.keepBothName(toAgent, converted.kind, base, target) : base;
+      const name = onConflict === "keep-both" ? await this.keepBothName(toAgent, converted.kind, base, taken) : base;
       const head = { itemId: id, revision: item.revision, kind: converted.kind, name, notes: [...conversion.notes] };
       if (converted.kind === "mcp") return head;
       if (converted.kind === "skill") {
