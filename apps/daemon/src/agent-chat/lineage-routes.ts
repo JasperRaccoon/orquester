@@ -29,6 +29,7 @@ import {
   AGENT_CHAT_ERROR_CODES,
   agentChatRoutes,
   isAgentPrincipalFor,
+  TARGET_BUSY,
   type AgentChatErrorCode,
   type AgentChatErrorEnvelope,
   type CallerPrincipal,
@@ -39,7 +40,6 @@ import type { FastifyRequest } from "fastify";
 
 import { LineageError, type LineageService } from "./lineage.ts";
 import { REPLY_ERROR_STATUS, ReplyError, type ReplyRouter } from "./replies.ts";
-import { replySubscriptionReleasePath } from "./waits.ts";
 
 export interface LineageRouteDeps {
   /** Null until the daemon's own API exists; the routes then answer 503. */
@@ -76,7 +76,7 @@ function codeOf(error: unknown): AgentChatErrorCode {
 }
 
 function refuse(reply: FastifyReply, error: unknown, fallback: string): FastifyReply {
-  if (error instanceof LineageError && (error.code === "EXCHANGE_LIMIT" || error.code === "TARGET_BUSY")) {
+  if (error instanceof LineageError && (error.code === "EXCHANGE_LIMIT" || error.code === TARGET_BUSY)) {
     return reply.code(409).send({ error: { code: error.code, message: error.message } });
   }
   const code = codeOf(error);
@@ -283,7 +283,7 @@ export function registerReplySubscriptionRoutes(app: FastifyInstance, deps: Repl
 
   // The waiting tool call was cancelled: release its waiter (the reply then comes as a message).
   app.post<{ Params: { id: string; subscriptionId: string } }>(
-    pattern(replySubscriptionReleasePath(":id", ":subscriptionId")),
+    pattern(agentChatRoutes.replySubscriptionRelease(":id", ":subscriptionId")),
     async (request, reply): Promise<{ released: boolean; state: string } | FastifyReply> => {
       const { id, subscriptionId } = request.params;
       const replies = deps.replies();

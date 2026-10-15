@@ -13,7 +13,6 @@ import { ChatSessionError } from "./chat-sessions.ts";
 import { LineageError, type LineageService } from "./lineage.ts";
 import { gateSessionCreateBody, registerLineageRoutes, registerReplySubscriptionRoutes } from "./lineage-routes.ts";
 import { ReplyError, type ReplyRouter } from "./replies.ts";
-import { replySubscriptionReleasePath } from "./waits.ts";
 
 function app(overrides: { fork?: () => Promise<unknown>; lineage?: Partial<LineageService> | null } = {}) {
   const server = Fastify();
@@ -222,10 +221,10 @@ test("the reply-subscription routes exist only where registered (the unix app), 
   assert.equal(notChat.statusCode, 404);
   const waited = await server.inject({ method: "POST", url: agentChatRoutes.replySubscriptionWait("chat-1", "s-1"), payload: { timeoutSeconds: 5 } });
   assert.deepEqual(waited.json(), { outcome: "notify", reason: "timeout", willNotify: true });
-  const released = await server.inject({ method: "POST", url: replySubscriptionReleasePath("chat-1", "s-1") });
+  const released = await server.inject({ method: "POST", url: agentChatRoutes.replySubscriptionRelease("chat-1", "s-1") });
   assert.deepEqual(released.json(), { released: true, state: "notify" });
-  assert.equal(replySubscriptionReleasePath("a b", "s/1"), "/api/sessions/a%20b/reply-subscriptions/s%2F1/release");
-  const remoteRelease = await remote.inject({ method: "POST", url: replySubscriptionReleasePath("chat-1", "s-1") });
+  assert.equal(agentChatRoutes.replySubscriptionRelease("a b", "s/1"), "/api/sessions/a%20b/reply-subscriptions/s%2F1/release");
+  const remoteRelease = await remote.inject({ method: "POST", url: agentChatRoutes.replySubscriptionRelease("chat-1", "s-1") });
   assert.equal(remoteRelease.statusCode, 404, "socket-only");
 });
 

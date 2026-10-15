@@ -60,6 +60,8 @@ import {
   parseMergeBackMessage,
   SETTLED_TURN_STATES,
   isDeadlineRefusal,
+  TARGET_BUSY,
+  TURN_NOT_IDLE,
   type ThreadReadResponse,
   type ThreadSnapshotPayload
 } from "@orquester/api/agent-chat";
@@ -73,7 +75,7 @@ import { assistantTextForTurn } from "../mcp/views.ts";
 export class LineageError extends Error {
   constructor(
     message: string,
-    readonly code: "THREAD_NOT_FOUND" | "INVALID_COMMAND" | "COMMAND_REJECTED" | "HOST_UNAVAILABLE" | "EXCHANGE_LIMIT" | "TARGET_BUSY"
+    readonly code: "THREAD_NOT_FOUND" | "INVALID_COMMAND" | "COMMAND_REJECTED" | "HOST_UNAVAILABLE" | "EXCHANGE_LIMIT" | typeof TARGET_BUSY
   ) {
     super(message);
     this.name = "LineageError";
@@ -124,12 +126,6 @@ export interface DeliveryListener {
 
 const DEFAULT_RECHECK_MS = 30_000;
 
-/**
- * `detail.reason` of the host's refusal of a `/turn` sent with `ifIdle: true` while a turn is active
- * (`agent-host/orchestration/orchestrator.ts` `TurnNotIdleRefusal`, the same literal). Never recorded
- * by the host: the entry stays queued, its attempt count untouched, for the next idle point.
- */
-export const TURN_NOT_IDLE_REASON = "turn-not-idle";
 /** What a merge's text may hold, header excluded: the parent's `/turn` cap minus the header. */
 export const MERGE_BACK_MAX_TEXT_CHARS = MAX_TURN_INPUT_CHARS - MERGE_BACK_OVERHEAD_CHARS;
 
@@ -478,12 +474,12 @@ export class LineageService {
       // A reply-bound `message` is a turn of its own, never a steer (§8.3): with the target busy,
       // "Deliver now" is refused and the message stays queued for its next idle point.
       if (isReplyBoundMessage(current) && !(await this.isIdle(api, current.parentSessionId))) {
-        throw new LineageError("That chat is working; the message is delivered at its next idle point.", "TARGET_BUSY");
+        throw new LineageError("That chat is working; the message is delivered at its next idle point.", TARGET_BUSY);
       }
       // A reply delivered now may join a running turn: it is plain text for the requester.
       const sent = await this.deliver(api, current, { steer: !isReplyBoundMessage(current) });
       if (sent.kind === "busy") {
-        throw new LineageError("That chat is working; the message is delivered at its next idle point.", "TARGET_BUSY");
+        throw new LineageError("That chat is working; the message is delivered at its next idle point.", TARGET_BUSY);
       }
       if (sent.kind === "unavailable") {
         throw new LineageError("The agent host is restarting; the merge stays queued.", "HOST_UNAVAILABLE");
@@ -598,8 +594,9 @@ export class LineageService {
       if (res.status < 400) return { kind: "sent", seq: (res.body as { seq?: number } | null)?.seq ?? 0, commandId };
       const error = (res.body as { error?: { code?: string; message?: string } } | null)?.error;
       if (res.status === 503 || error?.code === "HOST_UNAVAILABLE") return { kind: "unavailable" };
-      const reason = (error as { detail?: { reason?: unknown } } | undefined)?.detail?.reason;
-      if (res.status === 409 && reason === TURN_NOT_IDLE_REASON) return { kind: "busy" };
+      // The host refused the `ifIdle` precondition (409 TURN_NOT_IDLE, never recorded as a receipt):
+      // the entry stays queued, its attempt count untouched, for the next idle point.
+      if (res.status === 409 && error?.code === TURN_NOT_IDLE) return { kind: "busy" };
       return {
         kind: "refused",
         message: error?.message ?? `The parent refused the message (${res.status}).`,

@@ -8192,16 +8192,11 @@ function withForkedMcpApp(event: RuntimeEvent, apps: ReadonlyMap<string, McpAppR
 
 /**
  * The `/turn` precondition `ifIdle: true` refused: a turn is active, so the message would steer it.
- * 409 `COMMAND_REJECTED` with `detail.reason: "turn-not-idle"` (the daemon's delivery queue reads
- * the same literal, `lineage.ts` `TURN_NOT_IDLE_REASON`), and NOT recorded as a receipt: a refusal
+ * 409 `TURN_NOT_IDLE` (`TurnCommandBody.ifIdle`), which is not a recorded rejection code: a refusal
  * of the moment, the same command id may land later.
  */
 class TurnNotIdleRefusal extends AgentChatCommandError {
   constructor() {
-    super("COMMAND_REJECTED", "The thread is working; the message waits for its next idle point.", { reason: "turn-not-idle" });
-  }
-
-  override get recorded(): boolean {
-    return false;
+    super("TURN_NOT_IDLE", "The thread is working; the message waits for its next idle point.");
   }
 }

@@ -196,7 +196,7 @@ function fakeHost() {
         const t = thread(sessionId);
         if (body.ifIdle === true && !ignoreIfIdle && active(t)) {
           // The host's precondition: refused, NOT recorded (the same id may land later).
-          return { status: 409, body: { error: { code: "COMMAND_REJECTED", message: "working", detail: { reason: "turn-not-idle" } } } };
+          return { status: 409, body: { error: { code: "TURN_NOT_IDLE", message: "working" } } };
         }
         const post = { sessionId, body };
         beforePost?.(post);

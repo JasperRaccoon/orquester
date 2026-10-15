@@ -72,10 +72,7 @@ describe("causedBy on turn commands", () => {
     const before = (host.store.logs.get(threadId) ?? []).length;
     await assert.rejects(
       host.orchestrator.command(threadId, "turn", { commandId: id, input: "would steer", ifIdle: true }),
-      (error: unknown) =>
-        isAgentChatCommandError(error) &&
-        error.code === "COMMAND_REJECTED" &&
-        (error.detail as { reason?: unknown } | undefined)?.reason === "turn-not-idle"
+      (error: unknown) => isAgentChatCommandError(error) && error.code === "TURN_NOT_IDLE" && error.status === 409
     );
     assert.equal((host.store.logs.get(threadId) ?? []).length, before, "nothing appended");
     assert.equal(host.store.receipts.has(id), false, "not recorded: the same id may land later");
@@ -94,7 +91,7 @@ describe("causedBy on turn commands", () => {
     const id = cmd();
     await assert.rejects(
       host.orchestrator.command(threadId, "turn", { commandId: id, input: "a reply-bound message", ifIdle: true }),
-      (error: unknown) => isAgentChatCommandError(error) && (error.detail as { reason?: unknown } | undefined)?.reason === "turn-not-idle"
+      (error: unknown) => isAgentChatCommandError(error) && error.code === "TURN_NOT_IDLE"
     );
     await user;
     await host.settle();
@@ -140,13 +137,13 @@ describe("causedBy on turn commands", () => {
     assert.equal(read.thread.head.session.activeTurnId, null, "an activeTurnId-only check would let it through");
     await assert.rejects(
       host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "during compaction", ifIdle: true }),
-      (error: unknown) => isAgentChatCommandError(error) && (error.detail as { reason?: unknown } | undefined)?.reason === "turn-not-idle"
+      (error: unknown) => isAgentChatCommandError(error) && error.code === "TURN_NOT_IDLE"
     );
     // A user turn is queued behind it; still not idle for a reply-bound one.
     await host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "queued by the user" });
     await assert.rejects(
       host.orchestrator.command(threadId, "turn", { commandId: cmd(), input: "behind the queue", ifIdle: true }),
-      (error: unknown) => isAgentChatCommandError(error) && (error.detail as { reason?: unknown } | undefined)?.reason === "turn-not-idle"
+      (error: unknown) => isAgentChatCommandError(error) && error.code === "TURN_NOT_IDLE"
     );
     releaseCompact();
     await host.settle();

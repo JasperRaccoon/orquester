@@ -60,6 +60,9 @@ import {
   type CallerPrincipal,
   type CausedBy,
   type ComposerContextRecord,
+  REPLY_SUBSCRIPTION_LIMIT,
+  TARGET_BUSY,
+  WAIT_CYCLE,
   type ReplySubscriptionResponse,
   type ReplyWaitResponse,
   THREAD_HISTORY_MAX_TURNS,
@@ -95,10 +98,10 @@ export type ReplyErrorCode =
   | "COMMAND_REJECTED"
   | "HOST_UNAVAILABLE"
   | "EXCHANGE_LIMIT"
-  | "REPLY_SUBSCRIPTION_LIMIT"
+  | typeof REPLY_SUBSCRIPTION_LIMIT
   | "PERMISSION_DENIED"
-  | "WAIT_CYCLE"
-  | "TARGET_BUSY";
+  | typeof WAIT_CYCLE
+  | typeof TARGET_BUSY;
 
 /** HTTP status per refusal (the routes answer `{error: {code, message}}`). */
 export const REPLY_ERROR_STATUS: Record<ReplyErrorCode, number> = {
@@ -409,13 +412,13 @@ export class ReplyRouter implements DeliveryListener {
     }
     // A wait that would close a cycle is refused before anything is saved or queued (§8.6).
     if (body.reply === "wait" && waitsOn(targetId, fromThreadId)) {
-      throw new ReplyError(waitCycleError(targetId).message, "WAIT_CYCLE");
+      throw new ReplyError(waitCycleError(targetId).message, WAIT_CYCLE);
     }
     const pending = this.subs().filter((sub) => sub.fromThreadId === fromThreadId && sub.state !== "done").length;
     if (pending >= MAX_PENDING_REPLY_SUBSCRIPTIONS) {
       throw new ReplyError(
         `This chat already waits for ${pending} replies (limit ${MAX_PENDING_REPLY_SUBSCRIPTIONS}). Wait for some to arrive first.`,
-        "REPLY_SUBSCRIPTION_LIMIT"
+        REPLY_SUBSCRIPTION_LIMIT
       );
     }
 
@@ -526,7 +529,7 @@ export class ReplyRouter implements DeliveryListener {
     try {
       unregister = registerWait(sub.fromThreadId, sub.toThreadId);
     } catch (error) {
-      if (error instanceof ToolError) throw new ReplyError(error.message, "WAIT_CYCLE");
+      if (error instanceof ToolError) throw new ReplyError(error.message, WAIT_CYCLE);
       throw error;
     }
     const setTimer = this.opts.setTimer ?? ((fn: () => void, ms: number) => setTimeout(fn, ms));
