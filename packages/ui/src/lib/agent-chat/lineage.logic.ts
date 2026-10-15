@@ -9,9 +9,42 @@
 import type { SessionSummary, ThreadItem, ThreadLineage } from "@orquester/api";
 import { isMessageStreaming, type MessageStreamingContext } from "@orquester/api/agent-chat";
 
-/** The chip's verb: what the child is to its parent. */
+/**
+ * The chip's verb: what the child is to its parent. A chat another chat's agent opened
+ * (`opened`, unified MCP §4.1) reads "Opened by" — it is not a fork: it starts empty, with that
+ * chat's first message.
+ */
 export function lineageVerb(lineage: Pick<ThreadLineage, "relation">): string {
-  return lineage.relation === "delegate" ? "Delegated by" : "Forked from";
+  switch (lineage.relation) {
+    case "delegate":
+      return "Delegated by";
+    case "opened":
+      return "Opened by";
+    default:
+      return "Forked from";
+  }
+}
+
+/** What a child is called in its parent's list and the merge-back wording: fork, task, opened chat. */
+export function lineageRelationNoun(relation: ThreadLineage["relation"] | undefined): string {
+  switch (relation) {
+    case "delegate":
+      return "task";
+    case "opened":
+      return "opened chat";
+    default:
+      return "fork";
+  }
+}
+
+/** A parent's children counted by relation: "2 forks · 1 task · 1 opened chat". */
+export function lineageChildrenLabel(children: readonly Pick<SessionSummary, "lineage">[]): string {
+  const count = (relation: ThreadLineage["relation"]): number =>
+    children.filter((child) => (child.lineage?.relation ?? "fork") === relation).length;
+  const plural = (n: number, noun: string): string | null => (n > 0 ? `${n} ${noun}${n === 1 ? "" : "s"}` : null);
+  return [plural(count("fork"), "fork"), plural(count("delegate"), "task"), plural(count("opened"), "opened chat")]
+    .filter((part): part is string => part !== null)
+    .join(" · ");
 }
 
 /** The parent tab, when it is still open. */

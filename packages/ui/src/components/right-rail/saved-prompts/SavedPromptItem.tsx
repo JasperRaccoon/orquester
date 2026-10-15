@@ -22,6 +22,7 @@ import {
   Loader2,
   MoreHorizontal,
   Pencil,
+  Bot,
   Star,
   Trash2
 } from "lucide-react";
@@ -39,6 +40,28 @@ import type { SavedPromptDeliveryAction } from "./deliver";
 import { useIsomorphicLayoutEffect } from "./layout-effect";
 
 export type { SavedPromptDeliveryAction };
+
+const CREATOR_AGENT_LABELS: Readonly<Record<string, string>> = {
+  claude: "Claude",
+  codex: "Codex",
+  grok: "Grok",
+  opencode: "OpenCode"
+};
+
+/**
+ * The "by <agent>" badge of a prompt an agent created (unified MCP D-16), or null for the user's
+ * own. Only `kind: "agent"` is an agent's; the label is the agent's name, the title says which chat.
+ */
+export function promptCreatorBadge(prompt: Pick<SavedPrompt, "createdBy">): { label: string; title: string } | null {
+  const createdBy = prompt.createdBy;
+  if (createdBy?.kind !== "agent") return null;
+  const agent = (createdBy.agent && CREATOR_AGENT_LABELS[createdBy.agent]) || "an agent";
+  const chat = createdBy.title ? ` in the chat “${createdBy.title}”` : "";
+  return { label: `by ${agent}`, title: `Created by ${agent}${chat}. Read it before you use it; pin it from Edit once you trust it.` };
+}
+
+/** Why an agent-created prompt has no one-click pin. */
+export const AGENT_PROMPT_PIN_NOTE = "Created by an agent: open Edit to read it, then pin it there";
 
 /** The brief line under a prompt after an Insert / Send: it landed, or why not. */
 export interface SavedPromptFeedback {
@@ -212,6 +235,7 @@ export const SavedPromptItem: React.FC<SavedPromptItemProps> = (props) => {
                   <span className="sr-only">(pinned)</span>
                 </span>
               ) : null}
+              <CreatorBadge prompt={prompt} />
               {busy ? (
                 <Loader2 size={12} aria-hidden className="shrink-0 animate-spin text-neutral-400" />
               ) : null}
@@ -238,6 +262,7 @@ export const SavedPromptItem: React.FC<SavedPromptItemProps> = (props) => {
   }
 
   const context = promptContextLine(prompt.body);
+  const agentCreated = promptCreatorBadge(prompt) !== null;
   const scope = promptScopeLabel(prompt);
   const iconButton = cn(
     "inline-flex shrink-0 items-center justify-center rounded-md transition-colors hover:bg-neutral-800",
@@ -269,13 +294,19 @@ export const SavedPromptItem: React.FC<SavedPromptItemProps> = (props) => {
         >
           {prompt.title}
         </button>
-        {/* One label, "Pin"; whether it is pinned is `aria-pressed` (and the filled star). */}
+        <CreatorBadge prompt={prompt} className="mt-0.5" />
+        {/* One label, "Pin"; whether it is pinned is `aria-pressed` (and the filled star).
+            An agent's prompt has no one-click pin (unified MCP D-16): pinning puts it first
+            everywhere, so it is done deliberately, from Edit, after reading it. An already
+            pinned one can still be unpinned here. */}
         <button
           type="button"
           aria-pressed={prompt.pinned}
-          title="Pin"
+          title={agentCreated && !prompt.pinned ? AGENT_PROMPT_PIN_NOTE : "Pin"}
+          disabled={agentCreated && !prompt.pinned}
           onClick={props.onTogglePin}
-          className={iconButton}
+          className={cn(iconButton, "disabled:pointer-events-none disabled:opacity-40")}
+          data-agent-pin={agentCreated ? (prompt.pinned ? "unpin" : "disabled") : undefined}
         >
           <Star
             size={14}
@@ -474,3 +505,22 @@ const FeedbackLine: React.FC<{ feedback: SavedPromptFeedback; className?: string
       {feedback.text}
     </span>
   );
+
+/** The "by <agent>" pill, or nothing for the user's own prompt. */
+function CreatorBadge({ prompt, className }: { prompt: SavedPrompt; className?: string }): React.ReactElement | null {
+  const badge = promptCreatorBadge(prompt);
+  if (badge === null) return null;
+  return (
+    <span
+      title={badge.title}
+      data-created-by="agent"
+      className={cn(
+        "inline-flex shrink-0 items-center gap-0.5 rounded-full bg-info-soft/40 px-1.5 py-px text-[10px] font-medium text-info-300",
+        className
+      )}
+    >
+      <Bot size={10} aria-hidden />
+      {badge.label}
+    </span>
+  );
+}
