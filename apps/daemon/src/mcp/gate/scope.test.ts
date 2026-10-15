@@ -5,7 +5,7 @@
  */
 
 import assert from "node:assert/strict";
-import { mkdir, mkdtemp, realpath, rm, symlink } from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test from "node:test";
@@ -54,6 +54,33 @@ test("paths: inside a project (symlinks resolved) → that project; the root, a 
   assert.equal(await canonicalProject(api, join(ws, "acme")), null, "a workspace is no project");
   assert.equal(await canonicalProject(api, join(ws, "acme/api/src")), null, "nor is a directory inside one");
   assert.equal(await canonicalProject(api, join(ws, "acme/removed")), null, "a removed project is none (PROJECT_NOT_FOUND)");
+});
+
+test("paths: a file beside the projects is no project — workspace level, root level, or linked to; a real project's files are", async (t) => {
+  const { root, ws, api } = await tree(t);
+  const cwd = join(ws, "acme/api");
+  await writeFile(join(ws, "acme/notes.txt"), "workspace-level file");
+  await writeFile(join(ws, "root-notes.txt"), "root-level file");
+  await writeFile(join(ws, "acme/api/README.md"), "a project's file");
+  await symlink(join(ws, "acme/notes.txt"), join(ws, "acme/api/link-to-notes"));
+  await symlink(join(ws, "acme/notes.txt"), join(root, "elsewhere/link-to-notes"));
+  for (const path of [
+    join(ws, "acme/notes.txt"),
+    "../notes.txt",
+    join(ws, "root-notes.txt"),
+    join(ws, "acme/api/link-to-notes"),
+    join(root, "elsewhere/link-to-notes"),
+    join(ws, "acme/not-a-project/x.txt")
+  ]) {
+    assert.equal((await classifyPath(api, path, cwd)).kind, "outside", path);
+  }
+  const project = await classifyPath(api, join(ws, "acme/api"), cwd);
+  assert.equal(project.kind === "project" && project.project.canonical, join(ws, "acme/api"));
+  const file = await classifyPath(api, "README.md", cwd);
+  assert.equal(file.kind === "project" && `${file.project.workspace}/${file.project.name}`, "acme/api");
+  // The gate denies the workspace-level file for a chat caller (S6).
+  const facts = await gateFacts(api, caller({ projectPath: cwd, workspace: "acme", cwd }), claim({ paths: [join(ws, "acme/notes.txt")] }));
+  assert.deepEqual(facts.deniedPaths, [join(ws, "acme/notes.txt")]);
 });
 
 test("target classes, and a caller bound to no project: every target is other", async (t) => {

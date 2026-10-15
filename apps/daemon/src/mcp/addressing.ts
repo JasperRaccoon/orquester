@@ -108,10 +108,11 @@ export async function workspaceOfProject(api: { fsRoot: string; workspacesDir: s
 /**
  * Where a filesystem path a chat caller passes lies (ruling S6): inside a project directory
  * (`<workspacesDir>/<ws>/<project>[/…]`, the project directory itself included) → that project;
- * anything else — outside the sandbox, the workspaces root, a workspace directory itself, a path
- * beside the projects — is `outside`, which the gate refuses (never "unclassified"). A relative
- * path is taken from `cwd`. Symlinks are resolved first, so a link inside a project that points
- * elsewhere classifies by its target.
+ * anything else — outside the sandbox, the workspaces root, a workspace directory itself, a file
+ * directly in the root or in a workspace (`<ws>/notes.txt` is no project), a project directory that
+ * does not exist — is `outside`, which the gate refuses (never "unclassified"). A relative path is
+ * taken from `cwd`. Symlinks are resolved first, so a link inside a project that points elsewhere
+ * classifies by its target.
  */
 export type PathClass = { kind: "project"; project: CanonicalProject; path: string } | { kind: "outside"; path: string };
 
@@ -128,5 +129,8 @@ export async function classifyPath(api: { fsRoot: string; workspacesDir: string 
   if (!rel || rel.startsWith("..") || isAbsolute(rel)) return { kind: "outside", path: real };
   const [workspace, name] = rel.split(sep);
   if (!isValidName(workspace) || !isValidName(name)) return { kind: "outside", path: real };
-  return { kind: "project", project: { canonical: join(root, workspace, name), workspace, name }, path: real };
+  // A project is a DIRECTORY: a file beside the projects (`<ws>/notes.txt`) is no project.
+  const project = join(root, workspace, name);
+  if (!(await isDirectory(project))) return { kind: "outside", path: real };
+  return { kind: "project", project: { canonical: project, workspace, name }, path: real };
 }
