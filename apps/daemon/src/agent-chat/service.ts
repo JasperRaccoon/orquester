@@ -753,17 +753,7 @@ export class AgentChatService {
       }
       // PRINCIPAL-GATED (`principal.ts`): the route removed `agentCreated` unless the request's
       // principal is the parent's own agent (`gateSessionCreateBody`), so a `true` here is one.
-      const agentCreated = fields.lineage.agentCreated === true;
-      lineage = {
-        parentThreadId: parent.id,
-        relation,
-        createdAt: new Date().toISOString(),
-        // Recorded even at 0, so no later read walks the chain for this link.
-        delegationDepth: this.delegationDepthOf(parent) + (countsTowardDelegationDepth({ relation, agentCreated }) ? 1 : 0),
-        ...(agentCreated ? { agentCreated: true as const } : {}),
-        // §5.4: a child of a workflow-owned chat (or of one carrying the marker) inherits it.
-        ...(this.inheritsWorkflowOwnership(parent) ? { workflowOwned: true as const } : {})
-      };
+      lineage = createdChildLineage(parent, { relation, agentCreated: fields.lineage.agentCreated === true }, (id) => this.chat.get(id), new Date().toISOString());
     }
     if (fields.resume && !isUsableConversationId(fields.resume.conversationId)) {
       throw new ChatSessionError(
@@ -885,38 +875,15 @@ export class AgentChatService {
    * through the open tabs its lineage names.
    */
   delegationDepthOf(tab: { lineage?: ThreadLineage }): number {
-    let depth = 0;
-    let current: { lineage?: ThreadLineage } | undefined = tab;
-    const seen = new Set<string>();
-    while (current?.lineage) {
-      if (current.lineage.delegationDepth !== undefined) return depth + current.lineage.delegationDepth;
-      if (countsTowardDelegationDepth(current.lineage)) depth += 1;
-      const parentId: string = current.lineage.parentThreadId;
-      if (seen.has(parentId)) break;
-      seen.add(parentId);
-      current = this.chat.get(parentId) ?? undefined;
-    }
-    return depth;
+    return lineageDelegationDepth(tab, (id) => this.chat.get(id));
   }
 
   /**
    * Whether a chat created from `creator` (its delegate, opened chat or fork) inherits workflow
-   * ownership (unified MCP design 2026-10-15 §5.4): `creator` or an ancestor over the open tabs is
-   * owned by a workflow, or carries the inherited marker (`ThreadLineage.workflowOwned`). Only
-   * proven ownership is stamped — the marker is permanent; a walk that meets a closed ancestor stops
-   * here, and the gate's own walk (fail-closed behind agent-made links) still applies.
+   * ownership — {@link lineageInheritsWorkflowOwnership} over the open tabs.
    */
   inheritsWorkflowOwnership(creator: { owner?: SessionSummary["owner"]; lineage?: ThreadLineage }): boolean {
-    let current: { owner?: SessionSummary["owner"]; lineage?: ThreadLineage } | undefined = creator;
-    const seen = new Set<string>();
-    while (current) {
-      if (current.owner?.kind === "workflow" || current.lineage?.workflowOwned === true) return true;
-      const parentId = current.lineage?.parentThreadId;
-      if (parentId === undefined || seen.has(parentId)) return false;
-      seen.add(parentId);
-      current = this.chat.get(parentId);
-    }
-    return false;
+    return lineageInheritsWorkflowOwnership(creator, (id) => this.chat.get(id));
   }
 
   /** Two project paths name one project once resolved (realpath in the sandbox, else `resolve`). */
@@ -1911,6 +1878,72 @@ function isUsableConversationId(value: unknown): boolean {
 }
 
 export { ChatSessionError };
+
+/** A tab as the lineage stamps read it. */
+type LineageTab = { owner?: SessionSummary["owner"]; lineage?: ThreadLineage };
+
+/**
+ * How many agent-made links lie above and including `tab` (spec 2026-10-14 §5 "Delegation";
+ * unified MCP design 2026-10-15 §5.6, §13 c — {@link countsTowardDelegationDepth}): its
+ * lineage's recorded `delegationDepth`, else — a record from before the field — counted up
+ * through the open tabs (`tabs`) its lineage names.
+ */
+export function lineageDelegationDepth(tab: { lineage?: ThreadLineage }, tabs: (id: string) => LineageTab | undefined): number {
+  let depth = 0;
+  let current: { lineage?: ThreadLineage } | undefined = tab;
+  const seen = new Set<string>();
+  while (current?.lineage) {
+    if (current.lineage.delegationDepth !== undefined) return depth + current.lineage.delegationDepth;
+    if (countsTowardDelegationDepth(current.lineage)) depth += 1;
+    const parentId: string = current.lineage.parentThreadId;
+    if (seen.has(parentId)) break;
+    seen.add(parentId);
+    current = tabs(parentId) ?? undefined;
+  }
+  return depth;
+}
+
+/**
+ * Whether a chat created from `creator` (its delegate, opened chat or fork) inherits workflow
+ * ownership (unified MCP design 2026-10-15 §5.4): `creator` or an ancestor over the open tabs is
+ * owned by a workflow, or carries the inherited marker (`ThreadLineage.workflowOwned`). Only
+ * proven ownership is stamped — the marker is permanent; a walk that meets a closed ancestor stops
+ * here, and the gate's own walk (fail-closed behind agent-made links) still applies.
+ */
+export function lineageInheritsWorkflowOwnership(creator: LineageTab, tabs: (id: string) => LineageTab | undefined): boolean {
+  let current: LineageTab | undefined = creator;
+  const seen = new Set<string>();
+  while (current) {
+    if (current.owner?.kind === "workflow" || current.lineage?.workflowOwned === true) return true;
+    const parentId = current.lineage?.parentThreadId;
+    if (parentId === undefined || seen.has(parentId)) return false;
+    seen.add(parentId);
+    current = tabs(parentId);
+  }
+  return false;
+}
+
+/**
+ * The lineage the daemon records for a `delegate` or `opened` child of `parent` (spec 2026-10-14
+ * §6; unified MCP design 2026-10-15 §4.1, §5.4, §5.6, §13 c): its depth (recorded even at 0, so no
+ * later read walks the chain for this link), `agentCreated` when a chat tool made it (the route's
+ * principal gate already removed a forged one), and the inherited workflow-ownership marker.
+ */
+export function createdChildLineage(
+  parent: LineageTab & { id: string },
+  link: { relation: "delegate" | "opened"; agentCreated: boolean },
+  tabs: (id: string) => LineageTab | undefined,
+  createdAt: string
+): ThreadLineage {
+  return {
+    parentThreadId: parent.id,
+    relation: link.relation,
+    createdAt,
+    delegationDepth: lineageDelegationDepth(parent, tabs) + (countsTowardDelegationDepth(link) ? 1 : 0),
+    ...(link.agentCreated ? { agentCreated: true as const } : {}),
+    ...(lineageInheritsWorkflowOwnership(parent, tabs) ? { workflowOwned: true as const } : {})
+  };
+}
 
 /**
  * `lineage` with the daemon's own stamps: the delegation depth, unless it is 0 (a fork's lineage

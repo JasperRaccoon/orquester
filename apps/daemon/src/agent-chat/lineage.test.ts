@@ -681,6 +681,23 @@ describe("merge back", () => {
   });
 });
 
+describe("whenIdle", () => {
+  it("resolves once a queued merge's delivery lane and its outbox writes are done", async () => {
+    const busy = await setup({ parentBusy: true });
+    await busy.service.mergeBack("child", { text: "Plan B." });
+    busy.world.sessions.set("parent", summary("parent", { title: "Parent", chatSessionStatus: "ready" }));
+    busy.world.threads.set("parent", snapshot());
+    busy.world.touch("parent");
+    assert.equal(busy.service.hasWorkInFlight(), true, "the bus event started the parent's lane");
+    await busy.service.whenIdle();
+    assert.equal(busy.service.hasWorkInFlight(), false);
+    assert.equal(busy.world.turns.length, 1, "delivered");
+    const persisted = JSON.parse(await readFile(busy.outboxFile, "utf8")) as { entries: unknown[] };
+    assert.equal(persisted.entries.length, 0, "the outbox write after the delivery landed");
+    await busy.cleanup();
+  });
+});
+
 describe("the lineage read", () => {
   it("names the parent and lists the children oldest first, with their status", async () => {
     const { world, service, cleanup } = await setup();

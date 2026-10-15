@@ -261,6 +261,8 @@ export class ReplyRouter implements DeliveryListener {
   private outbox: ReplyOutbox = createDefaultReplyOutbox();
   private readOnly: string | null = null;
   private writes: Promise<void> = Promise.resolve();
+  /** Outbox writes queued and not yet landed ({@link hasWorkInFlight}). */
+  private pendingWrites = 0;
   private unsubscribe: (() => void) | null = null;
   private recheck: ReturnType<typeof setInterval> | null = null;
   private stopped = false;
@@ -1033,6 +1035,20 @@ export class ReplyRouter implements DeliveryListener {
     return true;
   }
 
+  /**
+   * Resolves once nothing is in flight: every target's evaluation has finished and the queued
+   * outbox writes have landed — including work those started meanwhile (tests wait on it instead
+   * of counting event-loop turns). A delivery handed to the queue is the queue's (`whenIdle` there).
+   */
+  async whenIdle(): Promise<void> {
+    while (this.hasWorkInFlight()) await Promise.all([...this.evalTail.values(), this.writes]);
+  }
+
+  /** True while a step is in flight (see {@link whenIdle}). */
+  hasWorkInFlight(): boolean {
+    return this.evalTail.size > 0 || this.pendingWrites > 0;
+  }
+
   /** Look at a target's thread for its open subscriptions: serialized per target, one pass queued at most. */
   private evaluate(targetId: string): Promise<void> {
     if (this.evalQueued.has(targetId)) return this.evalTail.get(targetId) ?? Promise.resolve();
@@ -1499,7 +1515,10 @@ export class ReplyRouter implements DeliveryListener {
         }
       )
     );
-    this.writes = attempt.then(() => undefined);
+    this.pendingWrites += 1;
+    this.writes = attempt.then(() => {
+      this.pendingWrites -= 1;
+    });
     return attempt;
   }
 }

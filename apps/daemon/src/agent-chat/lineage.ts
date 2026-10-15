@@ -173,6 +173,8 @@ export class LineageService {
   /** Parents with a drain already waiting in their lane: one is enough. */
   private readonly drainWaiting = new Set<string>();
   private writes: Promise<void> = Promise.resolve();
+  /** Outbox writes queued and not yet landed ({@link hasWorkInFlight}). */
+  private pendingWrites = 0;
   private stopped = false;
   /** Sessions whose pending merges were last published as non-empty. */
   private published = new Set<string>();
@@ -525,6 +527,20 @@ export class LineageService {
     return this.outbox.entries.filter((entry) => entry.parentSessionId === parentId && entry.state !== "failed");
   }
 
+  /**
+   * Resolves once nothing is in flight: every parent's delivery lane has drained and the queued
+   * outbox writes have landed — including work those steps started meanwhile (tests wait on it
+   * instead of counting event-loop turns).
+   */
+  async whenIdle(): Promise<void> {
+    while (this.hasWorkInFlight()) await Promise.all([...this.lanes.values(), this.writes]);
+  }
+
+  /** True while a step is in flight (see {@link whenIdle}). */
+  hasWorkInFlight(): boolean {
+    return this.lanes.size > 0 || this.pendingWrites > 0;
+  }
+
   private lane<T>(parentId: string, task: () => Promise<T>): Promise<T> {
     const before = this.lanes.get(parentId) ?? Promise.resolve();
     const run = before.then(task, task);
@@ -858,7 +874,10 @@ export class LineageService {
         }
       )
     );
-    this.writes = attempt.then(() => undefined);
+    this.pendingWrites += 1;
+    this.writes = attempt.then(() => {
+      this.pendingWrites -= 1;
+    });
     return attempt;
   }
 }

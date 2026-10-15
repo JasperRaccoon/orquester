@@ -485,6 +485,26 @@ describe("reply subscriptions: binding", () => {
   });
 });
 
+describe("reply subscriptions: whenIdle", () => {
+  it("resolves once the evaluation a settled turn starts, its delivery and every write are done — no event-loop counting", async () => {
+    const w = await world();
+    await w.router.subscribe("tgt", request("notify"));
+    await w.router.whenIdle();
+    await w.queue.whenIdle();
+    assert.equal(w.router.hasWorkInFlight() || w.queue.hasWorkInFlight(), false);
+    w.host.settle("tgt", { reply: "Found it." });
+    assert.equal(w.router.hasWorkInFlight(), true, "the bus event started an evaluation");
+    do {
+      await w.router.whenIdle();
+      await w.queue.whenIdle();
+    } while (w.router.hasWorkInFlight() || w.queue.hasWorkInFlight());
+    assert.equal(w.router.deliveries().length, 1);
+    assert.equal(parseThreadMessage(postsTo(w.host, "req")[0]!.body.input as string)?.body, "Found it.");
+    assert.equal(JSON.parse(readFileSync(w.replyFile, "utf8")).subscriptions[0].state, "done", "the last write landed");
+    await w.cleanup();
+  });
+});
+
 describe("reply subscriptions: refusals", () => {
   it("a message the idle target refuses for good is taken back: the sender hears it, nothing stays queued", async () => {
     const w = await world();
