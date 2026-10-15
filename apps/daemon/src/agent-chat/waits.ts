@@ -34,7 +34,7 @@ export function waitsOn(from: string, to: string): boolean {
 export function waitCycleError(target: string): ToolError {
   return new ToolError(
     WAIT_CYCLE,
-    `Thread "${target}" is itself waiting on this thread, so waiting on it would only run out the clock. Answer it (finish your turn), or read it with thread_read.`
+    `Chat "${target}" is itself waiting on this chat, so waiting on it would only run out the clock. Answer it (finish your turn), or read it with read_transcript.`
   );
 }
 
