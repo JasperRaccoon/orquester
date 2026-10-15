@@ -57,7 +57,7 @@ import {
   type ProfilePluginPreviewResponse,
   type ProfilePreviewFile,
   type ProfilePreviewTree
-} from "../../agent-profile/preview-wire.ts";
+} from "@orquester/api";
 import type { ApprovalPreview, ScopeContext, ToolCaller } from "../catalog/contract.ts";
 import type { DaemonApi, DaemonMethod, DaemonResponse } from "../daemon-api.ts";
 import { daemonError, ToolError } from "../errors.ts";
@@ -360,6 +360,8 @@ export function looksLikeSecret(key: string, value: string): boolean {
   if (SECRET_KEY.test(key)) return true;
   const bare = value.replace(/^\s*bearer\s+/i, "").trim();
   if (/^\s*bearer\s+\S{8,}/i.test(value) || SECRET_PREFIX.test(bare)) return true;
+  // A path or an option (`/usr/lib/x.so`, `--require=…`) is not a token, however varied its letters.
+  if (/^[-./~]/.test(bare) || /\/[^/]+\.[A-Za-z0-9]+$/.test(bare)) return false;
   return bare.length >= 24 && /^[A-Za-z0-9+/=_.~-]+$/.test(bare) && entropy(bare) >= 3.5;
 }
 
@@ -453,7 +455,11 @@ interface ChangeFacts {
   plugin?: ProfilePluginPreviewResponse;
   /** create with onConflict "replace": the item it would replace. */
   replaces?: ProfileItem;
+  /** create with onConflict "keep-both" over a taken name: the suffixed name the adapter will pick. */
+  writtenName?: string;
   pointing?: DaemonMcpCheckResponse["reason"];
+  /** A plugin's MCP servers that point at this daemon (install, or enabling an installed one). */
+  pluginPointing?: { name: string; reason: NonNullable<DaemonMcpCheckResponse["reason"]> }[];
 }
 
 export interface BatchFacts {
@@ -472,6 +478,52 @@ function findItem(snapshot: AgentProfileSnapshot, agent: Agent, id: string, inde
   const item = snapshot.items.find((entry) => entry.id === id);
   if (!item) throw new ToolError("ITEM_NOT_FOUND", `${where(index)}: ${CLI_LABELS[agent]} has no item "${clipText(id, MAX_ECHO_CHARS)}".${ERROR_HINTS.ITEM_NOT_FOUND}`);
   return item;
+}
+
+/**
+ * The string values one MCP server of a plugin carries (its URL, command line, header and env
+ * values), read from the plugin's own JSON files — what the CLI would load.
+ */
+function pluginServerValues(files: readonly ProfilePreviewFile[], name: string): { url?: string; values: string[] } {
+  const out: { url?: string; values: string[] } = { values: [] };
+  const strings = (value: unknown): string[] =>
+    typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((v): v is string => typeof v === "string") : value !== null && typeof value === "object" ? Object.values(value).filter((v): v is string => typeof v === "string") : [];
+  for (const file of files) {
+    if (file.text === undefined || !file.path.endsWith(".json")) continue;
+    let doc: unknown;
+    try {
+      doc = JSON.parse(file.text);
+    } catch {
+      continue;
+    }
+    if (doc === null || typeof doc !== "object") continue;
+    const record = doc as Record<string, unknown>;
+    const servers = record.mcpServers !== null && typeof record.mcpServers === "object" ? (record.mcpServers as Record<string, unknown>) : record;
+    const def = servers[name];
+    if (def === null || typeof def !== "object" || Array.isArray(def)) continue;
+    const server = def as Record<string, unknown>;
+    if (typeof server.url === "string") out.url = server.url;
+    out.values.push(...strings(server.headers), ...strings(server.env), ...strings(server.args), ...strings(server.command));
+  }
+  return out;
+}
+
+/** A plugin's MCP servers that point at this daemon: URL, bearer where its files carry one, the name. */
+async function pluginPointing(
+  client: ProfileClient,
+  agent: Agent,
+  provides: ProfilePluginPreviewResponse["provides"],
+  files: readonly ProfilePreviewFile[]
+): Promise<NonNullable<ChangeFacts["pluginPointing"]>> {
+  const out: NonNullable<ChangeFacts["pluginPointing"]> = [];
+  for (const server of provides.mcpServers) {
+    const found = pluginServerValues(files, server.name);
+    const url = found.url ?? server.url;
+    const values = [...found.values, ...(server.command ? [server.command] : []), ...(server.args ?? [])];
+    const { reason } = await client.daemonPointing({ agent, name: server.name, ...(url ? { url } : {}), values });
+    if (reason) out.push({ name: server.name, reason });
+  }
+  return out;
 }
 
 /** The MCP definition values a daemon-pointing check sends (plain values only; asked ones are unknown yet). */
@@ -508,13 +560,22 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
           fact.plugin = await client.pluginPreview(agent, change.plugin!.marketplace!, change.plugin!.plugin);
           if (fact.plugin.source.type === "local") pin("files", treeDigest(fact.plugin.source));
           pin("commit", fact.plugin.commit ?? "none");
+          fact.pluginPointing = await pluginPointing(client, agent, fact.plugin.provides, fact.plugin.source.type === "local" ? fact.plugin.source.files : []);
         }
         const name = kind === "mcp" ? change.mcp!.name : kind === "skill" || kind === "command" ? change[kind]!.name : kind === "marketplace" ? change.marketplace!.name : undefined;
-        if (name !== undefined && (change.onConflict ?? "fail") === "replace") {
-          const existing = (await snap()).items.find((entry) => entry.id === `${kind}:${name}`);
-          if (existing) {
+        const policy = change.onConflict ?? "fail";
+        if (name !== undefined && policy !== "fail") {
+          const items = (await snap()).items;
+          const existing = items.find((entry) => entry.id === `${kind}:${name}`);
+          if (existing && policy === "replace") {
             fact.replaces = existing;
             pin("replaces", existing.revision);
+          } else if (existing && policy === "keep-both") {
+            // As the adapters' `uniqueName`: `<name>-2`, `-3`, … the first one free.
+            let n = 2;
+            while (items.some((entry) => entry.id === `${kind}:${name}-${n}`)) n += 1;
+            fact.writtenName = `${name}-${n}`;
+            pin("name", fact.writtenName);
           }
         }
         break;
@@ -530,12 +591,29 @@ export async function readBatchFacts(api: DaemonApi, agent: Agent, changes: read
           throw new ToolError("PROFILE_CONFLICT", `${where(index)}: "${clipText(change.id!, MAX_ECHO_CHARS)}" changed since revision ${clipText(change.revision, MAX_ECHO_CHARS)} was read; it is now at ${fact.item.revision}. Re-read it (get_agent_profile) and check your change still applies.`);
         }
         pin("revision", fact.item.revision);
+        if (change.action === "update" && changeKind(change) !== fact.item.kind) {
+          throw new ToolError(
+            fact.item.kind === "plugin" || fact.item.kind === "marketplace" ? "KIND_NOT_SUPPORTED" : "INVALID_ARGUMENT",
+            fact.item.kind === "plugin" || fact.item.kind === "marketplace"
+              ? `${where(index)}: ${PROFILE_ITEM_KIND_LABELS[fact.item.kind].many} cannot be edited; delete it and create it again.`
+              : `${where(index)}: "${clipText(change.id!, MAX_ECHO_CHARS)}" is a ${KIND_ONE[fact.item.kind]}: pass its changes as ${fact.item.kind}.`
+          );
+        }
         if (fact.item.kind === "mcp" || fact.item.kind === "hook" || fact.item.kind === "plugin" || fact.item.kind === "marketplace" || change.action === "update") {
           fact.detail = await client.item(agent, change.id!);
         }
-        if ((fact.item.kind === "skill" || fact.item.kind === "command") && change.action !== "enable" && change.action !== "disable" && fact.item.path !== undefined) {
+        const readsFiles =
+          ((fact.item.kind === "skill" || fact.item.kind === "command") && change.action !== "enable" && change.action !== "disable") ||
+          (fact.item.kind === "plugin" && change.action === "enable");
+        if (readsFiles && fact.item.path !== undefined) {
           fact.files = await client.itemFiles(agent, change.id!);
           pin("files", treeDigest(fact.files));
+          if (fact.files.provides) fact.pluginPointing = await pluginPointing(client, agent, fact.files.provides, fact.files.files);
+        }
+        // An MCP server turned on or copied elsewhere: does what it holds (secret values merged in
+        // daemon-side by id) point at this daemon?
+        if (fact.item.kind === "mcp" && (change.action === "enable" || change.action === "copy")) {
+          fact.pointing = (await client.daemonPointing({ agent, id: change.id!, name: fact.item.name })).reason;
         }
         if (change.action === "update" && change.mcp) {
           const detail = fact.detail?.kind === "mcp" ? fact.detail.mcp : undefined;
@@ -675,28 +753,42 @@ function tooLarge(what: string): ToolError {
   return new ToolError("PREVIEW_TOO_LARGE", `${what} is too large to show the user in full in one approval card. Split the change into smaller calls.`);
 }
 
-/** The env / header rows of an MCP change: keys with set / asked / flagged, plain values shown unless they look secret. */
+/**
+ * Environment variables that make a process load code the variable names (an LD_PRELOAD library,
+ * a NODE_OPTIONS `--require`, …): a value here is code that runs inside the server.
+ */
+const CODE_LOADING_ENV = /^(NODE_OPTIONS|NODE_PATH|LD_PRELOAD|LD_LIBRARY_PATH|LD_AUDIT|DYLD_[A-Z_]+|PYTHONPATH|PYTHONSTARTUP|PYTHONHOME|PERL5OPT|PERL5LIB|PERLLIB|RUBYOPT|RUBYLIB|BASH_ENV|ENV|JAVA_TOOL_OPTIONS|_JAVA_OPTIONS|JDK_JAVA_OPTIONS|GIT_SSH_COMMAND|PATH)$/i;
+
+/**
+ * The env / header rows of an MCP change. Every value the AGENT wrote is shown in full — what is
+ * approved is what runs (a "secret-looking" value is still shown, flagged, with a caution). Only
+ * values the user types in this card (`{ask: true}`) and values already on disk are never shown.
+ */
 function secretRows(index: number, field: "env" | "headers", map: Record<string, SecretInput> | undefined, kept: readonly string[]): {
   rows: { label: string; value: string; state?: "set" | "asked" | "flagged" }[];
   asked: { key: string; label: string }[];
   flagged: string[];
+  codeLoading: string[];
 } {
+  const codeLoading: string[] = [];
   const rows: { label: string; value: string; state?: "set" | "asked" | "flagged" }[] = [];
   const asked: { key: string; label: string }[] = [];
   const flagged: string[] = [];
   const name = field === "env" ? "env" : "header";
-  for (const key of kept) if (!map || !Object.hasOwn(map, key)) rows.push({ label: `${name} ${key}`, value: "kept as it is", state: "set" });
+  for (const key of kept) if (!map || !Object.hasOwn(map, key)) rows.push({ label: `${name} ${key}`, value: "unchanged (its value is not shown)", state: "set" });
   for (const [key, value] of Object.entries(map ?? {})) {
     if (value === null) rows.push({ label: `${name} ${key}`, value: "removed" });
     else if (isAsk(value)) {
       rows.push({ label: `${name} ${key}`, value: "you type it in this card", state: "asked" });
       asked.push({ key: `c${index}.${field}.${key}`, label: `${key} (${name})` });
-    } else if (looksLikeSecret(key, value)) {
-      rows.push({ label: `${name} ${key}`, value: `•••• (${value.length} characters, written by the agent)`, state: "flagged" });
-      flagged.push(key);
-    } else rows.push({ label: `${name} ${key}`, value, state: "set" });
+    } else {
+      const secretLooking = looksLikeSecret(key, value);
+      rows.push({ label: `${name} ${key}`, value, state: secretLooking ? "flagged" : "set" });
+      if (secretLooking) flagged.push(key);
+      if (field === "env" && CODE_LOADING_ENV.test(key)) codeLoading.push(key);
+    }
   }
-  return { rows, asked, flagged };
+  return { rows, asked, flagged, codeLoading };
 }
 
 function pointingWarning(name: string, reason: DaemonMcpCheckResponse["reason"]): ApprovalPreviewSection[] {
@@ -713,15 +805,20 @@ function mcpSections(agent: Agent, index: number, change: ProfileChange, fact: C
   const mcp = change.mcp!;
   const current = fact.detail?.kind === "mcp" ? fact.detail.mcp : undefined;
   const transport = mcp.transport ?? current?.transport ?? (mcp.url !== undefined ? "http" : "stdio");
-  const name = mcp.name ?? current?.name ?? "";
+  // keep-both over a taken name: the adapter writes the suffixed name.
+  const name = fact.writtenName ?? mcp.name ?? current?.name ?? "";
   const rows: { label: string; value: string; state?: "set" | "asked" | "flagged" }[] = [
-    { label: "Name", value: name + (current && mcp.name && mcp.name !== current.name ? ` (renamed from ${current.name})` : "") },
+    {
+      label: "Name",
+      value: name + (current && mcp.name && mcp.name !== current.name ? ` (renamed from ${current.name})` : "") + (fact.writtenName ? ` ("${mcp.name}" is taken: keep-both)` : "")
+    },
     { label: "Transport", value: transport }
   ];
   const sections: ApprovalPreviewSection[] = [];
   const carry = current !== undefined && (current.transport === "stdio") === (transport === "stdio");
   const asked: { key: string; label: string }[] = [];
   const flagged: string[] = [];
+  const codeLoading: string[] = [];
   if (transport === "stdio") {
     const command = mcp.command ?? (carry ? current?.command : undefined) ?? "";
     const args = mcp.args ?? (carry ? current?.args : undefined) ?? [];
@@ -732,9 +829,11 @@ function mcpSections(agent: Agent, index: number, change: ProfileChange, fact: C
     rows.push(...env.rows);
     asked.push(...env.asked);
     flagged.push(...env.flagged);
+    codeLoading.push(...env.codeLoading);
   } else {
-    const url = mcp.url ?? (carry ? current?.url : undefined) ?? "";
-    rows.push({ label: "URL", value: redactUrlCredentials(url) });
+    // A URL the agent wrote is shown as written; one already on disk has its credentials hidden.
+    const url = mcp.url ?? (carry && current?.url !== undefined ? redactUrlCredentials(current.url) : "");
+    rows.push({ label: "URL", value: url });
     const headers = secretRows(index, "headers", mcp.headers, carry ? (current?.headers ?? []).map((entry) => entry.key) : []);
     rows.push(...headers.rows);
     asked.push(...headers.asked);
@@ -749,7 +848,14 @@ function mcpSections(agent: Agent, index: number, change: ProfileChange, fact: C
     sections.push({
       kind: "warning",
       level: "caution",
-      text: `${flagged.join(", ")} ${flagged.length === 1 ? "looks" : "look"} like a secret the agent wrote in plain text (it stays in this chat's transcript). Deny and ask for {ask: true} to type it here instead.`
+      text: `${flagged.join(", ")} ${flagged.length === 1 ? "looks" : "look"} like a secret the agent wrote in plain text: it is shown above and stays in this chat's transcript. Deny and ask for {ask: true} to type it here instead.`
+    });
+  }
+  if (codeLoading.length > 0) {
+    sections.push({
+      kind: "warning",
+      level: "danger",
+      text: `${codeLoading.join(", ")} ${codeLoading.length === 1 ? "makes" : "make"} the server's process load the code or search path it names: read the value above before approving.`
     });
   }
   sections.push(...pointingWarning(name, fact.pointing ?? null));
@@ -761,6 +867,11 @@ function mcpSections(agent: Agent, index: number, change: ProfileChange, fact: C
 
 function shellWord(word: string): string {
   return /^[A-Za-z0-9_@%+=:,./-]+$/.test(word) ? word : `'${word.replaceAll("'", "'\\''")}'`;
+}
+
+/** A skill's frontmatter as `writeSkill` writes it: its `name` key is its directory name (in place, or first). */
+function skillFrontmatter(frontmatter: Record<string, unknown>, name: string): Record<string, unknown> {
+  return "name" in frontmatter ? { ...frontmatter, name } : { name, ...frontmatter };
 }
 
 /** The new document an update writes: the current one with the patch applied (frontmatter merged). */
@@ -810,7 +921,26 @@ function detailSections(detail: ProfileItemDetail | undefined): ApprovalPreviewS
   }
 }
 
-function pluginSections(plugin: ProfilePluginPreviewResponse): ApprovalPreviewSection[] {
+/** What a plugin ships, as a card section: hooks with their commands, MCP servers with their command lines; and the warnings they call for. */
+function providesSections(provides: ProfilePluginPreviewResponse["provides"], pointing: ChangeFacts["pluginPointing"]): ApprovalPreviewSection[] {
+  const items: { label: string; change: "added"; detail?: string }[] = [
+    ...provides.skills.map((name) => ({ label: `skill ${name}`, change: "added" as const })),
+    ...provides.commands.map((name) => ({ label: `command /${name}`, change: "added" as const })),
+    ...provides.agents.map((name) => ({ label: `agent ${name}`, change: "added" as const })),
+    ...provides.hooks.map((hook) => ({ label: `hook ${hook.event}${hook.matcher ? ` (${hook.matcher})` : ""}`, change: "added" as const, detail: hook.command })),
+    ...provides.mcpServers.map((server) => ({
+      label: `MCP server ${server.name}`,
+      change: "added" as const,
+      detail: server.url ?? [server.command ?? "", ...(server.args ?? [])].map(shellWord).join(" ") + (server.envKeys.length > 0 ? ` (env: ${server.envKeys.join(", ")})` : "")
+    }))
+  ];
+  const sections: ApprovalPreviewSection[] = [{ kind: "changes", title: "What it provides", items }];
+  if (provides.hooks.length > 0) sections.push({ kind: "warning", level: "caution", text: "Its hooks run their commands on every matching event in every chat of this agent." });
+  for (const flagged of pointing ?? []) sections.push(...pointingWarning(flagged.name, flagged.reason));
+  return sections;
+}
+
+function pluginSections(plugin: ProfilePluginPreviewResponse, pointing: ChangeFacts["pluginPointing"]): ApprovalPreviewSection[] {
   const sections: ApprovalPreviewSection[] = [{
     kind: "fields",
     rows: [
@@ -831,20 +961,7 @@ function pluginSections(plugin: ProfilePluginPreviewResponse): ApprovalPreviewSe
     return sections;
   }
   if (!plugin.source.complete) throw tooLarge(`The plugin ${plugin.plugin}`);
-  const provides = plugin.provides;
-  const items: { label: string; change: "added"; detail?: string }[] = [
-    ...provides.skills.map((name) => ({ label: `skill ${name}`, change: "added" as const })),
-    ...provides.commands.map((name) => ({ label: `command /${name}`, change: "added" as const })),
-    ...provides.agents.map((name) => ({ label: `agent ${name}`, change: "added" as const })),
-    ...provides.hooks.map((hook) => ({ label: `hook ${hook.event}${hook.matcher ? ` (${hook.matcher})` : ""}`, change: "added" as const, detail: hook.command })),
-    ...provides.mcpServers.map((server) => ({
-      label: `MCP server ${server.name}`,
-      change: "added" as const,
-      detail: server.url ? redactUrlCredentials(server.url) : [server.command ?? "", ...(server.args ?? [])].map(shellWord).join(" ") + (server.envKeys.length > 0 ? ` (env: ${server.envKeys.join(", ")})` : "")
-    }))
-  ];
-  sections.push({ kind: "changes", title: "What it provides", items });
-  if (provides.hooks.length > 0) sections.push({ kind: "warning", level: "caution", text: "Its hooks run their commands on every matching event in every chat of this agent." });
+  sections.push(...providesSections(plugin.provides, pointing));
   sections.push(...fileSections(plugin.source.files, ""));
   return sections;
 }
@@ -878,10 +995,11 @@ export function buildPreview(batch: BatchFacts, caller: ToolCaller): ApprovalPre
           secretFields.push(...built.asked);
         } else if (kind === "skill" || kind === "command") {
           const doc = change[kind]!;
-          const file = kind === "skill" ? `${doc.name}/SKILL.md` : `commands/${doc.name}.md`;
-          // As `writeSkill` writes it: the skill's `name` key is its directory name.
-          const own = doc.frontmatter ?? {};
-          const frontmatter = kind !== "skill" ? own : "name" in own ? { ...own, name: doc.name } : { name: doc.name, ...own };
+          // keep-both over a taken name: the adapter writes the suffixed name.
+          const written = fact.writtenName ?? doc.name!;
+          const file = kind === "skill" ? `${written}/SKILL.md` : `commands/${written}.md`;
+          const frontmatter = kind === "skill" ? skillFrontmatter(doc.frontmatter ?? {}, written) : (doc.frontmatter ?? {});
+          if (fact.writtenName) sections.push({ kind: "text", text: `"${clipText(doc.name!, 80)}" is taken, so it is written as "${fact.writtenName}" (onConflict: keep-both).` });
           sections.push({ kind: "code", title: file, language: "markdown", text: documentText(agent, frontmatter, doc.body ?? "") });
         } else if (kind === "hook") {
           const hook = change.hook!;
@@ -893,16 +1011,26 @@ export function buildPreview(batch: BatchFacts, caller: ToolCaller): ApprovalPre
         } else if (kind === "plugin") {
           if (change.plugin!.spec !== undefined) {
             sections.push({ kind: "warning", level: "danger", text: `OpenCode loads ${quoted(change.plugin!.spec)} as code (an npm package or a local file) in every OpenCode session. Orquester cannot show its contents here.` });
-          } else sections.push(...pluginSections(fact.plugin!));
+          } else sections.push(...pluginSections(fact.plugin!, fact.pluginPointing));
         } else if (kind === "marketplace") {
           const source = change.marketplace!.source;
           const rows = [
             ...(change.marketplace!.name ? [{ label: "Name", value: change.marketplace!.name }] : []),
-            { label: "Source", value: source.type === "github" ? `GitHub ${source.repo}` : source.type === "git" ? redactUrlCredentials(source.url) : source.path },
+            { label: "Source", value: source.type === "github" ? `GitHub ${source.repo}` : source.type === "git" ? source.url : source.path },
             ...(source.type !== "path" && source.ref ? [{ label: "Ref", value: source.ref }] : []),
             { label: "Commit", value: source.type === "path" ? "the directory as it is" : "whatever the source holds when it is added" }
           ];
-          sections.push({ kind: "fields", rows }, { kind: "text", text: "Adding a marketplace installs nothing by itself: each plugin from it needs its own approval." });
+          sections.push(
+            { kind: "fields", rows },
+            {
+              kind: "warning",
+              level: "danger",
+              text: source.type === "path"
+                ? "This approval does not pin the directory: Orquester cannot show the marketplace's contents before it is added, and they may change after."
+                : "This approval does not pin a commit: Orquester cannot show the marketplace's contents before it is added, and the source may hold something else by then."
+            },
+            { kind: "text", text: "Adding a marketplace installs nothing by itself: each plugin from it gets its own approval card, showing its files with the marketplace's commit pinned." }
+          );
         }
         break;
       }
@@ -918,7 +1046,7 @@ export function buildPreview(batch: BatchFacts, caller: ToolCaller): ApprovalPre
             const name = change[kind]!.name ?? fact.item!.name;
             const file = kind === "skill" ? `${name}/SKILL.md` : `commands/${name}.md`;
             const before = documentText(agent, fact.detail.document.frontmatter, fact.detail.document.body);
-            const after = documentText(agent, doc.frontmatter, doc.body);
+            const after = documentText(agent, kind === "skill" ? skillFrontmatter(doc.frontmatter, name) : doc.frontmatter, doc.body);
             sections.push({ kind: "diff", title: `${file} — changes`, unifiedDiff: unifiedDiff(before, after, `a/${file}`, `b/${file}`) });
             sections.push({ kind: "code", title: `${file} — as it will be`, language: "markdown", text: after });
             const others = kind === "skill" ? (fact.files?.files ?? []).filter((entry) => entry.path !== "SKILL.md") : [];
@@ -948,8 +1076,11 @@ export function buildPreview(batch: BatchFacts, caller: ToolCaller): ApprovalPre
         sections.push(itemFields(fact.item!), ...detailSections(fact.detail));
         if (fact.files) {
           if (!fact.files.complete) throw tooLarge(`The ${KIND_ONE[fact.item!.kind]} ${fact.item!.name}`);
-          sections.push(...fileSections(fact.files.files, fact.item!.kind === "skill" ? fact.item!.name : ""));
+          // An installed plugin turned on: what it ships (its files are pinned); a skill or command: every file.
+          if (fact.files.provides) sections.push(...providesSections(fact.files.provides, fact.pluginPointing));
+          else sections.push(...fileSections(fact.files.files, fact.item!.kind === "skill" ? fact.item!.name : ""));
         }
+        if (fact.item!.kind === "mcp") sections.push(...pointingWarning(fact.item!.name, fact.pointing ?? null));
         const effect =
           change.action === "delete" ? `It is removed from ${CLI_LABELS[agent]}'s config${fact.item!.kind === "plugin" ? " (the plugin is uninstalled)" : ""}. Orquester keeps a backup of every file it rewrites.`
           : change.action === "trust_hook" ? `${CLI_LABELS[agent]} will run this command on every matching event.`
@@ -971,7 +1102,7 @@ export function buildPreview(batch: BatchFacts, caller: ToolCaller): ApprovalPre
       }
       case "import_scan":
         sections.push(
-          { kind: "fields", rows: [{ label: "Repository", value: redactUrlCredentials(change.url!) }] },
+          { kind: "fields", rows: [{ label: "Repository", value: change.url! }] },
           { kind: "warning", level: "caution", text: "Orquester downloads this repository from the network to list what it holds. Nothing is installed: importing an item needs another approval showing its files." }
         );
         break;
@@ -987,6 +1118,7 @@ export function buildPreview(batch: BatchFacts, caller: ToolCaller): ApprovalPre
         for (const candidate of detail.candidates.filter((entry) => change.picks!.includes(entry.ref))) {
           if (!candidate.complete) throw tooLarge(`The import item ${candidate.name}`);
           sections.push({ kind: "text", title: `${KIND_ONE[candidate.kind]} ${candidate.name}`, text: candidate.exists ? `${CLI_LABELS[agent]} already has one by that name (onConflict: ${change.onConflict ?? "fail"}).` : `New in ${CLI_LABELS[agent]}.` });
+          if (candidate.notes?.length) sections.push({ kind: "text", text: `As imported: ${candidate.notes.map((note) => clipText(note, 300)).join(" ")}` });
           sections.push(...fileSections(candidate.files, candidate.kind === "skill" ? candidate.name : ""));
         }
         break;

@@ -4121,6 +4121,7 @@ export function createServer(
             ? []
             : agentAccounts.list().accounts.filter((account) => account.agent === agent).map((account) => ({ id: account.id, home: agentAccounts.homePath(agent, account.id) })),
         projects: () => listProjectDirs(resolved.workspacesDir),
+        workspacesRoot: () => resolved.workspacesDir,
         logger: console
       }
     ),

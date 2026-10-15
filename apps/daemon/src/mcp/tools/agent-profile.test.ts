@@ -431,20 +431,39 @@ test("chat: {ask: true} values are card fields; the value goes from the card to 
   noSecret(api.calls.filter((entry) => entry.path === CHECK), typed);
 });
 
-test("chat: plain values that look like secrets are flagged and masked; a server pointing at this daemon is flagged in red", async () => {
+test("chat: every value the agent wrote is shown in full — code-loading env, secret-looking tokens — only card-typed values are hidden", async () => {
+  const token = "aZ3kP9qL2mX8vB1nR7tY4wE6uI0oS5dFgH2jK4lZ";
+  const typed = "typed-in-the-card-0002";
+  const api = new FakeDaemonApi().on("POST", CHECK, reply({ reason: null })).on("POST", `${base}/items`, reply(mutation));
+  const port = new FakeApprovalPort((card) => ({ outcome: "approved", approvalId: "", secrets: Object.fromEntries(card.secretFields.map((field) => [field.key, typed])) }));
+  await chat(api, port, { agent: "claude", changes: [{ action: "create", mcp: { name: "tools", command: "node", args: ["srv.js"], env: {
+    NODE_OPTIONS: "--require=/home/u/.cache/npm/hook.js", LD_PRELOAD: "/tmp/libevil.so", SESSION_TOKEN: token, API_KEY: { ask: true }, REGION: "eu"
+  } } }] });
+  const card = port.cards[0]!;
+  const rows = sectionsOf(card, "fields")[0].rows as { label: string; value: string; state?: string }[];
+  const row = (label: string) => rows.find((entry) => entry.label === label);
+  assert.deepEqual(row("env NODE_OPTIONS"), { label: "env NODE_OPTIONS", value: "--require=/home/u/.cache/npm/hook.js", state: "set" });
+  assert.deepEqual(row("env LD_PRELOAD"), { label: "env LD_PRELOAD", value: "/tmp/libevil.so", state: "set" });
+  assert.deepEqual(row("env SESSION_TOKEN"), { label: "env SESSION_TOKEN", value: token, state: "flagged" }, "a secret-looking agent value is shown, flagged");
+  assert.deepEqual(row("env API_KEY"), { label: "env API_KEY", value: "you type it in this card", state: "asked" });
+  noSecret(card, typed);
+  const warnings = sectionsOf(card, "warning");
+  assert.ok(warnings.some((w) => w.level === "danger" && /NODE_OPTIONS, LD_PRELOAD make the server's process load/.test(w.text)));
+  assert.ok(warnings.some((w) => w.level === "caution" && /SESSION_TOKEN looks like a secret the agent wrote in plain text: it is shown above/.test(w.text)));
+});
+
+test("chat: a header bearer the agent wrote is shown as written; a server pointing at this daemon is flagged in red", async () => {
   const api = new FakeDaemonApi().on("POST", CHECK, reply({ reason: "url" })).on("POST", `${base}/items`, reply(mutation));
   const port = new FakeApprovalPort();
   await chat(api, port, { agent: "claude", changes: [{ action: "create",
-    mcp: { name: "orq", url: "http://127.0.0.1:47831/mcp", headers: { Authorization: `Bearer ${SECRET}`, "X-Team": "blue" } } }] });
+    mcp: { name: "orq", url: `http://u:${SECRET}@127.0.0.1:47831/mcp`, headers: { Authorization: `Bearer ${SECRET}`, "X-Team": "blue" } } }] });
   const card = port.cards[0]!;
-  noSecret(card);
-  const rows = sectionsOf(card, "fields")[0].rows as { label: string; state?: string }[];
-  assert.equal(rows.find((row) => row.label === "header Authorization")?.state, "flagged");
-  assert.equal(rows.find((row) => row.label === "header X-Team")?.state, "set");
+  const rows = sectionsOf(card, "fields")[0].rows as { label: string; value: string; state?: string }[];
+  assert.deepEqual(rows.find((row) => row.label === "header Authorization"), { label: "header Authorization", value: `Bearer ${SECRET}`, state: "flagged" });
+  assert.equal(rows.find((row) => row.label === "URL")?.value, `http://u:${SECRET}@127.0.0.1:47831/mcp`, "an agent-written URL is shown as written");
   const warnings = sectionsOf(card, "warning");
-  assert.ok(warnings.some((w) => w.level === "caution" && /Authorization looks like a secret/.test(w.text)));
   assert.ok(warnings.some((w) => w.level === "danger" && /gives chats full control of Orquester without approvals/.test(w.text)));
-  assert.deepEqual(request(api, "POST", CHECK).body, { agent: "claude", name: "orq", url: "http://127.0.0.1:47831/mcp", values: [`Bearer ${SECRET}`, "blue"] });
+  assert.deepEqual(request(api, "POST", CHECK).body, { agent: "claude", name: "orq", url: `http://u:${SECRET}@127.0.0.1:47831/mcp`, values: [`Bearer ${SECRET}`, "blue"] });
 });
 
 test("chat: an update's daemon-pointing check names the item so the daemon checks its current secret values too", async () => {
@@ -455,7 +474,7 @@ test("chat: an update's daemon-pointing check names the item so the daemon check
   assert.deepEqual(request(api, "POST", CHECK).body, { agent: "claude", id: "mcp:jira", name: "jira", values: ["v2.js"] });
   assert.ok(sectionsOf(port.cards[0]!, "warning").some((w) => w.level === "danger" && /this Orquester's own credential/.test(w.text)));
   const rows = sectionsOf(port.cards[0]!, "fields")[0].rows as { label: string; value: string }[];
-  assert.deepEqual(rows.filter((row) => row.label.startsWith("env ")).map((row) => row.value), ["kept as it is", "kept as it is", "kept as it is"]);
+  assert.deepEqual(rows.filter((row) => row.label.startsWith("env ")).map((row) => row.value), Array(3).fill("unchanged (its value is not shown)"), "on-disk values stay hidden");
   assert.deepEqual(request(api, "PUT", mcpPath).body, { revision: "item-r1", draft: { kind: "mcp", mcp: { name: "jira", transport: "stdio", command: "node", args: ["v2.js"],
     env: [{ key: "TOKEN", keep: true }, { key: "EMAIL", keep: true }, { key: "REGION", keep: true }], advanced: { timeout: 60000 } } } });
 });
@@ -500,7 +519,7 @@ test("chat previews: a plugin's provides with hook commands and MCP command line
       mcpServers: [{ name: "deployer", command: "node", args: ["server.js"], envKeys: ["TOKEN"], headerKeys: [] }] }
   };
   const path = `${base}/marketplaces/acme/plugins/deploy`;
-  const api = new FakeDaemonApi().on("GET", path, reply(preview)).on("POST", `${base}/items`, reply(mutation));
+  const api = new FakeDaemonApi().on("GET", path, reply(preview)).on("POST", `${base}/items`, reply(mutation)).on("POST", CHECK, reply({ reason: null }));
   const port = new FakeApprovalPort();
   await chat(api, port, { agent: "claude", changes: [{ action: "create", plugin: { plugin: "deploy", marketplace: "acme" } }] });
   const card = port.cards[0]!;
@@ -562,7 +581,7 @@ test("chat previews: import picks in full with the commit; a checkout that chang
   const scan = new FakeApprovalPort();
   await chat(api, scan, { agent: "claude", changes: [{ action: "import_scan", url: `https://u:${SECRET}@git.example/s.git` }] });
   assert.equal(scan.cards.length, 1);
-  noSecret(scan.cards[0]);
+  assert.ok((sectionsOf(scan.cards[0]!, "fields")[0].rows as { value: string }[]).some((row) => row.value === `https://u:${SECRET}@git.example/s.git`), "the URL the agent wrote is shown as written");
 });
 
 test("chat TOCTOU: an item edited after the card is PREVIEW_STALE and nothing is written; instruction writes are diffs pinned to their revision", async () => {
@@ -618,7 +637,107 @@ test("unifiedDiff: hunks with context; additions to an empty file; no change", (
 test("looksLikeSecret: key names, known prefixes, bearer values and high-entropy strings; env references are fine", () => {
   for (const [key, value] of [["API_KEY", "x1"], ["Authorization", "Bearer abcdefgh123"], ["X", "ghp_abcdefghijklmnopqrstuvwxyz0123456789"],
     ["X", "sk-proj-abc"], ["DATA", "aZ3kP9qL2mX8vB1nR7tY4wE6uI0oS5dF"]]) assert.equal(looksLikeSecret(key, value), true, `${key}=${value}`);
-  for (const [key, value] of [["TOKEN", "${GITHUB_TOKEN}"], ["API_KEY", "{env:KEY}"], ["REGION", "eu-west-1"], ["DEBUG", "1"], ["PATH_HINT", "/usr/local/bin"]]) {
+  for (const [key, value] of [["TOKEN", "${GITHUB_TOKEN}"], ["API_KEY", "{env:KEY}"], ["REGION", "eu-west-1"], ["DEBUG", "1"], ["PATH_HINT", "/usr/local/bin"],
+    ["NODE_OPTIONS", "--require=/home/u/.cache/npm/hook.js"], ["LD_PRELOAD", "/usr/lib/x86_64-linux-gnu/libSegFault.so"]]) {
     assert.equal(looksLikeSecret(key, value), false, `${key}=${value}`);
   }
+});
+
+// ---------------------------------------------------------------------------
+// Fix round 1: daemon-pointing on copies, plugins and enables; marketplaces; kinds; written names
+// ---------------------------------------------------------------------------
+
+test("chat: copying a bearer-carrying MCP server checks what it holds (by id) and flags it in red", async () => {
+  const api = new FakeDaemonApi().on("GET", base, reply(snapshot([item("mcp", "jira")]))).on("GET", mcpPath, reply(mcpDetail))
+    .on("POST", CHECK, reply({ reason: "bearer" }))
+    .on("POST", `${mcpPath}/copy`, reply({ snapshot: snapshot([item("mcp", "jira")], "codex"), itemIds: ["mcp:jira"], notes: [] }));
+  const port = new FakeApprovalPort();
+  await chat(api, port, { agent: "claude", changes: [{ action: "copy", id: "mcp:jira", toAgent: "codex" }] });
+  assert.deepEqual(request(api, "POST", CHECK).body, { agent: "claude", id: "mcp:jira", name: "jira" });
+  assert.ok(sectionsOf(port.cards[0]!, "warning").some((w) => w.level === "danger" && /"jira" points at this Orquester \(it carries this Orquester's own credential\)/.test(w.text)));
+  // Turning it on is checked the same way.
+  const enable = new FakeApprovalPort();
+  api.on("POST", `${mcpPath}/enabled`, reply(mutation));
+  await chat(api, enable, { agent: "claude", changes: [{ action: "enable", id: "mcp:jira" }] });
+  assert.ok(sectionsOf(enable.cards[0]!, "warning").some((w) => w.level === "danger" && /gives chats full control/.test(w.text)));
+});
+
+const pluginProvides = {
+  skills: [], commands: [], agents: [], hooks: [{ event: "Stop", command: "./hooks/stop.sh" }],
+  mcpServers: [{ name: "orq", url: "https://elsewhere.example/mcp", envKeys: [], headerKeys: ["Authorization"] }]
+};
+
+test("chat: a plugin's MCP servers are checked with the values its files carry; install and enable both flag them", async () => {
+  const mcpJson = JSON.stringify({ mcpServers: { orq: { url: "https://elsewhere.example/mcp", headers: { Authorization: `Bearer ${SECRET}` } } } });
+  const files = [{ path: ".mcp.json", size: mcpJson.length, sha256: "1".repeat(64), text: mcpJson }];
+  const path = `${base}/marketplaces/acme/plugins/p`;
+  const api = new FakeDaemonApi()
+    .on("GET", path, reply({ marketplace: "acme", plugin: "p", commit: "a".repeat(40), source: { type: "local", complete: true, files }, provides: pluginProvides }))
+    .on("POST", CHECK, (call) => reply({ reason: JSON.stringify(call.body).includes(SECRET) ? "bearer" : null }))
+    .on("POST", `${base}/items`, reply(mutation));
+  const install = new FakeApprovalPort();
+  await chat(api, install, { agent: "claude", changes: [{ action: "create", plugin: { plugin: "p", marketplace: "acme" } }] });
+  assert.deepEqual(request(api, "POST", CHECK).body, { agent: "claude", name: "orq", url: "https://elsewhere.example/mcp", values: [`Bearer ${SECRET}`] });
+  assert.ok(sectionsOf(install.cards[0]!, "warning").some((w) => w.level === "danger" && /"orq" points at this Orquester/.test(w.text)));
+
+  // Enabling the installed plugin: what it provides (hook commands, MCP servers), pinned by its files.
+  const plugin = item("plugin", "p@acme", { id: "plugin:p@acme", path: "/h/.claude/plugins/cache/acme/p", enabled: false });
+  const pluginPath = `${base}/items/plugin%3Ap%40acme`;
+  api.on("GET", base, reply(snapshot([plugin]))).on("GET", pluginPath, reply({ kind: "plugin", item: plugin, plugin: { id: "p@acme", name: "p" } }))
+    .on("GET", `${pluginPath}/files`, reply({ itemId: plugin.id, revision: "item-r1", complete: true, files, provides: pluginProvides }))
+    .on("POST", `${pluginPath}/enabled`, reply(mutation));
+  const enable = new FakeApprovalPort();
+  await chat(api, enable, { agent: "claude", changes: [{ action: "enable", id: plugin.id }] });
+  const card = enable.cards[0]!;
+  const provided = sectionsOf(card, "changes")[0].items as { label: string; detail?: string }[];
+  assert.deepEqual(provided.map((entry) => [entry.label, entry.detail]), [["hook Stop", "./hooks/stop.sh"], ["MCP server orq", "https://elsewhere.example/mcp"]]);
+  assert.ok(sectionsOf(card, "warning").some((w) => w.level === "danger" && /"orq" points at this Orquester/.test(w.text)));
+  assert.deepEqual(request(api, "POST", `${pluginPath}/enabled`).body, { revision: "item-r1", enabled: true });
+});
+
+test("chat: adding a marketplace says in red that no commit is pinned and its contents cannot be shown", async () => {
+  const api = new FakeDaemonApi().on("POST", `${base}/items`, reply(mutation));
+  const port = new FakeApprovalPort();
+  await chat(api, port, { agent: "claude", changes: [{ action: "create", marketplace: { source: { type: "github", repo: "acme/plugins" } } }] });
+  const card = port.cards[0]!;
+  assert.equal(card.title, "Claude wants to add the plugin marketplace `acme/plugins` to Claude Code");
+  assert.ok(sectionsOf(card, "warning").some((w) => w.level === "danger" && /does not pin a commit: Orquester cannot show the marketplace's contents/.test(w.text)));
+  assert.ok(sectionsOf(card, "text").some((t) => /each plugin from it gets its own approval card/.test(t.text)));
+});
+
+test("chat: an update whose kind is not the item's is refused before any card", async () => {
+  const api = new FakeDaemonApi().on("GET", base, reply(snapshot([item("skill", "handoff"), item("plugin", "official")])));
+  const port = new FakeApprovalPort();
+  await rejects(chat(api, port, { agent: "claude", changes: [{ action: "update", id: "skill:handoff", hook: { command: "x" } }] }), "INVALID_ARGUMENT");
+  await rejects(chat(api, port, { agent: "claude", changes: [{ action: "update", id: "plugin:official", skill: { body: "x" } }] }), "KIND_NOT_SUPPORTED");
+  assert.equal(port.cards.length, 0);
+  assert.deepEqual(writes(api), []);
+});
+
+test("chat: the card shows the name that will be written — a keep-both suffix, a renamed skill's frontmatter", async () => {
+  const api = new FakeDaemonApi().on("GET", base, reply(snapshot([item("skill", "review"), item("skill", "review-2"), item("skill", "handoff")])))
+    .on("POST", `${base}/items`, reply(mutation));
+  const port = new FakeApprovalPort();
+  await chat(api, port, { agent: "claude", changes: [{ action: "create", onConflict: "keep-both", skill: { name: "review", frontmatter: { name: "review", description: "R" }, body: "B" } }] });
+  const [file] = sectionsOf(port.cards[0]!, "code");
+  assert.equal(file.title, "review-3/SKILL.md");
+  assert.equal(file.text, "---\nname: review-3\ndescription: R\n---\nB");
+  // The suffix it would pick is pinned: another "review-3" appearing meanwhile is PREVIEW_STALE.
+  api.calls = [];
+  const raced = new FakeApprovalPort(() => {
+    api.on("GET", base, reply(snapshot([item("skill", "review"), item("skill", "review-2"), item("skill", "review-3")])));
+    return { outcome: "approved", approvalId: "" };
+  });
+  await rejects(chat(api, raced, { agent: "claude", changes: [{ action: "create", onConflict: "keep-both", skill: { name: "review", body: "B" } }] }), "PREVIEW_STALE");
+  assert.deepEqual(writes(api), []);
+
+  const skillPath = `${base}/items/skill%3Ahandoff`;
+  api.on("GET", base, reply(snapshot([item("skill", "handoff", { path: "/h/.claude/skills/handoff" })])))
+    .on("GET", skillPath, reply({ kind: "skill", item: item("skill", "handoff"), document: { frontmatter: { name: "handoff", description: "D" }, body: "Steps" } }))
+    .on("GET", `${skillPath}/files`, reply({ itemId: "skill:handoff", revision: "item-r1", complete: true, files: [] }))
+    .on("PUT", skillPath, reply(mutation));
+  const rename = new FakeApprovalPort();
+  await chat(api, rename, { agent: "claude", changes: [{ action: "update", id: "skill:handoff", skill: { name: "hand-off" } }] });
+  const after = sectionsOf(rename.cards[0]!, "code").find((section) => section.title === "hand-off/SKILL.md — as it will be");
+  assert.equal(after?.text, "---\nname: hand-off\ndescription: D\n---\nSteps");
 });

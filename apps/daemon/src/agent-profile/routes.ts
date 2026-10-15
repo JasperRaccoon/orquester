@@ -51,7 +51,7 @@ import {
   uploadTempPath
 } from "../upload-stream.ts";
 import { AgentProfileError, profileErrors } from "./errors.ts";
-import { agentProfilePreviewRoutes } from "./preview-wire.ts";
+import { agentProfilePreviewRoutes } from "@orquester/api";
 import type { AgentProfileService } from "./service.ts";
 
 export interface AgentProfileRouteDeps {
@@ -75,7 +75,7 @@ export interface AgentProfileRouteDeps {
     | "assertCanScanUpload"
     | "listMarketplacePlugins"
   > &
-    /** The approval-card reads (`preview-wire.ts`); a route answers 503 without them. */
+    /** The approval-card reads (`@orquester/api` agent-profile.ts); a route answers 503 without them. */
     Partial<Pick<AgentProfileService, "itemFiles" | "importDetail" | "pluginPreview">>;
   /** `agentProfileImportsDir(appdir)`: where an upload is streamed before its scan. */
   importsDir: string;

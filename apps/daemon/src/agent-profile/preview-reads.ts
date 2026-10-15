@@ -1,5 +1,5 @@
 /**
- * The filesystem half of the approval-card reads (`preview-wire.ts`): a directory's files in full
+ * The filesystem half of the approval-card reads (`@orquester/api` agent-profile.ts): a directory's files in full
  * with their SHA-256 and flags, a git checkout's commit, and what a plugin directory ships.
  *
  * - Symlinks inside a tree are never followed: listed with their target text, flagged.
@@ -14,7 +14,7 @@
 import { createHash } from "node:crypto";
 import { lstat, open, readdir, readFile, readlink, realpath } from "node:fs/promises";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
-import type { ProfilePluginHook, ProfilePluginMcpServer, ProfilePluginPreviewResponse, ProfilePreviewFile, ProfilePreviewTree } from "./preview-wire.ts";
+import type { ProfilePluginHook, ProfilePluginMcpServer, ProfilePluginPreviewResponse, ProfilePreviewFile, ProfilePreviewTree } from "@orquester/api";
 
 export const PREVIEW_TREE_MAX_FILES = 2_000;
 /** Above the card's 1 MiB full-preview cap: a tree this large could never be shown anyway. */
@@ -155,6 +155,11 @@ export function insideOrNull(root: string, path: string): string | null {
   return full === root || full.startsWith(root.endsWith(sep) ? root : `${root}${sep}`) ? full : null;
 }
 
+/** `./hooks/x.json` / `${CLAUDE_PLUGIN_ROOT}/hooks/x.json` → `hooks/x.json` (the tree's paths). */
+function normalisePluginPath(path: string): string {
+  return path.replace(/^\$\{CLAUDE_PLUGIN_ROOT\}\//, "").replace(/^(\.\/)+/, "").replace(/\/+/g, "/");
+}
+
 // ---------------------------------------------------------------------------
 // What a plugin directory ships
 // ---------------------------------------------------------------------------
@@ -210,9 +215,9 @@ function mcpServersOf(map: unknown): ProfilePluginMcpServer[] {
 
 /**
  * What a plugin ships, from its files (Claude's layout, which Codex and Grok plugins share):
- * `skills/<n>/SKILL.md`, `commands/**.md`, `agents/*.md`, `hooks/hooks.json` (or the manifest's
- * inline `hooks`), `.mcp.json` and the manifest's `mcpServers`. Every file is listed in the tree
- * anyway; this is the summary the card leads with.
+ * `skills/<n>/SKILL.md`, `commands/**.md`, `agents/*.md`, `hooks/hooks.json`, `.mcp.json`, and the
+ * manifest's `hooks` / `mcpServers` — inline objects, or path strings (one or a list) naming files
+ * inside the plugin. Every file is listed in the tree anyway; this is the summary the card leads with.
  */
 export function pluginProvidesOf(tree: ProfilePreviewTree): ProfilePluginPreviewResponse["provides"] {
   const manifest = parseJson(textOf(tree, ".claude-plugin/plugin.json") ?? textOf(tree, ".codex-plugin/plugin.json"));
@@ -225,10 +230,20 @@ export function pluginProvidesOf(tree: ProfilePreviewTree): ProfilePluginPreview
     else if (/^commands\/.+\.md$/i.test(file.path)) commands.push(file.path.slice("commands/".length, -3));
     else if (/^agents\/[^/]+\.md$/i.test(file.path)) agents.push(file.path.slice("agents/".length, -3));
   }
-  const hooks = [...hooksOf(parseJson(textOf(tree, "hooks/hooks.json"))), ...(isRecord(manifest) && isRecord(manifest.hooks) ? hooksOf(manifest.hooks) : [])];
+  // A manifest field is an inline object, or a path (or list of paths) to a JSON file in the plugin.
+  const declared = (value: unknown, defaultPath: string): unknown[] => {
+    const docs: unknown[] = [];
+    const paths = typeof value === "string" ? [value] : Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string") : [];
+    if (!paths.includes(defaultPath) && !paths.some((path) => normalisePluginPath(path) === defaultPath)) docs.push(parseJson(textOf(tree, defaultPath)));
+    for (const path of paths) docs.push(parseJson(textOf(tree, normalisePluginPath(path))));
+    if (isRecord(value)) docs.push(value);
+    return docs;
+  };
+  const hookDocs = declared(isRecord(manifest) ? manifest.hooks : undefined, "hooks/hooks.json");
+  const hooks = hookDocs.flatMap((doc) => hooksOf(doc));
   const servers = new Map<string, ProfilePluginMcpServer>();
-  for (const server of [...mcpServersOf(parseJson(textOf(tree, ".mcp.json"))), ...(isRecord(manifest) ? mcpServersOf(manifest.mcpServers) : [])]) {
-    servers.set(server.name, server);
+  for (const doc of declared(isRecord(manifest) ? manifest.mcpServers : undefined, ".mcp.json")) {
+    for (const server of mcpServersOf(doc)) servers.set(server.name, server);
   }
   return { skills: [...skills].sort(), commands: commands.sort(), agents: agents.sort(), hooks, mcpServers: [...servers.values()] };
 }

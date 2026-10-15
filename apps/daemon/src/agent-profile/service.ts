@@ -77,7 +77,7 @@ import type { ProfileImports } from "./import.ts";
 import { assertCommandName, assertMcpServerName, assertSkillName, contentHash, parseItemId } from "./infra/index.ts";
 import type { McpCandidate } from "./daemon-mcp.ts";
 import { pluginProvidesOf, readGitCommit, readPreviewTree } from "./preview-reads.ts";
-import type { ProfileImportDetailResponse, ProfileItemFilesResponse, ProfilePluginPreviewResponse } from "./preview-wire.ts";
+import type { ProfileImportDetailResponse, ProfileItemFilesResponse, ProfilePluginPreviewResponse } from "@orquester/api";
 
 /** What the registry knows about an agent's CLI. */
 interface AgentInstallInfo {
@@ -281,19 +281,20 @@ export class AgentProfileService {
   }
 
   // -------------------------------------------------------------------------
-  // Approval-card reads (unified MCP design 2026-10-15 §7.1, §7.2; `preview-wire.ts`)
+  // Approval-card reads (unified MCP design 2026-10-15 §7.1, §7.2; `@orquester/api` agent-profile.ts)
   // -------------------------------------------------------------------------
 
-  /** A skill's or command's files in full, with hashes, and the item's revision now. */
+  /** A skill's, command's or installed plugin's files in full, with hashes, and the item's revision now; a plugin's `provides` too. */
   async itemFiles(agent: AgentProfileAgentId, id: string): Promise<ProfileItemFilesResponse> {
     this.installedAdapter(agent);
     const item = (await this.snapshot(agent)).items.find((entry) => entry.id === id);
     if (item === undefined) throw profileErrors.notFound(id);
-    if ((item.kind !== "skill" && item.kind !== "command") || item.path === undefined) {
-      throw profileErrors.invalid(`Only a skill's or a command's files can be read.`);
+    if ((item.kind !== "skill" && item.kind !== "command" && item.kind !== "plugin") || item.path === undefined) {
+      throw profileErrors.invalid(`Only a skill's, a command's or an installed plugin's files can be read.`);
     }
     try {
-      return { itemId: id, revision: item.revision, ...(await readPreviewTree(item.path)) };
+      const tree = await readPreviewTree(item.path);
+      return { itemId: id, revision: item.revision, ...tree, ...(item.kind === "plugin" ? { provides: pluginProvidesOf(tree) } : {}) };
     } catch (error) {
       throw profileErrors.unreadable(item.path, describe(error));
     }
@@ -340,12 +341,19 @@ export class AgentProfileService {
     const item = await this.installedAdapter(agent).exportItem(id);
     if (item.kind !== "mcp") return null;
     const server = item.server;
-    const bearerEnv = server.advanced?.bearer_token_env_var;
+    // Codex names its bearer by environment variable: `bearer_token_env_var`, the header → variable
+    // map `env_http_headers`, and the passed-through `env_vars`.
+    const names = (value: unknown): string[] =>
+      typeof value === "string" ? [value]
+      : Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string")
+      : value !== null && typeof value === "object" ? Object.values(value).filter((entry): entry is string => typeof entry === "string")
+      : [];
+    const advanced = server.advanced ?? {};
     return {
       name: server.name,
       ...(server.url !== undefined ? { url: server.url } : {}),
       values: [...Object.values(server.headers ?? {}), ...Object.values(server.env ?? {}), ...(server.args ?? []), ...(server.command ? [server.command] : [])],
-      envRefs: typeof bearerEnv === "string" ? [bearerEnv] : []
+      envRefs: [...names(advanced.bearer_token_env_var), ...names(advanced.env_http_headers), ...names(advanced.env_vars)]
     };
   }
 

@@ -46,7 +46,7 @@
  */
 
 import { lstat, readdir, readFile, realpath } from "node:fs/promises";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import type { FastifyInstance } from "fastify";
 import {
   AGENT_PROFILE_DAEMON_MCP_SERVERS_ROUTE,
@@ -60,7 +60,7 @@ import type { AgentHomes } from "./adapters/types.ts";
 import { parseToml, isTable, type TomlTable } from "./adapters/grok/toml-patch.ts";
 import { parseJsoncObject } from "./adapters/opencode/jsonc.ts";
 import { AgentProfileError } from "./errors.ts";
-import { DAEMON_MCP_SERVERS_CHECK_ROUTE, type DaemonMcpCheckResponse } from "./preview-wire.ts";
+import { DAEMON_MCP_SERVERS_CHECK_ROUTE, type DaemonMcpCheckResponse } from "@orquester/api";
 
 /** What the daemon knows about itself; injected by `index.ts`. Never exposes the bearer. */
 export interface DaemonMcpIdentity {
@@ -81,6 +81,8 @@ export interface DaemonMcpSources {
   accountHomes(agent: AgentProfileAgentId): Promise<{ id: string; home: string }[]>;
   /** Every project directory (`<workspaces>/<ws>/<project>`), for the panel's all-projects view. */
   projects(): Promise<string[]>;
+  /** The workspaces root: a `projectPath` filter must realpath inside it. */
+  workspacesRoot(): string;
   logger?: { warn(message: string): void };
 }
 
@@ -122,7 +124,8 @@ const LOOPBACK_HOSTS = new Set(["localhost", "0.0.0.0", "::1", "[::1]", "::", "[
 
 function isLoopbackHost(hostname: string): boolean {
   const host = hostname.toLowerCase().replace(/\.$/, "");
-  return LOOPBACK_HOSTS.has(host) || /^127(\.\d{1,3}){3}$/.test(host) || host.endsWith(".localhost") || /^\[?::ffff:127\./.test(host);
+  // WHATWG URL writes an IPv4-mapped loopback (`[::ffff:127.0.0.1]`) as `[::ffff:7f00:1]`.
+  return LOOPBACK_HOSTS.has(host) || /^127(\.\d{1,3}){3}$/.test(host) || host.endsWith(".localhost") || /^\[?::ffff:(127\.|7f[0-9a-f]{2}:)/.test(host);
 }
 
 function defaultPort(protocol: string): number | null {
@@ -277,7 +280,7 @@ export class DaemonMcpDetector {
    * `projectPath` only when given (the chat manifest), else of every project (the panel).
    */
   async detect(options: { projectPath?: string } = {}): Promise<DaemonPointingServer[]> {
-    const projectFilter = options.projectPath ? await realpathOr(options.projectPath) : undefined;
+    const projectFilter = options.projectPath ? await this.containedProject(options.projectPath) : undefined;
     const targets = await this.targets(projectFilter);
     const seenFiles = new Set<string>();
     const out: DaemonPointingServer[] = [];
@@ -306,6 +309,22 @@ export class DaemonMcpDetector {
       }
     }
     return out;
+  }
+
+  /**
+   * A `projectPath` filter's realpath, which must lie strictly inside the workspaces root (the
+   * sandbox rule): anything else is refused (400, the same answer whether or not it exists) and never read.
+   */
+  private async containedProject(projectPath: string): Promise<string> {
+    let real: string;
+    let root: string;
+    try {
+      [real, root] = await Promise.all([realpath(projectPath), realpath(this.sources.workspacesRoot())]);
+    } catch {
+      throw new AgentProfileError(400, "INVALID_REQUEST", "projectPath is not a project under the workspaces root.");
+    }
+    if (!real.startsWith(`${root}${sep}`)) throw new AgentProfileError(400, "INVALID_REQUEST", "projectPath is not a project under the workspaces root.");
+    return real;
   }
 
   private async targets(projectFilter: string | undefined): Promise<ScanTarget[]> {
@@ -446,7 +465,13 @@ export function registerDaemonMcpServersRoutes(
     if (projectPath !== undefined && (typeof projectPath !== "string" || !projectPath.startsWith("/") || projectPath.includes("\0"))) {
       return reply.code(400).send({ error: { code: "INVALID_REQUEST", message: "projectPath must be an absolute path." } });
     }
-    const servers = await deps.detector.detect(projectPath ? { projectPath } : {});
+    let servers: DaemonPointingServer[];
+    try {
+      servers = await deps.detector.detect(projectPath ? { projectPath } : {});
+    } catch (error) {
+      if (error instanceof AgentProfileError) return reply.code(error.status).send({ error: { code: error.code, message: error.message } });
+      throw error;
+    }
     const body: DaemonMcpServersResponse = { servers };
     return body;
   });

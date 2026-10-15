@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { cp, lstat, mkdir, mkdtemp, readFile, readlink, realpath, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { afterEach, beforeEach, describe, it, mock } from "node:test";
 import { fileURLToPath } from "node:url";
 import { parse as parseToml } from "@decimalturn/toml-patch";
@@ -921,6 +921,15 @@ describe("CodexProfileAdapter", () => {
         f.adapter.create({ kind: "plugin", plugin: { spec: "npm-thing" } }, { onConflict: "fail" }),
         assertProfileError("INVALID_ITEM")
       );
+    });
+
+    it("pluginSource: the plugin's directory inside the marketplace checkout, whose root (not its manifest) is the pinned checkout", async () => {
+      const location = await f.adapter.pluginSource("test-mkt", "other");
+      assert.equal(location.marketplaceDir, f.mkt, "plugin/list names the manifest; the checkout is its root");
+      assert.equal(location.source.type, "local");
+      assert.ok(location.source.type === "local" && location.source.dir.startsWith(`${f.mkt}${sep}`));
+      await assert.rejects(f.adapter.pluginSource("test-mkt", "ghost"), assertProfileError("INVALID_REQUEST"));
+      await assert.rejects(f.adapter.pluginSource("nope", "other"), assertProfileError("ITEM_NOT_FOUND"));
     });
 
     it("lists a marketplace's plugins, removes and adds a marketplace", async () => {

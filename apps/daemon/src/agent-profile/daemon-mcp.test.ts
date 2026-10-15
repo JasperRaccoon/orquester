@@ -57,10 +57,10 @@ async function fixture() {
 const byKey = (servers: DaemonPointingServer[]) => servers.map((s) => `${s.agent}|${s.home}|${s.scope}|${s.projectPath ?? ""}|${s.name}|${s.reason}`).sort();
 
 test("urlReachesDaemon: loopback on the daemon's port with path /mcp, or a configured origin", () => {
-  for (const url of ["http://127.0.0.1:47831/mcp", "http://localhost:47831/mcp/", "http://[::1]:47831/mcp", "http://0.0.0.0:47831/mcp", "http://127.1.2.3:47831/mcp", "https://orq.example.com/mcp", "https://ORQ.example.com:443/mcp"]) {
+  for (const url of ["http://[::ffff:127.0.0.1]:47831/mcp", "http://[::ffff:7f00:1]:47831/mcp", "http://127.0.0.1:47831/mcp", "http://localhost:47831/mcp/", "http://[::1]:47831/mcp", "http://0.0.0.0:47831/mcp", "http://127.1.2.3:47831/mcp", "https://orq.example.com/mcp", "https://ORQ.example.com:443/mcp"]) {
     assert.equal(urlReachesDaemon(url, PORT, ["https://orq.example.com"]), true, url);
   }
-  for (const url of ["http://127.0.0.1:47832/mcp", "http://127.0.0.1:47831/api", "http://10.0.0.1:47831/mcp", "https://evil.example.com/mcp", "http://orq.example.com/mcp", "not a url"]) {
+  for (const url of ["http://127.0.0.1:47832/mcp", "http://127.0.0.1:47831/api", "http://10.0.0.1:47831/mcp", "http://[::ffff:10.0.0.1]:47831/mcp", "https://evil.example.com/mcp", "http://orq.example.com/mcp", "not a url"]) {
     assert.equal(urlReachesDaemon(url, PORT, ["https://orq.example.com"]), false, url);
   }
 });
@@ -106,7 +106,7 @@ test("detect: every CLI's user config shape in the system home", async (t) => {
   }`);
   const id = identity();
   const logs: string[] = [];
-  const detector = new DaemonMcpDetector(id, { homes: fx.homes, accountHomes: async () => [], projects: () => listProjectDirs(fx.workspaces), logger: { warn: (m) => logs.push(m) } });
+  const detector = new DaemonMcpDetector(id, { homes: fx.homes, accountHomes: async () => [], projects: () => listProjectDirs(fx.workspaces), workspacesRoot: () => fx.workspaces, logger: { warn: (m) => logs.push(m) } });
   const servers = await detector.detect();
   assert.deepEqual(byKey(servers), [
     "claude|system|project|/elsewhere|local|url",
@@ -144,7 +144,8 @@ test("detect: every managed account home, each file read once, and project-level
   const detector = new DaemonMcpDetector(identity(), {
     homes: fx.homes,
     accountHomes: async (agent) => (agent === "claude" ? [{ id: "acc1", home: claudeAccount }] : agent === "codex" ? [{ id: "acc2", home: codexAccount }] : []),
-    projects: () => listProjectDirs(fx.workspaces)
+    projects: () => listProjectDirs(fx.workspaces),
+    workspacesRoot: () => fx.workspaces
   });
   assert.deepEqual(byKey(await detector.detect()), [
     "claude|acc1|user||mine|url",
@@ -166,7 +167,7 @@ test("routes: GET lists flagged servers on both transports; the socket-only chec
   const fx = await fixture();
   t.after(() => rm(fx.root, { recursive: true, force: true }));
   await write(fx.homes.claudeJson, JSON.stringify({ mcpServers: { o: { type: "http", url: "https://y.example/mcp", headers: { Authorization: `Bearer ${BEARER}` } } } }));
-  const detector = new DaemonMcpDetector(identity(), { homes: fx.homes, accountHomes: async () => [], projects: async () => [] });
+  const detector = new DaemonMcpDetector(identity(), { homes: fx.homes, accountHomes: async () => [], projects: async () => [], workspacesRoot: () => fx.workspaces });
   const local = Fastify({ logger: false });
   const remote = Fastify({ logger: false });
   t.after(async () => { await local.close(); await remote.close(); });
@@ -186,4 +187,23 @@ test("routes: GET lists flagged servers on both transports; the socket-only chec
   assert.deepEqual((await check(local, { agent: "claude", name: "z", url: "http://localhost:47831/mcp" })).json(), { reason: "url" });
   const bad = await check(local, { agent: "claude", name: "o", values: [1] });
   assert.equal(bad.statusCode, 400);
+});
+
+test("a projectPath filter must realpath inside the workspaces root; outside (or through a symlink out) it is refused, never read", async (t) => {
+  const fx = await fixture();
+  t.after(() => rm(fx.root, { recursive: true, force: true }));
+  const outside = join(fx.root, "outside");
+  await write(join(outside, ".mcp.json"), JSON.stringify({ mcpServers: { leak: { url: "http://localhost:47831/mcp" } } }));
+  await symlink(outside, join(fx.workspaces, "acme", "escape"));
+  const detector = new DaemonMcpDetector(identity(), { homes: fx.homes, accountHomes: async () => [], projects: async () => [], workspacesRoot: () => fx.workspaces });
+  const app = Fastify({ logger: false });
+  t.after(() => app.close());
+  registerDaemonMcpServersRoutes(app, { detector, mode: "local" });
+  for (const projectPath of [outside, join(fx.workspaces, "acme", "escape"), fx.workspaces, join(fx.root, "missing")]) {
+    const res = await app.inject({ method: "GET", url: `/api/agent-profile/daemon-mcp-servers?projectPath=${encodeURIComponent(projectPath)}` });
+    assert.equal(res.statusCode, 400, projectPath);
+    assert.ok(!res.body.includes("leak"));
+  }
+  const inside = await app.inject({ method: "GET", url: `/api/agent-profile/daemon-mcp-servers?projectPath=${encodeURIComponent(fx.project)}` });
+  assert.equal(inside.statusCode, 200);
 });

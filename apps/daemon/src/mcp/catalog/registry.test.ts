@@ -137,9 +137,8 @@ function reachable(entry: string): { modules: Set<string>; packages: Set<string>
 const PURE_MODULES = new Set([
   "agent-chat/activity-ladder.ts",
   // Task 11: the YAML frontmatter (de)serialiser the adapters write skills with (pure, `yaml` only),
-  // so the card shows a skill's file exactly as it will be written; the card reads' wire types.
+  // so the card shows a skill's file exactly as it will be written.
   "agent-profile/infra/frontmatter.ts",
-  "agent-profile/preview-wire.ts",
   "mcp/addressing.ts",
   "mcp/agents.ts",
   "mcp/attachments.ts",

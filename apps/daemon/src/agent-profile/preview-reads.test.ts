@@ -13,7 +13,11 @@ import test from "node:test";
 import { createHash } from "node:crypto";
 import Fastify from "fastify";
 import { claudePluginSource } from "./adapters/claude/plugins.ts";
+import type { PortableItem } from "./adapters/types.ts";
+import { codexMarketplaceRoot, codexPluginLocation } from "./adapters/codex/index.ts";
 import { ProfileImportStore } from "./import.ts";
+import { AgentProfileService } from "./service.ts";
+import { FakeProfileAdapter, fakeItem } from "./testing.ts";
 import { pluginProvidesOf, readGitCommit, readPreviewTree, treeDigest } from "./preview-reads.ts";
 import { registerAgentProfileRoutes, type AgentProfileRouteDeps } from "./routes.ts";
 
@@ -170,4 +174,72 @@ test("routes: the card reads answer what the service reads, and 503 without it",
   assert.equal((await app.inject({ method: "GET", url: "/api/agent-profile/nope/imports/i" })).statusCode, 404);
   const missing = await bare.inject({ method: "GET", url: "/api/agent-profile/claude/items/skill%3Aa/files" });
   assert.equal(missing.statusCode, 503);
+});
+
+test("pluginProvidesOf: hooks and MCP servers a manifest declares by path (one, or a list) count too", async (t) => {
+  const root = await tempRoot(t);
+  const plugin = join(root, "p");
+  await write(join(plugin, ".claude-plugin", "plugin.json"), JSON.stringify({ name: "p", hooks: "./config/hooks.json", mcpServers: ["./config/servers.json", "${CLAUDE_PLUGIN_ROOT}/more.json"] }));
+  await write(join(plugin, "config", "hooks.json"), JSON.stringify({ hooks: { SessionStart: [{ hooks: [{ type: "command", command: "echo start" }] }] } }));
+  await write(join(plugin, "config", "servers.json"), JSON.stringify({ mcpServers: { a: { command: "a-server" } } }));
+  await write(join(plugin, "more.json"), JSON.stringify({ b: { url: "https://b.example/mcp" } }));
+  await write(join(plugin, "hooks", "hooks.json"), JSON.stringify({ hooks: { Stop: [{ hooks: [{ type: "command", command: "echo stop" }] }] } }));
+  const provides = pluginProvidesOf(await readPreviewTree(plugin));
+  assert.deepEqual(provides.hooks.map((hook) => `${hook.event}:${hook.command}`).sort(), ["SessionStart:echo start", "Stop:echo stop"]);
+  assert.deepEqual(provides.mcpServers.map((server) => server.name).sort(), ["a", "b"]);
+});
+
+test("ProfileImportStore.inspect shows picks as they will be imported: frontmatter mapped, a Codex command made a skill", async (t) => {
+  const root = await tempRoot(t);
+  const store = new ProfileImportStore({
+    dir: join(root, "imports"),
+    existing: async () => new Set(),
+    logger: { info: () => undefined, warn: () => undefined },
+    clone: async (_url, _ref, dest) => {
+      await write(join(dest, "skills", "alpha", "SKILL.md"), "---\nname: other-name\ndescription: A\nlicense: MIT\n---\nalpha body");
+      await write(join(dest, "commands", "pr.md"), "---\ndescription: Open a PR\n---\nDo it.");
+    }
+  });
+  t.after(() => store.stop());
+  const scan = await store.scanGit("codex", "https://git.example/acme/kit.git");
+  const detail = await store.inspect("codex", scan.importId);
+  const alpha = detail.candidates.find((candidate) => candidate.kind === "skill" && candidate.files.some((file) => file.text?.includes("alpha body")))!;
+  const skillText = alpha.files.find((file) => file.path === "SKILL.md")!.text!;
+  assert.match(skillText, new RegExp(`^---\\nname: ${alpha.name}\\n`), "the name key is the item's name");
+  assert.doesNotMatch(skillText, /license/, "keys the agent does not know are dropped");
+  assert.ok(alpha.notes?.some((note) => /license/.test(note)));
+  const command = detail.candidates.find((candidate) => candidate.name === "pr")!;
+  assert.equal(command.kind, "skill");
+  assert.deepEqual(command.files.map((file) => file.path), ["SKILL.md"]);
+  assert.match(command.files[0]!.text!, /Do it\./);
+  assert.ok(command.notes?.some((note) => /imported as a skill/.test(note)));
+  assert.equal(command.files[0]!.sha256, sha(command.files[0]!.text!), "the hash is the shown text's");
+});
+
+test("AgentProfileService.mcpCandidate: header and env values and every Codex env reference, daemon-side only", async () => {
+  class Adapter extends FakeProfileAdapter {
+    override async exportItem(id: string): Promise<PortableItem> {
+      if (id !== "mcp:orq") return super.exportItem(id);
+      return { kind: "mcp", server: { name: "orq", transport: "http", url: "https://x.example/mcp", headers: { Authorization: "Bearer h" },
+        advanced: { bearer_token_env_var: "TOKEN_A", env_http_headers: { "X-Auth": "TOKEN_B" }, env_vars: ["TOKEN_C"] } } };
+    }
+  }
+  const adapter = new Adapter("codex");
+  adapter.items = [fakeItem("mcp", "orq")];
+  const service = new AgentProfileService({ adapters: { codex: adapter }, agentInfo: () => ({ installed: true }), converter: (item) => ({ item, notes: [] }), logger: { warn: () => undefined, error: () => undefined } });
+  assert.deepEqual(await service.mcpCandidate("codex", "mcp:orq"), { name: "orq", url: "https://x.example/mcp", values: ["Bearer h"], envRefs: ["TOKEN_A", "TOKEN_B", "TOKEN_C"] });
+  assert.equal(await service.mcpCandidate("codex", "skill:x"), null);
+});
+
+test("codexPluginLocation: the checkout is the manifest's root; a relative source is inside it; an escape is a remote source", () => {
+  const manifest = "/m/acme/.agents/plugins/marketplace.json";
+  assert.equal(codexMarketplaceRoot(manifest), "/m/acme");
+  assert.equal(codexMarketplaceRoot("/m/other/catalog.json"), "/m/other");
+  assert.equal(codexMarketplaceRoot("/m/dir"), "/m/dir");
+  const summary = (path?: string) => ({ version: null, localVersion: "1.0.0", source: { type: "local", ...(path !== undefined ? { path } : {}) } });
+  assert.deepEqual(codexPluginLocation(manifest, summary("./plugins/hello")), { marketplaceDir: "/m/acme", version: "1.0.0", source: { type: "local", dir: "/m/acme/plugins/hello" } });
+  assert.deepEqual(codexPluginLocation(manifest, summary("/abs/plugins/hello")), { marketplaceDir: "/m/acme", version: "1.0.0", source: { type: "local", dir: "/abs/plugins/hello" } });
+  assert.equal(codexPluginLocation(manifest, summary("../../etc")).source.type, "remote");
+  assert.deepEqual(codexPluginLocation(null, { version: "2", localVersion: null, source: { type: "git", url: "https://g.example/p.git" } }),
+    { marketplaceDir: null, version: "2", source: { type: "remote", description: "git https://g.example/p.git" } });
 });

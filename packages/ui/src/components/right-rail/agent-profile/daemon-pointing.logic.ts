@@ -33,3 +33,27 @@ export function daemonPointingTitle(reason: DaemonPointingReason): string {
         : "It is named \"orquester\", like Orquester's own in-chat server";
   return `${why}, which would give a chat full control of Orquester without approvals. Orquester turns it off inside the chats it launches; it still works outside Orquester.`;
 }
+
+const AGENTS = new Set(["claude", "codex", "grok", "opencode"]);
+const REASONS = new Set(["bearer", "url", "name"]);
+
+/** The route's answer, validated before it reaches the panel: malformed rows are dropped, a malformed body is `null`. */
+export function parseDaemonMcpServers(value: unknown): DaemonPointingServer[] | null {
+  if (value === null || typeof value !== "object" || !Array.isArray((value as { servers?: unknown }).servers)) return null;
+  const out: DaemonPointingServer[] = [];
+  for (const raw of (value as { servers: unknown[] }).servers) {
+    if (raw === null || typeof raw !== "object") continue;
+    const row = raw as Record<string, unknown>;
+    if (!AGENTS.has(row.agent as string) || typeof row.home !== "string" || (row.scope !== "user" && row.scope !== "project")) continue;
+    if (typeof row.name !== "string" || !REASONS.has(row.reason as string)) continue;
+    out.push({
+      agent: row.agent as AgentProfileAgentId,
+      home: row.home,
+      scope: row.scope,
+      ...(typeof row.projectPath === "string" ? { projectPath: row.projectPath } : {}),
+      name: row.name,
+      reason: row.reason as DaemonPointingReason
+    });
+  }
+  return out;
+}

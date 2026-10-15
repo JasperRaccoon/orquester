@@ -34,14 +34,14 @@
  * one more TTL, then removes it anyway.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Stats } from "node:fs";
 import { lstat, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from "node:fs/promises";
 import { basename, extname, join } from "node:path";
-import type { AgentProfileAgentId, ProfileImportCandidate, ProfileImportScanResponse } from "@orquester/api";
+import type { AgentProfileAgentId, ProfileImportCandidate, ProfileImportScanResponse, ProfilePreviewTree } from "@orquester/api";
 import type { PortableItem } from "./adapters/types.ts";
 import { readGitCommit, readPreviewTree } from "./preview-reads.ts";
-import type { ProfileImportDetailResponse } from "./preview-wire.ts";
+import type { ProfileImportDetailResponse } from "@orquester/api";
 import {
   CODEX_COMMAND_NOTE,
   commandNameFor,
@@ -284,9 +284,57 @@ export class ProfileImportStore implements ProfileImports {
     const candidates: ProfileImportDetailResponse["candidates"] = [];
     for (const [ref, candidate] of record.candidates) {
       const tree = await readPreviewTree(await assertInside(record.root, candidate.found.path));
-      candidates.push({ ref, kind: candidate.kind, name: candidate.name, exists: existing.has(`${candidate.kind}:${candidate.name}`), ...tree });
+      const mapped = await this.asImported(record, agent, candidate, tree);
+      candidates.push({ ref, kind: candidate.kind, name: candidate.name, exists: existing.has(`${candidate.kind}:${candidate.name}`), ...mapped });
     }
     return { importId, source: { ...record.origin }, candidates };
+  }
+
+  /**
+   * A candidate's tree as `take` will hand it over: its main document (`SKILL.md`, or the command
+   * file) with the frontmatter mapped for `agent` exactly as {@link buildItem} maps it — the `name`
+   * key, dropped keys, a Codex command made a skill — so the card shows what is written. Nothing is
+   * written here. Dropped keys come back as `notes`.
+   */
+  private async asImported(
+    record: ImportRecord,
+    agent: AgentProfileAgentId,
+    candidate: StoredCandidate,
+    tree: ProfilePreviewTree
+  ): Promise<ProfilePreviewTree & { notes?: string[] }> {
+    const path = await assertInside(record.root, candidate.found.path);
+    let main: string;
+    let text: string;
+    let renamed: string | undefined;
+    let notes: string[];
+    if (candidate.found.kind === "skill") {
+      main = SKILL_FILE;
+      const document = parseMarkdownDocument(await readFile(join(path, SKILL_FILE), "utf8"));
+      const mapped = mapFrontmatter(document.frontmatter, "skill", agent);
+      const frontmatter = Object.hasOwn(mapped.frontmatter, "name") ? { ...mapped.frontmatter, name: candidate.name } : { name: candidate.name, ...mapped.frontmatter };
+      text = serializeMarkdownDocument(frontmatter, document.body);
+      notes = droppedKeysNote(mapped.dropped, agent);
+    } else {
+      main = tree.files[0]?.path ?? basename(path);
+      const document = parseMarkdownDocument(await readFile(path, "utf8"));
+      if (candidate.kind === "skill") {
+        const skill = commandToSkillDocument(candidate.found.name, document.frontmatter);
+        text = serializeMarkdownDocument(skill.frontmatter, document.body);
+        renamed = SKILL_FILE;
+        notes = [CODEX_COMMAND_NOTE, ...droppedKeysNote(skill.dropped, agent)];
+      } else {
+        const mapped = mapFrontmatter(document.frontmatter, "command", agent);
+        text = serializeMarkdownDocument(mapped.frontmatter, document.body);
+        notes = droppedKeysNote(mapped.dropped, agent);
+      }
+    }
+    const bytes = Buffer.from(text, "utf8");
+    const files = tree.files.map((file) =>
+      file.path === main
+        ? { ...file, path: renamed ?? file.path, size: bytes.length, sha256: createHash("sha256").update(bytes).digest("hex"), text }
+        : file
+    );
+    return { ...tree, files, ...(notes.length > 0 ? { notes } : {}) };
   }
 
   /** Removes every import, the directory with them; later calls are refused. */

@@ -45,7 +45,7 @@
 import { SecretDigester } from "../../infra/secret-digest.ts";
 import { randomUUID } from "node:crypto";
 import { realpath, stat } from "node:fs/promises";
-import { isAbsolute, join, resolve, sep } from "node:path";
+import { dirname, isAbsolute, join, resolve, sep } from "node:path";
 import {
   PROFILE_HOOK_EVENTS,
   PROFILE_HOOK_EVENTS_WITHOUT_MATCHER,
@@ -1584,20 +1584,14 @@ export class CodexProfileAdapter implements ProfileAdapter {
     });
   }
 
-  /** `plugin/list`: a local plugin's directory (its `source.path`, relative to the marketplace), else what Codex fetches. */
+  /** `plugin/list`: a local plugin's directory (its `source.path`) inside the marketplace's checkout, else what Codex fetches. */
   async pluginSource(marketplace: string, plugin: string): Promise<PluginSourceLocation> {
     const listed = await this.rpc("plugin/list", {});
     const entry = listed.marketplaces.find((candidate) => candidate.name === marketplace);
     if (entry === undefined) throw profileErrors.notFound(itemId("marketplace", marketplace));
     const summary = entry.plugins.find((candidate) => candidate.name === plugin);
     if (summary === undefined) throw profileErrors.invalid(`The marketplace "${marketplace}" has no plugin "${plugin}".`);
-    const version = summary.version ?? summary.localVersion ?? undefined;
-    const base = { marketplaceDir: entry.path, ...(version ? { version } : {}) };
-    if (typeof summary.source.path === "string" && summary.source.path !== "") {
-      const dir = isAbsolute(summary.source.path) ? summary.source.path : resolve(entry.path ?? "/", summary.source.path);
-      return { ...base, source: { type: "local", dir } };
-    }
-    return { ...base, source: { type: "remote", description: [summary.source.type, summary.source.url].filter(Boolean).join(" ") } };
+    return codexPluginLocation(entry.path, summary);
   }
 
   // -------------------------------------------------------------------------
@@ -1753,4 +1747,37 @@ function describeMarketplaceSource(source: MarketplaceSource): string {
     case "path":
       return source.path;
   }
+}
+
+/**
+ * Where a Codex marketplace plugin lives before it is installed. `plugin/list` names a
+ * marketplace by its MANIFEST (`<root>/.agents/plugins/marketplace.json`, Codex 0.155): the
+ * checkout whose commit a card pins is `<root>`, and a relative `source.path` is relative to it
+ * (an absolute one, as Codex reports a local source, is taken as it is). A path that leaves the
+ * checkout, or a source with no path, is a source Codex fetches at install.
+ */
+export function codexPluginLocation(
+  manifestPath: string | null,
+  summary: { version: string | null; localVersion: string | null; source: { type: string; path?: string; url?: string } }
+): PluginSourceLocation {
+  const root = manifestPath === null ? null : codexMarketplaceRoot(manifestPath);
+  const version = summary.version ?? summary.localVersion ?? undefined;
+  const base = { marketplaceDir: root, ...(version ? { version } : {}) };
+  const sourcePath = summary.source.path;
+  if (typeof sourcePath === "string" && sourcePath !== "") {
+    if (isAbsolute(sourcePath)) return { ...base, source: { type: "local", dir: resolve(sourcePath) } };
+    if (root !== null) {
+      const dir = resolve(root, sourcePath);
+      if (dir === root || dir.startsWith(`${root}${sep}`)) return { ...base, source: { type: "local", dir } };
+    }
+  }
+  return { ...base, source: { type: "remote", description: [summary.source.type, summary.source.url ?? sourcePath].filter(Boolean).join(" ") } };
+}
+
+/** `<root>/.agents/plugins/marketplace.json` → `<root>`; another `.json` file → its directory; a directory → itself. */
+export function codexMarketplaceRoot(manifestPath: string): string {
+  const path = resolve(manifestPath);
+  const suffix = `${sep}.agents${sep}plugins${sep}marketplace.json`;
+  if (path.endsWith(suffix)) return path.slice(0, -suffix.length) || sep;
+  return path.endsWith(".json") ? dirname(path) : path;
 }

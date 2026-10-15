@@ -68,6 +68,8 @@ import {
   profileKindTabs
 } from "./list.logic";
 import type { ProfileRowConfirm } from "./ProfileItemRow";
+import { daemonPointingReasonFor } from "./daemon-pointing.logic";
+import { useDaemonPointingServers } from "./use-daemon-pointing";
 
 /** How long a saved item stays outlined. */
 const HIGHLIGHT_MS = 2_500;
@@ -189,6 +191,9 @@ export const AgentProfilePanel: React.FC<RightRailPanelProps> = ({ sessionId, va
   }, [highlightId]);
 
   const items = useMemo(() => snapshot?.items ?? [], [snapshot]);
+  // MCP servers that reach this Orquester's own /mcp: re-read whenever the shown profile moves.
+  const daemonServers = useDaemonPointingServers(api, snapshot?.revision ?? null);
+  const daemonPointingFor = useCallback((item: ProfileItem) => daemonPointingReasonFor(item, agent, daemonServers), [agent, daemonServers]);
   const kindTabs = useMemo(() => profileKindTabs(agent, items), [agent, items]);
   const kind = effectiveKindTab(kindTabs, tabs[agent] ?? lastAgentProfileTab(agent));
   const filtered = useMemo(() => filterProfileItems(items, { kind, query }), [items, kind, query]);
@@ -312,6 +317,7 @@ export const AgentProfilePanel: React.FC<RightRailPanelProps> = ({ sessionId, va
         highlightId={highlightId}
         confirming={sheet && confirming !== null ? confirming : null}
         copyTargetsFor={copyTargetsFor}
+        daemonPointingFor={daemonPointingFor}
         actions={actions}
         onOpenInstructions={() => openEditor({ mode: "instructions", agent })}
         creatableKinds={creatableKinds}
