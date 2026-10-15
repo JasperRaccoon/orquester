@@ -3,9 +3,11 @@
  * 2026-10-15 §3.2, §7, §9.3). It joins the card registry (`agent-chat/tool-approvals.ts`) and the
  * agent-tools store (`./service.ts`):
  *
- * - `request(card, signal)` opens the card and waits. On an approval with a grant choice the grant
- *   is recorded (only for a caller that is `full-access` and not workflow-owned at ANSWER time,
- *   the choice re-validated against the card's `grantOptions`); an approved toolset card turns the
+ * - `request(card, signal)` opens the card and waits. An approval with a grant choice is accepted
+ *   only for a caller that is `full-access` and not workflow-owned at ANSWER time (the choice
+ *   re-validated against the card's `grantOptions`); the grant itself is recorded only when the
+ *   executor calls the outcome's `commitGrant`, after the call passed the post-card gate re-run —
+ *   re-checking Full access then too. An approved toolset card turns the
  *   toolset on for the chat (persisted, then `onToolsetsChanged`); a denied one blocks asking again
  *   for 30 min.
  * - `findGrant(query)` answers from `agent-tools.json` (`lastUsedAt` stamped).
@@ -51,7 +53,7 @@ import type { ApprovalOutcome, ApprovalPort, ApprovalRequest, Grant, GrantQuery 
 import type { DaemonApi } from "../mcp/daemon-api.ts";
 import type { ExecutorPorts } from "../mcp/executor.ts";
 import { ToolError } from "../mcp/errors.ts";
-import { AgentToolsService, type AgentToolsThreadInfo } from "./service.ts";
+import { AgentToolsService, type AgentToolsThreadInfo, type NewAgentToolGrant } from "./service.ts";
 
 /** What the port knows of a caller now, read by the daemon (never from the card). */
 export interface CallerTraits {
@@ -164,7 +166,9 @@ export class AgentToolsApprovalPort implements ApprovalPort {
       : card.sections;
     /** The grant an approved create joins, decided at answer time (absent: none). */
     let joinGrantId: string | undefined;
-    return this.deps.registry.open(
+    /** The grant the user chose, planned at answer time and recorded by the outcome's `commitGrant`. */
+    let chosen: { input: NewAgentToolGrant; id: string } | undefined;
+    const outcome = this.deps.registry.open(
       {
         threadId: card.threadId,
         tool: card.tool,
@@ -203,12 +207,39 @@ export class AgentToolsApprovalPort implements ApprovalPort {
           }
           if (this.deps.tools.isReadOnly()) throw new ToolApprovalAnswerRefusal("AGENT_TOOLS_UNAVAILABLE", READ_ONLY_GRANT, 503);
         },
-        commitApproval: (answer) => this.commit(card, answer, toolset, joinGrantId),
+        commitApproval: (answer) => {
+          const committed = this.commit(card, answer, toolset, joinGrantId);
+          chosen = committed.chosen;
+          return committed.result;
+        },
         onDenied: () => {
           if (toolset !== null) this.deps.tools.recordToolsetDecline(card.threadId, toolset);
         }
       }
     );
+    return outcome.then((settled) => {
+      const plan = chosen;
+      if (settled.outcome !== "approved" || plan === undefined) return settled;
+      let once: Promise<{ grantId: string; grantScope: "chat" | "project" } | null> | undefined;
+      return { ...settled, commitGrant: () => (once ??= this.commitGrant(card.threadId, plan)) };
+    });
+  }
+
+  /**
+   * Record the grant an approved card chose — called by the executor once the call passed the
+   * post-card gate re-run. Only while the caller is still `full-access` and not workflow-owned; null
+   * (nothing recorded) otherwise, or when the store refuses.
+   */
+  private async commitGrant(threadId: string, plan: { input: NewAgentToolGrant; id: string }): Promise<{ grantId: string; grantScope: "chat" | "project" } | null> {
+    if (this.deps.workflowOwned(threadId)) return null;
+    const traits = await this.deps.callerTraits(threadId);
+    if (!traits || traits.workflowOwned || traits.runtimeMode !== "full-access" || this.deps.tools.isReadOnly()) return null;
+    try {
+      return { grantId: this.deps.tools.addGrant(plan.input, plan.id), grantScope: plan.input.scope };
+    } catch (error) {
+      console.error("[agent-tools] could not record a grant", error instanceof Error ? error.name : "unknown error");
+      return null;
+    }
   }
 
   /** The card's grant options narrowed to what the caller's current traits allow (§7.6, MUST 8). */
@@ -244,23 +275,25 @@ export class AgentToolsApprovalPort implements ApprovalPort {
     answer: ToolApprovalAnswer,
     toolset: ToolsetId | null,
     joinGrantId: string | undefined
-  ): { grantId?: string; grantScope?: "chat" | "project" } {
+  ): { result: { grantId?: string; grantScope?: "chat" | "project" }; chosen?: { input: NewAgentToolGrant; id: string } } {
     if (toolset !== null) this.deps.tools.enableToolsetForThread(card.threadId, toolset);
     if (answer.grant !== undefined) {
-      const grantId = this.deps.tools.addGrant({
+      // Planned, not recorded: the outcome's `commitGrant` records it once the call passed its re-gate.
+      const input: NewAgentToolGrant = {
         family: card.family,
         scope: answer.grant,
         projectPath: card.callerProjectPath,
         threadId: card.threadId,
         ...(card.family === "cross-project" && card.targetProjectPath !== undefined ? { targetProjectPath: card.targetProjectPath } : {}),
         ...(card.family === "workflows" && card.workflowId !== undefined ? { workflowId: card.workflowId } : {})
-      });
-      return { grantId, grantScope: answer.grant };
+      };
+      const id = this.deps.tools.plannedGrantId(input);
+      return { result: { grantId: id, grantScope: answer.grant }, chosen: { input, id } };
     }
     // Ruling: approving ONCE never widens a standing grant. Only a create the card said would join
     // (decided at answer time) returns the grant; the executor adds the new id after the create ran
     // (`recordWorkflowInGrant`). A plain approval of a run/update/delete joins nothing.
-    return joinGrantId !== undefined ? { grantId: joinGrantId, grantScope: "chat" } : {};
+    return { result: joinGrantId !== undefined ? { grantId: joinGrantId, grantScope: "chat" } : {} };
   }
 }
 
