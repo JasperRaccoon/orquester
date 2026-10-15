@@ -234,16 +234,32 @@ test("chat: another project of the workspace reads freely and acts behind a card
   assert.equal(h.manager.get(id)!.name, "Web 3");
 });
 
-test("chat: another workspace's own lists — reading needs Full access, writing always cards and is never grantable", async (t) => {
+test("chat: another workspace's own lists (S13 workspace target) — a read below Full access is a card, a write always cards; never grantable", async (t) => {
   const h = await harness(t);
   const id = await h.create({ workspace: "beta" }, "Beta");
-  assert.match(await h.refused("list_todos", { workspace: "beta" }, "PERMISSION_DENIED", h.chat({ runtimeMode: "auto" })), /Full access/);
+  // Below Full access: a card, never a refusal (the port double approves it).
+  const read = await h.value("list_todos", { workspace: "beta" }, h.chat({ runtimeMode: "auto" }));
+  assert.deepEqual((read.todos as { id: string }[]).map((todo) => todo.id), [id]);
+  const readCard = h.port.cards.at(-1)!;
+  assert.deepEqual([readCard.kind, readCard.family, readCard.grantOptions], ["boundary", "cross-workspace-read", []]);
+  assert.match(readCard.scope.label, /workspace beta/);
+  // Full access reads without a card.
+  const before = h.port.cards.length;
   await h.value("list_todos", { workspace: "beta" }, h.chat({ runtimeMode: "full-access" }));
+  assert.equal(h.port.cards.length, before);
+  // A write there always cards, in Full access too, and offers no grant (no project to grant for).
   await h.value("update_todos", { action: "toggle", workspace: "beta", id, item: 1 }, h.chat({ runtimeMode: "full-access" })).catch(() => undefined);
   const card = h.port.cards.at(-1)!;
   assert.equal(card.family, "cross-project");
   assert.deepEqual(card.grantOptions, []);
-  assert.deepEqual(card.pendingProjects, [{ workspace: "beta" }]);
+  assert.equal(card.targetProjectPath, undefined);
+  // The chat's own workspace lists: no card.
+  const own = h.port.cards.length;
+  await h.value("list_todos", { workspace: "acme" }, h.chat());
+  assert.equal(h.port.cards.length, own);
+  // A denied card refuses, as for a project target.
+  h.port.answerWith({ outcome: "denied", approvalId: "" });
+  await h.refused("list_todos", { workspace: "beta" }, "APPROVAL_DENIED", h.chat({ runtimeMode: "auto" }));
   // A workflow-owned chat never acts there.
   await h.refused("update_todos", { action: "update", workspace: "beta", id, name: "x" }, "PERMISSION_DENIED", h.chat({ workflowOwned: true, runtimeMode: "full-access" }));
 });

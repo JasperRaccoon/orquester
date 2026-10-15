@@ -14,6 +14,10 @@
  * | other project, same workspace| allow                  | trusted: allow · card   | full: allow · card          | card (no grant)  |
  * | other workspace              | full: allow · card     | full: allow · card      | card (grantable for full)   | card (no grant)  |
  *
+ * A workspace-level target (`scope.workspaces`: data a workspace owns outside its projects) uses the
+ * `own` row in the caller's own workspace and the `other workspace` row elsewhere, but is never
+ * grantable: its Act card names no target project, and an Admin call reaching one is cross-project.
+ *
  * Over it: Admin is a card in EVERY mode (ruling S1), refused while planning, and
  * `ADMIN_NOT_AVAILABLE` for a workflow-owned caller at once; a workflow-owned caller's every card
  * becomes a denial, and its cross-project Act is denied in every mode (§5.4); while planning, a
@@ -52,6 +56,12 @@ export interface GateInput {
   targets: readonly GateTarget[];
   /** `scope.pendingProjects`, classified by workspace (a project not created yet is never `own`). */
   pendingTargets: readonly { workspace: string; class: Exclude<TargetClass, "own"> }[];
+  /**
+   * `scope.workspaces` (workspace-level data, outside any project), classified: the caller's own
+   * workspace reads as `own`, any other (or every one, for a caller bound to no project) as
+   * `other-workspace` — the matrix's row for it applies (S13).
+   */
+  workspaceTargets: readonly { workspace: string; class: "own" | "other-workspace" }[];
   /** `scope.paths` that lie inside no project (ruling S6). */
   deniedPaths: readonly string[];
   /** `scope.sessions` that are not the caller's own children, when `scope.ownChildrenOnly` is set. */
@@ -135,7 +145,8 @@ export function gate(input: GateInput): GateDecision {
       // A catalog tool whose Admin call names no family is a bug: never a card the user cannot judge.
       return deny("PERMISSION_DENIED", `${tool} is not available: it declares no approval family.`);
     }
-    const crossProject = input.targets.some((target) => target.class !== "own") || input.pendingTargets.length > 0;
+    // Workspace-level data lies outside the caller's project wherever it is: never a grant.
+    const crossProject = input.targets.some((target) => target.class !== "own") || input.pendingTargets.length > 0 || input.workspaceTargets.length > 0;
     return {
       kind: "card",
       approvalKind: "admin",
@@ -150,7 +161,11 @@ export function gate(input: GateInput): GateDecision {
   }
 
   // Workflow-owned callers never act across projects, in any mode (§5.4).
-  const away = [...input.targets.filter((target) => target.class !== "own"), ...input.pendingTargets];
+  const away = [
+    ...input.targets.filter((target) => target.class !== "own"),
+    ...input.pendingTargets,
+    ...input.workspaceTargets.filter((target) => target.class !== "own")
+  ];
   if (input.tier === "act" && caller.workflowOwned && away.length > 0) {
     return deny("PERMISSION_DENIED", `${WORKFLOW_OWNED} work in another project: ${tool} may act only in this chat's own project.`);
   }
@@ -158,9 +173,12 @@ export function gate(input: GateInput): GateDecision {
   // The cards the matrix asks for: Act first (it covers what the call reads), then reads.
   let actCard: Extract<GateDecision, { kind: "card" }> | null = null;
   if (input.tier === "act") {
-    const carded = [...input.targets, ...input.pendingTargets.map((pending) => ({ project: "", ...pending }))].filter(
-      (target) => target.class !== "own" && needsCard(target.class, "act", caller.runtimeMode)
-    );
+    // A pending project or a workspace-level target names no project (`""`): its card is never grantable.
+    const carded = [
+      ...input.targets,
+      ...input.pendingTargets.map((pending) => ({ project: "", ...pending })),
+      ...input.workspaceTargets.map((target) => ({ project: "", ...target }))
+    ].filter((target) => target.class !== "own" && needsCard(target.class, "act", caller.runtimeMode));
     if (carded.length > 0) {
       const single = carded.length === 1 && carded[0]!.class === "other-workspace" && carded[0]!.project !== "" ? carded[0]!.project : undefined;
       actCard = {
@@ -176,7 +194,7 @@ export function gate(input: GateInput): GateDecision {
   let readCard: Extract<GateDecision, { kind: "card" }> | null = null;
   if (actCard === null && scope.reads !== "none") {
     const access: Access = scope.reads;
-    const carded = input.targets.filter((target) => target.class !== "own" && needsCard(target.class, access, caller.runtimeMode));
+    const carded = [...input.targets, ...input.workspaceTargets].filter((target) => target.class !== "own" && needsCard(target.class, access, caller.runtimeMode));
     if (carded.length > 0) {
       // The wider boundary names the card.
       const widest = carded.some((target) => target.class === "other-workspace") ? "other-workspace" : "same-workspace";

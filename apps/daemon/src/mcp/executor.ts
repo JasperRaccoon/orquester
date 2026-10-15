@@ -418,7 +418,7 @@ async function passCard(
   caller: ThreadCaller,
   scope: ScopeClaim,
   decision: Extract<GateDecision, { kind: "card" }>,
-  facts: Pick<GateInput, "targets" | "pendingTargets">,
+  facts: Pick<GateInput, "targets" | "pendingTargets" | "workspaceTargets">,
   ctx: ScopeContext,
   ownProject: CanonicalProject | null
 ): Promise<CardOutcome> {
@@ -427,7 +427,8 @@ async function passCard(
   const frozenArgs = deepFreeze(structuredClone(args));
   const hash = argumentsHash(frozenArgs);
   const where = facts.targets.find((target) => target.class !== "own");
-  const whereLabel = where ? await projectLabel(ctx.api, where.project) : (facts.pendingTargets[0] ? `workspace ${facts.pendingTargets[0].workspace}` : "");
+  const awayWorkspace = facts.pendingTargets[0]?.workspace ?? facts.workspaceTargets.find((target) => target.class !== "own")?.workspace;
+  const whereLabel = where ? await projectLabel(ctx.api, where.project) : (awayWorkspace ? `workspace ${awayWorkspace}` : "");
 
   let preview: ApprovalPreview | null = null;
   if (tool.approval) preview = await tool.approval(frozenArgs, ctx);
@@ -446,6 +447,8 @@ async function passCard(
       // Canonical, as the caller's own `projectPath` is (§7.6: Admin only inside the caller's project).
       projects: decision.approvalKind === "admin" ? facts.targets.map((target) => target.project) : [],
       pendingProjects: scope.pendingProjects?.length ?? 0,
+      // Workspace-level data is outside the caller's project: an Admin grant never covers it.
+      workspaceTargets: facts.workspaceTargets.length,
       ...(decision.targetProjectPath ? { targetProjectPath: decision.targetProjectPath } : {}),
       ...(preview?.workflowId ? { workflowId: preview.workflowId } : {}),
       ...(preview?.workflowReferencedPrompt ? { workflowReferencedPrompt: true } : {})

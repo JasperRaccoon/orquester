@@ -50,7 +50,7 @@ export async function gateFacts(
   api: DaemonApi,
   caller: ThreadCaller,
   scope: ScopeClaim
-): Promise<Pick<GateInput, "targets" | "pendingTargets" | "deniedPaths" | "notOwnChildren">> {
+): Promise<Pick<GateInput, "targets" | "pendingTargets" | "workspaceTargets" | "deniedPaths" | "notOwnChildren">> {
   // Read only when something is to be classified (most calls claim no project at all).
   const needsOwn = scope.projects.length > 0 || (scope.paths?.length ?? 0) > 0 || (scope.pendingProjects?.length ?? 0) > 0;
   const own = needsOwn ? await callerProject(api, caller) : null;
@@ -75,6 +75,11 @@ export async function gateFacts(
     workspace: pending.workspace,
     class: (own !== null && pending.workspace === own.workspace ? "same-workspace" : "other-workspace") as Exclude<TargetClass, "own">
   }));
+  // Workspace-level data: the caller's own workspace (it has a project there), else another.
+  const workspaceTargets = [...new Set(scope.workspaces ?? [])].map((workspace) => ({
+    workspace,
+    class: (caller.projectPath !== "" && caller.workspace !== "" && workspace === caller.workspace ? "own" : "other-workspace") as "own" | "other-workspace"
+  }));
   let notOwnChildren: string[] = [];
   if (scope.ownChildrenOnly !== undefined) {
     // Self is judged by `scope.self`, never as a child of itself.
@@ -84,7 +89,7 @@ export async function gateFacts(
       notOwnChildren = others.filter((id) => !children.has(id));
     }
   }
-  return { targets, pendingTargets, deniedPaths, notOwnChildren };
+  return { targets, pendingTargets, workspaceTargets, deniedPaths, notOwnChildren };
 }
 
 /** The deepest lineage walk (well past the agent-depth cap; a cycle stops at the first repeat). */

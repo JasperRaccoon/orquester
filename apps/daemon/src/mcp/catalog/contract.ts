@@ -110,6 +110,13 @@ export interface ScopeClaim {
   projects: string[];
   /** A workflow temp project not created yet, by workspace. */
   pendingProjects?: { workspace: string }[];
+  /**
+   * Workspace-level targets: data a workspace owns outside any of its projects (its own todo lists),
+   * by workspace name. The gate classifies each against the caller's workspace — its own, or another
+   * (S13: below Full access a card, never a refusal; an Act in another workspace is always a card) —
+   * and such a target is outside the caller's project, so an Admin call reaching one is never granted.
+   */
+  workspaces?: string[];
   /** Sessions read or acted on. */
   sessions: string[];
   /** The read class (§5.2): `metadata` (lists, status, settings, …) or `content` (transcripts, files, diffs, …). */

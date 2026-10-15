@@ -29,7 +29,7 @@ function scope(over: Partial<ScopeClaim> = {}): ScopeClaim {
 }
 
 function input(over: Partial<GateInput> & { tier: Tier }): GateInput {
-  return { tool: "t", planSafe: false, caller: caller(), scope: scope(), targets: [], pendingTargets: [], deniedPaths: [], notOwnChildren: [], ...over };
+  return { tool: "t", planSafe: false, caller: caller(), scope: scope(), targets: [], pendingTargets: [], workspaceTargets: [], deniedPaths: [], notOwnChildren: [], ...over };
 }
 
 /** A decision as a short string: `allow`, `card:<kind>:<family>`, `deny:<code>`. */
@@ -160,4 +160,29 @@ test("an unknown permission mode is the narrowest: every boundary cards", () => 
   const odd = caller({ runtimeMode: "brand-new-mode" as RuntimeMode });
   assert.equal(short(gate(input({ tier: "read", caller: odd, scope: scope({ reads: "content" }), targets: [SAME] }))), CARD_XP_READ);
   assert.equal(short(gate(input({ tier: "act", caller: odd, targets: [SAME] }))), CARD_XP_ACT);
+});
+
+test("workspace-level targets (S13): own workspace = own row; another workspace = the other-workspace row (cards below Full access, Act always a card, never grantable)", () => {
+  const own = [{ workspace: "acme", class: "own" as const }];
+  const away = [{ workspace: "beta", class: "other-workspace" as const }];
+  // Own workspace: allowed like the caller's own project, in every mode.
+  assert.equal(short(gate(input({ tier: "read", scope: scope({ reads: "metadata" }), workspaceTargets: own }))), ALLOW);
+  assert.equal(short(gate(input({ tier: "act", scope: scope({ writes: true }), workspaceTargets: own }))), ALLOW);
+  // Another workspace: a read is a card below Full access (never a refusal), allowed in Full access.
+  for (const mode of ["approval-required", "auto-accept-edits", "auto"] as const) {
+    assert.equal(short(gate(input({ tier: "read", caller: caller({ runtimeMode: mode }), scope: scope({ reads: "metadata" }), workspaceTargets: away }))), CARD_XWS_READ, mode);
+  }
+  assert.equal(short(gate(input({ tier: "read", caller: caller({ runtimeMode: "full-access" }), scope: scope({ reads: "metadata" }), workspaceTargets: away }))), ALLOW);
+  // An Act there is a card in every mode, naming no target project: never grantable.
+  for (const mode of ["approval-required", "full-access"] as const) {
+    const decision = gate(input({ tier: "act", caller: caller({ runtimeMode: mode }), scope: scope({ writes: true }), workspaceTargets: away }));
+    assert.equal(short(decision), CARD_XP_ACT, mode);
+    assert.equal(decision.kind === "card" ? decision.targetProjectPath : "?", undefined, "no target project: no grant");
+  }
+  // Admin reaching workspace-level data, even its own workspace's: cross-project (never granted).
+  const admin = gate(input({ tier: "admin", adminFamily: "desktops", caller: caller({ runtimeMode: "full-access" }), workspaceTargets: own }));
+  assert.equal(admin.kind === "card" && admin.crossProject, true);
+  // A workflow-owned chat never acts there, and its read card is a denial.
+  assert.equal(short(gate(input({ tier: "act", caller: caller({ workflowOwned: true, runtimeMode: "full-access" }), scope: scope({ writes: true }), workspaceTargets: away }))), "deny:PERMISSION_DENIED");
+  assert.equal(short(gate(input({ tier: "read", caller: caller({ workflowOwned: true }), scope: scope({ reads: "metadata" }), workspaceTargets: away }))), "deny:PERMISSION_DENIED");
 });

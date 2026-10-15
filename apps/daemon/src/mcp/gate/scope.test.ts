@@ -83,6 +83,16 @@ test("paths: a file beside the projects is no project — workspace level, root 
   assert.deepEqual(facts.deniedPaths, [join(ws, "acme/notes.txt")]);
 });
 
+test("workspace-level targets: the caller's own workspace is own, any other (and every one for a caller with no project) is other-workspace", async (t) => {
+  const { ws, api } = await tree(t);
+  const inAcme = caller({ projectPath: join(ws, "acme/api"), workspace: "acme" });
+  const facts = await gateFacts(api, inAcme, claim({ workspaces: ["acme", "beta", "beta"] }));
+  assert.deepEqual(facts.workspaceTargets, [{ workspace: "acme", class: "own" }, { workspace: "beta", class: "other-workspace" }]);
+  const homeless = await gateFacts(api, caller(), claim({ workspaces: ["acme"] }));
+  assert.deepEqual(homeless.workspaceTargets, [{ workspace: "acme", class: "other-workspace" }], "no project of its own: fail closed");
+  assert.deepEqual((await gateFacts(api, inAcme, claim())).workspaceTargets, []);
+});
+
 test("target classes, and a caller bound to no project: every target is other", async (t) => {
   const { ws, api } = await tree(t);
   const own = await canonicalProject(api, join(ws, "acme/api"));

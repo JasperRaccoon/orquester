@@ -329,6 +329,11 @@ export interface AgentToolGrantQuery {
   projects: readonly string[];
   /** A workflow temp project not created yet (`ScopeClaim.pendingProjects`): never granted. */
   pendingProjects?: number;
+  /**
+   * Workspace-level targets the call reaches (`ScopeClaim.workspaces`: data a workspace owns outside
+   * any project): outside the caller's project, so an Admin call reaching any is never granted.
+   */
+  workspaceTargets?: number;
   /** `cross-project`: the other-workspace project the Act targets. */
   targetProjectPath?: string;
   /** `workflows`: the workflow acted on; absent for a create, which a grant never covers. */
@@ -356,7 +361,12 @@ export function findGrant(file: AgentToolsFile, query: AgentToolGrantQuery): Age
     return file.grants.find((grant) => grant.family === "cross-project" && chatGrant(grant) && grant.targetProjectPath === target) ?? null;
   }
   // Admin families: never across projects, never for a temp project not created yet.
-  if (query.projectPath === "" || (query.pendingProjects ?? 0) > 0 || query.projects.some((project) => project !== query.projectPath)) {
+  if (
+    query.projectPath === "" ||
+    (query.pendingProjects ?? 0) > 0 ||
+    (query.workspaceTargets ?? 0) > 0 ||
+    query.projects.some((project) => project !== query.projectPath)
+  ) {
     return null;
   }
   for (const grant of file.grants) {

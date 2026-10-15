@@ -156,6 +156,7 @@ test("findGrant: only full-access, non workflow-owned callers; chat grants of th
   assert.equal(findGrant(file, q({ workflowOwned: true })), null);
   assert.equal(findGrant(file, q({ projects: [P, "/w/ws/other"] })), null, "cross-project Admin");
   assert.equal(findGrant(file, q({ pendingProjects: 1 })), null, "a temp project");
+  assert.equal(findGrant(file, q({ workspaceTargets: 1 })), null, "a workspace-level target (outside the project)");
   assert.equal(findGrant(file, q({ projectPath: "", projects: [] })), null, "a chat with no project");
   assert.equal(findGrant(file, q({ family: "saved-prompts" })), null, "saved-prompts grants are chat-only: a project record is never honoured");
   assert.equal(findGrant(file, q({ family: "agent-profile" })), null, "never grantable, whatever the file says");

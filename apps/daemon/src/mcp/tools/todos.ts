@@ -3,9 +3,9 @@
 // write goes through `/api/todos` (`../todo-tools.ts`, D-19).
 //
 // Scope: a project's lists claim that project (the gate's matrix, §5.2). A workspace's own lists
-// belong to no project: in the caller's own workspace they are the caller's; in another workspace
-// a write claims that workspace as a pending target (a card, never a grant) and a read below Full
-// access is refused — the claim has no workspace-level read target (reported to the coordinator).
+// belong to no project: they claim that workspace (`ScopeClaim.workspaces`). In the caller's own
+// workspace they are the caller's; in another workspace the S13 rule applies as for a project
+// there — a read below Full access is a card, a write always a card — and never a grant.
 
 import { basename, join } from "node:path";
 import { z } from "zod";
@@ -55,16 +55,8 @@ async function claimFor(sel: TodoSelector, ctx: ScopeContext, access: "read" | "
   await todoListRef(ctx.api, sel); // PROJECT_NOT_FOUND before anything is judged
   const claim: ScopeClaim = { projects: [], sessions: [], reads: access === "read" ? "metadata" : "none", writes: access === "act", causesTurnIn: [] };
   if (sel.project !== undefined) return { ...claim, projects: [join(ctx.api.workspacesDir, sel.workspace, sel.project)] };
-  const caller = ctx.caller;
-  if (caller.kind !== "thread" || caller.workspace === sel.workspace) return claim;
-  if (access === "act") return { ...claim, pendingProjects: [{ workspace: sel.workspace }] };
-  if (caller.runtimeMode !== "full-access") {
-    throw new ToolError(
-      "PERMISSION_DENIED",
-      `Workspace "${clipText(sel.workspace, 100)}" is not this chat's: reading its own lists needs Full access. Read a project's lists there (project), or ask the user.`
-    );
-  }
-  return claim;
+  // A workspace's own lists: the gate classifies the workspace against the caller's (S13).
+  return { ...claim, workspaces: [sel.workspace] };
 }
 
 /** A listed todo list: `bodyTruncated` marks one whose body is only its head — written back whole, it would lose the rest. */
