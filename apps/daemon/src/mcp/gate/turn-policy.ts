@@ -148,6 +148,13 @@ export function withProvenance(caller: TurnPolicyCaller, origin: ThreadMessageOr
 // ---------------------------------------------------------------------------
 
 /**
+ * `ScopeClaim.causesTurnIn` entry for a session the call itself creates (`create_session`,
+ * `fork_session` with a prompt): the exchange applies to it, the never-broader check does not —
+ * the tool opens it no broader than the caller (`openedThreadRuntimeMode`).
+ */
+export const NEW_SESSION = "(new)";
+
+/**
  * The turn whose `causedBy` the caller's call continues: the active turn, else the latest
  * unsettled one, else the latest — the turn `currentInteractionMode` reads.
  */

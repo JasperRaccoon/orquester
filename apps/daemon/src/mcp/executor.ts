@@ -60,18 +60,14 @@ import { withPrincipal, type DaemonApi } from "./daemon-api.ts";
 import { ToolError } from "./errors.ts";
 import { gate, type GateDecision, type GateInput } from "./gate/policy.ts";
 import { gateFacts } from "./gate/scope.ts";
-import { assertExchangeRoom, assertTargetModeNotBroader, causedByFor } from "./gate/turn-policy.ts";
+import { assertExchangeRoom, assertTargetModeNotBroader, causedByFor, NEW_SESSION } from "./gate/turn-policy.ts";
 import { toolByName } from "./catalog/index.ts";
 import { readThread } from "./reads.ts";
 import { argumentProblems, clipText, MAX_ECHO_CHARS, ok, toSafeToolError } from "./result.ts";
 import type { SessionSecretRequests } from "../session-tools/contract.ts";
 
-/**
- * `ScopeClaim.causesTurnIn` entry for a session the call itself creates (`create_session`,
- * `fork_session` with a prompt): the exchange applies to it, the never-broader check does not —
- * the tool opens it no broader than the caller (`openedThreadRuntimeMode`).
- */
-export const NEW_SESSION = "(new)";
+/** Re-exported for daemon-side callers; tool modules import it from `./gate/turn-policy.ts`. */
+export { NEW_SESSION };
 
 /** The toolsets on in one chat, by id. */
 export type EnabledToolsets = (caller: ThreadCaller) => Promise<ReadonlySet<string>>;

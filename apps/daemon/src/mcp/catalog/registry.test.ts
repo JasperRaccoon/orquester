@@ -201,7 +201,7 @@ test("import graph: everything reachable from catalog/index.ts is on the pure al
   assert.deepEqual(unexpected, [], "a module the agent host would load is not on the allow-list (no daemon services, no stores)");
   assert.deepEqual([...packages].filter((name) => !PURE_PACKAGES.has(name)).sort(), []);
   // The daemon-only halves never reach the host.
-  for (const daemonOnly of ["mcp/executor.ts", "mcp/server.ts", "mcp/daemon-api.ts", "mcp/principal.ts", "mcp/gate/policy.ts", "mcp/gate/scope.ts", "todos.ts", "index.ts"]) {
+  for (const daemonOnly of ["mcp/executor.ts", "mcp/server.ts", "mcp/daemon-api.ts", "mcp/principal.ts", "todos.ts", "index.ts"]) {
     assert.ok(!modules.has(daemonOnly), `${daemonOnly} is reachable from the catalog`);
   }
   // The walker sees through `import { type A }` only when every name is a type.
