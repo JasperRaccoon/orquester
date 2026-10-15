@@ -1576,6 +1576,38 @@ test("a fork records agentCreated only when the (gated) request carries it, and 
   await f.cleanup();
 });
 
+test("workflowOwned is stamped at creation from a workflow-owned creator (or a marked one), through delegate, opened and fork, and survives the creator closing (§5.4)", async () => {
+  const f = await makeFixture(OPENCODE, null);
+  const owner = { kind: "workflow" as const, workflowId: "wf-1", runId: "run-1", nodeId: "node-1" };
+  const owned = await f.service.createSession({ kind: "agent-chat", refId: "opencode", projectPath: "/w/p", cwd: "/w/p", owner }, 0);
+  const free = await f.service.createSession({ kind: "agent-chat", refId: "opencode", projectPath: "/w/p", cwd: "/w/p" }, 1);
+  const child = (parentId: string, relation: "opened" | "delegate", order: number) =>
+    f.service.createSession(
+      { kind: "agent-chat", refId: "opencode", projectPath: "/w/p", chat: { modelSelection: { model: "" }, lineage: { parentThreadId: parentId, relation, agentCreated: true } } },
+      order
+    );
+  const delegate = await child(owned.id, "delegate", 2);
+  assert.equal(delegate.lineage?.workflowOwned, true, "the creator is owned by a workflow");
+  const grandchild = await child(delegate.id, "opened", 3);
+  assert.equal(grandchild.lineage?.workflowOwned, true, "a descendant of an owned chat inherits it");
+  const fork = await f.service.forkSession(delegate.id, {}, 4);
+  assert.equal(fork.lineage.workflowOwned, true, "a fork of an owned descendant too (the daemon's stamp, not the host's)");
+  assert.equal(fork.session.lineage?.workflowOwned, true);
+  assert.equal((await child(free.id, "opened", 5)).lineage?.workflowOwned, undefined, "a free creator stamps nothing");
+  assert.equal((await f.service.forkSession(free.id, {}, 6)).lineage.workflowOwned, undefined);
+
+  // The owned chat and its delegate close: the marked chat still makes owned children, and the
+  // marker rides sessions.json through a restart.
+  f.service.chat.close(owned.id);
+  f.service.chat.close(delegate.id);
+  assert.equal((await child(grandchild.id, "delegate", 7)).lineage?.workflowOwned, true, "the marker alone proves it");
+  const reloaded = new ChatSessionManager();
+  reloaded.adopt(parseSessionsConfig({ version: 1, sessions: f.service.chat.records() }).sessions);
+  assert.equal(reloaded.get(grandchild.id)?.lineage?.workflowOwned, true);
+  assert.equal(reloaded.get(fork.session.id)?.lineage?.workflowOwned, true);
+  await f.cleanup();
+});
+
 test("a delegate's project is compared resolved, and the child groups under the parent's spelling", async () => {
   const f = await makeFixture(CLAUDE, null);
   const projectPath = join(f.appdir, "ws", "proj");

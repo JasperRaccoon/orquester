@@ -760,7 +760,9 @@ export class AgentChatService {
         createdAt: new Date().toISOString(),
         // Recorded even at 0, so no later read walks the chain for this link.
         delegationDepth: this.delegationDepthOf(parent) + (countsTowardDelegationDepth({ relation, agentCreated }) ? 1 : 0),
-        ...(agentCreated ? { agentCreated: true as const } : {})
+        ...(agentCreated ? { agentCreated: true as const } : {}),
+        // §5.4: a child of a workflow-owned chat (or of one carrying the marker) inherits it.
+        ...(this.inheritsWorkflowOwnership(parent) ? { workflowOwned: true as const } : {})
       };
     }
     if (fields.resume && !isUsableConversationId(fields.resume.conversationId)) {
@@ -895,6 +897,26 @@ export class AgentChatService {
       current = this.chat.get(parentId) ?? undefined;
     }
     return depth;
+  }
+
+  /**
+   * Whether a chat created from `creator` (its delegate, opened chat or fork) inherits workflow
+   * ownership (unified MCP design 2026-10-15 §5.4): `creator` or an ancestor over the open tabs is
+   * owned by a workflow, or carries the inherited marker (`ThreadLineage.workflowOwned`). Only
+   * proven ownership is stamped — the marker is permanent; a walk that meets a closed ancestor stops
+   * here, and the gate's own walk (fail-closed behind agent-made links) still applies.
+   */
+  inheritsWorkflowOwnership(creator: { owner?: SessionSummary["owner"]; lineage?: ThreadLineage }): boolean {
+    let current: { owner?: SessionSummary["owner"]; lineage?: ThreadLineage } | undefined = creator;
+    const seen = new Set<string>();
+    while (current) {
+      if (current.owner?.kind === "workflow" || current.lineage?.workflowOwned === true) return true;
+      const parentId = current.lineage?.parentThreadId;
+      if (parentId === undefined || seen.has(parentId)) return false;
+      seen.add(parentId);
+      current = this.chat.get(parentId);
+    }
+    return false;
   }
 
   /** Two project paths name one project once resolved (realpath in the sandbox, else `resolve`). */
@@ -1068,7 +1090,8 @@ export class AgentChatService {
       lineage: withLineageStamps(
         { parentThreadId: parentId, relation: "fork", createdAt: new Date().toISOString() },
         this.delegationDepthOf(parent),
-        agentCreated
+        agentCreated,
+        this.inheritsWorkflowOwnership(parent)
       ),
       // Recorded for every fork (an unkeyed one too): it tells a keyed repeat from a reuse, and
       // it is the cut a reconcile re-sends (`confirmFork`).
@@ -1144,7 +1167,7 @@ export class AgentChatService {
       throw new ChatSessionError(error instanceof Error ? error.message : String(error), "HOST_UNAVAILABLE");
     }
     // The host resolves the fork point; the depth is the daemon's, from the parent's record.
-    const lineage = withLineageStamps(result.lineage, this.delegationDepthOf(parent), agentCreated);
+    const lineage = withLineageStamps(result.lineage, this.delegationDepthOf(parent), agentCreated, this.inheritsWorkflowOwnership(parent));
     const forked = this.chat.setLineage(id, lineage) ?? summary;
     return { session: forked, lineage, strategy: result.strategy };
   }
@@ -1268,7 +1291,9 @@ export class AgentChatService {
         withLineageStamps(
           response.value.lineage ?? response.value.head.lineage ?? tab.lineage!,
           tab.lineage?.delegationDepth ?? 0,
-          tab.lineage?.agentCreated === true
+          tab.lineage?.agentCreated === true,
+          // What the tab recorded at creation (the parent may have closed since).
+          tab.lineage?.workflowOwned === true
         )
       );
       return;
@@ -1892,12 +1917,14 @@ export { ChatSessionError };
  * without one reads as its parent's), and `agentCreated` when a chat tool made the child — never
  * taken from the host's answer, which does not know (unified MCP design 2026-10-15 §13 c).
  */
-function withLineageStamps(lineage: ThreadLineage, depth: number, agentCreated: boolean): ThreadLineage {
-  const { delegationDepth: _depth, agentCreated: _agent, ...rest } = lineage;
+function withLineageStamps(lineage: ThreadLineage, depth: number, agentCreated: boolean, workflowOwned: boolean): ThreadLineage {
+  const { delegationDepth: _depth, agentCreated: _agent, workflowOwned: _owned, ...rest } = lineage;
   return {
     ...rest,
     ...(depth > 0 ? { delegationDepth: depth } : {}),
-    ...(agentCreated ? { agentCreated: true as const } : {})
+    ...(agentCreated ? { agentCreated: true as const } : {}),
+    // §5.4: the daemon's own stamp from the forked chat's tab, never the host's answer.
+    ...(workflowOwned ? { workflowOwned: true as const } : {})
   };
 }
 
