@@ -25,6 +25,7 @@ import { registerWait } from "../../agent-chat/waits.ts";
 import { FakeApprovalPort } from "../catalog/approval-double.ts";
 import type { ThreadCaller } from "../catalog/contract.ts";
 import { toolByName } from "../catalog/index.ts";
+import { chatToolByName } from "../../session-tools/legacy-aliases.ts";
 import { audienceDescription, audienceSchema, audienceShape, executeToolCall } from "../executor.ts";
 import { chatSummary, head, message, snapshot, stamp, turn } from "../fixtures.ts";
 import { busEvent, FakeDaemonApi } from "../testing.ts";
@@ -296,14 +297,13 @@ test("send_message across projects: Full access acts in its workspace; a supervi
   assert.equal(code(owned), "PERMISSION_DENIED");
 });
 
-test("send_message as the legacy thread_send {wait} alias: no subscription — the old steer-and-wait, a registered wait (WAIT_CYCLE)", async () => {
+test("an old host's thread_send {wait} (Task 6's real alias onto send_message): no subscription — the old steer-and-wait, a registered wait (WAIT_CYCLE)", async () => {
   const r = rig();
-  const tool = toolByName("send_message", "chat")!;
   const release = registerWait("peer", "me");
   try {
-    // The alias tool passes ctx.legacyAlias; called through a lookup that adds it.
-    const deps = { approvals: r.port, enabledToolsets: async () => new Set(TOOLSET_IDS), lookup: () => ({ ...tool, run: (args: unknown, ctx: any) => tool.run(args as never, { ...ctx, legacyAlias: "thread_send" }) }) };
-    const cycle = await executeToolCall(deps, { name: "send_message", arguments: { sessionId: "peer", text: "hi", reply: "wait" } }, {
+    // The production alias lookup: thread_send {wait: true} → send_message {reply: "wait"} with ctx.legacyAlias "thread_send".
+    const deps = { approvals: r.port, enabledToolsets: async () => new Set(TOOLSET_IDS), lookup: (name: string) => chatToolByName(name) };
+    const cycle = await executeToolCall(deps, { name: "thread_send", arguments: { threadId: "peer", text: "hi", wait: true } }, {
       caller: { kind: "thread", threadId: "me", title: "Implement auth", projectPath: OWN, workspace: "jaspersito", cwd: OWN, agentId: "claude", callId: "c1", runtimeMode: "full-access", planning: false, workflowOwned: false, exchange: null },
       api: r.api, signal: new AbortController().signal
     });

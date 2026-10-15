@@ -836,7 +836,8 @@ async function sendFromChat(args: SendArgs, ctx: CallContext, caller: ThreadCall
       ? buildPlanImplementationPrompt(await actionablePlanMarkdown(ctx.api, summary.id, checked))
       : provenanceFor(ctx, caller, "sent", text, reply, checked.head.runtimeMode);
   const attachments = args.attachments?.length ? await uploadInlineAttachments(ctx.api, summary.id, args.attachments) : [];
-  const legacyWait = (ctx as CallContext & { legacyAlias?: string }).legacyAlias === "thread_send" && reply === "wait";
+  // Task 6's alias sets `legacyAlias: "thread_send"` exactly for `thread_send {wait: true}` (legacy-aliases.ts).
+  const legacyWait = ctx.legacyAlias === "thread_send" && reply === "wait";
   if (reply === "none" || legacyWait) {
     const pending = chatPendingRefusal(checked, summary.id);
     if (pending) throw pending;
