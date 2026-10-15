@@ -7,15 +7,16 @@ import { ToolError } from "../errors.ts";
 import { activity,chatSummary,message,shellSummary } from "../fixtures.ts";
 import { ok } from "../result.ts";
 import { FakeDaemonApi } from "../testing.ts";
-import { type ToolContext,type ToolDef } from "../tool.ts";
-import { outputTools } from "./output.ts";
+import type { AnyOrquesterTool, CallContext } from "../catalog/contract.ts";
+import { outputFamily } from "./output.ts";
 
 const resultBytes = (value: unknown) => Buffer.byteLength(JSON.stringify(value), "utf8");
 
-const tool = outputTools.find((t) => t.name === "read_tool_output")!;
-/** The arguments as `run()` receives them: parsed by the tool's own schema, strict, defaults applied (server.ts). */
-const parse = (t: ToolDef, args: Record<string, unknown>) => z.object(t.input).strict().parse(args) as never;
-const ctx = (api: FakeDaemonApi): ToolContext => ({ api, todos: {} as never, files: {} as never, signal: new AbortController().signal, now: () => 0 });
+const tool = outputFamily.find((t) => t.name === "read_tool_output")!;
+/** The arguments as `run()` receives them: parsed by the tool's own schema, strict, defaults applied (the executor). */
+const parse = (t: AnyOrquesterTool, args: Record<string, unknown>) => z.object(t.input).strict().parse(args) as never;
+/** An external caller's context (full trust), as the executor builds it for `/mcp`. */
+const ctx = (api: FakeDaemonApi): CallContext => ({ api, signal: new AbortController().signal, now: () => 0, caller: { kind: "external" }, turn: { interactionMode: "default", provenance: (_origin, text) => text } });
 
 /** A daemon whose chat session c1 holds `item` whole (the unslimmed read, §5.6), beside a terminal tab t1. */
 function holding(item: ThreadItem, api = new FakeDaemonApi()): FakeDaemonApi {
@@ -24,7 +25,7 @@ function holding(item: ThreadItem, api = new FakeDaemonApi()): FakeDaemonApi {
     .on("GET", agentChatRoutes.item("c1", item.id), { status: 200, body: { item } });
 }
 
-const read = (api: FakeDaemonApi, args: Record<string, unknown>) => tool.run(parse(tool, { sessionId: "c1", ...args }), ctx(api));
+const read = (api: FakeDaemonApi, args: Record<string, unknown>) => tool.run(parse(tool, { sessionId: "c1", ...args }), ctx(api)) as Promise<Record<string, unknown>>;
 
 /** A command row as its provider wrote it: a `command_execution` completion carrying `data`. */
 const commandRow = (data: unknown, over: Record<string, unknown> = {}) =>

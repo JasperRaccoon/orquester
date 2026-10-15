@@ -52,7 +52,7 @@ interface GoalView { objective: string; status: AgentGoalStatus; continuing: boo
 interface GoalDetailView extends GoalView { phase?: string; rounds?: number; lastCheck?: string; tokensUsed?: number; tokenBudget?: number | null; elapsedMs?: number; setAt?: string; updatedAt: string }
 export interface SessionView { id: string; kind: "chat" | "terminal"; agent: string; adapter?: AgentAdapterId; title: string; project: ProjectRef; cwd: string; createdAt: string; order: number;
   status: "working" | "waiting" | "idle"; attention: "needs-input" | "finished" | "bell" | null; needsAttentionAt: string | null; reason: SessionReason | null;
-  /** The chat session this one was forked from or delegated by (spec 2026-10-14 §6); get_session_lineage lists children. */
+  /** The chat session this one was forked from, delegated by or opened by (spec 2026-10-14 §6); get_session lists children. */
   lineage?: { parentSessionId: string; relation: "fork" | "delegate" | "opened"; forkedFromTurnId?: string };
   chat?: { sessionStatus: ThreadSessionStatus; accountId: string; latestTurn: LatestTurnSummary | null; pending: { approvals: boolean; questions: boolean }; planReady: boolean; backgroundLiveness: "working" | "monitoring" | null; goal: GoalView | null };
   terminal?: { status: "running" | "exited"; exitCode?: number; legacyAgent?: boolean } }
@@ -377,7 +377,7 @@ export function sessionDetail(s: SessionSummary, snap: ThreadSnapshotPayload, ct
   const chat: SessionDetail["chat"] = {
     ...(base.chat as NonNullable<SessionView["chat"]>), goal: goalDetailView(snap, s.goal),
     model: head.modelSelection.model, options: optionsObject(head.modelSelection.options), runtimeMode: head.runtimeMode, home: head.home,
-    // Turns are numbered by START ORDER (turns.ts), never by the sparse checkpoint list — this is the number revert_session/get_turn_diff speak in.
+    // Turns are numbered by START ORDER (turns.ts), never by the sparse checkpoint list — this is the number control_session rewind/get_turn_diff speak in.
     activeTurnId: head.session.activeTurnId, turnCount: startedTurns(snap.turns).length, continueAfterRestart: head.continueAfterRestart !== undefined,
     supports: supportsFrom(caps)
   };
@@ -393,4 +393,44 @@ export function sessionDetail(s: SessionSummary, snap: ThreadSnapshotPayload, ct
   const reply = lastReply(snap);
   if (reply) detail.lastReply = reply;
   return fitDetail(detail, SESSION_DETAIL_BYTES);
+}
+
+// ---------------------------------------------------------------------------
+// Content omitted (unified MCP design 2026-10-15 §13 a)
+// ---------------------------------------------------------------------------
+
+/** Where the content a metadata read left out can be asked for. */
+export const CONTENT_OMITTED_HINT = "read_transcript asks for content access";
+
+/** A goal without its texts (objective, phase, last check): status and counters only. */
+function goalWithoutText<G extends GoalView>(goal: G | null): Omit<G, "objective" | "phase" | "lastCheck"> | null {
+  if (!goal) return null;
+  const { objective: _objective, phase: _phase, lastCheck: _lastCheck, ...rest } = goal as G & { phase?: string; lastCheck?: string };
+  return rest;
+}
+
+/**
+ * A list row as a chat caller without content rights for its project reads it (§13 a): the goal's objective — words a
+ * user or an agent wrote — is left out; everything else on a row is metadata.
+ */
+export function rowWithoutContent(view: SessionView): Record<string, unknown> {
+  if (!view.chat?.goal) return { ...view, contentOmitted: true };
+  return { ...view, chat: { ...view.chat, goal: goalWithoutText(view.chat.goal) }, contentOmitted: true };
+}
+
+/**
+ * A chat's detail as a metadata read returns it to a caller without content rights for its project (§13 a): status,
+ * settings, the pending-request counts, plan presence, the subagent roster and the context meter stay; the last reply,
+ * the plan's text, the requests' texts, the subagents' texts and the goal's texts go.
+ */
+export function detailWithoutContent(detail: SessionDetail): Record<string, unknown> {
+  const { lastReply: _lastReply, plan, pending, subagents, subagentsTruncated, chat, ...rest } = detail;
+  return {
+    ...rest,
+    chat: { ...chat, goal: goalWithoutText(chat.goal) },
+    pending: { approvals: pending.approvals.length, questions: pending.questions.length },
+    ...(plan ? { plan: { planId: plan.planId, actionable: plan.actionable } } : {}),
+    subagents: subagents.map(({ title: _title, progress: _progress, result: _result, error: _error, phaseTitle: _phaseTitle, workflow: _workflow, ...row }) => row),
+    ...(subagentsTruncated ? { subagentsTruncated } : {})
+  };
 }

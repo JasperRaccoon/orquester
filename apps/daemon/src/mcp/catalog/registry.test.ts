@@ -86,10 +86,12 @@ test("TOOLSETS agree with the catalog: a chat tool TOOLSETS names sits in that t
   for (const toolset of TOOLSETS) for (const entry of toolset.tools) assert.match(entry.name, TOOL_NAME_PATTERN);
 });
 
-test("transitional counts: the external surface is today's 72 tools; chat is the 16 legacy session tools", () => {
+test("transitional counts: the external surface is tool-names.ts's list; chat is the legacy session tools plus the families landed", () => {
   assert.deepEqual([...externalMcpToolNames()].sort(), [...EXTERNAL_MCP_TOOL_NAMES].sort());
-  assert.equal(catalogFor("external").length, 72);
-  assert.deepEqual(catalogFor("chat").map((tool) => tool.name).sort(), Object.keys(LEGACY_CHAT_META).sort());
+  assert.equal(catalogFor("external").length, EXTERNAL_MCP_TOOL_NAMES.length);
+  // Each Wave 3 family replaces its legacy entries with TOOLSETS tools (Task 14 pins 41 / 45 / 22).
+  const specNames = new Set(chatToolNames());
+  for (const tool of catalogFor("chat")) assert.ok(specNames.has(tool.name) || Object.prototype.hasOwnProperty.call(LEGACY_CHAT_META, tool.name), tool.name);
 });
 
 // ---------------------------------------------------------------------------

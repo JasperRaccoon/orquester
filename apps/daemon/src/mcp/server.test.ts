@@ -26,15 +26,9 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   get_turn_diff: { required: ["sessionId"], annotations: READ },
   create_session: { required: ["project"], annotations: WRITE },
   update_session: { required: ["sessionId"], annotations: WRITE_IDEMPOTENT },
-  // A retry is not a no-op: once the turn has stopped, a second interrupt goes on to stop the background work.
-  interrupt_session: { required: ["sessionId"], annotations: WRITE },
-  // A retry is refused once the task has stopped.
-  stop_task: { required: ["sessionId", "taskId"], annotations: WRITE },
-  stop_session: { required: ["sessionId"], annotations: WRITE_IDEMPOTENT },
-  close_session: { required: ["sessionId"], annotations: DESTROY },
-  revert_session: { required: ["sessionId", "keepTurns"], annotations: DESTROY },
-  // A retry compacts the context again.
-  compact_session: { required: ["sessionId"], annotations: WRITE },
+  // Unified MCP (Task 7): interrupt/stop_task/stop_process/compact/rewind/close. The most dangerous action names the
+  // hints: close and rewind discard; a retried interrupt goes on to stop background work, so not idempotent.
+  control_session: { required: ["sessionId", "action"], annotations: { ...DESTROY, idempotentHint: false } },
   // Thread lineage (spec 2026-10-14 §6): a retry forks again, and merges again.
   fork_session: { required: ["sessionId"], annotations: WRITE },
   merge_back_session: { required: ["sessionId"], annotations: WRITE },
@@ -45,9 +39,8 @@ const CONTRACT: Record<string, { required: string[]; annotations: object }> = {
   implement_plan: { required: ["sessionId"], annotations: WRITE },
   read_transcript: { required: ["sessionId"], annotations: READ },
   read_tool_output: { required: ["sessionId", "itemId"], annotations: READ },
-  answer_question: { required: ["sessionId", "answers"], annotations: WRITE },
-  dismiss_question: { required: ["sessionId"], annotations: WRITE },
-  resolve_approval: { required: ["sessionId", "decision"], annotations: WRITE },
+  // Unified MCP (Task 7): answer_question / dismiss_question / resolve_approval in one tool.
+  respond_to_request: { required: ["sessionId"], annotations: WRITE },
   wait_for_session: { required: [], annotations: READ },
   get_usage: { required: [], annotations: READ },
   get_cost: { required: [], annotations: READ },
