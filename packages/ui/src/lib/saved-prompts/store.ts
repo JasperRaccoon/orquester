@@ -154,6 +154,8 @@ function sanitizeSavedPrompt(value: unknown): SavedPrompt | null {
     return null;
   }
   const useCount = value.useCount;
+  const createdBy = sanitizeCreatedBy(value.createdBy);
+  const usedByWorkflows = sanitizeWorkflowUses(value.usedByWorkflows);
   return {
     id,
     title,
@@ -170,8 +172,34 @@ function sanitizeSavedPrompt(value: unknown): SavedPrompt | null {
     useCount:
       typeof useCount === "number" && Number.isFinite(useCount) && useCount > 0
         ? Math.floor(useCount)
-        : 0
+        : 0,
+    ...(createdBy ? { createdBy } : {}),
+    ...(usedByWorkflows ? { usedByWorkflows } : {})
   };
+}
+
+/**
+ * Who created a prompt (unified MCP D-16), kept only when it reads: an agent-created prompt shows
+ * a "by <agent>" badge and no one-click pin. Any other shape reads as the user's (absent).
+ */
+function sanitizeCreatedBy(value: unknown): SavedPrompt["createdBy"] {
+  if (!isRecord(value) || typeof value.kind !== "string" || value.kind.length === 0) return undefined;
+  const text = (field: unknown): string | undefined => (typeof field === "string" && field.length > 0 ? field : undefined);
+  const threadId = text(value.threadId);
+  const agent = text(value.agent);
+  const title = text(value.title);
+  return { kind: value.kind, ...(threadId ? { threadId } : {}), ...(agent ? { agent } : {}), ...(title ? { title } : {}) };
+}
+
+/** The workflows that reference a prompt (list rows), each `{workflowId, name}`; malformed entries dropped. */
+function sanitizeWorkflowUses(value: unknown): SavedPrompt["usedByWorkflows"] {
+  if (!Array.isArray(value)) return undefined;
+  const uses = value.flatMap((entry) =>
+    isRecord(entry) && typeof entry.workflowId === "string" && entry.workflowId.length > 0 && typeof entry.name === "string"
+      ? [{ workflowId: entry.workflowId, name: entry.name }]
+      : []
+  );
+  return uses.length > 0 ? uses : undefined;
 }
 
 function readListResponse(response: unknown): SavedPrompt[] {

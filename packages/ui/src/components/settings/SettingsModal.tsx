@@ -13,6 +13,7 @@ import {
   Server,
   SlidersHorizontal,
   Users,
+  Wrench,
   X
 } from "lucide-react";
 import { cn } from "../../lib/cn";
@@ -21,6 +22,7 @@ import { useIsDesktop } from "../../hooks";
 import { useAppStore } from "../../store/app";
 import { AgentAccountsSettings } from "./AgentAccountsSettings";
 import { AgentsSettings } from "./AgentsSettings";
+import { AgentToolsSettings } from "./AgentToolsSettings";
 import { AppearanceSettings } from "./AppearanceSettings";
 import { ChatSettings } from "./ChatSettings";
 import { GeneralSettings } from "./GeneralSettings";
@@ -35,6 +37,7 @@ type SectionId =
   | "general"
   | "appearance"
   | "chat"
+  | "agent-tools"
   | "agents"
   | "accounts"
   | "usage"
@@ -90,6 +93,16 @@ const SECTIONS: SectionDef[] = [
     desc: "Composer behaviour and resuming interrupted turns",
     keywords: ["composer", "steer", "queue", "enter", "skills", "slash", "continue", "restart", "resume", "interrupted"],
     render: () => <ChatSettings />
+  },
+  {
+    // Unified MCP §9.2: between Agent chat and the agent CLIs.
+    id: "agent-tools",
+    group: "agents",
+    label: "Agent tools",
+    icon: <Wrench size={15} />,
+    desc: "Orquester tools for agent chats, per agent; grants",
+    keywords: ["mcp", "orquester", "toolsets", "tools", "grants", "revoke", "approval", "workflow", "desktops", "admin", "permissions"],
+    render: () => <AgentToolsSettings />
   },
   {
     id: "agents",

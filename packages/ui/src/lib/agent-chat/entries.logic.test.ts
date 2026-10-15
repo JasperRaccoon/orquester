@@ -724,6 +724,23 @@ describe("session tools (design 2026-10-14 §1.5)", () => {
     }
   });
 
+  it("a gated call's row reads its toolApproval reference (unified MCP §7.3); an unmarked row never does", () => {
+    const toolApproval = { approvalId: "ap1", kind: "admin", family: "workflows", title: "Create “Nightly”", outcome: "approved" };
+    const entry = workLogEntryFromActivity(
+      activity("tool.completed", {
+        itemType: "mcp_tool_call",
+        title: "orquester: create_workflow",
+        data: { server: "orquester", tool: "create_workflow", sessionTool: { name: "create_workflow", references: { toolApproval } } }
+      })
+    );
+    assert.deepEqual(entry.toolApproval, toolApproval);
+    assert.equal(workEntryDisplayLabel(entry), "Created a workflow · Approved by you");
+    const unmarked = workLogEntryFromActivity(
+      activity("tool.completed", { itemType: "mcp_tool_call", title: "x", data: { server: "orquester", tool: "create_workflow", references: { toolApproval } } })
+    );
+    assert.equal(unmarked.toolApproval, undefined);
+  });
+
   it("a request_secret row reads its record — name and outcome, never a value", () => {
     const record = { name: "API_KEY", purpose: "Deploy", outcome: "provided" };
     const entry = workLogEntryFromActivity(

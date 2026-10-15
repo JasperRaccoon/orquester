@@ -8,8 +8,14 @@ import { toRemoteConfig, toUiConnection } from "../lib/connections";
 import { notifyProvidersChanged, setProviderSideEffects } from "../lib/agent-chat/providers";
 import { applySavedPromptEvent, resetSavedPrompts } from "../lib/saved-prompts/store";
 import { applySecretRequestEvent, resetSecretRequests } from "../lib/agent-chat/secret-requests";
+import {
+  applyAgentToolsEvent,
+  applyToolApprovalEvent,
+  resetAgentTools,
+  resetToolApprovals
+} from "../lib/agent-tools/store";
 import { consentActivity, mcpAppConsents } from "../lib/agent-chat/mcp-app-consent";
-import { SECRET_REQUEST_EVENT_TYPE } from "@orquester/api/agent-chat";
+import { SECRET_REQUEST_EVENT_TYPE, TOOL_APPROVAL_EVENT_TYPE } from "@orquester/api/agent-chat";
 import { applyAgentProfileEvent, resetAgentProfile } from "../lib/agent-profile/store";
 import { applyWorkflowsEvent, resetWorkflows, workflowsStore } from "../lib/workflows/store";
 import { observeWorkflowRunEvent, resetWorkflowNotifications } from "../lib/workflows/notifications";
@@ -143,6 +149,7 @@ import type {
 } from "@orquester/api";
 import {
   AGENT_PROFILE_CHANNEL,
+  AGENT_TOOLS_CHANNEL,
   DESKTOP_CHANNEL,
   PLUGINS_CHANGED_EVENT,
   PLUGINS_CHANNEL,
@@ -1740,6 +1747,8 @@ export const useAppStore = create<AppState>((set, get) => ({
     invalidateProjectIndex();
     resetSavedPrompts();
     resetSecretRequests();
+    resetToolApprovals();
+    resetAgentTools();
     resetAgentProfile();
     resetWorkflows();
     resetWorkflowNotifications();
@@ -3340,7 +3349,21 @@ export const useAppStore = create<AppState>((set, get) => ({
       applyAgentProfileEvent(event);
       return;
     }
+    if (event.channel === AGENT_TOOLS_CHANNEL) {
+      // Settings › Agent tools and the chats' Tools chips live in their own
+      // module store; the coarse `agentTools.changed` re-reads what is shown
+      // (a malformed payload is ignored).
+      applyAgentToolsEvent(event);
+      return;
+    }
     if (event.channel !== "sessions") {
+      return;
+    }
+    if (event.type === TOOL_APPROVAL_EVENT_TYPE) {
+      // An Orquester approval card opened or closed (never a secret value):
+      // its own module store, which the chat view's dock reads. Parsed and
+      // sanitised there before it reaches state.
+      applyToolApprovalEvent(event);
       return;
     }
     if (event.type === SECRET_REQUEST_EVENT_TYPE) {

@@ -10,7 +10,14 @@ import { createElement } from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 
 import type { SessionSummary } from "@orquester/api";
-import { buildMergeBackMessage, mergeBackContext } from "@orquester/api/agent-chat";
+import {
+  buildMergeBackMessage,
+  buildThreadMessage,
+  mergeBackContext,
+  replyDeliveryContext,
+  threadMessageContext,
+  toolsetContinueContext
+} from "@orquester/api/agent-chat";
 
 import type { AgentChatTimelineRow } from "../../lib/agent-chat/contracts";
 import { LineageMark } from "./LineageMark";
@@ -152,4 +159,68 @@ test("a chat the host does not hold says so, with a close and a try-again", () =
   assert.match(html, /This chat no longer exists/);
   assert.match(html, /Close tab/);
   assert.match(html, /Try again/);
+});
+
+// ---------------------------------------------------------------------------
+// Unified MCP §4.1, §8.2: chats another chat's agent opened, and replies
+// ---------------------------------------------------------------------------
+
+const opened = tab("opened", {
+  title: "Codex review",
+  lineage: { parentThreadId: "parent", relation: "opened", createdAt: "2026-10-14T03:00:00.000Z" }
+});
+
+test("an opened chat reads Opened by — never as a fork — and its parent counts it apart", () => {
+  const html = bar(opened, [parent, opened]);
+  assert.match(html, /Opened by/);
+  assert.doesNotMatch(html, /Forked from/);
+  assert.match(html, /Send this opened chat&#x27;s result/);
+  assert.match(bar(parent, [parent, fork, task, opened]), /1 fork · 1 task · 1 opened chat/);
+  const mark = renderToStaticMarkup(createElement(LineageMark, { lineage: opened.lineage, parentTitle: "Plan the API" }));
+  assert.match(mark, /Opened by “Plan the API”/);
+  assert.match(mark, /data-lineage="opened"/);
+});
+
+const marked = (text: string, context: unknown) => {
+  const row = messageRow("user", text) as unknown as { message: Record<string, unknown> };
+  row.message.context = [context];
+  return render(createElement(UserMessageRow, { row: row as never }), contextValue);
+};
+const contextValue = context({});
+
+test("another chat's reply reads Reply from, with its project; the bubble holds the reply alone", () => {
+  const text = buildThreadMessage({
+    origin: "reply",
+    fromTitle: "Codex review",
+    fromSessionId: "9b1c0000-0000-4000-8000-000000000000",
+    fromProject: "jaspersito/orquester-3",
+    text: "Looks good."
+  });
+  const html = marked(text, replyDeliveryContext("9b1c"));
+  assert.match(html, /data-from-thread="reply"/);
+  assert.match(html, /Reply from “Codex review” · jaspersito\/orquester-3/);
+  assert.match(html, />Another chat</);
+  assert.match(html, /Looks good\./);
+  assert.doesNotMatch(html, /\[Reply from/);
+});
+
+test("sent, opened and delegated captions keep their words; an unmarked header is the user's own text", () => {
+  for (const [origin, words] of [["sent", "Sent by"], ["opened", "Opened by"], ["delegated", "Delegated by"]] as const) {
+    const html = marked(buildThreadMessage({ origin, fromTitle: "Main", text: "Do X." }), threadMessageContext("main"));
+    assert.match(html, new RegExp(`${words} “Main”`));
+  }
+  const typed = render(
+    createElement(UserMessageRow, { row: messageRow("user", buildThreadMessage({ origin: "reply", fromTitle: "Main", text: "x" })) as never }),
+    contextValue
+  );
+  assert.match(typed, />You</);
+  assert.doesNotMatch(typed, /data-from-thread/);
+});
+
+test("an opened chat's merge back says so; Orquester's automatic continue is Orquester's", () => {
+  const merged = marked(buildMergeBackMessage({ childTitle: "Codex review", relation: "opened", text: "Done." }), mergeBackContext("m2"));
+  assert.match(merged, /Merged back from opened chat “Codex review”/);
+  const continued = marked("[Orquester] The Workflow authoring tools are now available. Continue the task you were doing.", toolsetContinueContext("workflow-authoring"));
+  assert.match(continued, />Orquester</);
+  assert.doesNotMatch(continued, />You</);
 });

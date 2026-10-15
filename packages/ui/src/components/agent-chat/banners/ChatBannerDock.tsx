@@ -1,10 +1,22 @@
 // Ported from T3 Code (MIT): apps/web/src/components/chat/ChatComposer.tsx:6131-6274,
 // apps/web/src/components/chat/ComposerBannerStack.tsx
 import React from "react";
-import type { AttachmentRef, SecretRequestSummary, ThreadItem } from "@orquester/api/agent-chat";
+import type {
+  AttachmentRef,
+  ParsedToolApprovalSummary,
+  SecretRequestSummary,
+  ThreadItem,
+  ToolApprovalAnswer
+} from "@orquester/api/agent-chat";
 import { MAX_TURN_ATTACHMENTS } from "@orquester/api/agent-chat";
 
 import { cn } from "../../../lib/cn";
+import {
+  failureStatus,
+  fetchToolApprovalDetail,
+  markToolApprovalClosed
+} from "../../../lib/agent-tools/store";
+import { useAppStore } from "../../../store/app";
 import { useMediaQuery } from "../../../hooks/use-media-query";
 import type { AgentChatActions } from "../../../lib/agent-chat/contracts";
 import type { ChatBannerDockProps } from "../contracts";
@@ -16,10 +28,13 @@ import { BackgroundLivenessBanner } from "./BackgroundLivenessBanner";
 import { PlanReadyBanner } from "./PlanReadyBanner";
 import { QuestionCard, type QuestionAttachment } from "./QuestionCard";
 import { SecretRequestCard, type SecretRequestAnswer } from "./SecretRequestCard";
+import { ToolApprovalCard } from "./ToolApprovalCard";
+import { useToolApprovals } from "./use-tool-approvals";
 import {
   resolveDockCard,
   showBackgroundLivenessBanner,
   sortBannerStack,
+  toolApprovalAnswerFailure,
   type BannerPriority,
   type BannerVariantName,
   type DockCard
@@ -80,6 +95,12 @@ export interface ChatBannerDockExtraProps {
   secretRequests?: readonly SecretRequestSummary[];
   /** Answers one; resolves once the daemon took it, rejects with the HTTP status (or null). */
   onAnswerSecret?: (requestId: string, answer: SecretRequestAnswer) => Promise<void>;
+  /**
+   * The chat's pending Orquester approval cards (unified MCP §7), oldest first. Absent: the dock
+   * reads them itself (`useToolApprovals`) — the chat view passes nothing; a render check passes
+   * fixtures.
+   */
+  toolApprovals?: readonly ParsedToolApprovalSummary[];
 }
 
 const NO_SECRET_REQUESTS: readonly SecretRequestSummary[] = [];
@@ -101,8 +122,9 @@ const CARD_BACKDROP = "min-w-0 rounded-t-xl bg-neutral-950";
  * The docked banner — everything that needs the user *now*, between the status
  * line and the composer.
  *
- * **Fixed priority order, one request at a time.** Approval, then pending
- * question, then an agent's request for a secret, then the plan-ready prompt,
+ * **Fixed priority order, one request at a time.** Approval, then an
+ * Orquester approval card, then pending question, then an agent's request for
+ * a secret, then the plan-ready prompt,
  * then the mobile-collapsed question ({@link resolveDockCard}); a `1/N` counter says how many are behind it.
  * Nothing here is ever a modal, nothing steals focus, and nothing scrolls
  * away — a request that scrolls away is a turn that hangs.
@@ -137,7 +159,8 @@ export function ChatBannerDock({
   entries,
   planTitle = null,
   secretRequests = NO_SECRET_REQUESTS,
-  onAnswerSecret
+  onAnswerSecret,
+  toolApprovals: toolApprovalsProp
 }: ChatBannerDockProps & ChatBannerDockExtraProps): React.ReactElement | null {
   // One breakpoint governs every mobile rule in the chat surface (§7.8).
   const isMobile = !useMediaQuery("(min-width: 640px)");
@@ -150,6 +173,43 @@ export function ChatBannerDock({
 
   const approval = approvals[0] ?? null;
   const userInput = userInputs[0] ?? null;
+
+  // Orquester approval cards (unified MCP §7): daemon-owned and memory-only, like the secret
+  // cards; answered on their own route only. Secrets typed on one go from the card to that
+  // route's body and nowhere else on this side.
+  const storedToolApprovals = useToolApprovals(sessionId, toolApprovalsProp === undefined);
+  const toolApprovals = toolApprovalsProp ?? storedToolApprovals;
+  const toolApproval = toolApprovals[0] ?? null;
+  const api = useAppStore((state) => state.api);
+  const openSettings = useAppStore((state) => state.openSettings);
+  // An answer that arrived after the card ended: said here, since the card itself is gone.
+  const [toolApprovalNotice, setToolApprovalNotice] = React.useState<string | null>(null);
+  React.useEffect(() => setToolApprovalNotice(null), [sessionId]);
+  const answerToolApproval = React.useCallback(
+    async (approvalId: string, answer: ToolApprovalAnswer): Promise<void> => {
+      if (!api) throw null;
+      try {
+        await api.answerToolApproval(sessionId, approvalId, answer);
+      } catch (error) {
+        const status = failureStatus(error);
+        const failure = toolApprovalAnswerFailure(status);
+        if (failure.closed) {
+          markToolApprovalClosed(sessionId, approvalId);
+          setToolApprovalNotice(failure.text);
+          return;
+        }
+        throw status;
+      }
+      setToolApprovalNotice(null);
+      markToolApprovalClosed(sessionId, approvalId);
+    },
+    [api, sessionId]
+  );
+  const loadToolApprovalDetail = React.useCallback(
+    (approvalId: string): Promise<ParsedToolApprovalSummary | null> =>
+      api ? fetchToolApprovalDetail(api, sessionId, approvalId) : Promise.resolve(null),
+    [api, sessionId]
+  );
   const secretRequest = onAnswerSecret ? (secretRequests[0] ?? null) : null;
 
   // MCP Apps (spec 2026-10-14 §3): this dock is where an app of this thread
@@ -179,6 +239,7 @@ export function ChatBannerDock({
 
   const liveCard = resolveDockCard({
     hasApproval: approval !== null,
+    hasToolApproval: toolApproval !== null,
     hasUserInput: userInput !== null,
     hasSecretRequest: secretRequest !== null,
     hasActionableProposedPlan: actionableProposedPlan,
@@ -237,7 +298,17 @@ export function ChatBannerDock({
         )
       });
     }
-    for (const notice of notices ?? []) {
+    const allNotices: DockNotice[] = [...(notices ?? [])];
+    if (toolApprovalNotice !== null) {
+      allNotices.push({
+        id: `tool-approval-notice:${sessionId}`,
+        variant: "warning",
+        title: "Approval",
+        description: toolApprovalNotice,
+        onDismiss: () => setToolApprovalNotice(null)
+      });
+    }
+    for (const notice of allNotices) {
       stackEntries.push({
         ...notice,
         render: (
@@ -266,7 +337,8 @@ export function ChatBannerDock({
     notices,
     onStopBackgroundWork,
     sessionId,
-    stopping
+    stopping,
+    toolApprovalNotice
   ]);
 
   // R8-m6: expand the stack, let the notices resolve, and the next one would
@@ -406,6 +478,18 @@ export function ChatBannerDock({
           isResponding={respondingRequestIds.includes(approval.requestId)}
           entries={entries}
           onRespond={(decision) => onApprove({ requestId: approval.requestId, decision })}
+        />
+      ) : null}
+
+      {card === "tool-approval" && toolApproval ? (
+        <ToolApprovalCard
+          key={toolApproval.approvalId}
+          card={toolApproval}
+          pendingCount={toolApprovals.length}
+          isMobile={isMobile}
+          onAnswer={(answer) => answerToolApproval(toolApproval.approvalId, answer)}
+          onLoadFull={() => loadToolApprovalDetail(toolApproval.approvalId)}
+          onOpenSettings={() => openSettings("agent-tools")}
         />
       ) : null}
 
